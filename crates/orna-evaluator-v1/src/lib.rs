@@ -7,10 +7,10 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     fmt,
-    rc::Rc,
+    fmt::Write as _,
+    sync::Arc,
 };
 
-use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use num_bigint::{BigInt, Sign};
 use num_integer::Integer;
 use num_traits::{Signed, ToPrimitive, Zero};
@@ -25,14 +25,18 @@ use orna_value_v1::{
     float_min, float_ordinary_eq, float_total_cmp,
 };
 use sha2::{Digest as _, Sha256};
+use serde::{
+    Deserialize,
+    de::{self, MapAccess, SeqAccess, Visitor},
+};
 use unicode_normalization::UnicodeNormalization;
 
 mod admitted_repl;
 mod cancellation;
 mod relation;
-mod timezone;
 mod repl;
 mod sys_bindings;
+mod timezone;
 
 pub use admitted_repl::{AdmittedReplSession, ReplError};
 pub use cancellation::CancellationToken;
@@ -40,19 +44,19 @@ use relation::{
     BucketBySpec, BucketPeriod, RelationBucket, RelationBucketError, RelationBucketState,
     RelationLastState, RelationPlan, RelationStage, RelationWindowState,
 };
-pub use timezone::{
-    Instant, LocalDateTime, LocalTimeResolution, TimeZone, TimeZoneError,
-    TIMEZONE_DATASET_VERSION, ZonedLocalDateTime, resolve_time_zone,
-};
 pub use repl::{ReplSession, parse_admitted_repl};
 pub use sys_bindings::SysHostBindingRegistry;
+pub use timezone::{
+    Instant, LocalDateTime, LocalTimeResolution, TIMEZONE_DATASET_VERSION, TimeZone, TimeZoneError,
+    ZonedLocalDateTime, resolve_time_zone,
+};
 
 /// The verified standard-source bundle used by the bounded local and remote
 /// REPL boundaries. `orna-standard` owns the canonical module source; this
 /// crate verifies its pinned profile before either boundary admits an import.
 /// Returns the reference standard sources supplied to the bounded REPL.
 #[must_use]
-pub fn reference_standard_sources() -> [(String, String); 48] {
+pub fn reference_standard_sources() -> [(String, String); 49] {
     orna_standard::reference_standard_sources_v1()
 }
 
@@ -189,7 +193,6 @@ impl StepBudget {
 /// supplied with the admitted nominal definitions.
 pub type Environment = BTreeMap<String, CanonicalValue>;
 
-
 /// A declaration-owned nominal field admitted to the evaluator.
 ///
 /// The semantic layer remains responsible for checking the field's static
@@ -308,8 +311,6 @@ impl NominalDefinition {
 /// Trusted evaluator definitions keyed by admitted source spellings.
 pub type NominalDefinitions = BTreeMap<String, NominalDefinition>;
 
-
-
 fn object_id_raw(object_id: [u8; 16]) -> Raw {
     Raw::Tag(37, Box::new(Raw::Bytes(object_id.to_vec())))
 }
@@ -415,11 +416,16 @@ fn validate_nominal_definitions(
             })?)
             .ok_or_else(|| error("ORNA-EVAL-LIMIT"))?;
         total_name_bytes = total_name_bytes
-            .checked_add(definition.variants.iter().try_fold(0usize, |total, variant| {
-                total
-                    .checked_add(variant.name.len())
-                    .ok_or_else(|| error("ORNA-EVAL-LIMIT"))
-            })?)
+            .checked_add(
+                definition
+                    .variants
+                    .iter()
+                    .try_fold(0usize, |total, variant| {
+                        total
+                            .checked_add(variant.name.len())
+                            .ok_or_else(|| error("ORNA-EVAL-LIMIT"))
+                    })?,
+            )
             .ok_or_else(|| error("ORNA-EVAL-LIMIT"))?;
     }
     limits.check_items(total_fields)?;
@@ -440,7 +446,6 @@ fn validate_nominal_definitions(
     Ok(())
 }
 
-
 fn validate_admitted_nominals(
     value: &Value,
     definitions: &NominalDefinitions,
@@ -448,6 +453,11 @@ fn validate_admitted_nominals(
 ) -> Result<(), EvaluationError> {
     match value {
         Value::List(values) | Value::Tuple(values) => {
+            for value in values {
+                validate_admitted_nominals(value, definitions, limits)?;
+            }
+        }
+        Value::Stream { values, .. } => {
             for value in values {
                 validate_admitted_nominals(value, definitions, limits)?;
             }
@@ -627,6 +637,16 @@ pub trait EffectHandler {
         _cancellation: Option<&CancellationToken>,
     ) -> Result<Option<CanonicalValue>, EvaluationError> {
         self.handle_registered_with_budget(operation, callee, arguments, budget)
+    }
+
+    /// Forks an activation-owned handler for one structured child task.
+    ///
+    /// Returning `None` leaves child host effects unavailable. Implementors
+    /// that return a handler must give the child an isolated ownership scope;
+    /// child adapters are moved to their worker and joined before the parent
+    /// activation returns.
+    fn fork_task_child(&mut self, _child_index: usize) -> Option<Box<dyn EffectHandler + Send>> {
+        None
     }
 
     /// Resolve a stored row reference at the reference's snapshot pin.
@@ -1104,6 +1124,34 @@ fn error(code: &'static str) -> EvaluationError {
     EvaluationError::redacted(SafeText::new(code).expect("static safe code"))
 }
 
+fn aggregate_task_failures(failures: &[EvaluationError]) -> EvaluationError {
+    let Some(primary) = failures.first() else {
+        return error("ORNA-EVAL-ERROR");
+    };
+    if failures.len() == 1 {
+        return primary.clone();
+    }
+    let primary_value = primary.canonical.clone().unwrap_or_else(|| {
+        CanonicalErrorValue::new(primary.code(), "<redacted>", [], BTreeMap::new())
+            .expect("redacted task error is canonical")
+    });
+    let mut causes = primary_value.causes();
+    for failure in failures.iter().skip(1) {
+        causes.push(failure.canonical.clone().unwrap_or_else(|| {
+            CanonicalErrorValue::new(failure.code(), "<redacted>", [], BTreeMap::new())
+                .expect("redacted task cause is canonical")
+        }));
+    }
+    let aggregate = CanonicalErrorValue::new(
+        primary_value.code(),
+        primary_value.message(),
+        causes,
+        primary_value.safe_details(),
+    )
+    .expect("ordered task error causes remain canonical");
+    EvaluationError::from_canonical(aggregate)
+}
+
 fn valid_date_literal(value: &str) -> bool {
     let bytes = value.as_bytes();
     if bytes.len() != 10
@@ -1270,7 +1318,9 @@ enum Value {
         nanosecond: u32,
     },
     /// Calendar periods remain distinct from elapsed durations.
-    Period { days: BigInt },
+    Period {
+        days: BigInt,
+    },
     Error(EvaluationError),
     Range {
         lower: Option<Box<Value>>,
@@ -1304,7 +1354,7 @@ enum Value {
         name: String,
         nominal_definitions: NominalDefinitions,
     },
-    Closure(Rc<Closure>),
+    Closure(Arc<Closure>),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1422,7 +1472,9 @@ impl DecimalValue {
             }
             numerator *= BigInt::from(10u8).pow(power as u32);
         } else {
-            let power = (-power).to_usize().ok_or_else(|| error("ORNA-EVAL-LIMIT"))?;
+            let power = (-power)
+                .to_usize()
+                .ok_or_else(|| error("ORNA-EVAL-LIMIT"))?;
             if power > DEFAULT_INTEGER_DIGITS {
                 return Err(error("ORNA-EVAL-LIMIT"));
             }
@@ -1457,7 +1509,9 @@ impl DecimalValue {
             }
             coefficient *= BigInt::from(10u8).pow(shift as u32);
         } else {
-            let shift = (-shift).to_usize().ok_or_else(|| error("ORNA-EVAL-LIMIT"))?;
+            let shift = (-shift)
+                .to_usize()
+                .ok_or_else(|| error("ORNA-EVAL-LIMIT"))?;
             if shift > DEFAULT_INTEGER_DIGITS {
                 return Err(error("ORNA-EVAL-LIMIT"));
             }
@@ -1597,6 +1651,16 @@ impl Value {
             Self::List(values) | Self::Tuple(values) => Raw::Array(
                 values
                     .into_iter()
+                    .map(Value::raw)
+                    .collect::<Result<_, _>>()?,
+            ),
+            // The finite stream's source identity and digest remain in the
+            // live evaluator value; the canonical boundary exposes its real
+            // item sequence rather than substituting a placeholder result.
+            Self::Stream { values, position, .. } => Raw::Array(
+                values
+                    .into_iter()
+                    .skip(position)
                     .map(Value::raw)
                     .collect::<Result<_, _>>()?,
             ),
@@ -1989,6 +2053,136 @@ enum RelationRow {
     Yield(Value),
     End,
 }
+
+fn invoke_task_callback(
+    callback: Value,
+    functions: &Functions,
+    aliases: Option<&BTreeMap<String, String>>,
+    session_functions: Option<&BTreeSet<String>>,
+    limits: Limits,
+    cancellation: CancellationToken,
+    repl_bindings: bool,
+    restrict_function_names: bool,
+    reject_unhandled_field_calls: bool,
+    depth: usize,
+    mut effects: Option<Box<dyn EffectHandler + Send>>,
+) -> Result<Value, EvaluationError> {
+    let mut context = Context {
+        limits,
+        steps: 0,
+        functions,
+        aliases,
+        session_functions,
+        repl_bindings,
+        restrict_function_names,
+        reject_unhandled_field_calls,
+        effects: effects
+            .as_deref_mut()
+            .map(|handler| handler as &mut dyn EffectHandler),
+        namespace: None,
+        transfer: None,
+        cancellation: Some(&cancellation),
+    };
+    context.invoke_callable(&callback, Vec::new(), depth)
+}
+
+/// Run finite callback lists with a bounded number of owned worker threads.
+/// A first ordinary failure stops admission for `parallel`; a first success
+/// stops admission for `race`. In-flight children observe the shared token,
+/// and `thread::scope` joins every worker before the owner returns.
+fn run_task_callbacks(
+    callbacks: &[Value],
+    mut child_effects: Vec<Option<Box<dyn EffectHandler + Send>>>,
+    callback_depth: usize,
+    parent: Option<CancellationToken>,
+    functions: &Functions,
+    aliases: Option<&BTreeMap<String, String>>,
+    session_functions: Option<&BTreeSet<String>>,
+    limits: Limits,
+    repl_bindings: bool,
+    restrict_function_names: bool,
+    reject_unhandled_field_calls: bool,
+    cancel_after_failure: bool,
+    cancel_after_success: bool,
+) -> (Vec<Option<Result<Value, EvaluationError>>>, Option<Value>) {
+    const MAX_TASK_WORKERS: usize = 32;
+    let available = std::thread::available_parallelism().map_or(1, usize::from);
+    let worker_count = callbacks.len().min(available).min(MAX_TASK_WORKERS).max(1);
+    let next = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let shared_cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let child_effects = Arc::new(std::sync::Mutex::new(std::mem::take(&mut child_effects)));
+
+    std::thread::scope(|scope| {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        for _ in 0..worker_count {
+            let sender = sender.clone();
+            let next = Arc::clone(&next);
+            let shared_cancel = Arc::clone(&shared_cancel);
+            let child_effects = Arc::clone(&child_effects);
+            let parent = parent.clone();
+            scope.spawn(move || {
+                loop {
+                    if shared_cancel.load(std::sync::atomic::Ordering::Acquire)
+                        || parent.as_ref().is_some_and(CancellationToken::is_requested)
+                    {
+                        break;
+                    }
+                    let index = next.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+                    let Some(callback) = callbacks.get(index).cloned() else {
+                        break;
+                    };
+                    let effects = child_effects
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .get_mut(index)
+                        .and_then(Option::take);
+                    let cancellation =
+                        CancellationToken::child(Arc::clone(&shared_cancel), parent.clone());
+                    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        invoke_task_callback(
+                            callback,
+                            functions,
+                            aliases,
+                            session_functions,
+                            limits,
+                            cancellation,
+                            repl_bindings,
+                            restrict_function_names,
+                            reject_unhandled_field_calls,
+                            callback_depth,
+                            effects,
+                        )
+                    }))
+                    .unwrap_or_else(|_| Err(error("ORNA-EVAL-ERROR")));
+                    if (cancel_after_failure
+                        && result
+                            .as_ref()
+                            .is_err_and(|failure| failure.code() != "ORNA-EVAL-CANCELLED"))
+                        || (cancel_after_success && result.is_ok())
+                    {
+                        shared_cancel.store(true, std::sync::atomic::Ordering::Release);
+                    }
+                    let _ = sender.send((index, result));
+                }
+            });
+        }
+        drop(sender);
+        let mut results = (0..callbacks.len()).map(|_| None).collect::<Vec<_>>();
+        let mut winner = None;
+        while let Ok((index, result)) = receiver.recv() {
+            if cancel_after_success
+                && winner.is_none()
+                && let Ok(value) = &result
+            {
+                winner = Some(value.clone());
+                shared_cancel.store(true, std::sync::atomic::Ordering::Release);
+            }
+            results[index] = Some(result);
+        }
+        (results, winner)
+    })
+}
+
 impl Context<'_, '_> {
     fn effect_value(&mut self, value: &CanonicalValue) -> Result<Value, EvaluationError> {
         // Effect results cross a canonical boundary. Apply the depth limit to
@@ -2205,7 +2399,9 @@ impl Context<'_, '_> {
         // stored seconds value, not this temporary nanosecond scaling.
         let (seconds, nanosecond) =
             total_nanoseconds.div_mod_floor(&BigInt::from(1_000_000_000u32));
-        let nanosecond = nanosecond.to_u32().ok_or_else(|| error("ORNA-EVAL-LIMIT"))?;
+        let nanosecond = nanosecond
+            .to_u32()
+            .ok_or_else(|| error("ORNA-EVAL-LIMIT"))?;
         self.integer(seconds.clone())?;
         Ok(Value::Duration {
             seconds,
@@ -2273,7 +2469,7 @@ impl Context<'_, '_> {
                 self.items(scope.0.len())?;
                 let mut captured = scope.clone();
                 captured.1.extend(captured.0.keys().cloned());
-                Ok(Value::Closure(Rc::new(Closure {
+                Ok(Value::Closure(Arc::new(Closure {
                     parameters: parameters
                         .iter()
                         .map(|parameter| Parameter {
@@ -2906,13 +3102,7 @@ impl Context<'_, '_> {
             ("-", Value::Decimal(value)) => self
                 .checked_decimal(DecimalValue::new(-value.coefficient, value.exponent10)?)
                 .map(Value::Decimal),
-            (
-                "-",
-                Value::Money {
-                    amount,
-                    currency,
-                },
-            ) => self
+            ("-", Value::Money { amount, currency }) => self
                 .checked_decimal(DecimalValue::new(-amount.coefficient, amount.exponent10)?)
                 .map(|amount| Value::Money { amount, currency }),
             (
@@ -2921,9 +3111,8 @@ impl Context<'_, '_> {
                     seconds,
                     nanosecond,
                 },
-            ) => self.duration_from_total_nanoseconds(
-                -elapsed_total_nanoseconds(&seconds, nanosecond),
-            ),
+            ) => self
+                .duration_from_total_nanoseconds(-elapsed_total_nanoseconds(&seconds, nanosecond)),
             ("-", Value::Float(value)) => finite_float(-f64::from_bits(value)),
             _ => Err(error("ORNA-EVAL-TYPE")),
         }
@@ -3183,8 +3372,14 @@ impl Context<'_, '_> {
                 true,
             ),
             (
-                Value::Money { amount: a, currency: ac },
-                Value::Money { amount: b, currency: bc },
+                Value::Money {
+                    amount: a,
+                    currency: ac,
+                },
+                Value::Money {
+                    amount: b,
+                    currency: bc,
+                },
             ) => self.money_binary(op, a, ac, b, bc),
             (Value::Money { amount, currency }, Value::Decimal(scalar)) => {
                 self.money_scalar_binary(op, amount, currency, scalar, false)
@@ -3303,10 +3498,7 @@ impl Context<'_, '_> {
         duration_nanosecond: u32,
         subtract: bool,
     ) -> Result<Value, EvaluationError> {
-        let instant = elapsed_total_nanoseconds(
-            &BigInt::from(instant_seconds),
-            instant_nanosecond,
-        );
+        let instant = elapsed_total_nanoseconds(&BigInt::from(instant_seconds), instant_nanosecond);
         let duration = elapsed_total_nanoseconds(&duration_seconds, duration_nanosecond);
         let total = if subtract {
             instant - duration
@@ -3497,7 +3689,9 @@ impl Context<'_, '_> {
                     currency: left_currency,
                 }),
             "-" => self
-                .checked_decimal(left.add(&DecimalValue::new(-right.coefficient, right.exponent10)?)?)
+                .checked_decimal(
+                    left.add(&DecimalValue::new(-right.coefficient, right.exponent10)?)?,
+                )
                 .map(|amount| Value::Money {
                     amount,
                     currency: left_currency,
@@ -3591,9 +3785,9 @@ impl Context<'_, '_> {
             scope,
             !self.restrict_function_names,
             function_name(callee).is_some_and(|name| self.functions.contains_key(&name)),
-        ) || resolved.as_deref().is_some_and(|name| {
-            matches!(name, "std.collection.asof_join" | "std.query.asof_join")
-        });
+        ) || resolved
+            .as_deref()
+            .is_some_and(|name| matches!(name, "std.collection.asof_join" | "std.query.asof_join"));
         let name = root_collection_name(callee).or_else(|| {
             native_export
                 .then(|| portable_collection_operation(callee, resolved.as_deref()))
@@ -3603,10 +3797,11 @@ impl Context<'_, '_> {
             return None;
         }
         let pipeline_relation = matches!(input, Some(Value::Relation(_)));
-        if input.is_some() && !pipeline_relation {
+        let relation_argument = relation_call_candidate(name, arguments, scope);
+        if input.is_some() && !pipeline_relation && !relation_argument {
             return None;
         }
-        if input.is_none() && !relation_call_candidate(name, arguments, scope) {
+        if input.is_none() && !relation_argument {
             return None;
         }
 
@@ -3620,12 +3815,28 @@ impl Context<'_, '_> {
             let ordered = relation_named_arguments(name, arguments, values, implicit)?;
             if name == "union" {
                 let mut union_operands = ordered.into_iter();
-                let (Some(Value::Relation(left)), Some(Value::Relation(right))) =
-                    (union_operands.next(), union_operands.next())
+                let (Some(left), Some(right)) = (union_operands.next(), union_operands.next())
                 else {
+                    return Err(error("ORNA-EVAL-ARGUMENT"));
+                };
+                let (Value::Relation(left), Value::Relation(right)) = (left, right) else {
                     return Err(error("ORNA-EVAL-TYPE"));
                 };
                 return Ok(Value::Relation(RelationPlan::union(left, right)));
+            }
+            if matches!(
+                name,
+                "chunk"
+                    | "flatten"
+                    | "partition"
+                    | "zip"
+                    | "zip_exact"
+                    | "group_by"
+                    | "split_when"
+                    | "rank"
+                    | "asof_join"
+            ) {
+                return self.collection_relation_operation(name, ordered, depth);
             }
             if name == "filter" {
                 let mut filter_arguments = ordered.into_iter();
@@ -3670,13 +3881,15 @@ impl Context<'_, '_> {
                 }
                 "window" => {
                     let size = relation_window_argument(&ordered[1])?;
-                    let step = ordered
-                        .get(2)
-                        .map_or(Ok(1), relation_window_argument)?;
+                    let step = ordered.get(2).map_or(Ok(1), relation_window_argument)?;
                     plan = plan.with_stage(RelationStage::Window(size, step));
                     Ok(Value::Relation(plan))
                 }
                 "distinct" => {
+                    plan = plan.with_stage(RelationStage::Distinct);
+                    Ok(Value::Relation(plan))
+                }
+                "unique" => {
                     plan = plan.with_stage(RelationStage::Distinct);
                     Ok(Value::Relation(plan))
                 }
@@ -3710,6 +3923,67 @@ impl Context<'_, '_> {
         })())
     }
 
+    fn collection_relation_operation(
+        &mut self,
+        name: &str,
+        mut values: Vec<Value>,
+        depth: usize,
+    ) -> Result<Value, EvaluationError> {
+        let collection_count = match name {
+            "zip" | "zip_exact" | "asof_join" => 2,
+            _ => 1,
+        };
+        if values.len() < collection_count {
+            return Err(error("ORNA-EVAL-ARGUMENT"));
+        }
+
+        let mut relation_kinds = Vec::with_capacity(collection_count);
+        for value in values.iter_mut().take(collection_count) {
+            match value {
+                Value::List(_) => relation_kinds.push(false),
+                Value::Relation(plan) => {
+                    relation_kinds.push(true);
+                    *value = Value::List(self.collect_relation_values(plan, depth + 1)?);
+                }
+                _ => return Err(error("ORNA-EVAL-TYPE")),
+            }
+        }
+
+        let relation_result = match name {
+            "zip" | "zip_exact" => {
+                if relation_kinds[0] != relation_kinds[1] {
+                    return Err(error("ORNA-EVAL-TYPE"));
+                }
+                relation_kinds[0]
+            }
+            // The result follows the left operand's container kind; the right
+            // side only supplies candidate rows to the as-of selector.
+            "asof_join" => relation_kinds[0],
+            _ => relation_kinds[0],
+        };
+
+        let result = self.collection(name, values, depth)?;
+        if !relation_result {
+            return Ok(result);
+        }
+        match result {
+            Value::List(rows) => Ok(Value::Relation(RelationPlan::from_values(rows))),
+            // `partition` has a scalar tuple result whose two components each
+            // preserve the source container kind.
+            Value::Tuple(parts) if name == "partition" && parts.len() == 2 => {
+                let mut relations = Vec::with_capacity(2);
+                for part in parts {
+                    let Value::List(rows) = part else {
+                        return Err(error("ORNA-EVAL-VALUE"));
+                    };
+                    relations.push(Value::Relation(RelationPlan::from_values(rows)));
+                }
+                Ok(Value::Tuple(relations))
+            }
+            _ => Err(error("ORNA-EVAL-VALUE")),
+        }
+    }
+
     fn for_each_bucket_group(
         &mut self,
         plan: &RelationPlan,
@@ -3735,6 +4009,7 @@ impl Context<'_, '_> {
             source: plan.source.clone(),
             source_identity: plan.source_identity,
             source_union: plan.source_union.clone(),
+            source_values: plan.source_values.clone(),
             stages: plan.stages[..bucket_index].to_vec(),
         };
         let suffix = &plan.stages[bucket_index + 1..];
@@ -3749,6 +4024,7 @@ impl Context<'_, '_> {
                 source: plan.source.clone(),
                 source_identity: plan.source_identity,
                 source_union: plan.source_union.clone(),
+                source_values: plan.source_values.clone(),
                 stages: plan.stages[..bucket_index + 1 + sort_pos].to_vec(),
             };
             let mut groups = Vec::new();
@@ -3785,30 +4061,31 @@ impl Context<'_, '_> {
         let mut window_states = (0..plan.stages.len())
             .map(|_| None)
             .collect::<Vec<Option<RelationWindowState>>>();
-        let mut emit = |context: &mut Self, bucket: RelationBucket| -> Result<bool, EvaluationError> {
-            let rows = context.apply_relation_stages(
-                Value::List(bucket.values),
-                suffix,
-                &mut counters,
-                &mut distinct_seen,
-                &mut pair_previous,
-                &mut window_states,
-                bucket_index + 1,
-                depth + 1,
-            )?;
-            for row in rows {
-                match row {
-                    RelationRow::Skip => {}
-                    RelationRow::End => return Ok(false),
-                    RelationRow::Yield(value) => {
-                        if !visit(context, value)? {
-                            return Ok(false);
+        let mut emit =
+            |context: &mut Self, bucket: RelationBucket| -> Result<bool, EvaluationError> {
+                let rows = context.apply_relation_stages(
+                    Value::List(bucket.values),
+                    suffix,
+                    &mut counters,
+                    &mut distinct_seen,
+                    &mut pair_previous,
+                    &mut window_states,
+                    bucket_index + 1,
+                    depth + 1,
+                )?;
+                for row in rows {
+                    match row {
+                        RelationRow::Skip => {}
+                        RelationRow::End => return Ok(false),
+                        RelationRow::Yield(value) => {
+                            if !visit(context, value)? {
+                                return Ok(false);
+                            }
                         }
                     }
                 }
-            }
-            Ok(true)
-        };
+                Ok(true)
+            };
         let mut ended = false;
         self.for_each_sorted_relation(&prefix, depth, |context, value| {
             let flushed = state.push(value).map_err(bucket_error)?;
@@ -3840,7 +4117,9 @@ impl Context<'_, '_> {
             "count" => {
                 let mut count = 0usize;
                 self.for_each_bucket_group(plan, bucket_index, depth, |context, _| {
-                    count = count.checked_add(1).ok_or_else(|| error("ORNA-EVAL-LIMIT"))?;
+                    count = count
+                        .checked_add(1)
+                        .ok_or_else(|| error("ORNA-EVAL-LIMIT"))?;
                     context.items(count)?;
                     Ok(true)
                 })?;
@@ -3883,7 +4162,9 @@ impl Context<'_, '_> {
                 self.observe_list_relation(operation, values, arguments, depth)
             }
             "every" | "exists" => {
-                let predicate = arguments.first().ok_or_else(|| error("ORNA-EVAL-ARGUMENT"))?;
+                let predicate = arguments
+                    .first()
+                    .ok_or_else(|| error("ORNA-EVAL-ARGUMENT"))?;
                 let want_exists = operation == "exists";
                 let mut result = !want_exists;
                 self.for_each_bucket_group(plan, bucket_index, depth, |context, value| {
@@ -4195,6 +4476,16 @@ impl Context<'_, '_> {
             return Ok(());
         }
 
+        if let Some(values) = &plan.source_values {
+            for value in values.iter().cloned() {
+                self.step()?;
+                if !visit(self, value)? {
+                    return Ok(());
+                }
+            }
+            return Ok(());
+        }
+
         let mut after = None;
         loop {
             // Relation work has its own cancellation checkpoints. A plan
@@ -4270,10 +4561,7 @@ impl Context<'_, '_> {
                     }
                 }
                 RelationStage::SharedFilter(batch) => {
-                    let predicates = batch
-                        .chunks()
-                        .iter()
-                        .flat_map(|chunk| chunk.iter());
+                    let predicates = batch.chunks().iter().flat_map(|chunk| chunk.iter());
                     if !self.relation_filter_passes(&value, predicates, depth + 1)? {
                         let mut rows = vec![RelationRow::Skip];
                         if stages.iter().enumerate().any(|(offset, stage)| {
@@ -4311,9 +4599,7 @@ impl Context<'_, '_> {
                             index + 1,
                             depth + 1,
                         )?;
-                        let ended = inner_rows
-                            .iter()
-                            .any(|row| matches!(row, RelationRow::End));
+                        let ended = inner_rows.iter().any(|row| matches!(row, RelationRow::End));
                         rows.extend(inner_rows);
                         self.items(rows.len())?;
                         if ended {
@@ -4411,6 +4697,7 @@ impl Context<'_, '_> {
             source: plan.source.clone(),
             source_identity: plan.source_identity,
             source_union: plan.source_union.clone(),
+            source_values: plan.source_values.clone(),
             stages: plan.stages[..sort_index].to_vec(),
         };
         let RelationStage::SortBy(key) = &plan.stages[sort_index] else {
@@ -4586,6 +4873,8 @@ impl Context<'_, '_> {
         if let Some((left, right)) = &plan.source_union {
             self.validate_relation_plan_sources(left)?;
             self.validate_relation_plan_sources(right)
+        } else if plan.source_values.is_some() {
+            Ok(())
         } else {
             self.effects
                 .as_deref_mut()
@@ -4658,6 +4947,161 @@ impl Context<'_, '_> {
         Ok(Value::Record(fields))
     }
 
+    fn decode_with_type_witness(
+        &mut self,
+        codec: &str,
+        supports_options: bool,
+        arguments: &[orna_syntax_v1::Argument],
+        input: Option<Value>,
+        scope: &mut Scope,
+        depth: usize,
+    ) -> Result<Value, EvaluationError> {
+        self.items(arguments.len() + usize::from(input.is_some()))?;
+        let mut supplied_input = input;
+        let mut witness = None;
+        let mut ignore_unknown_fields = false;
+        let mut saw_options = false;
+        let mut positional = usize::from(supplied_input.is_some());
+        for argument in arguments {
+            match argument.name.as_deref() {
+                Some("as") if witness.is_none() => {
+                    witness = function_name(&argument.value);
+                    if witness.is_none() {
+                        return Err(error("ORNA-EVAL-ARGUMENT"));
+                    }
+                }
+                Some("ignore_unknown_fields")
+                    if codec == "json" && supports_options && !saw_options =>
+                {
+                    let Value::Bool(value) = self.evaluate(&argument.value, scope, depth + 1)?
+                    else {
+                        return Err(error("ORNA-EVAL-TYPE"));
+                    };
+                    ignore_unknown_fields = value;
+                    saw_options = true;
+                }
+                Some("input") if supplied_input.is_none() => {
+                    supplied_input = Some(self.evaluate(&argument.value, scope, depth + 1)?);
+                }
+                None if supplied_input.is_none() && positional == 0 => {
+                    supplied_input = Some(self.evaluate(&argument.value, scope, depth + 1)?);
+                    positional += 1;
+                }
+                _ => return Err(error("ORNA-EVAL-ARGUMENT")),
+            }
+            if self.transfer.is_some() {
+                return Ok(Value::Null);
+            }
+        }
+        let witness = witness.ok_or_else(|| error("ORNA-EVAL-ARGUMENT"))?;
+        let input = supplied_input.ok_or_else(|| error("ORNA-EVAL-ARGUMENT"))?;
+        let decoded = match (codec, input) {
+            ("json", Value::String(input)) => {
+                self.decode_json_with_witness(
+                    &input,
+                    &witness,
+                    ignore_unknown_fields,
+                    scope,
+                    depth + 1,
+                )?
+            }
+            ("orna", Value::String(input)) => {
+                self.orna_codec("__decode", vec![Value::String(input)])?
+            }
+            ("ovb", Value::Blob(input)) => self.ovb_codec("__decode", vec![Value::Blob(input)])?,
+            ("json" | "orna", _) => return Err(error("ORNA-EVAL-TYPE")),
+            ("ovb", _) => return Err(error("ORNA-EVAL-TYPE")),
+            _ => return Err(error("ORNA-EVAL-UNSUPPORTED")),
+        };
+        if codec_type_matches(&decoded, &witness, &scope.3) {
+            Ok(decoded)
+        } else {
+            Err(error("ORNA-EVAL-VALUE"))
+        }
+    }
+
+    fn decode_json_with_witness(
+        &mut self,
+        input: &str,
+        witness: &str,
+        ignore_unknown_fields: bool,
+        scope: &mut Scope,
+        depth: usize,
+    ) -> Result<Value, EvaluationError> {
+        let input = self.string(input.to_owned())?;
+        let node = parse_json_node(&input)?;
+        let Some(definition) = scope.3.get(witness).cloned() else {
+            return json_node_to_value(node, self, depth);
+        };
+        if !definition.variants.is_empty() {
+            return Err(error("ORNA-EVAL-VALUE"));
+        }
+        self.depth(depth)?;
+        self.step()?;
+        let JsonNode::Object(entries) = node else {
+            return Err(error("ORNA-EVAL-VALUE"));
+        };
+        self.items(entries.len())?;
+        self.items(definition.fields.len())?;
+
+        let mut supplied = BTreeMap::new();
+        for (name, value) in entries {
+            self.string(name.clone())?;
+            if definition
+                .fields
+                .iter()
+                .any(|field| field.public && field.name == name)
+            {
+                supplied.insert(name, value);
+            } else if ignore_unknown_fields {
+                // Ignored fields still consume evaluator limits so a large
+                // unknown subtree cannot bypass the bounded decoder.
+                let _ = json_node_to_value(value, self, depth + 1)?;
+            } else {
+                return Err(error("ORNA-EVAL-VALUE"));
+            }
+        }
+
+        let mut construction_scope = scope.clone();
+        let mut fields = Vec::with_capacity(definition.fields.len());
+        for field in &definition.fields {
+            let value = if field.public {
+                if let Some(node) = supplied.remove(&field.name) {
+                    json_node_to_value(node, self, depth + 1)?
+                } else if let Some(default) = &field.default {
+                    let previous_namespace = self.namespace.clone();
+                    self.namespace = definition.owner.clone();
+                    let result = self.evaluate(default, &mut construction_scope, depth + 1);
+                    self.namespace = previous_namespace;
+                    result?
+                } else {
+                    return Err(error("ORNA-EVAL-VALUE"));
+                }
+            } else if let Some(default) = &field.default {
+                let previous_namespace = self.namespace.clone();
+                self.namespace = definition.owner.clone();
+                let result = self.evaluate(default, &mut construction_scope, depth + 1);
+                self.namespace = previous_namespace;
+                result?
+            } else {
+                return Err(error("ORNA-EVAL-VALUE"));
+            };
+            if self.transfer.is_some() {
+                return Ok(Value::Null);
+            }
+            construction_scope.0.insert(field.name.clone(), value.clone());
+            construction_scope.1.remove(&field.name);
+            fields.push((field.field_id.clone(), value));
+        }
+        if !supplied.is_empty() {
+            return Err(error("ORNA-EVAL-VALUE"));
+        }
+        Ok(Value::NominalRecord {
+            type_id: definition.type_id,
+            fields,
+        })
+    }
+
     fn call(
         &mut self,
         callee: &Expr,
@@ -4666,6 +5110,19 @@ impl Context<'_, '_> {
         scope: &mut Scope,
         depth: usize,
     ) -> Result<Value, EvaluationError> {
+        let resolved_name = self.resolve_function_name(callee, scope);
+        if let Some((codec, supports_options)) =
+            resolved_name.as_deref().and_then(codec_decode_operation)
+        {
+            return self.decode_with_type_witness(
+                codec,
+                supports_options,
+                arguments,
+                input,
+                scope,
+                depth,
+            );
+        }
         if function_name(callee).as_deref() == Some("std.ui.action") {
             if input.is_some() {
                 return Err(error("ORNA-EVAL-ARGUMENT"));
@@ -4679,10 +5136,7 @@ impl Context<'_, '_> {
             && !scope.0.contains_key("Some")
             && self.resolve_function_name(callee, scope).is_none()
         {
-            if input.is_some()
-                || arguments.len() != 1
-                || arguments[0].name.is_some()
-            {
+            if input.is_some() || arguments.len() != 1 || arguments[0].name.is_some() {
                 return Err(error("ORNA-EVAL-ARGUMENT"));
             }
             let value = self.evaluate(&arguments[0].value, scope, depth + 1)?;
@@ -4833,11 +5287,11 @@ impl Context<'_, '_> {
         if let Some(operation_name) = resolved_function.as_deref()
             && let Some(operation) =
                 orna_sys_v1::system_host_operation_registry().operation(operation_name)
-            && self.effects.is_some()
         {
-            if input.is_some()
-                || arguments.len() != operation.parameters.len()
-            {
+            if self.effects.is_none() {
+                return Err(error("ORNA-EVAL-UNSUPPORTED"));
+            }
+            if input.is_some() || arguments.len() != operation.parameters.len() {
                 return Err(error("ORNA-EVAL-ARGUMENT"));
             }
             let positional = arguments.iter().all(|argument| argument.name.is_none());
@@ -4848,9 +5302,7 @@ impl Context<'_, '_> {
                 for parameter in &operation.parameters {
                     let mut matches = arguments
                         .iter()
-                        .filter(|argument| {
-                            argument.name.as_deref() == Some(parameter.as_str())
-                        });
+                        .filter(|argument| argument.name.as_deref() == Some(parameter.as_str()));
                     let Some(argument) = matches.next() else {
                         return Err(error("ORNA-EVAL-ARGUMENT"));
                     };
@@ -4876,7 +5328,7 @@ impl Context<'_, '_> {
             let result = self
                 .effects
                 .as_deref_mut()
-                .expect("checked host effect handler")
+                .expect("host effects were checked above")
                 .handle_registered_with_cancellation_and_budget(
                     operation_name,
                     callee,
@@ -4893,8 +5345,8 @@ impl Context<'_, '_> {
                 return self.effect_value(&value);
             }
         }
-        let source_export_available = function_name(callee)
-            .is_some_and(|name| self.functions.contains_key(&name));
+        let source_export_available =
+            function_name(callee).is_some_and(|name| self.functions.contains_key(&name));
         let native_binding = registered_standard_binding(
             callee,
             resolved_function.as_deref(),
@@ -4912,6 +5364,12 @@ impl Context<'_, '_> {
         let native_bits = native_binding
             .filter(|binding| binding.kind == StandardBindingKind::Bits)
             .map(|binding| binding.operation);
+        let native_stream = native_binding
+            .filter(|binding| binding.kind == StandardBindingKind::Stream)
+            .map(|binding| binding.operation);
+        let native_concurrent = native_binding
+            .filter(|binding| binding.kind == StandardBindingKind::Concurrent)
+            .map(|binding| binding.operation);
         let native_stats = native_binding
             .filter(|binding| binding.kind == StandardBindingKind::Stats)
             .map(|binding| binding.operation);
@@ -4919,7 +5377,7 @@ impl Context<'_, '_> {
             .filter(|binding| binding.kind == StandardBindingKind::Time)
             .map(|binding| binding.operation);
         let root_stream = root_stream_name(callee);
-        let stream = match (root_stream, input.as_ref()) {
+        let root_stream_operation = match (root_stream, input.as_ref()) {
             (Some("from_list"), None) => Some("from_list"),
             (Some("for_each"), Some(Value::Stream { .. })) => Some("for_each"),
             _ => None,
@@ -4929,6 +5387,18 @@ impl Context<'_, '_> {
             .map(|binding| binding.operation);
         let native_base64 = native_binding
             .filter(|binding| binding.kind == StandardBindingKind::Base64)
+            .map(|binding| binding.operation);
+        let native_json = native_binding
+            .filter(|binding| binding.kind == StandardBindingKind::Json)
+            .map(|binding| binding.operation);
+        let native_orna_codec = native_binding
+            .filter(|binding| binding.kind == StandardBindingKind::OrnaCodec)
+            .map(|binding| binding.operation);
+        let native_ovb_codec = native_binding
+            .filter(|binding| binding.kind == StandardBindingKind::OvbCodec)
+            .map(|binding| binding.operation);
+        let native_money = native_binding
+            .filter(|binding| binding.kind == StandardBindingKind::Money)
             .map(|binding| binding.operation);
         let qualified_math = (!scope.0.contains_key("std"))
             .then(|| math_name(callee))
@@ -4956,8 +5426,7 @@ impl Context<'_, '_> {
             return Err(error("ORNA-EVAL-UNSUPPORTED"));
         }
         let native_collection = native_binding.is_some_and(|binding| {
-            binding.kind == StandardBindingKind::Collection
-                && binding.operation.starts_with("__")
+            binding.kind == StandardBindingKind::Collection && binding.operation.starts_with("__")
         });
         let native_asof_join = portable_collection_name(callee) == Some("asof_join")
             && !self.restrict_function_names
@@ -4977,19 +5446,27 @@ impl Context<'_, '_> {
         // primitives for operations whose values are erased at runtime.
         if !native_asof_join
             && !native_collection
-            && stream.is_none()
+            && root_stream_operation.is_none()
             && native_math.is_none()
             && native_text.is_none()
             && native_bits.is_none()
+            && native_stream.is_none()
+            && native_concurrent.is_none()
             && native_stats.is_none()
             && native_time.is_none()
             && native_hash.is_none()
             && native_base64.is_none()
+            && native_json.is_none()
+            && native_orna_codec.is_none()
+            && native_ovb_codec.is_none()
+            && native_money.is_none()
             && (qualified_math.is_none()
                 && qualified_bits.is_none()
                 && qualified_text.is_none()
                 && qualified_stats.is_none()
                 && qualified_time.is_none()
+                && native_stream.is_none()
+                && native_concurrent.is_none()
                 && portable_collection_operation(callee, resolved_function.as_deref()).is_none()
                 && root_collection.is_none()
                 || resolved_function.is_some())
@@ -5159,6 +5636,13 @@ impl Context<'_, '_> {
                 .flatten()
         });
         let time = native_time;
+        let stream = native_stream.or(root_stream_operation);
+        let concurrent = native_concurrent;
+        let base64 = native_base64;
+        let json = native_json;
+        let orna_codec = native_orna_codec;
+        let ovb_codec = native_ovb_codec;
+        let money = native_money;
         let collection =
             portable_collection_operation(callee, resolved_function.as_deref()).or(root_collection);
         let name = math
@@ -5167,8 +5651,13 @@ impl Context<'_, '_> {
             .or(stats)
             .or(time)
             .or(stream)
+            .or(concurrent)
             .or(native_hash)
-            .or(native_base64)
+            .or(base64)
+            .or(json)
+            .or(orna_codec)
+            .or(ovb_codec)
+            .or(money)
             .or(collection)
             .ok_or_else(|| error("ORNA-EVAL-UNSUPPORTED"))?;
         let implicit = usize::from(input.is_some());
@@ -5198,13 +5687,18 @@ impl Context<'_, '_> {
             }
         }
         values.extend(explicit);
-        let signature_name = match native_binding.map(|binding| binding.kind) {
+        let binding_name = match native_binding.map(|binding| binding.kind) {
             Some(StandardBindingKind::Hash) => format!("hash.{name}"),
-            Some(StandardBindingKind::Base64) => format!("base64.{name}"),
+            Some(StandardBindingKind::Base64) => {
+                format!("base64.{}", name.strip_prefix("__").unwrap_or(name))
+            }
+            Some(StandardBindingKind::Money) => {
+                format!("money.{}", name.strip_prefix("__").unwrap_or(name))
+            }
             _ => name.to_owned(),
         };
         let values = named_arguments(
-            &signature_name,
+            &binding_name,
             arguments,
             values,
             implicit,
@@ -5243,10 +5737,20 @@ impl Context<'_, '_> {
             self.time(name, values)
         } else if stream.is_some() {
             self.stream(name, values, depth)
+        } else if concurrent.is_some() {
+            self.concurrent(name, values, depth)
         } else if native_hash.is_some() {
             self.hash(name, values)
-        } else if native_base64.is_some() {
+        } else if base64.is_some() {
             self.base64(name, values)
+        } else if json.is_some() {
+            self.json_codec(name, values)
+        } else if orna_codec.is_some() {
+            self.orna_codec(name, values)
+        } else if ovb_codec.is_some() {
+            self.ovb_codec(name, values)
+        } else if money.is_some() {
+            self.money(name, values)
         } else {
             self.collection(name, values, depth)
         }
@@ -5390,91 +5894,6 @@ impl Context<'_, '_> {
             _ => Err(error("ORNA-EVAL-UNSUPPORTED")),
         }
     }
-    fn hash(&mut self, name: &str, values: Vec<Value>) -> Result<Value, EvaluationError> {
-        self.step()?;
-        match (name, values.as_slice()) {
-            ("sha256", [Value::Blob(input)]) => {
-                if input.len() > self.limits.max_string_bytes {
-                    return Err(error("ORNA-EVAL-LIMIT"));
-                }
-                Ok(Value::Blob(Sha256::digest(input).to_vec()))
-            }
-            ("sha256_text", [Value::String(input)]) => {
-                Ok(Value::Blob(Sha256::digest(input.as_bytes()).to_vec()))
-            }
-            ("domain_sha256", [Value::String(domain), Value::Blob(payload)]) => {
-                if domain.is_empty()
-                    || !domain.is_ascii()
-                    || domain.as_bytes().contains(&0)
-                    || payload.len() > self.limits.max_string_bytes
-                {
-                    return Err(error("ORNA-EVAL-VALUE"));
-                }
-                let mut digest = Sha256::new();
-                digest.update(domain.as_bytes());
-                digest.update([0]);
-                digest.update(payload);
-                Ok(Value::Blob(digest.finalize().to_vec()))
-            }
-            ("to_hex", [Value::Blob(digest)]) if digest.len() == 32 => {
-                const HEX: &[u8; 16] = b"0123456789abcdef";
-                let mut output = String::with_capacity(64);
-                for byte in digest {
-                    output.push(char::from(HEX[usize::from(byte >> 4)]));
-                    output.push(char::from(HEX[usize::from(byte & 0x0f)]));
-                }
-                self.string(output).map(Value::String)
-            }
-            ("from_hex", [Value::String(encoded)]) => {
-                let decoded = if encoded.len() == 64
-                    && encoded
-                        .as_bytes()
-                        .iter()
-                        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(byte))
-                {
-                    let mut bytes = Vec::with_capacity(32);
-                    for pair in encoded.as_bytes().chunks_exact(2) {
-                        let high = (pair[0] as char).to_digit(16).expect("validated hex digit");
-                        let low = (pair[1] as char).to_digit(16).expect("validated hex digit");
-                        bytes.push(((high << 4) | low) as u8);
-                    }
-                    Some(Box::new(Value::Blob(bytes)))
-                } else {
-                    None
-                };
-                Ok(Value::Option(decoded))
-            }
-            ("sha256" | "sha256_text" | "domain_sha256" | "to_hex" | "from_hex", _) => {
-                Err(error("ORNA-EVAL-TYPE"))
-            }
-            _ => Err(error("ORNA-EVAL-UNSUPPORTED")),
-        }
-    }
-    fn base64(&mut self, name: &str, values: Vec<Value>) -> Result<Value, EvaluationError> {
-        self.step()?;
-        match (name, values.as_slice()) {
-            ("encode", [Value::Blob(input)]) => {
-                if input.len() > self.limits.max_string_bytes {
-                    return Err(error("ORNA-EVAL-LIMIT"));
-                }
-                self.string(BASE64_STANDARD.encode(input)).map(Value::String)
-            }
-            ("decode", [Value::String(input)]) => {
-                if input.len() > self.limits.max_string_bytes {
-                    return Err(error("ORNA-EVAL-LIMIT"));
-                }
-                let decoded = BASE64_STANDARD
-                    .decode(input.as_bytes())
-                    .map_err(|_| error("ORNA-EVAL-ERROR"))?;
-                if decoded.len() > self.limits.max_string_bytes {
-                    return Err(error("ORNA-EVAL-LIMIT"));
-                }
-                Ok(Value::Blob(decoded))
-            }
-            ("encode" | "decode", _) => Err(error("ORNA-EVAL-TYPE")),
-            _ => Err(error("ORNA-EVAL-UNSUPPORTED")),
-        }
-    }
     fn text(&mut self, name: &str, values: Vec<Value>) -> Result<Value, EvaluationError> {
         let name = name.strip_prefix("__").unwrap_or(name);
         match (name, values.as_slice()) {
@@ -5563,14 +5982,442 @@ impl Context<'_, '_> {
             _ => Err(error("ORNA-EVAL-UNSUPPORTED")),
         }
     }
+    fn checked_stream_values(
+        &mut self,
+        stream: &Value,
+    ) -> Result<(Vec<Value>, String), EvaluationError> {
+        let Value::Stream {
+            values,
+            source_label,
+            source_digest,
+            position,
+        } = stream
+        else {
+            return Err(error("ORNA-EVAL-TYPE"));
+        };
+        if *position > values.len()
+            || self.list_stream_digest(source_label, values)? != *source_digest
+        {
+            return Err(error("ORNA-EVAL-VALUE"));
+        }
+        self.items(values.len().saturating_sub(*position))?;
+        Ok((values[*position..].to_vec(), source_label.clone()))
+    }
+
+    fn finite_stream(
+        &mut self,
+        source_label: String,
+        values: Vec<Value>,
+    ) -> Result<Value, EvaluationError> {
+        self.string(source_label.clone())?;
+        self.items(values.len())?;
+        let source_digest = self.list_stream_digest(&source_label, &values)?;
+        Ok(Value::Stream {
+            values,
+            source_label,
+            source_digest,
+            position: 0,
+        })
+    }
+    fn stream(
+        &mut self,
+        name: &str,
+        values: Vec<Value>,
+        depth: usize,
+    ) -> Result<Value, EvaluationError> {
+        match (name, values.as_slice()) {
+            ("from_list", [Value::List(items), Value::String(source_label)]) => {
+                self.finite_stream(source_label.clone(), items.clone())
+            }
+            ("for_each", [Value::Stream { .. }, action]) => {
+                let (items, _) = self.checked_stream_values(&values[0])?;
+                self.items(items.len())?;
+                for value in items {
+                    self.step()?;
+                    let result = self.invoke_predicate(action, value, depth + 1)?;
+                    if !matches!(result, Value::Unit | Value::Null) {
+                        return Err(error("ORNA-EVAL-TYPE"));
+                    }
+                    self.step()?;
+                }
+                Ok(Value::Unit)
+            }
+            ("batch", [Value::Stream { .. }, Value::Int(size)]) => {
+                let (items, source_label) = self.checked_stream_values(&values[0])?;
+                let size = self.positive_collection_size(size)?;
+                let mut batches = Vec::new();
+                for batch in items.chunks(size) {
+                    self.step()?;
+                    batches.push(Value::List(batch.to_vec()));
+                    self.items(batches.len())?;
+                }
+                self.finite_stream(format!("{source_label}|batch:{size}"), batches)
+            }
+            ("buffer", [Value::Stream { .. }, Value::Int(capacity)]) => {
+                let (items, source_label) = self.checked_stream_values(&values[0])?;
+                self.positive_collection_size(capacity)?;
+                // The immutable finite source is consumed under backpressure;
+                // a bounded queue changes scheduling, never item order/content.
+                self.finite_stream(format!("{source_label}|buffer"), items)
+            }
+            ("merge", [Value::List(streams)]) => {
+                let mut sources = Vec::with_capacity(streams.len());
+                for stream in streams {
+                    let (items, source_label) = self.checked_stream_values(stream)?;
+                    sources.push((source_label, items));
+                }
+                let total = sources.iter().try_fold(0usize, |total, (_, items)| {
+                    total
+                        .checked_add(items.len())
+                        .ok_or_else(|| error("ORNA-EVAL-LIMIT"))
+                })?;
+                self.items(total)?;
+                let mut merged = Vec::with_capacity(total);
+                // The reference leaves cross-source arrival to a live
+                // scheduler. These finite materialized sources have no event
+                // timestamps, so this evaluator uses a repeatable round-robin
+                // admission schedule while preserving every source's order.
+                for position in 0..sources
+                    .iter()
+                    .map(|(_, items)| items.len())
+                    .max()
+                    .unwrap_or(0)
+                {
+                    for (_, items) in &sources {
+                        if let Some(value) = items.get(position) {
+                            self.step()?;
+                            merged.push(value.clone());
+                        }
+                    }
+                }
+                let mut merge_identity = Sha256::new();
+                merge_identity.update(b"orna.merge.v1\0");
+                merge_identity.update((sources.len() as u64).to_be_bytes());
+                for (source_label, items) in &sources {
+                    merge_identity.update((source_label.len() as u64).to_be_bytes());
+                    merge_identity.update(source_label.as_bytes());
+                    merge_identity.update(self.list_stream_digest(source_label, items)?);
+                }
+                let source_identity = merge_identity
+                    .finalize()
+                    .iter()
+                    .map(|byte| format!("{byte:02x}"))
+                    .collect::<String>();
+                self.finite_stream(format!("merge:{source_identity}"), merged)
+            }
+            (
+                "throttle",
+                [
+                    Value::Stream { .. },
+                    Value::Duration {
+                        seconds,
+                        nanosecond,
+                    },
+                    Value::String(policy),
+                ],
+            ) => {
+                if elapsed_total_nanoseconds(seconds, *nanosecond) <= BigInt::from(0u8) {
+                    return Err(error("ORNA-EVAL-VALUE"));
+                }
+                if policy != "drop" {
+                    return Err(error("ORNA-EVAL-VALUE"));
+                }
+                // The reference requires elapsed intervals but gives this
+                // finite source no timestamp provider. Treat the materialized
+                // list as one observation instant; explicit `drop` keeps its
+                // first item and drops later same-instant values.
+                let (items, source_label) = self.checked_stream_values(&values[0])?;
+                let output = items.first().cloned().into_iter().collect();
+                self.finite_stream(format!("{source_label}|throttle:drop"), output)
+            }
+            (
+                "debounce",
+                [
+                    Value::Stream { .. },
+                    Value::Duration {
+                        seconds,
+                        nanosecond,
+                    },
+                    Value::String(policy),
+                ],
+            ) => {
+                if elapsed_total_nanoseconds(seconds, *nanosecond) <= BigInt::from(0u8) {
+                    return Err(error("ORNA-EVAL-VALUE"));
+                }
+                if policy != "latest" {
+                    return Err(error("ORNA-EVAL-VALUE"));
+                }
+                // The reference requires elapsed quiet intervals but gives
+                // this finite source no timestamp provider. Treat its items as
+                // one synchronous burst and apply explicit `latest` delivery.
+                let (items, source_label) = self.checked_stream_values(&values[0])?;
+                let output = items.last().cloned().into_iter().collect();
+                self.finite_stream(format!("{source_label}|debounce:latest"), output)
+            }
+            ("retry", [Value::Stream { .. }, Value::Record(policy)]) => {
+                let (items, source_label) = self.checked_stream_values(&values[0])?;
+                let Some(Value::Int(max_attempts)) = policy.get("max_attempts") else {
+                    return Err(error("ORNA-EVAL-TYPE"));
+                };
+                let Some(Value::Duration {
+                    seconds: initial_seconds,
+                    nanosecond: initial_nanos,
+                }) = policy.get("initial_delay")
+                else {
+                    return Err(error("ORNA-EVAL-TYPE"));
+                };
+                let Some(Value::Duration {
+                    seconds: maximum_seconds,
+                    nanosecond: maximum_nanos,
+                }) = policy.get("max_delay")
+                else {
+                    return Err(error("ORNA-EVAL-TYPE"));
+                };
+                if !max_attempts.is_positive()
+                    || elapsed_total_nanoseconds(initial_seconds, *initial_nanos)
+                        < BigInt::from(0u8)
+                    || elapsed_total_nanoseconds(maximum_seconds, *maximum_nanos)
+                        < elapsed_total_nanoseconds(initial_seconds, *initial_nanos)
+                {
+                    return Err(error("ORNA-EVAL-VALUE"));
+                }
+                // ListStreamSource is replayable and cannot produce a blocked
+                // provider delivery. A valid retry policy preserves it exactly.
+                self.finite_stream(format!("{source_label}|retry"), items)
+            }
+            ("recover", [Value::Stream { .. }, handler]) => {
+                let (items, source_label) = self.checked_stream_values(&values[0])?;
+                if !matches!(handler, Value::Function { .. } | Value::Closure(_)) {
+                    return Err(error("ORNA-EVAL-TYPE"));
+                }
+                // The finite list source cannot fail decoding or polling, so
+                // recovery has no failure to replace and retains every item.
+                self.finite_stream(format!("{source_label}|recover"), items)
+            }
+            ("from_list", [_, _])
+            | ("for_each", [_, _])
+            | ("batch", [_, _])
+            | ("buffer", [_, _])
+            | ("throttle", [_, _, _])
+            | ("debounce", [_, _, _])
+            | ("retry", [_, _])
+            | ("recover", [_, _])
+            | ("merge", [_]) => Err(error("ORNA-EVAL-TYPE")),
+            _ => Err(error("ORNA-EVAL-UNSUPPORTED")),
+        }
+    }
+    fn concurrent(
+        &mut self,
+        name: &str,
+        values: Vec<Value>,
+        depth: usize,
+    ) -> Result<Value, EvaluationError> {
+        match (name, values.as_slice()) {
+            ("parallel", [Value::List(callbacks)]) => {
+                self.items(callbacks.len())?;
+                if callbacks.is_empty() {
+                    return Ok(Value::List(Vec::new()));
+                }
+                self.depth(depth.saturating_add(1))?;
+                let parent = self.cancellation.cloned();
+                let mut child_effects = Vec::with_capacity(callbacks.len());
+                if let Some(effects) = self.effects.as_deref_mut() {
+                    for index in 0..callbacks.len() {
+                        child_effects.push(effects.fork_task_child(index));
+                    }
+                } else {
+                    child_effects.resize_with(callbacks.len(), || None);
+                }
+                let (results, _) = run_task_callbacks(
+                    callbacks,
+                    child_effects,
+                    depth.saturating_add(1),
+                    parent.clone(),
+                    self.functions,
+                    self.aliases,
+                    self.session_functions,
+                    self.limits,
+                    self.repl_bindings,
+                    self.restrict_function_names,
+                    self.reject_unhandled_field_calls,
+                    true,
+                    false,
+                );
+                if parent.as_ref().is_some_and(CancellationToken::is_requested) {
+                    return Err(error("ORNA-EVAL-CANCELLED"));
+                }
+                let failures = results
+                    .iter()
+                    .filter_map(|result| result.as_ref()?.as_ref().err())
+                    .filter(|failure| failure.code() != "ORNA-EVAL-CANCELLED")
+                    .cloned()
+                    .collect::<Vec<_>>();
+                if !failures.is_empty() {
+                    return Err(aggregate_task_failures(&failures));
+                }
+                let mut output = Vec::with_capacity(results.len());
+                for result in results {
+                    match result {
+                        Some(Ok(value)) => output.push(value),
+                        Some(Err(failure)) => return Err(failure),
+                        None => return Err(error("ORNA-EVAL-CANCELLED")),
+                    }
+                }
+                Ok(Value::List(output))
+            }
+            ("race", [Value::List(callbacks)]) => {
+                self.items(callbacks.len())?;
+                if callbacks.is_empty() {
+                    return Err(error("ORNA-EVAL-VALUE"));
+                }
+                self.depth(depth.saturating_add(1))?;
+                let parent = self.cancellation.cloned();
+                let mut child_effects = Vec::with_capacity(callbacks.len());
+                if let Some(effects) = self.effects.as_deref_mut() {
+                    for index in 0..callbacks.len() {
+                        child_effects.push(effects.fork_task_child(index));
+                    }
+                } else {
+                    child_effects.resize_with(callbacks.len(), || None);
+                }
+                let (results, winner) = run_task_callbacks(
+                    callbacks,
+                    child_effects,
+                    depth.saturating_add(1),
+                    parent.clone(),
+                    self.functions,
+                    self.aliases,
+                    self.session_functions,
+                    self.limits,
+                    self.repl_bindings,
+                    self.restrict_function_names,
+                    self.reject_unhandled_field_calls,
+                    false,
+                    true,
+                );
+                if parent.as_ref().is_some_and(CancellationToken::is_requested) {
+                    return Err(error("ORNA-EVAL-CANCELLED"));
+                }
+                if let Some(winner) = winner {
+                    return Ok(winner);
+                }
+                results
+                    .into_iter()
+                    .enumerate()
+                    .find_map(|(_, result)| {
+                        result.and_then(|result| match result {
+                            Err(failure) if failure.code() != "ORNA-EVAL-CANCELLED" => {
+                                Some(Err(failure))
+                            }
+                            _ => None,
+                        })
+                    })
+                    .unwrap_or_else(|| Err(error("ORNA-EVAL-ERROR")))
+            }
+            (
+                "timeout",
+                [
+                    callback,
+                    Value::Duration {
+                        seconds,
+                        nanosecond,
+                    },
+                ],
+            ) => {
+                self.depth(depth.saturating_add(1))?;
+                if seconds.is_negative() {
+                    return Err(error("ORNA-EVAL-VALUE"));
+                }
+                let seconds = seconds.to_u64().ok_or_else(|| error("ORNA-EVAL-VALUE"))?;
+                let timeout = std::time::Duration::new(seconds, *nanosecond);
+                let shared_cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+                let parent = self.cancellation.cloned();
+                let functions = self.functions;
+                let aliases = self.aliases;
+                let session_functions = self.session_functions;
+                let limits = self.limits;
+                let repl_bindings = self.repl_bindings;
+                let restrict_function_names = self.restrict_function_names;
+                let reject_unhandled_field_calls = self.reject_unhandled_field_calls;
+                let child_effects = self
+                    .effects
+                    .as_deref_mut()
+                    .and_then(|effects| effects.fork_task_child(0));
+                let result = std::thread::scope(|scope| {
+                    let (sender, receiver) = std::sync::mpsc::channel();
+                    let shared_for_task = Arc::clone(&shared_cancel);
+                    let callback = callback.clone();
+                    let task_parent = parent.clone();
+                    scope.spawn(move || {
+                        let cancellation =
+                            CancellationToken::child(Arc::clone(&shared_for_task), task_parent);
+                        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            invoke_task_callback(
+                                callback,
+                                functions,
+                                aliases,
+                                session_functions,
+                                limits,
+                                cancellation,
+                                repl_bindings,
+                                restrict_function_names,
+                                reject_unhandled_field_calls,
+                                depth.saturating_add(1),
+                                child_effects,
+                            )
+                        }))
+                        .unwrap_or_else(|_| Err(error("ORNA-EVAL-ERROR")));
+                        let _ = sender.send(result);
+                    });
+                    let started = std::time::Instant::now();
+                    loop {
+                        if parent.as_ref().is_some_and(CancellationToken::is_requested) {
+                            shared_cancel.store(true, std::sync::atomic::Ordering::Release);
+                            while receiver.recv().is_ok() {}
+                            return Err(error("ORNA-EVAL-CANCELLED"));
+                        }
+                        let remaining = timeout.saturating_sub(started.elapsed());
+                        if remaining.is_zero() {
+                            match receiver.try_recv() {
+                                Ok(result) => return result,
+                                Err(std::sync::mpsc::TryRecvError::Empty) => {
+                                    shared_cancel.store(true, std::sync::atomic::Ordering::Release);
+                                    let _ = receiver.recv();
+                                    return Err(error("ORNA-EVAL-TIMEOUT"));
+                                }
+                                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                                    return Err(error("ORNA-EVAL-ERROR"));
+                                }
+                            }
+                        }
+                        match receiver
+                            .recv_timeout(remaining.min(std::time::Duration::from_millis(10)))
+                        {
+                            Ok(result) => return result,
+                            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                                return Err(error("ORNA-EVAL-ERROR"));
+                            }
+                        }
+                    }
+                })?;
+                Ok(result)
+            }
+            ("parallel" | "race", [_]) | ("timeout", [_, _]) => Err(error("ORNA-EVAL-TYPE")),
+            _ => Err(error("ORNA-EVAL-UNSUPPORTED")),
+        }
+    }
     fn time(&mut self, name: &str, values: Vec<Value>) -> Result<Value, EvaluationError> {
         match (name, values.as_slice()) {
             (
                 "offset_at",
-                [Value::Instant {
-                    unix_seconds,
-                    nanosecond,
-                }, Value::String(zone)],
+                [
+                    Value::Instant {
+                        unix_seconds,
+                        nanosecond,
+                    },
+                    Value::String(zone),
+                ],
             ) => {
                 self.step()?;
                 let zone = resolve_time_zone(zone).map_err(|_| error("ORNA-EVAL-VALUE"))?;
@@ -5584,46 +6431,43 @@ impl Context<'_, '_> {
             }
             (
                 "resolve_local",
-                [Value::String(local), Value::String(zone), Value::String(ambiguous)],
+                [
+                    Value::String(local),
+                    Value::String(zone),
+                    Value::String(ambiguous),
+                ],
+            ) => self.resolve_local_time(local, zone, ambiguous, None),
+            (
+                "resolve_local",
+                [
+                    Value::String(local),
+                    Value::String(zone),
+                    Value::String(ambiguous),
+                    gap,
+                ],
             ) => {
-                if !matches!(ambiguous.as_str(), "reject" | "earlier" | "later") {
-                    return Err(error("ORNA-EVAL-VALUE"));
-                }
-                self.step()?;
-                let local = parse_local_datetime(local).ok_or_else(|| error("ORNA-EVAL-VALUE"))?;
-                let zone = resolve_time_zone(zone).map_err(|_| error("ORNA-EVAL-VALUE"))?;
-                let instant = match zone
-                    .resolve_local(local)
-                    .map_err(|_| error("ORNA-EVAL-VALUE"))?
-                {
-                    LocalTimeResolution::Unique { instant, .. } => instant,
-                    LocalTimeResolution::Ambiguous { earlier, .. }
-                        if ambiguous == "earlier" =>
-                    {
-                        earlier
-                    }
-                    LocalTimeResolution::Ambiguous { later, .. } if ambiguous == "later" => later,
-                    // A portable implementation cannot choose a machine-local
-                    // gap policy. Ambiguous times require an explicit choice.
-                    LocalTimeResolution::Ambiguous { .. }
-                    | LocalTimeResolution::Nonexistent { .. } => {
-                        return Err(error("ORNA-EVAL-VALUE"));
-                    }
+                let gap = match gap {
+                    Value::Null | Value::Option(None) => None,
+                    Value::String(gap) => Some(gap.as_str()),
+                    Value::Option(Some(inner)) => match inner.as_ref() {
+                        Value::String(gap) => Some(gap.as_str()),
+                        _ => return Err(error("ORNA-EVAL-TYPE")),
+                    },
+                    _ => return Err(error("ORNA-EVAL-TYPE")),
                 };
-                Ok(Value::Instant {
-                    unix_seconds: instant.unix_seconds,
-                    nanosecond: instant.nanosecond,
-                })
+                self.resolve_local_time(local, zone, ambiguous, gap)
             }
             (
                 "duration.compact.format"
                 | "duration.clock.format"
                 | "duration.words.format"
                 | "duration.iso.format",
-                [Value::Duration {
-                    seconds,
-                    nanosecond,
-                }],
+                [
+                    Value::Duration {
+                        seconds,
+                        nanosecond,
+                    },
+                ],
             ) => {
                 self.step()?;
                 format_duration_context(None)?;
@@ -5652,66 +6496,300 @@ impl Context<'_, '_> {
             _ => Err(error("ORNA-EVAL-UNSUPPORTED")),
         }
     }
-    fn stream(
+    fn resolve_local_time(
         &mut self,
-        name: &str,
-        values: Vec<Value>,
-        depth: usize,
+        local_text: &str,
+        zone_name: &str,
+        ambiguous: &str,
+        gap_adjustment: Option<&str>,
     ) -> Result<Value, EvaluationError> {
-        match (name, values.as_slice()) {
-            ("from_list", [Value::List(items), Value::String(source_label)]) => {
-                self.items(items.len())?;
-                let source_label = self.string(source_label.clone())?;
-                let source_digest = self.list_stream_digest(&source_label, items)?;
-                Ok(Value::Stream {
-                    values: items.clone(),
-                    source_label,
-                    source_digest,
-                    position: 0,
-                })
+        if !matches!(ambiguous, "reject" | "earlier" | "later")
+            || !matches!(
+                gap_adjustment,
+                None | Some("reject" | "shift_forward" | "shift_backward")
+            )
+        {
+            return Err(error("ORNA-EVAL-VALUE"));
+        }
+        self.step()?;
+        let local = parse_local_datetime(local_text).ok_or_else(|| error("ORNA-EVAL-VALUE"))?;
+        let zone = resolve_time_zone(zone_name).map_err(|_| error("ORNA-EVAL-VALUE"))?;
+        let instant = match zone
+            .resolve_local(local)
+            .map_err(|_| error("ORNA-EVAL-VALUE"))?
+        {
+            LocalTimeResolution::Unique { instant, .. } => instant,
+            LocalTimeResolution::Ambiguous { earlier, .. } if ambiguous == "earlier" => earlier,
+            LocalTimeResolution::Ambiguous { later, .. } if ambiguous == "later" => later,
+            LocalTimeResolution::Ambiguous { .. } => return Err(error("ORNA-EVAL-VALUE")),
+            LocalTimeResolution::Nonexistent { before, after } => {
+                let adjustment = match gap_adjustment {
+                    Some("shift_forward") => "shift_forward",
+                    Some("shift_backward") => "shift_backward",
+                    None | Some("reject") => return Err(error("ORNA-EVAL-VALUE")),
+                    _ => return Err(error("ORNA-EVAL-VALUE")),
+                };
+                let offset_before = zone
+                    .at(before)
+                    .map_err(|_| error("ORNA-EVAL-VALUE"))?
+                    .offset_seconds;
+                let offset_after = zone
+                    .at(after)
+                    .map_err(|_| error("ORNA-EVAL-VALUE"))?
+                    .offset_seconds;
+                let utc = resolve_time_zone("UTC").map_err(|_| error("ORNA-EVAL-VALUE"))?;
+                let LocalTimeResolution::Unique {
+                    instant: local_as_utc,
+                    ..
+                } = utc
+                    .resolve_local(local)
+                    .map_err(|_| error("ORNA-EVAL-VALUE"))?
+                else {
+                    return Err(error("ORNA-EVAL-VALUE"));
+                };
+                let offset = if adjustment == "shift_forward" {
+                    offset_before
+                } else {
+                    offset_after
+                };
+                let shifted = Instant::new(
+                    local_as_utc
+                        .unix_seconds
+                        .checked_sub(i64::from(offset))
+                        .ok_or_else(|| error("ORNA-EVAL-VALUE"))?,
+                    local.nanosecond,
+                )
+                .map_err(|_| error("ORNA-EVAL-VALUE"))?;
+                // Validate the shifted instant against the selected zone's
+                // supported range and transition table before returning it.
+                zone.at(shifted).map_err(|_| error("ORNA-EVAL-VALUE"))?;
+                shifted
             }
-            (
-                "for_each",
-                [
-                    Value::Stream {
-                        values,
-                        source_label,
-                        source_digest,
-                        position,
-                    },
-                    action,
-                ],
-            ) => {
-                self.items(values.len())?;
-                if *position > values.len()
-                    || self.list_stream_digest(source_label, values)? != *source_digest
+        };
+        Ok(Value::Instant {
+            unix_seconds: instant.unix_seconds,
+            nanosecond: instant.nanosecond,
+        })
+    }
+    fn base64(&mut self, name: &str, values: Vec<Value>) -> Result<Value, EvaluationError> {
+        match (name, values.as_slice()) {
+            ("__encode" | "encode", [Value::Blob(bytes)]) => {
+                self.items(bytes.len())?;
+                self.string(encode_base64(bytes)).map(Value::String)
+            }
+            ("__decode" | "decode", [Value::String(text)]) => {
+                self.string(text.clone())?;
+                let bytes = decode_base64(text)?;
+                self.items(bytes.len())?;
+                Ok(Value::Blob(bytes))
+            }
+            ("__encode" | "encode" | "__decode" | "decode", _) => {
+                Err(error("ORNA-EVAL-TYPE"))
+            }
+            _ => Err(error("ORNA-EVAL-UNSUPPORTED")),
+        }
+    }
+    fn hash(&mut self, name: &str, values: Vec<Value>) -> Result<Value, EvaluationError> {
+        self.step()?;
+        match (name, values.as_slice()) {
+            ("sha256", [Value::Blob(input)]) => {
+                if input.len() > self.limits.max_string_bytes {
+                    return Err(error("ORNA-EVAL-LIMIT"));
+                }
+                Ok(Value::Blob(Sha256::digest(input).to_vec()))
+            }
+            ("sha256_text", [Value::String(input)]) => {
+                Ok(Value::Blob(Sha256::digest(input.as_bytes()).to_vec()))
+            }
+            ("domain_sha256", [Value::String(domain), Value::Blob(payload)]) => {
+                if domain.is_empty()
+                    || !domain.is_ascii()
+                    || domain.as_bytes().contains(&0)
+                    || payload.len() > self.limits.max_string_bytes
                 {
                     return Err(error("ORNA-EVAL-VALUE"));
                 }
-                let mut next_index = *position;
-                while next_index < values.len() {
-                    self.step()?;
-                    let result = self.invoke_predicate(
-                        action,
-                        values[next_index].clone(),
-                        depth + 1,
-                    )?;
-                    if !matches!(result, Value::Unit | Value::Null) {
-                        return Err(error("ORNA-EVAL-TYPE"));
-                    }
-                    // Callback completion and checkpoint movement consume
-                    // independent cancellable steps; failures leave the
-                    // next-item position unchanged.
-                    self.step()?;
-                    next_index += 1;
-                }
-                Ok(Value::Unit)
+                let mut digest = Sha256::new();
+                digest.update(domain.as_bytes());
+                digest.update([0]);
+                digest.update(payload);
+                Ok(Value::Blob(digest.finalize().to_vec()))
             }
-            ("from_list", [_, _]) | ("for_each", [_, _]) => Err(error("ORNA-EVAL-TYPE")),
-            _ => Err(error("ORNA-EVAL-ARGUMENT")),
+            ("to_hex", [Value::Blob(digest)]) if digest.len() == 32 => {
+                const HEX: &[u8; 16] = b"0123456789abcdef";
+                let mut output = String::with_capacity(64);
+                for byte in digest {
+                    output.push(char::from(HEX[usize::from(byte >> 4)]));
+                    output.push(char::from(HEX[usize::from(byte & 0x0f)]));
+                }
+                self.string(output).map(Value::String)
+            }
+            ("from_hex", [Value::String(encoded)]) => {
+                let decoded = if encoded.len() == 64
+                    && encoded
+                        .as_bytes()
+                        .iter()
+                        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(byte))
+                {
+                    let mut bytes = Vec::with_capacity(32);
+                    for pair in encoded.as_bytes().chunks_exact(2) {
+                        let high = (pair[0] as char).to_digit(16).expect("validated hex digit");
+                        let low = (pair[1] as char).to_digit(16).expect("validated hex digit");
+                        bytes.push(((high << 4) | low) as u8);
+                    }
+                    Some(Box::new(Value::Blob(bytes)))
+                } else {
+                    None
+                };
+                Ok(Value::Option(decoded))
+            }
+            ("sha256" | "sha256_text" | "domain_sha256" | "to_hex" | "from_hex", _) => {
+                Err(error("ORNA-EVAL-TYPE"))
+            }
+            _ => Err(error("ORNA-EVAL-UNSUPPORTED")),
         }
     }
-
+    fn ovb_codec(&mut self, name: &str, values: Vec<Value>) -> Result<Value, EvaluationError> {
+        match (name, values.as_slice()) {
+            ("__encode", [value]) => {
+                let bytes = value
+                    .clone()
+                    .canonical()?
+                    .encode()
+                    .map_err(|_| error("ORNA-EVAL-VALUE"))?;
+                self.items(bytes.len())?;
+                Ok(Value::Blob(bytes))
+            }
+            ("__decode", [Value::Blob(bytes)]) => {
+                self.items(bytes.len())?;
+                let value = CanonicalValue::decode(bytes).map_err(|_| error("ORNA-EVAL-VALUE"))?;
+                Value::from_canonical(&value, self, 0)
+            }
+            ("__encode" | "__decode", _) => Err(error("ORNA-EVAL-TYPE")),
+            _ => Err(error("ORNA-EVAL-UNSUPPORTED")),
+        }
+    }
+    fn json_codec(&mut self, name: &str, values: Vec<Value>) -> Result<Value, EvaluationError> {
+        match (name, values.as_slice()) {
+            ("__encode", [value]) => {
+                let mut output = String::new();
+                write_json_value(value, &mut output, self, 0)?;
+                self.string(output).map(Value::String)
+            }
+            ("__decode", [Value::String(input)])
+            | ("__decode_with_options", [Value::String(input), Value::Bool(_)]) => {
+                self.string(input.clone())?;
+                let node = parse_json_node(input)?;
+                json_node_to_value(node, self, 0)
+            }
+            ("__decode" | "__decode_with_options", _) => Err(error("ORNA-EVAL-TYPE")),
+            _ => Err(error("ORNA-EVAL-UNSUPPORTED")),
+        }
+    }
+    fn orna_codec(&mut self, name: &str, values: Vec<Value>) -> Result<Value, EvaluationError> {
+        match (name, values.as_slice()) {
+            ("__encode", [value]) => {
+                let mut output = encode_orna_value(value, 0)?;
+                output.push('\n');
+                self.string(output).map(Value::String)
+            }
+            ("__decode", [Value::String(input)]) => {
+                self.string(input.clone())?;
+                let parsed = parse_expression(input);
+                if !parsed.is_ok() || !is_orna_data_expression(&parsed.value) {
+                    return Err(error("ORNA-EVAL-VALUE"));
+                }
+                let mut scope = Scope(
+                    BTreeMap::new(),
+                    BTreeSet::new(),
+                    BTreeSet::new(),
+                    NominalDefinitions::new(),
+                    BTreeSet::new(),
+                );
+                self.evaluate(&parsed.value, &mut scope, 0)
+            }
+            ("__decode", _) => Err(error("ORNA-EVAL-TYPE")),
+            _ => Err(error("ORNA-EVAL-UNSUPPORTED")),
+        }
+    }
+    fn money(&mut self, name: &str, values: Vec<Value>) -> Result<Value, EvaluationError> {
+        self.step()?;
+        match (name, values.as_slice()) {
+            ("__quantize", [amount, Value::Int(scale), Value::String(rounding)]) => {
+                let scale = scale
+                    .to_usize()
+                    .filter(|scale| *scale <= DEFAULT_INTEGER_DIGITS)
+                    .ok_or_else(|| error("ORNA-EVAL-VALUE"))?;
+                let decimal = money_amount(amount)?;
+                let rounded = quantize_decimal(&decimal, scale, rounding)?;
+                replace_money_amount(amount, rounded)
+            }
+            (
+                "__allocate",
+                [
+                    amount,
+                    Value::List(weight_values),
+                    Value::Int(scale),
+                    rounding,
+                ],
+            ) => {
+                self.items(weight_values.len())?;
+                let scale = scale
+                    .to_usize()
+                    .filter(|scale| *scale <= DEFAULT_INTEGER_DIGITS)
+                    .ok_or_else(|| error("ORNA-EVAL-VALUE"))?;
+                let rounding = match rounding {
+                    Value::Null | Value::Option(None) => None,
+                    Value::String(mode) => Some(mode.as_str()),
+                    Value::Option(Some(inner)) => match inner.as_ref() {
+                        Value::String(mode) => Some(mode.as_str()),
+                        _ => return Err(error("ORNA-EVAL-TYPE")),
+                    },
+                    _ => return Err(error("ORNA-EVAL-TYPE")),
+                };
+                let weights = weight_values
+                    .iter()
+                    .map(|weight| match weight {
+                        Value::Int(weight) if !weight.is_negative() => self.integer(weight.clone()),
+                        Value::Int(_) => Err(error("ORNA-EVAL-VALUE")),
+                        _ => Err(error("ORNA-EVAL-TYPE")),
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                let shares = allocate_minor_units(amount, &weights, scale, rounding)?;
+                self.items(shares.len())?;
+                shares
+                    .into_iter()
+                    .map(|share| replace_money_amount(amount, share))
+                    .collect::<Result<Vec<_>, _>>()
+                    .map(Value::List)
+            }
+            (
+                "__format",
+                [
+                    amount,
+                    Value::String(currency_code),
+                    Value::Int(minor_digits),
+                    Value::String(rounding),
+                    Value::String(locale),
+                ],
+            ) => {
+                let minor_digits = minor_digits
+                    .to_usize()
+                    .filter(|digits| *digits <= DEFAULT_INTEGER_DIGITS)
+                    .ok_or_else(|| error("ORNA-EVAL-VALUE"))?;
+                let formatted = format_money_value(
+                    amount,
+                    currency_code,
+                    minor_digits,
+                    rounding,
+                    locale,
+                )?;
+                self.string(formatted).map(Value::String)
+            }
+            ("__quantize" | "__allocate" | "__format", _) => Err(error("ORNA-EVAL-TYPE")),
+            _ => Err(error("ORNA-EVAL-UNSUPPORTED")),
+        }
+    }
     fn list_stream_digest(
         &mut self,
         source_label: &str,
@@ -5757,10 +6835,7 @@ impl Context<'_, '_> {
                 let mut groups = Vec::new();
                 for row in rows {
                     self.step()?;
-                    if let Some(bucket) = state
-                        .push(row.clone())
-                        .map_err(bucket_error)?
-                    {
+                    if let Some(bucket) = state.push(row.clone()).map_err(bucket_error)? {
                         self.items(bucket.values.len())?;
                         groups.push(Value::List(bucket.values));
                         self.items(groups.len())?;
@@ -5863,8 +6938,8 @@ impl Context<'_, '_> {
             }
             ("chunk", [_, _])
             | (
-                "flatten" | "distinct" | "unique" | "pairs" | "count" | "first" | "last"
-                | "min" | "max" | "sum",
+                "flatten" | "distinct" | "unique" | "pairs" | "count" | "first" | "last" | "min"
+                | "max" | "sum",
                 [_],
             )
             | ("one", [_] | [_, _])
@@ -6109,7 +7184,11 @@ impl Context<'_, '_> {
             }
             return Ok(Value::Decimal(total));
         }
-        if !values.is_empty() && values.iter().all(|value| matches!(value, Value::Money { .. })) {
+        if !values.is_empty()
+            && values
+                .iter()
+                .all(|value| matches!(value, Value::Money { .. }))
+        {
             self.step()?;
             let Value::Money {
                 amount: first_amount,
@@ -6193,9 +7272,7 @@ impl Context<'_, '_> {
             .exponent10
             .to_usize()
             .ok_or_else(|| error("ORNA-EVAL-LIMIT"))?;
-        let integer = self.integer(
-            value.coefficient * BigInt::from(10u8).pow(power as u32),
-        )?;
+        let integer = self.integer(value.coefficient * BigInt::from(10u8).pow(power as u32))?;
         Ok(Value::Int(integer))
     }
 
@@ -6215,9 +7292,7 @@ impl Context<'_, '_> {
                 };
                 self.exact_decimal_result(value, preserve_decimal)
             }
-            Err(failure)
-                if matches!(failure.code(), "InexactDivision" | "ORNA-EVAL-VALUE") =>
-            {
+            Err(failure) if matches!(failure.code(), "InexactDivision" | "ORNA-EVAL-VALUE") => {
                 let Some((scale, _)) = options else {
                     return Err(error("ORNA-EVAL-VALUE"));
                 };
@@ -6612,8 +7687,12 @@ impl Context<'_, '_> {
                 }
             }
             "percentile" => {
-                let [Value::List(rows), probability, Value::String(interpolation), rest @ ..] =
-                    values.as_slice()
+                let [
+                    Value::List(rows),
+                    probability,
+                    Value::String(interpolation),
+                    rest @ ..,
+                ] = values.as_slice()
                 else {
                     return Err(error("ORNA-EVAL-TYPE"));
                 };
@@ -6679,7 +7758,9 @@ impl Context<'_, '_> {
             Some(Value::Int(_)) if values.iter().all(|value| matches!(value, Value::Int(_))) => {
                 let mut total = BigInt::zero();
                 for value in values {
-                    let Value::Int(value) = value else { unreachable!() };
+                    let Value::Int(value) = value else {
+                        unreachable!()
+                    };
                     total = self.integer(total + value)?;
                 }
                 self.divide_stats(
@@ -6694,10 +7775,14 @@ impl Context<'_, '_> {
                     .iter()
                     .all(|value| matches!(value, Value::Decimal(_))) =>
             {
-                let Value::Decimal(first) = &values[0] else { unreachable!() };
+                let Value::Decimal(first) = &values[0] else {
+                    unreachable!()
+                };
                 let mut total = first.clone();
                 for value in &values[1..] {
-                    let Value::Decimal(value) = value else { unreachable!() };
+                    let Value::Decimal(value) = value else {
+                        unreachable!()
+                    };
                     total = total.add(value)?;
                 }
                 self.divide_stats(&total, &count, options, true)
@@ -6710,7 +7795,9 @@ impl Context<'_, '_> {
                 };
                 let mut total = f64::from_bits(*first);
                 for value in &values[1..] {
-                    let Value::Float(bits) = value else { unreachable!() };
+                    let Value::Float(bits) = value else {
+                        unreachable!()
+                    };
                     total += f64::from_bits(*bits);
                 }
                 finite_float(total / values.len() as f64)
@@ -6729,7 +7816,9 @@ impl Context<'_, '_> {
         };
         let homogeneous = match first {
             Value::Int(_) => values.iter().all(|value| matches!(value, Value::Int(_))),
-            Value::Decimal(_) => values.iter().all(|value| matches!(value, Value::Decimal(_))),
+            Value::Decimal(_) => values
+                .iter()
+                .all(|value| matches!(value, Value::Decimal(_))),
             Value::Float(_) => values.iter().all(|value| matches!(value, Value::Float(_))),
             _ => false,
         };
@@ -6836,7 +7925,9 @@ impl Context<'_, '_> {
         };
         let homogeneous = match first {
             Value::Int(_) => values.iter().all(|value| matches!(value, Value::Int(_))),
-            Value::Decimal(_) => values.iter().all(|value| matches!(value, Value::Decimal(_))),
+            Value::Decimal(_) => values
+                .iter()
+                .all(|value| matches!(value, Value::Decimal(_))),
             Value::Float(_) => values.iter().all(|value| matches!(value, Value::Float(_))),
             _ => false,
         };
@@ -6858,12 +7949,8 @@ impl Context<'_, '_> {
         let span = DecimalValue::new(BigInt::from(values.len() - 1), BigInt::zero())?;
         let position = probability.multiply(&span)?;
         let (index, fraction) = decimal_floor_fraction(&position)?;
-        let lower = values
-            .get(index)
-            .ok_or_else(|| error("ORNA-EVAL-VALUE"))?;
-        let upper = values
-            .get(index.saturating_add(1))
-            .unwrap_or(lower);
+        let lower = values.get(index).ok_or_else(|| error("ORNA-EVAL-VALUE"))?;
+        let upper = values.get(index.saturating_add(1)).unwrap_or(lower);
         match interpolation {
             "lower" => Ok(lower.clone()),
             "higher" => {
@@ -6912,8 +7999,10 @@ impl Context<'_, '_> {
                 self.exact_decimal_result(result, false)
             }
             (Value::Decimal(lower), Value::Decimal(upper)) => {
-                let delta =
-                    upper.add(&DecimalValue::new(-lower.coefficient.clone(), lower.exponent10.clone())?)?;
+                let delta = upper.add(&DecimalValue::new(
+                    -lower.coefficient.clone(),
+                    lower.exponent10.clone(),
+                )?)?;
                 let result = lower.add(&delta.multiply(fraction)?)?;
                 let result = if let Some((scale, _)) = options {
                     result.round_to_scale(scale)?
@@ -6924,8 +8013,7 @@ impl Context<'_, '_> {
             }
             (Value::Float(lower), Value::Float(upper)) => finite_float(
                 f64::from_bits(*lower)
-                    + (f64::from_bits(*upper) - f64::from_bits(*lower))
-                        * decimal_to_f64(fraction)?,
+                    + (f64::from_bits(*upper) - f64::from_bits(*lower)) * decimal_to_f64(fraction)?,
             ),
             _ => Err(error("ORNA-EVAL-UNSUPPORTED")),
         }
@@ -6959,7 +8047,11 @@ impl Context<'_, '_> {
             "lower" => lower,
             "higher" => upper,
             "nearest" => {
-                if fraction < 0.5 { lower } else { upper }
+                if fraction < 0.5 {
+                    lower
+                } else {
+                    upper
+                }
             }
             _ => lower,
         };
@@ -6970,7 +8062,9 @@ impl Context<'_, '_> {
             );
         }
         if interpolation == "midpoint" {
-            return finite_float((f64::from_bits(sorted[lower]) + f64::from_bits(sorted[upper])) / 2.0);
+            return finite_float(
+                (f64::from_bits(sorted[lower]) + f64::from_bits(sorted[upper])) / 2.0,
+            );
         }
         Ok(Value::Float(sorted[choose]))
     }
@@ -6996,7 +8090,11 @@ impl Context<'_, '_> {
                 Value::Option(Some(Box::new(Value::Float(value))))
             }));
         }
-        if !values.is_empty() && values.iter().all(|value| matches!(value, Value::Decimal(_))) {
+        if !values.is_empty()
+            && values
+                .iter()
+                .all(|value| matches!(value, Value::Decimal(_)))
+        {
             let mut candidate = None;
             for value in values {
                 self.step()?;
@@ -7017,11 +8115,13 @@ impl Context<'_, '_> {
                     candidate = Some(value.clone());
                 }
             }
-            return Ok(candidate.map_or(Value::Null, |value| {
-                Value::Option(Some(Box::new(value)))
-            }));
+            return Ok(candidate.map_or(Value::Null, |value| Value::Option(Some(Box::new(value)))));
         }
-        if !values.is_empty() && values.iter().all(|value| matches!(value, Value::Money { .. })) {
+        if !values.is_empty()
+            && values
+                .iter()
+                .all(|value| matches!(value, Value::Money { .. }))
+        {
             let currency = match &values[0] {
                 Value::Money { currency, .. } => *currency,
                 _ => unreachable!("non-empty all-Money list has a first Money"),
@@ -7054,9 +8154,7 @@ impl Context<'_, '_> {
                     candidate = Some(value.clone());
                 }
             }
-            return Ok(candidate.map_or(Value::Null, |value| {
-                Value::Option(Some(Box::new(value)))
-            }));
+            return Ok(candidate.map_or(Value::Null, |value| Value::Option(Some(Box::new(value)))));
         }
         let temporal_kind = values.first().and_then(range_endpoint_kind);
         if matches!(temporal_kind, Some("Date" | "Instant" | "Duration"))
@@ -7110,14 +8208,13 @@ impl Context<'_, '_> {
         Ok(candidate.map_or(Value::Null, |value| Value::Option(Some(Box::new(value)))))
     }
     fn first(&self, values: &[Value]) -> Result<Value, EvaluationError> {
-        Ok(values.first().cloned().map_or(Value::Null, |value| {
-            Value::Option(Some(Box::new(value)))
-        }))
+        Ok(values
+            .first()
+            .cloned()
+            .map_or(Value::Null, |value| Value::Option(Some(Box::new(value)))))
     }
     fn last(&self, values: &[Value]) -> Result<Value, EvaluationError> {
-        Ok(Value::Option(
-            values.last().cloned().map(Box::new),
-        ))
+        Ok(Value::Option(values.last().cloned().map(Box::new)))
     }
     fn one(
         &mut self,
@@ -7439,6 +8536,67 @@ impl Context<'_, '_> {
         }
         Ok(Value::List(joined))
     }
+    fn invoke_callable(
+        &mut self,
+        callable: &Value,
+        arguments: Vec<Value>,
+        depth: usize,
+    ) -> Result<Value, EvaluationError> {
+        let (parameters, body, mut captured, session_owned, namespace) = match callable {
+            Value::Function {
+                name,
+                nominal_definitions,
+            } => {
+                let function = self
+                    .functions
+                    .get(name)
+                    .ok_or_else(|| error("ORNA-EVAL-NAME"))?;
+                (
+                    function.parameters.clone(),
+                    function.body.clone(),
+                    Scope::from_environment_with_nominals(
+                        &function.environment,
+                        nominal_definitions,
+                        self,
+                    )?,
+                    self.session_functions
+                        .is_some_and(|functions| functions.contains(name)),
+                    function_namespace(name),
+                )
+            }
+            Value::Closure(closure) => (
+                closure.parameters.clone(),
+                closure.body.clone(),
+                closure.captured.clone(),
+                self.repl_bindings,
+                closure.namespace.clone(),
+            ),
+            _ => return Err(error("ORNA-EVAL-TYPE")),
+        };
+        self.depth(depth + 1)?;
+        self.items(arguments.len())?;
+        if arguments.len() > parameters.len() {
+            return Err(error("ORNA-EVAL-ARGUMENT"));
+        }
+        captured.2.extend(
+            self.session_functions
+                .into_iter()
+                .flat_map(|functions| functions.iter().cloned())
+                .filter(|name| captured.0.contains_key(name)),
+        );
+        let mut supplied = BTreeMap::new();
+        for (index, value) in arguments.into_iter().enumerate() {
+            supplied.insert(parameter_key(&parameters[index], index), value);
+        }
+        let previous_repl_bindings = self.repl_bindings;
+        self.repl_bindings = session_owned;
+        let previous_namespace = self.namespace.clone();
+        self.namespace = namespace;
+        let result = invoke_pure(self, &parameters, &body, captured, supplied, depth + 1);
+        self.namespace = previous_namespace;
+        self.repl_bindings = previous_repl_bindings;
+        result
+    }
     fn invoke_predicate(
         &mut self,
         callable: &Value,
@@ -7577,6 +8735,737 @@ impl Context<'_, '_> {
         let count = count.to_usize().ok_or_else(|| error("ORNA-EVAL-LIMIT"))?;
         Ok(Value::Int(self.integer(value >> count)?))
     }
+}
+
+const BASE64_ALPHABET: &[u8; 64] =
+    b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+fn encode_base64(input: &[u8]) -> String {
+    let mut output = String::with_capacity(input.len().div_ceil(3) * 4);
+    for chunk in input.chunks(3) {
+        let a = chunk[0];
+        let b = chunk.get(1).copied().unwrap_or_default();
+        let c = chunk.get(2).copied().unwrap_or_default();
+        output.push(BASE64_ALPHABET[usize::from(a >> 2)] as char);
+        output.push(BASE64_ALPHABET[usize::from(((a & 0x03) << 4) | (b >> 4))] as char);
+        output.push(if chunk.len() > 1 {
+            BASE64_ALPHABET[usize::from(((b & 0x0f) << 2) | (c >> 6))] as char
+        } else {
+            '='
+        });
+        output.push(if chunk.len() > 2 {
+            BASE64_ALPHABET[usize::from(c & 0x3f)] as char
+        } else {
+            '='
+        });
+    }
+    output
+}
+
+fn decode_base64(input: &str) -> Result<Vec<u8>, EvaluationError> {
+    if !input.is_ascii() || input.len() % 4 != 0 {
+        return Err(error("ORNA-EVAL-VALUE"));
+    }
+    let mut output = Vec::with_capacity(input.len() / 4 * 3);
+    let chunks = input.as_bytes().chunks_exact(4);
+    let count = chunks.len();
+    for (index, chunk) in chunks.enumerate() {
+        let final_chunk = index + 1 == count;
+        let decode = |byte: u8| {
+            BASE64_ALPHABET
+                .iter()
+                .position(|candidate| *candidate == byte)
+        };
+        let a = decode(chunk[0]).ok_or_else(|| error("ORNA-EVAL-VALUE"))? as u8;
+        let b = decode(chunk[1]).ok_or_else(|| error("ORNA-EVAL-VALUE"))? as u8;
+        let first = (a << 2) | (b >> 4);
+        output.push(first);
+        if chunk[2] == b'=' {
+            if !final_chunk || chunk[3] != b'=' || b & 0x0f != 0 {
+                return Err(error("ORNA-EVAL-VALUE"));
+            }
+            continue;
+        }
+        let c = decode(chunk[2]).ok_or_else(|| error("ORNA-EVAL-VALUE"))? as u8;
+        output.push((b << 4) | (c >> 2));
+        if chunk[3] == b'=' {
+            if !final_chunk || c & 0x03 != 0 {
+                return Err(error("ORNA-EVAL-VALUE"));
+            }
+            continue;
+        }
+        let d = decode(chunk[3]).ok_or_else(|| error("ORNA-EVAL-VALUE"))? as u8;
+        output.push((c << 6) | d);
+    }
+    Ok(output)
+}
+
+#[derive(Debug)]
+enum JsonNode {
+    Null,
+    Bool(bool),
+    Number(String),
+    String(String),
+    Array(Vec<JsonNode>),
+    Object(Vec<(String, JsonNode)>),
+}
+
+impl<'de> Deserialize<'de> for JsonNode {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct JsonNodeVisitor;
+        impl<'de> Visitor<'de> for JsonNodeVisitor {
+            type Value = JsonNode;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str("a JSON value")
+            }
+            fn visit_unit<E>(self) -> Result<Self::Value, E> {
+                Ok(JsonNode::Null)
+            }
+            fn visit_none<E>(self) -> Result<Self::Value, E> {
+                Ok(JsonNode::Null)
+            }
+            fn visit_bool<E>(self, value: bool) -> Result<Self::Value, E> {
+                Ok(JsonNode::Bool(value))
+            }
+            fn visit_i64<E>(self, value: i64) -> Result<Self::Value, E> {
+                Ok(JsonNode::Number(value.to_string()))
+            }
+            fn visit_u64<E>(self, value: u64) -> Result<Self::Value, E> {
+                Ok(JsonNode::Number(value.to_string()))
+            }
+            fn visit_f64<E>(self, value: f64) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                if value.is_finite() {
+                    Ok(JsonNode::Number(value.to_string()))
+                } else {
+                    Err(E::custom("JSON numbers must be finite"))
+                }
+            }
+            fn visit_str<E>(self, value: &str) -> Result<Self::Value, E> {
+                Ok(JsonNode::String(value.to_owned()))
+            }
+            fn visit_string<E>(self, value: String) -> Result<Self::Value, E> {
+                Ok(JsonNode::String(value))
+            }
+            fn visit_seq<A>(self, mut sequence: A) -> Result<Self::Value, A::Error>
+            where
+                A: SeqAccess<'de>,
+            {
+                let mut values = Vec::new();
+                while let Some(value) = sequence.next_element::<JsonNode>()? {
+                    values.push(value);
+                }
+                Ok(JsonNode::Array(values))
+            }
+            fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+            where
+                A: MapAccess<'de>,
+            {
+                let Some(first_key) = map.next_key::<String>()? else {
+                    return Ok(JsonNode::Object(Vec::new()));
+                };
+                // serde_json's arbitrary-precision number representation is a
+                // one-entry private map. Preserve its token exactly instead
+                // of passing it through a binary Float.
+                if first_key == "$serde_json::private::Number" {
+                    let number = map.next_value::<String>()?;
+                    if map.next_key::<String>()?.is_some() {
+                        return Err(de::Error::custom("malformed exact JSON number"));
+                    }
+                    return Ok(JsonNode::Number(number));
+                }
+                let mut names = BTreeSet::new();
+                let mut values = Vec::new();
+                names.insert(first_key.clone());
+                values.push((first_key, map.next_value::<JsonNode>()?));
+                while let Some(key) = map.next_key::<String>()? {
+                    if !names.insert(key.clone()) {
+                        return Err(de::Error::custom("duplicate JSON object key"));
+                    }
+                    values.push((key, map.next_value::<JsonNode>()?));
+                }
+                Ok(JsonNode::Object(values))
+            }
+        }
+        deserializer.deserialize_any(JsonNodeVisitor)
+    }
+}
+
+fn parse_json_node(input: &str) -> Result<JsonNode, EvaluationError> {
+    let mut deserializer = serde_json::Deserializer::from_str(input);
+    let node = JsonNode::deserialize(&mut deserializer).map_err(|_| error("ORNA-EVAL-VALUE"))?;
+    deserializer.end().map_err(|_| error("ORNA-EVAL-VALUE"))?;
+    Ok(node)
+}
+
+fn json_node_to_value(
+    node: JsonNode,
+    context: &mut Context<'_, '_>,
+    depth: usize,
+) -> Result<Value, EvaluationError> {
+    context.depth(depth)?;
+    context.step()?;
+    match node {
+        JsonNode::Null => Ok(Value::Null),
+        JsonNode::Bool(value) => Ok(Value::Bool(value)),
+        JsonNode::String(value) => context.string(value).map(Value::String),
+        JsonNode::Number(number) => {
+            if number.contains(['.', 'e', 'E']) {
+                let (mantissa, exponent) = match number.find(['e', 'E']) {
+                    Some(index) => (&number[..index], &number[index..]),
+                    None => (number.as_str(), ""),
+                };
+                let mantissa = if mantissa.contains('.') {
+                    mantissa.to_owned()
+                } else {
+                    format!("{mantissa}.0")
+                };
+                let normalized = format!("{mantissa}{exponent}");
+                let (coefficient, exponent) = parse_decimal(&normalized)?;
+                DecimalValue::new(coefficient, exponent).map(Value::Decimal)
+            } else {
+                let integer = BigInt::parse_bytes(number.as_bytes(), 10)
+                    .ok_or_else(|| error("ORNA-EVAL-VALUE"))?;
+                context.integer(integer).map(Value::Int)
+            }
+        }
+        JsonNode::Array(values) => {
+            context.items(values.len())?;
+            values
+                .into_iter()
+                .map(|value| json_node_to_value(value, context, depth + 1))
+                .collect::<Result<Vec<_>, _>>()
+                .map(Value::List)
+        }
+        JsonNode::Object(entries) => {
+            context.items(entries.len())?;
+            let mut fields = BTreeMap::new();
+            for (key, value) in entries {
+                context.string(key.clone())?;
+                fields.insert(key, json_node_to_value(value, context, depth + 1)?);
+            }
+            Ok(Value::Record(fields))
+        }
+    }
+}
+
+fn write_json_value(
+    value: &Value,
+    output: &mut String,
+    context: &mut Context<'_, '_>,
+    depth: usize,
+) -> Result<(), EvaluationError> {
+    context.depth(depth)?;
+    context.step()?;
+    match value {
+        Value::Null => output.push_str("null"),
+        Value::Bool(value) => output.push_str(if *value { "true" } else { "false" }),
+        Value::Int(value) => write!(output, "{value}").map_err(|_| error("ORNA-EVAL-LIMIT"))?,
+        Value::Decimal(value) => {
+            output.push_str(&decimal_json_token(value)?);
+        }
+        Value::Float(bits) => {
+            let number = f64::from_bits(*bits);
+            if !number.is_finite() {
+                return Err(error("ORNA-EVAL-VALUE"));
+            }
+            output.push_str(&number.to_string());
+        }
+        Value::String(value) => {
+            output.push_str(&serde_json::to_string(value).map_err(|_| error("ORNA-EVAL-VALUE"))?)
+        }
+        Value::List(values) | Value::Tuple(values) => {
+            context.items(values.len())?;
+            output.push('[');
+            for (index, value) in values.iter().enumerate() {
+                if index > 0 {
+                    output.push(',');
+                }
+                write_json_value(value, output, context, depth + 1)?;
+            }
+            output.push(']');
+        }
+        Value::Record(fields) => {
+            context.items(fields.len())?;
+            output.push('{');
+            for (index, (key, value)) in fields.iter().enumerate() {
+                if index > 0 {
+                    output.push(',');
+                }
+                output.push_str(&serde_json::to_string(key).map_err(|_| error("ORNA-EVAL-VALUE"))?);
+                output.push(':');
+                write_json_value(value, output, context, depth + 1)?;
+            }
+            output.push('}');
+        }
+        Value::Option(None) => output.push_str("null"),
+        Value::Option(Some(value)) => write_json_value(value, output, context, depth + 1)?,
+        Value::Unit
+        | Value::Money { .. }
+        | Value::Blob(_)
+        | Value::Date(_)
+        | Value::Uuid(_)
+        | Value::Reference(_)
+        | Value::Instant { .. }
+        | Value::Duration { .. }
+        | Value::Period { .. }
+        | Value::Error(_)
+        | Value::Range { .. }
+        | Value::Stream { .. }
+        | Value::Relation(_)
+        | Value::NominalRecord { .. }
+        | Value::Enum { .. }
+        | Value::Function { .. }
+        | Value::Closure(_) => return Err(error("ORNA-EVAL-UNSUPPORTED")),
+    }
+    if output.len() > context.limits.max_string_bytes {
+        return Err(error("ORNA-EVAL-LIMIT"));
+    }
+    Ok(())
+}
+
+fn decimal_json_token(value: &DecimalValue) -> Result<String, EvaluationError> {
+    if value.coefficient.is_zero() {
+        return Ok("0.0".to_owned());
+    }
+    let negative = value.coefficient.sign() == Sign::Minus;
+    let digits = value.coefficient.abs().to_str_radix(10);
+    let exponent = value
+        .exponent10
+        .to_i64()
+        .filter(|exponent| exponent.unsigned_abs() <= DEFAULT_INTEGER_DIGITS as u64)
+        .ok_or_else(|| error("ORNA-EVAL-LIMIT"))?;
+    let mut token = String::new();
+    if negative {
+        token.push('-');
+    }
+    if exponent >= 0 {
+        token.push_str(&digits);
+        token.push_str(&"0".repeat(exponent as usize));
+        token.push_str(".0");
+    } else {
+        let point = i64::try_from(digits.len()).map_err(|_| error("ORNA-EVAL-LIMIT"))? + exponent;
+        if point > 0 {
+            let point = usize::try_from(point).map_err(|_| error("ORNA-EVAL-LIMIT"))?;
+            token.push_str(&digits[..point]);
+            token.push('.');
+            token.push_str(&digits[point..]);
+        } else {
+            token.push_str("0.");
+            token.push_str(&"0".repeat(point.unsigned_abs() as usize));
+            token.push_str(&digits);
+        }
+    }
+    Ok(token)
+}
+
+fn encode_orna_value(value: &Value, depth: usize) -> Result<String, EvaluationError> {
+    if depth > DEFAULT_DEPTH {
+        return Err(error("ORNA-EVAL-LIMIT"));
+    }
+    Ok(match value {
+        Value::Null => "null".to_owned(),
+        Value::Unit => "()".to_owned(),
+        Value::Bool(value) => value.to_string(),
+        Value::Int(value) => value.to_string(),
+        Value::Decimal(value) => format!("{}e{}.decimal", value.coefficient, value.exponent10),
+        Value::Float(bits) => {
+            let value = f64::from_bits(*bits);
+            if value.is_nan() {
+                "Float.nan".to_owned()
+            } else if value == f64::INFINITY {
+                "Float.infinity".to_owned()
+            } else if value == f64::NEG_INFINITY {
+                "-Float.infinity".to_owned()
+            } else {
+                let text = format!("{value:.16e}");
+                let (mantissa, exponent) = text
+                    .split_once('e')
+                    .ok_or_else(|| error("ORNA-EVAL-VALUE"))?;
+                let exponent = exponent
+                    .parse::<i32>()
+                    .map_err(|_| error("ORNA-EVAL-VALUE"))?;
+                format!("{mantissa}e{exponent}f")
+            }
+        }
+        Value::String(value) => encode_orna_string(value),
+        Value::List(values) => format!(
+            "[{}]",
+            values
+                .iter()
+                .map(|value| encode_orna_value(value, depth + 1))
+                .collect::<Result<Vec<_>, _>>()?
+                .join(", ")
+        ),
+        Value::Tuple(values) => {
+            let mut parts = values
+                .iter()
+                .map(|value| encode_orna_value(value, depth + 1))
+                .collect::<Result<Vec<_>, _>>()?;
+            if parts.len() == 1 {
+                parts[0].push(',');
+            }
+            format!("({})", parts.join(", "))
+        }
+        Value::Record(fields) => {
+            if fields.is_empty() {
+                "{}".to_owned()
+            } else {
+                let mut output = String::from("{\n");
+                for (name, value) in fields {
+                    if !is_identifier(name) {
+                        return Err(error("ORNA-EVAL-UNSUPPORTED"));
+                    }
+                    output.push_str(&" ".repeat((depth + 1) * 2));
+                    output.push_str(name);
+                    output.push_str(": ");
+                    output.push_str(&encode_orna_value(value, depth + 1)?);
+                    output.push_str(",\n");
+                }
+                output.push_str(&" ".repeat(depth * 2));
+                output.push('}');
+                output
+            }
+        }
+        Value::Option(None) => "null".to_owned(),
+        Value::Option(Some(value)) => format!("Some({})", encode_orna_value(value, depth + 1)?),
+        Value::Blob(value) => encode_orna_string(&encode_base64(value)),
+        Value::Date(value) => format!("date{}", encode_orna_string(value)),
+        Value::Instant { .. } | Value::Duration { .. } | Value::Money { .. } => {
+            return Err(error("ORNA-EVAL-UNSUPPORTED"));
+        }
+        Value::Uuid(value) => encode_orna_string(&format_uuid_bytes(value)),
+        Value::Reference(value) => encode_orna_string(&encode_base64(
+            &value.encode().map_err(|_| error("ORNA-EVAL-VALUE"))?,
+        )),
+        Value::Period { .. }
+        | Value::Error(_)
+        | Value::Range { .. }
+        | Value::Stream { .. }
+        | Value::Relation(_)
+        | Value::NominalRecord { .. }
+        | Value::Enum { .. }
+        | Value::Function { .. }
+        | Value::Closure(_) => return Err(error("ORNA-EVAL-UNSUPPORTED")),
+    })
+}
+
+fn encode_orna_string(value: &str) -> String {
+    let mut output = String::from("\"");
+    for scalar in value.chars() {
+        match scalar {
+            '"' => output.push_str("\\\""),
+            '\\' => output.push_str("\\\\"),
+            '\n' => output.push_str("\\n"),
+            '\r' => output.push_str("\\r"),
+            '\t' => output.push_str("\\t"),
+            '{' => output.push_str("\\u{7b}"),
+            scalar if scalar.is_control() => {
+                write!(output, "\\u{{{:x}}}", scalar as u32).expect("String writes succeed");
+            }
+            scalar => output.push(scalar),
+        }
+    }
+    output.push('"');
+    output
+}
+
+fn is_identifier(value: &str) -> bool {
+    let mut chars = value.chars();
+    chars
+        .next()
+        .is_some_and(|first| first == '_' || first.is_alphabetic())
+        && chars.all(|scalar| scalar == '_' || scalar.is_alphanumeric())
+}
+
+fn is_orna_data_expression(expression: &Expr) -> bool {
+    match expression {
+        Expr::Literal { .. } => true,
+        Expr::Name { .. } => false,
+        Expr::Group { inner, .. } => is_orna_data_expression(inner),
+        Expr::Unary { op, rhs, .. } => {
+            matches!(op.as_str(), "+" | "-") && is_orna_data_expression(rhs)
+        }
+        Expr::List { elements, .. } | Expr::Tuple { elements, .. } => {
+            elements.iter().all(is_orna_data_expression)
+        }
+        Expr::Record { fields, .. } => fields
+            .iter()
+            .all(|field| is_orna_data_expression(&field.value)),
+        Expr::Field { base, .. } => matches!(
+            base.as_ref(),
+            Expr::Literal {
+                kind: LiteralKind::Decimal | LiteralKind::Integer,
+                ..
+            }
+        ),
+        Expr::Call {
+            callee, arguments, ..
+        } if matches!(callee.as_ref(), Expr::Name { text, .. } if text == "Some")
+            && arguments.len() == 1
+            && arguments.iter().all(|argument| argument.name.is_none()) =>
+        {
+            arguments
+                .iter()
+                .all(|argument| is_orna_data_expression(&argument.value))
+        }
+        _ => false,
+    }
+}
+
+fn format_uuid_bytes(bytes: &[u8; 16]) -> String {
+    let mut output = String::with_capacity(36);
+    for (index, byte) in bytes.iter().enumerate() {
+        if matches!(index, 4 | 6 | 8 | 10) {
+            output.push('-');
+        }
+        write!(output, "{byte:02x}").expect("String writes succeed");
+    }
+    output
+}
+
+fn money_amount(value: &Value) -> Result<DecimalValue, EvaluationError> {
+    match value {
+        Value::Int(value) => DecimalValue::new(value.clone(), BigInt::zero()),
+        Value::Decimal(value) => Ok(value.clone()),
+        Value::Money { amount, .. } => Ok(amount.clone()),
+        _ => Err(error("ORNA-EVAL-TYPE")),
+    }
+}
+
+fn replace_money_amount(value: &Value, amount: DecimalValue) -> Result<Value, EvaluationError> {
+    match value {
+        Value::Money { currency, .. } => Ok(Value::Money {
+            amount,
+            currency: *currency,
+        }),
+        Value::Int(_) | Value::Decimal(_) => Ok(Value::Decimal(amount)),
+        _ => Err(error("ORNA-EVAL-TYPE")),
+    }
+}
+
+fn format_money_value(
+    amount: &Value,
+    currency_code: &str,
+    minor_digits: usize,
+    rounding: &str,
+    locale: &str,
+) -> Result<String, EvaluationError> {
+    if currency_code.len() != 3
+        || !currency_code
+            .as_bytes()
+            .iter()
+            .all(|byte| byte.is_ascii_uppercase())
+    {
+        return Err(error("ORNA-EVAL-VALUE"));
+    }
+    let (grouping, decimal_separator, suffix_symbol) = match locale {
+        "en" | "en-US" | "en-GB" | "ja-JP" => (",", ".", false),
+        "fr-FR" => ("\u{202f}", ",", true),
+        "de-DE" => (".", ",", true),
+        _ => return Err(error("ORNA-EVAL-VALUE")),
+    };
+    let symbol = match currency_code {
+        "GBP" => "£",
+        "USD" => "$",
+        "EUR" => "€",
+        "JPY" => "¥",
+        "CAD" => "CA$",
+        "AUD" => "A$",
+        "NZD" => "NZ$",
+        "CHF" => "CHF",
+        _ => currency_code,
+    };
+    let original = money_amount(amount)?;
+    let rounded = quantize_decimal(&original, minor_digits, rounding)?;
+    let units = decimal_scaled_integer(&rounded, minor_digits)?
+        .ok_or_else(|| error("ORNA-EVAL-VALUE"))?;
+    let negative = units.sign() == Sign::Minus;
+    let digits = units.abs().to_str_radix(10);
+    let (whole, fraction) = if minor_digits == 0 {
+        (digits, String::new())
+    } else if digits.len() <= minor_digits {
+        (
+            "0".to_owned(),
+            format!("{}{}", "0".repeat(minor_digits - digits.len()), digits),
+        )
+    } else {
+        let split = digits.len() - minor_digits;
+        (digits[..split].to_owned(), digits[split..].to_owned())
+    };
+    let mut grouped = String::with_capacity(whole.len() + whole.len() / 3);
+    let mut first_group = whole.len() % 3;
+    if first_group == 0 {
+        first_group = 3;
+    }
+    grouped.push_str(&whole[..first_group]);
+    for start in (first_group..whole.len()).step_by(3) {
+        grouped.push_str(grouping);
+        grouped.push_str(&whole[start..start + 3]);
+    }
+    let mut number = grouped;
+    if minor_digits > 0 {
+        number.push_str(decimal_separator);
+        number.push_str(&fraction);
+    }
+    let sign = if negative { "-" } else { "" };
+    if symbol == currency_code {
+        if suffix_symbol {
+            Ok(format!("{sign}{number}\u{00a0}{currency_code}"))
+        } else {
+            Ok(format!("{sign}{currency_code}\u{00a0}{number}"))
+        }
+    } else if suffix_symbol {
+        Ok(format!("{sign}{number}\u{00a0}{symbol}"))
+    } else {
+        Ok(format!("{sign}{symbol}{number}"))
+    }
+}
+
+fn quantize_decimal(
+    value: &DecimalValue,
+    scale: usize,
+    rounding: &str,
+) -> Result<DecimalValue, EvaluationError> {
+    if scale > DEFAULT_INTEGER_DIGITS
+        || !matches!(
+            rounding,
+            "half_even" | "half_up" | "toward_zero" | "away_from_zero" | "floor" | "ceil"
+        )
+    {
+        return Err(error("ORNA-EVAL-VALUE"));
+    }
+    let shift = &value.exponent10 + BigInt::from(scale);
+    if shift.sign() != Sign::Minus {
+        let power = shift.to_usize().ok_or_else(|| error("ORNA-EVAL-LIMIT"))?;
+        if power > DEFAULT_INTEGER_DIGITS {
+            return Err(error("ORNA-EVAL-LIMIT"));
+        }
+        return DecimalValue::new(
+            &value.coefficient * BigInt::from(10u8).pow(power as u32),
+            -BigInt::from(scale),
+        );
+    }
+    let power = (-shift)
+        .to_usize()
+        .ok_or_else(|| error("ORNA-EVAL-LIMIT"))?;
+    if power > DEFAULT_INTEGER_DIGITS {
+        return Err(error("ORNA-EVAL-LIMIT"));
+    }
+    let divisor = BigInt::from(10u8).pow(power as u32);
+    let (mut quotient, remainder) = value.coefficient.div_rem(&divisor);
+    let negative = value.coefficient.sign() == Sign::Minus;
+    if !remainder.is_zero() {
+        let comparison = (remainder.abs() * 2u8).cmp(&divisor);
+        let increment = match rounding {
+            "toward_zero" => false,
+            "away_from_zero" => true,
+            "floor" => negative,
+            "ceil" => !negative,
+            "half_up" => comparison != std::cmp::Ordering::Less,
+            "half_even" => {
+                comparison == std::cmp::Ordering::Greater
+                    || (comparison == std::cmp::Ordering::Equal
+                        && (&quotient % 2u8).abs() == BigInt::from(1u8))
+            }
+            _ => return Err(error("ORNA-EVAL-VALUE")),
+        };
+        if increment {
+            if negative {
+                quotient -= 1;
+            } else {
+                quotient += 1;
+            }
+        }
+    }
+    DecimalValue::new(quotient, -BigInt::from(scale))
+}
+
+fn allocate_minor_units(
+    amount: &Value,
+    weights: &[BigInt],
+    scale: usize,
+    rounding: Option<&str>,
+) -> Result<Vec<DecimalValue>, EvaluationError> {
+    if weights.is_empty() || scale > DEFAULT_INTEGER_DIGITS {
+        return Err(error("ORNA-EVAL-VALUE"));
+    }
+    let total_weight = weights
+        .iter()
+        .fold(BigInt::zero(), |total, weight| total + weight);
+    if total_weight <= BigInt::zero() {
+        return Err(error("ORNA-EVAL-VALUE"));
+    }
+    let original = money_amount(amount)?;
+    let exact_units = decimal_scaled_integer(&original, scale)?;
+    let amount_units = match (exact_units, rounding) {
+        (Some(units), _) => units,
+        (None, Some(rounding)) => {
+            let rounded = quantize_decimal(&original, scale, rounding)?;
+            decimal_scaled_integer(&rounded, scale)?.ok_or_else(|| error("ORNA-EVAL-VALUE"))?
+        }
+        (None, None) => return Err(error("ORNA-EVAL-VALUE")),
+    };
+    let negative = amount_units.sign() == Sign::Minus;
+    let magnitude = amount_units.abs();
+    let mut shares = Vec::with_capacity(weights.len());
+    let mut remainders = Vec::with_capacity(weights.len());
+    let mut assigned = BigInt::zero();
+    for (index, weight) in weights.iter().enumerate() {
+        let numerator = &magnitude * weight;
+        let (share, remainder) = numerator.div_rem(&total_weight);
+        assigned += &share;
+        shares.push(share);
+        remainders.push((index, remainder));
+    }
+    let leftover = (&magnitude - assigned)
+        .to_usize()
+        .filter(|count| *count <= weights.len())
+        .ok_or_else(|| error("ORNA-EVAL-LIMIT"))?;
+    remainders.sort_by(|(left_index, left), (right_index, right)| {
+        right.cmp(left).then(left_index.cmp(right_index))
+    });
+    for (index, _) in remainders.into_iter().take(leftover) {
+        shares[index] += 1;
+    }
+    shares
+        .into_iter()
+        .map(|share| {
+            let share = if negative { -share } else { share };
+            DecimalValue::new(share, -BigInt::from(scale))
+        })
+        .collect()
+}
+
+fn decimal_scaled_integer(
+    value: &DecimalValue,
+    scale: usize,
+) -> Result<Option<BigInt>, EvaluationError> {
+    let shift = &value.exponent10 + BigInt::from(scale);
+    if shift.sign() != Sign::Minus {
+        let power = shift.to_usize().ok_or_else(|| error("ORNA-EVAL-LIMIT"))?;
+        if power > DEFAULT_INTEGER_DIGITS {
+            return Err(error("ORNA-EVAL-LIMIT"));
+        }
+        return Ok(Some(
+            &value.coefficient * BigInt::from(10u8).pow(power as u32),
+        ));
+    }
+    let power = (-shift)
+        .to_usize()
+        .ok_or_else(|| error("ORNA-EVAL-LIMIT"))?;
+    if power > DEFAULT_INTEGER_DIGITS {
+        return Err(error("ORNA-EVAL-LIMIT"));
+    }
+    let divisor = BigInt::from(10u8).pow(power as u32);
+    let (units, remainder) = value.coefficient.div_rem(&divisor);
+    Ok(remainder.is_zero().then_some(units))
 }
 
 fn pattern_names(pattern: &Pattern) -> BTreeSet<String> {
@@ -7767,18 +9656,15 @@ fn bind_constructor(
         .collect::<Vec<_>>()
         .join(".");
     let owner = context.string(owner)?;
-    let variant = context.string(
-        path.last()
-            .expect("path length checked")
-            .text
-            .clone(),
-    )?;
+    let variant = context.string(path.last().expect("path length checked").text.clone())?;
     let qualified_name = context.string(format!("{owner}.{variant}"))?;
     let Some((expected_type, expected_variant)) = enum_variant_identity(scope, &owner, &variant)
         .or_else(|| {
             scope.0.get(&qualified_name).and_then(|value| match value {
                 Value::Enum {
-                    type_id, variant_id, ..
+                    type_id,
+                    variant_id,
+                    ..
                 } => Some((type_id, variant_id)),
                 _ => None,
             })
@@ -7825,13 +9711,7 @@ fn bind_pattern_fields(
             return Ok(false);
         };
         if let Some(pattern) = &field.pattern {
-            if !bind(
-                pattern,
-                field_value.clone(),
-                scope,
-                context,
-                depth + 1,
-            )? {
+            if !bind(pattern, field_value.clone(), scope, context, depth + 1)? {
                 return Ok(false);
             }
         } else {
@@ -7860,6 +9740,14 @@ fn named_arguments(
             | "__percentile"
             | "__variance"
             | "__standard_deviation"
+            | "hash.sha256"
+            | "hash.sha256_text"
+            | "hash.to_hex"
+            | "hash.from_hex"
+            | "hash.domain_sha256"
+            | "base64.encode"
+            | "base64.decode"
+            | "money.format"
     ) && arguments.iter().all(|argument| argument.name.is_none())
     {
         return Ok(values);
@@ -7878,7 +9766,11 @@ fn named_arguments(
         "replace" => &["value", "from", "to"],
         "normalise" => &["value", "form"],
         "offset_at" => &["instant", "zone"],
-        "resolve_local" => &["local", "zone", "ambiguous"],
+        "resolve_local" => match values.len() {
+            3 => &["local", "zone", "ambiguous"],
+            4 => &["local", "zone", "ambiguous", "gap"],
+            _ => return Err(error("ORNA-EVAL-UNSUPPORTED")),
+        },
         "duration.compact.format"
         | "duration.clock.format"
         | "duration.words.format"
@@ -7890,12 +9782,18 @@ fn named_arguments(
         "bit_or" | "bit_and" | "bit_xor" => &["left", "right"],
         "bit_not" => &["value"],
         "shift_left" | "shift_right" => &["value", "count"],
-        "hash.sha256" | "hash.sha256_text" | "hash.to_hex" | "hash.from_hex"
-        | "base64.encode" | "base64.decode" => &["input"],
-        "hash.domain_sha256" => &["domain", "payload"],
-        "chunk" => &["values", "size"],
         "from_list" => &["values", "source_identity"],
         "for_each" => &["stream", "action"],
+        "batch" => &["stream", "size"],
+        "buffer" => &["stream", "capacity"],
+        "merge" => &["streams"],
+        "throttle" => &["stream", "duration", "drop_policy"],
+        "debounce" => &["stream", "duration", "delivery_policy"],
+        "retry" => &["stream", "policy"],
+        "recover" => &["stream", "handler"],
+        "parallel" | "race" => &["callbacks"],
+        "timeout" => &["callback", "duration"],
+        "chunk" => &["values", "size"],
         "flatten" | "unique" | "pairs" => &["values"],
         "distinct" | "count" => &["rows"],
         "last" => &["rows"],
@@ -7919,6 +9817,13 @@ fn named_arguments(
         },
         "__histogram" => &["rows", "bins", "include_final_upper"],
         "__rate" | "__derivative" | "__integrate" => &["points"],
+        "hash.sha256" | "hash.sha256_text" | "base64.encode" | "base64.decode" => {
+            &["input"]
+        }
+        "hash.to_hex" => &["digest"],
+        "hash.from_hex" => &["value"],
+        "hash.domain_sha256" => &["domain", "payload"],
+        "money.format" => &["amount", "currency_code", "minor_digits", "rounding", "locale"],
         "first" => &["rows"],
         "one" => match values.len() {
             1 => &["rows"],
@@ -7976,8 +9881,7 @@ fn named_arguments(
                     // Older bounded evaluator fixtures used `values` for
                     // finite lists. Keep that alias at runtime while the
                     // pinned 1.0 source signature canonically names `rows`.
-                    (name == "values" && expected.first() == Some(&"rows"))
-                        .then_some(0)
+                    (name == "values" && expected.first() == Some(&"rows")).then_some(0)
                 })
         } else if named_started {
             None
@@ -8038,10 +9942,16 @@ enum StandardBindingKind {
     Math,
     Text,
     Bits,
+    Stream,
+    Concurrent,
     Stats,
     Time,
     Hash,
     Base64,
+    Json,
+    OrnaCodec,
+    OvbCodec,
+    Money,
 }
 
 #[derive(Clone, Copy)]
@@ -8064,24 +9974,90 @@ const STANDARD_BINDING_MODULES: &[StandardBindingModule] = &[
         prefix: "std.collection.",
         kind: StandardBindingKind::Collection,
         operations: &[
-            "chunk", "flatten", "filter", "map", "flat_map", "sort_by", "rank", "take",
-            "drop", "distinct", "unique", "union", "count", "first", "one", "sum", "min",
-            "max", "every", "exists", "partition", "zip", "zip_exact", "group_by", "pairs",
-            "window", "split_when", "bucket_by", "asof_join", "__list_length",
-            "__list_concat", "__numeric_sum", "__stable_sort", "__minimum", "__maximum",
-            "__group_by", "__rank", "__asof_join", "__bucket_by",
+            "chunk",
+            "flatten",
+            "filter",
+            "map",
+            "flat_map",
+            "sort_by",
+            "rank",
+            "take",
+            "drop",
+            "distinct",
+            "unique",
+            "union",
+            "count",
+            "first",
+            "one",
+            "sum",
+            "min",
+            "max",
+            "every",
+            "exists",
+            "partition",
+            "zip",
+            "zip_exact",
+            "group_by",
+            "pairs",
+            "window",
+            "split_when",
+            "bucket_by",
+            "asof_join",
+            "__list_length",
+            "__list_concat",
+            "__numeric_sum",
+            "__stable_sort",
+            "__minimum",
+            "__maximum",
+            "__group_by",
+            "__rank",
+            "__asof_join",
+            "__bucket_by",
         ],
     },
     StandardBindingModule {
         prefix: "std.query.",
         kind: StandardBindingKind::Collection,
         operations: &[
-            "chunk", "flatten", "filter", "map", "flat_map", "sort_by", "rank", "take",
-            "drop", "distinct", "unique", "union", "count", "first", "one", "sum", "min",
-            "max", "every", "exists", "partition", "zip", "zip_exact", "group_by", "pairs",
-            "window", "split_when", "bucket_by", "asof_join", "__list_length",
-            "__list_concat", "__numeric_sum", "__stable_sort", "__minimum", "__maximum",
-            "__group_by", "__rank", "__asof_join", "__bucket_by",
+            "chunk",
+            "flatten",
+            "filter",
+            "map",
+            "flat_map",
+            "sort_by",
+            "rank",
+            "take",
+            "drop",
+            "distinct",
+            "unique",
+            "union",
+            "count",
+            "first",
+            "one",
+            "sum",
+            "min",
+            "max",
+            "every",
+            "exists",
+            "partition",
+            "zip",
+            "zip_exact",
+            "group_by",
+            "pairs",
+            "window",
+            "split_when",
+            "bucket_by",
+            "asof_join",
+            "__list_length",
+            "__list_concat",
+            "__numeric_sum",
+            "__stable_sort",
+            "__minimum",
+            "__maximum",
+            "__group_by",
+            "__rank",
+            "__asof_join",
+            "__bucket_by",
         ],
     },
     StandardBindingModule {
@@ -8093,45 +10069,117 @@ const STANDARD_BINDING_MODULES: &[StandardBindingModule] = &[
         prefix: "std.text.",
         kind: StandardBindingKind::Text,
         operations: &[
-            "__trim", "__split", "__join", "__starts_with", "__ends_with", "__contains",
-            "__replace", "__normalise", "__lower", "__upper",
+            "__trim",
+            "__split",
+            "__join",
+            "__starts_with",
+            "__ends_with",
+            "__contains",
+            "__replace",
+            "__normalise",
+            "__lower",
+            "__upper",
         ],
     },
     StandardBindingModule {
         prefix: "std.bits.",
         kind: StandardBindingKind::Bits,
         operations: &[
-            "__bit_or", "__bit_and", "__bit_xor", "__bit_not", "__shift_left", "__shift_right",
+            "__bit_or",
+            "__bit_and",
+            "__bit_xor",
+            "__bit_not",
+            "__shift_left",
+            "__shift_right",
         ],
+    },
+    StandardBindingModule {
+        prefix: "std.stream.",
+        kind: StandardBindingKind::Stream,
+        operations: &[
+            "from_list",
+            "for_each",
+            "batch",
+            "buffer",
+            "merge",
+            "throttle",
+            "debounce",
+            "retry",
+            "recover",
+        ],
+    },
+    StandardBindingModule {
+        prefix: "std.concurrent.",
+        kind: StandardBindingKind::Concurrent,
+        operations: &["parallel", "race", "timeout"],
     },
     StandardBindingModule {
         prefix: "std.stats.",
         kind: StandardBindingKind::Stats,
         operations: &[
-            "__mean", "__median", "__percentile", "__sum", "__min", "__max", "__range",
-            "__mode", "__variance", "__standard_deviation", "__histogram", "__rate",
-            "__derivative", "__integrate",
+            "__mean",
+            "__median",
+            "__percentile",
+            "__sum",
+            "__min",
+            "__max",
+            "__range",
+            "__mode",
+            "__variance",
+            "__standard_deviation",
+            "__histogram",
+            "__rate",
+            "__derivative",
+            "__integrate",
         ],
     },
     StandardBindingModule {
         prefix: "std.time.",
         kind: StandardBindingKind::Time,
         operations: &[
-            "offset_at", "resolve_local", "duration.compact.format", "duration.clock.format",
-            "duration.words.format", "duration.iso.format",
+            "offset_at",
+            "resolve_local",
+            "duration.compact.format",
+            "duration.clock.format",
+            "duration.words.format",
+            "duration.iso.format",
         ],
     },
     StandardBindingModule {
         prefix: "std.hash.",
         kind: StandardBindingKind::Hash,
         operations: &[
-            "sha256", "sha256_text", "domain_sha256", "to_hex", "from_hex",
+            "sha256",
+            "sha256_text",
+            "domain_sha256",
+            "to_hex",
+            "from_hex",
         ],
     },
     StandardBindingModule {
         prefix: "std.encoding.base64.",
         kind: StandardBindingKind::Base64,
-        operations: &["encode", "decode"],
+        operations: &["encode", "decode", "__encode", "__decode"],
+    },
+    StandardBindingModule {
+        prefix: "std.encoding.json.",
+        kind: StandardBindingKind::Json,
+        operations: &["__encode", "__decode", "__decode_with_options"],
+    },
+    StandardBindingModule {
+        prefix: "std.encoding.orna.",
+        kind: StandardBindingKind::OrnaCodec,
+        operations: &["__encode", "__decode"],
+    },
+    StandardBindingModule {
+        prefix: "std.encoding.ovb.",
+        kind: StandardBindingKind::OvbCodec,
+        operations: &["__encode", "__decode"],
+    },
+    StandardBindingModule {
+        prefix: "std.money.",
+        kind: StandardBindingKind::Money,
+        operations: &["__quantize", "__allocate", "__format"],
     },
 ];
 
@@ -8247,7 +10295,9 @@ fn format_duration(name: &str, seconds: &BigInt, nanosecond: u32) -> String {
     let (minutes, remainder) = remainder.div_rem(&BigInt::from(NANOS_PER_MINUTE));
     let (whole_seconds, fraction) = remainder.div_rem(&BigInt::from(NANOS_PER_SECOND));
     let hours = hours.to_u32().expect("hour remainder is below one day");
-    let minutes = minutes.to_u32().expect("minute remainder is below one hour");
+    let minutes = minutes
+        .to_u32()
+        .expect("minute remainder is below one hour");
     let whole_seconds = whole_seconds
         .to_u32()
         .expect("second remainder is below one minute");
@@ -8308,10 +10358,7 @@ fn format_duration(name: &str, seconds: &BigInt, nanosecond: u32) -> String {
                 ));
             }
             if hours > 0 {
-                parts.push(format!(
-                    "{hours} hour{}",
-                    if hours == 1 { "" } else { "s" }
-                ));
+                parts.push(format!("{hours} hour{}", if hours == 1 { "" } else { "s" }));
             }
             if minutes > 0 {
                 parts.push(format!(
@@ -8345,7 +10392,10 @@ fn format_duration(name: &str, seconds: &BigInt, nanosecond: u32) -> String {
                     output.push_str(&minutes.to_string());
                     output.push('M');
                 }
-                if whole_seconds > 0 || fraction > 0 || (days.is_zero() && hours == 0 && minutes == 0) {
+                if whole_seconds > 0
+                    || fraction > 0
+                    || (days.is_zero() && hours == 0 && minutes == 0)
+                {
                     output.push_str(&fractional_seconds);
                     output.push('S');
                 }
@@ -8460,13 +10510,28 @@ fn is_relation_source(expression: &Expr) -> bool {
 }
 
 fn relation_call_candidate(
-    _name: &str,
+    name: &str,
     arguments: &[orna_syntax_v1::Argument],
     scope: &Scope,
 ) -> bool {
+    if matches!(name, "union" | "zip" | "zip_exact" | "asof_join") {
+        return arguments
+            .iter()
+            .filter(|argument| {
+                argument.name.as_deref().is_none_or(|name| {
+                    matches!(name, "left" | "right") || (name == "rows" && arguments.len() == 1)
+                })
+            })
+            .any(|argument| relation_expression_candidate(&argument.value, scope));
+    }
     let relation_argument = arguments
         .iter()
         .find(|argument| argument.name.as_deref() == Some("rows"))
+        .or_else(|| {
+            arguments
+                .iter()
+                .find(|argument| argument.name.as_deref() == Some("values"))
+        })
         .or_else(|| arguments.first());
     let Some(argument) = relation_argument else {
         return false;
@@ -8489,11 +10554,24 @@ fn relation_expression_candidate(expression: &Expr, scope: &Scope) -> bool {
         Expr::Call {
             callee, arguments, ..
         } if root_collection_name(callee).is_some()
-            || portable_collection_name(callee).is_some() => arguments
-            .iter()
-            .find(|argument| argument.name.as_deref() == Some("rows"))
-            .or_else(|| arguments.first())
-            .is_some_and(|argument| relation_expression_candidate(&argument.value, scope)),
+            || portable_collection_name(callee).is_some() =>
+        {
+            arguments
+                .iter()
+                .find(|argument| argument.name.as_deref() == Some("rows"))
+                .or_else(|| {
+                    arguments
+                        .iter()
+                        .find(|argument| argument.name.as_deref() == Some("values"))
+                })
+                .or_else(|| {
+                    arguments
+                        .iter()
+                        .find(|argument| argument.name.as_deref() == Some("left"))
+                })
+                .or_else(|| arguments.first())
+                .is_some_and(|argument| relation_expression_candidate(&argument.value, scope))
+        }
         _ => false,
     }
 }
@@ -8508,12 +10586,18 @@ fn relation_named_arguments(
         "filter" => &["rows", "predicate"],
         "map" | "project" | "flat_map" => &["rows", "transform"],
         "sort_by" => &["rows", "key"],
+        "chunk" => &["values", "size"],
+        "flatten" => &["values"],
+        "partition" | "split_when" => &["values", "predicate"],
+        "group_by" | "rank" => &["values", "key"],
+        "zip" | "zip_exact" => &["left", "right"],
+        "asof_join" => &["left", "right", "time", "by"],
         "bucket_by" => match values.len() {
             2 => &["rows", "period"],
             3 => &["rows", "period", "zone"],
             _ => return Err(error("ORNA-EVAL-ARGUMENT")),
         },
-        "distinct" | "pairs" => &["rows"],
+        "distinct" | "unique" | "pairs" => &["rows"],
         "union" => &["left", "right"],
         "take" | "drop" => &["rows", "count"],
         "window" => match values.len() {
@@ -8653,6 +10737,38 @@ fn function_name(expression: &Expr) -> Option<String> {
     }
 }
 
+fn codec_decode_operation(name: &str) -> Option<(&'static str, bool)> {
+    match name {
+        "std.encoding.json.decode" => Some(("json", false)),
+        "std.encoding.json.decode_with_options" => Some(("json", true)),
+        "std.encoding.orna.decode" => Some(("orna", false)),
+        "std.encoding.ovb.decode" => Some(("ovb", false)),
+        _ => None,
+    }
+}
+
+fn codec_type_matches(
+    value: &Value,
+    witness: &str,
+    nominal_definitions: &NominalDefinitions,
+) -> bool {
+    if let Some(definition) = nominal_definitions.get(witness) {
+        return matches!(
+            value,
+            Value::NominalRecord { type_id, .. } if *type_id == definition.type_id
+        );
+    }
+    match witness {
+        "Str" | "Text" | "String" => matches!(value, Value::String(_)),
+        "Bool" => matches!(value, Value::Bool(_)),
+        "Int" | "Integer" => matches!(value, Value::Int(_)),
+        "Decimal" => matches!(value, Value::Decimal(_)),
+        "Float" => matches!(value, Value::Float(_)),
+        "Blob" => matches!(value, Value::Blob(_)),
+        _ => false,
+    }
+}
+
 fn system_relation_source(expression: &Expr) -> Option<&'static str> {
     match function_name(expression)?.as_str() {
         "sys.Storage" => Some("sys.Storage"),
@@ -8678,9 +10794,8 @@ fn is_static_effect_path(callee: &Expr, scope: &Scope) -> bool {
     matches!(callee, Expr::Field { base, .. }
         if matches!(base.as_ref(), Expr::ReplBinding { text, .. } if text == "$__orna_relation"))
         || matches!(callee, Expr::Field { .. })
-            && function_root_name(callee).is_some_and(|root| {
-                scope.4.contains(root) || !scope.0.contains_key(root)
-            })
+            && function_root_name(callee)
+                .is_some_and(|root| scope.4.contains(root) || !scope.0.contains_key(root))
 }
 
 fn one_like(value: &Value) -> Result<Value, EvaluationError> {
@@ -8933,14 +11048,26 @@ fn decimal_floor_fraction(value: &DecimalValue) -> Result<(usize, DecimalValue),
     }
     let divisor = BigInt::from(10u8).pow(power as u32);
     let (index, remainder) = value.coefficient.div_rem(&divisor);
-    Ok((index.to_usize().ok_or_else(|| error("ORNA-EVAL-LIMIT"))?, DecimalValue::new(remainder, value.exponent10.clone())?))
+    Ok((
+        index.to_usize().ok_or_else(|| error("ORNA-EVAL-LIMIT"))?,
+        DecimalValue::new(remainder, value.exponent10.clone())?,
+    ))
 }
 
 fn decimal_to_f64(value: &DecimalValue) -> Result<f64, EvaluationError> {
-    let coefficient = value.coefficient.to_f64().ok_or_else(|| error("ORNA-EVAL-VALUE"))?;
-    let exponent = value.exponent10.to_i32().ok_or_else(|| error("ORNA-EVAL-LIMIT"))?;
+    let coefficient = value
+        .coefficient
+        .to_f64()
+        .ok_or_else(|| error("ORNA-EVAL-VALUE"))?;
+    let exponent = value
+        .exponent10
+        .to_i32()
+        .ok_or_else(|| error("ORNA-EVAL-LIMIT"))?;
     let value = coefficient * 10f64.powi(exponent);
-    value.is_finite().then_some(value).ok_or_else(|| error("ORNA-EVAL-VALUE"))
+    value
+        .is_finite()
+        .then_some(value)
+        .ok_or_else(|| error("ORNA-EVAL-VALUE"))
 }
 
 fn lawful_sort_key(value: &Value) -> Result<(), EvaluationError> {
@@ -9105,6 +11232,28 @@ fn unescape_string_body(body: &str) -> Result<String, EvaluationError> {
             't' => output.push('\t'),
             '\\' => output.push('\\'),
             '"' => output.push('"'),
+            'u' => {
+                if characters.next() != Some('{') {
+                    return Err(error("ORNA-EVAL-VALUE"));
+                }
+                let mut digits = String::new();
+                loop {
+                    let character = characters.next().ok_or_else(|| error("ORNA-EVAL-VALUE"))?;
+                    if character == '}' {
+                        break;
+                    }
+                    if !character.is_ascii_hexdigit() || digits.len() == 6 {
+                        return Err(error("ORNA-EVAL-VALUE"));
+                    }
+                    digits.push(character);
+                }
+                if digits.is_empty() {
+                    return Err(error("ORNA-EVAL-VALUE"));
+                }
+                let scalar = u32::from_str_radix(&digits, 16)
+                    .map_err(|_| error("ORNA-EVAL-VALUE"))?;
+                output.push(char::from_u32(scalar).ok_or_else(|| error("ORNA-EVAL-VALUE"))?);
+            }
             _ => return Err(error("ORNA-EVAL-VALUE")),
         }
     }
@@ -9161,7 +11310,10 @@ mod tests {
                 }
             }
         }
-        assert!(registered >= 80, "expected the registered pinned host surface, got {registered}");
+        assert!(
+            registered >= 80,
+            "expected the registered pinned host surface, got {registered}"
+        );
     }
 
     fn evaluate_recovery(source: &str) -> CanonicalValue {
@@ -9192,6 +11344,206 @@ mod tests {
             transfer: None,
             cancellation: None,
         }
+    }
+
+    fn evaluate_relation_collection_fixture(
+        source: &str,
+        bindings: &[(&str, Vec<Value>)],
+    ) -> Result<Value, EvaluationError> {
+        fn materialize(
+            context: &mut Context<'_, '_>,
+            value: Value,
+        ) -> Result<Value, EvaluationError> {
+            match value {
+                Value::Relation(plan) => {
+                    Ok(Value::List(context.collect_relation_values(&plan, 0)?))
+                }
+                Value::Tuple(parts) => Ok(Value::Tuple(
+                    parts
+                        .into_iter()
+                        .map(|part| materialize(context, part))
+                        .collect::<Result<Vec<_>, _>>()?,
+                )),
+                Value::List(values) => Ok(Value::List(
+                    values
+                        .into_iter()
+                        .map(|value| materialize(context, value))
+                        .collect::<Result<Vec<_>, _>>()?,
+                )),
+                value => Ok(value),
+            }
+        }
+
+        let parsed = parse_expression(source);
+        assert!(parsed.is_ok(), "{source}: {:?}", parsed.diagnostics);
+        let functions = Functions::new();
+        let mut context = test_context(&functions);
+        let mut scope = Scope(
+            bindings
+                .iter()
+                .map(|(name, values)| {
+                    (
+                        (*name).to_owned(),
+                        Value::Relation(RelationPlan::from_values(values.clone())),
+                    )
+                })
+                .collect(),
+            BTreeSet::new(),
+            BTreeSet::new(),
+            NominalDefinitions::new(),
+            BTreeSet::new(),
+        );
+        let value = context.evaluate(&parsed.value, &mut scope, 0)?;
+        materialize(&mut context, value)
+    }
+
+    #[test]
+    fn relation_collection_group_and_partition_return_computed_relation_rows() {
+        let ints = |values: &[i64]| {
+            values
+                .iter()
+                .map(|value| Value::Int(BigInt::from(*value)))
+                .collect::<Vec<_>>()
+        };
+        let grouped = evaluate_relation_collection_fixture(
+            include_str!("../tests/fixtures/relation-group-by-result-0re2w.orna"),
+            &[("rows", ints(&[31, 12, 22, 13, 33]))],
+        )
+        .expect("group_by computes a relation result");
+        assert_eq!(
+            grouped,
+            Value::List(vec![
+                Value::Tuple(vec![Value::Int(BigInt::from(1)), Value::List(ints(&[31]))]),
+                Value::Tuple(vec![
+                    Value::Int(BigInt::from(2)),
+                    Value::List(ints(&[12, 22])),
+                ]),
+                Value::Tuple(vec![
+                    Value::Int(BigInt::from(3)),
+                    Value::List(ints(&[13, 33])),
+                ]),
+            ])
+        );
+
+        let partitioned = evaluate_relation_collection_fixture(
+            include_str!("../tests/fixtures/relation-partition-result-0re2w.orna"),
+            &[("rows", ints(&[3, 2, 4, 1]))],
+        )
+        .expect("partition computes both result relations");
+        assert_eq!(
+            partitioned,
+            Value::Tuple(vec![Value::List(ints(&[2, 4])), Value::List(ints(&[3, 1]))])
+        );
+    }
+
+    #[test]
+    fn relation_collection_depth_operators_keep_real_values_and_order() {
+        let ints = |values: &[i64]| {
+            values
+                .iter()
+                .map(|value| Value::Int(BigInt::from(*value)))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            evaluate_relation_collection_fixture(
+                include_str!("../tests/fixtures/relation-chunk-result-0re2w.orna"),
+                &[("rows", ints(&[1, 2, 3]))],
+            )
+            .unwrap(),
+            Value::List(vec![Value::List(ints(&[1, 2])), Value::List(ints(&[3]))])
+        );
+        assert_eq!(
+            evaluate_relation_collection_fixture(
+                include_str!("../tests/fixtures/relation-flatten-result-0re2w.orna"),
+                &[(
+                    "rows",
+                    vec![Value::List(ints(&[1, 2])), Value::List(ints(&[3]))]
+                )],
+            )
+            .unwrap(),
+            Value::List(ints(&[1, 2, 3]))
+        );
+        let left = ints(&[1, 2]);
+        let right = ["a", "b", "c"]
+            .into_iter()
+            .map(|value| Value::String(value.into()))
+            .collect::<Vec<_>>();
+        let zipped = Value::List(vec![
+            Value::Tuple(vec![left[0].clone(), right[0].clone()]),
+            Value::Tuple(vec![left[1].clone(), right[1].clone()]),
+        ]);
+        assert_eq!(
+            evaluate_relation_collection_fixture(
+                include_str!("../tests/fixtures/relation-zip-result-0re2w.orna"),
+                &[("left", left.clone()), ("right", right.clone())],
+            )
+            .unwrap(),
+            zipped
+        );
+        assert_eq!(
+            evaluate_relation_collection_fixture(
+                include_str!("../tests/fixtures/relation-zip-exact-result-0re2w.orna"),
+                &[("left", left), ("right", right[..2].to_vec())],
+            )
+            .unwrap(),
+            zipped
+        );
+        assert_eq!(
+            evaluate_relation_collection_fixture(
+                include_str!("../tests/fixtures/relation-unique-result-0re2w.orna"),
+                &[("rows", ints(&[3, 1, 3, 2, 1]))],
+            )
+            .unwrap(),
+            Value::List(ints(&[3, 1, 2]))
+        );
+        assert_eq!(
+            evaluate_relation_collection_fixture(
+                include_str!("../tests/fixtures/relation-split-when-result-0re2w.orna"),
+                &[("rows", ints(&[1, 2, 3, 4]))],
+            )
+            .unwrap(),
+            Value::List(vec![
+                Value::List(ints(&[1])),
+                Value::List(ints(&[2, 3])),
+                Value::List(ints(&[4])),
+            ])
+        );
+        assert_eq!(
+            evaluate_relation_collection_fixture(
+                include_str!("../tests/fixtures/relation-rank-result-0re2w.orna"),
+                &[("rows", ints(&[3, 1, 2, 1]))],
+            )
+            .unwrap(),
+            Value::List(vec![
+                Value::Tuple(vec![
+                    Value::Int(BigInt::from(1)),
+                    Value::Int(BigInt::from(1))
+                ]),
+                Value::Tuple(vec![
+                    Value::Int(BigInt::from(1)),
+                    Value::Int(BigInt::from(1))
+                ]),
+                Value::Tuple(vec![
+                    Value::Int(BigInt::from(2)),
+                    Value::Int(BigInt::from(3))
+                ]),
+                Value::Tuple(vec![
+                    Value::Int(BigInt::from(3)),
+                    Value::Int(BigInt::from(4))
+                ]),
+            ])
+        );
+        assert_eq!(
+            evaluate_relation_collection_fixture(
+                include_str!("../tests/fixtures/relation-asof-result-0re2w.orna"),
+                &[("left", ints(&[10])), ("right", ints(&[9, 11]))],
+            )
+            .unwrap(),
+            Value::List(vec![Value::Tuple(vec![
+                Value::Int(BigInt::from(10)),
+                Value::Option(Some(Box::new(Value::Int(BigInt::from(9))))),
+            ])])
+        );
     }
 
     #[test]
@@ -9413,7 +11765,6 @@ mod tests {
         );
         assert_eq!(effects.calls, 0);
     }
-
 
     #[test]
     fn recovery_pipelines_handle_ordinary_failures_and_skip_successes() {
@@ -10217,8 +12568,8 @@ mod tests {
         let outer_second = Value::Bool(true);
         let left = RelationPlan::new("Left".into())
             .with_stage(RelationStage::Filter(vec![left_first.clone()]));
-        let right = RelationPlan::new("Right".into())
-            .with_stage(RelationStage::Map(right_map.clone()));
+        let right =
+            RelationPlan::new("Right".into()).with_stage(RelationStage::Map(right_map.clone()));
         let plan = RelationPlan::union(left, right)
             .with_stage(RelationStage::Filter(vec![outer_first.clone()]))
             .with_stage(RelationStage::Filter(vec![outer_second.clone()]))
@@ -10228,7 +12579,11 @@ mod tests {
         let (left, right) = plan.source_union.as_ref().unwrap();
         assert_eq!(
             left.stages,
-            vec![RelationStage::Filter(vec![left_first, outer_first.clone(), outer_second.clone()])]
+            vec![RelationStage::Filter(vec![
+                left_first,
+                outer_first.clone(),
+                outer_second.clone()
+            ])]
         );
         assert_eq!(
             right.stages,
@@ -10384,7 +12739,10 @@ mod tests {
         assert!(inner.stages.is_empty());
         let (known_left, unknown_right) = inner.source_union.as_ref().unwrap();
         let merged = vec![first, second, third.clone(), fourth.clone()];
-        assert_eq!(known_left.stages, vec![RelationStage::Filter(merged.clone())]);
+        assert_eq!(
+            known_left.stages,
+            vec![RelationStage::Filter(merged.clone())]
+        );
         assert_eq!(unknown_right.stages, vec![RelationStage::Filter(merged)]);
         assert_eq!(
             unknown_tail.stages,
@@ -10433,7 +12791,12 @@ mod tests {
                 .flat_map(|chunk| chunk.iter())
                 .cloned()
                 .collect::<Vec<_>>(),
-            vec![left_own, outer_first.clone(), outer_second.clone(), outer_third.clone()]
+            vec![
+                left_own,
+                outer_first.clone(),
+                outer_second.clone(),
+                outer_third.clone()
+            ]
         );
         assert_eq!(
             middle_batch
@@ -10483,7 +12846,12 @@ mod tests {
         assert!(Arc::ptr_eq(&left_batch, &right_batch));
         assert_eq!(
             left_batch.values().cloned().collect::<Vec<_>>(),
-            vec![unknown_first, unknown_second, outer_first.clone(), outer_second.clone()]
+            vec![
+                unknown_first,
+                unknown_second,
+                outer_first.clone(),
+                outer_second.clone()
+            ]
         );
         let tail_batch = batch_for(unknown_tail);
         assert_eq!(
@@ -10549,7 +12917,10 @@ mod tests {
         let composed = RelationPlan::union(operand.clone(), operand)
             .with_stage(RelationStage::SharedFilter(shared_outer))
             .flush_filter_cascade();
-        let (left, right) = composed.source_union.as_ref().expect("unknown union remains");
+        let (left, right) = composed
+            .source_union
+            .as_ref()
+            .expect("unknown union remains");
         let left_batch = batch_for(left);
         let right_batch = batch_for(right);
 
