@@ -1255,6 +1255,40 @@ impl PackageResolver {
         Ok(route)
     }
 
+    /// Applies paired sparse rebinding chains, captures the resulting terminal
+    /// route identity, and carries that exact identity through later omission
+    /// chains. Non-empty replacement waves are rejected in the omission phase.
+    /// The reference is silent on this composed fold; v1 captures exact
+    /// lineage and pin equality at the rebind/omission boundary.
+    pub fn extend_nested_terminal_pair_sparse_checkpoint_storm_rebind_then_omission_chains_preserving_terminal_identity(
+        &self,
+        previous: &ReboundPathResolution,
+        rebind_chains: &[&[&[(&NestedPairDepthLabel, Option<&[[PinnedDatabase; 2]]>)]]],
+        omission_chains: &[&[&[(&NestedPairDepthLabel, Option<&[[PinnedDatabase; 2]]>)]]],
+    ) -> Result<ReboundPathResolution, AttachmentError> {
+        for chain in omission_chains {
+            for round in *chain {
+                for entry in round {
+                    if matches!(entry.1, Some(replacements) if !replacements.is_empty()) {
+                        return Err(AttachmentError::RetainedSnapshotUnavailable);
+                    }
+                }
+            }
+        }
+
+        let rebound_route = self
+            .extend_nested_terminal_pair_sparse_checkpoint_storm_chains_from_depth_labels(
+                previous,
+                rebind_chains,
+            )?;
+        let rebound_identity = rebound_route.terminal_route_identity();
+        self.extend_nested_terminal_pair_sparse_checkpoint_storm_chains_preserving_terminal_identity(
+            &rebound_route,
+            &rebound_identity,
+            omission_chains,
+        )
+    }
+
     /// Folds checkpoint-rooted terminal-pair storms across independent parent
     /// routes. Each table row is `(route, storms)` and resolves only checkpoints
     /// captured from that row's route; row order and anchor identity are kept
