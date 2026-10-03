@@ -4,8 +4,13 @@ use std::{collections::BTreeMap, fs, path::Path};
 use orna_sys_v1::{
     AbiType, EffectSet, OperationContract, SystemEffect, system_binding_modules_json,
     system_binding_stubs, system_provider_abi, system_provider_abi_json,
+    system_provider_abi_schema_json,
 };
 use serde_json::Value;
+
+#[path = "../build_host.rs"]
+#[allow(dead_code)]
+mod build_host;
 
 const GENERIC_KEYWORD_STUB_FIXTURE: &str = include_str!("fixtures/sys-invoke-generic-keyword.orna");
 const GENERIC_START_KEYWORD_STUB_FIXTURE: &str =
@@ -437,6 +442,125 @@ fn generated_sys_stubs_parse_resolve_to_registry_types_and_dispatch_one_to_one()
     assert_eq!(validated_stub_bodies, operation_count);
     println!(
         "generated_stub_validation operations={operation_count} canonical_placeholder_bodies={validated_stub_bodies}"
+    );
+}
+
+#[test]
+fn generated_provider_default_values_match_schema_and_idl_stubs() {
+    let registry_json = system_provider_abi_json();
+    let schema_json = system_provider_abi_schema_json();
+    build_host::validate_json_against_schema(registry_json, schema_json)
+        .expect("embedded provider defaults conform to the generated schema");
+
+    let registry: Value =
+        serde_json::from_str(registry_json).expect("embedded provider registry is valid JSON");
+    let raw_operations = registry["operations"]
+        .as_array()
+        .expect("embedded provider registry has operation rows");
+    let abi = system_provider_abi();
+    let source = system_binding_stubs();
+    let parsed = parse_module(source);
+    assert!(
+        parsed.is_ok(),
+        "generated declaration bundle parses: {:?}",
+        parsed.diagnostics
+    );
+    let operations = abi.operations().collect::<Vec<_>>();
+    let expected_operations = operations
+        .iter()
+        .map(|operation| operation.id.as_str())
+        .collect::<Vec<_>>();
+    validate_stub_dispatch_inventory(source, &expected_operations)
+        .expect("generated stub markers cover the provider registry in order");
+
+    let mut defaulted_operations = 0;
+    let mut defaulted_parameters = 0;
+    let mut null_defaults = 0;
+    let mut qualified_defaults = 0;
+    for ((item, operation), marker) in parsed
+        .value
+        .items
+        .iter()
+        .zip(operations)
+        .zip(expected_operations)
+    {
+        if operation.role.is_none() {
+            continue;
+        }
+        let has_default = operation
+            .signature
+            .parameters
+            .iter()
+            .any(|parameter| parameter.default.is_some());
+        if !has_default {
+            continue;
+        }
+        assert_eq!(marker, operation.id.as_str());
+
+        let row = raw_operations
+            .iter()
+            .find(|row| row["name"] == operation.id.as_str())
+            .expect("schema-validated registry row covers the defaulted operation");
+        assert_eq!(
+            row["signature"].as_str(),
+            Some(operation.signature.source.as_str()),
+            "schema row keeps the typed signature for {}",
+            operation.id.as_str()
+        );
+        let Declaration::Function { signature, .. } = &item.declaration else {
+            panic!(
+                "generated operation {} is not a function stub",
+                operation.id.as_str()
+            )
+        };
+        assert_eq!(
+            signature.parameters.len(),
+            operation.signature.parameters.len(),
+            "stub parameter count for {}",
+            operation.id.as_str()
+        );
+        for (parsed_parameter, registered_parameter) in signature
+            .parameters
+            .iter()
+            .zip(&operation.signature.parameters)
+        {
+            let parsed_default = parsed_parameter
+                .default
+                .as_ref()
+                .map(|default| &source[default.span().start..default.span().end]);
+            assert_eq!(
+                parsed_default,
+                registered_parameter.default.as_deref(),
+                "stub default matches typed registry for {}.{}",
+                operation.id.as_str(),
+                registered_parameter.name
+            );
+            let Some(default) = registered_parameter.default.as_deref() else {
+                continue;
+            };
+            defaulted_parameters += 1;
+            if default == "null" {
+                null_defaults += 1;
+            } else if default.contains('.') {
+                qualified_defaults += 1;
+            } else {
+                panic!(
+                    "unclassified provider default {default:?} on {}.{}",
+                    operation.id.as_str(),
+                    registered_parameter.name
+                );
+            }
+        }
+        defaulted_operations += 1;
+    }
+
+    assert!(defaulted_operations > 0);
+    assert_eq!(defaulted_parameters, 14);
+    assert!(null_defaults > 0);
+    assert!(qualified_defaults > 0);
+    println!(
+        "generated_provider_default_idl_parity operations={defaulted_operations} defaults={defaulted_parameters} null={null_defaults} qualified={qualified_defaults} total_cases={}",
+        defaulted_operations + defaulted_parameters
     );
 }
 
