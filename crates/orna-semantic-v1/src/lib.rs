@@ -7260,11 +7260,14 @@ fn infer(
                 .cloned()
                 .or_else(|| first_parent.clone());
             // Any all-omitted row can expose a cross-sibling selector collision.
-            // Paired partial omissions in the first row also establish a local
-            // recovery scope; keep unaffected siblings folding in both cases.
+            // A partial pinned tuple in the first row also needs a local scope
+            // to learn and retain its paired identity topology.
             let scoped_checkpoint_rollback = element_types
                 .iter()
                 .any(type_contains_omitted_checkpoint_tuple)
+                || first_parent
+                    .as_ref()
+                    .is_some_and(type_contains_partially_omitted_pinned_tuple)
                 || first_parent
                     .as_ref()
                     .is_some_and(type_contains_paired_checkpoint_omissions);
@@ -18738,11 +18741,22 @@ fn tuple_checkpoint_promotion_matches(left: &[Type], right: &[Type]) -> bool {
 }
 
 /// Extend a static fold anchor with the first concrete checkpoint subtree at
-/// each omitted path. Later parents use this representative topology to check
-/// rebinding even when the original parent omitted that tuple position. The
-/// reference does not specify sequential multi-parent tuple folds, so retain
-/// the first accepted pin topology at each path as the conservative rule.
+/// each omitted path. When a tuple has an omitted slot, learn its paired pin
+/// topology from the first accepted row as a unit so later parents cannot
+/// rebind sharing between its slots. If paired record siblings also contain
+/// omissions, leave tuple promotion pathwise so the enclosing sibling rollback
+/// remains atomic. The reference does not specify sequential multi-parent tuple
+/// folds, so retain the first accepted topology as the conservative rule.
 fn checkpoint_topology_anchor_with_first_pins(anchor: &Type, source: &Type) -> Type {
+    // Leave paired sibling holes visible to their enclosing record check,
+    // which learns cross-field identity from each row's accumulated maps.
+    if type_contains_paired_checkpoint_omissions(anchor) {
+        return anchor.clone();
+    }
+    checkpoint_topology_anchor_with_first_pins_local(anchor, source)
+}
+
+fn checkpoint_topology_anchor_with_first_pins_local(anchor: &Type, source: &Type) -> Type {
     if matches!(anchor, Type::Bottom) {
         return if type_contains_pinned_snapshot_identity(source) {
             source.clone()
@@ -18753,15 +18767,25 @@ fn checkpoint_topology_anchor_with_first_pins(anchor: &Type, source: &Type) -> T
 
     match (anchor, source) {
         (Type::Tuple(anchor), Type::Tuple(source)) if anchor.len() == source.len() => {
-            Type::Tuple(
-                anchor
-                    .iter()
-                    .zip(source)
-                    .map(|(anchor, source)| {
-                        checkpoint_topology_anchor_with_first_pins(anchor, source)
-                    })
-                    .collect(),
-            )
+            // If any paired slot was omitted, filling just that slot loses
+            // selector sharing with concrete siblings. Learn the tuple's
+            // paired topology from the first accepted row as one unit; later
+            // rows may alpha-rename it but cannot split or join the pair.
+            if anchor.iter().any(checkpoint_value_is_omitted)
+                && source.iter().any(type_contains_pinned_snapshot_identity)
+            {
+                Type::Tuple(source.clone())
+            } else {
+                Type::Tuple(
+                    anchor
+                        .iter()
+                        .zip(source)
+                        .map(|(anchor, source)| {
+                            checkpoint_topology_anchor_with_first_pins_local(anchor, source)
+                        })
+                        .collect(),
+                )
+            }
         }
         (Type::Record(anchor), Type::Record(source))
             if anchor.keys().eq(source.keys()) =>
@@ -18773,7 +18797,7 @@ fn checkpoint_topology_anchor_with_first_pins(anchor: &Type, source: &Type) -> T
                         source.get(name).map(|source| {
                             (
                                 name.clone(),
-                                checkpoint_topology_anchor_with_first_pins(anchor, source),
+                                checkpoint_topology_anchor_with_first_pins_local(anchor, source),
                             )
                         })
                     })
@@ -18781,19 +18805,19 @@ fn checkpoint_topology_anchor_with_first_pins(anchor: &Type, source: &Type) -> T
             )
         }
         (Type::List(anchor), Type::List(source)) => Type::List(Box::new(
-            checkpoint_topology_anchor_with_first_pins(anchor, source),
+            checkpoint_topology_anchor_with_first_pins_local(anchor, source),
         )),
         (Type::Range(anchor), Type::Range(source)) => Type::Range(Box::new(
-            checkpoint_topology_anchor_with_first_pins(anchor, source),
+            checkpoint_topology_anchor_with_first_pins_local(anchor, source),
         )),
         (Type::Relation(anchor), Type::Relation(source)) => Type::Relation(Box::new(
-            checkpoint_topology_anchor_with_first_pins(anchor, source),
+            checkpoint_topology_anchor_with_first_pins_local(anchor, source),
         )),
         (Type::Stream(anchor), Type::Stream(source)) => Type::Stream(Box::new(
-            checkpoint_topology_anchor_with_first_pins(anchor, source),
+            checkpoint_topology_anchor_with_first_pins_local(anchor, source),
         )),
         (Type::Optional(anchor), Type::Optional(source)) => Type::Optional(Box::new(
-            checkpoint_topology_anchor_with_first_pins(anchor, source),
+            checkpoint_topology_anchor_with_first_pins_local(anchor, source),
         )),
         (
             Type::Applied {
@@ -18811,7 +18835,7 @@ fn checkpoint_topology_anchor_with_first_pins(anchor: &Type, source: &Type) -> T
                     .iter()
                     .zip(source_arguments)
                     .map(|(anchor, source)| {
-                        checkpoint_topology_anchor_with_first_pins(anchor, source)
+                        checkpoint_topology_anchor_with_first_pins_local(anchor, source)
                     })
                     .collect(),
             }
@@ -18833,11 +18857,11 @@ fn checkpoint_topology_anchor_with_first_pins(anchor: &Type, source: &Type) -> T
                 .iter()
                 .zip(source_parameters)
                 .map(|(anchor, source)| {
-                    checkpoint_topology_anchor_with_first_pins(anchor, source)
+                    checkpoint_topology_anchor_with_first_pins_local(anchor, source)
                 })
                 .collect(),
             parameter_names: parameter_names.clone(),
-            result: Box::new(checkpoint_topology_anchor_with_first_pins(
+            result: Box::new(checkpoint_topology_anchor_with_first_pins_local(
                 anchor_result,
                 source_result,
             )),
@@ -18853,11 +18877,14 @@ fn checkpoint_topology_anchor_with_first_pins(anchor: &Type, source: &Type) -> T
                 unit: source_unit,
             },
         ) => Type::MoneyPerUnit {
-            currency: Box::new(checkpoint_topology_anchor_with_first_pins(
+            currency: Box::new(checkpoint_topology_anchor_with_first_pins_local(
                 anchor_currency,
                 source_currency,
             )),
-            unit: Box::new(checkpoint_topology_anchor_with_first_pins(anchor_unit, source_unit)),
+            unit: Box::new(checkpoint_topology_anchor_with_first_pins_local(
+                anchor_unit,
+                source_unit,
+            )),
         },
         _ => anchor.clone(),
     }
