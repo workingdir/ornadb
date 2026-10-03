@@ -7,7 +7,7 @@ use std::{
 
 use orna_evaluator_v1::{AdmittedReplSession, Limits, SysHostBindingRegistry};
 use orna_foundation_v1::CanonicalValue;
-use orna_project_v1::{LoadedProject, ProjectLoader};
+use orna_project_v1::{LoadedProject, ProjectLoadError, ProjectLoader};
 use orna_repository_v1::{Repository, initialize_repository};
 use orna_semantic_v1::StandardDependencyProfile;
 use orna_sys_v1::{EnvironmentProvider, ProcessProvider};
@@ -1600,6 +1600,8 @@ fn nested_module_pin_sources(collection: &str, leaf: &str) -> Vec<(String, Strin
 
 fn nested_module_pin_projects() -> (
     TempDir,
+    PathBuf,
+    Vec<String>,
     Vec<LoadedProject>,
     [String; 3],
     [Vec<(String, String)>; 3],
@@ -1680,6 +1682,8 @@ fn nested_module_pin_projects() -> (
 
     (
         directory,
+        project_path,
+        parent_snapshots,
         projects,
         [
             snapshots.remove(0),
@@ -3355,7 +3359,8 @@ fn replay_results_are_stable_across_semantics_preserving_module_repins() {
 
 #[test]
 fn nested_module_imports_replay_from_each_captured_snapshot_pin() {
-    let (_directory, projects, snapshots, source_bundles) = nested_module_pin_projects();
+    let (_directory, _project_path, _parent_snapshots, projects, snapshots, source_bundles) =
+        nested_module_pin_projects();
     let expected_values = [20, 24, 60];
     assert!(snapshots.windows(2).all(|pair| pair[0] != pair[1]));
     let mut retained_sessions = Vec::with_capacity(projects.len());
@@ -3384,5 +3389,59 @@ fn nested_module_imports_replay_from_each_captured_snapshot_pin() {
             });
         assert_eq!(output, Some(int(expected)));
         retained_sessions.push(session);
+    }
+}
+
+#[test]
+fn committed_snapshot_rejects_divergent_dependency_pin_profiles() {
+    let (_directory, project_path, parent_snapshots, projects, snapshots, source_bundles) =
+        nested_module_pin_projects();
+    let repository = Repository::discover(&project_path).unwrap();
+    let loader = ProjectLoader::default();
+    let expected_values = [20, 24, 60];
+
+    for index in 0..projects.len() {
+        let next = (index + 1) % projects.len();
+        assert_ne!(snapshots[index], snapshots[next]);
+        let committed_project = repository.resolve_snapshot(&parent_snapshots[index]).unwrap();
+        assert_eq!(
+            repository
+                .committed_submodule_commit(&committed_project, "stdlib/std")
+                .unwrap()
+                .as_str(),
+            snapshots[index]
+        );
+
+        let project = &projects[index];
+        let mut session = AdmittedReplSession::from_loaded_project(
+            project,
+            source_bundles[index].clone(),
+            Limits::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            session.submit(include_str!("fixtures/nested-module-pin-use.orna")),
+            Ok(None)
+        );
+        assert_eq!(
+            session.submit(include_str!("fixtures/nested-module-pin-call.orna")),
+            Ok(Some(int(expected_values[index]))),
+            "pin {} must compute from its own nested dependency bodies",
+            snapshots[index]
+        );
+
+        let divergent_profile = StandardDependencyProfile::from_sources(
+            snapshots[next].clone(),
+            source_bundles[next].clone(),
+        )
+        .unwrap();
+        assert!(matches!(
+            loader.load_committed_snapshot_with_standard_profile(
+                &repository,
+                &committed_project,
+                Some(divergent_profile),
+            ),
+            Err(ProjectLoadError::StandardSnapshotMismatch)
+        ));
     }
 }
