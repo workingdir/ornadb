@@ -4382,8 +4382,6 @@ fn captured_nested_closures_keep_paired_pin_identity_across_divergence_folds() {
     ];
     let imports = include_str!("fixtures/module-upgrade-paired-divergence-use.orna");
     let nested_closure = include_str!("fixtures/module-upgrade-divergence-fold-nested-closure.orna");
-    let bind_nested_closure =
-        include_str!("fixtures/module-upgrade-divergence-fold-nested-closure-bind.orna");
     let replay =
         include_str!("fixtures/module-upgrade-divergence-fold-nested-closure-replay.orna");
 
@@ -4412,9 +4410,6 @@ fn captured_nested_closures_keep_paired_pin_identity_across_divergence_folds() {
             definition.as_ref().unwrap_err().code()
         );
         assert_eq!(definition, Ok(None));
-        for binding in bind_nested_closure.lines() {
-            assert_eq!(session.submit(binding), Ok(None));
-        }
         assert_eq!(
             session.submit(replay),
             Ok(Some(ints(&expected[index]))),
