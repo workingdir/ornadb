@@ -1,0 +1,8 @@
+[
+    std.io.process.run("/usr/bin/cat", [], ".", [], std.encoding.base64.decode(std.encoding.base64.encode(std.encoding.base64.decode(std.encoding.base64.encode(std.encoding.base64.decode(""))))), 2.seconds, 64),
+    std.io.process.run("/usr/bin/cat", [], ".", [], std.encoding.base64.decode(std.encoding.base64.encode(std.encoding.base64.decode(std.encoding.base64.encode(std.encoding.base64.decode("AA=="))))), 2.seconds, 64),
+    std.io.process.run("/usr/bin/cat", [], ".", [], std.encoding.base64.decode(std.encoding.base64.encode(std.encoding.base64.decode(std.encoding.base64.encode(std.encoding.base64.decode("AAE="))))), 2.seconds, 64),
+    std.io.process.run("/usr/bin/cat", [], ".", [], std.encoding.base64.decode(std.encoding.base64.encode(std.encoding.base64.decode(std.encoding.base64.encode(std.encoding.base64.decode("AAEC"))))), 2.seconds, 64),
+    std.io.process.run("/usr/bin/cat", [], ".", [], std.encoding.base64.decode(std.encoding.base64.encode(std.encoding.base64.decode(std.encoding.base64.encode(std.encoding.base64.decode("/w=="))))), 2.seconds, 64),
+    std.io.process.run("/usr/bin/cat", [], ".", [], std.encoding.base64.decode(std.encoding.base64.encode(std.encoding.base64.decode(std.encoding.base64.encode(std.encoding.base64.decode("/+4="))))), 2.seconds, 64)
+]
