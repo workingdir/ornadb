@@ -233,6 +233,31 @@ fn paired_refresh_sparse_rotation_functions() -> Functions {
         .collect()
 }
 
+fn paired_snapshot_sparse_escalation_functions() -> Functions {
+    let parsed = parse_module(include_str!(
+        "fixtures/table_relation_paired_snapshot_sparse_escalation_5jpxd.orna"
+    ));
+    assert!(parsed.is_ok(), "{:?}", parsed.diagnostics);
+    parsed
+        .value
+        .items
+        .into_iter()
+        .map(|item| {
+            let orna_syntax_v1::Declaration::Function { signature, body } = item.declaration else {
+                panic!("fixture function expected")
+            };
+            (
+                signature.name,
+                PureFunction {
+                    parameters: signature.parameters,
+                    body,
+                    environment: Environment::new(),
+                },
+            )
+        })
+        .collect()
+}
+
 fn nested_pagination_compaction_functions() -> Functions {
     let parsed = parse_module(include_str!(
         "fixtures/table_relation_nested_pagination_compaction_gwlx9.orna"
@@ -2119,6 +2144,32 @@ fn paired_refresh_sparse_rotation_body() -> Expr {
         );
         let totals = relation_stage(frames, "map", vec![named_function("sum_frame")]);
         terminal(totals, "sum")
+    };
+    Expr::Tuple {
+        elements: vec![
+            fold("View.Left", "is_odd"),
+            fold("View.Right", "is_even"),
+        ],
+        span: span(),
+    }
+}
+
+fn paired_snapshot_sparse_escalation_body(depth: usize) -> Expr {
+    let fold = |source: &str, predicate: &str| {
+        let filtered = relation_stage(
+            relation_source(source),
+            "filter",
+            vec![named_function(predicate)],
+        );
+        let folded = (0..depth).fold(filtered, |input, _| {
+            let frames = relation_stage(
+                input,
+                "window",
+                vec![integer_literal(2), integer_literal(1)],
+            );
+            relation_stage(frames, "map", vec![named_function("sum_frame")])
+        });
+        terminal(folded, "sum")
     };
     Expr::Tuple {
         elements: vec![
@@ -4286,6 +4337,94 @@ fn paired_refreshes_keep_values_across_sparse_checkpoint_rotation_chains() {
         expected_cursors,
         "rotated sparse checkpoints resume only their paired source scope"
     );
+    assert!(source.pending["View.Left"].is_empty());
+    assert!(source.pending["View.Right"].is_empty());
+}
+
+#[test]
+fn paired_snapshots_keep_values_across_sparse_escalation_fold_chains() {
+    // The brief leaves “escalation” undefined; pin it to one additional
+    // complete window-and-sum stage per successive paired refresh.
+    let checkpoint_epochs = [
+        vec![
+            vec![0x81],
+            vec![0x81, 0x00],
+            vec![0x81, 0x00, 0x00],
+            vec![0x81, 0x00, 0x00, 0x00],
+        ],
+        vec![
+            vec![0x82],
+            vec![0x82, 0x01],
+            vec![0x82, 0x01, 0x00],
+            vec![0x82, 0x01, 0x00, 0x00],
+        ],
+        vec![
+            vec![0x83],
+            vec![0x83, 0x02],
+            vec![0x83, 0x02, 0x00],
+            vec![0x83, 0x02, 0x00, 0x00],
+        ],
+    ];
+    let restore = |groups: &[&[i64]], tokens: &[Vec<u8>]| {
+        assert_eq!(groups.len(), tokens.len() + 1);
+        groups
+            .iter()
+            .enumerate()
+            .map(|(index, values)| {
+                let after = index.checked_sub(1).map(|previous| tokens[previous].clone());
+                let next = tokens.get(index).cloned();
+                (after, page(values, next))
+            })
+            .collect::<CursorRestore>()
+    };
+    let mut restores = Vec::new();
+    let mut lane_names = Vec::new();
+    let mut rotated_chains = Vec::new();
+    let mut add_restore = |source_name: &'static str, groups: &[&[i64]], epoch: usize| {
+        let tokens = checkpoint_epochs[epoch][..groups.len() - 1].to_vec();
+        restores.push((source_name, restore(groups, &tokens)));
+        lane_names.push(source_name);
+        rotated_chains.push(tokens);
+    };
+    add_restore("View.Left", &[&[1, 2, 3], &[4, 5], &[6, 7, 8], &[9, 10]], 0);
+    add_restore("View.Right", &[&[1, 2], &[3, 4], &[5, 6], &[7, 8], &[9, 10]], 1);
+    add_restore("View.Left", &[&[11, 12, 13], &[14, 15, 16, 17], &[18, 19, 20]], 2);
+    add_restore("View.Right", &[&[11, 12, 13, 14], &[15], &[16, 17], &[18, 19, 20]], 0);
+    add_restore("View.Left", &[&[-9, -8], &[-7, -6], &[-5, -4], &[-3, -2], &[-1, 0]], 1);
+    add_restore("View.Right", &[&[-9, -8, -7], &[-6, -5, -4, -3], &[-2, -1, 0]], 2);
+    add_restore("View.Left", &[&[101, 102, 103, 104], &[105], &[106, 107, 108], &[109, 110]], 0);
+    add_restore("View.Right", &[&[101, 102], &[103, 104], &[105, 106], &[107, 108], &[109, 110]], 1);
+    drop(add_restore);
+
+    let mut source = PairedCursorRestoreSource::new(restores);
+    let mut functions = paired_snapshot_sparse_escalation_functions();
+    let mut snapshots = Vec::new();
+    for (depth, left, right) in [(1, 40, 48), (2, 180, 192), (3, -80, -64), (4, 1680, 1696)] {
+        functions.insert(
+            "run".into(),
+            PureFunction {
+                parameters: Vec::new(),
+                body: paired_snapshot_sparse_escalation_body(depth),
+                environment: Environment::new(),
+            },
+        );
+        snapshots.push(
+            invoke_named_with_effects(
+                "run",
+                &functions,
+                &Environment::new(),
+                Limits::default(),
+                &mut source,
+            )
+            .unwrap(),
+        );
+        assert_eq!(snapshots.last(), Some(&integer_pair(left, right)));
+    }
+    assert_eq!(snapshots[0], integer_pair(40, 48), "one fold stage computes (40, 48)");
+    assert_eq!(snapshots[1], integer_pair(180, 192), "two fold stages compute (180, 192)");
+    assert_eq!(snapshots[2], integer_pair(-80, -64), "three fold stages compute (-80, -64)");
+    assert_eq!(snapshots[3], integer_pair(1680, 1696), "four fold stages compute (1680, 1696)");
+    assert_eq!(source.lanes.len(), 8, "four paired snapshots read eight source scopes");
     assert!(source.pending["View.Left"].is_empty());
     assert!(source.pending["View.Right"].is_empty());
 }
