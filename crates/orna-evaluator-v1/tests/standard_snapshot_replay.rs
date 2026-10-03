@@ -1190,6 +1190,117 @@ fn paired_divergence_convergence_projects() -> (TempDir, [LoadedProject; 5], [St
     )
 }
 
+fn paired_divergence_project_pin_fold_projects()
+-> (TempDir, [LoadedProject; 4], [String; 4], [String; 4]) {
+    let (directory, projects, pins) = divergent_paired_module_projects();
+    let [base_project, _, _, _] = projects;
+    let project_path = directory.path().join("project");
+    let standard_path = project_path.join("stdlib/std");
+    let repository = Repository::discover(&project_path).unwrap();
+
+    let base_parent = git_output_at(
+        &project_path,
+        &["rev-list", "--all", "--reverse"],
+    )
+    .lines()
+    .find(|commit| {
+        git_output_at(&project_path, &["ls-tree", commit, "stdlib/std"])
+            .split_whitespace()
+            .nth(2)
+            == Some(pins[0].as_str())
+    })
+    .expect("base project snapshot must pin the paired module base")
+    .to_owned();
+
+    let math_parent = {
+        git_output_at(&project_path, &["checkout", "--detach", base_parent.as_str()]);
+        let parent = capture_standard_gitlink(
+            &project_path,
+            &pins[1],
+            "capture math divergence for paired project fold",
+        );
+        git_output_at(&project_path, &["branch", "math-project-pin", parent.as_str()]);
+        parent
+    };
+    let collection_parent = {
+        git_output_at(&project_path, &["checkout", "--detach", base_parent.as_str()]);
+        let parent = capture_standard_gitlink(
+            &project_path,
+            &pins[2],
+            "capture collection divergence for paired project fold",
+        );
+        git_output_at(
+            &project_path,
+            &["branch", "collection-project-pin", parent.as_str()],
+        );
+        parent
+    };
+
+    git_output_at(&standard_path, &["checkout", "--detach", pins[1].as_str()]);
+    git_output_at(
+        &standard_path,
+        &["merge", "--no-ff", "--no-commit", pins[2].as_str()],
+    );
+    commit_directory(&standard_path, "fold paired standard pin branches");
+    let folded_pin = git_output_at(&standard_path, &["rev-parse", "HEAD"]);
+    git_output_at(
+        &standard_path,
+        &["branch", "paired-project-fold-pin", folded_pin.as_str()],
+    );
+
+    git_output_at(
+        &project_path,
+        &["checkout", "--detach", math_parent.as_str()],
+    );
+    git_output_at(
+        &project_path,
+        &[
+            "update-index",
+            "--add",
+            "--cacheinfo",
+            &format!("160000,{folded_pin},stdlib/std"),
+        ],
+    );
+    let folded_tree = git_output_at(&project_path, &["write-tree"]);
+    let folded_parent = git_output_at(
+        &project_path,
+        &[
+            "commit-tree",
+            folded_tree.as_str(),
+            "-p",
+            math_parent.as_str(),
+            "-p",
+            collection_parent.as_str(),
+            "-m",
+            "fold paired standard pin across divergent project parents",
+        ],
+    );
+    git_output_at(
+        &project_path,
+        &[
+            "update-ref",
+            "refs/heads/paired-project-pin-fold",
+            folded_parent.as_str(),
+        ],
+    );
+
+    let load = |parent: &str| {
+        let parent = repository.resolve_snapshot(parent).unwrap();
+        ProjectLoader::default()
+            .load_committed_snapshot(&repository, &parent)
+            .unwrap()
+    };
+    let math_project = load(&math_parent);
+    let collection_project = load(&collection_parent);
+    let folded_project = load(&folded_parent);
+    (
+        directory,
+        [base_project, math_project, collection_project, folded_project],
+        [pins[0].clone(), pins[1].clone(), pins[2].clone(), folded_pin],
+        [base_parent, math_parent, collection_parent, folded_parent],
+    )
+}
+
 fn paired_divergence_compaction_projects() -> (TempDir, [LoadedProject; 5], [String; 5]) {
     let (directory, projects, pins) = divergent_paired_module_projects();
     let [
@@ -4105,6 +4216,147 @@ fn captured_snapshot_identity_survives_paired_divergence_convergence_folds() {
             cloned_sessions[index].submit(replay),
             Ok(Some(ints(&expected[index]))),
             "cloned replay must preserve convergence history pin {}",
+            pins[index]
+        );
+    }
+}
+
+#[test]
+fn captured_snapshot_identity_survives_paired_divergence_project_pin_folds() {
+    let (directory, projects, pins, project_parents) =
+        paired_divergence_project_pin_fold_projects();
+    let expected = [
+        [40, 4, 44, 40, 4, 44, 1_007, 1_008],
+        [50, 4, 54, 50, 4, 54, 10_007, 10_008],
+        [40, 5, 45, 40, 5, 45, 1_007, 1_008],
+        [50, 5, 55, 50, 5, 55, 10_007, 10_008],
+    ];
+    let expected_math = [
+        include_str!("fixtures/module-upgrade-std-v3.orna"),
+        include_str!("fixtures/module-upgrade-std-v4.orna"),
+        include_str!("fixtures/module-upgrade-std-v3.orna"),
+        include_str!("fixtures/module-upgrade-std-v4.orna"),
+    ];
+    let expected_collection = [
+        include_str!("fixtures/module-upgrade-std-collection-v4.orna"),
+        include_str!("fixtures/module-upgrade-std-collection-v4.orna"),
+        include_str!("fixtures/module-upgrade-std-collection-v5.orna"),
+        include_str!("fixtures/module-upgrade-std-collection-v5.orna"),
+    ];
+    let imports = include_str!("fixtures/module-upgrade-paired-divergence-use.orna");
+    let capture = include_str!("fixtures/module-upgrade-divergence-pin-fold-capture.orna");
+    let replay = include_str!("fixtures/module-upgrade-divergence-pin-fold-replay.orna");
+    let project_path = directory.path().join("project");
+    let standard_path = project_path.join("stdlib/std");
+
+    assert!(pins.windows(2).all(|pair| pair[0] != pair[1]));
+    let standard_merge = git_output_at(
+        &standard_path,
+        &["rev-list", "--parents", "-n", "1", pins[3].as_str()],
+    );
+    let standard_merge = standard_merge.split_whitespace().collect::<Vec<_>>();
+    assert_eq!(standard_merge.len(), 3, "paired pin fold has two parents");
+    assert_eq!(standard_merge[1], pins[1]);
+    assert_eq!(standard_merge[2], pins[2]);
+
+    for (index, parent) in project_parents.iter().enumerate() {
+        assert_eq!(
+            git_output_at(&project_path, &["rev-parse", parent.as_str()]),
+            *parent,
+            "project fold history {index} must keep its captured object"
+        );
+    }
+    for index in [1, 2] {
+        let ancestry = git_output_at(
+            &project_path,
+            &[
+                "rev-list",
+                "--parents",
+                "-n",
+                "1",
+                project_parents[index].as_str(),
+            ],
+        );
+        let ancestry = ancestry.split_whitespace().collect::<Vec<_>>();
+        assert_eq!(ancestry.len(), 2, "divergent project pin has one parent");
+        assert_eq!(ancestry[1], project_parents[0]);
+    }
+    let project_merge = git_output_at(
+        &project_path,
+        &[
+            "rev-list",
+            "--parents",
+            "-n",
+            "1",
+            project_parents[3].as_str(),
+        ],
+    );
+    let project_merge = project_merge.split_whitespace().collect::<Vec<_>>();
+    assert_eq!(project_merge.len(), 3, "project pin fold has two parents");
+    assert_eq!(project_merge[1], project_parents[1]);
+    assert_eq!(project_merge[2], project_parents[2]);
+    assert_eq!(
+        git_output_at(
+            &project_path,
+            &["ls-tree", project_parents[3].as_str(), "stdlib/std"]
+        )
+        .split_whitespace()
+        .nth(2),
+        Some(pins[3].as_str()),
+        "the project merge records the paired standard fold pin"
+    );
+
+    for (index, project) in projects.iter().enumerate() {
+        assert_eq!(
+            project.standard_profile().unwrap().snapshot(),
+            &pins[index],
+            "project branch {index} must retain its paired standard pin"
+        );
+        assert_eq!(
+            standard_source(project, "std/math.orna"),
+            expected_math[index]
+        );
+        assert_eq!(
+            standard_source(project, "std/collection.orna"),
+            expected_collection[index]
+        );
+    }
+
+    let mut sessions = Vec::with_capacity(projects.len());
+    for (index, project) in projects.iter().enumerate() {
+        let mut session = AdmittedReplSession::from_loaded_project(
+            project,
+            project.standard_sources().iter().cloned(),
+            Limits::default(),
+        )
+        .unwrap();
+        for import in imports.lines() {
+            assert_eq!(session.submit(import), Ok(None));
+        }
+        assert_eq!(session.submit(capture), Ok(None));
+        assert_eq!(
+            session.submit(replay),
+            Ok(Some(ints(&expected[index]))),
+            "captured closure must compute from paired project pin {}",
+            pins[index]
+        );
+        sessions.push(session);
+    }
+
+    for index in [3, 0, 2, 1, 3, 1, 0, 2] {
+        assert_eq!(
+            sessions[index].submit(replay),
+            Ok(Some(ints(&expected[index]))),
+            "interleaved replay must preserve paired project pin {}",
+            pins[index]
+        );
+    }
+    let mut cloned_sessions = sessions.clone();
+    for index in [2, 3, 0, 1] {
+        assert_eq!(
+            cloned_sessions[index].submit(replay),
+            Ok(Some(ints(&expected[index]))),
+            "cloned replay must preserve paired project pin {}",
             pins[index]
         );
     }
