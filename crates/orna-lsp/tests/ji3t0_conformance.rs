@@ -587,10 +587,10 @@ fn vscode_keywords(root: &Path, expected: &BTreeSet<String>) -> (&'static str, B
     );
     assert_eq!(grammar["scopeName"], "source.orna");
     assert_eq!(
-        grammar["repository"]["keywords"]["name"],
+        grammar["repository"]["keyword"]["name"],
         "keyword.control.orna"
     );
-    let pattern = grammar["repository"]["keywords"]["match"].as_str().unwrap();
+    let pattern = grammar["repository"]["keyword"]["match"].as_str().unwrap();
     let keywords = textmate_keywords(pattern);
     assert_surface_has_no_legacy(&keywords, expected, "VS Code TextMate");
     ("VS Code", keywords)
@@ -639,11 +639,13 @@ fn emacs_keywords(root: &Path, expected: &BTreeSet<String>) -> (&'static str, BT
     let source = fs::read_to_string(path).unwrap();
     assert_no_legacy_words(&Value::String(source.clone()), "Emacs extension output");
     let start = source
-        .find("(defvar orna-keywords")
-        .expect("Emacs keyword definition");
-    let end = source[start..].find("\n    \"Orna keywords").unwrap() + start;
-    let declaration = &source[start..end];
-    let words = quoted_words(declaration);
+        .find("(regexp-opt '")
+        .expect("Emacs keyword regexp definition");
+    let end = source[start..]
+        .find(") 'words)")
+        .expect("Emacs keyword regexp terminator")
+        + start;
+    let words = quoted_words(&source[start..end]);
     assert!(
         source.contains("(define-derived-mode orna-mode"),
         "Emacs mode is not defined"
@@ -675,7 +677,7 @@ fn sublime_keywords(root: &Path, expected: &BTreeSet<String>) -> (&'static str, 
     let lines = source.lines().collect::<Vec<_>>();
     let keyword_line = lines
         .iter()
-        .position(|line| line.contains("scope: keyword.control.orna"))
+        .position(|line| line.contains("scope: 'keyword.control.orna'"))
         .expect("Sublime keyword scope");
     let pattern_line = lines[..keyword_line]
         .iter()
@@ -683,10 +685,10 @@ fn sublime_keywords(root: &Path, expected: &BTreeSet<String>) -> (&'static str, 
         .find(|line| line.trim_start().starts_with("- match:"))
         .expect("Sublime keyword matcher");
     let pattern = pattern_line
-        .split_once('"')
-        .unwrap()
+        .split_once('\'')
+        .expect("Sublime single-quoted generated matcher")
         .1
-        .rsplit_once('"')
+        .rsplit_once('\'')
         .unwrap()
         .0;
     let keywords = textmate_keywords(pattern);
@@ -703,8 +705,10 @@ fn textmate_keywords(pattern: &str) -> BTreeSet<String> {
         panic!("keyword matcher has no explicit vocabulary: {pattern}");
     };
     let remainder = &pattern[start + 3..];
-    let end = remainder
-        .find(")\\b")
+    let end = [")\\b", ")(?!"]
+        .iter()
+        .filter_map(|delimiter| remainder.find(delimiter))
+        .min()
         .unwrap_or_else(|| panic!("keyword matcher is not word-bounded: {pattern}"));
     remainder[..end]
         .split('|')
