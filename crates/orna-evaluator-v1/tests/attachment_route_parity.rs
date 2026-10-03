@@ -1455,6 +1455,70 @@ fn fresh_nested_route_pair_chains_evaluate_rebound_closure_values() {
         Ok(Some(Value::int(96.into())))
     );
 
+    let cascade_terminal_label = checkpoint_cascades.retained_depth_label(8, 1).unwrap();
+    let compacted_identity = checkpoint_cascades.terminal_route_identity();
+    let compaction_folds = [
+        [first_cascade_label.clone(), cascade_terminal_label.clone()],
+        [cascade_terminal_label.clone(), first_cascade_label.clone()],
+    ];
+    let (compacted_pair_route, compacted_identity_edges) = resolver
+        .compact_nested_terminal_pair_history_folds_preserving_terminal_identity(
+            &checkpoint_cascades,
+            &compaction_folds,
+        )
+        .unwrap_or_else(|error| panic!("paired terminal compaction failed: {error:?}"));
+    assert_eq!(compacted_identity_edges.len(), 2);
+    for (before, after) in &compacted_identity_edges {
+        assert_eq!(before, &compacted_identity);
+        assert_eq!(after, &compacted_identity);
+    }
+    assert_eq!(
+        compacted_pair_route.terminal_route_identity(),
+        compacted_identity,
+        "paired history compaction leaves the terminal route identity unchanged"
+    );
+    assert_eq!(compacted_pair_route.retained_sessions().len(), 2);
+    assert_eq!(
+        compacted_pair_route.retained_depth_label(0, 0).unwrap(),
+        cascade_terminal_label,
+        "the terminal snapshot identity survives compaction and reordering"
+    );
+    assert_eq!(
+        compacted_pair_route.retained_depth_label(0, 1).unwrap(),
+        first_cascade_label,
+        "the nested root identity survives repeated compaction folds"
+    );
+    assert_eq!(
+        pin_route(&compacted_pair_route.retained_wave(0).unwrap()[0]),
+        pin_route(&checkpoint_cascades.retained_wave(8).unwrap()[1])
+    );
+    assert_eq!(
+        pin_route(&compacted_pair_route.retained_wave(0).unwrap()[1]),
+        pin_route(first_cascade_root)
+    );
+
+    let rebound_from_compacted_anchor = resolver
+        .extend_nested_terminal_pair_storm_from_label(
+            &compacted_pair_route,
+            &first_cascade_label,
+            std::slice::from_ref(&first_pair),
+        )
+        .unwrap_or_else(|error| panic!("rebind from compacted anchor failed: {error:?}"));
+    let mut compacted_anchor_eval = AdmittedReplSession::from_attached_database_session(
+        rebound_from_compacted_anchor.final_session(),
+        Limits::default(),
+    )
+    .unwrap();
+    assert_eq!(
+        compacted_anchor_eval.submit(&format!("use {};", aliases[3])),
+        Ok(None)
+    );
+    assert_eq!(
+        compacted_anchor_eval.submit(&format!("{}.package_value()", aliases[3])),
+        Ok(Some(Value::int(84.into()))),
+        "a pre-compaction label reopens its exact nested closure after two folds"
+    );
+
     let first_terminal_anchor_chain = resolver
         .extend_nested_terminal_pair_checkpoint_cascades(
             &first_stage,
