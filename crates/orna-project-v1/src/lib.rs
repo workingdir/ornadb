@@ -250,7 +250,18 @@ impl ProjectLoader {
         commit: &GitCommitRef,
         standard_profile: Option<StandardDependencyProfile>,
     ) -> Result<LoadedProject, ProjectLoadError> {
-        let source_paths = validate_committed_tree(repository, commit, self.limits)?;
+        let (source_paths, has_standard_gitlink) =
+            validate_committed_tree(repository, commit, self.limits)?;
+        if has_standard_gitlink
+            && let Some(profile) = &standard_profile
+            && repository
+                .committed_submodule_commit(commit, "stdlib/std")
+                .map_err(ProjectLoadError::Repository)?
+                .as_str()
+                != profile.snapshot()
+        {
+            return Err(ProjectLoadError::StandardSnapshotMismatch);
+        }
         load_reachable_project(
             self.limits,
             standard_profile,
@@ -298,7 +309,18 @@ impl ProjectLoader {
         candidate: &PrivateCommit,
         standard_profile: Option<StandardDependencyProfile>,
     ) -> Result<LoadedProject, ProjectLoadError> {
-        let source_paths = validate_private_candidate_tree(repository, candidate, self.limits)?;
+        let (source_paths, has_standard_gitlink) =
+            validate_private_candidate_tree(repository, candidate, self.limits)?;
+        if has_standard_gitlink
+            && let Some(profile) = &standard_profile
+            && repository
+                .private_candidate_submodule_commit(candidate, "stdlib/std")
+                .map_err(ProjectLoadError::Repository)?
+                .as_str()
+                != profile.snapshot()
+        {
+            return Err(ProjectLoadError::StandardSnapshotMismatch);
+        }
         load_reachable_project(
             self.limits,
             standard_profile,
@@ -602,6 +624,7 @@ pub enum ProjectLoadError {
     NonPortablePath,
     DuplicateModuleNamespace,
     ReservedNamespace,
+    StandardSnapshotMismatch,
 }
 
 impl fmt::Display for ProjectLoadError {
@@ -626,6 +649,9 @@ impl fmt::Display for ProjectLoadError {
                 "repository contains multiple source files for one module namespace"
             }
             Self::ReservedNamespace => "repository source module shadows a reserved namespace",
+            Self::StandardSnapshotMismatch => {
+                "standard dependency profile does not match the committed std submodule pin"
+            }
         })
     }
 }
@@ -723,7 +749,7 @@ fn validate_committed_tree(
     repository: &Repository,
     commit: &GitCommitRef,
     limits: ProjectLimits,
-) -> Result<BTreeSet<String>, ProjectLoadError> {
+) -> Result<(BTreeSet<String>, bool), ProjectLoadError> {
     let entries = repository
         .list_committed_tree(commit, limits.max_repository_entries.saturating_add(1))
         .map_err(ProjectLoadError::Repository)?;
@@ -734,7 +760,7 @@ fn validate_private_candidate_tree(
     repository: &Repository,
     candidate: &PrivateCommit,
     limits: ProjectLimits,
-) -> Result<BTreeSet<String>, ProjectLoadError> {
+) -> Result<(BTreeSet<String>, bool), ProjectLoadError> {
     let entries = repository
         .list_private_candidate_tree(candidate, limits.max_repository_entries.saturating_add(1))
         .map_err(ProjectLoadError::Repository)?;
@@ -744,18 +770,22 @@ fn validate_private_candidate_tree(
 fn validate_snapshot_tree(
     entries: Vec<CommittedTreeEntry>,
     limits: ProjectLimits,
-) -> Result<BTreeSet<String>, ProjectLoadError> {
+) -> Result<(BTreeSet<String>, bool), ProjectLoadError> {
     if entries.len() > limits.max_repository_entries {
         return Err(ProjectLoadError::RepositoryLimit);
     }
 
+    let has_standard_gitlink = entries.iter().any(|entry| {
+        entry.path().as_path() == Path::new("stdlib/std")
+            && entry.kind() == CommittedTreeEntryKind::Submodule
+    });
     let mut source_paths = BTreeSet::new();
     let mut module_owners = BTreeMap::<Vec<String>, String>::new();
     let mut siblings = BTreeMap::<PathBuf, BTreeMap<String, String>>::new();
     for entry in entries {
         validate_committed_tree_entry(entry, &mut siblings, &mut module_owners, &mut source_paths)?;
     }
-    Ok(source_paths)
+    Ok((source_paths, has_standard_gitlink))
 }
 
 fn validate_committed_tree_entry(
