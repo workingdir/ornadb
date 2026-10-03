@@ -195,6 +195,18 @@ fn ovb_sorts_structural_keys_but_collections_keep_signed_zero_representatives() 
 }
 
 #[test]
+fn stable_sort_orders_binary_ovb_keys_lexicographically() {
+    assert_eq!(
+        evaluate(include_str!("fixtures/stdlib-ovb-key-sort-w02pm.orna")),
+        Ok(value(Raw::Array(vec![
+            Raw::Text("z".into()),
+            Raw::Text("aa".into()),
+            Raw::Text("é".into()),
+        ])))
+    );
+}
+
+#[test]
 fn map_entry_tuples_roundtrip_as_list_of_tuples() {
     let expected_tuple = value(Raw::Array(vec![tuple(vec![
         Raw::Text("x".into()),

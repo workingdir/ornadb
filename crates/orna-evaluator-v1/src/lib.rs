@@ -12492,6 +12492,7 @@ fn lawful_sort_key(value: &Value) -> Result<(), EvaluationError> {
         | Value::Int(_)
         | Value::Decimal(_)
         | Value::Float(_)
+        | Value::Blob(_)
         | Value::String(_)
         | Value::Date(_)
         | Value::Instant { .. }
@@ -12504,6 +12505,10 @@ fn lawful_sort_key(value: &Value) -> Result<(), EvaluationError> {
 fn compare_sort_keys(left: &Value, right: &Value) -> Result<std::cmp::Ordering, EvaluationError> {
     match (left, right) {
         (Value::Bool(left), Value::Bool(right)) => Ok(left.cmp(right)),
+        // Byte strings have a deterministic unsigned lexicographic order.
+        // This lets source code sort by a complete OVB key encoding without
+        // converting those bytes into a lossy textual representation.
+        (Value::Blob(left), Value::Blob(right)) => Ok(left.cmp(right)),
         (Value::String(left), Value::String(right)) => Ok(left.cmp(right)),
         (Value::Date(left), Value::Date(right)) => Ok(left.cmp(right)),
         (
