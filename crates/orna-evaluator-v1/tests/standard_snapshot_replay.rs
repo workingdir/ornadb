@@ -340,6 +340,26 @@ fn base64_process_matrix_value() -> CanonicalValue {
     .unwrap()
 }
 
+fn base64_codec_depth_process_matrix_value() -> CanonicalValue {
+    CanonicalValue::new(Raw::Array(
+        [
+            &[][..],
+            &[0][..],
+            &[0, 1][..],
+            &[0, 1, 2][..],
+            &[255][..],
+            &[255, 238][..],
+            &[0, 1, 2, 3][..],
+            &[0, 1, 2, 3, 4][..],
+            &[0, 1, 2, 3, 4, 5][..],
+        ]
+        .into_iter()
+        .map(process_output_value)
+        .collect(),
+    ))
+    .unwrap()
+}
+
 #[test]
 fn captured_codec_snapshots_replay_real_base64_values_without_retargeting() {
     let (_directory, project_v1, project_v2, snapshots) = host_codec_snapshot_projects();
@@ -681,16 +701,16 @@ fn captured_codec_snapshots_preserve_nested_codec_bytes_through_host_process() {
             .submit_with_sys_host_bindings(fixture, &mut bindings)
             .unwrap_or_else(|error| panic!("nested codec process fold failed: {}", error.code()))
             .expect("the nested codec process fold returns all six values");
-        assert_eq!(output, base64_process_matrix_value());
+        assert_eq!(output, base64_codec_depth_process_matrix_value());
         folded_outputs.push(output);
     }
 
     assert_eq!(
         folded_outputs,
         vec![
-            base64_process_matrix_value(),
-            base64_process_matrix_value(),
-            base64_process_matrix_value(),
+            base64_codec_depth_process_matrix_value(),
+            base64_codec_depth_process_matrix_value(),
+            base64_codec_depth_process_matrix_value(),
         ]
     );
 }
