@@ -631,26 +631,10 @@ fn persistent_declaration_ranges(
             ranges.push((mapper.range(&name.span), mapper.range(&final_name.span)));
         }
     };
-    for declaration in parse.object_types() {
-        push_name(&declaration.name);
-    }
-    for declaration in parse.enum_types() {
-        push_name(&declaration.name);
-    }
-    for declaration in parse.record_value_types() {
-        push_name(&declaration.name);
-    }
-    for declaration in parse.primitive_value_types() {
-        push_name(&declaration.name);
-    }
-    for declaration in parse.opaque_value_types() {
-        push_name(&declaration.name);
-    }
-    for declaration in parse.server_functions() {
-        push_name(&declaration.name);
-    }
-    for declaration in parse.client_functions() {
-        push_name(&declaration.name);
+    for declaration in parse.language_model().declarations() {
+        if declaration.is_renameable() {
+            push_name(declaration.name());
+        }
     }
     ranges
 }
