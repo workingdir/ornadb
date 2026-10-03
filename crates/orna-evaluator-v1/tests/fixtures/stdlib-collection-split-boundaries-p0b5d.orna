@@ -1,0 +1,1 @@
+collection_ops.split_when([0, 0, 1, 0], value => value == 0)
