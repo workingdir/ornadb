@@ -10,13 +10,13 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 
 use orna_foundation_v1::{Diagnostic, DiagnosticSeverity, SafeText};
+use orna_value_v1::{Decimal, path_decode_key_components};
 use orna_syntax_v1::{
     AssignmentOperator, AssignmentTarget, ControlKind, Declaration, Expr, FieldInitializer, Item,
-    LambdaParameter, LiteralKind, Pattern, ProtocolMember, Statement, StringSegment, SyntaxSpan,
-    SyntaxTree, TypeExpr, TypeMember, TypeRepresentation, UseTail, Visibility,
+    LambdaParameter, LiteralKind, Pattern, ProtocolMember, SyntaxSpan, Statement,
+    StringSegment, SyntaxTree, TypeExpr, TypeMember, TypeRepresentation, UseTail, Visibility,
     parse_module_with_file,
 };
-use orna_value_v1::{Decimal, path_decode_key_components};
 use sha2::{Digest, Sha256};
 use unicode_casefold::UnicodeCaseFold;
 use unicode_normalization::{UnicodeNormalization, is_nfc};
@@ -880,7 +880,10 @@ impl Catalogue {
                 Namespace(vec!["std".into(), "ui".into()]),
                 [
                     ("UI", ui.clone()),
-                    ("Action", Type::Named("std.ui.Action".into())),
+                    (
+                        "Action",
+                        Type::Named("std.ui.Action".into()),
+                    ),
                     ("text", function(vec![Type::Text], ui.clone())),
                     ("button", function(vec![Type::Text, Type::Bool], ui.clone())),
                     (
@@ -1482,12 +1485,13 @@ impl RowUnitAdmission {
 /// This is schema admission only: it parses and type-checks the row expression,
 /// validates the encoded path key, and retains the existing assertion plans.
 /// Evaluation, persistence and assertion execution remain downstream concerns.
-pub fn admit_row_unit(analysis: &Analysis, input: &RowUnitInput<'_>) -> RowUnitAdmission {
+pub fn admit_row_unit(
+    analysis: &Analysis,
+    input: &RowUnitInput<'_>,
+) -> RowUnitAdmission {
     let mut result = RowUnitAdmission::default();
     if !analysis.is_ok() {
-        result
-            .diagnostics
-            .extend(analysis.diagnostics.iter().cloned());
+        result.diagnostics.extend(analysis.diagnostics.iter().cloned());
         return result;
     }
     if input.parse_as != "row_unit" {
@@ -1513,10 +1517,7 @@ pub fn admit_row_unit(analysis: &Analysis, input: &RowUnitInput<'_>) -> RowUnitA
             .key_path
             .iter()
             .any(|component| !valid_row_component(component))
-        || !input
-            .key_path
-            .last()
-            .is_some_and(|component| component.ends_with(".orna"))
+        || !input.key_path.last().is_some_and(|component| component.ends_with(".orna"))
     {
         result.diagnostics.push(diag(
             DIAG_BAD_PATH,
@@ -1607,8 +1608,7 @@ pub fn admit_row_unit(analysis: &Analysis, input: &RowUnitInput<'_>) -> RowUnitA
         return result;
     }
     let orna_syntax_v1::Expr::Record { fields, .. } = &parsed.value else {
-        result
-            .diagnostics
+        result.diagnostics
             .push(diag(DIAG_TYPE, "project row unit must contain one record"));
         return result;
     };
@@ -2019,8 +2019,12 @@ fn collect_header(
                 let Declaration::Function { signature, .. } = &item.declaration else {
                     return None;
                 };
-                (!signature.generics.is_empty())
-                    .then(|| (signature.name.clone(), declared_generic_parameters(item)))
+                (!signature.generics.is_empty()).then(|| {
+                    (
+                        signature.name.clone(),
+                        declared_generic_parameters(item),
+                    )
+                })
             })
             .collect(),
         implicit: false,
@@ -2822,7 +2826,9 @@ fn resolve_imports_with_dependencies(
                     name,
                     generics,
                     members,
-                } if generics.is_empty() => Some((name.clone(), members.clone())),
+                } if generics.is_empty() => {
+                    Some((name.clone(), members.clone()))
+                }
                 _ => None,
             })
             .collect(),
@@ -3304,9 +3310,8 @@ fn collect_nominal_conversion_effects(scope: &mut Scope, tree: &SyntaxTree) {
             let Some(source) = valid_static_type(&arguments[0], scope) else {
                 continue;
             };
-            let Some(orna_syntax_v1::ImplMember::Function {
-                signature, body, ..
-            }) = implementation.members.as_slice().first()
+            let Some(orna_syntax_v1::ImplMember::Function { signature, body, .. }) =
+                implementation.members.as_slice().first()
             else {
                 continue;
             };
@@ -3344,7 +3349,9 @@ fn collect_nominal_conversion_effects(scope: &mut Scope, tree: &SyntaxTree) {
         }
     }
 }
-fn conversion_metadata(scope: &Scope) -> BTreeMap<String, Vec<(Type, EffectSummary)>> {
+fn conversion_metadata(
+    scope: &Scope,
+) -> BTreeMap<String, Vec<(Type, EffectSummary)>> {
     let mut metadata = BTreeMap::new();
     for (target, sources) in &scope.nominal_conversions {
         let entries = sources
@@ -3401,7 +3408,10 @@ fn merge_exported_conversion_metadata(
                 continue;
             };
             for (source, effects) in &schema.conversions {
-                let sources = scope.nominal_conversions.entry(target.clone()).or_default();
+                let sources = scope
+                    .nominal_conversions
+                    .entry(target.clone())
+                    .or_default();
                 if !sources.contains(source) {
                     sources.push(source.clone());
                 }
@@ -3524,13 +3534,18 @@ fn check_item(
                     // Key paths are reconstructed as an ordered list of named
                     // columns, so destructuring patterns have no stable schema
                     // surface here.
-                    _ => diagnostics
-                        .push(diag(DIAG_TYPE, "primary-key fields must have simple names")),
+                    _ => diagnostics.push(diag(
+                        DIAG_TYPE,
+                        "primary-key fields must have simple names",
+                    )),
                 }
                 if let Some(annotation) = &key.annotation {
                     validate_type_annotation(annotation, scope, &BTreeSet::new(), diagnostics);
                 } else {
-                    diagnostics.push(diag(DIAG_TYPE, "primary-key fields must declare a type"));
+                    diagnostics.push(diag(
+                        DIAG_TYPE,
+                        "primary-key fields must declare a type",
+                    ));
                 }
                 let ty = key
                     .annotation
@@ -3555,12 +3570,16 @@ fn check_item(
                     };
                     let resolved = resolved_type_of(annotation, scope);
                     schema.fields.insert(key_name.clone(), resolved.clone());
-                    if let Some((_, key_type)) = schema.admission.as_mut().and_then(|admission| {
-                        admission
-                            .keys
-                            .iter_mut()
-                            .find(|(field, _)| field == key_name)
-                    }) {
+                    if let Some((_, key_type)) = schema
+                        .admission
+                        .as_mut()
+                        .and_then(|admission| {
+                            admission
+                                .keys
+                                .iter_mut()
+                                .find(|(field, _)| field == key_name)
+                        })
+                    {
                         *key_type = resolved;
                     }
                 }
@@ -3638,8 +3657,7 @@ fn check_item(
                     continue;
                 };
                 let expected = resolved_type_of(annotation, scope);
-                let inferred =
-                    infer_contextual(default, &expected, scope, &row_locals, diagnostics);
+                let inferred = infer_contextual(default, &expected, scope, &row_locals, diagnostics);
                 require_same(&expected, &inferred.ty, diagnostics);
             }
             validate_non_overlapping_implementations(
@@ -3956,13 +3974,7 @@ fn validate_nested_implementation_members(
                     .unwrap_or_else(|| source.clone()),
                 _ => source.clone(),
             };
-            bind_pattern(
-                &parameter.pattern,
-                source_binding,
-                scope,
-                &mut local,
-                diagnostics,
-            );
+            bind_pattern(&parameter.pattern, source_binding, scope, &mut local, diagnostics);
             if matches!(target, Type::Named(name) if scope.nominal_rows.contains_key(name)) {
                 let inferred = infer_from_nominal_target(
                     body,
@@ -4134,10 +4146,8 @@ fn validate_nested_implementation_members(
     }
 
     for required in required_members {
-        let implemented = implementation
-            .members
-            .iter()
-            .any(|member| match (required, member) {
+        let implemented = implementation.members.iter().any(|member| {
+            match (required, member) {
                 (
                     ProtocolMember::Function { signature, .. },
                     orna_syntax_v1::ImplMember::Function {
@@ -4153,7 +4163,8 @@ fn validate_nested_implementation_members(
                     },
                 ) => name == implementation_name,
                 _ => false,
-            });
+            }
+        });
         if !implemented {
             diagnostics.push(diag(DIAG_TYPE, "missing protocol implementation member"));
         }
@@ -4194,6 +4205,7 @@ fn infer_from_nominal_target(
         effects: inferred.effects,
     }
 }
+
 
 /// Resolve only the static type shapes this closed semantic scope can prove.
 /// Unknown nominal names are not accepted merely because `type_of` preserves
@@ -4451,9 +4463,7 @@ fn compatible_protocol_function_signature(
         generic_scope
             .type_aliases
             .remove(&implementation_generic.name);
-        generic_scope
-            .generic_type_parameters
-            .insert(placeholder.clone());
+        generic_scope.generic_type_parameters.insert(placeholder.clone());
         generic_scope.type_aliases.insert(
             required_generic.name.clone(),
             Type::Named(placeholder.clone()),
@@ -6050,11 +6060,7 @@ fn resolved_generic_parameters(
         root.0
             .iter()
             .cloned()
-            .chain(
-                path[1..path.len() - 1]
-                    .iter()
-                    .map(|part| (*part).to_owned()),
-            )
+            .chain(path[1..path.len() - 1].iter().map(|part| (*part).to_owned()))
             .collect(),
     );
     scope
@@ -6073,7 +6079,8 @@ fn generic_bound_protocol(bound: &Type, scope: &Scope) -> Option<Type> {
             .names
             .get(name)
             .is_some_and(|symbol| symbol.kind == SymbolKind::Protocol)
-        || qualified_export(scope, name).is_some_and(|symbol| symbol.kind == SymbolKind::Protocol)
+        || qualified_export(scope, name)
+            .is_some_and(|symbol| symbol.kind == SymbolKind::Protocol)
         || matches!(name.as_str(), "Display" | "Present")
     {
         Some(bound.clone())
@@ -6103,11 +6110,7 @@ fn qualified_export<'a>(scope: &'a Scope, name: &str) -> Option<&'a Symbol> {
         root.0
             .iter()
             .cloned()
-            .chain(
-                parts[1..parts.len() - 1]
-                    .iter()
-                    .map(|part| (*part).to_owned()),
-            )
+            .chain(parts[1..parts.len() - 1].iter().map(|part| (*part).to_owned()))
             .collect(),
     );
     scope
@@ -6180,14 +6183,17 @@ fn infer_local_generic_call(
     // parameter unbound when its source value appears later in the call.
     let inference_order = (0..arguments.len())
         .filter(|index| !matches!(arguments[*index].value, Expr::Lambda { .. }))
-        .chain(
-            (0..arguments.len())
-                .filter(|index| matches!(arguments[*index].value, Expr::Lambda { .. })),
-        );
+        .chain((0..arguments.len()).filter(|index| {
+            matches!(arguments[*index].value, Expr::Lambda { .. })
+        }));
     for index in inference_order {
         let argument = &arguments[index];
-        let expected =
-            expected_call_parameter(raw_parameters, parameter_names.as_deref(), arguments, index);
+        let expected = expected_call_parameter(
+            raw_parameters,
+            parameter_names.as_deref(),
+            arguments,
+            index,
+        );
         let contextual_expected =
             expected.map(|expected| substitute_generic_type(expected, &substitutions));
         let explicit_context = explicit_type_arguments
@@ -6198,18 +6204,12 @@ fn infer_local_generic_call(
             matches!(expected, Type::Named(name) if bounded_generic_names.contains(name))
         });
         let contextual_callback = matches!(argument.value, Expr::Lambda { .. })
-            && contextual_expected
-                .as_ref()
-                .is_some_and(|expected| function_parameters_are_concrete(expected, &generic_names));
+            && contextual_expected.as_ref().is_some_and(|expected| {
+                function_parameters_are_concrete(expected, &generic_names)
+            });
         let diagnostics_for_argument = &mut argument_diagnostics[index];
         let inferred = if let Some(expected) = explicit_context.as_ref() {
-            infer_contextual(
-                &argument.value,
-                expected,
-                scope,
-                local,
-                diagnostics_for_argument,
-            )
+            infer_contextual(&argument.value, expected, scope, local, diagnostics_for_argument)
         } else if let (true, Some(contextual_expected)) =
             (expected.is_some(), contextual_expected.as_ref())
         {
@@ -6217,12 +6217,7 @@ fn infer_local_generic_call(
                 if local_constructor_scope {
                     let mut argument_scope = scope.clone();
                     argument_scope.allow_local_private_nominal_construction = true;
-                    infer(
-                        &argument.value,
-                        &argument_scope,
-                        local,
-                        diagnostics_for_argument,
-                    )
+                    infer(&argument.value, &argument_scope, local, diagnostics_for_argument)
                 } else if contextual_callback {
                     // The callback's input can be concrete while its result
                     // still determines another generic. Leave only those
@@ -6335,9 +6330,7 @@ fn infer_codec_decode_call(
         if !scope.modules.contains_key("std") {
             return None;
         }
-        path.iter()
-            .map(|part| (*part).to_owned())
-            .collect::<Vec<_>>()
+        path.iter().map(|part| (*part).to_owned()).collect::<Vec<_>>()
     } else {
         let namespace = scope.modules.get(root)?;
         namespace
@@ -6365,54 +6358,36 @@ fn infer_codec_decode_call(
             Some("as") if witness.is_none() => {
                 witness = start_type_witness(&argument.value, scope);
                 if witness.is_none() {
-                    diagnostics.push(diag(
-                        DIAG_TYPE,
-                        "codec result type witness is not a known static type",
-                    ));
+                    diagnostics.push(diag(DIAG_TYPE, "codec result type witness is not a known static type"));
                 }
             }
             Some("input") if input.is_none() => {
-                let inferred =
-                    infer_contextual(&argument.value, &operation.0, scope, local, diagnostics);
+                let inferred = infer_contextual(&argument.value, &operation.0, scope, local, diagnostics);
                 effects.join(&inferred.effects);
                 input = Some(inferred.ty);
             }
             Some("ignore_unknown_fields") if operation.1 && !saw_options => {
-                let inferred =
-                    infer_contextual(&argument.value, &Type::Bool, scope, local, diagnostics);
+                let inferred = infer_contextual(&argument.value, &Type::Bool, scope, local, diagnostics);
                 effects.join(&inferred.effects);
                 saw_options = true;
             }
             None if input.is_none() && !positional_seen => {
-                let inferred =
-                    infer_contextual(&argument.value, &operation.0, scope, local, diagnostics);
+                let inferred = infer_contextual(&argument.value, &operation.0, scope, local, diagnostics);
                 effects.join(&inferred.effects);
                 input = Some(inferred.ty);
                 positional_seen = true;
             }
-            _ => diagnostics.push(diag(
-                DIAG_TYPE,
-                "codec decode arguments do not match the documented signature",
-            )),
+            _ => diagnostics.push(diag(DIAG_TYPE, "codec decode arguments do not match the documented signature")),
         }
     }
     let Some(witness) = witness else {
-        diagnostics.push(diag(
-            DIAG_TYPE,
-            "codec decode requires an explicit `as: T` type witness",
-        ));
-        return Some(Inferred {
-            ty: Type::Error,
-            effects,
-        });
+        diagnostics.push(diag(DIAG_TYPE, "codec decode requires an explicit `as: T` type witness"));
+        return Some(Inferred { ty: Type::Error, effects });
     };
     if input.is_none() {
         diagnostics.push(diag(DIAG_TYPE, "codec decode requires an input value"));
     }
-    Some(Inferred {
-        ty: witness,
-        effects,
-    })
+    Some(Inferred { ty: witness, effects })
 }
 
 /// Validate transfer statements after ordinary expression inference. `for` and
@@ -6667,7 +6642,10 @@ fn bind_pattern(
                 DIAG_TYPE,
                 "tuple pattern arity does not match the value type",
             )),
-            _ => diagnostics.push(diag(DIAG_TYPE, "tuple pattern requires a tuple value")),
+            _ => diagnostics.push(diag(
+                DIAG_TYPE,
+                "tuple pattern requires a tuple value",
+            )),
         },
         Pattern::List { elements, .. } => match ty {
             Type::List(element_ty) => {
@@ -6675,7 +6653,10 @@ fn bind_pattern(
                     bind_pattern(pattern, (*element_ty).clone(), scope, into, diagnostics);
                 }
             }
-            _ => diagnostics.push(diag(DIAG_TYPE, "list pattern requires a list value")),
+            _ => diagnostics.push(diag(
+                DIAG_TYPE,
+                "list pattern requires a list value",
+            )),
         },
         Pattern::Record { fields, .. } => {
             bind_record_pattern(fields, &ty, scope, into, diagnostics);
@@ -6807,7 +6788,10 @@ fn bind_constructor_pattern(
         if let [argument] = arguments {
             bind_pattern(argument, (**inner).clone(), scope, into, diagnostics);
         } else {
-            diagnostics.push(diag(DIAG_TYPE, "Some pattern requires exactly one payload"));
+            diagnostics.push(diag(
+                DIAG_TYPE,
+                "Some pattern requires exactly one payload",
+            ));
         }
         return;
     }
@@ -7530,7 +7514,10 @@ fn infer(
                                 _ => None,
                             })
                             .unwrap_or_else(|| {
-                                diagnostics.push(diag(DIAG_TYPE, "field access requires a record"));
+                                diagnostics.push(diag(
+                                    DIAG_TYPE,
+                                    "field access requires a record",
+                                ));
                                 Type::Error
                             })
                     }
@@ -7659,10 +7646,7 @@ fn infer(
                     let value = infer(&argument.value, scope, local, diagnostics);
                     effects.join(&value.effects);
                 }
-                diagnostics.push(diag(
-                    DIAG_TYPE,
-                    "Some requires exactly one positional value",
-                ));
+                diagnostics.push(diag(DIAG_TYPE, "Some requires exactly one positional value"));
                 return Inferred {
                     ty: Type::Error,
                     effects,
@@ -7799,10 +7783,13 @@ fn infer(
             {
                 return inferred;
             }
-            if let Some(inferred) = infer_race_call(callee, arguments, scope, local, diagnostics) {
+            if let Some(inferred) =
+                infer_race_call(callee, arguments, scope, local, diagnostics)
+            {
                 return inferred;
             }
-            if let Some(inferred) = infer_timeout_call(callee, arguments, scope, local, diagnostics)
+            if let Some(inferred) =
+                infer_timeout_call(callee, arguments, scope, local, diagnostics)
             {
                 return inferred;
             }
@@ -7832,15 +7819,16 @@ fn infer(
             let callee = infer(callee, scope, local, diagnostics);
             let mut effects = callee.effects.clone();
             effects.join(&intrinsic);
-            let call_parameters =
-                callable_function_type(&callee.ty).and_then(|function_type| match function_type {
+            let call_parameters = callable_function_type(&callee.ty).and_then(|function_type| {
+                match function_type {
                     Type::Function {
                         parameters,
                         parameter_names,
                         ..
                     } => Some((parameters.as_slice(), parameter_names.as_deref())),
                     _ => None,
-                });
+                }
+            });
             let values = arguments
                 .iter()
                 .enumerate()
@@ -7884,8 +7872,12 @@ fn infer(
                         None,
                         diagnostics,
                     );
-                    let historical_database =
-                        specialize_historical_database_result(&result, &values, arguments, local);
+                    let historical_database = specialize_historical_database_result(
+                        &result,
+                        &values,
+                        arguments,
+                        local,
+                    );
                     let result = historical_database.unwrap_or_else(|| {
                         specialize_dynamic_parameter_snapshot_contexts(
                             &result,
@@ -8192,7 +8184,9 @@ fn infer(
             let ty = if matches!(op.as_str(), "==" | "!=") {
                 if left.ty == Type::Error || right.ty == Type::Error {
                     Type::Error
-                } else if !types_match(&left.ty, &right.ty) && !types_match(&right.ty, &left.ty) {
+                } else if !types_match(&left.ty, &right.ty)
+                    && !types_match(&right.ty, &left.ty)
+                {
                     diagnostics.push(diag(DIAG_TYPE, "static types are incompatible"));
                     Type::Error
                 } else {
@@ -8526,9 +8520,7 @@ fn inferred_lambda_parameter_type(
 ) -> Option<Type> {
     inferred_comparison_parameter_type(body, name, scope, local)
         .or_else(|| lambda_numeric_parameter_usage(body, name).then_some(Type::Int))
-        .or_else(|| {
-            inferred_record_parameter_type(body, name).filter(|ty| !type_contains_error(ty))
-        })
+        .or_else(|| inferred_record_parameter_type(body, name).filter(|ty| !type_contains_error(ty)))
         .or_else(|| parameter_comparison_usage(body, name).then_some(Type::Error))
 }
 
@@ -8559,10 +8551,13 @@ fn inferred_comparison_parameter_type(
         match unwrap_group(parameter_side) {
             Expr::Name { text, .. } if text == name => Some(other),
             Expr::Field {
-                base, name: field, ..
-            } if is_direct_name(base, name) => {
-                Some(Type::Record(BTreeMap::from([(field.clone(), other)])))
-            }
+                base,
+                name: field,
+                ..
+            } if is_direct_name(base, name) => Some(Type::Record(BTreeMap::from([(
+                field.clone(),
+                other,
+            )]))),
             _ => None,
         }
     }
@@ -8594,12 +8589,12 @@ fn inferred_comparison_parameter_type(
                 inferred_comparison_parameter_type(&argument.value, name, scope, local)
             })
         }),
-        Expr::Tuple { elements, .. } | Expr::List { elements, .. } => elements
-            .iter()
-            .find_map(|element| inferred_comparison_parameter_type(element, name, scope, local)),
-        Expr::Record { fields, .. } | Expr::Nominal { fields, .. } => fields
-            .iter()
-            .find_map(|field| inferred_comparison_parameter_type(&field.value, name, scope, local)),
+        Expr::Tuple { elements, .. } | Expr::List { elements, .. } => elements.iter().find_map(
+            |element| inferred_comparison_parameter_type(element, name, scope, local),
+        ),
+        Expr::Record { fields, .. } | Expr::Nominal { fields, .. } => fields.iter().find_map(
+            |field| inferred_comparison_parameter_type(&field.value, name, scope, local),
+        ),
         Expr::Lambda { body, .. } => inferred_comparison_parameter_type(body, name, scope, local),
         Expr::Block {
             statements, tail, ..
@@ -8613,16 +8608,17 @@ fn inferred_comparison_parameter_type(
                 | Statement::Assignment { value, .. } => {
                     inferred_comparison_parameter_type(value, name, scope, local)
                 }
-                Statement::Return { value, .. } | Statement::Break { value, .. } => {
-                    value.as_ref().and_then(|value| {
+                Statement::Return { value, .. } | Statement::Break { value, .. } => value
+                    .as_ref()
+                    .and_then(|value| {
                         inferred_comparison_parameter_type(value, name, scope, local)
-                    })
-                }
+                    }),
                 Statement::Continue { .. } => None,
             })
             .or_else(|| {
-                tail.as_deref()
-                    .and_then(|tail| inferred_comparison_parameter_type(tail, name, scope, local))
+                tail.as_deref().and_then(|tail| {
+                    inferred_comparison_parameter_type(tail, name, scope, local)
+                })
             }),
         Expr::Control {
             condition,
@@ -8632,7 +8628,9 @@ fn inferred_comparison_parameter_type(
             ..
         } => condition
             .as_deref()
-            .and_then(|condition| inferred_comparison_parameter_type(condition, name, scope, local))
+            .and_then(|condition| {
+                inferred_comparison_parameter_type(condition, name, scope, local)
+            })
             .or_else(|| {
                 body.as_deref()
                     .and_then(|body| inferred_comparison_parameter_type(body, name, scope, local))
@@ -8954,8 +8952,11 @@ fn infer_assignment(
                 {
                     // Rebinding changes the pin seen by later reads of this local;
                     // inferred closure types retain the previous snapshot value.
-                    let rebound_type =
-                        specialize_snapshot_ref_parameter(value_expression, &value.ty, local);
+                    let rebound_type = specialize_snapshot_ref_parameter(
+                        value_expression,
+                        &value.ty,
+                        local,
+                    );
                     if let Some(symbol) = local.get_mut(name) {
                         // When a parameter is rebound from another snapshot
                         // parameter, preserve the source identity so returned
@@ -9435,7 +9436,8 @@ fn infer_case(
                     } else if catch_all {
                         for value in [false, true] {
                             if !covered.insert(value) {
-                                diagnostics.push(diag(DIAG_TYPE, "boolean case arm is duplicated"));
+                                diagnostics
+                                    .push(diag(DIAG_TYPE, "boolean case arm is duplicated"));
                             }
                         }
                     }
@@ -9659,7 +9661,8 @@ fn merge_list_element_types(left: &Type, right: &Type) -> Option<Type> {
         // cannot silently combine terminal values from separate lanes.
         return None;
     }
-    if (type_contains_pinned_checkpoint_tuple(left) || type_contains_pinned_checkpoint_tuple(right))
+    if (type_contains_pinned_checkpoint_tuple(left)
+        || type_contains_pinned_checkpoint_tuple(right))
         && (!checkpoint_pin_map_widths_match(left, right)
             || !checkpoint_value_pin_identity_topology_matches(left, right)
             || !nested_checkpoint_compaction_fold_preserves_pin_identity(left, right))
@@ -9741,16 +9744,16 @@ fn merge_checkpoint_field_map_inner(
             },
         ) if left_base == "sys.HistoricalCallable" && right_base == "sys.HistoricalCallable" => {
             match (left_arguments.as_slice(), right_arguments.as_slice()) {
-                ([left_snapshot, left_callable], [right_snapshot, right_callable]) => {
-                    Some(historical_callable_type(
+                ([left_snapshot, left_callable], [right_snapshot, right_callable]) => Some(
+                    historical_callable_type(
                         &merge_snapshot_context_map(left_snapshot, right_snapshot)?,
                         &merge_checkpoint_field_map_inner(
                             left_callable,
                             right_callable,
                             source_topology_validated,
                         )?,
-                    ))
-                }
+                    ),
+                ),
                 _ => None,
             }
         }
@@ -9795,7 +9798,11 @@ fn merge_checkpoint_field_map_inner(
                         && type_contains_pinned_snapshot_identity(right)
                         && pinned_snapshot_shape_matches(left, right)
                     {
-                        merge_checkpoint_field_map_inner(left, right, source_topology_validated)
+                        merge_checkpoint_field_map_inner(
+                            left,
+                            right,
+                            source_topology_validated,
+                        )
                     } else {
                         None
                     }
@@ -9850,9 +9857,13 @@ fn merge_checkpoint_field_map_inner(
                 source_topology_validated,
             )?)))
         }
-        (Type::Range(left), Type::Range(right)) => Some(Type::Range(Box::new(
-            merge_checkpoint_field_map_inner(left, right, source_topology_validated)?,
-        ))),
+        (Type::Range(left), Type::Range(right)) => {
+            Some(Type::Range(Box::new(merge_checkpoint_field_map_inner(
+                left,
+                right,
+                source_topology_validated,
+            )?)))
+        }
         (Type::Relation(left), Type::Relation(right)) => Some(Type::Relation(Box::new(
             merge_checkpoint_field_map_inner(left, right, source_topology_validated)?,
         ))),
@@ -9878,14 +9889,16 @@ fn merge_checkpoint_field_map_inner(
                     .collect::<Option<BTreeMap<_, _>>>()?,
             ))
         }
-        (Type::Tuple(left), Type::Tuple(right)) if left.len() == right.len() => Some(Type::Tuple(
-            left.iter()
-                .zip(right)
-                .map(|(left, right)| {
-                    merge_checkpoint_field_map_inner(left, right, source_topology_validated)
-                })
-                .collect::<Option<Vec<_>>>()?,
-        )),
+        (Type::Tuple(left), Type::Tuple(right)) if left.len() == right.len() => {
+            Some(Type::Tuple(
+                left.iter()
+                    .zip(right)
+                    .map(|(left, right)| {
+                        merge_checkpoint_field_map_inner(left, right, source_topology_validated)
+                    })
+                    .collect::<Option<Vec<_>>>()?,
+            ))
+        }
         (
             Type::Applied {
                 base: left_base,
@@ -9999,7 +10012,9 @@ fn checkpoint_snapshot_maps_are_valid(ty: &Type) -> bool {
         Type::Applied { base, .. } if base == "semantic.SnapshotContextMap" => {
             is_snapshot_context_map_shape(ty)
         }
-        Type::Applied { arguments, .. } => arguments.iter().all(checkpoint_snapshot_maps_are_valid),
+        Type::Applied { arguments, .. } => {
+            arguments.iter().all(checkpoint_snapshot_maps_are_valid)
+        }
         Type::List(element)
         | Type::Range(element)
         | Type::Relation(element)
@@ -10014,7 +10029,8 @@ fn checkpoint_snapshot_maps_are_valid(ty: &Type) -> bool {
                 && checkpoint_snapshot_maps_are_valid(result)
         }
         Type::MoneyPerUnit { currency, unit } => {
-            checkpoint_snapshot_maps_are_valid(currency) && checkpoint_snapshot_maps_are_valid(unit)
+            checkpoint_snapshot_maps_are_valid(currency)
+                && checkpoint_snapshot_maps_are_valid(unit)
         }
         _ => true,
     }
@@ -10371,7 +10387,11 @@ fn is_portable_statistics_operation(operation: &str) -> bool {
 // The pinned collection source declares one generic finite-list signature.
 // Nonempty calls get their element type from the rows; empty aggregates use
 // the caller's context where available and otherwise keep the Int zero rule.
-fn finite_list_aggregate_element(_callee: &Expr, _operation: &str, _scope: &Scope) -> Option<Type> {
+fn finite_list_aggregate_element(
+    _callee: &Expr,
+    _operation: &str,
+    _scope: &Scope,
+) -> Option<Type> {
     None
 }
 
@@ -10459,53 +10479,28 @@ fn infer_finite_list_collection_call(
     let portable_collection_call = match path.as_slice() {
         [operation] => matches!(
             *operation,
-            "filter"
-                | "map"
-                | "flat_map"
-                | "sort_by"
-                | "take"
-                | "drop"
-                | "distinct"
-                | "union"
-                | "count"
-                | "first"
-                | "one"
-                | "sum"
-                | "min"
-                | "max"
-                | "every"
-                | "exists"
-                | "chunk"
-                | "flatten"
-                | "partition"
-                | "zip"
-                | "zip_exact"
-                | "unique"
-                | "group_by"
-                | "pairs"
-                | "window"
-                | "split_when"
-                | "rank"
-                | "asof_join"
-                | "bucket_by"
+            "filter" | "map" | "flat_map" | "sort_by" | "take" | "drop" | "distinct"
+                | "union" | "count" | "first" | "one" | "sum" | "min" | "max"
+                | "every" | "exists" | "chunk" | "flatten" | "partition" | "zip"
+                | "zip_exact" | "unique" | "group_by" | "pairs" | "window"
+                | "split_when" | "rank" | "asof_join" | "bucket_by"
         ),
         _ => standard_collection_module_operation(callee, scope, local).is_some(),
     };
-    if portable_collection_call
-        && let Some(argument) = arguments
-            .iter()
-            .find(|argument| argument.name.as_deref() == Some("rows"))
-            .or_else(|| {
-                arguments
-                    .iter()
-                    .find(|argument| argument.name.as_deref() == Some("values"))
-            })
-            .or_else(|| {
-                arguments
-                    .iter()
-                    .find(|argument| argument.name.as_deref() == Some("left"))
-            })
-            .or_else(|| arguments.first())
+    if portable_collection_call && let Some(argument) = arguments
+        .iter()
+        .find(|argument| argument.name.as_deref() == Some("rows"))
+        .or_else(|| {
+            arguments
+                .iter()
+                .find(|argument| argument.name.as_deref() == Some("values"))
+        })
+        .or_else(|| {
+            arguments
+                .iter()
+                .find(|argument| argument.name.as_deref() == Some("left"))
+        })
+        .or_else(|| arguments.first())
     {
         let mut probe_diagnostics = Vec::new();
         let inferred = infer(&argument.value, scope, local, &mut probe_diagnostics);
@@ -10825,7 +10820,9 @@ fn infer_finite_list_helper_collection(
         let contextual_callback = slot.is_some_and(|slot| {
             matches!(
                 (operation, slot),
-                ("partition" | "split_when", 1) | ("group_by" | "rank", 1) | ("asof_join", 2 | 3)
+                ("partition" | "split_when", 1)
+                    | ("group_by" | "rank", 1)
+                    | ("asof_join", 2 | 3)
             )
         }) && matches!(&argument.value, Expr::Lambda { .. });
         let inferred = if contextual_callback {
@@ -10865,10 +10862,7 @@ fn infer_finite_list_helper_collection(
         ));
     }
 
-    let relation_input = matches!(
-        values.first().and_then(Option::as_ref),
-        Some(Type::Relation(_))
-    );
+    let relation_input = matches!(values.first().and_then(Option::as_ref), Some(Type::Relation(_)));
     let container = |element: Type| {
         if relation_input {
             Type::Relation(Box::new(element))
@@ -10876,27 +10870,23 @@ fn infer_finite_list_helper_collection(
             Type::List(Box::new(element))
         }
     };
-    let list_element = |index: usize, name: &str, diagnostics: &mut Vec<Diagnostic>| match values
-        .get(index)
-        .and_then(Option::as_ref)
-    {
-        Some(Type::List(element) | Type::Relation(element)) => element.as_ref().clone(),
-        Some(Type::Error) | None => Type::Error,
-        Some(_) => {
-            diagnostics.push(diag(
-                DIAG_TYPE,
-                format!("std.collection {operation} {name} must be a finite list"),
-            ));
-            Type::Error
+    let list_element = |index: usize, name: &str, diagnostics: &mut Vec<Diagnostic>| {
+        match values.get(index).and_then(Option::as_ref) {
+            Some(Type::List(element) | Type::Relation(element)) => element.as_ref().clone(),
+            Some(Type::Error) | None => Type::Error,
+            Some(_) => {
+                diagnostics.push(diag(
+                    DIAG_TYPE,
+                    format!("std.collection {operation} {name} must be a finite list"),
+                ));
+                Type::Error
+            }
         }
     };
     let first = list_element(0, "input", diagnostics);
     let result = match operation {
         "chunk" => {
-            let size = values
-                .get(1)
-                .and_then(Option::as_ref)
-                .unwrap_or(&Type::Error);
+            let size = values.get(1).and_then(Option::as_ref).unwrap_or(&Type::Error);
             require_same(&Type::Int, size, diagnostics);
             if let Some(index) = slots.get(1).and_then(|slot| *slot)
                 && is_non_positive_integer_constant(&arguments[index].value)
@@ -10926,7 +10916,10 @@ fn infer_finite_list_helper_collection(
                 effects.join(&callback.effects);
             }
             if operation == "partition" {
-                Type::Tuple(vec![container(first.clone()), container(first)])
+                Type::Tuple(vec![
+                    container(first.clone()),
+                    container(first),
+                ])
             } else {
                 container(Type::List(Box::new(first)))
             }
@@ -10982,17 +10975,17 @@ fn infer_finite_list_helper_collection(
                 ));
             }
             if operation == "group_by" {
-                container(Type::Tuple(vec![key_type, Type::List(Box::new(first))]))
+                container(Type::Tuple(vec![
+                    key_type,
+                    Type::List(Box::new(first)),
+                ]))
             } else {
                 container(Type::Tuple(vec![first, Type::Int]))
             }
         }
         "window" => {
             for index in [1, 2] {
-                let size = values
-                    .get(index)
-                    .and_then(Option::as_ref)
-                    .unwrap_or(&Type::Error);
+                let size = values.get(index).and_then(Option::as_ref).unwrap_or(&Type::Error);
                 require_same(&Type::Int, size, diagnostics);
                 if let Some(argument_index) = slots.get(index).and_then(|slot| *slot)
                     && is_non_positive_integer_constant(&arguments[argument_index].value)
@@ -11133,20 +11126,13 @@ fn infer_finite_list_simple_collection(
             format!("std.collection {operation} arguments do not match its static signature"),
         ));
     }
-    let first = values
-        .first()
-        .and_then(Option::as_ref)
-        .cloned()
-        .unwrap_or(Type::Error);
+    let first = values.first().and_then(Option::as_ref).cloned().unwrap_or(Type::Error);
     let Type::List(element) = first else {
         diagnostics.push(diag(
             DIAG_TYPE,
             format!("finite-list {operation} requires a finite list"),
         ));
-        return Inferred {
-            ty: Type::Error,
-            effects,
-        };
+        return Inferred { ty: Type::Error, effects };
     };
     let result = match operation {
         "count" => Type::Int,
@@ -11162,16 +11148,12 @@ fn infer_finite_list_simple_collection(
             }
         }
         "take" | "drop" => {
-            let count = values
-                .get(1)
-                .and_then(Option::as_ref)
-                .unwrap_or(&Type::Error);
+            let count = values.get(1).and_then(Option::as_ref).unwrap_or(&Type::Error);
             if count != &Type::Int && count != &Type::Error {
                 diagnostics.push(diag(DIAG_TYPE, format!("{operation} count must be an Int")));
                 Type::Error
             } else if count == &Type::Int
-                && slots[1]
-                    .is_some_and(|index| is_negative_integer_constant(&arguments[index].value))
+                && slots[1].is_some_and(|index| is_negative_integer_constant(&arguments[index].value))
             {
                 diagnostics.push(diag(
                     DIAG_TYPE,
@@ -11183,11 +11165,7 @@ fn infer_finite_list_simple_collection(
             }
         }
         "union" => {
-            let right = values
-                .get(1)
-                .and_then(Option::as_ref)
-                .cloned()
-                .unwrap_or(Type::Error);
+            let right = values.get(1).and_then(Option::as_ref).cloned().unwrap_or(Type::Error);
             match right {
                 Type::List(right_element) if types_match(&element, &right_element) => {
                     Type::List(element)
@@ -12517,21 +12495,15 @@ fn infer_relation_collection_pipeline(
     if let Some(parameter) = callback_parameter {
         let expected_count = 1;
         let malformed = arguments.len() != expected_count
-            || arguments.first().is_some_and(|argument| {
-                argument
-                    .name
-                    .as_deref()
-                    .is_some_and(|name| name != parameter)
-            });
+            || arguments
+                .first()
+                .is_some_and(|argument| argument.name.as_deref().is_some_and(|name| name != parameter));
         let Some(argument) = arguments.first() else {
             diagnostics.push(diag(
                 DIAG_TYPE,
                 format!("relation {operation} requires a {parameter} callback"),
             ));
-            return Inferred {
-                ty: Type::Error,
-                effects,
-            };
+            return Inferred { ty: Type::Error, effects };
         };
         let callback = infer_relation_callback(
             &argument.value,
@@ -12549,9 +12521,7 @@ fn infer_relation_collection_pipeline(
         if malformed {
             diagnostics.push(diag(
                 DIAG_TYPE,
-                format!(
-                    "relation {operation} pipeline arguments do not match its static signature"
-                ),
+                format!("relation {operation} pipeline arguments do not match its static signature"),
             ));
         }
         let valid = !malformed
@@ -12594,12 +12564,9 @@ fn infer_relation_collection_pipeline(
     };
     let mut malformed = arguments.len() != expected;
     if let Some(name) = expected_name {
-        malformed |= arguments.first().is_some_and(|argument| {
-            argument
-                .name
-                .as_deref()
-                .is_some_and(|actual| actual != name)
-        });
+        malformed |= arguments
+            .first()
+            .is_some_and(|argument| argument.name.as_deref().is_some_and(|actual| actual != name));
     }
     let mut values = Vec::with_capacity(arguments.len());
     for argument in arguments {
@@ -12649,10 +12616,7 @@ fn infer_relation_collection_pipeline(
         }
         "take" | "drop" => {
             if values.first().is_some_and(|ty| *ty != Type::Int) {
-                diagnostics.push(diag(
-                    DIAG_TYPE,
-                    format!("relation {operation} count must be an Int"),
-                ));
+                diagnostics.push(diag(DIAG_TYPE, format!("relation {operation} count must be an Int")));
                 Type::Error
             } else if values.first() == Some(&Type::Int)
                 && is_negative_integer_constant(&arguments[0].value)
@@ -12680,7 +12644,9 @@ fn infer_relation_collection_pipeline(
             }
         },
         "sum" if is_sum_element_type(&element) => element.clone(),
-        "min" | "max" if is_sort_key_type(&element) => Type::Optional(Box::new(element.clone())),
+        "min" | "max" if is_sort_key_type(&element) => {
+            Type::Optional(Box::new(element.clone()))
+        }
         "sum" | "min" | "max" => {
             diagnostics.push(diag(
                 DIAG_TYPE,
@@ -12756,8 +12722,7 @@ fn infer_relation_union_call(
     }
     let left = &values[slots[0].expect("validated relation union left slot")];
     let right = &values[slots[1].expect("validated relation union right slot")];
-    let (Type::Relation(left_element), Type::Relation(right_element)) = (&left.ty, &right.ty)
-    else {
+    let (Type::Relation(left_element), Type::Relation(right_element)) = (&left.ty, &right.ty) else {
         return None;
     };
     if !types_match(left_element, right_element) {
@@ -12976,7 +12941,9 @@ fn infer_relation_terminal_call(
         "take" | "drop" => Type::Relation(element.clone()),
         "window" => Type::Relation(Box::new(Type::List(Box::new(element.as_ref().clone())))),
         "sum" if is_sum_element_type(element.as_ref()) => element.as_ref().clone(),
-        "min" | "max" if is_sort_key_type(element.as_ref()) => Type::Optional(element.clone()),
+        "min" | "max" if is_sort_key_type(element.as_ref()) => {
+            Type::Optional(element.clone())
+        }
         "sum" | "min" | "max" => {
             diagnostics.push(diag(
                 DIAG_TYPE,
@@ -13213,9 +13180,9 @@ fn infer_success_pipeline(
         };
     }
     if diagnostics.iter().any(|diagnostic| {
-        diagnostic
-            .message()
-            .starts_with("a durable consumer function may own only one checkpointed source root")
+        diagnostic.message().starts_with(
+            "a durable consumer function may own only one checkpointed source root"
+        )
     }) {
         return Inferred {
             ty: Type::Error,
@@ -13832,9 +13799,7 @@ fn infer_success_pipeline(
         {
             (Type::Relation(Box::new(element.clone())), Some(Type::Bool))
         }
-        ("distinct", false, [])
-            if root_collection_intrinsic_is_unshadowed("distinct", scope, local) =>
-        {
+        ("distinct", false, []) if root_collection_intrinsic_is_unshadowed("distinct", scope, local) => {
             if is_default_float_equality_type(&element) {
                 diagnostics.push(diag(
                     DIAG_TYPE,
@@ -14653,7 +14618,9 @@ fn infer_relation_member_call(
     let Expr::Field { base, name, .. } = callee else {
         return None;
     };
-    if !matches!(name.as_str(), "count" | "first") || table_symbol(base, scope, local).is_some() {
+    if !matches!(name.as_str(), "count" | "first")
+        || table_symbol(base, scope, local).is_some()
+    {
         return None;
     }
 
@@ -15135,7 +15102,8 @@ fn require_same(expected: &Type, actual: &Type, diagnostics: &mut Vec<Diagnostic
 }
 
 fn types_match(expected: &Type, actual: &Type) -> bool {
-    if !checkpoint_snapshot_maps_are_valid(expected) || !checkpoint_snapshot_maps_are_valid(actual)
+    if !checkpoint_snapshot_maps_are_valid(expected)
+        || !checkpoint_snapshot_maps_are_valid(actual)
     {
         return false;
     }
@@ -15160,7 +15128,9 @@ fn types_match(expected: &Type, actual: &Type) -> bool {
     {
         return true;
     }
-    if expected == &Type::Named("sys.SnapshotRef".into()) && is_contextual_snapshot_ref(actual) {
+    if expected == &Type::Named("sys.SnapshotRef".into())
+        && is_contextual_snapshot_ref(actual)
+    {
         return true;
     }
     match (expected, actual) {
@@ -15496,8 +15466,10 @@ fn infer_timeout_call(
                     0 => &mut callback,
                     1 => &mut duration,
                     _ => {
-                        diagnostics
-                            .push(diag(DIAG_TYPE, "timeout expects a callback and a duration"));
+                        diagnostics.push(diag(
+                            DIAG_TYPE,
+                            "timeout expects a callback and a duration",
+                        ));
                         return Some(Inferred {
                             ty: Type::Error,
                             effects: EffectSummary::default(),
@@ -15838,9 +15810,9 @@ fn infer_descriptor_system_call(
     let result = descriptor_call_type(&function.result, &function.type_parameters)
         .expect("supported descriptor functions have concrete types");
     let result = if path == ["sys", "snapshot"] {
-        arguments
-            .first()
-            .map(|argument| snapshot_selector_context(&argument.value, values.first(), local))
+        arguments.first().map(|argument| {
+            snapshot_selector_context(&argument.value, values.first(), local)
+        })
             .unwrap_or(result)
     } else {
         result
@@ -16420,9 +16392,10 @@ fn substitute_generic_descriptor_type(
             if matches!(base.as_str(), "Relation" | "Query") =>
         {
             let element = arguments.first()?;
-            Some(Type::Relation(Box::new(
-                substitute_generic_descriptor_type(element, substitutions)?,
-            )))
+            Some(Type::Relation(Box::new(substitute_generic_descriptor_type(
+                element,
+                substitutions,
+            )?)))
         }
         system_api::SystemType::Applied { base, arguments } => Some(Type::Applied {
             base: base.clone(),
@@ -17326,10 +17299,9 @@ fn infer_nominal_conversion_call(
         return None;
     }
     let target_path = qualified_path(base);
-    if target_path
-        .as_ref()
-        .is_some_and(|path| path.first().is_some_and(|root| local.contains_key(*root)))
-    {
+    if target_path.as_ref().is_some_and(|path| {
+        path.first().is_some_and(|root| local.contains_key(*root))
+    }) {
         return None;
     }
     let symbol = if let Expr::Name { text, .. } = base.as_ref() {
@@ -17458,7 +17430,9 @@ fn snapshot_ref_binder_id(selector: &str) -> Option<&str> {
         .map(|(binder, _)| binder)
 }
 
-fn snapshot_parameter_context(selector: &str) -> Option<(Option<&str>, &str, bool)> {
+fn snapshot_parameter_context(
+    selector: &str,
+) -> Option<(Option<&str>, &str, bool)> {
     let selector = selector.strip_prefix("selector:")?;
     let (captured, selector) = if let Some(selector) = selector.strip_prefix("capture:") {
         (true, selector)
@@ -17542,24 +17516,25 @@ fn specialize_dynamic_parameter_snapshot_contexts(
     let nonreturning_argument = argument_types
         .iter()
         .any(contains_nonreturning_aggregate_component);
-    let incomplete_argument =
-        formal_parameters
-            .iter()
-            .enumerate()
-            .any(|(parameter_index, formal)| {
-                let Some(argument_index) =
-                    call_argument_index_for_position(parameter_names, parameter_index, arguments)
-                else {
-                    return !default_parameters.contains(&parameter_index);
-                };
-                let Some(actual) = argument_types.get(argument_index) else {
-                    return true;
-                };
-                contains_tuple_type(formal)
-                    && (contains_type_error(formal)
-                        || contains_type_error(actual)
-                        || !types_match(formal, actual))
-            });
+    let incomplete_argument = formal_parameters
+        .iter()
+        .enumerate()
+        .any(|(parameter_index, formal)| {
+            let Some(argument_index) = call_argument_index_for_position(
+                parameter_names,
+                parameter_index,
+                arguments,
+            ) else {
+                return !default_parameters.contains(&parameter_index);
+            };
+            let Some(actual) = argument_types.get(argument_index) else {
+                return true;
+            };
+            contains_tuple_type(formal)
+                && (contains_type_error(formal)
+                    || contains_type_error(actual)
+                    || !types_match(formal, actual))
+        });
     let paired_direct_binders = formal_parameters
         .iter()
         .filter_map(|formal| snapshot_ref_context_key(formal).and_then(snapshot_ref_binder_id))
@@ -17575,9 +17550,11 @@ fn specialize_dynamic_parameter_snapshot_contexts(
                 {
                     return false;
                 }
-                let Some(argument_index) =
-                    call_argument_index_for_position(parameter_names, parameter_index, arguments)
-                else {
+                let Some(argument_index) = call_argument_index_for_position(
+                    parameter_names,
+                    parameter_index,
+                    arguments,
+                ) else {
                     return false;
                 };
                 argument_types
@@ -17596,9 +17573,11 @@ fn specialize_dynamic_parameter_snapshot_contexts(
         nonreturning_argument || incomplete_argument || incomplete_paired_direct_rebind;
     if !suppress_rebinding {
         for (parameter_index, formal) in formal_parameters.iter().enumerate() {
-            let Some(argument_index) =
-                call_argument_index_for_position(parameter_names, parameter_index, arguments)
-            else {
+            let Some(argument_index) = call_argument_index_for_position(
+                parameter_names,
+                parameter_index,
+                arguments,
+            ) else {
                 continue;
             };
             let Some(actual) = argument_types.get(argument_index) else {
@@ -17650,16 +17629,16 @@ fn specialize_dynamic_parameter_snapshot_contexts_scoped(
     binder_contexts: &BTreeMap<String, Type>,
 ) -> Type {
     match ty {
-        Type::Applied {
-            base,
-            arguments: values,
-        } if base == "sys.SnapshotRefContext"
-            && let [Type::Named(selector)] = values.as_slice()
-            && let Some((binder, parameter, captured)) = snapshot_parameter_context(selector)
-            && match binder {
-                Some(binder) => !shadowed_parameters.contains(&format!("binder:{binder}")),
-                None => captured || !shadowed_parameters.contains(parameter),
-            } =>
+        Type::Applied { base, arguments: values }
+            if base == "sys.SnapshotRefContext"
+                && let [Type::Named(selector)] = values.as_slice()
+                && let Some((binder, parameter, captured)) = snapshot_parameter_context(selector)
+                && match binder {
+                    Some(binder) => {
+                        !shadowed_parameters.contains(&format!("binder:{binder}"))
+                    }
+                    None => captured || !shadowed_parameters.contains(parameter),
+                } =>
         {
             if let Some(binder) = binder
                 && let Some(actual) = binder_contexts.get(binder)
@@ -17684,8 +17663,7 @@ fn specialize_dynamic_parameter_snapshot_contexts_scoped(
                     || argument_types
                         .iter()
                         .any(|actual| contains_snapshot_context_key(actual, selector))
-                    || parameter_names
-                        .is_some_and(|names| names.iter().all(|name| name != parameter))
+                    || parameter_names.is_some_and(|names| names.iter().all(|name| name != parameter))
                 {
                     // A closure's result may mention its captured selector even
                     // when the current zero-argument call has no parameter to
@@ -17761,14 +17739,17 @@ fn specialize_dynamic_parameter_snapshot_contexts_scoped(
                     binder_contexts,
                 )),
             }
-        }
+        },
         // The reference leaves checkpoint-map recovery after a failed call
         // unspecified. Rebind each stored selector as its original pin slot
         // so an omitted sibling cannot collapse same-named paired binders.
         Type::Applied {
             base,
             arguments: map_arguments,
-        } if base == "semantic.SnapshotContextMap" && is_snapshot_context_map_shape(ty) => {
+        }
+            if base == "semantic.SnapshotContextMap"
+                && is_snapshot_context_map_shape(ty) =>
+        {
             let mut merged: Option<Type> = None;
             for selector in map_arguments {
                 let Type::Named(selector) = selector else {
@@ -17900,10 +17881,7 @@ fn specialize_dynamic_parameter_snapshot_contexts_scoped(
                 })
                 .collect(),
         ),
-        Type::Applied {
-            base,
-            arguments: values,
-        } => Type::Applied {
+        Type::Applied { base, arguments: values } => Type::Applied {
             base: base.clone(),
             arguments: values
                 .iter()
@@ -17997,8 +17975,8 @@ fn collect_snapshot_binder_contexts(
 /// result type. Walk aggregate patterns as well as direct SnapshotRef values.
 fn collect_snapshot_ref_binder_ids(ty: &Type, into: &mut BTreeSet<String>) {
     if is_contextual_snapshot_ref(ty) {
-        if let Some((Some(binder), _, _)) =
-            snapshot_ref_context_key(ty).and_then(snapshot_parameter_context)
+        if let Some((Some(binder), _, _)) = snapshot_ref_context_key(ty)
+            .and_then(snapshot_parameter_context)
         {
             into.insert(format!("binder:{binder}"));
         }
@@ -18042,9 +18020,7 @@ fn contains_snapshot_context_key(ty: &Type, key: &str) -> bool {
         {
             true
         }
-        Type::Function {
-            parameters, result, ..
-        } => {
+        Type::Function { parameters, result, .. } => {
             parameters
                 .iter()
                 .any(|parameter| contains_snapshot_context_key(parameter, key))
@@ -18283,10 +18259,9 @@ fn pinned_snapshot_reset_shape_matches(expected: &Type, selected: &Type) -> bool
     }
     let mut maps = Vec::new();
     let mut path = Vec::new();
-    let collected = collect_reset_snapshot_context_maps(expected, selected, &mut maps, &mut path);
-    let paired = snapshot_context_paired_identity_shapes_match(&maps);
-    let shape = pinned_snapshot_reset_shape_matches_at_path(expected, selected, false);
-    collected && paired && shape
+    collect_reset_snapshot_context_maps(expected, selected, &mut maps, &mut path)
+        && snapshot_context_paired_identity_shapes_match(&maps)
+        && pinned_snapshot_reset_shape_matches_at_path(expected, selected, false)
 }
 
 /// Sparse checkpoint rebinds may add or omit singleton selectors between
@@ -18295,16 +18270,13 @@ fn pinned_snapshot_reset_shape_matches(expected: &Type, selected: &Type) -> bool
 /// not change which checkpoint lanes share an identity. The reference is
 /// silent on this local reset rule, so retain paired path membership and let
 /// the selected checkpoint supply its exact maps.
-fn snapshot_context_paired_identity_shapes_match(pin_maps: &[SnapshotContextMapPair]) -> bool {
+fn snapshot_context_paired_identity_shapes_match(
+    pin_maps: &[SnapshotContextMapPair],
+) -> bool {
     fn paired_shapes(
         pin_maps: &[SnapshotContextMapPair],
         use_expected: bool,
-    ) -> BTreeSet<
-        BTreeSet<(
-            Vec<SnapshotTopologyBoundary>,
-            BTreeSet<SnapshotTopologyBoundary>,
-        )>,
-    > {
+    ) -> BTreeSet<BTreeSet<(Vec<SnapshotTopologyBoundary>, BTreeSet<SnapshotTopologyBoundary>)>> {
         let mut memberships = BTreeMap::<
             String,
             BTreeMap<Vec<SnapshotTopologyBoundary>, BTreeSet<SnapshotTopologyBoundary>>,
@@ -18321,9 +18293,10 @@ fn snapshot_context_paired_identity_shapes_match(pin_maps: &[SnapshotContextMapP
                 .enumerate()
                 .filter_map(|(index, boundary)| match boundary {
                     SnapshotTopologyBoundary::TupleElement(_)
-                    | SnapshotTopologyBoundary::RecordField(_) => {
-                        Some((pair.boundary_path[..index].to_vec(), boundary.clone()))
-                    }
+                    | SnapshotTopologyBoundary::RecordField(_) => Some((
+                        pair.boundary_path[..index].to_vec(),
+                        boundary.clone(),
+                    )),
                     _ => None,
                 })
                 .collect::<Vec<_>>();
@@ -18351,8 +18324,7 @@ fn snapshot_context_paired_identity_shapes_match(pin_maps: &[SnapshotContextMapP
     }
 
     let expected = paired_shapes(pin_maps, true);
-    let actual = paired_shapes(pin_maps, false);
-    !expected.is_empty() && expected == actual
+    !expected.is_empty() && expected == paired_shapes(pin_maps, false)
 }
 
 fn pinned_snapshot_reset_shape_matches_at_path(
@@ -18414,15 +18386,16 @@ fn pinned_snapshot_reset_shape_matches_at_path(
             expected_names == selected_names
                 && expected_defaults == selected_defaults
                 && expected_parameters.len() == selected_parameters.len()
-                && expected_parameters.iter().zip(selected_parameters).all(
-                    |(expected, selected)| {
+                && expected_parameters
+                    .iter()
+                    .zip(selected_parameters)
+                    .all(|(expected, selected)| {
                         pinned_snapshot_reset_shape_matches_at_path(
                             expected,
                             selected,
                             !input_position,
                         )
-                    },
-                )
+                    })
                 && pinned_snapshot_reset_shape_matches_at_path(
                     expected_result,
                     selected_result,
@@ -18438,9 +18411,7 @@ fn pinned_snapshot_reset_shape_matches_at_path(
                 base: selected_base,
                 arguments: selected_arguments,
             },
-        ) if expected_base == selected_base
-            && expected_arguments.len() == selected_arguments.len() =>
-        {
+        ) if expected_base == selected_base && expected_arguments.len() == selected_arguments.len() => {
             expected_arguments
                 .iter()
                 .zip(selected_arguments)
@@ -18542,19 +18513,15 @@ fn collect_reset_snapshot_context_maps(
             SnapshotTopologyBoundary::OptionalValue,
         ),
         (Type::Tuple(expected), Type::Tuple(selected)) if expected.len() == selected.len() => {
-            expected
-                .iter()
-                .zip(selected)
-                .enumerate()
-                .all(|(index, (expected, selected))| {
-                    collect_reset_maps_at_boundary(
-                        expected,
-                        selected,
-                        maps,
-                        path,
-                        SnapshotTopologyBoundary::TupleElement(index),
-                    )
-                })
+            expected.iter().zip(selected).enumerate().all(|(index, (expected, selected))| {
+                collect_reset_maps_at_boundary(
+                    expected,
+                    selected,
+                    maps,
+                    path,
+                    SnapshotTopologyBoundary::TupleElement(index),
+                )
+            })
         }
         (Type::Record(expected), Type::Record(selected)) => {
             expected.iter().all(|(name, expected)| {
@@ -18593,14 +18560,13 @@ fn collect_reset_snapshot_context_maps(
                         path,
                         SnapshotTopologyBoundary::FunctionParameter(index),
                     )
-                })
-                && collect_reset_maps_at_boundary(
-                    expected_result,
-                    selected_result,
-                    maps,
-                    path,
-                    SnapshotTopologyBoundary::FunctionResult,
-                )
+                }) && collect_reset_maps_at_boundary(
+                expected_result,
+                selected_result,
+                maps,
+                path,
+                SnapshotTopologyBoundary::FunctionResult,
+            )
         }
         (
             Type::Applied {
@@ -18611,9 +18577,7 @@ fn collect_reset_snapshot_context_maps(
                 base: selected_base,
                 arguments: selected_arguments,
             },
-        ) if expected_base == selected_base
-            && expected_arguments.len() == selected_arguments.len() =>
-        {
+        ) if expected_base == selected_base && expected_arguments.len() == selected_arguments.len() => {
             expected_arguments
                 .iter()
                 .zip(selected_arguments)
@@ -18692,15 +18656,15 @@ fn type_contains_valid_pinned_snapshot_identity(ty: &Type) -> bool {
         | Type::Relation(element)
         | Type::Stream(element)
         | Type::Optional(element) => type_contains_valid_pinned_snapshot_identity(element),
-        Type::Record(fields) => fields
-            .values()
-            .any(type_contains_valid_pinned_snapshot_identity),
+        Type::Record(fields) => fields.values().any(type_contains_valid_pinned_snapshot_identity),
         Type::Tuple(elements) => elements
             .iter()
             .any(type_contains_valid_pinned_snapshot_identity),
-        Type::Applied { arguments, .. } => arguments
-            .iter()
-            .any(type_contains_valid_pinned_snapshot_identity),
+        Type::Applied { arguments, .. } => {
+            arguments
+                .iter()
+                .any(type_contains_valid_pinned_snapshot_identity)
+        }
         Type::MoneyPerUnit { currency, unit } => {
             type_contains_valid_pinned_snapshot_identity(currency)
                 || type_contains_valid_pinned_snapshot_identity(unit)
@@ -18723,7 +18687,8 @@ fn type_contains_valid_pinned_snapshot_identity(ty: &Type) -> bool {
 /// local rebinding; permit it when the only differences are selector contexts
 /// on pinned snapshot values. Saved aliases retain their original identities.
 fn pinned_snapshot_shape_matches(expected: &Type, actual: &Type) -> bool {
-    if !checkpoint_snapshot_maps_are_valid(expected) || !checkpoint_snapshot_maps_are_valid(actual)
+    if !checkpoint_snapshot_maps_are_valid(expected)
+        || !checkpoint_snapshot_maps_are_valid(actual)
     {
         return false;
     }
@@ -18801,7 +18766,9 @@ fn pinned_snapshot_shape_matches(expected: &Type, actual: &Type) -> bool {
                 && expected_parameters
                     .iter()
                     .zip(actual_parameters)
-                    .all(|(expected, actual)| pinned_snapshot_shape_matches(expected, actual))
+                    .all(|(expected, actual)| {
+                        pinned_snapshot_shape_matches(expected, actual)
+                    })
                 && pinned_snapshot_shape_matches(expected_result, actual_result)
         }
         (Type::List(expected), Type::List(actual))
@@ -18815,9 +18782,9 @@ fn pinned_snapshot_shape_matches(expected: &Type, actual: &Type) -> bool {
             expected.len() == actual.len()
                 && record_pin_identity_topology_matches(expected, actual)
                 && expected.iter().all(|(name, expected)| {
-                    actual
-                        .get(name)
-                        .is_some_and(|actual| pinned_snapshot_shape_matches(expected, actual))
+                    actual.get(name).is_some_and(|actual| {
+                        pinned_snapshot_shape_matches(expected, actual)
+                    })
                 })
         }
         (Type::Tuple(expected), Type::Tuple(actual)) => {
@@ -18838,7 +18805,9 @@ fn pinned_snapshot_shape_matches(expected: &Type, actual: &Type) -> bool {
                 && expected_arguments
                     .iter()
                     .zip(actual_arguments)
-                    .all(|(expected, actual)| pinned_snapshot_shape_matches(expected, actual))
+                    .all(|(expected, actual)| {
+                        pinned_snapshot_shape_matches(expected, actual)
+                    })
         }
         (
             Type::MoneyPerUnit {
@@ -18969,7 +18938,9 @@ fn checkpoint_topology_anchor_with_first_pins_local(anchor: &Type, source: &Type
                 )
             }
         }
-        (Type::Record(anchor), Type::Record(source)) if anchor.keys().eq(source.keys()) => {
+        (Type::Record(anchor), Type::Record(source))
+            if anchor.keys().eq(source.keys()) =>
+        {
             Type::Record(
                 anchor
                     .iter()
@@ -19110,13 +19081,15 @@ fn type_contains_pinned_checkpoint_tuple(ty: &Type) -> bool {
         | Type::Stream(element)
         | Type::Optional(element) => type_contains_pinned_checkpoint_tuple(element),
         Type::Record(fields) => fields.values().any(type_contains_pinned_checkpoint_tuple),
-        Type::Applied { arguments, .. } => {
-            arguments.iter().any(type_contains_pinned_checkpoint_tuple)
-        }
+        Type::Applied { arguments, .. } => arguments
+            .iter()
+            .any(type_contains_pinned_checkpoint_tuple),
         Type::Function {
             parameters, result, ..
         } => {
-            parameters.iter().any(type_contains_pinned_checkpoint_tuple)
+            parameters
+                .iter()
+                .any(type_contains_pinned_checkpoint_tuple)
                 || type_contains_pinned_checkpoint_tuple(result)
         }
         Type::MoneyPerUnit { currency, unit } => {
@@ -19135,7 +19108,9 @@ fn type_contains_omitted_checkpoint_tuple(ty: &Type) -> bool {
     match ty {
         Type::Tuple(elements) => {
             checkpoint_value_is_omitted(ty)
-                || elements.iter().any(type_contains_omitted_checkpoint_tuple)
+                || elements
+                    .iter()
+                    .any(type_contains_omitted_checkpoint_tuple)
         }
         Type::List(element)
         | Type::Range(element)
@@ -19143,9 +19118,9 @@ fn type_contains_omitted_checkpoint_tuple(ty: &Type) -> bool {
         | Type::Stream(element)
         | Type::Optional(element) => type_contains_omitted_checkpoint_tuple(element),
         Type::Record(fields) => fields.values().any(type_contains_omitted_checkpoint_tuple),
-        Type::Applied { arguments, .. } => {
-            arguments.iter().any(type_contains_omitted_checkpoint_tuple)
-        }
+        Type::Applied { arguments, .. } => arguments
+            .iter()
+            .any(type_contains_omitted_checkpoint_tuple),
         Type::Function {
             parameters, result, ..
         } => {
@@ -19170,7 +19145,9 @@ fn type_sequence_has_omitted_pinned_checkpoint_tuple(types: &[Type]) -> bool {
     type_sequence_has_omitted_pinned_checkpoint_tuple_at_path(&aligned)
 }
 
-fn type_sequence_has_omitted_pinned_checkpoint_tuple_at_path(types: &[Option<&Type>]) -> bool {
+fn type_sequence_has_omitted_pinned_checkpoint_tuple_at_path(
+    types: &[Option<&Type>],
+) -> bool {
     let contains_pinned_tuple = types
         .iter()
         .flatten()
@@ -19346,7 +19323,8 @@ fn seed_omitted_pinned_checkpoint_tuple_paths(types: &mut [Type]) {
                             return None;
                         };
                         let element = elements.get(index)?;
-                        type_contains_pinned_checkpoint_tuple(element).then(|| element.clone())
+                        type_contains_pinned_checkpoint_tuple(element)
+                            .then(|| element.clone())
                     });
                     if let Some(template) = template {
                         if types.iter().any(|ty| match &**ty {
@@ -19570,11 +19548,9 @@ fn merge_multi_parent_checkpoint_value(
     parent: &Type,
     first_parent: &Type,
 ) -> Option<Type> {
-    let paired =
-        checkpoint_paired_boundary_fold_topology_matches(accumulated, parent, first_parent);
-    let source_topology_matches =
-        checkpoint_value_pin_identity_topology_matches(first_parent, parent)
-            || checkpoint_value_paired_pin_membership_matches(first_parent, parent);
+    let paired = checkpoint_paired_boundary_fold_topology_matches(accumulated, parent, first_parent);
+    let source_topology_matches = checkpoint_value_pin_identity_topology_matches(first_parent, parent)
+        || checkpoint_value_paired_pin_membership_matches(first_parent, parent);
     let compaction = nested_checkpoint_compaction_fold_preserves_pin_identity(accumulated, parent);
     if !paired || !source_topology_matches || !compaction {
         return None;
@@ -19621,7 +19597,8 @@ fn merge_multi_parent_checkpoint_value_scoped(
     // A parent that omits a pinned tuple path contributes no identity. Keep
     // the accumulated value and topology anchor so a later rebind continues
     // the same fold instead of freezing the tuple at the omission.
-    if checkpoint_value_is_omitted(parent) && type_contains_pinned_checkpoint_tuple(topology_anchor)
+    if checkpoint_value_is_omitted(parent)
+        && type_contains_pinned_checkpoint_tuple(topology_anchor)
     {
         return Some(ScopedCheckpointFold {
             merged: accumulated.clone(),
@@ -19647,357 +19624,335 @@ fn merge_multi_parent_checkpoint_value_scoped(
     let mut rejected_scope = false;
     let (mut merged, mut effective_parent) =
         match (accumulated, parent, rollback_anchor, topology_anchor) {
-            (
-                Type::Record(accumulated_fields),
-                Type::Record(parent_fields),
-                Type::Record(rollback_fields),
-                Type::Record(topology_fields),
-            ) if accumulated_fields.keys().eq(rollback_fields.keys())
-                && accumulated_fields.keys().eq(topology_fields.keys())
-                && parent_fields
-                    .keys()
-                    .all(|name| accumulated_fields.contains_key(name)) =>
-            {
-                let mut merged_fields = BTreeMap::new();
-                let mut effective_fields = BTreeMap::new();
-                for (name, accumulated_field) in accumulated_fields {
-                    let (Some(rollback_field), Some(topology_field)) =
-                        (rollback_fields.get(name), topology_fields.get(name))
-                    else {
-                        return scoped_checkpoint_rollback(
-                            rollback_anchor,
-                            path,
-                            rolled_back_paths,
-                        );
-                    };
-                    let Some(parent_field) = parent_fields.get(name) else {
-                        if type_contains_pinned_checkpoint_tuple(rollback_field)
-                            || type_contains_pinned_checkpoint_tuple(topology_field)
-                        {
-                            merged_fields.insert(name.clone(), accumulated_field.clone());
-                            effective_fields.insert(name.clone(), topology_field.clone());
-                            continue;
-                        }
-                        return scoped_checkpoint_rollback(
-                            rollback_anchor,
-                            path,
-                            rolled_back_paths,
-                        );
-                    };
-                    path.push(SnapshotTopologyBoundary::RecordField(name.clone()));
-                    let field = merge_multi_parent_checkpoint_value_scoped(
-                        accumulated_field,
-                        parent_field,
-                        rollback_field,
-                        topology_field,
-                        path,
-                        rolled_back_paths,
-                    );
-                    path.pop();
-                    let Some(field) = field else {
-                        return scoped_checkpoint_rollback(
-                            rollback_anchor,
-                            path,
-                            rolled_back_paths,
-                        );
-                    };
-                    rejected_scope |= field.rejected_scope;
-                    merged_fields.insert(name.clone(), field.merged);
-                    effective_fields.insert(name.clone(), field.effective_parent);
-                }
-                (Type::Record(merged_fields), Type::Record(effective_fields))
-            }
-            (
-                Type::Tuple(accumulated_slots),
-                Type::Tuple(parent_slots),
-                Type::Tuple(rollback_slots),
-                Type::Tuple(topology_slots),
-            ) if accumulated_slots.len() == parent_slots.len()
-                && accumulated_slots.len() == rollback_slots.len()
-                && accumulated_slots.len() == topology_slots.len() =>
-            {
-                let mut merged_slots = Vec::with_capacity(accumulated_slots.len());
-                let mut effective_slots = Vec::with_capacity(accumulated_slots.len());
-                for (index, ((accumulated_slot, parent_slot), (rollback_slot, topology_slot))) in
-                    accumulated_slots
-                        .iter()
-                        .zip(parent_slots)
-                        .zip(rollback_slots.iter().zip(topology_slots))
-                        .enumerate()
-                {
-                    path.push(SnapshotTopologyBoundary::TupleElement(index));
-                    let slot = merge_multi_parent_checkpoint_value_scoped(
-                        accumulated_slot,
-                        parent_slot,
-                        rollback_slot,
-                        topology_slot,
-                        path,
-                        rolled_back_paths,
-                    );
-                    path.pop();
-                    let Some(slot) = slot else {
-                        return scoped_checkpoint_rollback(
-                            rollback_anchor,
-                            path,
-                            rolled_back_paths,
-                        );
-                    };
-                    rejected_scope |= slot.rejected_scope;
-                    merged_slots.push(slot.merged);
-                    effective_slots.push(slot.effective_parent);
-                }
-                (Type::Tuple(merged_slots), Type::Tuple(effective_slots))
-            }
-            (
-                Type::List(accumulated_element),
-                Type::List(parent_element),
-                Type::List(rollback_element),
-                Type::List(topology_element),
-            ) => {
-                let child = merge_scoped_checkpoint_child(
-                    accumulated_element,
-                    parent_element,
-                    rollback_element,
-                    topology_element,
-                    SnapshotTopologyBoundary::ListElement,
+        (
+            Type::Record(accumulated_fields),
+            Type::Record(parent_fields),
+            Type::Record(rollback_fields),
+            Type::Record(topology_fields),
+        ) if accumulated_fields.keys().eq(rollback_fields.keys())
+            && accumulated_fields.keys().eq(topology_fields.keys())
+            && parent_fields
+                .keys()
+                .all(|name| accumulated_fields.contains_key(name)) =>
+        {
+            let mut merged_fields = BTreeMap::new();
+            let mut effective_fields = BTreeMap::new();
+            for (name, accumulated_field) in accumulated_fields {
+                let (Some(rollback_field), Some(topology_field)) =
+                    (rollback_fields.get(name), topology_fields.get(name))
+                else {
+                    return scoped_checkpoint_rollback(rollback_anchor, path, rolled_back_paths);
+                };
+                let Some(parent_field) = parent_fields.get(name) else {
+                    if type_contains_pinned_checkpoint_tuple(rollback_field)
+                        || type_contains_pinned_checkpoint_tuple(topology_field)
+                    {
+                        merged_fields.insert(name.clone(), accumulated_field.clone());
+                        effective_fields.insert(name.clone(), topology_field.clone());
+                        continue;
+                    }
+                    return scoped_checkpoint_rollback(rollback_anchor, path, rolled_back_paths);
+                };
+                path.push(SnapshotTopologyBoundary::RecordField(name.clone()));
+                let field = merge_multi_parent_checkpoint_value_scoped(
+                    accumulated_field,
+                    parent_field,
+                    rollback_field,
+                    topology_field,
                     path,
                     rolled_back_paths,
                 );
-                let Some(child) = child else {
+                path.pop();
+                let Some(field) = field else {
                     return scoped_checkpoint_rollback(rollback_anchor, path, rolled_back_paths);
                 };
-                rejected_scope |= child.rejected_scope;
-                (
-                    Type::List(Box::new(child.merged)),
-                    Type::List(Box::new(child.effective_parent)),
-                )
+                rejected_scope |= field.rejected_scope;
+                merged_fields.insert(name.clone(), field.merged);
+                effective_fields.insert(name.clone(), field.effective_parent);
             }
-            (
-                Type::Range(accumulated_element),
-                Type::Range(parent_element),
-                Type::Range(rollback_element),
-                Type::Range(topology_element),
-            ) => {
-                let child = merge_scoped_checkpoint_child(
-                    accumulated_element,
-                    parent_element,
-                    rollback_element,
-                    topology_element,
-                    SnapshotTopologyBoundary::RangeElement,
-                    path,
-                    rolled_back_paths,
-                );
-                let Some(child) = child else {
-                    return scoped_checkpoint_rollback(rollback_anchor, path, rolled_back_paths);
-                };
-                rejected_scope |= child.rejected_scope;
-                (
-                    Type::Range(Box::new(child.merged)),
-                    Type::Range(Box::new(child.effective_parent)),
-                )
-            }
-            (
-                Type::Relation(accumulated_element),
-                Type::Relation(parent_element),
-                Type::Relation(rollback_element),
-                Type::Relation(topology_element),
-            ) => {
-                let child = merge_scoped_checkpoint_child(
-                    accumulated_element,
-                    parent_element,
-                    rollback_element,
-                    topology_element,
-                    SnapshotTopologyBoundary::RelationElement,
-                    path,
-                    rolled_back_paths,
-                );
-                let Some(child) = child else {
-                    return scoped_checkpoint_rollback(rollback_anchor, path, rolled_back_paths);
-                };
-                rejected_scope |= child.rejected_scope;
-                (
-                    Type::Relation(Box::new(child.merged)),
-                    Type::Relation(Box::new(child.effective_parent)),
-                )
-            }
-            (
-                Type::Stream(accumulated_element),
-                Type::Stream(parent_element),
-                Type::Stream(rollback_element),
-                Type::Stream(topology_element),
-            ) => {
-                let child = merge_scoped_checkpoint_child(
-                    accumulated_element,
-                    parent_element,
-                    rollback_element,
-                    topology_element,
-                    SnapshotTopologyBoundary::StreamElement,
-                    path,
-                    rolled_back_paths,
-                );
-                let Some(child) = child else {
-                    return scoped_checkpoint_rollback(rollback_anchor, path, rolled_back_paths);
-                };
-                rejected_scope |= child.rejected_scope;
-                (
-                    Type::Stream(Box::new(child.merged)),
-                    Type::Stream(Box::new(child.effective_parent)),
-                )
-            }
-            (
-                Type::Optional(accumulated_value),
-                Type::Optional(parent_value),
-                Type::Optional(rollback_value),
-                Type::Optional(topology_value),
-            ) => {
-                let child = merge_scoped_checkpoint_child(
-                    accumulated_value,
-                    parent_value,
-                    rollback_value,
-                    topology_value,
-                    SnapshotTopologyBoundary::OptionalValue,
-                    path,
-                    rolled_back_paths,
-                );
-                let Some(child) = child else {
-                    return scoped_checkpoint_rollback(rollback_anchor, path, rolled_back_paths);
-                };
-                rejected_scope |= child.rejected_scope;
-                (
-                    Type::Optional(Box::new(child.merged)),
-                    Type::Optional(Box::new(child.effective_parent)),
-                )
-            }
-            (
-                Type::Applied {
-                    base: accumulated_base,
-                    arguments: accumulated_arguments,
-                },
-                Type::Applied {
-                    base: parent_base,
-                    arguments: parent_arguments,
-                },
-                Type::Applied {
-                    base: rollback_base,
-                    arguments: rollback_arguments,
-                },
-                Type::Applied {
-                    base: topology_base,
-                    arguments: topology_arguments,
-                },
-            ) if accumulated_base == parent_base
-                && accumulated_base == rollback_base
-                && accumulated_base == topology_base
-                && accumulated_arguments.len() == parent_arguments.len()
-                && accumulated_arguments.len() == rollback_arguments.len()
-                && accumulated_arguments.len() == topology_arguments.len()
-                && accumulated_base != "sys.HistoricalCallable"
-                && accumulated_base != "sys.HistoricalNamespace"
-                && !is_snapshot_context_type(accumulated) =>
-            {
-                let mut merged_arguments = Vec::with_capacity(accumulated_arguments.len());
-                let mut effective_arguments = Vec::with_capacity(accumulated_arguments.len());
-                for (index, arguments) in accumulated_arguments
+            (Type::Record(merged_fields), Type::Record(effective_fields))
+        }
+        (
+            Type::Tuple(accumulated_slots),
+            Type::Tuple(parent_slots),
+            Type::Tuple(rollback_slots),
+            Type::Tuple(topology_slots),
+        ) if accumulated_slots.len() == parent_slots.len()
+            && accumulated_slots.len() == rollback_slots.len()
+            && accumulated_slots.len() == topology_slots.len() =>
+        {
+            let mut merged_slots = Vec::with_capacity(accumulated_slots.len());
+            let mut effective_slots = Vec::with_capacity(accumulated_slots.len());
+            for (index, ((accumulated_slot, parent_slot), (rollback_slot, topology_slot))) in
+                accumulated_slots
                     .iter()
-                    .zip(parent_arguments)
-                    .zip(rollback_arguments)
-                    .zip(topology_arguments)
+                    .zip(parent_slots)
+                    .zip(rollback_slots.iter().zip(topology_slots))
                     .enumerate()
-                {
-                    let (
-                        ((accumulated_argument, parent_argument), rollback_argument),
-                        topology_argument,
-                    ) = arguments;
-                    let child = merge_scoped_checkpoint_child(
-                        accumulated_argument,
-                        parent_argument,
-                        rollback_argument,
-                        topology_argument,
-                        SnapshotTopologyBoundary::AppliedArgument {
-                            base: accumulated_base.clone(),
-                            index,
-                        },
-                        path,
-                        rolled_back_paths,
-                    );
-                    let Some(child) = child else {
-                        return scoped_checkpoint_rollback(
-                            rollback_anchor,
-                            path,
-                            rolled_back_paths,
-                        );
-                    };
-                    rejected_scope |= child.rejected_scope;
-                    merged_arguments.push(child.merged);
-                    effective_arguments.push(child.effective_parent);
-                }
-                (
-                    Type::Applied {
+            {
+                path.push(SnapshotTopologyBoundary::TupleElement(index));
+                let slot = merge_multi_parent_checkpoint_value_scoped(
+                    accumulated_slot,
+                    parent_slot,
+                    rollback_slot,
+                    topology_slot,
+                    path,
+                    rolled_back_paths,
+                );
+                path.pop();
+                let Some(slot) = slot else {
+                    return scoped_checkpoint_rollback(rollback_anchor, path, rolled_back_paths);
+                };
+                rejected_scope |= slot.rejected_scope;
+                merged_slots.push(slot.merged);
+                effective_slots.push(slot.effective_parent);
+            }
+            (Type::Tuple(merged_slots), Type::Tuple(effective_slots))
+        }
+        (
+            Type::List(accumulated_element),
+            Type::List(parent_element),
+            Type::List(rollback_element),
+            Type::List(topology_element),
+        ) => {
+            let child = merge_scoped_checkpoint_child(
+                accumulated_element,
+                parent_element,
+                rollback_element,
+                topology_element,
+                SnapshotTopologyBoundary::ListElement,
+                path,
+                rolled_back_paths,
+            );
+            let Some(child) = child else {
+                return scoped_checkpoint_rollback(rollback_anchor, path, rolled_back_paths);
+            };
+            rejected_scope |= child.rejected_scope;
+            (
+                Type::List(Box::new(child.merged)),
+                Type::List(Box::new(child.effective_parent)),
+            )
+        }
+        (
+            Type::Range(accumulated_element),
+            Type::Range(parent_element),
+            Type::Range(rollback_element),
+            Type::Range(topology_element),
+        ) => {
+            let child = merge_scoped_checkpoint_child(
+                accumulated_element,
+                parent_element,
+                rollback_element,
+                topology_element,
+                SnapshotTopologyBoundary::RangeElement,
+                path,
+                rolled_back_paths,
+            );
+            let Some(child) = child else {
+                return scoped_checkpoint_rollback(rollback_anchor, path, rolled_back_paths);
+            };
+            rejected_scope |= child.rejected_scope;
+            (
+                Type::Range(Box::new(child.merged)),
+                Type::Range(Box::new(child.effective_parent)),
+            )
+        }
+        (
+            Type::Relation(accumulated_element),
+            Type::Relation(parent_element),
+            Type::Relation(rollback_element),
+            Type::Relation(topology_element),
+        ) => {
+            let child = merge_scoped_checkpoint_child(
+                accumulated_element,
+                parent_element,
+                rollback_element,
+                topology_element,
+                SnapshotTopologyBoundary::RelationElement,
+                path,
+                rolled_back_paths,
+            );
+            let Some(child) = child else {
+                return scoped_checkpoint_rollback(rollback_anchor, path, rolled_back_paths);
+            };
+            rejected_scope |= child.rejected_scope;
+            (
+                Type::Relation(Box::new(child.merged)),
+                Type::Relation(Box::new(child.effective_parent)),
+            )
+        }
+        (
+            Type::Stream(accumulated_element),
+            Type::Stream(parent_element),
+            Type::Stream(rollback_element),
+            Type::Stream(topology_element),
+        ) => {
+            let child = merge_scoped_checkpoint_child(
+                accumulated_element,
+                parent_element,
+                rollback_element,
+                topology_element,
+                SnapshotTopologyBoundary::StreamElement,
+                path,
+                rolled_back_paths,
+            );
+            let Some(child) = child else {
+                return scoped_checkpoint_rollback(rollback_anchor, path, rolled_back_paths);
+            };
+            rejected_scope |= child.rejected_scope;
+            (
+                Type::Stream(Box::new(child.merged)),
+                Type::Stream(Box::new(child.effective_parent)),
+            )
+        }
+        (
+            Type::Optional(accumulated_value),
+            Type::Optional(parent_value),
+            Type::Optional(rollback_value),
+            Type::Optional(topology_value),
+        ) => {
+            let child = merge_scoped_checkpoint_child(
+                accumulated_value,
+                parent_value,
+                rollback_value,
+                topology_value,
+                SnapshotTopologyBoundary::OptionalValue,
+                path,
+                rolled_back_paths,
+            );
+            let Some(child) = child else {
+                return scoped_checkpoint_rollback(rollback_anchor, path, rolled_back_paths);
+            };
+            rejected_scope |= child.rejected_scope;
+            (
+                Type::Optional(Box::new(child.merged)),
+                Type::Optional(Box::new(child.effective_parent)),
+            )
+        }
+        (
+            Type::Applied {
+                base: accumulated_base,
+                arguments: accumulated_arguments,
+            },
+            Type::Applied {
+                base: parent_base,
+                arguments: parent_arguments,
+            },
+            Type::Applied {
+                base: rollback_base,
+                arguments: rollback_arguments,
+            },
+            Type::Applied {
+                base: topology_base,
+                arguments: topology_arguments,
+            },
+        ) if accumulated_base == parent_base
+            && accumulated_base == rollback_base
+            && accumulated_base == topology_base
+            && accumulated_arguments.len() == parent_arguments.len()
+            && accumulated_arguments.len() == rollback_arguments.len()
+            && accumulated_arguments.len() == topology_arguments.len()
+            && accumulated_base != "sys.HistoricalCallable"
+            && accumulated_base != "sys.HistoricalNamespace"
+            && !is_snapshot_context_type(accumulated) =>
+        {
+            let mut merged_arguments = Vec::with_capacity(accumulated_arguments.len());
+            let mut effective_arguments = Vec::with_capacity(accumulated_arguments.len());
+            for (index, arguments) in accumulated_arguments
+                .iter()
+                .zip(parent_arguments)
+                .zip(rollback_arguments)
+                .zip(topology_arguments)
+                .enumerate()
+            {
+                let (((accumulated_argument, parent_argument), rollback_argument), topology_argument) =
+                    arguments;
+                let child = merge_scoped_checkpoint_child(
+                    accumulated_argument,
+                    parent_argument,
+                    rollback_argument,
+                    topology_argument,
+                    SnapshotTopologyBoundary::AppliedArgument {
                         base: accumulated_base.clone(),
-                        arguments: merged_arguments,
+                        index,
                     },
-                    Type::Applied {
-                        base: accumulated_base.clone(),
-                        arguments: effective_arguments,
-                    },
-                )
+                    path,
+                    rolled_back_paths,
+                );
+                let Some(child) = child else {
+                    return scoped_checkpoint_rollback(rollback_anchor, path, rolled_back_paths);
+                };
+                rejected_scope |= child.rejected_scope;
+                merged_arguments.push(child.merged);
+                effective_arguments.push(child.effective_parent);
             }
             (
+                Type::Applied {
+                    base: accumulated_base.clone(),
+                    arguments: merged_arguments,
+                },
+                Type::Applied {
+                    base: accumulated_base.clone(),
+                    arguments: effective_arguments,
+                },
+            )
+        }
+        (
+            Type::MoneyPerUnit {
+                currency: accumulated_currency,
+                unit: accumulated_unit,
+            },
+            Type::MoneyPerUnit {
+                currency: parent_currency,
+                unit: parent_unit,
+            },
+            Type::MoneyPerUnit {
+                currency: rollback_currency,
+                unit: rollback_unit,
+            },
+            Type::MoneyPerUnit {
+                currency: topology_currency,
+                unit: topology_unit,
+            },
+        ) => {
+            let currency = merge_scoped_checkpoint_child(
+                accumulated_currency,
+                parent_currency,
+                rollback_currency,
+                topology_currency,
+                SnapshotTopologyBoundary::MoneyCurrency,
+                path,
+                rolled_back_paths,
+            );
+            let Some(currency) = currency else {
+                return scoped_checkpoint_rollback(rollback_anchor, path, rolled_back_paths);
+            };
+            let unit = merge_scoped_checkpoint_child(
+                accumulated_unit,
+                parent_unit,
+                rollback_unit,
+                topology_unit,
+                SnapshotTopologyBoundary::MoneyUnit,
+                path,
+                rolled_back_paths,
+            );
+            let Some(unit) = unit else {
+                return scoped_checkpoint_rollback(rollback_anchor, path, rolled_back_paths);
+            };
+            rejected_scope |= currency.rejected_scope || unit.rejected_scope;
+            (
                 Type::MoneyPerUnit {
-                    currency: accumulated_currency,
-                    unit: accumulated_unit,
+                    currency: Box::new(currency.merged),
+                    unit: Box::new(unit.merged),
                 },
                 Type::MoneyPerUnit {
-                    currency: parent_currency,
-                    unit: parent_unit,
+                    currency: Box::new(currency.effective_parent),
+                    unit: Box::new(unit.effective_parent),
                 },
-                Type::MoneyPerUnit {
-                    currency: rollback_currency,
-                    unit: rollback_unit,
-                },
-                Type::MoneyPerUnit {
-                    currency: topology_currency,
-                    unit: topology_unit,
-                },
-            ) => {
-                let currency = merge_scoped_checkpoint_child(
-                    accumulated_currency,
-                    parent_currency,
-                    rollback_currency,
-                    topology_currency,
-                    SnapshotTopologyBoundary::MoneyCurrency,
-                    path,
-                    rolled_back_paths,
-                );
-                let Some(currency) = currency else {
-                    return scoped_checkpoint_rollback(rollback_anchor, path, rolled_back_paths);
-                };
-                let unit = merge_scoped_checkpoint_child(
-                    accumulated_unit,
-                    parent_unit,
-                    rollback_unit,
-                    topology_unit,
-                    SnapshotTopologyBoundary::MoneyUnit,
-                    path,
-                    rolled_back_paths,
-                );
-                let Some(unit) = unit else {
-                    return scoped_checkpoint_rollback(rollback_anchor, path, rolled_back_paths);
-                };
-                rejected_scope |= currency.rejected_scope || unit.rejected_scope;
-                (
-                    Type::MoneyPerUnit {
-                        currency: Box::new(currency.merged),
-                        unit: Box::new(unit.merged),
-                    },
-                    Type::MoneyPerUnit {
-                        currency: Box::new(currency.effective_parent),
-                        unit: Box::new(unit.effective_parent),
-                    },
-                )
-            }
-            _ => return scoped_checkpoint_rollback(rollback_anchor, path, rolled_back_paths),
-        };
+            )
+        }
+        _ => return scoped_checkpoint_rollback(rollback_anchor, path, rolled_back_paths),
+    };
 
     let paired_boundaries_match = checkpoint_paired_boundary_fold_topology_matches(
         accumulated,
@@ -20017,18 +19972,20 @@ fn merge_multi_parent_checkpoint_value_scoped(
         // A late omission can change widths along with identity topology.
         // Let concrete mismatch paths roll back first, then revalidate widths.
         if rollback_conflicting_checkpoint_paths(
-            &mut merged,
-            &mut effective_parent,
-            rollback_anchor,
-            accumulated,
-            topology_anchor,
-            path,
-            rolled_back_paths,
-        ) && checkpoint_paired_boundary_fold_topology_matches(
-            accumulated,
-            &effective_parent,
-            topology_anchor,
-        ) && checkpoint_pin_map_widths_match(topology_anchor, &effective_parent)
+                &mut merged,
+                &mut effective_parent,
+                rollback_anchor,
+                accumulated,
+                topology_anchor,
+                path,
+                rolled_back_paths,
+            )
+            && checkpoint_paired_boundary_fold_topology_matches(
+                accumulated,
+                &effective_parent,
+                topology_anchor,
+            )
+            && checkpoint_pin_map_widths_match(topology_anchor, &effective_parent)
             && checkpoint_value_pin_identity_topology_matches(topology_anchor, &effective_parent)
             && nested_checkpoint_compaction_fold_preserves_pin_identity(
                 accumulated,
@@ -20166,17 +20123,15 @@ fn rollback_conflicting_checkpoint_paths(
     rolled_back_any
 }
 
-fn checkpoint_rollback_scope(
-    scope: &[SnapshotTopologyBoundary],
-) -> Option<Vec<SnapshotTopologyBoundary>> {
+fn checkpoint_rollback_scope(scope: &[SnapshotTopologyBoundary]) -> Option<Vec<SnapshotTopologyBoundary>> {
     for (index, boundary) in scope.iter().enumerate() {
         match boundary {
-            SnapshotTopologyBoundary::FunctionParameter(_)
-            | SnapshotTopologyBoundary::FunctionResult => {
+            SnapshotTopologyBoundary::FunctionParameter(_) | SnapshotTopologyBoundary::FunctionResult => {
                 return None;
             }
             SnapshotTopologyBoundary::AppliedArgument { base, .. }
-                if base == "sys.HistoricalCallable" || base == "sys.HistoricalNamespace" =>
+                if base == "sys.HistoricalCallable"
+                    || base == "sys.HistoricalNamespace" =>
             {
                 return Some(scope[..index].to_vec());
             }
@@ -20212,7 +20167,10 @@ fn checkpoint_value_at_scope<'a>(
                 index,
             },
         ) if base == boundary_base => arguments.get(*index)?,
-        (Type::MoneyPerUnit { currency, .. }, SnapshotTopologyBoundary::MoneyCurrency) => currency,
+        (
+            Type::MoneyPerUnit { currency, .. },
+            SnapshotTopologyBoundary::MoneyCurrency,
+        ) => currency,
         (Type::MoneyPerUnit { unit, .. }, SnapshotTopologyBoundary::MoneyUnit) => unit,
         _ => return None,
     };
@@ -20229,7 +20187,9 @@ fn checkpoint_replace_value_at_scope(
         return true;
     };
     let child = match (value, boundary) {
-        (Type::Record(fields), SnapshotTopologyBoundary::RecordField(name)) => fields.get_mut(name),
+        (Type::Record(fields), SnapshotTopologyBoundary::RecordField(name)) => {
+            fields.get_mut(name)
+        }
         (Type::Tuple(slots), SnapshotTopologyBoundary::TupleElement(index)) => {
             slots.get_mut(*index)
         }
@@ -20247,9 +20207,10 @@ fn checkpoint_replace_value_at_scope(
                 index,
             },
         ) if base == boundary_base => arguments.get_mut(*index),
-        (Type::MoneyPerUnit { currency, .. }, SnapshotTopologyBoundary::MoneyCurrency) => {
-            Some(currency.as_mut())
-        }
+        (
+            Type::MoneyPerUnit { currency, .. },
+            SnapshotTopologyBoundary::MoneyCurrency,
+        ) => Some(currency.as_mut()),
         (Type::MoneyPerUnit { unit, .. }, SnapshotTopologyBoundary::MoneyUnit) => {
             Some(unit.as_mut())
         }
@@ -20342,10 +20303,7 @@ fn checkpoint_compaction_mismatch_paths(
                 .chain(pair.actual.intersection(&other.actual))
                 .cloned()
                 .collect::<BTreeSet<_>>();
-            if folded
-                .intersection(&other_folded)
-                .cloned()
-                .collect::<BTreeSet<_>>()
+            if folded.intersection(&other_folded).cloned().collect::<BTreeSet<_>>()
                 != shared_before
             {
                 mismatched.insert(pair.boundary_path.clone());
@@ -20390,12 +20348,20 @@ fn checkpoint_paired_boundary_value_topology_matches(
                 .zip(parent)
                 .zip(anchor)
                 .all(|((accumulated, parent), anchor)| {
-                    checkpoint_paired_boundary_value_topology_matches(accumulated, parent, anchor)
+                    checkpoint_paired_boundary_value_topology_matches(
+                        accumulated, parent, anchor,
+                    )
                 })
         }
-        (Type::Optional(accumulated), Type::Optional(parent), Type::Optional(anchor)) => {
-            checkpoint_paired_boundary_value_topology_matches(accumulated, parent, anchor)
-        }
+        (
+            Type::Optional(accumulated),
+            Type::Optional(parent),
+            Type::Optional(anchor),
+        ) => checkpoint_paired_boundary_value_topology_matches(
+            accumulated,
+            parent,
+            anchor,
+        ),
         _ => true,
     }
 }
@@ -20486,7 +20452,8 @@ fn checkpoint_paired_boundary_record_maps_match(
             .collect::<Vec<_>>();
         if paired_maps.len() >= 2 {
             let membership_shapes = |expected: bool| {
-                let mut labels = BTreeMap::<String, BTreeSet<Vec<SnapshotTopologyBoundary>>>::new();
+                let mut labels =
+                    BTreeMap::<String, BTreeSet<Vec<SnapshotTopologyBoundary>>>::new();
                 for pair in &paired_maps {
                     let selectors = if expected {
                         &pair.expected
@@ -20524,9 +20491,7 @@ fn checkpoint_paired_boundary_record_maps_match(
 
 fn type_contains_pinned_tuple_through_boundaries(ty: &Type) -> bool {
     match ty {
-        Type::Record(fields) => fields
-            .values()
-            .any(type_contains_pinned_tuple_through_boundaries),
+        Type::Record(fields) => fields.values().any(type_contains_pinned_tuple_through_boundaries),
         Type::Tuple(elements) => {
             type_contains_pinned_snapshot_identity(ty)
                 || elements
@@ -20573,12 +20538,15 @@ fn checkpoint_paths_are_paired_boundaries(
         return false;
     };
     has_sibling_record_path
-        && left[..shared_tuple_depth_index].iter().all(|boundary| {
-            matches!(
-                boundary,
-                SnapshotTopologyBoundary::RecordField(_) | SnapshotTopologyBoundary::OptionalValue
-            )
-        })
+        && left[..shared_tuple_depth_index]
+            .iter()
+            .all(|boundary| {
+                matches!(
+                    boundary,
+                    SnapshotTopologyBoundary::RecordField(_)
+                        | SnapshotTopologyBoundary::OptionalValue
+                )
+            })
 }
 
 /// ORNA-CP-003 and ORNA-SYS-136 define explicit snapshot selection, but do not
@@ -20610,10 +20578,7 @@ fn checkpoint_value_paired_pin_membership_matches(expected: &Type, actual: &Type
         pin_maps: &[SnapshotContextMapPair],
         expected: bool,
     ) -> BTreeMap<
-        BTreeSet<(
-            Vec<SnapshotTopologyBoundary>,
-            BTreeSet<SnapshotTopologyBoundary>,
-        )>,
+        BTreeSet<(Vec<SnapshotTopologyBoundary>, BTreeSet<SnapshotTopologyBoundary>)>,
         usize,
     > {
         let mut memberships = BTreeMap::<
@@ -20632,9 +20597,10 @@ fn checkpoint_value_paired_pin_membership_matches(expected: &Type, actual: &Type
                 .enumerate()
                 .filter_map(|(index, boundary)| match boundary {
                     SnapshotTopologyBoundary::TupleElement(_)
-                    | SnapshotTopologyBoundary::RecordField(_) => {
-                        Some((pair.boundary_path[..index].to_vec(), boundary.clone()))
-                    }
+                    | SnapshotTopologyBoundary::RecordField(_) => Some((
+                        pair.boundary_path[..index].to_vec(),
+                        boundary.clone(),
+                    )),
                     _ => None,
                 })
                 .collect::<Vec<_>>();
@@ -20728,7 +20694,10 @@ fn nested_checkpoint_compaction_fold_preserves_pin_identity(left: &Type, right: 
 /// from opposite rows. The reference does not define that compaction case;
 /// only promote when every identity shared after the fold was shared within
 /// at least one input row.
-fn tuple_checkpoint_compaction_fold_preserves_pin_identity(left: &[Type], right: &[Type]) -> bool {
+fn tuple_checkpoint_compaction_fold_preserves_pin_identity(
+    left: &[Type],
+    right: &[Type],
+) -> bool {
     let mut pin_maps = Vec::new();
     let mut path = Vec::new();
     for (index, (left, right)) in left.iter().zip(right).enumerate() {
@@ -20752,9 +20721,9 @@ fn record_checkpoint_promotion_matches(
 ) -> bool {
     left.len() == right.len()
         && left.iter().all(|(name, left)| {
-            right
-                .get(name)
-                .is_some_and(|right| checkpoint_pin_map_widths_match(left, right))
+            right.get(name).is_some_and(|right| {
+                checkpoint_pin_map_widths_match(left, right)
+            })
         })
         && checkpoint_record_pin_identity_topology_matches(left, right)
         && record_checkpoint_compaction_fold_preserves_pin_identity(left, right)
@@ -20815,7 +20784,9 @@ fn record_checkpoint_compaction_fold_preserves_pin_identity(
 
 /// Folding selector maps across collection rows must not invent sharing
 /// between structural checkpoint slots that were independent in both rows.
-fn checkpoint_snapshot_fold_preserves_pin_identity(pin_maps: &[SnapshotContextMapPair]) -> bool {
+fn checkpoint_snapshot_fold_preserves_pin_identity(
+    pin_maps: &[SnapshotContextMapPair],
+) -> bool {
     pin_maps.iter().enumerate().all(|(index, pair)| {
         let folded = pair
             .expected
@@ -20872,13 +20843,9 @@ fn checkpoint_pin_map_widths_match(left: &Type, right: &Type) -> bool {
             .iter()
             .zip(right)
             .all(|(left, right)| checkpoint_pin_map_widths_match(left, right)),
-        (Type::Record(left), Type::Record(right)) if left.len() == right.len() => {
-            left.iter().all(|(name, left)| {
-                right
-                    .get(name)
-                    .is_some_and(|right| checkpoint_pin_map_widths_match(left, right))
-            })
-        }
+        (Type::Record(left), Type::Record(right)) if left.len() == right.len() => left
+            .iter()
+            .all(|(name, left)| right.get(name).is_some_and(|right| checkpoint_pin_map_widths_match(left, right))),
         // Function parameter/result compatibility is checked by the function
         // merge arm itself. Tuple promotion only needs to guard data slots;
         // recursively treating callable binders as tuple data breaks
@@ -20893,12 +20860,10 @@ fn checkpoint_pin_map_widths_match(left: &Type, right: &Type) -> bool {
                 base: right_base,
                 arguments: right_arguments,
             },
-        ) if left_base == right_base && left_arguments.len() == right_arguments.len() => {
-            left_arguments
-                .iter()
-                .zip(right_arguments)
-                .all(|(left, right)| checkpoint_pin_map_widths_match(left, right))
-        }
+        ) if left_base == right_base && left_arguments.len() == right_arguments.len() => left_arguments
+            .iter()
+            .zip(right_arguments)
+            .all(|(left, right)| checkpoint_pin_map_widths_match(left, right)),
         (
             Type::MoneyPerUnit {
                 currency: left_currency,
@@ -20993,7 +20958,9 @@ fn record_pin_identity_topology_matches(
     snapshot_context_topology_matches(&pin_maps)
 }
 
-fn snapshot_context_topology_matches(pin_maps: &[SnapshotContextMapPair]) -> bool {
+fn snapshot_context_topology_matches(
+    pin_maps: &[SnapshotContextMapPair],
+) -> bool {
     fn membership_signatures(
         pin_maps: &[SnapshotContextMapPair],
         expected: bool,
@@ -21058,9 +21025,7 @@ fn collect_corresponding_snapshot_context_maps_at_path(
         return collect_snapshot_context_maps_from_omitted_value_at_path(actual, true, into, path);
     }
     if matches!(actual, Type::Bottom) {
-        return collect_snapshot_context_maps_from_omitted_value_at_path(
-            expected, false, into, path,
-        );
+        return collect_snapshot_context_maps_from_omitted_value_at_path(expected, false, into, path);
     }
     if expected == &Type::Named("sys.SnapshotRef".into())
         || actual == &Type::Named("sys.SnapshotRef".into())
@@ -21074,7 +21039,8 @@ fn collect_corresponding_snapshot_context_maps_at_path(
                 ..
             },
             Type::Applied {
-                arguments: actual, ..
+                arguments: actual,
+                ..
             },
         ) = (expected, actual)
         else {
@@ -21099,7 +21065,8 @@ fn collect_corresponding_snapshot_context_maps_at_path(
                 ..
             },
             Type::Applied {
-                arguments: actual, ..
+                arguments: actual,
+                ..
             },
         ) = (expected, actual)
         else {
@@ -21125,56 +21092,43 @@ fn collect_corresponding_snapshot_context_maps_at_path(
     }
 
     match (expected, actual) {
-        (Type::List(expected), Type::List(actual)) => {
-            collect_corresponding_snapshot_context_maps_at_boundary(
-                expected,
-                actual,
-                into,
-                path,
-                SnapshotTopologyBoundary::ListElement,
-            )
-        }
-        (Type::Range(expected), Type::Range(actual)) => {
-            collect_corresponding_snapshot_context_maps_at_boundary(
-                expected,
-                actual,
-                into,
-                path,
-                SnapshotTopologyBoundary::RangeElement,
-            )
-        }
-        (Type::Relation(expected), Type::Relation(actual)) => {
-            collect_corresponding_snapshot_context_maps_at_boundary(
-                expected,
-                actual,
-                into,
-                path,
-                SnapshotTopologyBoundary::RelationElement,
-            )
-        }
-        (Type::Stream(expected), Type::Stream(actual)) => {
-            collect_corresponding_snapshot_context_maps_at_boundary(
-                expected,
-                actual,
-                into,
-                path,
-                SnapshotTopologyBoundary::StreamElement,
-            )
-        }
-        (Type::Optional(expected), Type::Optional(actual)) => {
-            collect_corresponding_snapshot_context_maps_at_boundary(
-                expected,
-                actual,
-                into,
-                path,
-                SnapshotTopologyBoundary::OptionalValue,
-            )
-        }
-        (Type::Tuple(expected), Type::Tuple(actual)) if expected.len() == actual.len() => expected
-            .iter()
-            .zip(actual)
-            .enumerate()
-            .all(|(index, (expected, actual))| {
+        (Type::List(expected), Type::List(actual)) => collect_corresponding_snapshot_context_maps_at_boundary(
+            expected,
+            actual,
+            into,
+            path,
+            SnapshotTopologyBoundary::ListElement,
+        ),
+        (Type::Range(expected), Type::Range(actual)) => collect_corresponding_snapshot_context_maps_at_boundary(
+            expected,
+            actual,
+            into,
+            path,
+            SnapshotTopologyBoundary::RangeElement,
+        ),
+        (Type::Relation(expected), Type::Relation(actual)) => collect_corresponding_snapshot_context_maps_at_boundary(
+            expected,
+            actual,
+            into,
+            path,
+            SnapshotTopologyBoundary::RelationElement,
+        ),
+        (Type::Stream(expected), Type::Stream(actual)) => collect_corresponding_snapshot_context_maps_at_boundary(
+            expected,
+            actual,
+            into,
+            path,
+            SnapshotTopologyBoundary::StreamElement,
+        ),
+        (Type::Optional(expected), Type::Optional(actual)) => collect_corresponding_snapshot_context_maps_at_boundary(
+            expected,
+            actual,
+            into,
+            path,
+            SnapshotTopologyBoundary::OptionalValue,
+        ),
+        (Type::Tuple(expected), Type::Tuple(actual)) if expected.len() == actual.len() => {
+            expected.iter().zip(actual).enumerate().all(|(index, (expected, actual))| {
                 collect_corresponding_snapshot_context_maps_at_boundary(
                     expected,
                     actual,
@@ -21182,18 +21136,17 @@ fn collect_corresponding_snapshot_context_maps_at_path(
                     path,
                     SnapshotTopologyBoundary::TupleElement(index),
                 )
-            }),
+            })
+        }
         (Type::Record(expected), Type::Record(actual)) if expected.len() == actual.len() => {
             expected.iter().all(|(name, expected)| {
-                actual.get(name).is_some_and(|actual| {
-                    collect_corresponding_snapshot_context_maps_at_boundary(
-                        expected,
-                        actual,
-                        into,
-                        path,
-                        SnapshotTopologyBoundary::RecordField(name.clone()),
-                    )
-                })
+                actual.get(name).is_some_and(|actual| collect_corresponding_snapshot_context_maps_at_boundary(
+                    expected,
+                    actual,
+                    into,
+                    path,
+                    SnapshotTopologyBoundary::RecordField(name.clone()),
+                ))
             })
         }
         (
@@ -21208,11 +21161,8 @@ fn collect_corresponding_snapshot_context_maps_at_path(
                 ..
             },
         ) if expected_parameters.len() == actual_parameters.len() => {
-            expected_parameters
-                .iter()
-                .zip(actual_parameters)
-                .enumerate()
-                .all(|(index, (expected, actual))| {
+            expected_parameters.iter().zip(actual_parameters).enumerate().all(
+                |(index, (expected, actual))| {
                     collect_corresponding_snapshot_context_maps_at_boundary(
                         expected,
                         actual,
@@ -21220,14 +21170,14 @@ fn collect_corresponding_snapshot_context_maps_at_path(
                         path,
                         SnapshotTopologyBoundary::FunctionParameter(index),
                     )
-                })
-                && collect_corresponding_snapshot_context_maps_at_boundary(
-                    expected_result,
-                    actual_result,
-                    into,
-                    path,
-                    SnapshotTopologyBoundary::FunctionResult,
-                )
+                },
+            ) && collect_corresponding_snapshot_context_maps_at_boundary(
+                expected_result,
+                actual_result,
+                into,
+                path,
+                SnapshotTopologyBoundary::FunctionResult,
+            )
         }
         (
             Type::Applied {
@@ -21239,11 +21189,8 @@ fn collect_corresponding_snapshot_context_maps_at_path(
                 arguments: actual_arguments,
             },
         ) if expected_base == actual_base && expected_arguments.len() == actual_arguments.len() => {
-            expected_arguments
-                .iter()
-                .zip(actual_arguments)
-                .enumerate()
-                .all(|(index, (expected, actual))| {
+            expected_arguments.iter().zip(actual_arguments).enumerate().all(
+                |(index, (expected, actual))| {
                     collect_corresponding_snapshot_context_maps_at_boundary(
                         expected,
                         actual,
@@ -21254,7 +21201,8 @@ fn collect_corresponding_snapshot_context_maps_at_path(
                             index,
                         },
                     )
-                })
+                },
+            )
         }
         (
             Type::MoneyPerUnit {
@@ -21500,18 +21448,18 @@ fn bind_historical_closure_context(snapshot: &Type, ty: &Type) -> Type {
                 result: Box::new(bind_historical_closure_context(snapshot, result)),
             },
         ),
-        Type::List(element) => {
-            Type::List(Box::new(bind_historical_closure_context(snapshot, element)))
-        }
-        Type::Relation(element) => {
-            Type::Relation(Box::new(bind_historical_closure_context(snapshot, element)))
-        }
-        Type::Stream(element) => {
-            Type::Stream(Box::new(bind_historical_closure_context(snapshot, element)))
-        }
-        Type::Optional(element) => {
-            Type::Optional(Box::new(bind_historical_closure_context(snapshot, element)))
-        }
+        Type::List(element) => Type::List(Box::new(bind_historical_closure_context(
+            snapshot, element,
+        ))),
+        Type::Relation(element) => Type::Relation(Box::new(bind_historical_closure_context(
+            snapshot, element,
+        ))),
+        Type::Stream(element) => Type::Stream(Box::new(bind_historical_closure_context(
+            snapshot, element,
+        ))),
+        Type::Optional(element) => Type::Optional(Box::new(bind_historical_closure_context(
+            snapshot, element,
+        ))),
         Type::Record(fields) => Type::Record(
             fields
                 .iter()
@@ -21552,7 +21500,11 @@ fn historical_namespace_parts(ty: &Type) -> Option<(&Type, &str)> {
         .flatten()
 }
 
-fn historical_root_available(modules: &BTreeMap<Namespace, ModuleHeader>, root: &str) -> bool {
+
+fn historical_root_available(
+    modules: &BTreeMap<Namespace, ModuleHeader>,
+    root: &str,
+) -> bool {
     modules
         .keys()
         .any(|namespace| namespace.0.first().is_some_and(|part| part == root))
@@ -21578,10 +21530,7 @@ fn infer_historical_member(
                 effects: EffectSummary::default(),
             });
         }
-        diagnostics.push(diag(
-            DIAG_UNRESOLVED,
-            "historical database member cannot be resolved",
-        ));
+        diagnostics.push(diag(DIAG_UNRESOLVED, "historical database member cannot be resolved"));
         return Some(Inferred {
             ty: Type::Error,
             effects: EffectSummary::default(),
@@ -21669,10 +21618,7 @@ fn infer_historical_member(
             },
         });
     }
-    diagnostics.push(diag(
-        DIAG_UNRESOLVED,
-        "historical database member cannot be resolved",
-    ));
+    diagnostics.push(diag(DIAG_UNRESOLVED, "historical database member cannot be resolved"));
     Some(Inferred {
         ty: Type::Error,
         effects: EffectSummary::default(),
@@ -21775,10 +21721,7 @@ fn infer_numeric_postfix(base: &Type, name: &str, scope: &Scope) -> Option<Type>
         // ordinary Duration APIs (including optional std formatters) accept
         // them without requiring std to define the core temporal value.
         Type::Int | Type::Decimal
-            if matches!(
-                name,
-                "hour" | "hours" | "minute" | "minutes" | "min" | "second" | "seconds" | "s"
-            ) =>
+            if matches!(name, "hour" | "hours" | "minute" | "minutes" | "min" | "second" | "seconds" | "s") =>
         {
             Some(Type::Named("std.DURATION".into()))
         }
@@ -21971,7 +21914,8 @@ fn contains_secret_value_type(ty: &Type) -> bool {
         Type::Function {
             parameters, result, ..
         } => {
-            parameters.iter().any(contains_secret_value_type) || contains_secret_value_type(result)
+            parameters.iter().any(contains_secret_value_type)
+                || contains_secret_value_type(result)
         }
         Type::Named(name) => name == "Secret",
         Type::Int
@@ -22486,14 +22430,24 @@ fn infer_module_relation(
                         }
                     }
                     Statement::Assert { value, .. } => {
-                        let inferred =
-                            infer_module_relation(value, table_rows, scope, &locals, diagnostics);
+                        let inferred = infer_module_relation(
+                            value,
+                            table_rows,
+                            scope,
+                            &locals,
+                            diagnostics,
+                        );
                         require_same(&Type::Bool, &inferred.ty, diagnostics);
                         effects.join(&inferred.effects);
                     }
                     Statement::Expression { value, .. } | Statement::Control { value, .. } => {
-                        let inferred =
-                            infer_module_relation(value, table_rows, scope, &locals, diagnostics);
+                        let inferred = infer_module_relation(
+                            value,
+                            table_rows,
+                            scope,
+                            &locals,
+                            diagnostics,
+                        );
                         effects.join(&inferred.effects);
                     }
                     Statement::Return { .. }
@@ -22555,9 +22509,11 @@ fn infer_module_relation(
             alternate: Some(alternate),
             ..
         } if arms.is_empty() => {
-            let condition = infer_module_relation(condition, table_rows, scope, local, diagnostics);
+            let condition =
+                infer_module_relation(condition, table_rows, scope, local, diagnostics);
             let body = infer_module_relation(body, table_rows, scope, local, diagnostics);
-            let alternate = infer_module_relation(alternate, table_rows, scope, local, diagnostics);
+            let alternate =
+                infer_module_relation(alternate, table_rows, scope, local, diagnostics);
             let mut effects = condition.effects;
             effects.join(&body.effects);
             effects.join(&alternate.effects);
@@ -22627,7 +22583,9 @@ fn infer_module_relation(
                 };
             };
             let Type::Function {
-                parameters, result, ..
+                parameters,
+                result,
+                ..
             } = &symbol.ty
             else {
                 return Inferred {
@@ -22772,8 +22730,8 @@ fn declared_nominal_schema(item: &Item) -> Option<TableSchema> {
             } else {
                 private_required = true;
             }
+            }
         }
-    }
     Some(TableSchema {
         fields,
         // Only declaration-backed completeness is exported.  Default
@@ -22924,7 +22882,9 @@ fn primary_key_type_error(
                 _ => Some("type has no canonical primary-key encoding"),
             }
         }
-        Type::Float => Some("Float is not a valid primary-key type"),
+        Type::Float => {
+            Some("Float is not a valid primary-key type")
+        }
         Type::Applied { base, .. } if base == "Float" => {
             Some("Float is not a valid primary-key type")
         }
@@ -23217,11 +23177,7 @@ fn resolved_helper_summary_key(
         root.0
             .iter()
             .cloned()
-            .chain(
-                path[1..path.len() - 1]
-                    .iter()
-                    .map(|part| (*part).to_owned()),
-            )
+            .chain(path[1..path.len() - 1].iter().map(|part| (*part).to_owned()))
             .collect(),
     );
     let module = scope.available_modules.get(&namespace)?;
@@ -23401,7 +23357,9 @@ fn tables_referenced(
     names
 }
 fn valid_row_path(path: &str) -> bool {
-    !path.is_empty() && path.len() <= 1024 && path.split('/').all(valid_row_path_component)
+    !path.is_empty()
+        && path.len() <= 1024
+        && path.split('/').all(valid_row_path_component)
 }
 
 fn valid_row_path_component(component: &str) -> bool {
@@ -23504,11 +23462,7 @@ fn analysis_named_symbol<'a>(name: &str, analysis: &'a Analysis) -> Option<&'a S
             }
         }
     }
-    let matches = if qualified.is_empty() {
-        exact
-    } else {
-        qualified
-    };
+    let matches = if qualified.is_empty() { exact } else { qualified };
     (matches.len() == 1).then(|| matches[0])
 }
 
@@ -23524,9 +23478,10 @@ fn row_key_matches_type(value: &str, ty: &Type, analysis: &Analysis) -> bool {
             if matches!(name.as_str(), "Uuid" | "UUID" | "std.UUID") {
                 canonical_uuid(value)
             } else {
-                analysis_named_symbol(name, analysis).is_some_and(|symbol| {
-                    symbol.kind == SymbolKind::Enum && symbol.enum_variants.contains(value)
-                })
+                analysis_named_symbol(name, analysis)
+                    .is_some_and(|symbol| {
+                        symbol.kind == SymbolKind::Enum && symbol.enum_variants.contains(value)
+                    })
             }
         }
         _ => false,
@@ -23687,27 +23642,14 @@ mod tests {
         collect_test_snapshot_contexts(&fields["left"], &mut left);
         let mut right = BTreeSet::new();
         collect_test_snapshot_contexts(&fields["right"], &mut right);
-        assert_eq!(
-            left.len(),
-            1,
-            "left pin slot must retain one identity: {left:?}"
-        );
-        assert_eq!(
-            right.len(),
-            1,
-            "right pin slot must retain one identity: {right:?}"
-        );
+        assert_eq!(left.len(), 1, "left pin slot must retain one identity: {left:?}");
+        assert_eq!(right.len(), 1, "right pin slot must retain one identity: {right:?}");
         assert!(
-            left.iter()
-                .next()
-                .is_some_and(|selector| selector.contains("pair.orna@10..18")),
+            left.iter().next().is_some_and(|selector| selector.contains("pair.orna@10..18")),
             "the left symbolic pin must keep its formal binder: {left:?}"
         );
         assert!(
-            right
-                .iter()
-                .next()
-                .is_some_and(|selector| selector.contains("pair.orna@20..28")),
+            right.iter().next().is_some_and(|selector| selector.contains("pair.orna@20..28")),
             "the right symbolic pin must keep its formal binder: {right:?}"
         );
         let Type::Applied {
@@ -23732,8 +23674,12 @@ mod tests {
 
     #[test]
     fn unknown_direct_pair_sibling_suppresses_valid_pin_promotion() {
-        let left = contextual_snapshot_ref("selector:binder:pair.orna@10..18:parameter:left_pin");
-        let right = contextual_snapshot_ref("selector:binder:pair.orna@20..28:parameter:right_pin");
+        let left = contextual_snapshot_ref(
+            "selector:binder:pair.orna@10..18:parameter:left_pin",
+        );
+        let right = contextual_snapshot_ref(
+            "selector:binder:pair.orna@20..28:parameter:right_pin",
+        );
         let result = Type::Record(BTreeMap::from([
             ("left".into(), left.clone()),
             ("right".into(), right.clone()),
@@ -23763,11 +23709,7 @@ mod tests {
 
         let mut contexts = BTreeSet::new();
         collect_test_snapshot_contexts(&specialized, &mut contexts);
-        assert_eq!(
-            contexts.len(),
-            2,
-            "both pins must remain represented: {contexts:?}"
-        );
+        assert_eq!(contexts.len(), 2, "both pins must remain represented: {contexts:?}");
         assert!(
             contexts
                 .iter()
@@ -24166,7 +24108,10 @@ mod tests {
             ],
         };
         let nested_malformed = Type::Record(BTreeMap::from([
-            ("pin".into(), contextual_snapshot_ref("selector:HEAD~3")),
+            (
+                "pin".into(),
+                contextual_snapshot_ref("selector:HEAD~3"),
+            ),
             ("map".into(), malformed.clone()),
         ]));
 
@@ -24203,7 +24148,9 @@ mod tests {
         assert!(
             pinned_snapshot_reset_type(&first_pinned_factory, &second_pinned_factory).is_some()
         );
-        assert!(pinned_snapshot_reset_type(&first_pinned_factory, &wider_pinned_factory).is_none());
+        assert!(
+            pinned_snapshot_reset_type(&first_pinned_factory, &wider_pinned_factory).is_none()
+        );
         assert!(!is_snapshot_context_map_shape(&malformed));
         assert!(!types_match(&malformed, &malformed));
         assert!(!types_match(&malformed, &Type::Bottom));
@@ -24213,10 +24160,7 @@ mod tests {
         assert!(!is_snapshot_context_map_shape(&singleton));
         assert!(!is_snapshot_context_map_shape(&unsorted));
         assert!(!is_snapshot_context_map_shape(&duplicate));
-        assert_eq!(
-            merge_list_element_types(&first, &first),
-            Some(first.clone())
-        );
+        assert_eq!(merge_list_element_types(&first, &first), Some(first.clone()));
         assert!(merge_list_element_types(&malformed, &malformed).is_none());
         assert!(merge_checkpoint_field_map(&malformed, &malformed).is_none());
         assert!(merge_checkpoint_field_map(&malformed, &first).is_none());
@@ -24334,27 +24278,19 @@ mod tests {
                 ),
             ])
         };
-        let first = stacked(
-            "selector:HEAD~501",
-            "selector:HEAD~502",
-            "selector:HEAD~503",
-        );
-        let cross_depth = stacked(
-            "selector:HEAD~504",
-            "selector:HEAD~501",
-            "selector:HEAD~505",
-        );
-        let depth_stable = stacked(
-            "selector:HEAD~601",
-            "selector:HEAD~602",
-            "selector:HEAD~603",
-        );
+        let first = stacked("selector:HEAD~501", "selector:HEAD~502", "selector:HEAD~503");
+        let cross_depth =
+            stacked("selector:HEAD~504", "selector:HEAD~501", "selector:HEAD~505");
+        let depth_stable =
+            stacked("selector:HEAD~601", "selector:HEAD~602", "selector:HEAD~603");
 
         assert!(record_checkpoint_promotion_matches(&first, &depth_stable));
         assert!(!record_checkpoint_promotion_matches(&first, &cross_depth));
-        assert!(
-            merge_list_element_types(&Type::Record(first), &Type::Record(cross_depth)).is_none()
-        );
+        assert!(merge_list_element_types(
+            &Type::Record(first),
+            &Type::Record(cross_depth)
+        )
+        .is_none());
     }
 
     #[test]
@@ -24364,10 +24300,7 @@ mod tests {
             pin("selector:HEAD~depth-a"),
             pin("selector:HEAD~depth-b"),
         ])];
-        let after = [Type::Tuple(vec![
-            Type::Bottom,
-            pin("selector:HEAD~depth-a"),
-        ])];
+        let after = [Type::Tuple(vec![Type::Bottom, pin("selector:HEAD~depth-a")])];
 
         assert!(checkpoint_pin_map_widths_match(&before[0], &after[0]));
         assert!(
@@ -24401,12 +24334,7 @@ mod tests {
             "Bool is a closed case scrutinee: {:?}",
             analysis.diagnostics
         );
-        assert_eq!(
-            analysis.diagnostics.len(),
-            1,
-            "diagnostics: {:?}",
-            analysis.diagnostics
-        );
+        assert_eq!(analysis.diagnostics.len(), 1, "diagnostics: {:?}", analysis.diagnostics);
         assert_eq!(
             analysis.diagnostics[0].message(),
             "case expression does not cover true and false"
@@ -24891,7 +24819,7 @@ mod tests {
         );
         assert!(a.diagnostics.iter().any(|diagnostic| {
             diagnostic.message().starts_with(
-                "a durable consumer function may own only one checkpointed source root",
+                "a durable consumer function may own only one checkpointed source root"
             )
         }));
     }
@@ -24912,7 +24840,7 @@ mod tests {
         );
         assert!(a.diagnostics.iter().any(|diagnostic| {
             diagnostic.message().starts_with(
-                "a durable consumer function may own only one checkpointed source root",
+                "a durable consumer function may own only one checkpointed source root"
             )
         }));
     }
@@ -24933,17 +24861,11 @@ mod tests {
             "fixture provider roots must resolve before checking ownership: {:?}",
             analysis.diagnostics
         );
-        assert!(
-            analysis.diagnostics.iter().any(|diagnostic| {
-                diagnostic.message().contains(
-                    "a durable consumer function may own only one checkpointed source root",
-                ) && diagnostic
-                    .message()
-                    .contains("extract separate named consumer functions")
-            }),
-            "diagnostics: {:?}",
-            analysis.diagnostics
-        );
+        assert!(analysis.diagnostics.iter().any(|diagnostic| {
+            diagnostic.message().contains(
+                "a durable consumer function may own only one checkpointed source root"
+            ) && diagnostic.message().contains("extract separate named consumer functions")
+        }), "diagnostics: {:?}", analysis.diagnostics);
     }
 
     #[test]
@@ -25058,4 +24980,5 @@ mod tests {
         )]);
         assert!(has(&analysis, DIAG_TYPE));
     }
+
 }
