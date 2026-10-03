@@ -439,6 +439,61 @@ pub struct BranchMergeColumnRestoreStormFoldSnapshot {
     pub storms: Vec<BranchMergeColumnRestoreStormLadderSnapshot>,
 }
 
+/// One stable column's depth labels at a specific wave in a restore storm.
+///
+/// `storm_index` is zero-based in committed lineage order. The stable
+/// `(table, column)` identity, storm range, and wave order travel with the
+/// labels so sibling ladders can be paired without interpreting cell values.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BranchMergeColumnRestoreStormDepthLabelWaveSnapshot {
+    pub storm_index: usize,
+    pub first_order: u64,
+    pub last_order: u64,
+    pub order: u64,
+    pub table: ObjectId,
+    pub column: ObjectId,
+    pub depth_labels: Vec<usize>,
+}
+
+/// Snapshot paths bound to one depth label in a paired column restore storm.
+///
+/// `snapshot_paths` contains the canonical row keys from that labeled
+/// fragment. An empty fragment remains represented with an empty path list.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BranchMergeColumnRestoreStormDepthPathSnapshot {
+    pub storm_index: usize,
+    pub first_order: u64,
+    pub last_order: u64,
+    pub order: u64,
+    pub table: ObjectId,
+    pub column: ObjectId,
+    pub label: usize,
+    pub snapshot_paths: Vec<CanonicalValue>,
+}
+
+/// One fragment's path identity in a dense storm-depth path timeline.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BranchMergeColumnRestoreStormDepthPathFragmentSnapshot {
+    pub label: usize,
+    pub snapshot_paths: Vec<CanonicalValue>,
+}
+
+/// A stable column's path-bearing depth slot at one restore wave in a storm.
+///
+/// `fragments: None` means the column was omitted from this wave. A present
+/// labeled empty fragment is `Some` with an empty `snapshot_paths` list, so
+/// omission cannot shift or inherit a neighboring depth identity.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BranchMergeColumnRestoreStormDepthPathWaveSlotSnapshot {
+    pub storm_index: usize,
+    pub first_order: u64,
+    pub last_order: u64,
+    pub order: u64,
+    pub table: ObjectId,
+    pub column: ObjectId,
+    pub fragments: Option<Vec<BranchMergeColumnRestoreStormDepthPathFragmentSnapshot>>,
+}
+
 /// A canonical column cell released with its source parent identity intact.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BranchMergeParentColumnDepthEvent {
@@ -1446,6 +1501,124 @@ impl BranchMergeTombstoneHistory {
                 }
             })
             .collect()
+    }
+
+    /// Returns the explicit paired depth-label roster for every present
+    /// column ladder in every committed restore storm.
+    ///
+    /// Each result binds local labels to its stable `(table, column)` pair,
+    /// storm index and order range, and restore-wave order. Empty fragments
+    /// contribute their labels; omitted columns contribute no label record.
+    /// This v1 projection does not renumber or align labels across waves.
+    pub fn column_restore_storm_depth_labels(
+        &self,
+    ) -> Vec<BranchMergeColumnRestoreStormDepthLabelWaveSnapshot> {
+        let mut labels = Vec::new();
+        for (storm_index, storm) in self.column_restore_storms().into_iter().enumerate() {
+            for ladder in storm.ladders {
+                for wave in ladder.waves {
+                    if let Some(fragments) = wave.fragments {
+                        labels.push(BranchMergeColumnRestoreStormDepthLabelWaveSnapshot {
+                            storm_index,
+                            first_order: storm.first_order,
+                            last_order: storm.last_order,
+                            order: wave.order,
+                            table: ladder.table,
+                            column: ladder.column,
+                            depth_labels: fragments
+                                .into_iter()
+                                .map(|fragment| fragment.label)
+                                .collect(),
+                        });
+                    }
+                }
+            }
+        }
+        labels
+    }
+
+    /// Returns each stable column's canonical snapshot paths under its local
+    /// depth label, keeping storm and restore-wave identity attached.
+    ///
+    /// Every present labeled fragment yields one record, including an empty
+    /// path list for an empty fragment. Omitted columns yield no records. This
+    /// v1 view treats the canonical row key as snapshot-path identity and
+    /// never carries that identity across labels, waves, columns, or storms.
+    pub fn column_restore_storm_depth_paths(
+        &self,
+    ) -> Vec<BranchMergeColumnRestoreStormDepthPathSnapshot> {
+        let mut paths = Vec::new();
+        for (storm_index, storm) in self.column_restore_storms().into_iter().enumerate() {
+            for ladder in storm.ladders {
+                for wave in ladder.waves {
+                    if let Some(fragments) = wave.fragments {
+                        for fragment in fragments {
+                            paths.push(BranchMergeColumnRestoreStormDepthPathSnapshot {
+                                storm_index,
+                                first_order: storm.first_order,
+                                last_order: storm.last_order,
+                                order: wave.order,
+                                table: ladder.table,
+                                column: ladder.column,
+                                label: fragment.label,
+                                snapshot_paths: fragment
+                                    .cells
+                                    .into_iter()
+                                    .map(|(path, _value)| path)
+                                    .collect(),
+                            });
+                        }
+                    }
+                }
+            }
+        }
+        paths
+    }
+
+    /// Returns dense depth-path slots for each stable column across all
+    /// committed restore storms.
+    ///
+    /// Every storm and wave slot remains paired with its stable `(table,
+    /// column)` identity. An omitted column is `None`; a present fragment
+    /// keeps its local label and canonical row-key paths, including an empty
+    /// path list. Labels restart for each wave and never carry across an
+    /// omission or storm boundary. MERGE-1 is silent about this extension;
+    /// v1 derives slots from the committed column folds without filling an
+    /// omitted slot from a sibling or earlier wave.
+    pub fn column_restore_storm_depth_path_slots(
+        &self,
+    ) -> Vec<BranchMergeColumnRestoreStormDepthPathWaveSlotSnapshot> {
+        let mut slots = Vec::new();
+        for fold in self.column_restore_storm_folds() {
+            for (storm_index, storm) in fold.storms.into_iter().enumerate() {
+                for wave in storm.waves {
+                    slots.push(BranchMergeColumnRestoreStormDepthPathWaveSlotSnapshot {
+                        storm_index,
+                        first_order: storm.first_order,
+                        last_order: storm.last_order,
+                        order: wave.order,
+                        table: fold.table,
+                        column: fold.column,
+                        fragments: wave.fragments.map(|fragments| {
+                            fragments
+                                .into_iter()
+                                .map(|fragment| {
+                                    BranchMergeColumnRestoreStormDepthPathFragmentSnapshot {
+                                        label: fragment.label,
+                                        snapshot_paths: fragment
+                                            .cells
+                                            .into_iter()
+                                            .map(|(path, _value)| path)
+                                            .collect(),
+                                    }
+                                })
+                                .collect()
+                        }),
+                    });
+                }
+            }
+        }
+        slots
     }
 
     /// Submits a complete paired restore wave from at least two distinct

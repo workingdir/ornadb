@@ -1,10 +1,10 @@
 #![cfg(feature = "dev-sys-export")]
 
-use std::{fs, process::Command};
+use std::{collections::BTreeMap, fs, path::Path, process::Command};
 
 use orna_sys_v1::{
-    SystemProviderAbi, system_api_json, system_api_schema_json, system_binding_stubs,
-    system_dispatch_table, system_host_operation_registry_json,
+    SystemProviderAbi, system_api_json, system_api_schema_json, system_binding_modules_json,
+    system_binding_stubs, system_dispatch_table, system_host_operation_registry_json,
     system_host_operation_registry_schema_json, system_provider_abi_json,
     system_provider_abi_schema_json,
 };
@@ -44,6 +44,33 @@ fn export_mode(option: Option<&str>, output_path: Option<&std::path::Path>) -> V
         Some(path) => fs::read(path).expect("read exported sys artifact"),
         None => output.stdout,
     }
+}
+
+fn read_exported_tree(root: &Path) -> std::io::Result<BTreeMap<String, Vec<u8>>> {
+    fn visit(
+        root: &Path,
+        base: &Path,
+        files: &mut BTreeMap<String, Vec<u8>>,
+    ) -> std::io::Result<()> {
+        for entry in fs::read_dir(root)? {
+            let path = entry?.path();
+            if path.is_dir() {
+                visit(&path, base, files)?;
+            } else {
+                let relative = path
+                    .strip_prefix(base)
+                    .expect("export path remains beneath its output directory")
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                files.insert(relative, fs::read(path)?);
+            }
+        }
+        Ok(())
+    }
+
+    let mut files = BTreeMap::new();
+    visit(root, root, &mut files)?;
+    Ok(files)
 }
 
 #[test]
@@ -192,6 +219,11 @@ fn dev_exports_cover_embedded_host_registry_schema_and_binding_bundle() {
             system_host_operation_registry_schema_json(),
         ),
         ("binding bundle", "--bindings", system_binding_stubs()),
+        (
+            "binding modules manifest",
+            "--binding-modules",
+            system_binding_modules_json(),
+        ),
     ] {
         let first_path = output_dir.join(format!("first/{label}.out"));
         let second_path = output_dir.join(format!("second/{label}.out"));
@@ -217,6 +249,79 @@ fn dev_exports_cover_embedded_host_registry_schema_and_binding_bundle() {
 }
 
 #[test]
+fn dev_all_export_reconstructs_the_complete_embedded_artifact_tree() {
+    let root = std::env::temp_dir().join(format!("orna-sys-all-artifacts-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&root);
+    let first_root = root.join("first");
+    let second_root = root.join("second");
+
+    for output_root in [&first_root, &second_root] {
+        let output = Command::new(env!("CARGO_BIN_EXE_sys-api-export"))
+            .arg("--all")
+            .arg(output_root)
+            .output()
+            .expect("run complete dev artifact export");
+        assert!(
+            output.status.success(),
+            "complete exporter failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(output.stdout.is_empty());
+    }
+
+    let modules: BTreeMap<String, String> =
+        serde_json::from_str(system_binding_modules_json()).expect("embedded module manifest");
+    let mut expected = BTreeMap::from([
+        ("api_sys.json".to_owned(), system_api_json().into_bytes()),
+        (
+            "system_api_schema.json".to_owned(),
+            system_api_schema_json().as_bytes().to_vec(),
+        ),
+        (
+            "system_provider_abi.json".to_owned(),
+            system_provider_abi_json().as_bytes().to_vec(),
+        ),
+        (
+            "system_provider_abi.schema.json".to_owned(),
+            system_provider_abi_schema_json().as_bytes().to_vec(),
+        ),
+        (
+            "system_host_operations.json".to_owned(),
+            system_host_operation_registry_json().as_bytes().to_vec(),
+        ),
+        (
+            "system_host_operations.schema.json".to_owned(),
+            system_host_operation_registry_schema_json()
+                .as_bytes()
+                .to_vec(),
+        ),
+        (
+            "system_bindings.orna".to_owned(),
+            system_binding_stubs().as_bytes().to_vec(),
+        ),
+        (
+            "system_binding_modules.json".to_owned(),
+            system_binding_modules_json().as_bytes().to_vec(),
+        ),
+    ]);
+    for (relative_path, source) in modules {
+        expected.insert(
+            format!("system_bindings/{relative_path}"),
+            source.into_bytes(),
+        );
+    }
+
+    let first = read_exported_tree(&first_root).expect("read first complete export tree");
+    let second = read_exported_tree(&second_root).expect("read second complete export tree");
+    assert_eq!(
+        first, expected,
+        "all exported bytes match embedded artifacts"
+    );
+    assert_eq!(second, expected, "independent all exports are byte-stable");
+    fs::remove_dir_all(&root).expect("remove temporary complete export directory");
+}
+
+#[test]
 fn dev_export_rejects_unknown_modes_and_extra_output_paths() {
     let unknown = Command::new(env!("CARGO_BIN_EXE_sys-api-export"))
         .arg("--not-a-mode")
@@ -228,6 +333,39 @@ fn dev_export_rejects_unknown_modes_and_extra_output_paths() {
     assert!(unknown_stderr.contains("unknown option `--not-a-mode`"));
     assert!(unknown_stderr.contains("--host-operations"));
     assert!(unknown_stderr.contains("--bindings"));
+    assert!(unknown_stderr.contains("--binding-modules"));
+    assert!(unknown_stderr.contains("--all output-directory"));
+
+    let missing_all_path = Command::new(env!("CARGO_BIN_EXE_sys-api-export"))
+        .arg("--all")
+        .output()
+        .expect("run exporter with no directory for complete export");
+    assert!(!missing_all_path.status.success());
+    assert!(missing_all_path.stdout.is_empty());
+    assert!(
+        String::from_utf8_lossy(&missing_all_path.stderr)
+            .contains("--all requires an output directory")
+    );
+
+    let nonempty_dir =
+        std::env::temp_dir().join(format!("orna-sys-nonempty-export-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&nonempty_dir);
+    fs::create_dir_all(&nonempty_dir).expect("create nonempty export directory");
+    let sentinel = nonempty_dir.join("keep.txt");
+    fs::write(&sentinel, "preserve").expect("write sentinel file");
+    let nonempty_output = Command::new(env!("CARGO_BIN_EXE_sys-api-export"))
+        .arg("--all")
+        .arg(&nonempty_dir)
+        .output()
+        .expect("run complete exporter with a nonempty directory");
+    assert!(!nonempty_output.status.success());
+    assert!(nonempty_output.stdout.is_empty());
+    assert!(
+        String::from_utf8_lossy(&nonempty_output.stderr)
+            .contains("requires an empty output directory")
+    );
+    assert_eq!(fs::read_to_string(&sentinel).unwrap(), "preserve");
+    fs::remove_dir_all(&nonempty_dir).expect("remove nonempty export directory");
 
     let extra_path = Command::new(env!("CARGO_BIN_EXE_sys-api-export"))
         .arg("first.json")
