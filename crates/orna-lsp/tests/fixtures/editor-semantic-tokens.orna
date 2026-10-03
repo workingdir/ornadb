@@ -1,0 +1,2 @@
+/* comment */
+let total = 12 + "hello {name}";
