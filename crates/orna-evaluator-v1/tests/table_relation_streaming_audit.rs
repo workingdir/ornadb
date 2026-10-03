@@ -1113,6 +1113,129 @@ fn paired_view_refresh_filtered_page_omissions_keep_scoped_pagination() {
     );
 }
 
+#[test]
+fn paired_view_variable_depth_pagination_keeps_scope_through_refresh_folds() {
+    // Sibling reads have one, two, three, or four pages. Cursor bytes recur
+    // across lanes and refreshes, while each continuation remains scope-local.
+    let subscriptions = [
+        (
+            "View.Left",
+            vec![
+                page(&[1], Some(vec![11])),
+                page(&[3], Some(vec![21])),
+                page(&[5], None),
+            ],
+        ),
+        (
+            "View.Left",
+            vec![page(&[2], Some(vec![11])), page(&[4], None)],
+        ),
+        ("View.Right", vec![page(&[-1], None)]),
+        (
+            "View.Right",
+            vec![page(&[6], Some(vec![11])), page(&[8], None)],
+        ),
+        ("View.Left", vec![page(&[3], None)]),
+        (
+            "View.Left",
+            vec![
+                page(&[2], Some(vec![11])),
+                page(&[4], Some(vec![21])),
+                page(&[6], None),
+            ],
+        ),
+        (
+            "View.Right",
+            vec![page(&[1], Some(vec![11])), page(&[3], None)],
+        ),
+        (
+            "View.Right",
+            vec![
+                page(&[4], Some(vec![11])),
+                page(&[6], Some(vec![21])),
+                page(&[8], None),
+            ],
+        ),
+        (
+            "View.Left",
+            vec![page(&[-1], Some(vec![11])), page(&[1], None)],
+        ),
+        ("View.Left", vec![page(&[8], None)]),
+        (
+            "View.Right",
+            vec![page(&[3], Some(vec![11])), page(&[5], None)],
+        ),
+        (
+            "View.Right",
+            vec![
+                page(&[2], Some(vec![11])),
+                page(&[4], Some(vec![21])),
+                page(&[6], Some(vec![31])),
+                page(&[8], None),
+            ],
+        ),
+    ];
+    let mut source = PairedViewRefreshSource::new(subscriptions);
+
+    let first = run_with_fixture_functions(paired_scoped_view_refresh_body(), &mut source).unwrap();
+    assert_eq!(first, integer(21));
+    let second = run_with_fixture_functions(paired_scoped_view_refresh_body(), &mut source).unwrap();
+    assert_eq!(second, integer(37));
+    let third = run_with_fixture_functions(paired_scoped_view_refresh_body(), &mut source).unwrap();
+    assert_eq!(third, integer(21));
+    assert_eq!(first, integer(21), "the shallow first refresh result remains captured");
+    assert_eq!(second, integer(37), "the deeper middle refresh result remains captured");
+
+    assert_eq!(source.lanes.len(), 12, "four scoped subscriptions bind per refresh");
+    for generation in 0..3 {
+        let start = generation * 4;
+        assert_eq!(source.lanes[start].0, "View.Left");
+        assert_eq!(source.lanes[start + 1].0, "View.Left");
+        assert_eq!(source.lanes[start + 2].0, "View.Right");
+        assert_eq!(source.lanes[start + 3].0, "View.Right");
+    }
+    let scopes = source.lanes.iter().map(|(_, scope, _)| *scope).collect::<Vec<_>>();
+    for (index, scope) in scopes.iter().enumerate() {
+        assert!(
+            !scopes[..index].contains(scope),
+            "pagination depth and repeated cursor bytes do not merge scopes: {scope:?}"
+        );
+    }
+    assert_eq!(source.cursors.len(), 26, "all variable-depth page chains are consumed");
+    assert_eq!(
+        source.cursors,
+        vec![
+            ("View.Left".into(), scopes[0], None),
+            ("View.Left".into(), scopes[0], Some(vec![11])),
+            ("View.Left".into(), scopes[0], Some(vec![21])),
+            ("View.Left".into(), scopes[1], None),
+            ("View.Left".into(), scopes[1], Some(vec![11])),
+            ("View.Right".into(), scopes[2], None),
+            ("View.Right".into(), scopes[3], None),
+            ("View.Right".into(), scopes[3], Some(vec![11])),
+            ("View.Left".into(), scopes[4], None),
+            ("View.Left".into(), scopes[5], None),
+            ("View.Left".into(), scopes[5], Some(vec![11])),
+            ("View.Left".into(), scopes[5], Some(vec![21])),
+            ("View.Right".into(), scopes[6], None),
+            ("View.Right".into(), scopes[6], Some(vec![11])),
+            ("View.Right".into(), scopes[7], None),
+            ("View.Right".into(), scopes[7], Some(vec![11])),
+            ("View.Right".into(), scopes[7], Some(vec![21])),
+            ("View.Left".into(), scopes[8], None),
+            ("View.Left".into(), scopes[8], Some(vec![11])),
+            ("View.Left".into(), scopes[9], None),
+            ("View.Right".into(), scopes[10], None),
+            ("View.Right".into(), scopes[10], Some(vec![11])),
+            ("View.Right".into(), scopes[11], None),
+            ("View.Right".into(), scopes[11], Some(vec![11])),
+            ("View.Right".into(), scopes[11], Some(vec![21])),
+            ("View.Right".into(), scopes[11], Some(vec![31])),
+        ],
+        "variable-depth cursor chains remain attached to their paired refresh scopes"
+    );
+}
+
 fn paired_subscription_cascade_body() -> Expr {
     let left = relation_stage(
         relation_stage(
