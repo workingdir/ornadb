@@ -1,0 +1,9 @@
+fn make_alias_restoration_closure(seed: Int) = delta => value => [
+    arithmetic.marker(),
+    sequence_ops.marker(),
+    arithmetic.marker() + sequence_ops.marker(),
+    arithmetic.shift(seed + delta + value),
+    std.math.marker(),
+    std.collection.marker(),
+    std.math.shift(seed + delta + value),
+];
