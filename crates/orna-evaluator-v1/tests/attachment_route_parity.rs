@@ -1455,6 +1455,80 @@ fn fresh_nested_route_pair_chains_evaluate_rebound_closure_values() {
         Ok(Some(Value::int(96.into())))
     );
 
+    let first_terminal_anchor_chain = resolver
+        .extend_nested_terminal_pair_checkpoint_cascades(
+            &first_stage,
+            &[checkpoint_plans[0]],
+        )
+        .unwrap_or_else(|error| panic!("first terminal anchor chain failed: {error:?}"));
+    let final_terminal_anchor_chain = resolver
+        .extend_nested_terminal_pair_checkpoint_cascades(
+            &first_terminal_anchor_chain,
+            &[checkpoint_plans[1]],
+        )
+        .unwrap_or_else(|error| panic!("nested terminal anchor chain failed: {error:?}"));
+    let first_terminal_anchor_identity = first_terminal_anchor_chain.terminal_route_identity();
+    let final_terminal_anchor_identity = final_terminal_anchor_chain.terminal_route_identity();
+    let expected_terminal_anchor_transitions = [
+        (
+            first_stage.terminal_route_identity(),
+            first_terminal_anchor_identity.clone(),
+        ),
+        (
+            first_terminal_anchor_identity,
+            final_terminal_anchor_identity.clone(),
+        ),
+    ];
+    assert_ne!(
+        expected_terminal_anchor_transitions[0].0,
+        expected_terminal_anchor_transitions[0].1,
+        "the first checkpoint anchor rebinds the terminal nested pin"
+    );
+    let (validated_terminal_anchor_chains, observed_terminal_anchor_transitions) = resolver
+        .extend_nested_terminal_pair_checkpoint_cascades_validating_terminal_identity_transitions(
+            &first_stage,
+            &checkpoint_plans,
+            &expected_terminal_anchor_transitions,
+        )
+        .unwrap();
+    assert_eq!(
+        observed_terminal_anchor_transitions,
+        expected_terminal_anchor_transitions,
+        "each paired terminal anchor chain reports its computed identity edge"
+    );
+    assert_eq!(
+        validated_terminal_anchor_chains.terminal_route_identity(),
+        final_terminal_anchor_identity,
+        "the final nested anchor chain keeps the computed terminal route identity"
+    );
+    assert_eq!(
+        validated_terminal_anchor_chains.retained_depth_label(0, 1).unwrap(),
+        saved_middle_handoff.depth_label().clone(),
+        "the nested anchor remains bound to its original retained depth"
+    );
+    assert_eq!(
+        validated_terminal_anchor_chains
+            .final_session()
+            .database(aliases[4])
+            .unwrap()
+            .pin()
+            .commit()
+            .as_str(),
+        leaf_final,
+        "validated terminal anchor chains resolve the real final package commit"
+    );
+    let mut stale_terminal_anchor_transitions = expected_terminal_anchor_transitions.clone();
+    stale_terminal_anchor_transitions[1].0 = expected_terminal_anchor_transitions[0].0.clone();
+    assert!(matches!(
+        resolver
+            .extend_nested_terminal_pair_checkpoint_cascades_validating_terminal_identity_transitions(
+                &first_stage,
+                &checkpoint_plans,
+                &stale_terminal_anchor_transitions,
+            ),
+        Err(AttachmentError::RetainedSnapshotUnavailable)
+    ));
+
     let replay_handoff = checkpoint_replay.retained_wave(4).unwrap()[0].clone();
     let replay_depth_label = checkpoint_replay.retained_depth_label(4, 0).unwrap();
     assert_eq!(replay_depth_label.wave(), 4);

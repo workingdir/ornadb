@@ -7,8 +7,9 @@ use std::{
 use orna_sys_v1::{
     SystemEffect, SystemProviderAbi, system_api_json, system_api_schema_json,
     system_binding_modules_json, system_binding_stubs, system_dispatch_table,
-    system_host_operation_registry_json, system_host_operation_registry_schema_json,
-    system_provider_abi_json, system_provider_abi_schema_json,
+    system_function_descriptor, system_host_operation_registry_json,
+    system_host_operation_registry_schema_json, system_provider_abi_json,
+    system_provider_abi_schema_json,
 };
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -810,6 +811,267 @@ fn generated_schema_accepts_relationship_shapes_that_typed_dispatch_rejects() {
 
     println!(
         "generated_schema_typed_dispatch_relationship_parity schema_valid=3 typed_rejections=unknown_role,missing_reverse_link,role_version_mismatch total_cases=3"
+    );
+}
+
+#[test]
+fn generated_bindings_match_schema_valid_provider_edge_mutations() {
+    fn effect_name(effect: SystemEffect) -> &'static str {
+        match effect {
+            SystemEffect::Read => "read",
+            SystemEffect::Invoke => "invoke",
+            SystemEffect::Admin => "admin",
+        }
+    }
+
+    let schema_json = build_provider::generate_provider_registry_schema()
+        .expect("provider dispatch schema regenerates from its generator");
+    assert_eq!(schema_json, system_provider_abi_schema_json());
+    let baseline_json = system_provider_abi_json();
+    let registry: Value =
+        serde_json::from_str(baseline_json).expect("embedded provider registry is valid JSON");
+    build_host::validate_json_against_schema(baseline_json, &schema_json)
+        .expect("embedded provider registry conforms to its generated schema");
+    let table = system_dispatch_table();
+    let mut version_schema_acceptances = 0;
+    let mut effect_schema_acceptances = 0;
+    let mut binding_cases = 0;
+
+    for role in table.roles() {
+        let version_mutation = {
+            let mut mutated = registry.clone();
+            let raw_role = mutated["roles"]
+                .as_array_mut()
+                .unwrap()
+                .iter_mut()
+                .find(|raw_role| raw_role["name"] == role.id.as_str())
+                .expect("typed role is present in generated registry JSON");
+            let minor = raw_role["version"]["minor"]
+                .as_u64()
+                .expect("generated role minor version is an integer");
+            raw_role["version"]["minor"] = Value::from(minor + 1);
+            mutated
+        };
+        let version_json = version_mutation.to_string();
+        build_host::validate_json_against_schema(&version_json, &schema_json)
+            .expect("well-formed version edge remains within the generated schema");
+        assert_eq!(
+            SystemProviderAbi::from_json(&version_json),
+            Err(orna_sys_v1::ProviderAbiError::OperationRoleVersionMismatch),
+            "typed dispatch rejects the version edge for {}",
+            role.id.as_str()
+        );
+        version_schema_acceptances += 1;
+
+        let role_operations = role
+            .operations
+            .iter()
+            .map(|operation| {
+                table
+                    .operation(operation.as_str())
+                    .expect("role edge resolves to typed operation")
+            })
+            .collect::<Vec<_>>();
+        let incompatible_effect = [
+            SystemEffect::Read,
+            SystemEffect::Invoke,
+            SystemEffect::Admin,
+        ]
+        .into_iter()
+        .find(|candidate| {
+            role_operations.iter().any(|operation| {
+                !operation
+                    .effects
+                    .iter()
+                    .all(|required| required == *candidate)
+            })
+        })
+        .expect("a single valid effect cannot satisfy every operation on this role");
+        let mut effect_mutation = registry.clone();
+        let raw_role = effect_mutation["roles"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|raw_role| raw_role["name"] == role.id.as_str())
+            .expect("typed role is present in generated registry JSON");
+        raw_role["effects"] = serde_json::json!([effect_name(incompatible_effect)]);
+        let effect_json = effect_mutation.to_string();
+        build_host::validate_json_against_schema(&effect_json, &schema_json)
+            .expect("well-formed effect edge remains within the generated schema");
+        let incompatible = SystemProviderAbi::from_json(&effect_json)
+            .expect("schema-valid effect edge deserializes before semantic validation");
+        assert_eq!(
+            incompatible.validate(),
+            Err(orna_sys_v1::ProviderDiagnostic::EffectIncompatible(
+                role.id.clone()
+            )),
+            "typed dispatch rejects the effect edge for {}",
+            role.id.as_str()
+        );
+        effect_schema_acceptances += 1;
+
+        for operation in role_operations {
+            let generated =
+                system_function_descriptor(operation.id.as_str()).unwrap_or_else(|| {
+                    panic!("missing generated binding for {}", operation.id.as_str())
+                });
+            assert_eq!(generated.name, operation.id.as_str());
+            assert_eq!(generated.signature, operation.signature.source);
+            let expected_effect = operation
+                .effects
+                .iter()
+                .next()
+                .expect("generated provider operation has an effect");
+            assert_eq!(expected_effect, generated.effect);
+            let raw_operation = registry["operations"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|raw_operation| raw_operation["name"] == operation.id.as_str())
+                .expect("generated registry includes each provider operation");
+            assert_eq!(
+                raw_operation["signature"].as_str(),
+                Some(generated.signature)
+            );
+            assert_eq!(
+                raw_operation["effect"].as_str(),
+                Some(effect_name(generated.effect))
+            );
+            let expected_role = format!(
+                "{}@{}.{}",
+                role.id.as_str(),
+                role.version.major,
+                role.version.minor
+            );
+            assert_eq!(raw_operation["role"].as_str(), Some(expected_role.as_str()));
+            binding_cases += 1;
+        }
+    }
+
+    assert_eq!(version_schema_acceptances, table.roles().count());
+    assert_eq!(effect_schema_acceptances, table.roles().count());
+    assert_eq!(
+        binding_cases,
+        table
+            .operations()
+            .filter(|operation| operation.role.is_some())
+            .count()
+    );
+    println!(
+        "generated_binding_schema_edge_parity roles={} schema_valid_edges=version,effect typed_edge_rejections=role_version_mismatch,effect_incompatible provider_bindings={binding_cases} total_cases={}",
+        table.roles().count(),
+        version_schema_acceptances + effect_schema_acceptances + binding_cases
+    );
+}
+
+#[test]
+fn generated_binding_provider_id_schema_rejections_match_typed_parser() {
+    let schema_json = build_provider::generate_provider_registry_schema()
+        .expect("provider dispatch schema regenerates from its generator");
+    assert_eq!(schema_json, system_provider_abi_schema_json());
+    let registry: Value = serde_json::from_str(system_provider_abi_json())
+        .expect("embedded provider registry is valid JSON");
+    build_host::validate_json_against_schema(system_provider_abi_json(), &schema_json)
+        .expect("embedded provider registry conforms to its generated schema");
+    let table = system_dispatch_table();
+    let mut role_id_rejections = 0;
+    let mut provider_id_rejections = 0;
+    let mut annotation_id_rejections = 0;
+    let mut generated_bindings = 0;
+
+    let assert_rejected = |mutated: Value, expected, label: &str| {
+        let json = mutated.to_string();
+        let schema_error = build_host::validate_json_against_schema(&json, &schema_json)
+            .expect_err("generated provider schema rejects malformed identifiers");
+        assert!(
+            schema_error.contains("identifier pattern"),
+            "schema rejection identifies {label}: {schema_error}"
+        );
+        assert_eq!(
+            SystemProviderAbi::from_json(&json),
+            Err(expected),
+            "typed provider parser rejects the same malformed identifier in {label}"
+        );
+    };
+
+    for role in table.roles() {
+        let role_index = registry["roles"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .position(|raw_role| raw_role["name"] == role.id.as_str())
+            .expect("typed provider role appears in generated registry JSON");
+        let mut invalid_role_id = registry.clone();
+        invalid_role_id["roles"][role_index]["name"] = Value::String("invalid role id".to_owned());
+        assert_rejected(
+            invalid_role_id,
+            orna_sys_v1::ProviderAbiError::InvalidRoleId,
+            "role name",
+        );
+        role_id_rejections += 1;
+
+        if role.builtin_provider.is_some() {
+            let mut invalid_provider_id = registry.clone();
+            invalid_provider_id["roles"][role_index]["builtin_provider"] =
+                Value::String("invalid provider id".to_owned());
+            assert_rejected(
+                invalid_provider_id,
+                orna_sys_v1::ProviderAbiError::InvalidProviderId,
+                "built-in provider",
+            );
+            provider_id_rejections += 1;
+        }
+
+        for operation_id in &role.operations {
+            let operation = table
+                .operation(operation_id.as_str())
+                .expect("provider role edge resolves to its typed operation");
+            let generated =
+                system_function_descriptor(operation.id.as_str()).unwrap_or_else(|| {
+                    panic!("missing generated binding for {}", operation.id.as_str())
+                });
+            assert_eq!(generated.name, operation.id.as_str());
+            assert_eq!(generated.signature, operation.signature.source);
+            assert_eq!(
+                operation.effects.iter().next(),
+                Some(generated.effect),
+                "generated binding effect matches {}",
+                operation.id.as_str()
+            );
+            let operation_index = registry["operations"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .position(|raw_operation| raw_operation["name"] == operation.id.as_str())
+                .expect("generated registry operation row exists");
+            let mut invalid_annotation = registry.clone();
+            invalid_annotation["operations"][operation_index]["role"] = Value::String(format!(
+                "invalid role id@{}.{}",
+                role.version.major, role.version.minor
+            ));
+            assert_rejected(
+                invalid_annotation,
+                orna_sys_v1::ProviderAbiError::InvalidRoleId,
+                "operation role annotation",
+            );
+            annotation_id_rejections += 1;
+            generated_bindings += 1;
+        }
+    }
+
+    assert_eq!(role_id_rejections, table.roles().count());
+    assert_eq!(
+        generated_bindings,
+        table
+            .operations()
+            .filter(|operation| operation.role.is_some())
+            .count()
+    );
+    assert_eq!(annotation_id_rejections, generated_bindings);
+    println!(
+        "generated_binding_provider_id_schema_parity roles={} role_id_rejections={role_id_rejections} provider_id_rejections={provider_id_rejections} operation_annotation_rejections={annotation_id_rejections} generated_bindings={generated_bindings} total_cases={}",
+        table.roles().count(),
+        role_id_rejections + provider_id_rejections + annotation_id_rejections
     );
 }
 
