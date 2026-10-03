@@ -6976,6 +6976,139 @@ fn paired_rebind_storms_preserve_tuple_fold_determinism() {
 }
 
 #[test]
+fn nested_three_way_tuple_rebind_chains_preserve_pair_identity() {
+    let source = include_str!("fixtures/historical-nested-three-way-tuple-rebind-chain.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-nested-three-way-tuple-rebind-chain.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    let type_diagnostics = result
+        .diagnostics
+        .iter()
+        .filter(|diagnostic| diagnostic.code() == DIAG_TYPE)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        type_diagnostics.len(),
+        1,
+        "only the terminal nested pair split should fail: {:?}",
+        type_diagnostics
+            .iter()
+            .map(|diagnostic| diagnostic.message())
+            .collect::<Vec<_>>()
+    );
+    let module = result
+        .modules
+        .values()
+        .find(|module| {
+            module
+                .symbols
+                .contains_key("accepts_nested_three_way_rebind_chain")
+        })
+        .expect("nested three-way tuple chain fixture module");
+    let tuple_contexts = |function: &str, tuple_index: usize| {
+        let Type::Function { result, .. } = &module.symbols[function].ty else {
+            panic!("{function} must preserve its computed result function");
+        };
+        let Type::Record(fields) = result.as_ref() else {
+            panic!("{function} must return its parent fold: {result:?}");
+        };
+        let Type::List(row) = fields.get("parent_fold").expect("parent fold") else {
+            panic!("{function} must retain its parent list");
+        };
+        let Type::Record(fields) = row.as_ref() else {
+            panic!("{function} must retain its row: {row:?}");
+        };
+        let Type::Tuple(outer) = fields.get("pins").expect("outer pin tuple") else {
+            panic!("{function} must retain its outer tuple");
+        };
+        let Type::Tuple(inner) = &outer[tuple_index] else {
+            panic!("{function} tuple {tuple_index} must retain its inner pair");
+        };
+        assert_eq!(inner.len(), 2, "{function} must preserve each paired slot");
+        inner
+            .iter()
+            .map(|slot| {
+                let mut contexts = BTreeSet::new();
+                collect_snapshot_contexts(slot, &mut contexts);
+                contexts
+            })
+            .collect::<Vec<_>>()
+    };
+
+    let accepted_left = BTreeSet::from([
+        "selector:HEAD~500".into(),
+        "selector:HEAD~510".into(),
+        "selector:HEAD~520".into(),
+        "selector:HEAD~530".into(),
+        "selector:HEAD~540".into(),
+    ]);
+    assert_eq!(
+        tuple_contexts("accepts_nested_three_way_rebind_chain", 0),
+        [accepted_left.clone(), accepted_left],
+        "the nested paired identity stays aligned across sequential three-way folds"
+    );
+    assert_eq!(
+        tuple_contexts("accepts_nested_three_way_rebind_chain", 1),
+        [
+            BTreeSet::from([
+                "selector:HEAD~501".into(),
+                "selector:HEAD~511".into(),
+                "selector:HEAD~521".into(),
+                "selector:HEAD~531".into(),
+                "selector:HEAD~541".into(),
+            ]),
+            BTreeSet::from([
+                "selector:HEAD~502".into(),
+                "selector:HEAD~512".into(),
+                "selector:HEAD~522".into(),
+                "selector:HEAD~532".into(),
+                "selector:HEAD~542".into(),
+            ]),
+        ],
+        "the independent nested tuple retains both real selector streams"
+    );
+    assert_eq!(
+        tuple_contexts(
+            "rejects_nested_three_way_pair_split_without_losing_sibling_values",
+            0,
+        ),
+        [
+            BTreeSet::from(["selector:HEAD~600".into()]),
+            BTreeSet::from(["selector:HEAD~600".into()]),
+        ],
+        "the conflicting nested pair rolls back together to its original identity"
+    );
+    assert_eq!(
+        tuple_contexts(
+            "rejects_nested_three_way_pair_split_without_losing_sibling_values",
+            1,
+        ),
+        [
+            BTreeSet::from([
+                "selector:HEAD~601".into(),
+                "selector:HEAD~611".into(),
+                "selector:HEAD~621".into(),
+                "selector:HEAD~641".into(),
+                "selector:HEAD~651".into(),
+            ]),
+            BTreeSet::from([
+                "selector:HEAD~602".into(),
+                "selector:HEAD~612".into(),
+                "selector:HEAD~622".into(),
+                "selector:HEAD~642".into(),
+                "selector:HEAD~652".into(),
+            ]),
+        ],
+        "a failed nested pair must not erase its sibling's sequential fold values"
+    );
+}
+
+#[test]
 fn multi_parent_selector_topology_storm_preserves_label_depth_identity() {
     let source = include_str!("fixtures/historical-multi-parent-selector-topology-storm.orna");
     let parsed = orna_syntax_v1::parse_module(source);
