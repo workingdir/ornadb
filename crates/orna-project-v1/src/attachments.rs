@@ -1076,6 +1076,63 @@ impl PackageResolver {
         Ok(route)
     }
 
+    /// Applies depth-labelled checkpoint storm rounds with stable omission
+    /// slots. A slot keeps the route identity of its first selected label;
+    /// `None` leaves that slot unchanged, and a later label cannot take its
+    /// place. The reference is silent on nested paired omissions, so v1 fixes
+    /// the slot count from the first round and revalidates every selected
+    /// identity after each fold. Failure returns no partial route.
+    pub fn extend_nested_terminal_pair_checkpoint_storm_rounds_from_depth_labels_with_omissions(
+        &self,
+        previous: &ReboundPathResolution,
+        rounds: &[&[Option<(&NestedPairDepthLabel, &[[PinnedDatabase; 2]])>]],
+    ) -> Result<ReboundPathResolution, AttachmentError> {
+        let mut route = previous.clone();
+        let mut retained_labels: Option<Vec<Option<NestedPairDepthLabel>>> = None;
+        for round in rounds {
+            let labels = retained_labels.get_or_insert_with(|| vec![None; round.len()]);
+            if labels.len() != round.len() {
+                return Err(AttachmentError::RetainedSnapshotUnavailable);
+            }
+
+            let checkpoints = round
+                .iter()
+                .enumerate()
+                .map(|(slot, plan)| match plan {
+                    Some((label, replacements)) => {
+                        route.validate_depth_label(label)?;
+                        if let Some(retained) = &labels[slot] {
+                            if retained != *label {
+                                return Err(AttachmentError::RetainedSnapshotUnavailable);
+                            }
+                        } else {
+                            labels[slot] = Some((*label).clone());
+                        }
+                        let checkpoint = route.handoff_checkpoint(label.wave, label.depth)?;
+                        if checkpoint.depth_label() != *label {
+                            return Err(AttachmentError::RetainedSnapshotUnavailable);
+                        }
+                        Ok(Some((checkpoint, *replacements)))
+                    }
+                    None => Ok(None),
+                })
+                .collect::<Result<Vec<_>, AttachmentError>>()?;
+            let storms = checkpoints
+                .iter()
+                .filter_map(|checkpoint| {
+                    checkpoint
+                        .as_ref()
+                        .map(|(checkpoint, replacements)| (checkpoint, *replacements))
+                })
+                .collect::<Vec<_>>();
+            route = self.extend_nested_terminal_pair_checkpoint_storms(&route, &storms)?;
+            for label in labels.iter().flatten() {
+                route.validate_depth_label(label)?;
+            }
+        }
+        Ok(route)
+    }
+
     /// Folds checkpoint-rooted terminal-pair storms across independent parent
     /// routes. Each table row is `(route, storms)` and resolves only checkpoints
     /// captured from that row's route; row order and anchor identity are kept
