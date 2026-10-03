@@ -2295,6 +2295,9 @@ fn explain_query_core_with_subqueries(
             .checked_sub(declared_join_count)
             .and_then(|offset| decorrelated_subqueries.get(offset));
         let selected_partial_index = partial_index_for_join(join, partial_indexes);
+        let decorrelated_index_omission_identity = decorrelated_subquery
+            .filter(|_| selected_partial_index.is_none())
+            .map(decorrelated_index_selection_omission_identity);
         let right_access = if let Some(candidate) = selected_partial_index {
             push_index_lookup(&mut operators, candidate, join.statistics.as_ref())
         } else {
@@ -2318,6 +2321,14 @@ fn explain_query_core_with_subqueries(
         if let Some(subquery) = decorrelated_subquery {
             for index in BTreeSet::from([right_access, right]) {
                 add_decorrelated_subquery_details(&mut operators[index].details, subquery);
+            }
+        }
+        if let Some(identity) = decorrelated_index_omission_identity.as_deref() {
+            for index in BTreeSet::from([right_access, right]) {
+                add_decorrelated_index_selection_omission_details(
+                    &mut operators[index].details,
+                    identity,
+                );
             }
         }
         let join_pair_identity = join_pair_identity_for_join(join, join_pair_identities);
@@ -2362,6 +2373,7 @@ fn explain_query_core_with_subqueries(
             window_aggregates,
             decorrelated_subquery,
             decorrelated_predicate_identity.as_deref(),
+            decorrelated_index_omission_identity.as_deref(),
         );
         let decorrelated_anchor_fold_id = decorrelated_subquery.map(|subquery| {
             query_decorrelated_anchor_fold_identity(
@@ -2492,6 +2504,9 @@ fn explain_query_core_with_subqueries(
         if let Some(identity) = decorrelated_predicate_identity.as_deref() {
             add_decorrelated_predicate_pushdown_details(&mut details, identity);
         }
+        if let Some(identity) = decorrelated_index_omission_identity.as_deref() {
+            add_decorrelated_index_selection_omission_details(&mut details, identity);
+        }
         if let Some(identity) = decorrelated_anchor_fold_id.as_deref() {
             add_decorrelated_anchor_fold_details(&mut details, identity);
         }
@@ -2515,6 +2530,7 @@ fn explain_query_core_with_subqueries(
         }
         if let Some(candidate) = selected_partial_index {
             add_partial_index_pair_identity_details(&mut details, candidate);
+            add_partial_index_selection_tie_break_details(&mut details);
         }
         add_join_cost_fold_details(
             &mut details,
@@ -3534,6 +3550,11 @@ fn partial_index_for_join<'a>(
     candidates: &'a [QueryPartialIndexDescription],
 ) -> Option<&'a QueryPartialIndexDescription> {
     let predicate = join.predicate.as_ref()?;
+    // The reference names explain node kinds but is silent on partial-index
+    // matching and tie-breaking. This adapter requires an exact table/predicate
+    // match, then selects the lexicographically smallest index identity so the
+    // explain-only choice is independent of catalog order. A missing exact
+    // match stays a scan rather than inferring predicate implication.
     candidates
         .iter()
         .filter(|candidate| {
@@ -3563,6 +3584,7 @@ fn push_index_lookup(
         ),
     ]);
     add_partial_index_pair_identity_details(&mut details, candidate);
+    add_partial_index_selection_tie_break_details(&mut details);
     if let Some(branch) = statistics.and_then(|stats| stats.mutable_branch.as_ref()) {
         details.insert(
             "mutable_branch".to_owned(),
@@ -3672,6 +3694,24 @@ fn decorrelated_predicate_pushdown_identity(
         partial_index_pair_identity(candidate).as_bytes(),
     );
     format!("decorrelated-pushdown:{}", hex(&hash.finalize()))
+}
+
+/// Gives an unindexed resolver-approved subquery a stable identity. The
+/// reference does not define an identity for this explain-only scan case, so
+/// bind the exact omitted source/predicate tuple to the subquery and preserve
+/// that omission in later sparse cost folds.
+fn decorrelated_index_selection_omission_identity(
+    subquery: &QueryDecorrelatedSubqueryDescription,
+) -> String {
+    let mut hash = Sha256::new();
+    hash.update(b"orna.sys.decorrelated-index-omission.v1\0");
+    hash_part(&mut hash, subquery.identity.as_str().as_bytes());
+    hash_part(&mut hash, subquery.source.as_str().as_bytes());
+    hash_part(
+        &mut hash,
+        subquery.correlation_predicate.as_str().as_bytes(),
+    );
+    format!("decorrelated-index-omission:{}", hex(&hash.finalize()))
 }
 
 /// Binds a resolver-approved decorrelation to the sparse fold accumulated on
@@ -3834,6 +3874,20 @@ fn add_decorrelated_predicate_pushdown_details(
     );
 }
 
+fn add_decorrelated_index_selection_omission_details(
+    details: &mut BTreeMap<String, PlanDetail>,
+    identity: &str,
+) {
+    details.insert(
+        "decorrelated_index_selection_omission_identity".to_owned(),
+        PlanDetail::Text(identity.to_owned()),
+    );
+    details.insert(
+        "decorrelated_index_selection_omission_reason".to_owned(),
+        PlanDetail::Text("no_exact_table_and_predicate_candidate".to_owned()),
+    );
+}
+
 fn add_partial_index_pair_identity_details(
     details: &mut BTreeMap<String, PlanDetail>,
     candidate: &QueryPartialIndexDescription,
@@ -3845,6 +3899,13 @@ fn add_partial_index_pair_identity_details(
     details.insert(
         "predicate_pushdown_pairing".to_owned(),
         PlanDetail::Text("exact_table_index_and_predicate".to_owned()),
+    );
+}
+
+fn add_partial_index_selection_tie_break_details(details: &mut BTreeMap<String, PlanDetail>) {
+    details.insert(
+        "index_selection_tie_break".to_owned(),
+        PlanDetail::Text("lexicographically_smallest_matching_index_identity".to_owned()),
     );
 }
 
@@ -3873,6 +3934,7 @@ fn query_join_cost_input_identity(
     window_aggregates: &[QueryWindowAggregatePushdownDescription],
     decorrelated_subquery: Option<&QueryDecorrelatedSubqueryDescription>,
     decorrelated_predicate_pushdown_identity: Option<&str>,
+    decorrelated_index_omission_identity: Option<&str>,
 ) -> String {
     let mut hash = Sha256::new();
     hash.update(b"orna.sys.query-join-cost-input.v1\0");
@@ -3907,6 +3969,10 @@ fn query_join_cost_input_identity(
         } else {
             hash.update([0]);
         }
+    }
+    if let Some(identity) = decorrelated_index_omission_identity {
+        hash.update([3]);
+        hash_part(&mut hash, identity.as_bytes());
     }
     hash_query_window_inputs(&mut hash, &join.source, window_aggregates);
     format!("join-input:{}", hex(&hash.finalize()))
