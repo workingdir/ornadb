@@ -7265,6 +7265,13 @@ fn infer(
                 .find(|parent| type_contains_pinned_checkpoint_tuple(parent))
                 .cloned()
                 .or_else(|| first_parent.clone());
+            // A sparse paired first row has no complete pin map to roll back
+            // to. Recover one as the first fully populated row is accepted,
+            // then retain the accepted sparse-chain map for later local rollback.
+            let paired_omission_recovery = first_parent
+                .as_ref()
+                .is_some_and(type_contains_paired_checkpoint_omissions);
+            let mut checkpoint_recovery_parent = first_parent.clone();
             // Any omitted row can expose a cross-sibling selector collision.
             // Sparse pinned tuples anywhere in the fold need a local scope so
             // a later rebind can roll back only the crossed tuple path.
@@ -7287,18 +7294,37 @@ fn infer(
                         merge_multi_parent_checkpoint_value_scoped(
                             prior,
                             &value,
-                            first_parent
-                                .as_ref()
-                                .expect("scoped fold has a rollback anchor"),
+                            if paired_omission_recovery {
+                                checkpoint_recovery_parent
+                                    .as_ref()
+                                    .expect("paired omission fold has a recovery anchor")
+                            } else {
+                                first_parent
+                                    .as_ref()
+                                    .expect("scoped fold has a rollback anchor")
+                            },
                             checkpoint_topology_parent
                                 .as_ref()
                                 .expect("transactional fold has a topology parent"),
                             &mut Vec::new(),
                             &mut rolled_back_checkpoint_paths,
                         )
-                        .map(|fold| {
+                        .map(|mut fold| {
                             if fold.rejected_scope {
                                 require_same(prior, &value, diagnostics);
+                                if paired_omission_recovery {
+                                    fold.merged = merge_unpaired_checkpoint_record_siblings(
+                                        &fold.merged,
+                                        &value,
+                                    )
+                                    .unwrap_or(fold.merged);
+                                    fold.effective_parent =
+                                        merge_unpaired_checkpoint_record_siblings(
+                                            &fold.effective_parent,
+                                            &value,
+                                        )
+                                        .unwrap_or(fold.effective_parent);
+                                }
                             }
                             // An omitted tuple path has no identity topology in
                             // the original anchor. Remember the first accepted
@@ -7315,6 +7341,18 @@ fn infer(
                                     })
                                     .unwrap_or_else(|| fold.effective_parent.clone()),
                             );
+                            if paired_omission_recovery
+                                && let Some(next_recovery_parent) = checkpoint_recovery_parent
+                                    .as_ref()
+                                    .and_then(|anchor| {
+                                        merge_checkpoint_field_map_multi_parent(
+                                            anchor,
+                                            &fold.effective_parent,
+                                        )
+                                    })
+                            {
+                                checkpoint_recovery_parent = Some(next_recovery_parent);
+                            }
                             fold.merged
                         })
                     } else if transactional_checkpoint_fold {
@@ -9709,6 +9747,35 @@ fn merge_checkpoint_field_map(left: &Type, right: &Type) -> Option<Type> {
 /// those already-validated identities to grow through nested callable results.
 fn merge_checkpoint_field_map_multi_parent(left: &Type, right: &Type) -> Option<Type> {
     merge_checkpoint_field_map_inner(left, right, true)
+}
+
+/// A rejected paired-pin scope must not discard unrelated checkpoint values
+/// from the same sparse row. Keep pinned tuple fields at their recovery anchor,
+/// while allowing independent record siblings to continue contributing pins.
+fn merge_unpaired_checkpoint_record_siblings(
+    accumulated: &Type,
+    parent: &Type,
+) -> Option<Type> {
+    let (Type::Record(accumulated), Type::Record(parent)) = (accumulated, parent) else {
+        return None;
+    };
+    let mut merged = BTreeMap::new();
+    for (name, accumulated_value) in accumulated {
+        let Some(parent_value) = parent.get(name) else {
+            merged.insert(name.clone(), accumulated_value.clone());
+            continue;
+        };
+        let value = if type_contains_pinned_checkpoint_tuple(accumulated_value)
+            || type_contains_pinned_checkpoint_tuple(parent_value)
+        {
+            accumulated_value.clone()
+        } else {
+            merge_checkpoint_field_map_multi_parent(accumulated_value, parent_value)
+                .unwrap_or_else(|| accumulated_value.clone())
+        };
+        merged.insert(name.clone(), value);
+    }
+    Some(Type::Record(merged))
 }
 
 fn merge_checkpoint_field_map_inner(
@@ -18999,9 +19066,17 @@ fn tuple_checkpoint_promotion_matches(left: &[Type], right: &[Type]) -> bool {
 /// remains atomic. The reference does not specify sequential multi-parent tuple
 /// folds, so retain the first accepted topology as the conservative rule.
 fn checkpoint_topology_anchor_with_first_pins(anchor: &Type, source: &Type) -> Type {
-    // Leave paired sibling holes visible to their enclosing record check,
-    // which learns cross-field identity from each row's accumulated maps.
     if type_contains_paired_checkpoint_omissions(anchor) {
+        // A sparse row cannot establish how omitted sibling slots relate. The
+        // first fully populated row can: promote its paired pin paths together
+        // so later omissions replay that learned cross-field topology and a
+        // split row rolls back without leaking one lane's new identity.
+        if !type_contains_partially_omitted_pinned_tuple(source)
+            && !type_contains_omitted_checkpoint_tuple(source)
+            && type_contains_pinned_checkpoint_tuple(source)
+        {
+            return checkpoint_topology_anchor_with_first_pins_local(anchor, source);
+        }
         return anchor.clone();
     }
     checkpoint_topology_anchor_with_first_pins_local(anchor, source)
