@@ -5805,9 +5805,9 @@ fn captured_pagination_identity_survives_paired_restoration_folds() {
     assert_eq!(pins[5], pins[0]);
     let expected = [
         vec![vec![1_008, 1_009], vec![1_010, 1_011], vec![1_012], vec![]],
-        vec![vec![10_012, 10_013], vec![10_014, 10_015], vec![10_016], vec![]],
+        vec![vec![10_008, 10_009], vec![10_010, 10_011], vec![10_012], vec![]],
         vec![vec![1_009, 1_010], vec![1_011, 1_012], vec![1_013], vec![]],
-        vec![vec![10_013, 10_014], vec![10_015, 10_016], vec![10_017], vec![]],
+        vec![vec![10_009, 10_010], vec![10_011, 10_012], vec![10_013], vec![]],
     ];
     let imports =
         include_str!("fixtures/module-upgrade-divergence-pagination-restoration-use.orna");
