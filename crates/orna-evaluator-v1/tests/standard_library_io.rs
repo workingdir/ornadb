@@ -1,3 +1,6 @@
+#[path = "support/pinned_io_std.rs"]
+mod pinned_io_std;
+
 use orna_evaluator_v1::{AdmittedReplSession, Limits};
 use orna_foundation_v1::CanonicalValue;
 use orna_value_v1::Raw;
@@ -8,8 +11,7 @@ fn bool_value(value: bool) -> CanonicalValue {
 
 #[test]
 fn pinned_filesystem_module_requires_a_host_effect_handler() {
-    let mut session = AdmittedReplSession::with_reference_standard(Limits::default())
-        .unwrap_or_else(|error| panic!("reference std failed to load: {}", error.code()));
+    let mut session = pinned_io_std::session();
     assert_eq!(
         session.submit(include_str!("fixtures/stdlib-use-io-t7auz.orna")),
         Ok(None)
