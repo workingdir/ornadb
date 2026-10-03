@@ -552,6 +552,92 @@ pub struct BranchMergeColumnRestorePairedSnapshotPathChainFoldSnapshot {
     pub snapshot_path: CanonicalValue,
     pub columns: Vec<BranchMergeColumnRestorePairedSnapshotPathColumnFoldSnapshot>,
 }
+
+/// One restore-wave slot for both sides of a strict text-path extension.
+///
+/// `None` means the column was omitted. `Some(Vec::new())` means the column
+/// was present but that exact path did not occur in any depth fragment.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BranchMergeColumnRestorePairedPathExtensionWaveSlotSnapshot {
+    pub order: u64,
+    pub prefix_depth_labels: Option<Vec<usize>>,
+    pub extension_depth_labels: Option<Vec<usize>>,
+}
+
+/// A path-prefix/extension pair folded across one restore storm.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BranchMergeColumnRestorePairedPathExtensionStormSnapshot {
+    pub storm_index: usize,
+    pub first_order: u64,
+    pub last_order: u64,
+    pub waves: Vec<BranchMergeColumnRestorePairedPathExtensionWaveSlotSnapshot>,
+}
+
+/// One stable column's path-prefix/extension history across restore storms.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BranchMergeColumnRestorePairedPathExtensionColumnFoldSnapshot {
+    pub column: ObjectId,
+    pub storms: Vec<BranchMergeColumnRestorePairedPathExtensionStormSnapshot>,
+}
+
+/// One strict path extension paired with its prefix across table columns.
+///
+/// Only canonical text keys with a slash-delimited prefix relationship form
+/// an extension pair. Keys remain opaque everywhere else in storage.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BranchMergeColumnRestorePairedPathExtensionFoldSnapshot {
+    pub table: ObjectId,
+    pub prefix_path: CanonicalValue,
+    pub extension_path: CanonicalValue,
+    pub columns: Vec<BranchMergeColumnRestorePairedPathExtensionColumnFoldSnapshot>,
+}
+
+/// The occurrence state of one canonical snapshot path in a restore wave.
+///
+/// Column omission and path omission are separate states: `ColumnOmitted`
+/// means the stable column has no wave slot, while `PathOmitted` means the
+/// column is present but this path has no depth label in that wave.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum BranchMergeSnapshotPathOccurrence {
+    ColumnOmitted,
+    PathOmitted,
+    DepthLabels(Vec<usize>),
+}
+
+/// One typed occurrence slot for a canonical snapshot path in a restore wave.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BranchMergeColumnRestoreSnapshotPathOccurrenceWaveSnapshot {
+    pub order: u64,
+    pub occurrence: BranchMergeSnapshotPathOccurrence,
+}
+
+/// One storm of typed occurrence slots for a snapshot path and stable column.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BranchMergeColumnRestoreSnapshotPathOccurrenceStormSnapshot {
+    pub storm_index: usize,
+    pub first_order: u64,
+    pub last_order: u64,
+    pub waves: Vec<BranchMergeColumnRestoreSnapshotPathOccurrenceWaveSnapshot>,
+}
+
+/// One stable column's typed occurrence history for a paired path fold.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BranchMergeColumnRestorePairedSnapshotPathOccurrenceColumnFoldSnapshot {
+    pub column: ObjectId,
+    pub storms: Vec<BranchMergeColumnRestoreSnapshotPathOccurrenceStormSnapshot>,
+}
+
+/// A canonical snapshot path with typed omission states across paired columns.
+///
+/// The path identity remains attached to the fold even when every column
+/// omits it in a wave. Each stable column retains its independent storm and
+/// depth labels.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BranchMergeColumnRestorePairedSnapshotPathOccurrenceFoldSnapshot {
+    pub table: ObjectId,
+    pub snapshot_path: CanonicalValue,
+    pub columns: Vec<BranchMergeColumnRestorePairedSnapshotPathOccurrenceColumnFoldSnapshot>,
+}
 /// A canonical column cell released with its source parent identity intact.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BranchMergeParentColumnDepthEvent {
@@ -1920,6 +2006,177 @@ impl BranchMergeTombstoneHistory {
             })
             .collect()
     }
+
+    /// Pairs every strict slash-delimited text-key extension with its prefix
+    /// across all stable columns, storms, and restore waves.
+    ///
+    /// Both paths retain independent local depth-label lists in every wave.
+    /// A missing column stays `None` on both sides; when the column is present,
+    /// an absent prefix or extension is `Some(Vec::new())`. Only a canonical
+    /// text key beginning with the exact prefix plus `/` is considered an
+    /// extension, so `rooted` is not an extension of `root`. MERGE-1 specifies
+    /// merge identity but is silent about this paired extension projection;
+    /// v1 applies the relation only to this read-only view and never rewrites
+    /// row keys or aligns sibling columns' depth labels.
+    pub fn column_restore_paired_path_extension_folds(
+        &self,
+    ) -> Vec<BranchMergeColumnRestorePairedPathExtensionFoldSnapshot> {
+        let path_folds = self.column_restore_paired_snapshot_path_chain_folds();
+        let mut extension_folds = Vec::new();
+
+        for prefix_fold in &path_folds {
+            for extension_fold in &path_folds {
+                if prefix_fold.table != extension_fold.table {
+                    continue;
+                }
+                let is_extension = match (
+                    prefix_fold.snapshot_path.raw(),
+                    extension_fold.snapshot_path.raw(),
+                ) {
+                    (OvbRaw::Text(prefix), OvbRaw::Text(extension)) => extension
+                        .strip_prefix(prefix)
+                        .is_some_and(|suffix| suffix.starts_with('/') && suffix.len() > 1),
+                    _ => false,
+                };
+                if !is_extension {
+                    continue;
+                }
+
+                let columns = prefix_fold
+                    .columns
+                    .iter()
+                    .map(|prefix_column| {
+                        let extension_column = extension_fold
+                            .columns
+                            .iter()
+                            .find(|column| column.column == prefix_column.column)
+                            .expect("paired path folds share a table's stable column roster");
+                        debug_assert_eq!(
+                            prefix_column.storms.len(),
+                            extension_column.storms.len()
+                        );
+                        let storms = prefix_column
+                            .storms
+                            .iter()
+                            .zip(&extension_column.storms)
+                            .map(|(prefix_storm, extension_storm)| {
+                                debug_assert_eq!(
+                                    prefix_storm.storm_index,
+                                    extension_storm.storm_index
+                                );
+                                debug_assert_eq!(
+                                    prefix_storm.first_order,
+                                    extension_storm.first_order
+                                );
+                                debug_assert_eq!(
+                                    prefix_storm.last_order,
+                                    extension_storm.last_order
+                                );
+                                debug_assert_eq!(
+                                    prefix_storm.waves.len(),
+                                    extension_storm.waves.len()
+                                );
+                                let waves = prefix_storm
+                                    .waves
+                                    .iter()
+                                    .zip(&extension_storm.waves)
+                                    .map(|(prefix_wave, extension_wave)| {
+                                        debug_assert_eq!(prefix_wave.order, extension_wave.order);
+                                        BranchMergeColumnRestorePairedPathExtensionWaveSlotSnapshot {
+                                            order: prefix_wave.order,
+                                            prefix_depth_labels: prefix_wave.depth_labels.clone(),
+                                            extension_depth_labels: extension_wave
+                                                .depth_labels
+                                                .clone(),
+                                        }
+                                    })
+                                    .collect();
+                                BranchMergeColumnRestorePairedPathExtensionStormSnapshot {
+                                    storm_index: prefix_storm.storm_index,
+                                    first_order: prefix_storm.first_order,
+                                    last_order: prefix_storm.last_order,
+                                    waves,
+                                }
+                            })
+                            .collect();
+                        BranchMergeColumnRestorePairedPathExtensionColumnFoldSnapshot {
+                            column: prefix_column.column,
+                            storms,
+                        }
+                    })
+                    .collect();
+                extension_folds.push(BranchMergeColumnRestorePairedPathExtensionFoldSnapshot {
+                    table: prefix_fold.table,
+                    prefix_path: prefix_fold.snapshot_path.clone(),
+                    extension_path: extension_fold.snapshot_path.clone(),
+                    columns,
+                });
+            }
+        }
+
+        extension_folds
+    }
+
+    /// Folds each canonical snapshot path across paired stable columns with
+    /// an explicit state for every restore-wave slot.
+    ///
+    /// The path key remains on the fold when waves omit the column or the
+    /// path. Those cases become `ColumnOmitted` and `PathOmitted`, while an
+    /// observed path carries only its own local depth labels. MERGE-1 is
+    /// silent about this typed omission view; v1 derives it from the paired
+    /// path history without changing row identity or depth assignment.
+    pub fn column_restore_paired_snapshot_path_occurrence_folds(
+        &self,
+    ) -> Vec<BranchMergeColumnRestorePairedSnapshotPathOccurrenceFoldSnapshot> {
+        self.column_restore_paired_snapshot_path_chain_folds()
+            .into_iter()
+            .map(|fold| {
+                let columns = fold
+                    .columns
+                    .into_iter()
+                    .map(|column| {
+                        let storms = column
+                            .storms
+                            .into_iter()
+                            .map(|storm| {
+                                let waves = storm
+                                    .waves
+                                    .into_iter()
+                                    .map(|wave| {
+                                        let occurrence = match wave.depth_labels {
+                                            None => BranchMergeSnapshotPathOccurrence::ColumnOmitted,
+                                            Some(labels) if labels.is_empty() => BranchMergeSnapshotPathOccurrence::PathOmitted,
+                                            Some(labels) => BranchMergeSnapshotPathOccurrence::DepthLabels(labels),
+                                        };
+                                        BranchMergeColumnRestoreSnapshotPathOccurrenceWaveSnapshot {
+                                            order: wave.order,
+                                            occurrence,
+                                        }
+                                    })
+                                    .collect();
+                                BranchMergeColumnRestoreSnapshotPathOccurrenceStormSnapshot {
+                                    storm_index: storm.storm_index,
+                                    first_order: storm.first_order,
+                                    last_order: storm.last_order,
+                                    waves,
+                                }
+                            })
+                            .collect();
+                        BranchMergeColumnRestorePairedSnapshotPathOccurrenceColumnFoldSnapshot {
+                            column: column.column,
+                            storms,
+                        }
+                    })
+                    .collect();
+                BranchMergeColumnRestorePairedSnapshotPathOccurrenceFoldSnapshot {
+                    table: fold.table,
+                    snapshot_path: fold.snapshot_path,
+                    columns,
+                }
+            })
+            .collect()
+    }
+
     /// Submits a complete paired restore wave from at least two distinct
     /// parent branches. Each parent and stable table-column pair retains its
     /// own fragment count and cell retry identity. Parent provenance remains
