@@ -1190,6 +1190,67 @@ fn paired_divergence_convergence_projects() -> (TempDir, [LoadedProject; 5], [St
     )
 }
 
+fn paired_divergence_compaction_projects() -> (TempDir, [LoadedProject; 5], [String; 5]) {
+    let (directory, projects, pins) = divergent_paired_module_projects();
+    let [
+        base_project,
+        math_project,
+        collection_project,
+        paired_project,
+    ] = projects;
+    let project_path = directory.path().join("project");
+    let standard_path = project_path.join("stdlib/std");
+
+    // Model compaction by squashing the paired source edits onto their shared base pin.
+    git_output_at(&standard_path, &["checkout", "--detach", pins[0].as_str()]);
+    fs::write(
+        standard_path.join("math.orna"),
+        include_str!("fixtures/module-upgrade-std-v4.orna"),
+    )
+    .unwrap();
+    fs::write(
+        standard_path.join("collection.orna"),
+        include_str!("fixtures/module-upgrade-std-collection-v5.orna"),
+    )
+    .unwrap();
+    commit_directory(&standard_path, "compact paired module divergence fold");
+    let compacted_pin = git_output_at(&standard_path, &["rev-parse", "HEAD"]);
+    git_output_at(
+        &standard_path,
+        &["branch", "compacted-paired-pin", compacted_pin.as_str()],
+    );
+    let compacted_parent = capture_standard_gitlink(
+        &project_path,
+        &compacted_pin,
+        "capture compacted paired module divergence fold",
+    );
+
+    git_output_at(&standard_path, &["gc", "--prune=now"]);
+    git_output_at(&project_path, &["gc", "--prune=now"]);
+    let repository = Repository::discover(&project_path).unwrap();
+    let parent = repository.resolve_snapshot(&compacted_parent).unwrap();
+    let compacted_project = ProjectLoader::default()
+        .load_committed_snapshot(&repository, &parent)
+        .unwrap();
+    (
+        directory,
+        [
+            base_project,
+            math_project,
+            collection_project,
+            paired_project,
+            compacted_project,
+        ],
+        [
+            pins[0].clone(),
+            pins[1].clone(),
+            pins[2].clone(),
+            pins[3].clone(),
+            compacted_pin,
+        ],
+    )
+}
+
 fn paired_divergence_reanchoring_projects()
 -> (TempDir, [LoadedProject; 6], [String; 6], [String; 3]) {
     let (directory, projects, pins) = divergent_paired_module_projects();
@@ -3938,6 +3999,126 @@ fn captured_snapshot_identity_survives_paired_divergence_convergence_folds() {
             cloned_sessions[index].submit(replay),
             Ok(Some(ints(&expected[index]))),
             "cloned replay must preserve convergence history pin {}",
+            pins[index]
+        );
+    }
+}
+
+#[test]
+fn captured_snapshot_identity_survives_paired_divergence_compaction_folds() {
+    let (directory, projects, pins) = paired_divergence_compaction_projects();
+    let expected = [
+        [40, 4, 44, 40, 4, 44, 1_007, 1_008],
+        [50, 4, 54, 50, 4, 54, 10_007, 10_008],
+        [40, 5, 45, 40, 5, 45, 1_007, 1_008],
+        [50, 5, 55, 50, 5, 55, 10_007, 10_008],
+        [50, 5, 55, 50, 5, 55, 10_007, 10_008],
+    ];
+    let expected_math = [
+        include_str!("fixtures/module-upgrade-std-v3.orna"),
+        include_str!("fixtures/module-upgrade-std-v4.orna"),
+        include_str!("fixtures/module-upgrade-std-v3.orna"),
+        include_str!("fixtures/module-upgrade-std-v4.orna"),
+        include_str!("fixtures/module-upgrade-std-v4.orna"),
+    ];
+    let expected_collection = [
+        include_str!("fixtures/module-upgrade-std-collection-v4.orna"),
+        include_str!("fixtures/module-upgrade-std-collection-v4.orna"),
+        include_str!("fixtures/module-upgrade-std-collection-v5.orna"),
+        include_str!("fixtures/module-upgrade-std-collection-v5.orna"),
+        include_str!("fixtures/module-upgrade-std-collection-v5.orna"),
+    ];
+    let imports = include_str!("fixtures/module-upgrade-paired-divergence-use.orna");
+    let capture = include_str!("fixtures/module-upgrade-divergence-compaction-capture.orna");
+    let replay = include_str!("fixtures/module-upgrade-divergence-compaction-replay.orna");
+    let standard_path = directory.path().join("project/stdlib/std");
+
+    assert!(pins.windows(2).all(|pair| pair[0] != pair[1]));
+    assert_ne!(
+        pins[3], pins[4],
+        "squashed and stepwise paired folds have distinct snapshot identities"
+    );
+    let paired_tree = git_output_at(
+        &standard_path,
+        &["rev-parse", &format!("{}^{{tree}}", pins[3])],
+    );
+    let compacted_tree = git_output_at(
+        &standard_path,
+        &["rev-parse", &format!("{}^{{tree}}", pins[4])],
+    );
+    assert_eq!(
+        paired_tree, compacted_tree,
+        "compaction must preserve both paired module source bodies"
+    );
+    for (pin, expected_parent) in [
+        (pins[3].as_str(), pins[1].as_str()),
+        (pins[4].as_str(), pins[0].as_str()),
+    ] {
+        let ancestry = git_output_at(&standard_path, &["rev-list", "--parents", "-n", "1", pin]);
+        let ancestry = ancestry.split_whitespace().collect::<Vec<_>>();
+        assert_eq!(
+            ancestry.len(),
+            2,
+            "paired fold must be a single-parent commit"
+        );
+        assert_eq!(ancestry[1], expected_parent);
+    }
+    for pin in &pins {
+        assert_eq!(
+            git_output_at(&standard_path, &["rev-parse", pin.as_str()]),
+            *pin,
+            "git object compaction must preserve captured pin {pin}"
+        );
+    }
+
+    let mut sessions = Vec::with_capacity(projects.len());
+    for (index, project) in projects.iter().enumerate() {
+        assert_eq!(
+            project.standard_profile().unwrap().snapshot(),
+            &pins[index],
+            "compaction history {index} must retain its captured standard pin"
+        );
+        assert_eq!(
+            standard_source(project, "std/math.orna"),
+            expected_math[index]
+        );
+        assert_eq!(
+            standard_source(project, "std/collection.orna"),
+            expected_collection[index]
+        );
+        let mut session = AdmittedReplSession::from_loaded_project(
+            project,
+            project.standard_sources().iter().cloned(),
+            Limits::default(),
+        )
+        .unwrap();
+        for import in imports.lines() {
+            assert_eq!(session.submit(import), Ok(None));
+        }
+        assert_eq!(session.submit(capture), Ok(None));
+        assert_eq!(
+            session.submit(replay),
+            Ok(Some(ints(&expected[index]))),
+            "captured replay must compute from compacted history pin {}",
+            pins[index]
+        );
+        sessions.push(session);
+    }
+
+    for index in [4, 0, 3, 2, 1, 4, 3, 0, 2, 1] {
+        assert_eq!(
+            sessions[index].submit(replay),
+            Ok(Some(ints(&expected[index]))),
+            "interleaved replay must preserve compacted history pin {}",
+            pins[index]
+        );
+    }
+    let mut cloned_sessions = sessions.clone();
+    for index in [4, 2, 0, 3, 1] {
+        assert_eq!(
+            cloned_sessions[index].submit(replay),
+            Ok(Some(ints(&expected[index]))),
+            "cloned replay must preserve compacted history pin {}",
             pins[index]
         );
     }
