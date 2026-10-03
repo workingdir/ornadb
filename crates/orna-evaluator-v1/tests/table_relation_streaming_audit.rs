@@ -627,6 +627,8 @@ fn paired_view_cursor_scopes_rebind_across_three_page_refresh_handoffs() {
         "first paired fold computes the positive odd and even values over three pages"
     );
     assert_eq!(source.lanes.len(), 2);
+    assert_eq!(source.lanes[0].0, "View.Left");
+    assert_eq!(source.lanes[1].0, "View.Right");
     let first_left = source.lanes[0].1;
     let first_right = source.lanes[1].1;
     assert_ne!(first_left, first_right);
@@ -637,11 +639,31 @@ fn paired_view_cursor_scopes_rebind_across_three_page_refresh_handoffs() {
         "refreshed fold computes only its new positive even value"
     );
     assert_eq!(source.lanes.len(), 4);
+    assert_eq!(source.lanes[2].0, "View.Left");
+    assert_eq!(source.lanes[3].0, "View.Right");
     let refreshed_left = source.lanes[2].1;
     let refreshed_right = source.lanes[3].1;
     assert_ne!(refreshed_left, refreshed_right);
     assert_ne!(first_left, refreshed_left);
     assert_ne!(first_right, refreshed_right);
+    assert_eq!(
+        source.cursors,
+        vec![
+            ("View.Left".into(), first_left, None),
+            ("View.Left".into(), first_left, Some(vec![11])),
+            ("View.Left".into(), first_left, Some(vec![33])),
+            ("View.Right".into(), first_right, None),
+            ("View.Right".into(), first_right, Some(vec![11])),
+            ("View.Right".into(), first_right, Some(vec![44])),
+            ("View.Left".into(), refreshed_left, None),
+            ("View.Left".into(), refreshed_left, Some(vec![11])),
+            ("View.Left".into(), refreshed_left, Some(vec![55])),
+            ("View.Right".into(), refreshed_right, None),
+            ("View.Right".into(), refreshed_right, Some(vec![11])),
+            ("View.Right".into(), refreshed_right, Some(vec![66])),
+        ],
+        "each view advances within its own cursor scope and refresh begins both at the head"
+    );
 }
 
 fn paired_subscription_cascade_body() -> Expr {
