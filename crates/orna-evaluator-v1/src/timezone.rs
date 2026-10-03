@@ -312,9 +312,8 @@ fn is_leap_year(year: i32) -> bool {
 
 fn local_seconds(local: LocalDateTime) -> Result<i64, TimeZoneError> {
     let days = days_from_civil(local.year, local.month, local.day);
-    let day_seconds = i64::from(local.hour) * 3_600
-        + i64::from(local.minute) * 60
-        + i64::from(local.second);
+    let day_seconds =
+        i64::from(local.hour) * 3_600 + i64::from(local.minute) * 60 + i64::from(local.second);
     days.checked_mul(SECONDS_PER_DAY)
         .and_then(|seconds| seconds.checked_add(day_seconds))
         .ok_or(TimeZoneError::InvalidLocalDateTime)
@@ -383,7 +382,6 @@ fn civil_from_days(days: i64) -> Result<(i32, u8, u8), TimeZoneError> {
     let month = month_part + if month_part < 10 { 3 } else { -9 };
     year += i64::from(month <= 2);
     Ok((year as i32, month as u8, day as u8))
-
 }
 
 fn days_from_civil(year: i32, month: u8, day: u8) -> i64 {
@@ -395,9 +393,7 @@ fn days_from_civil(year: i32, month: u8, day: u8) -> i64 {
     };
     let year_of_era = year - era * 400;
     let month = i64::from(month);
-    let day_of_year = (153 * (month + if month > 2 { -3 } else { 9 }) + 2) / 5
-        + i64::from(day)
-        - 1;
+    let day_of_year = (153 * (month + if month > 2 { -3 } else { 9 }) + 2) / 5 + i64::from(day) - 1;
     let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
     era * 146_097 + day_of_era - 719_468
 }
