@@ -46,6 +46,27 @@ fn sys_filesystem_registry_dispatches_real_reads_writes_lists_and_denials() {
         ),
         Ok(Some(text_value("native-file-value")))
     );
+    std::fs::write(root.path().join("lines.txt"), "alpha\n\nomega\n").unwrap();
+    assert_eq!(
+        session.submit_with_sys_host_bindings(
+            &fixture_root(
+                &include_str!("fixtures/stdlib-io-fs-read-mpk0d.orna")
+                    .replace("read_text", "read_lines")
+                    .replace("input.txt", "lines.txt"),
+                root.path()
+            ),
+            &mut bindings,
+        ),
+        Ok(Some(
+            CanonicalValue::new(Raw::Array(vec![
+                Raw::Text("alpha".into()),
+                Raw::Text(String::new()),
+                Raw::Text("omega".into()),
+                Raw::Text(String::new()),
+            ]))
+            .unwrap()
+        ))
+    );
     assert_eq!(
         session.submit_with_sys_host_bindings(
             &fixture_root(
@@ -55,7 +76,11 @@ fn sys_filesystem_registry_dispatches_real_reads_writes_lists_and_denials() {
             &mut bindings,
         ),
         Ok(Some(
-            CanonicalValue::new(Raw::Array(vec![Raw::Text("input.txt".into())])).unwrap()
+            CanonicalValue::new(Raw::Array(vec![
+                Raw::Text("input.txt".into()),
+                Raw::Text("lines.txt".into()),
+            ]))
+            .unwrap()
         ))
     );
     let metadata = session
