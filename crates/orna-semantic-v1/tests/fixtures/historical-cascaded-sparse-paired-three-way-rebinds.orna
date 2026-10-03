@@ -1,0 +1,28 @@
+pub fn factory_at(pin: sys.SnapshotRef) =
+    sys.database.as_of(pin).energy.factory;
+
+pub fn accepts_cascaded_sparse_rebinds() {
+    let first = [
+        { pins: (factory_at(sys.snapshot("HEAD~6000")), factory_at(sys.snapshot("HEAD~6000"))), witness: factory_at(sys.snapshot("HEAD~6001")) },
+        { witness: factory_at(sys.snapshot("HEAD~6011")) },
+        { pins: (factory_at(sys.snapshot("HEAD~6020")), factory_at(sys.snapshot("HEAD~6020"))), witness: factory_at(sys.snapshot("HEAD~6021")) },
+    ];
+    let second = [
+        { witness: factory_at(sys.snapshot("HEAD~6101")) },
+        { pins: (factory_at(sys.snapshot("HEAD~6110")), factory_at(sys.snapshot("HEAD~6110"))), witness: factory_at(sys.snapshot("HEAD~6111")) },
+        { pins: (factory_at(sys.snapshot("HEAD~6130")), factory_at(sys.snapshot("HEAD~6130"))), witness: factory_at(sys.snapshot("HEAD~6131")) },
+    ];
+    let third = [
+        { pins: (factory_at(sys.snapshot("HEAD~6200")), factory_at(sys.snapshot("HEAD~6200"))), witness: factory_at(sys.snapshot("HEAD~6201")) },
+        { witness: factory_at(sys.snapshot("HEAD~6211")) },
+        { pins: (factory_at(sys.snapshot("HEAD~6220")), factory_at(sys.snapshot("HEAD~6220"))), witness: factory_at(sys.snapshot("HEAD~6221")) },
+    ];
+    let cascades = [
+        { previous: first, witness: factory_at(sys.snapshot("HEAD~6301")) },
+        { witness: factory_at(sys.snapshot("HEAD~6311")) },
+        { previous: second, witness: factory_at(sys.snapshot("HEAD~6321")) },
+        { witness: factory_at(sys.snapshot("HEAD~6331")) },
+        { previous: third, witness: factory_at(sys.snapshot("HEAD~6341")) },
+    ];
+    { cascades: cascades }
+}
