@@ -858,6 +858,53 @@ impl PackageResolver {
         Ok((route, page_transitions))
     }
 
+    /// Compacts retained history through paired handoff checkpoints. Each
+    /// fold keeps the two exact checkpoint snapshots in caller order, so a
+    /// checkpoint captured before compaction remains replayable while its
+    /// snapshot is retained. The reference does not define checkpoint-backed
+    /// attach-history compaction; v1 requires both checkpoints to belong to
+    /// this route and validates their identities after every fold.
+    pub fn compact_nested_terminal_pair_checkpoint_folds_preserving_terminal_identity(
+        &self,
+        previous: &ReboundPathResolution,
+        checkpoint_folds: &[[&ReboundPathCheckpoint; 2]],
+    ) -> Result<
+        (
+            ReboundPathResolution,
+            Vec<(NestedPairTerminalRouteIdentity, NestedPairTerminalRouteIdentity)>,
+        ),
+        AttachmentError,
+    > {
+        let mut route = previous.clone();
+        let mut transitions = Vec::with_capacity(checkpoint_folds.len());
+        for checkpoints in checkpoint_folds {
+            for checkpoint in checkpoints {
+                checkpoint.validate_depth_identity()?;
+                route.validate_depth_label(checkpoint.depth_label())?;
+            }
+            let labels = [
+                checkpoints[0].depth_label().clone(),
+                checkpoints[1].depth_label().clone(),
+            ];
+            let (compacted, fold_transitions) = self
+                .compact_nested_terminal_pair_history_folds_preserving_terminal_identity(
+                    &route,
+                    std::slice::from_ref(&labels),
+                )?;
+            route = compacted;
+            for checkpoint in checkpoints {
+                route.validate_depth_label(checkpoint.depth_label())?;
+            }
+            transitions.push(
+                fold_transitions
+                    .into_iter()
+                    .next()
+                    .ok_or(AttachmentError::RetainedSnapshotUnavailable)?,
+            );
+        }
+        Ok((route, transitions))
+    }
+
     /// Continues a terminal-pair chain from an exact retained session. The
     /// first pair uses that session as its handoff root; later pairs continue
     /// from the preceding pair's newest handoff. The reference does not define
