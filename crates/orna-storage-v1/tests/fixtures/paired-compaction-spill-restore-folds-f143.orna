@@ -1,0 +1,25 @@
+{ id: "f143/restore-fold/main", name: "f143/left/fold-main", city: "f143/right/fold-main", }
+
+{ id: "f143/restore-fold/retry", name: "f143/left/fold-retry", city: "f143/right/fold-retry", }
+
+{ id: "f143/spill/reused", name: "f143/checkpoint/alpha", city: "f143/source/main", }
+
+{ id: "f143/spill/reused", name: "f143/checkpoint/alpha", city: "f143/source/peer", }
+
+{ id: "f143/spill/beta", name: "f143/checkpoint/beta", city: "f143/source/beta", }
+
+{ id: "f143/source-pair/main", name: "f143/source-checkpoint/main-left", city: "f143/source-checkpoint/main-right", }
+
+{ id: "f143/source-pair/retry", name: "f143/source-checkpoint/retry-left", city: "f143/source-checkpoint/retry-right", }
+
+{ id: "f143/segment/main-10", name: "f143/left/main-10", city: "f143/right/main-10", }
+
+{ id: "f143/segment/main-11", name: "f143/left/main-11", city: "f143/right/main-11", }
+
+{ id: "f143/segment/peer-10", name: "f143/left/peer-10", city: "f143/right/peer-10", }
+
+{ id: "f143/segment/retry-10", name: "f143/left/retry-10", city: "f143/right/retry-10", }
+
+{ id: "f143/segment/right-only-12", name: "f143/left/right-only-12", city: "f143/right/right-only-12", }
+
+{ id: "f143/segment/beta-6", name: "f143/left/beta-6", city: "f143/right/beta-6", }
