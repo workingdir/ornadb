@@ -10129,24 +10129,41 @@ impl Context<'_, '_> {
         step: &BigInt,
         statistic: &str,
     ) -> Result<Value, EvaluationError> {
-        // These loops keep long sparse series and their output windows within
-        // the evaluator's bounded step/depth model without recursive source calls.
-        let Value::List(windows) = self.windows(points, size, step)? else {
-            return Err(error("ORNA-EVAL-VALUE"));
-        };
-        let mut results = Vec::with_capacity(windows.len());
-        for window in windows {
+        // Visit complete windows in source order and discard each temporary
+        // window after computing its statistic. This keeps sparse timestamp
+        // order attached to each result without retaining every overlapping
+        // window at once.
+        self.items(points.len())?;
+        let size = self.positive_collection_size(size)?;
+        let step = self.positive_collection_size(step)?;
+        if size > points.len() {
+            return Ok(Value::List(Vec::new()));
+        }
+        for _ in points {
             self.step()?;
-            let Value::List(points) = window else {
-                return Err(error("ORNA-EVAL-VALUE"));
-            };
-            let result = self.stats(statistic, vec![Value::List(points)])?;
+        }
+
+        let last_start = points.len() - size;
+        let mut start = 0usize;
+        let mut results = Vec::new();
+        while start <= last_start {
+            let end = start + size;
+            let window = points[start..end].to_vec();
+            self.items(window.len())?;
+            self.step()?;
+            self.step()?;
+            let result = self.stats(statistic, vec![Value::List(window)])?;
             results.push(if matches!(statistic, "rate" | "integrate") {
                 Value::Option(Some(Box::new(result)))
             } else {
                 result
             });
             self.items(results.len())?;
+
+            let Some(next) = start.checked_add(step) else {
+                break;
+            };
+            start = next;
         }
         Ok(Value::List(results))
     }
