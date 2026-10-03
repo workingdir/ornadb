@@ -1467,6 +1467,111 @@ fn module_chain_upgrade_projects() -> (
     )
 }
 
+fn module_chain_sources(leaf: &str) -> Vec<(String, String)> {
+    [
+        (
+            "std/main.orna",
+            include_str!("fixtures/module-chain-std-main.orna"),
+        ),
+        (
+            "std/math.orna",
+            include_str!("fixtures/module-chain-std-math-v1.orna"),
+        ),
+        (
+            "std/collection.orna",
+            include_str!("fixtures/module-chain-std-collection-v1.orna"),
+        ),
+        (
+            "std/chain/entry.orna",
+            include_str!("fixtures/module-chain-std-entry-v1.orna"),
+        ),
+        (
+            "std/chain/bridge.orna",
+            include_str!("fixtures/module-chain-std-bridge-v1.orna"),
+        ),
+        ("std/chain/leaf.orna", leaf),
+    ]
+    .into_iter()
+    .map(|(path, source)| (path.to_owned(), source.to_owned()))
+    .collect()
+}
+
+fn module_chain_repin_projects() -> (
+    TempDir,
+    Vec<LoadedProject>,
+    [String; 3],
+    [Vec<(String, String)>; 3],
+) {
+    let (directory, project_path, standard_path) = module_chain_repository();
+    fs::write(
+        project_path.join("main.orna"),
+        include_str!("fixtures/module-chain-repin-project.orna"),
+    )
+    .unwrap();
+    let leaves = [
+        include_str!("fixtures/module-chain-std-leaf-v1.orna"),
+        include_str!("fixtures/module-chain-std-leaf-repin-v2.orna"),
+        include_str!("fixtures/module-chain-std-leaf-repin-v3.orna"),
+    ];
+    let source_bundles = leaves.map(module_chain_sources);
+    let mut snapshots = Vec::with_capacity(3);
+    let mut parent_snapshots = Vec::with_capacity(3);
+
+    for (index, leaf) in leaves.iter().enumerate() {
+        write_module_chain_version(
+            &standard_path,
+            include_str!("fixtures/module-chain-std-math-v1.orna"),
+            include_str!("fixtures/module-chain-std-collection-v1.orna"),
+            include_str!("fixtures/module-chain-std-entry-v1.orna"),
+            include_str!("fixtures/module-chain-std-bridge-v1.orna"),
+            leaf,
+        );
+        commit_directory(&standard_path, &format!("repin stable module chain {}", index + 1));
+        let standard_snapshot = git_output_at(&standard_path, &["rev-parse", "HEAD"]);
+        parent_snapshots.push(capture_standard_gitlink(
+            &project_path,
+            &standard_snapshot,
+            &format!("capture stable module repin {}", index + 1),
+        ));
+        snapshots.push(standard_snapshot);
+    }
+
+    let repository = Repository::discover(&project_path).unwrap();
+    let loader = ProjectLoader::default();
+    let projects = parent_snapshots
+        .iter()
+        .zip(&snapshots)
+        .zip(&source_bundles)
+        .map(|((parent_snapshot, standard_snapshot), sources)| {
+            let parent_snapshot = repository.resolve_snapshot(parent_snapshot).unwrap();
+            assert_eq!(
+                repository
+                    .committed_submodule_commit(&parent_snapshot, "stdlib/std")
+                    .unwrap()
+                    .as_str(),
+                standard_snapshot
+            );
+            let profile =
+                StandardDependencyProfile::from_sources(standard_snapshot.clone(), sources.clone())
+                    .unwrap();
+            loader
+                .load_committed_snapshot_with_standard_profile(
+                    &repository,
+                    &parent_snapshot,
+                    Some(profile),
+                )
+                .unwrap()
+        })
+        .collect();
+
+    (
+        directory,
+        projects,
+        [snapshots.remove(0), snapshots.remove(0), snapshots.remove(0)],
+        source_bundles,
+    )
+}
+
 fn incremental_transitive_upgrade_projects() -> (TempDir, Vec<LoadedProject>, Vec<String>) {
     let (directory, project_path, standard_path) = module_chain_repository();
     write_module_chain_version(
@@ -3057,5 +3162,75 @@ fn dependency_graph_upgrade_programs_compute_values_from_each_pinned_snapshot() 
                 upgrade + 1
             );
         }
+    }
+}
+
+#[test]
+fn replay_results_are_stable_across_semantics_preserving_module_repins() {
+    let (_directory, projects, snapshots, source_bundles) = module_chain_repin_projects();
+    let leaf_sources = [
+        include_str!("fixtures/module-chain-std-leaf-v1.orna"),
+        include_str!("fixtures/module-chain-std-leaf-repin-v2.orna"),
+        include_str!("fixtures/module-chain-std-leaf-repin-v3.orna"),
+    ];
+    let expected_body =
+        "pub fn finish(value: Int): Int = std.math.shift(value + std.collection.marker() + 3);";
+    assert!(snapshots.windows(2).all(|pair| pair[0] != pair[1]));
+    let mut retained_sessions = Vec::with_capacity(projects.len());
+
+    for (((project, snapshot), sources), expected_leaf) in projects
+        .iter()
+        .zip(&snapshots)
+        .zip(&source_bundles)
+        .zip(leaf_sources)
+    {
+        assert_eq!(project.standard_profile().unwrap().snapshot(), snapshot);
+        let pinned_leaf = sources
+            .iter()
+            .find(|(path, _)| path == "std/chain/leaf.orna")
+            .unwrap()
+            .1
+            .as_str();
+        assert_eq!(pinned_leaf, expected_leaf);
+        assert!(pinned_leaf.lines().any(|line| line == expected_body));
+
+        let mut session = AdmittedReplSession::from_loaded_project(
+            project,
+            sources.clone(),
+            Limits::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            session.submit(include_str!("fixtures/module-chain-repin-use.orna")),
+            Ok(None)
+        );
+        let output = session
+            .submit(include_str!("fixtures/module-chain-repin-call.orna"))
+            .unwrap_or_else(|error| {
+                panic!(
+                    "snapshot {snapshot} failed to compute the stable replay value: {}",
+                    error.code()
+                )
+            });
+        assert_eq!(output, Some(int(20)));
+        retained_sessions.push(session);
+    }
+
+    let replay = include_str!("fixtures/module-chain-repin-call.orna");
+    for (index, session) in retained_sessions.iter_mut().enumerate() {
+        assert_eq!(
+            session.submit(replay),
+            Ok(Some(int(20))),
+            "retained session {index} must keep its behavior after later repins"
+        );
+    }
+
+    let mut cloned_replays = retained_sessions.iter().cloned().collect::<Vec<_>>();
+    for index in (0..cloned_replays.len()).rev() {
+        assert_eq!(
+            cloned_replays[index].submit(replay),
+            Ok(Some(int(20))),
+            "cloned session {index} must replay deterministically in reverse pin order"
+        );
     }
 }
