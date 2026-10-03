@@ -2533,15 +2533,21 @@ fn sparse_nested_storm_folds_preserve_terminal_route_identity() {
     );
     let chained_terminal_identity = chained_sparse_fold.terminal_route_identity();
     let empty_replacement_waves: [[PinnedDatabase; 2]; 0] = [];
+    let paired_none_omission = [(&outer_label, None), (&nested_label, None)];
     let paired_omission_tail = [
         (&outer_label, Some(empty_replacement_waves.as_slice())),
         (&nested_label, None),
     ];
+    let first_omission_tail_chain = [paired_none_omission.as_slice()];
     let omission_tail_chain = [paired_omission_tail.as_slice()];
-    let omission_tail_chains = [omission_tail_chain.as_slice()];
+    let omission_tail_chains = [
+        first_omission_tail_chain.as_slice(),
+        omission_tail_chain.as_slice(),
+    ];
     let chained_after_omissions = resolver
-        .extend_nested_terminal_pair_sparse_checkpoint_storm_chains_from_depth_labels(
+        .extend_nested_terminal_pair_sparse_checkpoint_storm_chains_preserving_terminal_identity(
             &chained_sparse_fold,
+            &chained_terminal_identity,
             &omission_tail_chains,
         )
         .unwrap();
@@ -2658,6 +2664,15 @@ fn sparse_nested_storm_folds_preserve_terminal_route_identity() {
     assert_ne!(terminal_identity, independent_identity);
     assert!(matches!(
         after_omissions.validate_terminal_route_identity(&independent_identity),
+        Err(AttachmentError::RetainedSnapshotUnavailable)
+    ));
+    assert!(matches!(
+        resolver
+            .extend_nested_terminal_pair_sparse_checkpoint_storm_chains_preserving_terminal_identity(
+                &chained_sparse_fold,
+                &independent_identity,
+                &omission_tail_chains,
+            ),
         Err(AttachmentError::RetainedSnapshotUnavailable)
     ));
 
