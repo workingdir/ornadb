@@ -275,6 +275,18 @@ fn int(value: i64) -> CanonicalValue {
     CanonicalValue::new(Value::int(value.into()).raw().clone()).unwrap()
 }
 
+fn base64_padding_matrix_value() -> CanonicalValue {
+    CanonicalValue::new(Raw::Array(vec![
+        Raw::Bytes(Vec::new()),
+        Raw::Bytes(vec![0]),
+        Raw::Bytes(vec![0, 1]),
+        Raw::Bytes(vec![0, 1, 2]),
+        Raw::Bytes(vec![255]),
+        Raw::Bytes(vec![255, 238]),
+    ]))
+    .unwrap()
+}
+
 #[test]
 fn captured_codec_snapshots_replay_real_base64_values_without_retargeting() {
     let (_directory, project_v1, project_v2, snapshots) = host_codec_snapshot_projects();
@@ -408,6 +420,85 @@ fn captured_codec_snapshots_feed_real_process_stdin_after_interleaved_upgrade() 
     assert_process_value(&mut historical);
     assert_process_value(&mut upgraded);
     assert_process_value(&mut historical);
+}
+
+#[test]
+fn captured_codec_snapshots_retain_rfc4648_padding_values() {
+    let (_directory, project_v1, project_v2, snapshots) = host_codec_snapshot_projects();
+    let sources_v1 =
+        host_codec_standard_sources(include_str!("fixtures/snapshot-host-codec-base64-v1.orna"));
+    let sources_v2 =
+        host_codec_standard_sources(include_str!("fixtures/snapshot-host-codec-base64-v2.orna"));
+    let mut historical =
+        AdmittedReplSession::from_loaded_project(&project_v1, sources_v1, Limits::default())
+            .unwrap();
+    let mut upgraded =
+        AdmittedReplSession::from_loaded_project(&project_v2, sources_v2, Limits::default())
+            .unwrap();
+    assert_ne!(snapshots[0], snapshots[1]);
+    assert_eq!(
+        historical.submit(include_str!(
+            "fixtures/snapshot-host-codec-base64-padding-matrix.orna"
+        )),
+        Ok(Some(base64_padding_matrix_value()))
+    );
+    assert_eq!(
+        upgraded.submit(include_str!(
+            "fixtures/snapshot-host-codec-base64-padding-matrix.orna"
+        )),
+        Ok(Some(base64_padding_matrix_value()))
+    );
+}
+
+#[test]
+fn captured_codec_snapshots_reject_noncanonical_base64_without_losing_the_pin() {
+    let (_directory, project_v1, project_v2, snapshots) = host_codec_snapshot_projects();
+    let sources_v1 =
+        host_codec_standard_sources(include_str!("fixtures/snapshot-host-codec-base64-v1.orna"));
+    let sources_v2 =
+        host_codec_standard_sources(include_str!("fixtures/snapshot-host-codec-base64-v2.orna"));
+    let mut historical =
+        AdmittedReplSession::from_loaded_project(&project_v1, sources_v1, Limits::default())
+            .unwrap();
+    let mut upgraded =
+        AdmittedReplSession::from_loaded_project(&project_v2, sources_v2, Limits::default())
+            .unwrap();
+    assert_ne!(snapshots[0], snapshots[1]);
+
+    // RFC 4648 section 9's standard profile rejects malformed padding,
+    // nonstandard alphabets, whitespace, and nonzero unused tail bits. Keep
+    // these error assertions pinned to both captured dependency snapshots.
+    for (session, snapshot, marker) in [
+        (&mut historical, &snapshots[0], 1),
+        (&mut upgraded, &snapshots[1], 2),
+    ] {
+        assert_eq!(
+            session
+                .submit(include_str!("fixtures/snapshot-host-codec-tagged.orna"))
+                .unwrap()
+                .unwrap(),
+            CanonicalValue::new(Raw::Array(vec![
+                Raw::Int(marker.into()),
+                Raw::Text("AP8AQQ==".to_owned()),
+            ]))
+            .unwrap()
+        );
+        for invalid in ["A===", "AAA", "-w==", "AA==\n", "AA=A", "AB==", "AAB="] {
+            let source = include_str!("fixtures/snapshot-host-codec-decode-probe.orna")
+                .replace("__BASE64_INPUT__", &format!("{invalid:?}"));
+            assert_eq!(
+                session.submit(&source).unwrap_err().code(),
+                "ORNA-EVAL-VALUE",
+                "snapshot {snapshot} must reject noncanonical Base64 {invalid:?}"
+            );
+        }
+        assert_eq!(
+            session.submit(include_str!(
+                "fixtures/snapshot-host-codec-base64-padding-matrix.orna"
+            )),
+            Ok(Some(base64_padding_matrix_value()))
+        );
+    }
 }
 
 fn capture_standard_gitlink(project_path: &Path, standard_snapshot: &str, message: &str) -> String {
