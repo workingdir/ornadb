@@ -1,0 +1,37 @@
+pub fn factory_at(pin: sys.SnapshotRef) =
+    sys.database.as_of(pin).energy.factory;
+
+pub fn nested_checkpoint_at(root_pin: sys.SnapshotRef) =
+    (leaf_pin: sys.SnapshotRef) => {
+        root: factory_at(root_pin),
+        leaf: factory_at(leaf_pin),
+    };
+
+pub fn paired_checkpoint_at(left_pin: sys.SnapshotRef, right_pin: sys.SnapshotRef) =
+    (nested_checkpoint_at(left_pin), nested_checkpoint_at(right_pin));
+
+pub fn paired_checkpoint_reset_replay_values() {
+    let saved = paired_checkpoint_at(sys.snapshot("HEAD~950"), sys.snapshot("HEAD~930"));
+    let rolling = saved;
+    rolling = paired_checkpoint_at(sys.snapshot("HEAD~947"), sys.snapshot("HEAD~927"));
+    rolling = paired_checkpoint_at(sys.snapshot("HEAD~945"), sys.snapshot("HEAD~925"));
+    let folded_checkpoint = rolling;
+
+    rolling = paired_checkpoint_at(sys.snapshot("HEAD~940"), sys.snapshot("HEAD~920"));
+    rolling = paired_checkpoint_at(sys.snapshot("HEAD~935"), sys.snapshot("HEAD~915"));
+    rolling = folded_checkpoint;
+    let restored_folded = rolling;
+    rolling = saved;
+    let restored = rolling;
+
+    let (folded_left, folded_right) = restored_folded;
+    let (restored_left, restored_right) = restored;
+    {
+        folded_left: folded_left(sys.snapshot("HEAD~850")),
+        folded_right: folded_right(sys.snapshot("HEAD~830")),
+        restored_folded_left: folded_left(sys.snapshot("HEAD~845")),
+        restored_folded_right: folded_right(sys.snapshot("HEAD~825")),
+        restored_left: restored_left(sys.snapshot("HEAD~840")),
+        restored_right: restored_right(sys.snapshot("HEAD~820")),
+    }
+}
