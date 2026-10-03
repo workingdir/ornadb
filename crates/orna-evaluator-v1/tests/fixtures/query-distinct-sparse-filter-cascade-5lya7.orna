@@ -1,0 +1,28 @@
+[
+    union(
+        sys.Storage | filter(value => value >= 0),
+        sys.MaintenanceJob | filter(value => value >= 0)
+    )
+        | filter(value => value > 1)
+        | filter(value => value < 6)
+        | distinct()
+        | count(),
+    union(
+        sys.Storage | filter(value => value >= 0),
+        sys.MaintenanceJob | filter(value => value >= 0)
+    )
+        | filter(value => value > 1)
+        | filter(value => value < 6)
+        | distinct()
+        | pairs()
+        | first(),
+    union(
+        sys.Storage | filter(value => value >= 0),
+        sys.MaintenanceJob | filter(value => value >= 0)
+    )
+        | filter(value => value > 1)
+        | filter(value => value < 6)
+        | distinct()
+        | drop(2)
+        | first()
+]
