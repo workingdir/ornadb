@@ -27103,6 +27103,26 @@ fn snapshot_path_chain_folds_keep_depth_labels_across_restore_storms() {
             storms,
         }
     };
+    let paired_wave_slot = |order, depth_labels| {
+        BranchMergeColumnRestoreStormSnapshotPathWaveSlotSnapshot {
+            order,
+            depth_labels,
+        }
+    };
+    let paired_storm = |storm_index, first_order, last_order, waves| {
+        BranchMergeColumnRestoreSnapshotPathStormSnapshot {
+            storm_index,
+            first_order,
+            last_order,
+            waves,
+        }
+    };
+    let paired_column = |column, storms| {
+        BranchMergeColumnRestorePairedSnapshotPathColumnFoldSnapshot {
+            column: id(column),
+            storms,
+        }
+    };
 
     let mut history = BranchMergeTombstoneHistory::new(0);
     assert!(history.submit(&empty_plan(0)).unwrap().is_empty());
@@ -27193,6 +27213,80 @@ fn snapshot_path_chain_folds_keep_depth_labels_across_restore_storms() {
             ),
         ],
         "one canonical path remains attached to each column through three folds while labels restart locally and omissions remain distinct",
+    );
+
+    let paired_root_folds = history
+        .column_restore_paired_snapshot_path_chain_folds()
+        .into_iter()
+        .filter(|fold| fold.snapshot_path == root.key)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        paired_root_folds,
+        vec![BranchMergeColumnRestorePairedSnapshotPathChainFoldSnapshot {
+            table: id(1),
+            snapshot_path: root.key.clone(),
+            columns: vec![
+                paired_column(
+                    2,
+                    vec![
+                        paired_storm(
+                            0,
+                            1,
+                            2,
+                            vec![
+                                paired_wave_slot(1, Some(vec![0])),
+                                paired_wave_slot(2, Some(Vec::new())),
+                            ],
+                        ),
+                        paired_storm(
+                            1,
+                            4,
+                            5,
+                            vec![
+                                paired_wave_slot(4, Some(Vec::new())),
+                                paired_wave_slot(5, Some(Vec::new())),
+                            ],
+                        ),
+                        paired_storm(
+                            2,
+                            7,
+                            8,
+                            vec![
+                                paired_wave_slot(7, Some(vec![1])),
+                                paired_wave_slot(8, Some(Vec::new())),
+                            ],
+                        ),
+                    ],
+                ),
+                paired_column(
+                    3,
+                    vec![
+                        paired_storm(
+                            0,
+                            1,
+                            2,
+                            vec![paired_wave_slot(1, Some(vec![0])), paired_wave_slot(2, None)],
+                        ),
+                        paired_storm(
+                            1,
+                            4,
+                            5,
+                            vec![paired_wave_slot(4, None), paired_wave_slot(5, None)],
+                        ),
+                        paired_storm(
+                            2,
+                            7,
+                            8,
+                            vec![
+                                paired_wave_slot(7, Some(vec![0])),
+                                paired_wave_slot(8, Some(Vec::new())),
+                            ],
+                        ),
+                    ],
+                ),
+            ],
+        }],
+        "the paired fold shares the fixture path while preserving each sibling column's distinct omission and local depth labels",
     );
 }
 
