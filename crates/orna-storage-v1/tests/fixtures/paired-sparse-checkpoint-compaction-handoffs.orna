@@ -1,0 +1,9 @@
+{ id: "source-stream/alpha-0", name: "checkpoint-alpha", city: "chain-a" }
+
+{ id: "source-stream/alpha-1", name: "checkpoint-alpha", city: "chain-duplicate" }
+
+{ id: "source-stream/beta", name: "checkpoint-beta", city: "chain-beta" }
+
+{ id: "source-stream/catalog", name: "checkpoint-catalog", city: "catalog-only" }
+
+{ id: "source-stream/late", name: "checkpoint-late", city: "late-observation" }
