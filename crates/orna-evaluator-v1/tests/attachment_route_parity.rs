@@ -2849,6 +2849,128 @@ fn sparse_nested_storm_folds_preserve_terminal_route_identity() {
         leaf_final,
         "identity-edge validation preserves the exact final nested package value"
     );
+    let first_rebind_cascade = [
+        first_sparse_chain.as_slice(),
+        middle_rebind_chain.as_slice(),
+    ];
+    let restoring_rebind_cascade = [first_sparse_chain.as_slice()];
+    let paired_rebind_cascades = [
+        first_rebind_cascade.as_slice(),
+        restoring_rebind_cascade.as_slice(),
+    ];
+    let expected_cascade_identity_transitions = [
+        (
+            first_stage.terminal_route_identity(),
+            middle_chain_identity.clone(),
+        ),
+        (
+            middle_chain_identity.clone(),
+            restored_chain_identity.clone(),
+        ),
+    ];
+    let (cascade_fold, observed_cascade_transitions) = resolver
+        .extend_nested_terminal_pair_sparse_checkpoint_storm_rebind_cascades_validating_terminal_identity_transitions(
+            &first_stage,
+            &paired_rebind_cascades,
+            &expected_cascade_identity_transitions,
+        )
+        .unwrap();
+    assert_eq!(
+        observed_cascade_transitions,
+        expected_cascade_identity_transitions,
+        "each multi-chain rebind cascade validates and reports its exact paired terminal identity edge"
+    );
+    assert_eq!(
+        cascade_fold.terminal_route_identity(),
+        restored_chain_identity,
+        "the final cascaded route retains the restored identity"
+    );
+    assert_eq!(
+        cascade_fold
+            .final_session()
+            .database(aliases[4])
+            .unwrap()
+            .pin()
+            .commit()
+            .as_str(),
+        leaf_final,
+        "the cascaded identity proof reaches the concrete final package pin"
+    );
+    let stale_cascade_transitions = [
+        expected_cascade_identity_transitions[0].clone(),
+        (middle_chain_identity.clone(), middle_chain_identity.clone()),
+    ];
+    assert!(matches!(
+        resolver
+            .extend_nested_terminal_pair_sparse_checkpoint_storm_rebind_cascades_validating_terminal_identity_transitions(
+                &first_stage,
+                &paired_rebind_cascades,
+                &stale_cascade_transitions,
+            ),
+        Err(AttachmentError::RetainedSnapshotUnavailable)
+    ));
+    let paired_omission_segment_chain = [
+        paired_none_omission.as_slice(),
+        paired_omission_tail.as_slice(),
+    ];
+    let paired_omission_segments = [
+        paired_omission_segment_chain.as_slice(),
+        paired_omission_segment_chain.as_slice(),
+        paired_omission_segment_chain.as_slice(),
+    ];
+    let (paired_terminal_omission_fold, segment_identity_transitions) = resolver
+        .extend_nested_terminal_pair_sparse_checkpoint_storm_rebind_omission_segments_capturing_terminal_identity_transitions(
+            &first_stage,
+            &paired_rebind_chains,
+            &paired_omission_segments,
+        )
+        .unwrap();
+    assert_eq!(
+        segment_identity_transitions,
+        vec![
+            (
+                first_stage.terminal_route_identity(),
+                first_chain_identity.clone(),
+                first_chain_identity.clone(),
+            ),
+            (
+                first_chain_identity.clone(),
+                middle_chain_identity.clone(),
+                middle_chain_identity.clone(),
+            ),
+            (
+                middle_chain_identity.clone(),
+                restored_chain_identity.clone(),
+                restored_chain_identity.clone(),
+            ),
+        ],
+        "each rebind transition may change identity while its paired omission keeps that exact identity"
+    );
+    assert_eq!(
+        paired_terminal_omission_fold.terminal_route_identity(),
+        restored_chain_identity,
+        "the paired terminal omission fold returns the final rebound identity"
+    );
+    assert_eq!(
+        paired_terminal_omission_fold
+            .final_session()
+            .database(aliases[4])
+            .unwrap()
+            .pin()
+            .commit()
+            .as_str(),
+        leaf_final,
+        "the final audited segment retains its concrete terminal package pin"
+    );
+    assert!(matches!(
+        resolver
+            .extend_nested_terminal_pair_sparse_checkpoint_storm_rebind_omission_segments_capturing_terminal_identity_transitions(
+                &first_stage,
+                &first_only_rebind_chains,
+                &[invalid_omission_chain.as_slice()],
+            ),
+        Err(AttachmentError::RetainedSnapshotUnavailable)
+    ));
     let stale_identity_transitions = [
         expected_identity_transitions[0].clone(),
         (middle_chain_identity.clone(), middle_chain_identity.clone()),

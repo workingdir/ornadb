@@ -1363,6 +1363,45 @@ impl PackageResolver {
         }
         Ok(route)
     }
+
+    /// Applies nested terminal-pair rebind cascades, where each cascade may
+    /// contain several sparse rebind chains, and validates the exact identity
+    /// before and after every cascade. The reference is silent on grouped
+    /// cascade boundaries; v1 rejects a stale edge before a later cascade can
+    /// restore its terminal pins and returns no partial transition history.
+    pub fn extend_nested_terminal_pair_sparse_checkpoint_storm_rebind_cascades_validating_terminal_identity_transitions(
+        &self,
+        previous: &ReboundPathResolution,
+        rebind_cascades: &[&[&[&[(&NestedPairDepthLabel, Option<&[[PinnedDatabase; 2]]>)]]]],
+        expected_transitions: &[(NestedPairTerminalRouteIdentity, NestedPairTerminalRouteIdentity)],
+    ) -> Result<(
+        ReboundPathResolution,
+        Vec<(NestedPairTerminalRouteIdentity, NestedPairTerminalRouteIdentity)>,
+    ), AttachmentError> {
+        if rebind_cascades.len() != expected_transitions.len() {
+            return Err(AttachmentError::RetainedSnapshotUnavailable);
+        }
+
+        let mut route = previous.clone();
+        let mut transitions = Vec::with_capacity(rebind_cascades.len());
+        for (cascade, (expected_before, expected_after)) in
+            rebind_cascades.iter().zip(expected_transitions)
+        {
+            let before = route.terminal_route_identity();
+            route.validate_terminal_route_identity(expected_before)?;
+            route = self
+                .extend_nested_terminal_pair_sparse_checkpoint_storm_chains_from_depth_labels(
+                    &route,
+                    *cascade,
+                )?;
+            route.validate_terminal_route_identity(expected_after)?;
+            let after = route.terminal_route_identity();
+            transitions.push((before, after));
+        }
+
+        Ok((route, transitions))
+    }
+
     /// Applies paired rebinding and omission chains as consecutive terminal
     /// route segments. Each omission chain must preserve the terminal identity
     /// computed by its preceding rebind chain. Returns the final route and the
@@ -1497,6 +1536,60 @@ impl PackageResolver {
             route.validate_terminal_route_identity(expected_rebound_terminal_identity)?;
             let after = route.terminal_route_identity();
             transitions.push((before, after));
+        }
+
+        Ok((route, transitions))
+    }
+
+    /// Applies paired rebind/omission segments and captures the terminal
+    /// identity before rebind, after rebind, and after its paired omission
+    /// fold. Omission segments reject active replacement waves and must retain
+    /// the identity produced by their rebind. The reference is silent on this
+    /// three-boundary audit; v1 returns no partial transition history on error.
+    pub fn extend_nested_terminal_pair_sparse_checkpoint_storm_rebind_omission_segments_capturing_terminal_identity_transitions(
+        &self,
+        previous: &ReboundPathResolution,
+        rebind_chains: &[&[&[(&NestedPairDepthLabel, Option<&[[PinnedDatabase; 2]]>)]]],
+        omission_chains: &[&[&[(&NestedPairDepthLabel, Option<&[[PinnedDatabase; 2]]>)]]],
+    ) -> Result<(
+        ReboundPathResolution,
+        Vec<(
+            NestedPairTerminalRouteIdentity,
+            NestedPairTerminalRouteIdentity,
+            NestedPairTerminalRouteIdentity,
+        )>,
+    ), AttachmentError> {
+        if rebind_chains.len() != omission_chains.len() {
+            return Err(AttachmentError::RetainedSnapshotUnavailable);
+        }
+        for chain in omission_chains {
+            for round in *chain {
+                if round.iter().any(|(_, replacements)| {
+                    matches!(replacements, Some(waves) if !waves.is_empty())
+                }) {
+                    return Err(AttachmentError::RetainedSnapshotUnavailable);
+                }
+            }
+        }
+
+        let mut route = previous.clone();
+        let mut transitions = Vec::with_capacity(rebind_chains.len());
+        for (rebind_chain, omission_chain) in rebind_chains.iter().zip(omission_chains) {
+            let before_rebind = route.terminal_route_identity();
+            route = self
+                .extend_nested_terminal_pair_sparse_checkpoint_storm_chains_from_depth_labels(
+                    &route,
+                    &[*rebind_chain],
+                )?;
+            let after_rebind = route.terminal_route_identity();
+            route = self
+                .extend_nested_terminal_pair_sparse_checkpoint_storm_chains_preserving_terminal_identity(
+                    &route,
+                    &after_rebind,
+                    &[*omission_chain],
+                )?;
+            let after_omission = route.terminal_route_identity();
+            transitions.push((before_rebind, after_rebind, after_omission));
         }
 
         Ok((route, transitions))
