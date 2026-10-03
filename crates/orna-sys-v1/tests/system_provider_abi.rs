@@ -1,8 +1,9 @@
 use std::collections::BTreeSet;
 
 use orna_sys_v1::{
-    AbiType, AbiVersion, EffectSet, FailureCode, ProviderDiagnostic, ProviderId, ProviderOffer,
-    ProviderRoleRegistry, SemanticRoleId, SystemEffect, SystemProviderAbi, system_api_json,
+    AbiType, AbiVersion, EffectSet, FailureCode, OperationId, ProviderDiagnostic, ProviderFailure,
+    ProviderId, ProviderOffer, ProviderRoleRegistry, SemanticRoleId, SystemEffect,
+    SystemOperationProvider, SystemProviderAbi, TypeId, TypedValue, system_api_json,
     system_dispatch_table, system_provider_abi, system_provider_abi_json, validate_provider_offer,
 };
 use serde_json::Value;
@@ -12,6 +13,38 @@ const SHARED_PROVIDER_FAILURES: [&str; 3] = [
     "sys.abi.unavailable",
     "sys.abi.provider_failed",
 ];
+
+struct InvokeValueProvider {
+    offer: ProviderOffer,
+    operation: OperationId,
+    argument_types: Vec<String>,
+    response: Result<TypedValue, FailureCode>,
+}
+
+impl SystemOperationProvider for InvokeValueProvider {
+    fn offer(&self) -> &ProviderOffer {
+        &self.offer
+    }
+
+    fn invoke(
+        &self,
+        operation: &OperationId,
+        arguments: &[TypedValue],
+    ) -> Result<TypedValue, ProviderFailure> {
+        assert_eq!(operation, &self.operation);
+        assert_eq!(
+            arguments
+                .iter()
+                .map(|argument| argument.static_type().as_str().to_owned())
+                .collect::<Vec<_>>(),
+            self.argument_types
+        );
+        self.response.clone().map_err(|code| ProviderFailure {
+            code,
+            payload: None,
+        })
+    }
+}
 
 #[test]
 fn generated_provider_abi_carries_typed_operation_contracts_and_roles() {
@@ -1012,5 +1045,79 @@ fn dispatch_signature_depth_matrix_matches_every_typed_parameter_and_result() {
     println!(
         "dispatch_signature_depth_matrix operations={operation_cases} parameter_types={parameter_type_cases} result_types={result_type_cases} defaulted_parameters={defaulted_parameter_cases} type_shapes={type_shapes:?} total_cases={}",
         operation_cases + parameter_type_cases + result_type_cases
+    );
+}
+
+#[test]
+fn dispatch_to_provider_routes_typed_value_and_declared_failure() {
+    let table = system_dispatch_table();
+    let operation_name = "sys.invoke(Value)";
+    let contract = table
+        .operation(operation_name)
+        .expect("typed registry contains the erased invoke overload");
+    let role_id = contract
+        .role
+        .as_ref()
+        .expect("invoke overload is bound to a semantic provider role");
+    let role_registry = ProviderRoleRegistry::from_baked_abi(table)
+        .expect("baked provider roles link successfully");
+    let offer = role_registry
+        .resolve(role_id.as_str())
+        .expect("invoke provider offer resolves from the typed role registry")
+        .clone();
+    let arguments = contract
+        .signature
+        .parameters
+        .iter()
+        .map(|parameter| {
+            TypedValue::public(
+                TypeId::new(parameter.ty.canonical()),
+                parameter.name.as_bytes().to_vec(),
+            )
+        })
+        .collect::<Vec<_>>();
+    let argument_types = contract
+        .signature
+        .parameters
+        .iter()
+        .map(|parameter| parameter.ty.canonical())
+        .collect::<Vec<_>>();
+    let returned_value = TypedValue::public(
+        TypeId::new(contract.signature.result.canonical()),
+        b"typed-provider-result".to_vec(),
+    );
+    let provider = InvokeValueProvider {
+        offer: offer.clone(),
+        operation: contract.id.clone(),
+        argument_types: argument_types.clone(),
+        response: Ok(returned_value.clone()),
+    };
+    let mut checked_preconditions = 0;
+    assert_eq!(
+        table.dispatch_to_provider(operation_name, &provider, &arguments, |_| {
+            checked_preconditions += 1;
+            Ok(())
+        }),
+        Ok(orna_sys_v1::SystemDispatchResult::Returned(
+            returned_value.clone()
+        ))
+    );
+    assert_eq!(checked_preconditions, contract.preconditions.len());
+
+    let failure_code = FailureCode::new("sys.invoke.argument_missing").unwrap();
+    assert!(contract.declares_failure(&failure_code));
+    let failing_provider = InvokeValueProvider {
+        offer,
+        operation: contract.id.clone(),
+        argument_types,
+        response: Err(failure_code.clone()),
+    };
+    assert_eq!(
+        table.dispatch_to_provider(operation_name, &failing_provider, &arguments, |_| Ok(())),
+        Ok(orna_sys_v1::SystemDispatchResult::Failed(failure_code))
+    );
+    println!(
+        "dispatch_to_provider operation={operation_name} typed_arguments={} outcomes=returned_typed_value,declared_failure total_cases=2",
+        arguments.len()
     );
 }
