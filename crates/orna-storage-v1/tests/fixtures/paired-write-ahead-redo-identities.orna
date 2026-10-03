@@ -1,0 +1,11 @@
+{ id: "frame/10", name: "left-log-10", city: "right-log-10", }
+
+{ id: "frame/11", name: "left-log-11", city: "right-log-11", }
+
+{ id: "frame/12", name: "left-log-12", city: "right-log-12", }
+
+{ id: "frame/13", name: "left-log-repeat", city: "right-log-repeat", }
+
+{ id: "frame/14", name: "left-log-repeat", city: "right-log-repeat", }
+
+{ id: "frame/16", name: "left-log-16", city: "right-log-16", }
