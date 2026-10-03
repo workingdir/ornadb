@@ -1,14 +1,16 @@
 use std::{
-    fs,
+    env, fs,
     path::{Path, PathBuf},
     process::Command,
+    time::Duration,
 };
 
-use orna_evaluator_v1::{AdmittedReplSession, Limits};
+use orna_evaluator_v1::{AdmittedReplSession, Limits, SysHostBindingRegistry};
 use orna_foundation_v1::CanonicalValue;
 use orna_project_v1::{LoadedProject, ProjectLoader};
 use orna_repository_v1::{Repository, initialize_repository};
 use orna_semantic_v1::StandardDependencyProfile;
+use orna_sys_v1::{EnvironmentProvider, ProcessProvider};
 use orna_value_v1::{Raw, Value};
 use tempfile::TempDir;
 
@@ -349,6 +351,63 @@ fn captured_codec_snapshots_replay_real_base64_values_without_retargeting() {
             .unwrap()
         ))
     );
+}
+
+#[test]
+fn captured_codec_snapshots_feed_real_process_stdin_after_interleaved_upgrade() {
+    let (_directory, project_v1, project_v2, snapshots) = host_codec_snapshot_projects();
+    let sources_v1 =
+        host_codec_standard_sources(include_str!("fixtures/snapshot-host-codec-base64-v1.orna"));
+    let sources_v2 =
+        host_codec_standard_sources(include_str!("fixtures/snapshot-host-codec-base64-v2.orna"));
+    let mut historical =
+        AdmittedReplSession::from_loaded_project(&project_v1, sources_v1, Limits::default())
+            .unwrap();
+    let mut upgraded =
+        AdmittedReplSession::from_loaded_project(&project_v2, sources_v2, Limits::default())
+            .unwrap();
+    assert_eq!(
+        project_v1.standard_profile().unwrap().snapshot(),
+        &snapshots[0]
+    );
+    assert_eq!(
+        project_v2.standard_profile().unwrap().snapshot(),
+        &snapshots[1]
+    );
+
+    let working_directory = env::current_dir().unwrap();
+    let mut process = ProcessProvider::new(Duration::from_secs(2), 64).unwrap();
+    process
+        .allow_command("/usr/bin/cat", &working_directory, [])
+        .unwrap();
+    let mut bindings =
+        SysHostBindingRegistry::new(EnvironmentProvider::default()).with_process_provider(process);
+    let bytes = vec![0, 255, 0, b'A'];
+    let expected = CanonicalValue::new(Raw::Array(vec![
+        Raw::Tag(
+            60013,
+            Box::new(Raw::Array(vec![Raw::Int(1.into()), Raw::Int(0.into())])),
+        ),
+        Raw::Bytes(bytes),
+        Raw::Bytes(Vec::new()),
+    ]))
+    .unwrap();
+
+    let mut assert_process_value = |session: &mut AdmittedReplSession| {
+        let output = session.submit_with_sys_host_bindings(
+            include_str!("fixtures/snapshot-host-codec-process-call.orna"),
+            &mut bindings,
+        );
+        assert!(
+            output.is_ok(),
+            "captured process call failed: {}",
+            output.as_ref().unwrap_err().code()
+        );
+        assert_eq!(output, Ok(Some(expected.clone())));
+    };
+    assert_process_value(&mut historical);
+    assert_process_value(&mut upgraded);
+    assert_process_value(&mut historical);
 }
 
 fn capture_standard_gitlink(project_path: &Path, standard_snapshot: &str, message: &str) -> String {
