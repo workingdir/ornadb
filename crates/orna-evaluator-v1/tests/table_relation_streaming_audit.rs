@@ -1152,3 +1152,66 @@ fn paired_subscription_refresh_chain_retains_values_across_variable_page_handoff
         "each variable-length fold terminates and resumes only inside its own handoff scope"
     );
 }
+
+#[test]
+fn paired_subscription_read_batches_preserve_four_page_cursor_fold_chains() {
+    // Each pair traverses four pages before the next refresh handoff. The
+    // first and third generations reuse their complete cursor sequences to
+    // prove that batch identity follows the fresh read scope, not the token.
+    let mut source = PairedSubscriptionSource::new([
+        vec![
+            page(&[-1], Some(vec![11])),
+            page(&[1], Some(vec![22])),
+            page(&[3], Some(vec![33])),
+            page(&[5], None),
+        ],
+        vec![
+            page(&[2], Some(vec![11])),
+            page(&[4], Some(vec![24])),
+            page(&[6], Some(vec![34])),
+            page(&[8], None),
+        ],
+        vec![
+            page(&[7], Some(vec![11])),
+            page(&[9], Some(vec![52])),
+            page(&[11], Some(vec![53])),
+            page(&[13], None),
+        ],
+        vec![
+            page(&[2], Some(vec![11])),
+            page(&[8], Some(vec![64])),
+            page(&[10], Some(vec![65])),
+            page(&[12], None),
+        ],
+        vec![
+            page(&[-1], Some(vec![11])),
+            page(&[3], Some(vec![22])),
+            page(&[5], Some(vec![33])),
+            page(&[7], None),
+        ],
+        vec![
+            page(&[2], Some(vec![11])),
+            page(&[4], Some(vec![24])),
+            page(&[8], Some(vec![34])),
+            page(&[10], None),
+        ],
+    ]);
+
+    let first_fold = run_with_fixture_functions(paired_subscription_cascade_body(), &mut source).unwrap();
+    assert_eq!(first_fold, integer(21));
+    let second_fold = run_with_fixture_functions(paired_subscription_cascade_body(), &mut source).unwrap();
+    assert_eq!(second_fold, integer(3));
+    let third_fold = run_with_fixture_functions(paired_subscription_cascade_body(), &mut source).unwrap();
+    assert_eq!(third_fold, integer(12));
+
+    assert_eq!(first_fold, integer(21), "the first folded result survives both later handoffs");
+    assert_eq!(second_fold, integer(3), "the second folded result survives the third handoff");
+    assert_eq!(source.lanes.len(), 6);
+    for generation in 0..3 {
+        assert_ne!(
+            source.lanes[generation * 2].0,
+            source.lanes[generation * 2 + 1].0,
+            "generation {generation} keeps its left and right read scopes independent"
+        );
+    }
+}
