@@ -58,7 +58,7 @@ pub use timezone::{
 /// crate verifies its pinned profile before either boundary admits an import.
 /// Returns the reference standard sources supplied to the bounded REPL.
 #[must_use]
-pub fn reference_standard_sources() -> [(String, String); 57] {
+pub fn reference_standard_sources() -> [(String, String); 58] {
     orna_standard::reference_standard_sources_v1()
 }
 
@@ -6045,6 +6045,9 @@ impl Context<'_, '_> {
         let native_hash = native_binding
             .filter(|binding| binding.kind == StandardBindingKind::Hash)
             .map(|binding| binding.operation);
+        let native_random = native_binding
+            .filter(|binding| binding.kind == StandardBindingKind::Random)
+            .map(|binding| binding.operation);
         let native_base64 = native_binding
             .filter(|binding| binding.kind == StandardBindingKind::Base64)
             .map(|binding| binding.operation);
@@ -6117,6 +6120,7 @@ impl Context<'_, '_> {
             && native_stats.is_none()
             && native_time.is_none()
             && native_hash.is_none()
+            && native_random.is_none()
             && native_base64.is_none()
             && native_json.is_none()
             && native_orna_codec.is_none()
@@ -6317,6 +6321,7 @@ impl Context<'_, '_> {
             .or(concurrent)
             .or(native_ui)
             .or(native_hash)
+            .or(native_random)
             .or(base64)
             .or(json)
             .or(orna_codec)
@@ -6353,6 +6358,9 @@ impl Context<'_, '_> {
         values.extend(explicit);
         let binding_name = match native_binding.map(|binding| binding.kind) {
             Some(StandardBindingKind::Hash) => format!("hash.{name}"),
+            Some(StandardBindingKind::Random) => {
+                format!("random.{}", name.strip_prefix("__").unwrap_or(name))
+            }
             Some(StandardBindingKind::Base64) => {
                 format!("base64.{}", name.strip_prefix("__").unwrap_or(name))
             }
@@ -6407,6 +6415,8 @@ impl Context<'_, '_> {
             self.ui_node(values)
         } else if native_hash.is_some() {
             self.hash(name, values)
+        } else if native_random.is_some() {
+            self.random(name, values, callee)
         } else if base64.is_some() {
             self.base64(name, values)
         } else if json.is_some() {
@@ -8112,6 +8122,127 @@ impl Context<'_, '_> {
             _ => Err(error("ORNA-EVAL-UNSUPPORTED")),
         }
     }
+    fn random(
+        &mut self,
+        name: &str,
+        values: Vec<Value>,
+        callee: &Expr,
+    ) -> Result<Value, EvaluationError> {
+        self.step()?;
+        match (name, values.as_slice()) {
+            ("bytes" | "__bytes", [Value::Int(count)]) => {
+                let count = count.to_usize().ok_or_else(|| error("ORNA-EVAL-VALUE"))?;
+                self.items(count)?;
+                self.random_entropy(callee, count).map(Value::Blob)
+            }
+            ("integer" | "__integer", [Value::Int(lower), Value::Int(upper)]) => {
+                if upper <= lower {
+                    return Err(error("ORNA-EVAL-VALUE"));
+                }
+                let width = upper - lower;
+                let width = width.to_biguint().ok_or_else(|| error("ORNA-EVAL-VALUE"))?;
+                let bit_count = width.bits();
+                let byte_count =
+                    usize::try_from(bit_count.div_ceil(8)).map_err(|_| error("ORNA-EVAL-LIMIT"))?;
+                self.items(byte_count)?;
+                let high_byte_bits = (bit_count % 8) as u8;
+                loop {
+                    self.step()?;
+                    let mut sample = self.random_entropy(callee, byte_count)?;
+                    if high_byte_bits != 0 {
+                        let mask = (1u8 << high_byte_bits) - 1;
+                        *sample.last_mut().ok_or_else(|| error("ORNA-EVAL-VALUE"))? &= mask;
+                    }
+                    let candidate = BigInt::from_bytes_le(Sign::Plus, &sample);
+                    if candidate < BigInt::from(width.clone()) {
+                        return Ok(Value::Int(lower + candidate));
+                    }
+                }
+            }
+            ("choose" | "__choose", [Value::List(values)]) => {
+                if values.is_empty() {
+                    return Ok(Value::Option(None));
+                }
+                self.items(values.len())?;
+                let index = match self.random(
+                    "integer",
+                    vec![Value::Int(0.into()), Value::Int(BigInt::from(values.len()))],
+                    callee,
+                )? {
+                    Value::Int(index) => {
+                        index.to_usize().ok_or_else(|| error("ORNA-EVAL-VALUE"))?
+                    }
+                    _ => return Err(error("ORNA-EVAL-VALUE")),
+                };
+                let selected = values
+                    .get(index)
+                    .cloned()
+                    .ok_or_else(|| error("ORNA-EVAL-VALUE"))?;
+                Ok(Value::Option(Some(Box::new(selected))))
+            }
+            ("shuffle" | "__shuffle", [Value::List(values)]) => {
+                self.items(values.len())?;
+                let mut shuffled = values.clone();
+                for index in (1..shuffled.len()).rev() {
+                    self.step()?;
+                    let selected = match self.random(
+                        "integer",
+                        vec![Value::Int(0.into()), Value::Int(BigInt::from(index + 1))],
+                        callee,
+                    )? {
+                        Value::Int(selected) => selected
+                            .to_usize()
+                            .ok_or_else(|| error("ORNA-EVAL-VALUE"))?,
+                        _ => return Err(error("ORNA-EVAL-VALUE")),
+                    };
+                    shuffled.swap(index, selected);
+                }
+                Ok(Value::List(shuffled))
+            }
+            (
+                "bytes" | "__bytes" | "integer" | "__integer" | "choose" | "__choose" | "shuffle"
+                | "__shuffle",
+                _,
+            ) => Err(error("ORNA-EVAL-TYPE")),
+            _ => Err(error("ORNA-EVAL-UNSUPPORTED")),
+        }
+    }
+
+    fn random_entropy(&mut self, callee: &Expr, count: usize) -> Result<Vec<u8>, EvaluationError> {
+        let expected_count = count;
+        let count = CanonicalValue::new(Raw::Int(BigInt::from(count)))
+            .map_err(|_| error("ORNA-EVAL-VALUE"))?;
+        let arguments = [count];
+        let remaining = self.limits.max_steps.saturating_sub(self.steps);
+        let mut budget = StepBudget::new(remaining);
+        let cancellation = self.cancellation;
+        let result = self
+            .effects
+            .as_deref_mut()
+            .ok_or_else(|| error("ORNA-EVAL-UNSUPPORTED"))?
+            .handle_registered_with_cancellation_and_budget(
+                "std.random.entropy",
+                callee,
+                &arguments,
+                &mut budget,
+                cancellation,
+            );
+        let debited = remaining - budget.remaining();
+        self.steps = self
+            .steps
+            .checked_add(debited)
+            .ok_or_else(|| error("ORNA-EVAL-LIMIT"))?;
+        let value = result?.ok_or_else(|| error("ORNA-EVAL-UNSUPPORTED"))?;
+        let Raw::Bytes(bytes) = value.raw() else {
+            return Err(error("ORNA-EVAL-TYPE"));
+        };
+        if bytes.len() != expected_count {
+            return Err(error("ORNA-EVAL-VALUE"));
+        }
+        self.items(bytes.len())?;
+        Ok(bytes.clone())
+    }
+
     fn hash(&mut self, name: &str, values: Vec<Value>) -> Result<Value, EvaluationError> {
         self.step()?;
         match (name, values.as_slice()) {
@@ -11387,6 +11518,10 @@ fn named_arguments(
             | "hash.to_hex"
             | "hash.from_hex"
             | "hash.domain_sha256"
+            | "random.bytes"
+            | "random.integer"
+            | "random.choose"
+            | "random.shuffle"
             | "base64.encode"
             | "base64.decode"
             | "money.format"
@@ -11399,6 +11534,9 @@ fn named_arguments(
         "min" | "max" if collection => &["rows"],
         "min" | "max" => &["left", "right"],
         "clamp" => &["value", "min", "max"],
+        "random.bytes" => &["count"],
+        "random.integer" => &["lower_inclusive", "upper_exclusive"],
+        "random.choose" | "random.shuffle" => &["values"],
         "trim" | "lower" | "upper" => &["value"],
         "split" => &["value", "separator"],
         "join" => &["values", "separator"],
@@ -11641,6 +11779,7 @@ enum StandardBindingKind {
     Stats,
     Time,
     Hash,
+    Random,
     Base64,
     Json,
     OrnaCodec,
@@ -11877,6 +12016,20 @@ const STANDARD_BINDING_MODULES: &[StandardBindingModule] = &[
             "domain_sha256",
             "to_hex",
             "from_hex",
+        ],
+    },
+    StandardBindingModule {
+        prefix: "std.random.",
+        kind: StandardBindingKind::Random,
+        operations: &[
+            "bytes",
+            "integer",
+            "choose",
+            "shuffle",
+            "__bytes",
+            "__integer",
+            "__choose",
+            "__shuffle",
         ],
     },
     StandardBindingModule {
