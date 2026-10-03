@@ -4,14 +4,14 @@ use num_bigint::BigInt;
 use orna_evaluator_v1::{
     AdmittedReplSession, EffectHandler, Environment, EvaluationError, Functions, Limits,
     NominalDefinition, NominalDefinitions, NominalField, NominalVariant, PureFunction,
-    RelationPage, StepBudget, evaluate_expression, evaluate_expression_with_functions,
+    RelationPage, RelationReadScope, StepBudget, evaluate_expression, evaluate_expression_with_functions,
     evaluate_function, evaluate_parsed, evaluate_parsed_with_nominals, evaluate_repl,
     SysHostBindingRegistry, evaluate_with_functions_and_nominals, invoke_named,
     invoke_named_with_effects, invoke_named_with_effects_and_budget, invoke_named_with_nominals,
 };
 use orna_syntax_v1::{
-    lex, AssignmentOperator, AssignmentTarget, Expr, NameSegment, Pattern, RecordField, Statement,
-    SyntaxSpan, TokenKind,
+    lex, AssignmentOperator, AssignmentTarget, Expr, LambdaParameter, NameSegment, Pattern,
+    RecordField, Statement, SyntaxSpan, TokenKind,
 };
 use orna_value_v1::{Raw, Value, CANONICAL_NAN_BITS};
 
@@ -270,6 +270,19 @@ fn relation_argument(value: Expr, span: &SyntaxSpan) -> orna_syntax_v1::Argument
     }
 }
 
+fn relation_lambda(parameter: &str, body: Expr) -> Expr {
+    let span = relation_span();
+    Expr::Lambda {
+        parameters: vec![LambdaParameter {
+            pattern: Pattern::Name(parameter.into(), span.clone()),
+            annotation: None,
+            span: span.clone(),
+        }],
+        body: Box::new(body),
+        span,
+    }
+}
+
 fn relation_source_expression(source: &str) -> Expr {
     let span = relation_span();
     Expr::Call {
@@ -327,10 +340,13 @@ fn relation_integer(value: i64) -> Expr {
 }
 
 fn relation_pair(left: i64, right: i64) -> Value {
-    Value::new(Raw::Array(vec![
-        Raw::Int(left.into()),
-        Raw::Int(right.into()),
-    ]))
+    Value::new(Raw::Tag(
+        60015,
+        Box::new(Raw::Array(vec![
+            Raw::Int(left.into()),
+            Raw::Int(right.into()),
+        ])),
+    ))
     .unwrap()
 }
 fn relation_window_row(values: &[i64]) -> Value {
@@ -481,6 +497,11 @@ struct UnionRelationEffects {
     cursors: Vec<(String, Option<Vec<u8>>)>,
 }
 
+struct LateralRelationEffects {
+    rows: BTreeMap<String, Vec<Value>>,
+    reads: Vec<(String, RelationReadScope, Option<Vec<u8>>)>,
+}
+
 struct RepeatedUnknownRelationEffects {
     rows: Vec<Value>,
     starts: usize,
@@ -536,6 +557,50 @@ impl EffectHandler for UnionRelationEffects {
         budget.debit(1)?;
         self.cursors
             .push((source.into(), after.map(ToOwned::to_owned)));
+        let rows = self
+            .rows
+            .get(source)
+            .unwrap_or_else(|| panic!("unexpected relation source {source}"));
+        let index = after.map_or(0, |cursor| usize::from(cursor[0]));
+        if index >= rows.len() {
+            return Ok(Some(RelationPage {
+                rows: Vec::new(),
+                next: None,
+            }));
+        }
+        let next = (index + 1 < rows.len()).then(|| vec![(index + 1) as u8]);
+        Ok(Some(RelationPage {
+            rows: vec![rows[index].clone()],
+            next,
+        }))
+    }
+}
+
+impl LateralRelationEffects {
+    fn new(rows: BTreeMap<String, Vec<Value>>) -> Self {
+        Self {
+            rows,
+            reads: Vec::new(),
+        }
+    }
+}
+
+impl EffectHandler for LateralRelationEffects {
+    fn handle(&mut self, _: &Expr, _: &[Value]) -> Result<Option<Value>, EvaluationError> {
+        Ok(None)
+    }
+
+    fn scan_relation_page_scoped(
+        &mut self,
+        source: &str,
+        scope: RelationReadScope,
+        after: Option<&[u8]>,
+        _: usize,
+        budget: &mut StepBudget,
+    ) -> Result<Option<RelationPage>, EvaluationError> {
+        budget.debit(1)?;
+        self.reads
+            .push((source.to_owned(), scope, after.map(ToOwned::to_owned)));
         let rows = self
             .rows
             .get(source)
@@ -9810,6 +9875,128 @@ fn flat_map_relation_invokes_named_callback_once_per_row_and_preserves_inner_ord
         Value::option(Some(relation_pair(13, 1))).expect("option is canonical")
     );
 }
+
+#[test]
+fn lateral_flat_map_keeps_outer_identity_across_sparse_relation_cascades() {
+    let parents = relation_stage(
+        relation_union(
+            relation_source_expression("ParentLeft"),
+            relation_source_expression("ParentRight"),
+        ),
+        "filter",
+        vec![parsed_expression(include_str!(
+            "fixtures/query-lateral-parent-sparse-scope-cascade-0h0s9.orna"
+        ))],
+    );
+    let positive_child = parsed_expression(include_str!(
+        "fixtures/query-lateral-positive-child-0h0s9.orna"
+    ));
+    let children = relation_union(
+        relation_stage(
+            relation_source_expression("ChildLeft"),
+            "filter",
+            vec![positive_child.clone()],
+        ),
+        relation_stage(
+            relation_source_expression("ChildRight"),
+            "filter",
+            vec![positive_child],
+        ),
+    );
+    let children = relation_stage(
+        children,
+        "filter",
+        vec![parsed_expression(include_str!(
+            "fixtures/query-lateral-bound-child-0h0s9.orna"
+        ))],
+    );
+    let children = relation_stage(
+        children,
+        "map",
+        vec![parsed_expression(include_str!(
+            "fixtures/query-lateral-project-parent-0h0s9.orna"
+        ))],
+    );
+    let lateral = relation_named_flat_map_stage(parents, relation_lambda("parent", children));
+    let complete = relation_stage(
+        lateral,
+        "window",
+        vec![relation_integer(7), relation_integer(7)],
+    );
+    let body = relation_terminal(complete, "first");
+    let mut effects = LateralRelationEffects::new(BTreeMap::from([
+        (
+            "ParentLeft".into(),
+            vec![Value::int(0.into()), Value::int(2.into())],
+        ),
+        (
+            "ParentRight".into(),
+            vec![Value::int(3.into()), Value::int(0.into())],
+        ),
+        (
+            "ChildLeft".into(),
+            vec![Value::int(1.into()), Value::int(0.into()), Value::int(3.into())],
+        ),
+        (
+            "ChildRight".into(),
+            vec![Value::int(2.into()), Value::int(0.into()), Value::int(1.into())],
+        ),
+    ]));
+
+    let pair = |outer: i64, inner: i64| {
+        Raw::Tag(
+            60015,
+            Box::new(Raw::Array(vec![Raw::Int(outer.into()), Raw::Int(inner.into())])),
+        )
+    };
+    let expected_rows = Value::new(Raw::Array(vec![
+        pair(2, 1),
+        pair(2, 2),
+        pair(2, 1),
+        pair(3, 1),
+        pair(3, 3),
+        pair(3, 2),
+        pair(3, 1),
+    ]))
+    .unwrap();
+    assert_eq!(
+        invoke_relation(body, &mut effects, Limits::default()).unwrap(),
+        Value::option(Some(expected_rows)).unwrap(),
+        "lateral rows keep their parent key and left-to-right child identity"
+    );
+
+    for source in ["ChildLeft", "ChildRight"] {
+        let reads = effects
+            .reads
+            .iter()
+            .filter(|(read_source, _, _)| read_source == source)
+            .collect::<Vec<_>>();
+        let mut scopes = Vec::new();
+        for (_, scope, _) in &reads {
+            if !scopes.contains(scope) {
+                scopes.push(*scope);
+            }
+        }
+        assert_eq!(
+            scopes.len(),
+            2,
+            "only the two accepted outer rows open a {source} lateral scope"
+        );
+        for scope in scopes {
+            let cursors = reads
+                .iter()
+                .filter(|(_, read_scope, _)| *read_scope == scope)
+                .map(|(_, _, after)| after.clone())
+                .collect::<Vec<_>>();
+            assert_eq!(
+                cursors,
+                vec![None, Some(vec![1]), Some(vec![2])],
+                "each {source} child scope advances its own ordered sparse pages"
+            );
+        }
+    }
+}
+
 #[test]
 fn flat_map_relation_allows_empty_inner_lists_without_skipping_source_pages() {
     let source = relation_source_expression("Note");
