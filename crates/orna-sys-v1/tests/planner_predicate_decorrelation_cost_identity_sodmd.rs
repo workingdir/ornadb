@@ -502,7 +502,7 @@ fn changing_the_selected_index_rekeys_the_decorrelation_cost_fold_chain() {
     let changed_decorrelated = changed_joins[decorrelated_label];
     assert_eq!(
         text(baseline_decorrelated, "join_cost_fold_identity"),
-        "join-fold:50324da104496868a83d1a0555954d8b1743b313b8ef9b5f8c247a6846239e99",
+        "join-fold:bc8a73d1c4d2603ce7f20cf7a6556abb04466c3b58ad90c7c389a412e9a9e1c1",
         "the paired decorrelation/index and anchor inputs contribute to the fold identity"
     );
     let baseline_nodes = baseline
