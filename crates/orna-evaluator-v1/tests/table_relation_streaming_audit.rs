@@ -1317,6 +1317,20 @@ fn paired_view_long_cursor_spill_chains_keep_refresh_identity() {
         );
     }
     assert_eq!(source.cursors.len(), 31, "all one-to-four-page chains are consumed");
+    let depths = [4, 3, 2, 1, 2, 4, 3, 2, 1, 2, 4, 3];
+    let mut expected_cursors = Vec::new();
+    for (lane, depth) in depths.into_iter().enumerate() {
+        let (source_name, scope, _) = &source.lanes[lane];
+        expected_cursors.push((source_name.clone(), *scope, None));
+        for tag in 1..depth {
+            expected_cursors.push((source_name.clone(), *scope, Some(cursor(tag))));
+        }
+    }
+    assert_eq!(
+        source.cursors,
+        expected_cursors,
+        "128-byte shared cursor prefixes retain their exact payload and scope through each spill chain"
+    );
 }
 
 fn paired_subscription_cascade_body() -> Expr {
