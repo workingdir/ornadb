@@ -290,6 +290,106 @@ fn generated_tuple_return_provider_bindings_match_schema_and_typed_rows() {
 }
 
 #[test]
+fn tuple_return_provider_bindings_preserve_generated_dispatch_routes() {
+    const EXPECTED_ROUTES: [(&str, &str, &str, &str); 5] = [
+        (
+            "std.io.process.run",
+            "host.std.io.process@1.0",
+            "orna.sys.host.process.v1",
+            "invoke",
+        ),
+        (
+            "std.io.fs.metadata",
+            "host.std.io.fs.read@1.0",
+            "orna.sys.host.filesystem.v1",
+            "read",
+        ),
+        (
+            "std.io.fs.symlink_metadata",
+            "host.std.io.fs.read@1.0",
+            "orna.sys.host.filesystem.v1",
+            "read",
+        ),
+        (
+            "std.net.http.send",
+            "host.std.net.http@1.0",
+            "orna.sys.host.http.v1",
+            "invoke",
+        ),
+        (
+            "std.net.http.wait",
+            "host.std.net.http@1.0",
+            "orna.sys.host.http.v1",
+            "invoke",
+        ),
+    ];
+
+    let generated_schema =
+        build_host::generate_host_registry_schema().expect("tuple-return route schema regenerates");
+    assert_eq!(
+        generated_schema,
+        system_host_operation_registry_schema_json()
+    );
+    build_host::validate_host_registry_json(
+        system_host_operation_registry_json(),
+        &generated_schema,
+    )
+    .expect("embedded tuple-return route rows conform to the generated schema");
+    let raw: serde_json::Value = serde_json::from_str(system_host_operation_registry_json())
+        .expect("embedded host registry is valid JSON");
+    let rows = raw["operations"]
+        .as_array()
+        .expect("embedded host registry contains operation rows");
+    let registry = system_host_operation_registry();
+
+    let mut process_routes = 0;
+    let mut filesystem_routes = 0;
+    let mut http_routes = 0;
+    for (name, role_name, provider_name, effect) in EXPECTED_ROUTES {
+        let descriptor = registry
+            .operation(name)
+            .expect("tuple-return operation is in the typed host registry");
+        let row = rows
+            .iter()
+            .find(|row| row["name"] == name)
+            .expect("tuple-return operation has a generated JSON row");
+        assert_eq!(descriptor.role, role_name, "typed role for {name}");
+        assert_eq!(
+            descriptor.provider, provider_name,
+            "typed provider for {name}"
+        );
+        assert_eq!(descriptor.effects, [effect], "typed effect for {name}");
+        assert_eq!(row["role"].as_str(), Some(role_name));
+        assert_eq!(row["provider"].as_str(), Some(provider_name));
+        assert_eq!(row["effects"][0].as_str(), Some(effect));
+
+        let role = registry
+            .role(role_name)
+            .expect("tuple-return operation role is generated");
+        assert_eq!(role.provider, provider_name);
+        assert!(role.required);
+        assert!(
+            role.operations.iter().any(|operation| operation == name),
+            "generated role {role_name} dispatches {name}"
+        );
+        match provider_name {
+            "orna.sys.host.process.v1" => process_routes += 1,
+            "orna.sys.host.filesystem.v1" => filesystem_routes += 1,
+            "orna.sys.host.http.v1" => http_routes += 1,
+            _ => unreachable!("expected tuple-return provider route"),
+        }
+    }
+
+    assert_eq!(process_routes, 1);
+    assert_eq!(filesystem_routes, 2);
+    assert_eq!(http_routes, 2);
+    println!(
+        "generated_host_tuple_dispatch_routes operations={} process={process_routes} filesystem={filesystem_routes} http={http_routes} typed_roles=3 schema_validated=1",
+        EXPECTED_ROUTES.len()
+    );
+}
+
+#[test]
 fn generated_registry_schema_rejects_unknown_fields_and_malformed_failure_codes() {
     let mut registry: serde_json::Value =
         serde_json::from_str(system_host_operation_registry_json()).unwrap();
