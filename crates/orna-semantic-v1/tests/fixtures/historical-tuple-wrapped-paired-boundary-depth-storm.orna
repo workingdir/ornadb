@@ -1,0 +1,84 @@
+pub fn factory_at(pin: sys.SnapshotRef) =
+    sys.database.as_of(pin).energy.factory;
+
+pub fn rejects_tuple_wrapped_paired_depth_drift_after_selector_storm(failure: Error) {
+    let first = {
+        group: (
+            {
+                left: Some({ pins: (factory_at(sys.snapshot("HEAD~1201")), fail(failure)) }),
+                right: Some({ pins: (factory_at(sys.snapshot("HEAD~1211")), fail(failure)) }),
+            },
+            {
+                left: Some({ pins: (factory_at(sys.snapshot("HEAD~1221")), fail(failure)) }),
+                right: Some({ pins: (factory_at(sys.snapshot("HEAD~1231")), fail(failure)) }),
+            },
+        ),
+    };
+    let middle = {
+        group: (
+            {
+                left: Some({ pins: (factory_at(sys.snapshot("HEAD~1202")), factory_at(sys.snapshot("HEAD~1241"))) }),
+                right: Some({ pins: (factory_at(sys.snapshot("HEAD~1212")), factory_at(sys.snapshot("HEAD~1241"))) }),
+            },
+            {
+                left: Some({ pins: (factory_at(sys.snapshot("HEAD~1222")), factory_at(sys.snapshot("HEAD~1251"))) }),
+                right: Some({ pins: (factory_at(sys.snapshot("HEAD~1232")), factory_at(sys.snapshot("HEAD~1251"))) }),
+            },
+        ),
+    };
+    let last = {
+        group: (
+            {
+                left: Some({ pins: (factory_at(sys.snapshot("HEAD~1203")), factory_at(sys.snapshot("HEAD~1242"))) }),
+                right: Some({ pins: (factory_at(sys.snapshot("HEAD~1213")), factory_at(sys.snapshot("HEAD~1243"))) }),
+            },
+            {
+                left: Some({ pins: (factory_at(sys.snapshot("HEAD~1223")), factory_at(sys.snapshot("HEAD~1252"))) }),
+                right: Some({ pins: (factory_at(sys.snapshot("HEAD~1233")), factory_at(sys.snapshot("HEAD~1252"))) }),
+            },
+        ),
+    };
+    { first: first, middle: middle, last: last, folded: [first, middle, last] }
+}
+
+pub fn accepts_tuple_wrapped_paired_depths_after_selector_storm(failure: Error) {
+    let parents = [
+        {
+            group: (
+                {
+                    left: Some({ pins: (factory_at(sys.snapshot("HEAD~1261")), fail(failure)) }),
+                    right: Some({ pins: (factory_at(sys.snapshot("HEAD~1271")), fail(failure)) }),
+                },
+                {
+                    left: Some({ pins: (factory_at(sys.snapshot("HEAD~1281")), fail(failure)) }),
+                    right: Some({ pins: (factory_at(sys.snapshot("HEAD~1291")), fail(failure)) }),
+                },
+            ),
+        },
+        {
+            group: (
+                {
+                    left: Some({ pins: (factory_at(sys.snapshot("HEAD~1262")), factory_at(sys.snapshot("HEAD~1301"))) }),
+                    right: Some({ pins: (factory_at(sys.snapshot("HEAD~1272")), factory_at(sys.snapshot("HEAD~1301"))) }),
+                },
+                {
+                    left: Some({ pins: (factory_at(sys.snapshot("HEAD~1282")), factory_at(sys.snapshot("HEAD~1311"))) }),
+                    right: Some({ pins: (factory_at(sys.snapshot("HEAD~1292")), factory_at(sys.snapshot("HEAD~1311"))) }),
+                },
+            ),
+        },
+        {
+            group: (
+                {
+                    left: Some({ pins: (factory_at(sys.snapshot("HEAD~1263")), factory_at(sys.snapshot("HEAD~1302"))) }),
+                    right: Some({ pins: (factory_at(sys.snapshot("HEAD~1273")), factory_at(sys.snapshot("HEAD~1302"))) }),
+                },
+                {
+                    left: Some({ pins: (factory_at(sys.snapshot("HEAD~1283")), factory_at(sys.snapshot("HEAD~1312"))) }),
+                    right: Some({ pins: (factory_at(sys.snapshot("HEAD~1293")), factory_at(sys.snapshot("HEAD~1312"))) }),
+                },
+            ),
+        },
+    ];
+    { folded: parents }
+}
