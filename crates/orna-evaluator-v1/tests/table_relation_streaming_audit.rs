@@ -1931,6 +1931,95 @@ fn paired_compacted_cursor_restores_keep_scope_identity() {
     assert!(source.pending["View.Right"].is_empty());
 }
 
+#[test]
+fn paired_refresh_compaction_collisions_remain_scope_local() {
+    let compacted = vec![0xf0];
+    let generations = [
+        ([1, 2, 3, 4], [5, 8, 5, 8], [5, 4, 3, 2]),
+        ([3, 4, 1, 6], [5, 8, 5, 8], [2, 5, 4, 3]),
+        ([1, 6, 3, 2], [5, 8, 5, 8], [3, 2, 5, 4]),
+    ];
+    let mut restores = Vec::new();
+    let mut continuations_by_lane = Vec::new();
+    for (generation, (values, filtered_values, depths)) in generations.into_iter().enumerate() {
+        for lane in 0..4 {
+            let source_name = if lane < 2 { "View.Left" } else { "View.Right" };
+            let depth = depths[lane];
+            let long_tag = 0x10 + (generation * 4 + lane) as u8;
+            let chain = vec![
+                vec![long_tag; 128],
+                compacted.clone(),
+                vec![0xf1],
+                vec![0xf2],
+            ];
+            for pair in chain.windows(2) {
+                assert!(pair[0].as_slice() < pair[1].as_slice());
+            }
+            let restored_pages = (0..depth)
+                .map(|page_index| {
+                    let after = (page_index > 0).then(|| chain[page_index - 1].clone());
+                    let next = (page_index + 1 < depth).then(|| chain[page_index].clone());
+                    let value = if page_index == 0 {
+                        values[lane]
+                    } else {
+                        filtered_values[lane]
+                    };
+                    (after, page(&[value], next))
+                })
+                .collect::<BTreeMap<_, _>>();
+            restores.push((source_name, restored_pages));
+            continuations_by_lane.push(chain);
+        }
+    }
+    assert_eq!(compacted.len(), 1, "distinct long checkpoints compact to one shared cursor");
+    let mut source = PairedCursorRestoreSource::new(restores);
+
+    let first = run_with_fixture_functions(paired_scoped_view_refresh_body(), &mut source).unwrap();
+    assert_eq!(first, integer(14), "first paired refresh restores its values after compaction");
+    let second = run_with_fixture_functions(paired_scoped_view_refresh_body(), &mut source).unwrap();
+    assert_eq!(second, integer(18), "second refresh keeps compacted cursors in its own scopes");
+    let third = run_with_fixture_functions(paired_scoped_view_refresh_body(), &mut source).unwrap();
+    assert_eq!(third, integer(16), "third refresh restores from the converged cursor independently");
+    assert_eq!(first, integer(14), "later compacted refreshes preserve the initial value");
+    assert_eq!(second, integer(18), "later compacted refreshes preserve the middle value");
+
+    assert_eq!(source.lanes.len(), 12, "three refreshes bind four independently compacted scopes");
+    for generation in 0..3 {
+        let start = generation * 4;
+        assert_eq!(source.lanes[start].0, "View.Left");
+        assert_eq!(source.lanes[start + 1].0, "View.Left");
+        assert_eq!(source.lanes[start + 2].0, "View.Right");
+        assert_eq!(source.lanes[start + 3].0, "View.Right");
+    }
+    let scopes = source.lanes.iter().map(|(_, scope, _)| *scope).collect::<Vec<_>>();
+    for (index, scope) in scopes.iter().enumerate() {
+        assert!(
+            !scopes[..index].contains(scope),
+            "compaction collisions remain isolated by refresh scope: {scope:?}"
+        );
+    }
+    let depths = generations
+        .iter()
+        .flat_map(|(_, _, lane_depths)| lane_depths)
+        .copied()
+        .collect::<Vec<_>>();
+    let mut expected_cursors = Vec::new();
+    for (lane, depth) in depths.into_iter().enumerate() {
+        let (source_name, scope, _) = &source.lanes[lane];
+        expected_cursors.push((source_name.clone(), *scope, None));
+        for cursor in continuations_by_lane[lane].iter().take(depth - 1) {
+            expected_cursors.push((source_name.clone(), *scope, Some(cursor.clone())));
+        }
+    }
+    assert_eq!(
+        source.cursors,
+        expected_cursors,
+        "divergent long checkpoints converge on the compact cursor without crossing scopes"
+    );
+    assert!(source.pending["View.Left"].is_empty());
+    assert!(source.pending["View.Right"].is_empty());
+}
+
 fn paired_subscription_cascade_body() -> Expr {
     let left = relation_stage(
         relation_stage(
