@@ -6353,8 +6353,8 @@ fn multi_parent_checkpoint_reconciliation_keeps_depth_labels_transactional() {
             .iter()
             .filter(|diagnostic| diagnostic.code() == DIAG_TYPE)
             .count(),
-        1,
-        "the crossed middle parent must be rejected while the valid three-parent fold succeeds: {:?}",
+        2,
+        "the crossed middle parent and later collapsed-depth parent must be rejected while the valid three-parent fold succeeds: {:?}",
         result
             .diagnostics
             .iter()
@@ -6420,6 +6420,124 @@ fn multi_parent_checkpoint_reconciliation_keeps_depth_labels_transactional() {
             ]),
         ],
         "a valid three-parent fold must keep all computed parent depth labels"
+    );
+}
+
+#[test]
+fn multi_parent_selector_topology_storm_preserves_label_depth_identity() {
+    let source = include_str!("fixtures/historical-multi-parent-selector-topology-storm.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-multi-parent-selector-topology-storm.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert_eq!(
+        result
+            .diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.code() == DIAG_TYPE)
+            .count(),
+        1,
+        "a disjoint-label depth drift must fail while alpha-renamed topologies succeed: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+    let module = result
+        .modules
+        .values()
+        .find(|module| {
+            module
+                .symbols
+                .contains_key("rejects_selector_depth_drift_across_parent_storm")
+        })
+        .expect("multi-parent selector topology fixture module");
+
+    let sibling_pin_maps = |function: &str| {
+        let Type::Function { result, .. } = &module.symbols[function].ty else {
+            panic!("{function} must retain its computed result type");
+        };
+        let Type::Record(fields) = result.as_ref() else {
+            panic!("{function} must return its parent fold: {result:?}");
+        };
+        let Type::List(element) = fields.get("parent_fold").expect("parent fold result") else {
+            panic!("{function} must retain a parent list");
+        };
+        let Type::Record(siblings) = element.as_ref() else {
+            panic!("{function} must preserve sibling records: {element:?}");
+        };
+        ["left", "right"].map(|name| {
+            let Type::Record(depths) = &siblings[name] else {
+                panic!("{function}.{name} must preserve its depth record");
+            };
+            let Type::Tuple(slots) = &depths["pins"] else {
+                panic!("{function}.{name}.pins must preserve tuple depths");
+            };
+            assert_eq!(slots.len(), 2, "{function}.{name} must keep two depths");
+            slots
+                .iter()
+                .map(|slot| {
+                    let mut contexts = BTreeSet::new();
+                    collect_snapshot_contexts(slot, &mut contexts);
+                    assert!(
+                        !contexts.is_empty(),
+                        "{function}.{name} depth must retain real selector values"
+                    );
+                    contexts
+                })
+                .collect::<Vec<_>>()
+        })
+    };
+
+    assert_eq!(
+        sibling_pin_maps("rejects_selector_depth_drift_across_parent_storm"),
+        [
+            vec![
+                BTreeSet::from(["selector:HEAD~301".into()]),
+                BTreeSet::from(["selector:HEAD~301".into()]),
+            ],
+            vec![
+                BTreeSet::from(["selector:HEAD~311".into()]),
+                BTreeSet::from(["selector:HEAD~312".into()]),
+            ],
+        ],
+        "a rejected middle row must leave first-row identities in every sibling depth"
+    );
+    assert_eq!(
+        sibling_pin_maps("accepts_alpha_renamed_selector_topology_across_parent_storm"),
+        [
+            vec![
+                BTreeSet::from([
+                    "selector:HEAD~401".into(),
+                    "selector:HEAD~404".into(),
+                    "selector:HEAD~408".into(),
+                ]),
+                BTreeSet::from([
+                    "selector:HEAD~401".into(),
+                    "selector:HEAD~404".into(),
+                    "selector:HEAD~408".into(),
+                ]),
+            ],
+            vec![
+                BTreeSet::from([
+                    "selector:HEAD~411".into(),
+                    "selector:HEAD~414".into(),
+                    "selector:HEAD~418".into(),
+                ]),
+                BTreeSet::from([
+                    "selector:HEAD~412".into(),
+                    "selector:HEAD~415".into(),
+                    "selector:HEAD~419".into(),
+                ]),
+            ],
+        ],
+        "alpha-renamed rows must fold real selectors without changing their path membership"
     );
 }
 

@@ -6,13 +6,14 @@ use orna_evolution_v1::{
 use orna_foundation_v1::OvbRaw;
 use orna_storage_v1::{
     BranchMergeBudget, BranchMergeColumnDepthEvent, BranchMergeColumnDepthFragments,
+    BranchMergeColumnDepthLadderEvent,
     BranchMergeConflict, BranchMergeDepthFragmentRecovery,
     BranchMergeDepthWaveRecovery, BranchMergeError, BranchMergePlan,
     BranchMergeMultiParentTabularColumnDepthWave,
     BranchMergeTombstoneEvent, BranchRowSource,
     BranchMergePlanSequenceError, BranchMergePlanSequencer, BranchMergeTombstoneHistory,
     BranchMergeTabularColumnDepthWave, BranchMergeTabularDepthWave,
-    BranchMergeTableDepthFragments,
+    BranchMergeTableDepthFragments, BranchMergeTableDepthLadderEvent,
     BranchMergeTombstoneHistoryError, KeyRange, MergeSide, MergedSegment, RowSegmentManifest,
     SequencedBranchMergePlan, TableManifest, ThreeWaySnapshot, merge_three_way_snapshots,
 };
@@ -25863,6 +25864,7 @@ fn column_restore_ladders_keep_uneven_depth_labels_and_fixture_values() {
     let mut history = BranchMergeTombstoneHistory::new(0);
     assert!(history.submit_tabular_column_depth_wave(&wave(1)).unwrap().is_empty());
     assert!(history.column_events().is_empty());
+    assert!(history.column_ladder_events().is_empty());
     assert_eq!(history.next_order(), Some(0));
 
     assert!(history.submit(&empty_plan(0)).unwrap().is_empty());
@@ -25911,6 +25913,24 @@ fn column_restore_ladders_keep_uneven_depth_labels_and_fixture_values() {
             },
         ],
         "the shorter name branch and longer city branch retain independent labels and fixture-backed values",
+    );
+    assert_eq!(
+        history.column_ladder_events(),
+        &[
+            BranchMergeColumnDepthLadderEvent {
+                order: 1,
+                table: id(1),
+                column: id(2),
+                depth_labels: vec![0, 1],
+            },
+            BranchMergeColumnDepthLadderEvent {
+                order: 1,
+                table: id(1),
+                column: id(3),
+                depth_labels: vec![0, 1, 2, 3],
+            },
+        ],
+        "released ladders retain every column-local label, including the empty city depth",
     );
     assert_eq!(history.next_order(), Some(2));
     let committed = history.clone();
@@ -26207,6 +26227,170 @@ fn multi_parent_column_restore_ladders_keep_fragment_depth_identities() {
         history.submit_multi_parent_tabular_column_depth_wave(&wave(2)),
         Err(BranchMergeTombstoneHistoryError::DuplicateOrStale { order: 2 }),
         "an exact multi-parent retry remains stale after identity validation",
+    );
+    assert_eq!(history, committed);
+}
+
+#[test]
+fn tabular_restore_storm_releases_uneven_table_depth_identities() {
+    let fixture_rows = TOMBSTONE_DEPTH_COMMIT_ORDER
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    let fixture_row = |path: &str| {
+        fixture_rows
+            .iter()
+            .find(|row| row.key == string(path))
+            .unwrap_or_else(|| panic!("the in-crate storm fixture supplies {path}"))
+            .clone()
+    };
+    let root = fixture_row("root");
+    let child = fixture_row("root/child");
+    let deep = fixture_row("root/child/deep");
+    let leaf = fixture_row("root/child/deep/leaf/twig");
+    let anchor = fixture_row("a");
+    let anchor_child = fixture_row("a/child");
+    let anchor_deep = fixture_row("a/child/deep");
+    let anchor_leaf = fixture_row("a/child/deep/leaf");
+    assert_eq!(root.fields[&id(2)], string("Storm root"));
+    assert_eq!(leaf.fields[&id(2)], string("Storm twig"));
+    assert_eq!(anchor.fields[&id(2)], string("Anchor root"));
+    assert_eq!(anchor_leaf.fields[&id(2)], string("Anchor leaf"));
+
+    let depth = |fragment_count, fragments| BranchMergeTableDepthFragments {
+        fragment_count,
+        fragments,
+    };
+    let wave = |order| {
+        let tables = match order {
+            2 => BTreeMap::from([
+                (
+                    id(1),
+                    depth(
+                        3,
+                        BTreeMap::from([
+                            (0, vec![root.key.clone()]),
+                            (1, Vec::new()),
+                            (2, vec![child.key.clone()]),
+                        ]),
+                    ),
+                ),
+                (
+                    id(2),
+                    depth(
+                        2,
+                        BTreeMap::from([
+                            (0, vec![anchor.key.clone()]),
+                            (1, vec![anchor_deep.key.clone()]),
+                        ]),
+                    ),
+                ),
+            ]),
+            3 => BTreeMap::from([
+                (
+                    id(1),
+                    depth(
+                        2,
+                        BTreeMap::from([
+                            (0, vec![deep.key.clone()]),
+                            (1, vec![leaf.key.clone()]),
+                        ]),
+                    ),
+                ),
+                (
+                    id(2),
+                    depth(
+                        4,
+                        BTreeMap::from([
+                            (0, vec![anchor_child.key.clone()]),
+                            (1, Vec::new()),
+                            (2, vec![anchor_leaf.key.clone()]),
+                            (3, Vec::new()),
+                        ]),
+                    ),
+                ),
+            ]),
+            other => panic!("unexpected restore wave order: {other}"),
+        };
+        BranchMergeTabularDepthWave { order, tables }
+    };
+    let empty_plan = |order| SequencedBranchMergePlan {
+        order,
+        plan: BranchMergePlan {
+            schema: Schema { version: EvolutionVersion::V1_0, tables: Vec::new() },
+            tables: BTreeMap::new(),
+            checkpoints: BTreeMap::new(),
+            report: Default::default(),
+        },
+        ordered_row_tombstones: Vec::new(),
+    };
+
+    let mut history = BranchMergeTombstoneHistory::new(0);
+    assert!(history.submit_tabular_depth_wave(&wave(3)).unwrap().is_empty());
+    assert!(history.submit_tabular_depth_wave(&wave(2)).unwrap().is_empty());
+    assert!(history.table_ladder_events().is_empty());
+    assert!(history.submit(&empty_plan(0)).unwrap().is_empty());
+    assert_eq!(history.next_order(), Some(1));
+    assert!(history.table_ladder_events().is_empty());
+
+    let released = history.submit(&empty_plan(1)).unwrap();
+    assert_eq!(released.len(), 8, "the two queued storm waves release their fixture keys once");
+    assert_eq!(
+        history.table_ladder_events(),
+        &[
+            BranchMergeTableDepthLadderEvent {
+                order: 2,
+                table: id(1),
+                depth_labels: vec![0, 1, 2],
+            },
+            BranchMergeTableDepthLadderEvent {
+                order: 2,
+                table: id(2),
+                depth_labels: vec![0, 1],
+            },
+            BranchMergeTableDepthLadderEvent {
+                order: 3,
+                table: id(1),
+                depth_labels: vec![0, 1],
+            },
+            BranchMergeTableDepthLadderEvent {
+                order: 3,
+                table: id(2),
+                depth_labels: vec![0, 1, 2, 3],
+            },
+        ],
+        "out-of-order restore waves release in lineage order with independent table labels",
+    );
+    assert_eq!(
+        history.events().iter().map(|event| event.order).collect::<Vec<_>>(),
+        vec![2, 2, 2, 2, 3, 3, 3, 3],
+        "each completed storm wave keeps its own order across the shared release",
+    );
+    let committed = history.clone();
+
+    let mut shortened_retry = wave(2);
+    let table = shortened_retry.tables.get_mut(&id(1)).unwrap();
+    table.fragment_count = 2;
+    table.fragments = BTreeMap::from([
+        (0, vec![root.key.clone()]),
+        (1, vec![child.key.clone()]),
+    ]);
+    assert_eq!(
+        history.submit_tabular_depth_wave(&shortened_retry),
+        Err(BranchMergeTombstoneHistoryError::TabularFragmentCountMismatch {
+            order: 2,
+            table: id(1),
+            expected: 3,
+            actual: 2,
+        }),
+        "one table's restore retry cannot inherit a sibling table's shorter storm ladder",
+    );
+    assert_eq!(history, committed);
+
+    assert_eq!(
+        history.submit_tabular_depth_wave(&wave(2)),
+        Err(BranchMergeTombstoneHistoryError::DuplicateOrStale { order: 2 }),
+        "an exact replay after the storm release remains stale",
     );
     assert_eq!(history, committed);
 }

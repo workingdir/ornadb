@@ -15,6 +15,7 @@ mod publication_policy;
 
 pub use branch_merge::{
     BranchMergeBudget, BranchMergeColumnDepthEvent, BranchMergeColumnDepthFragments,
+    BranchMergeColumnDepthLadderEvent,
     BranchMergeConflict, BranchMergeDepthFragmentRecovery,
     BranchMergeDepthWaveRecovery, BranchMergeError, BranchMergePlan,
     BranchMergeMultiParentTabularColumnDepthWave, BranchMergeParentColumnDepthEvent,
@@ -23,7 +24,7 @@ pub use branch_merge::{
     BranchMergeTombstoneEvent, BranchMergeTombstoneHistory,
     BranchMergeTombstoneHistoryError,
     BranchMergePlanSequenceError, BranchMergePlanSequencer, BranchMergeReport,
-    SequencedBranchMergePlan,
+    BranchMergeTableDepthLadderEvent, SequencedBranchMergePlan,
     BranchRowSource, CheckpointId, KeyRange, MergeSide, MergedSegment, MergedTable,
     RowSegmentManifest, TableManifest, ThreeWaySnapshot, merge_three_way_snapshots,
 };
