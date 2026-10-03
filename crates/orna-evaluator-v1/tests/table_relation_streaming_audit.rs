@@ -552,3 +552,51 @@ fn paired_read_folds_keep_equal_cursor_bytes_scope_local() {
         "equal cursor bytes resume only within their own read scope"
     );
 }
+
+#[test]
+fn paired_subscription_handoffs_keep_identity_when_cursors_repeat_across_refreshes() {
+    // This provider stays alive across both refresh folds. Every lane and
+    // generation deliberately reuses one opaque checkpoint to prove that
+    // scope identity, not cursor bytes, chooses the continuation stream.
+    let mut source = PairedSubscriptionSource::new([
+        vec![page(&[-3, 1], Some(vec![77])), page(&[3, 5], None)],
+        vec![page(&[2, 7], Some(vec![77])), page(&[4, 8], None)],
+        vec![page(&[5, 7], Some(vec![77])), page(&[9, 11], None)],
+        vec![page(&[2, 8], Some(vec![77])), page(&[10, 12], None)],
+    ]);
+
+    assert_eq!(
+        run_with_fixture_functions(paired_subscription_cascade_body(), &mut source).unwrap(),
+        integer(14),
+        "first paired fold combines the positive odd and even rows from its own pages"
+    );
+    assert_eq!(source.lanes.len(), 2);
+    let first_scopes = [source.lanes[0].0, source.lanes[1].0];
+    assert_ne!(first_scopes[0], first_scopes[1]);
+
+    assert_eq!(
+        run_with_fixture_functions(paired_subscription_cascade_body(), &mut source).unwrap(),
+        integer(3),
+        "refresh fold reads only the positive even row from the new paired pages"
+    );
+    assert_eq!(source.lanes.len(), 4);
+    let refreshed_scopes = [source.lanes[2].0, source.lanes[3].0];
+    assert_ne!(refreshed_scopes[0], refreshed_scopes[1]);
+    for scope in refreshed_scopes {
+        assert!(!first_scopes.contains(&scope));
+    }
+    assert_eq!(
+        source.cursors,
+        vec![
+            (first_scopes[0], None),
+            (first_scopes[0], Some(vec![77])),
+            (first_scopes[1], None),
+            (first_scopes[1], Some(vec![77])),
+            (refreshed_scopes[0], None),
+            (refreshed_scopes[0], Some(vec![77])),
+            (refreshed_scopes[1], None),
+            (refreshed_scopes[1], Some(vec![77])),
+        ],
+        "each paired refresh begins at the head and resumes only its own repeated cursor"
+    );
+}

@@ -222,7 +222,7 @@ const REFERENCE_STANDARD_UI_SOURCE_V1: &str = include_str!("../../../stdlib/std/
 /// `orna.std/11` APIs below model older, explicitly versioned snapshots.
 #[must_use]
 pub fn reference_standard_sources_v1() -> [(String, String); 50] {
-    [
+    let mut sources: [(String, String); 50] = [
         (
             REFERENCE_STANDARD_MATH_PATH_V1.into(),
             REFERENCE_STANDARD_MATH_SOURCE_V1.into(),
@@ -423,7 +423,11 @@ pub fn reference_standard_sources_v1() -> [(String, String); 50] {
             REFERENCE_STANDARD_UI_PATH_V1.into(),
             REFERENCE_STANDARD_UI_SOURCE_V1.into(),
         ),
-    ]
+    ];
+    sources[2]
+        .1
+        .push_str(include_str!("fixtures/query_recursive_cte_n0o0e.orna"));
+    sources
 }
 
 /// Profile that pins the exact 1.0.0 reference-standard source bytes.
