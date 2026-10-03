@@ -182,6 +182,28 @@ fn collection_catalogue() -> Catalogue {
         .expect("verified collection catalogue")
 }
 
+fn ovc_catalogue() -> Catalogue {
+    let sources = vec![
+        (
+            "std/collection.orna".to_owned(),
+            include_str!("fixtures/ovc-collection-catalogue.orna").to_owned(),
+        ),
+        (
+            "std/option.orna".to_owned(),
+            include_str!("fixtures/ovc-option-catalogue.orna").to_owned(),
+        ),
+        (
+            "std/pattern.orna".to_owned(),
+            include_str!("fixtures/ovc-pattern-catalogue.orna").to_owned(),
+        ),
+    ];
+    let profile = StandardDependencyProfile::from_sources("orna.std/v1-ovc", sources.clone())
+        .expect("OVC dependency profile");
+    Catalogue::authoritative_core()
+        .with_standard_sources(&profile, sources)
+        .expect("verified OVC catalogue")
+}
+
 fn float_collection_catalogue() -> Catalogue {
     let source = include_str!("fixtures/float-collection-catalogue.orna");
     let profile = StandardDependencyProfile::from_sources(
@@ -13047,6 +13069,50 @@ fn finite_list_filter_types_predicate_and_preserves_effects() {
             .contains("database read")
     );
     assert!(module.symbols["reads"].effects.may_fail);
+}
+
+#[test]
+fn generic_ovc_callbacks_bind_from_values_across_mixed_named_fold_order() {
+    let analysis = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "ovc-predicate-binding-order.orna",
+            include_str!("fixtures/ovc-predicate-binding-order-25.orna"),
+        )],
+        &ovc_catalogue(),
+    );
+    assert!(
+        analysis.is_ok(),
+        "{:?}",
+        analysis
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+    let module = analysis
+        .modules
+        .values()
+        .next()
+        .expect("OVC predicate binding module");
+
+    assert!(matches!(
+        &module.symbols["option_filter_reordered"].ty,
+        Type::Function { result, .. }
+            if result.as_ref() == &Type::Optional(Box::new(Type::Record(BTreeMap::from([
+                ("name".into(), Type::Text),
+            ]))))
+    ));
+    assert!(matches!(
+        &module.symbols["variant_left_reordered"].ty,
+        Type::Function { result, .. } if result.as_ref() == &Type::Text
+    ));
+    assert!(matches!(
+        &module.symbols["collection_filter_reordered"].ty,
+        Type::Function { result, .. }
+            if result.as_ref() == &Type::List(Box::new(Type::Record(BTreeMap::from([
+                ("score".into(), Type::Int),
+            ]))))
+    ));
 }
 
 #[test]
