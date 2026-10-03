@@ -18406,6 +18406,9 @@ fn merge_multi_parent_checkpoint_value(
     parent: &Type,
     first_parent: &Type,
 ) -> Option<Type> {
+    if !checkpoint_paired_boundary_fold_topology_matches(accumulated, parent, first_parent) {
+        return None;
+    }
     if matches!(first_parent, Type::Tuple(_)) {
         return merge_multi_parent_checkpoint_tuple(accumulated, parent, first_parent);
     }
@@ -18834,6 +18837,179 @@ fn scoped_checkpoint_rollback(
         effective_parent: rollback_anchor.clone(),
         rejected_scope: true,
     })
+}
+
+/// Compare selector topology only for paired record boundaries whose values
+/// contain pinned tuples without crossing collection or closure boundaries.
+/// This lets a partially omitted first row acquire its depth relation, then
+/// prevents later rows in the same storm from splitting that learned pair.
+fn checkpoint_paired_boundary_fold_topology_matches(
+    accumulated: &Type,
+    parent: &Type,
+    topology_anchor: &Type,
+) -> bool {
+    let (Type::Record(accumulated_fields), Type::Record(parent_fields), Type::Record(anchor_fields)) =
+        (accumulated, parent, topology_anchor)
+    else {
+        return true;
+    };
+
+    let paired_field_names = anchor_fields
+        .iter()
+        .filter_map(|(name, anchor)| {
+            (type_contains_pinned_tuple_through_records(anchor)
+                && accumulated_fields
+                    .get(name)
+                    .is_some_and(type_contains_pinned_tuple_through_records)
+                && parent_fields
+                    .get(name)
+                    .is_some_and(type_contains_pinned_tuple_through_records))
+            .then_some(name)
+        })
+        .collect::<Vec<_>>();
+    if paired_field_names.len() < 2 {
+        return true;
+    }
+
+    let mut learned = Vec::new();
+    for name in paired_field_names {
+        let (Some(anchor), Some(accumulated), Some(parent)) = (
+            anchor_fields.get(name),
+            accumulated_fields.get(name),
+            parent_fields.get(name),
+        ) else {
+            continue;
+        };
+        let mut anchor_to_accumulated = Vec::new();
+        let mut anchor_to_parent = Vec::new();
+        // A nested shape mismatch is handled by the existing scoped fold. Use
+        // only the corresponding maps collected before that boundary.
+        let _ = collect_corresponding_snapshot_context_maps_at_path(
+            anchor,
+            accumulated,
+            &mut anchor_to_accumulated,
+            &mut Vec::new(),
+        );
+        let _ = collect_corresponding_snapshot_context_maps_at_path(
+            anchor,
+            parent,
+            &mut anchor_to_parent,
+            &mut Vec::new(),
+        );
+        for pair in &mut anchor_to_accumulated {
+            pair.boundary_path
+                .insert(0, SnapshotTopologyBoundary::RecordField(name.clone()));
+        }
+        let parent_maps = anchor_to_parent
+            .into_iter()
+            .map(|mut pair| {
+                pair.boundary_path
+                    .insert(0, SnapshotTopologyBoundary::RecordField(name.clone()));
+                (pair.boundary_path.clone(), pair)
+            })
+            .collect::<BTreeMap<_, _>>();
+        learned.extend(anchor_to_accumulated.iter().filter_map(|accumulated| {
+            let parent = parent_maps.get(&accumulated.boundary_path)?;
+            (accumulated.expected.is_empty()
+                && !accumulated.actual.is_empty()
+                && !parent.actual.is_empty())
+            .then(|| SnapshotContextMapPair {
+                boundary_path: accumulated.boundary_path.clone(),
+                expected: accumulated.actual.clone(),
+                actual: parent.actual.clone(),
+            })
+        }));
+    }
+
+    let paired_maps = learned
+        .iter()
+        .filter(|candidate| {
+            learned.iter().any(|other| {
+                other.boundary_path != candidate.boundary_path
+                    && checkpoint_paths_are_paired_boundaries(
+                        &candidate.boundary_path,
+                        &other.boundary_path,
+                    )
+            })
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    if paired_maps.len() < 2 {
+        return true;
+    }
+
+    let membership_shapes = |expected: bool| {
+        let mut labels = BTreeMap::<String, BTreeSet<Vec<SnapshotTopologyBoundary>>>::new();
+        for pair in &paired_maps {
+            let selectors = if expected {
+                &pair.expected
+            } else {
+                &pair.actual
+            };
+            for selector in selectors {
+                labels
+                    .entry(selector.clone())
+                    .or_default()
+                    .insert(pair.boundary_path.clone());
+            }
+        }
+        labels
+            .into_values()
+            .map(|membership| membership.into_iter().collect::<Vec<_>>())
+            .collect::<BTreeSet<_>>()
+    };
+
+    membership_shapes(true) == membership_shapes(false)
+}
+
+fn type_contains_pinned_tuple_through_records(ty: &Type) -> bool {
+    match ty {
+        Type::Record(fields) => fields.values().any(|field| {
+            matches!(field, Type::Tuple(_)) && type_contains_pinned_snapshot_identity(field)
+        }),
+        _ => false,
+    }
+}
+
+fn checkpoint_paths_are_paired_boundaries(
+    left: &[SnapshotTopologyBoundary],
+    right: &[SnapshotTopologyBoundary],
+) -> bool {
+    if left.len() != right.len() {
+        return false;
+    }
+    let mut sibling_record_field = None;
+    let mut shared_tuple_depth = None;
+    for (index, (left, right)) in left.iter().zip(right).enumerate() {
+        if left == right {
+            if matches!(left, SnapshotTopologyBoundary::TupleElement(_))
+                && shared_tuple_depth.is_none()
+            {
+                shared_tuple_depth = Some(index);
+            }
+        } else if matches!(
+            (left, right),
+            (
+                SnapshotTopologyBoundary::RecordField(_),
+                SnapshotTopologyBoundary::RecordField(_)
+            )
+        ) {
+            if sibling_record_field.replace(index).is_some() {
+                return false;
+            }
+        } else {
+            return false;
+        }
+    }
+    let (Some(sibling_record_field_index), Some(shared_tuple_depth_index)) =
+        (sibling_record_field, shared_tuple_depth)
+    else {
+        return false;
+    };
+    sibling_record_field_index < shared_tuple_depth_index
+        && left[sibling_record_field_index + 1..shared_tuple_depth_index]
+            .iter()
+            .all(|boundary| matches!(boundary, SnapshotTopologyBoundary::RecordField(_)))
 }
 
 /// ORNA-CP-003 and ORNA-SYS-136 define explicit snapshot selection, but do not
