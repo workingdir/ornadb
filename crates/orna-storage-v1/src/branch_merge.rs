@@ -256,6 +256,33 @@ pub struct BranchMergePairedCheckpointRedoFoldSparseMergeChainSnapshot {
     pub slots: Vec<BranchMergePairedCheckpointRedoFoldSparseMergeChainSlotSnapshot>,
 }
 
+/// One checkpoint pin bound to the checkpoint stream it names.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BranchMergePairedCheckpointPinIdentity {
+    pub checkpoint_id: CheckpointId,
+    pub generation: CheckpointGeneration,
+}
+
+/// One sparse occurrence retaining each directional checkpoint pin explicitly.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BranchMergePairedCheckpointRedoFoldSparsePinMergeChainSlotSnapshot {
+    /// Zero-based position of the source chain supplied to the merge.
+    pub merge_ordinal: usize,
+    /// Position of the sparse fold inside that source chain.
+    pub fold_ordinal: usize,
+    pub order: u64,
+    pub left_pin: Option<BranchMergePairedCheckpointPinIdentity>,
+    pub right_pin: Option<BranchMergePairedCheckpointPinIdentity>,
+    pub redo_fold_identity: BranchMergePairedRedoFoldIdentity,
+}
+
+/// A checkpoint stream merged across sparse chains without detaching pin IDs.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BranchMergePairedCheckpointRedoFoldSparsePinMergeChainSnapshot {
+    pub checkpoint_id: CheckpointId,
+    pub slots: Vec<BranchMergePairedCheckpointRedoFoldSparsePinMergeChainSlotSnapshot>,
+}
+
 /// One occurrence from a source sparse checkpoint chain after merge, retaining
 /// both the enclosing fold pair and the exact segment pair.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1349,6 +1376,68 @@ pub fn merge_paired_checkpoint_redo_sparse_stream_chains_preserving_fold_identit
                 .collect::<Vec<_>>();
             slots.sort_by_key(|slot| (slot.merge_ordinal, slot.fold_ordinal, slot.order));
             BranchMergePairedCheckpointRedoFoldSparseMergeChainSnapshot {
+                checkpoint_id,
+                slots,
+            }
+        })
+        .collect()
+}
+
+/// Merges sparse checkpoint pin chains while binding each pin to its ID.
+///
+/// The catalog unions known IDs with IDs observed in any source chain. Every
+/// occurrence keeps its source-chain ordinal, fold ordinal, order, and paired
+/// redo-fold identity. Each present side becomes an explicit `(checkpoint_id,
+/// generation)` pin; absent sides and sparse gaps stay absent. This prevents
+/// a pin copied from one checkpoint stream from being relabeled by a sibling
+/// stream during a three-way or wider merge.
+pub fn merge_paired_checkpoint_redo_sparse_stream_chains_preserving_checkpoint_pin_identity(
+    known_checkpoint_ids: &[CheckpointId],
+    merge_chains: &[Vec<BranchMergePairedCheckpointRedoFoldSparseStreamChainSnapshot>],
+) -> Vec<BranchMergePairedCheckpointRedoFoldSparsePinMergeChainSnapshot> {
+    let checkpoint_ids = known_checkpoint_ids
+        .iter()
+        .cloned()
+        .chain(
+            merge_chains
+                .iter()
+                .flat_map(|chain| chain.iter().map(|stream| stream.checkpoint_id.clone())),
+        )
+        .collect::<BTreeSet<_>>();
+
+    checkpoint_ids
+        .into_iter()
+        .map(|checkpoint_id| {
+            let mut slots = Vec::new();
+            for (merge_ordinal, chain) in merge_chains.iter().enumerate() {
+                for stream in chain
+                    .iter()
+                    .filter(|stream| stream.checkpoint_id == checkpoint_id)
+                {
+                    for slot in &stream.slots {
+                        let pin = |generation: &Option<CheckpointGeneration>| {
+                            generation.clone().map(|generation| {
+                                BranchMergePairedCheckpointPinIdentity {
+                                    checkpoint_id: checkpoint_id.clone(),
+                                    generation,
+                                }
+                            })
+                        };
+                        slots.push(
+                            BranchMergePairedCheckpointRedoFoldSparsePinMergeChainSlotSnapshot {
+                                merge_ordinal,
+                                fold_ordinal: slot.fold_ordinal,
+                                order: slot.order,
+                                left_pin: pin(&slot.left),
+                                right_pin: pin(&slot.right),
+                                redo_fold_identity: slot.redo_fold_identity.clone(),
+                            },
+                        );
+                    }
+                }
+            }
+            slots.sort_by_key(|slot| (slot.merge_ordinal, slot.fold_ordinal, slot.order));
+            BranchMergePairedCheckpointRedoFoldSparsePinMergeChainSnapshot {
                 checkpoint_id,
                 slots,
             }
