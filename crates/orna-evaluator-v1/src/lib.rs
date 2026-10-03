@@ -24,11 +24,11 @@ use orna_value_v1::{
     CANONICAL_NAN_BITS, ErrorValue as CanonicalErrorValue, Raw, domain_digest, float_max,
     float_min, float_ordinary_eq, float_total_cmp,
 };
-use sha2::{Digest as _, Sha256};
 use serde::{
     Deserialize,
     de::{self, MapAccess, Visitor},
 };
+use sha2::{Digest as _, Sha256};
 use serde_json::value::RawValue;
 use unicode_normalization::UnicodeNormalization;
 
@@ -211,6 +211,65 @@ pub struct StepBudget {
 pub struct RelationPage {
     pub rows: Vec<CanonicalValue>,
     pub next: Option<Vec<u8>>,
+}
+
+/// A provider-owned cursor bound to one activation's source identity.
+/// Checkpoints are opaque to the evaluator and are advanced only after the
+/// consumer commits a delivery.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StreamSourceCursor {
+    pub source: String,
+    pub identity: [u8; 32],
+    pub after: Option<Vec<u8>>,
+}
+
+/// One source checkpoint to commit atomically with a consumer callback.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StreamCheckpoint {
+    pub source: String,
+    pub identity: [u8; 32],
+    pub checkpoint: Vec<u8>,
+}
+
+/// An ordered provider delivery with its event-time and replay checkpoint.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StreamDelivery {
+    pub source: String,
+    pub identity: [u8; 32],
+    pub checkpoint: Vec<u8>,
+    pub event_time: Instant,
+    pub value: CanonicalValue,
+}
+
+/// A provider or decoding error associated with a blocked ordered delivery.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StreamFailure {
+    pub source: String,
+    pub identity: [u8; 32],
+    pub checkpoint: Option<Vec<u8>>,
+    pub event_time: Instant,
+    pub error: EvaluationError,
+    /// Only errors explicitly marked recoverable by the provider may reach a
+    /// `std.stream.recover` handler.
+    pub recoverable: bool,
+}
+
+/// A source event in provider-observed arrival order.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum StreamEvent {
+    Delivery(StreamDelivery),
+    Failure(StreamFailure),
+}
+
+/// One bounded provider poll. The provider supplies events in observed
+/// arrival order, preserves each source's order, and advances `watermark`
+/// when event-time quiet periods have elapsed. An empty nonterminal page must
+/// advance its watermark so consumers never busy-spin.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StreamPage {
+    pub events: Vec<StreamEvent>,
+    pub watermark: Instant,
+    pub ended_sources: BTreeSet<String>,
 }
 
 impl StepBudget {
@@ -741,6 +800,69 @@ pub trait EffectHandler {
     ) -> Result<Option<RelationPage>, EvaluationError> {
         Ok(None)
     }
+
+    /// Validate a provider stream binding before an activation constructs a
+    /// stream handle. The source identity is a stable digest of the caller's
+    /// identity label and provider source name.
+    fn validate_stream_source(
+        &mut self,
+        _source: &str,
+        _identity: &[u8; 32],
+        _budget: &mut StepBudget,
+        _cancellation: Option<&CancellationToken>,
+    ) -> Result<bool, EvaluationError> {
+        Ok(false)
+    }
+
+    /// Poll at most `max_events` deliveries for the supplied activation-owned
+    /// cursors. Implementations return merge events in observed arrival order
+    /// and checkpoint values that strictly increase lexicographically within
+    /// each source. Polling may wait for data or watermark progress, and must
+    /// honor cancellation. The evaluator checks the page bound and cursor
+    /// progression before invoking any callback.
+    fn poll_stream_sources(
+        &mut self,
+        _sources: &[StreamSourceCursor],
+        _max_events: usize,
+        _budget: &mut StepBudget,
+        _cancellation: Option<&CancellationToken>,
+    ) -> Result<StreamPage, EvaluationError> {
+        Err(error("ORNA-EVAL-UNSUPPORTED"))
+    }
+
+    /// Begin an activation transaction for one callback and its checkpoint
+    /// updates. Host effects issued by the callback use this same handler, so
+    /// `commit_stream_delivery` can atomically publish them with the source
+    /// checkpoints.
+    fn begin_stream_delivery(
+        &mut self,
+        _checkpoints: &[StreamCheckpoint],
+        _budget: &mut StepBudget,
+        _cancellation: Option<&CancellationToken>,
+    ) -> Result<(), EvaluationError> {
+        Err(error("ORNA-EVAL-UNSUPPORTED"))
+    }
+
+    /// Commit callback effects and all listed source checkpoints atomically.
+    fn commit_stream_delivery(
+        &mut self,
+        _checkpoints: &[StreamCheckpoint],
+        _budget: &mut StepBudget,
+        _cancellation: Option<&CancellationToken>,
+    ) -> Result<(), EvaluationError> {
+        Err(error("ORNA-EVAL-UNSUPPORTED"))
+    }
+
+    /// Roll back an uncommitted callback and leave every listed source cursor
+    /// unchanged. Implementations should make rollback idempotent.
+    fn rollback_stream_delivery(
+        &mut self,
+        _checkpoints: &[StreamCheckpoint],
+        _budget: &mut StepBudget,
+        _cancellation: Option<&CancellationToken>,
+    ) -> Result<(), EvaluationError> {
+        Err(error("ORNA-EVAL-UNSUPPORTED"))
+    }
 }
 
 /// Evaluate one expression using [`parse_expression`].
@@ -766,6 +888,98 @@ pub fn evaluate_expression_with_functions(
         return Err(error("ORNA-EVAL-PARSE"));
     }
     evaluate_with_functions(&parsed.value, environment, functions, limits)
+}
+
+/// Evaluate one expression with an activation-owned effect and stream
+/// provider. Provider calls, callback effects, and stream checkpoints share a
+/// single evaluator activation.
+pub fn evaluate_expression_with_effects(
+    source: &str,
+    environment: &Environment,
+    limits: Limits,
+    effects: &mut dyn EffectHandler,
+) -> Result<CanonicalValue, EvaluationError> {
+    evaluate_expression_with_effects_and_cancellation(source, environment, limits, effects, None)
+}
+
+/// Evaluate an expression with effects and an optional live cancellation
+/// request. Stream providers receive this same token during polls and
+/// checkpoint transactions and must stop promptly when it is requested.
+pub fn evaluate_expression_with_effects_and_cancellation(
+    source: &str,
+    environment: &Environment,
+    limits: Limits,
+    effects: &mut dyn EffectHandler,
+    cancellation: Option<&CancellationToken>,
+) -> Result<CanonicalValue, EvaluationError> {
+    evaluate_expression_with_functions_and_effects_and_cancellation(
+        source,
+        environment,
+        &Functions::new(),
+        limits,
+        effects,
+        cancellation,
+    )
+}
+
+/// Evaluate an expression with an explicit pure-function environment and a
+/// host effect adapter. This is useful to evaluate source that was already
+/// admitted against a module profile while retaining activation-scoped host
+/// capabilities.
+pub fn evaluate_expression_with_functions_and_effects(
+    source: &str,
+    environment: &Environment,
+    functions: &Functions,
+    limits: Limits,
+    effects: &mut dyn EffectHandler,
+) -> Result<CanonicalValue, EvaluationError> {
+    evaluate_expression_with_functions_and_effects_and_cancellation(
+        source,
+        environment,
+        functions,
+        limits,
+        effects,
+        None,
+    )
+}
+
+/// Evaluate admitted expression source, functions, host effects, and optional
+/// activation cancellation through one bounded evaluator context.
+pub fn evaluate_expression_with_functions_and_effects_and_cancellation(
+    source: &str,
+    environment: &Environment,
+    functions: &Functions,
+    limits: Limits,
+    effects: &mut dyn EffectHandler,
+    cancellation: Option<&CancellationToken>,
+) -> Result<CanonicalValue, EvaluationError> {
+    check_limits(source, limits)?;
+    let parsed = parse_expression(source);
+    if !parsed.is_ok() {
+        return Err(error("ORNA-EVAL-PARSE"));
+    }
+    validate_limits(limits)?;
+    let mut context = Context {
+        limits,
+        steps: 0,
+        functions,
+        aliases: None,
+        session_functions: None,
+        repl_bindings: false,
+        restrict_function_names: false,
+        reject_unhandled_field_calls: false,
+        effects: Some(effects),
+        namespace: None,
+        transfer: None,
+        cancellation,
+    };
+    context.items(functions.len())?;
+    let mut scope = Scope::from_environment(environment, &mut context)?;
+    let value = context.evaluate(&parsed.value, &mut scope, 0)?;
+    if context.transfer.is_some() {
+        return Err(error("ORNA-EVAL-UNSUPPORTED"));
+    }
+    value.canonical()
 }
 
 /// Evaluate a REPL expression using [`parse_repl`]. REPL declarations are
@@ -1344,6 +1558,24 @@ fn days_since_unix_epoch(year: u32, month: u32, day: u32) -> Option<i64> {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+struct ProviderRetryPolicy {
+    max_attempts: usize,
+    initial_delay_nanoseconds: BigInt,
+    max_delay_nanoseconds: BigInt,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ProviderStream {
+    sources: Vec<StreamSourceCursor>,
+    buffer_capacity: usize,
+    batch_size: Option<usize>,
+    throttle_nanoseconds: Option<BigInt>,
+    debounce_nanoseconds: Option<BigInt>,
+    retry: Option<ProviderRetryPolicy>,
+    recover: Option<Box<Value>>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 enum Value {
     Null,
     Unit,
@@ -1388,6 +1620,7 @@ enum Value {
         source_label: String,
         source_digest: [u8; 32],
         position: usize,
+        provider: Option<ProviderStream>,
     },
     Relation(RelationPlan),
     Tuple(Vec<Value>),
@@ -1592,7 +1825,15 @@ impl Value {
         match self {
             Self::Function { .. } | Self::Closure(_) => true,
             Self::List(values) | Self::Tuple(values) => values.iter().any(Self::contains_callable),
-            Self::Stream { values, .. } => values.iter().any(Self::contains_callable),
+            Self::Stream {
+                values, provider, ..
+            } => {
+                values.iter().any(Self::contains_callable)
+                    || provider
+                        .as_ref()
+                        .and_then(|provider| provider.recover.as_deref())
+                        .is_some_and(Self::contains_callable)
+            }
             Self::Record(values) => values.values().any(Self::contains_callable),
             Self::NominalRecord { fields, .. } => {
                 fields.iter().any(|(_, value)| value.contains_callable())
@@ -1608,7 +1849,15 @@ impl Value {
         match self {
             Self::Float(_) => true,
             Self::List(values) | Self::Tuple(values) => values.iter().any(Self::contains_float),
-            Self::Stream { values, .. } => values.iter().any(Self::contains_float),
+            Self::Stream {
+                values, provider, ..
+            } => {
+                values.iter().any(Self::contains_float)
+                    || provider
+                        .as_ref()
+                        .and_then(|provider| provider.recover.as_deref())
+                        .is_some_and(Self::contains_float)
+            }
             Self::Record(values) => values.values().any(Self::contains_float),
             Self::NominalRecord { fields, .. } => {
                 fields.iter().any(|(_, value)| value.contains_float())
@@ -1630,7 +1879,7 @@ impl Value {
             Self::Function { .. } | Self::Closure(_) => {
                 return Err(error("ORNA-EVAL-UNSUPPORTED"));
             }
-            Self::Relation(_) | Self::Stream { .. } | Self::Period { .. } => {
+            Self::Relation(_) | Self::Period { .. } => {
                 return Err(error("ORNA-EVAL-UNSUPPORTED"));
             }
             // Error values are only available to the handling side of `|?`.
@@ -1709,13 +1958,23 @@ impl Value {
             // The finite stream's source identity and digest remain in the
             // live evaluator value; the canonical boundary exposes its real
             // item sequence rather than substituting a placeholder result.
-            Self::Stream { values, position, .. } => Raw::Array(
-                values
-                    .into_iter()
-                    .skip(position)
-                    .map(Value::raw)
-                    .collect::<Result<_, _>>()?,
-            ),
+            Self::Stream {
+                values,
+                position,
+                provider,
+                ..
+            } => {
+                if provider.is_some() {
+                    return Err(error("ORNA-EVAL-UNSUPPORTED"));
+                }
+                Raw::Array(
+                    values
+                        .into_iter()
+                        .skip(position)
+                        .map(Value::raw)
+                        .collect::<Result<_, _>>()?,
+                )
+            }
             Self::Record(values) => {
                 // OVB map keys are ordered by their canonical text encoding:
                 // text length first, then bytewise lexical order.
@@ -2104,6 +2363,25 @@ enum RelationRow {
     Skip,
     Yield(Value),
     End,
+}
+
+#[derive(Clone, Debug)]
+struct ReadyStreamItem {
+    source: String,
+    identity: [u8; 32],
+    checkpoint: Vec<u8>,
+    event_time: Instant,
+    value: Value,
+    recovery_error: Option<EvaluationError>,
+}
+
+fn stream_elapsed_nanoseconds(later: Instant, earlier: Instant) -> Option<BigInt> {
+    if later < earlier {
+        return None;
+    }
+    let seconds = BigInt::from(later.unix_seconds) - BigInt::from(earlier.unix_seconds);
+    let nanoseconds = BigInt::from(later.nanosecond) - BigInt::from(earlier.nanosecond);
+    Some(seconds * BigInt::from(1_000_000_000u64) + nanoseconds)
 }
 
 fn invoke_task_callback(
@@ -5068,15 +5346,13 @@ impl Context<'_, '_> {
         let witness = witness.ok_or_else(|| error("ORNA-EVAL-ARGUMENT"))?;
         let input = supplied_input.ok_or_else(|| error("ORNA-EVAL-ARGUMENT"))?;
         let decoded = match (codec, input) {
-            ("json", Value::String(input)) => {
-                self.decode_json_with_witness(
-                    &input,
-                    &witness,
-                    ignore_unknown_fields,
-                    scope,
-                    depth + 1,
-                )?
-            }
+            ("json", Value::String(input)) => self.decode_json_with_witness(
+                &input,
+                &witness,
+                ignore_unknown_fields,
+                scope,
+                depth + 1,
+            )?,
             ("orna", Value::String(input)) => {
                 self.orna_codec("__decode", vec![Value::String(input)])?
             }
@@ -5161,7 +5437,9 @@ impl Context<'_, '_> {
             if self.transfer.is_some() {
                 return Ok(Value::Null);
             }
-            construction_scope.0.insert(field.name.clone(), value.clone());
+            construction_scope
+                .0
+                .insert(field.name.clone(), value.clone());
             construction_scope.1.remove(&field.name);
             fields.push((field.field_id.clone(), value));
         }
@@ -6061,11 +6339,13 @@ impl Context<'_, '_> {
             source_label,
             source_digest,
             position,
+            provider,
         } = stream
         else {
             return Err(error("ORNA-EVAL-TYPE"));
         };
-        if *position > values.len()
+        if provider.is_some()
+            || *position > values.len()
             || self.list_stream_digest(source_label, values)? != *source_digest
         {
             return Err(error("ORNA-EVAL-VALUE"));
@@ -6087,8 +6367,616 @@ impl Context<'_, '_> {
             source_label,
             source_digest,
             position: 0,
+            provider: None,
         })
     }
+
+    fn stream_effect<T>(
+        &mut self,
+        operation: impl FnOnce(
+            &mut dyn EffectHandler,
+            &mut StepBudget,
+            Option<&CancellationToken>,
+        ) -> Result<T, EvaluationError>,
+    ) -> Result<T, EvaluationError> {
+        let remaining = self.limits.max_steps.saturating_sub(self.steps);
+        let mut budget = StepBudget::new(remaining);
+        let cancellation = self.cancellation;
+        let result = match self.effects.as_deref_mut() {
+            Some(effects) => operation(effects, &mut budget, cancellation),
+            None => Err(error("ORNA-EVAL-UNSUPPORTED")),
+        };
+        let debited = remaining - budget.remaining();
+        self.steps = self
+            .steps
+            .checked_add(debited)
+            .ok_or_else(|| error("ORNA-EVAL-LIMIT"))?;
+        result
+    }
+
+    fn provider_stream(
+        &mut self,
+        source: &str,
+        identity_label: &str,
+    ) -> Result<Value, EvaluationError> {
+        let source = self.string(source.to_owned())?;
+        let identity_label = self.string(identity_label.to_owned())?;
+        if source.is_empty() || identity_label.is_empty() {
+            return Err(error("ORNA-EVAL-VALUE"));
+        }
+        // The reference pins finite-list identities, not connector identities.
+        // Bind the live cursor to both provider source and consumer label.
+        let identity_value = Raw::Array(vec![
+            Raw::Text(source.clone()),
+            Raw::Text(identity_label.clone()),
+        ]);
+        let identity = domain_digest("orna.provider-stream.v1", &identity_value)
+            .map_err(|_| error("ORNA-EVAL-VALUE"))?;
+        let available = self.stream_effect(|effects, budget, cancellation| {
+            effects.validate_stream_source(&source, &identity, budget, cancellation)
+        })?;
+        if !available {
+            return Err(error("ORNA-EVAL-UNSUPPORTED"));
+        }
+        let source_label = format!("{source}:{identity_label}");
+        self.string(source_label.clone())?;
+        Ok(Value::Stream {
+            values: Vec::new(),
+            source_label,
+            source_digest: identity,
+            position: 0,
+            provider: Some(ProviderStream {
+                sources: vec![StreamSourceCursor {
+                    source,
+                    identity,
+                    after: None,
+                }],
+                buffer_capacity: 1,
+                batch_size: None,
+                throttle_nanoseconds: None,
+                debounce_nanoseconds: None,
+                retry: None,
+                recover: None,
+            }),
+        })
+    }
+
+    fn provider_stream_value(
+        &mut self,
+        source_label: String,
+        source_digest: [u8; 32],
+        provider: ProviderStream,
+    ) -> Result<Value, EvaluationError> {
+        self.string(source_label.clone())?;
+        self.items(provider.sources.len())?;
+        Ok(Value::Stream {
+            values: Vec::new(),
+            source_label,
+            source_digest,
+            position: 0,
+            provider: Some(provider),
+        })
+    }
+
+    fn stream_checkpoints(items: &[ReadyStreamItem]) -> Vec<StreamCheckpoint> {
+        let mut checkpoints = BTreeMap::<(String, [u8; 32]), Vec<u8>>::new();
+        for item in items {
+            checkpoints
+                .entry((item.source.clone(), item.identity))
+                .and_modify(|checkpoint| {
+                    if item.checkpoint > *checkpoint {
+                        *checkpoint = item.checkpoint.clone();
+                    }
+                })
+                .or_insert_with(|| item.checkpoint.clone());
+        }
+        checkpoints
+            .into_iter()
+            .map(|((source, identity), checkpoint)| StreamCheckpoint {
+                source,
+                identity,
+                checkpoint,
+            })
+            .collect()
+    }
+
+    fn commit_stream_checkpoints(
+        &mut self,
+        checkpoints: &[StreamCheckpoint],
+    ) -> Result<(), EvaluationError> {
+        if checkpoints.is_empty() {
+            return Ok(());
+        }
+        self.stream_effect(|effects, budget, cancellation| {
+            effects.begin_stream_delivery(checkpoints, budget, cancellation)
+        })?;
+        let commit = self.stream_effect(|effects, budget, cancellation| {
+            effects.commit_stream_delivery(checkpoints, budget, cancellation)
+        });
+        if let Err(failure) = commit {
+            let _ = self.stream_effect(|effects, budget, _| {
+                effects.rollback_stream_delivery(checkpoints, budget, None)
+            });
+            return Err(failure);
+        }
+        Ok(())
+    }
+
+    fn rollback_stream_checkpoints(&mut self, checkpoints: &[StreamCheckpoint]) {
+        let _ = self.stream_effect(|effects, budget, _| {
+            effects.rollback_stream_delivery(checkpoints, budget, None)
+        });
+    }
+
+    fn commit_stream_callback(
+        &mut self,
+        items: &[ReadyStreamItem],
+        action: &Value,
+        recovery: Option<&Value>,
+        batch_size: Option<usize>,
+        depth: usize,
+    ) -> Result<(), EvaluationError> {
+        if items.is_empty() {
+            return Ok(());
+        }
+        let checkpoints = Self::stream_checkpoints(items);
+        self.stream_effect(|effects, budget, cancellation| {
+            effects.begin_stream_delivery(&checkpoints, budget, cancellation)
+        })?;
+
+        let callback = (|| {
+            let mut values = Vec::with_capacity(items.len());
+            for item in items {
+                let value = if let Some(failure) = &item.recovery_error {
+                    let recovery = recovery.ok_or_else(|| error("ORNA-EVAL-VALUE"))?;
+                    self.invoke_predicate(recovery, Value::Error(failure.clone()), depth + 1)?
+                } else {
+                    item.value.clone()
+                };
+                values.push(value);
+            }
+            let argument = if batch_size.is_some() {
+                Value::List(values)
+            } else {
+                values
+                    .into_iter()
+                    .next()
+                    .ok_or_else(|| error("ORNA-EVAL-VALUE"))?
+            };
+            let result = self.invoke_predicate(action, argument, depth + 1)?;
+            if !matches!(result, Value::Unit | Value::Null) {
+                return Err(error("ORNA-EVAL-TYPE"));
+            }
+            self.step()
+        })();
+
+        if let Err(failure) = callback {
+            self.rollback_stream_checkpoints(&checkpoints);
+            return Err(failure);
+        }
+        let commit = self.stream_effect(|effects, budget, cancellation| {
+            effects.commit_stream_delivery(&checkpoints, budget, cancellation)
+        });
+        if let Err(failure) = commit {
+            self.rollback_stream_checkpoints(&checkpoints);
+            return Err(failure);
+        }
+        Ok(())
+    }
+
+    fn wait_stream_retry_delay(&mut self, nanoseconds: &BigInt) -> Result<(), EvaluationError> {
+        let mut remaining = nanoseconds.clone();
+        let quantum = BigInt::from(10_000_000u32);
+        while remaining > BigInt::from(0u8) {
+            self.step()?;
+            let wait = remaining.clone().min(quantum.clone());
+            let nanos = wait.to_u32().ok_or_else(|| error("ORNA-EVAL-VALUE"))?;
+            std::thread::sleep(std::time::Duration::from_nanos(u64::from(nanos)));
+            remaining -= wait;
+        }
+        Ok(())
+    }
+
+    fn recoverable_stream_item(
+        failure: StreamFailure,
+        recovery_enabled: bool,
+    ) -> Result<ReadyStreamItem, EvaluationError> {
+        let Some(checkpoint) = failure.checkpoint else {
+            return Err(failure.error);
+        };
+        if !failure.recoverable || !recovery_enabled {
+            return Err(failure.error);
+        }
+        Ok(ReadyStreamItem {
+            source: failure.source,
+            identity: failure.identity,
+            checkpoint,
+            event_time: failure.event_time,
+            value: Value::Error(failure.error.clone()),
+            recovery_error: Some(failure.error),
+        })
+    }
+
+    fn retry_provider_delivery(
+        &mut self,
+        provider: &ProviderStream,
+        cursor: &StreamSourceCursor,
+        mut failure: StreamFailure,
+        watermark: &mut Instant,
+    ) -> Result<ReadyStreamItem, EvaluationError> {
+        if let Some(retry) = &provider.retry {
+            let expected_checkpoint = failure
+                .checkpoint
+                .as_deref()
+                .ok_or_else(|| failure.error.clone())?
+                .to_vec();
+            let mut delay = retry.initial_delay_nanoseconds.clone();
+            for _ in 1..retry.max_attempts {
+                self.wait_stream_retry_delay(&delay)?;
+                let mut source_ended = false;
+                loop {
+                    self.step()?;
+                    let page = self.stream_effect(|effects, budget, cancellation| {
+                        effects.poll_stream_sources(
+                            std::slice::from_ref(cursor),
+                            1,
+                            budget,
+                            cancellation,
+                        )
+                    })?;
+                    if page.events.len() > 1
+                        || page.watermark < *watermark
+                        || (page.events.is_empty()
+                            && page.ended_sources.is_empty()
+                            && page.watermark <= *watermark)
+                        || page
+                            .ended_sources
+                            .iter()
+                            .any(|source| source != &cursor.source)
+                    {
+                        return Err(error("ORNA-EVAL-VALUE"));
+                    }
+                    *watermark = page.watermark;
+                    let Some(event) = page.events.into_iter().next() else {
+                        if page.ended_sources.contains(&cursor.source) {
+                            source_ended = true;
+                            break;
+                        }
+                        continue;
+                    };
+                    match event {
+                        StreamEvent::Delivery(delivery) => {
+                            if delivery.source != cursor.source
+                                || delivery.identity != cursor.identity
+                                || delivery.checkpoint != expected_checkpoint
+                                || delivery.event_time != failure.event_time
+                                || delivery.event_time > *watermark
+                            {
+                                return Err(error("ORNA-EVAL-VALUE"));
+                            }
+                            return Ok(ReadyStreamItem {
+                                source: delivery.source,
+                                identity: delivery.identity,
+                                checkpoint: delivery.checkpoint,
+                                event_time: delivery.event_time,
+                                value: Value::from_canonical(&delivery.value, self, 0)?,
+                                recovery_error: None,
+                            });
+                        }
+                        StreamEvent::Failure(next) => {
+                            if next.source != cursor.source
+                                || next.identity != cursor.identity
+                                || next.checkpoint.as_deref() != Some(&expected_checkpoint)
+                                || next.event_time != failure.event_time
+                                || next.event_time > *watermark
+                            {
+                                return Err(error("ORNA-EVAL-VALUE"));
+                            }
+                            failure = next;
+                            break;
+                        }
+                    }
+                }
+                if source_ended {
+                    break;
+                }
+                delay = (delay * BigInt::from(2u8)).min(retry.max_delay_nanoseconds.clone());
+            }
+        }
+        Self::recoverable_stream_item(failure, provider.recover.is_some())
+    }
+
+    fn consume_provider_stream(
+        &mut self,
+        stream: &Value,
+        action: &Value,
+        depth: usize,
+    ) -> Result<Value, EvaluationError> {
+        let Value::Stream {
+            provider: Some(provider),
+            ..
+        } = stream
+        else {
+            return Err(error("ORNA-EVAL-TYPE"));
+        };
+        self.depth(depth)?;
+        self.items(provider.sources.len())?;
+        let mut cursors = provider.sources.clone();
+        let mut source_names = BTreeSet::new();
+        for cursor in &cursors {
+            if cursor.source.is_empty() || !source_names.insert(cursor.source.clone()) {
+                return Err(error("ORNA-EVAL-VALUE"));
+            }
+        }
+        let mut ended = BTreeSet::<String>::new();
+        let mut last_watermark = None;
+        let mut last_throttle_event = None;
+        let mut debounced = None::<ReadyStreamItem>;
+        let mut batch = Vec::<ReadyStreamItem>::new();
+
+        loop {
+            let active = cursors
+                .iter()
+                .filter(|cursor| !ended.contains(&cursor.source))
+                .cloned()
+                .collect::<Vec<_>>();
+            if active.is_empty() {
+                if let Some(item) = debounced.take() {
+                    batch.push(item);
+                }
+                if !batch.is_empty() {
+                    self.commit_stream_callback(
+                        &batch,
+                        action,
+                        provider.recover.as_deref(),
+                        provider.batch_size,
+                        depth,
+                    )?;
+                    batch.clear();
+                }
+                break;
+            }
+
+            self.step()?;
+            let page = self.stream_effect(|effects, budget, cancellation| {
+                effects.poll_stream_sources(&active, provider.buffer_capacity, budget, cancellation)
+            })?;
+            if page.events.len() > provider.buffer_capacity
+                || last_watermark.is_some_and(|last| page.watermark < last)
+                || (page.events.is_empty()
+                    && page.ended_sources.is_empty()
+                    && last_watermark.is_some_and(|last| page.watermark <= last))
+                || page
+                    .ended_sources
+                    .iter()
+                    .any(|source| !active.iter().any(|cursor| &cursor.source == source))
+            {
+                return Err(error("ORNA-EVAL-VALUE"));
+            }
+
+            // Validate the entire bounded page before executing any callback
+            // from it, so malformed later events cannot follow committed work.
+            let mut observed = cursors
+                .iter()
+                .map(|cursor| {
+                    (
+                        (cursor.source.clone(), cursor.identity),
+                        cursor.after.clone(),
+                    )
+                })
+                .collect::<BTreeMap<_, _>>();
+            let mut blocked = BTreeSet::<(String, [u8; 32])>::new();
+            for event in &page.events {
+                let (source, identity, checkpoint, event_time) = match event {
+                    StreamEvent::Delivery(delivery) => (
+                        &delivery.source,
+                        delivery.identity,
+                        Some(&delivery.checkpoint),
+                        delivery.event_time,
+                    ),
+                    StreamEvent::Failure(failure) => (
+                        &failure.source,
+                        failure.identity,
+                        failure.checkpoint.as_ref(),
+                        failure.event_time,
+                    ),
+                };
+                let key = (source.clone(), identity);
+                let Some(previous) = observed.get_mut(&key) else {
+                    return Err(error("ORNA-EVAL-VALUE"));
+                };
+                if event_time > page.watermark || blocked.contains(&key) {
+                    return Err(error("ORNA-EVAL-VALUE"));
+                }
+                if let Some(checkpoint) = checkpoint {
+                    if previous
+                        .as_ref()
+                        .is_some_and(|previous| checkpoint <= previous)
+                    {
+                        return Err(error("ORNA-EVAL-VALUE"));
+                    }
+                    *previous = Some(checkpoint.clone());
+                }
+                if matches!(event, StreamEvent::Failure(_)) {
+                    blocked.insert(key);
+                }
+            }
+            last_watermark = Some(page.watermark);
+
+            for event in page.events {
+                let ready = match event {
+                    StreamEvent::Delivery(delivery) => {
+                        let Some(cursor) = cursors.iter_mut().find(|cursor| {
+                            cursor.source == delivery.source && cursor.identity == delivery.identity
+                        }) else {
+                            return Err(error("ORNA-EVAL-VALUE"));
+                        };
+                        cursor.after = Some(delivery.checkpoint.clone());
+                        ReadyStreamItem {
+                            source: delivery.source,
+                            identity: delivery.identity,
+                            checkpoint: delivery.checkpoint,
+                            event_time: delivery.event_time,
+                            value: Value::from_canonical(&delivery.value, self, 0)?,
+                            recovery_error: None,
+                        }
+                    }
+                    StreamEvent::Failure(failure) => {
+                        let cursor = cursors
+                            .iter()
+                            .find(|cursor| {
+                                cursor.source == failure.source
+                                    && cursor.identity == failure.identity
+                            })
+                            .cloned()
+                            .ok_or_else(|| error("ORNA-EVAL-VALUE"))?;
+                        if let Some(previous) = debounced.take() {
+                            batch.push(previous);
+                        }
+                        if !batch.is_empty() {
+                            self.commit_stream_callback(
+                                &batch,
+                                action,
+                                provider.recover.as_deref(),
+                                provider.batch_size,
+                                depth,
+                            )?;
+                            batch.clear();
+                        }
+                        self.retry_provider_delivery(
+                            provider,
+                            &cursor,
+                            failure,
+                            last_watermark
+                                .as_mut()
+                                .expect("a validated page has a watermark"),
+                        )?
+                    }
+                };
+
+                if let (Some(interval), Some(pending)) =
+                    (&provider.debounce_nanoseconds, debounced.as_ref())
+                    && stream_elapsed_nanoseconds(ready.event_time, pending.event_time)
+                        .is_some_and(|elapsed| elapsed >= *interval)
+                {
+                    let expired = debounced.take().expect("pending debounce value exists");
+                    batch.push(expired);
+                    let target = provider.batch_size.unwrap_or(1);
+                    if batch.len() >= target {
+                        self.commit_stream_callback(
+                            &batch,
+                            action,
+                            provider.recover.as_deref(),
+                            provider.batch_size,
+                            depth,
+                        )?;
+                        batch.clear();
+                    }
+                }
+
+                if provider.debounce_nanoseconds.is_some() {
+                    // `latest` may acknowledge a replaced item only after all
+                    // older buffered items from that same source have run.
+                    if let Some(previous) = debounced.take() {
+                        let checkpoints = Self::stream_checkpoints(std::slice::from_ref(&previous));
+                        if batch.iter().any(|item| {
+                            item.source == previous.source && item.identity == previous.identity
+                        }) {
+                            self.commit_stream_callback(
+                                &batch,
+                                action,
+                                provider.recover.as_deref(),
+                                provider.batch_size,
+                                depth,
+                            )?;
+                            batch.clear();
+                        }
+                        self.commit_stream_checkpoints(&checkpoints)?;
+                    }
+                    debounced = Some(ready);
+                } else if let Some(interval) = &provider.throttle_nanoseconds {
+                    // Equal event-time ties retain provider arrival order: the
+                    // first eligible value wins and every drop is checkpointed.
+                    let emit = last_throttle_event.is_none_or(|last| {
+                        stream_elapsed_nanoseconds(ready.event_time, last)
+                            .is_some_and(|elapsed| elapsed >= *interval)
+                    });
+                    if emit {
+                        last_throttle_event = Some(ready.event_time);
+                        batch.push(ready);
+                    } else {
+                        let checkpoints = Self::stream_checkpoints(std::slice::from_ref(&ready));
+                        if batch.iter().any(|item| {
+                            item.source == ready.source && item.identity == ready.identity
+                        }) {
+                            self.commit_stream_callback(
+                                &batch,
+                                action,
+                                provider.recover.as_deref(),
+                                provider.batch_size,
+                                depth,
+                            )?;
+                            batch.clear();
+                        }
+                        self.commit_stream_checkpoints(&checkpoints)?;
+                    }
+                } else {
+                    batch.push(ready);
+                }
+
+                let target = provider.batch_size.unwrap_or(1);
+                if batch.len() >= target {
+                    self.commit_stream_callback(
+                        &batch,
+                        action,
+                        provider.recover.as_deref(),
+                        provider.batch_size,
+                        depth,
+                    )?;
+                    batch.clear();
+                }
+            }
+
+            if let (Some(interval), Some(pending)) =
+                (&provider.debounce_nanoseconds, debounced.as_ref())
+                && stream_elapsed_nanoseconds(page.watermark, pending.event_time)
+                    .is_some_and(|elapsed| elapsed >= *interval)
+            {
+                batch.push(debounced.take().expect("pending debounce value exists"));
+                let target = provider.batch_size.unwrap_or(1);
+                if batch.len() >= target {
+                    self.commit_stream_callback(
+                        &batch,
+                        action,
+                        provider.recover.as_deref(),
+                        provider.batch_size,
+                        depth,
+                    )?;
+                    batch.clear();
+                }
+            }
+
+            ended.extend(page.ended_sources);
+            if cursors.iter().all(|cursor| ended.contains(&cursor.source)) {
+                if let Some(item) = debounced.take() {
+                    batch.push(item);
+                }
+                if !batch.is_empty() {
+                    self.commit_stream_callback(
+                        &batch,
+                        action,
+                        provider.recover.as_deref(),
+                        provider.batch_size,
+                        depth,
+                    )?;
+                    batch.clear();
+                }
+                break;
+            }
+        }
+        Ok(Value::Unit)
+    }
+
     fn stream(
         &mut self,
         name: &str,
@@ -6096,9 +6984,21 @@ impl Context<'_, '_> {
         depth: usize,
     ) -> Result<Value, EvaluationError> {
         match (name, values.as_slice()) {
+            ("from_provider", [Value::String(source), Value::String(identity_label)]) => {
+                self.provider_stream(source, identity_label)
+            }
             ("from_list", [Value::List(items), Value::String(source_label)]) => {
                 self.finite_stream(source_label.clone(), items.clone())
             }
+            (
+                "for_each",
+                [
+                    Value::Stream {
+                        provider: Some(_), ..
+                    },
+                    action,
+                ],
+            ) => self.consume_provider_stream(&values[0], action, depth + 1),
             ("for_each", [Value::Stream { .. }, action]) => {
                 let (items, _) = self.checked_stream_values(&values[0])?;
                 self.items(items.len())?;
@@ -6113,6 +7013,26 @@ impl Context<'_, '_> {
                 Ok(Value::Unit)
             }
             ("batch", [Value::Stream { .. }, Value::Int(size)]) => {
+                if let Value::Stream {
+                    source_label,
+                    source_digest,
+                    provider: Some(provider),
+                    ..
+                } = &values[0]
+                {
+                    let size = self.positive_collection_size(size)?;
+                    self.items(size)?;
+                    if provider.batch_size.is_some() {
+                        return Err(error("ORNA-EVAL-VALUE"));
+                    }
+                    let mut provider = provider.clone();
+                    provider.batch_size = Some(size);
+                    return self.provider_stream_value(
+                        source_label.clone(),
+                        *source_digest,
+                        provider,
+                    );
+                }
                 let (items, source_label) = self.checked_stream_values(&values[0])?;
                 let size = self.positive_collection_size(size)?;
                 let mut batches = Vec::new();
@@ -6124,6 +7044,23 @@ impl Context<'_, '_> {
                 self.finite_stream(format!("{source_label}|batch:{size}"), batches)
             }
             ("buffer", [Value::Stream { .. }, Value::Int(capacity)]) => {
+                if let Value::Stream {
+                    source_label,
+                    source_digest,
+                    provider: Some(provider),
+                    ..
+                } = &values[0]
+                {
+                    let capacity = self.positive_collection_size(capacity)?;
+                    self.items(capacity)?;
+                    let mut provider = provider.clone();
+                    provider.buffer_capacity = capacity;
+                    return self.provider_stream_value(
+                        source_label.clone(),
+                        *source_digest,
+                        provider,
+                    );
+                }
                 let (items, source_label) = self.checked_stream_values(&values[0])?;
                 self.positive_collection_size(capacity)?;
                 // The immutable finite source is consumed under backpressure;
@@ -6131,6 +7068,84 @@ impl Context<'_, '_> {
                 self.finite_stream(format!("{source_label}|buffer"), items)
             }
             ("merge", [Value::List(streams)]) => {
+                if streams.iter().any(|stream| {
+                    matches!(
+                        stream,
+                        Value::Stream {
+                            provider: Some(_),
+                            ..
+                        }
+                    )
+                }) {
+                    self.items(streams.len())?;
+                    if streams.is_empty() {
+                        return self.provider_stream_value(
+                            "merge:empty".to_owned(),
+                            [0; 32],
+                            ProviderStream {
+                                sources: Vec::new(),
+                                buffer_capacity: 1,
+                                batch_size: None,
+                                throttle_nanoseconds: None,
+                                debounce_nanoseconds: None,
+                                retry: None,
+                                recover: None,
+                            },
+                        );
+                    }
+                    let mut sources = Vec::new();
+                    let mut capacity = usize::MAX;
+                    let mut merge_identity = Sha256::new();
+                    merge_identity.update(b"orna.provider-merge.v1\0");
+                    for stream in streams {
+                        let Value::Stream {
+                            provider: Some(provider),
+                            source_digest,
+                            ..
+                        } = stream
+                        else {
+                            return Err(error("ORNA-EVAL-TYPE"));
+                        };
+                        if provider.batch_size.is_some()
+                            || provider.throttle_nanoseconds.is_some()
+                            || provider.debounce_nanoseconds.is_some()
+                            || provider.retry.is_some()
+                            || provider.recover.is_some()
+                        {
+                            return Err(error("ORNA-EVAL-VALUE"));
+                        }
+                        capacity = capacity.min(provider.buffer_capacity);
+                        for source in &provider.sources {
+                            self.step()?;
+                            merge_identity.update((source.source.len() as u64).to_be_bytes());
+                            merge_identity.update(source.source.as_bytes());
+                            merge_identity.update(source.identity);
+                            sources.push(source.clone());
+                        }
+                        merge_identity.update(source_digest);
+                    }
+                    let identity: [u8; 32] = merge_identity.finalize().into();
+                    let label = format!(
+                        "merge:{}",
+                        identity
+                            .iter()
+                            .map(|byte| format!("{byte:02x}"))
+                            .collect::<String>()
+                    );
+                    return self.provider_stream_value(
+                        label,
+                        identity,
+                        ProviderStream {
+                            sources,
+                            buffer_capacity: capacity,
+                            batch_size: None,
+                            throttle_nanoseconds: None,
+                            debounce_nanoseconds: None,
+                            retry: None,
+                            recover: None,
+                        },
+                    );
+                }
                 let mut sources = Vec::with_capacity(streams.len());
                 for stream in streams {
                     let (items, source_label) = self.checked_stream_values(stream)?;
@@ -6192,6 +7207,27 @@ impl Context<'_, '_> {
                 if policy != "drop" {
                     return Err(error("ORNA-EVAL-VALUE"));
                 }
+                if let Value::Stream {
+                    source_label,
+                    source_digest,
+                    provider: Some(provider),
+                    ..
+                } = &values[0]
+                {
+                    if provider.throttle_nanoseconds.is_some()
+                        || provider.debounce_nanoseconds.is_some()
+                    {
+                        return Err(error("ORNA-EVAL-VALUE"));
+                    }
+                    let mut provider = provider.clone();
+                    provider.throttle_nanoseconds =
+                        Some(elapsed_total_nanoseconds(seconds, *nanosecond));
+                    return self.provider_stream_value(
+                        source_label.clone(),
+                        *source_digest,
+                        provider,
+                    );
+                }
                 // The reference requires elapsed intervals but gives this
                 // finite source no timestamp provider. Treat the materialized
                 // list as one observation instant; explicit `drop` keeps its
@@ -6217,6 +7253,27 @@ impl Context<'_, '_> {
                 if policy != "latest" {
                     return Err(error("ORNA-EVAL-VALUE"));
                 }
+                if let Value::Stream {
+                    source_label,
+                    source_digest,
+                    provider: Some(provider),
+                    ..
+                } = &values[0]
+                {
+                    if provider.debounce_nanoseconds.is_some()
+                        || provider.throttle_nanoseconds.is_some()
+                    {
+                        return Err(error("ORNA-EVAL-VALUE"));
+                    }
+                    let mut provider = provider.clone();
+                    provider.debounce_nanoseconds =
+                        Some(elapsed_total_nanoseconds(seconds, *nanosecond));
+                    return self.provider_stream_value(
+                        source_label.clone(),
+                        *source_digest,
+                        provider,
+                    );
+                }
                 // The reference requires elapsed quiet intervals but gives
                 // this finite source no timestamp provider. Treat its items as
                 // one synchronous burst and apply explicit `latest` delivery.
@@ -6225,6 +7282,61 @@ impl Context<'_, '_> {
                 self.finite_stream(format!("{source_label}|debounce:latest"), output)
             }
             ("retry", [Value::Stream { .. }, Value::Record(policy)]) => {
+                if let Value::Stream {
+                    source_label,
+                    source_digest,
+                    provider: Some(provider),
+                    ..
+                } = &values[0]
+                {
+                    let Some(Value::Int(max_attempts)) = policy.get("max_attempts") else {
+                        return Err(error("ORNA-EVAL-TYPE"));
+                    };
+                    let Some(Value::Duration {
+                        seconds: initial_seconds,
+                        nanosecond: initial_nanos,
+                    }) = policy.get("initial_delay")
+                    else {
+                        return Err(error("ORNA-EVAL-TYPE"));
+                    };
+                    let Some(Value::Duration {
+                        seconds: maximum_seconds,
+                        nanosecond: maximum_nanos,
+                    }) = policy.get("max_delay")
+                    else {
+                        return Err(error("ORNA-EVAL-TYPE"));
+                    };
+                    let initial_delay_nanoseconds =
+                        elapsed_total_nanoseconds(initial_seconds, *initial_nanos);
+                    let max_delay_nanoseconds =
+                        elapsed_total_nanoseconds(maximum_seconds, *maximum_nanos);
+                    let max_attempts = max_attempts
+                        .to_usize()
+                        .filter(|attempts| {
+                            *attempts > 0 && *attempts <= self.limits.max_collection_items
+                        })
+                        .ok_or_else(|| error("ORNA-EVAL-VALUE"))?;
+                    if initial_delay_nanoseconds < BigInt::from(0u8)
+                        || max_delay_nanoseconds < initial_delay_nanoseconds
+                        || provider.retry.is_some()
+                    {
+                        return Err(error("ORNA-EVAL-VALUE"));
+                    }
+                    let mut provider = provider.clone();
+                    // `max_attempts` counts the first delivery attempt as
+                    // well as retries; the initial delay applies before the
+                    // first redelivery, then doubles up to `max_delay`.
+                    provider.retry = Some(ProviderRetryPolicy {
+                        max_attempts,
+                        initial_delay_nanoseconds,
+                        max_delay_nanoseconds,
+                    });
+                    return self.provider_stream_value(
+                        source_label.clone(),
+                        *source_digest,
+                        provider,
+                    );
+                }
                 let (items, source_label) = self.checked_stream_values(&values[0])?;
                 let Some(Value::Int(max_attempts)) = policy.get("max_attempts") else {
                     return Err(error("ORNA-EVAL-TYPE"));
@@ -6256,6 +7368,26 @@ impl Context<'_, '_> {
                 self.finite_stream(format!("{source_label}|retry"), items)
             }
             ("recover", [Value::Stream { .. }, handler]) => {
+                if let Value::Stream {
+                    source_label,
+                    source_digest,
+                    provider: Some(provider),
+                    ..
+                } = &values[0]
+                {
+                    if !matches!(handler, Value::Function { .. } | Value::Closure(_))
+                        || provider.recover.is_some()
+                    {
+                        return Err(error("ORNA-EVAL-TYPE"));
+                    }
+                    let mut provider = provider.clone();
+                    provider.recover = Some(Box::new(handler.clone()));
+                    return self.provider_stream_value(
+                        source_label.clone(),
+                        *source_digest,
+                        provider,
+                    );
+                }
                 let (items, source_label) = self.checked_stream_values(&values[0])?;
                 if !matches!(handler, Value::Function { .. } | Value::Closure(_)) {
                     return Err(error("ORNA-EVAL-TYPE"));
@@ -6264,7 +7396,8 @@ impl Context<'_, '_> {
                 // recovery has no failure to replace and retains every item.
                 self.finite_stream(format!("{source_label}|recover"), items)
             }
-            ("from_list", [_, _])
+            ("from_provider", [_, _])
+            | ("from_list", [_, _])
             | ("for_each", [_, _])
             | ("batch", [_, _])
             | ("buffer", [_, _])
@@ -6653,9 +7786,7 @@ impl Context<'_, '_> {
                 self.items(bytes.len())?;
                 Ok(Value::Blob(bytes))
             }
-            ("__encode" | "encode" | "__decode" | "decode", _) => {
-                Err(error("ORNA-EVAL-TYPE"))
-            }
+            ("__encode" | "encode" | "__decode" | "decode", _) => Err(error("ORNA-EVAL-TYPE")),
             _ => Err(error("ORNA-EVAL-UNSUPPORTED")),
         }
     }
@@ -6847,13 +7978,8 @@ impl Context<'_, '_> {
                     .to_usize()
                     .filter(|digits| *digits <= DEFAULT_INTEGER_DIGITS)
                     .ok_or_else(|| error("ORNA-EVAL-VALUE"))?;
-                let formatted = format_money_value(
-                    amount,
-                    currency_code,
-                    minor_digits,
-                    rounding,
-                    locale,
-                )?;
+                let formatted =
+                    format_money_value(amount, currency_code, minor_digits, rounding, locale)?;
                 self.string(formatted).map(Value::String)
             }
             ("__quantize" | "__allocate" | "__format", _) => Err(error("ORNA-EVAL-TYPE")),
@@ -9335,8 +10461,8 @@ fn format_money_value(
     };
     let original = money_amount(amount)?;
     let rounded = quantize_decimal(&original, minor_digits, rounding)?;
-    let units = decimal_scaled_integer(&rounded, minor_digits)?
-        .ok_or_else(|| error("ORNA-EVAL-VALUE"))?;
+    let units =
+        decimal_scaled_integer(&rounded, minor_digits)?.ok_or_else(|| error("ORNA-EVAL-VALUE"))?;
     let negative = units.sign() == Sign::Minus;
     let digits = units.abs().to_str_radix(10);
     let (whole, fraction) = if minor_digits == 0 {
@@ -9834,6 +10960,7 @@ fn named_arguments(
         "bit_not" => &["value"],
         "shift_left" | "shift_right" => &["value", "count"],
         "from_list" => &["values", "source_identity"],
+        "from_provider" => &["source", "identity"],
         "for_each" => &["stream", "action"],
         "batch" => &["stream", "size"],
         "buffer" => &["stream", "capacity"],
@@ -9868,13 +10995,17 @@ fn named_arguments(
         },
         "__histogram" => &["rows", "bins", "include_final_upper"],
         "__rate" | "__derivative" | "__integrate" => &["points"],
-        "hash.sha256" | "hash.sha256_text" | "base64.encode" | "base64.decode" => {
-            &["input"]
-        }
+        "hash.sha256" | "hash.sha256_text" | "base64.encode" | "base64.decode" => &["input"],
         "hash.to_hex" => &["digest"],
         "hash.from_hex" => &["value"],
         "hash.domain_sha256" => &["domain", "payload"],
-        "money.format" => &["amount", "currency_code", "minor_digits", "rounding", "locale"],
+        "money.format" => &[
+            "amount",
+            "currency_code",
+            "minor_digits",
+            "rounding",
+            "locale",
+        ],
         "first" => &["rows"],
         "one" => match values.len() {
             1 => &["rows"],
@@ -10188,6 +11319,7 @@ const STANDARD_BINDING_MODULES: &[StandardBindingModule] = &[
         prefix: "std.stream.",
         kind: StandardBindingKind::Stream,
         operations: &[
+            "from_provider",
             "from_list",
             "for_each",
             "batch",
@@ -11412,8 +12544,8 @@ fn unescape_string_body(body: &str) -> Result<String, EvaluationError> {
                 if digits.is_empty() {
                     return Err(error("ORNA-EVAL-VALUE"));
                 }
-                let scalar = u32::from_str_radix(&digits, 16)
-                    .map_err(|_| error("ORNA-EVAL-VALUE"))?;
+                let scalar =
+                    u32::from_str_radix(&digits, 16).map_err(|_| error("ORNA-EVAL-VALUE"))?;
                 output.push(char::from_u32(scalar).ok_or_else(|| error("ORNA-EVAL-VALUE"))?);
             }
             _ => return Err(error("ORNA-EVAL-VALUE")),
