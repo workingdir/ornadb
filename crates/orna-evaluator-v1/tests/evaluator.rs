@@ -9448,6 +9448,53 @@ fn distinct_relation_eliminates_duplicates_and_handles_empty_input() {
 }
 
 #[test]
+fn distinct_relation_preserves_first_identity_across_sparse_filter_cascade_union() {
+    let body = parsed_expression(include_str!(
+        "fixtures/query-distinct-sparse-filter-cascade-5lya7.orna"
+    ));
+    let ints = |values: &[i64]| {
+        values
+            .iter()
+            .copied()
+            .map(|value| Value::int(value.into()))
+            .collect()
+    };
+    let mut effects = UnionRelationEffects {
+        rows: BTreeMap::from([
+            ("sys.Storage".into(), ints(&[2, 1, 2, 4, 9])),
+            ("sys.MaintenanceJob".into(), ints(&[2, 3, 4, 5, 6])),
+        ]),
+        cursors: Vec::new(),
+    };
+
+    let result = invoke_relation(body, &mut effects, Limits::default())
+        .unwrap_or_else(|error| panic!("sparse distinct cascade failed: {}", error.code()));
+
+    let first_pair = Value::new(Raw::Tag(
+        60015,
+        Box::new(Raw::Array(vec![Raw::Int(2.into()), Raw::Int(4.into())])),
+    ))
+    .expect("first pair is a canonical tuple");
+    let expected = Value::new(Raw::Array(vec![
+        Raw::Int(4.into()),
+        Value::option(Some(first_pair))
+            .expect("first pair is a canonical option")
+            .raw()
+            .clone(),
+        Value::option(Some(Value::int(3.into())))
+            .expect("third surviving identity is a canonical option")
+            .raw()
+            .clone(),
+    ]))
+    .expect("proof result is canonical");
+    assert_eq!(
+        result,
+        expected,
+        "the fold keeps the first surviving value for each identity across both union branches"
+    );
+}
+
+#[test]
 fn distinct_relation_take_zero_short_circuits_source_scanning() {
     let source = relation_source_expression("Note");
     let distinct = relation_stage(source, "distinct", Vec::new());
@@ -9948,6 +9995,57 @@ fn window_relation_handles_gaps_without_partial_windows() {
         invoke_relation(body, &mut effects, Limits::default()).unwrap(),
         Value::int(2.into()),
         "the gap after [4, 5] must not create a partial [7] window"
+    );
+}
+
+#[test]
+fn windowed_distinct_preserves_frame_identities_across_sparse_union_cascade() {
+    let body = parsed_expression(include_str!(
+        "fixtures/query-window-distinct-sparse-frame-cascade-xlnp8.orna"
+    ));
+    let ints = |values: &[i64]| {
+        values
+            .iter()
+            .copied()
+            .map(|value| Value::int(value.into()))
+            .collect()
+    };
+    let mut effects = UnionRelationEffects {
+        rows: BTreeMap::from([
+            ("sys.Storage".into(), ints(&[1, 0, 2, 0, 1])),
+            ("sys.MaintenanceJob".into(), ints(&[2, 0, 1, 0, 2])),
+        ]),
+        cursors: Vec::new(),
+    };
+
+    let result = invoke_relation(body, &mut effects, Limits::default())
+        .unwrap_or_else(|error| panic!("sparse windowed distinct failed: {}", error.code()));
+
+    let first_frame = relation_window_row(&[1, 2]);
+    let first_two_distinct_frames = Value::new(Raw::Tag(
+        60015,
+        Box::new(Raw::Array(vec![
+            Raw::Array(vec![Raw::Int(1.into()), Raw::Int(2.into())]),
+            Raw::Array(vec![Raw::Int(2.into()), Raw::Int(1.into())]),
+        ])),
+    ))
+    .expect("paired frames are a canonical tuple");
+    let expected = Value::new(Raw::Array(vec![
+        Raw::Int(1.into()),
+        Value::option(Some(first_frame))
+            .expect("first frame is a canonical option")
+            .raw()
+            .clone(),
+        Value::option(Some(first_two_distinct_frames))
+            .expect("first pair of frames is a canonical option")
+            .raw()
+            .clone(),
+    ]))
+    .expect("proof result is canonical");
+    assert_eq!(
+        result,
+        expected,
+        "sparse filters retain all frame positions across the union boundary, then distinct keeps the first original frames"
     );
 }
 

@@ -5,7 +5,7 @@
 //! capability.
 
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, HashSet},
     fmt,
     fmt::Write as _,
     sync::Arc,
@@ -204,14 +204,26 @@ pub struct StepBudget {
 }
 
 /// One bounded, canonical page of a relation scan. `next` is an exclusive
-/// canonical key cursor owned by the source; when `after` is present, the
-/// next cursor MUST be lexicographically greater than it. An absent cursor
-/// means exhaustion.
+/// canonical key cursor owned by the source read scope; when `after` is
+/// present, the next cursor MUST be lexicographically greater than it. Equal
+/// cursor bytes in different [`RelationReadScope`]s identify independent
+/// continuations. An absent cursor means exhaustion.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RelationPage {
     pub rows: Vec<CanonicalValue>,
     pub next: Option<Vec<u8>>,
 }
+
+/// Opaque identity for one relation source in an evaluator plan.
+///
+/// Cloned plans retain this identity across their page reads; independently
+/// created sources receive distinct identities, even when their source names
+/// are equal. A newly built plan for a later view refresh receives a fresh
+/// identity. Effect handlers should bind continuation state by both source
+/// name and this identity so paired same-name reads cannot resume one another's
+/// cursors.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct RelationReadScope(u64);
 
 /// A provider-owned cursor bound to one activation's source identity.
 /// Checkpoints are opaque to the evaluator and are advanced only after the
@@ -807,6 +819,24 @@ pub trait EffectHandler {
         Ok(None)
     }
 
+    /// Supplies a bounded page together with the identity of its relation
+    /// source. Implementations that retain page continuations should key them
+    /// by both `source` and `scope`: same-name planned reads are independent,
+    /// and a fresh scope starts a fresh observation during a later refresh.
+    /// The default delegates to [`EffectHandler::scan_relation_page`] to
+    /// preserve existing handlers while allowing stateful readers to keep
+    /// continuation cursors separate across equal-named view sources.
+    fn scan_relation_page_scoped(
+        &mut self,
+        source: &str,
+        _scope: RelationReadScope,
+        after: Option<&[u8]>,
+        limit: usize,
+        budget: &mut StepBudget,
+    ) -> Result<Option<RelationPage>, EvaluationError> {
+        self.scan_relation_page(source, after, limit, budget)
+    }
+
     /// Validate a provider stream binding before an activation constructs a
     /// stream handle. The source identity is a stable digest of the caller's
     /// identity label and provider source name.
@@ -1394,6 +1424,20 @@ fn error(code: &'static str) -> EvaluationError {
     // No parser diagnostic, source text, span, input value, or filesystem data
     // crosses this boundary.
     EvaluationError::redacted(SafeText::new(code).expect("static safe code"))
+}
+
+/// Encodes the lawful equality identity used by collection and relation
+/// distinct folds. The set stores this identity while the stream retains its
+/// first original value and therefore its stable order.
+fn distinct_identity(value: &Value) -> Result<Vec<u8>, EvaluationError> {
+    if value.contains_float() {
+        return Err(error("ORNA-EVAL-UNSUPPORTED"));
+    }
+    value
+        .clone()
+        .canonical()?
+        .encode()
+        .map_err(|_| error("ORNA-EVAL-VALUE"))
 }
 
 fn aggregate_task_failures(failures: &[EvaluationError]) -> EvaluationError {
@@ -4435,7 +4479,7 @@ impl Context<'_, '_> {
             else {
                 unreachable!("sort_by returns a list");
             };
-            let mut distinct_seen = vec![Vec::new(); plan.stages.len()];
+            let mut distinct_seen = vec![HashSet::new(); plan.stages.len()];
             let mut pair_previous = vec![None; plan.stages.len()];
             let mut window_states = (0..plan.stages.len())
                 .map(|_| None)
@@ -4452,7 +4496,7 @@ impl Context<'_, '_> {
             );
         }
         let mut counters = vec![0usize; plan.stages.len()];
-        let mut distinct_seen = vec![Vec::new(); plan.stages.len()];
+        let mut distinct_seen = vec![HashSet::new(); plan.stages.len()];
         let mut pair_previous = vec![None; plan.stages.len()];
         let mut window_states = (0..plan.stages.len())
             .map(|_| None)
@@ -4813,7 +4857,7 @@ impl Context<'_, '_> {
             return Ok(());
         }
         let mut counters = vec![0usize; plan.stages.len()];
-        let mut distinct_seen = vec![Vec::new(); plan.stages.len()];
+        let mut distinct_seen = vec![HashSet::new(); plan.stages.len()];
         let mut pair_previous = vec![None; plan.stages.len()];
         let mut window_states = (0..plan.stages.len())
             .map(|_| None)
@@ -4888,7 +4932,11 @@ impl Context<'_, '_> {
             // must remain interruptible even when its callbacks are absent,
             // short-circuiting, or otherwise do not execute.
             self.step()?;
-            let page = self.relation_page(&plan.source, after.as_deref())?;
+            let page = self.relation_page(
+                &plan.source,
+                plan.source_identity,
+                after.as_deref(),
+            )?;
             let page_len = page.rows.len();
             for canonical in page.rows {
                 self.step()?;
@@ -4931,7 +4979,7 @@ impl Context<'_, '_> {
         mut value: Value,
         stages: &[RelationStage],
         counters: &mut [usize],
-        distinct_seen: &mut [Vec<orna_foundation_v1::CanonicalValue>],
+        distinct_seen: &mut [HashSet<Vec<u8>>],
         pair_previous: &mut [Option<Value>],
         window_states: &mut [Option<RelationWindowState>],
         stage_offset: usize,
@@ -5013,15 +5061,10 @@ impl Context<'_, '_> {
                 }
                 RelationStage::BucketBy(_) => return Err(error("ORNA-EVAL-UNSUPPORTED")),
                 RelationStage::Distinct => {
-                    if value.contains_float() {
-                        return Err(error("ORNA-EVAL-UNSUPPORTED"));
-                    }
-                    let key = value.clone().canonical()?;
                     let seen = &mut distinct_seen[index];
-                    if seen.iter().any(|existing| existing == &key) {
+                    if !seen.insert(distinct_identity(&value)?) {
                         return Ok(vec![RelationRow::Skip]);
                     }
-                    seen.push(key);
                     self.items(seen.len())?;
                 }
                 RelationStage::Pairs => {
@@ -5110,7 +5153,7 @@ impl Context<'_, '_> {
             unreachable!("sort_by returns a list")
         };
         let suffix = &plan.stages[sort_index + 1..];
-        let mut distinct_seen = vec![Vec::new(); plan.stages.len()];
+        let mut distinct_seen = vec![HashSet::new(); plan.stages.len()];
         let mut pair_previous = vec![None; plan.stages.len()];
         let mut window_states = (0..plan.stages.len())
             .map(|_| None)
@@ -5133,7 +5176,7 @@ impl Context<'_, '_> {
         stages: &[RelationStage],
         stage_offset: usize,
         depth: usize,
-        distinct_seen: &mut [Vec<orna_foundation_v1::CanonicalValue>],
+        distinct_seen: &mut [HashSet<Vec<u8>>],
         pair_previous: &mut [Option<Value>],
         window_states: &mut [Option<RelationWindowState>],
         visit: impl FnMut(&mut Self, Value) -> Result<bool, EvaluationError>,
@@ -5194,7 +5237,7 @@ impl Context<'_, '_> {
         stages: &[RelationStage],
         stage_offset: usize,
         depth: usize,
-        distinct_seen: &mut [Vec<orna_foundation_v1::CanonicalValue>],
+        distinct_seen: &mut [HashSet<Vec<u8>>],
         pair_previous: &mut [Option<Value>],
         window_states: &mut [Option<RelationWindowState>],
         mut visit: impl FnMut(&mut Self, Value) -> Result<bool, EvaluationError>,
@@ -5239,6 +5282,7 @@ impl Context<'_, '_> {
     fn relation_page(
         &mut self,
         source: &str,
+        scope: RelationReadScope,
         after: Option<&[u8]>,
     ) -> Result<RelationPage, EvaluationError> {
         let remaining = self.limits.max_steps.saturating_sub(self.steps);
@@ -5247,7 +5291,9 @@ impl Context<'_, '_> {
             .effects
             .as_deref_mut()
             .ok_or_else(|| error("ORNA-EVAL-UNSUPPORTED"))
-            .and_then(|effects| effects.scan_relation_page(source, after, 1, &mut budget));
+            .and_then(|effects| {
+                effects.scan_relation_page_scoped(source, scope, after, 1, &mut budget)
+            });
         let debited = remaining.saturating_sub(budget.remaining());
         self.steps = self
             .steps
@@ -8330,6 +8376,10 @@ impl Context<'_, '_> {
             ("__window_rate", [Value::List(points), Value::Int(size), Value::Int(step)]) => {
                 self.window_time_series_statistics(points, size, step, "rate")
             }
+            (
+                "__window_rate_integrate",
+                [Value::List(points), Value::Int(size), Value::Int(step)],
+            ) => self.window_time_series_statistics(points, size, step, "rate_integrate"),
             ("__window_derivative", [Value::List(points), Value::Int(size), Value::Int(step)]) => {
                 self.window_time_series_statistics(points, size, step, "derivative")
             }
@@ -8360,9 +8410,13 @@ impl Context<'_, '_> {
             | ("zip" | "zip_exact", [_, _])
             | ("window", [_, _] | [_, _, _]) => Err(error("ORNA-EVAL-TYPE")),
             ("__strictly_ordered_time_series", [_]) => Err(error("ORNA-EVAL-TYPE")),
-            ("__window_rate" | "__window_derivative" | "__window_integrate", [_, _, _]) => {
-                Err(error("ORNA-EVAL-TYPE"))
-            }
+            (
+                "__window_rate"
+                | "__window_rate_integrate"
+                | "__window_derivative"
+                | "__window_integrate",
+                [_, _, _],
+            ) => Err(error("ORNA-EVAL-TYPE")),
             ("__list_length" | "__numeric_sum", [_])
             | ("__list_concat", [_, _])
             | ("__stable_sort" | "__group_by" | "__rank", [_, _])
@@ -8503,23 +8557,13 @@ impl Context<'_, '_> {
     }
     fn distinct(&mut self, values: &[Value]) -> Result<Value, EvaluationError> {
         self.items(values.len())?;
-        let mut keys = Vec::new();
+        let mut keys = HashSet::new();
         let mut unique = Vec::new();
         for value in values {
             self.step()?;
-            // Equality for this fallback is equality of the canonical value,
-            // not incidental host representation. Values that cannot cross the
-            // canonical boundary (including callables) have no lawful key.
-            // Float has no default lawful hash/equality implementation here,
-            // so distinctness fails closed rather than inventing semantics.
-            if value.contains_float() {
-                return Err(error("ORNA-EVAL-UNSUPPORTED"));
-            }
-            let key = value.clone().canonical()?;
-            if keys.iter().any(|existing| existing == &key) {
+            if !keys.insert(distinct_identity(value)?) {
                 continue;
             }
-            keys.push(key);
             self.step()?;
             unique.push(value.clone());
             self.items(unique.len())?;
@@ -10164,12 +10208,22 @@ impl Context<'_, '_> {
             self.step()?;
             let window = points[start..end].to_vec();
             self.step()?;
-            let result = self.stats(statistic, vec![Value::List(window)])?;
-            results.push(if matches!(statistic, "rate" | "integrate") {
-                Value::Option(Some(Box::new(result)))
+            let result = if statistic == "rate_integrate" {
+                let rate = self.stats_rate(&window)?;
+                let integral = self.stats_integrate(&window)?;
+                Value::Tuple(vec![
+                    Value::Option(Some(Box::new(rate))),
+                    Value::Option(Some(Box::new(integral))),
+                ])
             } else {
-                result
-            });
+                let result = self.stats(statistic, vec![Value::List(window)])?;
+                if matches!(statistic, "rate" | "integrate") {
+                    Value::Option(Some(Box::new(result)))
+                } else {
+                    result
+                }
+            };
+            results.push(result);
             self.items(results.len())?;
 
             let Some(next) = start.checked_add(step) else {
@@ -11301,7 +11355,10 @@ fn named_arguments(
         "__asof_join" => &["left", "right", "time", "by"],
         "__bucket_by" => &["rows", "period", "zone"],
         "__strictly_ordered_time_series" => &["points"],
-        "__window_rate" | "__window_derivative" | "__window_integrate" => {
+        "__window_rate"
+        | "__window_rate_integrate"
+        | "__window_derivative"
+        | "__window_integrate" => {
             &["points", "size", "step"]
         }
         "filter" => &["rows", "predicate"],
@@ -11563,6 +11620,7 @@ const STANDARD_BINDING_MODULES: &[StandardBindingModule] = &[
             "__bucket_by",
             "__strictly_ordered_time_series",
             "__window_rate",
+            "__window_rate_integrate",
             "__window_derivative",
             "__window_integrate",
         ],

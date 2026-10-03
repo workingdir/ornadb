@@ -6446,6 +6446,197 @@ fn multi_parent_checkpoint_reconciliation_keeps_depth_labels_transactional() {
 }
 
 #[test]
+fn sequential_three_way_tuple_folds_anchor_late_rebound_widths() {
+    let source = include_str!("fixtures/historical-sequential-three-way-tuple-fold-widths.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-sequential-three-way-tuple-fold-widths.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert_eq!(
+        result
+            .diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.code() == DIAG_TYPE)
+            .count(),
+        1,
+        "only the final parent whose nested tuple width drifts after being learned must fail: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+    let module = result
+        .modules
+        .values()
+        .find(|module| {
+            module
+                .symbols
+                .contains_key("stable_three_way_tuple_fold_keeps_first_rebound_width")
+        })
+        .expect("sequential tuple fold fixture module");
+    let tuple_slots = |function: &str| {
+        let Type::Function { result, .. } = &module.symbols[function].ty else {
+            panic!("{function} must return its computed fold");
+        };
+        let Type::Record(fields) = result.as_ref() else {
+            panic!("{function} must return a result record: {result:?}");
+        };
+        let Type::List(element) = fields.get("parent_fold").expect("parent fold") else {
+            panic!("{function} must retain the folded parent list");
+        };
+        let Type::Record(row) = element.as_ref() else {
+            panic!("{function} must preserve its computed parent record: {element:?}");
+        };
+        let root = row.get("root").expect("root tuple");
+        let Type::Tuple(_) = root else {
+            panic!("{function} must retain the root pin pair");
+        };
+        let tracked = row.get("tracked").expect("tracked pair list");
+        let Type::List(tracked_row) = tracked else {
+            panic!("{function} must retain the tracked tuple list");
+        };
+        let Type::Tuple(_) = tracked_row.as_ref() else {
+            panic!("{function} must preserve the tracked tuple pair: {tracked_row:?}");
+        };
+        (root, tracked)
+    };
+
+    let (stable_root, stable_tracked) =
+        tuple_slots("stable_three_way_tuple_fold_keeps_first_rebound_width");
+    for (slot, value, expected) in [
+        ("root", stable_root, BTreeSet::from([
+            "selector:HEAD~10".to_owned(), "selector:HEAD~11".to_owned(),
+            "selector:HEAD~12".to_owned(), "selector:HEAD~13".to_owned(),
+            "selector:HEAD~14".to_owned(), "selector:HEAD~15".to_owned(),
+        ])),
+        ("tracked", stable_tracked, BTreeSet::from([
+            "selector:HEAD~20".to_owned(), "selector:HEAD~21".to_owned(),
+            "selector:HEAD~22".to_owned(), "selector:HEAD~23".to_owned(),
+            "selector:HEAD~24".to_owned(), "selector:HEAD~25".to_owned(),
+            "selector:HEAD~26".to_owned(), "selector:HEAD~27".to_owned(),
+        ])),
+    ] {
+        let mut contexts = BTreeSet::new();
+        collect_snapshot_contexts(value, &mut contexts);
+        assert_eq!(
+            contexts, expected,
+            "stable sequential fold must return every computed selector at {slot}"
+        );
+    }
+
+    let (rejected_root, rejected_tracked) =
+        tuple_slots("rejects_late_tuple_width_rebind_after_sequential_fold");
+    let mut first_slot_contexts = BTreeSet::new();
+    collect_snapshot_contexts(rejected_root, &mut first_slot_contexts);
+    assert_eq!(
+        first_slot_contexts,
+        BTreeSet::from([
+            "selector:HEAD~50".to_owned(), "selector:HEAD~51".to_owned(),
+            "selector:HEAD~52".to_owned(), "selector:HEAD~53".to_owned(),
+            "selector:HEAD~54".to_owned(), "selector:HEAD~55".to_owned(),
+        ]),
+        "the independent root tuple must keep its real values through the rejected tracked width"
+    );
+    let mut rejected_slot_contexts = BTreeSet::new();
+    collect_snapshot_contexts(rejected_tracked, &mut rejected_slot_contexts);
+    assert!(
+        rejected_slot_contexts.is_empty(),
+        "a late map-width rebind must roll back to the first row's omitted tuple slot, got {rejected_slot_contexts:?}"
+    );
+}
+
+#[test]
+fn sparse_three_way_tuple_folds_learn_and_preserve_paired_pin_identity() {
+    let source = include_str!("fixtures/historical-sparse-three-way-paired-tuple-rebind.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-sparse-three-way-paired-tuple-rebind.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    let type_diagnostics = result
+        .diagnostics
+        .iter()
+        .filter(|diagnostic| diagnostic.code() == DIAG_TYPE)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        type_diagnostics.len(),
+        1,
+        "only the cascade that splits the learned paired identity should fail: {:?}",
+        type_diagnostics
+            .iter()
+            .map(|diagnostic| diagnostic.message())
+            .collect::<Vec<_>>()
+    );
+
+    let module = result
+        .modules
+        .values()
+        .find(|module| {
+            module
+                .symbols
+                .contains_key("accepts_sparse_pair_rebind_cascade")
+        })
+        .expect("sparse paired tuple rebind fixture module");
+    let pins = |function: &str| {
+        let Type::Function { result, .. } = &module.symbols[function].ty else {
+            panic!("{function} must retain its computed function type");
+        };
+        let Type::Record(fields) = result.as_ref() else {
+            panic!("{function} must return its computed record: {result:?}");
+        };
+        let Type::List(element) = fields.get("parent_fold").expect("parent fold") else {
+            panic!("{function} must retain its folded parent list");
+        };
+        let Type::Record(row) = element.as_ref() else {
+            panic!("{function} must retain its computed row: {element:?}");
+        };
+        let Type::Tuple(slots) = row.get("pins").expect("paired pins") else {
+            panic!("{function} must retain its paired tuple");
+        };
+        assert_eq!(slots.len(), 2, "{function} must preserve both tuple slots");
+        slots
+            .iter()
+            .map(|slot| {
+                let mut contexts = BTreeSet::new();
+                collect_snapshot_contexts(slot, &mut contexts);
+                contexts
+            })
+            .collect::<Vec<_>>()
+    };
+
+    assert_eq!(
+        pins("accepts_sparse_pair_rebind_cascade"),
+        [
+            BTreeSet::from([
+                "selector:HEAD~10".into(),
+                "selector:HEAD~20".into(),
+                "selector:HEAD~30".into(),
+            ]),
+            BTreeSet::from(["selector:HEAD~20".into(), "selector:HEAD~30".into()]),
+        ],
+        "after one sparse slot is filled, later alpha-renames keep the pair shared"
+    );
+    assert_eq!(
+        pins("rejects_sparse_pair_identity_split_cascade"),
+        [
+            BTreeSet::from(["selector:HEAD~40".into()]),
+            BTreeSet::new(),
+        ],
+        "a later split restores the sparse first-row pair without leaking partial identities"
+    );
+}
+
+#[test]
 fn multi_parent_selector_topology_storm_preserves_label_depth_identity() {
     let source = include_str!("fixtures/historical-multi-parent-selector-topology-storm.orna");
     let parsed = orna_syntax_v1::parse_module(source);

@@ -1,0 +1,47 @@
+pub fn factory_at(pin: sys.SnapshotRef) =
+    sys.database.as_of(pin).energy.factory;
+
+pub fn stable_three_way_tuple_fold_keeps_first_rebound_width(failure: Error) {
+    let parents = [
+        {
+            root: (factory_at(sys.snapshot("HEAD~10")), factory_at(sys.snapshot("HEAD~11"))),
+            tracked: [(fail(failure), fail(failure))],
+        },
+        {
+            root: (factory_at(sys.snapshot("HEAD~12")), factory_at(sys.snapshot("HEAD~13"))),
+            tracked: [
+                (factory_at(sys.snapshot("HEAD~20")), factory_at(sys.snapshot("HEAD~21"))),
+                (factory_at(sys.snapshot("HEAD~22")), factory_at(sys.snapshot("HEAD~23"))),
+            ],
+        },
+        {
+            root: (factory_at(sys.snapshot("HEAD~14")), factory_at(sys.snapshot("HEAD~15"))),
+            tracked: [
+                (factory_at(sys.snapshot("HEAD~24")), factory_at(sys.snapshot("HEAD~25"))),
+                (factory_at(sys.snapshot("HEAD~26")), factory_at(sys.snapshot("HEAD~27"))),
+            ],
+        },
+    ];
+    { parent_fold: parents }
+}
+
+pub fn rejects_late_tuple_width_rebind_after_sequential_fold(failure: Error) {
+    let parents = [
+        {
+            root: (factory_at(sys.snapshot("HEAD~50")), factory_at(sys.snapshot("HEAD~51"))),
+            tracked: [(fail(failure), fail(failure))],
+        },
+        {
+            root: (factory_at(sys.snapshot("HEAD~52")), factory_at(sys.snapshot("HEAD~53"))),
+            tracked: [
+                (factory_at(sys.snapshot("HEAD~60")), factory_at(sys.snapshot("HEAD~61"))),
+                (factory_at(sys.snapshot("HEAD~62")), factory_at(sys.snapshot("HEAD~63"))),
+            ],
+        },
+        {
+            root: (factory_at(sys.snapshot("HEAD~54")), factory_at(sys.snapshot("HEAD~55"))),
+            tracked: [(factory_at(sys.snapshot("HEAD~64")), factory_at(sys.snapshot("HEAD~65")))],
+        },
+    ];
+    { parent_fold: parents }
+}

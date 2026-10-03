@@ -134,6 +134,138 @@ pub struct BranchMergePairedCheckpointRedoChainSnapshot {
     pub runs: Vec<BranchMergePairedCheckpointRedoRunSnapshot>,
 }
 
+/// The ordered write-ahead log identities associated with one paired redo frame.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BranchMergePairedWriteAheadIdentity {
+    pub left_log: Vec<u8>,
+    pub right_log: Vec<u8>,
+}
+
+/// One paired redo frame with its source write-ahead identities attached.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BranchMergePairedCheckpointRedoIdentityFrame {
+    pub checkpoints: BranchMergePairedCheckpointRedoFrame,
+    pub write_ahead_identity: BranchMergePairedWriteAheadIdentity,
+}
+
+/// One compressed checkpoint run retaining every paired write-ahead identity.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BranchMergePairedCheckpointRedoIdentityRunSnapshot {
+    pub first_order: u64,
+    pub last_order: u64,
+    pub left: Option<CheckpointGeneration>,
+    pub right: Option<CheckpointGeneration>,
+    /// One pair per input order, in ascending order; repeated IDs are retained.
+    pub write_ahead_identities: Vec<BranchMergePairedWriteAheadIdentity>,
+}
+
+/// One checkpoint identity's compressed redo history and paired log lineage.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BranchMergePairedCheckpointRedoIdentityChainSnapshot {
+    pub checkpoint_id: CheckpointId,
+    pub runs: Vec<BranchMergePairedCheckpointRedoIdentityRunSnapshot>,
+}
+
+/// One committed redo order projected onto a sparse checkpoint stream.
+///
+/// An absent side remains `None`, while the frame's write-ahead identity is
+/// retained even when both checkpoint sides omit this stream.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BranchMergePairedCheckpointRedoSparseSlotSnapshot {
+    pub order: u64,
+    pub left: Option<CheckpointGeneration>,
+    pub right: Option<CheckpointGeneration>,
+    pub write_ahead_identity: BranchMergePairedWriteAheadIdentity,
+}
+
+/// A checkpoint stream's sparse state across the supplied paired redo frames.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BranchMergePairedCheckpointRedoSparseStreamSnapshot {
+    pub checkpoint_id: CheckpointId,
+    pub slots: Vec<BranchMergePairedCheckpointRedoSparseSlotSnapshot>,
+}
+
+/// Opaque directional identities for the left and right undo chains.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BranchMergePairedUndoChainIdentity {
+    pub left_chain: Vec<u8>,
+    pub right_chain: Vec<u8>,
+}
+
+/// A paired checkpoint redo frame carrying its paired undo-chain identity.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BranchMergePairedCheckpointRedoUndoFrame {
+    pub checkpoints: BranchMergePairedCheckpointRedoFrame,
+    pub undo_chain_identity: BranchMergePairedUndoChainIdentity,
+}
+
+/// One sparse stream slot retaining its frame's paired undo-chain identity.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BranchMergePairedCheckpointRedoUndoSparseSlotSnapshot {
+    pub order: u64,
+    pub left: Option<CheckpointGeneration>,
+    pub right: Option<CheckpointGeneration>,
+    pub undo_chain_identity: BranchMergePairedUndoChainIdentity,
+}
+
+/// A sparse checkpoint stream fold with exact paired undo-chain provenance.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BranchMergePairedCheckpointRedoUndoSparseStreamSnapshot {
+    pub checkpoint_id: CheckpointId,
+    pub slots: Vec<BranchMergePairedCheckpointRedoUndoSparseSlotSnapshot>,
+}
+
+/// Opaque active write-ahead segment identities for both redo sides.
+///
+/// A segment token identifies one segment incarnation. A rotated segment gets
+/// a new token, including when a physical segment label is reused.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BranchMergePairedWriteAheadSegmentIdentity {
+    pub left_segment: Vec<u8>,
+    pub right_segment: Vec<u8>,
+}
+
+/// A paired checkpoint redo frame carrying the active write-ahead segments.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BranchMergePairedCheckpointRedoSegmentFrame {
+    pub checkpoints: BranchMergePairedCheckpointRedoFrame,
+    pub segment_identity: BranchMergePairedWriteAheadSegmentIdentity,
+}
+
+/// One sparse checkpoint slot retaining the active segment pair at its order.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BranchMergePairedCheckpointRedoSegmentSparseSlotSnapshot {
+    pub order: u64,
+    pub left: Option<CheckpointGeneration>,
+    pub right: Option<CheckpointGeneration>,
+    pub segment_identity: BranchMergePairedWriteAheadSegmentIdentity,
+}
+
+/// A sparse checkpoint stream fold with per-order segment rotation lineage.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BranchMergePairedCheckpointRedoSegmentSparseStreamSnapshot {
+    pub checkpoint_id: CheckpointId,
+    pub slots: Vec<BranchMergePairedCheckpointRedoSegmentSparseSlotSnapshot>,
+}
+
+/// One compressed run of adjacent equal checkpoint state with every segment pair.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BranchMergePairedCheckpointRedoSegmentCompactionRunSnapshot {
+    pub first_order: u64,
+    pub last_order: u64,
+    pub left: Option<CheckpointGeneration>,
+    pub right: Option<CheckpointGeneration>,
+    /// One active left/right segment pair for each input order in this run.
+    pub segment_identities: Vec<BranchMergePairedWriteAheadSegmentIdentity>,
+}
+
+/// One sparse checkpoint stream's compacted redo and segment rotation history.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BranchMergePairedCheckpointRedoSegmentCompactionChainSnapshot {
+    pub checkpoint_id: CheckpointId,
+    pub runs: Vec<BranchMergePairedCheckpointRedoSegmentCompactionRunSnapshot>,
+}
+
 /// Compresses adjacent paired redo frames only when both sides retain exactly
 /// the same checkpoint state for an identity.
 ///
@@ -174,6 +306,261 @@ pub fn compress_paired_checkpoint_redo_chain(
                 }
             }
             BranchMergePairedCheckpointRedoChainSnapshot { checkpoint_id, runs }
+        })
+        .collect()
+}
+
+/// Compresses paired checkpoint redo states while retaining each source log
+/// identity in the order in which it was committed.
+///
+/// Checkpoint state uses the same conservative coalescing rule as
+/// [`compress_paired_checkpoint_redo_chain`]. Different write-ahead identity
+/// pairs do not prevent state compression: every original ordered pair is
+/// copied into the compressed run, including repeated identities. This keeps
+/// the exact left/right log provenance available after a chain is compacted.
+pub fn compress_paired_checkpoint_redo_chain_preserving_write_ahead_identity(
+    frames: &BTreeMap<u64, BranchMergePairedCheckpointRedoIdentityFrame>,
+) -> Vec<BranchMergePairedCheckpointRedoIdentityChainSnapshot> {
+    let checkpoint_ids = frames
+        .values()
+        .flat_map(|frame| {
+            frame
+                .checkpoints
+                .left
+                .keys()
+                .chain(frame.checkpoints.right.keys())
+                .cloned()
+        })
+        .collect::<BTreeSet<_>>();
+
+    checkpoint_ids
+        .into_iter()
+        .map(|checkpoint_id| {
+            let mut runs = Vec::<BranchMergePairedCheckpointRedoIdentityRunSnapshot>::new();
+            for (&order, frame) in frames {
+                let left = frame.checkpoints.left.get(&checkpoint_id).cloned();
+                let right = frame.checkpoints.right.get(&checkpoint_id).cloned();
+                if let Some(last) = runs.last_mut()
+                    && last.left == left
+                    && last.right == right
+                    && last.last_order.checked_add(1) == Some(order)
+                {
+                    last.last_order = order;
+                    last.write_ahead_identities
+                        .push(frame.write_ahead_identity.clone());
+                } else {
+                    runs.push(BranchMergePairedCheckpointRedoIdentityRunSnapshot {
+                        first_order: order,
+                        last_order: order,
+                        left,
+                        right,
+                        write_ahead_identities: vec![frame.write_ahead_identity.clone()],
+                    });
+                }
+            }
+            BranchMergePairedCheckpointRedoIdentityChainSnapshot { checkpoint_id, runs }
+        })
+        .collect()
+}
+
+/// Folds sparse paired redo frames into per-stream slots without losing stream
+/// identity at omission boundaries.
+///
+/// `known_checkpoint_ids` lets a caller carry checkpoint identities forward
+/// even when a stream is omitted from every frame in this fold. Identities
+/// observed in a frame are also included, so an incomplete catalog never
+/// drops checkpoint data. Output stream IDs and frame orders are sorted. Each
+/// supplied frame contributes exactly one slot per stream; a missing side is
+/// `None`, and no absent integer orders are invented. Paired write-ahead IDs
+/// stay attached to every slot, including slots where both sides omit a
+/// checkpoint. IDs, generations, positions, and log identities remain opaque.
+pub fn fold_paired_checkpoint_redo_sparse_streams(
+    known_checkpoint_ids: &[CheckpointId],
+    frames: &BTreeMap<u64, BranchMergePairedCheckpointRedoIdentityFrame>,
+) -> Vec<BranchMergePairedCheckpointRedoSparseStreamSnapshot> {
+    let checkpoint_ids = known_checkpoint_ids
+        .iter()
+        .cloned()
+        .chain(frames.values().flat_map(|frame| {
+            frame
+                .checkpoints
+                .left
+                .keys()
+                .chain(frame.checkpoints.right.keys())
+                .cloned()
+        }))
+        .collect::<BTreeSet<_>>();
+
+    checkpoint_ids
+        .into_iter()
+        .map(|checkpoint_id| {
+            let slots = frames
+                .iter()
+                .map(|(&order, frame)| BranchMergePairedCheckpointRedoSparseSlotSnapshot {
+                    order,
+                    left: frame.checkpoints.left.get(&checkpoint_id).cloned(),
+                    right: frame.checkpoints.right.get(&checkpoint_id).cloned(),
+                    write_ahead_identity: frame.write_ahead_identity.clone(),
+                })
+                .collect();
+            BranchMergePairedCheckpointRedoSparseStreamSnapshot {
+                checkpoint_id,
+                slots,
+            }
+        })
+        .collect()
+}
+
+/// Folds sparse paired redo frames while retaining each order's undo-chain pair.
+///
+/// Known checkpoint IDs and IDs observed in the frames are both projected.
+/// Every supplied frame contributes a slot per output stream, so a checkpoint
+/// omitted by both logs retains the frame's directional undo identity rather
+/// than erasing its lineage. Repeated undo pairs remain repeated at their
+/// original orders, and missing integer orders are not synthesized. All IDs,
+/// generations, positions, and undo-chain identities are opaque bytes/values.
+pub fn fold_paired_checkpoint_redo_sparse_streams_preserving_undo_chain_identity(
+    known_checkpoint_ids: &[CheckpointId],
+    frames: &BTreeMap<u64, BranchMergePairedCheckpointRedoUndoFrame>,
+) -> Vec<BranchMergePairedCheckpointRedoUndoSparseStreamSnapshot> {
+    let checkpoint_ids = known_checkpoint_ids
+        .iter()
+        .cloned()
+        .chain(frames.values().flat_map(|frame| {
+            frame
+                .checkpoints
+                .left
+                .keys()
+                .chain(frame.checkpoints.right.keys())
+                .cloned()
+        }))
+        .collect::<BTreeSet<_>>();
+
+    checkpoint_ids
+        .into_iter()
+        .map(|checkpoint_id| {
+            let slots = frames
+                .iter()
+                .map(|(&order, frame)| {
+                    BranchMergePairedCheckpointRedoUndoSparseSlotSnapshot {
+                        order,
+                        left: frame.checkpoints.left.get(&checkpoint_id).cloned(),
+                        right: frame.checkpoints.right.get(&checkpoint_id).cloned(),
+                        undo_chain_identity: frame.undo_chain_identity.clone(),
+                    }
+                })
+                .collect();
+            BranchMergePairedCheckpointRedoUndoSparseStreamSnapshot {
+                checkpoint_id,
+                slots,
+            }
+        })
+        .collect()
+}
+
+/// Folds sparse paired redo frames while preserving each side's active segment.
+///
+/// Known checkpoint IDs and IDs observed in the frames are both projected.
+/// Each supplied frame contributes one slot per output stream and retains the
+/// frame's exact left/right segment tokens even when both checkpoint sides
+/// omit that stream. Segment rotation is represented by a distinct token per
+/// segment incarnation; tokens remain directional and opaque. Repeated token
+/// pairs are retained at every order, and missing integer orders are not
+/// synthesized.
+pub fn fold_paired_checkpoint_redo_sparse_streams_preserving_segment_rotation_identity(
+    known_checkpoint_ids: &[CheckpointId],
+    frames: &BTreeMap<u64, BranchMergePairedCheckpointRedoSegmentFrame>,
+) -> Vec<BranchMergePairedCheckpointRedoSegmentSparseStreamSnapshot> {
+    let checkpoint_ids = known_checkpoint_ids
+        .iter()
+        .cloned()
+        .chain(frames.values().flat_map(|frame| {
+            frame
+                .checkpoints
+                .left
+                .keys()
+                .chain(frame.checkpoints.right.keys())
+                .cloned()
+        }))
+        .collect::<BTreeSet<_>>();
+
+    checkpoint_ids
+        .into_iter()
+        .map(|checkpoint_id| {
+            let slots = frames
+                .iter()
+                .map(|(&order, frame)| {
+                    BranchMergePairedCheckpointRedoSegmentSparseSlotSnapshot {
+                        order,
+                        left: frame.checkpoints.left.get(&checkpoint_id).cloned(),
+                        right: frame.checkpoints.right.get(&checkpoint_id).cloned(),
+                        segment_identity: frame.segment_identity.clone(),
+                    }
+                })
+                .collect();
+            BranchMergePairedCheckpointRedoSegmentSparseStreamSnapshot {
+                checkpoint_id,
+                slots,
+            }
+        })
+        .collect()
+}
+
+/// Compresses adjacent equal sparse checkpoint states while retaining each
+/// order's paired segment identity through rotation boundaries.
+///
+/// Known checkpoint IDs and IDs observed in the frames are both retained. A
+/// run joins only consecutive orders with equal left and right checkpoint
+/// values; missing entries are `None` and differ from a present positionless
+/// checkpoint. Segment rotation does not block state compaction because every
+/// segment pair is copied into the run in input order. An order gap or a
+/// checkpoint state change starts a new run, so no redo state is omitted.
+pub fn compress_paired_checkpoint_redo_sparse_chains_preserving_segment_rotation_identity(
+    known_checkpoint_ids: &[CheckpointId],
+    frames: &BTreeMap<u64, BranchMergePairedCheckpointRedoSegmentFrame>,
+) -> Vec<BranchMergePairedCheckpointRedoSegmentCompactionChainSnapshot> {
+    let checkpoint_ids = known_checkpoint_ids
+        .iter()
+        .cloned()
+        .chain(frames.values().flat_map(|frame| {
+            frame
+                .checkpoints
+                .left
+                .keys()
+                .chain(frame.checkpoints.right.keys())
+                .cloned()
+        }))
+        .collect::<BTreeSet<_>>();
+
+    checkpoint_ids
+        .into_iter()
+        .map(|checkpoint_id| {
+            let mut runs =
+                Vec::<BranchMergePairedCheckpointRedoSegmentCompactionRunSnapshot>::new();
+            for (&order, frame) in frames {
+                let left = frame.checkpoints.left.get(&checkpoint_id).cloned();
+                let right = frame.checkpoints.right.get(&checkpoint_id).cloned();
+                if let Some(last) = runs.last_mut()
+                    && last.left == left
+                    && last.right == right
+                    && last.last_order.checked_add(1) == Some(order)
+                {
+                    last.last_order = order;
+                    last.segment_identities.push(frame.segment_identity.clone());
+                } else {
+                    runs.push(BranchMergePairedCheckpointRedoSegmentCompactionRunSnapshot {
+                        first_order: order,
+                        last_order: order,
+                        left,
+                        right,
+                        segment_identities: vec![frame.segment_identity.clone()],
+                    });
+                }
+            }
+            BranchMergePairedCheckpointRedoSegmentCompactionChainSnapshot {
+                checkpoint_id,
+                runs,
+            }
         })
         .collect()
 }
