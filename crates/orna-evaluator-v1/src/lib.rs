@@ -5441,7 +5441,7 @@ impl Context<'_, '_> {
 
         let mut slots = BTreeMap::new();
         for child in children {
-            if !is_ui_presentation_node(child) {
+            if !is_ui_presentation_node(child, 1, self.limits.max_depth)? {
                 return Err(error("ORNA-EVAL-TYPE"));
             }
         }
@@ -12271,30 +12271,37 @@ fn ui_property_type_matches(type_name: &str, value: &Value) -> bool {
     }
 }
 
-fn is_ui_presentation_node(value: &Value) -> bool {
+fn is_ui_presentation_node(
+    value: &Value,
+    depth: usize,
+    max_depth: usize,
+) -> Result<bool, EvaluationError> {
+    if depth > max_depth {
+        return Err(error("ORNA-EVAL-LIMIT"));
+    }
     let Value::Record(fields) = value else {
-        return false;
+        return Ok(false);
     };
     if !matches!(fields.get("kind"), Some(Value::String(kind)) if kind == "node") {
-        return false;
+        return Ok(false);
     }
     let Some(Value::Record(contract)) = fields.get("contract") else {
-        return false;
+        return Ok(false);
     };
-    if !["id", "name", "version"].into_iter().all(|name| {
-        matches!(contract.get(name), Some(Value::String(value)) if !value.is_empty())
-    }) {
-        return false;
+    if !["id", "name", "version"]
+        .into_iter()
+        .all(|name| matches!(contract.get(name), Some(Value::String(value)) if !value.is_empty()))
+    {
+        return Ok(false);
     }
     let Some(Value::Record(properties)) = fields.get("properties") else {
-        return false;
+        return Ok(false);
     };
     if !properties.iter().all(|(name, property)| {
         let Value::Record(typed) = property else {
             return false;
         };
-        let (Some(Value::String(type_name)), Some(value)) =
-            (typed.get("type"), typed.get("value"))
+        let (Some(Value::String(type_name)), Some(value)) = (typed.get("type"), typed.get("value"))
         else {
             return false;
         };
@@ -12302,23 +12309,28 @@ fn is_ui_presentation_node(value: &Value) -> bool {
             && ui_property_type_matches(type_name, value)
             && value.clone().canonical().is_ok()
     }) {
-        return false;
+        return Ok(false);
     }
     let Some(Value::Record(slots)) = fields.get("slots") else {
-        return false;
+        return Ok(false);
     };
-    if !slots.values().all(|slot| {
+    let child_depth = depth
+        .checked_add(1)
+        .ok_or_else(|| error("ORNA-EVAL-LIMIT"))?;
+    for slot in slots.values() {
         let Value::List(children) = slot else {
-            return false;
+            return Ok(false);
         };
-        children.iter().all(is_ui_presentation_node)
-    }) {
-        return false;
+        for child in children {
+            if !is_ui_presentation_node(child, child_depth, max_depth)? {
+                return Ok(false);
+            }
+        }
     }
     let Some(Value::Record(actions)) = fields.get("actions") else {
-        return false;
+        return Ok(false);
     };
-    actions.values().all(is_ui_action_descriptor)
+    Ok(actions.values().all(is_ui_action_descriptor))
 }
 
 fn is_ui_action_descriptor(value: &Value) -> bool {
@@ -14903,7 +14915,16 @@ mod tests {
         }
 
         let valid = node(Vec::new());
-        assert!(is_ui_presentation_node(&valid));
+        assert!(is_ui_presentation_node(&valid, 0, 1).expect("shallow node depth"));
+
+        let nested = node(vec![valid.clone()]);
+        assert!(is_ui_presentation_node(&nested, 0, 1).expect("child at depth one"));
+        assert_eq!(
+            is_ui_presentation_node(&nested, 0, 0)
+                .expect_err("depth zero must reject its child")
+                .code(),
+            "ORNA-EVAL-LIMIT"
+        );
 
         let mut invalid_child = node(Vec::new());
         let Value::Record(fields) = &mut invalid_child else {
@@ -14912,7 +14933,7 @@ mod tests {
         fields.insert("contract".into(), Value::Record(BTreeMap::new()));
 
         let parent = node(vec![invalid_child]);
-        assert!(!is_ui_presentation_node(&parent));
+        assert!(!is_ui_presentation_node(&parent, 0, 2).expect("invalid child is not too deep"));
     }
 
     #[test]
