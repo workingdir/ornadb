@@ -83,6 +83,31 @@ fn sparse_window_fold_functions() -> Functions {
         .collect()
 }
 
+fn paired_window_refresh_compaction_functions() -> Functions {
+    let parsed = parse_module(include_str!(
+        "fixtures/table_relation_paired_window_refresh_compaction_lzevs.orna"
+    ));
+    assert!(parsed.is_ok(), "{:?}", parsed.diagnostics);
+    parsed
+        .value
+        .items
+        .into_iter()
+        .map(|item| {
+            let orna_syntax_v1::Declaration::Function { signature, body } = item.declaration else {
+                panic!("fixture function expected")
+            };
+            (
+                signature.name,
+                PureFunction {
+                    parameters: signature.parameters,
+                    body,
+                    environment: Environment::new(),
+                },
+            )
+        })
+        .collect()
+}
+
 fn scoped_refresh_aggregate_functions() -> Functions {
     let parsed = parse_module(include_str!(
         "fixtures/table_relation_scoped_refresh_aggregate_restore_4plgl.orna"
@@ -1820,6 +1845,16 @@ fn paired_sparse_window_fold_body() -> Expr {
     terminal(paired, "sum")
 }
 
+fn paired_window_refresh_compaction_body() -> Expr {
+    Expr::Tuple {
+        elements: vec![
+            terminal(sparse_window_fold("View.Left", "is_odd"), "sum"),
+            terminal(sparse_window_fold("View.Right", "is_even"), "sum"),
+        ],
+        span: span(),
+    }
+}
+
 fn paired_scoped_aggregate_restore_body() -> Expr {
     let left = terminal(
         relation_stage(
@@ -2101,6 +2136,83 @@ fn paired_sparse_window_folds_keep_identity_across_compacted_cursor_chains() {
         "each sparse window fold follows the same compacted page sequence in its own scope"
     );
     assert!(source.pending["View.Paired"].is_empty(), "all six sparse page chains are consumed");
+}
+
+#[test]
+fn paired_window_folds_keep_values_across_sparse_refresh_compaction_chains() {
+    // Cursor tokens intentionally repeat across sibling sources and refreshes.
+    // A new evaluation is a new snapshot, so its `(source, scope, cursor)` chain
+    // starts at that snapshot's first page even when the opaque cursor bytes match.
+    let cursors = [vec![0x5a], vec![0x5a, 0x00], vec![0x5a, 0x00, 0xff]];
+    let restore = |groups: &[&[i64]], tokens: &[Vec<u8>]| {
+        assert_eq!(groups.len(), tokens.len() + 1);
+        groups
+            .iter()
+            .enumerate()
+            .map(|(index, values)| {
+                let after = index.checked_sub(1).map(|previous| tokens[previous].clone());
+                let next = tokens.get(index).cloned();
+                (after, page(values, next))
+            })
+            .collect::<CursorRestore>()
+    };
+    let mut source = PairedCursorRestoreSource::new([
+        (
+            "View.Left",
+            restore(&[&[1, 2], &[3], &[4, 5]], &cursors[..2]),
+        ),
+        (
+            "View.Right",
+            restore(&[&[2, 3], &[4, 5, 6]], &cursors[..1]),
+        ),
+        (
+            "View.Left",
+            restore(&[&[1], &[4, 5], &[2], &[7]], &cursors),
+        ),
+        (
+            "View.Right",
+            restore(&[&[4, 1], &[6], &[3, 8]], &cursors[..2]),
+        ),
+        (
+            "View.Left",
+            restore(&[&[3, 4], &[7, 2], &[9]], &cursors[..2]),
+        ),
+        (
+            "View.Right",
+            restore(&[&[2], &[3, 8, 5], &[10]], &cursors[..2]),
+        ),
+    ]);
+    let mut functions = paired_window_refresh_compaction_functions();
+    functions.insert(
+        "run".into(),
+        PureFunction {
+            parameters: Vec::new(),
+            body: paired_window_refresh_compaction_body(),
+            environment: Environment::new(),
+        },
+    );
+    let run_refresh = |source: &mut PairedCursorRestoreSource| {
+        invoke_named_with_effects(
+            "run",
+            &functions,
+            &Environment::new(),
+            Limits::default(),
+            source,
+        )
+        .unwrap()
+    };
+
+    let first = run_refresh(&mut source);
+    assert_eq!(first, integer_pair(12, 16), "sparse odd/even windows fold to (12, 16)");
+    let second = run_refresh(&mut source);
+    assert_eq!(second, integer_pair(18, 24), "the compacted refresh folds its own rows to (18, 24)");
+    let third = run_refresh(&mut source);
+    assert_eq!(third, integer_pair(26, 28), "the next refresh folds its own rows to (26, 28)");
+    assert_eq!(first, integer_pair(12, 16), "later refreshes do not mutate the first snapshot result");
+    assert_eq!(second, integer_pair(18, 24), "later refreshes do not mutate the second snapshot result");
+
+    assert!(source.pending["View.Left"].is_empty());
+    assert!(source.pending["View.Right"].is_empty());
 }
 
 #[test]
