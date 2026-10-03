@@ -91,19 +91,32 @@ pub use introspection::{
 mod provider;
 pub use provider::*;
 
+mod host_registry;
+pub use host_registry::*;
+
+#[cfg(feature = "native-hosts")]
 mod host_environment;
+#[cfg(feature = "native-hosts")]
 pub use host_environment::*;
 
+#[cfg(feature = "native-hosts")]
 mod host_process;
+#[cfg(feature = "native-hosts")]
 pub use host_process::*;
 
+#[cfg(feature = "native-hosts")]
 mod host_clock;
+#[cfg(feature = "native-hosts")]
 pub use host_clock::*;
 
+#[cfg(feature = "native-hosts")]
 mod host_filesystem;
+#[cfg(feature = "native-hosts")]
 pub use host_filesystem::*;
 
+#[cfg(feature = "native-hosts")]
 mod host_network;
+#[cfg(feature = "native-hosts")]
 pub use host_network::*;
 
 pub const CANONICAL_VALUE_CODEC_V1: &str = "OVB-1";
