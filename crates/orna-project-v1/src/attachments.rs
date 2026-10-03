@@ -977,6 +977,74 @@ impl PackageResolver {
         Ok((route, transitions))
     }
 
+    /// Applies repeated paired checkpoint excursions and restorations. Each
+    /// fold contains exactly two anchored rebind chains; both identity edges
+    /// are checked, and the second chain must restore the fold's starting
+    /// terminal identity. Labels emitted by every anchor remain bound through
+    /// later folds. The reference does not specify this restoration pairing;
+    /// v1 requires exact lineage and pin equality at every boundary.
+    pub fn extend_nested_terminal_pair_checkpoint_restoration_folds_validating_terminal_identity_transitions(
+        &self,
+        previous: &ReboundPathResolution,
+        restoration_folds: &[[(&ReboundPathCheckpoint, &[[PinnedDatabase; 2]]); 2]],
+        expected_fold_transitions: &[
+            [(NestedPairTerminalRouteIdentity, NestedPairTerminalRouteIdentity); 2]
+        ],
+    ) -> Result<
+        (
+            ReboundPathResolution,
+            Vec<[(NestedPairTerminalRouteIdentity, NestedPairTerminalRouteIdentity); 2]>,
+        ),
+        AttachmentError,
+    > {
+        if restoration_folds.len() != expected_fold_transitions.len() {
+            return Err(AttachmentError::RetainedSnapshotUnavailable);
+        }
+
+        let mut route = previous.clone();
+        let mut retained_checkpoint_labels = Vec::new();
+        let mut all_transitions = Vec::with_capacity(restoration_folds.len());
+        for (fold, expected_transitions) in restoration_folds.iter().zip(expected_fold_transitions)
+        {
+            let starting_identity = route.terminal_route_identity();
+            let mut transitions = Vec::with_capacity(2);
+            for ((checkpoint, replacement_waves), (expected_before, expected_after)) in
+                fold.iter().zip(expected_transitions)
+            {
+                let before = route.terminal_route_identity();
+                route.validate_terminal_route_identity(expected_before)?;
+                let (folded, checkpoint_label) = self
+                    .extend_nested_terminal_pair_chain_from_checkpoint_with_labels(
+                        &route,
+                        checkpoint,
+                        replacement_waves,
+                        &retained_checkpoint_labels,
+                    )?;
+                if let Some(label) = checkpoint_label {
+                    retained_checkpoint_labels.push(label);
+                }
+                route = folded;
+                for label in &retained_checkpoint_labels {
+                    route.validate_depth_label(label)?;
+                }
+                let after = route.terminal_route_identity();
+                route.validate_terminal_route_identity(expected_after)?;
+                transitions.push((before, after));
+            }
+
+            route.validate_terminal_route_identity(&starting_identity)?;
+            let transitions: [
+                (NestedPairTerminalRouteIdentity, NestedPairTerminalRouteIdentity);
+                2
+            ] = transitions
+                .try_into()
+                .map_err(|_| AttachmentError::RetainedSnapshotUnavailable)?;
+            all_transitions.push(transitions);
+        }
+
+        Ok((route, all_transitions))
+    }
+
     fn extend_nested_terminal_pair_chain_from_checkpoint_with_labels(
         &self,
         previous: &ReboundPathResolution,
