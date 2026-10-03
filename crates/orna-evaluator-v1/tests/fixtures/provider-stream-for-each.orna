@@ -1,0 +1,4 @@
+std.stream.for_each(
+    std.stream.buffer(std.stream.from_provider("events", "consumer"), 2),
+    (value: Str) => { std.io.environment.get(value); }
+)

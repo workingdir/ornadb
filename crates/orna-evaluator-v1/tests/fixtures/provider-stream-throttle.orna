@@ -1,0 +1,8 @@
+std.stream.for_each(
+    std.stream.throttle(
+        std.stream.buffer(std.stream.from_provider("events", "throttle"), 3),
+        5.s,
+        "drop"
+    ),
+    (value: Str) => { std.io.environment.get(value); }
+)
