@@ -130,6 +130,21 @@ fn standard_dependency_revision_is_canonical_and_captures_provenance() {
             .revision_digest(),
         "prelude exports are part of catalogue admission provenance"
     );
+    let module_prelude = ordered
+        .clone()
+        .with_module_prelude_exports("std/nested/b.orna", ["second", "first"]);
+    assert_ne!(
+        ordered.revision_digest(),
+        module_prelude.revision_digest(),
+        "module-scoped prelude exports are part of catalogue admission provenance"
+    );
+    assert_eq!(
+        module_prelude.revision_digest(),
+        ordered
+            .with_module_prelude_exports("std/nested/b.orna", ["first", "second"])
+            .revision_digest(),
+        "module prelude export order does not change the captured revision"
+    );
 }
 
 #[test]
