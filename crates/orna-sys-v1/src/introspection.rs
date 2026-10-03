@@ -3173,6 +3173,8 @@ fn explain_query_core_with_limit_pushdowns(
                     identity,
                     parent_identity,
                     &left_fold_identity,
+                    declared_position,
+                    planned_position,
                     transition,
                     step.map(|(_, _, pair, _, _, _)| *pair),
                     step.map(|(_, _, _, refold, _, _)| *refold),
@@ -3389,6 +3391,8 @@ fn explain_query_core_with_limit_pushdowns(
                 identity,
                 parent_identity,
                 &left_fold_identity,
+                declared_position,
+                planned_position,
                 transition,
                 step.map(|(_, _, pair, _, _, _)| *pair),
                 step.map(|(_, _, _, refold, _, _)| *refold),
@@ -4767,6 +4771,8 @@ fn add_paired_index_cost_restoration_details(
     identity: &str,
     parent_identity: &str,
     parent_cost_identity: &str,
+    declared_position: usize,
+    planned_position: usize,
     transition: &str,
     pair_identity: Option<&str>,
     step_refold_identity: Option<&str>,
@@ -4788,6 +4794,14 @@ fn add_paired_index_cost_restoration_details(
     details.insert(
         "paired_index_cost_restoration_transition".to_owned(),
         PlanDetail::Text(transition.to_owned()),
+    );
+    details.insert(
+        "paired_index_cost_restoration_declared_input_position".to_owned(),
+        PlanDetail::Integer(u64::try_from(declared_position + 1).unwrap_or(u64::MAX)),
+    );
+    details.insert(
+        "paired_index_cost_restoration_planned_input_position".to_owned(),
+        PlanDetail::Integer(u64::try_from(planned_position + 1).unwrap_or(u64::MAX)),
     );
     if let Some(pair_identity) = pair_identity {
         details.insert(
