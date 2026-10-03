@@ -1,0 +1,1 @@
+std.encoding.ovb.encode(std.map.to_entries([("é", 4), ("e\u{301}", 2), ("z", 3)]))

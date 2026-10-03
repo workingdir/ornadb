@@ -1,0 +1,1 @@
+std.encoding.ovb.decode(std.encoding.ovb.encode({ z: 0, aa: 2, b: 1, é: 3 }), as: { z: Int, aa: Int, b: Int, é: Int })
