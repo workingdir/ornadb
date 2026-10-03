@@ -3609,6 +3609,23 @@ fn captured_snapshot_identity_survives_paired_divergence_escalations() {
         sessions.push(session);
     }
 
+    for index in [5, 0, 3, 2, 4, 1, 5, 2, 3, 0] {
+        assert_eq!(
+            sessions[index].submit(replay),
+            Ok(Some(ints(&expected[index]))),
+            "interleaved replay must preserve escalation pin {}",
+            pins[index]
+        );
+    }
+    let mut cloned_sessions = sessions.clone();
+    for index in [2, 5, 1, 4, 0, 3] {
+        assert_eq!(
+            cloned_sessions[index].submit(replay),
+            Ok(Some(ints(&expected[index]))),
+            "cloned replay must preserve escalation pin {}",
+            pins[index]
+        );
+    }
 }
 
 #[test]
