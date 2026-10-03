@@ -18181,3 +18181,94 @@ fn user_defined_uuid7_shadows_the_root_intrinsic() {
             if parameters.is_empty() && result.as_ref() == &Type::Text
     ));
 }
+
+#[test]
+fn single_pair_sparse_pin_fold_chain_keeps_learned_identity() {
+    let source = include_str!("fixtures/historical-single-pair-sparse-pin-fold-chain.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-single-pair-sparse-pin-fold-chain.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    let type_errors = result
+        .diagnostics
+        .iter()
+        .filter(|diagnostic| diagnostic.code() == DIAG_TYPE)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        type_errors.len(),
+        1,
+        "only the split after a single sparse pair was anchored should fail: {:?}",
+        type_errors
+            .iter()
+            .map(|diagnostic| diagnostic.message())
+            .collect::<Vec<_>>()
+    );
+    let module = result
+        .modules
+        .values()
+        .find(|module| module.symbols.contains_key("single_pair_sparse_pin_fold_chain"))
+        .expect("single-pair sparse fold fixture module");
+    let Type::Function { result, .. } =
+        &module.symbols["single_pair_sparse_pin_fold_chain"].ty
+    else {
+        panic!("sparse pin fold proof must return computed values");
+    };
+    let Type::List(row) = result.as_ref() else {
+        panic!("sparse pin fold must retain its computed rows: {result:?}");
+    };
+    let Type::Record(fields) = row.as_ref() else {
+        panic!("sparse pin fold rows must remain records: {row:?}");
+    };
+    let tuple_maps = |name: &str| {
+        let Type::Tuple(slots) = fields.get(name).expect("checkpoint pair") else {
+            panic!("{name} must remain a paired tuple");
+        };
+        assert_eq!(slots.len(), 2, "{name} keeps both sparse checkpoint slots");
+        slots
+            .iter()
+            .map(|slot| {
+                let mut contexts = BTreeSet::new();
+                collect_snapshot_contexts(slot, &mut contexts);
+                contexts
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        tuple_maps("left_checkpoint"),
+        [
+            BTreeSet::from(["selector:HEAD~6000".to_owned()]),
+            BTreeSet::from([
+                "selector:HEAD~6010".to_owned(),
+                "selector:HEAD~6020".to_owned(),
+                "selector:HEAD~6050".to_owned(),
+            ]),
+        ],
+        "rollback retains the partial first anchor and later accepted pin growth"
+    );
+    assert_eq!(
+        tuple_maps("right_checkpoint"),
+        [
+            BTreeSet::from(["selector:HEAD~5900".to_owned()]),
+            BTreeSet::from(["selector:HEAD~5900".to_owned()]),
+        ],
+        "the wholly omitted paired lane learns and keeps its later anchor"
+    );
+    let mut witness_contexts = BTreeSet::new();
+    collect_snapshot_contexts(
+        fields.get("witness").expect("independent witness"),
+        &mut witness_contexts,
+    );
+    assert_eq!(
+        witness_contexts,
+        ["6001", "6011", "6021", "6031", "6041", "6051"]
+            .map(|value| format!("selector:HEAD~{value}"))
+            .into_iter()
+            .collect(),
+        "the rejected split does not discard independent witness values"
+    );
+}
