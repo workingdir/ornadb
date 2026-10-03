@@ -145,6 +145,10 @@ const PAIRED_CHECKPOINT_REDO: &str =
     include_str!("fixtures/merge-paired-checkpoint-redo.orna");
 const PAIRED_REDO_FOLD_IDENTITIES: &str =
     include_str!("fixtures/paired-redo-fold-identities.orna");
+const PAIRED_SPARSE_COMPACTION_PIN_FOLDS: &str =
+    include_str!("fixtures/paired-sparse-compaction-pin-folds.orna");
+const PAIRED_SPARSE_COMPACTION_PIN_GENERATIONS: &str =
+    include_str!("fixtures/paired-sparse-compaction-pin-generations.orna");
 const PAIRED_WRITE_AHEAD_REDO_IDENTITIES: &str =
     include_str!("fixtures/paired-write-ahead-redo-identities.orna");
 const PAIRED_SPARSE_CHECKPOINT_REDO: &str =
@@ -34328,6 +34332,302 @@ fn paired_redo_fold_identity_survives_sparse_restore_handoff_chains() {
             last_order: 7,
         }),
         "invalid ranges report which restore handoff failed",
+    );
+}
+
+#[test]
+fn paired_checkpoint_pins_survive_three_sparse_compaction_handoff_restores() {
+    let fold_rows = PAIRED_SPARSE_COMPACTION_PIN_FOLDS
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    let generations = PAIRED_SPARSE_COMPACTION_PIN_GENERATIONS
+        .split("\n\n")
+        .map(parse_checkpoint_fixture)
+        .collect::<Vec<_>>();
+    assert_eq!(fold_rows.len(), 3);
+    assert_eq!(generations.len(), 5);
+
+    let folds = fold_rows
+        .iter()
+        .map(|row| BranchMergePairedRedoFoldIdentity {
+            left_fold: row.fields[&id(2)].encode().unwrap(),
+            right_fold: row.fields[&id(3)].encode().unwrap(),
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(folds[0], folds[2], "fixture includes a reused identity pair");
+    assert_ne!(folds[0], folds[1]);
+    assert_ne!(folds[1], folds[2]);
+
+    let alpha = b"n1kg3/checkpoint/alpha".to_vec();
+    let beta = b"n1kg3/checkpoint/beta".to_vec();
+    let catalog_only = b"n1kg3/checkpoint/catalog-only".to_vec();
+    let observed_late = b"n1kg3/checkpoint/late".to_vec();
+    let slot = |fold_ordinal,
+                order,
+                left: Option<CheckpointGeneration>,
+                right: Option<CheckpointGeneration>,
+                identity: &BranchMergePairedRedoFoldIdentity| {
+        orna_storage_v1::BranchMergePairedCheckpointRedoFoldSparseChainSlotSnapshot {
+            fold_ordinal,
+            order,
+            left,
+            right,
+            redo_fold_identity: identity.clone(),
+        }
+    };
+    let stream = |checkpoint_id: &[u8], slots| {
+        orna_storage_v1::BranchMergePairedCheckpointRedoFoldSparseStreamChainSnapshot {
+            checkpoint_id: checkpoint_id.to_vec(),
+            slots,
+        }
+    };
+
+    let first_left_compacted = compress_paired_checkpoint_redo_sparse_stream_chains_preserving_fold_identity(&[
+        stream(
+            &alpha,
+            vec![
+                slot(0, 20, Some(generations[0].clone()), Some(generations[1].clone()), &folds[0]),
+                slot(0, 21, Some(generations[0].clone()), Some(generations[1].clone()), &folds[0]),
+                slot(0, 23, Some(generations[2].clone()), None, &folds[1]),
+            ],
+        ),
+        stream(
+            &beta,
+            vec![slot(1, 25, Some(generations[4].clone()), None, &folds[2])],
+        ),
+    ]);
+    let first_right_compacted = compress_paired_checkpoint_redo_sparse_stream_chains_preserving_fold_identity(&[
+        stream(
+            &alpha,
+            vec![
+                slot(0, 20, Some(generations[4].clone()), Some(generations[1].clone()), &folds[2]),
+                slot(2, 20, None, Some(generations[3].clone()), &folds[1]),
+            ],
+        ),
+        stream(
+            &observed_late,
+            vec![slot(1, 31, None, None, &folds[0])],
+        ),
+    ]);
+    let first_handoff = merge_paired_checkpoint_redo_sparse_compaction_handoff_chains_preserving_fold_identity(
+        &[alpha.clone(), beta.clone(), catalog_only.clone()],
+        &[first_left_compacted, first_right_compacted],
+    );
+
+    let second_left_compacted = compress_paired_checkpoint_redo_sparse_stream_chains_preserving_fold_identity(&[
+        stream(
+            &alpha,
+            vec![
+                slot(0, 20, Some(generations[2].clone()), Some(generations[1].clone()), &folds[2]),
+                slot(0, 22, Some(generations[0].clone()), Some(generations[3].clone()), &folds[1]),
+            ],
+        ),
+        stream(
+            &observed_late,
+            vec![
+                slot(0, 30, None, Some(generations[4].clone()), &folds[0]),
+                slot(0, 31, None, Some(generations[4].clone()), &folds[0]),
+            ],
+        ),
+    ]);
+    let second_right_compacted = compress_paired_checkpoint_redo_sparse_stream_chains_preserving_fold_identity(&[
+        stream(
+            &alpha,
+            vec![slot(2, 23, Some(generations[0].clone()), None, &folds[0])],
+        ),
+        stream(
+            &beta,
+            vec![slot(0, 25, None, Some(generations[4].clone()), &folds[1])],
+        ),
+    ]);
+    let second_handoff = merge_paired_checkpoint_redo_sparse_compaction_handoff_chains_preserving_fold_identity(
+        &[alpha.clone(), beta.clone(), catalog_only.clone()],
+        &[second_left_compacted, second_right_compacted],
+    );
+
+    let third_compacted = compress_paired_checkpoint_redo_sparse_stream_chains_preserving_fold_identity(&[
+        stream(
+            &alpha,
+            vec![
+                slot(0, 21, Some(generations[4].clone()), Some(generations[0].clone()), &folds[0]),
+                slot(2, 20, None, None, &folds[2]),
+                slot(2, 21, None, None, &folds[2]),
+            ],
+        ),
+        stream(
+            &observed_late,
+            vec![slot(1, 30, Some(generations[0].clone()), Some(generations[3].clone()), &folds[1])],
+        ),
+    ]);
+    let third_handoff = merge_paired_checkpoint_redo_sparse_compaction_handoff_chains_preserving_fold_identity(
+        &[alpha.clone(), beta.clone(), catalog_only.clone()],
+        &[third_compacted],
+    );
+
+    let restored = orna_storage_v1::restore_paired_checkpoint_redo_sparse_compaction_handoff_chains_preserving_checkpoint_pin_identity(
+        &[alpha.clone(), beta.clone(), catalog_only.clone()],
+        &[first_handoff, second_handoff, third_handoff],
+    )
+    .unwrap();
+    assert_eq!(
+        restored
+            .iter()
+            .map(|snapshot| snapshot.checkpoint_id.clone())
+            .collect::<Vec<_>>(),
+        vec![alpha.clone(), beta.clone(), catalog_only.clone(), observed_late.clone()],
+        "known-only and late-observed checkpoint identities retain catalog order",
+    );
+    let slots = |checkpoint_id: &[u8]| {
+        &restored
+            .iter()
+            .find(|snapshot| snapshot.checkpoint_id == checkpoint_id)
+            .unwrap()
+            .slots
+    };
+    assert_eq!(
+        slots(&alpha)
+            .iter()
+            .map(|slot| (
+                slot.restore_ordinal,
+                slot.handoff_ordinal,
+                slot.fold_ordinal,
+                slot.order,
+            ))
+            .collect::<Vec<_>>(),
+        vec![
+            (0, 0, 0, 20),
+            (0, 0, 0, 21),
+            (0, 0, 0, 23),
+            (0, 1, 0, 20),
+            (0, 1, 2, 20),
+            (1, 0, 0, 20),
+            (1, 0, 0, 22),
+            (1, 1, 2, 23),
+            (2, 0, 0, 21),
+            (2, 0, 2, 20),
+            (2, 0, 2, 21),
+        ],
+        "restore, handoff, fold, and order distinguish colliding sparse chains",
+    );
+    let pin = |checkpoint_id: &[u8], generation: &CheckpointGeneration| {
+        Some(BranchMergePairedCheckpointPinIdentity {
+            checkpoint_id: checkpoint_id.to_vec(),
+            generation: generation.clone(),
+        })
+    };
+    assert_eq!(
+        slots(&alpha)
+            .iter()
+            .map(|slot| (slot.left_pin.clone(), slot.right_pin.clone()))
+            .collect::<Vec<_>>(),
+        vec![
+            (pin(&alpha, &generations[0]), pin(&alpha, &generations[1])),
+            (pin(&alpha, &generations[0]), pin(&alpha, &generations[1])),
+            (pin(&alpha, &generations[2]), None),
+            (pin(&alpha, &generations[4]), pin(&alpha, &generations[1])),
+            (None, pin(&alpha, &generations[3])),
+            (pin(&alpha, &generations[2]), pin(&alpha, &generations[1])),
+            (pin(&alpha, &generations[0]), pin(&alpha, &generations[3])),
+            (pin(&alpha, &generations[0]), None),
+            (pin(&alpha, &generations[4]), pin(&alpha, &generations[0])),
+            (None, None),
+            (None, None),
+        ],
+        "each side keeps its exact generation bound to the enclosing checkpoint",
+    );
+    assert_eq!(
+        slots(&alpha)
+            .iter()
+            .map(|slot| slot.redo_fold_identity.clone())
+            .collect::<Vec<_>>(),
+        vec![
+            folds[0].clone(),
+            folds[0].clone(),
+            folds[1].clone(),
+            folds[2].clone(),
+            folds[1].clone(),
+            folds[2].clone(),
+            folds[1].clone(),
+            folds[0].clone(),
+            folds[0].clone(),
+            folds[2].clone(),
+            folds[2].clone(),
+        ],
+        "fold pairs remain attached to the exact restored occurrence",
+    );
+    assert_eq!(slots(&beta).len(), 2);
+    assert_eq!(
+        (
+            slots(&beta)[0].restore_ordinal,
+            slots(&beta)[0].handoff_ordinal,
+            slots(&beta)[0].fold_ordinal,
+            slots(&beta)[0].order,
+        ),
+        (0, 0, 1, 25),
+    );
+    assert_eq!(slots(&beta)[0].left_pin, pin(&beta, &generations[4]));
+    assert!(slots(&beta)[0].right_pin.is_none());
+    assert_eq!(
+        (
+            slots(&beta)[1].restore_ordinal,
+            slots(&beta)[1].handoff_ordinal,
+            slots(&beta)[1].fold_ordinal,
+            slots(&beta)[1].order,
+        ),
+        (1, 1, 0, 25),
+    );
+    assert!(slots(&beta)[1].left_pin.is_none());
+    assert_eq!(slots(&beta)[1].right_pin, pin(&beta, &generations[4]));
+    assert!(slots(&catalog_only).is_empty());
+    assert_eq!(
+        slots(&observed_late)
+            .iter()
+            .map(|slot| (
+                slot.restore_ordinal,
+                slot.handoff_ordinal,
+                slot.fold_ordinal,
+                slot.order,
+            ))
+            .collect::<Vec<_>>(),
+        vec![(0, 1, 1, 31), (1, 0, 0, 30), (1, 0, 0, 31), (2, 0, 1, 30)],
+    );
+    assert!(slots(&observed_late)[0].left_pin.is_none());
+    assert!(slots(&observed_late)[0].right_pin.is_none());
+    assert!(slots(&observed_late)[1].left_pin.is_none());
+    assert_eq!(slots(&observed_late)[1].right_pin, pin(&observed_late, &generations[4]));
+    assert_eq!(slots(&observed_late)[3].left_pin, pin(&observed_late, &generations[0]));
+    assert_eq!(slots(&observed_late)[3].right_pin, pin(&observed_late, &generations[3]));
+
+    let malformed = vec![
+        orna_storage_v1::BranchMergePairedCheckpointRedoFoldSparseCompactionHandoffSnapshot {
+            checkpoint_id: alpha,
+            runs: vec![
+                orna_storage_v1::BranchMergePairedCheckpointRedoFoldSparseCompactionHandoffRunSnapshot {
+                    handoff_ordinal: 8,
+                    fold_ordinal: 5,
+                    first_order: 31,
+                    last_order: 30,
+                    left: None,
+                    right: None,
+                    redo_fold_identity: folds[0].clone(),
+                },
+            ],
+        },
+    ];
+    assert_eq!(
+        orna_storage_v1::restore_paired_checkpoint_redo_sparse_compaction_handoff_chains_preserving_checkpoint_pin_identity(
+            &[],
+            &[Vec::new(), Vec::new(), malformed],
+        ),
+        Err(orna_storage_v1::BranchMergePairedCheckpointRedoFoldSparseRestoreHandoffError::InvalidOrderRange {
+            restore_ordinal: 2,
+            handoff_ordinal: 8,
+            fold_ordinal: 5,
+            first_order: 31,
+            last_order: 30,
+        }),
+        "invalid compaction ranges retain their restore and source coordinates",
     );
 }
 
