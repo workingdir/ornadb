@@ -3,8 +3,10 @@
 use std::{fs, process::Command};
 
 use orna_sys_v1::{
-    SystemProviderAbi, system_api_json, system_api_schema_json, system_dispatch_table,
-    system_provider_abi_json, system_provider_abi_schema_json,
+    SystemProviderAbi, system_api_json, system_api_schema_json, system_binding_stubs,
+    system_dispatch_table, system_host_operation_registry_json,
+    system_host_operation_registry_schema_json, system_provider_abi_json,
+    system_provider_abi_schema_json,
 };
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -169,4 +171,70 @@ fn dev_provider_registry_export_is_byte_stable_schema_valid_and_runtime_identica
     );
 
     fs::remove_dir_all(&output_dir).expect("remove temporary provider export directory");
+}
+
+#[test]
+fn dev_exports_cover_embedded_host_registry_schema_and_binding_bundle() {
+    let output_dir =
+        std::env::temp_dir().join(format!("orna-sys-extra-artifacts-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&output_dir);
+    fs::create_dir_all(&output_dir).expect("create temporary sys artifact directory");
+
+    for (label, option, expected) in [
+        (
+            "host operations",
+            "--host-operations",
+            system_host_operation_registry_json(),
+        ),
+        (
+            "host operation schema",
+            "--host-operations-schema",
+            system_host_operation_registry_schema_json(),
+        ),
+        ("binding bundle", "--bindings", system_binding_stubs()),
+    ] {
+        let first_path = output_dir.join(format!("first/{label}.out"));
+        let second_path = output_dir.join(format!("second/{label}.out"));
+        let first = export_mode(Some(option), Some(&first_path));
+        assert_eq!(
+            first,
+            export_mode(Some(option), Some(&second_path)),
+            "separate exporter processes produce stable {label} bytes"
+        );
+        assert_eq!(
+            first,
+            expected.as_bytes(),
+            "{label} export matches its embedded build artifact"
+        );
+        assert_eq!(
+            export_mode(Some(option), None),
+            expected.as_bytes(),
+            "{label} stdout matches its embedded build artifact"
+        );
+    }
+
+    fs::remove_dir_all(&output_dir).expect("remove temporary sys artifact directory");
+}
+
+#[test]
+fn dev_export_rejects_unknown_modes_and_extra_output_paths() {
+    let unknown = Command::new(env!("CARGO_BIN_EXE_sys-api-export"))
+        .arg("--not-a-mode")
+        .output()
+        .expect("run exporter with an unknown option");
+    assert!(!unknown.status.success());
+    assert!(unknown.stdout.is_empty());
+    let unknown_stderr = String::from_utf8_lossy(&unknown.stderr);
+    assert!(unknown_stderr.contains("unknown option `--not-a-mode`"));
+    assert!(unknown_stderr.contains("--host-operations"));
+    assert!(unknown_stderr.contains("--bindings"));
+
+    let extra_path = Command::new(env!("CARGO_BIN_EXE_sys-api-export"))
+        .arg("first.json")
+        .arg("second.json")
+        .output()
+        .expect("run exporter with extra positional arguments");
+    assert!(!extra_path.status.success());
+    assert!(extra_path.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&extra_path.stderr).contains("usage: sys-api-export"));
 }
