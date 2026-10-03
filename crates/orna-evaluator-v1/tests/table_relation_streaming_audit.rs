@@ -1909,7 +1909,24 @@ fn paired_compacted_cursor_restores_keep_scope_identity() {
             "compacted cursor chains stay separated by fresh source scope: {scope:?}"
         );
     }
-    assert_eq!(source.cursors.len(), 42, "all variable-depth compacted restores are resolved");
+    let depths = generations
+        .iter()
+        .flat_map(|(_, _, lane_depths)| lane_depths)
+        .copied()
+        .collect::<Vec<_>>();
+    let mut expected_cursors = Vec::new();
+    for (lane, depth) in depths.into_iter().enumerate() {
+        let (source_name, scope, _) = &source.lanes[lane];
+        expected_cursors.push((source_name.clone(), *scope, None));
+        for cursor in continuations.iter().take(depth - 1) {
+            expected_cursors.push((source_name.clone(), *scope, Some(cursor.clone())));
+        }
+    }
+    assert_eq!(
+        source.cursors,
+        expected_cursors,
+        "each long or compacted cursor restores only inside its paired read scope"
+    );
     assert!(source.pending["View.Left"].is_empty());
     assert!(source.pending["View.Right"].is_empty());
 }
