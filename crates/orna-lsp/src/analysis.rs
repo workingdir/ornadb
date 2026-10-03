@@ -34,6 +34,7 @@ use crate::documents::{Document, PositionMapper};
 pub struct StandardLibrary {
     catalogue: StandardCatalogueV1,
     modules: std::collections::BTreeMap<NamespaceV1, orna_semantic_v1::ModuleHeader>,
+    documentation: std::collections::BTreeMap<String, String>,
 }
 
 impl StandardLibrary {
@@ -44,6 +45,8 @@ impl StandardLibrary {
     pub fn load() -> Result<Self, String> {
         let catalogue = reference_standard_catalogue_v1()
             .map_err(|error| format!("invalid pinned 1.0.0 standard catalogue: {error:?}"))?;
+        let documentation =
+            standard_function_documentation(orna_standard::reference_standard_sources_v1());
         let analysis = analyze_with_catalogue(&[], &catalogue);
         if !analysis.is_ok() {
             return Err("pinned 1.0.0 standard catalogue did not analyze cleanly".to_owned());
@@ -51,6 +54,7 @@ impl StandardLibrary {
         Ok(Self {
             catalogue,
             modules: analysis.modules,
+            documentation,
         })
     }
 }
@@ -98,6 +102,10 @@ pub fn check_document(
     standard: Option<&StandardLibrary>,
     mapper: &PositionMapper<'_>,
 ) -> Vec<Diagnostic> {
+    let syntax = orna_syntax::parse(&document.text);
+    if uses_compiler_declaration_grammar(&syntax, &document.text) {
+        return compiler_check_diagnostics(document, mapper);
+    }
     let Some(standard) = standard else {
         return syntax_diagnostics(document, mapper);
     };
@@ -153,6 +161,44 @@ pub fn check_document(
                 "standardProfile": standard.catalogue.standard_dependency_profile().map(|profile| profile.snapshot()),
             })),
         })
+        .collect()
+}
+
+fn uses_compiler_declaration_grammar(parse: &Parse, text: &str) -> bool {
+    // DDL documents use the compiler's accepted declaration grammar; module
+    // documents continue through syntax-v1 analysis so editor errors match the
+    // same source each respective frontend uses.
+    parse
+        .highlight()
+        .into_iter()
+        .find(|token| token.kind != HighlightKind::Comment)
+        .and_then(|token| text.get(token.range))
+        .is_some_and(|first| {
+            ["CREATE", "ALTER", "EXPORT"]
+                .iter()
+                .any(|keyword| first.eq_ignore_ascii_case(keyword))
+        })
+}
+
+fn compiler_check_diagnostics(document: &Document, mapper: &PositionMapper<'_>) -> Vec<Diagnostic> {
+    let logical_path = document.logical_path();
+    let Ok(bundle) =
+        SourceBundle::new([SourceUnit::new(logical_path.clone(), document.text.clone())])
+    else {
+        return syntax_diagnostics(document, mapper);
+    };
+    let Ok(base) = orna_core::catalogue::CatalogueSnapshot::new(
+        orna_compiler::EMPTY_APPLICATION_CATALOGUE_REVISION_ID,
+        Vec::new(),
+        Vec::new(),
+    ) else {
+        return syntax_diagnostics(document, mapper);
+    };
+    orna_compiler::check(&bundle, &base)
+        .diagnostics()
+        .iter()
+        .filter(|diagnostic| diagnostic.location().logical_path() == logical_path)
+        .map(|diagnostic| compiler_diagnostic(diagnostic, mapper, &document.uri, &logical_path))
         .collect()
 }
 
@@ -1971,6 +2017,7 @@ fn client_parameter_info<'a>(
 }
 
 fn client_local_hover(
+    parse: &Parse,
     declaration: &ClientFunctionDeclaration,
     root: &orna_syntax::NamePart,
     text: &str,
@@ -1994,7 +2041,9 @@ fn client_local_hover(
         default_text: None,
         documentation: None,
     };
-    Some(crate::hover::parameter_hover(&parameter, text, doc_link))
+    Some(crate::hover::parameter_hover(
+        parse, &parameter, text, doc_link,
+    ))
 }
 
 fn client_field_info_at<'a>(parse: &'a Parse, selected_span: &SourceSpan) -> Option<FieldInfo<'a>> {
@@ -3321,13 +3370,21 @@ pub fn hover(
         });
     if let Some(target_name) = target_function {
         if let Some(declaration) = client_target_declaration(parse, &span) {
-            let mut hover =
-                crate::hover::declaration_hover(declaration, &document.text, doc_link.as_deref());
+            let mut hover = crate::hover::declaration_hover(
+                parse,
+                declaration,
+                &document.text,
+                doc_link.as_deref(),
+            );
             hover.range = Some(mapper.range(&span));
             return Some(hover);
         }
-        if let Some(hover) = standard
-            .and_then(|library| standard_function_hover(library, &target_name, doc_link.as_deref()))
+        if let Some(hover) =
+            system_function_hover(&target_name, doc_link.as_deref()).or_else(|| {
+                standard.and_then(|library| {
+                    standard_function_hover(library, &target_name, doc_link.as_deref())
+                })
+            })
         {
             let mut hover = hover;
             hover.range = Some(mapper.range(&span));
@@ -3341,8 +3398,12 @@ pub fn hover(
             .map(|part| part.text.as_str())
             .collect::<Vec<_>>()
             .join(".");
-        if let Some(hover) = standard
-            .and_then(|library| standard_function_hover(library, &target_name, doc_link.as_deref()))
+        if let Some(hover) =
+            system_function_hover(&target_name, doc_link.as_deref()).or_else(|| {
+                standard.and_then(|library| {
+                    standard_function_hover(library, &target_name, doc_link.as_deref())
+                })
+            })
         {
             let mut hover = hover;
             hover.range = Some(mapper.range(&span));
@@ -3385,12 +3446,14 @@ pub fn hover(
                 // A field name shadows scalar and declaration names at the
                 // same spelling, for example a field named `text`.
                 Some(crate::hover::field_hover(
+                    parse,
                     &field,
                     &document.text,
                     doc_link.as_deref(),
                 ))
             } else if let Some(parameter) = parameter_at(parse, byte) {
                 Some(crate::hover::parameter_hover(
+                    parse,
                     &parameter,
                     &document.text,
                     doc_link.as_deref(),
@@ -3400,11 +3463,17 @@ pub fn hover(
                 match part {
                     ClientExpressionPart::FieldMember { .. } => client_field_info_at(parse, &span)
                         .map(|field| {
-                            crate::hover::field_hover(&field, &document.text, doc_link.as_deref())
+                            crate::hover::field_hover(
+                                parse,
+                                &field,
+                                &document.text,
+                                doc_link.as_deref(),
+                            )
                         }),
                     ClientExpressionPart::ParameterRoot(root) => {
                         client_parameter_info(declaration, root, part).map(|parameter| {
                             crate::hover::parameter_hover(
+                                parse,
                                 &parameter,
                                 &document.text,
                                 doc_link.as_deref(),
@@ -3415,6 +3484,7 @@ pub fn hover(
                         client_parameter_info(declaration, root, part)
                             .map(|parameter| {
                                 crate::hover::parameter_hover(
+                                    parse,
                                     &parameter,
                                     &document.text,
                                     doc_link.as_deref(),
@@ -3422,6 +3492,7 @@ pub fn hover(
                             })
                             .or_else(|| {
                                 client_local_hover(
+                                    parse,
                                     declaration,
                                     root,
                                     &document.text,
@@ -3433,6 +3504,7 @@ pub fn hover(
                         client_parameter_info(declaration, root, part)
                             .map(|parameter| {
                                 crate::hover::parameter_hover(
+                                    parse,
                                     &parameter,
                                     &document.text,
                                     doc_link.as_deref(),
@@ -3440,6 +3512,7 @@ pub fn hover(
                             })
                             .or_else(|| {
                                 client_local_hover(
+                                    parse,
                                     declaration,
                                     root,
                                     &document.text,
@@ -3452,6 +3525,7 @@ pub fn hover(
                 }
             } else if let Some(field) = sql_column_at(parse, byte, &document.text, &highlighted) {
                 Some(crate::hover::field_hover(
+                    parse,
                     &field,
                     &document.text,
                     doc_link.as_deref(),
@@ -3461,6 +3535,7 @@ pub fn hover(
                     sql_object_type_declaration_at(parse, &document.text, &highlighted, &span)
             {
                 Some(crate::hover::declaration_hover(
+                    parse,
                     declaration,
                     &document.text,
                     doc_link.as_deref(),
@@ -3469,6 +3544,7 @@ pub fn hover(
                 declaration_at_span(parse, &document.text, &highlighted, &name, kind, &span)
             {
                 Some(crate::hover::declaration_hover(
+                    parse,
                     declaration,
                     &document.text,
                     doc_link.as_deref(),
@@ -3836,6 +3912,7 @@ struct StandardFunctionSignature {
     domain: &'static str,
     parameters: Vec<(String, Option<String>)>,
     return_type: String,
+    documentation: Option<String>,
 }
 fn standard_function(standard: &StandardLibrary, name: &str) -> Option<StandardFunctionSignature> {
     let target = source_name_parts(name)
@@ -3878,8 +3955,10 @@ fn standard_function(standard: &StandardLibrary, name: &str) -> Option<StandardF
                 .collect()
         });
     let return_type = resolved_type_name(result);
+    let qualified_name = format!("{}.{}", namespace.display(), function_name);
     Some(StandardFunctionSignature {
-        name: format!("{}.{}", namespace.display(), function_name),
+        documentation: standard.documentation.get(&qualified_name).cloned(),
+        name: qualified_name,
         domain: "1.0",
         parameters,
         return_type,
@@ -3903,8 +3982,70 @@ fn standard_function_hover(
             .collect::<Vec<_>>()
             .join(", "),
         &function.return_type,
+        function.documentation.as_deref(),
         doc_link,
     ))
+}
+
+fn system_function_hover(name: &str, doc_link: Option<&str>) -> Option<lsp_types::Hover> {
+    let descriptors = orna_sys_v1::SYSTEM_FUNCTION_DESCRIPTORS
+        .iter()
+        .filter(|descriptor| {
+            descriptor
+                .name
+                .split(['(', '<'])
+                .next()
+                .is_some_and(|callable| callable.eq_ignore_ascii_case(name))
+        })
+        .collect::<Vec<_>>();
+    (!descriptors.is_empty()).then(|| crate::hover::system_function_hover(&descriptors, doc_link))
+}
+
+fn standard_function_documentation(
+    sources: impl IntoIterator<Item = (String, String)>,
+) -> std::collections::BTreeMap<String, String> {
+    let mut documentation = std::collections::BTreeMap::new();
+    for (path, source) in sources {
+        let Some(relative_path) = path
+            .strip_prefix("std/")
+            .and_then(|path| path.strip_suffix(".orna"))
+        else {
+            continue;
+        };
+        let mut module_parts = relative_path.split('/').collect::<Vec<_>>();
+        if module_parts.last() == Some(&"main") {
+            module_parts.pop();
+        }
+        let module = if module_parts.is_empty() {
+            "std".to_owned()
+        } else {
+            format!("std.{}", module_parts.join("."))
+        };
+        let mut pending = Vec::<String>::new();
+        for line in source.lines() {
+            let trimmed = line.trim_start();
+            if let Some(comment) = trimmed.strip_prefix("///") {
+                pending.push(comment.strip_prefix(' ').unwrap_or(comment).to_owned());
+                continue;
+            }
+            if trimmed.is_empty() && !pending.is_empty() {
+                pending.push(String::new());
+                continue;
+            }
+            if let Some(declaration) = trimmed.strip_prefix("pub fn ") {
+                let function = declaration
+                    .split(['(', '<', ':', ' '])
+                    .next()
+                    .unwrap_or_default();
+                let value = pending.join("\n").trim().to_owned();
+                if !function.is_empty() && !value.is_empty() {
+                    documentation.insert(format!("{module}.{function}"), value);
+                }
+            }
+            pending.clear();
+        }
+    }
+    documentation
 }
 
 fn signature_information(
@@ -4050,19 +4191,27 @@ pub fn completion_at(
             ..CompletionItem::default()
         });
     }
-    let mut add_named = |label: String, kind: CompletionItemKind, detail: String| {
-        items.push(CompletionItem {
-            label,
-            kind: Some(kind),
-            detail: Some(detail),
-            ..CompletionItem::default()
-        });
-    };
+    let mut add_named =
+        |label: String, kind: CompletionItemKind, detail: String, documentation: Option<String>| {
+            items.push(CompletionItem {
+                label,
+                kind: Some(kind),
+                detail: Some(detail),
+                documentation: documentation.map(lsp_types::Documentation::String),
+                ..CompletionItem::default()
+            });
+        };
     for schema in parse.schemas() {
         add_named(
             last_name(&schema.name),
             CompletionItemKind::MODULE,
             "schema".to_owned(),
+            schema
+                .name
+                .parts
+                .last()
+                .and_then(|name| parse.documentation_comment(name))
+                .map(str::to_owned),
         );
     }
     for declaration in parse.object_types() {
@@ -4070,6 +4219,12 @@ pub fn completion_at(
             last_name(&declaration.name),
             CompletionItemKind::INTERFACE,
             "object type".to_owned(),
+            declaration
+                .name
+                .parts
+                .last()
+                .and_then(|name| parse.documentation_comment(name))
+                .map(str::to_owned),
         );
     }
     for declaration in parse.enum_types() {
@@ -4077,6 +4232,12 @@ pub fn completion_at(
             last_name(&declaration.name),
             CompletionItemKind::ENUM,
             "enum type".to_owned(),
+            declaration
+                .name
+                .parts
+                .last()
+                .and_then(|name| parse.documentation_comment(name))
+                .map(str::to_owned),
         );
     }
     for declaration in parse.record_value_types() {
@@ -4084,6 +4245,12 @@ pub fn completion_at(
             last_name(&declaration.name),
             CompletionItemKind::STRUCT,
             "record value type".to_owned(),
+            declaration
+                .name
+                .parts
+                .last()
+                .and_then(|name| parse.documentation_comment(name))
+                .map(str::to_owned),
         );
     }
     for declaration in parse.primitive_value_types() {
@@ -4091,6 +4258,12 @@ pub fn completion_at(
             last_name(&declaration.name),
             CompletionItemKind::STRUCT,
             "primitive value type".to_owned(),
+            declaration
+                .name
+                .parts
+                .last()
+                .and_then(|name| parse.documentation_comment(name))
+                .map(str::to_owned),
         );
     }
     for declaration in parse.opaque_value_types() {
@@ -4098,6 +4271,12 @@ pub fn completion_at(
             last_name(&declaration.name),
             CompletionItemKind::STRUCT,
             "opaque value type".to_owned(),
+            declaration
+                .name
+                .parts
+                .last()
+                .and_then(|name| parse.documentation_comment(name))
+                .map(str::to_owned),
         );
     }
     for declaration in parse.server_functions() {
@@ -4113,6 +4292,12 @@ pub fn completion_at(
             last_name(&declaration.name),
             CompletionItemKind::FUNCTION,
             detail,
+            declaration
+                .name
+                .parts
+                .last()
+                .and_then(|name| parse.documentation_comment(name))
+                .map(str::to_owned),
         );
     }
     for declaration in parse.client_functions() {
@@ -4128,6 +4313,12 @@ pub fn completion_at(
             last_name(&declaration.name),
             CompletionItemKind::FUNCTION,
             detail,
+            declaration
+                .name
+                .parts
+                .last()
+                .and_then(|name| parse.documentation_comment(name))
+                .map(str::to_owned),
         );
     }
     if let Some(byte) = byte
@@ -4373,6 +4564,9 @@ fn add_client_member_completions(parse: &Parse, byte: usize, items: &mut Vec<Com
             label: field.text.clone(),
             kind: Some(CompletionItemKind::FIELD),
             detail: Some(format!("{kind} field of {}", qualified_name_text(&owner))),
+            documentation: parse
+                .documentation_comment(field)
+                .map(|documentation| lsp_types::Documentation::String(documentation.to_owned())),
             ..CompletionItem::default()
         });
     }
