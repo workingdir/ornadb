@@ -560,6 +560,51 @@ fn dispatch_metadata_regeneration_conforms_across_every_operation_and_role() {
 }
 
 #[test]
+fn dispatch_metadata_schema_rejects_invalid_operation_and_role_fields_matrix() {
+    let registry: Value =
+        serde_json::from_str(system_provider_abi_json()).expect("embedded dispatch metadata");
+    let schema_json = system_provider_abi_schema_json();
+    build_host::validate_json_against_schema(system_provider_abi_json(), schema_json)
+        .expect("generated dispatch metadata conforms before drift probes");
+
+    let operation_field_mutations = [
+        ("name", Value::String(String::new())),
+        ("version", serde_json::json!({"major": "one", "minor": 0})),
+        ("signature", Value::String(String::new())),
+        ("effect", Value::String("mutate".to_owned())),
+        ("preconditions", serde_json::json!([""])),
+        ("failures", serde_json::json!(["vendor.failure"])),
+        ("role", Value::String(String::new())),
+    ];
+    for (field, invalid) in operation_field_mutations {
+        let mut mutated = registry.clone();
+        mutated["operations"][0][field] = invalid;
+        assert!(
+            build_host::validate_json_against_schema(&mutated.to_string(), schema_json).is_err(),
+            "dispatch schema rejects invalid operation field {field}"
+        );
+    }
+
+    let role_field_mutations = [
+        ("name", Value::String(String::new())),
+        ("version", serde_json::json!({"major": 1, "minor": "zero"})),
+        ("effects", serde_json::json!(["mutate"])),
+        ("operations", serde_json::json!([""])),
+        ("required", Value::String("yes".to_owned())),
+        ("replaceable", Value::String("no".to_owned())),
+        ("builtin_provider", Value::String(String::new())),
+    ];
+    for (field, invalid) in role_field_mutations {
+        let mut mutated = registry.clone();
+        mutated["roles"][0][field] = invalid;
+        assert!(
+            build_host::validate_json_against_schema(&mutated.to_string(), schema_json).is_err(),
+            "dispatch schema rejects invalid role field {field}"
+        );
+    }
+}
+
+#[test]
 fn generated_artifact_drift_probe_rejects_tampered_outputs_and_stale_modules() {
     let regenerated = regenerate();
     let source_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
