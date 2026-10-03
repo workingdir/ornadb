@@ -2498,6 +2498,25 @@ fn captured_pair_resolution_folds_keep_each_pinned_snapshot_identity() {
         );
         sessions.push(session);
     }
+
+    for index in [2, 0, 1, 2, 1, 0] {
+        assert_eq!(
+            sessions[index].submit(fold_pair),
+            Ok(Some(int(expected_values[index]))),
+            "interleaved resolution fold must retain snapshot {}'s imported functions",
+            pins[index]
+        );
+    }
+
+    let mut cloned_sessions = sessions.clone();
+    for index in (0..cloned_sessions.len()).rev() {
+        assert_eq!(
+            cloned_sessions[index].submit(fold_pair),
+            Ok(Some(int(expected_values[index]))),
+            "cloned snapshot {} must preserve both resolved function identities",
+            pins[index]
+        );
+    }
 }
 
 #[test]
