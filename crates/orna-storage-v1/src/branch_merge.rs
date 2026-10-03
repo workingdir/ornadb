@@ -185,6 +185,36 @@ pub struct BranchMergePairedCheckpointRedoSparseStreamSnapshot {
     pub slots: Vec<BranchMergePairedCheckpointRedoSparseSlotSnapshot>,
 }
 
+/// Opaque directional identities for the left and right undo chains.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BranchMergePairedUndoChainIdentity {
+    pub left_chain: Vec<u8>,
+    pub right_chain: Vec<u8>,
+}
+
+/// A paired checkpoint redo frame carrying its paired undo-chain identity.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BranchMergePairedCheckpointRedoUndoFrame {
+    pub checkpoints: BranchMergePairedCheckpointRedoFrame,
+    pub undo_chain_identity: BranchMergePairedUndoChainIdentity,
+}
+
+/// One sparse stream slot retaining its frame's paired undo-chain identity.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BranchMergePairedCheckpointRedoUndoSparseSlotSnapshot {
+    pub order: u64,
+    pub left: Option<CheckpointGeneration>,
+    pub right: Option<CheckpointGeneration>,
+    pub undo_chain_identity: BranchMergePairedUndoChainIdentity,
+}
+
+/// A sparse checkpoint stream fold with exact paired undo-chain provenance.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BranchMergePairedCheckpointRedoUndoSparseStreamSnapshot {
+    pub checkpoint_id: CheckpointId,
+    pub slots: Vec<BranchMergePairedCheckpointRedoUndoSparseSlotSnapshot>,
+}
+
 /// Compresses adjacent paired redo frames only when both sides retain exactly
 /// the same checkpoint state for an identity.
 ///
@@ -323,6 +353,53 @@ pub fn fold_paired_checkpoint_redo_sparse_streams(
                 })
                 .collect();
             BranchMergePairedCheckpointRedoSparseStreamSnapshot {
+                checkpoint_id,
+                slots,
+            }
+        })
+        .collect()
+}
+
+/// Folds sparse paired redo frames while retaining each order's undo-chain pair.
+///
+/// Known checkpoint IDs and IDs observed in the frames are both projected.
+/// Every supplied frame contributes a slot per output stream, so a checkpoint
+/// omitted by both logs retains the frame's directional undo identity rather
+/// than erasing its lineage. Repeated undo pairs remain repeated at their
+/// original orders, and missing integer orders are not synthesized. All IDs,
+/// generations, positions, and undo-chain identities are opaque bytes/values.
+pub fn fold_paired_checkpoint_redo_sparse_streams_preserving_undo_chain_identity(
+    known_checkpoint_ids: &[CheckpointId],
+    frames: &BTreeMap<u64, BranchMergePairedCheckpointRedoUndoFrame>,
+) -> Vec<BranchMergePairedCheckpointRedoUndoSparseStreamSnapshot> {
+    let checkpoint_ids = known_checkpoint_ids
+        .iter()
+        .cloned()
+        .chain(frames.values().flat_map(|frame| {
+            frame
+                .checkpoints
+                .left
+                .keys()
+                .chain(frame.checkpoints.right.keys())
+                .cloned()
+        }))
+        .collect::<BTreeSet<_>>();
+
+    checkpoint_ids
+        .into_iter()
+        .map(|checkpoint_id| {
+            let slots = frames
+                .iter()
+                .map(|(&order, frame)| {
+                    BranchMergePairedCheckpointRedoUndoSparseSlotSnapshot {
+                        order,
+                        left: frame.checkpoints.left.get(&checkpoint_id).cloned(),
+                        right: frame.checkpoints.right.get(&checkpoint_id).cloned(),
+                        undo_chain_identity: frame.undo_chain_identity.clone(),
+                    }
+                })
+                .collect();
+            BranchMergePairedCheckpointRedoUndoSparseStreamSnapshot {
                 checkpoint_id,
                 slots,
             }
