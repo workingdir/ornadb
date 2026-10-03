@@ -12659,6 +12659,60 @@ fn nested_snapshot_boundary_reset_depth_keeps_each_selected_identity() {
 }
 
 #[test]
+fn paired_checkpoint_reset_replay_preserves_each_lane_identity() {
+    let source = include_str!("fixtures/historical-paired-checkpoint-reset-replay.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-paired-checkpoint-reset-replay.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(result.is_ok(), "{:?}", result.diagnostics);
+    let module = result
+        .modules
+        .values()
+        .find(|module| {
+            module
+                .symbols
+                .contains_key("paired_checkpoint_reset_replay_values")
+        })
+        .expect("paired checkpoint reset replay module");
+    let Type::Function { result, .. } =
+        &module.symbols["paired_checkpoint_reset_replay_values"].ty
+    else {
+        panic!("paired checkpoint reset replay must be callable");
+    };
+    let Type::Record(replays) = result.as_ref() else {
+        panic!("paired checkpoint reset replay must return both lanes and states");
+    };
+
+    for (stage, root, leaf) in [
+        ("folded_left", "selector:HEAD~945", "selector:HEAD~850"),
+        ("folded_right", "selector:HEAD~925", "selector:HEAD~830"),
+        ("restored_left", "selector:HEAD~950", "selector:HEAD~840"),
+        ("restored_right", "selector:HEAD~930", "selector:HEAD~820"),
+    ] {
+        let Type::Record(values) = replays.get(stage).expect("paired replay stage") else {
+            panic!("{stage} must contain computed snapshot values");
+        };
+        for (field, expected) in [("root", root), ("leaf", leaf)] {
+            let value = values.get(field).expect("checkpoint value");
+            assert_canonical_snapshot_context_maps(value);
+            let mut contexts = BTreeSet::new();
+            collect_snapshot_contexts(value, &mut contexts);
+            assert_eq!(
+                contexts,
+                BTreeSet::from([expected.to_owned()]),
+                "{stage}.{field} must replay the identity belonging to its paired checkpoint"
+            );
+        }
+    }
+}
+
+#[test]
 fn paired_checkpoint_snapshot_maps_survive_chained_depth_storms() {
     let source = include_str!(
         "fixtures/historical-paired-checkpoint-snapshot-retention-depth-storm.orna"
