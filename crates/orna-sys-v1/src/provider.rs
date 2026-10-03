@@ -552,6 +552,43 @@ impl SystemProviderAbi {
         }
     }
 
+    /// Resolve a provider-bound operation, check its preconditions and role
+    /// offer, then invoke the selected provider. Provider failures cross this
+    /// boundary only when the typed operation contract declares their code.
+    pub fn dispatch_to_provider(
+        &self,
+        operation: &str,
+        provider: &dyn SystemOperationProvider,
+        arguments: &[TypedValue],
+        check: impl FnMut(&Precondition) -> Result<(), FailureCode>,
+    ) -> Result<SystemDispatchResult<TypedValue>, ProviderDiagnostic> {
+        let contract = match self.check_preconditions(operation, check) {
+            Ok(contract) => contract,
+            Err(ProviderDiagnostic::PreconditionFailed { code, .. }) => {
+                return Ok(SystemDispatchResult::Failed(code));
+            }
+            Err(diagnostic) => return Err(diagnostic),
+        };
+        let Some(role_id) = &contract.role else {
+            return Err(ProviderDiagnostic::ProviderNotExecutable(
+                provider.offer().role.clone(),
+            ));
+        };
+        let role = self
+            .roles
+            .get(role_id)
+            .expect("validated operation role is in the dispatch table");
+        validate_provider_offer(role, provider.offer())?;
+
+        match provider.invoke(&contract.id, arguments) {
+            Ok(value) => Ok(SystemDispatchResult::Returned(value)),
+            Err(failure) => {
+                self.validate_failure(operation, &failure.code)?;
+                Ok(SystemDispatchResult::Failed(failure.code))
+            }
+        }
+    }
+
     pub fn roles(&self) -> impl Iterator<Item = &SemanticRoleContract> {
         self.roles.values()
     }

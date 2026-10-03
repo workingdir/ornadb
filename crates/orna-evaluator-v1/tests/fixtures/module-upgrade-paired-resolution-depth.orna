@@ -1,0 +1,6 @@
+if true {
+    let imported_pair = (seed: Int) => shift(seed) + marker();
+    [imported_pair(7), std.math.shift(8) + std.collection.marker()]
+} else {
+    [0, 0]
+}
