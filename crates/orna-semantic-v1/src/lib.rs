@@ -7271,6 +7271,17 @@ fn infer(
             let paired_omission_recovery = first_parent
                 .as_ref()
                 .is_some_and(type_contains_paired_checkpoint_omissions);
+            // A concrete paired anchor can also be re-established after a
+            // sparse parent. Keep that latest accepted map as its recovery
+            // point so a later crossed row does not erase the re-anchor.
+            let checkpoint_reanchor_recovery = paired_omission_recovery
+                || (omitted_pinned_tuple_path
+                    && first_parent
+                        .as_ref()
+                        .is_some_and(type_contains_pinned_checkpoint_tuple)
+                    && !first_parent
+                        .as_ref()
+                        .is_some_and(type_contains_omitted_checkpoint_tuple));
             let mut checkpoint_recovery_parent = first_parent.clone();
             // Any omitted row can expose a cross-sibling selector collision.
             // Sparse pinned tuples anywhere in the fold need a local scope so
@@ -7290,14 +7301,23 @@ fn infer(
             let mut ty = None;
             for value in element_types {
                 if let Some(prior) = &ty {
+                    // Paired sparse anchors evolve as accepted rows teach more
+                    // topology, so reject a bad row locally and retry later
+                    // rows. Folds without that recovery anchor retain their
+                    // original fold-wide freeze for a rejected path.
+                    let mut parent_rollback_paths = if checkpoint_reanchor_recovery {
+                        BTreeSet::new()
+                    } else {
+                        rolled_back_checkpoint_paths.clone()
+                    };
                     let merged = if transactional_checkpoint_fold && scoped_checkpoint_rollback {
                         merge_multi_parent_checkpoint_value_scoped(
                             prior,
                             &value,
-                            if paired_omission_recovery {
+                            if checkpoint_reanchor_recovery {
                                 checkpoint_recovery_parent
                                     .as_ref()
-                                    .expect("paired omission fold has a recovery anchor")
+                                    .expect("checkpoint re-anchor fold has a recovery anchor")
                             } else {
                                 first_parent
                                     .as_ref()
@@ -7307,12 +7327,12 @@ fn infer(
                                 .as_ref()
                                 .expect("transactional fold has a topology parent"),
                             &mut Vec::new(),
-                            &mut rolled_back_checkpoint_paths,
+                            &mut parent_rollback_paths,
                         )
                         .map(|mut fold| {
                             if fold.rejected_scope {
                                 require_same(prior, &value, diagnostics);
-                                if paired_omission_recovery {
+                                if checkpoint_reanchor_recovery {
                                     fold.merged = merge_unpaired_checkpoint_record_siblings(
                                         &fold.merged,
                                         &value,
@@ -7341,7 +7361,7 @@ fn infer(
                                     })
                                     .unwrap_or_else(|| fold.effective_parent.clone()),
                             );
-                            if paired_omission_recovery
+                            if checkpoint_reanchor_recovery
                                 && let Some(next_recovery_parent) = checkpoint_recovery_parent
                                     .as_ref()
                                     .and_then(|anchor| {
@@ -7366,6 +7386,9 @@ fn infer(
                     } else {
                         merge_list_element_types(prior, &value)
                     };
+                    if !checkpoint_reanchor_recovery {
+                        rolled_back_checkpoint_paths = parent_rollback_paths;
+                    }
                     if let Some(merged) = merged {
                         ty = Some(merged);
                     } else {
@@ -19067,19 +19090,148 @@ fn tuple_checkpoint_promotion_matches(left: &[Type], right: &[Type]) -> bool {
 /// folds, so retain the first accepted topology as the conservative rule.
 fn checkpoint_topology_anchor_with_first_pins(anchor: &Type, source: &Type) -> Type {
     if type_contains_paired_checkpoint_omissions(anchor) {
-        // A sparse row cannot establish how omitted sibling slots relate. The
-        // first fully populated row can: promote its paired pin paths together
-        // so later omissions replay that learned cross-field topology and a
-        // split row rolls back without leaking one lane's new identity.
-        if !type_contains_partially_omitted_pinned_tuple(source)
-            && !type_contains_omitted_checkpoint_tuple(source)
-            && type_contains_pinned_checkpoint_tuple(source)
-        {
-            return checkpoint_topology_anchor_with_first_pins_local(anchor, source);
-        }
-        return anchor.clone();
+        // Promote every complete tuple lane from this parent in one structural
+        // pass. An unrelated still-sparse lane must not prevent its complete
+        // siblings from teaching the paired topology for later snapshot folds.
+        return checkpoint_topology_anchor_with_first_complete_pins(anchor, source);
     }
     checkpoint_topology_anchor_with_first_pins_local(anchor, source)
+}
+
+fn checkpoint_topology_anchor_with_first_complete_pins(anchor: &Type, source: &Type) -> Type {
+    match (anchor, source) {
+        (Type::Record(anchor), Type::Record(source))
+            if anchor.keys().eq(source.keys()) =>
+        {
+            Type::Record(
+                anchor
+                    .iter()
+                    .filter_map(|(name, anchor)| {
+                        source.get(name).map(|source| {
+                            (
+                                name.clone(),
+                                checkpoint_topology_anchor_with_first_complete_pins(
+                                    anchor, source,
+                                ),
+                            )
+                        })
+                    })
+                    .collect(),
+            )
+        }
+        (Type::Tuple(anchor), Type::Tuple(source)) if anchor.len() == source.len() => {
+            let anchor_has_omission = type_contains_partially_omitted_pinned_tuple(&Type::Tuple(
+                anchor.clone(),
+            )) || type_contains_omitted_checkpoint_tuple(&Type::Tuple(anchor.clone()));
+            if anchor_has_omission {
+                let source_is_complete = !type_contains_partially_omitted_pinned_tuple(
+                    &Type::Tuple(source.clone()),
+                ) && !type_contains_omitted_checkpoint_tuple(&Type::Tuple(source.clone()));
+                if source_is_complete
+                    && type_contains_pinned_checkpoint_tuple(&Type::Tuple(source.clone()))
+                {
+                    Type::Tuple(source.clone())
+                } else {
+                    // Keep an incomplete lane's original anchor. A sibling
+                    // tuple can still be promoted independently in this pass.
+                    Type::Tuple(anchor.clone())
+                }
+            } else {
+                Type::Tuple(
+                    anchor
+                        .iter()
+                        .zip(source)
+                        .map(|(anchor, source)| {
+                            checkpoint_topology_anchor_with_first_complete_pins(anchor, source)
+                        })
+                        .collect(),
+                )
+            }
+        }
+        (Type::List(anchor), Type::List(source)) => Type::List(Box::new(
+            checkpoint_topology_anchor_with_first_complete_pins(anchor, source),
+        )),
+        (Type::Range(anchor), Type::Range(source)) => Type::Range(Box::new(
+            checkpoint_topology_anchor_with_first_complete_pins(anchor, source),
+        )),
+        (Type::Relation(anchor), Type::Relation(source)) => Type::Relation(Box::new(
+            checkpoint_topology_anchor_with_first_complete_pins(anchor, source),
+        )),
+        (Type::Stream(anchor), Type::Stream(source)) => Type::Stream(Box::new(
+            checkpoint_topology_anchor_with_first_complete_pins(anchor, source),
+        )),
+        (Type::Optional(anchor), Type::Optional(source)) => Type::Optional(Box::new(
+            checkpoint_topology_anchor_with_first_complete_pins(anchor, source),
+        )),
+        (
+            Type::Applied {
+                base: anchor_base,
+                arguments: anchor_arguments,
+            },
+            Type::Applied {
+                base: source_base,
+                arguments: source_arguments,
+            },
+        ) if anchor_base == source_base && anchor_arguments.len() == source_arguments.len() => {
+            Type::Applied {
+                base: anchor_base.clone(),
+                arguments: anchor_arguments
+                    .iter()
+                    .zip(source_arguments)
+                    .map(|(anchor, source)| {
+                        checkpoint_topology_anchor_with_first_complete_pins(anchor, source)
+                    })
+                    .collect(),
+            }
+        }
+        (
+            Type::Function {
+                parameters: anchor_parameters,
+                parameter_names,
+                result: anchor_result,
+                default_parameters,
+            },
+            Type::Function {
+                parameters: source_parameters,
+                result: source_result,
+                ..
+            },
+        ) if anchor_parameters.len() == source_parameters.len() => Type::Function {
+            parameters: anchor_parameters
+                .iter()
+                .zip(source_parameters)
+                .map(|(anchor, source)| {
+                    checkpoint_topology_anchor_with_first_complete_pins(anchor, source)
+                })
+                .collect(),
+            parameter_names: parameter_names.clone(),
+            result: Box::new(checkpoint_topology_anchor_with_first_complete_pins(
+                anchor_result,
+                source_result,
+            )),
+            default_parameters: default_parameters.clone(),
+        },
+        (
+            Type::MoneyPerUnit {
+                currency: anchor_currency,
+                unit: anchor_unit,
+            },
+            Type::MoneyPerUnit {
+                currency: source_currency,
+                unit: source_unit,
+            },
+        ) => Type::MoneyPerUnit {
+            currency: Box::new(checkpoint_topology_anchor_with_first_complete_pins(
+                anchor_currency,
+                source_currency,
+            )),
+            unit: Box::new(checkpoint_topology_anchor_with_first_complete_pins(
+                anchor_unit,
+                source_unit,
+            )),
+        },
+        _ => anchor.clone(),
+    }
 }
 
 fn checkpoint_topology_anchor_with_first_pins_local(anchor: &Type, source: &Type) -> Type {
@@ -19743,11 +19895,12 @@ struct ScopedCheckpointFold {
     rejected_scope: bool,
 }
 
-/// Reconcile one parent while allowing all-omitted-first-row folds to recover
-/// locally. A rejected nested scope is restored to the first row and frozen
-/// for later parents across record, tuple, collection-element, generic applied
-/// argument, and money-dimension boundaries; unaffected sibling paths keep
-/// folding. The reference is silent on rollback through these local structures,
+/// Reconcile one parent while allowing sparse paired folds to recover locally.
+/// A rejected nested scope is restored at its smallest boundary across record,
+/// tuple, collection-element, generic applied-argument, and money-dimension
+/// paths; unaffected sibling paths keep folding. The caller controls whether
+/// that scope stays frozen for later parents or is retried against a learned
+/// paired topology. The reference is silent on rollback through these local structures,
 /// so use the same smallest-failing-scope rule. Snapshot context maps,
 /// historical callable/namespace pairs, and function contracts remain atomic
 /// because their identities or binder rules are coupled. Rebuild the effective

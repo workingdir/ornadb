@@ -256,6 +256,95 @@ pub struct BranchMergePairedCheckpointRedoFoldSparseMergeChainSnapshot {
     pub slots: Vec<BranchMergePairedCheckpointRedoFoldSparseMergeChainSlotSnapshot>,
 }
 
+/// One checkpoint pin bound to the checkpoint stream it names.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BranchMergePairedCheckpointPinIdentity {
+    pub checkpoint_id: CheckpointId,
+    pub generation: CheckpointGeneration,
+}
+
+/// One sparse occurrence retaining each directional checkpoint pin explicitly.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BranchMergePairedCheckpointRedoFoldSparsePinMergeChainSlotSnapshot {
+    /// Zero-based position of the source chain supplied to the merge.
+    pub merge_ordinal: usize,
+    /// Position of the sparse fold inside that source chain.
+    pub fold_ordinal: usize,
+    pub order: u64,
+    pub left_pin: Option<BranchMergePairedCheckpointPinIdentity>,
+    pub right_pin: Option<BranchMergePairedCheckpointPinIdentity>,
+    pub redo_fold_identity: BranchMergePairedRedoFoldIdentity,
+}
+
+/// A checkpoint stream merged across sparse chains without detaching pin IDs.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BranchMergePairedCheckpointRedoFoldSparsePinMergeChainSnapshot {
+    pub checkpoint_id: CheckpointId,
+    pub slots: Vec<BranchMergePairedCheckpointRedoFoldSparsePinMergeChainSlotSnapshot>,
+}
+
+/// One occurrence from a source sparse checkpoint chain after merge, retaining
+/// both the enclosing fold pair and the exact segment pair.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BranchMergePairedCheckpointRedoFoldSegmentRotationSparseMergeChainSlotSnapshot {
+    /// Zero-based position of the source chain supplied to the merge.
+    pub merge_ordinal: usize,
+    /// Position of the sparse fold inside that source chain.
+    pub fold_ordinal: usize,
+    pub order: u64,
+    pub left: Option<CheckpointGeneration>,
+    pub right: Option<CheckpointGeneration>,
+    pub redo_fold_identity: BranchMergePairedRedoFoldIdentity,
+    pub segment_identity: BranchMergePairedWriteAheadSegmentIdentity,
+}
+
+/// A checkpoint stream merged across independent sparse fold/segment chains.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BranchMergePairedCheckpointRedoFoldSegmentRotationSparseMergeChainSnapshot {
+    pub checkpoint_id: CheckpointId,
+    pub slots: Vec<BranchMergePairedCheckpointRedoFoldSegmentRotationSparseMergeChainSlotSnapshot>,
+}
+
+/// A compacted merged state run retaining source, fold, and segment lineage.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BranchMergePairedCheckpointRedoFoldSegmentRotationSparseMergeChainCompactionRunSnapshot {
+    pub merge_ordinal: usize,
+    pub fold_ordinal: usize,
+    pub first_order: u64,
+    pub last_order: u64,
+    pub left: Option<CheckpointGeneration>,
+    pub right: Option<CheckpointGeneration>,
+    pub redo_fold_identity: BranchMergePairedRedoFoldIdentity,
+    /// One exact directional segment pair for every order in the run.
+    pub segment_identities: Vec<BranchMergePairedWriteAheadSegmentIdentity>,
+}
+
+/// A merged checkpoint stream compacted without losing segment rebinding.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BranchMergePairedCheckpointRedoFoldSegmentRotationSparseMergeChainCompactionSnapshot {
+    pub checkpoint_id: CheckpointId,
+    pub runs: Vec<BranchMergePairedCheckpointRedoFoldSegmentRotationSparseMergeChainCompactionRunSnapshot>,
+}
+
+/// A malformed compacted merged segment run cannot be restored losslessly.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum BranchMergePairedCheckpointRedoFoldSegmentRotationSparseMergeChainRestoreError {
+    InvalidOrderRange {
+        merge_ordinal: usize,
+        fold_ordinal: usize,
+        first_order: u64,
+        last_order: u64,
+    },
+    SegmentIdentityCountMismatch {
+        merge_ordinal: usize,
+        fold_ordinal: usize,
+        first_order: u64,
+        last_order: u64,
+        expected: u128,
+        actual: usize,
+    },
+}
+
 /// One compacted run retaining its independent handoff and fold coordinates.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BranchMergePairedCheckpointRedoFoldSparseCompactionHandoffRunSnapshot {
@@ -280,6 +369,39 @@ pub struct BranchMergePairedCheckpointRedoFoldSparseCompactionHandoffSnapshot {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum BranchMergePairedCheckpointRedoFoldSparseCompactionHandoffRestoreError {
     InvalidOrderRange {
+        handoff_ordinal: usize,
+        fold_ordinal: usize,
+        first_order: u64,
+        last_order: u64,
+    },
+}
+
+/// One restored occurrence retaining both restore-batch and handoff lineage.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BranchMergePairedCheckpointRedoFoldSparseRestoreHandoffSlotSnapshot {
+    /// Zero-based position of the compacted restore batch supplied by caller.
+    pub restore_ordinal: usize,
+    /// Source handoff ordinal retained by the compacted chain.
+    pub handoff_ordinal: usize,
+    pub fold_ordinal: usize,
+    pub order: u64,
+    pub left: Option<CheckpointGeneration>,
+    pub right: Option<CheckpointGeneration>,
+    pub redo_fold_identity: BranchMergePairedRedoFoldIdentity,
+}
+
+/// A checkpoint stream restored across multiple sparse handoff batches.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BranchMergePairedCheckpointRedoFoldSparseRestoreHandoffStreamSnapshot {
+    pub checkpoint_id: CheckpointId,
+    pub slots: Vec<BranchMergePairedCheckpointRedoFoldSparseRestoreHandoffSlotSnapshot>,
+}
+
+/// A malformed run rejected while restoring one compacted handoff batch.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum BranchMergePairedCheckpointRedoFoldSparseRestoreHandoffError {
+    InvalidOrderRange {
+        restore_ordinal: usize,
         handoff_ordinal: usize,
         fold_ordinal: usize,
         first_order: u64,
@@ -1218,6 +1340,234 @@ pub fn merge_paired_checkpoint_redo_sparse_stream_chains_preserving_fold_identit
         .collect()
 }
 
+/// Merges sparse checkpoint pin chains while binding each pin to its ID.
+///
+/// The catalog unions known IDs with IDs observed in any source chain. Every
+/// occurrence keeps its source-chain ordinal, fold ordinal, order, and paired
+/// redo-fold identity. Each present side becomes an explicit `(checkpoint_id,
+/// generation)` pin; absent sides and sparse gaps stay absent. This prevents
+/// a pin copied from one checkpoint stream from being relabeled by a sibling
+/// stream during a three-way or wider merge.
+pub fn merge_paired_checkpoint_redo_sparse_stream_chains_preserving_checkpoint_pin_identity(
+    known_checkpoint_ids: &[CheckpointId],
+    merge_chains: &[Vec<BranchMergePairedCheckpointRedoFoldSparseStreamChainSnapshot>],
+) -> Vec<BranchMergePairedCheckpointRedoFoldSparsePinMergeChainSnapshot> {
+    let checkpoint_ids = known_checkpoint_ids
+        .iter()
+        .cloned()
+        .chain(
+            merge_chains
+                .iter()
+                .flat_map(|chain| chain.iter().map(|stream| stream.checkpoint_id.clone())),
+        )
+        .collect::<BTreeSet<_>>();
+
+    checkpoint_ids
+        .into_iter()
+        .map(|checkpoint_id| {
+            let mut slots = Vec::new();
+            for (merge_ordinal, chain) in merge_chains.iter().enumerate() {
+                for stream in chain
+                    .iter()
+                    .filter(|stream| stream.checkpoint_id == checkpoint_id)
+                {
+                    for slot in &stream.slots {
+                        let pin = |generation: &Option<CheckpointGeneration>| {
+                            generation.clone().map(|generation| {
+                                BranchMergePairedCheckpointPinIdentity {
+                                    checkpoint_id: checkpoint_id.clone(),
+                                    generation,
+                                }
+                            })
+                        };
+                        slots.push(
+                            BranchMergePairedCheckpointRedoFoldSparsePinMergeChainSlotSnapshot {
+                                merge_ordinal,
+                                fold_ordinal: slot.fold_ordinal,
+                                order: slot.order,
+                                left_pin: pin(&slot.left),
+                                right_pin: pin(&slot.right),
+                                redo_fold_identity: slot.redo_fold_identity.clone(),
+                            },
+                        );
+                    }
+                }
+            }
+            slots.sort_by_key(|slot| (slot.merge_ordinal, slot.fold_ordinal, slot.order));
+            BranchMergePairedCheckpointRedoFoldSparsePinMergeChainSnapshot {
+                checkpoint_id,
+                slots,
+            }
+        })
+        .collect()
+}
+
+/// Merges sparse checkpoint chains while retaining fold and segment identity.
+///
+/// The output catalog unions known IDs with every source stream ID. Each
+/// source occurrence is copied once and tagged with its source-chain ordinal;
+/// equal local `(fold_ordinal, order)` coordinates remain distinct. Fold
+/// identity and the exact directional segment pair travel together through
+/// omissions and rotations. The reference does not define this local chained
+/// projection, so source-chain order is the stable provenance rule.
+pub fn merge_paired_checkpoint_redo_sparse_stream_chains_preserving_fold_and_segment_rotation_identity(
+    known_checkpoint_ids: &[CheckpointId],
+    merge_chains: &[Vec<BranchMergePairedCheckpointRedoFoldSegmentRotationSparseStreamChainSnapshot>],
+) -> Vec<BranchMergePairedCheckpointRedoFoldSegmentRotationSparseMergeChainSnapshot> {
+    let checkpoint_ids = known_checkpoint_ids
+        .iter()
+        .cloned()
+        .chain(
+            merge_chains
+                .iter()
+                .flat_map(|chain| chain.iter().map(|stream| stream.checkpoint_id.clone())),
+        )
+        .collect::<BTreeSet<_>>();
+
+    checkpoint_ids
+        .into_iter()
+        .map(|checkpoint_id| {
+            let mut slots = merge_chains
+                .iter()
+                .enumerate()
+                .flat_map(|(merge_ordinal, chain)| {
+                    chain
+                        .iter()
+                        .filter(|stream| stream.checkpoint_id == checkpoint_id)
+                        .flat_map(move |stream| {
+                            stream.slots.iter().map(move |slot| {
+                                BranchMergePairedCheckpointRedoFoldSegmentRotationSparseMergeChainSlotSnapshot {
+                                    merge_ordinal,
+                                    fold_ordinal: slot.fold_ordinal,
+                                    order: slot.order,
+                                    left: slot.left.clone(),
+                                    right: slot.right.clone(),
+                                    redo_fold_identity: slot.redo_fold_identity.clone(),
+                                    segment_identity: slot.segment_identity.clone(),
+                                }
+                            })
+                        })
+                })
+                .collect::<Vec<_>>();
+            slots.sort_by_key(|slot| (slot.merge_ordinal, slot.fold_ordinal, slot.order));
+            BranchMergePairedCheckpointRedoFoldSegmentRotationSparseMergeChainSnapshot {
+                checkpoint_id,
+                slots,
+            }
+        })
+        .collect()
+}
+
+/// Compacts merged segment chains without erasing any directional rotation.
+///
+/// A run covers only adjacent orders from one source chain and one fold whose
+/// checkpoint values and fold pair are equal. Every order's segment pair is
+/// retained in sequence, so a rotation never disappears during compaction.
+pub fn compress_paired_checkpoint_redo_sparse_merge_chains_preserving_fold_and_segment_rotation_identity(
+    streams: &[BranchMergePairedCheckpointRedoFoldSegmentRotationSparseMergeChainSnapshot],
+) -> Vec<BranchMergePairedCheckpointRedoFoldSegmentRotationSparseMergeChainCompactionSnapshot> {
+    streams
+        .iter()
+        .map(|stream| {
+            let mut runs = Vec::<
+                BranchMergePairedCheckpointRedoFoldSegmentRotationSparseMergeChainCompactionRunSnapshot,
+            >::new();
+            for slot in &stream.slots {
+                if let Some(last) = runs.last_mut()
+                    && last.merge_ordinal == slot.merge_ordinal
+                    && last.fold_ordinal == slot.fold_ordinal
+                    && last.left == slot.left
+                    && last.right == slot.right
+                    && last.redo_fold_identity == slot.redo_fold_identity
+                    && last.last_order.checked_add(1) == Some(slot.order)
+                {
+                    last.last_order = slot.order;
+                    last.segment_identities.push(slot.segment_identity.clone());
+                } else {
+                    runs.push(
+                        BranchMergePairedCheckpointRedoFoldSegmentRotationSparseMergeChainCompactionRunSnapshot {
+                            merge_ordinal: slot.merge_ordinal,
+                            fold_ordinal: slot.fold_ordinal,
+                            first_order: slot.order,
+                            last_order: slot.order,
+                            left: slot.left.clone(),
+                            right: slot.right.clone(),
+                            redo_fold_identity: slot.redo_fold_identity.clone(),
+                            segment_identities: vec![slot.segment_identity.clone()],
+                        },
+                    );
+                }
+            }
+            BranchMergePairedCheckpointRedoFoldSegmentRotationSparseMergeChainCompactionSnapshot {
+                checkpoint_id: stream.checkpoint_id.clone(),
+                runs,
+            }
+        })
+        .collect()
+}
+
+/// Restores each merged segment occurrence from compacted identity runs.
+///
+/// A run must provide exactly one directional segment pair for every order in
+/// its range. Invalid ranges and missing or extra pairs are rejected rather
+/// than inferred. Restored slots use source-chain, fold, and order order.
+pub fn restore_paired_checkpoint_redo_sparse_merge_chains_preserving_fold_and_segment_rotation_identity(
+    compacted: &[BranchMergePairedCheckpointRedoFoldSegmentRotationSparseMergeChainCompactionSnapshot],
+) -> Result<
+    Vec<BranchMergePairedCheckpointRedoFoldSegmentRotationSparseMergeChainSnapshot>,
+    BranchMergePairedCheckpointRedoFoldSegmentRotationSparseMergeChainRestoreError,
+> {
+    compacted
+        .iter()
+        .map(|stream| {
+            let mut slots = Vec::new();
+            for run in &stream.runs {
+                if run.last_order < run.first_order {
+                    return Err(
+                        BranchMergePairedCheckpointRedoFoldSegmentRotationSparseMergeChainRestoreError::InvalidOrderRange {
+                            merge_ordinal: run.merge_ordinal,
+                            fold_ordinal: run.fold_ordinal,
+                            first_order: run.first_order,
+                            last_order: run.last_order,
+                        },
+                    );
+                }
+                let expected = u128::from(run.last_order) - u128::from(run.first_order) + 1;
+                if expected != run.segment_identities.len() as u128 {
+                    return Err(
+                        BranchMergePairedCheckpointRedoFoldSegmentRotationSparseMergeChainRestoreError::SegmentIdentityCountMismatch {
+                            merge_ordinal: run.merge_ordinal,
+                            fold_ordinal: run.fold_ordinal,
+                            first_order: run.first_order,
+                            last_order: run.last_order,
+                            expected,
+                            actual: run.segment_identities.len(),
+                        },
+                    );
+                }
+                slots.extend(run.segment_identities.iter().enumerate().map(
+                    |(offset, segment_identity)| {
+                        BranchMergePairedCheckpointRedoFoldSegmentRotationSparseMergeChainSlotSnapshot {
+                            merge_ordinal: run.merge_ordinal,
+                            fold_ordinal: run.fold_ordinal,
+                            order: run.first_order + offset as u64,
+                            left: run.left.clone(),
+                            right: run.right.clone(),
+                            redo_fold_identity: run.redo_fold_identity.clone(),
+                            segment_identity: segment_identity.clone(),
+                        }
+                    },
+                ));
+            }
+            slots.sort_by_key(|slot| (slot.merge_ordinal, slot.fold_ordinal, slot.order));
+            Ok(BranchMergePairedCheckpointRedoFoldSegmentRotationSparseMergeChainSnapshot {
+                checkpoint_id: stream.checkpoint_id.clone(),
+                slots,
+            })
+        })
+        .collect()
+}
+
 /// Hands off compacted sparse redo-fold chains while preserving their lineage.
 ///
 /// Each compacted source chain is kept as an independent coordinate space.
@@ -1317,6 +1667,91 @@ pub fn restore_paired_checkpoint_redo_sparse_compaction_handoff_chains_preservin
             })
         })
         .collect()
+}
+
+/// Restores multiple compacted handoff chains without colliding local labels.
+///
+/// Each input vector is one independent restore batch. Restored occurrences
+/// retain both that batch's ordinal and the original handoff ordinal, followed
+/// by their fold and order coordinates. The checkpoint catalog unions known
+/// IDs with all restored streams; absent streams and sparse gaps remain absent.
+pub fn restore_paired_checkpoint_redo_sparse_compaction_handoff_chains_preserving_restore_identity(
+    known_checkpoint_ids: &[CheckpointId],
+    restore_handoffs: &[Vec<BranchMergePairedCheckpointRedoFoldSparseCompactionHandoffSnapshot>],
+) -> Result<
+    Vec<BranchMergePairedCheckpointRedoFoldSparseRestoreHandoffStreamSnapshot>,
+    BranchMergePairedCheckpointRedoFoldSparseRestoreHandoffError,
+> {
+    let mut restored_handoffs = Vec::with_capacity(restore_handoffs.len());
+    for (restore_ordinal, compacted) in restore_handoffs.iter().enumerate() {
+        let restored =
+            restore_paired_checkpoint_redo_sparse_compaction_handoff_chains_preserving_fold_identity(
+                compacted,
+            )
+            .map_err(|error| match error {
+                BranchMergePairedCheckpointRedoFoldSparseCompactionHandoffRestoreError::InvalidOrderRange {
+                    handoff_ordinal,
+                    fold_ordinal,
+                    first_order,
+                    last_order,
+                } => BranchMergePairedCheckpointRedoFoldSparseRestoreHandoffError::InvalidOrderRange {
+                    restore_ordinal,
+                    handoff_ordinal,
+                    fold_ordinal,
+                    first_order,
+                    last_order,
+                },
+            })?;
+        restored_handoffs.push(restored);
+    }
+
+    let checkpoint_ids = known_checkpoint_ids
+        .iter()
+        .cloned()
+        .chain(restored_handoffs.iter().flat_map(|batch| {
+            batch.iter().map(|stream| stream.checkpoint_id.clone())
+        }))
+        .collect::<BTreeSet<_>>();
+
+    Ok(checkpoint_ids
+        .into_iter()
+        .map(|checkpoint_id| {
+            let mut slots = restored_handoffs
+                .iter()
+                .enumerate()
+                .flat_map(|(restore_ordinal, batch)| {
+                    batch
+                        .iter()
+                        .filter(|stream| stream.checkpoint_id == checkpoint_id)
+                        .flat_map(move |stream| {
+                            stream.slots.iter().map(move |slot| {
+                                BranchMergePairedCheckpointRedoFoldSparseRestoreHandoffSlotSnapshot {
+                                    restore_ordinal,
+                                    handoff_ordinal: slot.merge_ordinal,
+                                    fold_ordinal: slot.fold_ordinal,
+                                    order: slot.order,
+                                    left: slot.left.clone(),
+                                    right: slot.right.clone(),
+                                    redo_fold_identity: slot.redo_fold_identity.clone(),
+                                }
+                            })
+                        })
+                })
+                .collect::<Vec<_>>();
+            slots.sort_by_key(|slot| {
+                (
+                    slot.restore_ordinal,
+                    slot.handoff_ordinal,
+                    slot.fold_ordinal,
+                    slot.order,
+                )
+            });
+            BranchMergePairedCheckpointRedoFoldSparseRestoreHandoffStreamSnapshot {
+                checkpoint_id,
+                slots,
+            }
+        })
+        .collect())
 }
 
 /// Compacts equal checkpoint state without losing paired fold identity.
