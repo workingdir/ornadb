@@ -3329,6 +3329,23 @@ fn captured_paired_pin_identity_survives_opposite_divergence_folds() {
         sessions.push(session);
     }
 
+    for index in [4, 2, 0, 3, 1, 4, 2, 1] {
+        assert_eq!(
+            sessions[index].submit(replay),
+            Ok(Some(ints(&expected[index]))),
+            "interleaved replay must retain paired module pin {}",
+            pins[index]
+        );
+    }
+    let mut cloned_sessions = sessions.clone();
+    for index in [2, 4, 1, 3, 0] {
+        assert_eq!(
+            cloned_sessions[index].submit(replay),
+            Ok(Some(ints(&expected[index]))),
+            "cloned replay must retain paired module pin {}",
+            pins[index]
+        );
+    }
 }
 
 #[test]
