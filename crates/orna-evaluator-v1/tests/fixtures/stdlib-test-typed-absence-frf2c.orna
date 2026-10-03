@@ -1,0 +1,1 @@
+fn absent_int(): Int? = null;
