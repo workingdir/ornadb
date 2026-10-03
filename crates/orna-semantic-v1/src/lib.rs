@@ -19650,6 +19650,18 @@ fn type_sequence_has_omitted_pinned_checkpoint_tuple_at_path(
                 .collect::<Vec<_>>();
             type_sequence_has_omitted_pinned_checkpoint_tuple_at_path(&elements)
         }
+        // Relation windows wrap their row collection in a Relation boundary;
+        // omissions inside that window still need a checkpoint fold anchor.
+        Type::Relation(_) if present.iter().all(|ty| matches!(ty, Type::Relation(_))) => {
+            let elements = present
+                .iter()
+                .map(|ty| match ty {
+                    Type::Relation(element) => Some(element.as_ref()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            type_sequence_has_omitted_pinned_checkpoint_tuple_at_path(&elements)
+        }
         Type::Optional(_) if present.iter().all(|ty| matches!(ty, Type::Optional(_))) => {
             let elements = present
                 .iter()
@@ -19681,6 +19693,7 @@ fn seed_omitted_pinned_checkpoint_tuple_paths(types: &mut [Type]) {
                     .collect(),
             ),
             Type::List(element) => Type::List(Box::new(omitted_shape(element))),
+            Type::Relation(element) => Type::Relation(Box::new(omitted_shape(element))),
             Type::Optional(element) => Type::Optional(Box::new(omitted_shape(element))),
             _ => Type::Bottom,
         }
@@ -19791,6 +19804,20 @@ fn seed_omitted_pinned_checkpoint_tuple_paths(types: &mut [Type]) {
                     .iter_mut()
                     .filter_map(|ty| match &mut **ty {
                         Type::List(element) => Some(element.as_mut()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>();
+                seed_aligned_paths(&mut children);
+            }
+            Type::Relation(_)
+                if types
+                    .iter()
+                    .all(|ty| matches!(**ty, Type::Relation(_))) =>
+            {
+                let mut children = types
+                    .iter_mut()
+                    .filter_map(|ty| match &mut **ty {
+                        Type::Relation(element) => Some(element.as_mut()),
                         _ => None,
                     })
                     .collect::<Vec<_>>();
@@ -24021,6 +24048,50 @@ fn diag(code: &'static str, message: impl Into<String>) -> Diagnostic {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sparse_checkpoint_seeding_crosses_relation_window_boundaries() {
+        let paired = Type::Tuple(vec![
+            contextual_snapshot_ref("selector:HEAD~left"),
+            contextual_snapshot_ref("selector:HEAD~right"),
+        ]);
+        let pinned = Type::Relation(Box::new(Type::List(Box::new(Type::Record(
+            BTreeMap::from([
+                ("left_checkpoint".into(), paired.clone()),
+                ("right_checkpoint".into(), paired),
+                ("witness".into(), Type::Int),
+            ]),
+        )))));
+        let omitted = Type::Relation(Box::new(Type::List(Box::new(Type::Record(
+            BTreeMap::from([("witness".into(), Type::Int)]),
+        )))));
+
+        assert!(type_sequence_has_omitted_pinned_checkpoint_tuple(&[
+            omitted.clone(),
+            pinned.clone(),
+        ]));
+
+        let mut rows = [omitted, pinned];
+        seed_omitted_pinned_checkpoint_tuple_paths(&mut rows);
+
+        let Type::Relation(window) = &rows[0] else {
+            panic!("window relation wrapper must survive sparse seeding");
+        };
+        let Type::List(row) = window.as_ref() else {
+            panic!("window row-list wrapper must survive sparse seeding");
+        };
+        let Type::Record(fields) = row.as_ref() else {
+            panic!("window row shape must be seeded as a record");
+        };
+        for name in ["left_checkpoint", "right_checkpoint"] {
+            assert_eq!(
+                fields.get(name),
+                Some(&Type::Tuple(vec![Type::Bottom, Type::Bottom])),
+                "the omitted {name} tuple keeps both fold slots neutral"
+            );
+        }
+    }
+
     #[test]
     fn suppressed_paired_rebind_keeps_same_named_tuple_pins_distinct() {
         let left_selector = "selector:binder:pair.orna@10..18:parameter:selected";
