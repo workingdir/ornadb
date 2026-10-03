@@ -3,10 +3,10 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use orna_sys_v1::{
     AbiType, AbiVersion, EffectSet, FailureCode, OperationId, ProviderDiagnostic, ProviderFailure,
-    ProviderId, ProviderOffer, ProviderRoleRegistry, SemanticRoleId, SystemEffect,
-    SystemOperationProvider, SystemProviderAbi, TypeId, TypedValue, system_api_json,
+    ProviderId, ProviderOffer, ProviderRoleRegistry, SemanticRoleId, SystemDispatchTable,
+    SystemEffect, SystemOperationProvider, SystemProviderAbi, TypeId, TypedValue, system_api_json,
     system_binding_stubs, system_dispatch_table, system_function_descriptor, system_provider_abi,
-    system_provider_abi_json, validate_provider_offer,
+    system_provider_abi_json, system_provider_abi_schema_json, validate_provider_offer,
 };
 use serde_json::Value;
 
@@ -229,6 +229,138 @@ fn generated_provider_abi_carries_typed_operation_contracts_and_roles() {
         .is_ok()
     );
     assert!(ProviderRoleRegistry::from_baked_abi(abi).is_ok());
+}
+
+#[test]
+fn generated_provider_alias_edges_dispatch_through_both_routes() {
+    const PROVIDER_ALIASES: [&str; 4] = ["-", "_", "9", "_9.edge-name"];
+
+    let schema_json = system_provider_abi_schema_json();
+    let baseline: Value =
+        serde_json::from_str(system_provider_abi_json()).expect("embedded provider registry");
+    let baseline_table = SystemDispatchTable::from_json(system_provider_abi_json())
+        .expect("embedded registry parses through the dispatch-table alias");
+    let role = baseline_table
+        .roles()
+        .find(|role| role.builtin_provider.is_some())
+        .expect("generated registry has a built-in provider role");
+    let role_name = role.id.as_str().to_owned();
+    let operation_name = role
+        .operations
+        .first()
+        .expect("provider role declares a generated operation")
+        .as_str()
+        .to_owned();
+    let role_index = baseline["roles"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .position(|raw_role| raw_role["name"] == role_name)
+        .expect("built-in provider role has a generated JSON row");
+
+    let mut schema_acceptances = 0;
+    let mut typed_alias_parses = 0;
+    let mut generated_binding_cases = 0;
+    let mut direct_routes = 0;
+    let mut registry_routes = 0;
+    for provider_alias in PROVIDER_ALIASES {
+        let mut registry_json = baseline.clone();
+        registry_json["roles"][role_index]["builtin_provider"] =
+            Value::String(provider_alias.to_owned());
+        let registry_json = registry_json.to_string();
+        build_host::validate_json_against_schema(&registry_json, schema_json).unwrap_or_else(
+            |error| {
+                panic!("provider alias {provider_alias:?} rejected by generated schema: {error}")
+            },
+        );
+        schema_acceptances += 1;
+
+        let table = SystemDispatchTable::from_json(&registry_json)
+            .expect("schema-valid provider alias parses through dispatch-table name");
+        let contract = table
+            .operation(&operation_name)
+            .expect("provider role operation remains in generated typed table");
+        assert_eq!(
+            contract.role.as_ref().map(|role| role.as_str()),
+            Some(role_name.as_str())
+        );
+        let generated = system_function_descriptor(&operation_name)
+            .expect("provider role operation has a generated binding");
+        assert_eq!(generated.name, operation_name);
+        assert_eq!(generated.signature, contract.signature.source);
+        assert_eq!(
+            contract.effects.iter().next(),
+            Some(generated.effect),
+            "provider alias route agrees with generated binding effect"
+        );
+        generated_binding_cases += 1;
+
+        let registry = ProviderRoleRegistry::from_baked_abi(&table)
+            .expect("provider alias registry satisfies required role contracts");
+        let selected_offer = registry
+            .resolve(&role_name)
+            .expect("provider alias is selected for its role")
+            .clone();
+        assert_eq!(selected_offer.provider.as_str(), provider_alias);
+        typed_alias_parses += 1;
+
+        let arguments = contract
+            .signature
+            .parameters
+            .iter()
+            .map(|parameter| {
+                TypedValue::public(
+                    TypeId::new(parameter.ty.canonical()),
+                    parameter.name.as_bytes().to_vec(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let result = TypedValue::public(
+            TypeId::new(contract.signature.result.canonical()),
+            provider_alias.as_bytes().to_vec(),
+        );
+        let provider = InvokeValueProvider {
+            offer: selected_offer,
+            operation: contract.id.clone(),
+            argument_types: contract
+                .signature
+                .parameters
+                .iter()
+                .map(|parameter| parameter.ty.canonical())
+                .collect(),
+            response: Ok(result.clone()),
+            calls: AtomicUsize::new(0),
+        };
+        assert_eq!(
+            table.dispatch_to_provider(&operation_name, &provider, &arguments, |_| Ok(())),
+            Ok(orna_sys_v1::SystemDispatchResult::Returned(result.clone())),
+            "direct dispatch accepts provider alias {provider_alias:?}"
+        );
+        direct_routes += 1;
+        assert_eq!(
+            registry.dispatch_to_provider(
+                &table,
+                generated.name,
+                &provider,
+                &arguments,
+                |_| Ok(())
+            ),
+            Ok(orna_sys_v1::SystemDispatchResult::Returned(result)),
+            "registry dispatch accepts provider alias {provider_alias:?}"
+        );
+        registry_routes += 1;
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 2);
+    }
+
+    println!(
+        "generated_provider_alias_dispatch_parity aliases={} schema_acceptances={schema_acceptances} typed_parses={typed_alias_parses} generated_bindings={generated_binding_cases} direct_routes={direct_routes} registry_routes={registry_routes} total_cases={}",
+        PROVIDER_ALIASES.len(),
+        schema_acceptances
+            + typed_alias_parses
+            + generated_binding_cases
+            + direct_routes
+            + registry_routes
+    );
 }
 
 #[test]
