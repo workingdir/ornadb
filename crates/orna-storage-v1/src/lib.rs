@@ -18,6 +18,8 @@ pub use branch_merge::{
     BranchMergeColumnDepthFragments, BranchMergeColumnDepthLadderEvent,
     BranchMergeColumnDepthLadderSnapshot, BranchMergeColumnDepthLadderWaveSnapshot,
     BranchMergeColumnRestoreLadderFoldSnapshot,
+    BranchMergeColumnRestoreLadderTimelineSnapshot,
+    BranchMergeColumnRestoreLadderWaveSlotSnapshot,
     BranchMergeConflict, BranchMergeDepthFragmentRecovery,
     BranchMergeDepthWaveRecovery, BranchMergeError, BranchMergePlan,
     BranchMergeMultiParentColumnDepthLadderWaveEvent,
