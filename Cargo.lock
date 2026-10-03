@@ -1592,6 +1592,7 @@ dependencies = [
  "orna-syntax-v1",
  "proptest",
  "rowan",
+ "serde_json",
 ]
 
 [[package]]
