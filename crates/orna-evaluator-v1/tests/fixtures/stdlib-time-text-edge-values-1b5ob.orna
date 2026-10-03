@@ -1,0 +1,16 @@
+text.split("", ",") == [""]
+&& text.split("🧑‍🚀β", "") == ["🧑", "\u{200D}", "🚀", "β"]
+&& text.split(",,", ",") == ["", "", ""]
+&& text.join([], "🙂") == ""
+&& text.join(["", "β", ""], "🙂") == "🙂β🙂"
+&& text.trim("\u{0085}\u{00A0}edge\u{3000}") == "edge"
+&& text.trim("\u{FEFF}edge\u{FEFF}") == "\u{FEFF}edge\u{FEFF}"
+&& text.normalise("é", "NFD") == "e\u{0301}"
+&& text.replace("aaaaa", "aa", "X") == "XXa"
+&& text.lower("Ο\u{0301}Σ") == "ο\u{0301}ς"
+&& time_ops.timezone_data_version() == "orna-iana-2024a"
+&& time_ops.offset_at(2024-03-31T00:59:59.999999999Z, "Europe/London") == 0
+&& time_ops.offset_at(2024-03-31T01:00:00Z, "Europe/London") == 3600
+&& time_ops.resolve_local("2024-02-29T23:59:59.000000001", "UTC", "reject") == 2024-02-29T23:59:59.000000001Z
+&& time_ops.resolve_local("2024-02-29T23:59:59.1", "UTC", "reject") == 2024-02-29T23:59:59.100000000Z
+&& time_ops.resolve_local("2024-01-01T00:00:00", "UTC", "reject") == 2024-01-01T00:00:00Z
