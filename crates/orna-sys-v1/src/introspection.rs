@@ -1198,6 +1198,38 @@ pub fn explain_query_with_join_pair_identities(
     )
 }
 
+/// Explains a sparse join cascade while retaining both logical join-pair and
+/// window-pushdown identities through physical cost reordering. Window
+/// aggregates remain attached to their exact source and ordered chain; each
+/// join fold includes that source chain in its right-input identity.
+///
+/// ORNA specifies structured plan rows but leaves window-chain identity
+/// encoding open. This adapter uses a domain-separated digest of the source
+/// reference and the resolver-ordered aggregate/frame tuples.
+pub fn explain_query_with_join_pair_identities_and_window_aggregate_pushdowns(
+    query: &QueryPlanDescription,
+    pairs: &[QueryJoinPairIdentityDescription],
+    aggregates: &[QueryWindowAggregatePushdownDescription],
+) -> Result<ExplainedPlan, ExplainError> {
+    explain_query_core_with_subqueries(
+        query,
+        1,
+        None,
+        None,
+        &[],
+        &[],
+        &[],
+        None,
+        &[],
+        &[],
+        &[],
+        &[],
+        &[],
+        aggregates,
+        pairs,
+    )
+}
+
 /// Explains window aggregates pushed to their resolved input sources.
 ///
 /// Pushdown is attached by exact source identity, while each aggregate and
@@ -2187,6 +2219,12 @@ fn explain_query_core_with_subqueries(
         &mut operators[current].details,
         &join_cost_fold_identity,
     );
+    if let Some(window_identity) = query_window_pushdown_chain_identity(
+        &query.source,
+        window_aggregates,
+    ) {
+        add_window_pushdown_chain_details(&mut operators[current].details, &window_identity);
+    }
     for (planned_position, (declared_position, join)) in
         planned_query_join_order(&query.joins).into_iter().enumerate()
     {
@@ -2206,6 +2244,13 @@ fn explain_query_core_with_subqueries(
             source_cardinality(join.statistics.as_ref()),
             window_aggregates,
         );
+        let right_window_identity =
+            query_window_pushdown_chain_identity(&join.source, window_aggregates);
+        if let Some(window_identity) = right_window_identity.as_deref() {
+            for index in BTreeSet::from([right_access, right]) {
+                add_window_pushdown_chain_details(&mut operators[index].details, window_identity);
+            }
+        }
         if let Some(subquery) = decorrelated_subquery {
             add_decorrelated_subquery_details(&mut operators[right].details, subquery);
         }
@@ -2290,6 +2335,9 @@ fn explain_query_core_with_subqueries(
         }
         if let Some(pair_identity) = join_pair_identity {
             add_join_pair_identity_details(&mut details, pair_identity);
+        }
+        if let Some(window_identity) = right_window_identity.as_deref() {
+            add_window_pushdown_chain_details(&mut details, window_identity);
         }
         if let Some(candidate) = selected_partial_index {
             add_partial_index_pair_identity_details(&mut details, candidate);
@@ -3231,7 +3279,17 @@ fn push_window_aggregates(
     cardinality: Cardinality,
     aggregates: &[QueryWindowAggregatePushdownDescription],
 ) -> usize {
-    for aggregate in aggregates.iter().filter(|aggregate| aggregate.source == *source) {
+    let matching = aggregates
+        .iter()
+        .filter(|aggregate| aggregate.source == *source)
+        .collect::<Vec<_>>();
+    if matching.is_empty() {
+        return input;
+    }
+    let chain_identity = query_window_pushdown_chain_identity(source, aggregates)
+        .expect("a nonempty matching window chain has an identity");
+    let chain_length = u64::try_from(matching.len()).unwrap_or(u64::MAX);
+    for (position, aggregate) in matching.into_iter().enumerate() {
         let details = BTreeMap::from([
             (
                 "operation".to_owned(),
@@ -3256,6 +3314,22 @@ fn push_window_aggregates(
             (
                 "window_frame_end".to_owned(),
                 PlanDetail::Text(aggregate.frame_end.as_detail()),
+            ),
+            (
+                "window_pushdown_chain_identity".to_owned(),
+                PlanDetail::Text(chain_identity.clone()),
+            ),
+            (
+                "window_pushdown_chain_position".to_owned(),
+                PlanDetail::Integer(u64::try_from(position + 1).unwrap_or(u64::MAX)),
+            ),
+            (
+                "window_pushdown_chain_length".to_owned(),
+                PlanDetail::Integer(chain_length),
+            ),
+            (
+                "window_pushdown_identity_policy".to_owned(),
+                PlanDetail::Text("source_ordered_sha256_v1".to_owned()),
             ),
             (
                 "pushdown_policy".to_owned(),
@@ -3480,18 +3554,54 @@ fn hash_query_window_inputs(
     source: &ObjectRef,
     window_aggregates: &[QueryWindowAggregatePushdownDescription],
 ) {
+    if let Some(identity) = query_window_pushdown_chain_identity(source, window_aggregates) {
+        hash.update([1]);
+        hash_part(hash, identity.as_bytes());
+    } else {
+        hash.update([0]);
+    }
+}
+
+/// ORNA leaves this planner-local chain identity encoding unspecified. Keep
+/// the source and resolver-ordered members in the digest so sparse cost
+/// reordering cannot transfer an aggregate chain to a neighboring input.
+fn query_window_pushdown_chain_identity(
+    source: &ObjectRef,
+    window_aggregates: &[QueryWindowAggregatePushdownDescription],
+) -> Option<String> {
     let matching = window_aggregates
         .iter()
         .filter(|aggregate| aggregate.source == *source)
         .collect::<Vec<_>>();
+    if matching.is_empty() {
+        return None;
+    }
+    let mut hash = Sha256::new();
+    hash.update(b"orna.sys.query-window-pushdown-chain.v1\0");
+    hash_part(&mut hash, source.as_str().as_bytes());
     hash.update((matching.len() as u64).to_be_bytes());
     for aggregate in matching {
-        hash_part(hash, aggregate.identity.as_str().as_bytes());
-        hash_part(hash, aggregate.aggregate.as_str().as_bytes());
-        hash_part(hash, aggregate.frame_identity.as_str().as_bytes());
-        hash_part(hash, aggregate.frame_start.as_detail().as_bytes());
-        hash_part(hash, aggregate.frame_end.as_detail().as_bytes());
+        hash_part(&mut hash, aggregate.identity.as_str().as_bytes());
+        hash_part(&mut hash, aggregate.aggregate.as_str().as_bytes());
+        hash_part(&mut hash, aggregate.frame_identity.as_str().as_bytes());
+        hash_part(&mut hash, aggregate.frame_start.as_detail().as_bytes());
+        hash_part(&mut hash, aggregate.frame_end.as_detail().as_bytes());
     }
+    Some(format!("window-chain:{}", hex(&hash.finalize())))
+}
+
+fn add_window_pushdown_chain_details(
+    details: &mut BTreeMap<String, PlanDetail>,
+    identity: &str,
+) {
+    details.insert(
+        "window_pushdown_chain_identity".to_owned(),
+        PlanDetail::Text(identity.to_owned()),
+    );
+    details.insert(
+        "window_pushdown_identity_policy".to_owned(),
+        PlanDetail::Text("source_ordered_sha256_v1".to_owned()),
+    );
 }
 
 fn hash_optional_text(hash: &mut Sha256, value: Option<&str>) {
