@@ -2404,6 +2404,8 @@ fn explain_query_core_with_limit_pushdowns(
             .and_then(|offset| decorrelated_subqueries.get(offset));
         let selected_partial_index = partial_index_for_join(join, partial_indexes);
         let join_pair_identity = join_pair_identity_for_join(join, join_pair_identities);
+        let paired_index_selection_id = join_pair_identity
+            .map(|pair| paired_index_selection_identity(pair, selected_partial_index));
         let decorrelated_index_omission_identity = decorrelated_subquery
             .filter(|_| selected_partial_index.is_none())
             .map(decorrelated_index_selection_omission_identity);
@@ -2472,6 +2474,13 @@ fn explain_query_core_with_limit_pushdowns(
                 add_join_pair_identity_details(&mut operators[index].details, pair_identity);
             }
         }
+        if let Some(identity) = paired_index_selection_id.as_deref() {
+            let mut index_nodes = BTreeSet::from([right_access, right]);
+            index_nodes.extend(right_limit_operator_start..right_limit_operator_end);
+            for index in index_nodes {
+                add_paired_index_selection_details(&mut operators[index].details, identity);
+            }
+        }
         let paired_predicate_pushdown_identity = join_pair_identity
             .zip(selected_partial_index)
             .map(|(pair, index)| paired_predicate_pushdown_identity(pair, index));
@@ -2512,6 +2521,20 @@ fn explain_query_core_with_limit_pushdowns(
             decorrelated_index_omission_identity.as_deref(),
             right_limit_chain_identity.as_deref(),
         );
+        let paired_index_refold_id = join_pair_identity
+            .zip(paired_index_selection_id.as_deref())
+            .map(|(pair, selection_identity)| {
+                query_paired_index_refold_identity(
+                    &left_fold_identity,
+                    &right_fold_identity,
+                    pair,
+                    selection_identity,
+                    paired_predicate_pushdown_identity.as_deref(),
+                    cardinality,
+                    work,
+                    work_overflow,
+                )
+            });
         let decorrelated_anchor_fold_id = decorrelated_subquery.map(|subquery| {
             query_decorrelated_anchor_fold_identity(
                 &left_fold_identity,
@@ -2612,11 +2635,30 @@ fn explain_query_core_with_limit_pushdowns(
                 );
             }
         }
+        if let (Some(identity), Some(pair), Some(selection_identity)) = (
+            paired_index_refold_id.as_deref(),
+            join_pair_identity,
+            paired_index_selection_id.as_deref(),
+        ) {
+            let mut refold_nodes = BTreeSet::from([right_access, right]);
+            refold_nodes.extend(right_limit_operator_start..right_limit_operator_end);
+            for index in refold_nodes {
+                add_paired_index_refold_details(
+                    &mut operators[index].details,
+                    identity,
+                    &left_fold_identity,
+                    &right_fold_identity,
+                    pair,
+                    selection_identity,
+                );
+            }
+        }
         let next_join_cost_fold_identity = query_join_cost_fold(
             &left_fold_identity,
             &right_fold_identity,
             join_pair_identity,
             paired_predicate_pushdown_identity.as_deref(),
+            paired_index_refold_id.as_deref(),
             decorrelated_predicate_identity.as_deref(),
             decorrelated_anchor_fold_id.as_deref(),
             window_anchor_fold_id.as_deref(),
@@ -2708,6 +2750,23 @@ fn explain_query_core_with_limit_pushdowns(
         }
         if let Some(identity) = paired_predicate_pushdown_identity.as_deref() {
             add_paired_predicate_pushdown_details(&mut details, identity);
+        }
+        if let Some(identity) = paired_index_selection_id.as_deref() {
+            add_paired_index_selection_details(&mut details, identity);
+        }
+        if let (Some(identity), Some(pair), Some(selection_identity)) = (
+            paired_index_refold_id.as_deref(),
+            join_pair_identity,
+            paired_index_selection_id.as_deref(),
+        ) {
+            add_paired_index_refold_details(
+                &mut details,
+                identity,
+                &left_fold_identity,
+                &right_fold_identity,
+                pair,
+                selection_identity,
+            );
         }
         if let Some(window_identity) = right_window_identity.as_deref() {
             add_window_pushdown_chain_details(&mut details, window_identity);
@@ -3946,6 +4005,82 @@ fn paired_predicate_pushdown_identity(
     format!("join-predicate-pair:{}", hex(&hash.finalize()))
 }
 
+/// Records the selected exact index tuple, or a typed no-match outcome, for a
+/// logical pair. ORNA leaves explain-only index identity encoding open; this
+/// value keeps sparse pair slots from disappearing during later cost refolds.
+fn paired_index_selection_identity(
+    pair: &QueryJoinPairIdentityDescription,
+    candidate: Option<&QueryPartialIndexDescription>,
+) -> String {
+    let mut hash = Sha256::new();
+    hash.update(b"orna.sys.paired-index-selection.v1\0");
+    hash_part(&mut hash, pair.identity.as_str().as_bytes());
+    hash_part(&mut hash, pair.left_source.as_str().as_bytes());
+    hash_part(&mut hash, pair.right_source.as_str().as_bytes());
+    hash_optional_text(
+        &mut hash,
+        pair.predicate.as_ref().map(ExpressionRef::as_str),
+    );
+    if let Some(candidate) = candidate {
+        hash.update([1]);
+        hash_part(
+            &mut hash,
+            partial_index_pair_identity(candidate).as_bytes(),
+        );
+    } else {
+        hash.update([0]);
+    }
+    format!("paired-index-selection:{}", hex(&hash.finalize()))
+}
+
+fn add_paired_index_selection_details(
+    details: &mut BTreeMap<String, PlanDetail>,
+    identity: &str,
+) {
+    details.insert(
+        "paired_index_selection_identity".to_owned(),
+        PlanDetail::Text(identity.to_owned()),
+    );
+    details.insert(
+        "paired_index_selection_policy".to_owned(),
+        PlanDetail::Text("exact_pair_index_or_no_match".to_owned()),
+    );
+}
+
+fn add_paired_index_refold_details(
+    details: &mut BTreeMap<String, PlanDetail>,
+    identity: &str,
+    parent_identity: &str,
+    input_identity: &str,
+    pair: &QueryJoinPairIdentityDescription,
+    selection_identity: &str,
+) {
+    details.insert(
+        "paired_index_refold_identity".to_owned(),
+        PlanDetail::Text(identity.to_owned()),
+    );
+    details.insert(
+        "paired_index_refold_parent_identity".to_owned(),
+        PlanDetail::Text(parent_identity.to_owned()),
+    );
+    details.insert(
+        "paired_index_refold_input_identity".to_owned(),
+        PlanDetail::Text(input_identity.to_owned()),
+    );
+    details.insert(
+        "paired_index_refold_pair_identity".to_owned(),
+        PlanDetail::Text(pair.identity.as_str().to_owned()),
+    );
+    details.insert(
+        "paired_index_refold_selection_identity".to_owned(),
+        PlanDetail::Text(selection_identity.to_owned()),
+    );
+    details.insert(
+        "paired_index_refold_pairing".to_owned(),
+        PlanDetail::Text("sparse_parent_fold_pair_and_exact_index_outcome".to_owned()),
+    );
+}
+
 fn add_paired_predicate_pushdown_details(
     details: &mut BTreeMap<String, PlanDetail>,
     identity: &str,
@@ -4370,11 +4505,45 @@ fn query_join_cost_input_identity(
     format!("join-input:{}", hex(&hash.finalize()))
 }
 
+/// Refolds a paired exact-index outcome against the current sparse cost
+/// ancestry. The reference does not define this plan-detail digest; carrying
+/// both parent and child identities makes later refolds auditable by pair.
+fn query_paired_index_refold_identity(
+    parent_identity: &str,
+    input_identity: &str,
+    pair: &QueryJoinPairIdentityDescription,
+    selection_identity: &str,
+    paired_predicate_identity: Option<&str>,
+    cardinality: Cardinality,
+    work: Option<u64>,
+    work_overflow: bool,
+) -> String {
+    let mut hash = Sha256::new();
+    hash.update(b"orna.sys.query-paired-index-refold.v1\0");
+    hash_part(&mut hash, parent_identity.as_bytes());
+    hash_part(&mut hash, input_identity.as_bytes());
+    hash_part(&mut hash, pair.identity.as_str().as_bytes());
+    hash_part(&mut hash, pair.left_source.as_str().as_bytes());
+    hash_part(&mut hash, pair.right_source.as_str().as_bytes());
+    hash_optional_text(
+        &mut hash,
+        pair.predicate.as_ref().map(ExpressionRef::as_str),
+    );
+    hash_part(&mut hash, selection_identity.as_bytes());
+    hash_optional_text(&mut hash, paired_predicate_identity);
+    hash_optional_u64(&mut hash, cardinality.rows);
+    hash_optional_u64(&mut hash, cardinality.bytes);
+    hash_optional_u64(&mut hash, work);
+    hash.update([u8::from(work_overflow)]);
+    format!("paired-index-refold:{}", hex(&hash.finalize()))
+}
+
 fn query_join_cost_fold(
     left_identity: &str,
     right_identity: &str,
     pair: Option<&QueryJoinPairIdentityDescription>,
     paired_predicate_pushdown_identity: Option<&str>,
+    paired_index_refold_identity: Option<&str>,
     decorrelated_predicate_pushdown_identity: Option<&str>,
     decorrelated_anchor_fold_identity: Option<&str>,
     window_anchor_fold_identity: Option<&str>,
@@ -4402,6 +4571,7 @@ fn query_join_cost_fold(
         hash.update([0]);
     }
     hash_optional_text(&mut hash, paired_predicate_pushdown_identity);
+    hash_optional_text(&mut hash, paired_index_refold_identity);
     hash_optional_text(&mut hash, decorrelated_predicate_pushdown_identity);
     hash_optional_text(&mut hash, decorrelated_anchor_fold_identity);
     hash_optional_text(&mut hash, window_anchor_fold_identity);
