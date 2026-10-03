@@ -1,0 +1,9 @@
+if true {
+    let cursor = std.iterator.zip(
+        std.iterator.from_list([4, 8, 15]),
+        std.iterator.from_list([2, 3])
+    );
+    std.iterator.first(cursor) == Some((4, 2))
+    && std.iterator.nth(cursor, 1) == Some((8, 3))
+    && std.iterator.first(cursor) == Some((4, 2))
+} else { false }
