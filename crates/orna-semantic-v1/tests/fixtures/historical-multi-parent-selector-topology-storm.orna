@@ -1,0 +1,38 @@
+pub fn factory_at(pin: sys.SnapshotRef) =
+    sys.database.as_of(pin).energy.factory;
+
+pub fn rejects_selector_depth_drift_across_parent_storm() {
+    let parents = [
+        {
+            left: { pins: (factory_at(sys.snapshot("HEAD~301")), factory_at(sys.snapshot("HEAD~301"))) },
+            right: { pins: (factory_at(sys.snapshot("HEAD~311")), factory_at(sys.snapshot("HEAD~312"))) },
+        },
+        {
+            left: { pins: (factory_at(sys.snapshot("HEAD~304")), factory_at(sys.snapshot("HEAD~305"))) },
+            right: { pins: (factory_at(sys.snapshot("HEAD~314")), factory_at(sys.snapshot("HEAD~315"))) },
+        },
+        {
+            left: { pins: (factory_at(sys.snapshot("HEAD~308")), factory_at(sys.snapshot("HEAD~308"))) },
+            right: { pins: (factory_at(sys.snapshot("HEAD~318")), factory_at(sys.snapshot("HEAD~319"))) },
+        },
+    ];
+    { parent_fold: parents }
+}
+
+pub fn accepts_alpha_renamed_selector_topology_across_parent_storm() {
+    let parents = [
+        {
+            left: { pins: (factory_at(sys.snapshot("HEAD~401")), factory_at(sys.snapshot("HEAD~401"))) },
+            right: { pins: (factory_at(sys.snapshot("HEAD~411")), factory_at(sys.snapshot("HEAD~412"))) },
+        },
+        {
+            left: { pins: (factory_at(sys.snapshot("HEAD~404")), factory_at(sys.snapshot("HEAD~404"))) },
+            right: { pins: (factory_at(sys.snapshot("HEAD~414")), factory_at(sys.snapshot("HEAD~415"))) },
+        },
+        {
+            left: { pins: (factory_at(sys.snapshot("HEAD~408")), factory_at(sys.snapshot("HEAD~408"))) },
+            right: { pins: (factory_at(sys.snapshot("HEAD~418")), factory_at(sys.snapshot("HEAD~419"))) },
+        },
+    ];
+    { parent_fold: parents }
+}
