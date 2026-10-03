@@ -7207,11 +7207,37 @@ fn infer(
                 .find(|parent| type_contains_pinned_checkpoint_tuple(parent))
                 .cloned()
                 .or_else(|| first_parent.clone());
+            // An all-omitted first row anchors rollback to the smallest
+            // structural checkpoint scope that later fails. Keep unaffected
+            // sibling scopes folding so valid depth labels are not discarded.
+            let scoped_checkpoint_rollback = first_parent
+                .as_ref()
+                .is_some_and(type_contains_omitted_checkpoint_tuple);
+            let mut rolled_back_checkpoint_paths = BTreeSet::new();
             let mut rejected_checkpoint_parent = false;
             let mut ty = None;
             for value in element_types {
                 if let Some(prior) = &ty {
-                    let merged = if transactional_checkpoint_fold {
+                    let merged = if transactional_checkpoint_fold && scoped_checkpoint_rollback {
+                        merge_multi_parent_checkpoint_value_scoped(
+                            prior,
+                            &value,
+                            first_parent
+                                .as_ref()
+                                .expect("scoped fold has a rollback anchor"),
+                            checkpoint_topology_parent
+                                .as_ref()
+                                .expect("transactional fold has a topology parent"),
+                            &mut Vec::new(),
+                            &mut rolled_back_checkpoint_paths,
+                        )
+                        .map(|fold| {
+                            if fold.rejected_scope {
+                                require_same(prior, &value, diagnostics);
+                            }
+                            fold.merged
+                        })
+                    } else if transactional_checkpoint_fold {
                         merge_multi_parent_checkpoint_value(
                             prior,
                             &value,
@@ -7234,10 +7260,11 @@ fn infer(
             }
 
             // The reference does not define recovery when one parent in a
-            // multi-parent checkpoint fold cannot reconcile. Keep the first
-            // parent's concrete labels as the recovery anchor; otherwise a
-            // later parent could be partially promoted after an earlier
-            // rejection, making the recovered pin map depend on parent order.
+            // multi-parent checkpoint fold cannot reconcile. For ordinary
+            // pinned folds, keep the whole first parent as the recovery
+            // anchor. When the first parent has omitted nested tuples, the
+            // scoped fold above freezes rejected paths at that anchor while
+            // allowing independent sibling paths to complete.
             if rejected_checkpoint_parent {
                 ty = first_parent;
             }
@@ -18379,6 +18406,9 @@ fn merge_multi_parent_checkpoint_value(
     parent: &Type,
     first_parent: &Type,
 ) -> Option<Type> {
+    if !checkpoint_paired_boundary_fold_topology_matches(accumulated, parent, first_parent) {
+        return None;
+    }
     if matches!(first_parent, Type::Tuple(_)) {
         return merge_multi_parent_checkpoint_tuple(accumulated, parent, first_parent);
     }
@@ -18390,6 +18420,472 @@ fn merge_multi_parent_checkpoint_value(
     }
 
     merge_checkpoint_field_map(accumulated, parent)
+}
+
+struct ScopedCheckpointFold {
+    merged: Type,
+    effective_parent: Type,
+    rejected_scope: bool,
+}
+
+/// Reconcile one parent while allowing all-omitted-first-row folds to recover
+/// locally. A rejected nested scope is restored to the first row and frozen
+/// for later parents across record, tuple, and collection-element boundaries;
+/// unaffected sibling paths keep folding. The reference is silent on rollback
+/// through nested containers, so these existing structural boundaries use
+/// the same smallest-failing-scope rule. Rebuild the effective parent with
+/// restored paths before rechecking cross-path pin identity, so local recovery
+/// cannot manufacture sharing.
+fn merge_multi_parent_checkpoint_value_scoped(
+    accumulated: &Type,
+    parent: &Type,
+    rollback_anchor: &Type,
+    topology_anchor: &Type,
+    path: &mut Vec<SnapshotTopologyBoundary>,
+    rolled_back_paths: &mut BTreeSet<Vec<SnapshotTopologyBoundary>>,
+) -> Option<ScopedCheckpointFold> {
+    if rolled_back_paths.contains(path) {
+        return Some(ScopedCheckpointFold {
+            merged: rollback_anchor.clone(),
+            effective_parent: rollback_anchor.clone(),
+            rejected_scope: false,
+        });
+    }
+
+    let has_rolled_back_descendant = rolled_back_paths
+        .iter()
+        .any(|rolled_back| rolled_back.len() > path.len() && rolled_back.starts_with(path));
+    if !has_rolled_back_descendant
+        && let Some(merged) =
+            merge_multi_parent_checkpoint_value(accumulated, parent, topology_anchor)
+    {
+        return Some(ScopedCheckpointFold {
+            merged,
+            effective_parent: parent.clone(),
+            rejected_scope: false,
+        });
+    }
+
+    let mut rejected_scope = false;
+    let (merged, effective_parent) = match (accumulated, parent, rollback_anchor, topology_anchor) {
+        (
+            Type::Record(accumulated_fields),
+            Type::Record(parent_fields),
+            Type::Record(rollback_fields),
+            Type::Record(topology_fields),
+        ) if accumulated_fields.len() == parent_fields.len()
+            && accumulated_fields.len() == rollback_fields.len()
+            && accumulated_fields.len() == topology_fields.len() =>
+        {
+            let mut merged_fields = BTreeMap::new();
+            let mut effective_fields = BTreeMap::new();
+            for (name, accumulated_field) in accumulated_fields {
+                let (Some(parent_field), Some(rollback_field), Some(topology_field)) = (
+                    parent_fields.get(name),
+                    rollback_fields.get(name),
+                    topology_fields.get(name),
+                ) else {
+                    return scoped_checkpoint_rollback(rollback_anchor, path, rolled_back_paths);
+                };
+                path.push(SnapshotTopologyBoundary::RecordField(name.clone()));
+                let field = merge_multi_parent_checkpoint_value_scoped(
+                    accumulated_field,
+                    parent_field,
+                    rollback_field,
+                    topology_field,
+                    path,
+                    rolled_back_paths,
+                );
+                path.pop();
+                let Some(field) = field else {
+                    return scoped_checkpoint_rollback(rollback_anchor, path, rolled_back_paths);
+                };
+                rejected_scope |= field.rejected_scope;
+                merged_fields.insert(name.clone(), field.merged);
+                effective_fields.insert(name.clone(), field.effective_parent);
+            }
+            (Type::Record(merged_fields), Type::Record(effective_fields))
+        }
+        (
+            Type::Tuple(accumulated_slots),
+            Type::Tuple(parent_slots),
+            Type::Tuple(rollback_slots),
+            Type::Tuple(topology_slots),
+        ) if accumulated_slots.len() == parent_slots.len()
+            && accumulated_slots.len() == rollback_slots.len()
+            && accumulated_slots.len() == topology_slots.len() =>
+        {
+            let mut merged_slots = Vec::with_capacity(accumulated_slots.len());
+            let mut effective_slots = Vec::with_capacity(accumulated_slots.len());
+            for (index, ((accumulated_slot, parent_slot), (rollback_slot, topology_slot))) in
+                accumulated_slots
+                    .iter()
+                    .zip(parent_slots)
+                    .zip(rollback_slots.iter().zip(topology_slots))
+                    .enumerate()
+            {
+                path.push(SnapshotTopologyBoundary::TupleElement(index));
+                let slot = merge_multi_parent_checkpoint_value_scoped(
+                    accumulated_slot,
+                    parent_slot,
+                    rollback_slot,
+                    topology_slot,
+                    path,
+                    rolled_back_paths,
+                );
+                path.pop();
+                let Some(slot) = slot else {
+                    return scoped_checkpoint_rollback(rollback_anchor, path, rolled_back_paths);
+                };
+                rejected_scope |= slot.rejected_scope;
+                merged_slots.push(slot.merged);
+                effective_slots.push(slot.effective_parent);
+            }
+            (Type::Tuple(merged_slots), Type::Tuple(effective_slots))
+        }
+        (
+            Type::List(accumulated_element),
+            Type::List(parent_element),
+            Type::List(rollback_element),
+            Type::List(topology_element),
+        ) => {
+            let child = merge_scoped_checkpoint_child(
+                accumulated_element,
+                parent_element,
+                rollback_element,
+                topology_element,
+                SnapshotTopologyBoundary::ListElement,
+                path,
+                rolled_back_paths,
+            );
+            let Some(child) = child else {
+                return scoped_checkpoint_rollback(rollback_anchor, path, rolled_back_paths);
+            };
+            rejected_scope |= child.rejected_scope;
+            (
+                Type::List(Box::new(child.merged)),
+                Type::List(Box::new(child.effective_parent)),
+            )
+        }
+        (
+            Type::Range(accumulated_element),
+            Type::Range(parent_element),
+            Type::Range(rollback_element),
+            Type::Range(topology_element),
+        ) => {
+            let child = merge_scoped_checkpoint_child(
+                accumulated_element,
+                parent_element,
+                rollback_element,
+                topology_element,
+                SnapshotTopologyBoundary::RangeElement,
+                path,
+                rolled_back_paths,
+            );
+            let Some(child) = child else {
+                return scoped_checkpoint_rollback(rollback_anchor, path, rolled_back_paths);
+            };
+            rejected_scope |= child.rejected_scope;
+            (
+                Type::Range(Box::new(child.merged)),
+                Type::Range(Box::new(child.effective_parent)),
+            )
+        }
+        (
+            Type::Relation(accumulated_element),
+            Type::Relation(parent_element),
+            Type::Relation(rollback_element),
+            Type::Relation(topology_element),
+        ) => {
+            let child = merge_scoped_checkpoint_child(
+                accumulated_element,
+                parent_element,
+                rollback_element,
+                topology_element,
+                SnapshotTopologyBoundary::RelationElement,
+                path,
+                rolled_back_paths,
+            );
+            let Some(child) = child else {
+                return scoped_checkpoint_rollback(rollback_anchor, path, rolled_back_paths);
+            };
+            rejected_scope |= child.rejected_scope;
+            (
+                Type::Relation(Box::new(child.merged)),
+                Type::Relation(Box::new(child.effective_parent)),
+            )
+        }
+        (
+            Type::Stream(accumulated_element),
+            Type::Stream(parent_element),
+            Type::Stream(rollback_element),
+            Type::Stream(topology_element),
+        ) => {
+            let child = merge_scoped_checkpoint_child(
+                accumulated_element,
+                parent_element,
+                rollback_element,
+                topology_element,
+                SnapshotTopologyBoundary::StreamElement,
+                path,
+                rolled_back_paths,
+            );
+            let Some(child) = child else {
+                return scoped_checkpoint_rollback(rollback_anchor, path, rolled_back_paths);
+            };
+            rejected_scope |= child.rejected_scope;
+            (
+                Type::Stream(Box::new(child.merged)),
+                Type::Stream(Box::new(child.effective_parent)),
+            )
+        }
+        (
+            Type::Optional(accumulated_value),
+            Type::Optional(parent_value),
+            Type::Optional(rollback_value),
+            Type::Optional(topology_value),
+        ) => {
+            let child = merge_scoped_checkpoint_child(
+                accumulated_value,
+                parent_value,
+                rollback_value,
+                topology_value,
+                SnapshotTopologyBoundary::OptionalValue,
+                path,
+                rolled_back_paths,
+            );
+            let Some(child) = child else {
+                return scoped_checkpoint_rollback(rollback_anchor, path, rolled_back_paths);
+            };
+            rejected_scope |= child.rejected_scope;
+            (
+                Type::Optional(Box::new(child.merged)),
+                Type::Optional(Box::new(child.effective_parent)),
+            )
+        }
+        _ => return scoped_checkpoint_rollback(rollback_anchor, path, rolled_back_paths),
+    };
+
+    if !checkpoint_pin_map_widths_match(topology_anchor, &effective_parent)
+        || !checkpoint_value_pin_identity_topology_matches(topology_anchor, &effective_parent)
+        || !nested_checkpoint_compaction_fold_preserves_pin_identity(accumulated, &effective_parent)
+    {
+        return scoped_checkpoint_rollback(rollback_anchor, path, rolled_back_paths);
+    }
+
+    Some(ScopedCheckpointFold {
+        merged,
+        effective_parent,
+        rejected_scope,
+    })
+}
+
+fn merge_scoped_checkpoint_child(
+    accumulated: &Type,
+    parent: &Type,
+    rollback_anchor: &Type,
+    topology_anchor: &Type,
+    boundary: SnapshotTopologyBoundary,
+    path: &mut Vec<SnapshotTopologyBoundary>,
+    rolled_back_paths: &mut BTreeSet<Vec<SnapshotTopologyBoundary>>,
+) -> Option<ScopedCheckpointFold> {
+    path.push(boundary);
+    let child = merge_multi_parent_checkpoint_value_scoped(
+        accumulated,
+        parent,
+        rollback_anchor,
+        topology_anchor,
+        path,
+        rolled_back_paths,
+    );
+    path.pop();
+    child
+}
+
+fn scoped_checkpoint_rollback(
+    rollback_anchor: &Type,
+    path: &[SnapshotTopologyBoundary],
+    rolled_back_paths: &mut BTreeSet<Vec<SnapshotTopologyBoundary>>,
+) -> Option<ScopedCheckpointFold> {
+    rolled_back_paths.insert(path.to_vec());
+    Some(ScopedCheckpointFold {
+        merged: rollback_anchor.clone(),
+        effective_parent: rollback_anchor.clone(),
+        rejected_scope: true,
+    })
+}
+
+/// Compare selector topology only for paired record boundaries whose values
+/// contain pinned tuples without crossing collection or closure boundaries.
+/// This lets a partially omitted first row acquire its depth relation, then
+/// prevents later rows in the same storm from splitting that learned pair.
+fn checkpoint_paired_boundary_fold_topology_matches(
+    accumulated: &Type,
+    parent: &Type,
+    topology_anchor: &Type,
+) -> bool {
+    let (Type::Record(accumulated_fields), Type::Record(parent_fields), Type::Record(anchor_fields)) =
+        (accumulated, parent, topology_anchor)
+    else {
+        return true;
+    };
+
+    let paired_field_names = anchor_fields
+        .iter()
+        .filter_map(|(name, anchor)| {
+            (type_contains_pinned_tuple_through_records(anchor)
+                && accumulated_fields
+                    .get(name)
+                    .is_some_and(type_contains_pinned_tuple_through_records)
+                && parent_fields
+                    .get(name)
+                    .is_some_and(type_contains_pinned_tuple_through_records))
+            .then_some(name)
+        })
+        .collect::<Vec<_>>();
+    if paired_field_names.len() < 2 {
+        return true;
+    }
+
+    let mut learned = Vec::new();
+    for name in paired_field_names {
+        let (Some(anchor), Some(accumulated), Some(parent)) = (
+            anchor_fields.get(name),
+            accumulated_fields.get(name),
+            parent_fields.get(name),
+        ) else {
+            continue;
+        };
+        let mut anchor_to_accumulated = Vec::new();
+        let mut anchor_to_parent = Vec::new();
+        // A nested shape mismatch is handled by the existing scoped fold. Use
+        // only the corresponding maps collected before that boundary.
+        let _ = collect_corresponding_snapshot_context_maps_at_path(
+            anchor,
+            accumulated,
+            &mut anchor_to_accumulated,
+            &mut Vec::new(),
+        );
+        let _ = collect_corresponding_snapshot_context_maps_at_path(
+            anchor,
+            parent,
+            &mut anchor_to_parent,
+            &mut Vec::new(),
+        );
+        for pair in &mut anchor_to_accumulated {
+            pair.boundary_path
+                .insert(0, SnapshotTopologyBoundary::RecordField(name.clone()));
+        }
+        let parent_maps = anchor_to_parent
+            .into_iter()
+            .map(|mut pair| {
+                pair.boundary_path
+                    .insert(0, SnapshotTopologyBoundary::RecordField(name.clone()));
+                (pair.boundary_path.clone(), pair)
+            })
+            .collect::<BTreeMap<_, _>>();
+        learned.extend(anchor_to_accumulated.iter().filter_map(|accumulated| {
+            let parent = parent_maps.get(&accumulated.boundary_path)?;
+            (accumulated.expected.is_empty()
+                && !accumulated.actual.is_empty()
+                && !parent.actual.is_empty())
+            .then(|| SnapshotContextMapPair {
+                boundary_path: accumulated.boundary_path.clone(),
+                expected: accumulated.actual.clone(),
+                actual: parent.actual.clone(),
+            })
+        }));
+    }
+
+    let paired_maps = learned
+        .iter()
+        .filter(|candidate| {
+            learned.iter().any(|other| {
+                other.boundary_path != candidate.boundary_path
+                    && checkpoint_paths_are_paired_boundaries(
+                        &candidate.boundary_path,
+                        &other.boundary_path,
+                    )
+            })
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    if paired_maps.len() < 2 {
+        return true;
+    }
+
+    let membership_shapes = |expected: bool| {
+        let mut labels = BTreeMap::<String, BTreeSet<Vec<SnapshotTopologyBoundary>>>::new();
+        for pair in &paired_maps {
+            let selectors = if expected {
+                &pair.expected
+            } else {
+                &pair.actual
+            };
+            for selector in selectors {
+                labels
+                    .entry(selector.clone())
+                    .or_default()
+                    .insert(pair.boundary_path.clone());
+            }
+        }
+        labels
+            .into_values()
+            .map(|membership| membership.into_iter().collect::<Vec<_>>())
+            .collect::<BTreeSet<_>>()
+    };
+
+    membership_shapes(true) == membership_shapes(false)
+}
+
+fn type_contains_pinned_tuple_through_records(ty: &Type) -> bool {
+    match ty {
+        Type::Record(fields) => fields.values().any(|field| {
+            matches!(field, Type::Tuple(_)) && type_contains_pinned_snapshot_identity(field)
+        }),
+        _ => false,
+    }
+}
+
+fn checkpoint_paths_are_paired_boundaries(
+    left: &[SnapshotTopologyBoundary],
+    right: &[SnapshotTopologyBoundary],
+) -> bool {
+    if left.len() != right.len() {
+        return false;
+    }
+    let mut sibling_record_field = None;
+    let mut shared_tuple_depth = None;
+    for (index, (left, right)) in left.iter().zip(right).enumerate() {
+        if left == right {
+            if matches!(left, SnapshotTopologyBoundary::TupleElement(_))
+                && shared_tuple_depth.is_none()
+            {
+                shared_tuple_depth = Some(index);
+            }
+        } else if matches!(
+            (left, right),
+            (
+                SnapshotTopologyBoundary::RecordField(_),
+                SnapshotTopologyBoundary::RecordField(_)
+            )
+        ) {
+            if sibling_record_field.replace(index).is_some() {
+                return false;
+            }
+        } else {
+            return false;
+        }
+    }
+    let (Some(sibling_record_field_index), Some(shared_tuple_depth_index)) =
+        (sibling_record_field, shared_tuple_depth)
+    else {
+        return false;
+    };
+    sibling_record_field_index < shared_tuple_depth_index
+        && left[sibling_record_field_index + 1..shared_tuple_depth_index]
+            .iter()
+            .all(|boundary| matches!(boundary, SnapshotTopologyBoundary::RecordField(_)))
 }
 
 /// ORNA-CP-003 and ORNA-SYS-136 define explicit snapshot selection, but do not

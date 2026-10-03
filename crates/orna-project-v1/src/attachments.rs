@@ -1032,6 +1032,43 @@ impl PackageResolver {
         Ok(SiblingRebindResolution { routes })
     }
 
+    /// Continues a sibling checkpoint-storm result with one plan per parent
+    /// row. Plans are paired with routes by input index, and each checkpoint
+    /// is validated only against the route at that index. The reference is
+    /// silent on nested multi-parent folds; v1 requires matching row counts
+    /// and revalidates every pre-existing depth identity after the folds.
+    /// No partial result is returned if any row fails.
+    pub fn extend_sibling_terminal_pair_checkpoint_storms_from_siblings(
+        &self,
+        previous: &SiblingRebindResolution,
+        storms_by_row: &[&[(&ReboundPathCheckpoint, &[[PinnedDatabase; 2]])]],
+    ) -> Result<SiblingRebindResolution, AttachmentError> {
+        if storms_by_row.len() != previous.routes.len() {
+            return Err(AttachmentError::RetainedSnapshotUnavailable);
+        }
+        for (route, storms) in storms_by_row.iter().enumerate() {
+            for (checkpoint, _) in *storms {
+                previous.validate_handoff_checkpoint(route, checkpoint)?;
+            }
+        }
+        let paths = previous
+            .routes
+            .iter()
+            .zip(storms_by_row)
+            .map(|(route, storms)| (route, *storms))
+            .collect::<Vec<_>>();
+        let folded = self.extend_sibling_terminal_pair_checkpoint_storms(&paths)?;
+        for (previous_route, folded_route) in previous.routes.iter().zip(&folded.routes) {
+            for (wave, length) in previous_route.retained_wave_lengths.iter().enumerate() {
+                for depth in 0..*length {
+                    let label = previous_route.retained_depth_label(wave, depth)?;
+                    folded_route.validate_depth_label(&label)?;
+                }
+            }
+        }
+        Ok(folded)
+    }
+
     /// Rebinds each terminal pair in a storm from one saved checkpoint.
     /// Every fold starts from the same exact nested pins and appends that
     /// checkpoint route to retained history. Each emitted route receives its
@@ -1551,6 +1588,22 @@ impl SiblingRebindResolution {
             .get(route)
             .ok_or(AttachmentError::RetainedSnapshotUnavailable)?
             .handoff_checkpoint(wave, depth)
+    }
+
+    /// Verifies that a checkpoint belongs to one retained sibling row.
+    /// Equal pins and wave/depth coordinates in another row do not transfer
+    /// identity. The reference does not define cross-row checkpoint reuse;
+    /// v1 accepts only the selected row's original route and snapshot token.
+    pub fn validate_handoff_checkpoint(
+        &self,
+        route: usize,
+        checkpoint: &ReboundPathCheckpoint,
+    ) -> Result<(), AttachmentError> {
+        checkpoint.validate_depth_identity()?;
+        self.routes
+            .get(route)
+            .ok_or(AttachmentError::RetainedSnapshotUnavailable)?
+            .validate_depth_label(&checkpoint.depth_label)
     }
 
     /// Takes ownership of the sibling results in input order.
