@@ -1,0 +1,7 @@
+use sys.query as query_ops;
+
+pub fn explain_stream_compaction_costs(query: Query<Int>): sys.Plan =
+    query_ops.plan_hint(query);
+
+pub fn paired_stream_compaction_coordinates(): Text =
+    "restore, handoff, source stream, compaction, fold, order, checkpoint sides, redo fold, paired segments";
