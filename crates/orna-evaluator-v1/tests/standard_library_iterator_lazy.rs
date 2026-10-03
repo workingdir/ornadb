@@ -69,7 +69,10 @@ fn pinned_iterator_and_lazy_modules_are_snapshot_bound_and_catalogued() {
     let sources = orna_standard::reference_standard_sources_v1()
         .into_iter()
         .filter(|(path, _)| {
-            path == "std/collection.orna" || path == "std/iterator.orna" || path == "std/lazy.orna"
+            path == "std/collection.orna"
+                || path == "std/iterator.orna"
+                || path == "std/iterator/adapters.orna"
+                || path == "std/lazy.orna"
         })
         .collect::<Vec<_>>();
     let profile =
@@ -80,7 +83,11 @@ fn pinned_iterator_and_lazy_modules_are_snapshot_bound_and_catalogued() {
             .verify_source(path, source)
             .expect("selected std module bytes match their captured snapshot");
     }
-    for path in ["std/iterator.orna", "std/lazy.orna"] {
+    for path in [
+        "std/iterator.orna",
+        "std/iterator/adapters.orna",
+        "std/lazy.orna",
+    ] {
         let mut changed = sources
             .iter()
             .find(|(source_path, _)| source_path == path)
@@ -145,6 +152,23 @@ fn pinned_iterator_and_lazy_modules_are_snapshot_bound_and_catalogued() {
         lazy_source.contains("pub fn zip_with<T, U, V>("),
         "missing delayed lazy zip-with export"
     );
+
+    let adapters_source = &sources
+        .iter()
+        .find(|(path, _)| path == "std/iterator/adapters.orna")
+        .expect("the captured iterator adapter module")
+        .1;
+    for declaration in [
+        "pub fn filter_map<T, U>(",
+        "pub fn flat_map<T, U>(",
+        "pub fn flatten<T>(",
+        "pub fn skip_while<T>(",
+    ] {
+        assert!(
+            adapters_source.contains(declaration),
+            "missing iterator adapter export `{declaration}`"
+        );
+    }
 
     let catalogue = Catalogue::authoritative_core()
         .with_standard_sources(&profile, sources.clone())
@@ -347,5 +371,55 @@ fn iterator_zip_uses_shortest_input_order_and_persistent_cursor_ownership() {
         )
         .unwrap_or_else(|error| panic!("evaluation of {source} failed: {}", error.code()));
         assert_eq!(actual, canonical(Raw::Bool(true)), "{source}");
+    }
+}
+
+#[test]
+fn iterator_adapters_return_ordered_computed_values() {
+    let functions = pinned_functions();
+    let nominals = pinned_iterator_nominals();
+    let evaluate = |source: &str| {
+        let parsed = orna_syntax_v1::parse_expression(source);
+        assert!(parsed.is_ok(), "{}: {:#?}", source, parsed.diagnostics);
+        evaluate_with_functions_and_nominals(
+            &parsed.value,
+            &Environment::new(),
+            &functions,
+            &nominals,
+            Limits::default(),
+        )
+        .unwrap_or_else(|error| panic!("evaluation of {source} failed: {}", error.code()))
+    };
+
+    for (source, expected) in [
+        (
+            include_str!("fixtures/stdlib-iterator-adapters-filter-map-da2ol.orna"),
+            canonical(Raw::Array(vec![int(20), int(40)])),
+        ),
+        (
+            include_str!("fixtures/stdlib-iterator-adapters-filter-map-some-null-da2ol.orna"),
+            canonical(Raw::Array(vec![Raw::Null])),
+        ),
+        (
+            include_str!("fixtures/stdlib-iterator-adapters-flat-map-da2ol.orna"),
+            canonical(Raw::Array(vec![
+                int(2),
+                int(20),
+                int(1),
+                int(10),
+                int(3),
+                int(30),
+            ])),
+        ),
+        (
+            include_str!("fixtures/stdlib-iterator-adapters-flatten-da2ol.orna"),
+            canonical(Raw::Array(vec![int(1), int(2), int(3)])),
+        ),
+        (
+            include_str!("fixtures/stdlib-iterator-adapters-skip-while-da2ol.orna"),
+            canonical(Raw::Array(vec![int(3), int(4), int(5)])),
+        ),
+    ] {
+        assert_eq!(evaluate(source), expected, "unexpected output for {source}");
     }
 }
