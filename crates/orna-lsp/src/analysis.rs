@@ -22,10 +22,13 @@ use orna_semantic_v1::{
 use orna_standard::reference_standard_catalogue_v1;
 use orna_syntax::FunctionReturnType;
 use orna_syntax::{
-    ClientExpression, ClientFunctionDeclaration, EnumTypeDeclaration, HighlightKind,
-    ObjectTypeDeclaration, OpaqueValueTypeDeclaration, Parse, PrimitiveValueTypeDeclaration,
-    QualifiedName, RecordValueTypeDeclaration, SchemaDeclaration, ServerFunctionDeclaration,
+    ClientExpression, ClientFunctionDeclaration, EnumTypeDeclaration, HighlightKind, IdentifierKey,
+    LanguageDeclaration, LanguageDeclarationKind, ObjectTypeDeclaration,
+    OpaqueValueTypeDeclaration, Parse, PrimitiveValueTypeDeclaration, QualifiedName,
+    RecordValueTypeDeclaration, SchemaDeclaration, ServerFunctionDeclaration,
     ServerFunctionParameter, SourceSlice, SourceSpan, StandardLargeObjectKind, TypeSpecification,
+    identifier_key, identifier_spelling_matches, qualified_name_matches_keys,
+    qualified_names_match, source_name_parts,
 };
 
 use crate::documents::{Document, PositionMapper};
@@ -511,6 +514,23 @@ impl DeclarationRef<'_> {
     }
 }
 
+impl<'a> From<LanguageDeclaration<'a>> for DeclarationRef<'a> {
+    fn from(declaration: LanguageDeclaration<'a>) -> Self {
+        match declaration {
+            LanguageDeclaration::Schema(declaration) => Self::Schema(declaration),
+            LanguageDeclaration::ObjectType(declaration) => Self::ObjectType(declaration),
+            LanguageDeclaration::EnumType(declaration) => Self::EnumType(declaration),
+            LanguageDeclaration::RecordValueType(declaration) => Self::RecordValueType(declaration),
+            LanguageDeclaration::PrimitiveValueType(declaration) => {
+                Self::PrimitiveValueType(declaration)
+            }
+            LanguageDeclaration::OpaqueValueType(declaration) => Self::OpaqueValueType(declaration),
+            LanguageDeclaration::ServerFunction(declaration) => Self::ServerFunction(declaration),
+            LanguageDeclaration::ClientFunction(declaration) => Self::ClientFunction(declaration),
+        }
+    }
+}
+
 /// Returns the token at one byte offset, including keywords.
 fn token_at(
     text: &str,
@@ -543,64 +563,6 @@ fn token_at(
             )
         })
 }
-#[derive(Clone, PartialEq, Eq)]
-enum IdentifierKey {
-    Quoted(String),
-    Unquoted(String),
-}
-
-/// Canonicalizes one source identifier using Orna's quoted-name rules.
-///
-/// Unquoted identifiers are case-insensitive. Quoted identifiers preserve
-/// exact spelling and do not match an unquoted identifier.
-fn identifier_key(spelling: &str) -> IdentifierKey {
-    if spelling.starts_with('"') && spelling.ends_with('"') {
-        IdentifierKey::Quoted(spelling.to_owned())
-    } else {
-        IdentifierKey::Unquoted(spelling.chars().flat_map(char::to_lowercase).collect())
-    }
-}
-
-fn identifier_spelling_matches(candidate: &str, query: &str) -> bool {
-    identifier_key(candidate) == identifier_key(query)
-}
-
-fn source_name_parts(name: &str) -> Vec<&str> {
-    let bytes = name.as_bytes();
-    let mut parts = Vec::new();
-    let mut start = 0;
-    let mut quoted = false;
-    let mut index = 0;
-    while index < bytes.len() {
-        match bytes[index] {
-            b'"' => {
-                if quoted && bytes.get(index + 1) == Some(&b'"') {
-                    index += 1;
-                } else {
-                    quoted = !quoted;
-                }
-            }
-            b'.' if !quoted => {
-                parts.push(&name[start..index]);
-                start = index + 1;
-            }
-            _ => {}
-        }
-        index += 1;
-    }
-    parts.push(&name[start..]);
-    parts
-}
-
-fn qualified_name_matches_keys(name: &QualifiedName, keys: &[IdentifierKey]) -> bool {
-    name.parts.len() == keys.len()
-        && name
-            .parts
-            .iter()
-            .zip(keys)
-            .all(|(part, key)| &identifier_key(&part.text) == key)
-}
-
 fn dotted_name_separator(text: &str, start: usize, end: usize) -> bool {
     let bytes = text.as_bytes();
     let mut index = start;
@@ -699,63 +661,31 @@ pub fn declaration_at<'a>(parse: &'a Parse, name: &str) -> Option<DeclarationRef
         }
     };
 
-    if let Some(declaration) = parse
-        .schemas()
-        .iter()
-        .find(|declaration| matches(&declaration.name))
-    {
-        return Some(DeclarationRef::Schema(declaration));
+    parse
+        .language_model()
+        .declarations()
+        .into_iter()
+        .filter(|declaration| matches(declaration.name()))
+        .min_by_key(|declaration| {
+            (
+                declaration_lookup_priority(declaration.kind()),
+                declaration.span().start,
+            )
+        })
+        .map(DeclarationRef::from)
+}
+
+fn declaration_lookup_priority(kind: LanguageDeclarationKind) -> u8 {
+    match kind {
+        LanguageDeclarationKind::Schema => 0,
+        LanguageDeclarationKind::ObjectType => 1,
+        LanguageDeclarationKind::EnumType => 2,
+        LanguageDeclarationKind::RecordValueType => 3,
+        LanguageDeclarationKind::PrimitiveValueType => 4,
+        LanguageDeclarationKind::OpaqueValueType => 5,
+        LanguageDeclarationKind::ServerFunction => 6,
+        LanguageDeclarationKind::ClientFunction => 7,
     }
-    if let Some(declaration) = parse
-        .object_types()
-        .iter()
-        .find(|declaration| matches(&declaration.name))
-    {
-        return Some(DeclarationRef::ObjectType(declaration));
-    }
-    if let Some(declaration) = parse
-        .enum_types()
-        .iter()
-        .find(|declaration| matches(&declaration.name))
-    {
-        return Some(DeclarationRef::EnumType(declaration));
-    }
-    if let Some(declaration) = parse
-        .record_value_types()
-        .iter()
-        .find(|declaration| matches(&declaration.name))
-    {
-        return Some(DeclarationRef::RecordValueType(declaration));
-    }
-    if let Some(declaration) = parse
-        .primitive_value_types()
-        .iter()
-        .find(|declaration| matches(&declaration.name))
-    {
-        return Some(DeclarationRef::PrimitiveValueType(declaration));
-    }
-    if let Some(declaration) = parse
-        .opaque_value_types()
-        .iter()
-        .find(|declaration| matches(&declaration.name))
-    {
-        return Some(DeclarationRef::OpaqueValueType(declaration));
-    }
-    if let Some(declaration) = parse
-        .server_functions()
-        .iter()
-        .find(|declaration| matches(&declaration.name))
-    {
-        return Some(DeclarationRef::ServerFunction(declaration));
-    }
-    if let Some(declaration) = parse
-        .client_functions()
-        .iter()
-        .find(|declaration| matches(&declaration.name))
-    {
-        return Some(DeclarationRef::ClientFunction(declaration));
-    }
-    None
 }
 
 fn declaration_for_keys<'a>(
@@ -763,113 +693,36 @@ fn declaration_for_keys<'a>(
     keys: &[IdentifierKey],
     kind: HighlightKind,
 ) -> Option<DeclarationRef<'a>> {
-    let matches = |name: &QualifiedName| qualified_name_matches_keys(name, keys);
-    match kind {
-        HighlightKind::NamespaceName => parse
-            .schemas()
-            .iter()
-            .find(|declaration| matches(&declaration.name))
-            .map(DeclarationRef::Schema),
-        HighlightKind::TypeName => parse
-            .object_types()
-            .iter()
-            .find(|declaration| matches(&declaration.name))
-            .map(DeclarationRef::ObjectType)
-            .or_else(|| {
-                parse
-                    .enum_types()
-                    .iter()
-                    .find(|declaration| matches(&declaration.name))
-                    .map(DeclarationRef::EnumType)
-            })
-            .or_else(|| {
-                parse
-                    .record_value_types()
-                    .iter()
-                    .find(|declaration| matches(&declaration.name))
-                    .map(DeclarationRef::RecordValueType)
-            })
-            .or_else(|| {
-                parse
-                    .primitive_value_types()
-                    .iter()
-                    .find(|declaration| matches(&declaration.name))
-                    .map(DeclarationRef::PrimitiveValueType)
-            })
-            .or_else(|| {
-                parse
-                    .opaque_value_types()
-                    .iter()
-                    .find(|declaration| matches(&declaration.name))
-                    .map(DeclarationRef::OpaqueValueType)
-            }),
-        HighlightKind::FunctionName => parse
-            .server_functions()
-            .iter()
-            .find(|declaration| matches(&declaration.name))
-            .map(DeclarationRef::ServerFunction)
-            .or_else(|| {
-                parse
-                    .client_functions()
-                    .iter()
-                    .find(|declaration| matches(&declaration.name))
-                    .map(DeclarationRef::ClientFunction)
-            }),
-        _ => parse
-            .schemas()
-            .iter()
-            .find(|declaration| matches(&declaration.name))
-            .map(DeclarationRef::Schema)
-            .or_else(|| {
-                parse
-                    .object_types()
-                    .iter()
-                    .find(|declaration| matches(&declaration.name))
-                    .map(DeclarationRef::ObjectType)
-            })
-            .or_else(|| {
-                parse
-                    .enum_types()
-                    .iter()
-                    .find(|declaration| matches(&declaration.name))
-                    .map(DeclarationRef::EnumType)
-            })
-            .or_else(|| {
-                parse
-                    .record_value_types()
-                    .iter()
-                    .find(|declaration| matches(&declaration.name))
-                    .map(DeclarationRef::RecordValueType)
-            })
-            .or_else(|| {
-                parse
-                    .primitive_value_types()
-                    .iter()
-                    .find(|declaration| matches(&declaration.name))
-                    .map(DeclarationRef::PrimitiveValueType)
-            })
-            .or_else(|| {
-                parse
-                    .opaque_value_types()
-                    .iter()
-                    .find(|declaration| matches(&declaration.name))
-                    .map(DeclarationRef::OpaqueValueType)
-            })
-            .or_else(|| {
-                parse
-                    .server_functions()
-                    .iter()
-                    .find(|declaration| matches(&declaration.name))
-                    .map(DeclarationRef::ServerFunction)
-            })
-            .or_else(|| {
-                parse
-                    .client_functions()
-                    .iter()
-                    .find(|declaration| matches(&declaration.name))
-                    .map(DeclarationRef::ClientFunction)
-            }),
-    }
+    let supported = |declaration: &LanguageDeclaration<'_>| match kind {
+        HighlightKind::NamespaceName => declaration.kind() == LanguageDeclarationKind::Schema,
+        HighlightKind::TypeName => matches!(
+            declaration.kind(),
+            LanguageDeclarationKind::ObjectType
+                | LanguageDeclarationKind::EnumType
+                | LanguageDeclarationKind::RecordValueType
+                | LanguageDeclarationKind::PrimitiveValueType
+                | LanguageDeclarationKind::OpaqueValueType
+        ),
+        HighlightKind::FunctionName => matches!(
+            declaration.kind(),
+            LanguageDeclarationKind::ServerFunction | LanguageDeclarationKind::ClientFunction
+        ),
+        _ => true,
+    };
+    parse
+        .language_model()
+        .declarations()
+        .into_iter()
+        .filter(|declaration| {
+            supported(declaration) && qualified_name_matches_keys(declaration.name(), keys)
+        })
+        .min_by_key(|declaration| {
+            (
+                declaration_lookup_priority(declaration.kind()),
+                declaration.span().start,
+            )
+        })
+        .map(DeclarationRef::from)
 }
 
 fn top_level_declaration_at_span<'a>(
@@ -1714,14 +1567,6 @@ fn client_call_callee_at<'a>(
     })
 }
 
-fn qualified_names_match(left: &QualifiedName, right: &QualifiedName) -> bool {
-    left.parts.len() == right.parts.len()
-        && left
-            .parts
-            .iter()
-            .zip(&right.parts)
-            .all(|(left, right)| identifier_spelling_matches(&left.text, &right.text))
-}
 fn type_owner_name(specification: &TypeSpecification) -> Option<QualifiedName> {
     match specification {
         TypeSpecification::Named(name) => Some(name.clone()),
@@ -3784,14 +3629,10 @@ pub fn signature_help(
             DeclarationRef::ServerFunction(function) => {
                 return Some(signature_information(
                     format!("SERVER FUNCTION {}", qualified_name_text(&function.name)),
-                    function.parameters.iter().map(|parameter| {
-                        (
-                            parameter.name.text.clone(),
-                            parameter.documentation.as_ref().and_then(|documentation| {
-                                documentation_text(Some(documentation)).map(str::to_owned)
-                            }),
-                        )
-                    }),
+                    function
+                        .parameters
+                        .iter()
+                        .map(|parameter| signature_parameter_info(parse, parameter)),
                     return_text(&function.return_type, &document.text),
                     active_parameter,
                 ));
@@ -3799,14 +3640,10 @@ pub fn signature_help(
             DeclarationRef::ClientFunction(function) => {
                 return Some(signature_information(
                     format!("CLIENT FUNCTION {}", qualified_name_text(&function.name)),
-                    function.parameters.iter().map(|parameter| {
-                        (
-                            parameter.name.text.clone(),
-                            parameter.documentation.as_ref().and_then(|documentation| {
-                                documentation_text(Some(documentation)).map(str::to_owned)
-                            }),
-                        )
-                    }),
+                    function
+                        .parameters
+                        .iter()
+                        .map(|parameter| signature_parameter_info(parse, parameter)),
                     return_text(&function.return_type, &document.text),
                     active_parameter,
                 ));
@@ -3825,6 +3662,20 @@ pub fn signature_help(
         function.return_type,
         active_parameter,
     ))
+}
+
+fn signature_parameter_info(
+    parse: &Parse,
+    parameter: &ServerFunctionParameter,
+) -> (String, Option<String>) {
+    let modifier = parameter
+        .documentation
+        .as_ref()
+        .and_then(|documentation| documentation_text(Some(documentation)));
+    (
+        parameter.name.text.clone(),
+        crate::hover::documentation_for(parse, &parameter.name, modifier),
+    )
 }
 
 /// Finds the start of the qualified callable name immediately before `open`.
@@ -4201,123 +4052,52 @@ pub fn completion_at(
                 ..CompletionItem::default()
             });
         };
-    for schema in parse.schemas() {
+    for declaration in parse.language_model().declarations() {
+        let (kind, detail) = match declaration {
+            LanguageDeclaration::Schema(_) => (CompletionItemKind::MODULE, "schema".to_owned()),
+            LanguageDeclaration::ObjectType(_) => {
+                (CompletionItemKind::INTERFACE, "object type".to_owned())
+            }
+            LanguageDeclaration::EnumType(_) => (CompletionItemKind::ENUM, "enum type".to_owned()),
+            LanguageDeclaration::RecordValueType(_) => {
+                (CompletionItemKind::STRUCT, "record value type".to_owned())
+            }
+            LanguageDeclaration::PrimitiveValueType(_) => (
+                CompletionItemKind::STRUCT,
+                "primitive value type".to_owned(),
+            ),
+            LanguageDeclaration::OpaqueValueType(_) => {
+                (CompletionItemKind::STRUCT, "opaque value type".to_owned())
+            }
+            LanguageDeclaration::ServerFunction(function) => {
+                let detail = if target_completion.is_some_and(|constructor| {
+                    server_target_is_eligible(parse, function, constructor, standard)
+                }) {
+                    "server function target"
+                } else {
+                    "server function"
+                };
+                (CompletionItemKind::FUNCTION, detail.to_owned())
+            }
+            LanguageDeclaration::ClientFunction(function) => {
+                let detail = if target_completion.is_some_and(|constructor| {
+                    client_target_is_eligible(function, constructor, standard)
+                }) {
+                    "client function target"
+                } else {
+                    "client function"
+                };
+                (CompletionItemKind::FUNCTION, detail.to_owned())
+            }
+        };
+        let name = declaration.name();
         add_named(
-            last_name(&schema.name),
-            CompletionItemKind::MODULE,
-            "schema".to_owned(),
-            schema
-                .name
-                .parts
-                .last()
-                .and_then(|name| parse.documentation_comment(name))
-                .map(str::to_owned),
-        );
-    }
-    for declaration in parse.object_types() {
-        add_named(
-            last_name(&declaration.name),
-            CompletionItemKind::INTERFACE,
-            "object type".to_owned(),
-            declaration
-                .name
-                .parts
-                .last()
-                .and_then(|name| parse.documentation_comment(name))
-                .map(str::to_owned),
-        );
-    }
-    for declaration in parse.enum_types() {
-        add_named(
-            last_name(&declaration.name),
-            CompletionItemKind::ENUM,
-            "enum type".to_owned(),
-            declaration
-                .name
-                .parts
-                .last()
-                .and_then(|name| parse.documentation_comment(name))
-                .map(str::to_owned),
-        );
-    }
-    for declaration in parse.record_value_types() {
-        add_named(
-            last_name(&declaration.name),
-            CompletionItemKind::STRUCT,
-            "record value type".to_owned(),
-            declaration
-                .name
-                .parts
-                .last()
-                .and_then(|name| parse.documentation_comment(name))
-                .map(str::to_owned),
-        );
-    }
-    for declaration in parse.primitive_value_types() {
-        add_named(
-            last_name(&declaration.name),
-            CompletionItemKind::STRUCT,
-            "primitive value type".to_owned(),
-            declaration
-                .name
-                .parts
-                .last()
-                .and_then(|name| parse.documentation_comment(name))
-                .map(str::to_owned),
-        );
-    }
-    for declaration in parse.opaque_value_types() {
-        add_named(
-            last_name(&declaration.name),
-            CompletionItemKind::STRUCT,
-            "opaque value type".to_owned(),
-            declaration
-                .name
-                .parts
-                .last()
-                .and_then(|name| parse.documentation_comment(name))
-                .map(str::to_owned),
-        );
-    }
-    for declaration in parse.server_functions() {
-        let detail = if target_completion.is_some_and(|constructor| {
-            server_target_is_eligible(parse, declaration, constructor, standard)
-        }) {
-            "server function target"
-        } else {
-            "server function"
-        }
-        .to_owned();
-        add_named(
-            last_name(&declaration.name),
-            CompletionItemKind::FUNCTION,
+            last_name(name),
+            kind,
             detail,
-            declaration
-                .name
-                .parts
+            name.parts
                 .last()
-                .and_then(|name| parse.documentation_comment(name))
-                .map(str::to_owned),
-        );
-    }
-    for declaration in parse.client_functions() {
-        let detail = if target_completion.is_some_and(|constructor| {
-            client_target_is_eligible(declaration, constructor, standard)
-        }) {
-            "client function target"
-        } else {
-            "client function"
-        }
-        .to_owned();
-        add_named(
-            last_name(&declaration.name),
-            CompletionItemKind::FUNCTION,
-            detail,
-            declaration
-                .name
-                .parts
-                .last()
-                .and_then(|name| parse.documentation_comment(name))
+                .and_then(|part| parse.documentation_comment(part))
                 .map(str::to_owned),
         );
     }

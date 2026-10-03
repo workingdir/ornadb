@@ -1802,6 +1802,62 @@ fn semantic_rename_updates_references_for_one_persistent_object() {
 }
 
 #[test]
+fn language_model_rename_projects_parsed_references_across_open_documents() {
+    let declaration_source = include_str!(
+        "fixtures/lsp-e2e-020-language-model-rename-declaration.orna"
+    );
+    let reference_source = include_str!(
+        "fixtures/lsp-e2e-021-language-model-rename-references.orna"
+    );
+    let mut client = Client::spawn();
+    initialize(&mut client);
+    let declaration_uri = "file:///test/language-model-declaration.orna";
+    let reference_uri = "file:///test/language-model-references.orna";
+    open_document(&mut client, declaration_uri, declaration_source, 1);
+    assert_eq!(
+        client.read_notification("textDocument/publishDiagnostics")["uri"],
+        declaration_uri
+    );
+    open_document(&mut client, reference_uri, reference_source, 1);
+    assert_eq!(
+        client.read_notification("textDocument/publishDiagnostics")["uri"],
+        reference_uri
+    );
+
+    let rename = client.request(
+        "textDocument/rename",
+        json!({
+            "textDocument": { "uri": declaration_uri },
+            "position": position_inside(declaration_source, "CREATE TYPE app.", "asset"),
+            "newName": "media_asset",
+        }),
+    );
+    let changes = rename["changes"]
+        .as_object()
+        .unwrap_or_else(|| panic!("language-model rename should resolve: {rename}"));
+    assert_eq!(changes.len(), 2, "both open documents change: {rename}");
+    let declaration_edits = changes[declaration_uri]
+        .as_array()
+        .expect("declaration document edits");
+    let reference_edits = changes[reference_uri]
+        .as_array()
+        .expect("reference document edits");
+    assert_eq!(declaration_edits.len(), 1);
+    assert_eq!(reference_edits.len(), 2);
+    assert!(changes.values().flat_map(|edits| edits.as_array().unwrap()).all(
+        |edit| edit["newText"] == "media_asset"
+    ));
+    let renamed_declaration = apply_text_edits(declaration_source, declaration_edits);
+    let renamed_references = apply_text_edits(reference_source, reference_edits);
+    assert!(renamed_declaration.contains("CREATE TYPE app.media_asset"));
+    assert!(!renamed_declaration.contains("app.asset"));
+    assert!(renamed_references.contains("REF app.media_asset"));
+    assert!(!renamed_references.contains("REF app.asset"));
+
+    client.shutdown();
+}
+
+#[test]
 fn semantic_rename_rejects_ambiguous_persistent_object() {
     let mut client = Client::spawn();
     initialize(&mut client);
