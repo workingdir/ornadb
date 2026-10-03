@@ -6233,6 +6233,7 @@ struct QueryPairedAggregateAnchorCascadeFold {
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct QueryPairedScopedWindowCompactionFold {
     identity: String,
+    latest_pair_identity: String,
     latest_window_scope_identity: String,
     aggregate_compaction_identity: String,
     window_pair_count: u64,
@@ -6384,6 +6385,7 @@ fn query_paired_scoped_window_compaction_fold(
             "paired-scoped-window-compaction-fold:{}",
             hex(&hash.finalize())
         ),
+        latest_pair_identity: pair_identity.to_owned(),
         latest_window_scope_identity: window_scope_identity.to_owned(),
         aggregate_compaction_identity: aggregate_fold.identity.clone(),
         window_pair_count,
@@ -6436,6 +6438,10 @@ fn add_paired_scoped_window_compaction_fold_details(
     details.insert(
         "paired_scoped_window_compaction_window_anchor_fold_identity".to_owned(),
         PlanDetail::Text(fold.latest_window_scope_identity.clone()),
+    );
+    details.insert(
+        "paired_scoped_window_compaction_latest_pair_identity".to_owned(),
+        PlanDetail::Text(fold.latest_pair_identity.clone()),
     );
     details.insert(
         "paired_scoped_window_compaction_aggregate_fold_identity".to_owned(),

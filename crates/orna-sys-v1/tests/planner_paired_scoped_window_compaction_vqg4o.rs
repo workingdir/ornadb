@@ -270,10 +270,27 @@ fn scoped_window_identity_tracks_paired_aggregate_compaction_folds() {
         ),
         text(first, "paired_aggregate_anchor_cascade_fold_identity")
     );
+    assert_eq!(
+        text(
+            first,
+            "paired_scoped_window_compaction_latest_pair_identity"
+        ),
+        text(first, "paired_scoped_window_compaction_pair_identity")
+    );
     assert_eq!(text(gap, fold_key), first_fold);
     assert_eq!(
         text(gap, "paired_scoped_window_compaction_fold_transition"),
         "carried_across_sparse_input"
+    );
+    assert_eq!(
+        text(gap, "paired_scoped_window_compaction_latest_pair_identity"),
+        text(first, "paired_scoped_window_compaction_pair_identity")
+    );
+    assert!(
+        gap.details()
+            .get("paired_scoped_window_compaction_pair_identity")
+            .is_none(),
+        "a sparse join carries the last scope but creates no new pair"
     );
 
     let second_fold = text(second, fold_key);
@@ -313,6 +330,13 @@ fn scoped_window_identity_tracks_paired_aggregate_compaction_folds() {
             "paired_scoped_window_compaction_aggregate_fold_identity"
         ),
         text(second, "paired_aggregate_anchor_cascade_fold_identity")
+    );
+    assert_eq!(
+        text(
+            second,
+            "paired_scoped_window_compaction_latest_pair_identity"
+        ),
+        text(second, "paired_scoped_window_compaction_pair_identity")
     );
 
     let tail_fold = text(tail, fold_key);
