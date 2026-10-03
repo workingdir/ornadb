@@ -3598,6 +3598,207 @@ fn generated_bindings_round_trip_typed_results_through_both_dispatch_paths() {
 }
 
 #[test]
+fn provider_generic_object_returns_preserve_witness_types_on_both_routes() {
+    const OBJECT_RETURN_OPERATIONS: [&str; 2] = ["sys.invoke<T>", "sys.start<T>"];
+    const OBJECT_RESULT_TYPES: [&str; 4] = [
+        "sys.ObjectRef",
+        "sys.FunctionRef",
+        "sys.RowRef<sys.Object>",
+        "sys.ObjectDescription",
+    ];
+
+    let generated_schema = build_provider::generate_provider_registry_schema()
+        .expect("provider object-return schema regenerates from its source generator");
+    assert_eq!(generated_schema, system_provider_abi_schema_json());
+    build_host::validate_json_against_schema(system_provider_abi_json(), &generated_schema)
+        .expect("embedded provider registry conforms to the regenerated schema");
+    let table = SystemProviderAbi::from_json(system_provider_abi_json())
+        .expect("schema-validated registry parses into typed provider contracts");
+    let registry = ProviderRoleRegistry::from_baked_abi(&table)
+        .expect("generic invoke/start provider offers resolve");
+
+    let mut generated_bindings = 0;
+    let mut object_type_bindings = 0;
+    let mut direct_routes = 0;
+    let mut registry_routes = 0;
+    let mut direct_result_mismatches = 0;
+    let mut registry_result_mismatches = 0;
+    for operation_name in OBJECT_RETURN_OPERATIONS {
+        let contract = table
+            .operation(operation_name)
+            .expect("generic object-return operation exists in the typed registry");
+        let generated = system_function_descriptor(operation_name)
+            .expect("generic object-return operation has a macro-generated descriptor");
+        assert_eq!(generated.signature, contract.signature.source);
+        assert_eq!(contract.effects.iter().next(), Some(generated.effect));
+        generated_bindings += 1;
+
+        let role_id = contract
+            .role
+            .as_ref()
+            .expect("generic invoke/start operation has a typed provider role");
+        let offer = registry
+            .resolve(role_id.as_str())
+            .expect("generic operation role has a selected provider offer")
+            .clone();
+
+        for object_type in OBJECT_RESULT_TYPES {
+            let expected_argument_types = contract
+                .signature
+                .parameters
+                .iter()
+                .map(|parameter| {
+                    if parameter.ty == AbiType::Named("T".to_owned()) {
+                        object_type.to_owned()
+                    } else {
+                        parameter.ty.canonical()
+                    }
+                })
+                .collect::<Vec<_>>();
+            let arguments = contract
+                .signature
+                .parameters
+                .iter()
+                .map(|parameter| {
+                    let (argument_type, payload) = if parameter.ty == AbiType::Named("T".to_owned())
+                    {
+                        (
+                            object_type.to_owned(),
+                            format!("witness-{object_type}").into_bytes(),
+                        )
+                    } else if parameter.name == "arguments" {
+                        (parameter.ty.canonical(), b"[]".to_vec())
+                    } else {
+                        (
+                            parameter.ty.canonical(),
+                            parameter
+                                .default
+                                .as_deref()
+                                .unwrap_or(&parameter.name)
+                                .as_bytes()
+                                .to_vec(),
+                        )
+                    };
+                    TypedValue::public(TypeId::new(argument_type), payload)
+                })
+                .collect::<Vec<_>>();
+            let expected_result_type = if operation_name == "sys.invoke<T>" {
+                object_type.to_owned()
+            } else {
+                format!("sys.InvocationHandle<{object_type}>")
+            };
+            let object_payload =
+                format!("object-return-{operation_name}-{object_type}").into_bytes();
+            let expected_result =
+                TypedValue::public(TypeId::new(expected_result_type.clone()), object_payload);
+            let provider_for = |response: TypedValue| InvokeValueProvider {
+                offer: offer.clone(),
+                operation: contract.id.clone(),
+                argument_types: expected_argument_types.clone(),
+                response: Ok(response),
+                calls: AtomicUsize::new(0),
+            };
+
+            let direct_provider = provider_for(expected_result.clone());
+            assert_eq!(
+                table.dispatch_to_provider(
+                    generated.name,
+                    &direct_provider,
+                    &arguments,
+                    |_| Ok(()),
+                ),
+                Ok(orna_sys_v1::SystemDispatchResult::Returned(
+                    expected_result.clone()
+                )),
+                "direct route preserves {operation_name} object result {object_type}"
+            );
+            assert_eq!(direct_provider.calls.load(Ordering::SeqCst), 1);
+            direct_routes += 1;
+
+            let registry_provider = provider_for(expected_result.clone());
+            assert_eq!(
+                registry.dispatch_to_provider(
+                    &table,
+                    generated.name,
+                    &registry_provider,
+                    &arguments,
+                    |_| Ok(()),
+                ),
+                Ok(orna_sys_v1::SystemDispatchResult::Returned(
+                    expected_result.clone()
+                )),
+                "selected-provider route preserves {operation_name} object result {object_type}"
+            );
+            assert_eq!(registry_provider.calls.load(Ordering::SeqCst), 1);
+            registry_routes += 1;
+
+            let wrong_object_type = if object_type == "sys.ObjectRef" {
+                "sys.FunctionRef"
+            } else {
+                "sys.ObjectRef"
+            };
+            let wrong_result_type = if operation_name == "sys.invoke<T>" {
+                wrong_object_type.to_owned()
+            } else {
+                format!("sys.InvocationHandle<{wrong_object_type}>")
+            };
+            let expected_diagnostic = ProviderDiagnostic::ResultTypeMismatch {
+                operation: contract.id.clone(),
+                expected: contract.signature.result.canonical(),
+                actual: wrong_result_type.clone(),
+            };
+            let wrong_result = TypedValue::public(
+                TypeId::new(wrong_result_type),
+                b"wrong-object-return-type".to_vec(),
+            );
+            let wrong_direct_provider = provider_for(wrong_result.clone());
+            let wrong_registry_provider = provider_for(wrong_result);
+            let direct_diagnostic = table
+                .dispatch_to_provider(generated.name, &wrong_direct_provider, &arguments, |_| {
+                    Ok(())
+                })
+                .expect_err("direct route rejects object return type outside its witness");
+            let registry_diagnostic = registry
+                .dispatch_to_provider(
+                    &table,
+                    generated.name,
+                    &wrong_registry_provider,
+                    &arguments,
+                    |_| Ok(()),
+                )
+                .expect_err("selected-provider route rejects object return type outside witness");
+            assert_eq!(direct_diagnostic, expected_diagnostic);
+            assert_eq!(registry_diagnostic, expected_diagnostic);
+            assert_eq!(direct_diagnostic.code(), "sys.abi.result_type_mismatch");
+            assert_eq!(registry_diagnostic.code(), "sys.abi.result_type_mismatch");
+            assert_eq!(wrong_direct_provider.calls.load(Ordering::SeqCst), 1);
+            assert_eq!(wrong_registry_provider.calls.load(Ordering::SeqCst), 1);
+            direct_result_mismatches += 1;
+            registry_result_mismatches += 1;
+            object_type_bindings += 1;
+        }
+    }
+
+    let expected_object_type_bindings = OBJECT_RETURN_OPERATIONS.len() * OBJECT_RESULT_TYPES.len();
+    assert_eq!(generated_bindings, OBJECT_RETURN_OPERATIONS.len());
+    assert_eq!(object_type_bindings, expected_object_type_bindings);
+    assert_eq!(direct_routes, expected_object_type_bindings);
+    assert_eq!(registry_routes, expected_object_type_bindings);
+    assert_eq!(direct_result_mismatches, expected_object_type_bindings);
+    assert_eq!(registry_result_mismatches, expected_object_type_bindings);
+    println!(
+        "provider_generic_object_return_parity operations={generated_bindings} object_types={} type_bindings={object_type_bindings} schema_validated=1 typed_registry=1 direct_routes={direct_routes} registry_routes={registry_routes} direct_result_mismatches={direct_result_mismatches} registry_result_mismatches={registry_result_mismatches} total_cases={}",
+        OBJECT_RESULT_TYPES.len(),
+        2 + generated_bindings
+            + object_type_bindings
+            + direct_routes
+            + registry_routes
+            + direct_result_mismatches
+            + registry_result_mismatches
+    );
+}
+
+#[test]
 fn generated_binding_argument_count_diagnostics_match_every_dispatch_route() {
     fn expect_diagnostic<T>(result: Result<T, ProviderDiagnostic>) -> ProviderDiagnostic {
         match result {
