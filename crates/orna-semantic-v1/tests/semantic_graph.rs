@@ -6762,6 +6762,188 @@ fn multi_parent_checkpoint_folds_preserve_labels_across_paired_omissions() {
 }
 
 #[test]
+fn nested_omission_checkpoint_storms_preserve_depth_labels_transactionally() {
+    let source = include_str!("fixtures/historical-nested-omission-depth-label-storm.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-nested-omission-depth-label-storm.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert_eq!(
+        result
+            .diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.code() == DIAG_TYPE)
+            .count(),
+        2,
+        "only the crossed all-omitted and partial nested folds should fail: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+    let module = result
+        .modules
+        .values()
+        .find(|module| {
+            module
+                .symbols
+                .contains_key("nested_omission_storm_rolls_back_after_crossing")
+        })
+        .expect("nested omission depth-label fixture module");
+
+    let nested_pins = |function: &str, sibling: &str| {
+        let Type::Function { result, .. } = &module.symbols[function].ty else {
+            panic!("{function} must retain its computed result type");
+        };
+        let Type::Record(fields) = result.as_ref() else {
+            panic!("{function} must return its computed parent fold: {result:?}");
+        };
+        let Type::List(row) = fields.get("parent_fold").expect("parent fold result") else {
+            panic!("{function} must return its reconciled parent list");
+        };
+        let Type::Record(siblings) = row.as_ref() else {
+            panic!("{function} must retain the sibling record: {row:?}");
+        };
+        let Type::Record(depths) = &siblings[sibling] else {
+            panic!("{function}.{sibling} must retain its depth record");
+        };
+        let Type::Tuple(depths) = &depths["pins"] else {
+            panic!("{function}.{sibling} must retain both nested pin depths");
+        };
+        assert_eq!(depths.len(), 2);
+        depths
+            .iter()
+            .map(|depth| {
+                let Type::Tuple(slots) = depth else {
+                    panic!("{function}.{sibling} depth must retain its paired slots");
+                };
+                assert_eq!(slots.len(), 2);
+                slots
+                    .iter()
+                    .map(|slot| {
+                        let mut contexts = BTreeSet::new();
+                        collect_snapshot_contexts(slot, &mut contexts);
+                        contexts
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>()
+    };
+
+    let rolled_back = nested_pins(
+        "nested_omission_storm_rolls_back_after_crossing",
+        "left",
+    );
+    assert_eq!(
+        rolled_back,
+        [
+            vec![BTreeSet::new(), BTreeSet::new()],
+            vec![BTreeSet::new(), BTreeSet::new()],
+        ],
+        "a rejected nested crossing must recover every omitted depth from the first parent"
+    );
+    assert_eq!(
+        nested_pins(
+            "nested_omission_storm_rolls_back_after_crossing",
+            "right",
+        ),
+        [
+            vec![
+                BTreeSet::from(["selector:HEAD~100".into()]),
+                BTreeSet::from(["selector:HEAD~101".into()]),
+            ],
+            vec![
+                BTreeSet::from(["selector:HEAD~102".into()]),
+                BTreeSet::from(["selector:HEAD~103".into()]),
+            ],
+        ],
+        "recovery must also preserve the first parent's concrete sibling labels"
+    );
+
+    assert_eq!(
+        nested_pins("nested_omission_storm_keeps_every_depth_label", "left"),
+        [
+            vec![
+                BTreeSet::from([
+                    "selector:HEAD~300".into(),
+                    "selector:HEAD~302".into(),
+                    "selector:HEAD~304".into(),
+                ]),
+                BTreeSet::from([
+                    "selector:HEAD~301".into(),
+                    "selector:HEAD~303".into(),
+                    "selector:HEAD~305".into(),
+                ]),
+            ],
+            vec![
+                BTreeSet::from([
+                    "selector:HEAD~310".into(),
+                    "selector:HEAD~312".into(),
+                    "selector:HEAD~314".into(),
+                ]),
+                BTreeSet::from([
+                    "selector:HEAD~311".into(),
+                    "selector:HEAD~313".into(),
+                    "selector:HEAD~315".into(),
+                ]),
+            ],
+        ],
+        "valid nested omissions must retain all computed labels at both depths"
+    );
+    assert_eq!(
+        nested_pins("nested_omission_storm_keeps_every_depth_label", "right"),
+        [
+            vec![
+                BTreeSet::from([
+                    "selector:HEAD~410".into(),
+                    "selector:HEAD~412".into(),
+                    "selector:HEAD~414".into(),
+                ]),
+                BTreeSet::from([
+                    "selector:HEAD~411".into(),
+                    "selector:HEAD~413".into(),
+                    "selector:HEAD~415".into(),
+                ]),
+            ],
+            vec![
+                BTreeSet::from([
+                    "selector:HEAD~400".into(),
+                    "selector:HEAD~402".into(),
+                    "selector:HEAD~404".into(),
+                ]),
+                BTreeSet::from([
+                    "selector:HEAD~401".into(),
+                    "selector:HEAD~403".into(),
+                    "selector:HEAD~405".into(),
+                ]),
+            ],
+        ],
+        "alternating sibling omissions must not exchange labels between depths"
+    );
+
+    assert_eq!(
+        nested_pins("partial_nested_omission_keeps_prior_depth_labels", "left"),
+        [
+            vec![
+                BTreeSet::from(["selector:HEAD~502".into()]),
+                BTreeSet::new(),
+            ],
+            vec![
+                BTreeSet::from(["selector:HEAD~512".into()]),
+                BTreeSet::new(),
+            ],
+        ],
+        "a partial first-parent omission must keep earlier concrete depth labels after a rejected row"
+    );
+}
+
+#[test]
 fn stacked_record_checkpoint_folds_preserve_selector_depth_labels() {
     let source = include_str!("fixtures/historical-stacked-selector-depth-fold.orna");
     let parsed = orna_syntax_v1::parse_module(source);
