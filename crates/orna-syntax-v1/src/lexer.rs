@@ -115,8 +115,8 @@ pub enum TokenKind {
 /// Operators recognized by the 1.0.0 lexer, ordered longest-first where
 /// spellings overlap. Editor grammars use the same inventory.
 pub const OPERATORS: &[&str] = &[
-    "..=", "=>", "==", "!=", "<=", ">=", "??", "|?", "&&", "||", "+=", "-=", "*=", "/=",
-    "..", "|", "!", "=", "<", ">", "+", "-", "*", "/", "%", "^", "?",
+    "..=", "=>", "==", "!=", "<=", ">=", "??", "|?", "&&", "||", "+=", "-=", "*=", "/=", "..", "|",
+    "!", "=", "<", ">", "+", "-", "*", "/", "%", "^", "?",
 ];
 
 /// Delimiter tokens recognized by the 1.0.0 lexer.
@@ -126,6 +126,9 @@ pub const LINE_COMMENT_START: &str = "//";
 pub const BLOCK_COMMENT_START: &str = "/*";
 pub const BLOCK_COMMENT_END: &str = "*/";
 pub const STRING_DELIMITER: char = '"';
+/// Candidate-number expression shared with generated editor grammars. The
+/// lexer remains authoritative for validating complete numeric tokens.
+pub const NUMBER_PATTERN: &str = r"(?:[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]*)?(?:Z|[+-][0-9]{2}:[0-9]{2})|[0-9]{4}-[0-9]{2}-[0-9]{2}|0x[0-9A-Fa-f_]*|0b[01_]*|[0-9][0-9_]*(?:\.[0-9_]+)?(?:[eE][+-]?[0-9_]*)?f?)";
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Token {
     pub kind: TokenKind,

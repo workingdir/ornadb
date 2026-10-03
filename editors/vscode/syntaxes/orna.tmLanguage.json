@@ -11,10 +11,10 @@
   ],
   "repository": {
     "comments": { "patterns": [
-      { "name": "comment.line.double-slash.orna", "match": "//[^\\r\\n]*" },
-      { "name": "comment.block.orna", "begin": "/\\*", "end": "\\*/", "patterns": [{ "include": "#comments" }] }
+      { "name": "comment.orna", "match": "//[^\\r\\n]*" },
+      { "name": "comment.orna", "begin": "/\\*", "end": "\\*/", "patterns": [{ "include": "#comments" }] }
     ]},
-    "string": { "name": "string.quoted.double.orna", "begin": "\\\"", "end": "\\\"", "patterns": [
+    "string": { "name": "string.quoted.double.orna", "begin": "\"", "end": "\"", "patterns": [
       { "name": "constant.character.escape.orna", "match": "\\\\(?:[\\\"\\\\nrt0]|u\\{[0-9A-Fa-f]{1,6}\\})" },
       { "name": "meta.interpolation.orna", "begin": "(?<!\\\\)\\{", "end": "\\}", "patterns": [{ "include": "#expressions" }] }
     ]},

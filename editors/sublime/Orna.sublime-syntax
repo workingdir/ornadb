@@ -6,13 +6,13 @@ scope: source.orna
 contexts:
   main:
     - match: '//.*$'
-      scope: comment.line.orna
-    - begin: '/\\*'
-      end: '\\*/'
-      scope: comment.block.orna
+      scope: 'comment.orna'
+    - begin: '/\*'
+      end: '\*/'
+      scope: 'comment.orna'
     - begin: '"'
       end: '"'
-      scope: string.quoted.double.orna
+      scope: 'string.quoted.double.orna'
       patterns:
         - match: '\\\\(?:["\\\\nrt0]|u\\{[0-9A-Fa-f]{1,6}\\})'
           scope: constant.character.escape.orna
@@ -22,12 +22,12 @@ contexts:
           patterns:
             - include: main
     - match: '(?<![\\p{L}\\p{N}_])(?:continue|protocol|assert|offset|affine|return|static|break|false|table|while|base|case|else|enum|impl|loop|null|self|true|type|unit|dim|for|let|pub|use|as|fn|if|in)(?![\\p{L}\\p{N}_])'
-      scope: keyword.control.orna
+      scope: 'keyword.control.orna'
     - match: '(?:[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]*)?(?:Z|[+-][0-9]{2}:[0-9]{2})|[0-9]{4}-[0-9]{2}-[0-9]{2}|0x[0-9A-Fa-f_]*|0b[01_]*|[0-9][0-9_]*(?:\.[0-9_]+)?(?:[eE][+-]?[0-9_]*)?f?)'
-      scope: constant.numeric.orna
+      scope: 'constant.numeric.orna'
     - match: '(?:\.\.=|=>|==|!=|<=|>=|\?\?|\|\?|&&|\|\||\+=|-=|\*=|/=|\.\.|\||!|=|<|>|\+|-|\*|/|%|\^|\?)'
-      scope: keyword.operator.orna
+      scope: 'keyword.operator.orna'
     - match: '(?:\{|\}|\(|\)|\[|\]|,|;|:|\.)'
-      scope: punctuation.orna
+      scope: 'punctuation.orna'
     - match: '[_\\p{L}][_\\p{L}\\p{N}]*'
-      scope: variable.other.orna
+      scope: 'variable.other.orna'
