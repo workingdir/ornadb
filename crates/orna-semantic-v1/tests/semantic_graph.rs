@@ -12405,6 +12405,81 @@ fn nested_snapshot_checkpoint_reset_chains_restore_selected_values() {
 }
 
 #[test]
+fn nested_snapshot_reset_does_not_promote_error_recovered_pin_maps() {
+    let source = include_str!("fixtures/historical-nested-snapshot-error-reset-chain.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-nested-snapshot-error-reset-chain.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert_eq!(
+        result
+            .diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.code() == DIAG_UNRESOLVED)
+            .count(),
+        1,
+        "the bad component should keep its unresolved-name diagnostic: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        result
+            .diagnostics
+            .iter()
+            .all(|diagnostic| diagnostic.code() != DIAG_TYPE),
+        "error recovery must not add a cascading reset type diagnostic: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+    let module = result
+        .modules
+        .values()
+        .find(|module| {
+            module
+                .symbols
+                .contains_key("nested_snapshot_error_reset_chain_values")
+        })
+        .expect("error-recovered checkpoint reset module");
+    let Type::Function { result, .. } =
+        &module.symbols["nested_snapshot_error_reset_chain_values"].ty
+    else {
+        panic!("error-recovered reset chain must remain callable");
+    };
+    let Type::Record(stages) = result.as_ref() else {
+        panic!("error-recovered reset chain must return selected stages");
+    };
+    for (stage, expected_root) in [
+        ("observed", "selector:HEAD~900"),
+        ("saved_observed", "selector:HEAD~900"),
+    ] {
+        let Type::Record(values) = stages.get(stage).expect("observed checkpoint stage") else {
+            panic!("{stage} must contain computed checkpoint values");
+        };
+        let mut contexts = BTreeSet::new();
+        collect_snapshot_contexts(
+            values.get("root").expect("root checkpoint value"),
+            &mut contexts,
+        );
+        assert_eq!(
+            contexts,
+            BTreeSet::from([expected_root.to_owned()]),
+            "{stage} must retain the last valid checkpoint pin after the error source is rejected"
+        );
+    }
+}
+
+#[test]
 fn nested_snapshot_boundary_resets_fill_and_restore_omitted_checkpoint_slots() {
     let source = include_str!("fixtures/historical-nested-snapshot-boundary-reset.orna");
     let parsed = orna_syntax_v1::parse_module(source);
