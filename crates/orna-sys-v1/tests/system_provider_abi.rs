@@ -1,9 +1,9 @@
 use std::collections::BTreeSet;
 
 use orna_sys_v1::{
-    system_api_json, system_dispatch_table, system_provider_abi, system_provider_abi_json, AbiType,
-    AbiVersion, EffectSet, FailureCode, ProviderDiagnostic, ProviderId, ProviderOffer,
-    ProviderRoleRegistry, SemanticRoleId, SystemEffect, SystemProviderAbi,
+    AbiType, AbiVersion, EffectSet, FailureCode, ProviderDiagnostic, ProviderId, ProviderOffer,
+    ProviderRoleRegistry, SemanticRoleId, SystemEffect, SystemProviderAbi, system_api_json,
+    system_dispatch_table, system_provider_abi, system_provider_abi_json, validate_provider_offer,
 };
 use serde_json::Value;
 
@@ -35,14 +35,18 @@ fn generated_provider_abi_carries_typed_operation_contracts_and_roles() {
         AbiType::Named("sys.SnapshotRef".into())
     );
     assert!(!checkout.preconditions.is_empty());
-    assert!(checkout
-        .declares_failure(&orna_sys_v1::FailureCode::new("sys.abi.precondition_failed").unwrap()));
-    assert!(abi
-        .validate_failure(
+    assert!(
+        checkout.declares_failure(
+            &orna_sys_v1::FailureCode::new("sys.abi.precondition_failed").unwrap()
+        )
+    );
+    assert!(
+        abi.validate_failure(
             checkout.id.as_str(),
             &orna_sys_v1::FailureCode::new("sys.abi.precondition_failed").unwrap(),
         )
-        .is_ok());
+        .is_ok()
+    );
     assert_eq!(
         abi.validate_failure(
             checkout.id.as_str(),
@@ -71,15 +75,18 @@ fn generated_provider_abi_carries_typed_operation_contracts_and_roles() {
         .expect("invoke semantic role is collected from implementations");
     assert_eq!(invoke_role.version, AbiVersion::V1_0);
     assert_eq!(invoke_role.effects, EffectSet::one(SystemEffect::Invoke));
-    assert!(invoke_role
-        .operations
-        .contains(&orna_sys_v1::OperationId::new("sys.invoke(Value)").unwrap()));
-    assert!(abi
-        .validate_failure(
+    assert!(
+        invoke_role
+            .operations
+            .contains(&orna_sys_v1::OperationId::new("sys.invoke(Value)").unwrap())
+    );
+    assert!(
+        abi.validate_failure(
             "sys.invoke(Value)",
             &orna_sys_v1::FailureCode::new("sys.invoke.argument_missing").unwrap(),
         )
-        .is_ok());
+        .is_ok()
+    );
     assert!(ProviderRoleRegistry::from_baked_abi(abi).is_ok());
 }
 
@@ -139,6 +146,98 @@ fn provider_registry_role_edges_are_a_bijective_effect_compatible_sweep() {
             "{} is linked exactly when it declares a semantic role",
             operation.id.as_str()
         );
+    }
+}
+
+#[test]
+fn every_baked_role_resolves_its_offer_and_rejects_version_or_effect_widening() {
+    let abi = system_dispatch_table();
+    let registry = ProviderRoleRegistry::from_baked_abi(abi)
+        .expect("all baked semantic roles have compatible provider offers");
+    registry
+        .validate_required()
+        .expect("every required role resolves from its baked provider");
+
+    for role in abi.roles() {
+        let built_in_provider = role
+            .builtin_provider
+            .clone()
+            .expect("each current baked role declares its provider");
+        let resolved = registry
+            .resolve(role.id.as_str())
+            .expect("each baked role resolves to an offer");
+        assert_eq!(resolved.provider, built_in_provider);
+        assert_eq!(resolved.role, role.id);
+        assert_eq!(resolved.version, role.version);
+        assert_eq!(resolved.effects, role.effects);
+
+        let incompatible_version = AbiVersion {
+            major: role.version.major ^ 1,
+            minor: role.version.minor,
+        };
+        let wrong_version = ProviderOffer {
+            provider: built_in_provider.clone(),
+            role: role.id.clone(),
+            version: incompatible_version,
+            effects: role.effects.clone(),
+        };
+        assert_eq!(
+            validate_provider_offer(role, &wrong_version),
+            Err(ProviderDiagnostic::RoleVersionMismatch {
+                role: role.id.clone(),
+                required: role.version,
+                provided: incompatible_version,
+            }),
+            "every baked role rejects a major-version mismatch: {}",
+            role.id.as_str()
+        );
+
+        let extra_effect = [
+            SystemEffect::Read,
+            SystemEffect::Invoke,
+            SystemEffect::Admin,
+        ]
+        .into_iter()
+        .find(|effect| !role.effects.iter().any(|registered| registered == *effect))
+        .expect("each baked role has an effect ceiling below the full effect set");
+        let widened_effects = EffectSet::new(role.effects.iter().chain([extra_effect]));
+        let widened_offer = ProviderOffer {
+            provider: built_in_provider.clone(),
+            role: role.id.clone(),
+            version: role.version,
+            effects: widened_effects,
+        };
+        assert_eq!(
+            validate_provider_offer(role, &widened_offer),
+            Err(ProviderDiagnostic::EffectIncompatible(role.id.clone())),
+            "every baked role rejects an effect-ceiling widening: {}",
+            role.id.as_str()
+        );
+
+        let alternate_offer = ProviderOffer {
+            provider: ProviderId::new("fixture.alternate").unwrap(),
+            role: role.id.clone(),
+            version: role.version,
+            effects: role.effects.clone(),
+        };
+        let mut link_registry = ProviderRoleRegistry::from_baked_abi(abi).unwrap();
+        if role.replaceable {
+            link_registry
+                .bind(alternate_offer.clone())
+                .expect("replaceable roles accept compatible alternate providers");
+            assert_eq!(
+                link_registry.resolve(role.id.as_str()).unwrap(),
+                &alternate_offer
+            );
+        } else {
+            assert_eq!(
+                link_registry.bind(alternate_offer),
+                Err(ProviderDiagnostic::DuplicateRoleProvider(role.id.clone())),
+                "nonreplaceable baked role keeps its declared provider: {}",
+                role.id.as_str()
+            );
+            assert_eq!(link_registry.resolve(role.id.as_str()).unwrap(), resolved);
+        }
     }
 }
 
