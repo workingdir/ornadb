@@ -46,6 +46,7 @@ pub use introspection::{
     explain_query, explain_query_with_decorrelated_subqueries, explain_query_with_partial_indexes,
     explain_query_with_window_aggregate_pushdowns,
     explain_query_with_join_pair_identities,
+    explain_query_with_join_pair_identities_and_window_aggregate_pushdowns,
     explain_query_with_conjunct_disjunct_limit_chain,
     explain_query_with_disjunct_conjunct_limit_chain,
     explain_query_with_disjunct_limit_conjunct_chain,
