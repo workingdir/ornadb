@@ -6542,6 +6542,138 @@ fn multi_parent_selector_topology_storm_preserves_label_depth_identity() {
 }
 
 #[test]
+fn pairwise_selector_topology_folds_preserve_paired_boundary_depths() {
+    let source = include_str!("fixtures/historical-paired-boundary-selector-depth-fold.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-paired-boundary-selector-depth-fold.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert_eq!(
+        result
+            .diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.code() == DIAG_TYPE)
+            .count(),
+        1,
+        "the disjoint-label pair must fail while the alpha-renamed pair succeeds: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+    let module = result
+        .modules
+        .values()
+        .find(|module| {
+            module
+                .symbols
+                .contains_key("rejects_pairwise_selector_topology_drift_across_boundaries")
+        })
+        .expect("paired-boundary selector fixture module");
+
+    let sibling_pin_maps = |ty: &Type| {
+        let Type::Record(siblings) = ty else {
+            panic!("paired boundary value must retain sibling records: {ty:?}");
+        };
+        ["left", "right"].map(|name| {
+            let Type::Record(depths) = &siblings[name] else {
+                panic!("{name} boundary must retain its depth record");
+            };
+            let Type::Tuple(slots) = &depths["pins"] else {
+                panic!("{name} boundary must retain paired tuple depths");
+            };
+            assert_eq!(slots.len(), 2, "{name} boundary must keep both depths");
+            slots
+                .iter()
+                .map(|slot| {
+                    let mut contexts = BTreeSet::new();
+                    collect_snapshot_contexts(slot, &mut contexts);
+                    assert!(!contexts.is_empty(), "{name} depth must keep real selectors");
+                    contexts
+                })
+                .collect::<Vec<_>>()
+        })
+    };
+
+    let Type::Function { result, .. } = &module.symbols
+        ["rejects_pairwise_selector_topology_drift_across_boundaries"]
+        .ty
+    else {
+        panic!("rejected pair must retain its computed result");
+    };
+    let Type::Record(fields) = result.as_ref() else {
+        panic!("rejected pair must return its source rows: {result:?}");
+    };
+    let first = sibling_pin_maps(fields.get("first").expect("first computed row"));
+    assert_eq!(
+        first,
+        [
+            vec![
+                BTreeSet::from(["selector:HEAD~701".into()]),
+                BTreeSet::from(["selector:HEAD~701".into()]),
+            ],
+            vec![
+                BTreeSet::from(["selector:HEAD~711".into()]),
+                BTreeSet::from(["selector:HEAD~712".into()]),
+            ],
+        ],
+        "first source row must keep its paired-boundary selector identities"
+    );
+    assert_eq!(
+        sibling_pin_maps(fields.get("second").expect("second computed row")),
+        [
+            vec![
+                BTreeSet::from(["selector:HEAD~704".into()]),
+                BTreeSet::from(["selector:HEAD~705".into()]),
+            ],
+            vec![
+                BTreeSet::from(["selector:HEAD~714".into()]),
+                BTreeSet::from(["selector:HEAD~715".into()]),
+            ],
+        ],
+        "second source row must keep its computed values despite the failed fold"
+    );
+    let Type::List(folded_row) = fields.get("folded").expect("folded list result") else {
+        panic!("rejected fold must retain its list shape");
+    };
+    assert_eq!(
+        sibling_pin_maps(folded_row),
+        first,
+        "a pairwise boundary mismatch must preserve the first row without promoting labels"
+    );
+
+    let Type::Function { result, .. } = &module.symbols
+        ["accepts_pairwise_alpha_renamed_selector_topology_across_boundaries"]
+        .ty
+    else {
+        panic!("stable pair must return its computed list");
+    };
+    let Type::List(folded_row) = result.as_ref() else {
+        panic!("stable pair must infer a folded list: {result:?}");
+    };
+    assert_eq!(
+        sibling_pin_maps(folded_row),
+        [
+            vec![
+                BTreeSet::from(["selector:HEAD~801".into(), "selector:HEAD~804".into()]),
+                BTreeSet::from(["selector:HEAD~801".into(), "selector:HEAD~804".into()]),
+            ],
+            vec![
+                BTreeSet::from(["selector:HEAD~811".into(), "selector:HEAD~814".into()]),
+                BTreeSet::from(["selector:HEAD~812".into(), "selector:HEAD~815".into()]),
+            ],
+        ],
+        "stable paired boundaries must union real labels at the same depths"
+    );
+}
+
+#[test]
 fn nested_sibling_pin_reconciliation_storms_preserve_depth_identity() {
     let source = include_str!("fixtures/historical-nested-sibling-pin-reconciliation-storm.orna");
     let parsed = orna_syntax_v1::parse_module(source);
