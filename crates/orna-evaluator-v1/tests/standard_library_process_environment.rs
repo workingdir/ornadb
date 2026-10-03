@@ -278,6 +278,44 @@ fn base64_binary_input_survives_real_process_stdin_and_stdout() {
 }
 
 #[test]
+fn process_arguments_keep_shell_metacharacters_as_literal_text() {
+    let mut session = AdmittedReplSession::with_reference_standard(Limits::default())
+        .unwrap_or_else(|error| panic!("reference std failed to load: {}", error.code()));
+    session
+        .submit(include_str!("fixtures/stdlib-use-io-t7auz.orna"))
+        .unwrap_or_else(|error| panic!("std.io import failed: {}", error.code()));
+
+    let mut process =
+        ProcessProvider::new(Duration::from_secs(2), 128).expect("valid process limits");
+    process
+        .allow_command("/usr/bin/printf", env::current_dir().unwrap(), [])
+        .expect("allowlisted printf executable and current directory");
+    let mut bindings = SysHostBindingRegistry::new(EnvironmentProvider::default())
+        .with_process_provider(process);
+
+    assert_eq!(
+        session.submit_with_sys_host_bindings(
+            include_str!("fixtures/stdlib-io-process-literal-arguments-i50o4.orna"),
+            &mut bindings,
+        ),
+        Ok(Some(
+            CanonicalValue::new(OvbRaw::Array(vec![
+                OvbRaw::Tag(
+                    60013,
+                    Box::new(OvbRaw::Array(vec![
+                        OvbRaw::Int(1.into()),
+                        OvbRaw::Int(0.into()),
+                    ])),
+                ),
+                OvbRaw::Bytes(b"$HOME;$(must-not-run)".to_vec()),
+                OvbRaw::Bytes(Vec::new()),
+            ]))
+            .unwrap()
+        ))
+    );
+}
+
+#[test]
 fn process_and_clock_fail_closed_when_registry_provider_is_not_installed() {
     let mut session = AdmittedReplSession::with_reference_standard(Limits::default())
         .unwrap_or_else(|error| panic!("reference std failed to load: {}", error.code()));
