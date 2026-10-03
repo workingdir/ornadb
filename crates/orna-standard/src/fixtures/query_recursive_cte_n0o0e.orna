@@ -4,7 +4,9 @@
 // its returned rows form the next round. Canonical distinct identity is folded
 // across the anchor and every round; first-seen order is observable. Every call
 // owns an independent identity fold, including paired calls with overlapping
-// rows. Evaluator limits bound nonterminating expansions. The Orna 1.0.0
-// reference does not prescribe recursive CTE syntax.
+// rows. An anchor built by flat_map/lateral scopes keeps its flattened
+// order, and the first value at each identity enters the recursive frontier.
+// Evaluator limits bound nonterminating expansions. The Orna 1.0.0 reference
+// does not prescribe recursive CTE syntax.
 pub fn recursive_cte<T>(anchor: [T], recursive_term: fn(T): [T]): [T] =
     __recursive_cte(anchor, recursive_term);
