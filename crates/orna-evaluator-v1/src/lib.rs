@@ -58,7 +58,7 @@ pub use timezone::{
 /// crate verifies its pinned profile before either boundary admits an import.
 /// Returns the reference standard sources supplied to the bounded REPL.
 #[must_use]
-pub fn reference_standard_sources() -> [(String, String); 49] {
+pub fn reference_standard_sources() -> [(String, String); 50] {
     orna_standard::reference_standard_sources_v1()
 }
 
@@ -5337,6 +5337,80 @@ impl Context<'_, '_> {
         Ok(Value::Record(fields))
     }
 
+    fn ui_node(&mut self, values: Vec<Value>) -> Result<Value, EvaluationError> {
+        let [Value::String(kind), Value::Record(properties), Value::List(children), Value::List(actions)] =
+            values.as_slice()
+        else {
+            return Err(error("ORNA-EVAL-TYPE"));
+        };
+        let contract_name = match kind.as_str() {
+            "field" | "text" | "rows" | "cols" | "stack" | "details" | "table" | "tree"
+            | "code" | "diff" | "chart" | "button" | "form" | "input" => kind,
+            _ => return Err(error("ORNA-EVAL-ARGUMENT")),
+        };
+        self.items(properties.len() + children.len() + actions.len() + 5)?;
+        self.string(contract_name.clone())?;
+
+        let properties = properties
+            .iter()
+            .map(|(name, value)| {
+                self.string(name.clone())?;
+                value.clone().canonical()?;
+                let mut typed = BTreeMap::new();
+                typed.insert(
+                    "type".into(),
+                    Value::String(ui_value_type_name(value).to_owned()),
+                );
+                typed.insert("value".into(), value.clone());
+                Ok((name.clone(), Value::Record(typed)))
+            })
+            .collect::<Result<BTreeMap<_, _>, EvaluationError>>()?;
+
+        let mut slots = BTreeMap::new();
+        for child in children {
+            if !is_ui_presentation_node(child) {
+                return Err(error("ORNA-EVAL-TYPE"));
+            }
+        }
+        slots.insert("content".into(), Value::List(children.clone()));
+
+        let mut action_map = BTreeMap::new();
+        for action in actions {
+            let Value::Tuple(pair) = action else {
+                return Err(error("ORNA-EVAL-TYPE"));
+            };
+            let [Value::String(name), descriptor] = pair.as_slice() else {
+                return Err(error("ORNA-EVAL-TYPE"));
+            };
+            if name.is_empty() || !is_ui_action_descriptor(descriptor) {
+                return Err(error("ORNA-EVAL-ARGUMENT"));
+            }
+            self.string(name.clone())?;
+            if action_map.insert(name.clone(), descriptor.clone()).is_some() {
+                return Err(error("ORNA-EVAL-ARGUMENT"));
+            }
+        }
+
+        let mut contract = BTreeMap::new();
+        contract.insert(
+            "id".into(),
+            Value::String(format!("std.ui.{contract_name}@1")),
+        );
+        contract.insert(
+            "name".into(),
+            Value::String(format!("std.ui.{contract_name}")),
+        );
+        contract.insert("version".into(), Value::String("1.0".into()));
+
+        let mut node = BTreeMap::new();
+        node.insert("kind".into(), Value::String("node".into()));
+        node.insert("contract".into(), Value::Record(contract));
+        node.insert("properties".into(), Value::Record(properties));
+        node.insert("slots".into(), Value::Record(slots));
+        node.insert("actions".into(), Value::Record(action_map));
+        Ok(Value::Record(node))
+    }
+
     fn decode_with_type_witness(
         &mut self,
         codec: &str,
@@ -5763,6 +5837,9 @@ impl Context<'_, '_> {
         let native_concurrent = native_binding
             .filter(|binding| binding.kind == StandardBindingKind::Concurrent)
             .map(|binding| binding.operation);
+        let native_ui = native_binding
+            .filter(|binding| binding.kind == StandardBindingKind::Ui)
+            .map(|binding| binding.operation);
         let native_stats = native_binding
             .filter(|binding| binding.kind == StandardBindingKind::Stats)
             .map(|binding| binding.operation);
@@ -5853,6 +5930,7 @@ impl Context<'_, '_> {
             && native_orna_codec.is_none()
             && native_ovb_codec.is_none()
             && native_money.is_none()
+            && native_ui.is_none()
             && (qualified_math.is_none()
                 && qualified_bits.is_none()
                 && qualified_text.is_none()
@@ -6045,6 +6123,7 @@ impl Context<'_, '_> {
             .or(time)
             .or(stream)
             .or(concurrent)
+            .or(native_ui)
             .or(native_hash)
             .or(base64)
             .or(json)
@@ -6132,6 +6211,8 @@ impl Context<'_, '_> {
             self.stream(name, values, depth)
         } else if concurrent.is_some() {
             self.concurrent(name, values, depth)
+        } else if native_ui.is_some() {
+            self.ui_node(values)
         } else if native_hash.is_some() {
             self.hash(name, values)
         } else if base64.is_some() {
@@ -11209,6 +11290,7 @@ enum StandardBindingKind {
     Bits,
     Stream,
     Concurrent,
+    Ui,
     Stats,
     Time,
     Hash,
@@ -11394,6 +11476,11 @@ const STANDARD_BINDING_MODULES: &[StandardBindingModule] = &[
         prefix: "std.concurrent.",
         kind: StandardBindingKind::Concurrent,
         operations: &["parallel", "race", "timeout"],
+    },
+    StandardBindingModule {
+        prefix: "std.ui.",
+        kind: StandardBindingKind::Ui,
+        operations: &["__node"],
     },
     StandardBindingModule {
         prefix: "std.stats.",
@@ -12080,6 +12167,100 @@ fn ui_input_type_name(name: &str) -> Option<&'static str> {
         "Decimal" | "std.decimal" => "std.decimal",
         _ => return None,
     })
+}
+
+fn ui_value_type_name(value: &Value) -> String {
+    match value {
+        Value::Null => "std.null".into(),
+        Value::Unit => "std.void".into(),
+        Value::Bool(_) => "std.boolean".into(),
+        Value::Int(_) => "std.integer".into(),
+        Value::Decimal(_) => "std.decimal".into(),
+        Value::Money { .. } => "std.money".into(),
+        Value::Float(_) => "std.float".into(),
+        Value::String(_) => "std.text".into(),
+        Value::Blob(_) => "std.binary_large_object".into(),
+        Value::Date(_) => "std.date".into(),
+        Value::Uuid(_) => "std.uuid".into(),
+        Value::Reference(_) => "std.reference".into(),
+        Value::Instant { .. } => "std.timestamp".into(),
+        Value::Duration { .. } => "std.duration".into(),
+        Value::Period { .. } => "std.period".into(),
+        Value::Error(_) => "std.error".into(),
+        Value::Range { .. } => "std.range".into(),
+        Value::List(_) => "std.list".into(),
+        Value::Stream { .. } => "std.stream".into(),
+        Value::Relation(_) => "std.relation".into(),
+        Value::Tuple(_) => "std.tuple".into(),
+        Value::Record(_) => "std.record".into(),
+        Value::NominalRecord { .. } => "std.nominal_record".into(),
+        Value::Enum { .. } => "std.enum".into(),
+        Value::Option(Some(value)) => format!("std.option<{}>", ui_value_type_name(value)),
+        Value::Option(None) => "std.option<unknown>".into(),
+        Value::Function { .. } | Value::Closure(_) => "std.function".into(),
+    }
+}
+
+fn is_ui_presentation_node(value: &Value) -> bool {
+    let Value::Record(fields) = value else {
+        return false;
+    };
+    if !matches!(fields.get("kind"), Some(Value::String(kind)) if kind == "node") {
+        return false;
+    }
+    let Some(Value::Record(contract)) = fields.get("contract") else {
+        return false;
+    };
+    if !["id", "name", "version"].into_iter().all(|name| {
+        matches!(contract.get(name), Some(Value::String(value)) if !value.is_empty())
+    }) {
+        return false;
+    }
+    let Some(Value::Record(properties)) = fields.get("properties") else {
+        return false;
+    };
+    if !properties.iter().all(|(name, property)| {
+        let Value::Record(typed) = property else {
+            return false;
+        };
+        let (Some(Value::String(type_name)), Some(value)) =
+            (typed.get("type"), typed.get("value"))
+        else {
+            return false;
+        };
+        !name.is_empty()
+            && type_name == &ui_value_type_name(value)
+            && value.clone().canonical().is_ok()
+    }) {
+        return false;
+    }
+    let Some(Value::Record(slots)) = fields.get("slots") else {
+        return false;
+    };
+    if !slots.values().all(|slot| {
+        let Value::List(children) = slot else {
+            return false;
+        };
+        children.iter().all(is_ui_presentation_node)
+    }) {
+        return false;
+    }
+    let Some(Value::Record(actions)) = fields.get("actions") else {
+        return false;
+    };
+    actions.values().all(is_ui_action_descriptor)
+}
+
+fn is_ui_action_descriptor(value: &Value) -> bool {
+    let Value::Record(fields) = value else {
+        return false;
+    };
+    let has_text = |name: &str| matches!(fields.get(name), Some(Value::String(value)) if !value.is_empty());
+    has_text("action_id")
+        && has_text("input_type")
+        && fields.get("debug_kind").is_none_or(|value| {
+            matches!(value, Value::Null | Value::String(_))
+        })
 }
 
 fn function_name(expression: &Expr) -> Option<String> {
@@ -14624,6 +14805,44 @@ mod tests {
         assert_eq!(field("action_id"), &Raw::Text("save".into()));
         assert_eq!(field("input_type"), &Raw::Text("std.text".into()));
         assert_eq!(field("debug_kind"), &Raw::Text("button".into()));
+    }
+
+    #[test]
+    fn presentation_container_validation_rejects_incomplete_nested_contracts() {
+        fn node(children: Vec<Value>) -> Value {
+            Value::Record(BTreeMap::from([
+                ("kind".into(), Value::String("node".into())),
+                (
+                    "contract".into(),
+                    Value::Record(BTreeMap::from([
+                        ("id".into(), Value::String("std.ui.text@1".into())),
+                        ("name".into(), Value::String("std.ui.text".into())),
+                        ("version".into(), Value::String("1.0".into())),
+                    ])),
+                ),
+                ("properties".into(), Value::Record(BTreeMap::new())),
+                (
+                    "slots".into(),
+                    Value::Record(BTreeMap::from([(
+                        "content".into(),
+                        Value::List(children),
+                    )])),
+                ),
+                ("actions".into(), Value::Record(BTreeMap::new())),
+            ]))
+        }
+
+        let valid = node(Vec::new());
+        assert!(is_ui_presentation_node(&valid));
+
+        let mut invalid_child = node(Vec::new());
+        let Value::Record(fields) = &mut invalid_child else {
+            unreachable!();
+        };
+        fields.insert("contract".into(), Value::Record(BTreeMap::new()));
+
+        let parent = node(vec![invalid_child]);
+        assert!(!is_ui_presentation_node(&parent));
     }
 
     #[test]
