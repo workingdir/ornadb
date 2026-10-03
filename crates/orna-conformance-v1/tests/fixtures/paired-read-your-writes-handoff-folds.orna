@@ -1,0 +1,21 @@
+pub table Note(id: Int) { amount: Int, label: Str, }
+
+fn seed() {
+    Note.insert({ id: 1, amount: 10, label: "stable" });
+    Note.insert({ id: 2, amount: 20, label: "seed" });
+    Note.insert({ id: 3, amount: 30, label: "stable" });
+}
+
+fn total(): Int = Note | map(note => note.amount) | sum;
+
+fn seed_identity(): Int = Note
+    | filter(note => note.label == "seed")
+    | map(note => note.id * note.amount)
+    | sum;
+
+fn parent() {
+    assert total() == 0;
+    seed();
+    assert total() == 60;
+    assert seed_identity() == 40;
+}
