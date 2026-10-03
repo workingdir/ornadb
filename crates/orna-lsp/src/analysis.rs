@@ -98,6 +98,10 @@ pub fn check_document(
     standard: Option<&StandardLibrary>,
     mapper: &PositionMapper<'_>,
 ) -> Vec<Diagnostic> {
+    let syntax = orna_syntax::parse(&document.text);
+    if uses_compiler_declaration_grammar(&syntax, &document.text) {
+        return compiler_check_diagnostics(document, mapper);
+    }
     let Some(standard) = standard else {
         return syntax_diagnostics(document, mapper);
     };
@@ -153,6 +157,44 @@ pub fn check_document(
                 "standardProfile": standard.catalogue.standard_dependency_profile().map(|profile| profile.snapshot()),
             })),
         })
+        .collect()
+}
+
+fn uses_compiler_declaration_grammar(parse: &Parse, text: &str) -> bool {
+    // DDL documents use the compiler's accepted declaration grammar; module
+    // documents continue through syntax-v1 analysis so editor errors match the
+    // same source each respective frontend uses.
+    parse
+        .highlight()
+        .into_iter()
+        .find(|token| token.kind != HighlightKind::Comment)
+        .and_then(|token| text.get(token.range))
+        .is_some_and(|first| {
+            ["CREATE", "ALTER", "EXPORT"]
+                .iter()
+                .any(|keyword| first.eq_ignore_ascii_case(keyword))
+        })
+}
+
+fn compiler_check_diagnostics(document: &Document, mapper: &PositionMapper<'_>) -> Vec<Diagnostic> {
+    let logical_path = document.logical_path();
+    let Ok(bundle) =
+        SourceBundle::new([SourceUnit::new(logical_path.clone(), document.text.clone())])
+    else {
+        return syntax_diagnostics(document, mapper);
+    };
+    let Ok(base) = orna_core::catalogue::CatalogueSnapshot::new(
+        orna_compiler::EMPTY_APPLICATION_CATALOGUE_REVISION_ID,
+        Vec::new(),
+        Vec::new(),
+    ) else {
+        return syntax_diagnostics(document, mapper);
+    };
+    orna_compiler::check(&bundle, &base)
+        .diagnostics()
+        .iter()
+        .filter(|diagnostic| diagnostic.location().logical_path() == logical_path)
+        .map(|diagnostic| compiler_diagnostic(diagnostic, mapper, &document.uri, &logical_path))
         .collect()
 }
 
@@ -1971,6 +2013,7 @@ fn client_parameter_info<'a>(
 }
 
 fn client_local_hover(
+    parse: &Parse,
     declaration: &ClientFunctionDeclaration,
     root: &orna_syntax::NamePart,
     text: &str,
@@ -1994,7 +2037,9 @@ fn client_local_hover(
         default_text: None,
         documentation: None,
     };
-    Some(crate::hover::parameter_hover(&parameter, text, doc_link))
+    Some(crate::hover::parameter_hover(
+        parse, &parameter, text, doc_link,
+    ))
 }
 
 fn client_field_info_at<'a>(parse: &'a Parse, selected_span: &SourceSpan) -> Option<FieldInfo<'a>> {
@@ -3321,8 +3366,12 @@ pub fn hover(
         });
     if let Some(target_name) = target_function {
         if let Some(declaration) = client_target_declaration(parse, &span) {
-            let mut hover =
-                crate::hover::declaration_hover(declaration, &document.text, doc_link.as_deref());
+            let mut hover = crate::hover::declaration_hover(
+                parse,
+                declaration,
+                &document.text,
+                doc_link.as_deref(),
+            );
             hover.range = Some(mapper.range(&span));
             return Some(hover);
         }
@@ -3385,12 +3434,14 @@ pub fn hover(
                 // A field name shadows scalar and declaration names at the
                 // same spelling, for example a field named `text`.
                 Some(crate::hover::field_hover(
+                    parse,
                     &field,
                     &document.text,
                     doc_link.as_deref(),
                 ))
             } else if let Some(parameter) = parameter_at(parse, byte) {
                 Some(crate::hover::parameter_hover(
+                    parse,
                     &parameter,
                     &document.text,
                     doc_link.as_deref(),
@@ -3400,11 +3451,17 @@ pub fn hover(
                 match part {
                     ClientExpressionPart::FieldMember { .. } => client_field_info_at(parse, &span)
                         .map(|field| {
-                            crate::hover::field_hover(&field, &document.text, doc_link.as_deref())
+                            crate::hover::field_hover(
+                                parse,
+                                &field,
+                                &document.text,
+                                doc_link.as_deref(),
+                            )
                         }),
                     ClientExpressionPart::ParameterRoot(root) => {
                         client_parameter_info(declaration, root, part).map(|parameter| {
                             crate::hover::parameter_hover(
+                                parse,
                                 &parameter,
                                 &document.text,
                                 doc_link.as_deref(),
@@ -3415,6 +3472,7 @@ pub fn hover(
                         client_parameter_info(declaration, root, part)
                             .map(|parameter| {
                                 crate::hover::parameter_hover(
+                                    parse,
                                     &parameter,
                                     &document.text,
                                     doc_link.as_deref(),
@@ -3422,6 +3480,7 @@ pub fn hover(
                             })
                             .or_else(|| {
                                 client_local_hover(
+                                    parse,
                                     declaration,
                                     root,
                                     &document.text,
@@ -3433,6 +3492,7 @@ pub fn hover(
                         client_parameter_info(declaration, root, part)
                             .map(|parameter| {
                                 crate::hover::parameter_hover(
+                                    parse,
                                     &parameter,
                                     &document.text,
                                     doc_link.as_deref(),
@@ -3440,6 +3500,7 @@ pub fn hover(
                             })
                             .or_else(|| {
                                 client_local_hover(
+                                    parse,
                                     declaration,
                                     root,
                                     &document.text,
@@ -3452,6 +3513,7 @@ pub fn hover(
                 }
             } else if let Some(field) = sql_column_at(parse, byte, &document.text, &highlighted) {
                 Some(crate::hover::field_hover(
+                    parse,
                     &field,
                     &document.text,
                     doc_link.as_deref(),
@@ -3461,6 +3523,7 @@ pub fn hover(
                     sql_object_type_declaration_at(parse, &document.text, &highlighted, &span)
             {
                 Some(crate::hover::declaration_hover(
+                    parse,
                     declaration,
                     &document.text,
                     doc_link.as_deref(),
@@ -3469,6 +3532,7 @@ pub fn hover(
                 declaration_at_span(parse, &document.text, &highlighted, &name, kind, &span)
             {
                 Some(crate::hover::declaration_hover(
+                    parse,
                     declaration,
                     &document.text,
                     doc_link.as_deref(),
@@ -4050,19 +4114,27 @@ pub fn completion_at(
             ..CompletionItem::default()
         });
     }
-    let mut add_named = |label: String, kind: CompletionItemKind, detail: String| {
-        items.push(CompletionItem {
-            label,
-            kind: Some(kind),
-            detail: Some(detail),
-            ..CompletionItem::default()
-        });
-    };
+    let mut add_named =
+        |label: String, kind: CompletionItemKind, detail: String, documentation: Option<String>| {
+            items.push(CompletionItem {
+                label,
+                kind: Some(kind),
+                detail: Some(detail),
+                documentation: documentation.map(lsp_types::Documentation::String),
+                ..CompletionItem::default()
+            });
+        };
     for schema in parse.schemas() {
         add_named(
             last_name(&schema.name),
             CompletionItemKind::MODULE,
             "schema".to_owned(),
+            schema
+                .name
+                .parts
+                .last()
+                .and_then(|name| parse.documentation_comment(name))
+                .map(str::to_owned),
         );
     }
     for declaration in parse.object_types() {
@@ -4070,6 +4142,12 @@ pub fn completion_at(
             last_name(&declaration.name),
             CompletionItemKind::INTERFACE,
             "object type".to_owned(),
+            declaration
+                .name
+                .parts
+                .last()
+                .and_then(|name| parse.documentation_comment(name))
+                .map(str::to_owned),
         );
     }
     for declaration in parse.enum_types() {
@@ -4077,6 +4155,12 @@ pub fn completion_at(
             last_name(&declaration.name),
             CompletionItemKind::ENUM,
             "enum type".to_owned(),
+            declaration
+                .name
+                .parts
+                .last()
+                .and_then(|name| parse.documentation_comment(name))
+                .map(str::to_owned),
         );
     }
     for declaration in parse.record_value_types() {
@@ -4084,6 +4168,12 @@ pub fn completion_at(
             last_name(&declaration.name),
             CompletionItemKind::STRUCT,
             "record value type".to_owned(),
+            declaration
+                .name
+                .parts
+                .last()
+                .and_then(|name| parse.documentation_comment(name))
+                .map(str::to_owned),
         );
     }
     for declaration in parse.primitive_value_types() {
@@ -4091,6 +4181,12 @@ pub fn completion_at(
             last_name(&declaration.name),
             CompletionItemKind::STRUCT,
             "primitive value type".to_owned(),
+            declaration
+                .name
+                .parts
+                .last()
+                .and_then(|name| parse.documentation_comment(name))
+                .map(str::to_owned),
         );
     }
     for declaration in parse.opaque_value_types() {
@@ -4098,6 +4194,12 @@ pub fn completion_at(
             last_name(&declaration.name),
             CompletionItemKind::STRUCT,
             "opaque value type".to_owned(),
+            declaration
+                .name
+                .parts
+                .last()
+                .and_then(|name| parse.documentation_comment(name))
+                .map(str::to_owned),
         );
     }
     for declaration in parse.server_functions() {
@@ -4113,6 +4215,12 @@ pub fn completion_at(
             last_name(&declaration.name),
             CompletionItemKind::FUNCTION,
             detail,
+            declaration
+                .name
+                .parts
+                .last()
+                .and_then(|name| parse.documentation_comment(name))
+                .map(str::to_owned),
         );
     }
     for declaration in parse.client_functions() {
@@ -4128,6 +4236,12 @@ pub fn completion_at(
             last_name(&declaration.name),
             CompletionItemKind::FUNCTION,
             detail,
+            declaration
+                .name
+                .parts
+                .last()
+                .and_then(|name| parse.documentation_comment(name))
+                .map(str::to_owned),
         );
     }
     if let Some(byte) = byte
@@ -4373,6 +4487,9 @@ fn add_client_member_completions(parse: &Parse, byte: usize, items: &mut Vec<Com
             label: field.text.clone(),
             kind: Some(CompletionItemKind::FIELD),
             detail: Some(format!("{kind} field of {}", qualified_name_text(&owner))),
+            documentation: parse
+                .documentation_comment(field)
+                .map(|documentation| lsp_types::Documentation::String(documentation.to_owned())),
             ..CompletionItem::default()
         });
     }

@@ -1,0 +1,11 @@
+std.error.code_chain(
+    std.error.caused_by(
+        "outer.failure",
+        "operation failed",
+        std.error.caused_by(
+            "storage.conflict",
+            "write conflicted",
+            std.error.make("filesystem.denied", "root is not authorized")
+        )
+    )
+)

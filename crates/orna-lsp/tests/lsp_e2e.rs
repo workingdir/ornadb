@@ -913,8 +913,8 @@ fn reports_diagnostics_for_legacy_sql_source_and_broken_document() {
     assert_eq!(diagnostics["uri"], uri);
     let legacy_items = diagnostics["diagnostics"].as_array().expect("diagnostics");
     assert!(
-        !legacy_items.is_empty(),
-        "SQL-style CREATE declarations are outside Orna 1.0 module grammar"
+        legacy_items.is_empty(),
+        "valid CREATE declarations are accepted by the compiler"
     );
 
     // The pull-based diagnostic request agrees with the pushed report.
@@ -949,7 +949,7 @@ fn reports_diagnostics_for_legacy_sql_source_and_broken_document() {
 }
 
 #[test]
-fn reports_legacy_client_fixture_diagnostics_and_editor_symbols() {
+fn reports_compiler_client_diagnostics_and_editor_symbols() {
     let mut client = Client::spawn();
     initialize(&mut client);
     let uri = "file:///test/accepted-client.orna";
@@ -958,8 +958,8 @@ fn reports_legacy_client_fixture_diagnostics_and_editor_symbols() {
     let diagnostics = client.read_notification("textDocument/publishDiagnostics");
     assert_eq!(diagnostics["uri"], uri);
     let items = diagnostics["diagnostics"].as_array().expect("diagnostics");
-    assert_eq!(items.len(), 4, "legacy single-quoted source diagnostics");
-    assert!(items.iter().all(|item| item["code"] == "ORNA-LEX-001"));
+    assert_eq!(items.len(), 1, "compiler diagnostic for unsupported body");
+    assert!(items[0]["code"].as_str().unwrap().starts_with("ORNA"));
 
     let symbols = client.request(
         "textDocument/documentSymbol",
@@ -978,7 +978,7 @@ fn reports_legacy_client_fixture_diagnostics_and_editor_symbols() {
 }
 
 #[test]
-fn reports_legacy_client_source_diagnostics_before_semantic_tokens() {
+fn reports_compiler_client_diagnostics_before_semantic_tokens() {
     let mut client = Client::spawn();
     initialize(&mut client);
     let uri = "file:///test/accepted-client-semantic.orna";
@@ -990,8 +990,8 @@ fn reports_legacy_client_source_diagnostics_before_semantic_tokens() {
     open_document(&mut client, uri, &source, 1);
     let diagnostics = client.read_notification("textDocument/publishDiagnostics");
     let items = diagnostics["diagnostics"].as_array().expect("diagnostics");
-    assert_eq!(items.len(), 4, "legacy single-quoted source diagnostics");
-    assert!(items.iter().all(|item| item["code"] == "ORNA-LEX-001"));
+    assert_eq!(items.len(), 1, "compiler diagnostic for unsupported body");
+    assert!(items[0]["code"].as_str().unwrap().starts_with("ORNA"));
 
     let tokens = decode_semantic_tokens(&client.request(
         "textDocument/semanticTokens/full",
@@ -1139,25 +1139,23 @@ fn reports_legacy_client_source_diagnostics_before_semantic_tokens() {
 }
 
 #[test]
-fn rejects_sql_order_by_fixture_as_an_orna_module() {
+fn accepts_order_by_create_declarations_without_diagnostics() {
     let mut client = Client::spawn();
     initialize(&mut client);
     let uri = "file:///test/accepted-order-by-semantic.orna";
     open_document(&mut client, uri, ORDER_BY_SOURCE, 1);
     let diagnostics = client.read_notification("textDocument/publishDiagnostics");
     let items = diagnostics["diagnostics"].as_array().expect("diagnostics");
-    assert_eq!(
-        items.len(),
-        3,
-        "three SQL declarations are not module items"
+    assert!(
+        items.is_empty(),
+        "compiler accepts the ORDER BY declaration"
     );
-    assert!(items.iter().all(|item| item["code"] == "ORNA-PARSE-001"));
 
     client.shutdown();
 }
 
 #[test]
-fn rejects_sql_update_delete_mutations_as_orna_module_source() {
+fn accepts_sql_update_delete_mutations_as_compiler_declarations() {
     let mut client = Client::spawn();
     initialize(&mut client);
     let uri = "file:///test/valid-mutations.orna";
@@ -1166,10 +1164,9 @@ fn rejects_sql_update_delete_mutations_as_orna_module_source() {
     let diagnostics = client.read_notification("textDocument/publishDiagnostics");
     let items = diagnostics["diagnostics"].as_array().expect("diagnostics");
     assert!(
-        !items.is_empty(),
-        "SQL UPDATE/DELETE are outside Orna 1.0 module grammar"
+        items.is_empty(),
+        "compiler accepts the mutation declarations"
     );
-    assert!(items.iter().any(|item| item["code"] == "ORNA-PARSE-001"));
 
     client.shutdown();
 }
@@ -1841,7 +1838,7 @@ fn semantic_rename_rejects_ambiguous_persistent_object() {
 }
 
 #[test]
-fn rejects_legacy_field_rename_ddl_outside_orna_1_0_module_grammar() {
+fn reports_compiler_diagnostic_for_invalid_field_rename() {
     let mut client = Client::spawn();
     initialize(&mut client);
     let uri = "file:///test/field-rename.orna";
@@ -1850,8 +1847,9 @@ fn rejects_legacy_field_rename_ddl_outside_orna_1_0_module_grammar() {
     let diagnostics = client.read_notification("textDocument/publishDiagnostics");
     assert_eq!(diagnostics["uri"], uri);
     let items = diagnostics["diagnostics"].as_array().expect("diagnostics");
-    assert_eq!(items.len(), 4, "legacy ALTER TYPE source diagnostics");
-    assert!(items.iter().all(|item| item["code"] == "ORNA-PARSE-001"));
+    assert_eq!(items.len(), 1, "one unresolved old field");
+    assert!(items[0]["code"].as_str().unwrap().starts_with("ORNA"));
+    assert!(!items[0]["message"].as_str().unwrap().is_empty());
 
     client.shutdown();
 }

@@ -1,0 +1,19 @@
+{ id: "nested-9spl2/restore-0/order-4", name: "left-a-4", city: "right-a-4", }
+
+{ id: "nested-9spl2/restore-0/order-5", name: "left-a-5", city: "right-a-5", }
+
+{ id: "nested-9spl2/restore-0/order-7", name: "left-a-7", city: "right-a-7", }
+
+{ id: "nested-9spl2/duplicate-stream/order-4", name: "left-b-4", city: "right-b-4", }
+
+{ id: "nested-9spl2/duplicate-stream/order-5", name: "left-b-5", city: "right-b-5", }
+
+{ id: "nested-9spl2/handoff/order-4", name: "left-handoff-4", city: "right-handoff-4", }
+
+{ id: "nested-9spl2/restore-1/order-4", name: "left-c-4", city: "right-c-4", }
+
+{ id: "nested-9spl2/restore-1-duplicate/order-4", name: "left-d-4", city: "right-d-4", }
+
+{ id: "nested-9spl2/late/order-9", name: "left-late-9", city: "right-late-9", }
+
+{ id: "nested-9spl2/beta/order-7", name: "left-beta-7", city: "right-beta-7", }
