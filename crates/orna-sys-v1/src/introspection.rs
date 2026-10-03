@@ -1286,6 +1286,34 @@ pub fn explain_query_with_partial_indexes(
     )
 }
 
+/// Explains exact partial-index pushdowns and resolver-approved correlated
+/// subqueries in one sparse cost cascade. Predicate and subquery identities
+/// remain paired to their exact right input as physical ordering moves known
+/// inputs ahead of sparse unknown-cost inputs.
+pub fn explain_query_with_partial_indexes_and_decorrelated_subqueries(
+    query: &QueryPlanDescription,
+    indexes: &[QueryPartialIndexDescription],
+    subqueries: &[QueryDecorrelatedSubqueryDescription],
+) -> Result<ExplainedPlan, ExplainError> {
+    explain_query_core_with_subqueries(
+        query,
+        1,
+        None,
+        None,
+        &[],
+        &[],
+        &[],
+        None,
+        &[],
+        &[],
+        &[],
+        indexes,
+        subqueries,
+        &[],
+        &[],
+    )
+}
+
 /// Explains a query followed by additional ordered limit stages.
 ///
 /// The optional `query.limit` is applied first, followed by each value in
@@ -2252,7 +2280,9 @@ fn explain_query_core_with_subqueries(
             }
         }
         if let Some(subquery) = decorrelated_subquery {
-            add_decorrelated_subquery_details(&mut operators[right].details, subquery);
+            for index in BTreeSet::from([right_access, right]) {
+                add_decorrelated_subquery_details(&mut operators[index].details, subquery);
+            }
         }
         let join_pair_identity = join_pair_identity_for_join(join, join_pair_identities);
         if let Some(pair_identity) = join_pair_identity {
@@ -2281,7 +2311,19 @@ fn explain_query_core_with_subqueries(
             join,
             selected_partial_index,
             window_aggregates,
+            decorrelated_subquery,
         );
+        let decorrelated_predicate_identity = decorrelated_subquery
+            .zip(selected_partial_index)
+            .map(|(subquery, index)| decorrelated_predicate_pushdown_identity(subquery, index));
+        if let Some(identity) = decorrelated_predicate_identity.as_deref() {
+            for index in BTreeSet::from([right_access, right]) {
+                add_decorrelated_predicate_pushdown_details(
+                    &mut operators[index].details,
+                    identity,
+                );
+            }
+        }
         let next_join_cost_fold_identity = query_join_cost_fold(
             &left_fold_identity,
             &right_fold_identity,
@@ -2332,6 +2374,9 @@ fn explain_query_core_with_subqueries(
         }
         if let Some(subquery) = decorrelated_subquery {
             add_decorrelated_subquery_details(&mut details, subquery);
+        }
+        if let Some(identity) = decorrelated_predicate_identity.as_deref() {
+            add_decorrelated_predicate_pushdown_details(&mut details, identity);
         }
         if let Some(pair_identity) = join_pair_identity {
             add_join_pair_identity_details(&mut details, pair_identity);
@@ -3441,6 +3486,42 @@ fn partial_index_pair_identity(candidate: &QueryPartialIndexDescription) -> Stri
     format!("index-pair:{}", hex(&hash.finalize()))
 }
 
+/// Combines the resolver-approved subquery/correlation tuple with the exact
+/// selected partial-index tuple. The reference leaves this combined identity
+/// encoding open, so use a domain-separated deterministic digest.
+fn decorrelated_predicate_pushdown_identity(
+    subquery: &QueryDecorrelatedSubqueryDescription,
+    candidate: &QueryPartialIndexDescription,
+) -> String {
+    let mut hash = Sha256::new();
+    hash.update(b"orna.sys.decorrelated-predicate-pushdown.v1\0");
+    hash_part(&mut hash, subquery.identity.as_str().as_bytes());
+    hash_part(&mut hash, subquery.source.as_str().as_bytes());
+    hash_part(
+        &mut hash,
+        subquery.correlation_predicate.as_str().as_bytes(),
+    );
+    hash_part(
+        &mut hash,
+        partial_index_pair_identity(candidate).as_bytes(),
+    );
+    format!("decorrelated-pushdown:{}", hex(&hash.finalize()))
+}
+
+fn add_decorrelated_predicate_pushdown_details(
+    details: &mut BTreeMap<String, PlanDetail>,
+    identity: &str,
+) {
+    details.insert(
+        "decorrelated_predicate_pushdown_identity".to_owned(),
+        PlanDetail::Text(identity.to_owned()),
+    );
+    details.insert(
+        "decorrelated_predicate_pushdown_pairing".to_owned(),
+        PlanDetail::Text("resolver_subquery_and_exact_index_pair".to_owned()),
+    );
+}
+
 fn add_partial_index_pair_identity_details(
     details: &mut BTreeMap<String, PlanDetail>,
     candidate: &QueryPartialIndexDescription,
@@ -3478,6 +3559,7 @@ fn query_join_cost_input_identity(
     join: &QueryJoinDescription,
     selected_index: Option<&QueryPartialIndexDescription>,
     window_aggregates: &[QueryWindowAggregatePushdownDescription],
+    decorrelated_subquery: Option<&QueryDecorrelatedSubqueryDescription>,
 ) -> String {
     let mut hash = Sha256::new();
     hash.update(b"orna.sys.query-join-cost-input.v1\0");
@@ -3488,6 +3570,17 @@ fn query_join_cost_input_identity(
         join.predicate.as_ref().map(ExpressionRef::as_str),
     );
     hash_query_statistics(&mut hash, join.statistics.as_ref());
+    if let Some(subquery) = decorrelated_subquery {
+        hash.update([1]);
+        hash_part(&mut hash, subquery.identity.as_str().as_bytes());
+        hash_part(&mut hash, subquery.source.as_str().as_bytes());
+        hash_part(
+            &mut hash,
+            subquery.correlation_predicate.as_str().as_bytes(),
+        );
+    } else {
+        hash.update([0]);
+    }
     if let Some(index) = selected_index {
         hash.update([1]);
         hash_part(
