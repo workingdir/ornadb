@@ -720,7 +720,7 @@ fn render_emacs() -> String {
   "Major mode for Orna source files."
   (setq-local comment-start {comment_start})
   (setq-local comment-end "")
-  (setq-local font-lock-defaults '(orna-font-lock-keywords nil t)))
+  (setq-local font-lock-defaults '(orna-font-lock-keywords nil nil)))
 (add-to-list 'auto-mode-alist '({extension_pattern} . orna-mode))
 (defun orna-setup-eglot ()
   "Register Orna buffers with the orna-lsp language server."
