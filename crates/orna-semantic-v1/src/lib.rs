@@ -17994,7 +17994,10 @@ fn snapshot_context_topology_matches(
         signatures
     }
 
-    membership_signatures(pin_maps, true) == membership_signatures(pin_maps, false)
+    pin_maps
+        .iter()
+        .all(|(expected, actual)| expected.len() == actual.len())
+        && membership_signatures(pin_maps, true) == membership_signatures(pin_maps, false)
 }
 
 fn collect_corresponding_snapshot_context_maps(
