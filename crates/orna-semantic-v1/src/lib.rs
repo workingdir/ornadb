@@ -7285,14 +7285,20 @@ fn infer(
                 || element_types
                     .iter()
                     .any(type_contains_paired_pinned_checkpoint_siblings);
+            let mut rolled_back_checkpoint_paths = BTreeSet::new();
             let mut rejected_checkpoint_parent = false;
             let mut ty = None;
             for value in element_types {
                 if let Some(prior) = &ty {
-                    // A rejected scope is frozen only while reconciling this
-                    // parent. Later rows must retry against the learned
-                    // topology so a valid continuation can recover the fold.
-                    let mut rolled_back_checkpoint_paths = BTreeSet::new();
+                    // Paired sparse anchors evolve as accepted rows teach more
+                    // topology, so reject a bad row locally and retry later
+                    // rows. Folds without that recovery anchor retain their
+                    // original fold-wide freeze for a rejected path.
+                    let mut parent_rollback_paths = if paired_omission_recovery {
+                        BTreeSet::new()
+                    } else {
+                        rolled_back_checkpoint_paths.clone()
+                    };
                     let merged = if transactional_checkpoint_fold && scoped_checkpoint_rollback {
                         merge_multi_parent_checkpoint_value_scoped(
                             prior,
@@ -7310,7 +7316,7 @@ fn infer(
                                 .as_ref()
                                 .expect("transactional fold has a topology parent"),
                             &mut Vec::new(),
-                            &mut rolled_back_checkpoint_paths,
+                            &mut parent_rollback_paths,
                         )
                         .map(|mut fold| {
                             if fold.rejected_scope {
@@ -7369,6 +7375,9 @@ fn infer(
                     } else {
                         merge_list_element_types(prior, &value)
                     };
+                    if !paired_omission_recovery {
+                        rolled_back_checkpoint_paths = parent_rollback_paths;
+                    }
                     if let Some(merged) = merged {
                         ty = Some(merged);
                     } else {
@@ -19875,11 +19884,12 @@ struct ScopedCheckpointFold {
     rejected_scope: bool,
 }
 
-/// Reconcile one parent while allowing all-omitted-first-row folds to recover
-/// locally. A rejected nested scope is restored to the first row and frozen
-/// for the rest of this parent across record, tuple, collection-element, generic applied
-/// argument, and money-dimension boundaries; unaffected sibling paths keep
-/// folding. The reference is silent on rollback through these local structures,
+/// Reconcile one parent while allowing sparse paired folds to recover locally.
+/// A rejected nested scope is restored at its smallest boundary across record,
+/// tuple, collection-element, generic applied-argument, and money-dimension
+/// paths; unaffected sibling paths keep folding. The caller controls whether
+/// that scope stays frozen for later parents or is retried against a learned
+/// paired topology. The reference is silent on rollback through these local structures,
 /// so use the same smallest-failing-scope rule. Snapshot context maps,
 /// historical callable/namespace pairs, and function contracts remain atomic
 /// because their identities or binder rules are coupled. Rebuild the effective
