@@ -439,6 +439,22 @@ pub struct BranchMergeColumnRestoreStormFoldSnapshot {
     pub storms: Vec<BranchMergeColumnRestoreStormLadderSnapshot>,
 }
 
+/// One stable column's depth labels at a specific wave in a restore storm.
+///
+/// `storm_index` is zero-based in committed lineage order. The stable
+/// `(table, column)` identity, storm range, and wave order travel with the
+/// labels so sibling ladders can be paired without interpreting cell values.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BranchMergeColumnRestoreStormDepthLabelWaveSnapshot {
+    pub storm_index: usize,
+    pub first_order: u64,
+    pub last_order: u64,
+    pub order: u64,
+    pub table: ObjectId,
+    pub column: ObjectId,
+    pub depth_labels: Vec<usize>,
+}
+
 /// A canonical column cell released with its source parent identity intact.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BranchMergeParentColumnDepthEvent {
@@ -1446,6 +1462,40 @@ impl BranchMergeTombstoneHistory {
                 }
             })
             .collect()
+    }
+
+    /// Returns the explicit paired depth-label roster for every present
+    /// column ladder in every committed restore storm.
+    ///
+    /// Each result binds local labels to its stable `(table, column)` pair,
+    /// storm index and order range, and restore-wave order. Empty fragments
+    /// contribute their labels; omitted columns contribute no label record.
+    /// This v1 projection does not renumber or align labels across waves.
+    pub fn column_restore_storm_depth_labels(
+        &self,
+    ) -> Vec<BranchMergeColumnRestoreStormDepthLabelWaveSnapshot> {
+        let mut labels = Vec::new();
+        for (storm_index, storm) in self.column_restore_storms().into_iter().enumerate() {
+            for ladder in storm.ladders {
+                for wave in ladder.waves {
+                    if let Some(fragments) = wave.fragments {
+                        labels.push(BranchMergeColumnRestoreStormDepthLabelWaveSnapshot {
+                            storm_index,
+                            first_order: storm.first_order,
+                            last_order: storm.last_order,
+                            order: wave.order,
+                            table: ladder.table,
+                            column: ladder.column,
+                            depth_labels: fragments
+                                .into_iter()
+                                .map(|fragment| fragment.label)
+                                .collect(),
+                        });
+                    }
+                }
+            }
+        }
+        labels
     }
 
     /// Submits a complete paired restore wave from at least two distinct
