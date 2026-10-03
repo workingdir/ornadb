@@ -91,9 +91,11 @@ fn pinned_concurrent_result_helpers_are_included_in_the_captured_snapshot() {
     assert_eq!(index, 56, "the async result helper source appends to the bundle");
     assert_eq!(path, crate::REFERENCE_STANDARD_CONCURRENT_RESULT_PATH_V1);
     for declaration in [
-        "pub fn collect<T, E>(",
-        "pub fn parallel<T, E>(",
-        "pub fn parallel_map<T, U, E>(",
+        "pub fn values<T, E>(",
+        "pub fn errors<T, E>(",
+        "pub fn partition<T, E>(",
+        "pub fn parallel_partition<T, E>(",
+        "pub fn parallel_map_partition<T, U, E>(",
     ] {
         assert!(source.contains(declaration), "missing {declaration}");
     }
