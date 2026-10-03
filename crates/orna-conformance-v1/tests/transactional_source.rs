@@ -2,6 +2,7 @@ use orna_conformance_v1::{SourceUnit, StageOutcome, TransactionalEvaluator};
 use orna_evaluator_v1::Limits;
 use orna_foundation_v1::Value;
 use orna_semantic_v1::{Catalogue, ModuleInput, analyze_with_catalogue};
+use orna_value_v1::Raw;
 
 fn source(parent_body: &str) -> SourceUnit {
     SourceUnit {
@@ -21,6 +22,16 @@ fn fixture_source(source: &str) -> SourceUnit {
         parse_as: "module_unit".into(),
         source: source.into(),
     }
+}
+
+fn row_field<'a>(row: &'a Value, field: &str) -> &'a Raw {
+    let Raw::Map(fields) = row.raw() else {
+        panic!("expected a table row record, got {:?}", row.raw());
+    };
+    fields
+        .iter()
+        .find_map(|(key, value)| (key == &Raw::Text(field.into())).then_some(value))
+        .unwrap_or_else(|| panic!("table row omitted field {field}"))
 }
 
 fn decimal_key_table_assertion_source(assertion: &str, parent_body: &str) -> SourceUnit {
@@ -763,6 +774,87 @@ fn all_unique_factory_compares_complete_nested_record_keys() {
                 .committed_row("Account", &Value::int(id.into()))
                 .is_some(),
             "unique nested record key row {id} was not committed"
+        );
+    }
+}
+
+#[test]
+fn relation_predicate_folds_preserve_paired_optional_values() {
+    let mut runtime = TransactionalEvaluator::new("parent", Limits::default());
+    let outcome = runtime.execute_source(&fixture_source(include_str!(
+        "fixtures/txn-relation-paired-omissions-my3f3.orna"
+    )));
+
+    assert!(matches!(&outcome, StageOutcome::Passed), "{outcome:?}");
+    let expected_keys = [
+        Raw::Array(vec![
+            Raw::Null,
+            Raw::Array(vec![Raw::Int(2.into()), Raw::Text("east".into())]),
+        ]),
+        Raw::Array(vec![
+            Raw::Array(vec![Raw::Int(1.into()), Raw::Text("west".into())]),
+            Raw::Null,
+        ]),
+        Raw::Array(vec![Raw::Null, Raw::Null]),
+        Raw::Array(vec![
+            Raw::Array(vec![Raw::Int(4.into()), Raw::Text("north".into())]),
+            Raw::Array(vec![Raw::Int(5.into()), Raw::Text("south".into())]),
+        ]),
+    ];
+    for (index, expected_key) in expected_keys.iter().enumerate() {
+        let id = index as i64 + 1;
+        let row = runtime
+            .committed_row("Reading", &Value::int(id.into()))
+            .unwrap_or_else(|| panic!("unique paired key row {id} was not committed"));
+        assert_eq!(row_field(&row, "key"), expected_key);
+        assert_eq!(row_field(&row, "expected"), expected_key);
+    }
+}
+
+#[test]
+fn relation_every_rejects_a_paired_value_mismatch_after_an_omission() {
+    let mut runtime = TransactionalEvaluator::new("parent", Limits::default());
+    let outcome = runtime.execute_source(&fixture_source(include_str!(
+        "fixtures/txn-relation-paired-omissions-mismatch-my3f3.orna"
+    )));
+
+    assert!(
+        matches!(
+            &outcome,
+            StageOutcome::Failed(diagnostic)
+                if diagnostic.code() == "ORNA-EVAL-TABLE-ASSERT"
+        ),
+        "the mismatch in the present half of the pair must reject the fold: {outcome:?}"
+    );
+    for id in [1, 2] {
+        assert_eq!(
+            runtime.committed_row("Reading", &Value::int(id.into())),
+            None,
+            "failed paired-value predicate published row {id}"
+        );
+    }
+}
+
+#[test]
+fn all_unique_rejects_a_second_fully_omitted_pair_key() {
+    let mut runtime = TransactionalEvaluator::new("parent", Limits::default());
+    let outcome = runtime.execute_source(&fixture_source(include_str!(
+        "fixtures/txn-relation-paired-omissions-duplicate-my3f3.orna"
+    )));
+
+    assert!(
+        matches!(
+            &outcome,
+            StageOutcome::Failed(diagnostic)
+                if diagnostic.code() == "ORNA-EVAL-TABLE-ASSERT"
+        ),
+        "null equals null in both selected pair positions: {outcome:?}"
+    );
+    for id in [1, 2] {
+        assert_eq!(
+            runtime.committed_row("Reading", &Value::int(id.into())),
+            None,
+            "duplicate fully omitted pair key published row {id}"
         );
     }
 }

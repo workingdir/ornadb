@@ -6542,6 +6542,133 @@ fn multi_parent_selector_topology_storm_preserves_label_depth_identity() {
 }
 
 #[test]
+fn paired_boundary_depth_topology_accumulates_through_selector_storms() {
+    let source = include_str!("fixtures/historical-paired-boundary-depth-selector-storm.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-paired-boundary-depth-selector-storm.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert_eq!(
+        result
+            .diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.code() == DIAG_TYPE)
+            .count(),
+        1,
+        "a later row must preserve topology learned after paired omissions: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+    let module = result
+        .modules
+        .values()
+        .find(|module| {
+            module.symbols.contains_key(
+                "rejects_late_paired_boundary_depth_drift_after_omission_storm",
+            )
+        })
+        .expect("paired boundary selector storm fixture module");
+    let folded_element = |function: &str| {
+        let Type::Function { result, .. } = &module.symbols[function].ty else {
+            panic!("{function} must retain its computed result");
+        };
+        let Type::Record(fields) = result.as_ref() else {
+            panic!("{function} must return a record: {result:?}");
+        };
+        let Type::List(element) = fields.get("folded").expect("folded parent list") else {
+            panic!("{function} must preserve its parent list");
+        };
+        element.as_ref()
+    };
+    let Type::Function { result, .. } =
+        &module.symbols["rejects_late_paired_boundary_depth_drift_after_omission_storm"].ty
+    else {
+        panic!("rejected storm must retain its computed result");
+    };
+    let Type::Record(fields) = result.as_ref() else {
+        panic!("rejected storm must return its source rows: {result:?}");
+    };
+    assert_eq!(
+        folded_element("rejects_late_paired_boundary_depth_drift_after_omission_storm"),
+        fields.get("first").expect("first source row"),
+        "a topology conflict must roll back every promoted selector to the first row"
+    );
+
+    let Type::Function { result, .. } =
+        &module.symbols["accepts_stable_paired_boundary_depths_after_omission_storm"].ty
+    else {
+        panic!("stable storm must return its computed result");
+    };
+    let Type::Record(fields) = result.as_ref() else {
+        panic!("stable storm must return a record: {result:?}");
+    };
+    let Type::List(element) = fields.get("folded").expect("stable folded parent list") else {
+        panic!("stable storm must retain a parent list");
+    };
+    let Type::Record(boundaries) = element.as_ref() else {
+        panic!("stable storm must compute a boundary record: {element:?}");
+    };
+    for (boundary, expected) in [
+        (
+            "left",
+            [
+                BTreeSet::from([
+                    "selector:HEAD~951".to_owned(),
+                    "selector:HEAD~952".to_owned(),
+                    "selector:HEAD~953".to_owned(),
+                ]),
+                BTreeSet::from([
+                    "selector:HEAD~971".to_owned(),
+                    "selector:HEAD~973".to_owned(),
+                ]),
+            ],
+        ),
+        (
+            "right",
+            [
+                BTreeSet::from([
+                    "selector:HEAD~961".to_owned(),
+                    "selector:HEAD~962".to_owned(),
+                    "selector:HEAD~963".to_owned(),
+                ]),
+                BTreeSet::from([
+                    "selector:HEAD~972".to_owned(),
+                    "selector:HEAD~974".to_owned(),
+                ]),
+            ],
+        ),
+    ] {
+        let Type::Record(depths) = &boundaries[boundary] else {
+            panic!("stable {boundary} boundary must remain a record");
+        };
+        let Type::Tuple(slots) = &depths["pins"] else {
+            panic!("stable {boundary} depth labels must retain the tuple");
+        };
+        let contexts = slots
+            .iter()
+            .map(|slot| {
+                let mut contexts = BTreeSet::new();
+                collect_snapshot_contexts(slot, &mut contexts);
+                contexts
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            contexts,
+            expected,
+            "stable {boundary} selectors must stay at their original paired depths"
+        );
+    }
+}
+
+#[test]
 fn pairwise_selector_topology_folds_preserve_paired_boundary_depths() {
     let source = include_str!("fixtures/historical-paired-boundary-selector-depth-fold.orna");
     let parsed = orna_syntax_v1::parse_module(source);
@@ -6976,9 +7103,22 @@ fn nested_omission_checkpoint_storms_preserve_depth_labels_transactionally() {
         rolled_back,
         [
             vec![BTreeSet::new(), BTreeSet::new()],
-            vec![BTreeSet::new(), BTreeSet::new()],
+            vec![
+                BTreeSet::from([
+                    "selector:HEAD~210".to_owned(),
+                    "selector:HEAD~212".to_owned(),
+                    "selector:HEAD~214".to_owned(),
+                    "selector:HEAD~222".to_owned(),
+                ]),
+                BTreeSet::from([
+                    "selector:HEAD~211".to_owned(),
+                    "selector:HEAD~213".to_owned(),
+                    "selector:HEAD~215".to_owned(),
+                    "selector:HEAD~223".to_owned(),
+                ]),
+            ],
         ],
-        "a rejected nested crossing must recover every omitted depth from the first parent"
+        "a rejected nested crossing rolls back only its pair while sibling depths keep their labels"
     );
     assert_eq!(
         nested_pins(
@@ -6987,15 +7127,39 @@ fn nested_omission_checkpoint_storms_preserve_depth_labels_transactionally() {
         ),
         [
             vec![
-                BTreeSet::from(["selector:HEAD~100".into()]),
-                BTreeSet::from(["selector:HEAD~101".into()]),
+                BTreeSet::from([
+                    "selector:HEAD~100".into(),
+                    "selector:HEAD~110".into(),
+                    "selector:HEAD~120".into(),
+                    "selector:HEAD~130".into(),
+                    "selector:HEAD~140".into(),
+                ]),
+                BTreeSet::from([
+                    "selector:HEAD~101".into(),
+                    "selector:HEAD~111".into(),
+                    "selector:HEAD~121".into(),
+                    "selector:HEAD~131".into(),
+                    "selector:HEAD~141".into(),
+                ]),
             ],
             vec![
-                BTreeSet::from(["selector:HEAD~102".into()]),
-                BTreeSet::from(["selector:HEAD~103".into()]),
+                BTreeSet::from([
+                    "selector:HEAD~102".into(),
+                    "selector:HEAD~112".into(),
+                    "selector:HEAD~122".into(),
+                    "selector:HEAD~132".into(),
+                    "selector:HEAD~142".into(),
+                ]),
+                BTreeSet::from([
+                    "selector:HEAD~103".into(),
+                    "selector:HEAD~113".into(),
+                    "selector:HEAD~123".into(),
+                    "selector:HEAD~133".into(),
+                    "selector:HEAD~143".into(),
+                ]),
             ],
         ],
-        "recovery must also preserve the first parent's concrete sibling labels"
+        "a failed depth scope must not discard concrete labels from its sibling"
     );
 
     assert_eq!(
@@ -7072,6 +7236,272 @@ fn nested_omission_checkpoint_storms_preserve_depth_labels_transactionally() {
             ],
         ],
         "a partial first-parent omission must keep earlier concrete depth labels after a rejected row"
+    );
+}
+
+#[test]
+fn omitted_nested_fold_rolls_back_only_the_rejected_depth_scope() {
+    let source = include_str!("fixtures/historical-omission-scoped-rollback.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-omission-scoped-rollback.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert_eq!(
+        result
+            .diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.code() == DIAG_TYPE)
+            .count(),
+        1,
+        "the crossed depth must remain diagnosed while independent paths fold: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+    let module = result
+        .modules
+        .values()
+        .find(|module| {
+            module
+                .symbols
+                .contains_key("scoped_omission_rollback_preserves_sibling_depths")
+        })
+        .expect("scoped omission rollback fixture module");
+    let Type::Function { result, .. } =
+        &module.symbols["scoped_omission_rollback_preserves_sibling_depths"].ty
+    else {
+        panic!("fixture function must retain its computed result type");
+    };
+    let Type::Record(fields) = result.as_ref() else {
+        panic!("fixture function must return its computed record: {result:?}");
+    };
+    let Type::List(row) = fields.get("parent_fold").expect("parent fold result") else {
+        panic!("fixture function must return the reconciled parent list");
+    };
+    let Type::Record(siblings) = row.as_ref() else {
+        panic!("reconciled parent must preserve sibling records: {row:?}");
+    };
+    let nested_pin_contexts = |sibling: &str| {
+        let Type::Record(depths) = &siblings[sibling] else {
+            panic!("{sibling} must preserve its depth record");
+        };
+        let Type::Tuple(depths) = &depths["pins"] else {
+            panic!("{sibling} must preserve both pin depths");
+        };
+        depths
+            .iter()
+            .map(|depth| {
+                let Type::Tuple(slots) = depth else {
+                    panic!("{sibling} depth must preserve its pin pair");
+                };
+                slots
+                    .iter()
+                    .map(|slot| {
+                        let mut contexts = BTreeSet::new();
+                        collect_snapshot_contexts(slot, &mut contexts);
+                        contexts
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        nested_pin_contexts("left"),
+        [
+            vec![BTreeSet::new(), BTreeSet::new()],
+            vec![
+                BTreeSet::from([
+                    "selector:HEAD~612".into(),
+                    "selector:HEAD~622".into(),
+                    "selector:HEAD~632".into(),
+                    "selector:HEAD~642".into(),
+                ]),
+                BTreeSet::from([
+                    "selector:HEAD~613".into(),
+                    "selector:HEAD~623".into(),
+                    "selector:HEAD~633".into(),
+                    "selector:HEAD~643".into(),
+                ]),
+            ],
+        ],
+        "only the crossed first depth should roll back; the compatible nested depth keeps real labels"
+    );
+    assert_eq!(
+        nested_pin_contexts("right"),
+        [
+            vec![
+                BTreeSet::from([
+                    "selector:HEAD~710".into(),
+                    "selector:HEAD~720".into(),
+                    "selector:HEAD~730".into(),
+                    "selector:HEAD~740".into(),
+                ]),
+                BTreeSet::from([
+                    "selector:HEAD~711".into(),
+                    "selector:HEAD~721".into(),
+                    "selector:HEAD~731".into(),
+                    "selector:HEAD~741".into(),
+                ]),
+            ],
+            vec![
+                BTreeSet::from([
+                    "selector:HEAD~712".into(),
+                    "selector:HEAD~722".into(),
+                    "selector:HEAD~732".into(),
+                    "selector:HEAD~742".into(),
+                ]),
+                BTreeSet::from([
+                    "selector:HEAD~713".into(),
+                    "selector:HEAD~723".into(),
+                    "selector:HEAD~733".into(),
+                    "selector:HEAD~743".into(),
+                ]),
+            ],
+        ],
+        "independent sibling pin depths should retain every real selector through the rejected parent"
+    );
+}
+
+#[test]
+fn nested_container_omission_rolls_back_only_the_conflicting_depth() {
+    let source = include_str!("fixtures/historical-nested-container-rollback.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-nested-container-rollback.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert_eq!(
+        result
+            .diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.code() == DIAG_TYPE)
+            .count(),
+        1,
+        "the crossed nested depth remains a type error: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+    let module = result
+        .modules
+        .values()
+        .find(|module| {
+            module
+                .symbols
+                .contains_key("nested_container_omission_rolls_back_one_depth")
+        })
+        .expect("nested-container rollback fixture module");
+    let Type::Function { result, .. } =
+        &module.symbols["nested_container_omission_rolls_back_one_depth"].ty
+    else {
+        panic!("fixture function must preserve its computed result type");
+    };
+    let Type::Record(fields) = result.as_ref() else {
+        panic!("fixture function must return its computed record: {result:?}");
+    };
+    let Type::List(row) = fields.get("parent_fold").expect("parent fold result") else {
+        panic!("parent fold must preserve its rows");
+    };
+    let Type::Record(siblings) = row.as_ref() else {
+        panic!("parent row must preserve its siblings: {row:?}");
+    };
+    let collect_depths = |pins: &Type| {
+        let Type::Tuple(depths) = pins else {
+            panic!("pin field must preserve both nested depths: {pins:?}");
+        };
+        depths
+            .iter()
+            .map(|depth| {
+                let Type::Tuple(slots) = depth else {
+                    panic!("each depth must preserve its selector pair");
+                };
+                slots
+                    .iter()
+                    .map(|slot| {
+                        let mut contexts = BTreeSet::new();
+                        collect_snapshot_contexts(slot, &mut contexts);
+                        contexts
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>()
+    };
+    let Type::List(left_element) = &siblings["left"] else {
+        panic!("left nested list must remain a real list type");
+    };
+    let Type::Record(left_fields) = left_element.as_ref() else {
+        panic!("left list element must preserve its nested record");
+    };
+    assert_eq!(
+        collect_depths(&left_fields["pins"]),
+        [
+            vec![BTreeSet::new(), BTreeSet::new()],
+            vec![
+                BTreeSet::from([
+                    "selector:HEAD~812".into(),
+                    "selector:HEAD~822".into(),
+                    "selector:HEAD~832".into(),
+                    "selector:HEAD~842".into(),
+                ]),
+                BTreeSet::from([
+                    "selector:HEAD~813".into(),
+                    "selector:HEAD~823".into(),
+                    "selector:HEAD~833".into(),
+                    "selector:HEAD~843".into(),
+                ]),
+            ],
+        ],
+        "rollback must reach through the list element and retain its unaffected nested depth"
+    );
+    let Type::Record(right_fields) = &siblings["right"] else {
+        panic!("right sibling must preserve its computed record");
+    };
+    assert_eq!(
+        collect_depths(&right_fields["pins"]),
+        [
+            vec![
+                BTreeSet::from([
+                    "selector:HEAD~910".into(),
+                    "selector:HEAD~920".into(),
+                    "selector:HEAD~930".into(),
+                    "selector:HEAD~940".into(),
+                ]),
+                BTreeSet::from([
+                    "selector:HEAD~911".into(),
+                    "selector:HEAD~921".into(),
+                    "selector:HEAD~931".into(),
+                    "selector:HEAD~941".into(),
+                ]),
+            ],
+            vec![
+                BTreeSet::from([
+                    "selector:HEAD~912".into(),
+                    "selector:HEAD~922".into(),
+                    "selector:HEAD~932".into(),
+                    "selector:HEAD~942".into(),
+                ]),
+                BTreeSet::from([
+                    "selector:HEAD~913".into(),
+                    "selector:HEAD~923".into(),
+                    "selector:HEAD~933".into(),
+                    "selector:HEAD~943".into(),
+                ]),
+            ],
+        ],
+        "rollback under a list wrapper must not erase its independent sibling labels"
     );
 }
 

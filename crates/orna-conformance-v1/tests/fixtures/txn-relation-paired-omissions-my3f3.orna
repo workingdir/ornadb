@@ -1,0 +1,22 @@
+pub table Reading(id: Int) {
+    key: ((Int, Str)?, (Int, Str)?),
+    expected: ((Int, Str)?, (Int, Str)?),
+    assert all_unique(reading => reading.key);
+    assert every(reading =>
+        if reading.id == 1 {
+            reading.key == reading.expected && reading.id == 1
+        } else if reading.id == 2 {
+            reading.key == reading.expected && reading.id == 2
+        } else if reading.id == 3 {
+            reading.key == reading.expected && reading.id == 3
+        } else {
+            reading.key == reading.expected && reading.id == 4
+        });
+}
+
+fn parent() {
+    Reading.insert({ id: 1, key: (null, (2, "east")), expected: (null, (2, "east")) });
+    Reading.insert({ id: 2, key: ((1, "west"), null), expected: ((1, "west"), null) });
+    Reading.insert({ id: 3, key: (null, null), expected: (null, null) });
+    Reading.insert({ id: 4, key: ((4, "north"), (5, "south")), expected: ((4, "north"), (5, "south")) });
+}

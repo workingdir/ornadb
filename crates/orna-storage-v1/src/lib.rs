@@ -14,13 +14,19 @@ mod scan_planner;
 mod publication_policy;
 
 pub use branch_merge::{
-    BranchMergeBudget, BranchMergeColumnDepthEvent, BranchMergeColumnDepthFragments,
-    BranchMergeColumnDepthLadderEvent,
+    BranchMergeBudget, BranchMergeColumnDepthEvent, BranchMergeColumnDepthFragmentSnapshot,
+    BranchMergeColumnDepthFragments, BranchMergeColumnDepthLadderEvent,
+    BranchMergeColumnDepthLadderSnapshot, BranchMergeColumnDepthLadderWaveSnapshot,
+    BranchMergeColumnRestoreLadderFoldSnapshot,
     BranchMergeConflict, BranchMergeDepthFragmentRecovery,
     BranchMergeDepthWaveRecovery, BranchMergeError, BranchMergePlan,
+    BranchMergeMultiParentColumnDepthLadderWaveEvent,
+    BranchMergeMultiParentColumnRestoreWaveSnapshot,
     BranchMergeMultiParentTabularColumnDepthWave, BranchMergeParentColumnDepthEvent,
-    BranchMergeParentColumnDepthLadderEvent,
-    BranchMergeTabularColumnDepthWave, BranchMergeTabularDepthWave,
+    BranchMergeParentColumnDepthFragmentSnapshot,
+    BranchMergeParentColumnDepthLadderEvent, BranchMergeParentColumnDepthLadderSnapshot,
+    BranchMergeTabularColumnDepthWave, BranchMergeTabularColumnRestoreWaveSnapshot,
+    BranchMergeTabularDepthWave,
     BranchMergeTableDepthFragments,
     BranchMergeTombstoneEvent, BranchMergeTombstoneHistory,
     BranchMergeTombstoneHistoryError,

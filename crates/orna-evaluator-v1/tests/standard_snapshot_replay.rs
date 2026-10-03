@@ -288,12 +288,26 @@ fn base64_padding_matrix_value() -> CanonicalValue {
         cases
             .into_iter()
             .map(|(bytes, encoded)| {
-                Raw::Array(vec![
-                    Raw::Bytes(bytes.to_vec()),
-                    Raw::Text(encoded.to_owned()),
-                ])
+                Raw::Tag(
+                    60015,
+                    Box::new(Raw::Array(vec![
+                        Raw::Bytes(bytes.to_vec()),
+                        Raw::Text(encoded.to_owned()),
+                    ])),
+                )
             })
             .collect(),
+    ))
+    .unwrap()
+}
+
+fn base64_snapshot_marker_value(marker: i64) -> CanonicalValue {
+    CanonicalValue::new(Raw::Tag(
+        60015,
+        Box::new(Raw::Array(vec![
+            Raw::Int(marker.into()),
+            Raw::Text("AP8AQQ==".to_owned()),
+        ])),
     ))
     .unwrap()
 }
@@ -318,6 +332,26 @@ fn base64_process_matrix_value() -> CanonicalValue {
             &[0, 1, 2][..],
             &[255][..],
             &[255, 238][..],
+        ]
+        .into_iter()
+        .map(process_output_value)
+        .collect(),
+    ))
+    .unwrap()
+}
+
+fn base64_codec_depth_process_matrix_value() -> CanonicalValue {
+    CanonicalValue::new(Raw::Array(
+        [
+            &[][..],
+            &[0][..],
+            &[0, 1][..],
+            &[0, 1, 2][..],
+            &[255][..],
+            &[255, 238][..],
+            &[0, 1, 2, 3][..],
+            &[0, 1, 2, 3, 4][..],
+            &[0, 1, 2, 3, 4, 5][..],
         ]
         .into_iter()
         .map(process_output_value)
@@ -383,24 +417,12 @@ fn captured_codec_snapshots_replay_real_base64_values_without_retargeting() {
         );
         assert_eq!(
             session.submit(include_str!("fixtures/snapshot-host-codec-tagged.orna")),
-            Ok(Some(
-                CanonicalValue::new(Raw::Array(vec![
-                    Raw::Int(expected_marker.into()),
-                    Raw::Text("AP8AQQ==".to_owned()),
-                ]))
-                .unwrap()
-            ))
+            Ok(Some(base64_snapshot_marker_value(expected_marker)))
         );
     }
     assert_eq!(
         historical.submit(include_str!("fixtures/snapshot-host-codec-tagged.orna")),
-        Ok(Some(
-            CanonicalValue::new(Raw::Array(vec![
-                Raw::Int(1.into()),
-                Raw::Text("AP8AQQ==".to_owned()),
-            ]))
-            .unwrap()
-        ))
+        Ok(Some(base64_snapshot_marker_value(1)))
     );
 }
 
@@ -516,11 +538,7 @@ fn captured_codec_snapshots_reject_noncanonical_base64_without_losing_the_pin() 
                 .submit(include_str!("fixtures/snapshot-host-codec-tagged.orna"))
                 .unwrap()
                 .unwrap(),
-            CanonicalValue::new(Raw::Array(vec![
-                Raw::Int(marker.into()),
-                Raw::Text("AP8AQQ==".to_owned()),
-            ]))
-            .unwrap()
+            base64_snapshot_marker_value(marker)
         );
         for invalid in ["A===", "AAA", "-w==", "AA==\n", "AA=A", "AB==", "AAB="] {
             let source = include_str!("fixtures/snapshot-host-codec-decode-probe.orna")
@@ -554,7 +572,6 @@ fn captured_codec_snapshots_send_padding_shapes_through_real_process_stdin() {
         AdmittedReplSession::from_loaded_project(&project_v2, sources_v2, Limits::default())
             .unwrap();
     assert_ne!(snapshots[0], snapshots[1]);
-
     let working_directory = env::current_dir().unwrap();
     let mut process = ProcessProvider::new(Duration::from_secs(2), 64).unwrap();
     process
@@ -577,6 +594,125 @@ fn captured_codec_snapshots_send_padding_shapes_through_real_process_stdin() {
     assert_process_matrix(&mut historical);
     assert_process_matrix(&mut upgraded);
     assert_process_matrix(&mut historical);
+}
+
+#[test]
+fn captured_codec_snapshots_fold_host_process_values_across_interleaved_pins() {
+    let (_directory, project_v1, project_v2, snapshots) = host_codec_snapshot_projects();
+    let sources_v1 =
+        host_codec_standard_sources(include_str!("fixtures/snapshot-host-codec-base64-v1.orna"));
+    let sources_v2 =
+        host_codec_standard_sources(include_str!("fixtures/snapshot-host-codec-base64-v2.orna"));
+    let mut historical =
+        AdmittedReplSession::from_loaded_project(&project_v1, sources_v1, Limits::default())
+            .unwrap();
+    let mut upgraded =
+        AdmittedReplSession::from_loaded_project(&project_v2, sources_v2, Limits::default())
+            .unwrap();
+    assert_ne!(snapshots[0], snapshots[1]);
+
+    let working_directory = env::current_dir().unwrap();
+    let mut process = ProcessProvider::new(Duration::from_secs(2), 64).unwrap();
+    process
+        .allow_command("/usr/bin/cat", &working_directory, [])
+        .unwrap();
+    let mut bindings =
+        SysHostBindingRegistry::new(EnvironmentProvider::default()).with_process_provider(process);
+    let mut folded_outputs = Vec::new();
+    for snapshot_index in [0, 1, 0] {
+        let (session, expected_marker) = match snapshot_index {
+            0 => (&mut historical, 1),
+            1 => (&mut upgraded, 2),
+            _ => unreachable!("the process fold only selects captured snapshots"),
+        };
+        let tagged = session
+            .submit(include_str!("fixtures/snapshot-host-codec-tagged.orna"))
+            .unwrap_or_else(|error| panic!("snapshot marker failed: {}", error.code()))
+            .expect("the captured snapshot marker returns a value");
+        let expected_tagged = base64_snapshot_marker_value(expected_marker);
+        assert_eq!(tagged, expected_tagged);
+
+        let process_values = session
+            .submit_with_sys_host_bindings(
+                include_str!("fixtures/snapshot-host-codec-process-padding-matrix.orna"),
+                &mut bindings,
+            )
+            .unwrap_or_else(|error| panic!("captured process fold failed: {}", error.code()))
+            .expect("the process fold returns its six captured values");
+        assert_eq!(process_values, base64_process_matrix_value());
+        folded_outputs.push(
+            CanonicalValue::new(Raw::Array(vec![
+                tagged.raw().clone(),
+                process_values.raw().clone(),
+            ]))
+            .unwrap(),
+        );
+    }
+    let process_values = base64_process_matrix_value();
+    let expected = [1, 2, 1]
+        .into_iter()
+        .map(|marker| {
+            let tagged = base64_snapshot_marker_value(marker);
+            CanonicalValue::new(Raw::Array(vec![
+                tagged.raw().clone(),
+                process_values.raw().clone(),
+            ]))
+            .unwrap()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(folded_outputs, expected);
+}
+
+#[test]
+fn captured_codec_snapshots_preserve_nested_codec_bytes_through_host_process() {
+    let fixture = include_str!("fixtures/snapshot-host-codec-process-nested-matrix.orna");
+    let (_directory, project_v1, project_v2, snapshots) = host_codec_snapshot_projects();
+    let sources_v1 =
+        host_codec_standard_sources(include_str!("fixtures/snapshot-host-codec-base64-v1.orna"));
+    let sources_v2 =
+        host_codec_standard_sources(include_str!("fixtures/snapshot-host-codec-base64-v2.orna"));
+    let mut historical =
+        AdmittedReplSession::from_loaded_project(&project_v1, sources_v1, Limits::default())
+            .unwrap();
+    let mut upgraded =
+        AdmittedReplSession::from_loaded_project(&project_v2, sources_v2, Limits::default())
+            .unwrap();
+    assert_ne!(snapshots[0], snapshots[1]);
+
+    let working_directory = env::current_dir().unwrap();
+    let mut process = ProcessProvider::new(Duration::from_secs(2), 64).unwrap();
+    process
+        .allow_command("/usr/bin/cat", &working_directory, [])
+        .unwrap();
+    let mut bindings =
+        SysHostBindingRegistry::new(EnvironmentProvider::default()).with_process_provider(process);
+    let mut folded_outputs = Vec::new();
+    for snapshot_index in [0, 1, 0] {
+        let (session, expected_marker) = match snapshot_index {
+            0 => (&mut historical, 1),
+            1 => (&mut upgraded, 2),
+            _ => unreachable!("the codec process fold only selects captured snapshots"),
+        };
+        assert_eq!(
+            session.submit(include_str!("fixtures/snapshot-host-codec-tagged.orna")),
+            Ok(Some(base64_snapshot_marker_value(expected_marker)))
+        );
+        let output = session
+            .submit_with_sys_host_bindings(fixture, &mut bindings)
+            .unwrap_or_else(|error| panic!("nested codec process fold failed: {}", error.code()))
+            .expect("the nested codec process fold returns all six values");
+        assert_eq!(output, base64_codec_depth_process_matrix_value());
+        folded_outputs.push(output);
+    }
+
+    assert_eq!(
+        folded_outputs,
+        vec![
+            base64_codec_depth_process_matrix_value(),
+            base64_codec_depth_process_matrix_value(),
+            base64_codec_depth_process_matrix_value(),
+        ]
+    );
 }
 
 fn capture_standard_gitlink(project_path: &Path, standard_snapshot: &str, message: &str) -> String {
