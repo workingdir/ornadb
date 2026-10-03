@@ -10054,6 +10054,165 @@ fn lateral_flat_map_keeps_outer_identity_across_sparse_relation_cascades() {
 }
 
 #[test]
+fn paired_windows_preserve_lateral_tuple_identity_across_sparse_scopes() {
+    let parents = relation_union(
+        relation_source_expression("ParentLeft"),
+        relation_source_expression("ParentRight"),
+    );
+    let positive_child = parsed_expression("child => child > 0");
+    let children = relation_union(
+        relation_stage(
+            relation_source_expression("ChildLeft"),
+            "filter",
+            vec![positive_child.clone()],
+        ),
+        relation_stage(
+            relation_source_expression("ChildRight"),
+            "filter",
+            vec![positive_child],
+        ),
+    );
+    let children = relation_stage(
+        children,
+        "filter",
+        vec![parsed_expression("child => child <= parent")],
+    );
+    let children = relation_stage(
+        children,
+        "map",
+        vec![parsed_expression(include_str!(
+            "fixtures/query-window-project-parent-ghb9w.orna"
+        ))],
+    );
+    let lateral = relation_named_flat_map_stage(parents, relation_lambda("parent", children));
+    let frames = relation_stage(
+        lateral,
+        "window",
+        vec![relation_integer(2), relation_integer(2)],
+    );
+    let unique_frames = relation_stage(frames, "distinct", Vec::new());
+    let frame_pairs = relation_stage(unique_frames, "pairs", Vec::new());
+    let body = relation_terminal(frame_pairs, "first");
+    let mut effects = LateralRelationEffects::new(BTreeMap::from([
+        (
+            "ParentLeft".into(),
+            vec![Value::int(10.into())],
+        ),
+        ("ParentRight".into(), vec![Value::int(20.into())]),
+        (
+            "ChildLeft".into(),
+            vec![Value::int(1.into()), Value::int(0.into())],
+        ),
+        (
+            "ChildRight".into(),
+            vec![Value::int(2.into()), Value::int(0.into())],
+        ),
+    ]));
+
+    let frame = |parent| {
+        Value::new(Raw::Array(vec![
+            relation_pair(parent, 1).raw().clone(),
+            relation_pair(parent, 2).raw().clone(),
+        ]))
+        .expect("lateral frame is canonical")
+    };
+    let expected = Value::option(Some(
+        Value::new(Raw::Tag(
+            60015,
+            Box::new(Raw::Array(vec![frame(10).raw().clone(), frame(20).raw().clone()])),
+        ))
+        .expect("paired lateral frames are canonical"),
+    ))
+    .expect("paired frame option is canonical");
+    assert_eq!(
+        invoke_relation(body, &mut effects, Limits::default())
+            .unwrap_or_else(|error| panic!("paired lateral windows failed: {}", error.code())),
+        expected,
+        "each complete frame keeps its original parent and child tuple identities"
+    );
+
+    for source in ["ChildLeft", "ChildRight"] {
+        let reads = effects
+            .reads
+            .iter()
+            .filter(|(read_source, _, _)| read_source == source)
+            .collect::<Vec<_>>();
+        let mut scopes = Vec::new();
+        for (_, scope, _) in &reads {
+            if !scopes.contains(scope) {
+                scopes.push(*scope);
+            }
+        }
+        assert_eq!(scopes.len(), 2, "accepted parents open separate {source} scopes");
+        for scope in scopes {
+            let cursors = reads
+                .iter()
+                .filter(|(_, read_scope, _)| *read_scope == scope)
+                .map(|(_, _, after)| after.clone())
+                .collect::<Vec<_>>();
+            assert_eq!(cursors, vec![None, Some(vec![1])]);
+        }
+    }
+}
+
+#[test]
+fn sparse_lateral_input_can_finish_short_of_a_window_larger_than_item_limit() {
+    let children = relation_union(
+        relation_stage(
+            relation_source_expression("ChildLeft"),
+            "filter",
+            vec![parsed_expression("child => child > 0")],
+        ),
+        relation_stage(
+            relation_source_expression("ChildRight"),
+            "filter",
+            vec![parsed_expression("child => child > 0")],
+        ),
+    );
+    let children = relation_stage(
+        children,
+        "filter",
+        vec![parsed_expression("child => child <= parent")],
+    );
+    let children = relation_stage(
+        children,
+        "map",
+        vec![parsed_expression(include_str!(
+            "fixtures/query-window-project-parent-ghb9w.orna"
+        ))],
+    );
+    let lateral = relation_named_flat_map_stage(
+        relation_source_expression("Parent"),
+        relation_lambda("parent", children),
+    );
+    let oversized = relation_stage(
+        lateral,
+        "window",
+        vec![relation_integer(100), relation_integer(1)],
+    );
+    let body = relation_terminal(oversized, "first");
+    let mut effects = LateralRelationEffects::new(BTreeMap::from([
+        ("Parent".into(), vec![Value::int(10.into())]),
+        ("ChildLeft".into(), vec![Value::int(1.into())]),
+        ("ChildRight".into(), vec![Value::int(2.into())]),
+    ]));
+
+    assert_eq!(
+        invoke_relation(
+            body,
+            &mut effects,
+            Limits {
+                max_collection_items: 2,
+                ..Limits::default()
+            },
+        )
+        .unwrap(),
+        Value::option(None).expect("empty complete-window result is canonical"),
+        "only retained values count against the collection bound when no complete frame exists"
+    );
+}
+
+#[test]
 fn flat_map_relation_allows_empty_inner_lists_without_skipping_source_pages() {
     let source = relation_source_expression("Note");
     let flat_map = relation_stage(
