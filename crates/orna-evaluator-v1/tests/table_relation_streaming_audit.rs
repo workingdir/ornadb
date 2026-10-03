@@ -738,6 +738,37 @@ fn paired_view_handoffs_rebind_old_cursor_tokens_to_fresh_scopes() {
         assert_eq!(right.0, "View.Right");
         assert_ne!(left.1, right.1, "generation {generation} keeps sibling view scopes distinct");
     }
+    let scopes = source.lanes.iter().map(|(_, scope, _)| *scope).collect::<Vec<_>>();
+    for (index, scope) in scopes.iter().enumerate() {
+        assert!(
+            !scopes[..index].contains(scope),
+            "each refresh binds its view to a new scope; repeated cursor bytes do not reuse scope {scope:?}"
+        );
+    }
+    assert_eq!(
+        source.cursors,
+        vec![
+            ("View.Left".into(), scopes[0], None),
+            ("View.Left".into(), scopes[0], Some(vec![11])),
+            ("View.Left".into(), scopes[0], Some(vec![33])),
+            ("View.Right".into(), scopes[1], None),
+            ("View.Right".into(), scopes[1], Some(vec![11])),
+            ("View.Right".into(), scopes[1], Some(vec![44])),
+            ("View.Left".into(), scopes[2], None),
+            ("View.Left".into(), scopes[2], Some(vec![11])),
+            ("View.Left".into(), scopes[2], Some(vec![55])),
+            ("View.Right".into(), scopes[3], None),
+            ("View.Right".into(), scopes[3], Some(vec![11])),
+            ("View.Right".into(), scopes[3], Some(vec![66])),
+            ("View.Left".into(), scopes[4], None),
+            ("View.Left".into(), scopes[4], Some(vec![11])),
+            ("View.Left".into(), scopes[4], Some(vec![33])),
+            ("View.Right".into(), scopes[5], None),
+            ("View.Right".into(), scopes[5], Some(vec![11])),
+            ("View.Right".into(), scopes[5], Some(vec![44])),
+        ],
+        "old cursors may recur after refresh but must only advance within the new scope"
+    );
 }
 
 fn paired_subscription_cascade_body() -> Expr {
