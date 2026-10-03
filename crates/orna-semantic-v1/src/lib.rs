@@ -19049,9 +19049,9 @@ fn type_contains_paired_checkpoint_omissions(ty: &Type) -> bool {
     }
 }
 
-/// Dense records can carry independent tuple-pin folds even when no parent
-/// omits a slot. Scope a late rebind failure to the conflicting tuple so a
-/// stable sibling keeps the values accumulated through the same storm.
+/// Dense records and tuples can carry independent nested tuple-pin folds even
+/// when no parent omits a slot. Scope a late rebind failure to the conflicting
+/// tuple so a stable sibling keeps the values accumulated through the storm.
 fn type_contains_paired_pinned_checkpoint_tuples(ty: &Type) -> bool {
     match ty {
         Type::Record(fields) => {
@@ -19064,9 +19064,16 @@ fn type_contains_paired_pinned_checkpoint_tuples(ty: &Type) -> bool {
                     .values()
                     .any(type_contains_paired_pinned_checkpoint_tuples)
         }
-        Type::Tuple(elements) => elements
-            .iter()
-            .any(type_contains_paired_pinned_checkpoint_tuples),
+        Type::Tuple(elements) => {
+            elements
+                .iter()
+                .filter(|element| type_contains_pinned_checkpoint_tuple(element))
+                .count()
+                >= 2
+                || elements
+                    .iter()
+                    .any(type_contains_paired_pinned_checkpoint_tuples)
+        }
         Type::List(element)
         | Type::Range(element)
         | Type::Relation(element)
