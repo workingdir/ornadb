@@ -7225,6 +7225,110 @@ fn three_way_tuple_storm_preserves_independent_sibling_rebinds() {
 }
 
 #[test]
+fn paired_tuple_identity_survives_sequential_three_way_omission_chains() {
+    let source = include_str!("fixtures/historical-three-way-paired-tuple-omission-chain.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-three-way-paired-tuple-omission-chain.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    let type_diagnostics = result
+        .diagnostics
+        .iter()
+        .filter(|diagnostic| diagnostic.code() == DIAG_TYPE)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        type_diagnostics.len(),
+        1,
+        "only the terminal pair split should be rejected across both omission chains: {:?}",
+        type_diagnostics
+            .iter()
+            .map(|diagnostic| diagnostic.message())
+            .collect::<Vec<_>>()
+    );
+    let module = result
+        .modules
+        .values()
+        .find(|module| {
+            module
+                .symbols
+                .contains_key("accepts_bare_pair_identity_across_three_way_omission_chain")
+        })
+        .expect("three-way paired tuple omission fixture module");
+    let row_fields = |function: &str| {
+        let Type::Function { result, .. } = &module.symbols[function].ty else {
+            panic!("{function} must retain its computed function type");
+        };
+        let Type::Record(fields) = result.as_ref() else {
+            panic!("{function} must return its parent fold: {result:?}");
+        };
+        let Type::List(row) = fields.get("parent_fold").expect("parent fold") else {
+            panic!("{function} must retain its parent list");
+        };
+        let Type::Record(fields) = row.as_ref() else {
+            panic!("{function} must retain its row: {row:?}");
+        };
+        fields
+    };
+    let pin_slots = |function: &str| {
+        let fields = row_fields(function);
+        let Type::Tuple(slots) = fields.get("pins").expect("paired pins") else {
+            panic!("{function}.pins must retain its paired tuple");
+        };
+        assert_eq!(slots.len(), 2, "{function} must preserve both tuple slots");
+        slots
+            .iter()
+            .map(|slot| {
+                let mut contexts = BTreeSet::new();
+                collect_snapshot_contexts(slot, &mut contexts);
+                contexts
+            })
+            .collect::<Vec<_>>()
+    };
+    let witness_contexts = |function: &str| {
+        let fields = row_fields(function);
+        let mut contexts = BTreeSet::new();
+        collect_snapshot_contexts(fields.get("witness").expect("witness sibling"), &mut contexts);
+        contexts
+    };
+
+    let accepted_pair = BTreeSet::from([
+        "selector:HEAD~700".into(),
+        "selector:HEAD~720".into(),
+        "selector:HEAD~740".into(),
+    ]);
+    assert_eq!(
+        pin_slots("accepts_bare_pair_identity_across_three_way_omission_chain"),
+        [accepted_pair.clone(), accepted_pair],
+        "whole-pair omissions are neutral between sequential three-way rebinds"
+    );
+    assert_eq!(
+        pin_slots("rejects_pair_split_after_three_way_omission_chain_without_losing_siblings"),
+        [
+            BTreeSet::from(["selector:HEAD~800".into()]),
+            BTreeSet::from(["selector:HEAD~800".into()]),
+        ],
+        "a late split restores both tuple slots to their common initial anchor"
+    );
+    assert_eq!(
+        witness_contexts("rejects_pair_split_after_three_way_omission_chain_without_losing_siblings"),
+        BTreeSet::from([
+            "selector:HEAD~801".into(),
+            "selector:HEAD~811".into(),
+            "selector:HEAD~821".into(),
+            "selector:HEAD~831".into(),
+            "selector:HEAD~842".into(),
+            "selector:HEAD~851".into(),
+        ]),
+        "tuple rollback preserves computed sibling values before and after the rejected split"
+    );
+}
+
+#[test]
 fn multi_parent_selector_topology_storm_preserves_label_depth_identity() {
     let source = include_str!("fixtures/historical-multi-parent-selector-topology-storm.orna");
     let parsed = orna_syntax_v1::parse_module(source);
