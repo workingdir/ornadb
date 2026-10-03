@@ -213,6 +213,14 @@ pub struct RelationPage {
     pub next: Option<Vec<u8>>,
 }
 
+/// Opaque identity for one relation source in an evaluator plan.
+///
+/// Cloned plans retain this identity across their page reads; independently
+/// created sources receive distinct identities, even when their source names
+/// are equal. Effect handlers can use it to scope read-batch cursors.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct RelationReadScope(u64);
+
 /// A provider-owned cursor bound to one activation's source identity.
 /// Checkpoints are opaque to the evaluator and are advanced only after the
 /// consumer commits a delivery.
@@ -805,6 +813,21 @@ pub trait EffectHandler {
         _budget: &mut StepBudget,
     ) -> Result<Option<RelationPage>, EvaluationError> {
         Ok(None)
+    }
+
+    /// Supplies a bounded page together with the identity of its relation
+    /// source. The default delegates to [`EffectHandler::scan_relation_page`]
+    /// to preserve existing handlers while allowing stateful readers to keep
+    /// continuation cursors separate across equal-named view sources.
+    fn scan_relation_page_scoped(
+        &mut self,
+        source: &str,
+        _scope: RelationReadScope,
+        after: Option<&[u8]>,
+        limit: usize,
+        budget: &mut StepBudget,
+    ) -> Result<Option<RelationPage>, EvaluationError> {
+        self.scan_relation_page(source, after, limit, budget)
     }
 
     /// Validate a provider stream binding before an activation constructs a
@@ -4888,7 +4911,11 @@ impl Context<'_, '_> {
             // must remain interruptible even when its callbacks are absent,
             // short-circuiting, or otherwise do not execute.
             self.step()?;
-            let page = self.relation_page(&plan.source, after.as_deref())?;
+            let page = self.relation_page(
+                &plan.source,
+                plan.source_identity,
+                after.as_deref(),
+            )?;
             let page_len = page.rows.len();
             for canonical in page.rows {
                 self.step()?;
@@ -5239,6 +5266,7 @@ impl Context<'_, '_> {
     fn relation_page(
         &mut self,
         source: &str,
+        scope: RelationReadScope,
         after: Option<&[u8]>,
     ) -> Result<RelationPage, EvaluationError> {
         let remaining = self.limits.max_steps.saturating_sub(self.steps);
@@ -5247,7 +5275,9 @@ impl Context<'_, '_> {
             .effects
             .as_deref_mut()
             .ok_or_else(|| error("ORNA-EVAL-UNSUPPORTED"))
-            .and_then(|effects| effects.scan_relation_page(source, after, 1, &mut budget));
+            .and_then(|effects| {
+                effects.scan_relation_page_scoped(source, scope, after, 1, &mut budget)
+            });
         let debited = remaining.saturating_sub(budget.remaining());
         self.steps = self
             .steps
