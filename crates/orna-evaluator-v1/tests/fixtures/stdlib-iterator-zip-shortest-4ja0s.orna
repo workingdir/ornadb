@@ -1,0 +1,4 @@
+std.iterator.collect(std.iterator.zip(
+    std.iterator.from_list([2, 3, 5]),
+    std.iterator.from_list([10, 20])
+)) == [(2, 10), (3, 20)]
