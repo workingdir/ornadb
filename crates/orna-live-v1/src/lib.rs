@@ -10502,6 +10502,7 @@ mod tests {
             let mut host = subscribed_host(Some(runtime));
             let committed = Arc::new(std::sync::atomic::AtomicBool::new(false));
             let value = CanonicalValue::unit().encode().unwrap();
+            let expected_row = value.clone();
             let mutation =
                 TableMutation::new([23; 16], "Hook", value.clone(), Some(value)).unwrap();
             let response = Envelope {
@@ -10525,6 +10526,7 @@ mod tests {
                     Arc::new(NoFault)
                 },
             )
+            .for_request(identity)
             .after_commit(move || {
                 committed_on_success.store(true, std::sync::atomic::Ordering::SeqCst);
             });
@@ -10539,6 +10541,117 @@ mod tests {
             ));
             assert_eq!(result.is_ok(), !fail, "dispatch result: {result:?}");
             assert_eq!(committed.load(std::sync::atomic::Ordering::SeqCst), !fail);
+            assert_eq!(
+                futures::executor::block_on(
+                    host.runtime
+                        .as_ref()
+                        .unwrap()
+                        .committed_table_row("Hook", &[23; 16])
+                )
+                .unwrap(),
+                (!fail).then_some(expected_row),
+                "only the correctly bound request publishes its actual row value"
+            );
+
+            drop(host);
+            fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[test]
+    fn transaction_rejects_missing_or_mismatched_request_tuple_before_write() {
+        for supplied_identity in [
+            None,
+            Some(RequestIdentity {
+                session_id: [91; 16],
+                request_id: [29; 16],
+            }),
+            Some(RequestIdentity {
+                session_id: [1; 16],
+                request_id: [92; 16],
+            }),
+        ] {
+            let nonce = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            let root = std::env::temp_dir().join(format!("orna-live-identity-guard-{nonce}"));
+            fs::create_dir(&root).unwrap();
+            assert!(
+                Command::new("git")
+                    .args(["init", "-b", "main"])
+                    .current_dir(&root)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+            let repository = Repository::discover(&root).unwrap();
+            let runtime = futures::executor::block_on(RuntimeState::open(
+                &repository,
+                RuntimeIdentity {
+                    database_id: [26; 16],
+                    repository_id: [27; 16],
+                },
+                [28; 32],
+            ))
+            .unwrap();
+            let context = futures::executor::block_on(runtime.begin_activation()).unwrap();
+            let identity = RequestIdentity {
+                session_id: [1; 16],
+                request_id: [29; 16],
+            };
+            let mut host = subscribed_host(Some(runtime));
+            let committed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let row = b"actual computed row".to_vec();
+            let mutation = TableMutation::new(
+                [23; 16],
+                "Identity",
+                row.clone(),
+                Some(row),
+            )
+            .unwrap();
+            let response = Envelope {
+                request: Some(identity.request_id),
+                watch: None,
+                message: Message::Result {
+                    status: ResultStatus::Success,
+                    value: Some(CanonicalValue::unit()),
+                    fingerprint: [30; 32],
+                    diagnostic: None,
+                },
+                extensions: BTreeMap::new(),
+            };
+            let committed_on_success = Arc::clone(&committed);
+            let mut transaction =
+                LiveEvalTransaction::new(vec![mutation], [24; 32], Arc::new(NoFault));
+            if let Some(supplied_identity) = supplied_identity {
+                transaction = transaction.for_request(supplied_identity);
+            }
+            let transaction = transaction.after_commit(move || {
+                committed_on_success.store(true, std::sync::atomic::Ordering::SeqCst);
+            });
+            let result = futures::executor::block_on(host.commit_eval_transaction(
+                identity.session_id,
+                identity.request_id,
+                [30; 32],
+                None,
+                &context,
+                response,
+                transaction,
+            ));
+            assert_eq!(result, Err(Error::ApplicationRejected));
+            assert!(!committed.load(std::sync::atomic::Ordering::SeqCst));
+            assert_eq!(
+                futures::executor::block_on(
+                    host.runtime
+                        .as_ref()
+                        .unwrap()
+                        .committed_table_row("Identity", &[23; 16])
+                )
+                .unwrap(),
+                None,
+                "an omitted or cross-session tuple cannot publish the row"
+            );
 
             drop(host);
             fs::remove_dir_all(root).unwrap();

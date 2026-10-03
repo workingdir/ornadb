@@ -583,7 +583,11 @@ impl LiveApplication for CompetingTerminalApplication {
             .unwrap()],
             [4; 32],
             Arc::new(NoFault),
-        );
+        )
+        .for_request(RequestIdentity {
+            session_id: session,
+            request_id: request,
+        });
         let response = unit_result(request, fingerprint);
         Box::pin(async move { Ok(LiveEvalResponse::transaction(response, transaction)) })
     }
@@ -637,7 +641,7 @@ impl LiveApplication for TransactionalApplication {
 
     fn eval_with_transaction<'a>(
         &'a mut self,
-        _: [u8; 16],
+        session: [u8; 16],
         request: [u8; 16],
         message: &'a Message,
         _: Option<&'a orna_runtime_v1::RuntimeActivationContext>,
@@ -652,7 +656,11 @@ impl LiveApplication for TransactionalApplication {
             self.mutations.clone(),
             [3; 32],
             Arc::clone(&self.faults),
-        );
+        )
+        .for_request(RequestIdentity {
+            session_id: session,
+            request_id: request,
+        });
         Box::pin(async move { Ok(LiveEvalResponse::transaction(response, transaction)) })
     }
     fn dispatch_eval_with_work<'a>(
@@ -676,7 +684,7 @@ impl LiveApplication for TransactionalApplication {
 
     fn dispatch_event_with_work<'a>(
         &'a mut self,
-        _: [u8; 16],
+        session: [u8; 16],
         request: [u8; 16],
         message: &'a Message,
         _: Option<[u8; 16]>,
@@ -693,7 +701,11 @@ impl LiveApplication for TransactionalApplication {
             self.mutations.clone(),
             [3; 32],
             Arc::clone(&self.faults),
-        );
+        )
+        .for_request(RequestIdentity {
+            session_id: session,
+            request_id: request,
+        });
         Box::pin(async move { Ok(LiveEvalResponse::transaction(response, transaction)) })
     }
 
@@ -899,7 +911,7 @@ impl LiveApplication for WatchEventApplication {
 
     fn dispatch_event_with_work<'a>(
         &'a mut self,
-        _: [u8; 16],
+        session: [u8; 16],
         request: [u8; 16],
         message: &'a Message,
         _: Option<[u8; 16]>,
@@ -930,7 +942,11 @@ impl LiveApplication for WatchEventApplication {
                         .unwrap()],
                         [201; 32],
                         Arc::new(FailAt(FaultPoint::AfterTableWrite)),
-                    ),
+                    )
+                    .for_request(RequestIdentity {
+                        session_id: session,
+                        request_id: request,
+                    }),
                 )),
                 WatchEventMode::Commit => Ok(LiveEvalResponse::transaction(
                     response,
@@ -944,7 +960,11 @@ impl LiveApplication for WatchEventApplication {
                         .unwrap()],
                         [202; 32],
                         Arc::new(NoFault),
-                    ),
+                    )
+                    .for_request(RequestIdentity {
+                        session_id: session,
+                        request_id: request,
+                    }),
                 )),
             }
         })
