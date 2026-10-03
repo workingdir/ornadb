@@ -5822,6 +5822,15 @@ fn type_mentions_generic(ty: &Type, generic_names: &BTreeSet<String>) -> bool {
     }
 }
 
+fn function_parameters_are_concrete(ty: &Type, generic_names: &BTreeSet<String>) -> bool {
+    let Type::Function { parameters, .. } = ty else {
+        return false;
+    };
+    parameters
+        .iter()
+        .all(|parameter| !type_mentions_generic(parameter, generic_names))
+}
+
 fn substitute_generic_type(ty: &Type, substitutions: &BTreeMap<String, Type>) -> Type {
     match ty {
         Type::Named(name) => substitutions
@@ -6167,53 +6176,96 @@ fn infer_local_generic_call(
     }
     let mut effects = intrinsic_call_effects(callee);
     effects.join(&symbol.effects);
-    let values = arguments
-        .iter()
-        .enumerate()
-        .map(|(index, argument)| {
-            let expected = expected_call_parameter(
-                raw_parameters,
-                parameter_names.as_deref(),
-                arguments,
-                index,
-            );
-            let explicit_context = explicit_type_arguments
-                .is_some()
-                .then(|| expected.map(|expected| substitute_generic_type(expected, &substitutions)))
-                .flatten();
-            let local_constructor_scope = expected.is_some_and(|expected| {
-                matches!(expected, Type::Named(name) if bounded_generic_names.contains(name))
+    let mut values = vec![Type::Error; arguments.len()];
+    let mut argument_diagnostics = vec![Vec::new(); arguments.len()];
+    // Generic value arguments establish callback input types. Infer them
+    // before lambdas so named argument order cannot leave a predicate's
+    // parameter unbound when its source value appears later in the call.
+    let inference_order = (0..arguments.len())
+        .filter(|index| !matches!(arguments[*index].value, Expr::Lambda { .. }))
+        .chain((0..arguments.len()).filter(|index| {
+            matches!(arguments[*index].value, Expr::Lambda { .. })
+        }));
+    for index in inference_order {
+        let argument = &arguments[index];
+        let expected = expected_call_parameter(
+            raw_parameters,
+            parameter_names.as_deref(),
+            arguments,
+            index,
+        );
+        let contextual_expected =
+            expected.map(|expected| substitute_generic_type(expected, &substitutions));
+        let explicit_context = explicit_type_arguments
+            .is_some()
+            .then(|| contextual_expected.clone())
+            .flatten();
+        let local_constructor_scope = expected.is_some_and(|expected| {
+            matches!(expected, Type::Named(name) if bounded_generic_names.contains(name))
+        });
+        let contextual_callback = matches!(argument.value, Expr::Lambda { .. })
+            && contextual_expected.as_ref().is_some_and(|expected| {
+                function_parameters_are_concrete(expected, &generic_names)
             });
-            let inferred = if let Some(expected) = explicit_context.as_ref() {
-                infer_contextual(&argument.value, expected, scope, local, diagnostics)
-            } else if let Some(expected) = expected {
-                if type_mentions_generic(expected, &generic_names) {
-                    if local_constructor_scope {
-                        let mut argument_scope = scope.clone();
-                        argument_scope.allow_local_private_nominal_construction = true;
-                        infer(&argument.value, &argument_scope, local, diagnostics)
-                    } else {
-                        infer(&argument.value, scope, local, diagnostics)
-                    }
+        let diagnostics_for_argument = &mut argument_diagnostics[index];
+        let inferred = if let Some(expected) = explicit_context.as_ref() {
+            infer_contextual(&argument.value, expected, scope, local, diagnostics_for_argument)
+        } else if let (true, Some(contextual_expected)) =
+            (expected.is_some(), contextual_expected.as_ref())
+        {
+            if type_mentions_generic(contextual_expected, &generic_names) {
+                if local_constructor_scope {
+                    let mut argument_scope = scope.clone();
+                    argument_scope.allow_local_private_nominal_construction = true;
+                    infer(&argument.value, &argument_scope, local, diagnostics_for_argument)
+                } else if contextual_callback {
+                    // The callback's input can be concrete while its result
+                    // still determines another generic. Leave only those
+                    // result variables open for inference after contextualizing.
+                    let unresolved = generic_names
+                        .iter()
+                        .filter(|name| !substitutions.contains_key(*name))
+                        .map(|name| (name.clone(), Type::Error))
+                        .collect::<BTreeMap<_, _>>();
+                    let callback_context =
+                        substitute_generic_type(contextual_expected, &unresolved);
+                    infer_contextual(
+                        &argument.value,
+                        &callback_context,
+                        scope,
+                        local,
+                        diagnostics_for_argument,
+                    )
                 } else {
-                    infer_contextual(&argument.value, expected, scope, local, diagnostics)
+                    infer(&argument.value, scope, local, diagnostics_for_argument)
                 }
             } else {
-                infer(&argument.value, scope, local, diagnostics)
-            };
-            effects.join(&inferred.effects);
-            if let Some(expected) = expected {
-                constrain_generic_type(
-                    expected,
-                    &inferred.ty,
-                    &generic_names,
-                    &mut substitutions,
-                    diagnostics,
-                );
+                infer_contextual(
+                    &argument.value,
+                    contextual_expected,
+                    scope,
+                    local,
+                    diagnostics_for_argument,
+                )
             }
-            inferred.ty
-        })
-        .collect::<Vec<_>>();
+        } else {
+            infer(&argument.value, scope, local, diagnostics_for_argument)
+        };
+        effects.join(&inferred.effects);
+        if let Some(expected) = expected {
+            constrain_generic_type(
+                expected,
+                &inferred.ty,
+                &generic_names,
+                &mut substitutions,
+                diagnostics_for_argument,
+            );
+        }
+        values[index] = inferred.ty;
+    }
+    for diagnostics_for_argument in argument_diagnostics {
+        diagnostics.extend(diagnostics_for_argument);
+    }
     for generic in &generic_parameters {
         let Some(actual) = substitutions.get(&generic.name) else {
             diagnostics.push(diag(DIAG_TYPE, "generic type argument cannot be inferred"));
@@ -8893,17 +8945,19 @@ fn infer_assignment(
                         "snapshot context maps must contain canonical selector sets",
                     ));
                 }
-                Some(expected)
-                    if pinned_snapshot_rebind_compatible(&expected, &value.ty) =>
-                {
-                    // A local pin aggregate or historical closure now refers
-                    // to the new selector identities; aliases inferred before
-                    // this assignment keep their old contexts.
-                    if let Some(symbol) = local.get_mut(name) {
-                        symbol.ty = value.ty.clone();
+                Some(expected) => {
+                    if let Some(reset_type) = pinned_snapshot_reset_type(&expected, &value.ty) {
+                        // A checkpoint reset replaces the local with the exact
+                        // selected value. Do not merge it with intermediate
+                        // rebinds: saved aliases keep their own identities, and
+                        // a later reset must recover the source map unchanged.
+                        if let Some(symbol) = local.get_mut(name) {
+                            symbol.ty = reset_type;
+                        }
+                    } else {
+                        require_same(&expected, &value.ty, diagnostics);
                     }
                 }
-                Some(expected) => require_same(&expected, &value.ty, diagnostics),
                 None => diagnostics.push(diag(
                     DIAG_UNRESOLVED,
                     "assignment target cannot be resolved",
@@ -18077,12 +18131,17 @@ fn callable_function_type(ty: &Type) -> Option<&Type> {
     }
 }
 
-fn pinned_snapshot_rebind_compatible(expected: &Type, actual: &Type) -> bool {
-    checkpoint_snapshot_maps_are_valid(expected)
-        && checkpoint_snapshot_maps_are_valid(actual)
+/// A compatible local checkpoint reset adopts the selected source value's
+/// exact identity map. The reference is silent on structured local reset
+/// chains; replacement preserves saved selector identities without unioning
+/// them with intermediate checkpoints.
+fn pinned_snapshot_reset_type(expected: &Type, selected: &Type) -> Option<Type> {
+    (checkpoint_snapshot_maps_are_valid(expected)
+        && checkpoint_snapshot_maps_are_valid(selected)
         && type_contains_pinned_snapshot_identity(expected)
-        && type_contains_pinned_snapshot_identity(actual)
-        && pinned_snapshot_shape_matches(expected, actual)
+        && type_contains_pinned_snapshot_identity(selected)
+        && pinned_snapshot_shape_matches(expected, selected))
+    .then(|| selected.clone())
 }
 
 fn type_contains_pinned_snapshot_identity(ty: &Type) -> bool {
@@ -22945,8 +23004,8 @@ mod tests {
             &first
         ));
         assert!(type_contains_pinned_snapshot_identity(&first));
-        assert!(pinned_snapshot_rebind_compatible(&first, &second));
-        assert!(!pinned_snapshot_rebind_compatible(&first, &wider));
+        assert!(pinned_snapshot_reset_type(&first, &second).is_some());
+        assert!(pinned_snapshot_reset_type(&first, &wider).is_none());
         let terminal_factory = Type::Function {
             parameters: vec![],
             parameter_names: Some(vec![]),
@@ -22964,20 +23023,18 @@ mod tests {
             &first_pinned_factory,
             &wider_pinned_factory
         ));
-        assert!(pinned_snapshot_rebind_compatible(
-            &first_pinned_factory,
-            &second_pinned_factory
-        ));
-        assert!(!pinned_snapshot_rebind_compatible(
-            &first_pinned_factory,
-            &wider_pinned_factory
-        ));
+        assert!(
+            pinned_snapshot_reset_type(&first_pinned_factory, &second_pinned_factory).is_some()
+        );
+        assert!(
+            pinned_snapshot_reset_type(&first_pinned_factory, &wider_pinned_factory).is_none()
+        );
         assert!(!is_snapshot_context_map_shape(&malformed));
         assert!(!types_match(&malformed, &malformed));
         assert!(!types_match(&malformed, &Type::Bottom));
         assert!(!pinned_snapshot_shape_matches(&malformed, &malformed));
         assert!(!type_contains_pinned_snapshot_identity(&malformed));
-        assert!(!pinned_snapshot_rebind_compatible(&malformed, &second));
+        assert!(pinned_snapshot_reset_type(&malformed, &second).is_none());
         assert!(!is_snapshot_context_map_shape(&singleton));
         assert!(!is_snapshot_context_map_shape(&unsorted));
         assert!(!is_snapshot_context_map_shape(&duplicate));
@@ -22995,10 +23052,7 @@ mod tests {
         assert!(!type_contains_pinned_snapshot_identity(&nested_malformed));
         assert!(merge_list_element_types(&nested_malformed, &nested_malformed).is_none());
         assert!(merge_checkpoint_field_map(&nested_malformed, &nested_malformed).is_none());
-        assert!(!pinned_snapshot_rebind_compatible(
-            &nested_malformed,
-            &nested_malformed
-        ));
+        assert!(pinned_snapshot_reset_type(&nested_malformed, &nested_malformed).is_none());
     }
 
     #[test]

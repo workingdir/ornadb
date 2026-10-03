@@ -1,0 +1,9 @@
+pub enum Either<LeftValue, RightValue> {
+    Left { value: LeftValue },
+    Right { value: RightValue },
+}
+pub fn fold<L, R, U>(
+    value: Either<L, R>,
+    on_left: fn(L): U,
+    on_right: fn(R): U
+): U = null;

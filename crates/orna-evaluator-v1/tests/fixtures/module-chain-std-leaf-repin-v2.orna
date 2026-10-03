@@ -1,0 +1,4 @@
+// Repinned metadata only: the exported leaf behavior is unchanged.
+use std.math.{shift};
+use std.collection.{marker};
+pub fn finish(value: Int): Int = std.math.shift(value + std.collection.marker() + 3);
