@@ -122,6 +122,16 @@ fn explain(
     .expect("exact predicate and resolver-approved subquery produce a paired plan")
 }
 
+fn indexes_with_orders_index(index: &str) -> Vec<QueryPartialIndexDescription> {
+    let mut indexes = indexes();
+    indexes
+        .iter_mut()
+        .find(|candidate| candidate.table.as_str() == "table:Orders")
+        .expect("the fixture declares the exact Orders index")
+        .index = object(index);
+    indexes
+}
+
 fn joins_by_label<'a>(plan: &'a orna_sys_v1::ExplainedPlan) -> BTreeMap<&'a str, &'a PlanNode> {
     let nodes = plan
         .nodes()
@@ -385,5 +395,150 @@ fn changing_decorrelation_identity_rekeys_its_predicate_pair_and_dependent_folds
             changed_joins["subquery:orders-for-owner-v2"],
             "decorrelated_predicate_pushdown_identity"
         )
+    );
+}
+
+#[test]
+fn changing_the_selected_index_rekeys_the_decorrelation_cost_fold_chain() {
+    let parsed = orna_syntax_v1::parse_module(FIXTURE);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+    assert_eq!(parsed.value.items.len(), 2);
+
+    let mut query = query([
+        "table:Expensive",
+        "table:Unknown",
+        "table:Small",
+        "table:Medium",
+        "table:Orders",
+    ]);
+    let ordinary_orders = query
+        .joins
+        .iter_mut()
+        .find(|join| join.source.as_str() == "table:Orders")
+        .expect("the query includes an ordinary Orders join");
+    ordinary_orders.predicate = Some(expression("expr:ordinary-orders"));
+
+    let subquery = subquery("subquery:orders-for-owner");
+    let baseline = explain_query_with_partial_indexes_and_decorrelated_subqueries(
+        &query,
+        &indexes_with_orders_index("index:owner-orders"),
+        std::slice::from_ref(&subquery),
+    )
+    .expect("the matching resolver predicate selects the exact partial index");
+    let changed = explain_query_with_partial_indexes_and_decorrelated_subqueries(
+        &query,
+        &indexes_with_orders_index("index:owner-orders-v2"),
+        std::slice::from_ref(&subquery),
+    )
+    .expect("a second exact index remains eligible for the same predicate");
+    let baseline_joins = joins_by_label(&baseline);
+    let changed_joins = joins_by_label(&changed);
+
+    let ordinary = baseline_joins["table:Orders"];
+    let ordinary_after = changed_joins["table:Orders"];
+    assert_eq!(
+        text(ordinary, "join_cost_fold_identity"),
+        text(ordinary_after, "join_cost_fold_identity"),
+        "an ordinary join with a different predicate is outside the decorrelation/index pair"
+    );
+    assert!(
+        ordinary
+            .details()
+            .get("decorrelated_predicate_pushdown_identity")
+            .is_none()
+    );
+
+    let decorrelated_label = "subquery:orders-for-owner";
+    let baseline_decorrelated = baseline_joins[decorrelated_label];
+    let changed_decorrelated = changed_joins[decorrelated_label];
+    assert_eq!(
+        text(baseline_decorrelated, "join_cost_fold_identity"),
+        "join-fold:d83475a8fec991e8e4cd7308566cb8b7ba19dde2b1a8e1ba2593728c16e088ff",
+        "the fold digest directly includes the composite decorrelation/index identity"
+    );
+    let baseline_nodes = baseline
+        .nodes()
+        .iter()
+        .map(|node| (node.reference().as_str().to_owned(), node))
+        .collect::<BTreeMap<_, _>>();
+    let changed_nodes = changed
+        .nodes()
+        .iter()
+        .map(|node| (node.reference().as_str().to_owned(), node))
+        .collect::<BTreeMap<_, _>>();
+    let baseline_access = baseline_nodes[baseline_decorrelated.inputs()[1].as_str()];
+    let changed_access = changed_nodes[changed_decorrelated.inputs()[1].as_str()];
+    assert_eq!(baseline_access.kind(), PlanNodeKind::IndexLookup);
+    assert_eq!(changed_access.kind(), PlanNodeKind::IndexLookup);
+    assert_eq!(
+        baseline_access.object().map(ObjectRef::as_str),
+        Some("index:owner-orders")
+    );
+    assert_eq!(
+        changed_access.object().map(ObjectRef::as_str),
+        Some("index:owner-orders-v2")
+    );
+    assert_ne!(
+        text(baseline_decorrelated, "predicate_pushdown_identity"),
+        text(changed_decorrelated, "predicate_pushdown_identity")
+    );
+    assert_ne!(
+        text(
+            baseline_decorrelated,
+            "decorrelated_predicate_pushdown_identity"
+        ),
+        text(
+            changed_decorrelated,
+            "decorrelated_predicate_pushdown_identity"
+        )
+    );
+    assert_ne!(
+        text(baseline_decorrelated, "join_cost_fold_right_identity"),
+        text(changed_decorrelated, "join_cost_fold_right_identity")
+    );
+
+    for label in [
+        decorrelated_label,
+        "table:Small",
+        "table:Medium",
+        "table:Expensive",
+        "table:Unknown",
+    ] {
+        let before = baseline_joins[label];
+        let after = changed_joins[label];
+        assert_ne!(
+            text(before, "join_cost_fold_identity"),
+            text(after, "join_cost_fold_identity"),
+            "the selected index identity propagates through the fold at {label}"
+        );
+        assert_eq!(
+            (
+                before.estimated_rows(),
+                before.estimated_bytes(),
+                before.estimated_work(),
+            ),
+            (
+                after.estimated_rows(),
+                after.estimated_bytes(),
+                after.estimated_work(),
+            ),
+            "changing index identity preserves the actual estimates at {label}"
+        );
+    }
+    assert_eq!(
+        (
+            baseline_decorrelated.estimated_rows(),
+            baseline_decorrelated.estimated_bytes(),
+            baseline_decorrelated.estimated_work(),
+        ),
+        (Some(12), Some(41_448), Some(34))
+    );
+    assert_eq!(
+        (
+            baseline_access.estimated_rows(),
+            baseline_access.estimated_bytes(),
+            baseline_access.estimated_work(),
+        ),
+        (Some(4), Some(8_192), Some(6))
     );
 }

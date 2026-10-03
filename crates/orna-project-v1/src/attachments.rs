@@ -1363,7 +1363,6 @@ impl PackageResolver {
         }
         Ok(route)
     }
-
     /// Applies paired rebinding and omission chains as consecutive terminal
     /// route segments. Each omission chain must preserve the terminal identity
     /// computed by its preceding rebind chain. Returns the final route and the

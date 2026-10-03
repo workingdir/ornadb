@@ -2817,7 +2817,7 @@ fn sparse_nested_storm_folds_preserve_terminal_route_identity() {
                 &first_stage,
                 &paired_rebind_chains,
                 &expected_identity_transitions[..2],
-            ),
+        ),
         Err(AttachmentError::RetainedSnapshotUnavailable)
     ));
     let (captured_chain_fold, captured_chain_identities) = resolver

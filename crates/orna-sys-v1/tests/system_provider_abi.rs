@@ -1,4 +1,5 @@
 use std::collections::BTreeSet;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use orna_sys_v1::{
     AbiType, AbiVersion, EffectSet, FailureCode, OperationId, ProviderDiagnostic, ProviderFailure,
@@ -19,6 +20,7 @@ struct InvokeValueProvider {
     operation: OperationId,
     argument_types: Vec<String>,
     response: Result<TypedValue, FailureCode>,
+    calls: AtomicUsize,
 }
 
 impl SystemOperationProvider for InvokeValueProvider {
@@ -31,6 +33,7 @@ impl SystemOperationProvider for InvokeValueProvider {
         operation: &OperationId,
         arguments: &[TypedValue],
     ) -> Result<TypedValue, ProviderFailure> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
         assert_eq!(operation, &self.operation);
         assert_eq!(
             arguments
@@ -1091,6 +1094,7 @@ fn dispatch_to_provider_routes_typed_value_and_declared_failure() {
         operation: contract.id.clone(),
         argument_types: argument_types.clone(),
         response: Ok(returned_value.clone()),
+        calls: AtomicUsize::new(0),
     };
     let mut checked_preconditions = 0;
     assert_eq!(
@@ -1103,6 +1107,7 @@ fn dispatch_to_provider_routes_typed_value_and_declared_failure() {
         ))
     );
     assert_eq!(checked_preconditions, contract.preconditions.len());
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
 
     let failure_code = FailureCode::new("sys.invoke.argument_missing").unwrap();
     assert!(contract.declares_failure(&failure_code));
@@ -1111,6 +1116,7 @@ fn dispatch_to_provider_routes_typed_value_and_declared_failure() {
         operation: contract.id.clone(),
         argument_types,
         response: Err(failure_code.clone()),
+        calls: AtomicUsize::new(0),
     };
     assert_eq!(
         table.dispatch_to_provider(operation_name, &failing_provider, &arguments, |_| Ok(())),
@@ -1119,5 +1125,155 @@ fn dispatch_to_provider_routes_typed_value_and_declared_failure() {
     println!(
         "dispatch_to_provider operation={operation_name} typed_arguments={} outcomes=returned_typed_value,declared_failure total_cases=2",
         arguments.len()
+    );
+}
+
+#[test]
+fn dispatch_to_provider_checks_arity_argument_types_and_generic_result_binding() {
+    let table = system_dispatch_table();
+    let operation_name = "sys.invoke(Value)";
+    let contract = table.operation(operation_name).expect("typed overload");
+    let role_id = contract.role.as_ref().expect("provider-bound operation");
+    let registry = ProviderRoleRegistry::from_baked_abi(table).unwrap();
+    let offer = registry.resolve(role_id.as_str()).unwrap().clone();
+    let arguments = contract
+        .signature
+        .parameters
+        .iter()
+        .map(|parameter| {
+            TypedValue::public(
+                TypeId::new(parameter.ty.canonical()),
+                parameter.name.as_bytes().to_vec(),
+            )
+        })
+        .collect::<Vec<_>>();
+    let argument_types = contract
+        .signature
+        .parameters
+        .iter()
+        .map(|parameter| parameter.ty.canonical())
+        .collect::<Vec<_>>();
+    let provider = InvokeValueProvider {
+        offer: offer.clone(),
+        operation: contract.id.clone(),
+        argument_types: argument_types.clone(),
+        response: Ok(TypedValue::public(
+            TypeId::new(contract.signature.result.canonical()),
+            b"typed-provider-result".to_vec(),
+        )),
+        calls: AtomicUsize::new(0),
+    };
+
+    assert_eq!(
+        table.dispatch_to_provider(
+            operation_name,
+            &provider,
+            &arguments[..arguments.len() - 1],
+            |_| Ok(())
+        ),
+        Err(ProviderDiagnostic::ArgumentCountMismatch {
+            operation: contract.id.clone(),
+            expected: arguments.len(),
+            actual: arguments.len() - 1,
+        })
+    );
+
+    let mut wrong_argument_type = arguments.clone();
+    wrong_argument_type[0] = TypedValue::public(
+        TypeId::new("sys.NotTheDeclaredArgument"),
+        b"invalid-argument".to_vec(),
+    );
+    assert_eq!(
+        table.dispatch_to_provider(operation_name, &provider, &wrong_argument_type, |_| Ok(())),
+        Err(ProviderDiagnostic::ArgumentTypeMismatch {
+            operation: contract.id.clone(),
+            parameter: contract.signature.parameters[0].name.clone(),
+            expected: contract.signature.parameters[0].ty.canonical(),
+            actual: "sys.NotTheDeclaredArgument".to_owned(),
+        })
+    );
+    assert_eq!(
+        provider.calls.load(Ordering::SeqCst),
+        0,
+        "arity and argument-type violations stop before invoking a provider"
+    );
+
+    let wrong_result_provider = InvokeValueProvider {
+        offer,
+        operation: contract.id.clone(),
+        argument_types,
+        response: Ok(TypedValue::public(
+            TypeId::new("sys.NotTheDeclaredResult"),
+            b"invalid-result".to_vec(),
+        )),
+        calls: AtomicUsize::new(0),
+    };
+    assert_eq!(
+        table.dispatch_to_provider(operation_name, &wrong_result_provider, &arguments, |_| Ok(
+            ()
+        )),
+        Err(ProviderDiagnostic::ResultTypeMismatch {
+            operation: contract.id.clone(),
+            expected: contract.signature.result.canonical(),
+            actual: "sys.NotTheDeclaredResult".to_owned(),
+        })
+    );
+    assert_eq!(wrong_result_provider.calls.load(Ordering::SeqCst), 1);
+
+    let generic_abi = serde_json::json!({
+        "abi_version": {"major": 1, "minor": 0},
+        "operations": [{
+            "name": "sys.meta<T>",
+            "version": {"major": 1, "minor": 0},
+            "signature": "fn sys.meta<T>(value: T): sys.ValueMetadata<T>",
+            "effect": "read",
+            "preconditions": [],
+            "failures": [],
+            "role": "langitem.sys.meta@1.0"
+        }],
+        "roles": [{
+            "name": "langitem.sys.meta",
+            "version": {"major": 1, "minor": 0},
+            "effects": ["read"],
+            "operations": ["sys.meta<T>"],
+            "required": true,
+            "replaceable": false,
+            "builtin_provider": "fixture.metadata"
+        }]
+    });
+    let generic_table = SystemProviderAbi::from_json(&generic_abi.to_string()).unwrap();
+    let generic_operation_name = "sys.meta<T>";
+    let generic_contract = generic_table.operation(generic_operation_name).unwrap();
+    let generic_role = generic_contract.role.as_ref().unwrap();
+    let generic_registry = ProviderRoleRegistry::from_baked_abi(&generic_table).unwrap();
+    let generic_offer = generic_registry
+        .resolve(generic_role.as_str())
+        .unwrap()
+        .clone();
+    let generic_argument = TypedValue::public(TypeId::new("sys.Example"), b"example".to_vec());
+    let generic_result = TypedValue::public(
+        TypeId::new("sys.ValueMetadata<sys.Example>"),
+        b"metadata".to_vec(),
+    );
+    let generic_provider = InvokeValueProvider {
+        offer: generic_offer,
+        operation: generic_contract.id.clone(),
+        argument_types: vec!["sys.Example".to_owned()],
+        response: Ok(generic_result.clone()),
+        calls: AtomicUsize::new(0),
+    };
+    assert_eq!(
+        generic_table.dispatch_to_provider(
+            generic_operation_name,
+            &generic_provider,
+            &[generic_argument],
+            |_| Ok(())
+        ),
+        Ok(orna_sys_v1::SystemDispatchResult::Returned(generic_result))
+    );
+    assert_eq!(generic_provider.calls.load(Ordering::SeqCst), 1);
+
+    println!(
+        "dispatch_to_provider_type_matrix operation={operation_name} rejected=argument_count,argument_type,result_type generic_bindings=1 total_cases=4"
     );
 }
