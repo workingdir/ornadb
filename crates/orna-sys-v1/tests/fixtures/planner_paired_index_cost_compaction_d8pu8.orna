@@ -1,0 +1,4 @@
+use sys.query as query_ops;
+
+pub fn inspect_paired_index_compaction(query: Query<Int>): sys.Plan =
+    query_ops.plan_hint(query);
