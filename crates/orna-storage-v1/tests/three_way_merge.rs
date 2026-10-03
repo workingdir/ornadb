@@ -38028,6 +38028,14 @@ fn paired_redo_fold_identity_survives_sparse_checkpoint_spill_restore_chains() {
         ),
     ];
 
+    let pinned_restored = orna_storage_v1::restore_paired_checkpoint_redo_sparse_spill_chains_preserving_checkpoint_pin_identity(
+        &[alpha.clone(), beta.clone(), catalog_only.clone()],
+        &[
+            vec![first_spill.clone(), second_spill.clone()],
+            later_spills.clone(),
+        ],
+    )
+    .unwrap();
     let restored = orna_storage_v1::restore_paired_checkpoint_redo_sparse_spill_chains_preserving_source_identity(
         &[alpha.clone(), beta.clone(), catalog_only.clone()],
         &[vec![first_spill, second_spill], later_spills],
@@ -38094,6 +38102,43 @@ fn paired_redo_fold_identity_survives_sparse_checkpoint_spill_restore_chains() {
     assert!(slots(&late)[0].left.is_none());
     assert!(slots(&late)[0].right.is_none());
     assert_eq!(slots(&late)[0].source_stream_id, source_stream_id(4));
+
+    for (stream, pinned_stream) in restored.iter().zip(&pinned_restored) {
+        assert_eq!(pinned_stream.checkpoint_id, stream.checkpoint_id);
+        assert_eq!(pinned_stream.slots.len(), stream.slots.len());
+        for (slot, pinned_slot) in stream.slots.iter().zip(&pinned_stream.slots) {
+            assert_eq!(pinned_slot.restore_ordinal, slot.restore_ordinal);
+            assert_eq!(pinned_slot.spill_ordinal, slot.spill_ordinal);
+            assert_eq!(pinned_slot.spill_id, slot.spill_id);
+            assert_eq!(pinned_slot.stream_ordinal, slot.stream_ordinal);
+            assert_eq!(pinned_slot.source_stream_id, slot.source_stream_id);
+            assert_eq!(pinned_slot.compaction_ordinal, slot.compaction_ordinal);
+            assert_eq!(pinned_slot.handoff_ordinal, slot.handoff_ordinal);
+            assert_eq!(pinned_slot.fold_ordinal, slot.fold_ordinal);
+            assert_eq!(pinned_slot.order, slot.order);
+            assert_eq!(pinned_slot.redo_fold_identity, slot.redo_fold_identity);
+            assert_eq!(
+                pinned_slot.left_pin,
+                slot.left.clone().map(|generation| {
+                    orna_storage_v1::BranchMergePairedCheckpointPinIdentity {
+                        checkpoint_id: stream.checkpoint_id.clone(),
+                        generation,
+                    }
+                }),
+                "left pins bind only the exact generation on their checkpoint stream",
+            );
+            assert_eq!(
+                pinned_slot.right_pin,
+                slot.right.clone().map(|generation| {
+                    orna_storage_v1::BranchMergePairedCheckpointPinIdentity {
+                        checkpoint_id: stream.checkpoint_id.clone(),
+                        generation,
+                    }
+                }),
+                "right pins bind only the exact generation on their checkpoint stream",
+            );
+        }
+    }
 
     let malformed = spill(
         0,
