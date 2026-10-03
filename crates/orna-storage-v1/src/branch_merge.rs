@@ -1117,6 +1117,56 @@ pub enum BranchMergePairedCheckpointRedoFoldSpillNestedPairedCheckpointCompactio
     },
 }
 
+/// One independently scoped restore fold over paired nested-compaction spills.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BranchMergePairedCheckpointRedoFoldSpillNestedPairedCheckpointCompactionRestoreFoldIdentitySnapshot {
+    pub restore_fold_identity: Vec<u8>,
+    pub known_checkpoint_ids: Vec<CheckpointId>,
+    pub restore_batches: Vec<Vec<
+        BranchMergePairedCheckpointRedoFoldSpillNestedPairedCheckpointCompactionSnapshot,
+    >>,
+}
+
+/// One restored order carrying its opaque restore-fold identity and paired pins.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BranchMergePairedCheckpointRedoFoldSpillNestedPairedCheckpointCompactionRestoreFoldIdentityPinSlotSnapshot {
+    pub restore_fold_ordinal: usize,
+    pub restore_fold_identity: Vec<u8>,
+    pub restore_ordinal: usize,
+    pub spill_ordinal: usize,
+    pub spill_id: Vec<u8>,
+    pub stream_ordinal: usize,
+    pub source_stream_id: Vec<u8>,
+    pub compaction_ordinal: usize,
+    pub merge_ordinal: usize,
+    pub source_stream_ordinal: usize,
+    pub fold_ordinal: usize,
+    pub order: u64,
+    pub left_pin: Option<BranchMergePairedCheckpointSegmentPinIdentity>,
+    pub right_pin: Option<BranchMergePairedCheckpointSegmentPinIdentity>,
+    pub redo_fold_identity: BranchMergePairedRedoFoldIdentity,
+    pub segment_identity: BranchMergePairedWriteAheadSegmentIdentity,
+}
+
+/// One checkpoint result scoped by the opaque identity of its restore fold.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BranchMergePairedCheckpointRedoFoldSpillNestedPairedCheckpointCompactionRestoreFoldIdentityPinStreamSnapshot {
+    pub restore_fold_ordinal: usize,
+    pub restore_fold_identity: Vec<u8>,
+    pub checkpoint_id: CheckpointId,
+    pub slots: Vec<BranchMergePairedCheckpointRedoFoldSpillNestedPairedCheckpointCompactionRestoreFoldIdentityPinSlotSnapshot>,
+}
+
+/// A malformed nested paired compaction tagged with its restore-fold identity.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum BranchMergePairedCheckpointRedoFoldSpillNestedPairedCheckpointCompactionRestoreFoldIdentityError {
+    RestoreFold {
+        restore_fold_ordinal: usize,
+        restore_fold_identity: Vec<u8>,
+        source: BranchMergePairedCheckpointRedoFoldSpillNestedPairedCheckpointCompactionRestoreError,
+    },
+}
+
 /// A nested paired-checkpoint compaction carrying its opaque merge identity.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BranchMergePairedCheckpointRedoFoldSpillNestedMergeIdentityRunSnapshot {
@@ -4949,6 +4999,72 @@ pub fn restore_paired_checkpoint_redo_sparse_spill_nested_paired_checkpoint_comp
             }
         })
         .collect())
+}
+
+/// Restores paired nested-compaction spills under opaque outer fold identities.
+///
+/// Each fold owns its checkpoint catalogue and is expanded through the
+/// established paired-checkpoint spill restore. Results remain fold-scoped,
+/// so repeated checkpoint, spill, ordinal, and order values cannot merge
+/// occurrences from different restore histories. The opaque fold bytes and
+/// caller ordinal are copied to each stream and slot. The reference is silent
+/// on this identity layer; supplied bytes remain opaque and an invalid nested
+/// run is reported with both its fold identity and inner validation path.
+pub fn restore_paired_checkpoint_redo_sparse_spill_nested_paired_checkpoint_compaction_restore_fold_identities_preserving_pin_identity(
+    restore_folds: &[BranchMergePairedCheckpointRedoFoldSpillNestedPairedCheckpointCompactionRestoreFoldIdentitySnapshot],
+) -> Result<
+    Vec<BranchMergePairedCheckpointRedoFoldSpillNestedPairedCheckpointCompactionRestoreFoldIdentityPinStreamSnapshot>,
+    BranchMergePairedCheckpointRedoFoldSpillNestedPairedCheckpointCompactionRestoreFoldIdentityError,
+> {
+    let mut restored_folds = Vec::new();
+    for (restore_fold_ordinal, restore_fold) in restore_folds.iter().enumerate() {
+        let restored =
+            restore_paired_checkpoint_redo_sparse_spill_nested_paired_checkpoint_compactions_preserving_pin_identity(
+                &restore_fold.known_checkpoint_ids,
+                &restore_fold.restore_batches,
+            )
+            .map_err(|source| {
+                BranchMergePairedCheckpointRedoFoldSpillNestedPairedCheckpointCompactionRestoreFoldIdentityError::RestoreFold {
+                    restore_fold_ordinal,
+                    restore_fold_identity: restore_fold.restore_fold_identity.clone(),
+                    source,
+                }
+            })?;
+
+        restored_folds.extend(restored.into_iter().map(|stream| {
+            let slots = stream
+                .slots
+                .into_iter()
+                .map(|slot| {
+                    BranchMergePairedCheckpointRedoFoldSpillNestedPairedCheckpointCompactionRestoreFoldIdentityPinSlotSnapshot {
+                        restore_fold_ordinal,
+                        restore_fold_identity: restore_fold.restore_fold_identity.clone(),
+                        restore_ordinal: slot.restore_ordinal,
+                        spill_ordinal: slot.spill_ordinal,
+                        spill_id: slot.spill_id,
+                        stream_ordinal: slot.stream_ordinal,
+                        source_stream_id: slot.source_stream_id,
+                        compaction_ordinal: slot.compaction_ordinal,
+                        merge_ordinal: slot.merge_ordinal,
+                        source_stream_ordinal: slot.source_stream_ordinal,
+                        fold_ordinal: slot.fold_ordinal,
+                        order: slot.order,
+                        left_pin: slot.left_pin,
+                        right_pin: slot.right_pin,
+                        redo_fold_identity: slot.redo_fold_identity,
+                        segment_identity: slot.segment_identity,
+                    }
+                })
+                .collect();
+            BranchMergePairedCheckpointRedoFoldSpillNestedPairedCheckpointCompactionRestoreFoldIdentityPinStreamSnapshot {
+                restore_fold_ordinal,
+                restore_fold_identity: restore_fold.restore_fold_identity.clone(),
+                checkpoint_id: stream.checkpoint_id,
+                slots,
+            }
+        }));
+    }
+    Ok(restored_folds)
 }
 
 /// Restores nested spill chains with paired, ordinal-independent merge identity.

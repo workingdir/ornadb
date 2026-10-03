@@ -17,7 +17,7 @@
   "Major mode for Orna source files."
   (setq-local comment-start "// ")
   (setq-local comment-end "")
-  (setq-local font-lock-defaults '(orna-font-lock-keywords nil t)))
+  (setq-local font-lock-defaults '(orna-font-lock-keywords nil nil)))
 (add-to-list 'auto-mode-alist '("\\.orna\\'" . orna-mode))
 (defun orna-setup-eglot ()
   "Register Orna buffers with the orna-lsp language server."
