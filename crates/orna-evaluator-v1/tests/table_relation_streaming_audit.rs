@@ -4,11 +4,11 @@
 //! are outside this crate's effect boundary; these tests cover the ordered,
 //! paged relation behavior the evaluator itself owns.
 
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 
 use orna_evaluator_v1::{
     invoke_named_with_effects, EffectHandler, Environment, EvaluationError, Functions, Limits,
-    PureFunction, RelationPage, StepBudget,
+    PureFunction, RelationPage, RelationReadScope, StepBudget,
 };
 use orna_foundation_v1::CanonicalValue;
 use orna_syntax_v1::{parse_module, Argument, Expr, LiteralKind, SyntaxSpan};
@@ -137,6 +137,59 @@ impl EffectHandler for PagedSource {
     }
 }
 
+struct ScopedPagedSource {
+    pages: BTreeMap<String, VecDeque<RelationPage>>,
+    scopes: BTreeMap<String, RelationReadScope>,
+    cursors: Vec<(String, RelationReadScope, Option<Vec<u8>>)>,
+}
+
+impl ScopedPagedSource {
+    fn new(pages: impl IntoIterator<Item = (&'static str, Vec<RelationPage>)>) -> Self {
+        Self {
+            pages: pages
+                .into_iter()
+                .map(|(source, pages)| (source.to_owned(), pages.into()))
+                .collect(),
+            scopes: BTreeMap::new(),
+            cursors: Vec::new(),
+        }
+    }
+}
+
+impl EffectHandler for ScopedPagedSource {
+    fn handle(&mut self, _: &Expr, _: &[orna_value_v1::Value]) -> Result<Option<orna_value_v1::Value>, EvaluationError> {
+        Ok(None)
+    }
+
+    fn scan_relation_page_scoped(
+        &mut self,
+        source: &str,
+        scope: RelationReadScope,
+        after: Option<&[u8]>,
+        limit: usize,
+        budget: &mut StepBudget,
+    ) -> Result<Option<RelationPage>, EvaluationError> {
+        if limit == 0 {
+            return Ok(Some(RelationPage {
+                rows: Vec::new(),
+                next: None,
+            }));
+        }
+        budget.debit(1)?;
+        if let Some(previous) = self.scopes.insert(source.to_owned(), scope) {
+            assert_eq!(previous, scope, "each page keeps its relation source identity");
+        }
+        self.cursors.push((source.to_owned(), scope, after.map(ToOwned::to_owned)));
+        let Some(pages) = self.pages.get_mut(source) else {
+            return Ok(None);
+        };
+        Ok(Some(pages.pop_front().unwrap_or(RelationPage {
+            rows: Vec::new(),
+            next: None,
+        })))
+    }
+}
+
 fn page(values: &[i64], next: Option<Vec<u8>>) -> RelationPage {
     RelationPage { rows: values.iter().copied().map(integer).collect(), next }
 }
@@ -148,7 +201,7 @@ fn run(body: Expr, effects: &mut PagedSource) -> Result<CanonicalValue, Evaluati
     )]), &Environment::new(), Limits::default(), effects)
 }
 
-fn run_with_fixture_functions(body: Expr, effects: &mut PagedSource) -> Result<CanonicalValue, EvaluationError> {
+fn run_with_fixture_functions(body: Expr, effects: &mut dyn EffectHandler) -> Result<CanonicalValue, EvaluationError> {
     let mut functions = fixture_functions();
     functions.insert("run".into(), PureFunction {
         parameters: Vec::new(),
@@ -231,4 +284,97 @@ fn filtered_mapped_take_stops_after_the_requested_prefix() {
     );
     assert_eq!(effects.cursors, vec![None, Some(vec![1])]);
     assert!(effects.requested_limits.iter().all(|limit| *limit > 0));
+}
+
+fn incremental_scoped_view_body() -> Expr {
+    let left = relation_stage(
+        relation_stage(
+            relation_source("View.Left"),
+            "filter",
+            vec![named_function("is_odd")],
+        ),
+        "filter",
+        vec![named_function("below_five")],
+    );
+    let right = relation_stage(
+        relation_stage(
+            relation_source("View.Right"),
+            "filter",
+            vec![named_function("is_even")],
+        ),
+        "filter",
+        vec![named_function("below_eight")],
+    );
+    let combined = relation_stage(left, "union", vec![right]);
+    let refreshed = relation_stage(
+        combined,
+        "filter",
+        vec![named_function("is_positive")],
+    );
+    let mapped = relation_stage(refreshed, "map", vec![named_function("add_one")]);
+    terminal(mapped, "sum")
+}
+
+#[test]
+fn incremental_view_refresh_keeps_values_scoped_across_read_batches() {
+    let mut first_refresh = ScopedPagedSource::new([
+        (
+            "View.Left",
+            vec![page(&[1, 2], Some(vec![1])), page(&[3, 4], None)],
+        ),
+        (
+            "View.Right",
+            vec![page(&[4, 5], Some(vec![1])), page(&[6, 7], None)],
+        ),
+    ]);
+    assert_eq!(
+        run_with_fixture_functions(incremental_scoped_view_body(), &mut first_refresh).unwrap(),
+        integer(18),
+        "left odd rows and right even rows each retain their source filter across both pages"
+    );
+    assert_eq!(
+        first_refresh.cursors,
+        vec![
+            ("View.Left".into(), first_refresh.scopes["View.Left"], None),
+            ("View.Left".into(), first_refresh.scopes["View.Left"], Some(vec![1])),
+            ("View.Right".into(), first_refresh.scopes["View.Right"], None),
+            ("View.Right".into(), first_refresh.scopes["View.Right"], Some(vec![1])),
+        ],
+        "each scoped source resumes with its own cursor and then advances independently"
+    );
+    assert_ne!(
+        first_refresh.scopes["View.Left"],
+        first_refresh.scopes["View.Right"],
+        "sibling view sources have independent identities"
+    );
+
+    let mut second_refresh = ScopedPagedSource::new([
+        (
+            "View.Left",
+            vec![page(&[-3, 5], Some(vec![2])), page(&[7, 8], None)],
+        ),
+        (
+            "View.Right",
+            vec![page(&[2, 9], Some(vec![2])), page(&[8, 11], None)],
+        ),
+    ]);
+    assert_eq!(
+        run_with_fixture_functions(incremental_scoped_view_body(), &mut second_refresh).unwrap(),
+        integer(3),
+        "a refresh computes only the positive even row below eight from its own batches"
+    );
+    assert_eq!(
+        second_refresh.cursors,
+        vec![
+            ("View.Left".into(), second_refresh.scopes["View.Left"], None),
+            ("View.Left".into(), second_refresh.scopes["View.Left"], Some(vec![2])),
+            ("View.Right".into(), second_refresh.scopes["View.Right"], None),
+            ("View.Right".into(), second_refresh.scopes["View.Right"], Some(vec![2])),
+        ]
+    );
+    assert_ne!(
+        first_refresh.scopes["View.Left"],
+        second_refresh.scopes["View.Left"],
+        "a later refresh receives a fresh scope for newly computed batches"
+    );
 }

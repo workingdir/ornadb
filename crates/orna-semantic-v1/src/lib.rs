@@ -7259,12 +7259,15 @@ fn infer(
                 .find(|parent| type_contains_pinned_checkpoint_tuple(parent))
                 .cloned()
                 .or_else(|| first_parent.clone());
-            // The first row anchors rollback. An all-omitted tuple in any row
-            // can expose a cross-sibling selector collision, so enable scoped
-            // recovery for the whole fold and keep unaffected siblings folding.
+            // Any all-omitted row can expose a cross-sibling selector collision.
+            // Paired partial omissions in the first row also establish a local
+            // recovery scope; keep unaffected siblings folding in both cases.
             let scoped_checkpoint_rollback = element_types
                 .iter()
-                .any(type_contains_omitted_checkpoint_tuple);
+                .any(type_contains_omitted_checkpoint_tuple)
+                || first_parent
+                    .as_ref()
+                    .is_some_and(type_contains_paired_checkpoint_omissions);
             let mut rolled_back_checkpoint_paths = BTreeSet::new();
             let mut rejected_checkpoint_parent = false;
             let mut ty = None;
@@ -18957,6 +18960,86 @@ fn type_contains_omitted_checkpoint_tuple(ty: &Type) -> bool {
     }
 }
 
+/// Paired records can also anchor a scoped rollback when both contain a
+/// partially omitted pinned tuple. A single partial tuple has concrete slots
+/// to continue folding, but paired omissions establish a relationship between
+/// sibling paths; reject a later cross-path rebind locally so unaffected
+/// depths and record siblings can still accumulate labels.
+fn type_contains_paired_checkpoint_omissions(ty: &Type) -> bool {
+    match ty {
+        Type::Record(fields) => {
+            let omitted_siblings = fields
+                .values()
+                .filter(|field| type_contains_partially_omitted_pinned_tuple(field))
+                .count();
+            omitted_siblings >= 2
+                || fields
+                    .values()
+                    .any(type_contains_paired_checkpoint_omissions)
+        }
+        Type::Tuple(elements) => elements
+            .iter()
+            .any(type_contains_paired_checkpoint_omissions),
+        Type::List(element)
+        | Type::Range(element)
+        | Type::Relation(element)
+        | Type::Stream(element)
+        | Type::Optional(element) => type_contains_paired_checkpoint_omissions(element),
+        Type::Applied { arguments, .. } => arguments
+            .iter()
+            .any(type_contains_paired_checkpoint_omissions),
+        Type::Function {
+            parameters, result, ..
+        } => {
+            parameters
+                .iter()
+                .any(type_contains_paired_checkpoint_omissions)
+                || type_contains_paired_checkpoint_omissions(result)
+        }
+        Type::MoneyPerUnit { currency, unit } => {
+            type_contains_paired_checkpoint_omissions(currency)
+                || type_contains_paired_checkpoint_omissions(unit)
+        }
+        _ => false,
+    }
+}
+
+fn type_contains_partially_omitted_pinned_tuple(ty: &Type) -> bool {
+    match ty {
+        Type::Tuple(elements) => {
+            (elements.iter().any(checkpoint_value_is_omitted)
+                && elements.iter().any(type_contains_pinned_snapshot_identity))
+                || elements
+                    .iter()
+                    .any(type_contains_partially_omitted_pinned_tuple)
+        }
+        Type::List(element)
+        | Type::Range(element)
+        | Type::Relation(element)
+        | Type::Stream(element)
+        | Type::Optional(element) => type_contains_partially_omitted_pinned_tuple(element),
+        Type::Record(fields) => fields
+            .values()
+            .any(type_contains_partially_omitted_pinned_tuple),
+        Type::Applied { arguments, .. } => arguments
+            .iter()
+            .any(type_contains_partially_omitted_pinned_tuple),
+        Type::Function {
+            parameters, result, ..
+        } => {
+            parameters
+                .iter()
+                .any(type_contains_partially_omitted_pinned_tuple)
+                || type_contains_partially_omitted_pinned_tuple(result)
+        }
+        Type::MoneyPerUnit { currency, unit } => {
+            type_contains_partially_omitted_pinned_tuple(currency)
+                || type_contains_partially_omitted_pinned_tuple(unit)
+        }
+        _ => false,
+    }
+}
+
 /// A partial tuple still has concrete checkpoint depth labels to fold. Only a
 /// tuple whose every slot is omitted anchors the transactional recovery point;
 /// nested records and tuples can carry that all-omitted shape at any depth.
@@ -19487,7 +19570,6 @@ fn rollback_conflicting_checkpoint_paths(
     if implicated_paths.is_empty() {
         return false;
     }
-
     let scopes = implicated_paths
         .into_iter()
         .filter_map(|scope| {
@@ -19514,7 +19596,6 @@ fn rollback_conflicting_checkpoint_paths(
             Some((rollback_scope, relative_scope))
         })
         .collect::<BTreeMap<_, _>>();
-
     let mut rolled_back_any = false;
     for (full_scope, scope) in scopes {
         let (Some(anchor_scope), Some(_), Some(_)) = (

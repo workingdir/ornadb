@@ -1076,6 +1076,63 @@ impl PackageResolver {
         Ok(route)
     }
 
+    /// Applies depth-labelled checkpoint storm rounds with stable omission
+    /// slots. A slot keeps the route identity of its first selected label;
+    /// `None` leaves that slot unchanged, and a later label cannot take its
+    /// place. The reference is silent on nested paired omissions, so v1 fixes
+    /// the slot count from the first round and revalidates every selected
+    /// identity after each fold. Failure returns no partial route.
+    pub fn extend_nested_terminal_pair_checkpoint_storm_rounds_from_depth_labels_with_omissions(
+        &self,
+        previous: &ReboundPathResolution,
+        rounds: &[&[Option<(&NestedPairDepthLabel, &[[PinnedDatabase; 2]])>]],
+    ) -> Result<ReboundPathResolution, AttachmentError> {
+        let mut route = previous.clone();
+        let mut retained_labels: Option<Vec<Option<NestedPairDepthLabel>>> = None;
+        for round in rounds {
+            let labels = retained_labels.get_or_insert_with(|| vec![None; round.len()]);
+            if labels.len() != round.len() {
+                return Err(AttachmentError::RetainedSnapshotUnavailable);
+            }
+
+            let checkpoints = round
+                .iter()
+                .enumerate()
+                .map(|(slot, plan)| match plan {
+                    Some((label, replacements)) => {
+                        route.validate_depth_label(label)?;
+                        if let Some(retained) = &labels[slot] {
+                            if retained != *label {
+                                return Err(AttachmentError::RetainedSnapshotUnavailable);
+                            }
+                        } else {
+                            labels[slot] = Some((*label).clone());
+                        }
+                        let checkpoint = route.handoff_checkpoint(label.wave, label.depth)?;
+                        if checkpoint.depth_label() != *label {
+                            return Err(AttachmentError::RetainedSnapshotUnavailable);
+                        }
+                        Ok(Some((checkpoint, *replacements)))
+                    }
+                    None => Ok(None),
+                })
+                .collect::<Result<Vec<_>, AttachmentError>>()?;
+            let storms = checkpoints
+                .iter()
+                .filter_map(|checkpoint| {
+                    checkpoint
+                        .as_ref()
+                        .map(|(checkpoint, replacements)| (checkpoint, *replacements))
+                })
+                .collect::<Vec<_>>();
+            route = self.extend_nested_terminal_pair_checkpoint_storms(&route, &storms)?;
+            for label in labels.iter().flatten() {
+                route.validate_depth_label(label)?;
+            }
+        }
+        Ok(route)
+    }
+
     /// Folds checkpoint-rooted terminal-pair storms across independent parent
     /// routes. Each table row is `(route, storms)` and resolves only checkpoints
     /// captured from that row's route; row order and anchor identity are kept
@@ -1591,6 +1648,29 @@ impl ReboundPathResolution {
         &self.final_session
     }
 
+    /// Captures the route lineage and exact pins of the current terminal
+    /// closure. The reference leaves terminal identity across omitted nested
+    /// rebinds unspecified; v1 binds it to the originating route and terminal
+    /// pin set so an unchanged terminal remains verifiable across omissions.
+    pub fn terminal_route_identity(&self) -> NestedPairTerminalRouteIdentity {
+        NestedPairTerminalRouteIdentity::from_session(&self.route_identity, &self.final_session)
+    }
+
+    /// Verifies that this resolution still ends at the exact terminal route
+    /// captured earlier, including its lineage and ordered attached pins.
+    pub fn validate_terminal_route_identity(
+        &self,
+        identity: &NestedPairTerminalRouteIdentity,
+    ) -> Result<(), AttachmentError> {
+        if Arc::ptr_eq(&self.route_identity, &identity.route_identity)
+            && identity.matches_session(&self.final_session)
+        {
+            Ok(())
+        } else {
+            Err(AttachmentError::RetainedSnapshotUnavailable)
+        }
+    }
+
     /// Snapshots retained before each replacement, in path order.
     pub fn retained_sessions(&self) -> &[AttachedDatabaseSession] {
         &self.retained_sessions
@@ -1779,6 +1859,49 @@ impl PartialEq for NestedPairDepthLabel {
 }
 
 impl Eq for NestedPairDepthLabel {}
+
+/// An opaque identity for one resolution's terminal closure. Equality binds
+/// the complete pin route to its originating nested route lineage.
+#[derive(Clone, Debug)]
+pub struct NestedPairTerminalRouteIdentity {
+    route_identity: Arc<()>,
+    primary: PackagePin,
+    attached: Vec<(String, PackagePin)>,
+}
+
+impl NestedPairTerminalRouteIdentity {
+    fn from_session(route_identity: &Arc<()>, session: &AttachedDatabaseSession) -> Self {
+        Self {
+            route_identity: route_identity.clone(),
+            primary: session.primary().pin().clone(),
+            attached: session
+                .attached()
+                .map(|(alias, database)| (alias.to_owned(), database.pin().clone()))
+                .collect(),
+        }
+    }
+
+    fn matches_session(&self, session: &AttachedDatabaseSession) -> bool {
+        self.primary.eq(session.primary().pin())
+            && self
+                .attached
+                .iter()
+                .map(|(alias, pin)| (alias.as_str(), pin))
+                .eq(session
+                    .attached()
+                    .map(|(alias, database)| (alias, database.pin())))
+    }
+}
+
+impl PartialEq for NestedPairTerminalRouteIdentity {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.route_identity, &other.route_identity)
+            && self.primary == other.primary
+            && self.attached == other.attached
+    }
+}
+
+impl Eq for NestedPairTerminalRouteIdentity {}
 
 /// An immutable copy of a retained nested route, suitable for replay after a
 /// later route has been extended or rebound.
