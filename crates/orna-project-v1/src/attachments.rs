@@ -1370,6 +1370,31 @@ impl PackageResolver {
         )
     }
 
+    /// Applies a sparse paired rebind fold only when it reaches the caller's
+    /// expected terminal identity, then carries that exact identity through
+    /// nested omission chains. The reference is silent on guarding this
+    /// boundary across omission folds; v1 rejects a stale rebind identity or
+    /// any omission drift and returns no partial route.
+    pub fn extend_nested_terminal_pair_sparse_checkpoint_storm_rebind_then_omission_chains_validating_rebound_terminal_identity(
+        &self,
+        previous: &ReboundPathResolution,
+        rebind_chains: &[&[&[(&NestedPairDepthLabel, Option<&[[PinnedDatabase; 2]]>)]]],
+        expected_rebound_terminal_identity: &NestedPairTerminalRouteIdentity,
+        omission_chains: &[&[&[(&NestedPairDepthLabel, Option<&[[PinnedDatabase; 2]]>)]]],
+    ) -> Result<ReboundPathResolution, AttachmentError> {
+        let rebound_route = self
+            .extend_nested_terminal_pair_sparse_checkpoint_storm_chains_from_depth_labels(
+                previous,
+                rebind_chains,
+            )?;
+        rebound_route.validate_terminal_route_identity(expected_rebound_terminal_identity)?;
+        self.extend_nested_terminal_pair_sparse_checkpoint_storm_chains_preserving_terminal_identity(
+            &rebound_route,
+            expected_rebound_terminal_identity,
+            omission_chains,
+        )
+    }
+
     /// Folds checkpoint-rooted terminal-pair storms across independent parent
     /// routes. Each table row is `(route, storms)` and resolves only checkpoints
     /// captured from that row's route; row order and anchor identity are kept
