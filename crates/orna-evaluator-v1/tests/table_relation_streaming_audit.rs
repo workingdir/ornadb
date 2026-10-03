@@ -1085,3 +1085,70 @@ fn paired_subscription_handoffs_rebind_reused_batch_cursors_to_fresh_scopes() {
         "a repeated continuation resumes only within its new paired subscription scope"
     );
 }
+
+#[test]
+fn paired_subscription_refresh_chain_retains_values_across_variable_page_handoffs() {
+    // The reference is silent about retaining source subscriptions across
+    // refresh folds with different page counts. Each new scoped fold binds a
+    // fresh pair while captured outputs remain values from their own snapshot.
+    let mut source = PairedSubscriptionSource::new([
+        vec![
+            page(&[1], Some(vec![11])),
+            page(&[3], Some(vec![33])),
+            page(&[5], None),
+        ],
+        vec![page(&[2], Some(vec![11])), page(&[4], None)],
+        vec![page(&[-3], Some(vec![11])), page(&[3], None)],
+        vec![
+            page(&[2], Some(vec![11])),
+            page(&[9], Some(vec![66])),
+            page(&[8], None),
+        ],
+        vec![page(&[1], None)],
+        vec![page(&[2], Some(vec![11])), page(&[4], None)],
+    ]);
+
+    let first_fold = run_with_fixture_functions(paired_subscription_cascade_body(), &mut source).unwrap();
+    assert_eq!(first_fold, integer(14));
+    let second_fold = run_with_fixture_functions(paired_subscription_cascade_body(), &mut source).unwrap();
+    assert_eq!(second_fold, integer(7));
+    let third_fold = run_with_fixture_functions(paired_subscription_cascade_body(), &mut source).unwrap();
+    assert_eq!(third_fold, integer(10));
+
+    assert_eq!(first_fold, integer(14), "the first fold remains pinned after two refresh handoffs");
+    assert_eq!(second_fold, integer(7), "the second fold remains pinned after the third fold");
+    assert_eq!(source.lanes.len(), 6);
+    for generation in 0..3 {
+        assert_ne!(
+            source.lanes[generation * 2].0,
+            source.lanes[generation * 2 + 1].0,
+            "refresh generation {generation} owns distinct paired subscription scopes"
+        );
+    }
+    let scopes = source.lanes.iter().map(|(scope, _)| *scope).collect::<Vec<_>>();
+    for (index, scope) in scopes.iter().enumerate() {
+        assert!(
+            !scopes[..index].contains(scope),
+            "all refresh handoffs allocate fresh subscription scopes"
+        );
+    }
+    assert_eq!(
+        source.cursors,
+        vec![
+            (scopes[0], None),
+            (scopes[0], Some(vec![11])),
+            (scopes[0], Some(vec![33])),
+            (scopes[1], None),
+            (scopes[1], Some(vec![11])),
+            (scopes[2], None),
+            (scopes[2], Some(vec![11])),
+            (scopes[3], None),
+            (scopes[3], Some(vec![11])),
+            (scopes[3], Some(vec![66])),
+            (scopes[4], None),
+            (scopes[5], None),
+            (scopes[5], Some(vec![11])),
+        ],
+        "each variable-length fold terminates and resumes only inside its own handoff scope"
+    );
+}
