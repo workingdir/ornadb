@@ -616,6 +616,8 @@ pub enum BranchMergePairedCheckpointRedoFoldSparseCompactionRestoreHandoffError 
 pub struct BranchMergePairedCheckpointRedoFoldSpillRunSnapshot {
     /// Source handoff position retained before this spill was written.
     pub handoff_ordinal: usize,
+    /// Original merge position retained by the compacted spill run.
+    pub merge_ordinal: usize,
     pub fold_ordinal: usize,
     pub first_order: u64,
     pub last_order: u64,
@@ -651,6 +653,7 @@ pub struct BranchMergePairedCheckpointRedoFoldSpillRestoreSlotSnapshot {
     pub source_stream_id: Vec<u8>,
     pub compaction_ordinal: usize,
     pub handoff_ordinal: usize,
+    pub merge_ordinal: usize,
     pub fold_ordinal: usize,
     pub order: u64,
     pub left: Option<CheckpointGeneration>,
@@ -701,6 +704,7 @@ pub enum BranchMergePairedCheckpointRedoFoldSpillRestoreError {
         source_stream_id: Vec<u8>,
         compaction_ordinal: usize,
         handoff_ordinal: usize,
+        merge_ordinal: usize,
         fold_ordinal: usize,
         first_order: u64,
         last_order: u64,
@@ -3091,12 +3095,13 @@ pub fn restore_paired_checkpoint_redo_sparse_compaction_handoff_chains_preservin
 /// Each outer vector is an independent restore batch and each spill retains
 /// its input position and stable spill ID. Repeated checkpoint streams remain
 /// separate through their stream ordinal and source stream ID; compacted runs
-/// keep their source handoff and fold labels. Exact paired checkpoint values
-/// and redo-fold identities are copied to each represented order. Known and
-/// observed checkpoint IDs are unioned in sorted order; gaps, omitted sides,
-/// and absent streams remain absent. The reference is silent on checkpoint
-/// spill restore semantics, so source positions are stable local identities
-/// and malformed paths report the complete spill and checkpoint coordinates.
+/// keep their source handoff, merge, and fold labels. Exact paired checkpoint
+/// values and redo-fold identities are copied to each represented order.
+/// Known and observed checkpoint IDs are unioned in sorted order; gaps,
+/// omitted sides, and absent streams remain absent. The reference is silent
+/// on checkpoint spill restore semantics, so source positions are stable local
+/// identities and malformed paths report the complete spill and checkpoint
+/// coordinates.
 pub fn restore_paired_checkpoint_redo_sparse_spill_chains_preserving_source_identity(
     known_checkpoint_ids: &[CheckpointId],
     restore_spills: &[Vec<BranchMergePairedCheckpointRedoFoldSpillSnapshot>],
@@ -3128,6 +3133,7 @@ pub fn restore_paired_checkpoint_redo_sparse_spill_chains_preserving_source_iden
                                 source_stream_id: stream.source_stream_id.clone(),
                                 compaction_ordinal,
                                 handoff_ordinal: run.handoff_ordinal,
+                                merge_ordinal: run.merge_ordinal,
                                 fold_ordinal: run.fold_ordinal,
                                 first_order: run.first_order,
                                 last_order: run.last_order,
@@ -3144,6 +3150,7 @@ pub fn restore_paired_checkpoint_redo_sparse_spill_chains_preserving_source_iden
                             source_stream_id: stream.source_stream_id.clone(),
                             compaction_ordinal,
                             handoff_ordinal: run.handoff_ordinal,
+                            merge_ordinal: run.merge_ordinal,
                             fold_ordinal: run.fold_ordinal,
                             order,
                             left: run.left.clone(),
