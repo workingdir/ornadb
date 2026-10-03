@@ -204,6 +204,7 @@ struct Parser<'source> {
     index: usize,
     builder: GreenNodeBuilder<'static>,
     diagnostics: Vec<Diagnostic>,
+    documentation_comments: Vec<(usize, SourceSlice)>,
     schemas: Vec<SchemaDeclaration>,
     object_types: Vec<ObjectTypeDeclaration>,
     enum_types: Vec<EnumTypeDeclaration>,
@@ -225,6 +226,7 @@ impl<'source> Parser<'source> {
             index: 0,
             builder: GreenNodeBuilder::new(),
             diagnostics,
+            documentation_comments: Vec::new(),
             schemas: Vec::new(),
             object_types: Vec::new(),
             enum_types: Vec::new(),
@@ -265,6 +267,7 @@ impl<'source> Parser<'source> {
                 root: rowan::SyntaxNode::new_root(green),
             },
             diagnostics: self.diagnostics,
+            documentation_comments: self.documentation_comments,
             schemas: self.schemas,
             object_types: self.object_types,
             enum_types: self.enum_types,
@@ -433,6 +436,12 @@ impl<'source> Parser<'source> {
 
         self.skip_trivia();
         let name = self.parse_qualified_name("expected a schema name after CREATE SCHEMA");
+        if let Some(name) = &name {
+            self.capture_documentation_comment(
+                statement_start,
+                name.parts.last().expect("qualified name").span.start,
+            );
+        }
         self.skip_trivia();
         let semicolon = self.expect_kind(TokenKind::Semicolon, "expected ';' after schema name");
 
@@ -477,6 +486,10 @@ impl<'source> Parser<'source> {
             self.builder.finish_node();
             return;
         };
+        self.capture_documentation_comment(
+            statement_start,
+            name.parts.last().expect("qualified name").span.start,
+        );
         self.skip_trivia();
         if self
             .expect_kind(
@@ -637,6 +650,7 @@ impl<'source> Parser<'source> {
         (|| {
             let name = self.expect_identifier(&format!("expected a {subject} parameter name"))?;
             let start = name.span.start;
+            self.capture_documentation_comment(start, start);
             self.skip_trivia();
             let type_specification = self.parse_type_specification()?;
             let mut end = type_specification.span().end;
@@ -1190,6 +1204,12 @@ impl<'source> Parser<'source> {
 
         self.skip_trivia();
         let name = self.parse_qualified_name("expected a type name after CREATE TYPE");
+        if let Some(name) = &name {
+            self.capture_documentation_comment(
+                statement_start,
+                name.parts.last().expect("qualified name").span.start,
+            );
+        }
         self.skip_trivia();
         if !self.expect_word("AS") {
             self.recover_statement();
@@ -1823,6 +1843,7 @@ impl<'source> Parser<'source> {
         let result = (|| {
             let name = self.expect_identifier("expected a record value field name")?;
             let field_start = name.span.start;
+            self.capture_documentation_comment(field_start, field_start);
             self.skip_trivia();
             if self.current().is_some_and(|token| token.is_word("REF")) {
                 self.error_current("ORNA0001", "record value fields cannot use REF");
@@ -1867,6 +1888,7 @@ impl<'source> Parser<'source> {
             return None;
         };
         let field_start = name.span.start;
+        self.capture_documentation_comment(field_start, field_start);
         self.skip_trivia();
         let Some(type_specification) = self.parse_type_specification() else {
             self.builder.finish_node();
@@ -2514,6 +2536,56 @@ impl<'source> Parser<'source> {
         while self.current().is_some_and(|token| token.kind.is_trivia()) {
             self.bump();
         }
+    }
+
+    fn capture_documentation_comment(&mut self, before: usize, target: usize) {
+        let Some(token_index) = self
+            .tokens
+            .iter()
+            .position(|token| token.range.start == before)
+        else {
+            return;
+        };
+        let mut reversed_lines = Vec::new();
+        let mut newlines = 0;
+        let mut comment_start = before;
+        let mut comment_end = before;
+        for token in self.tokens[..token_index].iter().rev() {
+            if token.kind == TokenKind::Whitespace {
+                newlines += token.text.bytes().filter(|byte| *byte == b'\n').count();
+                if newlines > 1 {
+                    break;
+                }
+                continue;
+            }
+            if token.kind == TokenKind::LineComment
+                && token.text.starts_with("--|")
+                && newlines <= 1
+            {
+                reversed_lines.push(token.text[3..].trim().to_owned());
+                comment_start = token.range.start;
+                if comment_end == before {
+                    comment_end = token.range.end;
+                }
+                newlines = 0;
+                continue;
+            }
+            break;
+        }
+        if reversed_lines.is_empty() {
+            return;
+        }
+        reversed_lines.reverse();
+        self.documentation_comments.push((
+            target,
+            SourceSlice {
+                text: reversed_lines.join("\n"),
+                span: SourceSpan {
+                    start: comment_start,
+                    end: comment_end,
+                },
+            },
+        ));
     }
 
     fn recover_client_function_statement(&mut self) {
