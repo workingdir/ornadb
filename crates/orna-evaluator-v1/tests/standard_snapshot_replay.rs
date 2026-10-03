@@ -2899,3 +2899,75 @@ fn diamond_dependency_snapshots_replay_deterministically_when_interleaved() {
         );
     }
 }
+
+#[test]
+fn dependency_graph_replays_reject_divergent_edge_sources() {
+    let (_directory, projects, snapshots, source_bundles) = dependency_graph_projects();
+    let mut divergent_edges = 0;
+
+    for index in 0..projects.len() - 1 {
+        assert_ne!(snapshots[index], snapshots[index + 1]);
+        assert_eq!(
+            projects[index].standard_profile().unwrap().snapshot(),
+            snapshots[index]
+        );
+        assert_eq!(
+            projects[index + 1]
+                .standard_profile()
+                .unwrap()
+                .snapshot(),
+            snapshots[index + 1]
+        );
+
+        for (path, older_source) in &source_bundles[index] {
+            let newer_source = source_bundles[index + 1]
+                .iter()
+                .find(|(candidate, _)| candidate == path)
+                .unwrap()
+                .1
+                .as_str();
+            if older_source == newer_source {
+                continue;
+            }
+            divergent_edges += 1;
+
+            let mut older_program_with_newer_edge = source_bundles[index].clone();
+            older_program_with_newer_edge
+                .iter_mut()
+                .find(|(candidate, _)| candidate == path)
+                .unwrap()
+                .1 = newer_source.to_owned();
+            assert_eq!(
+                AdmittedReplSession::from_loaded_project(
+                    &projects[index],
+                    older_program_with_newer_edge,
+                    Limits::default(),
+                )
+                .unwrap_err()
+                .code(),
+                "ORNA-REPL-STANDARD",
+                "older program must reject the newer {path} source"
+            );
+
+            let mut newer_program_with_older_edge = source_bundles[index + 1].clone();
+            newer_program_with_older_edge
+                .iter_mut()
+                .find(|(candidate, _)| candidate == path)
+                .unwrap()
+                .1 = older_source.clone();
+            assert_eq!(
+                AdmittedReplSession::from_loaded_project(
+                    &projects[index + 1],
+                    newer_program_with_older_edge,
+                    Limits::default(),
+                )
+                .unwrap_err()
+                .code(),
+                "ORNA-REPL-STANDARD",
+                "newer program must reject the older {path} source"
+            );
+        }
+    }
+
+    assert_eq!(divergent_edges, 4, "each graph layer changes in one upgrade");
+}
