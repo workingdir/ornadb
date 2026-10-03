@@ -17,6 +17,7 @@ use orna_storage_v1::{
     BranchMergePairedLogSegmentIdentity,
     BranchMergePairedRedoChainIdentity,
     BranchMergePairedCheckpointRedoChainIdentityFrame,
+    BranchMergePairedCheckpointRedoChainCompactionIdentityFrame,
     BranchMergePairedCompactionIdentity,
     BranchMergePairedCheckpointRedoCompactionIdentityFrame,
     BranchMergeBudget, BranchMergeColumnDepthEvent, BranchMergeColumnDepthFragments,
@@ -72,6 +73,8 @@ use orna_storage_v1::{
     fold_paired_checkpoint_redo_sparse_stream_chains_preserving_log_segment_identity,
     fold_paired_checkpoint_redo_sparse_stream_chains_preserving_chain_and_log_segment_identity,
     compress_paired_checkpoint_redo_sparse_stream_chains_preserving_chain_and_log_segment_identity,
+    fold_paired_checkpoint_redo_sparse_stream_chains_preserving_chain_and_compaction_identity,
+    compress_paired_checkpoint_redo_sparse_stream_chains_preserving_chain_and_compaction_identity,
     compress_paired_checkpoint_redo_sparse_chains_preserving_segment_rotation_identity,
     compress_paired_checkpoint_redo_sparse_chains_preserving_log_segment_identity,
     compress_paired_checkpoint_redo_sparse_chains_preserving_chain_and_log_segment_identity,
@@ -118,6 +121,8 @@ const PAIRED_COMPACTED_REDO_CHAIN_IDENTITIES: &str =
     include_str!("fixtures/paired-compacted-redo-chain-identities.orna");
 const PAIRED_COMPACTED_COMPACTION_IDENTITIES: &str =
     include_str!("fixtures/paired-compacted-compaction-identities.orna");
+const PAIRED_SPARSE_WRITE_AHEAD_COMPACTION_IDENTITIES: &str =
+    include_str!("fixtures/paired-sparse-write-ahead-compaction-identities.orna");
 const PAIRED_UNDO_CHAIN_COMPACTION_ROTATIONS: &str =
     include_str!("fixtures/paired-undo-chain-compaction-rotations.orna");
 const TOMBSTONE_DEPTH_SHALLOW: &str = include_str!("fixtures/merge-tombstone-depth-shallow.orna");
@@ -22901,6 +22906,240 @@ fn paired_undo_identity_survives_compaction_rotations_across_sparse_folds() {
     assert_eq!(runs(&observed_late)[0].left, None);
     assert_eq!(runs(&observed_late)[3].first_order, 86);
     assert_eq!(runs(&observed_late)[3].left, Some(checkpoint_states[4].clone()));
+}
+
+#[test]
+fn paired_redo_chain_identity_survives_sparse_write_ahead_compaction_omissions() {
+    let chain_rows = PAIRED_COMPACTED_REDO_CHAIN_IDENTITIES
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    let log_rows = PAIRED_COMPACTED_LOG_IDENTITIES
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    let segment_rows = PAIRED_COMPACTED_SEGMENT_ROTATIONS
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    let compaction_rows = PAIRED_SPARSE_WRITE_AHEAD_COMPACTION_IDENTITIES
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    let checkpoint_states = PAIRED_CHECKPOINT_REDO
+        .split("\n\n")
+        .map(parse_checkpoint_fixture)
+        .collect::<Vec<_>>();
+    assert_eq!(chain_rows.len(), 6);
+    assert_eq!(log_rows.len(), 6);
+    assert_eq!(segment_rows.len(), 6);
+    assert_eq!(compaction_rows.len(), 3);
+    let keys = |rows: &[KeyedRow]| rows.iter().map(|row| row.key.clone()).collect::<Vec<_>>();
+    assert_eq!(keys(&chain_rows), keys(&log_rows));
+    assert_eq!(keys(&chain_rows), keys(&segment_rows));
+
+    let redo_chains = chain_rows
+        .iter()
+        .map(|row| BranchMergePairedRedoChainIdentity {
+            left_chain: row.fields[&id(2)].encode().unwrap(),
+            right_chain: row.fields[&id(3)].encode().unwrap(),
+        })
+        .collect::<Vec<_>>();
+    let log_segments = log_rows
+        .iter()
+        .zip(&segment_rows)
+        .map(|(log_row, segment_row)| BranchMergePairedLogSegmentIdentity {
+            write_ahead_identity: BranchMergePairedWriteAheadIdentity {
+                left_log: log_row.fields[&id(2)].encode().unwrap(),
+                right_log: log_row.fields[&id(3)].encode().unwrap(),
+            },
+            segment_identity: BranchMergePairedWriteAheadSegmentIdentity {
+                left_segment: segment_row.fields[&id(2)].encode().unwrap(),
+                right_segment: segment_row.fields[&id(3)].encode().unwrap(),
+            },
+        })
+        .collect::<Vec<_>>();
+    let compactions = chain_rows
+        .iter()
+        .map(|chain_row| {
+            compaction_rows
+                .iter()
+                .find(|compaction_row| compaction_row.key == chain_row.key)
+                .map(|row| BranchMergePairedCompactionIdentity {
+                    left_compaction: row.fields[&id(2)].encode().unwrap(),
+                    right_compaction: row.fields[&id(3)].encode().unwrap(),
+                })
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        compactions.iter().map(Option::is_some).collect::<Vec<_>>(),
+        vec![true, false, true, false, true, false],
+        "fixture omissions are aligned to transaction keys rather than shifting later observations",
+    );
+    assert_eq!(redo_chains[0], redo_chains[1]);
+    assert_eq!(redo_chains[2], redo_chains[3]);
+    assert_eq!(redo_chains[3], redo_chains[4]);
+    assert_ne!(redo_chains[4], redo_chains[5]);
+
+    let alpha = b"redo-compaction/alpha".to_vec();
+    let beta = b"redo-compaction/beta".to_vec();
+    let catalog_only = b"redo-compaction/catalog-only".to_vec();
+    let observed_late = b"redo-compaction/observed-late".to_vec();
+    let left_base = checkpoint_states[0].clone();
+    let right_base = checkpoint_states[1].clone();
+    let left_redo = checkpoint_states[2].clone();
+    let right_redo = checkpoint_states[3].clone();
+    let positionless = checkpoint_states[4].clone();
+    let checkpoints = |checkpoint_id: &[u8], generation: CheckpointGeneration| {
+        BTreeMap::from([(checkpoint_id.to_vec(), generation)])
+    };
+    let frame = |index: usize,
+                 left: BTreeMap<Vec<u8>, CheckpointGeneration>,
+                 right: BTreeMap<Vec<u8>, CheckpointGeneration>| {
+        BranchMergePairedCheckpointRedoChainCompactionIdentityFrame {
+            checkpoints: BranchMergePairedCheckpointRedoFrame { left, right },
+            redo_chain_identity: redo_chains[index].clone(),
+            log_segment_identity: log_segments[index].clone(),
+            compaction_identity: compactions[index].clone(),
+        }
+    };
+
+    let mut first_fold = BTreeMap::new();
+    first_fold.insert(
+        100,
+        frame(
+            0,
+            checkpoints(&alpha, left_base.clone()),
+            checkpoints(&alpha, right_base.clone()),
+        ),
+    );
+    let mut left_at_101 = checkpoints(&alpha, left_base.clone());
+    left_at_101.insert(beta.clone(), positionless.clone());
+    first_fold.insert(
+        101,
+        frame(1, left_at_101, checkpoints(&alpha, right_base.clone())),
+    );
+    first_fold.insert(
+        103,
+        frame(
+            2,
+            checkpoints(&alpha, left_base.clone()),
+            checkpoints(&alpha, right_base.clone()),
+        ),
+    );
+
+    let mut second_fold = BTreeMap::new();
+    second_fold.insert(
+        103,
+        frame(
+            3,
+            checkpoints(&alpha, left_redo.clone()),
+            checkpoints(&alpha, right_redo.clone()),
+        ),
+    );
+    let mut right_at_104 = checkpoints(&alpha, right_redo.clone());
+    right_at_104.insert(beta.clone(), positionless.clone());
+    second_fold.insert(
+        104,
+        frame(4, checkpoints(&alpha, left_redo.clone()), right_at_104),
+    );
+
+    let mut left_at_106 = checkpoints(&alpha, left_base.clone());
+    left_at_106.insert(observed_late.clone(), positionless.clone());
+    let third_fold = BTreeMap::from([(
+        106,
+        frame(5, left_at_106, checkpoints(&alpha, right_base.clone())),
+    )]);
+
+    let streams = fold_paired_checkpoint_redo_sparse_stream_chains_preserving_chain_and_compaction_identity(
+        &[alpha.clone(), beta.clone(), catalog_only.clone()],
+        &[first_fold, second_fold, third_fold],
+    );
+    assert_eq!(
+        streams
+            .iter()
+            .map(|stream| stream.checkpoint_id.clone())
+            .collect::<Vec<_>>(),
+        vec![alpha.clone(), beta.clone(), catalog_only.clone(), observed_late.clone()],
+    );
+    let slots = |checkpoint_id: &[u8]| {
+        &streams
+            .iter()
+            .find(|stream| stream.checkpoint_id == checkpoint_id)
+            .unwrap()
+            .slots
+    };
+    let expected_slots = [(0, 100), (0, 101), (0, 103), (1, 103), (1, 104), (2, 106)];
+    for stream in &streams {
+        assert_eq!(
+            stream
+                .slots
+                .iter()
+                .map(|slot| (slot.fold_ordinal, slot.order))
+                .collect::<Vec<_>>(),
+            expected_slots,
+        );
+        for (index, slot) in stream.slots.iter().enumerate() {
+            assert_eq!(slot.redo_chain_identity, redo_chains[index]);
+            assert_eq!(slot.log_segment_identity, log_segments[index]);
+            assert_eq!(slot.compaction_identity, compactions[index]);
+        }
+    }
+    assert!(slots(&catalog_only)
+        .iter()
+        .all(|slot| slot.left.is_none() && slot.right.is_none()));
+    assert_eq!(slots(&catalog_only)[1].compaction_identity, None);
+    assert_eq!(slots(&beta)[1].left, Some(positionless.clone()));
+    assert_eq!(slots(&beta)[4].right, Some(positionless.clone()));
+
+    let compacted = compress_paired_checkpoint_redo_sparse_stream_chains_preserving_chain_and_compaction_identity(&streams);
+    let runs = |checkpoint_id: &[u8]| {
+        &compacted
+            .iter()
+            .find(|snapshot| snapshot.checkpoint_id == checkpoint_id)
+            .unwrap()
+            .runs
+    };
+    assert_eq!(
+        runs(&alpha)
+            .iter()
+            .map(|run| (
+                run.fold_ordinal,
+                run.first_order,
+                run.last_order,
+                run.redo_chain_identity.clone(),
+            ))
+            .collect::<Vec<_>>(),
+        vec![
+            (0, 100, 101, redo_chains[0].clone()),
+            (0, 103, 103, redo_chains[2].clone()),
+            (1, 103, 104, redo_chains[3].clone()),
+            (2, 106, 106, redo_chains[5].clone()),
+        ],
+        "redo-chain identity and fold boundaries survive compaction omissions",
+    );
+    assert_eq!(
+        runs(&alpha)[0].compaction_identities,
+        vec![compactions[0].clone(), compactions[1].clone()],
+        "an omitted compaction observation does not split a stable redo-chain run",
+    );
+    assert_eq!(
+        runs(&alpha)[2].compaction_identities,
+        vec![compactions[3].clone(), compactions[4].clone()],
+        "a later compaction observation remains aligned after an omission",
+    );
+    assert_eq!(runs(&alpha)[0].log_segment_identities, log_segments[0..2]);
+    assert_eq!(runs(&alpha)[2].log_segment_identities, log_segments[3..5]);
+    for run in runs(&alpha) {
+        assert_eq!(run.log_segment_identities.len(), run.compaction_identities.len());
+        assert_eq!(run.compaction_identities.len(), (run.last_order - run.first_order + 1) as usize);
+    }
+    assert_eq!(runs(&catalog_only).len(), 4);
+    assert_eq!(runs(&catalog_only)[0].redo_chain_identity, redo_chains[0]);
+    assert_eq!(runs(&catalog_only)[0].compaction_identities, vec![compactions[0].clone(), compactions[1].clone()]);
+    assert_eq!(runs(&observed_late).len(), 4);
+    assert_eq!(runs(&observed_late)[0].left, None);
+    assert_eq!(runs(&observed_late)[3].left, Some(positionless));
 }
 
 #[test]
