@@ -12937,6 +12937,22 @@ fn infer_success_pipeline(
         && let Expr::Call {
             callee, arguments, ..
         } = rhs
+        && standard_statistics_module_operation(callee, scope, local).is_some()
+    {
+        return infer_relation_statistics_call(
+            callee,
+            arguments,
+            Some(input),
+            scope,
+            local,
+            diagnostics,
+        )
+        .expect("recognized statistics module operation has relation input");
+    }
+    if matches!(&input.ty, Type::Relation(_))
+        && let Expr::Call {
+            callee, arguments, ..
+        } = rhs
         && let Some(operation) = standard_collection_module_operation(callee, scope, local)
     {
         return infer_relation_collection_pipeline(
