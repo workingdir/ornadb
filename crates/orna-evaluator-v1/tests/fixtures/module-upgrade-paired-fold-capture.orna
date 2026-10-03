@@ -1,0 +1,10 @@
+fn captured_fold_pair(seed: Int) = [
+    math_ops.marker(),
+    collection_ops.marker(),
+    math_ops.marker() + collection_ops.marker(),
+    std.math.marker(),
+    std.collection.marker(),
+    std.math.marker() + std.collection.marker(),
+    math_ops.shift(seed),
+    std.math.shift(seed + 1),
+];
