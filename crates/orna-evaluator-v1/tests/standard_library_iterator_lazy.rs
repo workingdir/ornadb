@@ -1,8 +1,8 @@
 use std::collections::BTreeMap;
 
 use orna_evaluator_v1::{
-    AdmittedReplSession, Environment, Functions, Limits, PureFunction,
-    evaluate_expression_with_functions,
+    evaluate_expression_with_functions, AdmittedReplSession, Environment, Functions, Limits,
+    PureFunction,
 };
 use orna_foundation_v1::CanonicalValue;
 use orna_semantic_v1::{Catalogue, StandardDependencyProfile};
@@ -57,16 +57,12 @@ fn pinned_iterator_and_lazy_modules_are_snapshot_bound_and_importable() {
     let sources = orna_standard::reference_standard_sources_v1()
         .into_iter()
         .filter(|(path, _)| {
-            path == "std/collection.orna"
-                || path == "std/iterator.orna"
-                || path == "std/lazy.orna"
+            path == "std/collection.orna" || path == "std/iterator.orna" || path == "std/lazy.orna"
         })
         .collect::<Vec<_>>();
-    let profile = StandardDependencyProfile::from_sources(
-        "orna.std/7hqga-iterator-lazy",
-        sources.clone(),
-    )
-    .expect("iterator and lazy modules are captured in an immutable std snapshot");
+    let profile =
+        StandardDependencyProfile::from_sources("orna.std/7hqga-iterator-lazy", sources.clone())
+            .expect("iterator and lazy modules are captured in an immutable std snapshot");
     for (path, source) in &sources {
         profile
             .verify_source(path, source)
@@ -93,14 +89,20 @@ fn pinned_iterator_and_lazy_modules_are_snapshot_bound_and_importable() {
         "pub fn enumerate<T>(source: Iterator<T>): Iterator<(Int, T)>",
         "pub fn fold<T, U>(source: Iterator<T>, initial: U, combine: fn(U, T): U): U",
     ] {
-        assert!(iterator_source.contains(declaration), "missing iterator export `{declaration}`");
+        assert!(
+            iterator_source.contains(declaration),
+            "missing iterator export `{declaration}`"
+        );
     }
     for contract in [
         "Pulls every item from left before requesting an item from right.",
         "Enumeration starts at zero",
         "Folds a finite iterator from left to right",
     ] {
-        assert!(iterator_source.contains(contract), "missing iterator contract `{contract}`");
+        assert!(
+            iterator_source.contains(contract),
+            "missing iterator contract `{contract}`"
+        );
     }
     let lazy_source = &sources
         .iter()
@@ -120,13 +122,14 @@ fn pinned_iterator_and_lazy_modules_are_snapshot_bound_and_importable() {
     let catalogue = Catalogue::authoritative_core()
         .with_standard_sources(&profile, sources.clone())
         .expect("selected iterator and lazy modules resolve in the captured source bundle");
-    let mut session = AdmittedReplSession::from_catalogue(
-        &[],
-        catalogue,
-        sources,
-        Limits::default(),
-    )
-    .unwrap_or_else(|error| panic!("captured iterator/lazy source failed to load: {}", error.code()));
+    let mut session =
+        AdmittedReplSession::from_catalogue(&[], catalogue, sources, Limits::default())
+            .unwrap_or_else(|error| {
+                panic!(
+                    "captured iterator/lazy source failed to load: {}",
+                    error.code()
+                )
+            });
     session
         .submit(include_str!("fixtures/stdlib-use-iterator-lazy-s58ir.orna"))
         .unwrap_or_else(|error| panic!("iterator/lazy imports failed: {}", error.code()));
@@ -139,11 +142,20 @@ fn pinned_iterator_and_lazy_modules_are_snapshot_bound_and_importable() {
 fn core_assertions_work_without_std_and_both_modules_remain_optional() {
     let mut session = AdmittedReplSession::new(Limits::default());
     session
-        .submit(include_str!("fixtures/stdlib-core-assertions-without-iterator-lazy-s58ir.orna"))
-        .unwrap_or_else(|error| panic!("core assertion declaration failed without std: {}", error.code()));
+        .submit(include_str!(
+            "fixtures/stdlib-core-assertions-without-iterator-lazy-s58ir.orna"
+        ))
+        .unwrap_or_else(|error| {
+            panic!(
+                "core assertion declaration failed without std: {}",
+                error.code()
+            )
+        });
     assert_eq!(
         session
-            .submit(include_str!("fixtures/stdlib-core-assertions-call-without-iterator-lazy-s58ir.orna"))
+            .submit(include_str!(
+                "fixtures/stdlib-core-assertions-call-without-iterator-lazy-s58ir.orna"
+            ))
             .unwrap_or_else(|error| panic!("core assertion failed without std: {}", error.code())),
         Some(bool_value(true))
     );
@@ -151,7 +163,9 @@ fn core_assertions_work_without_std_and_both_modules_remain_optional() {
     let mut without_iterator = AdmittedReplSession::new(Limits::default());
     assert_eq!(
         without_iterator
-            .submit(include_str!("fixtures/stdlib-iterator-without-snapshot-s58ir.orna"))
+            .submit(include_str!(
+                "fixtures/stdlib-iterator-without-snapshot-s58ir.orna"
+            ))
             .unwrap_err()
             .code(),
         "ORNA-S010-IMPORT"
@@ -159,7 +173,9 @@ fn core_assertions_work_without_std_and_both_modules_remain_optional() {
     let mut without_lazy = AdmittedReplSession::new(Limits::default());
     assert_eq!(
         without_lazy
-            .submit(include_str!("fixtures/stdlib-lazy-without-snapshot-s58ir.orna"))
+            .submit(include_str!(
+                "fixtures/stdlib-lazy-without-snapshot-s58ir.orna"
+            ))
             .unwrap_err()
             .code(),
         "ORNA-S010-IMPORT"
@@ -167,7 +183,7 @@ fn core_assertions_work_without_std_and_both_modules_remain_optional() {
 }
 
 #[test]
-fn lazy_thunk_mapping_returns_the_computed_value() {
+fn lazy_thunk_mapping_and_chaining_return_computed_values() {
     assert_eq!(
         evaluate_expression_with_functions(
             include_str!("fixtures/stdlib-lazy-map-value-7hqga.orna"),
@@ -176,5 +192,14 @@ fn lazy_thunk_mapping_returns_the_computed_value() {
             Limits::default(),
         ),
         Ok(canonical(int(6)))
+    );
+    assert_eq!(
+        evaluate_expression_with_functions(
+            include_str!("fixtures/stdlib-lazy-and-then-value-7hqga.orna"),
+            &Environment::new(),
+            &pinned_functions(),
+            Limits::default(),
+        ),
+        Ok(canonical(int(12)))
     );
 }
