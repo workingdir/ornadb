@@ -1,0 +1,38 @@
+pub fn factory_at(pin: sys.SnapshotRef) =
+    sys.database.as_of(pin).energy.factory;
+
+pub fn extended_factory_at(pin: sys.SnapshotRef) = factory_at(pin)();
+
+pub fn sibling_extension_omission_depth_wave(failure: Error) {
+    let parents = [
+        {
+            nested: {
+                left: { pins: ((fail(failure), extended_factory_at(sys.snapshot("HEAD~101"))), (extended_factory_at(sys.snapshot("HEAD~110")), extended_factory_at(sys.snapshot("HEAD~111")))) },
+                right: { pins: ((extended_factory_at(sys.snapshot("HEAD~200")), extended_factory_at(sys.snapshot("HEAD~201"))), (fail(failure), fail(failure))) },
+                steady: { pins: ((extended_factory_at(sys.snapshot("HEAD~800")), extended_factory_at(sys.snapshot("HEAD~801"))), (extended_factory_at(sys.snapshot("HEAD~810")), extended_factory_at(sys.snapshot("HEAD~811")))) },
+            },
+        },
+        {
+            nested: {
+                left: { pins: ((extended_factory_at(sys.snapshot("HEAD~300")), extended_factory_at(sys.snapshot("HEAD~301"))), (extended_factory_at(sys.snapshot("HEAD~310")), extended_factory_at(sys.snapshot("HEAD~311")))) },
+                right: { pins: ((extended_factory_at(sys.snapshot("HEAD~400")), extended_factory_at(sys.snapshot("HEAD~401"))), (extended_factory_at(sys.snapshot("HEAD~410")), extended_factory_at(sys.snapshot("HEAD~411")))) },
+                steady: { pins: ((extended_factory_at(sys.snapshot("HEAD~900")), extended_factory_at(sys.snapshot("HEAD~901"))), (extended_factory_at(sys.snapshot("HEAD~910")), extended_factory_at(sys.snapshot("HEAD~911")))) },
+            },
+        },
+        {
+            nested: {
+                left: { pins: ((extended_factory_at(sys.snapshot("HEAD~200")), extended_factory_at(sys.snapshot("HEAD~501"))), (extended_factory_at(sys.snapshot("HEAD~510")), extended_factory_at(sys.snapshot("HEAD~511")))) },
+                right: { pins: ((extended_factory_at(sys.snapshot("HEAD~500")), extended_factory_at(sys.snapshot("HEAD~502"))), (extended_factory_at(sys.snapshot("HEAD~520")), extended_factory_at(sys.snapshot("HEAD~521")))) },
+                steady: { pins: ((extended_factory_at(sys.snapshot("HEAD~1000")), extended_factory_at(sys.snapshot("HEAD~1001"))), (extended_factory_at(sys.snapshot("HEAD~1010")), extended_factory_at(sys.snapshot("HEAD~1011")))) },
+            },
+        },
+        {
+            nested: {
+                left: { pins: ((extended_factory_at(sys.snapshot("HEAD~600")), extended_factory_at(sys.snapshot("HEAD~601"))), (extended_factory_at(sys.snapshot("HEAD~610")), extended_factory_at(sys.snapshot("HEAD~611")))) },
+                right: { pins: ((extended_factory_at(sys.snapshot("HEAD~700")), extended_factory_at(sys.snapshot("HEAD~701"))), (extended_factory_at(sys.snapshot("HEAD~710")), extended_factory_at(sys.snapshot("HEAD~711")))) },
+                steady: { pins: ((extended_factory_at(sys.snapshot("HEAD~1100")), extended_factory_at(sys.snapshot("HEAD~1101"))), (extended_factory_at(sys.snapshot("HEAD~1110")), extended_factory_at(sys.snapshot("HEAD~1111")))) },
+            },
+        },
+    ];
+    { parent_fold: parents }
+}
