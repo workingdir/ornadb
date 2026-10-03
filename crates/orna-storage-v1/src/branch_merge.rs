@@ -411,6 +411,14 @@ pub struct BranchMergeColumnRestoreLadderTimelineSnapshot {
     pub waves: Vec<BranchMergeColumnRestoreLadderWaveSlotSnapshot>,
 }
 
+/// A maximal contiguous run of committed paired column-restore waves.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BranchMergeColumnRestoreStormSnapshot {
+    pub first_order: u64,
+    pub last_order: u64,
+    pub ladders: Vec<BranchMergeColumnRestoreLadderTimelineSnapshot>,
+}
+
 /// A canonical column cell released with its source parent identity intact.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BranchMergeParentColumnDepthEvent {
@@ -1288,6 +1296,74 @@ impl BranchMergeTombstoneHistory {
                     table,
                     column,
                     waves,
+                }
+            })
+            .collect()
+    }
+
+    /// Returns column-restore storms as maximal contiguous runs of paired
+    /// column-wave orders. A different committed submission mode closes the
+    /// current storm. Each result carries dense per-column timelines for its
+    /// own order range. MERGE-1 is silent about storm boundaries; v1 uses the
+    /// contiguous restore-mode run as the boundary policy.
+    pub fn column_restore_storms(&self) -> Vec<BranchMergeColumnRestoreStormSnapshot> {
+        let timelines = self.column_restore_ladder_timelines();
+        let mut ranges = Vec::new();
+        let mut first_order: Option<u64> = None;
+        let mut last_order: Option<u64> = None;
+
+        for (order, mode) in &self.committed_modes {
+            if *mode == BranchMergeTombstoneSubmissionMode::TabularColumnDepthWave {
+                let contiguous = last_order
+                    .map(|last| last.checked_add(1) == Some(*order))
+                    .unwrap_or(true);
+                if first_order.is_some() && !contiguous {
+                    ranges.push((
+                        first_order.take().expect("storm has a first order"),
+                        last_order.take().expect("storm has a last order"),
+                    ));
+                }
+                if first_order.is_none() {
+                    first_order = Some(*order);
+                }
+                last_order = Some(*order);
+            } else if first_order.is_some() {
+                ranges.push((
+                    first_order.take().expect("storm has a first order"),
+                    last_order.take().expect("storm has a last order"),
+                ));
+            }
+        }
+        if let (Some(first), Some(last)) = (first_order, last_order) {
+            ranges.push((first, last));
+        }
+
+        ranges
+            .into_iter()
+            .map(|(first_order, last_order)| {
+                let ladders = timelines
+                    .iter()
+                    .filter_map(|timeline| {
+                        let waves = timeline
+                            .waves
+                            .iter()
+                            .filter(|wave| wave.order >= first_order && wave.order <= last_order)
+                            .cloned()
+                            .collect::<Vec<_>>();
+                        waves
+                            .iter()
+                            .any(|wave| wave.fragments.is_some())
+                            .then(|| BranchMergeColumnRestoreLadderTimelineSnapshot {
+                                table: timeline.table,
+                                column: timeline.column,
+                                waves,
+                            })
+                    })
+                    .collect();
+                BranchMergeColumnRestoreStormSnapshot {
+                    first_order,
+                    last_order,
+                    ladders,
                 }
             })
             .collect()
