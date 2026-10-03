@@ -1,0 +1,6 @@
+fn make_iteration_closure(seed: Int) = delta => collection.map(
+    [1, 2, 3],
+    value => math.marker() + collection.marker()
+        + math.shift(seed + delta + value)
+        + math.shift(seed + delta + value + 1)
+);
