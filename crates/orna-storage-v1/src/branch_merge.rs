@@ -615,6 +615,37 @@ pub struct BranchMergePairedCheckpointRedoFoldWalMergeRestoreHandoffStreamSnapsh
     pub slots: Vec<BranchMergePairedCheckpointRedoFoldWalMergeRestoreHandoffSlotSnapshot>,
 }
 
+/// One directional checkpoint pin bound to its WAL and segment incarnation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BranchMergePairedCheckpointWalSegmentPinIdentity {
+    pub checkpoint_id: CheckpointId,
+    pub generation: CheckpointGeneration,
+    pub write_ahead_id: Vec<u8>,
+    pub segment_id: Vec<u8>,
+}
+
+/// One restored WAL compaction occurrence with checkpoint-scoped side pins.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BranchMergePairedCheckpointRedoFoldWalMergeRestorePinHandoffSlotSnapshot {
+    pub restore_ordinal: usize,
+    pub handoff_ordinal: usize,
+    pub merge_ordinal: usize,
+    pub fold_ordinal: usize,
+    pub order: u64,
+    pub left_pin: Option<BranchMergePairedCheckpointWalSegmentPinIdentity>,
+    pub right_pin: Option<BranchMergePairedCheckpointWalSegmentPinIdentity>,
+    pub redo_fold_identity: BranchMergePairedRedoFoldIdentity,
+    /// Retains the original atomic pair even when a checkpoint side is absent.
+    pub log_segment_identity: BranchMergePairedLogSegmentIdentity,
+}
+
+/// A checkpoint stream restored with its complete paired WAL pin lineage.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BranchMergePairedCheckpointRedoFoldWalMergeRestorePinHandoffStreamSnapshot {
+    pub checkpoint_id: CheckpointId,
+    pub slots: Vec<BranchMergePairedCheckpointRedoFoldWalMergeRestorePinHandoffSlotSnapshot>,
+}
+
 /// A malformed sparse WAL merge run cannot be restored without losing lineage.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum BranchMergePairedCheckpointRedoFoldWalMergeRestoreHandoffError {
@@ -2713,6 +2744,79 @@ pub fn restore_paired_checkpoint_redo_sparse_wal_merge_handoff_chains_preserving
         );
     }
     Ok(restored)
+}
+
+/// Restores sparse WAL compaction chains with checkpoint-bound directional pins.
+///
+/// Each present side's pin binds the enclosing checkpoint ID, exact generation,
+/// exact WAL ID, and matching segment incarnation. Restore, handoff, merge,
+/// fold, and order coordinates are inherited from the validated source chain;
+/// the original atomic WAL/segment pair and redo-fold identity remain attached.
+/// Missing sides stay unpinned rather than borrowing identity from the opposite
+/// side or an adjacent occurrence. This pin projection is not defined by the
+/// reference, so source coordinates and same-side bindings are used directly.
+pub fn restore_paired_checkpoint_redo_sparse_wal_merge_handoff_chains_preserving_pin_identity(
+    known_checkpoint_ids: &[CheckpointId],
+    restore_handoffs: &[Vec<Vec<BranchMergePairedCheckpointRedoFoldWalSparseMergeChainCompactionSnapshot>>],
+) -> Result<
+    Vec<BranchMergePairedCheckpointRedoFoldWalMergeRestorePinHandoffStreamSnapshot>,
+    BranchMergePairedCheckpointRedoFoldWalMergeRestoreHandoffError,
+> {
+    restore_paired_checkpoint_redo_sparse_wal_merge_handoff_chains_preserving_identity(
+        known_checkpoint_ids,
+        restore_handoffs,
+    )
+    .map(|streams| {
+        streams
+            .into_iter()
+            .map(|stream| {
+                let checkpoint_id = stream.checkpoint_id;
+                let slots = stream
+                    .slots
+                    .into_iter()
+                    .map(|slot| {
+                        let pin = |generation: Option<CheckpointGeneration>,
+                                   write_ahead_id: &[u8],
+                                   segment_id: &[u8]| {
+                            generation.map(|generation| {
+                                BranchMergePairedCheckpointWalSegmentPinIdentity {
+                                    checkpoint_id: checkpoint_id.clone(),
+                                    generation,
+                                    write_ahead_id: write_ahead_id.to_vec(),
+                                    segment_id: segment_id.to_vec(),
+                                }
+                            })
+                        };
+                        let left_pin = pin(
+                            slot.left,
+                            &slot.log_segment_identity.write_ahead_identity.left_log,
+                            &slot.log_segment_identity.segment_identity.left_segment,
+                        );
+                        let right_pin = pin(
+                            slot.right,
+                            &slot.log_segment_identity.write_ahead_identity.right_log,
+                            &slot.log_segment_identity.segment_identity.right_segment,
+                        );
+                        BranchMergePairedCheckpointRedoFoldWalMergeRestorePinHandoffSlotSnapshot {
+                            restore_ordinal: slot.restore_ordinal,
+                            handoff_ordinal: slot.handoff_ordinal,
+                            merge_ordinal: slot.merge_ordinal,
+                            fold_ordinal: slot.fold_ordinal,
+                            order: slot.order,
+                            left_pin,
+                            right_pin,
+                            redo_fold_identity: slot.redo_fold_identity,
+                            log_segment_identity: slot.log_segment_identity,
+                        }
+                    })
+                    .collect();
+                BranchMergePairedCheckpointRedoFoldWalMergeRestorePinHandoffStreamSnapshot {
+                    checkpoint_id,
+                    slots,
+                }
+            })
+            .collect()
+    })
 }
 
 /// Restores paired fold/segment identities across sparse checkpoint rotations.
