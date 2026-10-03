@@ -18366,11 +18366,18 @@ fn pinned_snapshot_reset_shape_matches(expected: &Type, selected: &Type) -> bool
         return true;
     }
 
-    // Sparse three-way checkpoint folds may replace selectors while preserving
-    // the identity shared by sibling tuple slots. Keep this exception narrow:
-    // record-field topology and callable reset contracts remain exact.
-    snapshot_context_paired_tuple_identity_shapes_match(&maps)
+    // Retain the established sparse-pair reset rule first. The narrow
+    // restoration exception handles a multi-field record with both partial
+    // and wholly omitted checkpoint pairs.
+    if snapshot_context_paired_tuple_identity_shapes_match(&maps, false)
         && pinned_snapshot_sparse_tuple_shape_matches_at_path(expected, selected, false)
+    {
+        return true;
+    }
+
+    record_has_partial_and_empty_checkpoint_pairs(selected)
+        && snapshot_context_paired_tuple_identity_shapes_match(&maps, true)
+        && pinned_snapshot_sparse_restoration_shape_matches_at_path(expected, selected, false)
 }
 
 /// A sparse checkpoint rebind may add or omit singleton selectors while
@@ -18379,6 +18386,7 @@ fn pinned_snapshot_reset_shape_matches(expected: &Type, selected: &Type) -> bool
 /// and must still pass the exact reset topology check.
 fn snapshot_context_paired_tuple_identity_shapes_match(
     pin_maps: &[SnapshotContextMapPair],
+    allow_omitted_source_lanes: bool,
 ) -> bool {
     fn paired_shapes(
         pin_maps: &[SnapshotContextMapPair],
@@ -18430,7 +18438,49 @@ fn snapshot_context_paired_tuple_identity_shapes_match(
     }
 
     let expected = paired_shapes(pin_maps, true);
-    !expected.is_empty() && expected == paired_shapes(pin_maps, false)
+    let selected = paired_shapes(pin_maps, false);
+    if allow_omitted_source_lanes {
+        // A fully omitted paired checkpoint field can be restored from its
+        // sparse saved source after a dense fold, dropping only learned maps.
+        selected.is_subset(&expected)
+    } else {
+        !expected.is_empty() && expected == selected
+    }
+}
+
+/// The reference is silent about map-width restoration for a record that
+/// stores several paired checkpoint fields. Support the family-40 shape
+/// narrowly: one pair field is partly omitted and a sibling pair is wholly
+/// omitted. Closure capture and single-pair rollback behavior stays strict.
+fn record_has_partial_and_empty_checkpoint_pairs(ty: &Type) -> bool {
+    match ty {
+        Type::Record(fields) => {
+            let pair_slots = fields
+                .values()
+                .filter_map(|field| match field {
+                    Type::Tuple(slots) if slots.len() > 1 => Some(slots),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            let has_empty_pair = pair_slots
+                .iter()
+                .any(|slots| slots.iter().all(|slot| matches!(slot, Type::Bottom)));
+            let has_partial_pair = pair_slots.iter().any(|slots| {
+                slots.iter().any(|slot| matches!(slot, Type::Bottom))
+                    && slots.iter().any(|slot| !matches!(slot, Type::Bottom))
+            });
+            (has_empty_pair && has_partial_pair)
+                || fields
+                    .values()
+                    .any(record_has_partial_and_empty_checkpoint_pairs)
+        }
+        Type::List(inner)
+        | Type::Range(inner)
+        | Type::Relation(inner)
+        | Type::Stream(inner)
+        | Type::Optional(inner) => record_has_partial_and_empty_checkpoint_pairs(inner),
+        _ => false,
+    }
 }
 
 fn pinned_snapshot_reset_shape_matches_at_path(
@@ -18449,11 +18499,41 @@ fn pinned_snapshot_sparse_tuple_shape_matches_at_path(
     pinned_snapshot_reset_shape_matches_at_path_mode(expected, selected, input_position, true)
 }
 
+fn pinned_snapshot_sparse_restoration_shape_matches_at_path(
+    expected: &Type,
+    selected: &Type,
+    input_position: bool,
+) -> bool {
+    pinned_snapshot_reset_shape_matches_at_path_with_width(
+        expected,
+        selected,
+        input_position,
+        true,
+        true,
+    )
+}
+
 fn pinned_snapshot_reset_shape_matches_at_path_mode(
     expected: &Type,
     selected: &Type,
     input_position: bool,
     allow_sparse_tuple_identities: bool,
+) -> bool {
+    pinned_snapshot_reset_shape_matches_at_path_with_width(
+        expected,
+        selected,
+        input_position,
+        allow_sparse_tuple_identities,
+        false,
+    )
+}
+
+fn pinned_snapshot_reset_shape_matches_at_path_with_width(
+    expected: &Type,
+    selected: &Type,
+    input_position: bool,
+    allow_sparse_tuple_identities: bool,
+    allow_snapshot_context_width_drift: bool,
 ) -> bool {
     if input_position && matches!(selected, Type::Bottom) && !matches!(expected, Type::Bottom) {
         // A reset cannot narrow an established callable input to Bottom: a
@@ -18468,7 +18548,10 @@ fn pinned_snapshot_reset_shape_matches_at_path_mode(
     }
     if allow_sparse_tuple_identities {
         if is_contextual_snapshot_ref(expected) || is_contextual_snapshot_ref(selected) {
-            return is_contextual_snapshot_ref(expected) && is_contextual_snapshot_ref(selected);
+            return is_contextual_snapshot_ref(expected) && is_contextual_snapshot_ref(selected)
+                || (allow_snapshot_context_width_drift
+                    && is_snapshot_context_map_shape(expected)
+                    && is_snapshot_context_map_shape(selected));
         }
         if is_snapshot_context_map_shape(expected) || is_snapshot_context_map_shape(selected) {
             return is_snapshot_context_map_shape(expected) && is_snapshot_context_map_shape(selected);
@@ -18486,31 +18569,34 @@ fn pinned_snapshot_reset_shape_matches_at_path_mode(
         | (Type::Relation(expected), Type::Relation(selected))
         | (Type::Stream(expected), Type::Stream(selected))
         | (Type::Optional(expected), Type::Optional(selected)) => {
-            pinned_snapshot_reset_shape_matches_at_path_mode(
+            pinned_snapshot_reset_shape_matches_at_path_with_width(
                 expected,
                 selected,
                 input_position,
                 allow_sparse_tuple_identities,
+                allow_snapshot_context_width_drift,
             )
         }
         (Type::Tuple(expected), Type::Tuple(selected)) if expected.len() == selected.len() => {
             expected.iter().zip(selected).all(|(expected, selected)| {
-                pinned_snapshot_reset_shape_matches_at_path_mode(
+                pinned_snapshot_reset_shape_matches_at_path_with_width(
                     expected,
                     selected,
                     input_position,
                     allow_sparse_tuple_identities,
+                    allow_snapshot_context_width_drift,
                 )
             })
         }
         (Type::Record(expected), Type::Record(selected)) if expected.len() == selected.len() => {
             expected.iter().all(|(name, expected)| {
                 selected.get(name).is_some_and(|selected| {
-                    pinned_snapshot_reset_shape_matches_at_path_mode(
+                    pinned_snapshot_reset_shape_matches_at_path_with_width(
                         expected,
                         selected,
                         input_position,
                         allow_sparse_tuple_identities,
+                        allow_snapshot_context_width_drift,
                     )
                 })
             })
@@ -18536,18 +18622,20 @@ fn pinned_snapshot_reset_shape_matches_at_path_mode(
                     .iter()
                     .zip(selected_parameters)
                     .all(|(expected, selected)| {
-                        pinned_snapshot_reset_shape_matches_at_path_mode(
+                        pinned_snapshot_reset_shape_matches_at_path_with_width(
                             expected,
                             selected,
                             !input_position,
                             allow_sparse_tuple_identities,
+                            allow_snapshot_context_width_drift,
                         )
                     })
-                && pinned_snapshot_reset_shape_matches_at_path_mode(
+                && pinned_snapshot_reset_shape_matches_at_path_with_width(
                     expected_result,
                     selected_result,
                     input_position,
                     allow_sparse_tuple_identities,
+                    allow_snapshot_context_width_drift,
                 )
         }
         (
@@ -18564,11 +18652,12 @@ fn pinned_snapshot_reset_shape_matches_at_path_mode(
                 .iter()
                 .zip(selected_arguments)
                 .all(|(expected, selected)| {
-                    pinned_snapshot_reset_shape_matches_at_path_mode(
+                    pinned_snapshot_reset_shape_matches_at_path_with_width(
                         expected,
                         selected,
                         input_position,
                         allow_sparse_tuple_identities,
+                        allow_snapshot_context_width_drift,
                     )
                 })
         }
@@ -18582,16 +18671,18 @@ fn pinned_snapshot_reset_shape_matches_at_path_mode(
                 unit: selected_unit,
             },
         ) => {
-            pinned_snapshot_reset_shape_matches_at_path_mode(
+            pinned_snapshot_reset_shape_matches_at_path_with_width(
                 expected_currency,
                 selected_currency,
                 input_position,
                 allow_sparse_tuple_identities,
-            ) && pinned_snapshot_reset_shape_matches_at_path_mode(
+                allow_snapshot_context_width_drift,
+            ) && pinned_snapshot_reset_shape_matches_at_path_with_width(
                 expected_unit,
                 selected_unit,
                 input_position,
                 allow_sparse_tuple_identities,
+                allow_snapshot_context_width_drift,
             )
         }
         _ => expected == selected,

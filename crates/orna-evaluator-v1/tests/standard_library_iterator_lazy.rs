@@ -279,3 +279,45 @@ fn iterator_last_returns_the_final_value_and_null_for_empty_input() {
         );
     }
 }
+
+#[test]
+fn iterator_nth_is_zero_based_and_returns_null_at_finite_boundaries() {
+    let functions = pinned_functions();
+    let nominals = pinned_iterator_nominals();
+    let source = include_str!("fixtures/stdlib-iterator-nth-boundaries-cli9f.orna");
+    let parsed = orna_syntax_v1::parse_expression(source);
+    assert!(parsed.is_ok(), "{}: {:#?}", source, parsed.diagnostics);
+    let actual = evaluate_with_functions_and_nominals(
+        &parsed.value,
+        &Environment::new(),
+        &functions,
+        &nominals,
+        Limits::default(),
+    )
+    .unwrap_or_else(|error| panic!("evaluation of {source} failed: {}", error.code()));
+    assert_eq!(actual, canonical(Raw::Bool(true)), "{source}");
+}
+
+#[test]
+fn iterator_nth_negative_index_fails_with_its_pinned_error_identity() {
+    let functions = pinned_functions();
+    let nominals = pinned_iterator_nominals();
+    let source = include_str!("fixtures/stdlib-iterator-nth-negative-cli9f.orna");
+    let parsed = orna_syntax_v1::parse_expression(source);
+    assert!(parsed.is_ok(), "{}: {:#?}", source, parsed.diagnostics);
+    let error = evaluate_with_functions_and_nominals(
+        &parsed.value,
+        &Environment::new(),
+        &functions,
+        &nominals,
+        Limits::default(),
+    )
+    .expect_err("negative iterator indices must fail");
+    assert_eq!(
+        error
+            .canonical_error()
+            .expect("source failure keeps its canonical error identity")
+            .code(),
+        "std.iterator.negative_index"
+    );
+}
