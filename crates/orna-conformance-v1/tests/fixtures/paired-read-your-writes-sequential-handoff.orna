@@ -1,0 +1,52 @@
+pub table Note(id: Int) { amount: Int, label: Str, }
+
+// ORNA-QUERY-005 specifies same-activation read-your-writes, while the
+// reference is silent on paired same-table subscription ownership. Each arm
+// is treated as an independent read scope, and each fresh fold observes the
+// current activation overlay.
+fn seed() {
+    Note.insert({ id: 1, amount: 10, label: "stable" });
+    Note.insert({ id: 2, amount: 20, label: "seed" });
+    Note.insert({ id: 3, amount: 30, label: "stable" });
+}
+
+fn paired_total(): Int = Note
+    | filter(note => note.id % 2 == 1)
+    | union(Note | filter(note => note.id % 2 == 0))
+    | map(note => note.amount)
+    | sum;
+
+fn paired_identity_total(): Int = Note
+    | filter(note => note.id % 2 == 1)
+    | union(Note | filter(note => note.id % 2 == 0))
+    | map(note => note.id * note.amount)
+    | sum;
+
+fn parent() {
+    seed();
+    let seeded_total = paired_total();
+    let seeded_identity_total = paired_identity_total();
+    assert seeded_total == 60;
+    assert seeded_identity_total == 140;
+
+    Note.update(2, { amount: 25, label: "rebound" });
+    Note.insert({ id: 4, amount: 40, label: "stable" });
+    let first_handoff_total = paired_total();
+    let first_handoff_identity_total = paired_identity_total();
+    assert first_handoff_total == 105;
+    assert first_handoff_identity_total == 310;
+    assert seeded_total == 60;
+    assert seeded_identity_total == 140;
+
+    Note.update(1, { amount: 11, label: "rebound" });
+    Note.update(3, { amount: 33, label: "stable" });
+    Note.insert({ id: 5, amount: 50, label: "new" });
+    let second_handoff_total = paired_total();
+    let second_handoff_identity_total = paired_identity_total();
+    assert second_handoff_total == 159;
+    assert second_handoff_identity_total == 570;
+    assert first_handoff_total == 105;
+    assert first_handoff_identity_total == 310;
+    assert seeded_total == 60;
+    assert seeded_identity_total == 140;
+}
