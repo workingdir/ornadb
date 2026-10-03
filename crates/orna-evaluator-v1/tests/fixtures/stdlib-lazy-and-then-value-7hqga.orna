@@ -1,0 +1,1 @@
+std.lazy.force(std.lazy.and_then(() => 3, value => () => value * 4))
