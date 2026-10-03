@@ -1,2 +1,0 @@
-let offset_closure = make_paired_fold_closure(3);
-let value_closure = offset_closure(4);
