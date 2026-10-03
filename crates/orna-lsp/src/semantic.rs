@@ -1,56 +1,45 @@
-//! Semantic token computation from the Orna highlight classifier.
-//!
-//! The server advertises a fixed legend. The classifier output maps directly
-//! onto it; punctuation is skipped because editors style it through their
-//! own grammar.
+//! Semantic token projection from the frozen 1.0.0 lexer.
 
 use lsp_types::{Range, SemanticToken, SemanticTokenType};
-use orna_syntax::{HighlightKind, Parse, grammar};
+use orna_syntax_v1::{Parse, SyntaxTree, TokenKind, lex};
 
 use crate::documents::PositionMapper;
 
-/// Build the LSP legend from the shared syntax presentation table.
+/// LSP token legend supported by this server.
 pub fn legend() -> Vec<SemanticTokenType> {
-    grammar::semantic_token_types()
-        .map(SemanticTokenType::new)
-        .collect()
+    [
+        SemanticTokenType::KEYWORD,
+        SemanticTokenType::FUNCTION,
+        SemanticTokenType::TYPE,
+        SemanticTokenType::ENUM,
+        SemanticTokenType::VARIABLE,
+        SemanticTokenType::STRING,
+        SemanticTokenType::NUMBER,
+        SemanticTokenType::OPERATOR,
+    ]
+    .into_iter()
+    .collect()
 }
 
-/// Maps one classifier kind to its legend index.
-fn legend_index(kind: HighlightKind) -> Option<usize> {
-    grammar::semantic_token_index(kind)
-}
-
-/// Returns the delta-encoded semantic tokens for one document.
-///
-/// When `range` is present, only token segments that intersect the range are
-/// included, matching the `textDocument/semanticTokens/range` contract.
+/// Returns delta-encoded tokens from `orna-syntax-v1` lexer spans.
 pub fn semantic_tokens(
-    parse: &Parse,
+    parse: &Parse<SyntaxTree>,
+    text: &str,
     mapper: &PositionMapper<'_>,
     range: Option<&Range>,
 ) -> Vec<SemanticToken> {
+    let Ok(tokens) = lex(text) else {
+        return Vec::new();
+    };
+    let symbols = crate::analysis::declaration_symbols(parse, text);
     let mut data = Vec::new();
     let mut previous_line = 0u32;
     let mut previous_start = 0u32;
-    for token in parse.highlight() {
-        let span = orna_syntax::SourceSpan {
-            start: token.range.start,
-            end: token.range.end,
-        };
-        let kind = if matches!(
-            token.kind,
-            orna_syntax::HighlightKind::PropertyName | orna_syntax::HighlightKind::QuotedIdentifier
-        ) && crate::analysis::is_client_target_function_span(parse, &span)
-        {
-            orna_syntax::HighlightKind::FunctionName
-        } else {
-            token.kind
-        };
-        let Some(index) = legend_index(kind) else {
+    for token in tokens {
+        let Some(token_type) = token_type(&token.kind, &token.text, &token.span, &symbols) else {
             continue;
         };
-        for (position, length) in mapper.segments(&span) {
+        for (position, length) in mapper.segments(&token.span) {
             if length == 0 {
                 continue;
             }
@@ -76,7 +65,7 @@ pub fn semantic_tokens(
                 delta_line,
                 delta_start,
                 length,
-                token_type: index as u32,
+                token_type,
                 token_modifiers_bitset: 0,
             });
             previous_line = line;
@@ -84,4 +73,70 @@ pub fn semantic_tokens(
         }
     }
     data
+}
+
+fn token_type(
+    kind: &TokenKind,
+    text: &str,
+    span: &orna_syntax_v1::SyntaxSpan,
+    symbols: &[crate::analysis::EditorSymbol],
+) -> Option<u32> {
+    let index = match kind {
+        TokenKind::Keyword(_) => 0,
+        TokenKind::Identifier { .. } => symbols
+            .iter()
+            .find(|symbol| symbol.selection == *span)
+            .map(|symbol| match symbol.kind {
+                crate::analysis::EditorSymbolKind::Function => 1,
+                crate::analysis::EditorSymbolKind::Type => 2,
+                crate::analysis::EditorSymbolKind::Enum => 3,
+                crate::analysis::EditorSymbolKind::Table
+                | crate::analysis::EditorSymbolKind::Protocol
+                | crate::analysis::EditorSymbolKind::Other => 4,
+            })
+            .or(Some(4))?,
+        TokenKind::String
+        | TokenKind::StringStart
+        | TokenKind::StringText
+        | TokenKind::StringEnd => 5,
+        TokenKind::Integer
+        | TokenKind::Decimal
+        | TokenKind::Float
+        | TokenKind::Date
+        | TokenKind::Instant => 6,
+        TokenKind::Punct(value) if is_operator(value) => 7,
+        TokenKind::Punct(_)
+        | TokenKind::InterpolationStart
+        | TokenKind::InterpolationEnd
+        | TokenKind::Eof
+        | TokenKind::ReplBinding => return None,
+    };
+    let _ = text;
+    Some(index)
+}
+
+fn is_operator(value: &str) -> bool {
+    matches!(
+        value,
+        "!" | "?"
+            | "??"
+            | "|?"
+            | "|"
+            | "||"
+            | "&&"
+            | "=="
+            | "!="
+            | "<"
+            | "<="
+            | ">"
+            | ">="
+            | "+"
+            | "-"
+            | "*"
+            | "/"
+            | "%"
+            | "=>"
+            | ".."
+            | "..="
+    )
 }
