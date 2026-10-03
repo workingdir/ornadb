@@ -1,0 +1,5 @@
+std.encoding.json.decode_with_options(
+    "\u{7b}\"$serde_json::private::Number\":\"9007199254740993\",\"answer\":42\u{7d}",
+    as: CodecRecord,
+    ignore_unknown_fields: true
+).answer == 42
