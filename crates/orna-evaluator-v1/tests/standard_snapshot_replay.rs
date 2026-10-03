@@ -1263,7 +1263,7 @@ fn paired_divergence_refold_projects() -> (TempDir, [LoadedProject; 9], [String;
 
     let mut refolded_pins = Vec::with_capacity(5);
     let mut refolded_parents = Vec::with_capacity(5);
-    for (module, source, message) in [
+    for (fold_index, (module, source, message)) in [
         (
             "math.orna",
             include_str!("fixtures/module-upgrade-std-v4.orna"),
@@ -1289,10 +1289,15 @@ fn paired_divergence_refold_projects() -> (TempDir, [LoadedProject; 9], [String;
             include_str!("fixtures/module-upgrade-std-collection-v5.orna"),
             "refold collection back to paired source bodies",
         ),
-    ] {
+    ]
+    .into_iter()
+    .enumerate()
+    {
         fs::write(standard_path.join(module), source).unwrap();
         commit_directory(&standard_path, message);
         let pin = git_output_at(&standard_path, &["rev-parse", "HEAD"]);
+        let branch = format!("refold-pin-{fold_index}");
+        git_output_at(&standard_path, &["branch", branch.as_str(), pin.as_str()]);
         let parent = capture_standard_gitlink(&project_path, &pin, message);
         refolded_pins.push(pin);
         refolded_parents.push(parent);
