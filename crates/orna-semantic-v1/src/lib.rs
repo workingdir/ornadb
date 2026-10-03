@@ -7196,15 +7196,14 @@ fn infer(
             let first_parent = element_types.first().cloned();
             let transactional_checkpoint_fold = element_types.len() > 2
                 && first_parent.as_ref().is_some_and(|first| {
-                    matches!(first, Type::Tuple(_))
-                        && type_contains_pinned_snapshot_identity(first)
+                    type_contains_pinned_checkpoint_tuple(first)
                 });
             let mut rejected_checkpoint_parent = false;
             let mut ty = None;
             for value in element_types {
                 if let Some(prior) = &ty {
                     let merged = if transactional_checkpoint_fold {
-                        merge_multi_parent_checkpoint_tuple(
+                        merge_multi_parent_checkpoint_value(
                             prior,
                             &value,
                             first_parent.as_ref().expect("transactional fold has a parent"),
@@ -17886,21 +17885,178 @@ fn merge_multi_parent_checkpoint_tuple(
     merge_checkpoint_field_map(&Type::Tuple(accumulated.clone()), &Type::Tuple(parent.clone()))
 }
 
-/// A folded tuple map must not invent cross-slot identity by unioning maps
-/// from opposite rows. The reference does not define that compaction case;
-/// only promote when every identity shared after the fold was shared within
-/// at least one input row.
-fn tuple_checkpoint_compaction_fold_preserves_pin_identity(
-    left: &[Type],
-    right: &[Type],
-) -> bool {
-    let mut pin_maps = Vec::new();
-    for (left, right) in left.iter().zip(right) {
-        if !collect_corresponding_snapshot_context_maps(left, right, &mut pin_maps) {
-            return false;
+/// Detect a pinned tuple anywhere inside a collection row. A nested tuple is
+/// still a set of sibling depth slots when its containing record is reconciled
+/// across parents, so those folds need the same transactional recovery as a
+/// top-level tuple fold.
+fn type_contains_pinned_checkpoint_tuple(ty: &Type) -> bool {
+    match ty {
+        Type::Tuple(_) => type_contains_pinned_snapshot_identity(ty),
+        Type::List(element)
+        | Type::Range(element)
+        | Type::Relation(element)
+        | Type::Stream(element)
+        | Type::Optional(element) => type_contains_pinned_checkpoint_tuple(element),
+        Type::Record(fields) => fields.values().any(type_contains_pinned_checkpoint_tuple),
+        Type::Applied { arguments, .. } => arguments
+            .iter()
+            .any(type_contains_pinned_checkpoint_tuple),
+        Type::Function {
+            parameters, result, ..
+        } => {
+            parameters
+                .iter()
+                .any(type_contains_pinned_checkpoint_tuple)
+                || type_contains_pinned_checkpoint_tuple(result)
         }
+        Type::MoneyPerUnit { currency, unit } => {
+            type_contains_pinned_checkpoint_tuple(currency)
+                || type_contains_pinned_checkpoint_tuple(unit)
+        }
+        _ => false,
+    }
+}
+
+/// Reconcile another parent into a nested checkpoint fold. Source parents
+/// retain the first parent's map widths, while the accumulated maps may grow.
+/// Check identity sharing across every aligned map in the row so nested sibling
+/// tuples cannot promote the same depth label through different record paths.
+fn merge_multi_parent_checkpoint_value(
+    accumulated: &Type,
+    parent: &Type,
+    first_parent: &Type,
+) -> Option<Type> {
+    if matches!(first_parent, Type::Tuple(_)) {
+        return merge_multi_parent_checkpoint_tuple(accumulated, parent, first_parent);
+    }
+    if !checkpoint_pin_map_widths_match(first_parent, parent)
+        || !nested_checkpoint_compaction_fold_preserves_pin_identity(accumulated, parent)
+    {
+        return None;
     }
 
+    merge_checkpoint_field_map(accumulated, parent)
+}
+
+fn nested_checkpoint_compaction_fold_preserves_pin_identity(left: &Type, right: &Type) -> bool {
+    let mut pin_maps = Vec::new();
+    if !collect_checkpoint_fold_snapshot_maps(left, right, &mut pin_maps) {
+        return false;
+    }
+    checkpoint_snapshot_fold_preserves_pin_identity(&pin_maps)
+}
+
+/// Unlike rebind topology matching, a reconciliation fold allows map widths
+/// to grow. It only rejects a selector that becomes shared by sibling slots
+/// after combining parent rows when those rows did not already share it.
+fn collect_checkpoint_fold_snapshot_maps(
+    left: &Type,
+    right: &Type,
+    into: &mut Vec<(BTreeSet<String>, BTreeSet<String>)>,
+) -> bool {
+    if matches!(left, Type::Bottom) && matches!(right, Type::Bottom) {
+        return true;
+    }
+    if matches!(left, Type::Bottom) {
+        return collect_snapshot_context_maps_from_omitted_value(right, true, into);
+    }
+    if matches!(right, Type::Bottom) {
+        return collect_snapshot_context_maps_from_omitted_value(left, false, into);
+    }
+    if left == &Type::Named("sys.SnapshotRef".into())
+        || right == &Type::Named("sys.SnapshotRef".into())
+    {
+        return true;
+    }
+    if is_snapshot_context_type(left) || is_snapshot_context_type(right) {
+        if !is_snapshot_context_map_shape(left) || !is_snapshot_context_map_shape(right) {
+            return false;
+        }
+        let selectors = |ty: &Type| {
+            let Type::Applied { arguments, .. } = ty else {
+                return BTreeSet::new();
+            };
+            arguments
+                .iter()
+                .filter_map(|argument| match argument {
+                    Type::Named(selector) => Some(selector.clone()),
+                    _ => None,
+                })
+                .collect::<BTreeSet<_>>()
+        };
+        into.push((selectors(left), selectors(right)));
+        return true;
+    }
+
+    match (left, right) {
+        (Type::List(left), Type::List(right))
+        | (Type::Range(left), Type::Range(right))
+        | (Type::Relation(left), Type::Relation(right))
+        | (Type::Stream(left), Type::Stream(right))
+        | (Type::Optional(left), Type::Optional(right)) => {
+            collect_checkpoint_fold_snapshot_maps(left, right, into)
+        }
+        (Type::Tuple(left), Type::Tuple(right)) if left.len() == right.len() => left
+            .iter()
+            .zip(right)
+            .all(|(left, right)| collect_checkpoint_fold_snapshot_maps(left, right, into)),
+        (Type::Record(left), Type::Record(right)) if left.len() == right.len() => left
+            .iter()
+            .all(|(name, left)| right.get(name).is_some_and(|right| {
+                collect_checkpoint_fold_snapshot_maps(left, right, into)
+            })),
+        (
+            Type::Function {
+                parameters: left_parameters,
+                result: left_result,
+                ..
+            },
+            Type::Function {
+                parameters: right_parameters,
+                result: right_result,
+                ..
+            },
+        ) if left_parameters.len() == right_parameters.len() => {
+            left_parameters
+                .iter()
+                .zip(right_parameters)
+                .all(|(left, right)| collect_checkpoint_fold_snapshot_maps(left, right, into))
+                && collect_checkpoint_fold_snapshot_maps(left_result, right_result, into)
+        }
+        (
+            Type::Applied {
+                base: left_base,
+                arguments: left_arguments,
+            },
+            Type::Applied {
+                base: right_base,
+                arguments: right_arguments,
+            },
+        ) if left_base == right_base && left_arguments.len() == right_arguments.len() => {
+            left_arguments.iter().zip(right_arguments).all(|(left, right)| {
+                collect_checkpoint_fold_snapshot_maps(left, right, into)
+            })
+        }
+        (
+            Type::MoneyPerUnit {
+                currency: left_currency,
+                unit: left_unit,
+            },
+            Type::MoneyPerUnit {
+                currency: right_currency,
+                unit: right_unit,
+            },
+        ) => {
+            collect_checkpoint_fold_snapshot_maps(left_currency, right_currency, into)
+                && collect_checkpoint_fold_snapshot_maps(left_unit, right_unit, into)
+        }
+        _ => true,
+    }
+}
+
+fn checkpoint_snapshot_fold_preserves_pin_identity(
+    pin_maps: &[(BTreeSet<String>, BTreeSet<String>)],
+) -> bool {
     pin_maps.iter().enumerate().all(|(index, (left, right))| {
         let folded = left.union(right).cloned().collect::<BTreeSet<_>>();
         pin_maps[index + 1..]
@@ -17922,6 +18078,24 @@ fn tuple_checkpoint_compaction_fold_preserves_pin_identity(
                 shared_after == shared_before
             })
     })
+}
+
+/// A folded tuple map must not invent cross-slot identity by unioning maps
+/// from opposite rows. The reference does not define that compaction case;
+/// only promote when every identity shared after the fold was shared within
+/// at least one input row.
+fn tuple_checkpoint_compaction_fold_preserves_pin_identity(
+    left: &[Type],
+    right: &[Type],
+) -> bool {
+    let mut pin_maps = Vec::new();
+    for (left, right) in left.iter().zip(right) {
+        if !collect_corresponding_snapshot_context_maps(left, right, &mut pin_maps) {
+            return false;
+        }
+    }
+
+    checkpoint_snapshot_fold_preserves_pin_identity(&pin_maps)
 }
 
 fn checkpoint_pin_map_widths_match(left: &Type, right: &Type) -> bool {
