@@ -9560,6 +9560,62 @@ fn distinct_relation_preserves_first_identity_across_sparse_filter_cascade_union
 }
 
 #[test]
+fn paired_distinct_cascades_preserve_first_values_and_stop_at_sparse_take_bounds() {
+    let body = parsed_expression(include_str!(
+        "fixtures/query-paired-distinct-sparse-cascade-8jk3e.orna"
+    ));
+    let ints = |values: &[i64]| {
+        values
+            .iter()
+            .copied()
+            .map(|value| Value::int(value.into()))
+            .collect()
+    };
+    let mut effects = UnionRelationEffects {
+        rows: BTreeMap::from([
+            ("sys.Storage".into(), ints(&[0, 2, 2, 4])),
+            ("sys.MaintenanceJob".into(), ints(&[4, 6, 5, 2])),
+        ]),
+        cursors: Vec::new(),
+    };
+
+    let result = invoke_relation(body, &mut effects, Limits::default())
+        .unwrap_or_else(|error| panic!("paired sparse distinct cascades failed: {}", error.code()));
+    let expected = Value::new(Raw::Array(vec![
+        Value::option(Some(relation_pair(2, 4)))
+            .expect("first paired identity is canonical")
+            .raw()
+            .clone(),
+        Value::option(Some(Value::int(4.into())))
+            .expect("second retained identity is canonical")
+            .raw()
+            .clone(),
+    ]))
+    .expect("paired fold result is canonical");
+    assert_eq!(
+        result,
+        expected,
+        "branch-local distinct folds keep their first values, then the sparse shared cascade folds the union in order"
+    );
+
+    let first_query_reads = vec![
+        ("sys.Storage".into(), None),
+        ("sys.Storage".into(), Some(vec![1])),
+        ("sys.Storage".into(), Some(vec![2])),
+        ("sys.MaintenanceJob".into(), None),
+    ];
+    assert_eq!(
+        effects.cursors,
+        first_query_reads
+            .iter()
+            .chain(&first_query_reads)
+            .cloned()
+            .collect::<Vec<_>>(),
+        "a duplicate rejected by a completed take must close its branch without reading another page"
+    );
+}
+
+#[test]
 fn distinct_relation_take_zero_short_circuits_source_scanning() {
     let source = relation_source_expression("Note");
     let distinct = relation_stage(source, "distinct", Vec::new());
