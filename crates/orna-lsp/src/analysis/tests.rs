@@ -314,7 +314,9 @@ fn standard_function_hover_and_signature_use_catalogue_data() {
         &mapper,
     )
     .expect("standard function hover");
-    assert!(!hover_markdown(&hover).is_empty());
+    let hover_text = hover_markdown(&hover);
+    assert!(hover_text.contains("Returns the exact successor of `value`"));
+    assert!(hover_text.contains("std.math.increment(41)"));
     let open = text.find("std.math.increment(").expect("call");
     let signature = super::signature_help(
         &document,
@@ -327,6 +329,39 @@ fn standard_function_hover_and_signature_use_catalogue_data() {
     assert_eq!(signature.signatures.len(), 1);
     assert!(signature.signatures[0].label.contains("std.math.increment"));
     assert!(signature.signatures[0].label.contains("value"));
+}
+
+#[test]
+fn system_registry_hover_renders_signature_and_source_documentation() {
+    let standard = StandardLibrary::load().expect("standard library");
+    let text = include_str!("fixtures/analysis-041-system-registry-hover-text.orna");
+    let document = Document::new(
+        "file:///system-registry-hover.orna".parse().unwrap(),
+        text.to_owned(),
+        1,
+    );
+    let parse = orna_syntax::parse(text);
+    let mapper = PositionMapper::new(text);
+    let position = text.find("sys.describe").expect("system function call") + 1;
+    let hover = hover(
+        &document,
+        &parse,
+        Some(&standard),
+        mapper.position(position),
+        &mapper,
+    )
+    .expect("generated system function hover");
+    let value = hover_markdown(&hover);
+    assert!(value.contains("**sys function · read**"), "{value}");
+    assert!(
+        value.contains("fn sys.describe(object: sys.ObjectRef): sys.ObjectDescription"),
+        "{value}"
+    );
+    assert!(
+        value.contains("Returns the structured description associated with an already resolved object reference"),
+        "{value}"
+    );
+    assert!(value.contains("does not execute the object"), "{value}");
 }
 
 #[test]
