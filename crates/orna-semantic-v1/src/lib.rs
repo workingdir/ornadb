@@ -7185,20 +7185,51 @@ fn infer(
             infer_nominal(path, fields, scope, local, diagnostics)
         }
         Expr::List { elements, .. } => {
-            let mut ty = None;
+            let mut element_types = Vec::with_capacity(elements.len());
             let mut effects = EffectSummary::default();
             for element in elements {
                 let value = infer(element, scope, local, diagnostics);
                 effects.join(&value.effects);
+                element_types.push(value.ty);
+            }
+
+            let first_parent = element_types.first().cloned();
+            let transactional_checkpoint_fold = element_types.len() > 2
+                && first_parent.as_ref().is_some_and(|first| {
+                    matches!(first, Type::Tuple(_))
+                        && type_contains_pinned_snapshot_identity(first)
+                });
+            let mut rejected_checkpoint_parent = false;
+            let mut ty = None;
+            for value in element_types {
                 if let Some(prior) = &ty {
-                    if let Some(merged) = merge_list_element_types(prior, &value.ty) {
+                    let merged = if transactional_checkpoint_fold {
+                        merge_multi_parent_checkpoint_tuple(
+                            prior,
+                            &value,
+                            first_parent.as_ref().expect("transactional fold has a parent"),
+                        )
+                    } else {
+                        merge_list_element_types(prior, &value)
+                    };
+                    if let Some(merged) = merged {
                         ty = Some(merged);
                     } else {
-                        require_same(prior, &value.ty, diagnostics);
+                        require_same(prior, &value, diagnostics);
+                        rejected_checkpoint_parent |= transactional_checkpoint_fold;
                     }
                 } else {
-                    ty = Some(value.ty);
+                    ty = Some(value);
                 }
+            }
+
+            // The reference does not define recovery when one parent in a
+            // multi-parent checkpoint fold cannot reconcile. Keep the first
+            // parent's concrete labels as the recovery anchor; otherwise a
+            // later parent could be partially promoted after an earlier
+            // rejection, making the recovered pin map depend on parent order.
+            if rejected_checkpoint_parent {
+                ty = first_parent;
             }
             if ty.is_none() {
                 diagnostics.push(diag(
@@ -17824,6 +17855,35 @@ fn tuple_checkpoint_promotion_matches(left: &[Type], right: &[Type]) -> bool {
             .zip(right)
             .all(|(left, right)| checkpoint_pin_map_widths_match(left, right))
         && tuple_checkpoint_compaction_fold_preserves_pin_identity(left, right)
+}
+
+/// Reconcile another parent into a multi-parent tuple checkpoint fold. Each
+/// source parent must have the first parent's map width, while the accumulated
+/// result may grow as it collects more parent labels. The fold guard still
+/// rejects any new cross-slot identity introduced by the accumulated union.
+fn merge_multi_parent_checkpoint_tuple(
+    accumulated: &Type,
+    parent: &Type,
+    first_parent: &Type,
+) -> Option<Type> {
+    let (Type::Tuple(accumulated), Type::Tuple(parent), Type::Tuple(first_parent)) =
+        (accumulated, parent, first_parent)
+    else {
+        return None;
+    };
+    if accumulated.len() != first_parent.len() || parent.len() != first_parent.len() {
+        return None;
+    }
+    if !first_parent
+        .iter()
+        .zip(parent)
+        .all(|(first, parent)| checkpoint_pin_map_widths_match(first, parent))
+        || !tuple_checkpoint_compaction_fold_preserves_pin_identity(accumulated, parent)
+    {
+        return None;
+    }
+
+    merge_checkpoint_field_map(&Type::Tuple(accumulated.clone()), &Type::Tuple(parent.clone()))
 }
 
 /// A folded tuple map must not invent cross-slot identity by unioning maps
