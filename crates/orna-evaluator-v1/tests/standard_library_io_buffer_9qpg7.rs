@@ -100,3 +100,39 @@ fn core_still_works_without_optional_io_buffer_modules() {
         Ok(Some(canonical(Raw::Int(3.into()))))
     );
 }
+
+#[test]
+fn pinned_stream_buffer_preserves_every_finite_source_value_in_order() {
+    let mut session = pinned_io_std::session();
+    assert_eq!(
+        session.submit(include_str!("fixtures/stdlib-use-stream-n8phe.orna")),
+        Ok(None)
+    );
+    assert_eq!(
+        session.submit(include_str!("fixtures/stdlib-stream-buffer-9qpg7.orna")),
+        Ok(Some(canonical(Raw::Array(vec![
+            Raw::Int(4.into()),
+            Raw::Int(1.into()),
+            Raw::Int(6.into()),
+        ]))))
+    );
+}
+
+#[test]
+fn pinned_stream_list_batches_retain_the_short_final_batch() {
+    let mut session = pinned_io_std::session();
+    assert_eq!(
+        session.submit(include_str!("fixtures/stdlib-use-stream-n8phe.orna")),
+        Ok(None)
+    );
+    assert_eq!(
+        session.submit(include_str!(
+            "fixtures/stdlib-stream-list-batches-9qpg7.orna"
+        )),
+        Ok(Some(canonical(Raw::Array(vec![
+            Raw::Array(vec![Raw::Int(4.into()), Raw::Int(1.into())]),
+            Raw::Array(vec![Raw::Int(6.into()), Raw::Int(2.into())]),
+            Raw::Array(vec![Raw::Int(8.into())]),
+        ]))))
+    );
+}

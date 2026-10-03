@@ -743,6 +743,7 @@ fn reference_standard_uses_pinned_orna_1_source_and_resolves_its_imports() {
     assert_eq!(sources[21].0, REFERENCE_STANDARD_STREAM_PATH_V1);
     for declaration in [
         "pub fn from_list<T>(values: [T], source_identity: Str): Stream<T>",
+        "pub fn from_list_batches<T>(",
         "pub fn for_each<T>(stream: Stream<T>, action: fn(T): Unit): Unit",
         "pub fn batch<T>(stream: Stream<T>, size: Int): Stream<[T]>",
         "pub fn buffer<T>(stream: Stream<T>, capacity: Int): Stream<T>",
@@ -756,6 +757,7 @@ fn reference_standard_uses_pinned_orna_1_source_and_resolves_its_imports() {
     }
     for contract in [
         "canonical typed digest",
+        "final short batch is retained",
         "Process one item at a time",
         "default backpressure",
         "observed arrival order",
@@ -1620,6 +1622,9 @@ fn pinned_io_buffer_module_is_captured_and_resolves_stream_adapters() {
     let mut changed_source = source.clone();
     changed_source.push_str("\n// changed after snapshot capture\n");
     assert!(profile.verify_source(path, &changed_source).is_err());
+    Catalogue::authoritative_core()
+        .with_standard_sources(&profile, sources.clone())
+        .expect("the semantic catalogue accepts the full IO buffer snapshot");
     reference_standard_catalogue_v1()
         .expect("the IO buffer module and its stream dependencies typecheck");
 }
