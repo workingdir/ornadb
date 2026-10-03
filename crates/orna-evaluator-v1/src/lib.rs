@@ -1949,11 +1949,23 @@ impl Value {
                     Raw::Bool(upper_inclusive),
                 ])),
             ),
-            Self::List(values) | Self::Tuple(values) => Raw::Array(
+            Self::List(values) => Raw::Array(
                 values
                     .into_iter()
                     .map(Value::raw)
                     .collect::<Result<_, _>>()?,
+            ),
+            Self::Tuple(values) if values.is_empty() => {
+                Raw::Tag(60014, Box::new(Raw::Array(Vec::new())))
+            }
+            Self::Tuple(values) => Raw::Tag(
+                60015,
+                Box::new(Raw::Array(
+                    values
+                        .into_iter()
+                        .map(Value::raw)
+                        .collect::<Result<_, _>>()?,
+                )),
             ),
             // The finite stream's source identity and digest remain in the
             // live evaluator value; the canonical boundary exposes its real
@@ -2087,6 +2099,20 @@ impl Value {
                     .map(|value| Self::from_raw(value, context, depth + 1))
                     .collect::<Result<Vec<_>, _>>()
                     .map(Self::List)
+            }
+            Raw::Tag(60015, boxed) => {
+                let Raw::Array(values) = boxed.as_ref() else {
+                    return Err(error("ORNA-EVAL-VALUE"));
+                };
+                if values.is_empty() {
+                    return Err(error("ORNA-EVAL-VALUE"));
+                }
+                context.items(values.len())?;
+                values
+                    .iter()
+                    .map(|value| Self::from_raw(value, context, depth + 1))
+                    .collect::<Result<Vec<_>, _>>()
+                    .map(Self::Tuple)
             }
             Raw::Map(values) => {
                 context.items(values.len())?;
