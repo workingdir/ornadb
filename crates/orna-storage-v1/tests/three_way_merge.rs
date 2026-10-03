@@ -196,6 +196,8 @@ const PAIRED_SPARSE_SEGMENT_ROTATION_RESTORES: &str =
     include_str!("fixtures/paired-sparse-segment-rotation-restores.orna");
 const PAIRED_SPARSE_SEGMENT_ROTATION_STREAM_ORDINALS: &str =
     include_str!("fixtures/paired-sparse-segment-rotation-stream-ordinals.orna");
+const PAIRED_SPARSE_CHECKPOINT_ROTATION_COMPACTION_ORDINALS: &str =
+    include_str!("fixtures/paired-sparse-checkpoint-rotation-compaction-ordinals.orna");
 const PAIRED_SPARSE_COMPACTION_ROTATION_RESTORES: &str =
     include_str!("fixtures/paired-sparse-compaction-rotation-restores.orna");
 const PAIRED_UNDO_CHAIN_COMPACTION_ROTATIONS: &str =
@@ -35129,6 +35131,7 @@ fn paired_redo_fold_identity_survives_sparse_checkpoint_rotation_handoffs() {
             restore_ordinal: 0,
             handoff_ordinal: 1,
             stream_ordinal: 0,
+            compaction_ordinal: 0,
             fold_ordinal: 8,
             first_order: 9,
             last_order: 8,
@@ -35143,6 +35146,7 @@ fn paired_redo_fold_identity_survives_sparse_checkpoint_rotation_handoffs() {
             restore_ordinal: 0,
             handoff_ordinal: 0,
             stream_ordinal: 0,
+            compaction_ordinal: 0,
             fold_ordinal: 8,
             first_order: 20,
             last_order: 21,
@@ -35526,11 +35530,120 @@ fn paired_redo_fold_rotation_restore_retains_duplicate_stream_ordinals() {
             restore_ordinal: 0,
             handoff_ordinal: 0,
             stream_ordinal: 1,
+            compaction_ordinal: 0,
             fold_ordinal: 4,
             first_order: 9,
             last_order: 8,
         }),
         "invalid ranges identify the duplicate checkpoint stream that supplied them",
+    );
+}
+
+#[test]
+fn paired_redo_fold_rotation_restore_retains_duplicate_compaction_ordinals() {
+    let identity_rows = PAIRED_SPARSE_CHECKPOINT_ROTATION_COMPACTION_ORDINALS
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    let checkpoint_rows = PAIRED_CHECKPOINT_REDO
+        .split("\n\n")
+        .map(parse_checkpoint_fixture)
+        .collect::<Vec<_>>();
+    assert_eq!(identity_rows.len(), 4);
+    assert_eq!(checkpoint_rows.len(), 5);
+
+    let folds = identity_rows[..2]
+        .iter()
+        .map(|row| BranchMergePairedRedoFoldIdentity {
+            left_fold: row.fields[&id(2)].encode().unwrap(),
+            right_fold: row.fields[&id(3)].encode().unwrap(),
+        })
+        .collect::<Vec<_>>();
+    let rotations = identity_rows[2..]
+        .iter()
+        .map(|row| BranchMergePairedWriteAheadSegmentIdentity {
+            left_segment: row.fields[&id(2)].encode().unwrap(),
+            right_segment: row.fields[&id(3)].encode().unwrap(),
+        })
+        .collect::<Vec<_>>();
+    let checkpoint_id = b"checkpoint-rotation/duplicate-compaction".to_vec();
+    let run = |state_index: usize, identity_index: usize| {
+        BranchMergePairedCheckpointRedoFoldSegmentRotationCompactionRunSnapshot {
+            fold_ordinal: 5,
+            first_order: 12,
+            last_order: 12,
+            left: Some(checkpoint_rows[state_index].clone()),
+            right: Some(checkpoint_rows[state_index + 1].clone()),
+            redo_fold_identity: folds[identity_index].clone(),
+            segment_identities: vec![rotations[identity_index].clone()],
+        }
+    };
+    let source_stream = BranchMergePairedCheckpointRedoFoldSegmentRotationCompactionSnapshot {
+        checkpoint_id: checkpoint_id.clone(),
+        runs: vec![run(0, 0), run(2, 1)],
+    };
+
+    let restored = restore_paired_checkpoint_redo_sparse_segment_rotation_handoff_chains_preserving_fold_identity(
+        &[],
+        &[vec![vec![source_stream]]],
+    )
+    .unwrap();
+    assert_eq!(restored.len(), 1);
+    let slots = &restored[0].slots;
+    assert_eq!(
+        slots
+            .iter()
+            .map(|slot| (
+                slot.restore_ordinal,
+                slot.handoff_ordinal,
+                slot.stream_ordinal,
+                slot.compaction_ordinal,
+                slot.fold_ordinal,
+                slot.order,
+            ))
+            .collect::<Vec<_>>(),
+        vec![(0, 0, 0, 0, 5, 12), (0, 0, 0, 1, 5, 12)],
+        "equal fold/order labels retain each compaction run's source position",
+    );
+    assert_eq!(slots[0].redo_fold_identity, folds[0]);
+    assert_eq!(slots[1].redo_fold_identity, folds[1]);
+    assert_eq!(slots[0].segment_identity, rotations[0]);
+    assert_eq!(slots[1].segment_identity, rotations[1]);
+    assert_eq!(slots[0].left, Some(checkpoint_rows[0].clone()));
+    assert_eq!(slots[0].right, Some(checkpoint_rows[1].clone()));
+    assert_eq!(slots[1].left, Some(checkpoint_rows[2].clone()));
+    assert_eq!(slots[1].right, Some(checkpoint_rows[3].clone()));
+
+    let malformed = BranchMergePairedCheckpointRedoFoldSegmentRotationCompactionSnapshot {
+        checkpoint_id: checkpoint_id.clone(),
+        runs: vec![
+            run(0, 0),
+            BranchMergePairedCheckpointRedoFoldSegmentRotationCompactionRunSnapshot {
+                fold_ordinal: 6,
+                first_order: 13,
+                last_order: 12,
+                left: None,
+                right: None,
+                redo_fold_identity: folds[0].clone(),
+                segment_identities: vec![],
+            },
+        ],
+    };
+    assert_eq!(
+        restore_paired_checkpoint_redo_sparse_segment_rotation_handoff_chains_preserving_fold_identity(
+            &[],
+            &[vec![vec![malformed]]],
+        ),
+        Err(orna_storage_v1::BranchMergePairedCheckpointRedoFoldSegmentRotationRestoreHandoffError::InvalidOrderRange {
+            restore_ordinal: 0,
+            handoff_ordinal: 0,
+            stream_ordinal: 0,
+            compaction_ordinal: 1,
+            fold_ordinal: 6,
+            first_order: 13,
+            last_order: 12,
+        }),
+        "invalid ranges identify their compaction run in the source stream",
     );
 }
 
