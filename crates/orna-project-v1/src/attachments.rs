@@ -11,6 +11,7 @@ use std::{
     error::Error,
     fmt,
     path::Path,
+    sync::Arc,
 };
 
 use orna_repository_v1::{
@@ -521,6 +522,7 @@ impl PackageResolver {
             final_session,
             retained_sessions: retained,
             retained_wave_lengths: vec![1],
+            route_identity: Arc::new(()),
         })
     }
 
@@ -552,6 +554,7 @@ impl PackageResolver {
             final_session: current,
             retained_sessions,
             retained_wave_lengths,
+            route_identity: Arc::new(()),
         })
     }
 
@@ -632,6 +635,7 @@ impl PackageResolver {
             final_session,
             mut retained_sessions,
             retained_wave_lengths: extension_wave_lengths,
+            ..
         } = extension;
         let mut all_retained = previous.retained_sessions.clone();
         all_retained.append(&mut retained_sessions);
@@ -641,6 +645,7 @@ impl PackageResolver {
             final_session,
             retained_sessions: all_retained,
             retained_wave_lengths,
+            route_identity: previous.route_identity.clone(),
         }
     }
 
@@ -652,6 +657,7 @@ impl PackageResolver {
             final_session,
             mut retained_sessions,
             retained_wave_lengths: extension_wave_lengths,
+            ..
         } = extension;
         let mut all_retained = previous.retained_sessions.clone();
         all_retained.push(previous.final_session.clone());
@@ -663,6 +669,7 @@ impl PackageResolver {
             final_session,
             retained_sessions: all_retained,
             retained_wave_lengths,
+            route_identity: previous.route_identity.clone(),
         }
     }
 
@@ -914,6 +921,7 @@ impl PackageResolver {
         let folded_label = NestedPairDepthLabel::from_session(
             checkpoint_wave,
             0,
+            &route.route_identity,
             retained_checkpoint,
         );
         route.validate_depth_label(&folded_label)?;
@@ -988,6 +996,28 @@ impl PackageResolver {
             }
         }
         Ok(route)
+    }
+
+    /// Folds checkpoint-rooted terminal-pair storms across independent parent
+    /// routes. Each table row is `(route, storms)` and resolves only checkpoints
+    /// captured from that row's route; row order and anchor identity are kept
+    /// independently. The reference is silent on tabular multi-parent folds,
+    /// so v1 validates every row through the single-route checkpoint rules and
+    /// returns no partial batch if any row or fold fails.
+    pub fn extend_sibling_terminal_pair_checkpoint_storms(
+        &self,
+        paths: &[(
+            &ReboundPathResolution,
+            &[(&ReboundPathCheckpoint, &[[PinnedDatabase; 2]])],
+        )],
+    ) -> Result<SiblingRebindResolution, AttachmentError> {
+        let routes = paths
+            .iter()
+            .map(|(previous, storms)| {
+                self.extend_nested_terminal_pair_checkpoint_storms(previous, storms)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(SiblingRebindResolution { routes })
     }
 
     /// Rebinds each terminal pair in a storm from one saved checkpoint.
@@ -1236,6 +1266,7 @@ pub struct ReboundPathResolution {
     final_session: AttachedDatabaseSession,
     retained_sessions: Vec<AttachedDatabaseSession>,
     retained_wave_lengths: Vec<usize>,
+    route_identity: Arc<()>,
 }
 
 impl ReboundPathResolution {
@@ -1258,17 +1289,22 @@ impl ReboundPathResolution {
         self.retained_sessions.get(start..start + length)
     }
 
-    /// Labels one pre-rebind depth in a retained wave by its position and
-    /// exact pin route. The reference leaves labels across folded storms
-    /// unspecified; v1 uses the snapshot index as depth and rejects reuse if
-    /// that coordinate no longer denotes the same primary and attached pins.
+    /// Labels one pre-rebind depth in a retained wave by its position, exact
+    /// pin route, and originating route lineage. The reference leaves labels
+    /// across folded storms unspecified; v1 rejects reuse from an independently
+    /// resolved route even when its pins and coordinates happen to be equal.
     pub fn retained_depth_label(
         &self,
         wave: usize,
         depth: usize,
     ) -> Result<NestedPairDepthLabel, AttachmentError> {
         let session = self.retained_snapshot_at_depth(wave, depth)?;
-        Ok(NestedPairDepthLabel::from_session(wave, depth, session))
+        Ok(NestedPairDepthLabel::from_session(
+            wave,
+            depth,
+            &self.route_identity,
+            session,
+        ))
     }
 
     fn retained_snapshot_at_depth(
@@ -1300,7 +1336,9 @@ impl ReboundPathResolution {
         label: &NestedPairDepthLabel,
     ) -> Result<(), AttachmentError> {
         let session = self.retained_snapshot_at_depth(label.wave, label.depth)?;
-        if label.matches_session(session) {
+        if Arc::ptr_eq(&self.route_identity, &label.route_identity)
+            && label.matches_session(session)
+        {
             Ok(())
         } else {
             Err(AttachmentError::RetainedSnapshotUnavailable)
@@ -1316,7 +1354,12 @@ impl ReboundPathResolution {
         snapshot: usize,
     ) -> Result<ReboundPathCheckpoint, AttachmentError> {
         let handoff = self.retained_snapshot_at_depth(wave, snapshot)?.clone();
-        let depth_label = NestedPairDepthLabel::from_session(wave, snapshot, &handoff);
+        let depth_label = NestedPairDepthLabel::from_session(
+            wave,
+            snapshot,
+            &self.route_identity,
+            &handoff,
+        );
         Ok(ReboundPathCheckpoint {
             handoff,
             depth_label,
@@ -1329,20 +1372,27 @@ impl ReboundPathResolution {
     }
 }
 
-/// A retained wave/depth coordinate bound to the exact pins at that route.
-#[derive(Clone, Debug, Eq, PartialEq)]
+/// A retained wave/depth coordinate bound to the exact pins and route lineage.
+#[derive(Clone, Debug)]
 pub struct NestedPairDepthLabel {
     wave: usize,
     depth: usize,
+    route_identity: Arc<()>,
     primary: PackagePin,
     attached: Vec<(String, PackagePin)>,
 }
 
 impl NestedPairDepthLabel {
-    fn from_session(wave: usize, depth: usize, session: &AttachedDatabaseSession) -> Self {
+    fn from_session(
+        wave: usize,
+        depth: usize,
+        route_identity: &Arc<()>,
+        session: &AttachedDatabaseSession,
+    ) -> Self {
         Self {
             wave,
             depth,
+            route_identity: route_identity.clone(),
             primary: session.primary().pin().clone(),
             attached: session
                 .attached()
@@ -1372,6 +1422,18 @@ impl NestedPairDepthLabel {
         self.depth
     }
 }
+
+impl PartialEq for NestedPairDepthLabel {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.route_identity, &other.route_identity)
+            && self.wave == other.wave
+            && self.depth == other.depth
+            && self.primary == other.primary
+            && self.attached == other.attached
+    }
+}
+
+impl Eq for NestedPairDepthLabel {}
 
 /// An immutable copy of a retained nested route, suitable for replay after a
 /// later route has been extended or rebound.

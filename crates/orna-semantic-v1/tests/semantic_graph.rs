@@ -6557,6 +6557,190 @@ fn nested_sibling_pin_reconciliation_storms_preserve_depth_identity() {
 }
 
 #[test]
+fn multi_parent_checkpoint_folds_preserve_labels_across_paired_omissions() {
+    let source = include_str!(
+        "fixtures/historical-paired-omission-multi-parent-reconciliation.orna"
+    );
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-paired-omission-multi-parent-reconciliation.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert_eq!(
+        result
+            .diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.code() == DIAG_TYPE)
+            .count(),
+        1,
+        "only the deliberately crossed parent must fail: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+    let module = result
+        .modules
+        .values()
+        .find(|module| {
+            module
+                .symbols
+                .contains_key("omitted_first_pair_rolls_back_after_crossed_parent")
+        })
+        .expect("paired-omission reconciliation fixture module");
+    let parent_slots = |function: &str| {
+        let Type::Function { result, .. } = &module.symbols[function].ty else {
+            panic!("{function} must return its computed parent fold");
+        };
+        let Type::Record(fields) = result.as_ref() else {
+            panic!("{function} must return a result record: {result:?}");
+        };
+        let Type::List(element) = fields.get("parent_fold").expect("parent fold result") else {
+            panic!("{function} must return the reconciled list");
+        };
+        let Type::Tuple(slots) = element.as_ref() else {
+            panic!("{function} must preserve the paired tuple: {element:?}");
+        };
+        assert_eq!(slots.len(), 2);
+        slots
+    };
+
+    assert_eq!(
+        parent_slots("omitted_first_pair_rolls_back_after_crossed_parent"),
+        &[Type::Bottom, Type::Bottom],
+        "a failed fold whose first parent omitted both pins must not promote labels from later rows"
+    );
+    let valid_slots = parent_slots("valid_paired_omissions_keep_all_parent_depth_labels");
+    for (slot, expected) in [
+        (
+            0,
+            BTreeSet::from([
+                "selector:HEAD~200".to_owned(),
+                "selector:HEAD~202".to_owned(),
+                "selector:HEAD~204".to_owned(),
+            ]),
+        ),
+        (
+            1,
+            BTreeSet::from([
+                "selector:HEAD~201".to_owned(),
+                "selector:HEAD~203".to_owned(),
+                "selector:HEAD~205".to_owned(),
+            ]),
+        ),
+    ] {
+        let mut contexts = BTreeSet::new();
+        collect_snapshot_contexts(&valid_slots[slot], &mut contexts);
+        assert_eq!(
+            contexts, expected,
+            "valid paired omissions must retain the computed labels in slot {slot}"
+        );
+    }
+}
+
+#[test]
+fn stacked_record_checkpoint_folds_preserve_selector_depth_labels() {
+    let source = include_str!("fixtures/historical-stacked-selector-depth-fold.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new("historical-stacked-selector-depth-fold.orna", source)],
+        &historical_nested_callable_catalogue(),
+    );
+    assert_eq!(
+        result
+            .diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.code() == DIAG_TYPE)
+            .count(),
+        1,
+        "only the cross-depth folded list should be rejected: {:?}",
+        result.diagnostics
+    );
+    fn selectors(ty: &Type) -> BTreeSet<String> {
+        let mut selectors = BTreeSet::new();
+        collect_snapshot_contexts(ty, &mut selectors);
+        selectors
+    }
+    fn assert_selectors(ty: &Type, expected: &[&str]) {
+        assert_eq!(
+            selectors(ty),
+            expected
+                .iter()
+                .map(|selector| format!("selector:{selector}"))
+                .collect(),
+            "selector labels must stay at their computed structural depth: {ty:?}"
+        );
+    }
+
+    let module = result
+        .modules
+        .values()
+        .find(|module| {
+            module
+                .symbols
+                .contains_key("rejects_cross_depth_record_fold")
+        })
+        .expect("fixture module with cross-depth proof");
+    let rejected_symbol = &module.symbols["rejects_cross_depth_record_fold"];
+    let Type::Function {
+        result: rejected_cases,
+        ..
+    } = &rejected_symbol.ty
+    else {
+        panic!("rejected-fold proof must be a computed function");
+    };
+    let Type::Record(rejected_cases) = rejected_cases.as_ref() else {
+        panic!("rejected-fold proof must keep its computed case values: {rejected_cases:?}");
+    };
+    for (case, root, middle, leaf) in [
+        ("first", "HEAD~501", "HEAD~502", "HEAD~503"),
+        ("second", "HEAD~504", "HEAD~501", "HEAD~505"),
+    ] {
+        let Type::Record(row) = rejected_cases.get(case).expect("computed input row") else {
+            panic!("{case} must remain a computed record");
+        };
+        assert_selectors(&row["root"], &[root]);
+        let Type::Tuple(stack) = &row["stack"] else {
+            panic!("{case} must retain its nested tuple boundary");
+        };
+        assert_selectors(&stack[0], &[middle]);
+        let Type::Record(leaf_row) = &stack[1] else {
+            panic!("{case} must retain its nested leaf record");
+        };
+        assert_selectors(&leaf_row["leaf"], &[leaf]);
+    }
+
+    let Type::Function {
+        result: safe_list,
+        ..
+    } = &module.symbols["accepts_depth_stable_record_fold"].ty
+    else {
+        panic!("depth-stable proof must be a computed function");
+    };
+    let Type::List(safe_row) = safe_list.as_ref() else {
+        panic!("depth-stable checkpoint rows must compute a list: {safe_list:?}");
+    };
+    let Type::Record(safe_row) = safe_row.as_ref() else {
+        panic!("depth-stable list rows must retain their record shape");
+    };
+    assert_selectors(&safe_row["root"], &["HEAD~601", "HEAD~604"]);
+    let Type::Tuple(stack) = &safe_row["stack"] else {
+        panic!("depth-stable rows must retain their nested tuple boundary");
+    };
+    assert_selectors(&stack[0], &["HEAD~602", "HEAD~605"]);
+    let Type::Record(leaf_row) = &stack[1] else {
+        panic!("depth-stable rows must retain their nested leaf record");
+    };
+    assert_selectors(&leaf_row["leaf"], &["HEAD~603", "HEAD~606"]);
+}
+
+#[test]
 fn unknown_direct_pair_sibling_suppresses_pin_promotion() {
     let source = include_str!(
         "fixtures/historical-direct-paired-pin-rebind-suppression.orna"
