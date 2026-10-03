@@ -1414,10 +1414,20 @@ fn sibling_checkpoint_folds_keep_tabular_anchor_identities() {
     let stage_b = resolver
         .resolve_nested_terminal_pair(&nested_b, pair_b.clone())
         .unwrap();
+    let independent_stage_a = resolver
+        .resolve_nested_terminal_pair(&nested_a, pair_a.clone())
+        .unwrap();
     let root_a = stage_a.handoff_checkpoint(0, 0).unwrap();
     let middle_a_checkpoint = stage_a.handoff_checkpoint(0, 1).unwrap();
     let root_b = stage_b.handoff_checkpoint(0, 0).unwrap();
     let middle_b_checkpoint = stage_b.handoff_checkpoint(0, 1).unwrap();
+    let independent_root_a = independent_stage_a.handoff_checkpoint(0, 0).unwrap();
+    assert_eq!(
+        root_a.handoff().primary().pin().commit(),
+        independent_root_a.handoff().primary().pin().commit(),
+        "independent routes can retain the same exact pins"
+    );
+    assert_ne!(root_a.depth_label(), independent_root_a.depth_label());
 
     let terminal_pair_a = [
         PinnedDatabase::resolve(
@@ -1441,15 +1451,19 @@ fn sibling_checkpoint_folds_keep_tabular_anchor_identities() {
     ];
     let root_waves_a = [pair_a.clone()];
     let middle_waves_a = [terminal_pair_a.clone()];
+    let root_return_waves_a = [pair_a.clone()];
     let root_waves_b = [pair_b.clone()];
     let middle_waves_b = [terminal_pair_b.clone()];
+    let root_return_waves_b = [pair_b.clone()];
     let storms_a = [
         (&root_a, root_waves_a.as_slice()),
         (&middle_a_checkpoint, middle_waves_a.as_slice()),
+        (&root_a, root_return_waves_a.as_slice()),
     ];
     let storms_b = [
         (&root_b, root_waves_b.as_slice()),
         (&middle_b_checkpoint, middle_waves_b.as_slice()),
+        (&root_b, root_return_waves_b.as_slice()),
     ];
     let paths = [
         (&stage_a, storms_a.as_slice()),
@@ -1459,7 +1473,7 @@ fn sibling_checkpoint_folds_keep_tabular_anchor_identities() {
     assert!(matches!(
         resolver.extend_sibling_terminal_pair_checkpoint_storms(&[(
             &stage_a,
-            [(&root_b, root_waves_a.as_slice())].as_slice()
+            [(&independent_root_a, root_waves_a.as_slice())].as_slice()
         ),]),
         Err(AttachmentError::RetainedSnapshotUnavailable)
     ));
@@ -1480,11 +1494,35 @@ fn sibling_checkpoint_folds_keep_tabular_anchor_identities() {
         );
         assert_eq!(route.retained_depth_label(4, 0).unwrap().wave(), 4);
         assert_eq!(
-            route.final_session().primary().pin().commit().as_str(),
+            route.retained_depth_label(0, 0).unwrap(),
+            if expected_value == 91 {
+                root_a.depth_label().clone()
+            } else {
+                root_b.depth_label().clone()
+            },
+            "the first anchor label survives the A-to-B-to-A cycle"
+        );
+        let returned_anchor = route.retained_wave(6).unwrap().first().unwrap();
+        assert_eq!(
+            returned_anchor.primary().pin().commit().as_str(),
+            if expected_value == 91 {
+                root_a.handoff().primary().pin().commit().as_str()
+            } else {
+                root_b.handoff().primary().pin().commit().as_str()
+            }
+        );
+        assert_eq!(
+            route
+                .final_session()
+                .database(aliases[4])
+                .unwrap()
+                .pin()
+                .commit()
+                .as_str(),
             expected_leaf.as_str()
         );
         let mut evaluator = AdmittedReplSession::from_attached_database_session(
-            &route.retained_wave(4).unwrap()[1],
+            route.final_session(),
             Limits::default(),
         )
         .unwrap();
