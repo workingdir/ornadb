@@ -644,6 +644,18 @@ pub struct QueryJoinDescription {
     pub predicate: Option<ExpressionRef>,
 }
 
+/// A partial index that may accelerate a join predicate when both the input
+/// table and the predicate reference match exactly. Sparse predicate cascades
+/// therefore cannot shift an index candidate onto a neighboring join.
+/// The lookup reuses the matching join input's pinned statistics because this
+/// descriptor carries identity, not an independent index cardinality.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct QueryPartialIndexDescription {
+    pub table: ObjectRef,
+    pub index: ObjectRef,
+    pub partial_predicate: ExpressionRef,
+}
+
 /// A known table mutation at the tail of a query plan. Counts are estimates
 /// from the pinned adapter state; inserts/deletes adjust the table estimate,
 /// while updates/rekeys preserve its cardinality.
@@ -1054,6 +1066,31 @@ impl std::error::Error for ExplainError {}
 /// actual fields remain absent because explain does not execute the query.
 pub fn explain_query(query: &QueryPlanDescription) -> Result<ExplainedPlan, ExplainError> {
     explain_query_with_limit_chain(query, &[])
+}
+
+/// Explains a query while choosing exact-identity partial indexes for join
+/// inputs. A candidate is selected only when both its table and partial
+/// predicate equal the join input's table and predicate. For duplicate exact
+/// matches, the lexicographically smallest index reference wins. Unmatched or
+/// predicate-free joins retain their table scan.
+pub fn explain_query_with_partial_indexes(
+    query: &QueryPlanDescription,
+    indexes: &[QueryPartialIndexDescription],
+) -> Result<ExplainedPlan, ExplainError> {
+    explain_query_with_predicate_pressure_and_branch_limits_and_storms_with_partial_indexes(
+        query,
+        1,
+        None,
+        None,
+        &[],
+        &[],
+        &[],
+        None,
+        &[],
+        &[],
+        &[],
+        indexes,
+    )
 }
 
 /// Explains a query followed by additional ordered limit stages.
@@ -1664,6 +1701,36 @@ fn explain_query_with_predicate_pressure_and_branch_limits_and_storms(
     disjunct_storms: &[DisjunctStormDescription],
     disjunct_storm_cascades: &[DisjunctStormCascadeDescription],
 ) -> Result<ExplainedPlan, ExplainError> {
+    explain_query_with_predicate_pressure_and_branch_limits_and_storms_with_partial_indexes(
+        query,
+        disjunct_count,
+        conjunct_count,
+        conjunct_count_per_disjunct,
+        nested_input_limits,
+        nested_branch_limits,
+        limits_between_disjunct_and_conjunct,
+        post_expansion_conjunct,
+        additional_limits,
+        disjunct_storms,
+        disjunct_storm_cascades,
+        &[],
+    )
+}
+
+fn explain_query_with_predicate_pressure_and_branch_limits_and_storms_with_partial_indexes(
+    query: &QueryPlanDescription,
+    disjunct_count: u64,
+    conjunct_count: Option<u64>,
+    conjunct_count_per_disjunct: Option<u64>,
+    nested_input_limits: &[u64],
+    nested_branch_limits: &[u64],
+    limits_between_disjunct_and_conjunct: &[u64],
+    post_expansion_conjunct: Option<&ExpressionRef>,
+    additional_limits: &[u64],
+    disjunct_storms: &[DisjunctStormDescription],
+    disjunct_storm_cascades: &[DisjunctStormCascadeDescription],
+    partial_indexes: &[QueryPartialIndexDescription],
+) -> Result<ExplainedPlan, ExplainError> {
     let (storm_cascade_operators, storm_cascade_expressions, storm_cascade_predicates) =
         disjunct_storm_cascade_shape_counts(disjunct_storm_cascades)?;
     if disjunct_count == 0
@@ -1711,6 +1778,18 @@ fn explain_query_with_predicate_pressure_and_branch_limits_and_storms(
     {
         return Err(ExplainError::InvalidObject);
     }
+    if partial_indexes.len() > MAX_PLAN_NODES {
+        return Err(ExplainError::TooManyNodes);
+    }
+    if partial_indexes
+        .iter()
+        .any(|candidate| {
+            invalid_reference(candidate.table.as_str())
+                || invalid_reference(candidate.index.as_str())
+        })
+    {
+        return Err(ExplainError::InvalidObject);
+    }
     let operator_bound = 1usize
         .saturating_add(query.joins.len().saturating_mul(2))
         .saturating_add(usize::from(query.predicate.is_some()))
@@ -1739,6 +1818,11 @@ fn explain_query_with_predicate_pressure_and_branch_limits_and_storms(
         .chain(query.projections.iter())
         .chain(query.ordering.iter().map(|ordering| &ordering.expression))
         .chain(query.joins.iter().filter_map(|join| join.predicate.as_ref()))
+        .chain(
+            partial_indexes
+                .iter()
+                .map(|candidate| &candidate.partial_predicate),
+        )
         .chain(post_expansion_conjunct.iter().copied())
         .chain(disjunct_storms.iter().map(|storm| &storm.predicate))
         .chain(storm_cascade_predicates.iter().copied())
@@ -1778,7 +1862,11 @@ fn explain_query_with_predicate_pressure_and_branch_limits_and_storms(
     for (planned_position, (declared_position, join)) in
         planned_query_join_order(&query.joins).into_iter().enumerate()
     {
-        let right = push_scan(&mut operators, join.source.clone(), join.statistics.as_ref());
+        let right = if let Some(candidate) = partial_index_for_join(join, partial_indexes) {
+            push_index_lookup(&mut operators, candidate, join.statistics.as_ref())
+        } else {
+            push_scan(&mut operators, join.source.clone(), join.statistics.as_ref())
+        };
         let right_cardinality = source_cardinality(join.statistics.as_ref());
         let cardinality = join_cardinality(
             current_cardinality,
@@ -2696,6 +2784,77 @@ fn planned_query_join_order(joins: &[QueryJoinDescription]) -> Vec<(usize, &Quer
         (work.is_none(), work.unwrap_or_default(), *declared_position)
     });
     ordered
+}
+
+fn partial_index_for_join<'a>(
+    join: &QueryJoinDescription,
+    candidates: &'a [QueryPartialIndexDescription],
+) -> Option<&'a QueryPartialIndexDescription> {
+    let predicate = join.predicate.as_ref()?;
+    candidates
+        .iter()
+        .filter(|candidate| {
+            candidate.table == join.source && candidate.partial_predicate == *predicate
+        })
+        .min_by(|left, right| left.index.as_str().cmp(right.index.as_str()))
+}
+
+fn push_index_lookup(
+    operators: &mut Vec<Operator>,
+    candidate: &QueryPartialIndexDescription,
+    statistics: Option<&QuerySourceStatistics>,
+) -> usize {
+    let cardinality = source_cardinality(statistics);
+    let mut details = BTreeMap::from([
+        (
+            "table".to_owned(),
+            PlanDetail::Text(candidate.table.as_str().to_owned()),
+        ),
+        (
+            "partial_predicate_identity".to_owned(),
+            PlanDetail::Text(candidate.partial_predicate.as_str().to_owned()),
+        ),
+        (
+            "index_selection".to_owned(),
+            PlanDetail::Text("exact_table_and_predicate_identity".to_owned()),
+        ),
+    ]);
+    if let Some(branch) = statistics.and_then(|stats| stats.mutable_branch.as_ref()) {
+        details.insert(
+            "mutable_branch".to_owned(),
+            PlanDetail::Text(branch.name.clone()),
+        );
+        details.insert(
+            "branch_generation".to_owned(),
+            PlanDetail::Integer(branch.generation),
+        );
+        details.insert(
+            "statistics_scope".to_owned(),
+            PlanDetail::Text("overlay_inclusive".to_owned()),
+        );
+    }
+    let work = cardinality
+        .rows
+        .zip(cardinality.bytes)
+        .and_then(|(rows, bytes)| rows.checked_add(ceil_div(bytes, 4096)));
+    if cardinality
+        .rows
+        .zip(cardinality.bytes)
+        .is_some_and(|(rows, bytes)| rows.checked_add(ceil_div(bytes, 4096)).is_none())
+    {
+        record_work_overflow(&mut details);
+    }
+    let index = operators.len();
+    operators.push(Operator::new(
+        PlanNodeKind::IndexLookup,
+        Some(candidate.index.clone()),
+        Some(candidate.partial_predicate.clone()),
+        details,
+        Vec::new(),
+        cardinality,
+        work,
+    ));
+    index
 }
 
 fn push_scan(
