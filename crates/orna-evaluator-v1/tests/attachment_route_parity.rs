@@ -2849,10 +2849,14 @@ fn sparse_nested_storm_folds_preserve_terminal_route_identity() {
         leaf_final,
         "identity-edge validation preserves the exact final nested package value"
     );
+    let paired_omission_segment_chain = [
+        paired_none_omission.as_slice(),
+        paired_omission_tail.as_slice(),
+    ];
     let paired_omission_segments = [
-        omission_tail_chains.as_slice(),
-        omission_tail_chains.as_slice(),
-        omission_tail_chains.as_slice(),
+        paired_omission_segment_chain.as_slice(),
+        paired_omission_segment_chain.as_slice(),
+        paired_omission_segment_chain.as_slice(),
     ];
     let (paired_terminal_omission_fold, segment_identity_transitions) = resolver
         .extend_nested_terminal_pair_sparse_checkpoint_storm_rebind_omission_segments_capturing_terminal_identity_transitions(
