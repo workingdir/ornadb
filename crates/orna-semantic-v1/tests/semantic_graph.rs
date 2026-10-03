@@ -12309,6 +12309,19 @@ fn nested_snapshot_checkpoint_reset_chains_restore_selected_values() {
             .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
             .collect::<Vec<_>>()
     );
+    assert!(
+        result.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code() == DIAG_TYPE
+                && diagnostic.message()
+                    == "checkpoint reset source must preserve nested snapshot pin topology and callable contracts"
+        }),
+        "the crossed reset should explain its pin-topology rejection: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
     let module = result
         .modules
         .values()
