@@ -451,22 +451,33 @@ fn generated_stub_parity_guard_rejects_missing_duplicate_and_unknown_dispatch_ro
         .lines()
         .find(|line| line.starts_with("// sys-op: "))
         .expect("generated stubs have dispatch markers");
+    let mut rejected_drift_cases = 0;
     let missing = source.replacen(&format!("{first_marker}\n"), "", 1);
     assert!(
         validate_stub_dispatch_inventory(&missing, &expected).is_err(),
         "omitting a generated dispatch row fails the parity guard"
     );
+    rejected_drift_cases += 1;
 
     let duplicate = format!("{source}\n{first_marker}\n");
     assert!(
         validate_stub_dispatch_inventory(&duplicate, &expected).is_err(),
         "duplicating a generated dispatch row fails the parity guard"
     );
+    rejected_drift_cases += 1;
 
     let unknown = source.replacen(first_marker, "// sys-op: sys.vendor.unknown", 1);
     assert!(
         validate_stub_dispatch_inventory(&unknown, &expected).is_err(),
         "redirecting a generated stub to an unknown registry operation fails the parity guard"
+    );
+    rejected_drift_cases += 1;
+    assert_eq!(rejected_drift_cases, 3);
+    println!(
+        "generated_stub_dispatch_parity operations={} rejected_drift_cases={} categories=missing,duplicate,unknown total_cases={}",
+        expected.len(),
+        rejected_drift_cases,
+        expected.len() + rejected_drift_cases
     );
 }
 
