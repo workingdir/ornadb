@@ -12692,6 +12692,16 @@ fn paired_checkpoint_reset_replay_preserves_each_lane_identity() {
     for (stage, root, leaf) in [
         ("folded_left", "selector:HEAD~945", "selector:HEAD~850"),
         ("folded_right", "selector:HEAD~925", "selector:HEAD~830"),
+        (
+            "restored_folded_left",
+            "selector:HEAD~945",
+            "selector:HEAD~845",
+        ),
+        (
+            "restored_folded_right",
+            "selector:HEAD~925",
+            "selector:HEAD~825",
+        ),
         ("restored_left", "selector:HEAD~950", "selector:HEAD~840"),
         ("restored_right", "selector:HEAD~930", "selector:HEAD~820"),
     ] {
