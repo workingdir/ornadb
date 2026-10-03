@@ -28,6 +28,8 @@ use orna_storage_v1::{
     BranchMergePairedCheckpointRedoFoldChainCompactionIdentityFold,
     BranchMergePairedCheckpointRedoUndoFrame,
     BranchMergePairedCheckpointRedoUndoCompactionIdentityFrame,
+    BranchMergePairedCheckpointRedoUndoSegmentRotationFrame,
+    BranchMergePairedUndoSegmentRotationIdentity,
     BranchMergePairedWriteAheadIdentity,
     BranchMergePairedWriteAheadSegmentIdentity,
     BranchMergePairedUndoChainIdentity,
@@ -110,6 +112,8 @@ use orna_storage_v1::{
     fold_paired_checkpoint_redo_sparse_streams_preserving_undo_chain_identity,
     fold_paired_checkpoint_redo_sparse_stream_chains_preserving_undo_chain_identity,
     compress_paired_checkpoint_redo_sparse_stream_chains_preserving_undo_chain_identity,
+    fold_paired_checkpoint_redo_sparse_stream_chains_preserving_undo_and_segment_rotation_identity,
+    compress_paired_checkpoint_redo_sparse_stream_chains_preserving_undo_and_segment_rotation_identity,
     fold_paired_checkpoint_redo_sparse_stream_chains_preserving_undo_and_compaction_identity,
     compress_paired_checkpoint_redo_sparse_stream_chains_preserving_undo_and_compaction_identity,
     fold_paired_checkpoint_redo_sparse_streams_preserving_segment_rotation_identity,
@@ -24599,6 +24603,146 @@ fn paired_undo_compaction_fold_identity_survives_sparse_rotation_folds() {
         "later stream observation leaves its earlier omission folds and surrounding gaps intact",
     );
     assert_eq!(runs(&observed_late)[2].undo_chain_identities, later_identities[0..2]);
+}
+
+#[test]
+fn paired_rollback_identity_stays_bound_to_sparse_segment_rotations() {
+    let rows = |fixture: &str| {
+        fixture
+            .split("\n\n")
+            .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+            .collect::<Vec<_>>()
+    };
+    let first_undo_rows = rows(PAIRED_SPARSE_UNDO_CHAIN_IDENTITIES);
+    let later_undo_rows = rows(PAIRED_UNDO_CHAIN_FOLD_ROTATIONS);
+    let first_segment_rows = rows(PAIRED_SPARSE_SEGMENT_ROTATIONS);
+    let later_segment_rows = rows(PAIRED_SEGMENT_FOLD_CHAIN);
+    let checkpoint_states = PAIRED_CHECKPOINT_REDO
+        .split("\n\n")
+        .map(parse_checkpoint_fixture)
+        .collect::<Vec<_>>();
+    let undo_identities = |rows: &[KeyedRow]| {
+        rows.iter()
+            .map(|row| BranchMergePairedUndoChainIdentity {
+                left_chain: row.fields[&id(2)].encode().unwrap(),
+                right_chain: row.fields[&id(3)].encode().unwrap(),
+            })
+            .collect::<Vec<_>>()
+    };
+    let segment_identities = |rows: &[KeyedRow]| {
+        rows.iter()
+            .map(|row| BranchMergePairedWriteAheadSegmentIdentity {
+                left_segment: row.fields[&id(2)].encode().unwrap(),
+                right_segment: row.fields[&id(3)].encode().unwrap(),
+            })
+            .collect::<Vec<_>>()
+    };
+    let first_undo = undo_identities(&first_undo_rows);
+    let later_undo = undo_identities(&later_undo_rows);
+    let first_segments = segment_identities(&first_segment_rows);
+    let later_segments = segment_identities(&later_segment_rows);
+    assert_eq!(first_undo.len(), 4);
+    assert_eq!(later_undo.len(), 3);
+    assert_eq!(first_segments.len(), 4);
+    assert_eq!(later_segments.len(), 3);
+    assert_eq!(first_undo[3], later_undo[0]);
+    assert_eq!(first_undo[0], later_undo[2]);
+    assert_eq!(first_segments[2], later_segments[0]);
+    assert_eq!(first_segments[0], later_segments[2]);
+    let paired = |undos: &[BranchMergePairedUndoChainIdentity], segments: &[BranchMergePairedWriteAheadSegmentIdentity]| {
+        assert_eq!(undos.len(), segments.len());
+        undos.iter().cloned().zip(segments.iter().cloned()).map(
+            |(undo_chain_identity, segment_identity)| BranchMergePairedUndoSegmentRotationIdentity {
+                undo_chain_identity,
+                segment_identity,
+            },
+        ).collect::<Vec<_>>()
+    };
+    let first_identities = paired(&first_undo, &first_segments);
+    let later_identities = paired(&later_undo, &later_segments);
+    assert_ne!(first_identities[3], later_identities[0]);
+    assert_eq!(first_identities[0], later_identities[2]);
+
+    let alpha = b"rollback-rotation/alpha".to_vec();
+    let beta = b"rollback-rotation/beta".to_vec();
+    let catalog_only = b"rollback-rotation/catalog-only".to_vec();
+    let observed_late = b"rollback-rotation/observed-late".to_vec();
+    let positionless = checkpoint_states[4].clone();
+    let first_states = [
+        (BTreeMap::from([(alpha.clone(), checkpoint_states[0].clone())]), BTreeMap::from([(alpha.clone(), checkpoint_states[1].clone())])),
+        (BTreeMap::from([(alpha.clone(), checkpoint_states[0].clone())]), BTreeMap::from([(alpha.clone(), checkpoint_states[1].clone()), (beta.clone(), positionless.clone())])),
+        (BTreeMap::from([(alpha.clone(), checkpoint_states[2].clone())]), BTreeMap::new()),
+        (BTreeMap::from([(alpha.clone(), checkpoint_states[2].clone())]), BTreeMap::from([(alpha.clone(), checkpoint_states[3].clone())])),
+    ];
+    let later_states = [
+        (BTreeMap::from([(alpha.clone(), checkpoint_states[2].clone())]), BTreeMap::from([(alpha.clone(), checkpoint_states[3].clone())])),
+        (BTreeMap::from([(alpha.clone(), checkpoint_states[2].clone())]), BTreeMap::from([(alpha.clone(), checkpoint_states[3].clone())])),
+        (BTreeMap::from([(beta.clone(), positionless.clone()), (observed_late.clone(), positionless.clone())]), BTreeMap::new()),
+    ];
+    let make_frame = |left, right, undo_chain_identity: &BranchMergePairedUndoChainIdentity, segment_identity: &BranchMergePairedWriteAheadSegmentIdentity| {
+        BranchMergePairedCheckpointRedoUndoSegmentRotationFrame {
+            checkpoints: BranchMergePairedCheckpointRedoFrame { left, right },
+            identity: BranchMergePairedUndoSegmentRotationIdentity {
+                undo_chain_identity: undo_chain_identity.clone(),
+                segment_identity: segment_identity.clone(),
+            },
+        }
+    };
+    let mut first_fold = BTreeMap::new();
+    for (((order, (left, right)), undo), segment) in [30_u64, 31, 33, 34]
+        .into_iter().zip(first_states).zip(&first_undo).zip(&first_segments)
+    {
+        first_fold.insert(order, make_frame(left, right, undo, segment));
+    }
+    let mut later_fold = BTreeMap::new();
+    for (((order, (left, right)), undo), segment) in [34_u64, 35, 36]
+        .into_iter().zip(later_states).zip(&later_undo).zip(&later_segments)
+    {
+        later_fold.insert(order, make_frame(left, right, undo, segment));
+    }
+    let streams = fold_paired_checkpoint_redo_sparse_stream_chains_preserving_undo_and_segment_rotation_identity(
+        &[alpha.clone(), beta.clone(), catalog_only.clone()],
+        &[first_fold, later_fold],
+    );
+    assert_eq!(
+        streams.iter().map(|stream| stream.checkpoint_id.clone()).collect::<Vec<_>>(),
+        vec![alpha.clone(), beta.clone(), catalog_only.clone(), observed_late.clone()],
+    );
+    let coordinates = [(0, 30), (0, 31), (0, 33), (0, 34), (1, 34), (1, 35), (1, 36)];
+    let expected_identities = first_identities.iter().chain(&later_identities).cloned().collect::<Vec<_>>();
+    for stream in &streams {
+        assert_eq!(stream.slots.iter().map(|slot| (slot.fold_ordinal, slot.order)).collect::<Vec<_>>(), coordinates);
+        assert_eq!(stream.slots.iter().map(|slot| slot.identity.clone()).collect::<Vec<_>>(), expected_identities);
+    }
+    let slots = |checkpoint_id: &[u8]| &streams.iter().find(|stream| stream.checkpoint_id == checkpoint_id).unwrap().slots;
+    assert_eq!(slots(&alpha)[0].left, Some(checkpoint_states[0].clone()));
+    assert_eq!(slots(&alpha)[0].right, Some(checkpoint_states[1].clone()));
+    assert_eq!(slots(&alpha)[4].left, Some(checkpoint_states[2].clone()));
+    assert_eq!(slots(&alpha)[4].right, Some(checkpoint_states[3].clone()));
+    assert_eq!(slots(&beta)[1].right, Some(positionless.clone()));
+    assert_eq!(slots(&observed_late)[6].left, Some(positionless.clone()));
+    assert!(slots(&catalog_only).iter().all(|slot| slot.left.is_none() && slot.right.is_none()));
+
+    let compacted = compress_paired_checkpoint_redo_sparse_stream_chains_preserving_undo_and_segment_rotation_identity(&streams);
+    let runs = |checkpoint_id: &[u8]| &compacted.iter().find(|stream| stream.checkpoint_id == checkpoint_id).unwrap().runs;
+    assert_eq!(
+        runs(&alpha).iter().map(|run| (run.fold_ordinal, run.first_order, run.last_order)).collect::<Vec<_>>(),
+        vec![(0, 30, 31), (0, 33, 33), (0, 34, 34), (1, 34, 35), (1, 36, 36)],
+    );
+    assert_eq!(runs(&alpha)[0].identities, first_identities[0..2]);
+    assert_eq!(runs(&alpha)[1].identities, first_identities[2..3]);
+    assert_eq!(runs(&alpha)[2].identities, first_identities[3..4]);
+    assert_eq!(runs(&alpha)[3].identities, later_identities[0..2]);
+    assert_eq!(runs(&alpha)[4].identities, later_identities[2..3]);
+    assert_eq!(
+        runs(&catalog_only).iter().map(|run| (run.fold_ordinal, run.first_order, run.last_order)).collect::<Vec<_>>(),
+        vec![(0, 30, 31), (0, 33, 34), (1, 34, 36)],
+    );
+    assert_eq!(runs(&catalog_only)[0].identities, first_identities[0..2]);
+    assert_eq!(runs(&catalog_only)[1].identities, first_identities[2..4]);
+    assert_eq!(runs(&catalog_only)[2].identities, later_identities);
+    assert_eq!(runs(&beta)[1].right, Some(positionless));
+    assert_eq!(runs(&beta)[1].identities, first_identities[1..2]);
 }
 
 #[test]
