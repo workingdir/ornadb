@@ -1,0 +1,1 @@
+std.lazy.force(std.lazy.map(() => 5, value => value + 1))

@@ -1,10 +1,55 @@
-use orna_evaluator_v1::{AdmittedReplSession, Limits};
+use std::collections::BTreeMap;
+
+use orna_evaluator_v1::{
+    AdmittedReplSession, Environment, Functions, Limits, PureFunction,
+    evaluate_expression_with_functions,
+};
 use orna_foundation_v1::CanonicalValue;
 use orna_semantic_v1::{Catalogue, StandardDependencyProfile};
 use orna_value_v1::Raw;
 
 fn bool_value(value: bool) -> CanonicalValue {
     CanonicalValue::new(Raw::Bool(value)).unwrap()
+}
+
+fn int(value: i64) -> Raw {
+    Raw::Int(value.into())
+}
+
+fn canonical(raw: Raw) -> CanonicalValue {
+    CanonicalValue::new(raw).unwrap()
+}
+
+fn pinned_functions() -> Functions {
+    let mut functions = BTreeMap::new();
+    for (path, source) in orna_standard::reference_standard_sources_v1() {
+        let parsed = orna_syntax_v1::parse_module(&source);
+        assert!(parsed.is_ok(), "{path}: {:#?}", parsed.diagnostics);
+        let module = path
+            .strip_prefix("std/")
+            .and_then(|path| path.strip_suffix(".orna"))
+            .expect("pinned std paths have a std/ prefix and .orna suffix")
+            .replace('/', ".");
+        for item in parsed.value.items {
+            if let orna_syntax_v1::Declaration::Function { signature, body } = item.declaration {
+                let name = format!("std.{module}.{}", signature.name);
+                assert!(
+                    functions
+                        .insert(
+                            name.clone(),
+                            PureFunction {
+                                parameters: signature.parameters,
+                                body,
+                                environment: Environment::new(),
+                            },
+                        )
+                        .is_none(),
+                    "duplicate pinned standard function {name}"
+                );
+            }
+        }
+    }
+    functions
 }
 
 #[test]
@@ -18,7 +63,7 @@ fn pinned_iterator_and_lazy_modules_are_snapshot_bound_and_importable() {
         })
         .collect::<Vec<_>>();
     let profile = StandardDependencyProfile::from_sources(
-        "orna.std/s58ir-iterator-lazy",
+        "orna.std/7hqga-iterator-lazy",
         sources.clone(),
     )
     .expect("iterator and lazy modules are captured in an immutable std snapshot");
@@ -37,6 +82,40 @@ fn pinned_iterator_and_lazy_modules_are_snapshot_bound_and_importable() {
         changed.push_str("\n// changed after snapshot capture\n");
         assert!(profile.verify_source(path, &changed).is_err());
     }
+
+    let iterator_source = &sources
+        .iter()
+        .find(|(path, _)| path == "std/iterator.orna")
+        .expect("the captured iterator module")
+        .1;
+    for declaration in [
+        "pub fn chain<T>(left: Iterator<T>, right: Iterator<T>): Iterator<T>",
+        "pub fn enumerate<T>(source: Iterator<T>): Iterator<(Int, T)>",
+        "pub fn fold<T, U>(source: Iterator<T>, initial: U, combine: fn(U, T): U): U",
+    ] {
+        assert!(iterator_source.contains(declaration), "missing iterator export `{declaration}`");
+    }
+    for contract in [
+        "Pulls every item from left before requesting an item from right.",
+        "Enumeration starts at zero",
+        "Folds a finite iterator from left to right",
+    ] {
+        assert!(iterator_source.contains(contract), "missing iterator contract `{contract}`");
+    }
+    let lazy_source = &sources
+        .iter()
+        .find(|(path, _)| path == "std/lazy.orna")
+        .expect("the captured lazy module")
+        .1;
+    assert!(
+        lazy_source.contains("pub fn from_pull<T>(")
+            && lazy_source.contains("std.iterator.Iterator<T>"),
+        "missing lazy pull-to-iterator export"
+    );
+    assert!(
+        lazy_source.contains("callback runs only when that cursor is advanced"),
+        "missing lazy pull evaluation boundary"
+    );
 
     let catalogue = Catalogue::authoritative_core()
         .with_standard_sources(&profile, sources.clone())
@@ -84,5 +163,18 @@ fn core_assertions_work_without_std_and_both_modules_remain_optional() {
             .unwrap_err()
             .code(),
         "ORNA-S010-IMPORT"
+    );
+}
+
+#[test]
+fn lazy_thunk_mapping_returns_the_computed_value() {
+    assert_eq!(
+        evaluate_expression_with_functions(
+            include_str!("fixtures/stdlib-lazy-map-value-7hqga.orna"),
+            &Environment::new(),
+            &pinned_functions(),
+            Limits::default(),
+        ),
+        Ok(canonical(int(6)))
     );
 }
