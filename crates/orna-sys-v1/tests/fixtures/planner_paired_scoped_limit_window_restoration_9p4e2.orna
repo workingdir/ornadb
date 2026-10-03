@@ -1,0 +1,3 @@
+use sys.query as query_ops;
+
+pub fn paired_scoped_limit_window_restoration(query: Query<Int>): sys.Plan = query_ops.plan_hint(query);
