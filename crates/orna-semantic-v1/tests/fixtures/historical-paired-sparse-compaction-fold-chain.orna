@@ -1,0 +1,50 @@
+pub fn factory_at(pin: sys.SnapshotRef) =
+    sys.database.as_of(pin).energy.factory;
+
+pub fn paired_sparse_compaction_fold_chain(failure: Error) {
+    let checkpoints = [
+        { witness: factory_at(sys.snapshot("HEAD~500")) },
+        {
+            left_checkpoint: (factory_at(sys.snapshot("HEAD~510")), fail(failure)),
+            right_checkpoint: (fail(failure), factory_at(sys.snapshot("HEAD~410"))),
+            witness: factory_at(sys.snapshot("HEAD~511")),
+        },
+        {
+            left_checkpoint: (factory_at(sys.snapshot("HEAD~520")), factory_at(sys.snapshot("HEAD~520"))),
+            right_checkpoint: (factory_at(sys.snapshot("HEAD~420")), factory_at(sys.snapshot("HEAD~420"))),
+            witness: factory_at(sys.snapshot("HEAD~521")),
+        },
+        { witness: factory_at(sys.snapshot("HEAD~522")) },
+        {
+            left_checkpoint: (factory_at(sys.snapshot("HEAD~530")), factory_at(sys.snapshot("HEAD~530"))),
+            right_checkpoint: (factory_at(sys.snapshot("HEAD~430")), factory_at(sys.snapshot("HEAD~430"))),
+            witness: factory_at(sys.snapshot("HEAD~531")),
+        },
+    ];
+    let saved = checkpoints;
+    checkpoints = [
+        { witness: factory_at(sys.snapshot("HEAD~600")) },
+        {
+            left_checkpoint: (factory_at(sys.snapshot("HEAD~610")), fail(failure)),
+            right_checkpoint: (fail(failure), factory_at(sys.snapshot("HEAD~510"))),
+            witness: factory_at(sys.snapshot("HEAD~611")),
+        },
+        {
+            left_checkpoint: (factory_at(sys.snapshot("HEAD~620")), factory_at(sys.snapshot("HEAD~620"))),
+            right_checkpoint: (factory_at(sys.snapshot("HEAD~520")), factory_at(sys.snapshot("HEAD~520"))),
+            witness: factory_at(sys.snapshot("HEAD~621")),
+        },
+        { witness: factory_at(sys.snapshot("HEAD~622")) },
+        {
+            left_checkpoint: (factory_at(sys.snapshot("HEAD~630")), factory_at(sys.snapshot("HEAD~631"))),
+            right_checkpoint: (factory_at(sys.snapshot("HEAD~530")), factory_at(sys.snapshot("HEAD~530"))),
+            witness: factory_at(sys.snapshot("HEAD~632")),
+        },
+        {
+            left_checkpoint: (factory_at(sys.snapshot("HEAD~640")), factory_at(sys.snapshot("HEAD~640"))),
+            right_checkpoint: (factory_at(sys.snapshot("HEAD~540")), factory_at(sys.snapshot("HEAD~540"))),
+            witness: factory_at(sys.snapshot("HEAD~641")),
+        },
+    ];
+    { saved: saved, compacted: checkpoints }
+}
