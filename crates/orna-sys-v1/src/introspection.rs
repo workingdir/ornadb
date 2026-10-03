@@ -6532,6 +6532,7 @@ struct QueryWindowSpillCascadeFold {
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct QueryPairedAggregateSpillRestorationFold {
     identity: String,
+    previous_identity: Option<String>,
     aggregate_fold_identity: String,
     spill_fold_identity: Option<String>,
     aggregate_pair_count: u64,
@@ -6905,15 +6906,13 @@ fn query_paired_aggregate_spill_restoration_fold(
     let spill_pair_count = spill_fold.map_or(0, |fold| fold.spill_pair_count);
     let aggregate_fold_identity = aggregate_fold.identity.clone();
     let spill_fold_identity = spill_fold.map(|fold| fold.identity.clone());
+    let previous_identity = previous.map(|fold| fold.identity.clone());
     let overflowed = aggregate_fold.overflowed
         || spill_totals.is_some_and(|totals| totals.overflowed);
 
     let mut hash = Sha256::new();
     hash.update(b"orna.sys.query-paired-aggregate-spill-restoration-fold.v1\0");
-    hash_optional_text(
-        &mut hash,
-        previous.map(|previous| previous.identity.as_str()),
-    );
+    hash_optional_text(&mut hash, previous_identity.as_deref());
     hash_part(&mut hash, pair_identity.as_bytes());
     hash_part(&mut hash, aggregate_fold_identity.as_bytes());
     hash_optional_text(&mut hash, spill_fold_identity.as_deref());
@@ -6933,6 +6932,7 @@ fn query_paired_aggregate_spill_restoration_fold(
             "paired-aggregate-spill-restoration-fold:{}",
             hex(&hash.finalize())
         ),
+        previous_identity,
         aggregate_fold_identity,
         spill_fold_identity,
         aggregate_pair_count: aggregate_fold.pair_count,
@@ -6951,6 +6951,14 @@ fn add_paired_aggregate_spill_restoration_fold_details(
         "paired_aggregate_spill_restoration_fold_identity".to_owned(),
         PlanDetail::Text(fold.identity.clone()),
     );
+    if let Some(identity) = fold.previous_identity.as_deref() {
+        details.insert(
+            "paired_aggregate_spill_restoration_previous_fold_identity".to_owned(),
+            PlanDetail::Text(identity.to_owned()),
+        );
+    } else {
+        details.remove("paired_aggregate_spill_restoration_previous_fold_identity");
+    }
     details.insert(
         "paired_aggregate_spill_restoration_aggregate_fold_identity".to_owned(),
         PlanDetail::Text(fold.aggregate_fold_identity.clone()),
