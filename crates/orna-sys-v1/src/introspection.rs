@@ -679,6 +679,17 @@ pub struct QueryJoinDescription {
     pub predicate: Option<ExpressionRef>,
 }
 
+/// Resolver-supplied identity for the logical pair folded by a join. It is
+/// associated by exact right-source and predicate identity, so physical cost
+/// reordering cannot shift a pair label onto a neighboring join.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct QueryJoinPairIdentityDescription {
+    pub identity: ObjectRef,
+    pub left_source: ObjectRef,
+    pub right_source: ObjectRef,
+    pub predicate: Option<ExpressionRef>,
+}
+
 /// A correlated subquery that the resolver has already approved for
 /// decorrelation into a predicate join. The planner keeps the subquery and
 /// correlation identities on both the join and its input while cost ordering
@@ -1156,6 +1167,34 @@ pub fn explain_query_with_decorrelated_subqueries(
         &[],
         subqueries,
         &[],
+        &[],
+    )
+}
+
+/// Explains a query with stable identities for resolver-approved logical
+/// join pairs. Pair metadata is looked up using the pair's exact right source
+/// and optional predicate, then copied to both the source access node and its
+/// join fold after physical cost ordering.
+pub fn explain_query_with_join_pair_identities(
+    query: &QueryPlanDescription,
+    pairs: &[QueryJoinPairIdentityDescription],
+) -> Result<ExplainedPlan, ExplainError> {
+    explain_query_core_with_subqueries(
+        query,
+        1,
+        None,
+        None,
+        &[],
+        &[],
+        &[],
+        None,
+        &[],
+        &[],
+        &[],
+        &[],
+        &[],
+        &[],
+        pairs,
     )
 }
 
@@ -1186,6 +1225,7 @@ pub fn explain_query_with_window_aggregate_pushdowns(
         &[],
         &[],
         aggregates,
+        &[],
     )
 }
 
@@ -1867,6 +1907,7 @@ fn explain_query_with_predicate_pressure_and_branch_limits_and_storms_with_parti
         partial_indexes,
         &[],
         &[],
+        &[],
     )
 }
 
@@ -1885,12 +1926,14 @@ fn explain_query_core_with_subqueries(
     partial_indexes: &[QueryPartialIndexDescription],
     decorrelated_subqueries: &[QueryDecorrelatedSubqueryDescription],
     window_aggregates: &[QueryWindowAggregatePushdownDescription],
+    join_pair_identities: &[QueryJoinPairIdentityDescription],
 ) -> Result<ExplainedPlan, ExplainError> {
     if query
         .joins
         .len()
         .saturating_add(decorrelated_subqueries.len())
         .saturating_add(window_aggregates.len())
+        .saturating_add(join_pair_identities.len())
         > MAX_PLAN_NODES
     {
         return Err(ExplainError::TooManyNodes);
@@ -1935,6 +1978,54 @@ fn explain_query_core_with_subqueries(
         let matching_sources = usize::from(query.source == aggregate.source)
             + query.joins.iter().filter(|join| join.source == aggregate.source).count();
         if matching_sources != 1 {
+            return Err(ExplainError::InvalidObject);
+        }
+    }
+
+    let mut join_pair_identities_seen = BTreeSet::new();
+    let mut join_pair_targets_seen = BTreeSet::new();
+    for pair in join_pair_identities {
+        if invalid_reference(pair.identity.as_str())
+            || invalid_reference(pair.left_source.as_str())
+            || invalid_reference(pair.right_source.as_str())
+        {
+            return Err(ExplainError::InvalidObject);
+        }
+        if pair
+            .predicate
+            .as_ref()
+            .is_some_and(|predicate| invalid_reference(predicate.as_str()))
+        {
+            return Err(ExplainError::InvalidExpression);
+        }
+        if pair.left_source == pair.right_source
+            || !join_pair_identities_seen.insert(pair.identity.as_str())
+        {
+            return Err(ExplainError::InvalidObject);
+        }
+        let left_source_count = usize::from(query.source == pair.left_source)
+            + query
+                .joins
+                .iter()
+                .filter(|join| join.source == pair.left_source)
+                .count();
+        let matching_joins = query
+            .joins
+            .iter()
+            .filter(|join| {
+                join.source == pair.right_source && join.predicate == pair.predicate
+            })
+            .count();
+        if left_source_count != 1 || matching_joins != 1 {
+            return Err(ExplainError::InvalidObject);
+        }
+        let target = (
+            pair.right_source.as_str().to_owned(),
+            pair.predicate
+                .as_ref()
+                .map(|predicate| predicate.as_str().to_owned()),
+        );
+        if !join_pair_targets_seen.insert(target) {
             return Err(ExplainError::InvalidObject);
         }
     }
@@ -2038,6 +2129,7 @@ fn explain_query_core_with_subqueries(
         .chain(window_aggregates.iter().flat_map(|aggregate| {
             [&aggregate.aggregate, &aggregate.frame_identity]
         }))
+        .chain(join_pair_identities.iter().filter_map(|pair| pair.predicate.as_ref()))
         .any(|expression| invalid_reference(expression.as_str()))
     {
         return Err(ExplainError::InvalidExpression);
@@ -2047,6 +2139,12 @@ fn explain_query_core_with_subqueries(
         .len()
         .saturating_add(query.ordering.len())
         .saturating_add(window_aggregates.len().saturating_mul(2))
+        .saturating_add(
+            join_pair_identities
+                .iter()
+                .filter(|pair| pair.predicate.is_some())
+                .count(),
+        )
         .saturating_add(usize::from(query.predicate.is_some()))
         .saturating_add(usize::from(post_expansion_conjunct.is_some()))
         .saturating_add(query.joins.iter().filter(|join| join.predicate.is_some()).count())
@@ -2099,6 +2197,10 @@ fn explain_query_core_with_subqueries(
         );
         if let Some(subquery) = decorrelated_subquery {
             add_decorrelated_subquery_details(&mut operators[right].details, subquery);
+        }
+        let join_pair_identity = join_pair_identity_for_join(join, join_pair_identities);
+        if let Some(pair_identity) = join_pair_identity {
+            add_join_pair_identity_details(&mut operators[right].details, pair_identity);
         }
         let right_cardinality = source_cardinality(join.statistics.as_ref());
         let cardinality = join_cardinality(
@@ -2153,6 +2255,9 @@ fn explain_query_core_with_subqueries(
         }
         if let Some(subquery) = decorrelated_subquery {
             add_decorrelated_subquery_details(&mut details, subquery);
+        }
+        if let Some(pair_identity) = join_pair_identity {
+            add_join_pair_identity_details(&mut details, pair_identity);
         }
         let prior = current;
         current = operators.len();
@@ -3038,6 +3143,43 @@ fn add_decorrelated_subquery_details(
         "subquery_decorrelation".to_owned(),
         PlanDetail::Text("resolver_approved_predicate_join".to_owned()),
     );
+}
+
+fn join_pair_identity_for_join<'a>(
+    join: &QueryJoinDescription,
+    pairs: &'a [QueryJoinPairIdentityDescription],
+) -> Option<&'a QueryJoinPairIdentityDescription> {
+    pairs.iter().find(|pair| {
+        pair.right_source == join.source && pair.predicate == join.predicate
+    })
+}
+
+fn add_join_pair_identity_details(
+    details: &mut BTreeMap<String, PlanDetail>,
+    pair: &QueryJoinPairIdentityDescription,
+) {
+    details.insert(
+        "join_pair_identity".to_owned(),
+        PlanDetail::Text(pair.identity.as_str().to_owned()),
+    );
+    details.insert(
+        "logical_left_source_identity".to_owned(),
+        PlanDetail::Text(pair.left_source.as_str().to_owned()),
+    );
+    details.insert(
+        "logical_right_source_identity".to_owned(),
+        PlanDetail::Text(pair.right_source.as_str().to_owned()),
+    );
+    details.insert(
+        "join_pair_identity_resolution".to_owned(),
+        PlanDetail::Text("exact_right_source_and_predicate".to_owned()),
+    );
+    if let Some(predicate) = &pair.predicate {
+        details.insert(
+            "logical_predicate_identity".to_owned(),
+            PlanDetail::Text(predicate.as_str().to_owned()),
+        );
+    }
 }
 
 fn push_window_aggregates(
