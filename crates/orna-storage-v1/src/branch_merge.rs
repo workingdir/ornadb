@@ -108,6 +108,76 @@ pub struct ThreeWaySnapshot {
     pub checkpoints: BTreeMap<CheckpointId, CheckpointGeneration>,
 }
 
+/// One committed redo frame containing the paired log checkpoint snapshots.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BranchMergePairedCheckpointRedoFrame {
+    pub left: BTreeMap<CheckpointId, CheckpointGeneration>,
+    pub right: BTreeMap<CheckpointId, CheckpointGeneration>,
+}
+
+/// One run of adjacent redo frames with the same paired checkpoint state.
+///
+/// `None` means that side has no checkpoint entry. A present checkpoint whose
+/// `position` is `None` remains a distinct `Some(CheckpointGeneration)` value.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BranchMergePairedCheckpointRedoRunSnapshot {
+    pub first_order: u64,
+    pub last_order: u64,
+    pub left: Option<CheckpointGeneration>,
+    pub right: Option<CheckpointGeneration>,
+}
+
+/// The compressed redo chain for one stable checkpoint identity.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BranchMergePairedCheckpointRedoChainSnapshot {
+    pub checkpoint_id: CheckpointId,
+    pub runs: Vec<BranchMergePairedCheckpointRedoRunSnapshot>,
+}
+
+/// Compresses adjacent paired redo frames only when both sides retain exactly
+/// the same checkpoint state for an identity.
+///
+/// Frame keys are committed transaction orders. Runs merge only across
+/// consecutive integer orders with equal full generations and positions on
+/// both sides. Checkpoint IDs and position bytes remain opaque; missing map
+/// entries are distinct from present checkpoints with `position: None`. A gap
+/// or a change on either side starts a new run, so no intervening redo state
+/// is inferred or discarded.
+pub fn compress_paired_checkpoint_redo_chain(
+    frames: &BTreeMap<u64, BranchMergePairedCheckpointRedoFrame>,
+) -> Vec<BranchMergePairedCheckpointRedoChainSnapshot> {
+    let checkpoint_ids = frames
+        .values()
+        .flat_map(|frame| frame.left.keys().chain(frame.right.keys()).cloned())
+        .collect::<BTreeSet<_>>();
+
+    checkpoint_ids
+        .into_iter()
+        .map(|checkpoint_id| {
+            let mut runs = Vec::<BranchMergePairedCheckpointRedoRunSnapshot>::new();
+            for (&order, frame) in frames {
+                let left = frame.left.get(&checkpoint_id).cloned();
+                let right = frame.right.get(&checkpoint_id).cloned();
+                if let Some(last) = runs.last_mut()
+                    && last.left == left
+                    && last.right == right
+                    && last.last_order.checked_add(1) == Some(order)
+                {
+                    last.last_order = order;
+                } else {
+                    runs.push(BranchMergePairedCheckpointRedoRunSnapshot {
+                        first_order: order,
+                        last_order: order,
+                        left,
+                        right,
+                    });
+                }
+            }
+            BranchMergePairedCheckpointRedoChainSnapshot { checkpoint_id, runs }
+        })
+        .collect()
+}
+
 /// The decoder is called only for a range whose three manifest digests differ
 /// (or when segment layouts cannot be aligned). Implementations should decode
 /// incrementally and stop immediately when the visitor returns `false`.
