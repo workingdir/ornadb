@@ -19,6 +19,7 @@ pub use branch_merge::{
     BranchMergeConflict, BranchMergeDepthFragmentRecovery,
     BranchMergeDepthWaveRecovery, BranchMergeError, BranchMergePlan,
     BranchMergeMultiParentTabularColumnDepthWave, BranchMergeParentColumnDepthEvent,
+    BranchMergeParentColumnDepthLadderEvent,
     BranchMergeTabularColumnDepthWave, BranchMergeTabularDepthWave,
     BranchMergeTableDepthFragments,
     BranchMergeTombstoneEvent, BranchMergeTombstoneHistory,
