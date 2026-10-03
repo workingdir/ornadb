@@ -160,6 +160,31 @@ fn paired_pagination_nested_escalation_functions() -> Functions {
         .collect()
 }
 
+fn paired_pagination_nested_compaction_functions() -> Functions {
+    let parsed = parse_module(include_str!(
+        "fixtures/table_relation_paired_pagination_nested_compaction_3iro7.orna"
+    ));
+    assert!(parsed.is_ok(), "{:?}", parsed.diagnostics);
+    parsed
+        .value
+        .items
+        .into_iter()
+        .map(|item| {
+            let orna_syntax_v1::Declaration::Function { signature, body } = item.declaration else {
+                panic!("fixture function expected")
+            };
+            (
+                signature.name,
+                PureFunction {
+                    parameters: signature.parameters,
+                    body,
+                    environment: Environment::new(),
+                },
+            )
+        })
+        .collect()
+}
+
 fn sparse_window_fold_functions() -> Functions {
     let parsed = parse_module(include_str!("fixtures/table_relation_sparse_window_fold_d4441.orna"));
     assert!(parsed.is_ok(), "{:?}", parsed.diagnostics);
@@ -2120,6 +2145,43 @@ fn paired_nested_spill_aggregate_body() -> Expr {
         elements: vec![
             nested_spill_aggregate("View.Left"),
             nested_spill_aggregate("View.Right"),
+        ],
+        span: span(),
+    }
+}
+
+fn nested_pagination_compaction(source: &str) -> Expr {
+    let prefix = relation_stage(
+        relation_source(source),
+        "take",
+        vec![integer_literal(10)],
+    );
+    let adjacent_totals = relation_stage(
+        relation_stage(
+            prefix,
+            "window",
+            vec![integer_literal(2), integer_literal(1)],
+        ),
+        "map",
+        vec![named_function("sum_frame")],
+    );
+    let overlapping_totals = relation_stage(
+        relation_stage(
+            adjacent_totals,
+            "window",
+            vec![integer_literal(3), integer_literal(2)],
+        ),
+        "map",
+        vec![named_function("sum_frame")],
+    );
+    terminal(overlapping_totals, "sum")
+}
+
+fn paired_nested_pagination_compaction_body() -> Expr {
+    Expr::Tuple {
+        elements: vec![
+            nested_pagination_compaction("View.Left"),
+            nested_pagination_compaction("View.Right"),
         ],
         span: span(),
     }
@@ -4840,4 +4902,130 @@ fn paired_pagination_keeps_identity_across_nested_escalation_spill_folds() {
     );
     assert!(source.pending["View.Left"].is_empty());
     assert!(source.pending["View.Right"].is_empty());
+}
+
+#[test]
+fn paired_pagination_nested_compaction_keeps_snapshot_values() {
+    // Two nested window folds read the same ten-row prefix from each paired
+    // snapshot. Cursor tokens cross two compaction boundaries; a sixth page
+    // holds a sentinel beyond the take(10) prefix.
+    let long_a_lengths = [255, 256, 511, 512];
+    let long_b_lengths = [512, 511, 256, 255];
+    let long_a = long_a_lengths.map(|length| vec![0x5a; length]);
+    let compact_a = vec![0x5b];
+    let long_b = long_b_lengths.map(|length| vec![0x5b; length]);
+    let compact_b = vec![0x5c];
+    let after_compaction = vec![0x5d];
+    assert!(compact_a < long_b[0]);
+    assert!(long_b[0] < compact_b);
+    assert!(compact_b < after_compaction);
+
+    let restore = |values: &[i64], a: &[u8], b: &[u8]| {
+        assert_eq!(values.len(), 10);
+        let rows = values.chunks(2).collect::<Vec<_>>();
+        BTreeMap::from([
+            (None, page(rows[0], Some(a.to_vec()))),
+            (
+                Some(a.to_vec()),
+                page(rows[1], Some(compact_a.clone())),
+            ),
+            (
+                Some(compact_a.clone()),
+                page(rows[2], Some(b.to_vec())),
+            ),
+            (
+                Some(b.to_vec()),
+                page(rows[3], Some(compact_b.clone())),
+            ),
+            (
+                Some(compact_b.clone()),
+                page(rows[4], Some(after_compaction.clone())),
+            ),
+            (
+                Some(after_compaction.clone()),
+                page(&[999_999], None),
+            ),
+        ])
+    };
+    let snapshots = [
+        (
+            [1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
+            [10, 20, 30, 40, 50, 60, 70, 80, 90, 100],
+        ),
+        (
+            [11, 12, 13, 14, 15, 16, 17, 18, 19, 20],
+            [2, 4, 6, 8, 10, 12, 14, 16, 18, 20],
+        ),
+        (
+            [-1, -2, -3, -4, -5, -6, -7, -8, -9, -10],
+            [3, 6, 9, 12, 15, 18, 21, 24, 27, 30],
+        ),
+        (
+            [100, 90, 80, 70, 60, 50, 40, 30, 20, 10],
+            [5, 10, 15, 20, 25, 30, 35, 40, 45, 50],
+        ),
+    ];
+    let mut restores = Vec::new();
+    let mut expected_lanes = Vec::new();
+    for (refresh, (left, right)) in snapshots.iter().enumerate() {
+        for (lane, source_name, values) in [
+            (refresh * 2, "View.Left", left.as_slice()),
+            (refresh * 2 + 1, "View.Right", right.as_slice()),
+        ] {
+            let a = long_a[lane % long_a.len()].clone();
+            let b = long_b[lane % long_b.len()].clone();
+            restores.push((source_name, restore(values, &a, &b)));
+            expected_lanes.push(source_name);
+        }
+    }
+
+    let mut source = PairedCursorRestoreSource::new(restores);
+    let mut functions = paired_pagination_nested_compaction_functions();
+    functions.insert(
+        "run".into(),
+        PureFunction {
+            parameters: Vec::new(),
+            body: paired_nested_pagination_compaction_body(),
+            environment: Environment::new(),
+        },
+    );
+    let mut outputs = Vec::new();
+    for _ in 0..snapshots.len() {
+        outputs.push(
+            invoke_named_with_effects(
+                "run",
+                &functions,
+                &Environment::new(),
+                Limits::default(),
+                &mut source,
+            )
+            .unwrap(),
+        );
+    }
+    assert_eq!(
+        outputs,
+        vec![
+            integer_pair(132, 1320),
+            integer_pair(372, 264),
+            integer_pair(-132, 396),
+            integer_pair(1320, 660),
+        ],
+        "nested folds compute real aggregates from each paired ten-row snapshot"
+    );
+    let scopes = source
+        .lanes
+        .iter()
+        .zip(expected_lanes)
+        .map(|((source_name, scope, _), expected_name)| {
+            assert_eq!(source_name, expected_name);
+            *scope
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(scopes.len(), 8);
+    for (index, scope) in scopes.iter().enumerate() {
+        assert!(
+            !scopes[..index].contains(scope),
+            "each paired snapshot has a distinct scope: {scope:?}"
+        );
+    }
 }
