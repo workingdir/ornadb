@@ -13,9 +13,17 @@ fn seed_identity(): Int = Note
     | map(note => note.id * note.amount)
     | sum;
 
+fn rebound_identity(): Int = Note
+    | filter(note => note.label == "rebound")
+    | map(note => note.id * note.amount)
+    | sum;
+
 fn parent() {
     assert total() == 0;
     seed();
     assert total() == 60;
     assert seed_identity() == 40;
+    Note.update(2, { amount: 25, label: "rebound" });
+    assert total() == 65;
+    assert rebound_identity() == 50;
 }
