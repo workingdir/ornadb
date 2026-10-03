@@ -360,6 +360,31 @@ fn base64_codec_depth_process_matrix_value() -> CanonicalValue {
     .unwrap()
 }
 
+fn base64_process_reprocess_matrix_value() -> CanonicalValue {
+    CanonicalValue::new(Raw::Array(
+        [
+            &[][..],
+            &[0][..],
+            &[0, 1][..],
+            &[0, 1, 2][..],
+            &[255][..],
+            &[255, 238][..],
+            &[0, 1, 2, 3][..],
+            &[0, 1, 2, 3, 4][..],
+            &[0, 1, 2, 3, 4, 5][..],
+        ]
+        .into_iter()
+        .map(|bytes| {
+            Raw::Array(vec![
+                process_output_value(bytes),
+                process_output_value(bytes),
+            ])
+        })
+        .collect(),
+    ))
+    .unwrap()
+}
+
 #[test]
 fn captured_codec_snapshots_replay_real_base64_values_without_retargeting() {
     let (_directory, project_v1, project_v2, snapshots) = host_codec_snapshot_projects();
@@ -713,6 +738,55 @@ fn captured_codec_snapshots_preserve_nested_codec_bytes_through_host_process() {
             base64_codec_depth_process_matrix_value(),
         ]
     );
+}
+
+#[test]
+fn captured_codec_snapshots_reprocess_host_output_through_nested_codecs() {
+    let fixture =
+        include_str!("fixtures/snapshot-host-codec-process-reprocess-matrix.orna");
+    let (_directory, project_v1, project_v2, snapshots) = host_codec_snapshot_projects();
+    let sources_v1 =
+        host_codec_standard_sources(include_str!("fixtures/snapshot-host-codec-base64-v1.orna"));
+    let sources_v2 =
+        host_codec_standard_sources(include_str!("fixtures/snapshot-host-codec-base64-v2.orna"));
+    let mut historical =
+        AdmittedReplSession::from_loaded_project(&project_v1, sources_v1, Limits::default())
+            .unwrap();
+    let mut upgraded =
+        AdmittedReplSession::from_loaded_project(&project_v2, sources_v2, Limits::default())
+            .unwrap();
+    assert_ne!(snapshots[0], snapshots[1]);
+
+    let working_directory = env::current_dir().unwrap();
+    let mut process = ProcessProvider::new(Duration::from_secs(2), 64).unwrap();
+    process
+        .allow_command("/usr/bin/cat", &working_directory, [])
+        .unwrap();
+    let mut bindings =
+        SysHostBindingRegistry::new(EnvironmentProvider::default()).with_process_provider(process);
+    let expected = base64_process_reprocess_matrix_value();
+    let mut folded_outputs = Vec::new();
+    for snapshot_index in [0, 1, 0] {
+        let (session, expected_marker) = match snapshot_index {
+            0 => (&mut historical, 1),
+            1 => (&mut upgraded, 2),
+            _ => unreachable!("the reprocess fold only selects captured snapshots"),
+        };
+        assert_eq!(
+            session.submit(include_str!("fixtures/snapshot-host-codec-tagged.orna")),
+            Ok(Some(base64_snapshot_marker_value(expected_marker)))
+        );
+        let output = session
+            .submit_with_sys_host_bindings(fixture, &mut bindings)
+            .unwrap_or_else(|error| {
+                panic!("nested process output replay failed: {}", error.code())
+            })
+            .expect("each captured snapshot returns both process results for every input");
+        assert_eq!(output, expected);
+        folded_outputs.push(output);
+    }
+
+    assert_eq!(folded_outputs, vec![expected.clone(), expected.clone(), expected]);
 }
 
 fn capture_standard_gitlink(project_path: &Path, standard_snapshot: &str, message: &str) -> String {
