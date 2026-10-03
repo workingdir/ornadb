@@ -1,3 +1,6 @@
+#[path = "support/pinned_io_std.rs"]
+mod pinned_io_std;
+
 use std::{
     io::{Read, Write},
     net::TcpListener,
@@ -6,7 +9,7 @@ use std::{
     time::Duration,
 };
 
-use orna_evaluator_v1::{AdmittedReplSession, Limits, SysHostBindingRegistry};
+use orna_evaluator_v1::SysHostBindingRegistry;
 use orna_foundation_v1::{CanonicalValue, OvbRaw};
 use orna_sys_v1::{EnvironmentProvider, FilesystemProvider, HttpProvider};
 use orna_value_v1::Raw;
@@ -31,7 +34,7 @@ fn sys_filesystem_registry_dispatches_real_reads_writes_lists_and_denials() {
     filesystem.allow_root(root.path()).unwrap();
     let mut bindings = SysHostBindingRegistry::new(EnvironmentProvider::default())
         .with_filesystem_provider(filesystem);
-    let mut session = AdmittedReplSession::with_reference_standard(Limits::default()).unwrap();
+    let mut session = pinned_io_std::session();
     session
         .submit(include_str!("fixtures/stdlib-use-io-fs-mpk0d.orna"))
         .unwrap();
@@ -140,7 +143,7 @@ fn filesystem_codec_roundtrip_preserves_existing_and_exact_values() {
     filesystem.allow_root(root.path()).unwrap();
     let mut bindings = SysHostBindingRegistry::new(EnvironmentProvider::default())
         .with_filesystem_provider(filesystem);
-    let mut session = AdmittedReplSession::with_reference_standard(Limits::default()).unwrap();
+    let mut session = pinned_io_std::session();
     session
         .submit(include_str!("fixtures/stdlib-use-encoding-6u13r.orna"))
         .unwrap();
@@ -198,7 +201,7 @@ fn all_registered_filesystem_dispatch_arms_execute_with_native_results() {
     filesystem.allow_root(root.path()).unwrap();
     let mut bindings = SysHostBindingRegistry::new(EnvironmentProvider::default())
         .with_filesystem_provider(filesystem);
-    let mut session = AdmittedReplSession::with_reference_standard(Limits::default()).unwrap();
+    let mut session = pinned_io_std::session();
     session
         .submit(include_str!("fixtures/stdlib-use-io-fs-mpk0d.orna"))
         .unwrap();
@@ -247,7 +250,7 @@ fn sys_filesystem_symlink_metadata_is_non_following_and_reads_cannot_escape_root
     filesystem.allow_root(root.path()).unwrap();
     let mut bindings = SysHostBindingRegistry::new(EnvironmentProvider::default())
         .with_filesystem_provider(filesystem);
-    let mut session = AdmittedReplSession::with_reference_standard(Limits::default()).unwrap();
+    let mut session = pinned_io_std::session();
     session
         .submit(include_str!("fixtures/stdlib-use-io-fs-mpk0d.orna"))
         .unwrap();
@@ -314,7 +317,7 @@ fn sys_http_registry_dispatches_real_bounded_loopback_response() {
     http.allow_origin(&origin).unwrap();
     let mut bindings =
         SysHostBindingRegistry::new(EnvironmentProvider::default()).with_http_provider(http);
-    let mut session = AdmittedReplSession::with_reference_standard(Limits::default()).unwrap();
+    let mut session = pinned_io_std::session();
     session
         .submit(include_str!("fixtures/stdlib-use-net-http-mpk0d.orna"))
         .unwrap();
@@ -372,7 +375,7 @@ fn sys_http_start_wait_and_cancel_dispatch_real_native_behavior() {
     http.allow_origin(&origin).unwrap();
     let mut bindings =
         SysHostBindingRegistry::new(EnvironmentProvider::default()).with_http_provider(http);
-    let mut session = AdmittedReplSession::with_reference_standard(Limits::default()).unwrap();
+    let mut session = pinned_io_std::session();
     session
         .submit(include_str!("fixtures/stdlib-use-net-http-mpk0d.orna"))
         .unwrap();
@@ -419,7 +422,7 @@ fn sys_http_start_wait_and_cancel_dispatch_real_native_behavior() {
     http.allow_origin(&origin).unwrap();
     let mut bindings =
         SysHostBindingRegistry::new(EnvironmentProvider::default()).with_http_provider(http);
-    let mut session = AdmittedReplSession::with_reference_standard(Limits::default()).unwrap();
+    let mut session = pinned_io_std::session();
     session
         .submit(include_str!("fixtures/stdlib-use-net-http-mpk0d.orna"))
         .unwrap();
@@ -439,7 +442,7 @@ fn sys_http_start_wait_and_cancel_dispatch_real_native_behavior() {
 fn sys_http_registry_requires_an_installed_origin_allowlist() {
     let url = "http://127.0.0.1:9/never-connected";
     let source = include_str!("fixtures/stdlib-net-http-send-mpk0d.orna").replace("URL_VALUE", url);
-    let mut session = AdmittedReplSession::with_reference_standard(Limits::default()).unwrap();
+    let mut session = pinned_io_std::session();
     session
         .submit(include_str!("fixtures/stdlib-use-net-http-mpk0d.orna"))
         .unwrap();
@@ -470,7 +473,7 @@ fn sys_filesystem_host_operation_fails_closed_without_provider() {
     let root = tempfile::tempdir().unwrap();
     std::fs::write(root.path().join("input.txt"), "native-file-value").unwrap();
     let mut bindings = SysHostBindingRegistry::default();
-    let mut session = AdmittedReplSession::with_reference_standard(Limits::default()).unwrap();
+    let mut session = pinned_io_std::session();
     session
         .submit(include_str!("fixtures/stdlib-use-io-fs-mpk0d.orna"))
         .unwrap();
@@ -498,7 +501,7 @@ fn sys_filesystem_provider_enforces_host_selected_text_and_entry_limits() {
     filesystem.allow_root(root.path()).unwrap();
     let mut bindings = SysHostBindingRegistry::new(EnvironmentProvider::default())
         .with_filesystem_provider(filesystem);
-    let mut session = AdmittedReplSession::with_reference_standard(Limits::default()).unwrap();
+    let mut session = pinned_io_std::session();
     session
         .submit(include_str!("fixtures/stdlib-use-io-fs-mpk0d.orna"))
         .unwrap();
