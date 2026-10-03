@@ -60,6 +60,29 @@ fn nested_window_aggregate_functions() -> Functions {
         .collect()
 }
 
+fn sparse_window_fold_functions() -> Functions {
+    let parsed = parse_module(include_str!("fixtures/table_relation_sparse_window_fold_d4441.orna"));
+    assert!(parsed.is_ok(), "{:?}", parsed.diagnostics);
+    parsed
+        .value
+        .items
+        .into_iter()
+        .map(|item| {
+            let orna_syntax_v1::Declaration::Function { signature, body } = item.declaration else {
+                panic!("fixture function expected")
+            };
+            (
+                signature.name,
+                PureFunction {
+                    parameters: signature.parameters,
+                    body,
+                    environment: Environment::new(),
+                },
+            )
+        })
+        .collect()
+}
+
 fn integer(value: i64) -> CanonicalValue {
     CanonicalValue::new(Raw::Int(value.into())).unwrap()
 }
@@ -1727,6 +1750,43 @@ fn paired_nested_window_aggregate_body() -> Expr {
     terminal(paired, "sum")
 }
 
+fn sparse_window_fold(source: &str, predicate: &str) -> Expr {
+    let filtered = relation_stage(
+        relation_source(source),
+        "filter",
+        vec![named_function(predicate)],
+    );
+    let inner_frames = relation_stage(
+        filtered,
+        "window",
+        vec![integer_literal(2), integer_literal(1)],
+    );
+    let inner_totals = relation_stage(
+        inner_frames,
+        "map",
+        vec![named_function("sum_frame")],
+    );
+    let outer_frames = relation_stage(
+        inner_totals,
+        "window",
+        vec![integer_literal(2), integer_literal(1)],
+    );
+    relation_stage(
+        outer_frames,
+        "map",
+        vec![named_function("sum_frame")],
+    )
+}
+
+fn paired_sparse_window_fold_body() -> Expr {
+    let paired = relation_stage(
+        sparse_window_fold("View.Paired", "is_odd"),
+        "union",
+        vec![sparse_window_fold("View.Paired", "is_even")],
+    );
+    terminal(paired, "sum")
+}
+
 #[test]
 fn nested_window_aggregates_recompute_real_values_for_paired_restore_chains() {
     let cursor_one = vec![0x73, 0x00, 0xff];
@@ -1813,6 +1873,96 @@ fn nested_window_aggregates_recompute_real_values_for_paired_restore_chains() {
     );
     assert!(source.pending["View.Paired"].is_empty(), "all six restored snapshots are consumed");
 
+}
+
+#[test]
+fn paired_sparse_window_folds_keep_identity_across_compacted_cursor_chains() {
+    let cursors = [
+        vec![0x73, 0x00],
+        vec![0x73, 0x01],
+        vec![0x73, 0x02],
+        vec![0x73, 0x03],
+    ];
+    let restore = |values: [i64; 5]| {
+        let mut pages = BTreeMap::new();
+        for index in 0..values.len() {
+            let after = (index > 0).then(|| cursors[index - 1].clone());
+            let next = (index + 1 < values.len()).then(|| cursors[index].clone());
+            pages.insert(after, page(&[values[index]], next));
+        }
+        pages
+    };
+    let mut source = PairedCursorRestoreSource::new([
+        ("View.Paired", restore([1, 0, 3, 2, 5])),
+        ("View.Paired", restore([2, 1, 4, 3, 6])),
+        ("View.Paired", restore([1, 2, 5, 0, 7])),
+        ("View.Paired", restore([4, 1, 6, 3, 8])),
+        ("View.Paired", restore([3, 4, 7, 2, 9])),
+        ("View.Paired", restore([2, 3, 8, 5, 10])),
+    ]);
+    let functions = sparse_window_fold_functions();
+    let run_paired = |source: &mut PairedCursorRestoreSource| {
+        let mut functions = functions.clone();
+        functions.insert(
+            "run".into(),
+            PureFunction {
+                parameters: Vec::new(),
+                body: paired_sparse_window_fold_body(),
+                environment: Environment::new(),
+            },
+        );
+        invoke_named_with_effects(
+            "run",
+            &functions,
+            &Environment::new(),
+            Limits::default(),
+            source,
+        )
+        .unwrap()
+    };
+
+    let first = run_paired(&mut source);
+    assert_eq!(first, integer(28), "sparse odd/even pages fold to 12 and 16");
+    let second = run_paired(&mut source);
+    assert_eq!(second, integer(42), "the second paired compact chain folds to 18 and 24");
+    let third = run_paired(&mut source);
+    assert_eq!(third, integer(54), "the third paired compact chain folds to 26 and 28");
+    assert_eq!(first, integer(28), "later cursor restores preserve the first paired fold");
+    assert_eq!(second, integer(42), "later cursor restores preserve the second paired fold");
+
+    assert_eq!(source.lanes.len(), 6, "three restores bind two independent source scopes each");
+    let scopes = source
+        .lanes
+        .iter()
+        .map(|(name, scope, _)| {
+            assert_eq!(name, "View.Paired");
+            *scope
+        })
+        .collect::<Vec<_>>();
+    for (index, scope) in scopes.iter().enumerate() {
+        assert!(
+            !scopes[..index].contains(scope),
+            "identical compact cursor tokens remain scoped to their paired lane: {scope:?}"
+        );
+    }
+    let expected_cursors = scopes
+        .iter()
+        .copied()
+        .flat_map(|scope| {
+            std::iter::once(("View.Paired".to_owned(), scope, None)).chain(
+                cursors
+                    .iter()
+                    .cloned()
+                    .map(move |cursor| ("View.Paired".to_owned(), scope, Some(cursor))),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        source.cursors,
+        expected_cursors,
+        "each sparse window fold follows the same compacted page sequence in its own scope"
+    );
+    assert!(source.pending["View.Paired"].is_empty(), "all six sparse page chains are consumed");
 }
 
 #[test]
