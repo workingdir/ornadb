@@ -1951,6 +1951,53 @@ fn sibling_checkpoint_folds_keep_tabular_anchor_identities() {
             "repeated folds return the value computed by each paired parent route"
         );
     }
+
+    let omission_round = [
+        Some((&depth_label_a, middle_waves_a.as_slice())),
+        None,
+        Some((&depth_label_independent_a, middle_waves_a.as_slice())),
+    ];
+    let followup_round = [
+        Some((&depth_label_a, no_pair_waves.as_slice())),
+        Some((&depth_label_b, root_waves_b.as_slice())),
+        None,
+    ];
+    let omission_rounds = [omission_round.as_slice(), followup_round.as_slice()];
+    let omission_continued = resolver
+        .extend_sibling_terminal_pair_checkpoint_storm_rounds_from_depth_labels_with_omissions(
+            &nested_folded,
+            &omission_rounds,
+        )
+        .unwrap_or_else(|error| panic!("paired closure omissions failed: {error:?}"));
+    for (row, depth, source_label, expected_value) in [
+        (0, 1, &depth_label_a, 91),
+        (1, 0, &depth_label_b, 92),
+        (2, 1, &depth_label_independent_a, 91),
+    ] {
+        assert_eq!(
+            omission_continued.retained_depth_label(row, 6, depth).unwrap(),
+            *source_label,
+            "an omitted paired closure does not shift the row's retained depth identity"
+        );
+        assert_eq!(
+            evaluate_terminal_pin(omission_continued.routes()[row].final_session(), aliases[4]),
+            Ok(Some(Value::int(expected_value.into()))),
+            "the paired omission keeps row {row}'s terminal route value"
+        );
+    }
+    let crossed_equal_pin_omission_round = [
+        Some((&depth_label_a, middle_waves_a.as_slice())),
+        None,
+        Some((&depth_label_a, middle_waves_a.as_slice())),
+    ];
+    assert!(matches!(
+        resolver.extend_sibling_terminal_pair_checkpoint_storm_rounds_from_depth_labels_with_omissions(
+            &nested_folded,
+            &[crossed_equal_pin_omission_round.as_slice()],
+        ),
+        Err(AttachmentError::RetainedSnapshotUnavailable)
+    ));
+
     let twice_continued = resolver
         .extend_sibling_terminal_pair_checkpoint_storm_rounds_from_depths(
             &nested_folded,
