@@ -30,6 +30,7 @@ use crate::{
     REFERENCE_STANDARD_VIEWS_PATH_V1,
     REFERENCE_STANDARD_INTROSPECTION_PATH_V1, REFERENCE_STANDARD_REFLECTION_PATH_V1,
     REFERENCE_STANDARD_ALGORITHM_PATH_V1, REFERENCE_STANDARD_UI_PATH_V1,
+    REFERENCE_STANDARD_FORMAT_PATH_V1, REFERENCE_STANDARD_PARSE_PATH_V1,
     reference_standard_catalogue_v1,
     reference_standard_profile_v1, reference_standard_sources_v1,
 };
@@ -37,7 +38,7 @@ use crate::{
 #[test]
 fn pinned_ui_presentation_helpers_are_included_as_source() {
     let sources = reference_standard_sources_v1();
-    assert_eq!(sources.len(), 53);
+    assert_eq!(sources.len(), 54);
     assert_eq!(sources[49].0, REFERENCE_STANDARD_UI_PATH_V1);
     let parsed = orna_syntax_v1::parse_module_with_file(
         &sources[49].1,
@@ -96,6 +97,27 @@ fn pinned_std_entrypoint_imports_optional_content_modules() {
     assert!(entrypoint.lines().any(|line| line.trim() == "use views;"));
     assert!(entrypoint.lines().any(|line| line.trim() == "use introspection;"));
     assert!(entrypoint.lines().any(|line| line.trim() == "use reflection;"));
+    assert!(entrypoint.lines().any(|line| line.trim() == "use format;"));
+    assert!(entrypoint.lines().any(|line| line.trim() == "use parse;"));
+}
+
+#[test]
+fn pinned_format_and_parse_modules_are_captured_and_resolve() {
+    let sources = reference_standard_sources_v1();
+    for (index, path, export) in [
+        (52, REFERENCE_STANDARD_FORMAT_PATH_V1, "pub fn integer(value: Int): Str"),
+        (53, REFERENCE_STANDARD_PARSE_PATH_V1, "pub fn integer(input: Str): Int?"),
+    ] {
+        assert_eq!(sources[index].0, path);
+        assert!(sources[index].1.contains(export));
+        let parsed = orna_syntax_v1::parse_module_with_file(&sources[index].1, path);
+        assert!(parsed.is_ok(), "{path}: {:#?}", parsed.diagnostics);
+        reference_standard_profile_v1()
+            .verify_source(path, &sources[index].1)
+            .expect("published module bytes belong to the pinned standard profile");
+    }
+    reference_standard_catalogue_v1()
+        .expect("format and parse imports resolve through the pinned standard catalogue");
 }
 
 #[test]
@@ -963,7 +985,7 @@ fn reference_standard_uses_pinned_orna_1_source_and_resolves_its_imports() {
     ] {
         assert!(sources[33].1.contains(contract), "missing std.test contract `{contract}`");
     }
-    assert_eq!(sources.len(), 53);
+    assert_eq!(sources.len(), 54);
     assert_eq!(sources[49].0, REFERENCE_STANDARD_UI_PATH_V1);
     for declaration in [
         "pub fn Field<T>(label: Str, value: T): UI",
@@ -1425,7 +1447,7 @@ fn pinned_filesystem_effect_is_visible_to_consumers_and_forbidden_in_assertions(
 #[test]
 fn pinned_filesystem_path_and_metadata_modules_are_captured_and_typecheck() {
     let sources = reference_standard_sources_v1();
-    assert_eq!(sources.len(), 53);
+    assert_eq!(sources.len(), 54);
     for (index, path) in [
         (42, REFERENCE_STANDARD_IO_PATH_MODULE_PATH_V1),
         (43, REFERENCE_STANDARD_IO_METADATA_PATH_V1),
@@ -1489,7 +1511,7 @@ fn pinned_filesystem_path_and_metadata_modules_are_captured_and_typecheck() {
 #[test]
 fn pinned_process_and_environment_modules_are_captured_and_typecheck() {
     let sources = reference_standard_sources_v1();
-    assert_eq!(sources.len(), 53);
+    assert_eq!(sources.len(), 54);
     for (index, path) in [
         (44, REFERENCE_STANDARD_IO_PROCESS_PATH_V1),
         (45, REFERENCE_STANDARD_IO_ENVIRONMENT_PATH_V1),
