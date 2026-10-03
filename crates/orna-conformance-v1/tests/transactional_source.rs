@@ -439,11 +439,17 @@ fn parsed_paired_subscription_folds_compute_candidate_values() {
     let two = runtime
         .committed_row("Note", &Value::int(2.into()))
         .expect("seeded second paired row commits");
-    assert_eq!(row_field(two, "amount"), &Raw::Int(20.into()));
+    assert_eq!(row_field(two, "amount"), &Raw::Int(25.into()));
+    assert_eq!(row_field(two, "label"), &Raw::Text("rebound".into()));
     let three = runtime
         .committed_row("Note", &Value::int(3.into()))
         .expect("seeded third paired row commits");
     assert_eq!(row_field(three, "amount"), &Raw::Int(30.into()));
+    let four = runtime
+        .committed_row("Note", &Value::int(4.into()))
+        .expect("row inserted after the first paired fold commits");
+    assert_eq!(row_field(four, "amount"), &Raw::Int(40.into()));
+    assert_eq!(row_field(four, "label"), &Raw::Text("stable".into()));
 }
 
 #[test]
