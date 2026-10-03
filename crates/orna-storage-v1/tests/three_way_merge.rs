@@ -7,6 +7,9 @@ use orna_foundation_v1::OvbRaw;
 use orna_storage_v1::{
     BranchMergePairedCheckpointRedoIdentityFrame,
     BranchMergePairedCheckpointRedoFrame,
+    BranchMergePairedRedoFoldIdentity,
+    BranchMergePairedCheckpointRedoSparseFold,
+    BranchMergePairedCheckpointRedoFoldSegmentRotationFold,
     BranchMergePairedCheckpointRedoUndoFrame,
     BranchMergePairedCheckpointRedoUndoCompactionIdentityFrame,
     BranchMergePairedWriteAheadIdentity,
@@ -62,6 +65,10 @@ use orna_storage_v1::{
     compress_paired_checkpoint_redo_chain_preserving_write_ahead_identity,
     fold_paired_checkpoint_redo_sparse_streams,
     fold_paired_checkpoint_redo_sparse_stream_chains_preserving_write_ahead_identity,
+    fold_paired_checkpoint_redo_sparse_stream_chains_preserving_fold_identity,
+    compress_paired_checkpoint_redo_sparse_stream_chains_preserving_fold_identity,
+    fold_paired_checkpoint_redo_sparse_stream_chains_preserving_fold_and_segment_rotation_identity,
+    compress_paired_checkpoint_redo_sparse_stream_chains_preserving_fold_and_segment_rotation_identity,
     fold_paired_checkpoint_redo_sparse_streams_preserving_undo_chain_identity,
     fold_paired_checkpoint_redo_sparse_stream_chains_preserving_undo_chain_identity,
     compress_paired_checkpoint_redo_sparse_stream_chains_preserving_undo_chain_identity,
@@ -100,6 +107,8 @@ const CHECKPOINT_TAIL_LEFT: &str = include_str!("fixtures/merge-checkpoint-tail-
 const CHECKPOINT_TAIL_RIGHT: &str = include_str!("fixtures/merge-checkpoint-tail-right.orna");
 const PAIRED_CHECKPOINT_REDO: &str =
     include_str!("fixtures/merge-paired-checkpoint-redo.orna");
+const PAIRED_REDO_FOLD_IDENTITIES: &str =
+    include_str!("fixtures/paired-redo-fold-identities.orna");
 const PAIRED_WRITE_AHEAD_REDO_IDENTITIES: &str =
     include_str!("fixtures/paired-write-ahead-redo-identities.orna");
 const PAIRED_SPARSE_CHECKPOINT_REDO: &str =
@@ -23254,6 +23263,178 @@ fn paired_checkpoint_redo_compression_keeps_state_changes_and_order_gaps() {
 }
 
 #[test]
+fn paired_redo_fold_identity_survives_sparse_checkpoint_chains() {
+    let identity_rows = PAIRED_REDO_FOLD_IDENTITIES
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    let checkpoint_states = PAIRED_CHECKPOINT_REDO
+        .split("\n\n")
+        .map(parse_checkpoint_fixture)
+        .collect::<Vec<_>>();
+    assert_eq!(identity_rows.len(), 3);
+    assert_eq!(checkpoint_states.len(), 5);
+
+    let identities = identity_rows
+        .iter()
+        .map(|row| BranchMergePairedRedoFoldIdentity {
+            left_fold: row.fields[&id(2)].encode().unwrap(),
+            right_fold: row.fields[&id(3)].encode().unwrap(),
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(identities[0], identities[2]);
+    assert_ne!(identities[0], identities[1]);
+
+    let alpha = b"redo-fold/alpha".to_vec();
+    let beta = b"redo-fold/beta".to_vec();
+    let catalog_only = b"redo-fold/catalog-only".to_vec();
+    let observed_late = b"redo-fold/observed-late".to_vec();
+    let left_base = checkpoint_states[0].clone();
+    let right_base = checkpoint_states[1].clone();
+    let left_redo = checkpoint_states[2].clone();
+    let right_redo = checkpoint_states[3].clone();
+    let positionless = checkpoint_states[4].clone();
+    assert_eq!(positionless.position, None);
+
+    let checkpoints = |checkpoint_id: &[u8], generation: CheckpointGeneration| {
+        BTreeMap::from([(checkpoint_id.to_vec(), generation)])
+    };
+    let frame = |left, right| BranchMergePairedCheckpointRedoFrame { left, right };
+
+    let mut first_fold = BTreeMap::new();
+    first_fold.insert(
+        200,
+        frame(
+            checkpoints(&alpha, left_base.clone()),
+            checkpoints(&alpha, right_base.clone()),
+        ),
+    );
+    first_fold.insert(
+        201,
+        frame(
+            checkpoints(&alpha, left_base.clone()),
+            checkpoints(&alpha, right_base.clone()),
+        ),
+    );
+    let mut left_at_203 = checkpoints(&alpha, left_base.clone());
+    left_at_203.insert(beta.clone(), positionless.clone());
+    first_fold.insert(
+        203,
+        frame(left_at_203, checkpoints(&alpha, right_base.clone())),
+    );
+
+    let mut second_fold = BTreeMap::new();
+    second_fold.insert(
+        203,
+        frame(
+            checkpoints(&alpha, left_redo.clone()),
+            checkpoints(&alpha, right_redo.clone()),
+        ),
+    );
+    let mut right_at_204 = checkpoints(&alpha, right_redo.clone());
+    right_at_204.insert(beta.clone(), positionless.clone());
+    second_fold.insert(
+        204,
+        frame(checkpoints(&alpha, left_redo.clone()), right_at_204),
+    );
+
+    let mut left_at_206 = checkpoints(&alpha, left_base.clone());
+    left_at_206.insert(observed_late.clone(), positionless.clone());
+    let third_fold = BTreeMap::from([(
+        206,
+        frame(left_at_206, checkpoints(&alpha, right_base.clone())),
+    )]);
+
+    let streams = fold_paired_checkpoint_redo_sparse_stream_chains_preserving_fold_identity(
+        &[alpha.clone(), beta.clone(), catalog_only.clone()],
+        &[
+            BranchMergePairedCheckpointRedoSparseFold {
+                redo_fold_identity: identities[0].clone(),
+                frames: first_fold,
+            },
+            BranchMergePairedCheckpointRedoSparseFold {
+                redo_fold_identity: identities[1].clone(),
+                frames: second_fold,
+            },
+            BranchMergePairedCheckpointRedoSparseFold {
+                redo_fold_identity: identities[2].clone(),
+                frames: third_fold,
+            },
+        ],
+    );
+    assert_eq!(
+        streams
+            .iter()
+            .map(|stream| stream.checkpoint_id.clone())
+            .collect::<Vec<_>>(),
+        vec![alpha.clone(), beta.clone(), catalog_only.clone(), observed_late.clone()],
+    );
+
+    let slots = |checkpoint_id: &[u8]| {
+        &streams
+            .iter()
+            .find(|stream| stream.checkpoint_id == checkpoint_id)
+            .unwrap()
+            .slots
+    };
+    let expected_slots = [(0, 200), (0, 201), (0, 203), (1, 203), (1, 204), (2, 206)];
+    for stream in &streams {
+        assert_eq!(
+            stream
+                .slots
+                .iter()
+                .map(|slot| (slot.fold_ordinal, slot.order))
+                .collect::<Vec<_>>(),
+            expected_slots,
+            "reused order 203 remains distinguishable by fold ordinal",
+        );
+        for (index, slot) in stream.slots.iter().enumerate() {
+            assert_eq!(slot.redo_fold_identity, identities[[0, 0, 0, 1, 1, 2][index]]);
+        }
+    }
+    assert_eq!(slots(&alpha)[0].left, Some(left_base.clone()));
+    assert_eq!(slots(&alpha)[3].left, Some(left_redo.clone()));
+    assert_eq!(slots(&beta)[2].left, Some(positionless.clone()));
+    assert_eq!(slots(&beta)[4].right, Some(positionless.clone()));
+    assert!(slots(&catalog_only)
+        .iter()
+        .all(|slot| slot.left.is_none() && slot.right.is_none()));
+    assert_eq!(slots(&observed_late)[5].left, Some(positionless.clone()));
+
+    let compacted =
+        compress_paired_checkpoint_redo_sparse_stream_chains_preserving_fold_identity(&streams);
+    let runs = |checkpoint_id: &[u8]| {
+        &compacted
+            .iter()
+            .find(|snapshot| snapshot.checkpoint_id == checkpoint_id)
+            .unwrap()
+            .runs
+    };
+    assert_eq!(
+        runs(&alpha)
+            .iter()
+            .map(|run| (run.fold_ordinal, run.first_order, run.last_order))
+            .collect::<Vec<_>>(),
+        vec![(0, 200, 201), (0, 203, 203), (1, 203, 204), (2, 206, 206)],
+        "sparse gaps and fold boundaries split compressed ranges",
+    );
+    assert_eq!(
+        runs(&alpha)
+            .iter()
+            .map(|run| run.redo_fold_identity.clone())
+            .collect::<Vec<_>>(),
+        vec![identities[0].clone(), identities[0].clone(), identities[1].clone(), identities[2].clone()],
+        "a reused pair remains attached to its separate fold occurrences",
+    );
+    assert_eq!(runs(&beta).len(), 5);
+    assert_eq!(runs(&beta)[1].left, Some(positionless.clone()));
+    assert_eq!(runs(&beta)[3].right, Some(positionless.clone()));
+    assert_eq!(runs(&catalog_only).len(), 4);
+    assert_eq!(runs(&observed_late).len(), 4);
+    assert_eq!(runs(&observed_late)[3].left, Some(positionless));
+}
+
+#[test]
 fn paired_checkpoint_redo_compaction_preserves_write_ahead_identities() {
     let identity_rows = PAIRED_WRITE_AHEAD_REDO_IDENTITIES
         .split("\n\n")
@@ -24267,6 +24448,275 @@ fn paired_segment_rotation_identity_survives_sparse_checkpoint_fold_compaction_c
     assert_eq!(runs(&observed_late)[2].segment_identities, second_segments[0..1]);
     assert_eq!(runs(&observed_late)[3].segment_identities, second_segments[1..2]);
     assert_eq!(runs(&observed_late)[4].segment_identities, second_segments[2..3]);
+}
+
+#[test]
+fn paired_redo_fold_identity_survives_sparse_segment_rotation_chains() {
+    let fold_rows = PAIRED_REDO_FOLD_IDENTITIES
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    let first_segment_rows = PAIRED_SPARSE_SEGMENT_ROTATIONS
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    let later_segment_rows = PAIRED_SEGMENT_FOLD_CHAIN
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    let checkpoint_states = PAIRED_CHECKPOINT_REDO
+        .split("\n\n")
+        .map(parse_checkpoint_fixture)
+        .collect::<Vec<_>>();
+    assert_eq!(fold_rows.len(), 3);
+    assert_eq!(first_segment_rows.len(), 4);
+    assert_eq!(later_segment_rows.len(), 3);
+    assert_eq!(checkpoint_states.len(), 5);
+
+    let fold_identities = fold_rows
+        .iter()
+        .map(|row| BranchMergePairedRedoFoldIdentity {
+            left_fold: row.fields[&id(2)].encode().unwrap(),
+            right_fold: row.fields[&id(3)].encode().unwrap(),
+        })
+        .collect::<Vec<_>>();
+    let segment_identities = |rows: &[KeyedRow]| {
+        rows.iter()
+            .map(|row| BranchMergePairedWriteAheadSegmentIdentity {
+                left_segment: row.fields[&id(2)].encode().unwrap(),
+                right_segment: row.fields[&id(3)].encode().unwrap(),
+            })
+            .collect::<Vec<_>>()
+    };
+    let first_segments = segment_identities(&first_segment_rows);
+    let later_segments = segment_identities(&later_segment_rows);
+    assert_eq!(fold_identities[0], fold_identities[2]);
+    assert_ne!(fold_identities[0], fold_identities[1]);
+    assert_ne!(first_segments[0], first_segments[1]);
+    assert_eq!(first_segments[2], later_segments[0]);
+    assert_eq!(first_segments[0], later_segments[2]);
+
+    let alpha = b"fold-segment/alpha".to_vec();
+    let beta = b"fold-segment/beta".to_vec();
+    let catalog_only = b"fold-segment/catalog-only".to_vec();
+    let observed_late = b"fold-segment/observed-late".to_vec();
+    let left_base = checkpoint_states[0].clone();
+    let right_base = checkpoint_states[1].clone();
+    let left_redo = checkpoint_states[2].clone();
+    let right_redo = checkpoint_states[3].clone();
+    let positionless = checkpoint_states[4].clone();
+    assert_eq!(positionless.position, None);
+    let checkpoints = |checkpoint_id: &[u8], state: CheckpointGeneration| {
+        BTreeMap::from([(checkpoint_id.to_vec(), state)])
+    };
+    let frame = |left, right, segment_identity| BranchMergePairedCheckpointRedoSegmentFrame {
+        checkpoints: BranchMergePairedCheckpointRedoFrame { left, right },
+        segment_identity,
+    };
+
+    let first_states = [
+        (
+            checkpoints(&alpha, left_base.clone()),
+            checkpoints(&alpha, right_base.clone()),
+        ),
+        (
+            checkpoints(&alpha, left_base.clone()),
+            checkpoints(&alpha, right_base.clone()),
+        ),
+        (checkpoints(&beta, positionless.clone()), BTreeMap::new()),
+        (
+            checkpoints(&alpha, left_redo.clone()),
+            checkpoints(&alpha, right_redo.clone()),
+        ),
+    ];
+    let mut first_fold = BTreeMap::new();
+    for ((order, (left, right)), segment_identity) in [40_u64, 41, 43, 44]
+        .into_iter()
+        .zip(first_states)
+        .zip(&first_segments)
+    {
+        first_fold.insert(order, frame(left, right, segment_identity.clone()));
+    }
+
+    let later_states = [
+        (
+            checkpoints(&alpha, left_redo.clone()),
+            checkpoints(&alpha, right_redo.clone()),
+        ),
+        (
+            checkpoints(&alpha, left_redo.clone()),
+            checkpoints(&alpha, right_redo.clone()),
+        ),
+        (BTreeMap::new(), checkpoints(&beta, positionless.clone())),
+    ];
+    let mut later_fold = BTreeMap::new();
+    for ((order, (left, right)), segment_identity) in [43_u64, 44, 45]
+        .into_iter()
+        .zip(later_states)
+        .zip(&later_segments)
+    {
+        later_fold.insert(order, frame(left, right, segment_identity.clone()));
+    }
+
+    let mut left_at_46 = checkpoints(&alpha, left_base.clone());
+    left_at_46.insert(observed_late.clone(), positionless.clone());
+    let third_fold = BTreeMap::from([(
+        46,
+        frame(
+            left_at_46,
+            checkpoints(&alpha, right_base.clone()),
+            first_segments[0].clone(),
+        ),
+    )]);
+
+    let streams = fold_paired_checkpoint_redo_sparse_stream_chains_preserving_fold_and_segment_rotation_identity(
+        &[alpha.clone(), beta.clone(), catalog_only.clone()],
+        &[
+            BranchMergePairedCheckpointRedoFoldSegmentRotationFold {
+                redo_fold_identity: fold_identities[0].clone(),
+                frames: first_fold,
+            },
+            BranchMergePairedCheckpointRedoFoldSegmentRotationFold {
+                redo_fold_identity: fold_identities[1].clone(),
+                frames: later_fold,
+            },
+            BranchMergePairedCheckpointRedoFoldSegmentRotationFold {
+                redo_fold_identity: fold_identities[2].clone(),
+                frames: third_fold,
+            },
+        ],
+    );
+    assert_eq!(
+        streams
+            .iter()
+            .map(|stream| stream.checkpoint_id.clone())
+            .collect::<Vec<_>>(),
+        vec![alpha.clone(), beta.clone(), catalog_only.clone(), observed_late.clone()],
+    );
+    let slots = |checkpoint_id: &[u8]| {
+        &streams
+            .iter()
+            .find(|stream| stream.checkpoint_id == checkpoint_id)
+            .unwrap()
+            .slots
+    };
+    let expected_orders = [
+        (0, 40), (0, 41), (0, 43), (0, 44), (1, 43), (1, 44), (1, 45), (2, 46),
+    ];
+    let expected_folds = [0, 0, 0, 0, 1, 1, 1, 2]
+        .map(|fold| fold_identities[fold].clone());
+    let expected_segments = first_segments
+        .iter()
+        .chain(&later_segments)
+        .cloned()
+        .chain([first_segments[0].clone()])
+        .collect::<Vec<_>>();
+    for stream in &streams {
+        assert_eq!(
+            stream
+                .slots
+                .iter()
+                .map(|slot| (slot.fold_ordinal, slot.order))
+                .collect::<Vec<_>>(),
+            expected_orders,
+            "overlapping order 43 stays scoped to its sparse fold",
+        );
+        assert_eq!(
+            stream
+                .slots
+                .iter()
+                .map(|slot| slot.redo_fold_identity.clone())
+                .collect::<Vec<_>>(),
+            expected_folds,
+            "the exact directional fold pair accompanies each checkpoint observation",
+        );
+        assert_eq!(
+            stream
+                .slots
+                .iter()
+                .map(|slot| slot.segment_identity.clone())
+                .collect::<Vec<_>>(),
+            expected_segments,
+            "the exact directional segment rotation accompanies each observation",
+        );
+    }
+    assert_eq!(slots(&alpha)[0].left, Some(left_base.clone()));
+    assert_eq!(slots(&alpha)[2].left, None);
+    assert_eq!(slots(&alpha)[3].right, Some(right_redo.clone()));
+    assert_eq!(slots(&alpha)[4].left, Some(left_redo.clone()));
+    assert_eq!(slots(&beta)[2].left, Some(positionless.clone()));
+    assert_eq!(slots(&beta)[6].right, Some(positionless.clone()));
+    assert!(slots(&catalog_only)
+        .iter()
+        .all(|slot| slot.left.is_none() && slot.right.is_none()));
+    assert_eq!(slots(&observed_late)[7].left, Some(positionless.clone()));
+
+    let compacted =
+        compress_paired_checkpoint_redo_sparse_stream_chains_preserving_fold_and_segment_rotation_identity(
+            &streams,
+        );
+    let runs = |checkpoint_id: &[u8]| {
+        &compacted
+            .iter()
+            .find(|stream| stream.checkpoint_id == checkpoint_id)
+            .unwrap()
+            .runs
+    };
+    assert_eq!(
+        runs(&alpha)
+            .iter()
+            .map(|run| (
+                run.fold_ordinal,
+                run.first_order,
+                run.last_order,
+                run.left.clone(),
+                run.right.clone(),
+            ))
+            .collect::<Vec<_>>(),
+        vec![
+            (0, 40, 41, Some(left_base.clone()), Some(right_base.clone())),
+            (0, 43, 43, None, None),
+            (0, 44, 44, Some(left_redo.clone()), Some(right_redo.clone())),
+            (1, 43, 44, Some(left_redo), Some(right_redo)),
+            (1, 45, 45, None, None),
+            (2, 46, 46, Some(left_base), Some(right_base)),
+        ],
+        "gaps, state changes, and fold boundaries produce distinct state runs",
+    );
+    assert_eq!(
+        runs(&alpha)
+            .iter()
+            .map(|run| run.redo_fold_identity.clone())
+            .collect::<Vec<_>>(),
+        vec![
+            fold_identities[0].clone(),
+            fold_identities[0].clone(),
+            fold_identities[0].clone(),
+            fold_identities[1].clone(),
+            fold_identities[1].clone(),
+            fold_identities[2].clone(),
+        ],
+    );
+    assert_eq!(runs(&alpha)[0].segment_identities, first_segments[0..2]);
+    assert_eq!(runs(&alpha)[3].segment_identities, later_segments[0..2]);
+    assert_eq!(runs(&alpha)[5].segment_identities, vec![first_segments[0].clone()]);
+    assert_eq!(runs(&beta)[1].left, Some(positionless.clone()));
+    assert_eq!(runs(&beta)[4].right, Some(positionless.clone()));
+    assert_eq!(
+        runs(&catalog_only)
+            .iter()
+            .map(|run| (run.fold_ordinal, run.first_order, run.last_order))
+            .collect::<Vec<_>>(),
+        vec![(0, 40, 41), (0, 43, 44), (1, 43, 45), (2, 46, 46)],
+        "the order gap splits while adjacent omitted orders compact within each fold",
+    );
+    assert_eq!(
+        runs(&catalog_only)[1].segment_identities,
+        first_segments[2..4],
+        "segment rotations survive omission-run compaction",
+    );
+    assert_eq!(runs(&observed_late).len(), 4);
+    assert_eq!(runs(&observed_late)[3].left, Some(positionless));
 }
 
 #[test]
