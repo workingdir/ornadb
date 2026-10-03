@@ -36,3 +36,34 @@ fn paired_recursive_folds_preserve_sparse_distinct_anchor_order() {
         "sparse pre-recursion distinct folds retain each lane's first anchor order while recursive duplicate candidates share only that lane's identity set"
     );
 }
+
+#[test]
+fn paired_recursive_folds_keep_empty_sparse_distinct_anchor_independent() {
+    let mut session = AdmittedReplSession::with_reference_standard(Limits::default())
+        .unwrap_or_else(|error| panic!("reference standard profile failed with {}", error.code()));
+    assert_eq!(
+        session.submit(include_str!("fixtures/stdlib-use-query-2213.orna")),
+        Ok(None)
+    );
+    assert_eq!(
+        session.submit(include_str!("fixtures/stdlib-use-collection-4tksn.orna")),
+        Ok(None)
+    );
+
+    let actual = session
+        .submit(include_str!(
+            "fixtures/stdlib-query-paired-recursive-empty-distinct-anchor-t7vp3.orna"
+        ))
+        .unwrap_or_else(|error| panic!("empty paired recursive distinct anchors failed with {}", error.code()));
+    let expected = CanonicalValue::new(Raw::Tag(
+        60015,
+        Box::new(Raw::Array(vec![raw_ints(&[]), raw_ints(&[20, 10, 30])])),
+    ))
+    .expect("empty paired recursive distinct anchor result is canonical");
+
+    assert_eq!(
+        actual,
+        Some(expected),
+        "an empty sparse distinct anchor owns an empty fold and does not suppress the paired nonempty anchor's recursive values"
+    );
+}
