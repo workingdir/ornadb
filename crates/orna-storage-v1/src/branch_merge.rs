@@ -494,6 +494,46 @@ pub struct BranchMergeColumnRestoreStormDepthPathWaveSlotSnapshot {
     pub fragments: Option<Vec<BranchMergeColumnRestoreStormDepthPathFragmentSnapshot>>,
 }
 
+/// One restore-wave slot for a canonical snapshot path within a column fold.
+///
+/// `depth_labels: None` means the column was omitted from this wave. A
+/// present column with no occurrence of this path uses `Some(Vec::new())`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BranchMergeColumnRestoreStormSnapshotPathWaveSlotSnapshot {
+    pub order: u64,
+    pub depth_labels: Option<Vec<usize>>,
+}
+
+/// One canonical snapshot path folded across a stable column's restore storm.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BranchMergeColumnRestoreStormSnapshotPathFoldSnapshot {
+    pub storm_index: usize,
+    pub first_order: u64,
+    pub last_order: u64,
+    pub table: ObjectId,
+    pub column: ObjectId,
+    pub snapshot_path: CanonicalValue,
+    pub waves: Vec<BranchMergeColumnRestoreStormSnapshotPathWaveSlotSnapshot>,
+}
+
+/// One restore storm in a chained canonical snapshot-path fold.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BranchMergeColumnRestoreSnapshotPathStormSnapshot {
+    pub storm_index: usize,
+    pub first_order: u64,
+    pub last_order: u64,
+    pub waves: Vec<BranchMergeColumnRestoreStormSnapshotPathWaveSlotSnapshot>,
+}
+
+/// One canonical snapshot path folded across all restore storms for a column.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BranchMergeColumnRestoreSnapshotPathChainFoldSnapshot {
+    pub table: ObjectId,
+    pub column: ObjectId,
+    pub snapshot_path: CanonicalValue,
+    pub storms: Vec<BranchMergeColumnRestoreSnapshotPathStormSnapshot>,
+}
+
 /// A canonical column cell released with its source parent identity intact.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BranchMergeParentColumnDepthEvent {
@@ -1619,6 +1659,153 @@ impl BranchMergeTombstoneHistory {
             }
         }
         slots
+    }
+
+    /// Folds each canonical snapshot path through every depth wave of its
+    /// stable table-column pair in each restore storm.
+    ///
+    /// Paths are discovered from the committed cells, then each result gets a
+    /// dense wave timeline. `None` marks an omitted column; `Some(Vec::new())`
+    /// marks a present column where that exact path was omitted. A path found
+    /// in multiple depths lists every local label, so a sibling path cannot
+    /// adopt its identity. Storm boundaries remain independent. MERGE-1 is
+    /// silent about this inverse view; v1 keeps one fold per stable column and
+    /// canonical path within each storm. Paths follow their first occurrence
+    /// while scanning restore order, depth label, then retained cell order.
+    pub fn column_restore_storm_snapshot_path_folds(
+        &self,
+    ) -> Vec<BranchMergeColumnRestoreStormSnapshotPathFoldSnapshot> {
+        let mut folds = Vec::new();
+        for column_fold in self.column_restore_storm_folds() {
+            for (storm_index, storm) in column_fold.storms.into_iter().enumerate() {
+                let mut snapshot_paths = Vec::new();
+                for wave in &storm.waves {
+                    if let Some(fragments) = &wave.fragments {
+                        for (path, _) in fragments
+                            .iter()
+                            .flat_map(|fragment| fragment.cells.iter())
+                        {
+                            if !snapshot_paths.contains(path) {
+                                snapshot_paths.push(path.clone());
+                            }
+                        }
+                    }
+                }
+                for snapshot_path in snapshot_paths {
+                    let waves = storm
+                        .waves
+                        .iter()
+                        .map(|wave| {
+                            let depth_labels = wave.fragments.as_ref().map(|fragments| {
+                                fragments
+                                    .iter()
+                                    .filter_map(|fragment| {
+                                        fragment
+                                            .cells
+                                            .iter()
+                                            .any(|(path, _)| path == &snapshot_path)
+                                            .then_some(fragment.label)
+                                    })
+                                    .collect()
+                            });
+                            BranchMergeColumnRestoreStormSnapshotPathWaveSlotSnapshot {
+                                order: wave.order,
+                                depth_labels,
+                            }
+                        })
+                        .collect();
+                    folds.push(BranchMergeColumnRestoreStormSnapshotPathFoldSnapshot {
+                        storm_index,
+                        first_order: storm.first_order,
+                        last_order: storm.last_order,
+                        table: column_fold.table,
+                        column: column_fold.column,
+                        snapshot_path,
+                        waves,
+                    });
+                }
+            }
+        }
+        folds
+    }
+
+    /// Folds each stable canonical snapshot path through the complete chain
+    /// of restore storms for its table-column pair.
+    ///
+    /// Unlike per-storm path folds, this view keeps one path identity across
+    /// every storm while retaining explicit storm ranges. Every storm has
+    /// dense wave slots: an omitted column remains `None`, while a present
+    /// column where the path is absent remains `Some(Vec::new())`. Depth
+    /// labels stay local to their wave and do not flow through omitted slots.
+    /// MERGE-1 is silent about this chained fold, so v1 groups by stable
+    /// `(table, column, canonical row key)` identity and keeps every storm's
+    /// local depth roster unchanged.
+    pub fn column_restore_snapshot_path_chain_folds(
+        &self,
+    ) -> Vec<BranchMergeColumnRestoreSnapshotPathChainFoldSnapshot> {
+        let mut folds = Vec::new();
+        for column_fold in self.column_restore_storm_folds() {
+            let mut snapshot_paths = Vec::new();
+            for storm in &column_fold.storms {
+                for wave in &storm.waves {
+                    if let Some(fragments) = &wave.fragments {
+                        for (path, _) in fragments
+                            .iter()
+                            .flat_map(|fragment| fragment.cells.iter())
+                        {
+                            if !snapshot_paths.contains(path) {
+                                snapshot_paths.push(path.clone());
+                            }
+                        }
+                    }
+                }
+            }
+
+            for snapshot_path in snapshot_paths {
+                let storms = column_fold
+                    .storms
+                    .iter()
+                    .enumerate()
+                    .map(|(storm_index, storm)| {
+                        let waves = storm
+                            .waves
+                            .iter()
+                            .map(|wave| {
+                                let depth_labels = wave.fragments.as_ref().map(|fragments| {
+                                    fragments
+                                        .iter()
+                                        .filter_map(|fragment| {
+                                            fragment
+                                                .cells
+                                                .iter()
+                                                .any(|(path, _)| path == &snapshot_path)
+                                                .then_some(fragment.label)
+                                        })
+                                        .collect()
+                                });
+                                BranchMergeColumnRestoreStormSnapshotPathWaveSlotSnapshot {
+                                    order: wave.order,
+                                    depth_labels,
+                                }
+                            })
+                            .collect();
+                        BranchMergeColumnRestoreSnapshotPathStormSnapshot {
+                            storm_index,
+                            first_order: storm.first_order,
+                            last_order: storm.last_order,
+                            waves,
+                        }
+                    })
+                    .collect();
+                folds.push(BranchMergeColumnRestoreSnapshotPathChainFoldSnapshot {
+                    table: column_fold.table,
+                    column: column_fold.column,
+                    snapshot_path,
+                    storms,
+                });
+            }
+        }
+        folds
     }
 
     /// Submits a complete paired restore wave from at least two distinct
