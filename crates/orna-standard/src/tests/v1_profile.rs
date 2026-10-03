@@ -42,7 +42,7 @@ use crate::{
 #[test]
 fn pinned_ui_presentation_helpers_are_included_as_source() {
     let sources = reference_standard_sources_v1();
-    assert_eq!(sources.len(), 56);
+    assert_eq!(sources.len(), 57);
     assert_eq!(sources[49].0, REFERENCE_STANDARD_UI_PATH_V1);
     let parsed = orna_syntax_v1::parse_module_with_file(
         &sources[49].1,
@@ -78,6 +78,30 @@ fn pinned_algorithm_module_is_part_of_the_captured_std_snapshot() {
         .expect("algorithm source bytes are recorded by the captured std profile");
     reference_standard_catalogue_v1()
         .expect("algorithm imports resolve in the captured standard catalogue");
+}
+
+#[test]
+fn pinned_concurrent_result_helpers_are_included_in_the_captured_snapshot() {
+    let sources = reference_standard_sources_v1();
+    let (index, (path, source)) = sources
+        .iter()
+        .enumerate()
+        .find(|(_, (path, _))| path == crate::REFERENCE_STANDARD_CONCURRENT_RESULT_PATH_V1)
+        .expect("the pinned source bundle includes std.concurrent.result");
+    assert_eq!(index, 56, "the async result helper source appends to the bundle");
+    assert_eq!(path, crate::REFERENCE_STANDARD_CONCURRENT_RESULT_PATH_V1);
+    for declaration in [
+        "pub fn collect<T, E>(",
+        "pub fn parallel<T, E>(",
+        "pub fn parallel_map<T, U, E>(",
+    ] {
+        assert!(source.contains(declaration), "missing {declaration}");
+    }
+    crate::reference_standard_profile_v1()
+        .verify_source(path, source)
+        .expect("async result helper source bytes are recorded by the pinned std profile");
+    crate::reference_standard_catalogue_v1()
+        .expect("the concurrent result helper resolves against its pinned dependencies");
 }
 
 #[test]
@@ -1069,7 +1093,7 @@ fn reference_standard_uses_pinned_orna_1_source_and_resolves_its_imports() {
     ] {
         assert!(sources[33].1.contains(contract), "missing std.test contract `{contract}`");
     }
-    assert_eq!(sources.len(), 56);
+    assert_eq!(sources.len(), 57);
     assert_eq!(sources[49].0, REFERENCE_STANDARD_UI_PATH_V1);
     for declaration in [
         "pub fn Field<T>(label: Str, value: T): UI",
@@ -1531,7 +1555,7 @@ fn pinned_filesystem_effect_is_visible_to_consumers_and_forbidden_in_assertions(
 #[test]
 fn pinned_filesystem_path_and_metadata_modules_are_captured_and_typecheck() {
     let sources = reference_standard_sources_v1();
-    assert_eq!(sources.len(), 56);
+    assert_eq!(sources.len(), 57);
     for (index, path) in [
         (42, REFERENCE_STANDARD_IO_PATH_MODULE_PATH_V1),
         (43, REFERENCE_STANDARD_IO_METADATA_PATH_V1),
@@ -1595,7 +1619,7 @@ fn pinned_filesystem_path_and_metadata_modules_are_captured_and_typecheck() {
 #[test]
 fn pinned_io_buffer_module_is_captured_and_resolves_stream_adapters() {
     let sources = reference_standard_sources_v1();
-    assert_eq!(sources.len(), 56);
+    assert_eq!(sources.len(), 57);
     let (path, source) = sources
         .iter()
         .find(|(path, _)| path == REFERENCE_STANDARD_IO_BUFFER_PATH_V1)
@@ -1632,7 +1656,7 @@ fn pinned_io_buffer_module_is_captured_and_resolves_stream_adapters() {
 #[test]
 fn pinned_process_and_environment_modules_are_captured_and_typecheck() {
     let sources = reference_standard_sources_v1();
-    assert_eq!(sources.len(), 56);
+    assert_eq!(sources.len(), 57);
     for (index, path) in [
         (44, REFERENCE_STANDARD_IO_PROCESS_PATH_V1),
         (45, REFERENCE_STANDARD_IO_ENVIRONMENT_PATH_V1),
