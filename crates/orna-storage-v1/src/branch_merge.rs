@@ -263,6 +263,41 @@ pub struct BranchMergePairedCheckpointPinIdentity {
     pub generation: CheckpointGeneration,
 }
 
+/// One directional segment incarnation pinned by a checkpoint generation.
+///
+/// The segment ID is copied from that side of the paired segment identity;
+/// it is never inferred from a sibling pin or selected by generation order.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BranchMergePairedCheckpointSegmentPinIdentity {
+    pub checkpoint_id: CheckpointId,
+    pub generation: CheckpointGeneration,
+    pub segment_id: Vec<u8>,
+}
+
+/// One sparse occurrence retaining checkpoint-bound pins and its source pair.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BranchMergePairedCheckpointRedoFoldSegmentRotationSparsePinMergeChainSlotSnapshot {
+    /// Zero-based position of the source chain supplied to the merge.
+    pub merge_ordinal: usize,
+    /// Position of the sparse fold inside that source chain.
+    pub fold_ordinal: usize,
+    pub order: u64,
+    pub left_pin: Option<BranchMergePairedCheckpointSegmentPinIdentity>,
+    pub right_pin: Option<BranchMergePairedCheckpointSegmentPinIdentity>,
+    pub redo_fold_identity: BranchMergePairedRedoFoldIdentity,
+    /// Kept even when one or both checkpoint sides have no pin.
+    pub segment_identity: BranchMergePairedWriteAheadSegmentIdentity,
+}
+
+/// Checkpoint streams merged across sparse chains with segment pins bound to
+/// both their checkpoint IDs and directional segment incarnations.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BranchMergePairedCheckpointRedoFoldSegmentRotationSparsePinMergeChainSnapshot {
+    pub checkpoint_id: CheckpointId,
+    pub slots:
+        Vec<BranchMergePairedCheckpointRedoFoldSegmentRotationSparsePinMergeChainSlotSnapshot>,
+}
+
 /// One sparse occurrence retaining each directional checkpoint pin explicitly.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BranchMergePairedCheckpointRedoFoldSparsePinMergeChainSlotSnapshot {
@@ -1543,6 +1578,66 @@ pub fn merge_paired_checkpoint_redo_sparse_stream_chains_preserving_fold_and_seg
             }
         })
         .collect()
+}
+
+/// Merges sparse segment-pin chains while binding every directional segment
+/// to the checkpoint generation that pins it.
+///
+/// The output catalog unions known IDs with IDs observed in any source chain.
+/// Source-chain, fold, and order coordinates remain distinct; no generation
+/// comparison chooses a winner. A side's pin is present only when that source
+/// occurrence has a checkpoint generation, and it carries the same stream ID
+/// plus that side's exact segment ID. The paired segment identity is retained
+/// even when one or both pins are omitted. This stable provenance rule defines
+/// the local sparse projection where the reference is silent.
+pub fn merge_paired_checkpoint_redo_sparse_stream_chains_preserving_fold_and_segment_pin_identity(
+    known_checkpoint_ids: &[CheckpointId],
+    merge_chains: &[Vec<
+        BranchMergePairedCheckpointRedoFoldSegmentRotationSparseStreamChainSnapshot,
+    >],
+) -> Vec<BranchMergePairedCheckpointRedoFoldSegmentRotationSparsePinMergeChainSnapshot> {
+    merge_paired_checkpoint_redo_sparse_stream_chains_preserving_fold_and_segment_rotation_identity(
+        known_checkpoint_ids,
+        merge_chains,
+    )
+    .into_iter()
+    .map(|stream| {
+        let checkpoint_id = stream.checkpoint_id;
+        let slots = stream
+            .slots
+            .into_iter()
+            .map(|slot| {
+                let left_pin = slot.left.clone().map(|generation| {
+                    BranchMergePairedCheckpointSegmentPinIdentity {
+                        checkpoint_id: checkpoint_id.clone(),
+                        generation,
+                        segment_id: slot.segment_identity.left_segment.clone(),
+                    }
+                });
+                let right_pin = slot.right.clone().map(|generation| {
+                    BranchMergePairedCheckpointSegmentPinIdentity {
+                        checkpoint_id: checkpoint_id.clone(),
+                        generation,
+                        segment_id: slot.segment_identity.right_segment.clone(),
+                    }
+                });
+                BranchMergePairedCheckpointRedoFoldSegmentRotationSparsePinMergeChainSlotSnapshot {
+                    merge_ordinal: slot.merge_ordinal,
+                    fold_ordinal: slot.fold_ordinal,
+                    order: slot.order,
+                    left_pin,
+                    right_pin,
+                    redo_fold_identity: slot.redo_fold_identity,
+                    segment_identity: slot.segment_identity,
+                }
+            })
+            .collect();
+        BranchMergePairedCheckpointRedoFoldSegmentRotationSparsePinMergeChainSnapshot {
+            checkpoint_id,
+            slots,
+        }
+    })
+    .collect()
 }
 
 /// Compacts merged segment chains without erasing any directional rotation.
