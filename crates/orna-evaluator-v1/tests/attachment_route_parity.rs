@@ -2676,6 +2676,40 @@ fn sparse_nested_storm_folds_preserve_terminal_route_identity() {
         leaf_middle,
         "the intermediate paired chain selects the computed middle package snapshot"
     );
+    let identity_guarded_omission_fold = resolver
+        .extend_nested_terminal_pair_sparse_checkpoint_storm_rebind_then_omission_chains_validating_rebound_terminal_identity(
+            &first_stage,
+            &first_only_rebind_chains,
+            &first_chain_identity,
+            &omission_tail_chains,
+        )
+        .unwrap();
+    assert_eq!(
+        identity_guarded_omission_fold.terminal_route_identity(),
+        first_chain_identity,
+        "the expected rebind identity remains exact through nested omission chains"
+    );
+    assert_eq!(
+        identity_guarded_omission_fold
+            .final_session()
+            .database(aliases[4])
+            .unwrap()
+            .pin()
+            .commit()
+            .as_str(),
+        leaf_final,
+        "identity validation preserves the actual terminal package snapshot"
+    );
+    assert!(matches!(
+        resolver
+            .extend_nested_terminal_pair_sparse_checkpoint_storm_rebind_then_omission_chains_validating_rebound_terminal_identity(
+                &first_stage,
+                &first_only_rebind_chains,
+                &middle_chain_identity,
+                &omission_tail_chains,
+            ),
+        Err(AttachmentError::RetainedSnapshotUnavailable)
+    ));
     let expected_chain_identities = [
         first_chain_identity.clone(),
         middle_chain_identity.clone(),
