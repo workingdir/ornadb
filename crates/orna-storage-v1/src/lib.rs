@@ -16,7 +16,8 @@ mod publication_policy;
 pub use branch_merge::{
     BranchMergeBudget, BranchMergeColumnDepthEvent, BranchMergeColumnDepthFragmentSnapshot,
     BranchMergeColumnDepthFragments, BranchMergeColumnDepthLadderEvent,
-    BranchMergeColumnDepthLadderSnapshot,
+    BranchMergeColumnDepthLadderSnapshot, BranchMergeColumnDepthLadderWaveSnapshot,
+    BranchMergeColumnRestoreLadderFoldSnapshot,
     BranchMergeConflict, BranchMergeDepthFragmentRecovery,
     BranchMergeDepthWaveRecovery, BranchMergeError, BranchMergePlan,
     BranchMergeMultiParentColumnDepthLadderWaveEvent,
