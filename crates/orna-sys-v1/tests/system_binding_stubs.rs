@@ -1,4 +1,4 @@
-use orna_syntax_v1::{Declaration, TypeExpr, parse_module};
+use orna_syntax_v1::{Declaration, Expr, LiteralKind, TypeExpr, parse_module};
 use orna_sys_v1::{
     AbiType, EffectSet, OperationContract, SystemEffect, system_binding_stubs, system_provider_abi,
     system_provider_abi_json,
@@ -85,6 +85,35 @@ fn validate_stub_dispatch_inventory(
     Ok(())
 }
 
+fn validate_stub_body(body: &Expr) -> Result<(), String> {
+    let Expr::Call {
+        callee, arguments, ..
+    } = body
+    else {
+        return Err("stub body is not the generated declaration error".to_owned());
+    };
+    if !matches!(callee.as_ref(), Expr::Name { text, .. } if text == "error") {
+        return Err("stub body does not call error".to_owned());
+    }
+    let is_string_argument = |index: usize, name: &str, value: &str| {
+        arguments.get(index).is_some_and(|argument| {
+            argument.name.as_deref() == Some(name)
+                && matches!(
+                    &argument.value,
+                    Expr::Literal { text, kind: LiteralKind::String, .. }
+                        if text == &format!("\"{value}\"")
+                )
+        })
+    };
+    if arguments.len() != 2
+        || !is_string_argument(0, "code", "sys.binding.stub")
+        || !is_string_argument(1, "message", "generated declaration stub")
+    {
+        return Err("stub body differs from the canonical generated declaration error".to_owned());
+    }
+    Ok(())
+}
+
 fn validate_stub_contract(source: &str, operation: &OperationContract) -> Result<(), String> {
     let parsed = parse_module(source);
     if !parsed.is_ok() {
@@ -118,9 +147,10 @@ fn validate_stub_contract(source: &str, operation: &OperationContract) -> Result
         }
     }
 
-    let Declaration::Function { signature, .. } = &parsed.value.items[0].declaration else {
+    let Declaration::Function { signature, body } = &parsed.value.items[0].declaration else {
         return Err("stub declaration is not a function".to_owned());
     };
+    validate_stub_body(body)?;
     let expected_name = local_function_name(operation);
     if signature.name != expected_name {
         return Err(format!(
@@ -225,6 +255,7 @@ fn generated_sys_stubs_parse_resolve_to_registry_types_and_dispatch_one_to_one()
         .map(|row| (row["name"].as_str().expect("dispatch operation name"), row))
         .collect::<std::collections::BTreeMap<_, _>>();
     let operations = abi.operations().collect::<Vec<_>>();
+    let operation_count = operations.len();
     let expected_operation_ids = operations
         .iter()
         .map(|operation| operation.id.as_str())
@@ -265,7 +296,8 @@ fn generated_sys_stubs_parse_resolve_to_registry_types_and_dispatch_one_to_one()
         "an operation may own only one emitted stub"
     );
 
-    assert_eq!(parsed.value.items.len(), operations.len());
+    assert_eq!(parsed.value.items.len(), operation_count);
+    let mut validated_stub_bodies = 0;
     for ((item, operation), (module_marker, marker, aliases)) in parsed
         .value
         .items
@@ -322,9 +354,16 @@ fn generated_sys_stubs_parse_resolve_to_registry_types_and_dispatch_one_to_one()
             expected_role.as_deref(),
             "stub marker {marker} resolves to the dispatch semantic role"
         );
-        let Declaration::Function { signature, .. } = &item.declaration else {
+        let Declaration::Function { signature, body } = &item.declaration else {
             panic!("each generated stub must be a function declaration")
         };
+        validate_stub_body(body).unwrap_or_else(|error| {
+            panic!(
+                "generated stub body for {} is invalid: {error}",
+                operation.id.as_str()
+            )
+        });
+        validated_stub_bodies += 1;
         assert_eq!(signature.name, local_function_name(operation));
         assert_eq!(
             signature
@@ -393,6 +432,10 @@ fn generated_sys_stubs_parse_resolve_to_registry_types_and_dispatch_one_to_one()
             operation.id.as_str()
         );
     }
+    assert_eq!(validated_stub_bodies, operation_count);
+    println!(
+        "generated_stub_validation operations={operation_count} canonical_placeholder_bodies={validated_stub_bodies}"
+    );
 }
 
 #[test]
@@ -492,6 +535,14 @@ fn generated_stub_contract_validation_rejects_parseable_and_syntactic_drift() {
         (
             "result type",
             replace_once(stub, "): T =", "): sys.Value ="),
+        ),
+        (
+            "stub body",
+            replace_once(
+                stub,
+                "error(code: \"sys.binding.stub\", message: \"generated declaration stub\")",
+                "error(code: \"sys.abi.unavailable\", message: \"generated declaration stub\")",
+            ),
         ),
         (
             "parameter inventory",
