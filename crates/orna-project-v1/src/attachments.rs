@@ -1334,6 +1334,35 @@ impl PackageResolver {
         Ok((route, transitions))
     }
 
+    /// Applies sparse nested terminal-pair rebind chains only when every
+    /// before/after terminal identity matches the supplied transition. The
+    /// reference is silent on validating paired identity edges across fold
+    /// chains; v1 checks both ends at each boundary and rejects drift before
+    /// any later chain can mask it by restoring the same terminal pins.
+    pub fn extend_nested_terminal_pair_sparse_checkpoint_storm_chains_validating_terminal_identity_transitions(
+        &self,
+        previous: &ReboundPathResolution,
+        chains: &[&[&[(&NestedPairDepthLabel, Option<&[[PinnedDatabase; 2]]>)]]],
+        expected_transitions: &[(NestedPairTerminalRouteIdentity, NestedPairTerminalRouteIdentity)],
+    ) -> Result<ReboundPathResolution, AttachmentError> {
+        if chains.len() != expected_transitions.len() {
+            return Err(AttachmentError::RetainedSnapshotUnavailable);
+        }
+
+        let mut route = previous.clone();
+        for (chain, (expected_before, expected_after)) in
+            chains.iter().zip(expected_transitions)
+        {
+            route.validate_terminal_route_identity(expected_before)?;
+            route = self
+                .extend_nested_terminal_pair_sparse_checkpoint_storm_chains_from_depth_labels(
+                    &route,
+                    &[*chain],
+                )?;
+            route.validate_terminal_route_identity(expected_after)?;
+        }
+        Ok(route)
+    }
     /// Applies paired rebinding and omission chains as consecutive terminal
     /// route segments. Each omission chain must preserve the terminal identity
     /// computed by its preceding rebind chain. Returns the final route and the
@@ -1421,6 +1450,56 @@ impl PackageResolver {
             expected_rebound_terminal_identity,
             omission_chains,
         )
+    }
+
+    /// Applies a sparse rebind fold after verifying its terminal identity, then
+    /// records the exact before/after identity for each paired omission chain.
+    /// Omission chains reject active replacement waves, and any drift aborts
+    /// the whole operation without returning a partial transition list. The
+    /// reference is silent on this composition; v1 treats each omission-chain
+    /// boundary as an auditable identity-preservation edge.
+    pub fn extend_nested_terminal_pair_sparse_checkpoint_storm_rebind_then_omission_chains_capturing_terminal_identity_transitions(
+        &self,
+        previous: &ReboundPathResolution,
+        rebind_chains: &[&[&[(&NestedPairDepthLabel, Option<&[[PinnedDatabase; 2]]>)]]],
+        expected_rebound_terminal_identity: &NestedPairTerminalRouteIdentity,
+        omission_chains: &[&[&[(&NestedPairDepthLabel, Option<&[[PinnedDatabase; 2]]>)]]],
+    ) -> Result<(
+        ReboundPathResolution,
+        Vec<(NestedPairTerminalRouteIdentity, NestedPairTerminalRouteIdentity)>,
+    ), AttachmentError> {
+        for chain in omission_chains {
+            for round in *chain {
+                if round.iter().any(|(_, replacements)| {
+                    matches!(replacements, Some(waves) if !waves.is_empty())
+                }) {
+                    return Err(AttachmentError::RetainedSnapshotUnavailable);
+                }
+            }
+        }
+
+        let rebound_route = self
+            .extend_nested_terminal_pair_sparse_checkpoint_storm_chains_from_depth_labels(
+                previous,
+                rebind_chains,
+            )?;
+        rebound_route.validate_terminal_route_identity(expected_rebound_terminal_identity)?;
+
+        let mut route = rebound_route;
+        let mut transitions = Vec::with_capacity(omission_chains.len());
+        for omission_chain in omission_chains {
+            let before = route.terminal_route_identity();
+            route = self
+                .extend_nested_terminal_pair_sparse_checkpoint_storm_chains_from_depth_labels(
+                    &route,
+                    &[*omission_chain],
+                )?;
+            route.validate_terminal_route_identity(expected_rebound_terminal_identity)?;
+            let after = route.terminal_route_identity();
+            transitions.push((before, after));
+        }
+
+        Ok((route, transitions))
     }
 
     /// Folds checkpoint-rooted terminal-pair storms across independent parent
