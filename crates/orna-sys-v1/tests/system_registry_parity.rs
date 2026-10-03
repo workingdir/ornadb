@@ -5,10 +5,10 @@ use std::{
 };
 
 use orna_sys_v1::{
-    SystemEffect, SystemProviderAbi, system_api_json, system_api_schema_json, system_binding_stubs,
-    system_dispatch_table, system_host_operation_registry_json,
-    system_host_operation_registry_schema_json, system_provider_abi_json,
-    system_provider_abi_schema_json,
+    SystemEffect, SystemProviderAbi, system_api_json, system_api_schema_json,
+    system_binding_modules_json, system_binding_stubs, system_dispatch_table,
+    system_host_operation_registry_json, system_host_operation_registry_schema_json,
+    system_provider_abi_json, system_provider_abi_schema_json,
 };
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -93,6 +93,10 @@ fn verify_generated_output_tree(
             artifacts.provider_abi_json.as_str(),
         ),
         ("system_provider_abi.schema.json", provider_schema_json),
+        (
+            "system_binding_modules.json",
+            artifacts.binding_modules_json.as_str(),
+        ),
         ("system_bindings.orna", artifacts.binding_bundle.as_str()),
         ("system_host_operations.json", host_registry_json),
         ("system_host_operations.schema.json", host_schema_json),
@@ -132,6 +136,7 @@ fn copy_output_tree(source: &Path, destination: &Path) -> std::io::Result<()> {
         "system_api_schema.json",
         "system_provider_abi.json",
         "system_provider_abi.schema.json",
+        "system_binding_modules.json",
         "system_bindings.orna",
         "system_host_operations.json",
         "system_host_operations.schema.json",
@@ -222,6 +227,12 @@ fn generated_artifact_determinism_matrix_matches_embedded_and_build_outputs() {
             provider_schema_json.as_str(),
             system_provider_abi_schema_json(),
             "system_provider_abi.schema.json",
+        ),
+        (
+            "generated sys binding-module manifest",
+            regenerated.binding_modules_json.as_str(),
+            system_binding_modules_json(),
+            "system_binding_modules.json",
         ),
         (
             "generated Orna stubs",
@@ -728,6 +739,10 @@ fn generated_artifact_drift_probe_rejects_tampered_outputs_and_stale_modules() {
         (
             "system_provider_abi.schema.json",
             "system_provider_abi.schema.json".to_owned(),
+        ),
+        (
+            "system_binding_modules.json",
+            "system_binding_modules.json".to_owned(),
         ),
         ("system_bindings.orna", "system_bindings.orna".to_owned()),
         (
