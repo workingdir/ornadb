@@ -1,0 +1,34 @@
+pub fn factory_at(pin: sys.SnapshotRef) =
+    sys.database.as_of(pin).energy.factory;
+
+// Paired omitted leaves must each keep their own rollback anchor when a later
+// parent crosses identities at two different sibling depths.
+pub fn paired_depth_omission_storm_keeps_labels(failure: Error) {
+    let parents = [
+        {
+            nested: {
+                left: { pins: ((fail(failure), fail(failure)), (factory_at(sys.snapshot("HEAD~120")), factory_at(sys.snapshot("HEAD~121")))) },
+                right: { pins: ((factory_at(sys.snapshot("HEAD~100")), factory_at(sys.snapshot("HEAD~101"))), (fail(failure), fail(failure))) },
+            },
+        },
+        {
+            nested: {
+                left: { pins: ((factory_at(sys.snapshot("HEAD~200")), factory_at(sys.snapshot("HEAD~201"))), (factory_at(sys.snapshot("HEAD~220")), factory_at(sys.snapshot("HEAD~221")))) },
+                right: { pins: ((factory_at(sys.snapshot("HEAD~210")), factory_at(sys.snapshot("HEAD~211"))), (factory_at(sys.snapshot("HEAD~230")), factory_at(sys.snapshot("HEAD~231")))) },
+            },
+        },
+        {
+            nested: {
+                left: { pins: ((factory_at(sys.snapshot("HEAD~100")), factory_at(sys.snapshot("HEAD~242"))), (factory_at(sys.snapshot("HEAD~240")), factory_at(sys.snapshot("HEAD~241")))) },
+                right: { pins: ((factory_at(sys.snapshot("HEAD~250")), factory_at(sys.snapshot("HEAD~251"))), (factory_at(sys.snapshot("HEAD~120")), factory_at(sys.snapshot("HEAD~261")))) },
+            },
+        },
+        {
+            nested: {
+                left: { pins: ((factory_at(sys.snapshot("HEAD~300")), factory_at(sys.snapshot("HEAD~301"))), (factory_at(sys.snapshot("HEAD~320")), factory_at(sys.snapshot("HEAD~321")))) },
+                right: { pins: ((factory_at(sys.snapshot("HEAD~310")), factory_at(sys.snapshot("HEAD~311"))), (factory_at(sys.snapshot("HEAD~330")), factory_at(sys.snapshot("HEAD~331")))) },
+            },
+        },
+    ];
+    { parent_fold: parents }
+}
