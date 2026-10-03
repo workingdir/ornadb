@@ -575,6 +575,22 @@ fn provider_diagnostic_codes_stay_outside_the_public_failure_catalog() {
             provided: AbiVersion { major: 2, minor: 0 },
         },
         ProviderDiagnostic::EffectIncompatible(role),
+        ProviderDiagnostic::ArgumentCountMismatch {
+            operation: operation.clone(),
+            expected: 1,
+            actual: 0,
+        },
+        ProviderDiagnostic::ArgumentTypeMismatch {
+            operation: operation.clone(),
+            parameter: "value".into(),
+            expected: "sys.Value".into(),
+            actual: "sys.String".into(),
+        },
+        ProviderDiagnostic::ResultTypeMismatch {
+            operation: operation.clone(),
+            expected: "sys.Value".into(),
+            actual: "sys.String".into(),
+        },
         ProviderDiagnostic::UndeclaredFailure {
             operation,
             code: FailureCode::new("sys.storage.corrupt").unwrap(),
@@ -605,6 +621,8 @@ fn provider_diagnostic_codes_stay_outside_the_public_failure_catalog() {
     assert_eq!(
         diagnostic_codes,
         BTreeSet::from([
+            "sys.abi.argument_count_mismatch",
+            "sys.abi.argument_type_mismatch",
             "sys.abi.duplicate_role_contract",
             "sys.abi.duplicate_role_provider",
             "sys.abi.effect_incompatible",
@@ -613,6 +631,7 @@ fn provider_diagnostic_codes_stay_outside_the_public_failure_catalog() {
             "sys.abi.provider_not_selected",
             "sys.abi.role_unavailable",
             "sys.abi.role_version_mismatch",
+            "sys.abi.result_type_mismatch",
             "sys.abi.undeclared_failure",
             "sys.abi.unknown_operation",
             "sys.abi.unknown_role",
