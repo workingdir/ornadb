@@ -7245,9 +7245,12 @@ fn infer(
                 element_types.push(value.ty);
             }
 
-            let first_parent = element_types.first().cloned();
             let omitted_pinned_tuple_path =
                 type_sequence_has_omitted_pinned_checkpoint_tuple(&element_types);
+            if omitted_pinned_tuple_path {
+                seed_omitted_pinned_checkpoint_tuple_paths(&mut element_types);
+            }
+            let first_parent = element_types.first().cloned();
             let transactional_checkpoint_fold = element_types.len() > 2
                 && first_parent.as_ref().is_some_and(|first| {
                     type_contains_pinned_checkpoint_tuple(first)
@@ -19102,6 +19105,62 @@ fn type_sequence_has_omitted_pinned_checkpoint_tuple_at_path(
             type_sequence_has_omitted_pinned_checkpoint_tuple_at_path(&elements)
         }
         _ => false,
+    }
+}
+
+/// Give record-fold rows a neutral shape for pinned tuple paths that are
+/// absent from an earlier sibling. The first row still anchors every field it
+/// supplies, while an absent pinned tuple starts as Bottom at each structural
+/// leaf so the first concrete row can establish its identity topology. The
+/// reference does not define local sparse-record tuple folds; treat omission
+/// as an empty contribution and retain the tuple path for later scoped
+/// rollback.
+fn seed_omitted_pinned_checkpoint_tuple_paths(types: &mut [Type]) {
+    fn omitted_shape(value: &Type) -> Type {
+        match value {
+            Type::Tuple(elements) => Type::Tuple(elements.iter().map(omitted_shape).collect()),
+            Type::Record(fields) => Type::Record(
+                fields
+                    .iter()
+                    .map(|(name, value)| (name.clone(), omitted_shape(value)))
+                    .collect(),
+            ),
+            _ => Type::Bottom,
+        }
+    }
+
+    if !types.iter().all(|ty| matches!(ty, Type::Record(_))) {
+        return;
+    }
+    let names = types
+        .iter()
+        .flat_map(|ty| match ty {
+            Type::Record(fields) => fields.keys().cloned().collect::<Vec<_>>(),
+            _ => Vec::new(),
+        })
+        .collect::<BTreeSet<_>>();
+    for name in names {
+        let template = types.iter().find_map(|ty| {
+            let Type::Record(fields) = ty else {
+                return None;
+            };
+            let field = fields.get(&name)?;
+            type_contains_pinned_checkpoint_tuple(field).then(|| field.clone())
+        });
+        if let Some(template) = template {
+            let omitted = omitted_shape(&template);
+            for ty in types.iter_mut() {
+                let Type::Record(fields) = ty else {
+                    continue;
+                };
+                if fields
+                    .get(&name)
+                    .is_none_or(|field| matches!(field, Type::Bottom))
+                {
+                    fields.insert(name.clone(), omitted.clone());
+                }
+            }
+        }
     }
 }
 

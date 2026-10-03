@@ -1,0 +1,29 @@
+pub fn factory_at(pin: sys.SnapshotRef) =
+    sys.database.as_of(pin).energy.factory;
+
+pub fn accepts_sparse_rebinds_after_omitted_pair_rows(failure: Error) {
+    let parents = [
+        { witness: factory_at(sys.snapshot("HEAD~2991")) },
+        { pins: (factory_at(sys.snapshot("HEAD~3000")), factory_at(sys.snapshot("HEAD~3000"))), witness: factory_at(sys.snapshot("HEAD~3001")) },
+        { witness: factory_at(sys.snapshot("HEAD~3011")) },
+        { pins: (factory_at(sys.snapshot("HEAD~3020")), fail(failure)), witness: factory_at(sys.snapshot("HEAD~3021")) },
+        { witness: factory_at(sys.snapshot("HEAD~3031")) },
+        { pins: (factory_at(sys.snapshot("HEAD~3040")), factory_at(sys.snapshot("HEAD~3040"))), witness: factory_at(sys.snapshot("HEAD~3041")) },
+        { witness: factory_at(sys.snapshot("HEAD~3051")) },
+        { pins: (factory_at(sys.snapshot("HEAD~3060")), factory_at(sys.snapshot("HEAD~3060"))), witness: factory_at(sys.snapshot("HEAD~3061")) },
+    ];
+    { parent_fold: parents }
+}
+
+pub fn rejects_sparse_rebind_split_after_omitted_pair_rows(failure: Error) {
+    let parents = [
+        { witness: factory_at(sys.snapshot("HEAD~3991")) },
+        { pins: (factory_at(sys.snapshot("HEAD~4000")), factory_at(sys.snapshot("HEAD~4000"))), witness: factory_at(sys.snapshot("HEAD~4001")) },
+        { witness: factory_at(sys.snapshot("HEAD~4011")) },
+        { pins: (factory_at(sys.snapshot("HEAD~4020")), fail(failure)), witness: factory_at(sys.snapshot("HEAD~4021")) },
+        { witness: factory_at(sys.snapshot("HEAD~4031")) },
+        { pins: (factory_at(sys.snapshot("HEAD~4040")), factory_at(sys.snapshot("HEAD~4041"))), witness: factory_at(sys.snapshot("HEAD~4042")) },
+        { pins: (factory_at(sys.snapshot("HEAD~4050")), factory_at(sys.snapshot("HEAD~4050"))), witness: factory_at(sys.snapshot("HEAD~4051")) },
+    ];
+    { parent_fold: parents }
+}

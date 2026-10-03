@@ -7329,6 +7329,117 @@ fn paired_tuple_identity_survives_sequential_three_way_omission_chains() {
 }
 
 #[test]
+fn sparse_paired_rebind_chains_preserve_identity_across_omitted_rows() {
+    let source = include_str!("fixtures/historical-sparse-paired-three-way-omission-chain.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-sparse-paired-three-way-omission-chain.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    let type_diagnostics = result
+        .diagnostics
+        .iter()
+        .filter(|diagnostic| diagnostic.code() == DIAG_TYPE)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        type_diagnostics.len(),
+        1,
+        "only the terminal split after an omitted sparse pair should be rejected: {:?}",
+        type_diagnostics
+            .iter()
+            .map(|diagnostic| diagnostic.message())
+            .collect::<Vec<_>>()
+    );
+    let module = result
+        .modules
+        .values()
+        .find(|module| {
+            module
+                .symbols
+                .contains_key("accepts_sparse_rebinds_after_omitted_pair_rows")
+        })
+        .expect("sparse paired three-way omission fixture module");
+    let row_fields = |function: &str| {
+        let Type::Function { result, .. } = &module.symbols[function].ty else {
+            panic!("{function} must retain its computed function type");
+        };
+        let Type::Record(fields) = result.as_ref() else {
+            panic!("{function} must return its computed parent fold: {result:?}");
+        };
+        let Type::List(row) = fields.get("parent_fold").expect("parent fold") else {
+            panic!("{function} must retain the folded parent list");
+        };
+        let Type::Record(fields) = row.as_ref() else {
+            panic!("{function} must retain its row: {row:?}");
+        };
+        fields
+    };
+    let pin_slots = |function: &str| {
+        let fields = row_fields(function);
+        let Type::Tuple(slots) = fields.get("pins").expect("paired pins") else {
+            panic!("{function}.pins must retain its paired tuple");
+        };
+        assert_eq!(slots.len(), 2, "{function} must preserve both tuple slots");
+        slots
+            .iter()
+            .map(|slot| {
+                let mut contexts = BTreeSet::new();
+                collect_snapshot_contexts(slot, &mut contexts);
+                contexts
+            })
+            .collect::<Vec<_>>()
+    };
+    let witness_contexts = |function: &str| {
+        let mut contexts = BTreeSet::new();
+        collect_snapshot_contexts(
+            row_fields(function).get("witness").expect("witness sibling"),
+            &mut contexts,
+        );
+        contexts
+    };
+
+    assert_eq!(
+        pin_slots("accepts_sparse_rebinds_after_omitted_pair_rows"),
+        [
+            BTreeSet::from([
+                "selector:HEAD~3000".into(),
+                "selector:HEAD~3020".into(),
+                "selector:HEAD~3040".into(),
+                "selector:HEAD~3060".into(),
+            ]),
+            BTreeSet::from([
+                "selector:HEAD~3000".into(),
+                "selector:HEAD~3040".into(),
+                "selector:HEAD~3060".into(),
+            ]),
+        ],
+        "omitted rows do not erase sparse slot history or change later paired rebind identity"
+    );
+    assert_eq!(
+        pin_slots("rejects_sparse_rebind_split_after_omitted_pair_rows"),
+        [BTreeSet::new(), BTreeSet::new()],
+        "a later pair split rolls both slots back to the originally omitted tuple"
+    );
+    assert_eq!(
+        witness_contexts("rejects_sparse_rebind_split_after_omitted_pair_rows"),
+        BTreeSet::from([
+            "selector:HEAD~3991".into(),
+            "selector:HEAD~4001".into(),
+            "selector:HEAD~4011".into(),
+            "selector:HEAD~4021".into(),
+            "selector:HEAD~4031".into(),
+            "selector:HEAD~4042".into(),
+            "selector:HEAD~4051".into(),
+        ]),
+        "rejecting the sparse tuple split leaves each sibling witness value intact"
+    );
+}
+
+#[test]
 fn multi_parent_selector_topology_storm_preserves_label_depth_identity() {
     let source = include_str!("fixtures/historical-multi-parent-selector-topology-storm.orna");
     let parsed = orna_syntax_v1::parse_module(source);
