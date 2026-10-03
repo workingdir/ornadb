@@ -1268,7 +1268,7 @@ impl PackageResolver {
     ) -> Result<ReboundPathResolution, AttachmentError> {
         for chain in omission_chains {
             for round in *chain {
-                for entry in round {
+                for entry in round.iter() {
                     if matches!(entry.1, Some(replacements) if !replacements.is_empty()) {
                         return Err(AttachmentError::RetainedSnapshotUnavailable);
                     }
