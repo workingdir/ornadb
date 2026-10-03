@@ -1,0 +1,7 @@
+{ id: "f86/checkpoint/reused", name: "f86/left/checkpoint-alpha", city: "f86/right/checkpoint-omega", }
+
+{ id: "f86/checkpoint/reused", name: "f86/left/checkpoint-beta", city: "f86/right/checkpoint-sigma", }
+
+{ id: "f86/checkpoint/reused", name: "f86/left/checkpoint-alpha", city: "f86/right/checkpoint-tau", }
+
+{ id: "f86/checkpoint/reused", name: "f86/left/checkpoint-gamma", city: "f86/right/checkpoint-omega", }
