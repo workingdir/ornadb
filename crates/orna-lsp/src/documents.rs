@@ -5,7 +5,7 @@
 //! document text that the analysis stages need.
 
 use lsp_types::{Position, Range, Uri};
-use orna_syntax::SourceSpan;
+use orna_syntax_v1::SyntaxSpan as SourceSpan;
 
 /// One open Orna source document.
 #[derive(Clone, Debug)]
@@ -206,10 +206,7 @@ mod tests {
     fn ranges_map_multibyte_boundaries_to_exact_utf16_positions() {
         let text = "aé😀b";
         let mapper = PositionMapper::new(text);
-        let span = SourceSpan {
-            start: "a".len(),
-            end: "aé😀".len(),
-        };
+        let span = SourceSpan::new("a".len(), "aé😀".len());
 
         assert_eq!(
             mapper.range(&span),
@@ -413,14 +410,7 @@ mod tests {
     fn segments_advance_across_multiline_tokens() {
         let text = "/* first\n😀 second\nthird */";
         let mapper = PositionMapper::new(text);
-        let comment = orna_syntax::highlight(text)
-            .into_iter()
-            .find(|token| token.kind == orna_syntax::HighlightKind::Comment)
-            .expect("multiline comment token");
-        let span = SourceSpan {
-            start: comment.range.start,
-            end: comment.range.end,
-        };
+        let span = SourceSpan::new(0, text.len());
 
         assert_eq!(
             mapper.segments(&span),
@@ -454,10 +444,7 @@ mod tests {
     fn crlf_line_segments_exclude_carriage_return() {
         let text = "first\r\nsecond";
         let mapper = PositionMapper::new(text);
-        let span = SourceSpan {
-            start: 0,
-            end: text.len(),
-        };
+        let span = SourceSpan::new(0, text.len());
 
         assert_eq!(
             mapper.segments(&span),
@@ -486,7 +473,7 @@ mod tests {
         let mapper = PositionMapper::new(text);
 
         assert_eq!(
-            mapper.segments(&SourceSpan { start: 5, end: 8 }),
+            mapper.segments(&SourceSpan::new(5, 8)),
             vec![(
                 Position {
                     line: 1,
@@ -496,7 +483,7 @@ mod tests {
             )]
         );
         assert_eq!(
-            mapper.segments(&SourceSpan { start: 6, end: 8 }),
+            mapper.segments(&SourceSpan::new(6, 8)),
             vec![(
                 Position {
                     line: 1,
