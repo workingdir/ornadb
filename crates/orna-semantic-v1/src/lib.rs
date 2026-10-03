@@ -20026,6 +20026,76 @@ fn infer_module_relation(
     local: &BTreeMap<String, Symbol>,
     diagnostics: &mut Vec<Diagnostic>,
 ) -> Inferred {
+    match value {
+        Expr::Group { inner, .. } => {
+            return infer_module_relation(inner, table_rows, scope, local, diagnostics);
+        }
+        Expr::Block {
+            statements,
+            tail: Some(tail),
+            ..
+        } if statements.is_empty() => {
+            return infer_module_relation(tail, table_rows, scope, local, diagnostics);
+        }
+        Expr::Unary { op, rhs, .. } if op == "!" => {
+            let operand = infer_module_relation(rhs, table_rows, scope, local, diagnostics);
+            return Inferred {
+                ty: if operand.ty == Type::Bool {
+                    Type::Bool
+                } else {
+                    Type::Error
+                },
+                effects: operand.effects,
+            };
+        }
+        // Section 9 predicates compose through ordinary short-circuit Boolean
+        // continuations; keep resolving relation folds in each continuation
+        // instead of treating nested table names as ordinary values.
+        Expr::Binary { lhs, op, rhs, .. } if op == "&&" || op == "||" => {
+            let left = infer_module_relation(lhs, table_rows, scope, local, diagnostics);
+            let right = infer_module_relation(rhs, table_rows, scope, local, diagnostics);
+            let mut effects = left.effects;
+            effects.join(&right.effects);
+            return Inferred {
+                ty: if left.ty == Type::Bool && right.ty == Type::Bool {
+                    Type::Bool
+                } else {
+                    Type::Error
+                },
+                effects,
+            };
+        }
+        Expr::Control {
+            kind: ControlKind::If,
+            binding: None,
+            condition: Some(condition),
+            body: Some(body),
+            arms,
+            alternate: Some(alternate),
+            ..
+        } if arms.is_empty() => {
+            let condition =
+                infer_module_relation(condition, table_rows, scope, local, diagnostics);
+            let body = infer_module_relation(body, table_rows, scope, local, diagnostics);
+            let alternate =
+                infer_module_relation(alternate, table_rows, scope, local, diagnostics);
+            let mut effects = condition.effects;
+            effects.join(&body.effects);
+            effects.join(&alternate.effects);
+            return Inferred {
+                ty: if condition.ty == Type::Bool
+                    && body.ty == Type::Bool
+                    && alternate.ty == Type::Bool
+                {
+                    Type::Bool
+                } else {
+                    Type::Error
+                },
+                effects,
+            };
+        }
+        _ => {}
+    }
     let Expr::Call {
         callee, arguments, ..
     } = value
