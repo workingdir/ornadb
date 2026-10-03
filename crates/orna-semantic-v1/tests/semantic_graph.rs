@@ -8354,6 +8354,116 @@ fn nested_paired_omissions_keep_each_reconciled_fold_depth_identity() {
 
 
 #[test]
+fn late_paired_omission_rolls_back_only_crossed_nested_sibling_depths() {
+    let source = include_str!("fixtures/historical-late-paired-omission-sibling-fold.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-late-paired-omission-sibling-fold.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    let type_diagnostics = result
+        .diagnostics
+        .iter()
+        .filter(|diagnostic| diagnostic.code() == DIAG_TYPE)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        type_diagnostics.len(),
+        1,
+        "the parent crossing the left and right pin maps should be rejected once: {:?}",
+        type_diagnostics
+            .iter()
+            .map(|diagnostic| diagnostic.message())
+            .collect::<Vec<_>>()
+    );
+    let module = result
+        .modules
+        .values()
+        .find(|module| module.symbols.contains_key("late_paired_omission_sibling_fold"))
+        .expect("late paired omission fixture module");
+    let Type::Function { result, .. } =
+        &module.symbols["late_paired_omission_sibling_fold"].ty
+    else {
+        panic!("late paired omission must retain its computed function type");
+    };
+    let Type::Record(fields) = result.as_ref() else {
+        panic!("late paired omission must return its computed record: {result:?}");
+    };
+    let Type::List(parent) = fields.get("parent_fold").expect("parent fold") else {
+        panic!("late paired omission must retain its parent list");
+    };
+    let Type::Record(parent) = parent.as_ref() else {
+        panic!("folded parent must remain a record: {parent:?}");
+    };
+    let Type::Record(siblings) = parent.get("nested").expect("nested siblings") else {
+        panic!("folded nested value must retain sibling records");
+    };
+    let pin_contexts = |sibling: &str, depth: usize, slot: usize| {
+        let Type::Record(fields) = &siblings[sibling] else {
+            panic!("{sibling} must retain its nested record");
+        };
+        let Type::Tuple(depths) = &fields["pins"] else {
+            panic!("{sibling} must retain both checkpoint depths");
+        };
+        let Type::Tuple(slots) = &depths[depth] else {
+            panic!("{sibling} depth must retain both paired positions");
+        };
+        let mut contexts = BTreeSet::new();
+        collect_snapshot_contexts(&slots[slot], &mut contexts);
+        contexts
+    };
+
+    assert_eq!(
+        pin_contexts("left", 0, 0),
+        BTreeSet::from(["selector:HEAD~100".into()]),
+        "the crossed left pin restores its first-parent identity"
+    );
+    assert_eq!(
+        pin_contexts("left", 0, 1),
+        BTreeSet::from([
+            "selector:HEAD~101".into(),
+            "selector:HEAD~301".into(),
+            "selector:HEAD~601".into(),
+        ]),
+        "the left neighbor keeps labels from unaffected parents"
+    );
+    assert_eq!(
+        pin_contexts("right", 0, 0),
+        BTreeSet::from(["selector:HEAD~200".into()]),
+        "the omitted right pin shares the rollback boundary with the crossing"
+    );
+    assert_eq!(
+        pin_contexts("right", 0, 1),
+        BTreeSet::from([
+            "selector:HEAD~201".into(),
+            "selector:HEAD~701".into(),
+        ]),
+        "the neighboring right pin keeps folding while its crossed sibling rolls back"
+    );
+    assert_eq!(
+        pin_contexts("right", 1, 0),
+        BTreeSet::from([
+            "selector:HEAD~210".into(),
+            "selector:HEAD~410".into(),
+            "selector:HEAD~710".into(),
+        ]),
+        "the independent right depth keeps labels after its paired sibling rolls back"
+    );
+    assert_eq!(
+        pin_contexts("steady", 1, 1),
+        BTreeSet::from([
+            "selector:HEAD~811".into(),
+            "selector:HEAD~911".into(),
+            "selector:HEAD~1011".into(),
+        ]),
+        "an unaffected sibling preserves its computed depth history"
+    );
+}
+
+#[test]
 fn nested_omission_checkpoint_storms_preserve_depth_labels_transactionally() {
     let source = include_str!("fixtures/historical-nested-omission-depth-label-storm.orna");
     let parsed = orna_syntax_v1::parse_module(source);
