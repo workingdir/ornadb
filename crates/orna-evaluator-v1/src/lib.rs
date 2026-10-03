@@ -28,8 +28,8 @@ use serde::{
     Deserialize,
     de::{self, MapAccess, Visitor},
 };
-use sha2::{Digest as _, Sha256};
 use serde_json::value::RawValue;
+use sha2::{Digest as _, Sha256};
 use unicode_normalization::UnicodeNormalization;
 
 mod admitted_repl;
@@ -4932,11 +4932,7 @@ impl Context<'_, '_> {
             // must remain interruptible even when its callbacks are absent,
             // short-circuiting, or otherwise do not execute.
             self.step()?;
-            let page = self.relation_page(
-                &plan.source,
-                plan.source_identity,
-                after.as_deref(),
-            )?;
+            let page = self.relation_page(&plan.source, plan.source_identity, after.as_deref())?;
             let page_len = page.rows.len();
             for canonical in page.rows {
                 self.step()?;
@@ -5022,42 +5018,19 @@ impl Context<'_, '_> {
                 RelationStage::FlatMap(transform) => {
                     self.step()?;
                     let mapped = self.invoke_predicate(transform, value, depth + 1)?;
-                    let Value::List(inner) = mapped else {
-                        return Err(error("ORNA-EVAL-TYPE"));
-                    };
-                    self.items(inner.len())?;
                     let suffix = &stages[local_index + 1..];
-                    let mut rows = Vec::new();
-                    for inner_value in inner {
-                        if inner_value.contains_callable() {
-                            return Err(error("ORNA-EVAL-UNSUPPORTED"));
-                        }
-                        self.step()?;
-                        let inner_rows = self.apply_relation_stages(
-                            inner_value,
-                            suffix,
-                            counters,
-                            distinct_seen,
-                            pair_previous,
-                            window_states,
-                            index + 1,
-                            depth + 1,
-                        )?;
-                        let ended = inner_rows.iter().any(|row| matches!(row, RelationRow::End));
-                        rows.extend(inner_rows);
-                        self.items(rows.len())?;
-                        if ended {
-                            break;
-                        }
-                    }
-                    if !rows.iter().any(|row| matches!(row, RelationRow::End))
-                        && stages.iter().enumerate().any(|(offset, stage)| {
-                            matches!(stage, RelationStage::Take(count) if counters[stage_offset + offset] >= *count)
-                        })
-                    {
-                        rows.push(RelationRow::End);
-                    }
-                    return Ok(rows);
+                    return self.apply_relation_flat_map(
+                        mapped,
+                        stages,
+                        suffix,
+                        counters,
+                        distinct_seen,
+                        pair_previous,
+                        window_states,
+                        stage_offset,
+                        index + 1,
+                        depth + 1,
+                    );
                 }
                 RelationStage::BucketBy(_) => return Err(error("ORNA-EVAL-UNSUPPORTED")),
                 RelationStage::Distinct => {
@@ -5106,6 +5079,76 @@ impl Context<'_, '_> {
         if stages.iter().enumerate().any(|(offset, stage)| {
             matches!(stage, RelationStage::Take(count) if counters[stage_offset + offset] >= *count)
         }) {
+            rows.push(RelationRow::End);
+        }
+        Ok(rows)
+    }
+
+    fn apply_relation_flat_map(
+        &mut self,
+        mapped: Value,
+        stages: &[RelationStage],
+        suffix: &[RelationStage],
+        counters: &mut [usize],
+        distinct_seen: &mut [HashSet<Vec<u8>>],
+        pair_previous: &mut [Option<Value>],
+        window_states: &mut [Option<RelationWindowState>],
+        stage_offset: usize,
+        suffix_offset: usize,
+        depth: usize,
+    ) -> Result<Vec<RelationRow>, EvaluationError> {
+        let mut rows = Vec::new();
+        match mapped {
+            Value::List(inner) => {
+                self.items(inner.len())?;
+                for inner_value in inner {
+                    if inner_value.contains_callable() {
+                        return Err(error("ORNA-EVAL-UNSUPPORTED"));
+                    }
+                    self.step()?;
+                    let inner_rows = self.apply_relation_stages(
+                        inner_value,
+                        suffix,
+                        counters,
+                        distinct_seen,
+                        pair_previous,
+                        window_states,
+                        suffix_offset,
+                        depth + 1,
+                    )?;
+                    let ended = inner_rows.iter().any(|row| matches!(row, RelationRow::End));
+                    rows.extend(inner_rows);
+                    self.items(rows.len())?;
+                    if ended {
+                        break;
+                    }
+                }
+            }
+            Value::Relation(plan) => {
+                self.for_each_relation_value(&plan, depth + 1, |context, inner_value| {
+                    let inner_rows = context.apply_relation_stages(
+                        inner_value,
+                        suffix,
+                        counters,
+                        distinct_seen,
+                        pair_previous,
+                        window_states,
+                        suffix_offset,
+                        depth + 1,
+                    )?;
+                    let ended = inner_rows.iter().any(|row| matches!(row, RelationRow::End));
+                    rows.extend(inner_rows);
+                    context.items(rows.len())?;
+                    Ok(!ended)
+                })?;
+            }
+            _ => return Err(error("ORNA-EVAL-TYPE")),
+        }
+        if !rows.iter().any(|row| matches!(row, RelationRow::End))
+            && stages.iter().enumerate().any(|(offset, stage)| {
+                matches!(stage, RelationStage::Take(count) if counters[stage_offset + offset] >= *count)
+            })
+        {
             rows.push(RelationRow::End);
         }
         Ok(rows)
@@ -5441,7 +5484,10 @@ impl Context<'_, '_> {
                 return Err(error("ORNA-EVAL-ARGUMENT"));
             }
             self.string(name.clone())?;
-            if action_map.insert(name.clone(), descriptor.clone()).is_some() {
+            if action_map
+                .insert(name.clone(), descriptor.clone())
+                .is_some()
+            {
                 return Err(error("ORNA-EVAL-ARGUMENT"));
             }
         }
@@ -8449,9 +8495,13 @@ impl Context<'_, '_> {
         self.items(values.len())?;
         let mut flattened = Vec::new();
         for value in values {
-            let Value::List(inner) = self.invoke_predicate(transform, value.clone(), depth + 1)?
-            else {
-                return Err(error("ORNA-EVAL-TYPE"));
+            let inner = match self.invoke_predicate(transform, value.clone(), depth + 1)? {
+                Value::List(inner) => inner,
+                // A relation-valued callback is a lateral finite collection:
+                // scan it for this outer value, retaining its own read scope
+                // while preserving the surrounding flat_map order.
+                Value::Relation(plan) => self.collect_relation_values(&plan, depth + 1)?,
+                _ => return Err(error("ORNA-EVAL-TYPE")),
             };
             self.items(inner.len())?;
             for value in inner {
@@ -10406,8 +10456,7 @@ fn parse_json_raw(raw: &str) -> Result<JsonNode, EvaluationError> {
 }
 
 fn parse_json_node(input: &str) -> Result<JsonNode, EvaluationError> {
-    let raw: Box<RawValue> =
-        serde_json::from_str(input).map_err(|_| error("ORNA-EVAL-VALUE"))?;
+    let raw: Box<RawValue> = serde_json::from_str(input).map_err(|_| error("ORNA-EVAL-VALUE"))?;
     parse_json_raw(raw.get())
 }
 
@@ -11358,9 +11407,7 @@ fn named_arguments(
         "__window_rate"
         | "__window_rate_integrate"
         | "__window_derivative"
-        | "__window_integrate" => {
-            &["points", "size", "step"]
-        }
+        | "__window_integrate" => &["points", "size", "step"],
         "filter" => &["rows", "predicate"],
         "partition" | "split_when" => &["values", "predicate"],
         "group_by" => &["values", "key"],
@@ -12516,12 +12563,13 @@ fn is_ui_action_descriptor(value: &Value) -> bool {
     let Value::Record(fields) = value else {
         return false;
     };
-    let has_text = |name: &str| matches!(fields.get(name), Some(Value::String(value)) if !value.is_empty());
+    let has_text =
+        |name: &str| matches!(fields.get(name), Some(Value::String(value)) if !value.is_empty());
     has_text("action_id")
         && has_text("input_type")
-        && fields.get("debug_kind").is_none_or(|value| {
-            matches!(value, Value::Null | Value::String(_))
-        })
+        && fields
+            .get("debug_kind")
+            .is_none_or(|value| matches!(value, Value::Null | Value::String(_)))
 }
 
 fn function_name(expression: &Expr) -> Option<String> {
@@ -12620,11 +12668,9 @@ fn codec_type_matches(
         CodecTypeWitness::Record(witness_fields) => match value {
             Value::Record(fields) if fields.len() == witness_fields.len() => {
                 fields.iter().all(|(name, value)| {
-                    witness_fields
-                        .get(name)
-                        .is_some_and(|witness| {
-                            codec_type_matches(value, witness, nominal_definitions)
-                        })
+                    witness_fields.get(name).is_some_and(|witness| {
+                        codec_type_matches(value, witness, nominal_definitions)
+                    })
                 })
             }
             _ => false,
@@ -13073,8 +13119,7 @@ fn parse_decimal(text: &str) -> Result<(BigInt, BigInt), EvaluationError> {
         .ok_or_else(|| error("ORNA-EVAL-VALUE"))?;
     let coefficient = BigInt::parse_bytes(format!("{whole}{fraction}").as_bytes(), 10)
         .ok_or_else(|| error("ORNA-EVAL-VALUE"))?;
-    let fraction_digits =
-        i64::try_from(fraction.len()).map_err(|_| error("ORNA-EVAL-LIMIT"))?;
+    let fraction_digits = i64::try_from(fraction.len()).map_err(|_| error("ORNA-EVAL-LIMIT"))?;
     let exponent = exponent
         .checked_sub(fraction_digits)
         .ok_or_else(|| error("ORNA-EVAL-LIMIT"))?;
@@ -15084,10 +15129,7 @@ mod tests {
                 ("properties".into(), Value::Record(BTreeMap::new())),
                 (
                     "slots".into(),
-                    Value::Record(BTreeMap::from([(
-                        "content".into(),
-                        Value::List(children),
-                    )])),
+                    Value::Record(BTreeMap::from([("content".into(), Value::List(children))])),
                 ),
                 ("actions".into(), Value::Record(BTreeMap::new())),
             ]))
