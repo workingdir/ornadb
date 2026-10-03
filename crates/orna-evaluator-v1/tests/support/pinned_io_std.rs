@@ -7,6 +7,7 @@ pub fn sources() -> Vec<(String, String)> {
         .filter(|(path, _)| {
             path == "std/collection.orna"
                 || path == "std/text.orna"
+                || path == "std/stream.orna"
                 || path == "std/io/main.orna"
                 || path.starts_with("std/io/")
                 || path == "std/encoding/main.orna"
