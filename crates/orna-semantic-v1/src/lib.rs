@@ -18913,12 +18913,17 @@ fn rollback_conflicting_checkpoint_paths(
 
     let scopes = implicated_paths
         .into_iter()
-        .filter_map(|scope| checkpoint_rollback_scope(&scope))
-        .filter(|scope| !scope.is_empty())
-        .collect::<BTreeSet<_>>();
+        .filter_map(|scope| {
+            let mut full_scope = path.to_vec();
+            full_scope.extend(scope);
+            let rollback_scope = checkpoint_rollback_scope(&full_scope)?;
+            (rollback_scope.starts_with(path) && rollback_scope.len() >= path.len())
+                .then(|| (rollback_scope.clone(), rollback_scope[path.len()..].to_vec()))
+        })
+        .collect::<BTreeMap<_, _>>();
 
     let mut rolled_back_any = false;
-    for scope in scopes {
+    for (full_scope, scope) in scopes {
         let (Some(anchor_scope), Some(_), Some(_)) = (
             checkpoint_value_at_scope(rollback_anchor, &scope),
             checkpoint_value_at_scope(merged, &scope),
@@ -18927,8 +18932,6 @@ fn rollback_conflicting_checkpoint_paths(
             continue;
         };
         let anchor_scope = anchor_scope.clone();
-        let mut full_scope = path.to_vec();
-        full_scope.extend(scope.iter().cloned());
         if rolled_back_paths.contains(&full_scope) {
             continue;
         }
@@ -18950,15 +18953,18 @@ fn checkpoint_rollback_scope(scope: &[SnapshotTopologyBoundary]) -> Option<Vec<S
             }
             SnapshotTopologyBoundary::AppliedArgument { base, .. }
                 if base == "sys.HistoricalCallable"
-                    || base == "sys.HistoricalNamespace"
-                    || base == "semantic.SnapshotContextMap" =>
+                    || base == "sys.HistoricalNamespace" =>
             {
                 return Some(scope[..index].to_vec());
             }
             _ => {}
         }
     }
-    Some(scope.to_vec())
+    // Preserve the established first structural rollback boundary for direct
+    // pin maps and aggregate dimensions. Historical callable pairs carry a
+    // coupled captured context, so their sibling tuple slot is the narrowest
+    // safe boundary and is returned above.
+    scope.first().cloned().map(|boundary| vec![boundary])
 }
 
 fn checkpoint_value_at_scope<'a>(
