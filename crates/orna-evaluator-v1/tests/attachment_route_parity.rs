@@ -2968,6 +2968,64 @@ fn sparse_nested_storm_folds_preserve_terminal_route_identity() {
                 &first_stage,
                 &first_only_rebind_chains,
                 &[invalid_omission_chain.as_slice()],
+        ),
+        Err(AttachmentError::RetainedSnapshotUnavailable)
+    ));
+    let validated_terminal_omission_fold = resolver
+        .extend_nested_terminal_pair_sparse_checkpoint_storm_rebind_omission_segments_validating_terminal_identity_transitions(
+            &first_stage,
+            &paired_rebind_chains,
+            &paired_omission_segments,
+            &segment_identity_transitions,
+        )
+        .unwrap();
+    assert_eq!(
+        validated_terminal_omission_fold.terminal_route_identity(),
+        restored_chain_identity,
+        "all expected rebind and omission boundaries validate through the paired fold"
+    );
+    assert_eq!(
+        validated_terminal_omission_fold
+            .final_session()
+            .database(aliases[4])
+            .unwrap()
+            .pin()
+            .commit()
+            .as_str(),
+        leaf_final,
+        "validated identity edges preserve the concrete final terminal package pin"
+    );
+    let stale_segment_identity_transitions = [
+        segment_identity_transitions[0].clone(),
+        (
+            first_chain_identity.clone(),
+            first_chain_identity.clone(),
+            middle_chain_identity.clone(),
+        ),
+        segment_identity_transitions[2].clone(),
+    ];
+    assert!(matches!(
+        resolver
+            .extend_nested_terminal_pair_sparse_checkpoint_storm_rebind_omission_segments_validating_terminal_identity_transitions(
+                &first_stage,
+                &paired_rebind_chains,
+                &paired_omission_segments,
+                &stale_segment_identity_transitions,
+            ),
+        Err(AttachmentError::RetainedSnapshotUnavailable)
+    ));
+    let expected_single_segment_transition = [(
+        first_stage.terminal_route_identity(),
+        first_chain_identity.clone(),
+        first_chain_identity.clone(),
+    )];
+    assert!(matches!(
+        resolver
+            .extend_nested_terminal_pair_sparse_checkpoint_storm_rebind_omission_segments_validating_terminal_identity_transitions(
+                &first_stage,
+                &first_only_rebind_chains,
+                &[invalid_omission_chain.as_slice()],
+                &expected_single_segment_transition,
             ),
         Err(AttachmentError::RetainedSnapshotUnavailable)
     ));
