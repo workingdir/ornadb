@@ -1,0 +1,35 @@
+pub fn factory_at(pin: sys.SnapshotRef) =
+    sys.database.as_of(pin).energy.factory;
+
+// Calling the captured factory extends its snapshot through nested readers.
+pub fn extended_factory_at(pin: sys.SnapshotRef) = factory_at(pin)();
+
+pub fn nested_extension_omission_storm_keeps_depth_identities(failure: Error) {
+    let parents = [
+        {
+            nested: {
+                left: { pins: ((fail(failure), fail(failure)), (extended_factory_at(sys.snapshot("HEAD~120")), extended_factory_at(sys.snapshot("HEAD~121")))) },
+                right: { pins: ((extended_factory_at(sys.snapshot("HEAD~100")), extended_factory_at(sys.snapshot("HEAD~101"))), (fail(failure), fail(failure))) },
+            },
+        },
+        {
+            nested: {
+                left: { pins: ((extended_factory_at(sys.snapshot("HEAD~200")), extended_factory_at(sys.snapshot("HEAD~201"))), (extended_factory_at(sys.snapshot("HEAD~220")), extended_factory_at(sys.snapshot("HEAD~221")))) },
+                right: { pins: ((extended_factory_at(sys.snapshot("HEAD~210")), extended_factory_at(sys.snapshot("HEAD~211"))), (extended_factory_at(sys.snapshot("HEAD~230")), extended_factory_at(sys.snapshot("HEAD~231")))) },
+            },
+        },
+        {
+            nested: {
+                left: { pins: ((extended_factory_at(sys.snapshot("HEAD~100")), extended_factory_at(sys.snapshot("HEAD~242"))), (extended_factory_at(sys.snapshot("HEAD~240")), extended_factory_at(sys.snapshot("HEAD~241")))) },
+                right: { pins: ((extended_factory_at(sys.snapshot("HEAD~250")), extended_factory_at(sys.snapshot("HEAD~251"))), (extended_factory_at(sys.snapshot("HEAD~260")), extended_factory_at(sys.snapshot("HEAD~261")))) },
+            },
+        },
+        {
+            nested: {
+                left: { pins: ((extended_factory_at(sys.snapshot("HEAD~300")), extended_factory_at(sys.snapshot("HEAD~301"))), (extended_factory_at(sys.snapshot("HEAD~320")), extended_factory_at(sys.snapshot("HEAD~321")))) },
+                right: { pins: ((extended_factory_at(sys.snapshot("HEAD~310")), extended_factory_at(sys.snapshot("HEAD~311"))), (extended_factory_at(sys.snapshot("HEAD~330")), extended_factory_at(sys.snapshot("HEAD~331")))) },
+            },
+        },
+    ];
+    { parent_fold: parents }
+}
