@@ -2490,6 +2490,7 @@ fn explain_query_core_with_subqueries(
         }
         if let Some(candidate) = selected_partial_index {
             add_partial_index_pair_identity_details(&mut details, candidate);
+            add_partial_index_selection_tie_break_details(&mut details);
         }
         add_join_cost_fold_details(
             &mut details,
@@ -3509,6 +3510,11 @@ fn partial_index_for_join<'a>(
     candidates: &'a [QueryPartialIndexDescription],
 ) -> Option<&'a QueryPartialIndexDescription> {
     let predicate = join.predicate.as_ref()?;
+    // The reference names explain node kinds but is silent on partial-index
+    // matching and tie-breaking. This adapter requires an exact table/predicate
+    // match, then selects the lexicographically smallest index identity so the
+    // explain-only choice is independent of catalog order. A missing exact
+    // match stays a scan rather than inferring predicate implication.
     candidates
         .iter()
         .filter(|candidate| {
@@ -3538,6 +3544,7 @@ fn push_index_lookup(
         ),
     ]);
     add_partial_index_pair_identity_details(&mut details, candidate);
+    add_partial_index_selection_tie_break_details(&mut details);
     if let Some(branch) = statistics.and_then(|stats| stats.mutable_branch.as_ref()) {
         details.insert(
             "mutable_branch".to_owned(),
@@ -3776,6 +3783,13 @@ fn add_partial_index_pair_identity_details(
     details.insert(
         "predicate_pushdown_pairing".to_owned(),
         PlanDetail::Text("exact_table_index_and_predicate".to_owned()),
+    );
+}
+
+fn add_partial_index_selection_tie_break_details(details: &mut BTreeMap<String, PlanDetail>) {
+    details.insert(
+        "index_selection_tie_break".to_owned(),
+        PlanDetail::Text("lexicographically_smallest_matching_index_identity".to_owned()),
     );
 }
 
