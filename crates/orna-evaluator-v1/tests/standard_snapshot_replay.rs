@@ -287,6 +287,34 @@ fn base64_padding_matrix_value() -> CanonicalValue {
     .unwrap()
 }
 
+fn process_output_value(stdout: &[u8]) -> Raw {
+    Raw::Array(vec![
+        Raw::Tag(
+            60013,
+            Box::new(Raw::Array(vec![Raw::Int(1.into()), Raw::Int(0.into())])),
+        ),
+        Raw::Bytes(stdout.to_vec()),
+        Raw::Bytes(Vec::new()),
+    ])
+}
+
+fn base64_process_matrix_value() -> CanonicalValue {
+    CanonicalValue::new(Raw::Array(
+        [
+            &[][..],
+            &[0][..],
+            &[0, 1][..],
+            &[0, 1, 2][..],
+            &[255][..],
+            &[255, 238][..],
+        ]
+        .into_iter()
+        .map(process_output_value)
+        .collect(),
+    ))
+    .unwrap()
+}
+
 #[test]
 fn captured_codec_snapshots_replay_real_base64_values_without_retargeting() {
     let (_directory, project_v1, project_v2, snapshots) = host_codec_snapshot_projects();
@@ -499,6 +527,45 @@ fn captured_codec_snapshots_reject_noncanonical_base64_without_losing_the_pin() 
             Ok(Some(base64_padding_matrix_value()))
         );
     }
+}
+
+#[test]
+fn captured_codec_snapshots_send_padding_shapes_through_real_process_stdin() {
+    let (_directory, project_v1, project_v2, snapshots) = host_codec_snapshot_projects();
+    let sources_v1 =
+        host_codec_standard_sources(include_str!("fixtures/snapshot-host-codec-base64-v1.orna"));
+    let sources_v2 =
+        host_codec_standard_sources(include_str!("fixtures/snapshot-host-codec-base64-v2.orna"));
+    let mut historical =
+        AdmittedReplSession::from_loaded_project(&project_v1, sources_v1, Limits::default())
+            .unwrap();
+    let mut upgraded =
+        AdmittedReplSession::from_loaded_project(&project_v2, sources_v2, Limits::default())
+            .unwrap();
+    assert_ne!(snapshots[0], snapshots[1]);
+
+    let working_directory = env::current_dir().unwrap();
+    let mut process = ProcessProvider::new(Duration::from_secs(2), 64).unwrap();
+    process
+        .allow_command("/usr/bin/cat", &working_directory, [])
+        .unwrap();
+    let mut bindings =
+        SysHostBindingRegistry::new(EnvironmentProvider::default()).with_process_provider(process);
+    let mut assert_process_matrix = |session: &mut AdmittedReplSession| {
+        let output = session.submit_with_sys_host_bindings(
+            include_str!("fixtures/snapshot-host-codec-process-padding-matrix.orna"),
+            &mut bindings,
+        );
+        assert!(
+            output.is_ok(),
+            "captured process matrix failed: {}",
+            output.as_ref().unwrap_err().code()
+        );
+        assert_eq!(output, Ok(Some(base64_process_matrix_value())));
+    };
+    assert_process_matrix(&mut historical);
+    assert_process_matrix(&mut upgraded);
+    assert_process_matrix(&mut historical);
 }
 
 fn capture_standard_gitlink(project_path: &Path, standard_snapshot: &str, message: &str) -> String {
