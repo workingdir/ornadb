@@ -692,6 +692,31 @@ pub struct QueryJoinPairIdentityDescription {
     pub predicate: Option<ExpressionRef>,
 }
 
+/// One checkpoint observed while compacting paired log segments for a
+/// mutable branch-local join input. A missing side records a sparse slot;
+/// when a segment is present, its compaction identity must also be present.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct QueryPairedCheckpointSegmentCompactionStepDescription {
+    pub checkpoint_identity: ObjectRef,
+    pub left_segment_identity: Option<ObjectRef>,
+    pub right_segment_identity: Option<ObjectRef>,
+    pub left_compaction_identity: Option<ObjectRef>,
+    pub right_compaction_identity: Option<ObjectRef>,
+}
+
+/// Resolver-supplied paired checkpoint/segment lineage for one exact join
+/// pair and mutable branch generation. Steps remain in compaction order.
+/// ORNA defines checkpoint and segment identity preservation in storage, but
+/// does not define how query-plan cost restoration should annotate that
+/// lineage. The explain adapter treats these references as opaque and folds
+/// them into plan metadata without changing cardinality or cost estimates.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct QueryPairedCheckpointSegmentCompactionChainDescription {
+    pub join_pair_identity: ObjectRef,
+    pub branch: MutableBranchSnapshot,
+    pub steps: Vec<QueryPairedCheckpointSegmentCompactionStepDescription>,
+}
+
 /// A resolver-approved input limit attached to one exact logical join pair.
 /// Multiple entries for the same pair form an ordered limit chain in slice
 /// order. Explain applies the chain after source access and before the join;
@@ -1263,6 +1288,7 @@ pub fn explain_query_with_join_pair_identities_and_limit_pushdowns(
         pairs,
         limit_pushdowns,
         &[],
+        &[],
     )
 }
 
@@ -1294,6 +1320,44 @@ pub fn explain_query_with_join_pair_identities_and_limit_window_aggregate_pushdo
         aggregates,
         pairs,
         limit_pushdowns,
+        &[],
+        &[],
+    )
+}
+
+/// Explains paired input limits composed with exact window aggregate and spill
+/// chains. Spill estimates remain bound to their resolver-approved pair and
+/// aggregate, while the sparse planner carries all three identities through
+/// joins where one or more chains are absent. The adapter reports estimated
+/// spill work; it does not perform or infer runtime compaction.
+/// A cumulative fold additionally binds nested compaction history to paired
+/// limit/aggregate restoration events. This explain-only identity policy is
+/// adapter-defined because ORNA leaves digest composition unspecified.
+pub fn explain_query_with_join_pair_identities_limit_window_aggregate_and_spill_pushdowns(
+    query: &QueryPlanDescription,
+    pairs: &[QueryJoinPairIdentityDescription],
+    limit_pushdowns: &[QueryLimitPushdownDescription],
+    aggregates: &[QueryWindowAggregatePushdownDescription],
+    spills: &[QueryWindowSpillDescription],
+) -> Result<ExplainedPlan, ExplainError> {
+    explain_query_core_with_limit_pushdowns(
+        query,
+        1,
+        None,
+        None,
+        &[],
+        &[],
+        &[],
+        None,
+        &[],
+        &[],
+        &[],
+        &[],
+        &[],
+        aggregates,
+        pairs,
+        limit_pushdowns,
+        spills,
         &[],
     )
 }
@@ -1363,6 +1427,7 @@ pub fn explain_query_with_join_pair_identities_window_aggregate_and_spill_pushdo
         pairs,
         &[],
         spills,
+        &[],
     )
 }
 
@@ -1446,6 +1511,40 @@ pub fn explain_query_with_partial_indexes_and_join_pair_identities(
         &[],
         &[],
         pairs,
+    )
+}
+
+/// Explains paired index routes while retaining checkpoint segment compaction
+/// lineage inside the branch-local cost restoration fold. Every supplied
+/// chain must name one exact join pair and the mutable branch generation on
+/// that input. Sparse inputs carry the prior fold; paired checkpoint steps
+/// advance it in planned cost order. Compaction metadata is explain-only and
+/// does not modify estimates or execute storage operations.
+pub fn explain_query_with_partial_indexes_and_paired_checkpoint_segment_compaction_chains(
+    query: &QueryPlanDescription,
+    indexes: &[QueryPartialIndexDescription],
+    pairs: &[QueryJoinPairIdentityDescription],
+    checkpoint_chains: &[QueryPairedCheckpointSegmentCompactionChainDescription],
+) -> Result<ExplainedPlan, ExplainError> {
+    explain_query_core_with_limit_pushdowns(
+        query,
+        1,
+        None,
+        None,
+        &[],
+        &[],
+        &[],
+        None,
+        &[],
+        &[],
+        &[],
+        indexes,
+        &[],
+        &[],
+        pairs,
+        &[],
+        &[],
+        checkpoint_chains,
     )
 }
 
@@ -2199,6 +2298,7 @@ fn explain_query_core_with_subqueries(
         join_pair_identities,
         &[],
         &[],
+        &[],
     )
 }
 
@@ -2220,6 +2320,7 @@ fn explain_query_core_with_limit_pushdowns(
     join_pair_identities: &[QueryJoinPairIdentityDescription],
     input_limit_pushdowns: &[QueryLimitPushdownDescription],
     window_spills: &[QueryWindowSpillDescription],
+    checkpoint_compaction_chains: &[QueryPairedCheckpointSegmentCompactionChainDescription],
 ) -> Result<ExplainedPlan, ExplainError> {
     if query
         .joins
@@ -2229,6 +2330,7 @@ fn explain_query_core_with_limit_pushdowns(
         .saturating_add(join_pair_identities.len())
         .saturating_add(input_limit_pushdowns.len())
         .saturating_add(window_spills.len())
+        .saturating_add(checkpoint_compaction_chains.len())
         > MAX_PLAN_NODES
     {
         return Err(ExplainError::TooManyNodes);
@@ -2335,6 +2437,78 @@ fn explain_query_core_with_limit_pushdowns(
         );
         if !join_pair_targets_seen.insert(target) {
             return Err(ExplainError::InvalidObject);
+        }
+    }
+    let mut checkpoint_chain_pairs_seen = BTreeSet::new();
+    let mut checkpoint_step_count = 0usize;
+    for chain in checkpoint_compaction_chains {
+        if invalid_reference(chain.join_pair_identity.as_str())
+            || invalid_reference(&chain.branch.name)
+            || chain.steps.is_empty()
+        {
+            return Err(ExplainError::InvalidObject);
+        }
+        if !checkpoint_chain_pairs_seen.insert(chain.join_pair_identity.as_str()) {
+            return Err(ExplainError::InvalidObject);
+        }
+        let matching_pairs = join_pair_identities
+            .iter()
+            .filter(|pair| pair.identity == chain.join_pair_identity)
+            .count();
+        if matching_pairs != 1 {
+            return Err(ExplainError::InvalidObject);
+        }
+        let pair = join_pair_identities
+            .iter()
+            .find(|pair| pair.identity == chain.join_pair_identity)
+            .expect("one paired identity was counted");
+        let matching_joins = query
+            .joins
+            .iter()
+            .filter(|join| {
+                join.source == pair.right_source && join.predicate == pair.predicate
+            })
+            .collect::<Vec<_>>();
+        if matching_joins.len() != 1
+            || matching_joins[0]
+                .statistics
+                .as_ref()
+                .and_then(|statistics| statistics.mutable_branch.as_ref())
+                != Some(&chain.branch)
+        {
+            return Err(ExplainError::InvalidObject);
+        }
+        checkpoint_step_count = checkpoint_step_count.saturating_add(chain.steps.len());
+        if checkpoint_step_count > MAX_PLAN_NODES {
+            return Err(ExplainError::TooManyNodes);
+        }
+        for step in &chain.steps {
+            if invalid_reference(step.checkpoint_identity.as_str())
+                || step
+                    .left_segment_identity
+                    .as_ref()
+                    .is_some_and(|identity| invalid_reference(identity.as_str()))
+                || step
+                    .right_segment_identity
+                    .as_ref()
+                    .is_some_and(|identity| invalid_reference(identity.as_str()))
+                || step
+                    .left_compaction_identity
+                    .as_ref()
+                    .is_some_and(|identity| invalid_reference(identity.as_str()))
+                || step
+                    .right_compaction_identity
+                    .as_ref()
+                    .is_some_and(|identity| invalid_reference(identity.as_str()))
+                || step.left_segment_identity.is_some()
+                    != step.left_compaction_identity.is_some()
+                || step.right_segment_identity.is_some()
+                    != step.right_compaction_identity.is_some()
+                || (step.left_segment_identity.is_none()
+                    && step.right_segment_identity.is_none())
+            {
+                return Err(ExplainError::InvalidObject);
+            }
         }
     }
     for limit_pushdown in input_limit_pushdowns {
@@ -2543,10 +2717,16 @@ fn explain_query_core_with_limit_pushdowns(
     let mut paired_index_anchor_chain_identity: Option<String> = None;
     let mut paired_index_cost_restoration_chain_identity: Option<String> = None;
     let mut paired_index_cost_compaction_chain: Option<(String, u64, u64, u64)> = None;
+    let mut paired_checkpoint_cost_restoration_fold: Option<
+        QueryPairedCheckpointCostRestorationFold,
+    > = None;
     let mut paired_decorrelation_cost_restoration_chain_identity: Option<String> = None;
     let mut paired_window_spill_cascade_fold: Option<QueryWindowSpillCascadeFold> = None;
     let mut paired_aggregate_anchor_cascade_fold: Option<QueryPairedAggregateAnchorCascadeFold> =
         None;
+    let mut paired_scoped_window_compaction_fold: Option<
+        QueryPairedScopedWindowCompactionFold,
+    > = None;
     let mut paired_limit_aggregate_restoration_fold:
         Option<QueryPairedLimitAggregateRestorationFold> = None;
     let mut paired_aggregate_spill_restoration_fold: Option<
@@ -2554,6 +2734,9 @@ fn explain_query_core_with_limit_pushdowns(
     > = None;
     let mut paired_window_compaction_spill_fold: Option<
         QueryPairedWindowCompactionSpillFold,
+    > = None;
+    let mut paired_limit_window_compaction_fold: Option<
+        QueryPairedLimitWindowCompactionFold,
     > = None;
     let mut paired_join_limit_anchor_cascade_fold: Option<QueryJoinLimitAnchorCascadeFold> = None;
     let mut paired_limit_window_cascade_fold: Option<QueryLimitWindowCascadeFold> = None;
@@ -2575,6 +2758,11 @@ fn explain_query_core_with_limit_pushdowns(
             .and_then(|offset| decorrelated_subqueries.get(offset));
         let selected_partial_index = partial_index_for_join(join, partial_indexes);
         let join_pair_identity = join_pair_identity_for_join(join, join_pair_identities);
+        let checkpoint_compaction_chain = join_pair_identity.and_then(|pair| {
+            checkpoint_compaction_chains
+                .iter()
+                .find(|chain| chain.join_pair_identity == pair.identity)
+        });
         let paired_index_selection_id = join_pair_identity
             .map(|pair| paired_index_selection_identity(pair, selected_partial_index));
         let decorrelated_index_omission_identity = decorrelated_subquery
@@ -3206,6 +3394,53 @@ fn explain_query_core_with_limit_pushdowns(
                 );
             }
         }
+        let paired_scoped_window_compaction_pair_identity = join_pair_identity
+            .zip(window_anchor_fold_id.as_deref())
+            .zip(paired_aggregate_anchor_cascade_fold.as_ref())
+            .map(|((pair, window_scope_identity), aggregate_fold)| {
+                query_paired_scoped_window_compaction_pair_identity(
+                    pair,
+                    window_scope_identity,
+                    &aggregate_fold.identity,
+                )
+            });
+        if let (Some(pair_identity), Some(window_scope_identity), Some(aggregate_fold)) = (
+            paired_scoped_window_compaction_pair_identity.as_deref(),
+            window_anchor_fold_id.as_deref(),
+            paired_aggregate_anchor_cascade_fold.as_ref(),
+        ) {
+            let window_stage_count =
+                u64::try_from(operators.len() - right_window_operator_start).unwrap_or(u64::MAX);
+            paired_scoped_window_compaction_fold =
+                Some(query_paired_scoped_window_compaction_fold(
+                    paired_scoped_window_compaction_fold.as_ref(),
+                    pair_identity,
+                    window_scope_identity,
+                    window_stage_count,
+                    aggregate_fold,
+                ));
+        }
+        if let Some(identity) = paired_scoped_window_compaction_pair_identity.as_deref() {
+            let mut scope_nodes = BTreeSet::from([right_access, right]);
+            scope_nodes.extend(right_window_operator_start..operators.len());
+            for index in scope_nodes {
+                add_paired_scoped_window_compaction_pair_details(
+                    &mut operators[index].details,
+                    identity,
+                );
+            }
+        }
+        if let Some(fold) = paired_scoped_window_compaction_fold.as_ref() {
+            let mut scope_nodes = BTreeSet::from([right_access, right]);
+            scope_nodes.extend(right_window_operator_start..operators.len());
+            for index in scope_nodes {
+                add_paired_scoped_window_compaction_fold_details(
+                    &mut operators[index].details,
+                    fold,
+                    paired_scoped_window_compaction_pair_identity.is_some(),
+                );
+            }
+        }
         let paired_limit_aggregate_restoration_pair_identity =
             query_paired_limit_aggregate_restoration_pair_identity(
                 paired_limit_pushdown_anchor_fold_id.as_deref(),
@@ -3314,6 +3549,21 @@ fn explain_query_core_with_limit_pushdowns(
                 ),
             );
         }
+        let paired_limit_window_compaction_pair_identity =
+            query_paired_limit_window_compaction_pair_identity(
+                paired_limit_aggregate_restoration_pair_identity.as_deref(),
+                paired_window_compaction_spill_pair_identity.as_deref(),
+            );
+        if let Some(pair_identity) = paired_limit_window_compaction_pair_identity.as_deref() {
+            paired_limit_window_compaction_fold = Some(
+                query_paired_limit_window_compaction_fold(
+                    paired_limit_window_compaction_fold.as_ref(),
+                    pair_identity,
+                    paired_limit_aggregate_restoration_fold.as_ref(),
+                    paired_window_compaction_spill_fold.as_ref(),
+                ),
+            );
+        }
         let paired_aggregate_spill_restoration_pair_identity =
             query_paired_aggregate_spill_restoration_pair_identity(
                 paired_aggregate_pushdown_anchor_fold_id.as_deref(),
@@ -3407,6 +3657,29 @@ fn explain_query_core_with_limit_pushdowns(
                     &mut operators[index].details,
                     fold,
                     paired_window_compaction_spill_pair_identity.is_some(),
+                );
+            }
+        }
+        if let Some(identity) = paired_limit_window_compaction_pair_identity.as_deref() {
+            let mut fold_nodes = BTreeSet::from([right_access, right]);
+            fold_nodes.extend(right_limit_operator_start..right_limit_operator_end);
+            fold_nodes.extend(right_window_operator_start..operators.len());
+            for index in fold_nodes {
+                add_paired_limit_window_compaction_pair_details(
+                    &mut operators[index].details,
+                    identity,
+                );
+            }
+        }
+        if let Some(fold) = paired_limit_window_compaction_fold.as_ref() {
+            let mut fold_nodes = BTreeSet::from([right_access, right]);
+            fold_nodes.extend(right_limit_operator_start..right_limit_operator_end);
+            fold_nodes.extend(right_window_operator_start..operators.len());
+            for index in fold_nodes {
+                add_paired_limit_window_compaction_fold_details(
+                    &mut operators[index].details,
+                    fold,
+                    paired_limit_window_compaction_pair_identity.is_some(),
                 );
             }
         }
@@ -3648,6 +3921,9 @@ fn explain_query_core_with_limit_pushdowns(
             paired_aggregate_anchor_cascade_fold
                 .as_ref()
                 .map(|fold| fold.identity.as_str()),
+            paired_scoped_window_compaction_fold
+                .as_ref()
+                .map(|fold| fold.identity.as_str()),
             paired_window_spill_cascade_fold
                 .as_ref()
                 .map(|fold| fold.identity.as_str()),
@@ -3660,6 +3936,9 @@ fn explain_query_core_with_limit_pushdowns(
             paired_limit_aggregate_restoration_fold
                 .as_ref()
                 .map(|fold| fold.identity.as_str()),
+            paired_limit_window_compaction_fold
+                .as_ref()
+                .map(|fold| fold.identity.as_str()),
             paired_limit_window_cascade_fold
                 .as_ref()
                 .map(|fold| fold.identity.as_str()),
@@ -3669,7 +3948,57 @@ fn explain_query_core_with_limit_pushdowns(
             cardinality,
             work,
             work_overflow,
+            paired_checkpoint_cost_restoration_fold
+                .as_ref()
+                .map(|fold| fold.identity.as_str()),
         );
+        let paired_checkpoint_cost_restoration_advance =
+            checkpoint_compaction_chain.map(|chain| {
+                let parent_identity = paired_checkpoint_cost_restoration_fold
+                    .as_ref()
+                    .map(|fold| fold.identity.clone())
+                    .unwrap_or_else(|| {
+                        query_paired_checkpoint_cost_restoration_seed_identity(
+                            &query.snapshot,
+                            &left_fold_identity,
+                        )
+                    });
+                let chain_identity =
+                    query_paired_checkpoint_segment_compaction_chain_identity(chain);
+                let fold = query_paired_checkpoint_cost_restoration_fold(
+                    paired_checkpoint_cost_restoration_fold.as_ref(),
+                    &parent_identity,
+                    &next_join_cost_fold_identity,
+                    next_paired_index_cost_compaction_chain
+                        .as_ref()
+                        .map(|(identity, _, _, _)| identity.as_str()),
+                    chain,
+                    &chain_identity,
+                );
+                (parent_identity, chain_identity, fold)
+            });
+        let next_paired_checkpoint_cost_restoration_fold =
+            paired_checkpoint_cost_restoration_advance
+                .as_ref()
+                .map(|(_, _, fold)| fold.clone())
+                .or_else(|| paired_checkpoint_cost_restoration_fold.clone());
+        let paired_checkpoint_cost_restoration_parent_identity =
+            paired_checkpoint_cost_restoration_advance
+                .as_ref()
+                .map(|(parent, _, _)| parent.as_str())
+                .or_else(|| {
+                    paired_checkpoint_cost_restoration_fold
+                        .as_ref()
+                        .map(|fold| fold.identity.as_str())
+                });
+        let paired_checkpoint_cost_restoration_transition =
+            if paired_checkpoint_cost_restoration_advance.is_some() {
+                Some("append_branch_checkpoint_segment_chain")
+            } else if next_paired_checkpoint_cost_restoration_fold.is_some() {
+                Some("carry_through_sparse_cost_fold")
+            } else {
+                None
+            };
         for index in BTreeSet::from([right_access, right]) {
             operators[index].details.insert(
                 "paired_join_cost_fold_identity".to_owned(),
@@ -3782,6 +4111,16 @@ fn explain_query_core_with_limit_pushdowns(
         if let Some(cascade_fold) = paired_aggregate_anchor_cascade_fold.as_ref() {
             add_paired_aggregate_cascade_fold_details(&mut details, cascade_fold);
         }
+        if let Some(identity) = paired_scoped_window_compaction_pair_identity.as_deref() {
+            add_paired_scoped_window_compaction_pair_details(&mut details, identity);
+        }
+        if let Some(fold) = paired_scoped_window_compaction_fold.as_ref() {
+            add_paired_scoped_window_compaction_fold_details(
+                &mut details,
+                fold,
+                paired_scoped_window_compaction_pair_identity.is_some(),
+            );
+        }
         if let Some(identity) = paired_window_spill_anchor_fold_id.as_deref() {
             add_paired_window_spill_anchor_fold_details(&mut details, identity);
         }
@@ -3824,6 +4163,16 @@ fn explain_query_core_with_limit_pushdowns(
         }
         if let Some(fold) = paired_limit_aggregate_restoration_fold.as_ref() {
             add_paired_limit_aggregate_restoration_fold_details(&mut details, fold);
+        }
+        if let Some(identity) = paired_limit_window_compaction_pair_identity.as_deref() {
+            add_paired_limit_window_compaction_pair_details(&mut details, identity);
+        }
+        if let Some(fold) = paired_limit_window_compaction_fold.as_ref() {
+            add_paired_limit_window_compaction_fold_details(
+                &mut details,
+                fold,
+                paired_limit_window_compaction_pair_identity.is_some(),
+            );
         }
         if let Some(identity) = paired_limit_pushdown_anchor_fold_id.as_deref() {
             add_paired_limit_pushdown_anchor_fold_details(&mut details, identity);
@@ -3976,6 +4325,46 @@ fn explain_query_core_with_limit_pushdowns(
             &right_fold_identity,
             &next_join_cost_fold_identity,
         );
+        if let (
+            Some(fold),
+            Some(parent_identity),
+            Some(transition),
+        ) = (
+            next_paired_checkpoint_cost_restoration_fold.as_ref(),
+            paired_checkpoint_cost_restoration_parent_identity,
+            paired_checkpoint_cost_restoration_transition,
+        ) {
+            let chain = paired_checkpoint_cost_restoration_advance
+                .as_ref()
+                .map(|(_, chain_identity, _)| chain_identity.as_str());
+            let pair = checkpoint_compaction_chain
+                .map(|chain| chain.join_pair_identity.as_str());
+            let mut checkpoint_nodes = BTreeSet::from([right_access, right]);
+            checkpoint_nodes.extend(right_limit_operator_start..right_limit_operator_end);
+            checkpoint_nodes.extend(right_window_operator_start..operators.len());
+            for index in checkpoint_nodes {
+                add_paired_checkpoint_cost_restoration_details(
+                    &mut operators[index].details,
+                    fold,
+                    parent_identity,
+                    &next_join_cost_fold_identity,
+                    transition,
+                    pair,
+                    chain,
+                    checkpoint_compaction_chain,
+                );
+            }
+            add_paired_checkpoint_cost_restoration_details(
+                &mut details,
+                fold,
+                parent_identity,
+                &next_join_cost_fold_identity,
+                transition,
+                pair,
+                chain,
+                checkpoint_compaction_chain,
+            );
+        }
         let prior = current;
         current = operators.len();
         operators.push(Operator::new(
@@ -3994,6 +4383,8 @@ fn explain_query_core_with_limit_pushdowns(
         paired_index_cost_restoration_chain_identity =
             next_paired_index_cost_restoration_chain_identity;
         paired_index_cost_compaction_chain = next_paired_index_cost_compaction_chain;
+        paired_checkpoint_cost_restoration_fold =
+            next_paired_checkpoint_cost_restoration_fold;
         paired_decorrelation_cost_restoration_chain_identity =
             next_paired_decorrelation_cost_restoration_chain_identity;
     }
@@ -4816,6 +5207,12 @@ fn explain_query_core_with_limit_pushdowns(
             *pair_count,
             *index_count,
             *scan_count,
+        );
+    }
+    if let Some(fold) = paired_checkpoint_cost_restoration_fold.as_ref() {
+        add_paired_checkpoint_cost_restoration_output_details(
+            &mut operators[current].details,
+            fold,
         );
     }
     build_plan(query.snapshot.clone(), operators, current)
@@ -6077,6 +6474,19 @@ struct QueryPairedAggregateAnchorCascadeFold {
     overflowed: bool,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct QueryPairedScopedWindowCompactionFold {
+    identity: String,
+    latest_pair_identity: String,
+    latest_window_scope_identity: String,
+    aggregate_compaction_identity: String,
+    window_pair_count: u64,
+    window_stage_count: u64,
+    aggregate_pair_count: u64,
+    aggregate_stage_count: u64,
+    overflowed: bool,
+}
+
 /// Appends an exact paired aggregate chain to the sparse planned sequence.
 /// Inputs without a window chain carry the previous identity through; the
 /// next aggregate chain restores it by folding the new exact pair.
@@ -6145,6 +6555,164 @@ fn add_paired_aggregate_cascade_fold_details(
     );
     details.insert(
         "paired_aggregate_anchor_cascade_overflowed".to_owned(),
+        PlanDetail::Boolean(fold.overflowed),
+    );
+}
+
+/// Binds an exact logical pair and anchor-scoped window chain to the current
+/// cumulative paired-aggregate compaction fold. ORNA leaves this explain-only
+/// digest composition unspecified; source and frame scope remain explicit.
+fn query_paired_scoped_window_compaction_pair_identity(
+    pair: &QueryJoinPairIdentityDescription,
+    window_scope_identity: &str,
+    aggregate_compaction_identity: &str,
+) -> String {
+    let mut hash = Sha256::new();
+    hash.update(b"orna.sys.query-paired-scoped-window-compaction-pair.v1\0");
+    hash_part(&mut hash, pair.identity.as_str().as_bytes());
+    hash_part(&mut hash, pair.left_source.as_str().as_bytes());
+    hash_part(&mut hash, pair.right_source.as_str().as_bytes());
+    hash_optional_text(
+        &mut hash,
+        pair.predicate.as_ref().map(ExpressionRef::as_str),
+    );
+    hash_part(&mut hash, window_scope_identity.as_bytes());
+    hash_part(&mut hash, aggregate_compaction_identity.as_bytes());
+    format!(
+        "paired-scoped-window-compaction-pair:{}",
+        hex(&hash.finalize())
+    )
+}
+
+/// Accumulates exact scoped window chains over the paired aggregate
+/// compaction history. A window chain advances both identities; joins without
+/// a window chain carry the latest scope and aggregate fold unchanged.
+fn query_paired_scoped_window_compaction_fold(
+    previous: Option<&QueryPairedScopedWindowCompactionFold>,
+    pair_identity: &str,
+    window_scope_identity: &str,
+    window_stage_count: u64,
+    aggregate_fold: &QueryPairedAggregateAnchorCascadeFold,
+) -> QueryPairedScopedWindowCompactionFold {
+    let mut overflowed = previous.is_some_and(|fold| fold.overflowed) || aggregate_fold.overflowed;
+    let window_pair_count = previous
+        .map_or(1, |fold| fold.window_pair_count.checked_add(1).unwrap_or_else(|| {
+            overflowed = true;
+            u64::MAX
+        }));
+    let window_stage_count = previous.map_or(window_stage_count, |fold| {
+        fold.window_stage_count
+            .checked_add(window_stage_count)
+            .unwrap_or_else(|| {
+                overflowed = true;
+                u64::MAX
+            })
+    });
+
+    let mut hash = Sha256::new();
+    hash.update(b"orna.sys.query-paired-scoped-window-compaction-fold.v1\0");
+    hash_optional_text(
+        &mut hash,
+        previous.map(|fold| fold.identity.as_str()),
+    );
+    hash_part(&mut hash, pair_identity.as_bytes());
+    hash_part(&mut hash, window_scope_identity.as_bytes());
+    hash_part(&mut hash, aggregate_fold.identity.as_bytes());
+    hash.update(window_pair_count.to_be_bytes());
+    hash.update(window_stage_count.to_be_bytes());
+    hash.update(aggregate_fold.pair_count.to_be_bytes());
+    hash.update(aggregate_fold.aggregate_stage_count.to_be_bytes());
+    hash.update([u8::from(overflowed)]);
+
+    QueryPairedScopedWindowCompactionFold {
+        identity: format!(
+            "paired-scoped-window-compaction-fold:{}",
+            hex(&hash.finalize())
+        ),
+        latest_pair_identity: pair_identity.to_owned(),
+        latest_window_scope_identity: window_scope_identity.to_owned(),
+        aggregate_compaction_identity: aggregate_fold.identity.clone(),
+        window_pair_count,
+        window_stage_count,
+        aggregate_pair_count: aggregate_fold.pair_count,
+        aggregate_stage_count: aggregate_fold.aggregate_stage_count,
+        overflowed,
+    }
+}
+
+fn add_paired_scoped_window_compaction_pair_details(
+    details: &mut BTreeMap<String, PlanDetail>,
+    identity: &str,
+) {
+    details.insert(
+        "paired_scoped_window_compaction_pair_identity".to_owned(),
+        PlanDetail::Text(identity.to_owned()),
+    );
+    details.insert(
+        "paired_scoped_window_compaction_pairing".to_owned(),
+        PlanDetail::Text(
+            "exact_join_pair_scoped_window_anchor_and_cumulative_aggregate_compaction".to_owned(),
+        ),
+    );
+}
+
+fn add_paired_scoped_window_compaction_fold_details(
+    details: &mut BTreeMap<String, PlanDetail>,
+    fold: &QueryPairedScopedWindowCompactionFold,
+    advanced_on_window_pair: bool,
+) {
+    details.insert(
+        "paired_scoped_window_compaction_fold_identity".to_owned(),
+        PlanDetail::Text(fold.identity.clone()),
+    );
+    details.insert(
+        "paired_scoped_window_compaction_fold_pairing".to_owned(),
+        PlanDetail::Text(
+            "sparse_scoped_window_chains_over_paired_aggregate_compaction_folds".to_owned(),
+        ),
+    );
+    details.insert(
+        "paired_scoped_window_compaction_fold_transition".to_owned(),
+        PlanDetail::Text(if advanced_on_window_pair {
+            "advanced_scoped_window_pair".to_owned()
+        } else {
+            "carried_across_sparse_input".to_owned()
+        }),
+    );
+    details.insert(
+        "paired_scoped_window_compaction_window_anchor_fold_identity".to_owned(),
+        PlanDetail::Text(fold.latest_window_scope_identity.clone()),
+    );
+    details.insert(
+        "paired_scoped_window_compaction_latest_pair_identity".to_owned(),
+        PlanDetail::Text(fold.latest_pair_identity.clone()),
+    );
+    details.insert(
+        "paired_scoped_window_compaction_aggregate_fold_identity".to_owned(),
+        PlanDetail::Text(fold.aggregate_compaction_identity.clone()),
+    );
+    for (key, value) in [
+        (
+            "paired_scoped_window_compaction_window_pair_count",
+            fold.window_pair_count,
+        ),
+        (
+            "paired_scoped_window_compaction_window_stage_count",
+            fold.window_stage_count,
+        ),
+        (
+            "paired_scoped_window_compaction_aggregate_pair_count",
+            fold.aggregate_pair_count,
+        ),
+        (
+            "paired_scoped_window_compaction_aggregate_stage_count",
+            fold.aggregate_stage_count,
+        ),
+    ] {
+        details.insert(key.to_owned(), PlanDetail::Integer(value));
+    }
+    details.insert(
+        "paired_scoped_window_compaction_overflowed".to_owned(),
         PlanDetail::Boolean(fold.overflowed),
     );
 }
@@ -6232,6 +6800,35 @@ struct QueryPairedLimitAggregateRestorationFold {
     aggregate_stage_count: u64,
     limit_pair_count: u64,
     limit_stage_count: u64,
+    overflowed: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct QueryPairedCheckpointCostRestorationFold {
+    identity: String,
+    chain_count: u64,
+    checkpoint_count: u64,
+    left_segment_count: u64,
+    right_segment_count: u64,
+    left_compaction_count: u64,
+    right_compaction_count: u64,
+    branch_scopes: BTreeSet<(String, u64)>,
+    overflowed: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct QueryPairedLimitWindowCompactionFold {
+    identity: String,
+    limit_aggregate_identity: Option<String>,
+    window_compaction_identity: Option<String>,
+    limit_pair_count: u64,
+    limit_stage_count: u64,
+    aggregate_pair_count: u64,
+    aggregate_stage_count: u64,
+    window_pair_count: u64,
+    window_stage_count: u64,
+    spill_pair_count: u64,
+    spill_totals: Option<QueryAggregateSpillTotals>,
     overflowed: bool,
 }
 
@@ -6750,6 +7347,236 @@ fn add_paired_limit_aggregate_restoration_fold_details(
         "paired_limit_aggregate_restoration_overflowed".to_owned(),
         PlanDetail::Boolean(fold.overflowed),
     );
+}
+
+fn query_paired_limit_window_compaction_pair_identity(
+    limit_aggregate_pair_identity: Option<&str>,
+    window_compaction_pair_identity: Option<&str>,
+) -> Option<String> {
+    if limit_aggregate_pair_identity.is_none() && window_compaction_pair_identity.is_none() {
+        return None;
+    }
+    let mut hash = Sha256::new();
+    hash.update(b"orna.sys.query-paired-limit-window-compaction-pair.v1\0");
+    hash_optional_text(&mut hash, limit_aggregate_pair_identity);
+    hash_optional_text(&mut hash, window_compaction_pair_identity);
+    Some(format!(
+        "paired-limit-window-compaction-pair:{}",
+        hex(&hash.finalize())
+    ))
+}
+
+/// Combines cumulative limit/aggregate restoration and window compaction
+/// histories. Either exact pair advances the identity; all counters and spill
+/// estimates reflect the accumulated chains, including through sparse joins.
+fn query_paired_limit_window_compaction_fold(
+    previous: Option<&QueryPairedLimitWindowCompactionFold>,
+    pair_identity: &str,
+    limit_aggregate_fold: Option<&QueryPairedLimitAggregateRestorationFold>,
+    window_compaction_fold: Option<&QueryPairedWindowCompactionSpillFold>,
+) -> QueryPairedLimitWindowCompactionFold {
+    let limit_pair_count = limit_aggregate_fold.map_or(0, |fold| fold.limit_pair_count);
+    let limit_stage_count = limit_aggregate_fold.map_or(0, |fold| fold.limit_stage_count);
+    let aggregate_pair_count = window_compaction_fold
+        .map(|fold| fold.window_pair_count)
+        .or_else(|| limit_aggregate_fold.map(|fold| fold.aggregate_pair_count))
+        .unwrap_or(0);
+    let aggregate_stage_count = window_compaction_fold
+        .map(|fold| fold.window_stage_count)
+        .or_else(|| limit_aggregate_fold.map(|fold| fold.aggregate_stage_count))
+        .unwrap_or(0);
+    let window_pair_count = window_compaction_fold.map_or(0, |fold| fold.window_pair_count);
+    let window_stage_count = window_compaction_fold.map_or(0, |fold| fold.window_stage_count);
+    let spill_pair_count = window_compaction_fold.map_or(0, |fold| fold.spill_pair_count);
+    let spill_totals = window_compaction_fold.and_then(|fold| fold.spill_totals);
+    let overflowed = limit_aggregate_fold.is_some_and(|fold| fold.overflowed)
+        || window_compaction_fold.is_some_and(|fold| fold.overflowed)
+        || spill_totals.is_some_and(|totals| totals.overflowed);
+
+    let mut hash = Sha256::new();
+    hash.update(b"orna.sys.query-paired-limit-window-compaction-fold.v1\0");
+    hash_optional_text(
+        &mut hash,
+        previous.map(|previous| previous.identity.as_str()),
+    );
+    hash_part(&mut hash, pair_identity.as_bytes());
+    hash_optional_text(
+        &mut hash,
+        limit_aggregate_fold.map(|fold| fold.identity.as_str()),
+    );
+    hash_optional_text(
+        &mut hash,
+        window_compaction_fold.map(|fold| fold.identity.as_str()),
+    );
+    for count in [
+        limit_pair_count,
+        limit_stage_count,
+        aggregate_pair_count,
+        aggregate_stage_count,
+        window_pair_count,
+        window_stage_count,
+        spill_pair_count,
+    ] {
+        hash.update(count.to_be_bytes());
+    }
+    if let Some(totals) = spill_totals {
+        hash.update([1]);
+        hash_query_aggregate_spill_totals(&mut hash, totals);
+    } else {
+        hash.update([0]);
+    }
+    hash.update([u8::from(overflowed)]);
+
+    QueryPairedLimitWindowCompactionFold {
+        identity: format!(
+            "paired-limit-window-compaction-fold:{}",
+            hex(&hash.finalize())
+        ),
+        limit_aggregate_identity: limit_aggregate_fold.map(|fold| fold.identity.clone()),
+        window_compaction_identity: window_compaction_fold.map(|fold| fold.identity.clone()),
+        limit_pair_count,
+        limit_stage_count,
+        aggregate_pair_count,
+        aggregate_stage_count,
+        window_pair_count,
+        window_stage_count,
+        spill_pair_count,
+        spill_totals,
+        overflowed,
+    }
+}
+
+fn add_paired_limit_window_compaction_pair_details(
+    details: &mut BTreeMap<String, PlanDetail>,
+    identity: &str,
+) {
+    details.insert(
+        "paired_limit_window_compaction_pair_identity".to_owned(),
+        PlanDetail::Text(identity.to_owned()),
+    );
+    details.insert(
+        "paired_limit_window_compaction_pairing".to_owned(),
+        PlanDetail::Text(
+            "exact_limit_aggregate_restore_and_window_compaction_spill_pair_events".to_owned(),
+        ),
+    );
+}
+
+fn add_paired_limit_window_compaction_fold_details(
+    details: &mut BTreeMap<String, PlanDetail>,
+    fold: &QueryPairedLimitWindowCompactionFold,
+    advanced_on_pair: bool,
+) {
+    details.insert(
+        "paired_limit_window_compaction_fold_identity".to_owned(),
+        PlanDetail::Text(fold.identity.clone()),
+    );
+    details.insert(
+        "paired_limit_window_compaction_fold_pairing".to_owned(),
+        PlanDetail::Text(
+            "sparse_limit_restore_chains_with_nested_aggregate_compaction_and_spill_history"
+                .to_owned(),
+        ),
+    );
+    for (key, value) in [
+        (
+            "paired_limit_window_compaction_limit_aggregate_fold_identity",
+            fold.limit_aggregate_identity.as_deref(),
+        ),
+        (
+            "paired_limit_window_compaction_window_spill_fold_identity",
+            fold.window_compaction_identity.as_deref(),
+        ),
+    ] {
+        if let Some(value) = value {
+            details.insert(key.to_owned(), PlanDetail::Text(value.to_owned()));
+        } else {
+            details.remove(key);
+        }
+    }
+    details.insert(
+        "paired_limit_window_compaction_fold_transition".to_owned(),
+        PlanDetail::Text(if advanced_on_pair {
+            "advanced_restore_or_compaction_pair".to_owned()
+        } else {
+            "carried_across_sparse_input".to_owned()
+        }),
+    );
+    for (key, value) in [
+        (
+            "paired_limit_window_compaction_limit_pair_count",
+            fold.limit_pair_count,
+        ),
+        (
+            "paired_limit_window_compaction_limit_stage_count",
+            fold.limit_stage_count,
+        ),
+        (
+            "paired_limit_window_compaction_aggregate_pair_count",
+            fold.aggregate_pair_count,
+        ),
+        (
+            "paired_limit_window_compaction_aggregate_stage_count",
+            fold.aggregate_stage_count,
+        ),
+        (
+            "paired_limit_window_compaction_window_pair_count",
+            fold.window_pair_count,
+        ),
+        (
+            "paired_limit_window_compaction_window_stage_count",
+            fold.window_stage_count,
+        ),
+        (
+            "paired_limit_window_compaction_spill_pair_count",
+            fold.spill_pair_count,
+        ),
+    ] {
+        details.insert(key.to_owned(), PlanDetail::Integer(value));
+    }
+    let totals = fold.spill_totals;
+    details.insert(
+        "paired_limit_window_compaction_spill_stage_count".to_owned(),
+        PlanDetail::Integer(totals.map_or(0, |totals| totals.stage_count)),
+    );
+    details.insert(
+        "paired_limit_window_compaction_spill_unknown_working_set_count".to_owned(),
+        PlanDetail::Integer(totals.map_or(0, |totals| totals.unknown_working_set_count)),
+    );
+    details.insert(
+        "paired_limit_window_compaction_overflowed".to_owned(),
+        PlanDetail::Boolean(fold.overflowed),
+    );
+    let status = match totals {
+        None => "no_spill_pairs",
+        Some(totals) if fold.overflowed || totals.overflowed => "overflow",
+        Some(totals) if totals.unknown_working_set_count > 0 => "unknown_working_set",
+        Some(_) => "computed",
+    };
+    details.insert(
+        "paired_limit_window_compaction_estimate_status".to_owned(),
+        PlanDetail::Text(status.to_owned()),
+    );
+    for (key, value) in [
+        (
+            "paired_limit_window_compaction_estimated_bytes",
+            totals.and_then(|totals| totals.estimated_bytes),
+        ),
+        (
+            "paired_limit_window_compaction_estimated_io_blocks",
+            totals.and_then(|totals| totals.estimated_io_blocks),
+        ),
+        (
+            "paired_limit_window_compaction_estimated_io_work",
+            totals.and_then(|totals| totals.estimated_io_work),
+        ),
+    ] {
+        if let Some(value) = value {
+            details.insert(key.to_owned(), PlanDetail::Integer(value));
+        } else {
+            details.remove(key);
+        }
+    }
 }
 
 /// Sums spill estimates in the resolver-ordered aggregate chain for one
@@ -7533,6 +8360,273 @@ fn query_paired_index_cost_restoration_seed_identity(parent_cost_identity: &str)
     )
 }
 
+fn query_paired_checkpoint_cost_restoration_seed_identity(
+    snapshot: &SnapshotRef,
+    parent_cost_identity: &str,
+) -> String {
+    let mut hash = Sha256::new();
+    hash.update(b"orna.sys.query-paired-checkpoint-cost-restoration-seed.v1\0");
+    hash_part(&mut hash, snapshot.as_str().as_bytes());
+    hash_part(&mut hash, parent_cost_identity.as_bytes());
+    format!(
+        "paired-checkpoint-cost-restoration:{}",
+        hex(&hash.finalize())
+    )
+}
+
+fn query_paired_checkpoint_segment_compaction_chain_identity(
+    chain: &QueryPairedCheckpointSegmentCompactionChainDescription,
+) -> String {
+    let mut hash = Sha256::new();
+    hash.update(b"orna.sys.query-paired-checkpoint-segment-compaction-chain.v1\0");
+    hash_part(&mut hash, chain.join_pair_identity.as_str().as_bytes());
+    hash_part(&mut hash, chain.branch.name.as_bytes());
+    hash.update(chain.branch.generation.to_be_bytes());
+    hash.update((chain.steps.len() as u64).to_be_bytes());
+    for step in &chain.steps {
+        hash_part(&mut hash, step.checkpoint_identity.as_str().as_bytes());
+        hash_optional_text(
+            &mut hash,
+            step.left_segment_identity
+                .as_ref()
+                .map(ObjectRef::as_str),
+        );
+        hash_optional_text(
+            &mut hash,
+            step.right_segment_identity
+                .as_ref()
+                .map(ObjectRef::as_str),
+        );
+        hash_optional_text(
+            &mut hash,
+            step.left_compaction_identity
+                .as_ref()
+                .map(ObjectRef::as_str),
+        );
+        hash_optional_text(
+            &mut hash,
+            step.right_compaction_identity
+                .as_ref()
+                .map(ObjectRef::as_str),
+        );
+    }
+    format!("paired-checkpoint-segment-chain:{}", hex(&hash.finalize()))
+}
+
+fn add_checkpoint_fold_count(total: &mut u64, increment: usize, overflowed: &mut bool) {
+    let increment = u64::try_from(increment).unwrap_or_else(|_| {
+        *overflowed = true;
+        u64::MAX
+    });
+    *total = total.checked_add(increment).unwrap_or_else(|| {
+        *overflowed = true;
+        u64::MAX
+    });
+}
+
+fn query_paired_checkpoint_cost_restoration_fold(
+    previous: Option<&QueryPairedCheckpointCostRestorationFold>,
+    parent_identity: &str,
+    parent_cost_identity: &str,
+    paired_index_cost_compaction_identity: Option<&str>,
+    chain: &QueryPairedCheckpointSegmentCompactionChainDescription,
+    chain_identity: &str,
+) -> QueryPairedCheckpointCostRestorationFold {
+    let mut fold = previous.cloned().unwrap_or_else(|| {
+        QueryPairedCheckpointCostRestorationFold {
+            identity: parent_identity.to_owned(),
+            chain_count: 0,
+            checkpoint_count: 0,
+            left_segment_count: 0,
+            right_segment_count: 0,
+            left_compaction_count: 0,
+            right_compaction_count: 0,
+            branch_scopes: BTreeSet::new(),
+            overflowed: false,
+        }
+    });
+    add_checkpoint_fold_count(&mut fold.chain_count, 1, &mut fold.overflowed);
+    add_checkpoint_fold_count(
+        &mut fold.checkpoint_count,
+        chain.steps.len(),
+        &mut fold.overflowed,
+    );
+    add_checkpoint_fold_count(
+        &mut fold.left_segment_count,
+        chain.steps.iter().filter(|step| step.left_segment_identity.is_some()).count(),
+        &mut fold.overflowed,
+    );
+    add_checkpoint_fold_count(
+        &mut fold.right_segment_count,
+        chain.steps.iter().filter(|step| step.right_segment_identity.is_some()).count(),
+        &mut fold.overflowed,
+    );
+    add_checkpoint_fold_count(
+        &mut fold.left_compaction_count,
+        chain.steps.iter().filter(|step| step.left_compaction_identity.is_some()).count(),
+        &mut fold.overflowed,
+    );
+    add_checkpoint_fold_count(
+        &mut fold.right_compaction_count,
+        chain.steps.iter().filter(|step| step.right_compaction_identity.is_some()).count(),
+        &mut fold.overflowed,
+    );
+    fold.branch_scopes
+        .insert((chain.branch.name.clone(), chain.branch.generation));
+
+    let mut hash = Sha256::new();
+    hash.update(b"orna.sys.query-paired-checkpoint-cost-restoration-fold.v1\0");
+    hash_part(&mut hash, parent_identity.as_bytes());
+    hash_part(&mut hash, parent_cost_identity.as_bytes());
+    hash_optional_text(&mut hash, paired_index_cost_compaction_identity);
+    hash_part(&mut hash, chain_identity.as_bytes());
+    hash.update(fold.chain_count.to_be_bytes());
+    hash.update(fold.checkpoint_count.to_be_bytes());
+    hash.update(fold.left_segment_count.to_be_bytes());
+    hash.update(fold.right_segment_count.to_be_bytes());
+    hash.update(fold.left_compaction_count.to_be_bytes());
+    hash.update(fold.right_compaction_count.to_be_bytes());
+    hash.update((fold.branch_scopes.len() as u64).to_be_bytes());
+    hash.update([u8::from(fold.overflowed)]);
+    fold.identity = format!(
+        "paired-checkpoint-cost-restoration:{}",
+        hex(&hash.finalize())
+    );
+    fold
+}
+
+fn add_paired_checkpoint_cost_restoration_details(
+    details: &mut BTreeMap<String, PlanDetail>,
+    fold: &QueryPairedCheckpointCostRestorationFold,
+    parent_identity: &str,
+    parent_cost_identity: &str,
+    transition: &str,
+    pair_identity: Option<&str>,
+    chain_identity: Option<&str>,
+    chain: Option<&QueryPairedCheckpointSegmentCompactionChainDescription>,
+) {
+    details.insert(
+        "paired_checkpoint_cost_restoration_fold_identity".to_owned(),
+        PlanDetail::Text(fold.identity.clone()),
+    );
+    details.insert(
+        "paired_checkpoint_cost_restoration_parent_identity".to_owned(),
+        PlanDetail::Text(parent_identity.to_owned()),
+    );
+    details.insert(
+        "paired_checkpoint_cost_restoration_parent_cost_identity".to_owned(),
+        PlanDetail::Text(parent_cost_identity.to_owned()),
+    );
+    details.insert(
+        "paired_checkpoint_cost_restoration_transition".to_owned(),
+        PlanDetail::Text(transition.to_owned()),
+    );
+    details.insert(
+        "paired_checkpoint_cost_restoration_chain_count".to_owned(),
+        PlanDetail::Integer(fold.chain_count),
+    );
+    details.insert(
+        "paired_checkpoint_cost_restoration_branch_scope_count".to_owned(),
+        PlanDetail::Integer(fold.branch_scopes.len() as u64),
+    );
+    details.insert(
+        "paired_checkpoint_cost_restoration_checkpoint_count".to_owned(),
+        PlanDetail::Integer(fold.checkpoint_count),
+    );
+    details.insert(
+        "paired_checkpoint_cost_restoration_left_segment_count".to_owned(),
+        PlanDetail::Integer(fold.left_segment_count),
+    );
+    details.insert(
+        "paired_checkpoint_cost_restoration_right_segment_count".to_owned(),
+        PlanDetail::Integer(fold.right_segment_count),
+    );
+    details.insert(
+        "paired_checkpoint_cost_restoration_left_compaction_count".to_owned(),
+        PlanDetail::Integer(fold.left_compaction_count),
+    );
+    details.insert(
+        "paired_checkpoint_cost_restoration_right_compaction_count".to_owned(),
+        PlanDetail::Integer(fold.right_compaction_count),
+    );
+    details.insert(
+        "paired_checkpoint_cost_restoration_overflowed".to_owned(),
+        PlanDetail::Boolean(fold.overflowed),
+    );
+    details.insert(
+        "paired_checkpoint_cost_restoration_policy".to_owned(),
+        PlanDetail::Text("branch_local_cost_fold_with_ordered_sparse_checkpoint_segments".to_owned()),
+    );
+    if let Some(pair_identity) = pair_identity {
+        details.insert(
+            "paired_checkpoint_cost_restoration_pair_identity".to_owned(),
+            PlanDetail::Text(pair_identity.to_owned()),
+        );
+    }
+    if let Some(chain_identity) = chain_identity {
+        details.insert(
+            "paired_checkpoint_cost_restoration_step_chain_identity".to_owned(),
+            PlanDetail::Text(chain_identity.to_owned()),
+        );
+    }
+    if let Some(chain) = chain {
+        details.insert(
+            "paired_checkpoint_cost_restoration_branch_identity".to_owned(),
+            PlanDetail::Text(chain.branch.name.clone()),
+        );
+        details.insert(
+            "paired_checkpoint_cost_restoration_branch_generation".to_owned(),
+            PlanDetail::Integer(chain.branch.generation),
+        );
+    }
+}
+
+fn add_paired_checkpoint_cost_restoration_output_details(
+    details: &mut BTreeMap<String, PlanDetail>,
+    fold: &QueryPairedCheckpointCostRestorationFold,
+) {
+    details.insert(
+        "paired_checkpoint_cost_restoration_output_policy".to_owned(),
+        PlanDetail::Text("branch_local_cost_fold_with_ordered_sparse_checkpoint_segments".to_owned()),
+    );
+    details.insert(
+        "paired_checkpoint_cost_restoration_output_fold_identity".to_owned(),
+        PlanDetail::Text(fold.identity.clone()),
+    );
+    details.insert(
+        "paired_checkpoint_cost_restoration_output_chain_count".to_owned(),
+        PlanDetail::Integer(fold.chain_count),
+    );
+    details.insert(
+        "paired_checkpoint_cost_restoration_output_branch_scope_count".to_owned(),
+        PlanDetail::Integer(fold.branch_scopes.len() as u64),
+    );
+    details.insert(
+        "paired_checkpoint_cost_restoration_output_checkpoint_count".to_owned(),
+        PlanDetail::Integer(fold.checkpoint_count),
+    );
+    details.insert(
+        "paired_checkpoint_cost_restoration_output_left_segment_count".to_owned(),
+        PlanDetail::Integer(fold.left_segment_count),
+    );
+    details.insert(
+        "paired_checkpoint_cost_restoration_output_right_segment_count".to_owned(),
+        PlanDetail::Integer(fold.right_segment_count),
+    );
+    details.insert(
+        "paired_checkpoint_cost_restoration_output_left_compaction_count".to_owned(),
+        PlanDetail::Integer(fold.left_compaction_count),
+    );
+    details.insert(
+        "paired_checkpoint_cost_restoration_output_right_compaction_count".to_owned(),
+        PlanDetail::Integer(fold.right_compaction_count),
+    );
+    details.insert(
+        "paired_checkpoint_cost_restoration_output_overflowed".to_owned(),
+        PlanDetail::Boolean(fold.overflowed),
+    );
+}
+
 fn query_paired_index_cost_compaction_seed_identity(parent_cost_identity: &str) -> String {
     let mut hash = Sha256::new();
     hash.update(b"orna.sys.query-paired-index-cost-compaction-seed.v1\0");
@@ -7747,15 +8841,18 @@ fn query_join_cost_fold(
     paired_window_spill_anchor_fold_identity: Option<&str>,
     paired_aggregate_spill_anchor_fold_identity: Option<&str>,
     paired_aggregate_anchor_cascade_fold_identity: Option<&str>,
+    paired_scoped_window_compaction_fold_identity: Option<&str>,
     paired_window_spill_cascade_fold_identity: Option<&str>,
     paired_aggregate_spill_restoration_fold_identity: Option<&str>,
     paired_window_compaction_spill_fold_identity: Option<&str>,
     paired_limit_aggregate_restoration_fold_identity: Option<&str>,
+    paired_limit_window_compaction_fold_identity: Option<&str>,
     paired_limit_window_cascade_fold_identity: Option<&str>,
     paired_join_limit_anchor_cascade_fold_identity: Option<&str>,
     cardinality: Cardinality,
     work: Option<u64>,
     work_overflow: bool,
+    paired_checkpoint_cost_restoration_fold_identity: Option<&str>,
 ) -> String {
     let mut hash = Sha256::new();
     hash.update(b"orna.sys.query-join-cost-fold.v1\0");
@@ -7791,6 +8888,7 @@ fn query_join_cost_fold(
     }
     hash_optional_text(&mut hash, paired_aggregate_spill_anchor_fold_identity);
     hash_optional_text(&mut hash, paired_aggregate_anchor_cascade_fold_identity);
+    hash_optional_text(&mut hash, paired_scoped_window_compaction_fold_identity);
     hash_optional_text(&mut hash, paired_window_spill_cascade_fold_identity);
     hash_optional_text(
         &mut hash,
@@ -7801,12 +8899,17 @@ fn query_join_cost_fold(
         &mut hash,
         paired_limit_aggregate_restoration_fold_identity,
     );
+    hash_optional_text(&mut hash, paired_limit_window_compaction_fold_identity);
     hash_optional_text(&mut hash, paired_limit_window_cascade_fold_identity);
     hash_optional_text(&mut hash, paired_join_limit_anchor_cascade_fold_identity);
     hash_optional_u64(&mut hash, cardinality.rows);
     hash_optional_u64(&mut hash, cardinality.bytes);
     hash_optional_u64(&mut hash, work);
     hash.update([u8::from(work_overflow)]);
+    if let Some(identity) = paired_checkpoint_cost_restoration_fold_identity {
+        hash.update([1]);
+        hash_part(&mut hash, identity.as_bytes());
+    }
     format!("join-fold:{}", hex(&hash.finalize()))
 }
 

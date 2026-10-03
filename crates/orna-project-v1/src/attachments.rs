@@ -819,6 +819,170 @@ impl PackageResolver {
         Ok((route, page_transitions))
     }
 
+    /// Repeatedly compacts one labelled terminal pair, rotating its order
+    /// after each fold. `folds_per_page` controls how many rotations occur in
+    /// each page; the orientation carries across page boundaries and a zero
+    /// count preserves an empty page without changing it. The reference does
+    /// not define rotation for attach-history folds; v1 rotates the two exact
+    /// snapshot identities and validates the terminal route after every fold.
+    /// If a label is stale, no partial route is returned.
+    pub fn compact_nested_terminal_pair_history_rotation_pages_preserving_terminal_identity(
+        &self,
+        previous: &ReboundPathResolution,
+        labels: &[NestedPairDepthLabel; 2],
+        folds_per_page: &[usize],
+    ) -> Result<
+        (
+            ReboundPathResolution,
+            Vec<Vec<(NestedPairTerminalRouteIdentity, NestedPairTerminalRouteIdentity)>>,
+        ),
+        AttachmentError,
+    > {
+        let mut route = previous.clone();
+        let mut ordered_labels = [labels[0].clone(), labels[1].clone()];
+        let mut page_transitions = Vec::with_capacity(folds_per_page.len());
+        for fold_count in folds_per_page {
+            let mut transitions = Vec::with_capacity(*fold_count);
+            for _ in 0..*fold_count {
+                let (compacted, fold_transitions) = self
+                    .compact_nested_terminal_pair_history_folds_preserving_terminal_identity(
+                        &route,
+                        std::slice::from_ref(&ordered_labels),
+                    )?;
+                route = compacted;
+                transitions.extend(fold_transitions);
+                ordered_labels.rotate_left(1);
+            }
+            page_transitions.push(transitions);
+        }
+        Ok((route, page_transitions))
+    }
+
+    /// Compacts retained history through paired handoff checkpoints. Each
+    /// fold keeps the two exact checkpoint snapshots in caller order, so a
+    /// checkpoint captured before compaction remains replayable while its
+    /// snapshot is retained. The reference does not define checkpoint-backed
+    /// attach-history compaction; v1 requires both checkpoints to belong to
+    /// this route and validates their identities after every fold.
+    pub fn compact_nested_terminal_pair_checkpoint_folds_preserving_terminal_identity(
+        &self,
+        previous: &ReboundPathResolution,
+        checkpoint_folds: &[[&ReboundPathCheckpoint; 2]],
+    ) -> Result<
+        (
+            ReboundPathResolution,
+            Vec<(NestedPairTerminalRouteIdentity, NestedPairTerminalRouteIdentity)>,
+        ),
+        AttachmentError,
+    > {
+        let mut route = previous.clone();
+        let mut transitions = Vec::with_capacity(checkpoint_folds.len());
+        for checkpoints in checkpoint_folds {
+            for checkpoint in checkpoints {
+                checkpoint.validate_depth_identity()?;
+                route.validate_depth_label(checkpoint.depth_label())?;
+            }
+            let labels = [
+                checkpoints[0].depth_label().clone(),
+                checkpoints[1].depth_label().clone(),
+            ];
+            let (compacted, fold_transitions) = self
+                .compact_nested_terminal_pair_history_folds_preserving_terminal_identity(
+                    &route,
+                    std::slice::from_ref(&labels),
+                )?;
+            route = compacted;
+            for checkpoint in checkpoints {
+                route.validate_depth_label(checkpoint.depth_label())?;
+            }
+            transitions.push(
+                fold_transitions
+                    .into_iter()
+                    .next()
+                    .ok_or(AttachmentError::RetainedSnapshotUnavailable)?,
+            );
+        }
+        Ok((route, transitions))
+    }
+
+    /// Compacts paired checkpoints across retained history and checkpoint
+    /// spills. A same-route checkpoint may restore its exact snapshot into a
+    /// temporary retained wave after an earlier fold removed that snapshot;
+    /// the fold then keeps the selected pair and their original identities.
+    /// The reference does not define spilled in-memory attach checkpoints, so
+    /// v1 treats the checkpoint's owned handoff as the spill record. Foreign,
+    /// malformed, or duplicate checkpoint identities fail atomically.
+    pub fn compact_nested_terminal_pair_checkpoint_spill_folds_preserving_terminal_identity(
+        &self,
+        previous: &ReboundPathResolution,
+        checkpoint_folds: &[[&ReboundPathCheckpoint; 2]],
+    ) -> Result<
+        (
+            ReboundPathResolution,
+            Vec<(NestedPairTerminalRouteIdentity, NestedPairTerminalRouteIdentity)>,
+        ),
+        AttachmentError,
+    > {
+        let mut route = previous.clone();
+        let mut transitions = Vec::with_capacity(checkpoint_folds.len());
+        for checkpoints in checkpoint_folds {
+            for checkpoint in checkpoints {
+                checkpoint.validate_depth_identity()?;
+                if !Arc::ptr_eq(
+                    &route.route_identity,
+                    &checkpoint.depth_label.route_identity,
+                ) {
+                    return Err(AttachmentError::RetainedSnapshotUnavailable);
+                }
+            }
+            if Arc::ptr_eq(
+                &checkpoints[0].depth_label.snapshot_identity,
+                &checkpoints[1].depth_label.snapshot_identity,
+            ) {
+                return Err(AttachmentError::RetainedSnapshotUnavailable);
+            }
+
+            let mut spilled_sessions = Vec::new();
+            let mut spilled_identities = Vec::new();
+            for checkpoint in checkpoints {
+                let label = checkpoint.depth_label();
+                if route
+                    .retained_snapshot_identities
+                    .iter()
+                    .any(|identity| Arc::ptr_eq(identity, &label.snapshot_identity))
+                {
+                    route.validate_depth_label(label)?;
+                } else {
+                    spilled_sessions.push(checkpoint.handoff().clone());
+                    spilled_identities.push(label.snapshot_identity.clone());
+                }
+            }
+            if !spilled_sessions.is_empty() {
+                route
+                    .retained_sessions
+                    .extend(spilled_sessions.iter().cloned());
+                route
+                    .retained_snapshot_identities
+                    .extend(spilled_identities);
+                route.retained_wave_lengths.push(spilled_sessions.len());
+            }
+
+            let labels = [
+                checkpoints[0].depth_label().clone(),
+                checkpoints[1].depth_label().clone(),
+            ];
+            let before = route.terminal_route_identity();
+            route = route.compact_retained_depth_pair(&labels)?;
+            let after = route.terminal_route_identity();
+            route.validate_terminal_route_identity(&before)?;
+            for checkpoint in checkpoints {
+                route.validate_depth_label(checkpoint.depth_label())?;
+            }
+            transitions.push((before, after));
+        }
+        Ok((route, transitions))
+    }
+
     /// Continues a terminal-pair chain from an exact retained session. The
     /// first pair uses that session as its handoff root; later pairs continue
     /// from the preceding pair's newest handoff. The reference does not define

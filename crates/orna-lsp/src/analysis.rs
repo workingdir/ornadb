@@ -37,6 +37,7 @@ use crate::documents::{Document, PositionMapper};
 pub struct StandardLibrary {
     catalogue: StandardCatalogueV1,
     modules: std::collections::BTreeMap<NamespaceV1, orna_semantic_v1::ModuleHeader>,
+    documentation: std::collections::BTreeMap<String, String>,
 }
 
 impl StandardLibrary {
@@ -47,6 +48,8 @@ impl StandardLibrary {
     pub fn load() -> Result<Self, String> {
         let catalogue = reference_standard_catalogue_v1()
             .map_err(|error| format!("invalid pinned 1.0.0 standard catalogue: {error:?}"))?;
+        let documentation =
+            standard_function_documentation(orna_standard::reference_standard_sources_v1());
         let analysis = analyze_with_catalogue(&[], &catalogue);
         if !analysis.is_ok() {
             return Err("pinned 1.0.0 standard catalogue did not analyze cleanly".to_owned());
@@ -54,6 +57,7 @@ impl StandardLibrary {
         Ok(Self {
             catalogue,
             modules: analysis.modules,
+            documentation,
         })
     }
 }
@@ -3220,8 +3224,12 @@ pub fn hover(
             hover.range = Some(mapper.range(&span));
             return Some(hover);
         }
-        if let Some(hover) = standard
-            .and_then(|library| standard_function_hover(library, &target_name, doc_link.as_deref()))
+        if let Some(hover) =
+            system_function_hover(&target_name, doc_link.as_deref()).or_else(|| {
+                standard.and_then(|library| {
+                    standard_function_hover(library, &target_name, doc_link.as_deref())
+                })
+            })
         {
             let mut hover = hover;
             hover.range = Some(mapper.range(&span));
@@ -3235,8 +3243,12 @@ pub fn hover(
             .map(|part| part.text.as_str())
             .collect::<Vec<_>>()
             .join(".");
-        if let Some(hover) = standard
-            .and_then(|library| standard_function_hover(library, &target_name, doc_link.as_deref()))
+        if let Some(hover) =
+            system_function_hover(&target_name, doc_link.as_deref()).or_else(|| {
+                standard.and_then(|library| {
+                    standard_function_hover(library, &target_name, doc_link.as_deref())
+                })
+            })
         {
             let mut hover = hover;
             hover.range = Some(mapper.range(&span));
@@ -3751,6 +3763,7 @@ struct StandardFunctionSignature {
     domain: &'static str,
     parameters: Vec<(String, Option<String>)>,
     return_type: String,
+    documentation: Option<String>,
 }
 fn standard_function(standard: &StandardLibrary, name: &str) -> Option<StandardFunctionSignature> {
     let target = source_name_parts(name)
@@ -3793,8 +3806,10 @@ fn standard_function(standard: &StandardLibrary, name: &str) -> Option<StandardF
                 .collect()
         });
     let return_type = resolved_type_name(result);
+    let qualified_name = format!("{}.{}", namespace.display(), function_name);
     Some(StandardFunctionSignature {
-        name: format!("{}.{}", namespace.display(), function_name),
+        documentation: standard.documentation.get(&qualified_name).cloned(),
+        name: qualified_name,
         domain: "1.0",
         parameters,
         return_type,
@@ -3818,8 +3833,70 @@ fn standard_function_hover(
             .collect::<Vec<_>>()
             .join(", "),
         &function.return_type,
+        function.documentation.as_deref(),
         doc_link,
     ))
+}
+
+fn system_function_hover(name: &str, doc_link: Option<&str>) -> Option<lsp_types::Hover> {
+    let descriptors = orna_sys_v1::SYSTEM_FUNCTION_DESCRIPTORS
+        .iter()
+        .filter(|descriptor| {
+            descriptor
+                .name
+                .split(['(', '<'])
+                .next()
+                .is_some_and(|callable| callable.eq_ignore_ascii_case(name))
+        })
+        .collect::<Vec<_>>();
+    (!descriptors.is_empty()).then(|| crate::hover::system_function_hover(&descriptors, doc_link))
+}
+
+fn standard_function_documentation(
+    sources: impl IntoIterator<Item = (String, String)>,
+) -> std::collections::BTreeMap<String, String> {
+    let mut documentation = std::collections::BTreeMap::new();
+    for (path, source) in sources {
+        let Some(relative_path) = path
+            .strip_prefix("std/")
+            .and_then(|path| path.strip_suffix(".orna"))
+        else {
+            continue;
+        };
+        let mut module_parts = relative_path.split('/').collect::<Vec<_>>();
+        if module_parts.last() == Some(&"main") {
+            module_parts.pop();
+        }
+        let module = if module_parts.is_empty() {
+            "std".to_owned()
+        } else {
+            format!("std.{}", module_parts.join("."))
+        };
+        let mut pending = Vec::<String>::new();
+        for line in source.lines() {
+            let trimmed = line.trim_start();
+            if let Some(comment) = trimmed.strip_prefix("///") {
+                pending.push(comment.strip_prefix(' ').unwrap_or(comment).to_owned());
+                continue;
+            }
+            if trimmed.is_empty() && !pending.is_empty() {
+                pending.push(String::new());
+                continue;
+            }
+            if let Some(declaration) = trimmed.strip_prefix("pub fn ") {
+                let function = declaration
+                    .split(['(', '<', ':', ' '])
+                    .next()
+                    .unwrap_or_default();
+                let value = pending.join("\n").trim().to_owned();
+                if !function.is_empty() && !value.is_empty() {
+                    documentation.insert(format!("{module}.{function}"), value);
+                }
+            }
+            pending.clear();
+        }
+    }
+    documentation
 }
 
 fn signature_information(

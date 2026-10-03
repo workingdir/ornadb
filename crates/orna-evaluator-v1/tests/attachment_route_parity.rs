@@ -1694,7 +1694,7 @@ fn fresh_nested_route_pair_chains_evaluate_rebound_closure_values() {
 }
 
 #[test]
-fn paired_terminal_compaction_fold_pages_preserve_nested_rebind_identity() {
+fn paired_terminal_checkpoint_spill_compaction_folds_preserve_nested_rebind_identity() {
     let package_source = include_str!("fixtures/attachment-route-package.orna");
     let primary_source = include_str!("fixtures/attachment-route-primary.orna");
     let (package_dir, package_repository, _) = repository(package_source);
@@ -1809,11 +1809,14 @@ fn paired_terminal_compaction_fold_pages_preserve_nested_rebind_identity() {
         .extend_nested_terminal_pair_chain(&fresh_route, &[first_pair.clone()])
         .unwrap();
     let nested_rebinds = resolver
-        .extend_nested_terminal_pair_chain(&first_stage, &[second_pair])
+        .extend_nested_terminal_pair_chain(&first_stage, &[second_pair.clone()])
         .unwrap();
     let first_label = first_stage.retained_depth_label(0, 0).unwrap();
     let second_label = nested_rebinds.retained_depth_label(2, 1).unwrap();
     let dropped_label = nested_rebinds.retained_depth_label(1, 0).unwrap();
+    let first_checkpoint = first_stage.handoff_checkpoint(0, 0).unwrap();
+    let second_checkpoint = nested_rebinds.handoff_checkpoint(2, 1).unwrap();
+    let dropped_checkpoint = nested_rebinds.handoff_checkpoint(1, 0).unwrap();
     let terminal_identity = nested_rebinds.terminal_route_identity();
     let folds = [
         [first_label.clone(), second_label.clone()],
@@ -1878,9 +1881,156 @@ fn paired_terminal_compaction_fold_pages_preserve_nested_rebind_identity() {
         Err(AttachmentError::RetainedSnapshotUnavailable)
     ));
 
+    let rotation_pages = [1, 0, 1, 2];
+    let (rotated_compacted, rotation_transitions) = resolver
+        .compact_nested_terminal_pair_history_rotation_pages_preserving_terminal_identity(
+            &nested_rebinds,
+            &[first_label.clone(), second_label.clone()],
+            &rotation_pages,
+        )
+        .unwrap();
+    assert_eq!(rotation_transitions.len(), rotation_pages.len());
+    assert_eq!(
+        rotation_transitions
+            .iter()
+            .map(Vec::len)
+            .collect::<Vec<_>>(),
+        rotation_pages,
+        "rotation orientation carries over both the empty page and later pages"
+    );
+    for (before, after) in rotation_transitions.iter().flatten() {
+        assert_eq!(before, &terminal_identity);
+        assert_eq!(after, &terminal_identity);
+    }
+    assert_eq!(rotated_compacted.terminal_route_identity(), terminal_identity);
+    assert_eq!(
+        rotated_compacted.retained_depth_label(0, 0).unwrap(),
+        second_label,
+        "four pair rotations leave the second captured identity first"
+    );
+    assert_eq!(
+        rotated_compacted.retained_depth_label(0, 1).unwrap(),
+        first_label
+    );
+    assert!(matches!(
+        resolver.extend_nested_terminal_pair_storm_from_label(
+            &rotated_compacted,
+            &dropped_label,
+            &[]
+        ),
+        Err(AttachmentError::RetainedSnapshotUnavailable)
+    ));
+
+    let checkpoint_folds = [
+        [&first_checkpoint, &second_checkpoint],
+        [&second_checkpoint, &first_checkpoint],
+    ];
+    let (checkpoint_compacted, checkpoint_transitions) = resolver
+        .compact_nested_terminal_pair_checkpoint_folds_preserving_terminal_identity(
+            &nested_rebinds,
+            &checkpoint_folds,
+        )
+        .unwrap();
+    assert_eq!(checkpoint_transitions.len(), 2);
+    for (before, after) in &checkpoint_transitions {
+        assert_eq!(before, &terminal_identity);
+        assert_eq!(after, &terminal_identity);
+    }
+    assert_eq!(
+        checkpoint_compacted.terminal_route_identity(),
+        terminal_identity
+    );
+    assert_eq!(
+        checkpoint_compacted.retained_depth_label(0, 0).unwrap(),
+        second_label
+    );
+    assert_eq!(
+        checkpoint_compacted.retained_depth_label(0, 1).unwrap(),
+        first_label
+    );
+    assert!(matches!(
+        resolver.extend_nested_terminal_pair_chain_from_checkpoint(
+            &checkpoint_compacted,
+            &dropped_checkpoint,
+            &[],
+        ),
+        Err(AttachmentError::RetainedSnapshotUnavailable)
+    ));
+    let checkpoint_replay = resolver
+        .extend_nested_terminal_pair_chain_from_checkpoint(
+            &checkpoint_compacted,
+            &first_checkpoint,
+            std::slice::from_ref(&first_pair),
+        )
+        .unwrap();
+    let mut checkpoint_evaluator = AdmittedReplSession::from_attached_database_session(
+        &checkpoint_replay.retained_wave(2).unwrap()[1],
+        Limits::default(),
+    )
+    .unwrap();
+    assert_eq!(
+        checkpoint_evaluator.submit(&format!("use {};", aliases[3])),
+        Ok(None)
+    );
+    assert_eq!(
+        checkpoint_evaluator.submit(&format!("{}.package_value()", aliases[3])),
+        Ok(Some(Value::int(84.into()))),
+        "a checkpoint captured before paired folds replays the same nested closure"
+    );
+
+    let checkpoint_spill_folds = [
+        [&first_checkpoint, &second_checkpoint],
+        [&dropped_checkpoint, &first_checkpoint],
+    ];
+    let (spill_compacted, spill_transitions) = resolver
+        .compact_nested_terminal_pair_checkpoint_spill_folds_preserving_terminal_identity(
+            &nested_rebinds,
+            &checkpoint_spill_folds,
+        )
+        .unwrap();
+    assert_eq!(spill_transitions.len(), 2);
+    for (before, after) in &spill_transitions {
+        assert_eq!(before, &terminal_identity);
+        assert_eq!(after, &terminal_identity);
+    }
+    assert_eq!(spill_compacted.retained_sessions().len(), 2);
+    assert_eq!(spill_compacted.terminal_route_identity(), terminal_identity);
+    assert_eq!(
+        spill_compacted.retained_depth_label(0, 0).unwrap(),
+        dropped_label,
+        "a checkpoint spill restores its exact snapshot identity for the next fold"
+    );
+    assert_eq!(
+        spill_compacted.retained_depth_label(0, 1).unwrap(),
+        first_label
+    );
+    let restored_spill_route = &spill_compacted.retained_wave(0).unwrap()[0];
+    for alias in aliases {
+        assert_eq!(
+            restored_spill_route.database(alias).map(|database| database.pin()),
+            dropped_checkpoint
+                .handoff()
+                .database(alias)
+                .map(|database| database.pin()),
+            "the folded route restores the spilled checkpoint pin for {alias}"
+        );
+    }
+    let restored_spill_checkpoint = resolver
+        .extend_nested_terminal_pair_chain_from_checkpoint(
+            &spill_compacted,
+            &dropped_checkpoint,
+            &[],
+        )
+        .unwrap();
+    assert_eq!(
+        restored_spill_checkpoint.terminal_route_identity(),
+        terminal_identity,
+        "the restored spill checkpoint leaves the terminal route unchanged"
+    );
+
     let rebound = resolver
         .extend_nested_terminal_pair_storm_from_label(
-            &paged_compacted,
+            &rotated_compacted,
             &first_label,
             std::slice::from_ref(&first_pair),
         )

@@ -18407,6 +18407,13 @@ fn paired_sparse_compaction_fold_chain_keeps_learned_omission_identity() {
     let Type::Record(stages) = result.as_ref() else {
         panic!("sparse compaction proof must expose saved and compacted stages: {result:?}");
     };
+    assert_eq!(
+        stages.get("window"),
+        Some(&Type::Relation(Box::new(Type::List(Box::new(Type::Named(
+            "WindowRow".into(),
+        )))))),
+        "the fold result preserves the concrete relation-window shape"
+    );
     let checkpoint_maps = |stage: &str, lane: &str| {
         let Type::List(row) = stages.get(stage).expect("compaction stage") else {
             panic!("{stage} must retain the folded checkpoint rows");

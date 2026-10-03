@@ -1,12 +1,20 @@
 default: check
 
 # Run the default local fmt/build/lint/non-ignored test/rustdoc gate.
-check: fixture-audit fmt build lint test lsp-language-model-drift sys-artifact-ci rustdoc-check
+check: fixture-audit editor-artifacts-check fmt build lint test lsp-language-model-drift sys-artifact-ci rustdoc-check
 
 # Reject external reference paths and a checkout-local reference tree.
 fixture-audit:
     test ! -e reference || (echo "fixture-audit: remove the top-level reference tree" >&2; exit 1)
     cargo test --locked -p orna-syntax --test reference_path_boundary
+
+# Regenerate checked-in TextMate, semantic-token, and VS Code metadata.
+editor-artifacts:
+    cargo run --locked -p orna-syntax --example generate_editor_artifacts
+
+# Reject editor artifacts that drift from the orna-syntax grammar metadata.
+editor-artifacts-check:
+    cargo run --locked -p orna-syntax --example generate_editor_artifacts -- --check
 
 
 # Verify formatting without changing source files.

@@ -60,6 +60,31 @@ fn nested_window_aggregate_functions() -> Functions {
         .collect()
 }
 
+fn nested_aggregate_refresh_functions() -> Functions {
+    let parsed = parse_module(include_str!(
+        "fixtures/table_relation_nested_aggregate_refresh_restore_i6k3c.orna"
+    ));
+    assert!(parsed.is_ok(), "{:?}", parsed.diagnostics);
+    parsed
+        .value
+        .items
+        .into_iter()
+        .map(|item| {
+            let orna_syntax_v1::Declaration::Function { signature, body } = item.declaration else {
+                panic!("fixture function expected")
+            };
+            (
+                signature.name,
+                PureFunction {
+                    parameters: signature.parameters,
+                    body,
+                    environment: Environment::new(),
+                },
+            )
+        })
+        .collect()
+}
+
 fn sparse_window_fold_functions() -> Functions {
     let parsed = parse_module(include_str!("fixtures/table_relation_sparse_window_fold_d4441.orna"));
     assert!(parsed.is_ok(), "{:?}", parsed.diagnostics);
@@ -83,8 +108,91 @@ fn sparse_window_fold_functions() -> Functions {
         .collect()
 }
 
+fn paired_window_refresh_compaction_functions() -> Functions {
+    let parsed = parse_module(include_str!(
+        "fixtures/table_relation_paired_window_refresh_compaction_lzevs.orna"
+    ));
+    assert!(parsed.is_ok(), "{:?}", parsed.diagnostics);
+    parsed
+        .value
+        .items
+        .into_iter()
+        .map(|item| {
+            let orna_syntax_v1::Declaration::Function { signature, body } = item.declaration else {
+                panic!("fixture function expected")
+            };
+            (
+                signature.name,
+                PureFunction {
+                    parameters: signature.parameters,
+                    body,
+                    environment: Environment::new(),
+                },
+            )
+        })
+        .collect()
+}
+
+fn paired_limit_refresh_compaction_functions() -> Functions {
+    let parsed = parse_module(include_str!(
+        "fixtures/table_relation_paired_limit_refresh_compaction_la0gy.orna"
+    ));
+    assert!(parsed.is_ok(), "{:?}", parsed.diagnostics);
+    parsed
+        .value
+        .items
+        .into_iter()
+        .map(|item| {
+            let orna_syntax_v1::Declaration::Function { signature, body } = item.declaration else {
+                panic!("fixture function expected")
+            };
+            (
+                signature.name,
+                PureFunction {
+                    parameters: signature.parameters,
+                    body,
+                    environment: Environment::new(),
+                },
+            )
+        })
+        .collect()
+}
+
+fn scoped_refresh_aggregate_functions() -> Functions {
+    let parsed = parse_module(include_str!(
+        "fixtures/table_relation_scoped_refresh_aggregate_restore_4plgl.orna"
+    ));
+    assert!(parsed.is_ok(), "{:?}", parsed.diagnostics);
+    parsed
+        .value
+        .items
+        .into_iter()
+        .map(|item| {
+            let orna_syntax_v1::Declaration::Function { signature, body } = item.declaration else {
+                panic!("fixture function expected")
+            };
+            (
+                signature.name,
+                PureFunction {
+                    parameters: signature.parameters,
+                    body,
+                    environment: Environment::new(),
+                },
+            )
+        })
+        .collect()
+}
+
 fn integer(value: i64) -> CanonicalValue {
     CanonicalValue::new(Raw::Int(value.into())).unwrap()
+}
+
+fn integer_pair(left: i64, right: i64) -> CanonicalValue {
+    CanonicalValue::new(Raw::Tag(
+        60015,
+        Box::new(Raw::Array(vec![Raw::Int(left.into()), Raw::Int(right.into())])),
+    ))
+    .unwrap()
 }
 
 fn optional(value: CanonicalValue) -> CanonicalValue {
@@ -1750,6 +1858,16 @@ fn paired_nested_window_aggregate_body() -> Expr {
     terminal(paired, "sum")
 }
 
+fn paired_nested_aggregate_refresh_body() -> Expr {
+    Expr::Tuple {
+        elements: vec![
+            terminal(nested_window_aggregate("View.Left"), "sum"),
+            terminal(nested_window_aggregate("View.Right"), "sum"),
+        ],
+        span: span(),
+    }
+}
+
 fn sparse_window_fold(source: &str, predicate: &str) -> Expr {
     let filtered = relation_stage(
         relation_source(source),
@@ -1785,6 +1903,138 @@ fn paired_sparse_window_fold_body() -> Expr {
         vec![sparse_window_fold("View.Paired", "is_even")],
     );
     terminal(paired, "sum")
+}
+
+fn paired_window_refresh_compaction_body() -> Expr {
+    Expr::Tuple {
+        elements: vec![
+            terminal(sparse_window_fold("View.Left", "is_odd"), "sum"),
+            terminal(sparse_window_fold("View.Right", "is_even"), "sum"),
+        ],
+        span: span(),
+    }
+}
+
+fn paired_limit_refresh_compaction_body() -> Expr {
+    let limited_sum = |source: &str| {
+        let first_limit = relation_stage(
+            relation_source(source),
+            "take",
+            vec![integer_literal(4)],
+        );
+        let tightened_limit = relation_stage(first_limit, "take", vec![integer_literal(3)]);
+        let scaled = relation_stage(tightened_limit, "map", vec![named_function("scale_row")]);
+        terminal(scaled, "sum")
+    };
+    Expr::Tuple {
+        elements: vec![limited_sum("View.Left"), limited_sum("View.Right")],
+        span: span(),
+    }
+}
+
+fn paired_scoped_aggregate_restore_body() -> Expr {
+    let left = terminal(
+        relation_stage(
+            relation_source("View.Left"),
+            "filter",
+            vec![named_function("is_odd")],
+        ),
+        "sum",
+    );
+    let right = terminal(
+        relation_stage(
+            relation_source("View.Right"),
+            "filter",
+            vec![named_function("is_even")],
+        ),
+        "sum",
+    );
+    Expr::Tuple {
+        elements: vec![left, right],
+        span: span(),
+    }
+}
+
+#[test]
+fn paired_aggregate_restores_keep_refresh_scope_identity_and_values() {
+    let cursor_one = vec![0x54, 0x00];
+    let cursor_two = vec![0x54, 0x01];
+    let restore = |values: [i64; 3]| {
+        BTreeMap::from([
+            (None, page(&[values[0]], Some(cursor_one.clone()))),
+            (
+                Some(cursor_one.clone()),
+                page(&[values[1]], Some(cursor_two.clone())),
+            ),
+            (Some(cursor_two.clone()), page(&[values[2]], None)),
+        ])
+    };
+    let mut source = PairedCursorRestoreSource::new([
+        ("View.Left", restore([1, 2, 3])),
+        ("View.Right", restore([2, 3, 4])),
+        ("View.Left", restore([5, 6, 7])),
+        ("View.Right", restore([6, 7, 8])),
+        ("View.Left", restore([2, 9, 10])),
+        ("View.Right", restore([9, 10, 11])),
+    ]);
+    let functions = scoped_refresh_aggregate_functions();
+    let run_pair = |source: &mut PairedCursorRestoreSource| {
+        let mut functions = functions.clone();
+        functions.insert(
+            "run".into(),
+            PureFunction {
+                parameters: Vec::new(),
+                body: paired_scoped_aggregate_restore_body(),
+                environment: Environment::new(),
+            },
+        );
+        invoke_named_with_effects(
+            "run",
+            &functions,
+            &Environment::new(),
+            Limits::default(),
+            source,
+        )
+        .unwrap()
+    };
+
+    let first = run_pair(&mut source);
+    assert_eq!(first, integer_pair(4, 6), "odd left rows sum to 4 and even right rows sum to 6");
+    let second = run_pair(&mut source);
+    assert_eq!(second, integer_pair(12, 14), "the second paired restore sums its own rows");
+    let third = run_pair(&mut source);
+    assert_eq!(third, integer_pair(9, 10), "the third paired restore sums its own rows");
+    assert_eq!(first, integer_pair(4, 6), "later refreshes retain the first aggregate pair");
+    assert_eq!(second, integer_pair(12, 14), "later refreshes retain the second aggregate pair");
+
+    assert_eq!(source.lanes.len(), 6, "three refreshes bind independent left and right scopes");
+    for generation in 0..3 {
+        let start = generation * 2;
+        assert_eq!(source.lanes[start].0, "View.Left");
+        assert_eq!(source.lanes[start + 1].0, "View.Right");
+    }
+    let scopes = source.lanes.iter().map(|(_, scope, _)| *scope).collect::<Vec<_>>();
+    for (index, scope) in scopes.iter().enumerate() {
+        assert!(
+            !scopes[..index].contains(scope),
+            "paired aggregate restore chains keep fresh scope identities: {scope:?}"
+        );
+    }
+    let mut expected_cursors = Vec::new();
+    for (name, scope, _) in &source.lanes {
+        expected_cursors.extend([
+            (name.clone(), *scope, None),
+            (name.clone(), *scope, Some(cursor_one.clone())),
+            (name.clone(), *scope, Some(cursor_two.clone())),
+        ]);
+    }
+    assert_eq!(
+        source.cursors,
+        expected_cursors,
+        "reused compact cursor bytes resume only within each refresh's source scope"
+    );
+    assert!(source.pending["View.Left"].is_empty());
+    assert!(source.pending["View.Right"].is_empty());
 }
 
 #[test]
@@ -1876,6 +2126,127 @@ fn nested_window_aggregates_recompute_real_values_for_paired_restore_chains() {
 }
 
 #[test]
+fn nested_aggregates_keep_values_across_paired_refresh_restore_chains() {
+    // The reference leaves cross-refresh cursor reuse unspecified; each refreshed
+    // source snapshot therefore owns an independent `(source, scope, cursor)` chain.
+    let cursors = [vec![0x69], vec![0x69, 0x00], vec![0x69, 0x00, 0xff]];
+    let restore = |groups: &[&[i64]], tokens: &[Vec<u8>]| {
+        assert_eq!(groups.len(), tokens.len() + 1);
+        groups
+            .iter()
+            .enumerate()
+            .map(|(index, values)| {
+                let after = index.checked_sub(1).map(|previous| tokens[previous].clone());
+                let next = tokens.get(index).cloned();
+                (after, page(values, next))
+            })
+            .collect::<CursorRestore>()
+    };
+    let mut source = PairedCursorRestoreSource::new([
+        (
+            "View.Left",
+            restore(&[&[1], &[2], &[3]], &cursors[..2]),
+        ),
+        (
+            "View.Right",
+            restore(&[&[10, 20], &[30]], &cursors[..1]),
+        ),
+        (
+            "View.Left",
+            restore(&[&[4, 5], &[6]], &cursors[..1]),
+        ),
+        (
+            "View.Right",
+            restore(&[&[2], &[4], &[6]], &cursors[..2]),
+        ),
+        (
+            "View.Left",
+            restore(&[&[-1], &[3, 5]], &cursors[..1]),
+        ),
+        (
+            "View.Right",
+            restore(&[&[2, 4], &[8]], &cursors[..1]),
+        ),
+    ]);
+    let mut functions = nested_aggregate_refresh_functions();
+    functions.insert(
+        "run".into(),
+        PureFunction {
+            parameters: Vec::new(),
+            body: paired_nested_aggregate_refresh_body(),
+            environment: Environment::new(),
+        },
+    );
+    let run_refresh = |source: &mut PairedCursorRestoreSource| {
+        invoke_named_with_effects(
+            "run",
+            &functions,
+            &Environment::new(),
+            Limits::default(),
+            source,
+        )
+        .unwrap()
+    };
+
+    let first = run_refresh(&mut source);
+    assert_eq!(first, integer_pair(8, 80), "nested window folds compute the first paired snapshot");
+    let second = run_refresh(&mut source);
+    assert_eq!(second, integer_pair(20, 16), "the next restore chain computes its own nested totals");
+    let third = run_refresh(&mut source);
+    assert_eq!(third, integer_pair(10, 18), "the final restore chain retains both nested totals");
+    assert_eq!(first, integer_pair(8, 80), "later paired restores leave the first value snapshot intact");
+    assert_eq!(second, integer_pair(20, 16), "later paired restores leave the second value snapshot intact");
+
+    let lane_names = [
+        "View.Left",
+        "View.Right",
+        "View.Left",
+        "View.Right",
+        "View.Left",
+        "View.Right",
+    ];
+    let cursor_traces = [
+        vec![None, Some(cursors[0].clone()), Some(cursors[1].clone())],
+        vec![None, Some(cursors[0].clone())],
+        vec![None, Some(cursors[0].clone())],
+        vec![None, Some(cursors[0].clone()), Some(cursors[1].clone())],
+        vec![None, Some(cursors[0].clone())],
+        vec![None, Some(cursors[0].clone())],
+    ];
+    assert_eq!(source.lanes.len(), lane_names.len());
+    let scopes = source
+        .lanes
+        .iter()
+        .zip(lane_names)
+        .map(|((source_name, scope, _), expected_name)| {
+            assert_eq!(source_name, expected_name, "each refresh restores left then right");
+            *scope
+        })
+        .collect::<Vec<_>>();
+    for (index, scope) in scopes.iter().enumerate() {
+        assert!(
+            !scopes[..index].contains(scope),
+            "paired restores retain distinct identity across sibling sources and refreshes: {scope:?}"
+        );
+    }
+    let mut expected_cursors = Vec::new();
+    for (index, trace) in cursor_traces.into_iter().enumerate() {
+        expected_cursors.extend(
+            trace
+                .into_iter()
+                .map(|cursor| (lane_names[index].to_owned(), scopes[index], cursor)),
+        );
+    }
+    assert_eq!(
+        source.cursors,
+        expected_cursors,
+        "repeated opaque cursors resume only their own nested aggregate restore chain"
+    );
+    assert!(source.pending["View.Left"].is_empty());
+    assert!(source.pending["View.Right"].is_empty());
+}
+
+#[test]
 fn paired_sparse_window_folds_keep_identity_across_compacted_cursor_chains() {
     let cursors = [
         vec![0x73, 0x00],
@@ -1963,6 +2334,254 @@ fn paired_sparse_window_folds_keep_identity_across_compacted_cursor_chains() {
         "each sparse window fold follows the same compacted page sequence in its own scope"
     );
     assert!(source.pending["View.Paired"].is_empty(), "all six sparse page chains are consumed");
+}
+
+#[test]
+fn paired_window_folds_keep_values_across_sparse_refresh_compaction_chains() {
+    // Cursor tokens intentionally repeat across sibling sources and refreshes.
+    // A new evaluation is a new snapshot, so its `(source, scope, cursor)` chain
+    // starts at that snapshot's first page even when the opaque cursor bytes match.
+    let cursors = [vec![0x5a], vec![0x5a, 0x00], vec![0x5a, 0x00, 0xff]];
+    let restore = |groups: &[&[i64]], tokens: &[Vec<u8>]| {
+        assert_eq!(groups.len(), tokens.len() + 1);
+        groups
+            .iter()
+            .enumerate()
+            .map(|(index, values)| {
+                let after = index.checked_sub(1).map(|previous| tokens[previous].clone());
+                let next = tokens.get(index).cloned();
+                (after, page(values, next))
+            })
+            .collect::<CursorRestore>()
+    };
+    let mut source = PairedCursorRestoreSource::new([
+        (
+            "View.Left",
+            restore(&[&[1, 2], &[3], &[4, 5]], &cursors[..2]),
+        ),
+        (
+            "View.Right",
+            restore(&[&[2, 3], &[4, 5, 6]], &cursors[..1]),
+        ),
+        (
+            "View.Left",
+            restore(&[&[1], &[4, 5], &[2], &[7]], &cursors),
+        ),
+        (
+            "View.Right",
+            restore(&[&[4, 1], &[6], &[3, 8]], &cursors[..2]),
+        ),
+        (
+            "View.Left",
+            restore(&[&[3, 4], &[7, 2], &[9]], &cursors[..2]),
+        ),
+        (
+            "View.Right",
+            restore(&[&[2], &[3, 8, 5], &[10]], &cursors[..2]),
+        ),
+    ]);
+    let mut functions = paired_window_refresh_compaction_functions();
+    functions.insert(
+        "run".into(),
+        PureFunction {
+            parameters: Vec::new(),
+            body: paired_window_refresh_compaction_body(),
+            environment: Environment::new(),
+        },
+    );
+    let run_refresh = |source: &mut PairedCursorRestoreSource| {
+        invoke_named_with_effects(
+            "run",
+            &functions,
+            &Environment::new(),
+            Limits::default(),
+            source,
+        )
+        .unwrap()
+    };
+
+    let first = run_refresh(&mut source);
+    assert_eq!(first, integer_pair(12, 16), "sparse odd/even windows fold to (12, 16)");
+    let second = run_refresh(&mut source);
+    assert_eq!(second, integer_pair(18, 24), "the compacted refresh folds its own rows to (18, 24)");
+    let third = run_refresh(&mut source);
+    assert_eq!(third, integer_pair(26, 28), "the next refresh folds its own rows to (26, 28)");
+    assert_eq!(first, integer_pair(12, 16), "later refreshes do not mutate the first snapshot result");
+    assert_eq!(second, integer_pair(18, 24), "later refreshes do not mutate the second snapshot result");
+
+    let lane_names = [
+        "View.Left",
+        "View.Right",
+        "View.Left",
+        "View.Right",
+        "View.Left",
+        "View.Right",
+    ];
+    let cursor_traces = [
+        vec![None, Some(cursors[0].clone()), Some(cursors[1].clone())],
+        vec![None, Some(cursors[0].clone())],
+        vec![
+            None,
+            Some(cursors[0].clone()),
+            Some(cursors[1].clone()),
+            Some(cursors[2].clone()),
+        ],
+        vec![None, Some(cursors[0].clone()), Some(cursors[1].clone())],
+        vec![None, Some(cursors[0].clone()), Some(cursors[1].clone())],
+        vec![None, Some(cursors[0].clone()), Some(cursors[1].clone())],
+    ];
+    assert_eq!(source.lanes.len(), lane_names.len());
+    let scopes = source
+        .lanes
+        .iter()
+        .zip(lane_names)
+        .map(|((source_name, scope, _), expected_name)| {
+            assert_eq!(source_name, expected_name, "each refresh reads left then right");
+            *scope
+        })
+        .collect::<Vec<_>>();
+    for (index, scope) in scopes.iter().enumerate() {
+        assert!(
+            !scopes[..index].contains(scope),
+            "paired refreshes cannot alias sibling or prior snapshot scopes: {scope:?}"
+        );
+    }
+    let mut expected_cursors = Vec::new();
+    for (index, trace) in cursor_traces.into_iter().enumerate() {
+        expected_cursors.extend(
+            trace
+                .into_iter()
+                .map(|cursor| (lane_names[index].to_owned(), scopes[index], cursor)),
+        );
+    }
+    assert_eq!(
+        source.cursors,
+        expected_cursors,
+        "reused compact cursor bytes advance only within each sparse refresh source scope"
+    );
+    assert!(source.pending["View.Left"].is_empty());
+    assert!(source.pending["View.Right"].is_empty());
+}
+
+#[test]
+fn paired_limit_compaction_refreshes_keep_scoped_prefix_values() {
+    // Nested `take` stages tighten the requested prefix. Compacted opaque
+    // continuations are snapshot-local even when all six chains reuse them.
+    let compacted_cursor = vec![0xf0];
+    let after_compaction_cursor = vec![0xf1];
+    let restore = |values: [i64; 4], long_cursor: &[u8]| {
+        BTreeMap::from([
+            (None, page(&[values[0]], Some(long_cursor.to_vec()))),
+            (
+                Some(long_cursor.to_vec()),
+                page(&[values[1]], Some(compacted_cursor.clone())),
+            ),
+            (
+                Some(compacted_cursor.clone()),
+                page(&[values[2]], Some(after_compaction_cursor.clone())),
+            ),
+            (
+                Some(after_compaction_cursor.clone()),
+                page(&[values[3]], None),
+            ),
+        ])
+    };
+    let generations = [
+        ([1, 2, 3, 999], [10, 20, 30, 999]),
+        ([4, 5, 6, 888], [2, 4, 6, 888]),
+        ([3, 7, 9, 777], [1, 8, 10, 777]),
+    ];
+    let mut restores = Vec::new();
+    let mut lane_names = Vec::new();
+    let mut long_cursors_by_lane = Vec::new();
+    for (generation, (left, right)) in generations.into_iter().enumerate() {
+        for (lane, (source_name, values)) in
+            [("View.Left", left), ("View.Right", right)].into_iter().enumerate()
+        {
+            let tag = 0x20 + (generation * 2 + lane) as u8;
+            let long_cursor = vec![tag; 128];
+            restores.push((source_name, restore(values, &long_cursor)));
+            lane_names.push(source_name);
+            long_cursors_by_lane.push(long_cursor);
+        }
+    }
+    let mut source = PairedCursorRestoreSource::new(restores);
+    let mut functions = paired_limit_refresh_compaction_functions();
+    functions.insert(
+        "run".into(),
+        PureFunction {
+            parameters: Vec::new(),
+            body: paired_limit_refresh_compaction_body(),
+            environment: Environment::new(),
+        },
+    );
+    let run_refresh = |source: &mut PairedCursorRestoreSource| {
+        invoke_named_with_effects(
+            "run",
+            &functions,
+            &Environment::new(),
+            Limits::default(),
+            source,
+        )
+        .unwrap()
+    };
+
+    let first = run_refresh(&mut source);
+    assert_eq!(first, integer_pair(60, 600), "the first paired prefix scales and sums its first three rows");
+    let second = run_refresh(&mut source);
+    assert_eq!(second, integer_pair(150, 120), "the next compacted pair computes from its own prefixes");
+    let third = run_refresh(&mut source);
+    assert_eq!(third, integer_pair(190, 190), "the final pair keeps each refreshed limit prefix separate");
+    assert_eq!(first, integer_pair(60, 600), "later restores leave the first limited result intact");
+    assert_eq!(second, integer_pair(150, 120), "later restores leave the second limited result intact");
+
+    assert_eq!(source.lanes.len(), lane_names.len());
+    let scopes = source
+        .lanes
+        .iter()
+        .zip(lane_names.iter().copied())
+        .map(|((source_name, scope, _), expected_name)| {
+            assert_eq!(source_name, expected_name, "each refresh reads left then right");
+            *scope
+        })
+        .collect::<Vec<_>>();
+    for (index, scope) in scopes.iter().enumerate() {
+        assert!(
+            !scopes[..index].contains(scope),
+            "fresh paired limits cannot reuse a sibling or prior refresh scope: {scope:?}"
+        );
+    }
+    let mut expected_cursors = Vec::new();
+    for index in 0..lane_names.len() {
+        let source_name = lane_names[index].to_owned();
+        expected_cursors.extend([
+            (source_name.clone(), scopes[index], None),
+            (
+                source_name.clone(),
+                scopes[index],
+                Some(long_cursors_by_lane[index].clone()),
+            ),
+            (
+                source_name,
+                scopes[index],
+                Some(compacted_cursor.clone()),
+            ),
+        ]);
+    }
+    assert_eq!(
+        source.cursors,
+        expected_cursors,
+        "each limited prefix follows only its scoped cursor chain through compaction"
+    );
+    assert!(
+        source
+            .cursors
+            .iter()
+            .all(|(_, _, cursor)| cursor.as_ref() != Some(&after_compaction_cursor)),
+        "take(3) completes before requesting the fourth, out-of-prefix page"
+    );
+    assert!(source.pending["View.Left"].is_empty());
+    assert!(source.pending["View.Right"].is_empty());
 }
 
 #[test]
