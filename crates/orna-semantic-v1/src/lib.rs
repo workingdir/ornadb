@@ -7280,9 +7280,21 @@ fn infer(
                     && (!type_contains_omitted_checkpoint_tuple(parent)
                         || type_contains_partially_omitted_pinned_tuple(parent))
             });
+            let first_parent_has_omitted_checkpoint_tuple = first_parent
+                .as_ref()
+                .is_some_and(type_contains_omitted_checkpoint_tuple);
+            let later_parent_establishes_checkpoint_map = checkpoint_topology_parent
+                .as_ref()
+                .is_some_and(type_contains_pinned_checkpoint_tuple);
+            // If sparse compaction starts before any tuple pin exists, use the
+            // first concrete topology as the recovery point. The reference is
+            // silent on local compaction rollback, so keep accepted identities
+            // when a later parent conflicts instead of restoring empty slots.
             let checkpoint_reanchor_recovery = paired_omission_recovery
                 || (omitted_pinned_tuple_path
-                    && first_parent_can_grow_checkpoint_map);
+                    && (first_parent_can_grow_checkpoint_map
+                        || (first_parent_has_omitted_checkpoint_tuple
+                            && later_parent_establishes_checkpoint_map)));
             let mut checkpoint_recovery_parent = first_parent.clone();
             // Any omitted row can expose a cross-sibling selector collision.
             // Sparse pinned tuples anywhere in the fold need a local scope so
