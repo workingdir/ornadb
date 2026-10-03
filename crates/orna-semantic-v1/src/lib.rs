@@ -7267,7 +7267,10 @@ fn infer(
                 .any(type_contains_omitted_checkpoint_tuple)
                 || element_types
                     .iter()
-                    .any(type_contains_partially_omitted_pinned_tuple);
+                    .any(type_contains_partially_omitted_pinned_tuple)
+                || element_types
+                    .iter()
+                    .any(type_contains_paired_pinned_checkpoint_tuples);
             let mut rolled_back_checkpoint_paths = BTreeSet::new();
             let mut rejected_checkpoint_parent = false;
             let mut ty = None;
@@ -19041,6 +19044,48 @@ fn type_contains_paired_checkpoint_omissions(ty: &Type) -> bool {
         Type::MoneyPerUnit { currency, unit } => {
             type_contains_paired_checkpoint_omissions(currency)
                 || type_contains_paired_checkpoint_omissions(unit)
+        }
+        _ => false,
+    }
+}
+
+/// Dense records can carry independent tuple-pin folds even when no parent
+/// omits a slot. Scope a late rebind failure to the conflicting tuple so a
+/// stable sibling keeps the values accumulated through the same storm.
+fn type_contains_paired_pinned_checkpoint_tuples(ty: &Type) -> bool {
+    match ty {
+        Type::Record(fields) => {
+            fields
+                .values()
+                .filter(|field| type_contains_pinned_checkpoint_tuple(field))
+                .count()
+                >= 2
+                || fields
+                    .values()
+                    .any(type_contains_paired_pinned_checkpoint_tuples)
+        }
+        Type::Tuple(elements) => elements
+            .iter()
+            .any(type_contains_paired_pinned_checkpoint_tuples),
+        Type::List(element)
+        | Type::Range(element)
+        | Type::Relation(element)
+        | Type::Stream(element)
+        | Type::Optional(element) => type_contains_paired_pinned_checkpoint_tuples(element),
+        Type::Applied { arguments, .. } => arguments
+            .iter()
+            .any(type_contains_paired_pinned_checkpoint_tuples),
+        Type::Function {
+            parameters, result, ..
+        } => {
+            parameters
+                .iter()
+                .any(type_contains_paired_pinned_checkpoint_tuples)
+                || type_contains_paired_pinned_checkpoint_tuples(result)
+        }
+        Type::MoneyPerUnit { currency, unit } => {
+            type_contains_paired_pinned_checkpoint_tuples(currency)
+                || type_contains_paired_pinned_checkpoint_tuples(unit)
         }
         _ => false,
     }
