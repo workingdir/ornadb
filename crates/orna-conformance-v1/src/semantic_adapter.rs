@@ -4346,6 +4346,7 @@ impl TableActivationCandidateValidator for TransactionalTableCandidateValidator 
                 &self.functions,
                 self.limits,
                 &mut budget,
+                0,
             )
             .map_err(|_| table_assertion_diagnostic())?;
             if !matches!(value.raw(), OvbRaw::Bool(true)) {
@@ -4454,6 +4455,7 @@ impl StreamTableCandidateValidator for ListTableCandidateValidator {
                 &self.functions,
                 self.limits,
                 &mut budget,
+                0,
             )
             .map_err(|_| table_assertion_diagnostic())?;
             if !matches!(value.raw(), OvbRaw::Bool(true)) {
@@ -8229,12 +8231,30 @@ fn validate_module_assertions(
             functions,
             limits,
             budget,
+            0,
         )?;
         if !matches!(value.raw(), OvbRaw::Bool(true)) {
             return Err(transaction_error("ORNA-EVAL-MODULE-ASSERT"));
         }
     }
     Ok(())
+}
+
+fn module_assertion_child_depth(
+    depth: usize,
+    limits: EvaluatorLimits,
+) -> Result<usize, EvaluationError> {
+    // Section 9 specifies fold order and short-circuiting but no distinct
+    // nesting bound, so use the evaluator's configured depth limit for this
+    // recursive continuation walk.
+    let child_depth = depth
+        .checked_add(1)
+        .ok_or_else(|| transaction_error("ORNA-EVAL-LIMIT"))?;
+    if child_depth > limits.max_depth {
+        Err(transaction_error("ORNA-EVAL-LIMIT"))
+    } else {
+        Ok(child_depth)
+    }
 }
 
 fn evaluate_module_assertion(
@@ -8244,14 +8264,17 @@ fn evaluate_module_assertion(
     functions: &Functions,
     limits: EvaluatorLimits,
     budget: &mut StepBudget,
+    depth: usize,
 ) -> Result<Value, EvaluationError> {
     let Some((kind, table, binding, body)) = module_assertion_quantifier(expression) else {
-        return evaluate_with_functions_and_budget(
+        return evaluate_module_assertion_continuation(
+            activation,
             expression,
             environment,
             functions,
             limits,
             budget,
+            depth,
         );
     };
     let table = table.to_owned();
@@ -8262,11 +8285,20 @@ fn evaluate_module_assertion(
         ModuleAssertionKind::Every => {
             for (_, row) in relation {
                 debit_host_step(budget)?;
+                let child_depth = module_assertion_child_depth(depth, limits)?;
                 let mut local = environment.clone();
                 local.insert(binding.to_owned(), row);
                 if !matches!(
-                    evaluate_module_assertion(activation, body, &local, functions, limits, budget)?
-                        .raw(),
+                    evaluate_module_assertion(
+                        activation,
+                        body,
+                        &local,
+                        functions,
+                        limits,
+                        budget,
+                        child_depth,
+                    )?
+                    .raw(),
                     OvbRaw::Bool(true)
                 ) {
                     return canonical_bool(false);
@@ -8277,11 +8309,20 @@ fn evaluate_module_assertion(
         ModuleAssertionKind::Exists => {
             for (_, row) in relation {
                 debit_host_step(budget)?;
+                let child_depth = module_assertion_child_depth(depth, limits)?;
                 let mut local = environment.clone();
                 local.insert(binding.to_owned(), row);
                 if matches!(
-                    evaluate_module_assertion(activation, body, &local, functions, limits, budget)?
-                        .raw(),
+                    evaluate_module_assertion(
+                        activation,
+                        body,
+                        &local,
+                        functions,
+                        limits,
+                        budget,
+                        child_depth,
+                    )?
+                    .raw(),
                     OvbRaw::Bool(true)
                 ) {
                     return canonical_bool(true);
@@ -8292,6 +8333,134 @@ fn evaluate_module_assertion(
     }
 }
 
+fn evaluate_module_assertion_continuation(
+    activation: &TransactionActivation<'_>,
+    expression: &Expr,
+    environment: &Environment,
+    functions: &Functions,
+    limits: EvaluatorLimits,
+    budget: &mut StepBudget,
+    depth: usize,
+) -> Result<Value, EvaluationError> {
+    match expression {
+        Expr::Group { inner, .. } => evaluate_module_assertion(
+            activation,
+            inner,
+            environment,
+            functions,
+            limits,
+            budget,
+            module_assertion_child_depth(depth, limits)?,
+        ),
+        Expr::Block {
+            statements,
+            tail: Some(tail),
+            ..
+        } if statements.is_empty() => evaluate_module_assertion(
+            activation,
+            tail,
+            environment,
+            functions,
+            limits,
+            budget,
+            module_assertion_child_depth(depth, limits)?,
+        ),
+        Expr::Unary { op, rhs, .. } if op == "!" => {
+            let value = evaluate_module_assertion(
+                activation,
+                rhs,
+                environment,
+                functions,
+                limits,
+                budget,
+                module_assertion_child_depth(depth, limits)?,
+            )?;
+            match value.raw() {
+                OvbRaw::Bool(value) => canonical_bool(!value),
+                _ => Err(transaction_error("ORNA-EVAL-MODULE-ASSERT")),
+            }
+        }
+        Expr::Binary { lhs, op, rhs, .. } if op == "&&" || op == "||" => {
+            let left = evaluate_module_assertion(
+                activation,
+                lhs,
+                environment,
+                functions,
+                limits,
+                budget,
+                module_assertion_child_depth(depth, limits)?,
+            )?;
+            let OvbRaw::Bool(left) = left.raw() else {
+                return Err(transaction_error("ORNA-EVAL-MODULE-ASSERT"));
+            };
+            if (op == "&&" && !left) || (op == "||" && *left) {
+                return canonical_bool(*left);
+            }
+            let right = evaluate_module_assertion(
+                activation,
+                rhs,
+                environment,
+                functions,
+                limits,
+                budget,
+                module_assertion_child_depth(depth, limits)?,
+            )?;
+            match right.raw() {
+                OvbRaw::Bool(right) => canonical_bool(*right),
+                _ => Err(transaction_error("ORNA-EVAL-MODULE-ASSERT")),
+            }
+        }
+        Expr::Control {
+            kind: orna_syntax_v1::ControlKind::If,
+            binding: None,
+            condition: Some(condition),
+            body: Some(body),
+            arms,
+            alternate: Some(alternate),
+            ..
+        } if arms.is_empty() => {
+            let child_depth = module_assertion_child_depth(depth, limits)?;
+            let condition = evaluate_module_assertion(
+                activation,
+                condition,
+                environment,
+                functions,
+                limits,
+                budget,
+                child_depth,
+            )?;
+            match condition.raw() {
+                OvbRaw::Bool(true) => evaluate_module_assertion(
+                    activation,
+                    body,
+                    environment,
+                    functions,
+                    limits,
+                    budget,
+                    child_depth,
+                ),
+                OvbRaw::Bool(false) => evaluate_module_assertion(
+                    activation,
+                    alternate,
+                    environment,
+                    functions,
+                    limits,
+                    budget,
+                    child_depth,
+                ),
+                _ => Err(transaction_error("ORNA-EVAL-MODULE-ASSERT")),
+            }
+        }
+        _ => evaluate_with_functions_and_budget(
+            expression,
+            environment,
+            functions,
+            limits,
+            budget,
+        ),
+    }
+}
+
 fn evaluate_module_assertion_rows(
     rows: &orna_runtime_v1::RuntimeTableRows,
     expression: &Expr,
@@ -8299,14 +8468,17 @@ fn evaluate_module_assertion_rows(
     functions: &Functions,
     limits: EvaluatorLimits,
     budget: &mut StepBudget,
+    depth: usize,
 ) -> Result<Value, EvaluationError> {
     let Some((kind, table, binding, body)) = module_assertion_quantifier(expression) else {
-        return evaluate_with_functions_and_budget(
+        return evaluate_module_assertion_rows_continuation(
+            rows,
             expression,
             environment,
             functions,
             limits,
             budget,
+            depth,
         );
     };
     let relation = rows
@@ -8319,13 +8491,22 @@ fn evaluate_module_assertion_rows(
                 limits
                     .check_items(index.saturating_add(1))
                     .map_err(|_| transaction_error("ORNA-EVAL-LIMIT"))?;
+                let child_depth = module_assertion_child_depth(depth, limits)?;
                 let row = Value::decode(encoded)
                     .map_err(|_| transaction_error("ORNA-EVAL-MODULE-ASSERT"))?;
                 let mut local = environment.clone();
                 local.insert(binding.to_owned(), row);
                 if !matches!(
-                    evaluate_module_assertion_rows(rows, body, &local, functions, limits, budget)?
-                        .raw(),
+                    evaluate_module_assertion_rows(
+                        rows,
+                        body,
+                        &local,
+                        functions,
+                        limits,
+                        budget,
+                        child_depth,
+                    )?
+                    .raw(),
                     OvbRaw::Bool(true)
                 ) {
                     return canonical_bool(false);
@@ -8339,13 +8520,22 @@ fn evaluate_module_assertion_rows(
                 limits
                     .check_items(index.saturating_add(1))
                     .map_err(|_| transaction_error("ORNA-EVAL-LIMIT"))?;
+                let child_depth = module_assertion_child_depth(depth, limits)?;
                 let row = Value::decode(encoded)
                     .map_err(|_| transaction_error("ORNA-EVAL-MODULE-ASSERT"))?;
                 let mut local = environment.clone();
                 local.insert(binding.to_owned(), row);
                 if matches!(
-                    evaluate_module_assertion_rows(rows, body, &local, functions, limits, budget)?
-                        .raw(),
+                    evaluate_module_assertion_rows(
+                        rows,
+                        body,
+                        &local,
+                        functions,
+                        limits,
+                        budget,
+                        child_depth,
+                    )?
+                    .raw(),
                     OvbRaw::Bool(true)
                 ) {
                     return canonical_bool(true);
@@ -8353,6 +8543,134 @@ fn evaluate_module_assertion_rows(
             }
             canonical_bool(false)
         }
+    }
+}
+
+fn evaluate_module_assertion_rows_continuation(
+    rows: &orna_runtime_v1::RuntimeTableRows,
+    expression: &Expr,
+    environment: &Environment,
+    functions: &Functions,
+    limits: EvaluatorLimits,
+    budget: &mut StepBudget,
+    depth: usize,
+) -> Result<Value, EvaluationError> {
+    match expression {
+        Expr::Group { inner, .. } => evaluate_module_assertion_rows(
+            rows,
+            inner,
+            environment,
+            functions,
+            limits,
+            budget,
+            module_assertion_child_depth(depth, limits)?,
+        ),
+        Expr::Block {
+            statements,
+            tail: Some(tail),
+            ..
+        } if statements.is_empty() => evaluate_module_assertion_rows(
+            rows,
+            tail,
+            environment,
+            functions,
+            limits,
+            budget,
+            module_assertion_child_depth(depth, limits)?,
+        ),
+        Expr::Unary { op, rhs, .. } if op == "!" => {
+            let value = evaluate_module_assertion_rows(
+                rows,
+                rhs,
+                environment,
+                functions,
+                limits,
+                budget,
+                module_assertion_child_depth(depth, limits)?,
+            )?;
+            match value.raw() {
+                OvbRaw::Bool(value) => canonical_bool(!value),
+                _ => Err(transaction_error("ORNA-EVAL-MODULE-ASSERT")),
+            }
+        }
+        Expr::Binary { lhs, op, rhs, .. } if op == "&&" || op == "||" => {
+            let left = evaluate_module_assertion_rows(
+                rows,
+                lhs,
+                environment,
+                functions,
+                limits,
+                budget,
+                module_assertion_child_depth(depth, limits)?,
+            )?;
+            let OvbRaw::Bool(left) = left.raw() else {
+                return Err(transaction_error("ORNA-EVAL-MODULE-ASSERT"));
+            };
+            if (op == "&&" && !left) || (op == "||" && *left) {
+                return canonical_bool(*left);
+            }
+            let right = evaluate_module_assertion_rows(
+                rows,
+                rhs,
+                environment,
+                functions,
+                limits,
+                budget,
+                module_assertion_child_depth(depth, limits)?,
+            )?;
+            match right.raw() {
+                OvbRaw::Bool(right) => canonical_bool(*right),
+                _ => Err(transaction_error("ORNA-EVAL-MODULE-ASSERT")),
+            }
+        }
+        Expr::Control {
+            kind: orna_syntax_v1::ControlKind::If,
+            binding: None,
+            condition: Some(condition),
+            body: Some(body),
+            arms,
+            alternate: Some(alternate),
+            ..
+        } if arms.is_empty() => {
+            let child_depth = module_assertion_child_depth(depth, limits)?;
+            let condition = evaluate_module_assertion_rows(
+                rows,
+                condition,
+                environment,
+                functions,
+                limits,
+                budget,
+                child_depth,
+            )?;
+            match condition.raw() {
+                OvbRaw::Bool(true) => evaluate_module_assertion_rows(
+                    rows,
+                    body,
+                    environment,
+                    functions,
+                    limits,
+                    budget,
+                    child_depth,
+                ),
+                OvbRaw::Bool(false) => evaluate_module_assertion_rows(
+                    rows,
+                    alternate,
+                    environment,
+                    functions,
+                    limits,
+                    budget,
+                    child_depth,
+                ),
+                _ => Err(transaction_error("ORNA-EVAL-MODULE-ASSERT")),
+            }
+        }
+        _ => evaluate_with_functions_and_budget(
+            expression,
+            environment,
+            functions,
+            limits,
+            budget,
+        ),
     }
 }
 
