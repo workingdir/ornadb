@@ -2782,6 +2782,84 @@ fn paired_dependency_upgrade_replay_keeps_each_original_snapshot_pin() {
 }
 
 #[test]
+fn paired_snapshot_pin_replay_matches_alias_and_qualified_values_across_upgrades() {
+    let (
+        _directory,
+        project_v1,
+        project_v2,
+        project_v3,
+        project_v4,
+        project_v5,
+        project_v6,
+        snapshots,
+    ) = module_upgrade_projects();
+    let projects = [
+        &project_v1,
+        &project_v2,
+        &project_v3,
+        &project_v4,
+        &project_v5,
+        &project_v6,
+    ];
+    let expected = [
+        [8, 3, 11, 9, 3, 12],
+        [107, 3, 110, 108, 3, 111],
+        [1_007, 3, 1_010, 1_008, 3, 1_011],
+        [1_007, 4, 1_011, 1_008, 4, 1_012],
+        [10_007, 5, 10_012, 10_008, 5, 10_013],
+        [100_007, 6, 100_013, 100_008, 6, 100_014],
+    ];
+    let use_modules = include_str!("fixtures/module-upgrade-module-pin-replay-use.orna");
+    let replay = include_str!("fixtures/module-upgrade-module-pin-replay-fold.orna");
+
+    assert!(snapshots.windows(2).all(|pair| pair[0] != pair[1]));
+    let mut sessions = Vec::with_capacity(projects.len());
+    for (index, project) in projects.iter().enumerate() {
+        assert_eq!(
+            project.standard_profile().unwrap().snapshot(),
+            &snapshots[index],
+            "project v{} must retain its captured paired-module pin",
+            index + 1
+        );
+        let mut session = AdmittedReplSession::from_loaded_project(
+            project,
+            project.standard_sources().iter().cloned(),
+            Limits::default(),
+        )
+        .unwrap();
+        for import in use_modules.lines() {
+            assert_eq!(session.submit(import), Ok(None));
+        }
+        assert_eq!(
+            session.submit(replay),
+            Ok(Some(ints(&expected[index]))),
+            "snapshot {} must give aliases and qualified calls the same captured module pair",
+            snapshots[index]
+        );
+        sessions.push(session);
+    }
+
+    for index in [5, 0, 3, 1, 4, 2, 5, 0] {
+        assert_eq!(
+            sessions[index].submit(replay),
+            Ok(Some(ints(&expected[index]))),
+            "interleaved replay must preserve alias and qualified values for snapshot {}",
+            snapshots[index]
+        );
+    }
+
+    let mut cloned_sessions = sessions.clone();
+    for index in [2, 4, 1, 5, 0, 3] {
+        assert_eq!(
+            cloned_sessions[index].submit(replay),
+            Ok(Some(ints(&expected[index]))),
+            "cloned replay must preserve paired resolution for snapshot {}",
+            snapshots[index]
+        );
+    }
+}
+
+#[test]
 fn replayed_closure_uses_its_captured_dependency_snapshot_after_snapshot_changes() {
     let (_directory, project_v1, project_v2, snapshot_v1, snapshot_v2, sources_v1, sources_v2) =
         snapshot_projects();
