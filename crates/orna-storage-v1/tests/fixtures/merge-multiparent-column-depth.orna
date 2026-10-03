@@ -1,0 +1,23 @@
+{
+  id: "shared",
+  name: "Root value",
+  city: "Oslo",
+}
+
+{
+  id: "branch/left",
+  name: "Left leaf",
+  city: "Bergen",
+}
+
+{
+  id: "branch/right",
+  name: "Right leaf",
+  city: "Melbourne",
+}
+
+{
+  id: "branch/right/deep",
+  name: "Right deep",
+  city: "Canberra",
+}
