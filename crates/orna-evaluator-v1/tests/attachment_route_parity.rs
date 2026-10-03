@@ -1195,6 +1195,57 @@ fn fresh_nested_route_pair_chains_evaluate_rebound_closure_values() {
         omission_evaluator.submit(&format!("{}.package_value()", aliases[4])),
         Ok(Some(Value::int(96.into())))
     );
+    let terminal_identity = nested_omissions.terminal_route_identity();
+    let terminal_omission_round = [None, None];
+    let terminal_omission_rounds = [terminal_omission_round.as_slice()];
+    let after_terminal_omission = resolver
+        .extend_nested_terminal_pair_checkpoint_storm_rounds_from_depth_labels_with_omissions(
+            &nested_omissions,
+            &terminal_omission_rounds,
+        )
+        .unwrap_or_else(|error| panic!("terminal omission round failed: {error:?}"));
+    after_terminal_omission
+        .validate_terminal_route_identity(&terminal_identity)
+        .unwrap_or_else(|error| panic!("terminal route identity changed after omission: {error:?}"));
+    assert_eq!(
+        after_terminal_omission.terminal_route_identity(),
+        terminal_identity,
+        "an all-omission round preserves the exact terminal route identity"
+    );
+
+    let independent_nested_route = resolver
+        .resolve_nested_rebind_path(&nested_parent, &[])
+        .unwrap();
+    let independent_terminal_route = resolver
+        .extend_nested_terminal_pair_chain(
+            &independent_nested_route,
+            &[first_pair.clone(), second_pair.clone()],
+        )
+        .unwrap_or_else(|error| panic!("independent terminal route failed: {error:?}"));
+    assert_eq!(
+        after_terminal_omission
+            .final_session()
+            .primary()
+            .pin(),
+        independent_terminal_route
+            .final_session()
+            .primary()
+            .pin(),
+        "independently resolved route reaches the same terminal primary pin"
+    );
+    assert_eq!(
+        attached_pin_route(after_terminal_omission.final_session()),
+        attached_pin_route(independent_terminal_route.final_session()),
+        "independently resolved route reaches the same attached terminal pins"
+    );
+    let independent_terminal_identity = independent_terminal_route.terminal_route_identity();
+    assert_ne!(terminal_identity, independent_terminal_identity);
+    assert!(matches!(
+        after_terminal_omission
+            .validate_terminal_route_identity(&independent_terminal_identity),
+        Err(AttachmentError::RetainedSnapshotUnavailable)
+    ));
+
     let crossed_omission_slot = [
         Some((saved_middle_handoff.depth_label(), depth_one_waves.as_slice())),
         None,
