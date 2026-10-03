@@ -2346,16 +2346,17 @@ fn explain_query_core_with_subqueries(
             .zip(right_cardinality.rows)
             .is_some_and(|(left, right)| left.checked_add(right).is_none());
         let left_fold_identity = join_cost_fold_identity.clone();
+        let decorrelated_predicate_identity = decorrelated_subquery
+            .zip(selected_partial_index)
+            .map(|(subquery, index)| decorrelated_predicate_pushdown_identity(subquery, index));
         let right_fold_identity = query_join_cost_input_identity(
             &query.snapshot,
             join,
             selected_partial_index,
             window_aggregates,
             decorrelated_subquery,
+            decorrelated_predicate_identity.as_deref(),
         );
-        let decorrelated_predicate_identity = decorrelated_subquery
-            .zip(selected_partial_index)
-            .map(|(subquery, index)| decorrelated_predicate_pushdown_identity(subquery, index));
         let decorrelated_anchor_fold_id = decorrelated_subquery.map(|subquery| {
             query_decorrelated_anchor_fold_identity(
                 &left_fold_identity,
@@ -3697,6 +3698,7 @@ fn query_join_cost_input_identity(
     selected_index: Option<&QueryPartialIndexDescription>,
     window_aggregates: &[QueryWindowAggregatePushdownDescription],
     decorrelated_subquery: Option<&QueryDecorrelatedSubqueryDescription>,
+    decorrelated_predicate_pushdown_identity: Option<&str>,
 ) -> String {
     let mut hash = Sha256::new();
     hash.update(b"orna.sys.query-join-cost-input.v1\0");
@@ -3707,25 +3709,30 @@ fn query_join_cost_input_identity(
         join.predicate.as_ref().map(ExpressionRef::as_str),
     );
     hash_query_statistics(&mut hash, join.statistics.as_ref());
-    if let Some(subquery) = decorrelated_subquery {
-        hash.update([1]);
-        hash_part(&mut hash, subquery.identity.as_str().as_bytes());
-        hash_part(&mut hash, subquery.source.as_str().as_bytes());
-        hash_part(
-            &mut hash,
-            subquery.correlation_predicate.as_str().as_bytes(),
-        );
+    if let Some(identity) = decorrelated_predicate_pushdown_identity {
+        hash.update([2]);
+        hash_part(&mut hash, identity.as_bytes());
     } else {
-        hash.update([0]);
-    }
-    if let Some(index) = selected_index {
-        hash.update([1]);
-        hash_part(
-            &mut hash,
-            partial_index_pair_identity(index).as_bytes(),
-        );
-    } else {
-        hash.update([0]);
+        if let Some(subquery) = decorrelated_subquery {
+            hash.update([1]);
+            hash_part(&mut hash, subquery.identity.as_str().as_bytes());
+            hash_part(&mut hash, subquery.source.as_str().as_bytes());
+            hash_part(
+                &mut hash,
+                subquery.correlation_predicate.as_str().as_bytes(),
+            );
+        } else {
+            hash.update([0]);
+        }
+        if let Some(index) = selected_index {
+            hash.update([1]);
+            hash_part(
+                &mut hash,
+                partial_index_pair_identity(index).as_bytes(),
+            );
+        } else {
+            hash.update([0]);
+        }
     }
     hash_query_window_inputs(&mut hash, &join.source, window_aggregates);
     format!("join-input:{}", hex(&hash.finalize()))
