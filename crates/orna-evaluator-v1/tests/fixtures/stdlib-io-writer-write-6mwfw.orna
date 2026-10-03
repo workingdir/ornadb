@@ -1,0 +1,1 @@
+io.writer.write_all_text("ROOT_PATH", "output.txt", "first\nsecond", false)

@@ -731,7 +731,13 @@ pub fn validate_function_metadata(metadata: &Value) -> Result<(), String> {
     // These are the fields consumed by semantic SystemApi. Rejecting unknown
     // keys catches annotation typos that serde would otherwise silently drop.
     const REQUIRED: [&str; 4] = ["name", "effect", "signature", "purpose"];
-    const OPTIONAL: [&str; 4] = ["contract", "preconditions", "ownership", "snapshot_rule"];
+    const OPTIONAL: [&str; 5] = [
+        "contract",
+        "preconditions",
+        "ownership",
+        "snapshot_rule",
+        "documentation",
+    ];
 
     for field in REQUIRED {
         let Some(value) = object.get(field).and_then(Value::as_str) else {
