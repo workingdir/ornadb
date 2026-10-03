@@ -2537,6 +2537,7 @@ fn nested_paired_resolution_keeps_import_and_qualified_paths_on_each_pin() {
     let use_pair = include_str!("fixtures/module-upgrade-paired-use.orna");
     let replay = include_str!("fixtures/module-upgrade-paired-resolution-depth.orna");
 
+    let mut sessions = Vec::with_capacity(projects.len());
     for (index, project) in projects.iter().enumerate() {
         assert_eq!(project.standard_profile().unwrap().snapshot(), pins[index]);
         let mut session = AdmittedReplSession::from_loaded_project(
@@ -2561,8 +2562,27 @@ fn nested_paired_resolution_keeps_import_and_qualified_paths_on_each_pin() {
             "nested imported and qualified calls must resolve from snapshot {}",
             pins[index]
         );
+        sessions.push(session);
     }
 
+    for index in [2, 0, 1, 2, 1, 0] {
+        assert_eq!(
+            sessions[index].submit(replay),
+            Ok(Some(ints(&expected[index]))),
+            "interleaved nested resolution must retain snapshot {}'s paired functions",
+            pins[index]
+        );
+    }
+
+    let mut cloned_sessions = sessions.clone();
+    for index in (0..cloned_sessions.len()).rev() {
+        assert_eq!(
+            cloned_sessions[index].submit(replay),
+            Ok(Some(ints(&expected[index]))),
+            "cloned nested resolution must retain snapshot {}'s paired functions",
+            pins[index]
+        );
+    }
 }
 
 #[test]
