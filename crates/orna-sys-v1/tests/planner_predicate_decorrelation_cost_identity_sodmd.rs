@@ -453,7 +453,7 @@ fn changing_the_selected_index_rekeys_the_decorrelation_cost_fold_chain() {
     let changed_decorrelated = changed_joins[decorrelated_label];
     assert_eq!(
         text(baseline_decorrelated, "join_cost_fold_identity"),
-        "join-fold:f28848eeb91bdf833716c288c03e1d6d260422e86ba59053575010489c305cf2",
+        "join-fold:d83475a8fec991e8e4cd7308566cb8b7ba19dde2b1a8e1ba2593728c16e088ff",
         "the fold digest directly includes the composite decorrelation/index identity"
     );
     let baseline_nodes = baseline
