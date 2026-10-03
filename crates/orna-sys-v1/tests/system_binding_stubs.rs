@@ -1136,6 +1136,107 @@ fn generated_provider_alias_optional_defaults_match_schema_and_idl() {
 }
 
 #[test]
+fn generated_object_return_bindings_match_schema_registry_and_idl() {
+    const OBJECT_RETURN_OPERATIONS: [&str; 2] = ["sys.invoke<T>", "sys.start<T>"];
+
+    let generated_schema = build_provider::generate_provider_registry_schema()
+        .expect("provider object-return schema regenerates from its typed source");
+    assert_eq!(generated_schema, system_provider_abi_schema_json());
+    build_host::validate_json_against_schema(system_provider_abi_json(), &generated_schema)
+        .expect("embedded provider registry conforms to its regenerated schema");
+    let registry_json: Value =
+        serde_json::from_str(system_provider_abi_json()).expect("embedded provider registry");
+    let raw_operations = registry_json["operations"]
+        .as_array()
+        .expect("embedded provider registry has operation rows");
+    let registry = orna_sys_v1::SystemProviderAbi::from_json(system_provider_abi_json())
+        .expect("embedded registry parses into the typed provider table");
+    let source = system_binding_stubs();
+    let parsed = parse_module(source);
+    assert!(
+        parsed.is_ok(),
+        "generated generic invoke/start bundle parses: {:?}",
+        parsed.diagnostics
+    );
+    let markers = source
+        .lines()
+        .filter_map(|line| line.strip_prefix("// sys-op: "))
+        .collect::<Vec<_>>();
+
+    let mut schema_rows = 0;
+    let mut typed_contracts = 0;
+    let mut generated_bindings = 0;
+    let mut idl_results = 0;
+    let mut generic_result_witnesses = 0;
+    for operation_name in OBJECT_RETURN_OPERATIONS {
+        let contract = registry
+            .operation(operation_name)
+            .expect("generic provider operation exists in the typed registry");
+        let row = raw_operations
+            .iter()
+            .find(|row| row["name"] == operation_name)
+            .expect("generated schema input contains the generic provider operation");
+        assert_eq!(
+            row["signature"].as_str(),
+            Some(contract.signature.source.as_str()),
+            "schema row carries the typed object-return signature for {operation_name}"
+        );
+        schema_rows += 1;
+        typed_contracts += 1;
+
+        let generated = system_function_descriptor(operation_name)
+            .expect("generic object-return operation has a macro-generated descriptor");
+        assert_eq!(generated.signature, contract.signature.source);
+        assert_eq!(contract.effects.iter().next(), Some(generated.effect));
+        generated_bindings += 1;
+
+        let item_index = markers
+            .iter()
+            .position(|marker| *marker == operation_name)
+            .expect("generated IDL has the generic provider operation marker");
+        let Declaration::Function { signature, .. } = &parsed.value.items[item_index].declaration
+        else {
+            panic!("generated binding {operation_name} is not a function")
+        };
+        assert_eq!(signature.generics.len(), 1);
+        assert_eq!(signature.generics[0].name, "T");
+        assert_eq!(contract.signature.type_parameters, vec!["T".to_owned()]);
+        let parsed_result = resolve_type(
+            signature
+                .result
+                .as_ref()
+                .expect("generic provider IDL declares its result type"),
+        )
+        .expect("generic provider IDL result type resolves");
+        assert_eq!(
+            parsed_result, contract.signature.result,
+            "IDL retains the typed object-return result shape for {operation_name}"
+        );
+        idl_results += 1;
+
+        let type_witness_parameter = contract
+            .signature
+            .parameters
+            .iter()
+            .find(|parameter| parameter.name == "as")
+            .expect("generic object-return operation has an explicit type witness");
+        assert_eq!(type_witness_parameter.ty, AbiType::Named("T".to_owned()));
+        generic_result_witnesses += 1;
+    }
+
+    assert_eq!(schema_rows, OBJECT_RETURN_OPERATIONS.len());
+    assert_eq!(typed_contracts, OBJECT_RETURN_OPERATIONS.len());
+    assert_eq!(generated_bindings, OBJECT_RETURN_OPERATIONS.len());
+    assert_eq!(idl_results, OBJECT_RETURN_OPERATIONS.len());
+    assert_eq!(generic_result_witnesses, OBJECT_RETURN_OPERATIONS.len());
+    println!(
+        "generated_object_return_binding_parity operations={} schema_rows={schema_rows} typed_contracts={typed_contracts} macro_bindings={generated_bindings} idl_results={idl_results} result_witnesses={generic_result_witnesses} total_cases={}",
+        OBJECT_RETURN_OPERATIONS.len(),
+        schema_rows + typed_contracts + generated_bindings + idl_results + generic_result_witnesses
+    );
+}
+
+#[test]
 fn generated_idl_modules_parse_and_validate_registry_contracts_independently() {
     let abi = system_provider_abi();
     let modules: BTreeMap<String, String> = serde_json::from_str(system_binding_modules_json())
