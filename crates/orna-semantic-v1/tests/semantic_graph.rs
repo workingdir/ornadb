@@ -7722,6 +7722,126 @@ fn opposed_sparse_three_way_chains_preserve_paired_tuple_identity() {
 }
 
 #[test]
+fn sparse_frame_rebind_chains_preserve_paired_three_way_identity() {
+    let source = include_str!("fixtures/historical-sparse-frame-three-way-rebind-chains.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-sparse-frame-three-way-rebind-chains.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    let type_errors = result
+        .diagnostics
+        .iter()
+        .filter(|diagnostic| diagnostic.code() == DIAG_TYPE)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        type_errors.len(),
+        1,
+        "only the frame chain that splits its paired identity should fail: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+    let module = result
+        .modules
+        .values()
+        .find(|module| module.symbols.contains_key("accepts_sparse_frame_rebind_chains"))
+        .expect("sparse frame rebind fixture module");
+    let Type::Function { result, .. } = &module.symbols["accepts_sparse_frame_rebind_chains"].ty
+    else {
+        panic!("frame chain must return its computed function type");
+    };
+    let Type::Record(result_fields) = result.as_ref() else {
+        panic!("frame chain must return a computed record: {result:?}");
+    };
+    let Type::List(wave_row) = result_fields.get("waves").expect("frame waves") else {
+        panic!("waves must retain a computed list");
+    };
+    let Type::Record(wave_fields) = wave_row.as_ref() else {
+        panic!("wave rows must retain their record values: {wave_row:?}");
+    };
+    let Type::List(frame_row) = wave_fields.get("frames").expect("nested frames") else {
+        panic!("frame histories must retain their computed list");
+    };
+    let Type::Record(frame_fields) = frame_row.as_ref() else {
+        panic!("frame rows must retain their record values: {frame_row:?}");
+    };
+    let Type::Record(bindings) = frame_fields.get("frame").expect("binding frame") else {
+        panic!("binding frame must remain a computed record");
+    };
+    let contexts = |name: &str| {
+        let Type::Tuple(slots) = bindings.get(name).expect("paired frame bindings") else {
+            panic!("{name} frame bindings must remain a tuple");
+        };
+        assert_eq!(slots.len(), 2, "{name} keeps both tuple positions");
+        slots
+            .iter()
+            .map(|slot| {
+                let mut selectors = BTreeSet::new();
+                collect_snapshot_contexts(slot, &mut selectors);
+                selectors
+            })
+            .collect::<Vec<_>>()
+    };
+    let expected = [
+        BTreeSet::from([
+            "selector:HEAD~8120".into(),
+            "selector:HEAD~8140".into(),
+            "selector:HEAD~8200".into(),
+            "selector:HEAD~8220".into(),
+            "selector:HEAD~8240".into(),
+        ]),
+        BTreeSet::from([
+            "selector:HEAD~8100".into(),
+            "selector:HEAD~8120".into(),
+            "selector:HEAD~8140".into(),
+            "selector:HEAD~8220".into(),
+            "selector:HEAD~8240".into(),
+        ]),
+    ];
+    assert_eq!(contexts("first"), expected, "first frame retains slot-local selectors");
+    assert_eq!(contexts("second"), expected, "sibling frame retains paired selectors");
+
+    let mut frame_witnesses = BTreeSet::new();
+    collect_snapshot_contexts(
+        frame_fields.get("witness").expect("frame witness"),
+        &mut frame_witnesses,
+    );
+    assert_eq!(
+        frame_witnesses,
+        BTreeSet::from([
+            "selector:HEAD~8110".into(),
+            "selector:HEAD~8130".into(),
+            "selector:HEAD~8150".into(),
+            "selector:HEAD~8210".into(),
+            "selector:HEAD~8230".into(),
+            "selector:HEAD~8250".into(),
+        ]),
+        "each frame's computed witness survives the three-way rebind chain"
+    );
+    let mut wave_witnesses = BTreeSet::new();
+    collect_snapshot_contexts(
+        wave_fields.get("witness").expect("wave witness"),
+        &mut wave_witnesses,
+    );
+    assert_eq!(
+        wave_witnesses,
+        BTreeSet::from([
+            "selector:HEAD~8400".into(),
+            "selector:HEAD~8410".into(),
+            "selector:HEAD~8420".into(),
+        ]),
+        "the omitted wave preserves all real outer witness values"
+    );
+}
+
+#[test]
 fn multi_parent_selector_topology_storm_preserves_label_depth_identity() {
     let source = include_str!("fixtures/historical-multi-parent-selector-topology-storm.orna");
     let parsed = orna_syntax_v1::parse_module(source);
