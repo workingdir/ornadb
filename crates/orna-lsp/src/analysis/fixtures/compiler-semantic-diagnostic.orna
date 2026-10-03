@@ -1,0 +1,4 @@
+CREATE SCHEMA app;
+CREATE TYPE app.Greeting AS OBJECT (
+    value MISSING_TYPE
+);

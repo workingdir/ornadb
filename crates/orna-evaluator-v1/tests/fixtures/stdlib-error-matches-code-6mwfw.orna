@@ -1,0 +1,11 @@
+std.error.matches_code(
+    std.error.caused_by(
+        "storage.conflict",
+        "write conflicted",
+        std.error.make("filesystem.denied", "root is not authorized")
+    ),
+    "storage.conflict"
+) && !std.error.matches_code(
+    std.error.make("parse.invalid", "bad input"),
+    "storage.conflict"
+)

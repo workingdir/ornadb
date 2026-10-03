@@ -1,3 +1,5 @@
+pub table WindowRow(id: Int) { value: Int, }
+
 pub fn factory_at(pin: sys.SnapshotRef) =
     sys.database.as_of(pin).energy.factory;
 
@@ -46,5 +48,5 @@ pub fn paired_sparse_compaction_fold_chain(failure: Error) {
             witness: factory_at(sys.snapshot("HEAD~641")),
         },
     ];
-    { saved: saved, compacted: checkpoints }
+    { saved: saved, compacted: checkpoints, window: window(WindowRow, 2) }
 }
