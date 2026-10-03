@@ -225,6 +225,20 @@ pub struct BranchMergePairedWriteAheadSegmentIdentity {
     pub right_segment: Vec<u8>,
 }
 
+/// The paired write-ahead log IDs bound to their active segment incarnations.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BranchMergePairedLogSegmentIdentity {
+    pub write_ahead_identity: BranchMergePairedWriteAheadIdentity,
+    pub segment_identity: BranchMergePairedWriteAheadSegmentIdentity,
+}
+
+/// A paired redo frame with its log IDs atomically bound to segment IDs.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BranchMergePairedCheckpointRedoLogSegmentFrame {
+    pub checkpoints: BranchMergePairedCheckpointRedoFrame,
+    pub log_segment_identity: BranchMergePairedLogSegmentIdentity,
+}
+
 /// A paired checkpoint redo frame carrying the active write-ahead segments.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BranchMergePairedCheckpointRedoSegmentFrame {
@@ -264,6 +278,24 @@ pub struct BranchMergePairedCheckpointRedoSegmentCompactionRunSnapshot {
 pub struct BranchMergePairedCheckpointRedoSegmentCompactionChainSnapshot {
     pub checkpoint_id: CheckpointId,
     pub runs: Vec<BranchMergePairedCheckpointRedoSegmentCompactionRunSnapshot>,
+}
+
+/// One sparse checkpoint stream's compacted log-to-segment identity history.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BranchMergePairedCheckpointRedoLogSegmentCompactionChainSnapshot {
+    pub checkpoint_id: CheckpointId,
+    pub runs: Vec<BranchMergePairedCheckpointRedoLogSegmentCompactionRunSnapshot>,
+}
+
+/// A compacted checkpoint state run retaining each order's paired log/segment identity.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BranchMergePairedCheckpointRedoLogSegmentCompactionRunSnapshot {
+    pub first_order: u64,
+    pub last_order: u64,
+    pub left: Option<CheckpointGeneration>,
+    pub right: Option<CheckpointGeneration>,
+    /// One atomically bound left/right log and segment pair per input order.
+    pub log_segment_identities: Vec<BranchMergePairedLogSegmentIdentity>,
 }
 
 /// Compresses adjacent paired redo frames only when both sides retain exactly
@@ -558,6 +590,67 @@ pub fn compress_paired_checkpoint_redo_sparse_chains_preserving_segment_rotation
                 }
             }
             BranchMergePairedCheckpointRedoSegmentCompactionChainSnapshot {
+                checkpoint_id,
+                runs,
+            }
+        })
+        .collect()
+}
+
+/// Compacts sparse checkpoint state while preserving each order's paired
+/// write-ahead log and segment identities as one lineage record.
+///
+/// Checkpoint IDs come from both the caller's known catalog and frame entries.
+/// Runs join only across consecutive orders with identical full state on both
+/// sides. Every input order contributes its original ordered log/segment pair
+/// to the run, including repeated identities and rotations. Keeping the pair
+/// in one value prevents a compacted log sequence from becoming misaligned
+/// with its segment rotation sequence. State changes and order gaps split runs.
+pub fn compress_paired_checkpoint_redo_sparse_chains_preserving_log_segment_identity(
+    known_checkpoint_ids: &[CheckpointId],
+    frames: &BTreeMap<u64, BranchMergePairedCheckpointRedoLogSegmentFrame>,
+) -> Vec<BranchMergePairedCheckpointRedoLogSegmentCompactionChainSnapshot> {
+    let checkpoint_ids = known_checkpoint_ids
+        .iter()
+        .cloned()
+        .chain(frames.values().flat_map(|frame| {
+            frame
+                .checkpoints
+                .left
+                .keys()
+                .chain(frame.checkpoints.right.keys())
+                .cloned()
+        }))
+        .collect::<BTreeSet<_>>();
+
+    checkpoint_ids
+        .into_iter()
+        .map(|checkpoint_id| {
+            let mut runs = Vec::<
+                BranchMergePairedCheckpointRedoLogSegmentCompactionRunSnapshot,
+            >::new();
+            for (&order, frame) in frames {
+                let left = frame.checkpoints.left.get(&checkpoint_id).cloned();
+                let right = frame.checkpoints.right.get(&checkpoint_id).cloned();
+                if let Some(last) = runs.last_mut()
+                    && last.left == left
+                    && last.right == right
+                    && last.last_order.checked_add(1) == Some(order)
+                {
+                    last.last_order = order;
+                    last.log_segment_identities
+                        .push(frame.log_segment_identity.clone());
+                } else {
+                    runs.push(BranchMergePairedCheckpointRedoLogSegmentCompactionRunSnapshot {
+                        first_order: order,
+                        last_order: order,
+                        left,
+                        right,
+                        log_segment_identities: vec![frame.log_segment_identity.clone()],
+                    });
+                }
+            }
+            BranchMergePairedCheckpointRedoLogSegmentCompactionChainSnapshot {
                 checkpoint_id,
                 runs,
             }
