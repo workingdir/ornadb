@@ -112,40 +112,9 @@ impl Keyword {
     }
 
     pub fn from_text(s: &str) -> Option<Self> {
-        Some(match s {
-            "as" => Self::As,
-            "assert" => Self::Assert,
-            "base" => Self::Base,
-            "break" => Self::Break,
-            "case" => Self::Case,
-            "continue" => Self::Continue,
-            "dim" => Self::Dim,
-            "else" => Self::Else,
-            "enum" => Self::Enum,
-            "false" => Self::False,
-            "fn" => Self::Fn,
-            "for" => Self::For,
-            "if" => Self::If,
-            "impl" => Self::Impl,
-            "in" => Self::In,
-            "let" => Self::Let,
-            "loop" => Self::Loop,
-            "null" => Self::Null,
-            "offset" => Self::Offset,
-            "affine" => Self::Affine,
-            "protocol" => Self::Protocol,
-            "pub" => Self::Pub,
-            "return" => Self::Return,
-            "self" => Self::SelfValue,
-            "static" => Self::Static,
-            "table" => Self::Table,
-            "true" => Self::True,
-            "type" => Self::Type,
-            "unit" => Self::Unit,
-            "use" => Self::Use,
-            "while" => Self::While,
-            _ => return None,
-        })
+        Self::ALL
+            .into_iter()
+            .find(|keyword| keyword.spelling() == s)
     }
 }
 
@@ -178,6 +147,24 @@ pub enum TokenKind {
     Punct(&'static str),
     Eof,
 }
+
+/// Operators recognized by the 1.0.0 lexer, ordered longest-first where
+/// spellings overlap. Editor grammars use the same inventory.
+pub const OPERATORS: &[&str] = &[
+    "..=", "=>", "==", "!=", "<=", ">=", "??", "|?", "&&", "||", "+=", "-=", "*=", "/=", "..", "|",
+    "!", "=", "<", ">", "+", "-", "*", "/", "%", "^", "?",
+];
+
+/// Delimiter tokens recognized by the 1.0.0 lexer.
+pub const PUNCTUATION: &[&str] = &["{", "}", "(", ")", "[", "]", ",", ";", ":", "."];
+
+pub const LINE_COMMENT_START: &str = "//";
+pub const BLOCK_COMMENT_START: &str = "/*";
+pub const BLOCK_COMMENT_END: &str = "*/";
+pub const STRING_DELIMITER: char = '"';
+/// Candidate-number expression shared with generated editor grammars. The
+/// lexer remains authoritative for validating complete numeric tokens.
+pub const NUMBER_PATTERN: &str = r"(?:[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]*)?(?:Z|[+-][0-9]{2}:[0-9]{2})|[0-9]{4}-[0-9]{2}-[0-9]{2}|0x[0-9A-Fa-f_]*|0b[01_]*|[0-9][0-9_]*(?:\.[0-9_]+)?(?:[eE][+-]?[0-9_]*)?f?)";
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Token {
     pub kind: TokenKind,
@@ -194,6 +181,17 @@ pub struct LexError {
 /// Lexes UTF-8 source. Comments and whitespace are deliberately omitted from
 /// the grammar stream; their byte locations are retained by every token span.
 pub fn lex(source: &str) -> Result<Vec<Token>, Vec<LexError>> {
+    let (tokens, errors) = lex_recovering(source);
+    if errors.is_empty() {
+        Ok(tokens)
+    } else {
+        Err(errors)
+    }
+}
+
+/// Lexes through recoverable errors so editor clients can keep highlighting
+/// the valid tokens surrounding an unfinished or mistyped token.
+pub(crate) fn lex_recovering(source: &str) -> (Vec<Token>, Vec<LexError>) {
     let mut l = Lexer {
         source,
         at: 0,
@@ -208,11 +206,7 @@ pub fn lex(source: &str) -> Result<Vec<Token>, Vec<LexError>> {
         text: String::new(),
         span: SourceSpan::new(source.len(), source.len()),
     });
-    if l.errors.is_empty() {
-        Ok(l.tokens)
-    } else {
-        Err(l.errors)
-    }
+    (l.tokens, l.errors)
 }
 // Interpolation can recurse before parser admission; bound that lexer stack
 // separately from ordinary braces and sequential string literals.
@@ -255,17 +249,17 @@ impl<'a> Lexer<'a> {
                 self.bump();
                 continue;
             }
-            if self.take("//") {
+            if self.take(LINE_COMMENT_START) {
                 while self.at < self.source.len() && !matches!(self.peek(), '\n' | '\r') {
                     self.bump()
                 }
                 continue;
             }
-            if self.take("/*") {
+            if self.take(BLOCK_COMMENT_START) {
                 self.comment(start);
                 continue;
             }
-            if c == '"' {
+            if c == STRING_DELIMITER {
                 self.string(start);
                 continue;
             }
@@ -282,51 +276,29 @@ impl<'a> Lexer<'a> {
                 self.number_or_time(start);
                 continue;
             }
-            let p = [
-                "..=", "=>", "==", "!=", "<=", ">=", "??", "|?", "&&", "||", "+=", "-=", "*=",
-                "/=", "..", "0x", "0b",
-            ];
-            if let Some(x) = p.into_iter().find(|x| self.rest().starts_with(*x)) {
+            if let Some(x) = OPERATORS
+                .iter()
+                .find(|spelling| self.rest().starts_with(**spelling))
+            {
+                let x = *x;
                 self.at += x.len();
                 self.push(TokenKind::Punct(x), start);
                 continue;
             }
-            let one = match c {
-                '{' => {
-                    if interpolation {
-                        brace_depth += 1;
-                    }
-                    "{"
-                }
-                '}' => "}",
-                '(' => "(",
-                ')' => ")",
-                '[' => "[",
-                ']' => "]",
-                ',' => ",",
-                ';' => ";",
-                ':' => ":",
-                '.' => ".",
-                '|' => "|",
-                '!' => "!",
-                '=' => "=",
-                '<' => "<",
-                '>' => ">",
-                '+' => "+",
-                '-' => "-",
-                '*' => "*",
-                '/' => "/",
-                '%' => "%",
-                '^' => "^",
-                '?' => "?",
-                _ => "",
-            };
-            if one.is_empty() {
-                self.bump();
-                self.error("ORNA-LEX-001", "unexpected character", start, self.at)
-            } else {
+            if c == '{' && interpolation {
+                brace_depth += 1;
+            }
+            let one = PUNCTUATION
+                .iter()
+                .chain(OPERATORS.iter())
+                .find(|spelling| spelling.len() == c.len_utf8() && spelling.starts_with(c))
+                .copied();
+            if let Some(one) = one {
                 self.bump();
                 self.push(TokenKind::Punct(one), start)
+            } else {
+                self.bump();
+                self.error("ORNA-LEX-001", "unexpected character", start, self.at)
             }
         }
         if interpolation {
@@ -342,9 +314,9 @@ impl<'a> Lexer<'a> {
     fn comment(&mut self, start: usize) {
         let mut depth = 1;
         while self.at < self.source.len() {
-            if self.take("/*") {
+            if self.take(BLOCK_COMMENT_START) {
                 depth += 1
-            } else if self.take("*/") {
+            } else if self.take(BLOCK_COMMENT_END) {
                 depth -= 1;
                 if depth == 0 {
                     return;
@@ -521,7 +493,7 @@ impl<'a> Lexer<'a> {
                 segment_start = self.at;
                 continue;
             }
-            if c == '"' {
+            if c == STRING_DELIMITER {
                 self.bump();
                 if interpolated {
                     if segment_start < self.at - 1 {
