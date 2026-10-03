@@ -1,5 +1,7 @@
 // Generated from Unicode 16.0.0 DerivedCoreProperties.txt.
 // Source: https://www.unicode.org/Public/16.0.0/ucd/DerivedCoreProperties.txt
+// Copyright © 2024 Unicode, Inc.; terms: https://www.unicode.org/terms_of_use.html
+// Unicode and the Unicode Logo are registered trademarks of Unicode, Inc.
 const CASED: &[(u32, u32)] = &[
     (0x41, 0x5A),
     (0x61, 0x7A),
