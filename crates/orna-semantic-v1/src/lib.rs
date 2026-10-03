@@ -8972,6 +8972,10 @@ fn infer_assignment(
                         if let Some(symbol) = local.get_mut(name) {
                             symbol.ty = reset_type;
                         }
+                    } else if contains_type_error(&expected) || contains_type_error(&value.ty) {
+                        // Error recovery cannot prove that a checkpoint source
+                        // carries a stable pin map. Keep the last valid local
+                        // identity and avoid cascading a second type diagnostic.
                     } else if type_contains_pinned_snapshot_identity(&expected)
                         && type_contains_pinned_snapshot_identity(&value.ty)
                     {
@@ -18163,10 +18167,13 @@ fn callable_function_type(ty: &Type) -> Option<&Type> {
 /// A compatible local checkpoint reset adopts the selected source value's
 /// exact identity map. The reference is silent on structured local reset
 /// chains; replacement preserves saved selector identities without unioning
-/// them with intermediate checkpoints.
+/// them with intermediate checkpoints. Error-recovered values are not valid
+/// reset sources because their nested pin maps have not been established.
 fn pinned_snapshot_reset_type(expected: &Type, selected: &Type) -> Option<Type> {
     (checkpoint_snapshot_maps_are_valid(expected)
         && checkpoint_snapshot_maps_are_valid(selected)
+        && !contains_type_error(expected)
+        && !contains_type_error(selected)
         && type_contains_pinned_snapshot_identity(expected)
         && type_contains_pinned_snapshot_identity(selected)
         && pinned_snapshot_reset_shape_matches(expected, selected))

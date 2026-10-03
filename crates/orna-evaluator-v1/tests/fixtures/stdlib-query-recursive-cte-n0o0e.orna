@@ -1,0 +1,4 @@
+std.query.recursive_cte(
+    [0, 2, 2],
+    value => if value < 7 { [value + 1, value + 2] } else { [value] }
+)
