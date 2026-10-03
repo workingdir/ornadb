@@ -7271,6 +7271,14 @@ fn infer(
             let paired_omission_recovery = first_parent
                 .as_ref()
                 .is_some_and(type_contains_paired_checkpoint_omissions);
+            // A concrete paired anchor can also be re-established after a
+            // sparse parent. Keep that latest accepted map as its recovery
+            // point so a later crossed row does not erase the re-anchor.
+            let checkpoint_reanchor_recovery = paired_omission_recovery
+                || (omitted_pinned_tuple_path
+                    && first_parent
+                        .as_ref()
+                        .is_some_and(type_contains_pinned_checkpoint_tuple));
             let mut checkpoint_recovery_parent = first_parent.clone();
             // Any omitted row can expose a cross-sibling selector collision.
             // Sparse pinned tuples anywhere in the fold need a local scope so
@@ -7294,7 +7302,7 @@ fn infer(
                     // topology, so reject a bad row locally and retry later
                     // rows. Folds without that recovery anchor retain their
                     // original fold-wide freeze for a rejected path.
-                    let mut parent_rollback_paths = if paired_omission_recovery {
+                    let mut parent_rollback_paths = if checkpoint_reanchor_recovery {
                         BTreeSet::new()
                     } else {
                         rolled_back_checkpoint_paths.clone()
@@ -7303,10 +7311,10 @@ fn infer(
                         merge_multi_parent_checkpoint_value_scoped(
                             prior,
                             &value,
-                            if paired_omission_recovery {
+                            if checkpoint_reanchor_recovery {
                                 checkpoint_recovery_parent
                                     .as_ref()
-                                    .expect("paired omission fold has a recovery anchor")
+                                    .expect("checkpoint re-anchor fold has a recovery anchor")
                             } else {
                                 first_parent
                                     .as_ref()
@@ -7321,7 +7329,7 @@ fn infer(
                         .map(|mut fold| {
                             if fold.rejected_scope {
                                 require_same(prior, &value, diagnostics);
-                                if paired_omission_recovery {
+                                if checkpoint_reanchor_recovery {
                                     fold.merged = merge_unpaired_checkpoint_record_siblings(
                                         &fold.merged,
                                         &value,
@@ -7350,7 +7358,7 @@ fn infer(
                                     })
                                     .unwrap_or_else(|| fold.effective_parent.clone()),
                             );
-                            if paired_omission_recovery
+                            if checkpoint_reanchor_recovery
                                 && let Some(next_recovery_parent) = checkpoint_recovery_parent
                                     .as_ref()
                                     .and_then(|anchor| {
@@ -7375,7 +7383,7 @@ fn infer(
                     } else {
                         merge_list_element_types(prior, &value)
                     };
-                    if !paired_omission_recovery {
+                    if !checkpoint_reanchor_recovery {
                         rolled_back_checkpoint_paths = parent_rollback_paths;
                     }
                     if let Some(merged) = merged {
