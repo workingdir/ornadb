@@ -1,0 +1,7 @@
+use sys.query as query_ops;
+
+pub fn explain_segment_rotation_costs(query: Query<Int>): sys.Plan =
+    query_ops.plan_hint(query);
+
+pub fn paired_segment_rotation_coordinates(): Text =
+    "checkpoint plus source stream, fold, order, and paired segment identities";
