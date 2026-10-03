@@ -2458,6 +2458,23 @@ enum RelationRow {
     End,
 }
 
+/// A downstream stage can reject a value after an earlier `take` has already
+/// emitted its full result. Preserve the rejection while also closing the
+/// source scan so the next page is not read just to rediscover that bound.
+fn rejected_relation_rows(
+    stages: &[RelationStage],
+    counters: &[usize],
+    stage_offset: usize,
+) -> Vec<RelationRow> {
+    let mut rows = vec![RelationRow::Skip];
+    if stages.iter().enumerate().any(|(offset, stage)| {
+        matches!(stage, RelationStage::Take(count) if counters[stage_offset + offset] >= *count)
+    }) {
+        rows.push(RelationRow::End);
+    }
+    rows
+}
+
 #[derive(Clone, Debug)]
 struct ReadyStreamItem {
     source: String,
@@ -4989,30 +5006,13 @@ impl Context<'_, '_> {
             match stage {
                 RelationStage::Filter(predicates) => {
                     if !self.relation_filter_passes(&value, predicates.iter(), depth + 1)? {
-                        let mut rows = vec![RelationRow::Skip];
-                        // Once a preceding take has consumed its bound, a
-                        // downstream filter rejection still exhausts that
-                        // bounded relation. Propagate the stop now so the
-                        // source is not evaluated once more just to discover
-                        // the already-reached bound.
-                        if stages.iter().enumerate().any(|(offset, stage)| {
-                            matches!(stage, RelationStage::Take(count) if counters[stage_offset + offset] >= *count)
-                        }) {
-                            rows.push(RelationRow::End);
-                        }
-                        return Ok(rows);
+                        return Ok(rejected_relation_rows(stages, counters, stage_offset));
                     }
                 }
                 RelationStage::SharedFilter(batch) => {
                     let predicates = batch.chunks().iter().flat_map(|chunk| chunk.iter());
                     if !self.relation_filter_passes(&value, predicates, depth + 1)? {
-                        let mut rows = vec![RelationRow::Skip];
-                        if stages.iter().enumerate().any(|(offset, stage)| {
-                            matches!(stage, RelationStage::Take(count) if counters[stage_offset + offset] >= *count)
-                        }) {
-                            rows.push(RelationRow::End);
-                        }
-                        return Ok(rows);
+                        return Ok(rejected_relation_rows(stages, counters, stage_offset));
                     }
                 }
                 RelationStage::Map(transform) => {
@@ -5039,13 +5039,13 @@ impl Context<'_, '_> {
                 RelationStage::Distinct => {
                     let seen = &mut distinct_seen[index];
                     if !seen.insert(distinct_identity(&value)?) {
-                        return Ok(vec![RelationRow::Skip]);
+                        return Ok(rejected_relation_rows(stages, counters, stage_offset));
                     }
                     self.items(seen.len())?;
                 }
                 RelationStage::Pairs => {
                     let Some(previous) = pair_previous[index].replace(value.clone()) else {
-                        return Ok(vec![RelationRow::Skip]);
+                        return Ok(rejected_relation_rows(stages, counters, stage_offset));
                     };
                     self.items(2)?;
                     value = Value::Tuple(vec![previous, value]);
@@ -5057,14 +5057,14 @@ impl Context<'_, '_> {
                             .expect("window stage parameters are validated")
                     });
                     let Some(window) = state.push(value) else {
-                        return Ok(vec![RelationRow::Skip]);
+                        return Ok(rejected_relation_rows(stages, counters, stage_offset));
                     };
                     value = Value::List(window);
                 }
                 RelationStage::Drop(count) => {
                     if counters[index] < *count {
                         counters[index] += 1;
-                        return Ok(vec![RelationRow::Skip]);
+                        return Ok(rejected_relation_rows(stages, counters, stage_offset));
                     }
                 }
                 RelationStage::Take(count) => {
