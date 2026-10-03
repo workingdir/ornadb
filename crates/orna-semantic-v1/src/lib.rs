@@ -9786,8 +9786,9 @@ fn merge_checkpoint_field_map_multi_parent(left: &Type, right: &Type) -> Option<
 }
 
 /// A rejected paired-pin scope must not discard unrelated checkpoint values
-/// from the same sparse row. Keep pinned tuple fields at their recovery anchor,
-/// while allowing independent record siblings to continue contributing pins.
+/// from the same sparse row. Descend through a record only when it directly
+/// contains paired tuples and an independent sibling; deeper paired records
+/// stay atomic while their tuple rollback identity is still being recovered.
 fn merge_unpaired_checkpoint_record_siblings(
     accumulated: &Type,
     parent: &Type,
@@ -9801,17 +9802,46 @@ fn merge_unpaired_checkpoint_record_siblings(
             merged.insert(name.clone(), accumulated_value.clone());
             continue;
         };
-        let value = if type_contains_pinned_checkpoint_tuple(accumulated_value)
-            || type_contains_pinned_checkpoint_tuple(parent_value)
-        {
-            accumulated_value.clone()
-        } else {
-            merge_checkpoint_field_map_multi_parent(accumulated_value, parent_value)
-                .unwrap_or_else(|| accumulated_value.clone())
+        let contains_pinned_tuple = type_contains_pinned_checkpoint_tuple(accumulated_value)
+            || type_contains_pinned_checkpoint_tuple(parent_value);
+        let value = match (accumulated_value, parent_value) {
+            (Type::Record(_), Type::Record(_))
+                if contains_pinned_tuple
+                    && record_has_direct_pinned_tuple_and_unpaired_sibling(
+                        accumulated_value,
+                        parent_value,
+                    ) =>
+            {
+                merge_unpaired_checkpoint_record_siblings(accumulated_value, parent_value)
+                    .unwrap_or_else(|| accumulated_value.clone())
+            }
+            _ if contains_pinned_tuple => accumulated_value.clone(),
+            _ => merge_checkpoint_field_map_multi_parent(accumulated_value, parent_value)
+                .unwrap_or_else(|| accumulated_value.clone()),
         };
         merged.insert(name.clone(), value);
     }
     Some(Type::Record(merged))
+}
+
+fn record_has_direct_pinned_tuple_and_unpaired_sibling(accumulated: &Type, parent: &Type) -> bool {
+    let (Type::Record(accumulated), Type::Record(parent)) = (accumulated, parent) else {
+        return false;
+    };
+    let direct_pinned_tuple = accumulated.iter().any(|(name, value)| {
+        matches!(value, Type::Tuple(_))
+            && type_contains_pinned_checkpoint_tuple(value)
+            && parent.get(name).is_some_and(|parent| {
+                matches!(parent, Type::Tuple(_)) && type_contains_pinned_checkpoint_tuple(parent)
+            })
+    });
+    let unpaired_sibling = accumulated.iter().any(|(name, value)| {
+        parent.get(name).is_some_and(|parent| {
+            !type_contains_pinned_checkpoint_tuple(value)
+                && !type_contains_pinned_checkpoint_tuple(parent)
+        })
+    });
+    direct_pinned_tuple && unpaired_sibling
 }
 
 fn merge_checkpoint_field_map_inner(
