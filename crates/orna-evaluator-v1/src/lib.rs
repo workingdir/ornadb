@@ -10148,9 +10148,9 @@ impl Context<'_, '_> {
         let mut results = Vec::new();
         while start <= last_start {
             let end = start + size;
-            let window = points[start..end].to_vec();
-            self.items(window.len())?;
+            self.items(size)?;
             self.step()?;
+            let window = points[start..end].to_vec();
             self.step()?;
             let result = self.stats(statistic, vec![Value::List(window)])?;
             results.push(if matches!(statistic, "rate" | "integrate") {
