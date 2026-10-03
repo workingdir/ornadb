@@ -219,9 +219,11 @@ pub struct RelationPage {
 /// Cloned plans retain this identity across their page reads; independently
 /// created sources receive distinct identities, even when their source names
 /// are equal. A newly built plan for a later view refresh receives a fresh
-/// identity. Effect handlers should bind continuation state by both source
-/// name and this identity so paired same-name reads cannot resume one another's
-/// cursors.
+/// identity. The identity follows its source through folds and pagination
+/// handoffs; cursor bytes are checkpoints, not identities, and may be reused
+/// by sibling subscriptions or later refreshes. Effect handlers should bind
+/// continuation state by both source name and this identity so paired same-name
+/// reads cannot resume one another's cursors.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct RelationReadScope(u64);
 
@@ -823,6 +825,7 @@ pub trait EffectHandler {
     /// source. Implementations that retain page continuations should key them
     /// by both `source` and `scope`: same-name planned reads are independent,
     /// and a fresh scope starts a fresh observation during a later refresh.
+    /// Repeated cursor bytes do not transfer a continuation between scopes.
     /// The default delegates to [`EffectHandler::scan_relation_page`] to
     /// preserve existing handlers while allowing stateful readers to keep
     /// continuation cursors separate across equal-named view sources.
@@ -8303,6 +8306,9 @@ impl Context<'_, '_> {
         depth: usize,
     ) -> Result<Value, EvaluationError> {
         match (name, values.as_slice()) {
+            ("recursive_cte" | "__recursive_cte", [Value::List(anchor), recursive_term]) => {
+                self.recursive_cte(anchor, recursive_term, depth)
+            }
             ("__list_length", [Value::List(values)]) => self.count(values),
             ("__list_concat", [Value::List(left), Value::List(right)]) => self.union(left, right),
             ("__numeric_sum", [Value::List(values)]) => self.sum(values),
@@ -8474,10 +8480,60 @@ impl Context<'_, '_> {
             | ("__stable_sort" | "__group_by" | "__rank", [_, _])
             | ("__minimum" | "__maximum", [_])
             | ("__asof_join", [_, _, _, _]) => Err(error("ORNA-EVAL-TYPE")),
+            ("recursive_cte" | "__recursive_cte", [_, _]) => Err(error("ORNA-EVAL-TYPE")),
             ("asof_join", _) => Err(error("ORNA-EVAL-ARGUMENT")),
+            ("recursive_cte" | "__recursive_cte", _) => Err(error("ORNA-EVAL-ARGUMENT")),
             _ => Err(error("ORNA-EVAL-UNSUPPORTED")),
         }
     }
+
+    /// Computes a finite breadth-first recursive query, using one canonical
+    /// identity set for the anchor and every recursive round. The output owns
+    /// the first value for each identity and preserves anchor/round/term order.
+    fn recursive_cte(
+        &mut self,
+        anchor: &[Value],
+        recursive_term: &Value,
+        depth: usize,
+    ) -> Result<Value, EvaluationError> {
+        let mut seen = HashSet::new();
+        let mut result = Vec::new();
+        let mut frontier = Vec::new();
+        self.items(anchor.len())?;
+        for value in anchor {
+            self.step()?;
+            if seen.insert(distinct_identity(value)?) {
+                result.push(value.clone());
+                frontier.push(value.clone());
+                self.items(result.len())?;
+            }
+        }
+
+        while !frontier.is_empty() {
+            let mut next_frontier = Vec::new();
+            for row in std::mem::take(&mut frontier) {
+                self.step()?;
+                let next = self.invoke_predicate(recursive_term, row, depth + 1)?;
+                let Value::List(candidates) = next else {
+                    return Err(error("ORNA-EVAL-TYPE"));
+                };
+                self.items(candidates.len())?;
+                for value in candidates {
+                    self.step()?;
+                    if seen.insert(distinct_identity(&value)?) {
+                        result.push(value.clone());
+                        next_frontier.push(value);
+                        self.items(result.len())?;
+                        self.items(next_frontier.len())?;
+                    }
+                }
+            }
+            frontier = next_frontier;
+        }
+
+        Ok(Value::List(result))
+    }
+
     fn map(
         &mut self,
         values: &[Value],
@@ -11353,6 +11409,7 @@ fn named_arguments(
         "parallel" | "race" => &["callbacks"],
         "timeout" => &["callback", "duration"],
         "chunk" => &["values", "size"],
+        "recursive_cte" | "__recursive_cte" => &["anchor", "recursive_term"],
         "flatten" | "unique" | "pairs" => &["values"],
         "distinct" | "count" => &["rows"],
         "last" => &["rows"],
@@ -11638,6 +11695,8 @@ const STANDARD_BINDING_MODULES: &[StandardBindingModule] = &[
             "take",
             "drop",
             "distinct",
+            "recursive_cte",
+            "__recursive_cte",
             "unique",
             "union",
             "count",
@@ -12127,6 +12186,7 @@ fn root_collection_name(expression: &Expr) -> Option<&str> {
             | "rank"
             | "filter"
             | "distinct"
+            | "__recursive_cte"
             | "union"
             | "pairs"
             | "take"

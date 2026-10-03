@@ -14,6 +14,8 @@ use orna_storage_v1::{
     BranchMergePairedCheckpointRedoSegmentFrame,
     BranchMergePairedCheckpointRedoLogSegmentFrame,
     BranchMergePairedLogSegmentIdentity,
+    BranchMergePairedRedoChainIdentity,
+    BranchMergePairedCheckpointRedoChainIdentityFrame,
     BranchMergeBudget, BranchMergeColumnDepthEvent, BranchMergeColumnDepthFragments,
     BranchMergeColumnDepthFragmentSnapshot, BranchMergeColumnDepthLadderEvent,
     BranchMergeColumnDepthLadderSnapshot, BranchMergeColumnDepthLadderWaveSnapshot,
@@ -59,6 +61,7 @@ use orna_storage_v1::{
     fold_paired_checkpoint_redo_sparse_streams_preserving_segment_rotation_identity,
     compress_paired_checkpoint_redo_sparse_chains_preserving_segment_rotation_identity,
     compress_paired_checkpoint_redo_sparse_chains_preserving_log_segment_identity,
+    compress_paired_checkpoint_redo_sparse_chains_preserving_chain_and_log_segment_identity,
 };
 use orna_syntax_v1::{Expr, LiteralKind, parse_row};
 use std::{
@@ -92,6 +95,8 @@ const PAIRED_COMPACTED_SEGMENT_ROTATIONS: &str =
     include_str!("fixtures/paired-compacted-segment-rotations.orna");
 const PAIRED_COMPACTED_LOG_IDENTITIES: &str =
     include_str!("fixtures/paired-compacted-log-identities.orna");
+const PAIRED_COMPACTED_REDO_CHAIN_IDENTITIES: &str =
+    include_str!("fixtures/paired-compacted-redo-chain-identities.orna");
 const TOMBSTONE_DEPTH_SHALLOW: &str = include_str!("fixtures/merge-tombstone-depth-shallow.orna");
 const TOMBSTONE_DEPTH_MIDDLE: &str = include_str!("fixtures/merge-tombstone-depth-middle.orna");
 const TOMBSTONE_DEPTH_DEEP: &str = include_str!("fixtures/merge-tombstone-depth-deep.orna");
@@ -23400,6 +23405,174 @@ fn paired_sparse_compaction_preserves_log_segment_identity_pairs() {
     assert_eq!(runs(&catalog_only).len(), 2);
     assert_eq!(runs(&catalog_only)[0].log_segment_identities, lineages[0..3]);
     assert_eq!(runs(&catalog_only)[1].log_segment_identities, lineages[3..6]);
+}
+
+#[test]
+fn paired_sparse_compaction_preserves_redo_chain_identity_across_segment_rotations() {
+    let chain_rows = PAIRED_COMPACTED_REDO_CHAIN_IDENTITIES
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    let log_rows = PAIRED_COMPACTED_LOG_IDENTITIES
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    let segment_rows = PAIRED_COMPACTED_SEGMENT_ROTATIONS
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    let checkpoint_states = PAIRED_CHECKPOINT_REDO
+        .split("\n\n")
+        .map(parse_checkpoint_fixture)
+        .collect::<Vec<_>>();
+    assert_eq!(chain_rows.len(), 6);
+    assert_eq!(log_rows.len(), 6);
+    assert_eq!(segment_rows.len(), 6);
+    let keys = |rows: &[KeyedRow]| rows.iter().map(|row| row.key.clone()).collect::<Vec<_>>();
+    assert_eq!(keys(&chain_rows), keys(&log_rows));
+    assert_eq!(keys(&chain_rows), keys(&segment_rows));
+
+    let chains = chain_rows
+        .iter()
+        .map(|row| BranchMergePairedRedoChainIdentity {
+            left_chain: row.fields[&id(2)].encode().unwrap(),
+            right_chain: row.fields[&id(3)].encode().unwrap(),
+        })
+        .collect::<Vec<_>>();
+    let lineages = log_rows
+        .iter()
+        .zip(&segment_rows)
+        .map(|(log_row, segment_row)| BranchMergePairedLogSegmentIdentity {
+            write_ahead_identity: BranchMergePairedWriteAheadIdentity {
+                left_log: log_row.fields[&id(2)].encode().unwrap(),
+                right_log: log_row.fields[&id(3)].encode().unwrap(),
+            },
+            segment_identity: BranchMergePairedWriteAheadSegmentIdentity {
+                left_segment: segment_row.fields[&id(2)].encode().unwrap(),
+                right_segment: segment_row.fields[&id(3)].encode().unwrap(),
+            },
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(chains[0], chains[1]);
+    assert_eq!(chains[2], chains[3]);
+    assert_eq!(chains[3], chains[4]);
+    assert_ne!(chains[1], chains[2]);
+    assert_ne!(chains[4], chains[5]);
+    assert_ne!(lineages[0].segment_identity, lineages[1].segment_identity);
+    assert_eq!(lineages[4], lineages[5]);
+
+    let left_base = checkpoint_states[0].clone();
+    let right_base = checkpoint_states[1].clone();
+    let left_redo = checkpoint_states[2].clone();
+    let right_redo = checkpoint_states[3].clone();
+    let positionless = checkpoint_states[4].clone();
+    let alpha = b"redo-chain/alpha".to_vec();
+    let beta = b"redo-chain/beta".to_vec();
+    let catalog_only = b"redo-chain/catalog-only".to_vec();
+    let orders = [80_u64, 81, 82, 84, 85, 86];
+    let mut frames = BTreeMap::new();
+    for (index, ((order, redo_chain_identity), log_segment_identity)) in orders
+        .into_iter()
+        .zip(&chains)
+        .zip(&lineages)
+        .enumerate()
+    {
+        let (left, mut right) = match index {
+            0 | 1 | 2 => (
+                BTreeMap::from([(alpha.clone(), left_base.clone())]),
+                BTreeMap::from([(alpha.clone(), right_base.clone())]),
+            ),
+            3 | 4 | 5 => (
+                BTreeMap::from([(alpha.clone(), left_redo.clone())]),
+                BTreeMap::from([(alpha.clone(), right_redo.clone())]),
+            ),
+            _ => unreachable!(),
+        };
+        if index == 2 {
+            right.insert(beta.clone(), positionless.clone());
+        }
+        frames.insert(
+            order,
+            BranchMergePairedCheckpointRedoChainIdentityFrame {
+                checkpoints: BranchMergePairedCheckpointRedoFrame { left, right },
+                redo_chain_identity: redo_chain_identity.clone(),
+                log_segment_identity: log_segment_identity.clone(),
+            },
+        );
+    }
+
+    let snapshots = compress_paired_checkpoint_redo_sparse_chains_preserving_chain_and_log_segment_identity(
+        &[alpha.clone(), beta.clone(), catalog_only.clone()],
+        &frames,
+    );
+    assert_eq!(
+        snapshots.iter().map(|snapshot| snapshot.checkpoint_id.clone()).collect::<Vec<_>>(),
+        vec![alpha.clone(), beta.clone(), catalog_only.clone()],
+    );
+    let runs = |checkpoint_id: &[u8]| {
+        &snapshots
+            .iter()
+            .find(|snapshot| snapshot.checkpoint_id == checkpoint_id)
+            .unwrap()
+            .runs
+    };
+    assert_eq!(
+        runs(&alpha)
+            .iter()
+            .map(|run| (run.first_order, run.last_order, run.left.clone(), run.right.clone()))
+            .collect::<Vec<_>>(),
+        vec![
+            (80, 81, Some(left_base), Some(right_base)),
+            (82, 82, Some(checkpoint_states[0].clone()), Some(checkpoint_states[1].clone())),
+            (84, 85, Some(left_redo.clone()), Some(right_redo.clone())),
+            (86, 86, Some(left_redo), Some(right_redo)),
+        ],
+        "chain changes split otherwise stable checkpoint state and order gaps stay visible",
+    );
+    assert_eq!(
+        runs(&alpha).iter().map(|run| run.redo_chain_identity.clone()).collect::<Vec<_>>(),
+        vec![chains[0].clone(), chains[2].clone(), chains[3].clone(), chains[5].clone()],
+    );
+    assert_eq!(runs(&alpha)[0].log_segment_identities, lineages[0..2]);
+    assert_eq!(runs(&alpha)[1].log_segment_identities, lineages[2..3]);
+    assert_eq!(runs(&alpha)[2].log_segment_identities, lineages[3..5]);
+    assert_eq!(runs(&alpha)[3].log_segment_identities, lineages[5..6]);
+
+    assert_eq!(
+        runs(&beta)
+            .iter()
+            .map(|run| (run.first_order, run.last_order, run.left.clone(), run.right.clone()))
+            .collect::<Vec<_>>(),
+        vec![
+            (80, 81, None, None),
+            (82, 82, None, Some(positionless)),
+            (84, 85, None, None),
+            (86, 86, None, None),
+        ],
+        "missing and present-positionless states retain their independent redo chain labels",
+    );
+    assert_eq!(
+        runs(&beta).iter().map(|run| run.redo_chain_identity.clone()).collect::<Vec<_>>(),
+        vec![chains[0].clone(), chains[2].clone(), chains[3].clone(), chains[5].clone()],
+    );
+    assert_eq!(runs(&beta)[0].log_segment_identities, lineages[0..2]);
+    assert_eq!(runs(&beta)[1].log_segment_identities, lineages[2..3]);
+    assert_eq!(runs(&beta)[2].log_segment_identities, lineages[3..5]);
+    assert_eq!(runs(&beta)[3].log_segment_identities, lineages[5..6]);
+    assert_eq!(runs(&catalog_only).len(), 4);
+    assert_eq!(
+        runs(&catalog_only)
+            .iter()
+            .map(|run| (run.first_order, run.last_order, run.redo_chain_identity.clone()))
+            .collect::<Vec<_>>(),
+        vec![
+            (80, 81, chains[0].clone()),
+            (82, 82, chains[2].clone()),
+            (84, 85, chains[3].clone()),
+            (86, 86, chains[5].clone()),
+        ],
+        "catalog-only streams preserve chain transitions and sparse gaps",
+    );
 }
 
 #[test]
