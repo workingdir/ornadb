@@ -11,7 +11,9 @@ fn bool_value(value: bool) -> CanonicalValue {
 fn pinned_collection_algorithms_execute_from_the_captured_orna_module() {
     let sources = orna_standard::reference_standard_sources_v1()
         .into_iter()
+        .filter(|(path, _)| path == "std/collection.orna" || path == "std/algorithm.orna")
         .collect::<Vec<_>>();
+    assert_eq!(sources.len(), 2, "algorithm dependencies are captured");
     let algorithm = sources
         .iter()
         .find(|(path, _)| path == "std/algorithm.orna")
@@ -23,6 +25,20 @@ fn pinned_collection_algorithms_execute_from_the_captured_orna_module() {
         sources.clone(),
     )
     .expect("algorithm dependencies are captured in an immutable std snapshot");
+    for (path, source) in &sources {
+        profile
+            .verify_source(path, source)
+            .expect("selected source bytes match their captured dependency snapshot");
+        assert!(
+            profile
+                .verify_source(
+                    path,
+                    &format!("{source}\n// changed after snapshot capture")
+                )
+                .is_err(),
+            "edited source bytes must not replace the captured {path}"
+        );
+    }
     let catalogue = Catalogue::authoritative_core()
         .with_standard_sources(&profile, sources.clone())
         .unwrap_or_else(|error| {
@@ -37,8 +53,10 @@ fn pinned_collection_algorithms_execute_from_the_captured_orna_module() {
         session.submit(include_str!("fixtures/stdlib-use-algorithm-oo3k6.orna")),
         Ok(None)
     );
-
-    for behavior in [include_str!("fixtures/stdlib-algorithm-sort-oo3k6.orna")] {
+    for behavior in [
+        include_str!("fixtures/stdlib-algorithm-sort-oo3k6.orna"),
+        include_str!("fixtures/stdlib-algorithm-stable-ties-cli9f.orna"),
+    ] {
         assert_eq!(
             session.submit(behavior).unwrap_or_else(|error| panic!(
                 "algorithm fixture {behavior:?} failed: {}",
@@ -52,9 +70,10 @@ fn pinned_collection_algorithms_execute_from_the_captured_orna_module() {
     let behavior = include_str!("fixtures/stdlib-algorithm-behavior-oo3k6.orna");
     for (index, check) in behavior.split("\n&& ").enumerate() {
         assert_eq!(
-            session
-                .submit(check)
-                .unwrap_or_else(|error| panic!("algorithm behavior {index} failed: {} ({check})", error.code())),
+            session.submit(check).unwrap_or_else(|error| panic!(
+                "algorithm behavior {index} failed: {} ({check})",
+                error.code()
+            )),
             expected,
             "algorithm behavior {index}: {check}"
         );
