@@ -1,0 +1,1 @@
+io.process.run("/usr/bin/env", [], ".", [("ORNA_PROOF", "isolated-child")], null, 2.seconds, 128)
