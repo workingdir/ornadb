@@ -4801,6 +4801,19 @@ fn captured_snapshot_identity_survives_paired_divergence_closure_restoration_fol
     }));
     assert_eq!(pins[4], pins[3], "closure restoration retains the paired pin");
     assert_eq!(pins[5], pins[0], "the final restoration selects the baseline pin");
+    assert_eq!(
+        projects[3].standard_profile().unwrap().snapshot(),
+        projects[4].standard_profile().unwrap().snapshot(),
+        "the closure-only restore keeps the paired dependency pin fixed"
+    );
+    assert_ne!(
+        expected_closures[3], expected_closures[4],
+        "the paired closure source changes during the restoration fold"
+    );
+    assert_ne!(
+        expected[3], expected[4],
+        "restoring only the closure source changes its computed value"
+    );
     for (index, (project_parent, pin)) in project_parents.iter().zip(&pins).enumerate() {
         let gitlink = git_output_at(
             &project_path,
