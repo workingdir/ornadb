@@ -35125,6 +35125,7 @@ fn paired_redo_fold_identity_survives_sparse_checkpoint_rotation_handoffs() {
         Err(orna_storage_v1::BranchMergePairedCheckpointRedoFoldSegmentRotationRestoreHandoffError::InvalidOrderRange {
             restore_ordinal: 0,
             handoff_ordinal: 1,
+            stream_ordinal: 0,
             fold_ordinal: 8,
             first_order: 9,
             last_order: 8,
@@ -35138,6 +35139,7 @@ fn paired_redo_fold_identity_survives_sparse_checkpoint_rotation_handoffs() {
         Err(orna_storage_v1::BranchMergePairedCheckpointRedoFoldSegmentRotationRestoreHandoffError::SegmentIdentityCountMismatch {
             restore_ordinal: 0,
             handoff_ordinal: 0,
+            stream_ordinal: 0,
             fold_ordinal: 8,
             first_order: 20,
             last_order: 21,
@@ -35498,6 +35500,34 @@ fn paired_redo_fold_rotation_restore_retains_duplicate_stream_ordinals() {
     assert_eq!(slots[0].right, Some(checkpoint_rows[1].clone()));
     assert_eq!(slots[1].left, Some(checkpoint_rows[2].clone()));
     assert_eq!(slots[1].right, Some(checkpoint_rows[3].clone()));
+
+    let malformed = BranchMergePairedCheckpointRedoFoldSegmentRotationCompactionSnapshot {
+        checkpoint_id: checkpoint_id.clone(),
+        runs: vec![BranchMergePairedCheckpointRedoFoldSegmentRotationCompactionRunSnapshot {
+            fold_ordinal: 4,
+            first_order: 9,
+            last_order: 8,
+            left: None,
+            right: None,
+            redo_fold_identity: folds[0].clone(),
+            segment_identities: vec![],
+        }],
+    };
+    assert_eq!(
+        restore_paired_checkpoint_redo_sparse_segment_rotation_handoff_chains_preserving_fold_identity(
+            &[],
+            &[vec![vec![stream(0, 0), malformed]]],
+        ),
+        Err(orna_storage_v1::BranchMergePairedCheckpointRedoFoldSegmentRotationRestoreHandoffError::InvalidOrderRange {
+            restore_ordinal: 0,
+            handoff_ordinal: 0,
+            stream_ordinal: 1,
+            fold_ordinal: 4,
+            first_order: 9,
+            last_order: 8,
+        }),
+        "invalid ranges identify the duplicate checkpoint stream that supplied them",
+    );
 }
 
 #[test]

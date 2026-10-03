@@ -669,6 +669,7 @@ pub enum BranchMergePairedCheckpointRedoFoldSegmentRotationRestoreHandoffError {
     InvalidOrderRange {
         restore_ordinal: usize,
         handoff_ordinal: usize,
+        stream_ordinal: usize,
         fold_ordinal: usize,
         first_order: u64,
         last_order: u64,
@@ -676,6 +677,7 @@ pub enum BranchMergePairedCheckpointRedoFoldSegmentRotationRestoreHandoffError {
     SegmentIdentityCountMismatch {
         restore_ordinal: usize,
         handoff_ordinal: usize,
+        stream_ordinal: usize,
         fold_ordinal: usize,
         first_order: u64,
         last_order: u64,
@@ -2739,6 +2741,7 @@ pub fn restore_paired_checkpoint_redo_sparse_segment_rotation_handoff_chains_pre
                                 BranchMergePairedCheckpointRedoFoldSegmentRotationRestoreHandoffError::InvalidOrderRange {
                                     restore_ordinal,
                                     handoff_ordinal,
+                                    stream_ordinal,
                                     fold_ordinal: run.fold_ordinal,
                                     first_order: run.first_order,
                                     last_order: run.last_order,
@@ -2752,6 +2755,7 @@ pub fn restore_paired_checkpoint_redo_sparse_segment_rotation_handoff_chains_pre
                                 BranchMergePairedCheckpointRedoFoldSegmentRotationRestoreHandoffError::SegmentIdentityCountMismatch {
                                     restore_ordinal,
                                     handoff_ordinal,
+                                    stream_ordinal,
                                     fold_ordinal: run.fold_ordinal,
                                     first_order: run.first_order,
                                     last_order: run.last_order,
