@@ -1,0 +1,23 @@
+{ id: "f140/checkpoint/alpha-main", name: "f140/checkpoint/alpha", city: "f140/stream/alpha-main", }
+
+{ id: "f140/checkpoint/alpha-peer", name: "f140/checkpoint/alpha", city: "f140/stream/alpha-peer", }
+
+{ id: "f140/checkpoint/beta", name: "f140/checkpoint/beta", city: "f140/stream/beta", }
+
+{ id: "f140/segment/alpha-3", name: "f140/left/alpha-3", city: "f140/right/alpha-3", }
+
+{ id: "f140/segment/alpha-4", name: "f140/left/alpha-4", city: "f140/right/alpha-4", }
+
+{ id: "f140/segment/alpha-6", name: "f140/left/alpha-6", city: "f140/right/alpha-6", }
+
+{ id: "f140/segment/alpha-peer-9", name: "f140/left/alpha-peer-9", city: "f140/right/alpha-peer-9", }
+
+{ id: "f140/segment/alpha-handoff-3", name: "f140/left/alpha-handoff-3", city: "f140/right/alpha-handoff-3", }
+
+{ id: "f140/segment/alpha-batch-12", name: "f140/left/alpha-batch-12", city: "f140/right/alpha-batch-12", }
+
+{ id: "f140/segment/alpha-next-fold-3", name: "f140/left/alpha-next-fold-3", city: "f140/right/alpha-next-fold-3", }
+
+{ id: "f140/segment/alpha-next-fold-4", name: "f140/left/alpha-next-fold-4", city: "f140/right/alpha-next-fold-4", }
+
+{ id: "f140/segment/beta-1", name: "f140/left/beta-1", city: "f140/right/beta-1", }
