@@ -9,7 +9,7 @@ use serde_json::Value;
 #[allow(dead_code)]
 mod build_support;
 
-const SYS_API_V1_SHA256: &str = "b569785bfaa204b366b2cee444c01a9aa8dd74c710852fdad925dcfae60a256f";
+const SYS_API_V1_SHA256: &str = "ce59a945835ec9a5b7af56d9760b1cea810a480e642fee53ceabdd618ba08747";
 const SYSTEM_API_FIXTURE: &str = include_str!("fixtures/system-api-annotation.orna");
 const GENERIC_TYPE_GRAPH_FIXTURE: &str = include_str!("fixtures/sys-generic-type-graph.orna");
 
@@ -40,7 +40,7 @@ fn published_artifact_is_the_deterministic_registry_projection() {
     let digest = format!("{:x}", Sha256::digest(generated.as_bytes()));
     assert_eq!(
         digest, SYS_API_V1_SHA256,
-        "the on-demand api/sys.json export preserves the frozen 1.0 bytes"
+        "the on-demand api/sys.json export matches the reviewed docs-enriched 1.0 artifact"
     );
 }
 
@@ -94,6 +94,23 @@ fn every_portable_function_has_the_collected_runtime_descriptor() {
         assert_eq!(descriptor.effect, effect, "effect for {name}");
         assert_eq!(descriptor.signature, function["signature"], "signature for {name}");
         assert_eq!(descriptor.purpose, function["purpose"], "purpose for {name}");
+        assert_eq!(
+            descriptor.documentation,
+            function["documentation"].as_str(),
+            "documentation for {name}"
+        );
+        assert_eq!(descriptor.contract, function["contract"].as_str(), "contract for {name}");
+        assert_eq!(
+            descriptor.preconditions,
+            function["preconditions"].as_str(),
+            "preconditions for {name}"
+        );
+        assert_eq!(descriptor.ownership, function["ownership"].as_str(), "ownership for {name}");
+        assert_eq!(
+            descriptor.snapshot_rule,
+            function["snapshot_rule"].as_str(),
+            "snapshot rule for {name}"
+        );
     }
 }
 

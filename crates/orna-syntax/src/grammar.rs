@@ -5,6 +5,7 @@
 //! map so editor artifacts and the LSP legend are derived from the same data.
 
 use crate::{HighlightKind, KEYWORDS, SCALAR_TYPES};
+use std::collections::BTreeSet;
 
 /// Source comments beginning with this sequence run through the line ending.
 pub const LINE_COMMENT_START: &str = "--";
@@ -31,6 +32,36 @@ pub const BRACKET_PAIRS: &[(&str, &str)] = &[("(", ")"), ("[", "]"), ("{", "}")]
 pub const NUMBER_PATTERN: &str = r"\b[0-9]+\b";
 /// TextMate fallback pattern for identifiers accepted by the lexer.
 pub const IDENTIFIER_PATTERN: &str = r"[\p{L}_][\p{L}\p{N}_]*";
+
+/// Tree-sitter grammar nodes that represent operator spellings.
+const TREE_SITTER_OPERATOR_NODES: &[&str] = &[
+    "comparison_operator",
+    "additive_operator",
+    "multiplicative_operator",
+    "unary_operator",
+    "assignment_operator",
+    "arrow_operator",
+    "client_comparison_operator",
+    "client_additive_operator",
+    "client_multiplicative_operator",
+    "client_unary_operator",
+    "client_concat_operator",
+];
+
+/// Tree-sitter grammar nodes that represent punctuation spellings.
+const TREE_SITTER_PUNCTUATION_NODES: &[&str] = &[
+    "lparen",
+    "rparen",
+    "lbracket",
+    "rbracket",
+    "lbrace",
+    "rbrace",
+    "comma",
+    "semicolon",
+    "dot",
+    "colon",
+    "question_mark",
+];
 
 /// Operator spellings classified by `orna-syntax`.
 pub const OPERATORS: &[&str] = &[
@@ -315,10 +346,260 @@ pub fn render_vscode_artifacts() -> (String, String) {
     (package, language_configuration)
 }
 
+/// Render the Tree-sitter parser grammar with keyword rules from this crate.
+pub fn render_tree_sitter_grammar() -> String {
+    let keyword_words = tree_sitter_keyword_words()
+        .into_iter()
+        .map(|word| format!("    {},", js_string(&word)))
+        .collect::<Vec<_>>()
+        .join("\n");
+    render_template(
+        TREE_SITTER_GRAMMAR_TEMPLATE,
+        &[("@@KEYWORDS@@", keyword_words)],
+    )
+}
+
+/// Render Tree-sitter highlights directly from the shared vocabulary and roles.
+pub fn render_tree_sitter_highlights() -> String {
+    let keyword_nodes = tree_sitter_keyword_nodes();
+    let operator_nodes = node_group(TREE_SITTER_OPERATOR_NODES);
+    let punctuation_nodes = node_group(TREE_SITTER_PUNCTUATION_NODES);
+    let declaration_keyword_nodes = keyword_nodes
+        .lines()
+        .map(|line| format!("        {line}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    render_template(
+        TREE_SITTER_HIGHLIGHTS_TEMPLATE,
+        &[
+            ("@@KEYWORD_NODES@@", keyword_nodes.clone()),
+            ("@@KEYWORD_NODE_GROUP@@", keyword_nodes),
+            ("@@OPERATOR_NODES@@", operator_nodes),
+            ("@@PUNCTUATION_NODES@@", punctuation_nodes),
+            ("@@DECLARATION_KEYWORD_NODES@@", declaration_keyword_nodes),
+            (
+                "@@COMMENT_CAPTURE@@",
+                tree_sitter_capture(HighlightKind::Comment),
+            ),
+            (
+                "@@STRING_CAPTURE@@",
+                tree_sitter_capture(HighlightKind::StringLiteral),
+            ),
+            (
+                "@@QUOTED_IDENTIFIER_CAPTURE@@",
+                tree_sitter_capture(HighlightKind::QuotedIdentifier),
+            ),
+            (
+                "@@NUMBER_CAPTURE@@",
+                tree_sitter_capture(HighlightKind::NumberLiteral),
+            ),
+            (
+                "@@KEYWORD_CAPTURE@@",
+                tree_sitter_capture(HighlightKind::Keyword),
+            ),
+            (
+                "@@TYPE_CAPTURE@@",
+                tree_sitter_capture(HighlightKind::TypeName),
+            ),
+            (
+                "@@FUNCTION_CAPTURE@@",
+                tree_sitter_capture(HighlightKind::FunctionName),
+            ),
+            (
+                "@@VARIABLE_CAPTURE@@",
+                tree_sitter_capture(HighlightKind::VariableName),
+            ),
+            (
+                "@@NAMESPACE_CAPTURE@@",
+                tree_sitter_capture(HighlightKind::NamespaceName),
+            ),
+            (
+                "@@PROPERTY_CAPTURE@@",
+                tree_sitter_capture(HighlightKind::PropertyName),
+            ),
+            (
+                "@@OPERATOR_CAPTURE@@",
+                tree_sitter_capture(HighlightKind::Operator),
+            ),
+            (
+                "@@PUNCTUATION_CAPTURE@@",
+                tree_sitter_capture(HighlightKind::Punctuation),
+            ),
+        ],
+    )
+}
+
+/// Render static syntax and file detection for Vim from shared token classes.
+pub fn render_vim_artifacts() -> (String, String) {
+    let keywords = vim_keyword_declaration("ornaKeyword", KEYWORDS);
+    let scalar_words = SCALAR_TYPES
+        .iter()
+        .filter(|value| !value.contains(char::is_whitespace))
+        .copied()
+        .collect::<Vec<_>>();
+    let scalar_names = vim_keyword_declaration("ornaType", &scalar_words);
+    let compound_types = SCALAR_TYPES
+        .iter()
+        .filter(|value| value.contains(char::is_whitespace))
+        .map(|value| {
+            format!(
+                r#"syntax match ornaType /\c\<{}\>/"#,
+                value.replace(' ', r"\s\+")
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let operators = vim_alternation(OPERATORS);
+    let punctuation = vim_alternation(PUNCTUATION);
+    let syntax = format!(
+        r#"" Vim syntax file
+" Language: Orna
+" Generated from orna-syntax grammar metadata.
+
+if exists("b:current_syntax")
+    finish
+endif
+
+syntax case ignore
+syntax iskeyword @,48-57,_
+
+{keywords}
+{scalar_names}
+{compound_types}
+syntax region ornaString start=+'+ skip=+''+ end=+'+
+syntax region ornaQuotedIdentifier start=+"+ skip=+""+ end=+"+
+syntax match ornaComment "--.*$" contains=@Spell
+syntax region ornaComment start=+/\*+ end=+\*/+ contains=@Spell
+syntax match ornaNumber "\<[0-9]\+\(\.[0-9]\+\)\?\>"
+syntax match ornaOperator /{operators}/
+syntax match ornaPunctuation /{punctuation}/
+syntax match ornaFunction /\<\k\+\ze\s*(/
+syntax match ornaIdentifier /\<\k\+\>/
+
+hi def link ornaKeyword Statement
+hi def link ornaType Type
+hi def link ornaString String
+hi def link ornaQuotedIdentifier Identifier
+hi def link ornaComment Comment
+hi def link ornaNumber Number
+hi def link ornaOperator Operator
+hi def link ornaPunctuation Delimiter
+hi def link ornaFunction Function
+hi def link ornaIdentifier Identifier
+
+let b:current_syntax = "orna"
+"#,
+        operators = operators,
+        punctuation = punctuation,
+    );
+    let filetype = r#"" ftdetect/orna.vim
+" Generated from orna-syntax grammar metadata.
+augroup orna_filetype
+    au!
+    au BufRead,BufNewFile *.orna setfiletype orna
+augroup END
+"#
+    .to_owned();
+    // Force every shared presentation class to keep a named editor group.
+    for presentation in TOKEN_PRESENTATIONS {
+        let group = vim_group(presentation.kind);
+        debug_assert!(syntax.contains(group));
+    }
+    (syntax, filetype)
+}
+
+/// Render an Emacs major mode package with its lexical vocabulary generated.
+pub fn render_emacs_mode() -> String {
+    let keywords = lisp_string_list(KEYWORDS);
+    let scalar_types = lisp_string_list(SCALAR_TYPES);
+    let operators = lisp_string_list(OPERATORS);
+    let number_scope = emacs_face(HighlightKind::NumberLiteral);
+    let keyword_face = emacs_face(HighlightKind::Keyword);
+    let type_face = emacs_face(HighlightKind::TypeName);
+    let string_face = emacs_face(HighlightKind::StringLiteral);
+    let quoted_identifier_face = emacs_face(HighlightKind::QuotedIdentifier);
+    let comment_face = emacs_face(HighlightKind::Comment);
+    let operator_face = emacs_face(HighlightKind::Operator);
+    let number_pattern = json_string(NUMBER_PATTERN);
+    let definitions = format!(
+        r#"(defvar orna-keywords
+    '{keywords}
+    "Orna keywords generated from orna-syntax.")
+
+(defvar orna-types
+    '{scalar_types}
+    "Orna scalar types generated from orna-syntax.")
+
+(defvar orna-operators
+    '{operators}
+    "Orna operators generated from orna-syntax.")
+
+(defvar orna-font-lock-keywords
+    `((,(regexp-opt orna-keywords 'words) . {keyword_face})
+      (,(regexp-opt orna-types 'words) . {type_face})
+      ("--.*$" . {comment_face})
+      ("/\\*\\(?:.\\|\\n\\)*?\\*/" . {comment_face})
+      ("'\\(?:''\\|[^']\\)*'" . {string_face})
+      ("\"\\(?:\"\"\\|[^\"]\\)*\"" . {quoted_identifier_face})
+      ({number_pattern} (0 {number_scope} keep))
+      (,(regexp-opt orna-operators) (0 {operator_face} keep)))
+    "Font-lock rules generated from orna-syntax.")
+"#,
+    );
+    render_template(
+        EMACS_MODE_TEMPLATE,
+        &[
+            ("@@PACKAGE_VERSION@@", EDITOR_PACKAGE_VERSION.to_owned()),
+            ("@@FONT_LOCK_DEFINITIONS@@", definitions),
+        ],
+    )
+}
+
+/// Render a Sublime Text syntax definition from the shared token metadata.
+pub fn render_sublime_syntax() -> String {
+    let keyword_pattern = regex_alternation(KEYWORDS);
+    let scalar_pattern = regex_alternation(SCALAR_TYPES);
+    let operators = regex_alternation_without_boundaries(OPERATORS);
+    let punctuation = regex_alternation_without_boundaries(PUNCTUATION);
+    let keyword_scope = scope_for(HighlightKind::Keyword);
+    let type_scope = scope_for(HighlightKind::TypeName);
+    let string_scope = scope_for(HighlightKind::StringLiteral);
+    let quoted_identifier_scope = scope_for(HighlightKind::QuotedIdentifier);
+    let comment_scope = scope_for(HighlightKind::Comment);
+    let number_scope = scope_for(HighlightKind::NumberLiteral);
+    let operator_scope = scope_for(HighlightKind::Operator);
+    let punctuation_scope = scope_for(HighlightKind::Punctuation);
+    format!(
+        "%YAML 1.2\n---\nname: Orna\nfile_extensions: [orna]\nscope: {TEXTMATE_SCOPE}\n\ncontexts:\n  main:\n    - include: comments\n    - match: {}\n      scope: {}\n    - match: {}\n      scope: {}\n    - match: {}\n      scope: {}\n    - match: {}\n      scope: {}\n    - match: {}\n      scope: {}\n    - match: {}\n      scope: {}\n    - match: {}\n      scope: {}\n    - match: {}\n      scope: {}\n\n  comments:\n    - match: {}\n      scope: {}\n    - begin: {}\n      end: {}\n      scope: {}\n",
+        json_string(&quoted_delimited_pattern(STRING_DELIMITER)),
+        string_scope,
+        json_string(&quoted_delimited_pattern(QUOTED_IDENTIFIER_DELIMITER)),
+        quoted_identifier_scope,
+        json_string(&scalar_pattern),
+        type_scope,
+        json_string(&keyword_pattern),
+        keyword_scope,
+        json_string(NUMBER_PATTERN),
+        number_scope,
+        json_string(&operators),
+        operator_scope,
+        json_string(&punctuation),
+        punctuation_scope,
+        json_string(IDENTIFIER_PATTERN),
+        scope_for(HighlightKind::VariableName),
+        json_string(&format!("{}[^\\n]*", regex_escape(LINE_COMMENT_START))),
+        comment_scope,
+        json_string(&regex_escape(BLOCK_COMMENT_START)),
+        json_string(&regex_escape(BLOCK_COMMENT_END)),
+        comment_scope,
+    )
+}
+
 /// Render all checked-in editor artifacts in deterministic order.
 pub fn generated_editor_artifacts() -> Vec<GeneratedEditorArtifact> {
     let textmate = render_textmate_grammar();
     let (vscode_package, vscode_configuration) = render_vscode_artifacts();
+    let (vim_syntax, vim_filetype) = render_vim_artifacts();
     vec![
         GeneratedEditorArtifact {
             path: "editors/textmate/orna.tmLanguage.json",
@@ -340,7 +621,183 @@ pub fn generated_editor_artifacts() -> Vec<GeneratedEditorArtifact> {
             path: "editors/semantic-token-legend.json",
             contents: render_semantic_token_legend(),
         },
+        GeneratedEditorArtifact {
+            path: "editors/tree-sitter-orna/grammar.js",
+            contents: render_tree_sitter_grammar(),
+        },
+        GeneratedEditorArtifact {
+            path: "editors/tree-sitter-orna/queries/highlights.scm",
+            contents: render_tree_sitter_highlights(),
+        },
+        GeneratedEditorArtifact {
+            path: "editors/tree-sitter-orna/tree-sitter.json",
+            contents: render_template(
+                TREE_SITTER_MANIFEST_TEMPLATE,
+                &[("@@PACKAGE_VERSION@@", json_string(EDITOR_PACKAGE_VERSION))],
+            ),
+        },
+        GeneratedEditorArtifact {
+            path: "editors/tree-sitter-orna/package.json",
+            contents: render_template(
+                TREE_SITTER_PACKAGE_TEMPLATE,
+                &[("@@PACKAGE_VERSION@@", json_string(EDITOR_PACKAGE_VERSION))],
+            ),
+        },
+        GeneratedEditorArtifact {
+            path: "editors/vim/syntax/orna.vim",
+            contents: vim_syntax,
+        },
+        GeneratedEditorArtifact {
+            path: "editors/vim/ftdetect/orna.vim",
+            contents: vim_filetype,
+        },
+        GeneratedEditorArtifact {
+            path: "editors/emacs/orna-eglot.el",
+            contents: render_emacs_mode(),
+        },
+        GeneratedEditorArtifact {
+            path: "editors/sublime/Orna.sublime-syntax",
+            contents: render_sublime_syntax(),
+        },
     ]
+}
+
+fn tree_sitter_keyword_words() -> Vec<String> {
+    KEYWORDS
+        .iter()
+        .copied()
+        .chain(
+            SCALAR_TYPES
+                .iter()
+                .flat_map(|value| value.split_whitespace()),
+        )
+        .map(|word| word.to_ascii_lowercase())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
+fn tree_sitter_keyword_nodes() -> String {
+    tree_sitter_keyword_words()
+        .iter()
+        .map(|word| format!("    (kw_{word})"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn tree_sitter_capture(kind: HighlightKind) -> String {
+    let presentation = TOKEN_PRESENTATIONS
+        .iter()
+        .find(|presentation| presentation.kind == kind)
+        .expect("every HighlightKind has editor presentation metadata");
+    let capture = presentation
+        .semantic_token_type
+        .unwrap_or_else(|| match kind {
+            HighlightKind::QuotedIdentifier => "identifier",
+            HighlightKind::Punctuation => "punctuation",
+            _ => unreachable!("all other syntax kinds have semantic token names"),
+        });
+    format!("@{capture}")
+}
+
+fn node_group(nodes: &[&str]) -> String {
+    nodes
+        .iter()
+        .map(|node| format!("    ({node})"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn js_string(value: &str) -> String {
+    json_string(value)
+}
+
+fn vim_keyword_declaration(group: &str, words: &[&str]) -> String {
+    let values = words
+        .iter()
+        .map(|word| word.to_ascii_uppercase())
+        .collect::<Vec<_>>();
+    let lines = values
+        .chunks(8)
+        .map(|chunk| chunk.join(" "))
+        .collect::<Vec<_>>();
+    format!(
+        "syntax keyword {group} {}\n{}",
+        lines[0],
+        lines[1..]
+            .iter()
+            .map(|line| format!("            \\ {line}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    )
+}
+
+fn vim_alternation(values: &[&str]) -> String {
+    let mut values = values.iter().map(|value| *value).collect::<Vec<_>>();
+    values.sort_by_key(|value| std::cmp::Reverse(value.len()));
+    format!(
+        r"\%({}\)",
+        values
+            .iter()
+            .map(|value| value
+                .chars()
+                .map(|character| {
+                    if r"\.^$~[]*/".contains(character) {
+                        format!("\\{character}")
+                    } else {
+                        character.to_string()
+                    }
+                })
+                .collect::<String>())
+            .collect::<Vec<_>>()
+            .join(r"\|")
+    )
+}
+
+fn vim_group(kind: HighlightKind) -> &'static str {
+    match kind {
+        HighlightKind::Keyword => "ornaKeyword",
+        HighlightKind::TypeName => "ornaType",
+        HighlightKind::FunctionName => "ornaFunction",
+        HighlightKind::VariableName => "ornaIdentifier",
+        HighlightKind::NamespaceName => "ornaIdentifier",
+        HighlightKind::PropertyName => "ornaIdentifier",
+        HighlightKind::StringLiteral => "ornaString",
+        HighlightKind::NumberLiteral => "ornaNumber",
+        HighlightKind::Comment => "ornaComment",
+        HighlightKind::Operator => "ornaOperator",
+        HighlightKind::Punctuation => "ornaPunctuation",
+        HighlightKind::QuotedIdentifier => "ornaQuotedIdentifier",
+    }
+}
+
+fn lisp_string_list(values: &[&str]) -> String {
+    format!(
+        "({})",
+        values
+            .iter()
+            .map(|value| json_string(value))
+            .collect::<Vec<_>>()
+            .join(" ")
+    )
+}
+
+fn emacs_face(kind: HighlightKind) -> &'static str {
+    match kind {
+        HighlightKind::Keyword => "font-lock-keyword-face",
+        HighlightKind::TypeName => "font-lock-type-face",
+        HighlightKind::FunctionName => "font-lock-function-name-face",
+        HighlightKind::VariableName => "font-lock-variable-name-face",
+        HighlightKind::NamespaceName => "font-lock-constant-face",
+        HighlightKind::PropertyName => "font-lock-variable-name-face",
+        HighlightKind::StringLiteral => "font-lock-string-face",
+        HighlightKind::NumberLiteral => "font-lock-constant-face",
+        HighlightKind::Comment => "font-lock-comment-face",
+        HighlightKind::Operator => "font-lock-keyword-face",
+        HighlightKind::Punctuation | HighlightKind::QuotedIdentifier => {
+            "font-lock-variable-name-face"
+        }
+    }
 }
 
 fn scope_for(kind: HighlightKind) -> &'static str {
@@ -512,6 +969,111 @@ const VSCODE_LANGUAGE_CONFIGURATION_TEMPLATE: &str = r#"{
   "surroundingPairs": [
 @@SURROUNDING_PAIRS@@
   ]
+}
+"#;
+
+const TREE_SITTER_GRAMMAR_TEMPLATE: &str = include_str!("../templates/tree-sitter-grammar.js.in");
+const EMACS_MODE_TEMPLATE: &str = include_str!("../templates/orna-eglot.el.in");
+
+const TREE_SITTER_HIGHLIGHTS_TEMPLATE: &str = r#"; Orna Tree-sitter captures, generated from orna-syntax token metadata.
+(comment) @@COMMENT_CAPTURE@@
+(string_literal) @@STRING_CAPTURE@@
+(quoted_identifier) @@QUOTED_IDENTIFIER_CAPTURE@@
+(number) @@NUMBER_CAPTURE@@
+
+[
+@@KEYWORD_NODES@@
+] @@KEYWORD_CAPTURE@@
+
+(scalar_type) @@TYPE_CAPTURE@@
+
+[
+@@OPERATOR_NODES@@
+] @@OPERATOR_CAPTURE@@
+
+[
+@@PUNCTUATION_NODES@@
+] @@PUNCTUATION_CAPTURE@@
+
+(qualified_name) @@NAMESPACE_CAPTURE@@
+(type_spec (qualified_name) @@TYPE_CAPTURE@@)
+(create_schema_statement name: (qualified_name) @@NAMESPACE_CAPTURE@@)
+(create_enum_type_statement name: (qualified_name) @@TYPE_CAPTURE@@)
+(create_object_type_statement name: (qualified_name) @@TYPE_CAPTURE@@)
+(create_value_type_statement name: (qualified_name) @@TYPE_CAPTURE@@)
+(export_type_statement name: (qualified_name) @@TYPE_CAPTURE@@)
+(create_server_function_statement name: (qualified_name) @@FUNCTION_CAPTURE@@)
+(create_client_function_statement name: (qualified_name) @@FUNCTION_CAPTURE@@)
+(create_external_client_function_statement name: (qualified_name) @@FUNCTION_CAPTURE@@)
+(select_statement table: (qualified_name) @@TYPE_CAPTURE@@)
+(insert_statement table: (qualified_name) @@TYPE_CAPTURE@@)
+(update_statement table: (qualified_name) @@TYPE_CAPTURE@@)
+(delete_statement table: (qualified_name) @@TYPE_CAPTURE@@)
+(call_statement callee: (invocation name: (qualified_name) @@FUNCTION_CAPTURE@@))
+(client_call_expression callee: (client_call_callee) @@FUNCTION_CAPTURE@@)
+
+(parameter_definition name: (identifier) @@VARIABLE_CAPTURE@@)
+(field_definition name: (identifier) @@PROPERTY_CAPTURE@@)
+(table_column_definition name: (identifier) @@PROPERTY_CAPTURE@@)
+(record_field name: (identifier) @@PROPERTY_CAPTURE@@)
+(update_statement column: (identifier) @@PROPERTY_CAPTURE@@)
+(client_parameter_read) @@VARIABLE_CAPTURE@@
+(client_field_path parameter: (_) @@VARIABLE_CAPTURE@@)
+(client_field_path field: (_) @@PROPERTY_CAPTURE@@)
+(let_declaration name: (identifier) @@VARIABLE_CAPTURE@@)
+(let_statement name: (identifier) @@VARIABLE_CAPTURE@@)
+(const_declaration name: (identifier) @@VARIABLE_CAPTURE@@)
+(state_declaration name: (identifier) @@VARIABLE_CAPTURE@@)
+(client_local_declaration name: (_) @@VARIABLE_CAPTURE@@)
+(client_let_statement name: (_) @@VARIABLE_CAPTURE@@)
+(client_assignment_statement target: (_) @@VARIABLE_CAPTURE@@)
+(client_state_declaration name: (_) @@VARIABLE_CAPTURE@@)
+(for_statement name: (identifier) @@VARIABLE_CAPTURE@@)
+(create_user_statement name: (identifier) @@VARIABLE_CAPTURE@@)
+(create_role_statement name: (identifier) @@VARIABLE_CAPTURE@@)
+
+; Keyword components may also appear as names. This alternative list is
+; generated from the same keyword inventory as grammar.js.
+(qualified_name [
+@@DECLARATION_KEYWORD_NODES@@
+] @@NAMESPACE_CAPTURE@@)
+(type_spec (qualified_name [
+@@DECLARATION_KEYWORD_NODES@@
+] @@TYPE_CAPTURE@@))
+"#;
+
+const TREE_SITTER_MANIFEST_TEMPLATE: &str = r#"{
+  "grammars": [
+    {
+      "name": "orna",
+      "camelcase": "Orna",
+      "scope": "source.orna",
+      "path": ".",
+      "file-types": ["orna"],
+      "highlights": "queries/highlights.scm"
+    }
+  ],
+  "metadata": {
+    "version": @@PACKAGE_VERSION@@,
+    "license": "MIT",
+    "description": "Generated Tree-sitter grammar for Orna",
+    "authors": [{ "name": "OrnaDB" }],
+    "links": { "repository": "https://github.com/workingdir/ornadb" }
+  }
+}
+"#;
+
+const TREE_SITTER_PACKAGE_TEMPLATE: &str = r#"{
+  "name": "tree-sitter-orna",
+  "version": @@PACKAGE_VERSION@@,
+  "description": "Generated Tree-sitter grammar for Orna",
+  "tree-sitter": {
+    "scopes": { "source.orna": "orna" },
+    "file-types": ["orna"],
+    "highlights": ["queries/highlights.scm"]
+  },
+  "scripts": { "test": "tree-sitter test" },
+  "devDependencies": { "tree-sitter-cli": "^0.26.5" }
 }
 "#;
 
