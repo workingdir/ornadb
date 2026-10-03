@@ -49,7 +49,78 @@ fn checked_in_editor_artifacts_match_the_grammar_generator() {
             "stale artifact: {}",
             artifact.path
         );
-        serde_json::from_str::<serde_json::Value>(&contents)
-            .unwrap_or_else(|error| panic!("invalid JSON in {}: {error}", artifact.path));
+        if artifact.path.ends_with(".json") {
+            serde_json::from_str::<serde_json::Value>(&contents)
+                .unwrap_or_else(|error| panic!("invalid JSON in {}: {error}", artifact.path));
+        }
     }
+}
+
+#[test]
+fn editor_packages_share_keyword_inventory_and_highlight_roles() {
+    let artifacts = grammar::generated_editor_artifacts();
+    let content = |path: &str| {
+        artifacts
+            .iter()
+            .find(|artifact| artifact.path == path)
+            .unwrap_or_else(|| panic!("missing generated artifact {path}"))
+            .contents
+            .as_str()
+    };
+
+    let tree_sitter = content("editors/tree-sitter-orna/grammar.js");
+    let tree_sitter_query = content("editors/tree-sitter-orna/queries/highlights.scm");
+    let vim = content("editors/vim/syntax/orna.vim");
+    let emacs = content("editors/emacs/orna-eglot.el");
+    let sublime = content("editors/sublime/Orna.sublime-syntax");
+    let textmate = content("editors/textmate/orna.tmLanguage.json");
+
+    for spelling in grammar::keywords().iter().chain(grammar::scalar_types()) {
+        let lower = spelling.to_ascii_lowercase();
+        for word in lower.split_whitespace() {
+            assert!(
+                tree_sitter.contains(&format!("\"{word}\"")),
+                "Tree-sitter grammar is missing shared spelling {word:?}"
+            );
+            assert!(
+                tree_sitter_query.contains(&format!("(kw_{word})")),
+                "Tree-sitter query is missing shared node kw_{word}"
+            );
+            for (editor, generated) in [
+                ("Vim", vim),
+                ("Emacs", emacs),
+                ("Sublime", sublime),
+                ("TextMate", textmate),
+            ] {
+                let has_word = generated
+                    .to_ascii_lowercase()
+                    .split(|character: char| !character.is_ascii_alphanumeric() && character != '_')
+                    .any(|candidate| candidate == word);
+                assert!(
+                    has_word,
+                    "{editor} output is missing shared spelling {word:?}"
+                );
+            }
+        }
+    }
+    for capture in [
+        "@comment",
+        "@string",
+        "@number",
+        "@keyword",
+        "@type",
+        "@function",
+        "@variable",
+        "@namespace",
+        "@property",
+        "@operator",
+        "@punctuation",
+    ] {
+        assert!(
+            tree_sitter_query.contains(capture),
+            "missing {capture} capture"
+        );
+    }
+    assert!(content("editors/tree-sitter-orna/package.json").contains("tree-sitter-orna"));
+    assert!(content("editors/vscode/package.json").contains("orna-syntax"));
 }
