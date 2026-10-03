@@ -1,0 +1,1 @@
+let left_frames: [[Int]] = collection_ops.window(left_sparse, 3, 2);
