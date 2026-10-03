@@ -1,0 +1,7 @@
+[
+    std.stream.batch(
+        std.stream.from_list([1, 2, 3], "runtime-proof"),
+        2
+    ),
+    std.concurrent.parallel([() => 17, () => 23])
+]
