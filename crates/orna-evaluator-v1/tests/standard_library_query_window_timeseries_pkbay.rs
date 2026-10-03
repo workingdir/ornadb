@@ -19,7 +19,7 @@ fn optional_ints(values: &[i64]) -> CanonicalValue {
 
 fn session() -> AdmittedReplSession {
     let mut session = AdmittedReplSession::with_reference_standard(Limits::default())
-        .expect("reference standard profile is admitted");
+        .unwrap_or_else(|error| panic!("reference standard profile failed with {}", error.code()));
     for import in [
         include_str!("fixtures/stdlib-use-query-2213.orna"),
         include_str!("fixtures/stdlib-use-stats-z09xc.orna"),
@@ -105,6 +105,35 @@ fn time_series_rejects_reversal_between_disjoint_windows() {
         ))
         .expect_err("window boundaries must not hide a source timestamp reversal");
     assert_eq!(error.code(), "ORNA-EVAL-ERROR");
+}
+
+#[test]
+fn time_series_checks_ordering_inside_a_multi_point_sparse_gap() {
+    let error = session()
+        .submit(include_str!(
+            "fixtures/stdlib-query-window-time-gap-reversal-neuwd.orna"
+        ))
+        .expect_err("ordering inside skipped positions must be validated");
+    assert_eq!(error.code(), "ORNA-EVAL-ERROR");
+}
+
+#[test]
+fn time_series_statistics_preserve_elapsed_time_after_a_deeper_sparse_gap() {
+    let mut session = session();
+    let rate = session
+        .submit(include_str!("fixtures/stdlib-query-window-rate-deep-gap-neuwd.orna"))
+        .unwrap_or_else(|error| panic!("deep-gap window rate failed with {}", error.code()));
+    assert_eq!(rate, Some(optional_ints(&[2, 2])));
+
+    let derivative = session
+        .submit(include_str!("fixtures/stdlib-query-window-derivative-deep-gap-neuwd.orna"))
+        .unwrap_or_else(|error| panic!("deep-gap derivative failed with {}", error.code()));
+    assert_eq!(derivative, Some(canonical(Raw::Bool(true))));
+
+    let integral = session
+        .submit(include_str!("fixtures/stdlib-query-window-integrate-deep-gap-neuwd.orna"))
+        .unwrap_or_else(|error| panic!("deep-gap integration failed with {}", error.code()));
+    assert_eq!(integral, Some(optional_ints(&[1, 51])));
 }
 
 #[test]

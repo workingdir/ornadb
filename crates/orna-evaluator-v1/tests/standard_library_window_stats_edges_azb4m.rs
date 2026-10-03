@@ -81,3 +81,33 @@ fn stats_percentile_endpoints_and_histogram_bounds_return_exact_values() {
         "bins include their lower bounds, exclude intermediate upper bounds, and optionally include only the final upper bound"
     );
 }
+
+#[test]
+fn sparse_windows_still_validate_percentile_and_histogram_contracts() {
+    let mut session = session();
+    assert_eq!(
+        session.submit(include_str!(
+            "fixtures/stdlib-query-window-percentile-sparse-neuwd.orna"
+        )),
+        Ok(Some(ints(&[]))),
+        "valid percentile options return an empty result when no complete windows exist"
+    );
+    assert_eq!(
+        session.submit(include_str!(
+            "fixtures/stdlib-query-window-histogram-sparse-neuwd.orna"
+        )),
+        Ok(Some(ints(&[]))),
+        "valid bins return an empty result when no complete windows exist"
+    );
+
+    for source in [
+        include_str!("fixtures/stdlib-query-window-percentile-invalid-probability-neuwd.orna"),
+        include_str!("fixtures/stdlib-query-window-percentile-invalid-method-neuwd.orna"),
+        include_str!("fixtures/stdlib-query-window-histogram-overlapping-bins-neuwd.orna"),
+    ] {
+        let error = session
+            .submit(source)
+            .expect_err("invalid statistic options must fail without complete windows");
+        assert_eq!(error.code(), "ORNA-EVAL-VALUE", "fixture: {source}");
+    }
+}
