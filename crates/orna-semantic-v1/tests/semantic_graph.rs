@@ -6239,6 +6239,191 @@ fn paired_omission_folds_preserve_rebound_depth_labels() {
 }
 
 #[test]
+fn paired_collapse_rebinds_preserve_global_depth_label_topology() {
+    let source = include_str!("fixtures/historical-paired-collapse-rebind-depth-labels.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-paired-collapse-rebind-depth-labels.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert_eq!(
+        result
+            .diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.code() == DIAG_TYPE)
+            .count(),
+        1,
+        "a rebind that changes a shared depth label into pairwise labels must fail, while a consistent relabel succeeds: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+    let module = result
+        .modules
+        .values()
+        .find(|module| {
+            module
+                .symbols
+                .contains_key("rejects_paired_collapse_rebind_depth_drift")
+        })
+        .expect("paired collapse rebind fixture module");
+
+    let slot_contexts = |function: &str, field: &str| {
+        let Type::Function { result, .. } = &module.symbols[function].ty else {
+            panic!("{function} must retain its executable result type");
+        };
+        let Type::Record(fields) = result.as_ref() else {
+            panic!("{function} must return saved and rebound values: {result:?}");
+        };
+        let value = fields.get(field).expect("computed paired fold value");
+        let Type::List(element) = value else {
+            panic!("{function}.{field} must remain a collapsed list: {value:?}");
+        };
+        let Type::Tuple(slots) = element.as_ref() else {
+            panic!("{function}.{field} must preserve all tuple positions: {element:?}");
+        };
+        assert_eq!(slots.len(), 3, "{function}.{field} must keep three depth slots");
+        slots
+            .iter()
+            .map(|slot| {
+                let mut contexts = BTreeSet::new();
+                collect_snapshot_contexts(slot, &mut contexts);
+                assert!(!contexts.is_empty(), "{function}.{field} slot must keep real pin values");
+                contexts
+            })
+            .collect::<Vec<_>>()
+    };
+
+    let triangle = vec![
+        BTreeSet::from(["selector:HEAD~101".into(), "selector:HEAD~102".into()]),
+        BTreeSet::from(["selector:HEAD~101".into(), "selector:HEAD~103".into()]),
+        BTreeSet::from(["selector:HEAD~102".into(), "selector:HEAD~103".into()]),
+    ];
+    assert_eq!(
+        slot_contexts("rejects_paired_collapse_rebind_depth_drift", "saved"),
+        triangle,
+        "failed rebind must leave each original pairwise depth label in its slot"
+    );
+    assert_eq!(
+        slot_contexts("rejects_paired_collapse_rebind_depth_drift", "rebound"),
+        triangle,
+        "failed rebind must not promote the star-shaped candidate into saved slots"
+    );
+    assert_eq!(
+        slot_contexts("accepts_paired_collapse_rebind_depth_relabel", "saved"),
+        vec![
+            BTreeSet::from(["selector:HEAD~301".into(), "selector:HEAD~302".into()]),
+            BTreeSet::from(["selector:HEAD~301".into(), "selector:HEAD~303".into()]),
+            BTreeSet::from(["selector:HEAD~302".into(), "selector:HEAD~303".into()]),
+        ],
+        "saved paired folds must retain their original depth labels"
+    );
+    assert_eq!(
+        slot_contexts("accepts_paired_collapse_rebind_depth_relabel", "rebound"),
+        vec![
+            BTreeSet::from(["selector:HEAD~401".into(), "selector:HEAD~402".into()]),
+            BTreeSet::from(["selector:HEAD~401".into(), "selector:HEAD~403".into()]),
+            BTreeSet::from(["selector:HEAD~402".into(), "selector:HEAD~403".into()]),
+        ],
+        "valid relabel must return its computed pairwise depth values"
+    );
+}
+
+#[test]
+fn multi_parent_checkpoint_reconciliation_keeps_depth_labels_transactional() {
+    let source = include_str!("fixtures/historical-multi-parent-checkpoint-reconciliation.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-multi-parent-checkpoint-reconciliation.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert_eq!(
+        result
+            .diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.code() == DIAG_TYPE)
+            .count(),
+        1,
+        "the crossed middle parent must be rejected while the valid three-parent fold succeeds: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+    let module = result
+        .modules
+        .values()
+        .find(|module| {
+            module
+                .symbols
+                .contains_key("rejected_middle_parent_does_not_partially_promote_later_labels")
+        })
+        .expect("multi-parent checkpoint fixture module");
+
+    let slot_contexts = |function: &str| {
+        let Type::Function { result, .. } = &module.symbols[function].ty else {
+            panic!("{function} must retain its executable result type");
+        };
+        let Type::Record(fields) = result.as_ref() else {
+            panic!("{function} must return its computed parent fold: {result:?}");
+        };
+        let value = fields.get("parent_fold").expect("computed parent fold");
+        let Type::List(element) = value else {
+            panic!("{function} must retain a reconciled list: {value:?}");
+        };
+        let Type::Tuple(slots) = element.as_ref() else {
+            panic!("{function} must preserve paired tuple positions: {element:?}");
+        };
+        assert_eq!(slots.len(), 2, "{function} must retain both tuple positions");
+        slots
+            .iter()
+            .map(|slot| {
+                let mut contexts = BTreeSet::new();
+                collect_snapshot_contexts(slot, &mut contexts);
+                assert!(!contexts.is_empty(), "{function} slot must contain real selectors");
+                contexts
+            })
+            .collect::<Vec<_>>()
+    };
+
+    assert_eq!(
+        slot_contexts("rejected_middle_parent_does_not_partially_promote_later_labels"),
+        vec![
+            BTreeSet::from(["selector:HEAD~10".into()]),
+            BTreeSet::from(["selector:HEAD~11".into()]),
+        ],
+        "a failed middle parent must leave the first parent's depth labels intact"
+    );
+    assert_eq!(
+        slot_contexts("valid_three_parent_fold_keeps_each_parent_label"),
+        vec![
+            BTreeSet::from([
+                "selector:HEAD~30".into(),
+                "selector:HEAD~32".into(),
+                "selector:HEAD~34".into(),
+            ]),
+            BTreeSet::from([
+                "selector:HEAD~31".into(),
+                "selector:HEAD~33".into(),
+                "selector:HEAD~35".into(),
+            ]),
+        ],
+        "a valid three-parent fold must keep all computed parent depth labels"
+    );
+}
+
+#[test]
 fn unknown_direct_pair_sibling_suppresses_pin_promotion() {
     let source = include_str!(
         "fixtures/historical-direct-paired-pin-rebind-suppression.orna"

@@ -892,6 +892,7 @@ impl PackageResolver {
         retained_checkpoint_labels: &[NestedPairDepthLabel],
     ) -> Result<(ReboundPathResolution, Option<NestedPairDepthLabel>), AttachmentError> {
         checkpoint.validate_depth_identity()?;
+        previous.validate_depth_label(&checkpoint.depth_label)?;
         let Some((first, remaining)) = replacement_waves.split_first() else {
             for label in retained_checkpoint_labels {
                 previous.validate_depth_label(label)?;
@@ -943,37 +944,71 @@ impl PackageResolver {
         Ok((route, Some(folded_label)))
     }
 
+    /// Applies checkpoint-rooted storms in plan order, allowing a later storm
+    /// to return to an earlier nested anchor. Each pair starts from that
+    /// checkpoint's exact pins. The source wave/depth label and every emitted
+    /// checkpoint-root label are revalidated after subsequent folds, so a
+    /// cycle cannot silently redirect a handoff. The reference is silent on
+    /// cyclic checkpoint storms; v1 preserves order and exact routes, and
+    /// returns no partial result if a label or replacement fails. Empty plans
+    /// still validate their source handoff.
+    pub fn extend_nested_terminal_pair_checkpoint_storms(
+        &self,
+        previous: &ReboundPathResolution,
+        storms: &[(&ReboundPathCheckpoint, &[[PinnedDatabase; 2]])],
+    ) -> Result<ReboundPathResolution, AttachmentError> {
+        let mut route = previous.clone();
+        let mut retained_checkpoint_labels = Vec::new();
+        for (checkpoint, replacement_waves) in storms {
+            checkpoint.validate_depth_identity()?;
+            route.validate_depth_label(&checkpoint.depth_label)?;
+            if replacement_waves.is_empty() {
+                let (folded, _) = self
+                    .extend_nested_terminal_pair_chain_from_checkpoint_with_labels(
+                        &route,
+                        checkpoint,
+                        &[],
+                        &retained_checkpoint_labels,
+                    )?;
+                route = folded;
+                continue;
+            }
+            for replacements in *replacement_waves {
+                let (folded, checkpoint_label) = self
+                    .extend_nested_terminal_pair_chain_from_checkpoint_with_labels(
+                        &route,
+                        checkpoint,
+                        std::slice::from_ref(replacements),
+                        &retained_checkpoint_labels,
+                    )?;
+                let label = checkpoint_label
+                    .ok_or(AttachmentError::RetainedSnapshotUnavailable)?;
+                retained_checkpoint_labels.push(label);
+                route = folded;
+            }
+        }
+        Ok(route)
+    }
+
     /// Rebinds each terminal pair in a storm from one saved checkpoint.
     /// Every fold starts from the same exact nested pins and appends that
     /// checkpoint route to retained history. Each emitted route receives its
     /// own wave/depth label, and every earlier emitted label is checked after
-    /// each later fold so checkpoint history cannot be silently regrouped.
+    /// each later fold. The source checkpoint must still match its original
+    /// wave/depth in `previous`; empty storms validate that identity too.
     /// The reference is silent on checkpoint-rooted storm folds; v1 preserves
     /// exact pins and ordering and returns no partial route if a replacement
-    /// fails. An empty storm validates the checkpoint identity.
+    /// fails.
     pub fn extend_nested_terminal_pair_storm_from_checkpoint(
         &self,
         previous: &ReboundPathResolution,
         checkpoint: &ReboundPathCheckpoint,
         replacement_waves: &[[PinnedDatabase; 2]],
     ) -> Result<ReboundPathResolution, AttachmentError> {
-        checkpoint.validate_depth_identity()?;
-
-        let mut route = previous.clone();
-        let mut retained_checkpoint_labels = Vec::new();
-        for replacements in replacement_waves {
-            let (folded, checkpoint_label) = self
-                .extend_nested_terminal_pair_chain_from_checkpoint_with_labels(
-                    &route,
-                    checkpoint,
-                    std::slice::from_ref(replacements),
-                    &retained_checkpoint_labels,
-                )?;
-            let label = checkpoint_label.ok_or(AttachmentError::RetainedSnapshotUnavailable)?;
-            retained_checkpoint_labels.push(label);
-            route = folded;
-        }
-        Ok(route)
+        self.extend_nested_terminal_pair_checkpoint_storms(
+            previous,
+            &[(checkpoint, replacement_waves)],
+        )
     }
 
     /// Resolves independently rebound paths for sibling parent snapshots.
