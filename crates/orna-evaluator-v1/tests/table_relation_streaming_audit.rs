@@ -451,6 +451,38 @@ fn incremental_scoped_view_body() -> Expr {
     terminal(mapped, "sum")
 }
 
+fn paired_scoped_view_refresh_body() -> Expr {
+    let subscription = |source: &str, parity: &str, bound: &str| {
+        relation_stage(
+            relation_stage(
+                relation_source(source),
+                "filter",
+                vec![named_function(parity)],
+            ),
+            "filter",
+            vec![named_function(bound)],
+        )
+    };
+    let left = relation_stage(
+        subscription("View.Left", "is_odd", "below_five"),
+        "union",
+        vec![subscription("View.Left", "is_even", "below_eight")],
+    );
+    let right = relation_stage(
+        subscription("View.Right", "is_odd", "below_five"),
+        "union",
+        vec![subscription("View.Right", "is_even", "below_eight")],
+    );
+    let paired = relation_stage(left, "union", vec![right]);
+    let positive = relation_stage(
+        paired,
+        "filter",
+        vec![named_function("is_positive")],
+    );
+    let mapped = relation_stage(positive, "map", vec![named_function("add_one")]);
+    terminal(mapped, "sum")
+}
+
 #[test]
 fn incremental_view_refresh_keeps_values_scoped_across_read_batches() {
     let mut first_refresh = ScopedPagedSource::new([
@@ -769,6 +801,46 @@ fn paired_view_handoffs_rebind_old_cursor_tokens_to_fresh_scopes() {
         ],
         "old cursors may recur after refresh but must only advance within the new scope"
     );
+}
+
+#[test]
+fn paired_view_subscriptions_keep_cursor_identity_across_refresh_handoffs() {
+    // Each scoped view has two sibling subscriptions. Reusing the same opaque
+    // cursor after refresh must bind every subscription to its new page stream.
+    let mut source = PairedViewRefreshSource::new([
+        ("View.Left", vec![page(&[1], Some(vec![11])), page(&[3], None)]),
+        ("View.Left", vec![page(&[2], Some(vec![11])), page(&[4], None)]),
+        ("View.Right", vec![page(&[-1], Some(vec![11])), page(&[5], None)]),
+        ("View.Right", vec![page(&[6], Some(vec![11])), page(&[8], None)]),
+        ("View.Left", vec![page(&[7], Some(vec![11])), page(&[9], None)]),
+        ("View.Left", vec![page(&[8], Some(vec![11])), page(&[10], None)]),
+        ("View.Right", vec![page(&[5], Some(vec![11])), page(&[7], None)]),
+        ("View.Right", vec![page(&[2], Some(vec![11])), page(&[8], None)]),
+        ("View.Left", vec![page(&[-1], Some(vec![11])), page(&[3], None)]),
+        ("View.Left", vec![page(&[2], Some(vec![11])), page(&[4], None)]),
+        ("View.Right", vec![page(&[1], Some(vec![11])), page(&[5], None)]),
+        ("View.Right", vec![page(&[2], Some(vec![11])), page(&[4], None)]),
+    ]);
+
+    let first = run_with_fixture_functions(paired_scoped_view_refresh_body(), &mut source).unwrap();
+    assert_eq!(first, integer(21));
+    let second = run_with_fixture_functions(paired_scoped_view_refresh_body(), &mut source).unwrap();
+    assert_eq!(second, integer(3));
+    let third = run_with_fixture_functions(paired_scoped_view_refresh_body(), &mut source).unwrap();
+    assert_eq!(third, integer(22));
+    assert_eq!(first, integer(21), "the initial paired-view fold remains captured across refreshes");
+    assert_eq!(second, integer(3), "the second paired-view fold remains captured after the third");
+
+    assert_eq!(source.lanes.len(), 12);
+    for generation in 0..3 {
+        let start = generation * 4;
+        assert_eq!(source.lanes[start].0, "View.Left");
+        assert_eq!(source.lanes[start + 1].0, "View.Left");
+        assert_eq!(source.lanes[start + 2].0, "View.Right");
+        assert_eq!(source.lanes[start + 3].0, "View.Right");
+        assert_ne!(source.lanes[start].1, source.lanes[start + 1].1);
+        assert_ne!(source.lanes[start + 2].1, source.lanes[start + 3].1);
+    }
 }
 
 fn paired_subscription_cascade_body() -> Expr {
