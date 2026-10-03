@@ -6,7 +6,8 @@ use orna_evolution_v1::{
 use orna_foundation_v1::OvbRaw;
 use orna_storage_v1::{
     BranchMergeBudget, BranchMergeColumnDepthEvent, BranchMergeColumnDepthFragments,
-    BranchMergeColumnDepthLadderEvent,
+    BranchMergeColumnDepthFragmentSnapshot, BranchMergeColumnDepthLadderEvent,
+    BranchMergeColumnDepthLadderSnapshot,
     BranchMergeConflict, BranchMergeDepthFragmentRecovery,
     BranchMergeDepthWaveRecovery, BranchMergeError, BranchMergePlan,
     BranchMergeMultiParentColumnDepthLadderWaveEvent,
@@ -16,7 +17,8 @@ use orna_storage_v1::{
     BranchMergeParentColumnDepthLadderEvent,
     BranchMergeTombstoneEvent, BranchRowSource,
     BranchMergePlanSequenceError, BranchMergePlanSequencer, BranchMergeTombstoneHistory,
-    BranchMergeTabularColumnDepthWave, BranchMergeTabularDepthWave,
+    BranchMergeTabularColumnDepthWave, BranchMergeTabularColumnRestoreWaveSnapshot,
+    BranchMergeTabularDepthWave,
     BranchMergeTableDepthFragments, BranchMergeTableDepthLadderEvent,
     BranchMergeTombstoneHistoryError, KeyRange, MergeSide, MergedSegment, RowSegmentManifest,
     SequencedBranchMergePlan, TableManifest, ThreeWaySnapshot, merge_three_way_snapshots,
@@ -25869,6 +25871,7 @@ fn column_restore_ladders_keep_uneven_depth_labels_and_fixture_values() {
     assert!(history.submit_tabular_column_depth_wave(&wave(1)).unwrap().is_empty());
     assert!(history.column_events().is_empty());
     assert!(history.column_ladder_events().is_empty());
+    assert!(history.column_restore_waves().is_empty());
     assert_eq!(history.next_order(), Some(0));
 
     assert!(history.submit(&empty_plan(0)).unwrap().is_empty());
@@ -25935,6 +25938,51 @@ fn column_restore_ladders_keep_uneven_depth_labels_and_fixture_values() {
             },
         ],
         "released ladders retain every column-local label, including the empty city depth",
+    );
+    assert_eq!(
+        history.column_restore_waves(),
+        vec![BranchMergeTabularColumnRestoreWaveSnapshot {
+            order: 1,
+            columns: vec![
+                BranchMergeColumnDepthLadderSnapshot {
+                    table: id(1),
+                    column: id(2),
+                    fragments: vec![
+                        BranchMergeColumnDepthFragmentSnapshot {
+                            label: 0,
+                            cells: vec![(root.key.clone(), string("Ladder root"))],
+                        },
+                        BranchMergeColumnDepthFragmentSnapshot {
+                            label: 1,
+                            cells: vec![(child.key.clone(), string("Ladder child"))],
+                        },
+                    ],
+                },
+                BranchMergeColumnDepthLadderSnapshot {
+                    table: id(1),
+                    column: id(3),
+                    fragments: vec![
+                        BranchMergeColumnDepthFragmentSnapshot {
+                            label: 0,
+                            cells: vec![(root.key.clone(), string("Oslo"))],
+                        },
+                        BranchMergeColumnDepthFragmentSnapshot {
+                            label: 1,
+                            cells: Vec::new(),
+                        },
+                        BranchMergeColumnDepthFragmentSnapshot {
+                            label: 2,
+                            cells: vec![(child.key.clone(), string("Bergen"))],
+                        },
+                        BranchMergeColumnDepthFragmentSnapshot {
+                            label: 3,
+                            cells: vec![(deep.key.clone(), string("Trondheim"))],
+                        },
+                    ],
+                },
+            ],
+        }],
+        "the released snapshot atomically binds each column-local depth label to fixture cells",
     );
     assert_eq!(history.next_order(), Some(2));
     let committed = history.clone();
