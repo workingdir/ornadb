@@ -11487,10 +11487,6 @@ const STANDARD_BINDING_MODULES: &[StandardBindingModule] = &[
             "__rank",
             "__asof_join",
             "__bucket_by",
-            "__strictly_ordered_time_series",
-            "__window_rate",
-            "__window_derivative",
-            "__window_integrate",
         ],
     },
     StandardBindingModule {
@@ -11536,6 +11532,10 @@ const STANDARD_BINDING_MODULES: &[StandardBindingModule] = &[
             "__rank",
             "__asof_join",
             "__bucket_by",
+            "__strictly_ordered_time_series",
+            "__window_rate",
+            "__window_derivative",
+            "__window_integrate",
         ],
     },
     StandardBindingModule {
