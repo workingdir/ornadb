@@ -1,0 +1,1 @@
+std.concurrent.parallel_map([2, 3, 5], value => value * value)

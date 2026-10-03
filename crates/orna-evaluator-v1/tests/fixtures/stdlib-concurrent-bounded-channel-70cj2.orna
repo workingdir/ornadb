@@ -1,0 +1,4 @@
+std.stream.batch(
+    std.stream.buffer(std.stream.from_list([2, 3, 5], "bounded-channel"), 2),
+    1
+)
