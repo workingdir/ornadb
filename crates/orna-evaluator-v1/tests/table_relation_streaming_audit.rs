@@ -1000,3 +1000,57 @@ fn paired_subscription_batch_scopes_survive_three_page_handoffs_and_refresh() {
         "each batch resumes its subscription scope and each refresh starts a new pair"
     );
 }
+
+#[test]
+fn paired_subscription_handoffs_rebind_reused_batch_cursors_to_fresh_scopes() {
+    // Cursor tokens may recur after a refresh. The provider keys each stream
+    // by `RelationReadScope`, so same-source paired subscriptions do not
+    // resume a prior fold's page batches when their opaque cursors reappear.
+    let mut source = PairedSubscriptionSource::new([
+        vec![
+            page(&[1], Some(vec![11])),
+            page(&[3], Some(vec![33])),
+            page(&[5], None),
+        ],
+        vec![
+            page(&[2], Some(vec![11])),
+            page(&[4], Some(vec![44])),
+            page(&[6], None),
+        ],
+        vec![
+            page(&[-3], Some(vec![11])),
+            page(&[5], Some(vec![55])),
+            page(&[7], None),
+        ],
+        vec![
+            page(&[2], Some(vec![11])),
+            page(&[9], Some(vec![66])),
+            page(&[8], None),
+        ],
+        vec![
+            page(&[-1], Some(vec![11])),
+            page(&[3], Some(vec![33])),
+            page(&[7], None),
+        ],
+        vec![
+            page(&[2], Some(vec![11])),
+            page(&[4], Some(vec![44])),
+            page(&[10], None),
+        ],
+    ]);
+
+    for (fold, expected) in [21, 3, 12].into_iter().enumerate() {
+        assert_eq!(
+            run_with_fixture_functions(paired_subscription_cascade_body(), &mut source).unwrap(),
+            integer(expected),
+            "same-source paired refresh fold {fold} computes only its own filtered pages"
+        );
+    }
+
+    assert_eq!(source.lanes.len(), 6);
+    for generation in 0..3 {
+        let left = source.lanes[generation * 2].0;
+        let right = source.lanes[generation * 2 + 1].0;
+        assert_ne!(left, right, "generation {generation} keeps sibling subscriptions distinct");
+    }
+}
