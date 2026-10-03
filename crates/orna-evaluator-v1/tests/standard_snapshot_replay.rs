@@ -1572,6 +1572,124 @@ fn module_chain_repin_projects() -> (
     )
 }
 
+fn nested_module_pin_sources(collection: &str, leaf: &str) -> Vec<(String, String)> {
+    [
+        (
+            "std/main.orna",
+            include_str!("fixtures/module-chain-std-main.orna"),
+        ),
+        (
+            "std/math.orna",
+            include_str!("fixtures/module-chain-std-math-v1.orna"),
+        ),
+        ("std/collection.orna", collection),
+        (
+            "std/chain/entry.orna",
+            include_str!("fixtures/nested-module-pin-entry.orna"),
+        ),
+        (
+            "std/chain/bridge.orna",
+            include_str!("fixtures/nested-module-pin-bridge.orna"),
+        ),
+        ("std/chain/leaf.orna", leaf),
+    ]
+    .into_iter()
+    .map(|(path, source)| (path.to_owned(), source.to_owned()))
+    .collect()
+}
+
+fn nested_module_pin_projects() -> (
+    TempDir,
+    Vec<LoadedProject>,
+    [String; 3],
+    [Vec<(String, String)>; 3],
+) {
+    let (directory, project_path, standard_path) = module_chain_repository();
+    fs::write(
+        project_path.join("main.orna"),
+        include_str!("fixtures/nested-module-pin-project.orna"),
+    )
+    .unwrap();
+    let collections = [
+        include_str!("fixtures/module-chain-std-collection-v1.orna"),
+        include_str!("fixtures/module-chain-std-collection-v1.orna"),
+        include_str!("fixtures/nested-module-pin-collection-v2.orna"),
+    ];
+    let leaves = [
+        include_str!("fixtures/nested-module-pin-leaf-v1.orna"),
+        include_str!("fixtures/nested-module-pin-leaf-v2.orna"),
+        include_str!("fixtures/nested-module-pin-leaf-v2.orna"),
+    ];
+    let source_bundles = [
+        nested_module_pin_sources(collections[0], leaves[0]),
+        nested_module_pin_sources(collections[1], leaves[1]),
+        nested_module_pin_sources(collections[2], leaves[2]),
+    ];
+    let mut snapshots = Vec::with_capacity(3);
+    let mut parent_snapshots = Vec::with_capacity(3);
+
+    for index in 0..source_bundles.len() {
+        write_module_chain_version(
+            &standard_path,
+            include_str!("fixtures/module-chain-std-math-v1.orna"),
+            collections[index],
+            include_str!("fixtures/nested-module-pin-entry.orna"),
+            include_str!("fixtures/nested-module-pin-bridge.orna"),
+            leaves[index],
+        );
+        commit_directory(
+            &standard_path,
+            &format!("nested module repin snapshot {}", index + 1),
+        );
+        let standard_snapshot = git_output_at(&standard_path, &["rev-parse", "HEAD"]);
+        parent_snapshots.push(capture_standard_gitlink(
+            &project_path,
+            &standard_snapshot,
+            &format!("capture nested repin {}", index + 1),
+        ));
+        snapshots.push(standard_snapshot);
+    }
+
+    let repository = Repository::discover(&project_path).unwrap();
+    let loader = ProjectLoader::default();
+    let projects = parent_snapshots
+        .iter()
+        .zip(&snapshots)
+        .zip(&source_bundles)
+        .map(|((parent_snapshot, standard_snapshot), sources)| {
+            let parent_snapshot = repository.resolve_snapshot(parent_snapshot).unwrap();
+            assert_eq!(
+                repository
+                    .committed_submodule_commit(&parent_snapshot, "stdlib/std")
+                    .unwrap()
+                    .as_str(),
+                standard_snapshot
+            );
+            let profile =
+                StandardDependencyProfile::from_sources(standard_snapshot.clone(), sources.clone())
+                    .unwrap();
+            loader
+                .load_committed_snapshot_with_standard_profile(
+                    &repository,
+                    &parent_snapshot,
+                    Some(profile),
+                )
+                .unwrap()
+        })
+        .collect();
+
+    (
+        directory,
+        projects,
+        [
+            snapshots.remove(0),
+            snapshots.remove(0),
+            snapshots.remove(0),
+        ],
+        source_bundles,
+    )
+}
+
 fn incremental_transitive_upgrade_projects() -> (TempDir, Vec<LoadedProject>, Vec<String>) {
     let (directory, project_path, standard_path) = module_chain_repository();
     write_module_chain_version(
@@ -3232,5 +3350,39 @@ fn replay_results_are_stable_across_semantics_preserving_module_repins() {
             Ok(Some(int(20))),
             "cloned session {index} must replay deterministically in reverse pin order"
         );
+    }
+}
+
+#[test]
+fn nested_module_imports_replay_from_each_captured_snapshot_pin() {
+    let (_directory, projects, snapshots, source_bundles) = nested_module_pin_projects();
+    let expected_values = [20, 24, 60];
+    assert!(snapshots.windows(2).all(|pair| pair[0] != pair[1]));
+    let mut retained_sessions = Vec::with_capacity(projects.len());
+
+    for (((project, snapshot), sources), expected) in projects
+        .iter()
+        .zip(&snapshots)
+        .zip(&source_bundles)
+        .zip(expected_values)
+    {
+        assert_eq!(project.standard_profile().unwrap().snapshot(), snapshot);
+        let mut session =
+            AdmittedReplSession::from_loaded_project(project, sources.clone(), Limits::default())
+                .unwrap();
+        assert_eq!(
+            session.submit(include_str!("fixtures/nested-module-pin-use.orna")),
+            Ok(None)
+        );
+        let output = session
+            .submit(include_str!("fixtures/nested-module-pin-call.orna"))
+            .unwrap_or_else(|error| {
+                panic!(
+                    "snapshot {snapshot} failed to resolve its nested imports: {}",
+                    error.code()
+                )
+            });
+        assert_eq!(output, Some(int(expected)));
+        retained_sessions.push(session);
     }
 }
