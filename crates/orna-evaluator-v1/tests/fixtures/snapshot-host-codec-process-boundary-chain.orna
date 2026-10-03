@@ -1,0 +1,43 @@
+(() => {
+    let input = std.encoding.base64.decode("__BASE64_INPUT__");
+    let (tee_status, tee_stdout, tee_stderr) = std.io.process.run(
+        "/usr/bin/tee", ["/dev/stderr"], ".", [], input, 2.seconds, 64
+    );
+    assert tee_status == Some(0);
+    assert tee_stdout == input;
+    assert tee_stderr == input;
+
+    let (stdout_status, stdout, stdout_stderr) = std.io.process.run(
+        "/usr/bin/cat", [], ".", [],
+        std.encoding.base64.decode(std.encoding.base64.encode(
+            std.encoding.base64.decode(std.encoding.base64.encode(
+                std.encoding.base64.decode(std.encoding.base64.encode(
+                    std.encoding.base64.decode(std.encoding.base64.encode(tee_stdout))
+                ))
+            ))
+        )), 2.seconds, 64
+    );
+    assert stdout_status == Some(0);
+    assert stdout == input;
+    assert stdout_stderr == std.encoding.base64.decode("");
+
+    let (stderr_status, stderr, stderr_stderr) = std.io.process.run(
+        "/usr/bin/cat", [], ".", [],
+        std.encoding.base64.decode(std.encoding.base64.encode(
+            std.encoding.base64.decode(std.encoding.base64.encode(
+                std.encoding.base64.decode(std.encoding.base64.encode(
+                    std.encoding.base64.decode(std.encoding.base64.encode(tee_stderr))
+                ))
+            ))
+        )), 2.seconds, 64
+    );
+    assert stderr_status == Some(0);
+    assert stderr == input;
+    assert stderr_stderr == std.encoding.base64.decode("");
+
+    [
+        (tee_status, tee_stdout, tee_stderr),
+        (stdout_status, stdout, stdout_stderr),
+        (stderr_status, stderr, stderr_stderr)
+    ]
+})()
