@@ -37110,6 +37110,7 @@ fn paired_redo_fold_identity_survives_sparse_checkpoint_compaction_handoff_chain
             ],
         ),
         Err(orna_storage_v1::BranchMergePairedCheckpointRedoFoldSparseCompactionRestoreHandoffError::InvalidOrderRange {
+            checkpoint_id: alpha.clone(),
             restore_ordinal: 0,
             stream_ordinal: 1,
             compaction_ordinal: 1,
