@@ -336,6 +336,43 @@ pub struct BranchMergePairedCheckpointRedoChainIdentityCompactionSnapshot {
     pub runs: Vec<BranchMergePairedCheckpointRedoChainIdentityRunSnapshot>,
 }
 
+/// Opaque compaction identities for the left and right redo histories.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BranchMergePairedCompactionIdentity {
+    pub left_compaction: Vec<u8>,
+    pub right_compaction: Vec<u8>,
+}
+
+/// A paired redo-chain frame carrying the compaction pair that produced it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BranchMergePairedCheckpointRedoCompactionIdentityFrame {
+    pub checkpoints: BranchMergePairedCheckpointRedoFrame,
+    pub redo_chain_identity: BranchMergePairedRedoChainIdentity,
+    pub log_segment_identity: BranchMergePairedLogSegmentIdentity,
+    pub compaction_identity: BranchMergePairedCompactionIdentity,
+}
+
+/// A compacted checkpoint run retaining per-order compaction and log lineage.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BranchMergePairedCheckpointRedoCompactionIdentityRunSnapshot {
+    pub first_order: u64,
+    pub last_order: u64,
+    pub left: Option<CheckpointGeneration>,
+    pub right: Option<CheckpointGeneration>,
+    pub redo_chain_identity: BranchMergePairedRedoChainIdentity,
+    /// One paired compaction identity for each order in the run.
+    pub compaction_identities: Vec<BranchMergePairedCompactionIdentity>,
+    /// One paired log/segment identity for each order in the run.
+    pub log_segment_identities: Vec<BranchMergePairedLogSegmentIdentity>,
+}
+
+/// One sparse checkpoint stream's compacted redo and compaction identity view.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BranchMergePairedCheckpointRedoCompactionIdentitySnapshot {
+    pub checkpoint_id: CheckpointId,
+    pub runs: Vec<BranchMergePairedCheckpointRedoCompactionIdentityRunSnapshot>,
+}
+
 /// Compresses adjacent paired redo frames only when both sides retain exactly
 /// the same checkpoint state for an identity.
 ///
@@ -751,6 +788,71 @@ pub fn compress_paired_checkpoint_redo_sparse_chains_preserving_chain_and_log_se
                 }
             }
             BranchMergePairedCheckpointRedoChainIdentityCompactionSnapshot {
+                checkpoint_id,
+                runs,
+            }
+        })
+        .collect()
+}
+
+/// Compacts sparse redo chains while retaining each paired compaction ID.
+///
+/// Checkpoint IDs from both the caller's catalog and the input frames are
+/// emitted. A run joins only consecutive orders with identical two-sided
+/// checkpoint state and redo-chain identity. Compaction IDs do not alter the
+/// run boundary: each order's opaque left/right compaction pair is preserved
+/// in order, alongside the paired log/segment lineage. Thus compaction changes
+/// survive chain rotations without being mistaken for redo state changes.
+/// Missing checkpoint entries remain distinct from present positionless
+/// generations; order gaps and redo-chain changes split runs.
+pub fn compress_paired_checkpoint_redo_sparse_chains_preserving_compaction_identity(
+    known_checkpoint_ids: &[CheckpointId],
+    frames: &BTreeMap<u64, BranchMergePairedCheckpointRedoCompactionIdentityFrame>,
+) -> Vec<BranchMergePairedCheckpointRedoCompactionIdentitySnapshot> {
+    let checkpoint_ids = known_checkpoint_ids
+        .iter()
+        .cloned()
+        .chain(frames.values().flat_map(|frame| {
+            frame
+                .checkpoints
+                .left
+                .keys()
+                .chain(frame.checkpoints.right.keys())
+                .cloned()
+        }))
+        .collect::<BTreeSet<_>>();
+
+    checkpoint_ids
+        .into_iter()
+        .map(|checkpoint_id| {
+            let mut runs = Vec::<BranchMergePairedCheckpointRedoCompactionIdentityRunSnapshot>::new();
+            for (&order, frame) in frames {
+                let left = frame.checkpoints.left.get(&checkpoint_id).cloned();
+                let right = frame.checkpoints.right.get(&checkpoint_id).cloned();
+                if let Some(last) = runs.last_mut()
+                    && last.left == left
+                    && last.right == right
+                    && last.redo_chain_identity == frame.redo_chain_identity
+                    && last.last_order.checked_add(1) == Some(order)
+                {
+                    last.last_order = order;
+                    last.compaction_identities
+                        .push(frame.compaction_identity.clone());
+                    last.log_segment_identities
+                        .push(frame.log_segment_identity.clone());
+                } else {
+                    runs.push(BranchMergePairedCheckpointRedoCompactionIdentityRunSnapshot {
+                        first_order: order,
+                        last_order: order,
+                        left,
+                        right,
+                        redo_chain_identity: frame.redo_chain_identity.clone(),
+                        compaction_identities: vec![frame.compaction_identity.clone()],
+                        log_segment_identities: vec![frame.log_segment_identity.clone()],
+                    });
+                }
+            }
+            BranchMergePairedCheckpointRedoCompactionIdentitySnapshot {
                 checkpoint_id,
                 runs,
             }
