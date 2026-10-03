@@ -8954,6 +8954,17 @@ fn infer_assignment(
                         if let Some(symbol) = local.get_mut(name) {
                             symbol.ty = reset_type;
                         }
+                    } else if type_contains_pinned_snapshot_identity(&expected)
+                        && type_contains_pinned_snapshot_identity(&value.ty)
+                    {
+                        // The reference does not specify diagnostics for
+                        // incompatible structured checkpoint resets. Keep the
+                        // local unchanged and explain why this source cannot
+                        // continue the pin-stable chain.
+                        diagnostics.push(diag(
+                            DIAG_TYPE,
+                            "checkpoint reset source must preserve nested snapshot pin topology and callable contracts",
+                        ));
                     } else {
                         require_same(&expected, &value.ty, diagnostics);
                     }
