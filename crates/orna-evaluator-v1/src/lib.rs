@@ -8518,7 +8518,9 @@ impl Context<'_, '_> {
     /// identity set for the anchor and every recursive round. The invocation
     /// owns that fold; input anchor order (including any prior lateral
     /// flat-map order) determines first values and the breadth-first output
-    /// order.
+    /// order. The returned order is preserved by downstream window frames;
+    /// sibling calls keep separate folds even when those frames overlap in
+    /// value identity.
     fn recursive_cte(
         &mut self,
         anchor: &[Value],

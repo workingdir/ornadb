@@ -88,3 +88,71 @@ fn paired_lateral_anchors_keep_distinct_identity_across_recursive_folds() {
         "each sparse lateral anchor preserves flattened first-seen values in its own recursive fold"
     );
 }
+
+#[test]
+fn paired_recursive_anchors_keep_identity_through_sparse_window_frame_folds() {
+    let mut session = AdmittedReplSession::with_reference_standard(Limits::default())
+        .expect("reference standard profile is admitted");
+    assert_eq!(
+        session.submit(include_str!("fixtures/stdlib-use-query-2213.orna")),
+        Ok(None)
+    );
+    assert_eq!(
+        session.submit(include_str!("fixtures/stdlib-use-collection-4tksn.orna")),
+        Ok(None)
+    );
+
+    let actual = session
+        .submit(include_str!(
+            "fixtures/stdlib-query-paired-recursive-window-fold-i7cej.orna"
+        ))
+        .unwrap_or_else(|error| panic!("paired recursive window folds failed with {}", error.code()));
+    let expected = CanonicalValue::new(Raw::Tag(
+        60015,
+        Box::new(Raw::Array(vec![
+            raw_integers(&[101, 201, 301]),
+            raw_integers(&[301, 201, 401]),
+        ])),
+    ))
+    .expect("paired sparse window fold result is canonical");
+
+    assert_eq!(
+        actual,
+        Some(expected),
+        "each recursive anchor keeps its own breadth-first identity order through overlapping complete frames and both distinct folds"
+    );
+}
+
+#[test]
+fn paired_recursive_window_folds_keep_empty_short_lane_independent() {
+    let mut session = AdmittedReplSession::with_reference_standard(Limits::default())
+        .expect("reference standard profile is admitted");
+    assert_eq!(
+        session.submit(include_str!("fixtures/stdlib-use-query-2213.orna")),
+        Ok(None)
+    );
+    assert_eq!(
+        session.submit(include_str!("fixtures/stdlib-use-collection-4tksn.orna")),
+        Ok(None)
+    );
+
+    let actual = session
+        .submit(include_str!(
+            "fixtures/stdlib-query-paired-recursive-window-short-fold-i7cej.orna"
+        ))
+        .unwrap_or_else(|error| panic!("short paired recursive window folds failed with {}", error.code()));
+    let expected = CanonicalValue::new(Raw::Tag(
+        60015,
+        Box::new(Raw::Array(vec![
+            raw_integers(&[]),
+            raw_integers(&[20, 10]),
+        ])),
+    ))
+    .expect("short paired window fold result is canonical");
+
+    assert_eq!(
+        actual,
+        Some(expected),
+        "an anchor shorter than the frame width folds to an empty result without suppressing a sibling's complete frame"
+    );
+}

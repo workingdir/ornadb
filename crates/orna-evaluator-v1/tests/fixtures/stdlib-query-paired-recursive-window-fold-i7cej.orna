@@ -1,0 +1,44 @@
+(
+    collection_ops.distinct(
+        collection_ops.flatten(
+            collection_ops.map(
+                collection_ops.window(
+                    query_ops.recursive_cte(
+                        collection_ops.filter(
+                            collection_ops.flat_map(
+                                [10, 0, 20],
+                                parent => [parent * 10 + 1, parent * 10 + 1]
+                            ),
+                            value => value > 1
+                        ),
+                        row => if row < 301 { [row + 100, row + 100] } else { [row] }
+                    ),
+                    2,
+                    1
+                ),
+                frame => collection_ops.distinct(frame)
+            )
+        )
+    ),
+    collection_ops.distinct(
+        collection_ops.flatten(
+            collection_ops.map(
+                collection_ops.window(
+                    query_ops.recursive_cte(
+                        collection_ops.filter(
+                            collection_ops.flat_map(
+                                [30, 0, 20],
+                                parent => [parent * 10 + 1, parent * 10 + 1]
+                            ),
+                            value => value > 1
+                        ),
+                        row => if row < 401 { [row + 100, row + 100] } else { [row] }
+                    ),
+                    2,
+                    1
+                ),
+                frame => collection_ops.distinct(frame)
+            )
+        )
+    )
+)
