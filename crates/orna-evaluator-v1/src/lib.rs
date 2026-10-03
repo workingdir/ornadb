@@ -1991,6 +1991,12 @@ impl Value {
                 // OVB map keys are ordered by their canonical text encoding:
                 // text length first, then bytewise lexical order.
                 let mut fields = values.into_iter().collect::<Vec<_>>();
+                if fields
+                    .iter()
+                    .any(|(key, _)| !key.nfc().eq(key.chars()))
+                {
+                    return Err(error("ORNA-EVAL-VALUE"));
+                }
                 fields.sort_by(|(left, _), (right, _)| {
                     left.len().cmp(&right.len()).then_with(|| left.cmp(right))
                 });
@@ -2121,6 +2127,9 @@ impl Value {
                     let Raw::Text(key) = key else {
                         return Err(error("ORNA-EVAL-UNSUPPORTED"));
                     };
+                    if !key.nfc().eq(key.chars()) {
+                        return Err(error("ORNA-EVAL-VALUE"));
+                    }
                     context.string(key.clone())?;
                     if record
                         .insert(key.clone(), Self::from_raw(value, context, depth + 1)?)
@@ -5334,14 +5343,14 @@ impl Context<'_, '_> {
     ) -> Result<Value, EvaluationError> {
         self.items(arguments.len() + usize::from(input.is_some()))?;
         let mut supplied_input = input;
-        let mut witness = None;
+        let mut witness: Option<CodecTypeWitness> = None;
         let mut ignore_unknown_fields = false;
         let mut saw_options = false;
         let mut positional = usize::from(supplied_input.is_some());
         for argument in arguments {
             match argument.name.as_deref() {
                 Some("as") if witness.is_none() => {
-                    witness = function_name(&argument.value);
+                    witness = codec_type_witness(&argument.value);
                     if witness.is_none() {
                         return Err(error("ORNA-EVAL-ARGUMENT"));
                     }
@@ -5397,13 +5406,16 @@ impl Context<'_, '_> {
     fn decode_json_with_witness(
         &mut self,
         input: &str,
-        witness: &str,
+        witness: &CodecTypeWitness,
         ignore_unknown_fields: bool,
         scope: &mut Scope,
         depth: usize,
     ) -> Result<Value, EvaluationError> {
         let input = self.string(input.to_owned())?;
         let node = parse_json_node(&input)?;
+        let CodecTypeWitness::Named(witness) = witness else {
+            return json_node_to_value(node, self, depth);
+        };
         let Some(definition) = scope.3.get(witness).cloned() else {
             return json_node_to_value(node, self, depth);
         };
@@ -12067,25 +12079,93 @@ fn codec_decode_operation(name: &str) -> Option<(&'static str, bool)> {
     }
 }
 
+#[derive(Clone, Debug)]
+enum CodecTypeWitness {
+    Named(String),
+    List(Box<Self>),
+    Tuple(Vec<Self>),
+    Record(BTreeMap<String, Self>),
+}
+
+fn codec_type_witness(expression: &Expr) -> Option<CodecTypeWitness> {
+    match expression {
+        Expr::Group { inner, .. } => codec_type_witness(inner),
+        Expr::List { elements, .. } if elements.len() == 1 => Some(CodecTypeWitness::List(
+            Box::new(codec_type_witness(&elements[0])?),
+        )),
+        Expr::Tuple { elements, .. } => Some(CodecTypeWitness::Tuple(
+            elements
+                .iter()
+                .map(codec_type_witness)
+                .collect::<Option<Vec<_>>>()?,
+        )),
+        Expr::Record { fields, .. } => {
+            let mut witness = BTreeMap::new();
+            for field in fields {
+                if !field.name.nfc().eq(field.name.chars())
+                    || witness
+                        .insert(field.name.clone(), codec_type_witness(&field.value)?)
+                        .is_some()
+                {
+                    return None;
+                }
+            }
+            Some(CodecTypeWitness::Record(witness))
+        }
+        _ => function_name(expression).map(CodecTypeWitness::Named),
+    }
+}
+
 fn codec_type_matches(
     value: &Value,
-    witness: &str,
+    witness: &CodecTypeWitness,
     nominal_definitions: &NominalDefinitions,
 ) -> bool {
-    if let Some(definition) = nominal_definitions.get(witness) {
-        return matches!(
-            value,
-            Value::NominalRecord { type_id, .. } if *type_id == definition.type_id
-        );
-    }
     match witness {
-        "Str" | "Text" | "String" => matches!(value, Value::String(_)),
-        "Bool" => matches!(value, Value::Bool(_)),
-        "Int" | "Integer" => matches!(value, Value::Int(_)),
-        "Decimal" => matches!(value, Value::Decimal(_)),
-        "Float" => matches!(value, Value::Float(_)),
-        "Blob" => matches!(value, Value::Blob(_)),
-        _ => false,
+        CodecTypeWitness::Named(witness) => {
+            if let Some(definition) = nominal_definitions.get(witness) {
+                return matches!(
+                    value,
+                    Value::NominalRecord { type_id, .. } if *type_id == definition.type_id
+                );
+            }
+            match witness.as_str() {
+                "Str" | "Text" | "String" => matches!(value, Value::String(_)),
+                "Bool" => matches!(value, Value::Bool(_)),
+                "Int" | "Integer" => matches!(value, Value::Int(_)),
+                "Decimal" => matches!(value, Value::Decimal(_)),
+                "Float" => matches!(value, Value::Float(_)),
+                "Blob" => matches!(value, Value::Blob(_)),
+                "Unit" => matches!(value, Value::Unit),
+                _ => false,
+            }
+        }
+        CodecTypeWitness::List(element) => matches!(
+            value,
+            Value::List(values) if values.iter().all(|value| codec_type_matches(value, element, nominal_definitions))
+        ),
+        CodecTypeWitness::Tuple(elements) => match value {
+            Value::Unit => elements.is_empty(),
+            Value::Tuple(values) => {
+                values.len() == elements.len()
+                    && values.iter().zip(elements).all(|(value, element)| {
+                        codec_type_matches(value, element, nominal_definitions)
+                    })
+            }
+            _ => false,
+        },
+        CodecTypeWitness::Record(witness_fields) => match value {
+            Value::Record(fields) if fields.len() == witness_fields.len() => {
+                fields.iter().all(|(name, value)| {
+                    witness_fields
+                        .get(name)
+                        .is_some_and(|witness| {
+                            codec_type_matches(value, witness, nominal_definitions)
+                        })
+                })
+            }
+            _ => false,
+        },
     }
 }
 
