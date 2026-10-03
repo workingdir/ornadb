@@ -23376,6 +23376,27 @@ mod tests {
     }
 
     #[test]
+    fn checkpoint_resets_preserve_nested_callable_input_contracts() {
+        let callable = |parameter: Type, result_selector: &str| Type::Function {
+            parameters: vec![parameter],
+            parameter_names: Some(vec!["nested_pin".into()]),
+            default_parameters: BTreeSet::new(),
+            result: Box::new(contextual_snapshot_ref(result_selector)),
+        };
+        let concrete_input = callable(
+            contextual_snapshot_ref("selector:input:checkpoint"),
+            "selector:result:checkpoint",
+        );
+        let omitted_input = callable(Type::Bottom, "selector:result:omitted-input");
+
+        assert!(pinned_snapshot_reset_type(&omitted_input, &concrete_input).is_some());
+        assert!(
+            pinned_snapshot_reset_type(&concrete_input, &omitted_input).is_none(),
+            "restoring a nested checkpoint must not remove an input boundary that the local accepted"
+        );
+    }
+
+    #[test]
     fn tuple_checkpoint_rebind_preserves_full_selector_membership_signatures() {
         let context_map = |selectors: &[&str]| Type::Applied {
             base: "semantic.SnapshotContextMap".into(),
