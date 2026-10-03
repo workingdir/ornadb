@@ -1036,7 +1036,8 @@ impl PackageResolver {
     /// row. Plans are paired with routes by input index, and each checkpoint
     /// is validated only against the route at that index. The reference is
     /// silent on nested multi-parent folds; v1 requires matching row counts
-    /// and returns no partial result if any row fails.
+    /// and revalidates every pre-existing depth identity after the folds.
+    /// No partial result is returned if any row fails.
     pub fn extend_sibling_terminal_pair_checkpoint_storms_from_siblings(
         &self,
         previous: &SiblingRebindResolution,
@@ -1051,7 +1052,16 @@ impl PackageResolver {
             .zip(storms_by_row)
             .map(|(route, storms)| (route, *storms))
             .collect::<Vec<_>>();
-        self.extend_sibling_terminal_pair_checkpoint_storms(&paths)
+        let folded = self.extend_sibling_terminal_pair_checkpoint_storms(&paths)?;
+        for (previous_route, folded_route) in previous.routes.iter().zip(&folded.routes) {
+            for (wave, length) in previous_route.retained_wave_lengths.iter().enumerate() {
+                for depth in 0..*length {
+                    let label = previous_route.retained_depth_label(wave, depth)?;
+                    folded_route.validate_depth_label(&label)?;
+                }
+            }
+        }
+        Ok(folded)
     }
 
     /// Rebinds each terminal pair in a storm from one saved checkpoint.

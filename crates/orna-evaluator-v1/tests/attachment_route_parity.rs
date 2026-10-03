@@ -1644,4 +1644,69 @@ fn sibling_checkpoint_folds_keep_tabular_anchor_identities() {
         ),
         Err(AttachmentError::RetainedSnapshotUnavailable)
     ));
+
+    let anchor_b = folded.handoff_checkpoint(1, 4, 0).unwrap();
+    let continuation_a = [(&anchor_a, middle_waves_a.as_slice())];
+    let continuation_b = [(&anchor_b, middle_waves_b.as_slice())];
+    let continuation_independent_a = [(&anchor_independent_a, middle_waves_a.as_slice())];
+    let continuation_plans = [
+        continuation_a.as_slice(),
+        continuation_b.as_slice(),
+        continuation_independent_a.as_slice(),
+    ];
+    assert!(matches!(
+        resolver.extend_sibling_terminal_pair_checkpoint_storms_from_siblings(
+            &folded,
+            &continuation_plans[..2],
+        ),
+        Err(AttachmentError::RetainedSnapshotUnavailable)
+    ));
+    let nested_folded = resolver
+        .extend_sibling_terminal_pair_checkpoint_storms_from_siblings(
+            &folded,
+            &continuation_plans,
+        )
+        .unwrap_or_else(|error| panic!("nested sibling checkpoint folds failed: {error:?}"));
+    assert_eq!(nested_folded.routes().len(), 3);
+    for row in 0..3 {
+        assert_eq!(
+            nested_folded.retained_depth_label(row, 4, 0).unwrap(),
+            folded.retained_depth_label(row, 4, 0).unwrap(),
+            "nested folds preserve the parent's earlier anchor identity"
+        );
+    }
+    let nested_anchor_a = nested_folded.handoff_checkpoint(0, 8, 0).unwrap();
+    let nested_anchor_independent_a = nested_folded.handoff_checkpoint(2, 8, 0).unwrap();
+    assert_eq!(
+        nested_anchor_a.handoff().primary().pin(),
+        nested_anchor_independent_a.handoff().primary().pin()
+    );
+    assert_eq!(
+        attached_pins(&nested_anchor_a),
+        attached_pins(&nested_anchor_independent_a)
+    );
+    assert_ne!(
+        nested_anchor_a.depth_label(),
+        nested_anchor_independent_a.depth_label(),
+        "new nested anchors keep independent row identities despite equal pins"
+    );
+    assert!(matches!(
+        resolver.extend_nested_terminal_pair_checkpoint_storms(
+            &nested_folded.routes()[2],
+            &[(&nested_anchor_a, no_pair_waves.as_slice())],
+        ),
+        Err(AttachmentError::RetainedSnapshotUnavailable)
+    ));
+    for (row, expected_value) in [(0, 91), (1, 92), (2, 91)] {
+        let mut evaluator = AdmittedReplSession::from_attached_database_session(
+            &nested_folded.routes()[row].final_session(),
+            Limits::default(),
+        )
+        .unwrap();
+        assert_eq!(evaluator.submit(&format!("use {};", aliases[4])), Ok(None));
+        assert_eq!(
+            evaluator.submit(&format!("{}.package_value()", aliases[4])),
+            Ok(Some(Value::int(expected_value.into())))
+        );
+    }
 }
