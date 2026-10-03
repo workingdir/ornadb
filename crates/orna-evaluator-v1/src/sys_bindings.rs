@@ -11,6 +11,8 @@ use orna_sys_v1::{
 
 use crate::{CancellationToken, EffectHandler, EvaluationError, StepBudget};
 
+const MAX_RANDOM_BYTES: usize = 1_048_576;
+
 /// Evaluator-facing registration of built-in sys host providers.
 ///
 /// Operations are selected from the build-generated sys registry. Environment
@@ -23,6 +25,7 @@ pub struct SysHostBindingRegistry {
     clock: Option<ClockProvider>,
     filesystem: Option<FilesystemProvider>,
     http: Option<HttpProvider>,
+    system_random: bool,
 }
 
 impl SysHostBindingRegistry {
@@ -36,6 +39,7 @@ impl SysHostBindingRegistry {
             clock: None,
             filesystem: None,
             http: None,
+            system_random: false,
         }
     }
 
@@ -67,6 +71,13 @@ impl SysHostBindingRegistry {
         self
     }
 
+    /// Installs the operating system CSPRNG for the optional `std.random` module.
+    #[must_use]
+    pub fn with_system_random_provider(mut self) -> Self {
+        self.system_random = true;
+        self
+    }
+
     /// Captures only names explicitly approved by the host.
     pub fn capture_environment(
         names: impl IntoIterator<Item = String>,
@@ -80,6 +91,28 @@ impl SysHostBindingRegistry {
         arguments: &[CanonicalValue],
         cancellation: Option<&CancellationToken>,
     ) -> Result<Option<CanonicalValue>, EvaluationError> {
+        if operation_name == "std.random.entropy" {
+            if !self.system_random {
+                return Err(redacted_error("ORNA-EVAL-UNSUPPORTED"));
+            }
+            let [count] = arguments else {
+                return Err(redacted_error("ORNA-EVAL-ARGUMENT"));
+            };
+            let OvbRaw::Int(count) = count.raw() else {
+                return Err(redacted_error("ORNA-EVAL-TYPE"));
+            };
+            let count = count
+                .to_usize()
+                .ok_or_else(|| redacted_error("ORNA-EVAL-VALUE"))?;
+            if count > MAX_RANDOM_BYTES {
+                return Err(redacted_error("ORNA-EVAL-LIMIT"));
+            }
+            let mut bytes = vec![0; count];
+            getrandom::fill(&mut bytes).map_err(|_| redacted_error("ORNA-EVAL-UNSUPPORTED"))?;
+            return CanonicalValue::new(OvbRaw::Bytes(bytes))
+                .map(Some)
+                .map_err(|_| redacted_error("ORNA-EVAL-VALUE"));
+        }
         let registry = system_host_operation_registry();
         let Some(operation) = registry.operation(operation_name) else {
             return Ok(None);
