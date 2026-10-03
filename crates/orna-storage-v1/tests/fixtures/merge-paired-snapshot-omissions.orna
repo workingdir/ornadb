@@ -1,0 +1,17 @@
+{
+  id: "restore/root",
+  name: "Root identity",
+  city: "Oslo",
+}
+
+{
+  id: "restore/root/child",
+  name: "Child identity",
+  city: "Bergen",
+}
+
+{
+  id: "restore/other",
+  name: "Other path",
+  city: "Paris",
+}

@@ -44,6 +44,23 @@ fn query_windows_compute_rate_and_trapezoidal_integral_per_overlapping_window() 
 }
 
 #[test]
+fn sparse_statistic_windows_keep_their_source_time_order() {
+    let actual = session()
+        .submit(include_str!(
+            "fixtures/stdlib-query-time-order-sparse-windows-d05h9.orna"
+        ))
+        .unwrap_or_else(|error| panic!("sparse ordered window values failed with {}", error.code()));
+    assert_eq!(
+        actual,
+        Some(canonical(Raw::Array(vec![
+            Raw::Bool(true),
+            Raw::Bool(true),
+            Raw::Bool(true),
+        ])))
+    );
+}
+
+#[test]
 fn query_windows_preserve_elapsed_time_across_sparse_nonoverlapping_windows() {
     let mut session = session();
     let rate = session

@@ -8045,6 +8045,83 @@ fn chained_extension_omissions_keep_sibling_depth_labels_scoped() {
 
 
 #[test]
+fn nested_extension_list_rollbacks_preserve_unaffected_depth_identities() {
+    let source = include_str!("fixtures/historical-extension-nested-list-rollback-depth-26.orna");
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-extension-nested-list-rollback-depth-26.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert_eq!(
+        result
+            .diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.code() == DIAG_TYPE)
+            .count(),
+        2,
+        "the nested extension omissions are diagnosed at both fold boundaries: {:?}",
+        result.diagnostics.iter().map(|diagnostic| diagnostic.message()).collect::<Vec<_>>()
+    );
+    let module = result
+        .modules
+        .values()
+        .find(|module| module.symbols.contains_key("nested_extension_list_rollback_depths"))
+        .expect("nested extension list fixture module");
+    let Type::Function { result, .. } =
+        &module.symbols["nested_extension_list_rollback_depths"].ty
+    else {
+        panic!("nested extension rollback must compute a function result");
+    };
+    let Type::Record(result_fields) = result.as_ref() else {
+        panic!("nested extension rollback must return its computed record: {result:?}");
+    };
+    let Type::List(batch) = result_fields.get("batches").expect("batch list") else {
+        panic!("nested rollback output must retain outer batches");
+    };
+    let Type::List(row) = batch.as_ref() else {
+        panic!("each batch must retain its inner row list: {batch:?}");
+    };
+    let Type::Record(row) = row.as_ref() else {
+        panic!("nested rows must retain their computed record: {row:?}");
+    };
+    let Type::Tuple(depths) = row.get("pins").expect("extension depths") else {
+        panic!("extension depths must remain paired: {row:?}");
+    };
+    let contexts = |pin: &Type| {
+        let mut contexts = BTreeSet::new();
+        collect_snapshot_contexts(pin, &mut contexts);
+        contexts
+    };
+    let depth_contexts = |depth: &Type| {
+        let Type::Tuple(slots) = depth else { panic!("depth pair: {depth:?}") };
+        slots.iter().map(contexts).collect::<Vec<_>>()
+    };
+    assert_eq!(
+        depth_contexts(&depths[0]),
+        [BTreeSet::new(), BTreeSet::new()],
+        "the first batch's omitted extension pair remains omitted across nested folds"
+    );
+    assert_eq!(
+        depth_contexts(&depths[1]),
+        [
+            BTreeSet::from([
+                "selector:HEAD~90".into(),
+                "selector:HEAD~92".into(),
+                "selector:HEAD~94".into(),
+            ]),
+            BTreeSet::from([
+                "selector:HEAD~91".into(),
+                "selector:HEAD~93".into(),
+                "selector:HEAD~95".into(),
+            ]),
+        ],
+        "the independently pinned depth retains its first-batch extension identities"
+    );
+}
+
+#[test]
 fn multi_parent_checkpoint_folds_preserve_labels_across_paired_omissions() {
     let source = include_str!(
         "fixtures/historical-paired-omission-multi-parent-reconciliation.orna"
@@ -11977,6 +12054,92 @@ fn nested_snapshot_boundary_resets_fill_and_restore_omitted_checkpoint_slots() {
             );
         } else {
             assert_eq!(values.get("leaf"), Some(&Type::Bottom));
+        }
+    }
+}
+
+#[test]
+fn nested_snapshot_boundary_reset_depth_keeps_each_selected_identity() {
+    let source = include_str!("fixtures/historical-nested-snapshot-boundary-reset-depth.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-nested-snapshot-boundary-reset-depth.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(result.is_ok(), "{:?}", result.diagnostics);
+    let module = result
+        .modules
+        .values()
+        .find(|module| {
+            module
+                .symbols
+                .contains_key("nested_snapshot_boundary_reset_depth_values")
+        })
+        .expect("deep nested checkpoint reset module");
+    let Type::Function { result, .. } =
+        &module.symbols["nested_snapshot_boundary_reset_depth_values"].ty
+    else {
+        panic!("deep nested reset must return computed values");
+    };
+    let Type::Record(stages) = result.as_ref() else {
+        panic!("deep nested reset must expose each checkpoint stage");
+    };
+    for (stage, selectors, tail) in [
+        (
+            "saved_omitted",
+            [
+                ("root", "selector:HEAD~620"),
+                ("branch", "selector:HEAD~590"),
+                ("leaf", "selector:HEAD~580"),
+            ],
+            None,
+        ),
+        (
+            "reset_omitted",
+            [
+                ("root", "selector:HEAD~620"),
+                ("branch", "selector:HEAD~560"),
+                ("leaf", "selector:HEAD~550"),
+            ],
+            None,
+        ),
+        (
+            "reset_complete",
+            [
+                ("root", "selector:HEAD~610"),
+                ("branch", "selector:HEAD~530"),
+                ("leaf", "selector:HEAD~520"),
+            ],
+            Some("selector:HEAD~510"),
+        ),
+    ] {
+        let Type::Record(values) = stages.get(stage).expect("reset stage") else {
+            panic!("{stage} must contain nested checkpoint values");
+        };
+        for (field, expected) in selectors {
+            let value = values.get(field).expect("nested checkpoint field");
+            assert_canonical_snapshot_context_maps(value);
+            let mut contexts = BTreeSet::new();
+            collect_snapshot_contexts(value, &mut contexts);
+            assert_eq!(
+                contexts,
+                BTreeSet::from([expected.to_owned()]),
+                "{stage}.{field} must retain the selected boundary identity"
+            );
+        }
+        match tail {
+            Some(expected) => {
+                let value = values.get("tail").expect("deepest checkpoint field");
+                assert_canonical_snapshot_context_maps(value);
+                let mut contexts = BTreeSet::new();
+                collect_snapshot_contexts(value, &mut contexts);
+                assert_eq!(contexts, BTreeSet::from([expected.to_owned()]));
+            }
+            None => assert_eq!(values.get("tail"), Some(&Type::Bottom)),
         }
     }
 }
