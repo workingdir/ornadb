@@ -60,6 +60,31 @@ fn nested_window_aggregate_functions() -> Functions {
         .collect()
 }
 
+fn nested_aggregate_refresh_functions() -> Functions {
+    let parsed = parse_module(include_str!(
+        "fixtures/table_relation_nested_aggregate_refresh_restore_i6k3c.orna"
+    ));
+    assert!(parsed.is_ok(), "{:?}", parsed.diagnostics);
+    parsed
+        .value
+        .items
+        .into_iter()
+        .map(|item| {
+            let orna_syntax_v1::Declaration::Function { signature, body } = item.declaration else {
+                panic!("fixture function expected")
+            };
+            (
+                signature.name,
+                PureFunction {
+                    parameters: signature.parameters,
+                    body,
+                    environment: Environment::new(),
+                },
+            )
+        })
+        .collect()
+}
+
 fn sparse_window_fold_functions() -> Functions {
     let parsed = parse_module(include_str!("fixtures/table_relation_sparse_window_fold_d4441.orna"));
     assert!(parsed.is_ok(), "{:?}", parsed.diagnostics);
@@ -1808,6 +1833,16 @@ fn paired_nested_window_aggregate_body() -> Expr {
     terminal(paired, "sum")
 }
 
+fn paired_nested_aggregate_refresh_body() -> Expr {
+    Expr::Tuple {
+        elements: vec![
+            terminal(nested_window_aggregate("View.Left"), "sum"),
+            terminal(nested_window_aggregate("View.Right"), "sum"),
+        ],
+        span: span(),
+    }
+}
+
 fn sparse_window_fold(source: &str, predicate: &str) -> Expr {
     let filtered = relation_stage(
         relation_source(source),
@@ -2046,6 +2081,127 @@ fn nested_window_aggregates_recompute_real_values_for_paired_restore_chains() {
     );
     assert!(source.pending["View.Paired"].is_empty(), "all six restored snapshots are consumed");
 
+}
+
+#[test]
+fn nested_aggregates_keep_values_across_paired_refresh_restore_chains() {
+    // The reference leaves cross-refresh cursor reuse unspecified; each refreshed
+    // source snapshot therefore owns an independent `(source, scope, cursor)` chain.
+    let cursors = [vec![0x69], vec![0x69, 0x00], vec![0x69, 0x00, 0xff]];
+    let restore = |groups: &[&[i64]], tokens: &[Vec<u8>]| {
+        assert_eq!(groups.len(), tokens.len() + 1);
+        groups
+            .iter()
+            .enumerate()
+            .map(|(index, values)| {
+                let after = index.checked_sub(1).map(|previous| tokens[previous].clone());
+                let next = tokens.get(index).cloned();
+                (after, page(values, next))
+            })
+            .collect::<CursorRestore>()
+    };
+    let mut source = PairedCursorRestoreSource::new([
+        (
+            "View.Left",
+            restore(&[&[1], &[2], &[3]], &cursors[..2]),
+        ),
+        (
+            "View.Right",
+            restore(&[&[10, 20], &[30]], &cursors[..1]),
+        ),
+        (
+            "View.Left",
+            restore(&[&[4, 5], &[6]], &cursors[..1]),
+        ),
+        (
+            "View.Right",
+            restore(&[&[2], &[4], &[6]], &cursors[..2]),
+        ),
+        (
+            "View.Left",
+            restore(&[&[-1], &[3, 5]], &cursors[..1]),
+        ),
+        (
+            "View.Right",
+            restore(&[&[2, 4], &[8]], &cursors[..1]),
+        ),
+    ]);
+    let mut functions = nested_aggregate_refresh_functions();
+    functions.insert(
+        "run".into(),
+        PureFunction {
+            parameters: Vec::new(),
+            body: paired_nested_aggregate_refresh_body(),
+            environment: Environment::new(),
+        },
+    );
+    let run_refresh = |source: &mut PairedCursorRestoreSource| {
+        invoke_named_with_effects(
+            "run",
+            &functions,
+            &Environment::new(),
+            Limits::default(),
+            source,
+        )
+        .unwrap()
+    };
+
+    let first = run_refresh(&mut source);
+    assert_eq!(first, integer_pair(8, 80), "nested window folds compute the first paired snapshot");
+    let second = run_refresh(&mut source);
+    assert_eq!(second, integer_pair(20, 16), "the next restore chain computes its own nested totals");
+    let third = run_refresh(&mut source);
+    assert_eq!(third, integer_pair(10, 18), "the final restore chain retains both nested totals");
+    assert_eq!(first, integer_pair(8, 80), "later paired restores leave the first value snapshot intact");
+    assert_eq!(second, integer_pair(20, 16), "later paired restores leave the second value snapshot intact");
+
+    let lane_names = [
+        "View.Left",
+        "View.Right",
+        "View.Left",
+        "View.Right",
+        "View.Left",
+        "View.Right",
+    ];
+    let cursor_traces = [
+        vec![None, Some(cursors[0].clone()), Some(cursors[1].clone())],
+        vec![None, Some(cursors[0].clone())],
+        vec![None, Some(cursors[0].clone())],
+        vec![None, Some(cursors[0].clone()), Some(cursors[1].clone())],
+        vec![None, Some(cursors[0].clone())],
+        vec![None, Some(cursors[0].clone())],
+    ];
+    assert_eq!(source.lanes.len(), lane_names.len());
+    let scopes = source
+        .lanes
+        .iter()
+        .zip(lane_names)
+        .map(|((source_name, scope, _), expected_name)| {
+            assert_eq!(source_name, expected_name, "each refresh restores left then right");
+            *scope
+        })
+        .collect::<Vec<_>>();
+    for (index, scope) in scopes.iter().enumerate() {
+        assert!(
+            !scopes[..index].contains(scope),
+            "paired restores retain distinct identity across sibling sources and refreshes: {scope:?}"
+        );
+    }
+    let mut expected_cursors = Vec::new();
+    for (index, trace) in cursor_traces.into_iter().enumerate() {
+        expected_cursors.extend(
+            trace
+                .into_iter()
+                .map(|cursor| (lane_names[index].to_owned(), scopes[index], cursor)),
+        );
+    }
+    assert_eq!(
+        source.cursors,
+        expected_cursors,
+        "repeated opaque cursors resume only their own nested aggregate restore chain"
+    );
+    assert!(source.pending["View.Left"].is_empty());
+    assert!(source.pending["View.Right"].is_empty());
 }
 
 #[test]
