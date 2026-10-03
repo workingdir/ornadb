@@ -1,0 +1,8 @@
+time_ops.resolve_local("2024-02-30T00:00:00", "UTC", "reject")
+time_ops.resolve_local("0000-01-01T00:00:00", "UTC", "reject")
+time_ops.resolve_local("2024-01-01T24:00:00", "UTC", "reject")
+time_ops.resolve_local("2024-01-01T00:00:60", "UTC", "reject")
+time_ops.resolve_local("2024-01-01T00:00:00.1234567890", "UTC", "reject")
+time_ops.resolve_local("2024-01-01T00:00:00Z", "UTC", "reject")
+time_ops.resolve_local("2024-01-01T00:00:00", "Mars/Olympus", "reject")
+time_ops.resolve_local("2024-01-01T00:00:00", "America/New_York", "reject")
