@@ -5,6 +5,7 @@ use orna_evolution_v1::{
 };
 use orna_foundation_v1::OvbRaw;
 use orna_storage_v1::{
+    BranchMergePairedCheckpointRedoFrame,
     BranchMergeBudget, BranchMergeColumnDepthEvent, BranchMergeColumnDepthFragments,
     BranchMergeColumnDepthFragmentSnapshot, BranchMergeColumnDepthLadderEvent,
     BranchMergeColumnDepthLadderSnapshot, BranchMergeColumnDepthLadderWaveSnapshot,
@@ -42,7 +43,8 @@ use orna_storage_v1::{
     BranchMergeTabularDepthWave,
     BranchMergeTableDepthFragments, BranchMergeTableDepthLadderEvent,
     BranchMergeTombstoneHistoryError, KeyRange, MergeSide, MergedSegment, RowSegmentManifest,
-    SequencedBranchMergePlan, TableManifest, ThreeWaySnapshot, merge_three_way_snapshots,
+    SequencedBranchMergePlan, TableManifest, ThreeWaySnapshot,
+    compress_paired_checkpoint_redo_chain, merge_three_way_snapshots,
 };
 use orna_syntax_v1::{Expr, LiteralKind, parse_row};
 use std::{
@@ -62,6 +64,8 @@ const CHECKPOINT_RESET: &str = include_str!("fixtures/merge-checkpoint-reset.orn
 const CHECKPOINT_TAIL_BASE: &str = include_str!("fixtures/merge-checkpoint-tail-base.orna");
 const CHECKPOINT_TAIL_LEFT: &str = include_str!("fixtures/merge-checkpoint-tail-left.orna");
 const CHECKPOINT_TAIL_RIGHT: &str = include_str!("fixtures/merge-checkpoint-tail-right.orna");
+const PAIRED_CHECKPOINT_REDO: &str =
+    include_str!("fixtures/merge-paired-checkpoint-redo.orna");
 const TOMBSTONE_DEPTH_SHALLOW: &str = include_str!("fixtures/merge-tombstone-depth-shallow.orna");
 const TOMBSTONE_DEPTH_MIDDLE: &str = include_str!("fixtures/merge-tombstone-depth-middle.orna");
 const TOMBSTONE_DEPTH_DEEP: &str = include_str!("fixtures/merge-tombstone-depth-deep.orna");
@@ -22609,6 +22613,117 @@ fn paired_restore_fold_keeps_uneven_fragment_retry_labels() {
         "the original label still reaches the existing stale-position result",
     );
     assert_eq!(history, committed);
+}
+
+#[test]
+fn paired_checkpoint_redo_compression_keeps_state_changes_and_order_gaps() {
+    let fixture_states = PAIRED_CHECKPOINT_REDO
+        .split("\n\n")
+        .map(parse_checkpoint_fixture)
+        .collect::<Vec<_>>();
+    assert_eq!(fixture_states.len(), 5);
+    let left_base = fixture_states[0].clone();
+    let right_base = fixture_states[1].clone();
+    let left_redo = fixture_states[2].clone();
+    let right_redo = fixture_states[3].clone();
+    let positionless = fixture_states[4].clone();
+    assert_eq!(positionless.position, None);
+
+    let alpha = b"consumer/alpha".to_vec();
+    let beta = b"consumer/beta".to_vec();
+    let frame = |left: Vec<(Vec<u8>, CheckpointGeneration)>,
+                 right: Vec<(Vec<u8>, CheckpointGeneration)>| {
+        BranchMergePairedCheckpointRedoFrame {
+            left: left.into_iter().collect(),
+            right: right.into_iter().collect(),
+        }
+    };
+    let frames = BTreeMap::from([
+        (
+            10,
+            frame(
+                vec![(alpha.clone(), left_base.clone())],
+                vec![(alpha.clone(), right_base.clone())],
+            ),
+        ),
+        (
+            11,
+            frame(
+                vec![
+                    (alpha.clone(), left_base.clone()),
+                    (beta.clone(), positionless.clone()),
+                ],
+                vec![(alpha.clone(), right_base.clone())],
+            ),
+        ),
+        (
+            12,
+            frame(
+                vec![
+                    (alpha.clone(), left_redo.clone()),
+                    (beta.clone(), positionless.clone()),
+                ],
+                vec![(alpha.clone(), right_base.clone())],
+            ),
+        ),
+        (
+            13,
+            frame(
+                vec![(alpha.clone(), left_redo.clone())],
+                vec![(alpha.clone(), right_redo.clone())],
+            ),
+        ),
+        (
+            14,
+            frame(
+                vec![(alpha.clone(), left_redo.clone())],
+                vec![(alpha.clone(), right_redo.clone())],
+            ),
+        ),
+        (
+            16,
+            frame(
+                vec![(alpha.clone(), left_redo.clone())],
+                vec![(alpha.clone(), right_redo.clone())],
+            ),
+        ),
+    ]);
+
+    let chains = compress_paired_checkpoint_redo_chain(&frames);
+    assert_eq!(
+        chains.iter().map(|chain| chain.checkpoint_id.clone()).collect::<Vec<_>>(),
+        vec![alpha.clone(), beta.clone()],
+    );
+    let runs = |checkpoint_id: &[u8]| {
+        chains
+            .iter()
+            .find(|chain| chain.checkpoint_id == checkpoint_id)
+            .unwrap()
+            .runs
+            .iter()
+            .map(|run| (run.first_order, run.last_order, run.left.clone(), run.right.clone()))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        runs(&alpha),
+        vec![
+            (10, 11, Some(left_base.clone()), Some(right_base.clone())),
+            (12, 12, Some(left_redo.clone()), Some(right_base.clone())),
+            (13, 14, Some(left_redo.clone()), Some(right_redo.clone())),
+            (16, 16, Some(left_redo.clone()), Some(right_redo.clone())),
+        ],
+        "a change on either log splits its run, while only adjacent identical pairs compress",
+    );
+    assert_eq!(
+        runs(&beta),
+        vec![
+            (10, 10, None, None),
+            (11, 12, Some(positionless.clone()), None),
+            (13, 14, None, None),
+            (16, 16, None, None),
+        ],
+        "an absent checkpoint differs from a present positionless checkpoint and order gaps stay explicit",
+    );
 }
 
 #[test]

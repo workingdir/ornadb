@@ -14,6 +14,9 @@ mod scan_planner;
 mod publication_policy;
 
 pub use branch_merge::{
+    BranchMergePairedCheckpointRedoFrame,
+    BranchMergePairedCheckpointRedoRunSnapshot,
+    BranchMergePairedCheckpointRedoChainSnapshot,
     BranchMergeBudget, BranchMergeColumnDepthEvent, BranchMergeColumnDepthFragmentSnapshot,
     BranchMergeColumnDepthFragments, BranchMergeColumnDepthLadderEvent,
     BranchMergeColumnDepthLadderSnapshot, BranchMergeColumnDepthLadderWaveSnapshot,
@@ -61,7 +64,8 @@ pub use branch_merge::{
     BranchMergePlanSequenceError, BranchMergePlanSequencer, BranchMergeReport,
     BranchMergeTableDepthLadderEvent, SequencedBranchMergePlan,
     BranchRowSource, CheckpointId, KeyRange, MergeSide, MergedSegment, MergedTable,
-    RowSegmentManifest, TableManifest, ThreeWaySnapshot, merge_three_way_snapshots,
+    RowSegmentManifest, TableManifest, ThreeWaySnapshot, compress_paired_checkpoint_redo_chain,
+    merge_three_way_snapshots,
 };
 
 pub use compact::{
