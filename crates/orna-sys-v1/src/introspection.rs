@@ -3322,6 +3322,9 @@ fn explain_query_core_with_limit_pushdowns(
             paired_window_spill_cascade_fold
                 .as_ref()
                 .map(|fold| fold.identity.as_str()),
+            paired_aggregate_spill_restoration_fold
+                .as_ref()
+                .map(|fold| fold.identity.as_str()),
             paired_limit_window_cascade_fold
                 .as_ref()
                 .map(|fold| fold.identity.as_str()),
@@ -6673,6 +6676,7 @@ fn query_join_cost_fold(
     paired_aggregate_spill_anchor_fold_identity: Option<&str>,
     paired_aggregate_anchor_cascade_fold_identity: Option<&str>,
     paired_window_spill_cascade_fold_identity: Option<&str>,
+    paired_aggregate_spill_restoration_fold_identity: Option<&str>,
     paired_limit_window_cascade_fold_identity: Option<&str>,
     paired_join_limit_anchor_cascade_fold_identity: Option<&str>,
     cardinality: Cardinality,
@@ -6714,6 +6718,10 @@ fn query_join_cost_fold(
     hash_optional_text(&mut hash, paired_aggregate_spill_anchor_fold_identity);
     hash_optional_text(&mut hash, paired_aggregate_anchor_cascade_fold_identity);
     hash_optional_text(&mut hash, paired_window_spill_cascade_fold_identity);
+    hash_optional_text(
+        &mut hash,
+        paired_aggregate_spill_restoration_fold_identity,
+    );
     hash_optional_text(&mut hash, paired_limit_window_cascade_fold_identity);
     hash_optional_text(&mut hash, paired_join_limit_anchor_cascade_fold_identity);
     hash_optional_u64(&mut hash, cardinality.rows);
