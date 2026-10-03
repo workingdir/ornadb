@@ -2492,6 +2492,8 @@ fn paired_limit_compaction_refreshes_keep_scoped_prefix_values() {
         ([3, 7, 9, 777], [1, 8, 10, 777]),
     ];
     let mut restores = Vec::new();
+    let mut lane_names = Vec::new();
+    let mut long_cursors_by_lane = Vec::new();
     for (generation, (left, right)) in generations.into_iter().enumerate() {
         for (lane, (source_name, values)) in
             [("View.Left", left), ("View.Right", right)].into_iter().enumerate()
@@ -2499,6 +2501,8 @@ fn paired_limit_compaction_refreshes_keep_scoped_prefix_values() {
             let tag = 0x20 + (generation * 2 + lane) as u8;
             let long_cursor = vec![tag; 128];
             restores.push((source_name, restore(values, &long_cursor)));
+            lane_names.push(source_name);
+            long_cursors_by_lane.push(long_cursor);
         }
     }
     let mut source = PairedCursorRestoreSource::new(restores);
@@ -2530,6 +2534,52 @@ fn paired_limit_compaction_refreshes_keep_scoped_prefix_values() {
     assert_eq!(third, integer_pair(190, 190), "the final pair keeps each refreshed limit prefix separate");
     assert_eq!(first, integer_pair(60, 600), "later restores leave the first limited result intact");
     assert_eq!(second, integer_pair(150, 120), "later restores leave the second limited result intact");
+
+    assert_eq!(source.lanes.len(), lane_names.len());
+    let scopes = source
+        .lanes
+        .iter()
+        .zip(lane_names.iter().copied())
+        .map(|((source_name, scope, _), expected_name)| {
+            assert_eq!(source_name, expected_name, "each refresh reads left then right");
+            *scope
+        })
+        .collect::<Vec<_>>();
+    for (index, scope) in scopes.iter().enumerate() {
+        assert!(
+            !scopes[..index].contains(scope),
+            "fresh paired limits cannot reuse a sibling or prior refresh scope: {scope:?}"
+        );
+    }
+    let mut expected_cursors = Vec::new();
+    for index in 0..lane_names.len() {
+        let source_name = lane_names[index].to_owned();
+        expected_cursors.extend([
+            (source_name.clone(), scopes[index], None),
+            (
+                source_name.clone(),
+                scopes[index],
+                Some(long_cursors_by_lane[index].clone()),
+            ),
+            (
+                source_name,
+                scopes[index],
+                Some(compacted_cursor.clone()),
+            ),
+        ]);
+    }
+    assert_eq!(
+        source.cursors,
+        expected_cursors,
+        "each limited prefix follows only its scoped cursor chain through compaction"
+    );
+    assert!(
+        source
+            .cursors
+            .iter()
+            .all(|(_, _, cursor)| cursor.as_ref() != Some(&after_compaction_cursor)),
+        "take(3) completes before requesting the fourth, out-of-prefix page"
+    );
     assert!(source.pending["View.Left"].is_empty());
     assert!(source.pending["View.Right"].is_empty());
 }
