@@ -1249,6 +1249,99 @@ fn paired_divergence_compaction_projects() -> (TempDir, [LoadedProject; 5], [Str
     )
 }
 
+fn paired_divergence_refold_projects() -> (TempDir, [LoadedProject; 9], [String; 9]) {
+    let (directory, projects, pins) = divergent_paired_module_projects();
+    let [
+        base_project,
+        math_project,
+        collection_project,
+        math_first_project,
+    ] = projects;
+    let project_path = directory.path().join("project");
+    let standard_path = project_path.join("stdlib/std");
+    git_output_at(&standard_path, &["checkout", "--detach", pins[2].as_str()]);
+
+    let mut refolded_pins = Vec::with_capacity(5);
+    let mut refolded_parents = Vec::with_capacity(5);
+    for (module, source, message) in [
+        (
+            "math.orna",
+            include_str!("fixtures/module-upgrade-std-v4.orna"),
+            "fold math after collection on opposite paired branch",
+        ),
+        (
+            "collection.orna",
+            include_str!("fixtures/module-upgrade-std-collection-v6.orna"),
+            "refold collection forward on paired branch",
+        ),
+        (
+            "math.orna",
+            include_str!("fixtures/module-upgrade-std-v5.orna"),
+            "refold math forward on paired branch",
+        ),
+        (
+            "math.orna",
+            include_str!("fixtures/module-upgrade-std-v4.orna"),
+            "refold math back on paired branch",
+        ),
+        (
+            "collection.orna",
+            include_str!("fixtures/module-upgrade-std-collection-v5.orna"),
+            "refold collection back to paired source bodies",
+        ),
+    ] {
+        fs::write(standard_path.join(module), source).unwrap();
+        commit_directory(&standard_path, message);
+        let pin = git_output_at(&standard_path, &["rev-parse", "HEAD"]);
+        let parent = capture_standard_gitlink(&project_path, &pin, message);
+        refolded_pins.push(pin);
+        refolded_parents.push(parent);
+    }
+
+    let repository = Repository::discover(&project_path).unwrap();
+    let refolded_projects = refolded_parents
+        .iter()
+        .map(|parent| {
+            let snapshot = repository.resolve_snapshot(parent).unwrap();
+            ProjectLoader::default()
+                .load_committed_snapshot(&repository, &snapshot)
+                .unwrap()
+        })
+        .collect::<Vec<_>>();
+    let [
+        opposite_pair_project,
+        collection_upgrade_project,
+        math_upgrade_project,
+        math_refold_project,
+        paired_refold_project,
+    ] = refolded_projects.try_into().unwrap();
+    (
+        directory,
+        [
+            base_project,
+            math_project,
+            collection_project,
+            math_first_project,
+            opposite_pair_project,
+            collection_upgrade_project,
+            math_upgrade_project,
+            math_refold_project,
+            paired_refold_project,
+        ],
+        [
+            pins[0].clone(),
+            pins[1].clone(),
+            pins[2].clone(),
+            pins[3].clone(),
+            refolded_pins[0].clone(),
+            refolded_pins[1].clone(),
+            refolded_pins[2].clone(),
+            refolded_pins[3].clone(),
+            refolded_pins[4].clone(),
+        ],
+    )
+}
+
 fn paired_divergence_reanchoring_projects()
 -> (TempDir, [LoadedProject; 6], [String; 6], [String; 3]) {
     let (directory, projects, pins) = divergent_paired_module_projects();
