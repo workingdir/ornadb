@@ -419,6 +419,26 @@ pub struct BranchMergeColumnRestoreStormSnapshot {
     pub ladders: Vec<BranchMergeColumnRestoreLadderTimelineSnapshot>,
 }
 
+/// One stable column's dense depth-label timeline inside a restore storm.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BranchMergeColumnRestoreStormLadderSnapshot {
+    pub first_order: u64,
+    pub last_order: u64,
+    pub waves: Vec<BranchMergeColumnRestoreLadderWaveSlotSnapshot>,
+}
+
+/// A stable table-column identity folded across all committed restore storms.
+///
+/// Every storm remains a separate group. A column absent for an entire storm
+/// still receives a storm entry with `None` wave slots, so later depth labels
+/// cannot be mistaken for a continuation of an earlier group.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BranchMergeColumnRestoreStormFoldSnapshot {
+    pub table: ObjectId,
+    pub column: ObjectId,
+    pub storms: Vec<BranchMergeColumnRestoreStormLadderSnapshot>,
+}
+
 /// A canonical column cell released with its source parent identity intact.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BranchMergeParentColumnDepthEvent {
@@ -1364,6 +1384,65 @@ impl BranchMergeTombstoneHistory {
                     first_order,
                     last_order,
                     ladders,
+                }
+            })
+            .collect()
+    }
+
+    /// Folds each stable table-column pair across committed restore storms.
+    ///
+    /// Unlike `column_restore_ladder_timelines`, this view retains storm
+    /// boundaries as explicit groups. Each storm has dense wave slots, and a
+    /// column absent for the whole group is represented by `None` in every
+    /// slot. MERGE-1 is silent about cross-storm label continuity; v1 keeps
+    /// every storm's labels local and never carries a depth index across a
+    /// non-column submission boundary.
+    pub fn column_restore_storm_folds(
+        &self,
+    ) -> Vec<BranchMergeColumnRestoreStormFoldSnapshot> {
+        let storms = self.column_restore_storms();
+        let mut identities = BTreeMap::new();
+        for storm in &storms {
+            for ladder in &storm.ladders {
+                identities.insert((ladder.table, ladder.column), ());
+            }
+        }
+
+        identities
+            .into_keys()
+            .map(|(table, column)| {
+                let storm_folds = storms
+                    .iter()
+                    .map(|storm| {
+                        let waves = storm
+                            .ladders
+                            .iter()
+                            .find(|ladder| ladder.table == table && ladder.column == column)
+                            .map(|ladder| ladder.waves.clone())
+                            .unwrap_or_else(|| {
+                                storm
+                                    .ladders
+                                    .first()
+                                    .expect("a committed restore storm contains a column")
+                                    .waves
+                                    .iter()
+                                    .map(|wave| BranchMergeColumnRestoreLadderWaveSlotSnapshot {
+                                        order: wave.order,
+                                        fragments: None,
+                                    })
+                                    .collect()
+                            });
+                        BranchMergeColumnRestoreStormLadderSnapshot {
+                            first_order: storm.first_order,
+                            last_order: storm.last_order,
+                            waves,
+                        }
+                    })
+                    .collect();
+                BranchMergeColumnRestoreStormFoldSnapshot {
+                    table,
+                    column,
+                    storms: storm_folds,
                 }
             })
             .collect()

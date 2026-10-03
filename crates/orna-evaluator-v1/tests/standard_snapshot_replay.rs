@@ -313,6 +313,10 @@ fn base64_snapshot_marker_value(marker: i64) -> CanonicalValue {
 }
 
 fn process_output_value(stdout: &[u8]) -> Raw {
+    process_output_with_stderr_value(stdout, &[])
+}
+
+fn process_output_with_stderr_value(stdout: &[u8], stderr: &[u8]) -> Raw {
     Raw::Tag(
         60015,
         Box::new(Raw::Array(vec![
@@ -321,9 +325,18 @@ fn process_output_value(stdout: &[u8]) -> Raw {
                 Box::new(Raw::Array(vec![Raw::Int(1.into()), Raw::Int(0.into())])),
             ),
             Raw::Bytes(stdout.to_vec()),
-            Raw::Bytes(Vec::new()),
+            Raw::Bytes(stderr.to_vec()),
         ])),
     )
+}
+
+fn process_boundary_codec_chain_value(bytes: &[u8]) -> CanonicalValue {
+    CanonicalValue::new(Raw::Array(vec![
+        process_output_with_stderr_value(bytes, bytes),
+        process_output_value(bytes),
+        process_output_value(bytes),
+    ]))
+    .unwrap()
 }
 
 fn base64_process_matrix_value() -> CanonicalValue {
@@ -712,8 +725,7 @@ fn captured_codec_snapshots_preserve_nested_codec_bytes_through_host_process() {
 
 #[test]
 fn captured_codec_snapshots_reprocess_host_output_through_nested_codecs() {
-    let fixture =
-        include_str!("fixtures/snapshot-host-codec-process-reprocess-matrix.orna");
+    let fixture = include_str!("fixtures/snapshot-host-codec-process-reprocess-matrix.orna");
     let parsed = orna_syntax_v1::parse_repl(fixture);
     assert!(parsed.diagnostics.is_empty(), "{:#?}", parsed.diagnostics);
     let (_directory, project_v1, project_v2, snapshots) = host_codec_snapshot_projects();
@@ -780,7 +792,90 @@ fn captured_codec_snapshots_reprocess_host_output_through_nested_codecs() {
         folded_outputs.push(replay_matrix);
     }
 
-    assert_eq!(folded_outputs, vec![expected.clone(), expected.clone(), expected]);
+    assert_eq!(
+        folded_outputs,
+        vec![expected.clone(), expected.clone(), expected]
+    );
+}
+
+#[test]
+fn captured_codec_snapshots_fold_both_process_pipes_through_nested_boundaries() {
+    let fixture = include_str!("fixtures/snapshot-host-codec-process-boundary-chain.orna");
+    let parsed = orna_syntax_v1::parse_repl(fixture);
+    assert!(parsed.diagnostics.is_empty(), "{:#?}", parsed.diagnostics);
+    let (_directory, project_v1, project_v2, snapshots) = host_codec_snapshot_projects();
+    let sources_v1 =
+        host_codec_standard_sources(include_str!("fixtures/snapshot-host-codec-base64-v1.orna"));
+    let sources_v2 =
+        host_codec_standard_sources(include_str!("fixtures/snapshot-host-codec-base64-v2.orna"));
+    let mut historical =
+        AdmittedReplSession::from_loaded_project(&project_v1, sources_v1, Limits::default())
+            .unwrap();
+    let mut upgraded =
+        AdmittedReplSession::from_loaded_project(&project_v2, sources_v2, Limits::default())
+            .unwrap();
+    assert_ne!(snapshots[0], snapshots[1]);
+
+    let working_directory = env::current_dir().unwrap();
+    let mut process = ProcessProvider::new(Duration::from_secs(2), 64).unwrap();
+    process
+        .allow_command("/usr/bin/tee", &working_directory, [])
+        .unwrap();
+    process
+        .allow_command("/usr/bin/cat", &working_directory, [])
+        .unwrap();
+    let mut bindings =
+        SysHostBindingRegistry::new(EnvironmentProvider::default()).with_process_provider(process);
+    let inputs = [
+        ("", &[][..]),
+        ("AA==", &[0][..]),
+        ("AAE=", &[0, 1][..]),
+        ("AAEC", &[0, 1, 2][..]),
+        ("/w==", &[255][..]),
+        ("AAECAwQF", &[0, 1, 2, 3, 4, 5][..]),
+    ];
+    let expected = CanonicalValue::new(Raw::Array(
+        inputs
+            .iter()
+            .map(|(_, bytes)| process_boundary_codec_chain_value(bytes).raw().clone())
+            .collect(),
+    ))
+    .unwrap();
+
+    let mut folded_matrices = Vec::new();
+    for snapshot_index in [0, 1, 0] {
+        let (session, marker) = match snapshot_index {
+            0 => (&mut historical, 1),
+            1 => (&mut upgraded, 2),
+            _ => unreachable!("the process boundary fold only selects captured snapshots"),
+        };
+        assert_eq!(
+            session.submit(include_str!("fixtures/snapshot-host-codec-tagged.orna")),
+            Ok(Some(base64_snapshot_marker_value(marker)))
+        );
+
+        let mut rows = Vec::new();
+        for (encoded, bytes) in &inputs {
+            let source = fixture.replace("__BASE64_INPUT__", encoded);
+            let output = session
+                .submit_with_sys_host_bindings(&source, &mut bindings)
+                .unwrap_or_else(|error| {
+                    panic!("captured process codec chain failed: {}", error.code())
+                })
+                .expect("the two captured output pipes feed real nested process calls");
+            let expected_row = process_boundary_codec_chain_value(bytes);
+            assert_eq!(output, expected_row, "snapshot {marker}, input {encoded:?}");
+            rows.push(output.raw().clone());
+        }
+        let matrix = CanonicalValue::new(Raw::Array(rows)).unwrap();
+        assert_eq!(matrix, expected, "captured snapshot {marker} matrix");
+        folded_matrices.push(matrix);
+    }
+
+    assert_eq!(
+        folded_matrices,
+        vec![expected.clone(), expected.clone(), expected]
+    );
 }
 
 fn capture_standard_gitlink(project_path: &Path, standard_snapshot: &str, message: &str) -> String {
