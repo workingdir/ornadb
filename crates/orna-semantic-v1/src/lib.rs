@@ -7265,6 +7265,13 @@ fn infer(
                 .find(|parent| type_contains_pinned_checkpoint_tuple(parent))
                 .cloned()
                 .or_else(|| first_parent.clone());
+            // A sparse paired first row has no complete pin map to roll back
+            // to. Recover one as the first fully populated row is accepted,
+            // then retain the accepted sparse-chain map for later local rollback.
+            let paired_omission_recovery = first_parent
+                .as_ref()
+                .is_some_and(type_contains_paired_checkpoint_omissions);
+            let mut checkpoint_recovery_parent = first_parent.clone();
             // Any omitted row can expose a cross-sibling selector collision.
             // Sparse pinned tuples anywhere in the fold need a local scope so
             // a later rebind can roll back only the crossed tuple path.
@@ -7287,18 +7294,37 @@ fn infer(
                         merge_multi_parent_checkpoint_value_scoped(
                             prior,
                             &value,
-                            first_parent
-                                .as_ref()
-                                .expect("scoped fold has a rollback anchor"),
+                            if paired_omission_recovery {
+                                checkpoint_recovery_parent
+                                    .as_ref()
+                                    .expect("paired omission fold has a recovery anchor")
+                            } else {
+                                first_parent
+                                    .as_ref()
+                                    .expect("scoped fold has a rollback anchor")
+                            },
                             checkpoint_topology_parent
                                 .as_ref()
                                 .expect("transactional fold has a topology parent"),
                             &mut Vec::new(),
                             &mut rolled_back_checkpoint_paths,
                         )
-                        .map(|fold| {
+                        .map(|mut fold| {
                             if fold.rejected_scope {
                                 require_same(prior, &value, diagnostics);
+                                if paired_omission_recovery {
+                                    fold.merged = merge_unpaired_checkpoint_record_siblings(
+                                        &fold.merged,
+                                        &value,
+                                    )
+                                    .unwrap_or(fold.merged);
+                                    fold.effective_parent =
+                                        merge_unpaired_checkpoint_record_siblings(
+                                            &fold.effective_parent,
+                                            &value,
+                                        )
+                                        .unwrap_or(fold.effective_parent);
+                                }
                             }
                             // An omitted tuple path has no identity topology in
                             // the original anchor. Remember the first accepted
@@ -7315,6 +7341,18 @@ fn infer(
                                     })
                                     .unwrap_or_else(|| fold.effective_parent.clone()),
                             );
+                            if paired_omission_recovery
+                                && let Some(next_recovery_parent) = checkpoint_recovery_parent
+                                    .as_ref()
+                                    .and_then(|anchor| {
+                                        merge_checkpoint_field_map_multi_parent(
+                                            anchor,
+                                            &fold.effective_parent,
+                                        )
+                                    })
+                            {
+                                checkpoint_recovery_parent = Some(next_recovery_parent);
+                            }
                             fold.merged
                         })
                     } else if transactional_checkpoint_fold {
@@ -9709,6 +9747,35 @@ fn merge_checkpoint_field_map(left: &Type, right: &Type) -> Option<Type> {
 /// those already-validated identities to grow through nested callable results.
 fn merge_checkpoint_field_map_multi_parent(left: &Type, right: &Type) -> Option<Type> {
     merge_checkpoint_field_map_inner(left, right, true)
+}
+
+/// A rejected paired-pin scope must not discard unrelated checkpoint values
+/// from the same sparse row. Keep pinned tuple fields at their recovery anchor,
+/// while allowing independent record siblings to continue contributing pins.
+fn merge_unpaired_checkpoint_record_siblings(
+    accumulated: &Type,
+    parent: &Type,
+) -> Option<Type> {
+    let (Type::Record(accumulated), Type::Record(parent)) = (accumulated, parent) else {
+        return None;
+    };
+    let mut merged = BTreeMap::new();
+    for (name, accumulated_value) in accumulated {
+        let Some(parent_value) = parent.get(name) else {
+            merged.insert(name.clone(), accumulated_value.clone());
+            continue;
+        };
+        let value = if type_contains_pinned_checkpoint_tuple(accumulated_value)
+            || type_contains_pinned_checkpoint_tuple(parent_value)
+        {
+            accumulated_value.clone()
+        } else {
+            merge_checkpoint_field_map_multi_parent(accumulated_value, parent_value)
+                .unwrap_or_else(|| accumulated_value.clone())
+        };
+        merged.insert(name.clone(), value);
+    }
+    Some(Type::Record(merged))
 }
 
 fn merge_checkpoint_field_map_inner(
@@ -18264,15 +18331,105 @@ fn pinned_snapshot_reset_shape_matches(expected: &Type, selected: &Type) -> bool
     }
     let mut maps = Vec::new();
     let mut path = Vec::new();
-    collect_reset_snapshot_context_maps(expected, selected, &mut maps, &mut path)
-        && snapshot_context_topology_matches(&maps)
+    if !collect_reset_snapshot_context_maps(expected, selected, &mut maps, &mut path) {
+        return false;
+    }
+
+    // Keep the established exact-topology rule for ordinary checkpoint resets.
+    if snapshot_context_topology_matches(&maps)
         && pinned_snapshot_reset_shape_matches_at_path(expected, selected, false)
+    {
+        return true;
+    }
+
+    // Sparse three-way checkpoint folds may replace selectors while preserving
+    // the identity shared by sibling tuple slots. Keep this exception narrow:
+    // record-field topology and callable reset contracts remain exact.
+    snapshot_context_paired_tuple_identity_shapes_match(&maps)
+        && pinned_snapshot_sparse_tuple_shape_matches_at_path(expected, selected, false)
+}
+
+/// A sparse checkpoint rebind may add or omit singleton selectors while
+/// preserving paired tuple identities. Compare tuple sibling lane paths and
+/// ignore selector counts; record-field sharing has a separate rollback rule
+/// and must still pass the exact reset topology check.
+fn snapshot_context_paired_tuple_identity_shapes_match(
+    pin_maps: &[SnapshotContextMapPair],
+) -> bool {
+    fn paired_shapes(
+        pin_maps: &[SnapshotContextMapPair],
+        use_expected: bool,
+    ) -> BTreeSet<BTreeSet<(Vec<SnapshotTopologyBoundary>, BTreeSet<SnapshotTopologyBoundary>)>> {
+        let mut memberships = BTreeMap::<
+            String,
+            BTreeMap<Vec<SnapshotTopologyBoundary>, BTreeSet<SnapshotTopologyBoundary>>,
+        >::new();
+        for pair in pin_maps {
+            let selectors = if use_expected {
+                &pair.expected
+            } else {
+                &pair.actual
+            };
+            let tuple_lanes = pair
+                .boundary_path
+                .iter()
+                .enumerate()
+                .filter_map(|(index, boundary)| match boundary {
+                    SnapshotTopologyBoundary::TupleElement(_) => Some((
+                        pair.boundary_path[..index].to_vec(),
+                        boundary.clone(),
+                    )),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            for selector in selectors {
+                for (parent, lane) in &tuple_lanes {
+                    memberships
+                        .entry(selector.clone())
+                        .or_default()
+                        .entry(parent.clone())
+                        .or_default()
+                        .insert(lane.clone());
+                }
+            }
+        }
+        memberships
+            .into_values()
+            .filter_map(|parent_memberships| {
+                let paired = parent_memberships
+                    .into_iter()
+                    .filter(|(_, lanes)| lanes.len() > 1)
+                    .collect::<BTreeSet<_>>();
+                (!paired.is_empty()).then_some(paired)
+            })
+            .collect()
+    }
+
+    let expected = paired_shapes(pin_maps, true);
+    !expected.is_empty() && expected == paired_shapes(pin_maps, false)
 }
 
 fn pinned_snapshot_reset_shape_matches_at_path(
     expected: &Type,
     selected: &Type,
     input_position: bool,
+) -> bool {
+    pinned_snapshot_reset_shape_matches_at_path_mode(expected, selected, input_position, false)
+}
+
+fn pinned_snapshot_sparse_tuple_shape_matches_at_path(
+    expected: &Type,
+    selected: &Type,
+    input_position: bool,
+) -> bool {
+    pinned_snapshot_reset_shape_matches_at_path_mode(expected, selected, input_position, true)
+}
+
+fn pinned_snapshot_reset_shape_matches_at_path_mode(
+    expected: &Type,
+    selected: &Type,
+    input_position: bool,
+    allow_sparse_tuple_identities: bool,
 ) -> bool {
     if input_position && matches!(selected, Type::Bottom) && !matches!(expected, Type::Bottom) {
         // A reset cannot narrow an established callable input to Bottom: a
@@ -18282,7 +18439,21 @@ fn pinned_snapshot_reset_shape_matches_at_path(
     if matches!(expected, Type::Bottom) || matches!(selected, Type::Bottom) {
         return true;
     }
-    if !type_contains_bottom(expected) && !type_contains_bottom(selected) {
+    if expected == selected {
+        return true;
+    }
+    if allow_sparse_tuple_identities {
+        if is_contextual_snapshot_ref(expected) || is_contextual_snapshot_ref(selected) {
+            return is_contextual_snapshot_ref(expected) && is_contextual_snapshot_ref(selected);
+        }
+        if is_snapshot_context_map_shape(expected) || is_snapshot_context_map_shape(selected) {
+            return is_snapshot_context_map_shape(expected) && is_snapshot_context_map_shape(selected);
+        }
+    }
+    if !allow_sparse_tuple_identities
+        && !type_contains_bottom(expected)
+        && !type_contains_bottom(selected)
+    {
         return pinned_snapshot_shape_matches(expected, selected);
     }
     match (expected, selected) {
@@ -18291,17 +18462,32 @@ fn pinned_snapshot_reset_shape_matches_at_path(
         | (Type::Relation(expected), Type::Relation(selected))
         | (Type::Stream(expected), Type::Stream(selected))
         | (Type::Optional(expected), Type::Optional(selected)) => {
-            pinned_snapshot_reset_shape_matches_at_path(expected, selected, input_position)
+            pinned_snapshot_reset_shape_matches_at_path_mode(
+                expected,
+                selected,
+                input_position,
+                allow_sparse_tuple_identities,
+            )
         }
         (Type::Tuple(expected), Type::Tuple(selected)) if expected.len() == selected.len() => {
             expected.iter().zip(selected).all(|(expected, selected)| {
-                pinned_snapshot_reset_shape_matches_at_path(expected, selected, input_position)
+                pinned_snapshot_reset_shape_matches_at_path_mode(
+                    expected,
+                    selected,
+                    input_position,
+                    allow_sparse_tuple_identities,
+                )
             })
         }
         (Type::Record(expected), Type::Record(selected)) if expected.len() == selected.len() => {
             expected.iter().all(|(name, expected)| {
                 selected.get(name).is_some_and(|selected| {
-                    pinned_snapshot_reset_shape_matches_at_path(expected, selected, input_position)
+                    pinned_snapshot_reset_shape_matches_at_path_mode(
+                        expected,
+                        selected,
+                        input_position,
+                        allow_sparse_tuple_identities,
+                    )
                 })
             })
         }
@@ -18326,16 +18512,18 @@ fn pinned_snapshot_reset_shape_matches_at_path(
                     .iter()
                     .zip(selected_parameters)
                     .all(|(expected, selected)| {
-                        pinned_snapshot_reset_shape_matches_at_path(
+                        pinned_snapshot_reset_shape_matches_at_path_mode(
                             expected,
                             selected,
                             !input_position,
+                            allow_sparse_tuple_identities,
                         )
                     })
-                && pinned_snapshot_reset_shape_matches_at_path(
+                && pinned_snapshot_reset_shape_matches_at_path_mode(
                     expected_result,
                     selected_result,
                     input_position,
+                    allow_sparse_tuple_identities,
                 )
         }
         (
@@ -18352,7 +18540,12 @@ fn pinned_snapshot_reset_shape_matches_at_path(
                 .iter()
                 .zip(selected_arguments)
                 .all(|(expected, selected)| {
-                    pinned_snapshot_reset_shape_matches_at_path(expected, selected, input_position)
+                    pinned_snapshot_reset_shape_matches_at_path_mode(
+                        expected,
+                        selected,
+                        input_position,
+                        allow_sparse_tuple_identities,
+                    )
                 })
         }
         (
@@ -18365,14 +18558,16 @@ fn pinned_snapshot_reset_shape_matches_at_path(
                 unit: selected_unit,
             },
         ) => {
-            pinned_snapshot_reset_shape_matches_at_path(
+            pinned_snapshot_reset_shape_matches_at_path_mode(
                 expected_currency,
                 selected_currency,
                 input_position,
-            ) && pinned_snapshot_reset_shape_matches_at_path(
+                allow_sparse_tuple_identities,
+            ) && pinned_snapshot_reset_shape_matches_at_path_mode(
                 expected_unit,
                 selected_unit,
                 input_position,
+                allow_sparse_tuple_identities,
             )
         }
         _ => expected == selected,
@@ -18871,9 +19066,17 @@ fn tuple_checkpoint_promotion_matches(left: &[Type], right: &[Type]) -> bool {
 /// remains atomic. The reference does not specify sequential multi-parent tuple
 /// folds, so retain the first accepted topology as the conservative rule.
 fn checkpoint_topology_anchor_with_first_pins(anchor: &Type, source: &Type) -> Type {
-    // Leave paired sibling holes visible to their enclosing record check,
-    // which learns cross-field identity from each row's accumulated maps.
     if type_contains_paired_checkpoint_omissions(anchor) {
+        // A sparse row cannot establish how omitted sibling slots relate. The
+        // first fully populated row can: promote its paired pin paths together
+        // so later omissions replay that learned cross-field topology and a
+        // split row rolls back without leaking one lane's new identity.
+        if !type_contains_partially_omitted_pinned_tuple(source)
+            && !type_contains_omitted_checkpoint_tuple(source)
+            && type_contains_pinned_checkpoint_tuple(source)
+        {
+            return checkpoint_topology_anchor_with_first_pins_local(anchor, source);
+        }
         return anchor.clone();
     }
     checkpoint_topology_anchor_with_first_pins_local(anchor, source)
