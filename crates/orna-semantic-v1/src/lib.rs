@@ -7267,7 +7267,10 @@ fn infer(
                 .any(type_contains_omitted_checkpoint_tuple)
                 || element_types
                     .iter()
-                    .any(type_contains_partially_omitted_pinned_tuple);
+                    .any(type_contains_partially_omitted_pinned_tuple)
+                || element_types
+                    .iter()
+                    .any(type_contains_paired_pinned_checkpoint_tuples);
             let mut rolled_back_checkpoint_paths = BTreeSet::new();
             let mut rejected_checkpoint_parent = false;
             let mut ty = None;
@@ -8972,6 +8975,10 @@ fn infer_assignment(
                         if let Some(symbol) = local.get_mut(name) {
                             symbol.ty = reset_type;
                         }
+                    } else if contains_type_error(&expected) || contains_type_error(&value.ty) {
+                        // Error recovery cannot prove that a checkpoint source
+                        // carries a stable pin map. Keep the last valid local
+                        // identity and avoid cascading a second type diagnostic.
                     } else if type_contains_pinned_snapshot_identity(&expected)
                         && type_contains_pinned_snapshot_identity(&value.ty)
                     {
@@ -18163,10 +18170,13 @@ fn callable_function_type(ty: &Type) -> Option<&Type> {
 /// A compatible local checkpoint reset adopts the selected source value's
 /// exact identity map. The reference is silent on structured local reset
 /// chains; replacement preserves saved selector identities without unioning
-/// them with intermediate checkpoints.
+/// them with intermediate checkpoints. Error-recovered values are not valid
+/// reset sources because their nested pin maps have not been established.
 fn pinned_snapshot_reset_type(expected: &Type, selected: &Type) -> Option<Type> {
     (checkpoint_snapshot_maps_are_valid(expected)
         && checkpoint_snapshot_maps_are_valid(selected)
+        && !contains_type_error(expected)
+        && !contains_type_error(selected)
         && type_contains_pinned_snapshot_identity(expected)
         && type_contains_pinned_snapshot_identity(selected)
         && pinned_snapshot_reset_shape_matches(expected, selected))
@@ -19034,6 +19044,48 @@ fn type_contains_paired_checkpoint_omissions(ty: &Type) -> bool {
         Type::MoneyPerUnit { currency, unit } => {
             type_contains_paired_checkpoint_omissions(currency)
                 || type_contains_paired_checkpoint_omissions(unit)
+        }
+        _ => false,
+    }
+}
+
+/// Dense records can carry independent tuple-pin folds even when no parent
+/// omits a slot. Scope a late rebind failure to the conflicting tuple so a
+/// stable sibling keeps the values accumulated through the same storm.
+fn type_contains_paired_pinned_checkpoint_tuples(ty: &Type) -> bool {
+    match ty {
+        Type::Record(fields) => {
+            fields
+                .values()
+                .filter(|field| type_contains_pinned_checkpoint_tuple(field))
+                .count()
+                >= 2
+                || fields
+                    .values()
+                    .any(type_contains_paired_pinned_checkpoint_tuples)
+        }
+        Type::Tuple(elements) => elements
+            .iter()
+            .any(type_contains_paired_pinned_checkpoint_tuples),
+        Type::List(element)
+        | Type::Range(element)
+        | Type::Relation(element)
+        | Type::Stream(element)
+        | Type::Optional(element) => type_contains_paired_pinned_checkpoint_tuples(element),
+        Type::Applied { arguments, .. } => arguments
+            .iter()
+            .any(type_contains_paired_pinned_checkpoint_tuples),
+        Type::Function {
+            parameters, result, ..
+        } => {
+            parameters
+                .iter()
+                .any(type_contains_paired_pinned_checkpoint_tuples)
+                || type_contains_paired_pinned_checkpoint_tuples(result)
+        }
+        Type::MoneyPerUnit { currency, unit } => {
+            type_contains_paired_pinned_checkpoint_tuples(currency)
+                || type_contains_paired_pinned_checkpoint_tuples(unit)
         }
         _ => false,
     }
