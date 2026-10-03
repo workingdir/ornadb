@@ -222,8 +222,8 @@ pub struct RelationPage {
 /// identity. The identity follows its source through folds and pagination
 /// handoffs; cursor bytes are checkpoints, not identities, and may be reused
 /// by sibling subscriptions or later refreshes. Effect handlers should bind
-/// continuation state by both source name and this identity so paired same-name
-/// reads cannot resume one another's cursors.
+/// each read batch's continuation state by both source name and this identity
+/// so paired same-name reads cannot resume one another's cursors.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct RelationReadScope(u64);
 
@@ -1443,6 +1443,33 @@ fn distinct_identity(value: &Value) -> Result<Vec<u8>, EvaluationError> {
         .map_err(|_| error("ORNA-EVAL-VALUE"))
 }
 
+/// Keeps the first original value for each canonical collection identity.
+/// Each query invocation constructs its own fold so paired recursive queries
+/// cannot suppress one another's anchor or recursive rows.
+#[derive(Default)]
+struct DistinctValueFold {
+    identities: HashSet<Vec<u8>>,
+    values: Vec<Value>,
+}
+
+impl DistinctValueFold {
+    fn insert(&mut self, value: Value) -> Result<bool, EvaluationError> {
+        if !self.identities.insert(distinct_identity(&value)?) {
+            return Ok(false);
+        }
+        self.values.push(value);
+        Ok(true)
+    }
+
+    fn len(&self) -> usize {
+        self.values.len()
+    }
+
+    fn into_values(self) -> Vec<Value> {
+        self.values
+    }
+}
+
 fn aggregate_task_failures(failures: &[EvaluationError]) -> EvaluationError {
     let Some(primary) = failures.first() else {
         return error("ORNA-EVAL-ERROR");
@@ -2456,6 +2483,23 @@ enum RelationRow {
     Skip,
     Yield(Value),
     End,
+}
+
+/// A downstream stage can reject a value after an earlier `take` has already
+/// emitted its full result. Preserve the rejection while also closing the
+/// source scan so the next page is not read just to rediscover that bound.
+fn rejected_relation_rows(
+    stages: &[RelationStage],
+    counters: &[usize],
+    stage_offset: usize,
+) -> Vec<RelationRow> {
+    let mut rows = vec![RelationRow::Skip];
+    if stages.iter().enumerate().any(|(offset, stage)| {
+        matches!(stage, RelationStage::Take(count) if counters[stage_offset + offset] >= *count)
+    }) {
+        rows.push(RelationRow::End);
+    }
+    rows
 }
 
 #[derive(Clone, Debug)]
@@ -4989,30 +5033,13 @@ impl Context<'_, '_> {
             match stage {
                 RelationStage::Filter(predicates) => {
                     if !self.relation_filter_passes(&value, predicates.iter(), depth + 1)? {
-                        let mut rows = vec![RelationRow::Skip];
-                        // Once a preceding take has consumed its bound, a
-                        // downstream filter rejection still exhausts that
-                        // bounded relation. Propagate the stop now so the
-                        // source is not evaluated once more just to discover
-                        // the already-reached bound.
-                        if stages.iter().enumerate().any(|(offset, stage)| {
-                            matches!(stage, RelationStage::Take(count) if counters[stage_offset + offset] >= *count)
-                        }) {
-                            rows.push(RelationRow::End);
-                        }
-                        return Ok(rows);
+                        return Ok(rejected_relation_rows(stages, counters, stage_offset));
                     }
                 }
                 RelationStage::SharedFilter(batch) => {
                     let predicates = batch.chunks().iter().flat_map(|chunk| chunk.iter());
                     if !self.relation_filter_passes(&value, predicates, depth + 1)? {
-                        let mut rows = vec![RelationRow::Skip];
-                        if stages.iter().enumerate().any(|(offset, stage)| {
-                            matches!(stage, RelationStage::Take(count) if counters[stage_offset + offset] >= *count)
-                        }) {
-                            rows.push(RelationRow::End);
-                        }
-                        return Ok(rows);
+                        return Ok(rejected_relation_rows(stages, counters, stage_offset));
                     }
                 }
                 RelationStage::Map(transform) => {
@@ -5039,32 +5066,32 @@ impl Context<'_, '_> {
                 RelationStage::Distinct => {
                     let seen = &mut distinct_seen[index];
                     if !seen.insert(distinct_identity(&value)?) {
-                        return Ok(vec![RelationRow::Skip]);
+                        return Ok(rejected_relation_rows(stages, counters, stage_offset));
                     }
                     self.items(seen.len())?;
                 }
                 RelationStage::Pairs => {
                     let Some(previous) = pair_previous[index].replace(value.clone()) else {
-                        return Ok(vec![RelationRow::Skip]);
+                        return Ok(rejected_relation_rows(stages, counters, stage_offset));
                     };
                     self.items(2)?;
                     value = Value::Tuple(vec![previous, value]);
                 }
                 RelationStage::Window(size, step) => {
-                    self.items(*size)?;
                     let state = window_states[index].get_or_insert_with(|| {
                         RelationWindowState::try_new(*size, *step)
                             .expect("window stage parameters are validated")
                     });
+                    self.items(state.next_item_bound())?;
                     let Some(window) = state.push(value) else {
-                        return Ok(vec![RelationRow::Skip]);
+                        return Ok(rejected_relation_rows(stages, counters, stage_offset));
                     };
                     value = Value::List(window);
                 }
                 RelationStage::Drop(count) => {
                     if counters[index] < *count {
                         counters[index] += 1;
-                        return Ok(vec![RelationRow::Skip]);
+                        return Ok(rejected_relation_rows(stages, counters, stage_offset));
                     }
                 }
                 RelationStage::Take(count) => {
@@ -8488,24 +8515,26 @@ impl Context<'_, '_> {
     }
 
     /// Computes a finite breadth-first recursive query, using one canonical
-    /// identity set for the anchor and every recursive round. The output owns
-    /// the first value for each identity and preserves anchor/round/term order.
+    /// identity set for the anchor and every recursive round. The invocation
+    /// owns that fold; input anchor order (including any prior lateral
+    /// flat-map order) determines first values and the breadth-first output
+    /// order. The returned order is preserved by downstream window frames;
+    /// sibling calls keep separate folds even when those frames overlap in
+    /// value identity.
     fn recursive_cte(
         &mut self,
         anchor: &[Value],
         recursive_term: &Value,
         depth: usize,
     ) -> Result<Value, EvaluationError> {
-        let mut seen = HashSet::new();
-        let mut result = Vec::new();
+        let mut fold = DistinctValueFold::default();
         let mut frontier = Vec::new();
         self.items(anchor.len())?;
         for value in anchor {
             self.step()?;
-            if seen.insert(distinct_identity(value)?) {
-                result.push(value.clone());
+            if fold.insert(value.clone())? {
                 frontier.push(value.clone());
-                self.items(result.len())?;
+                self.items(fold.len())?;
             }
         }
 
@@ -8520,10 +8549,9 @@ impl Context<'_, '_> {
                 self.items(candidates.len())?;
                 for value in candidates {
                     self.step()?;
-                    if seen.insert(distinct_identity(&value)?) {
-                        result.push(value.clone());
+                    if fold.insert(value.clone())? {
                         next_frontier.push(value);
-                        self.items(result.len())?;
+                        self.items(fold.len())?;
                         self.items(next_frontier.len())?;
                     }
                 }
@@ -8531,7 +8559,7 @@ impl Context<'_, '_> {
             frontier = next_frontier;
         }
 
-        Ok(Value::List(result))
+        Ok(Value::List(fold.into_values()))
     }
 
     fn map(
@@ -8665,18 +8693,16 @@ impl Context<'_, '_> {
     }
     fn distinct(&mut self, values: &[Value]) -> Result<Value, EvaluationError> {
         self.items(values.len())?;
-        let mut keys = HashSet::new();
-        let mut unique = Vec::new();
+        let mut fold = DistinctValueFold::default();
         for value in values {
             self.step()?;
-            if !keys.insert(distinct_identity(value)?) {
+            if !fold.insert(value.clone())? {
                 continue;
             }
             self.step()?;
-            unique.push(value.clone());
-            self.items(unique.len())?;
+            self.items(fold.len())?;
         }
-        Ok(Value::List(unique))
+        Ok(Value::List(fold.into_values()))
     }
     fn union(&mut self, left: &[Value], right: &[Value]) -> Result<Value, EvaluationError> {
         self.items(left.len())?;
