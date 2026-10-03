@@ -1,0 +1,99 @@
+pub fn factory_at(pin: sys.SnapshotRef) =
+    sys.database.as_of(pin).energy.factory;
+
+pub fn accepts_sparse_checkpoint_rebind_chains(failure: Error) {
+    let saved = [
+        {
+            left_checkpoint: (factory_at(sys.snapshot("HEAD~8200")), fail(failure)),
+            right_checkpoint: (fail(failure), factory_at(sys.snapshot("HEAD~8100"))),
+            witness: factory_at(sys.snapshot("HEAD~8210")),
+        },
+        {
+            left_checkpoint: (factory_at(sys.snapshot("HEAD~8220")), factory_at(sys.snapshot("HEAD~8220"))),
+            right_checkpoint: (factory_at(sys.snapshot("HEAD~8120")), factory_at(sys.snapshot("HEAD~8120"))),
+            witness: factory_at(sys.snapshot("HEAD~8230")),
+        },
+        { witness: factory_at(sys.snapshot("HEAD~8240")) },
+        {
+            left_checkpoint: (factory_at(sys.snapshot("HEAD~8260")), factory_at(sys.snapshot("HEAD~8260"))),
+            right_checkpoint: (factory_at(sys.snapshot("HEAD~8160")), factory_at(sys.snapshot("HEAD~8160"))),
+            witness: factory_at(sys.snapshot("HEAD~8270")),
+        },
+    ];
+    let rolling = saved;
+    rolling = [
+        {
+            left_checkpoint: (factory_at(sys.snapshot("HEAD~8320")), factory_at(sys.snapshot("HEAD~8320"))),
+            right_checkpoint: (factory_at(sys.snapshot("HEAD~8310")), factory_at(sys.snapshot("HEAD~8310"))),
+            witness: factory_at(sys.snapshot("HEAD~8330")),
+        },
+        { witness: factory_at(sys.snapshot("HEAD~8340")) },
+        {
+            left_checkpoint: (factory_at(sys.snapshot("HEAD~8360")), factory_at(sys.snapshot("HEAD~8360"))),
+            right_checkpoint: (factory_at(sys.snapshot("HEAD~8350")), factory_at(sys.snapshot("HEAD~8350"))),
+            witness: factory_at(sys.snapshot("HEAD~8370")),
+        },
+        { witness: factory_at(sys.snapshot("HEAD~8380")) },
+    ];
+    let after_first_rebind = rolling;
+    rolling = [
+        { witness: factory_at(sys.snapshot("HEAD~8440")) },
+        {
+            left_checkpoint: (factory_at(sys.snapshot("HEAD~8460")), factory_at(sys.snapshot("HEAD~8460"))),
+            right_checkpoint: (factory_at(sys.snapshot("HEAD~8450")), factory_at(sys.snapshot("HEAD~8450"))),
+            witness: factory_at(sys.snapshot("HEAD~8470")),
+        },
+        {
+            left_checkpoint: (factory_at(sys.snapshot("HEAD~8480")), factory_at(sys.snapshot("HEAD~8480"))),
+            right_checkpoint: (factory_at(sys.snapshot("HEAD~8490")), factory_at(sys.snapshot("HEAD~8490"))),
+            witness: factory_at(sys.snapshot("HEAD~8500")),
+        },
+        { witness: factory_at(sys.snapshot("HEAD~8510")) },
+    ];
+    let after_second_rebind = rolling;
+    rolling = saved;
+    let restored = rolling;
+    {
+        saved: saved,
+        after_first_rebind: after_first_rebind,
+        after_second_rebind: after_second_rebind,
+        restored: restored,
+    }
+}
+
+pub fn rejects_sparse_checkpoint_identity_split(failure: Error) {
+    let paired = [
+        {
+            left_checkpoint: (factory_at(sys.snapshot("HEAD~8600")), fail(failure)),
+            right_checkpoint: (fail(failure), factory_at(sys.snapshot("HEAD~8600"))),
+        },
+        {
+            left_checkpoint: (factory_at(sys.snapshot("HEAD~8620")), factory_at(sys.snapshot("HEAD~8620"))),
+            right_checkpoint: (factory_at(sys.snapshot("HEAD~8620")), factory_at(sys.snapshot("HEAD~8620"))),
+        },
+        {
+            left_checkpoint: (factory_at(sys.snapshot("HEAD~8640")), factory_at(sys.snapshot("HEAD~8640"))),
+            right_checkpoint: (factory_at(sys.snapshot("HEAD~8640")), factory_at(sys.snapshot("HEAD~8640"))),
+        },
+    ];
+    let split = [
+        {
+            left_checkpoint: (fail(failure), factory_at(sys.snapshot("HEAD~8700"))),
+            right_checkpoint: (fail(failure), factory_at(sys.snapshot("HEAD~8701"))),
+        },
+        {
+            left_checkpoint: (factory_at(sys.snapshot("HEAD~8720")), factory_at(sys.snapshot("HEAD~8720"))),
+            right_checkpoint: (factory_at(sys.snapshot("HEAD~8730")), factory_at(sys.snapshot("HEAD~8730"))),
+        },
+        {
+            left_checkpoint: (factory_at(sys.snapshot("HEAD~8740")), factory_at(sys.snapshot("HEAD~8740"))),
+            right_checkpoint: (factory_at(sys.snapshot("HEAD~8750")), factory_at(sys.snapshot("HEAD~8750"))),
+        },
+    ];
+    let checkpoints = [
+        { checkpoints: paired, witness: factory_at(sys.snapshot("HEAD~8800")) },
+        { witness: factory_at(sys.snapshot("HEAD~8801")) },
+        { checkpoints: split, witness: factory_at(sys.snapshot("HEAD~8802")) },
+    ];
+    { checkpoints: checkpoints }
+}
