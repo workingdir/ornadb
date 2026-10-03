@@ -3176,6 +3176,7 @@ fn replay_results_are_stable_across_semantics_preserving_module_repins() {
     let expected_body =
         "pub fn finish(value: Int): Int = std.math.shift(value + std.collection.marker() + 3);";
     assert!(snapshots.windows(2).all(|pair| pair[0] != pair[1]));
+    let mut retained_sessions = Vec::with_capacity(projects.len());
 
     for (((project, snapshot), sources), expected_leaf) in projects
         .iter()
@@ -3212,5 +3213,24 @@ fn replay_results_are_stable_across_semantics_preserving_module_repins() {
                 )
             });
         assert_eq!(output, Some(int(20)));
+        retained_sessions.push(session);
+    }
+
+    let replay = include_str!("fixtures/module-chain-repin-call.orna");
+    for (index, session) in retained_sessions.iter_mut().enumerate() {
+        assert_eq!(
+            session.submit(replay),
+            Ok(Some(int(20))),
+            "retained session {index} must keep its behavior after later repins"
+        );
+    }
+
+    let mut cloned_replays = retained_sessions.iter().cloned().collect::<Vec<_>>();
+    for index in (0..cloned_replays.len()).rev() {
+        assert_eq!(
+            cloned_replays[index].submit(replay),
+            Ok(Some(int(20))),
+            "cloned session {index} must replay deterministically in reverse pin order"
+        );
     }
 }
