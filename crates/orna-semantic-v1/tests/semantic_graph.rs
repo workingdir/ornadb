@@ -7702,6 +7702,151 @@ fn nested_extension_omissions_preserve_sibling_depth_identities() {
 }
 
 #[test]
+fn paired_depth_omissions_restore_each_crossed_anchor() {
+    let source = include_str!("fixtures/historical-paired-depth-omission-reconciliation.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-paired-depth-omission-reconciliation.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert_eq!(
+        result
+            .diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.code() == DIAG_TYPE)
+            .count(),
+        1,
+        "the paired crossed-parent candidate is rejected once: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| diagnostic.message())
+            .collect::<Vec<_>>()
+    );
+    let module = result
+        .modules
+        .values()
+        .find(|module| {
+            module
+                .symbols
+                .contains_key("paired_depth_omission_storm_keeps_labels")
+        })
+        .expect("paired depth omission fixture module");
+    let Type::Function { result, .. } = &module.symbols
+        ["paired_depth_omission_storm_keeps_labels"]
+        .ty
+    else {
+        panic!("paired depth omission storm must retain its computed result");
+    };
+    let Type::Record(fields) = result.as_ref() else {
+        panic!("paired depth omission storm must return a record: {result:?}");
+    };
+    let Type::List(parent) = fields.get("parent_fold").expect("parent fold") else {
+        panic!("paired depth omission storm must retain its parent list");
+    };
+    let Type::Record(parent) = parent.as_ref() else {
+        panic!("folded parent must remain a record: {parent:?}");
+    };
+    let Type::Record(siblings) = parent.get("nested").expect("nested siblings") else {
+        panic!("folded nested field must remain a record");
+    };
+    let slots = |sibling: &str| {
+        let Type::Record(depths) = &siblings[sibling] else {
+            panic!("{sibling} must remain a depth record");
+        };
+        let Type::Tuple(depths) = &depths["pins"] else {
+            panic!("{sibling} must retain both paired depths");
+        };
+        depths
+            .iter()
+            .map(|depth| {
+                let Type::Tuple(slots) = depth else {
+                    panic!("{sibling} depth must remain paired");
+                };
+                slots
+                    .iter()
+                    .map(|slot| {
+                        let mut contexts = BTreeSet::new();
+                        collect_snapshot_contexts(slot, &mut contexts);
+                        contexts
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>()
+    };
+    let Type::Record(left) = &siblings["left"] else {
+        panic!("left sibling must remain a record");
+    };
+    let Type::Tuple(left_depths) = &left["pins"] else {
+        panic!("left sibling must retain its depths");
+    };
+    let Type::Tuple(left_first_depth) = &left_depths[0] else {
+        panic!("left first depth must remain paired");
+    };
+    assert_eq!(left_first_depth[0], Type::Bottom);
+    let Type::Record(right) = &siblings["right"] else {
+        panic!("right sibling must remain a record");
+    };
+    let Type::Tuple(right_depths) = &right["pins"] else {
+        panic!("right sibling must retain its depths");
+    };
+    let Type::Tuple(right_second_depth) = &right_depths[1] else {
+        panic!("right second depth must remain paired");
+    };
+    assert_eq!(right_second_depth[0], Type::Bottom);
+    assert_eq!(
+        slots("left"),
+        [
+            vec![
+                BTreeSet::new(),
+                BTreeSet::from([
+                    "selector:HEAD~201".into(),
+                    "selector:HEAD~242".into(),
+                    "selector:HEAD~301".into(),
+                ]),
+            ],
+            vec![
+                BTreeSet::from(["selector:HEAD~120".into()]),
+                BTreeSet::from([
+                    "selector:HEAD~121".into(),
+                    "selector:HEAD~221".into(),
+                    "selector:HEAD~241".into(),
+                    "selector:HEAD~321".into(),
+                ]),
+            ],
+        ],
+        "the paired crossed identity restores the live left slot to its anchor label"
+    );
+    assert_eq!(
+        slots("right"),
+        [
+            vec![
+                BTreeSet::from(["selector:HEAD~100".into()]),
+                BTreeSet::from([
+                    "selector:HEAD~101".into(),
+                    "selector:HEAD~211".into(),
+                    "selector:HEAD~251".into(),
+                    "selector:HEAD~311".into(),
+                ]),
+            ],
+            vec![
+                BTreeSet::new(),
+                BTreeSet::from([
+                    "selector:HEAD~231".into(),
+                    "selector:HEAD~261".into(),
+                    "selector:HEAD~331".into(),
+                ]),
+            ],
+        ],
+        "right adjacent depths continue accumulating their own labels"
+    );
+}
+
+#[test]
 fn multi_parent_checkpoint_folds_preserve_labels_across_paired_omissions() {
     let source = include_str!(
         "fixtures/historical-paired-omission-multi-parent-reconciliation.orna"
