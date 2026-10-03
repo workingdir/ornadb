@@ -18369,8 +18369,8 @@ fn checkpoint_value_is_omitted(ty: &Type) -> bool {
 
 /// Reconcile another parent into a nested checkpoint fold. Source parents
 /// retain the first parent's map widths and selector membership at each
-/// structural path, while accumulated maps may grow. This keeps the first row
-/// as the transactional recovery point if a later parent changes depth labels.
+/// structural path, while accumulated maps may grow only without introducing
+/// new cross-path identity between nested sibling tuples.
 fn merge_multi_parent_checkpoint_value(
     accumulated: &Type,
     parent: &Type,
