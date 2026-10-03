@@ -5441,7 +5441,7 @@ impl Context<'_, '_> {
 
         let mut slots = BTreeMap::new();
         for child in children {
-            if !is_ui_presentation_node(child) {
+            if !is_ui_presentation_node(child, 1, self.limits.max_depth)? {
                 return Err(error("ORNA-EVAL-TYPE"));
             }
         }
@@ -8312,6 +8312,18 @@ impl Context<'_, '_> {
             ("window", [Value::List(values), Value::Int(size), Value::Int(step)]) => {
                 self.windows(values, size, step)
             }
+            ("__strictly_ordered_time_series", [Value::List(points)]) => {
+                self.strictly_ordered_time_series(points)
+            }
+            ("__window_rate", [Value::List(points), Value::Int(size), Value::Int(step)]) => {
+                self.window_time_series_statistics(points, size, step, "rate")
+            }
+            ("__window_derivative", [Value::List(points), Value::Int(size), Value::Int(step)]) => {
+                self.window_time_series_statistics(points, size, step, "derivative")
+            }
+            ("__window_integrate", [Value::List(points), Value::Int(size), Value::Int(step)]) => {
+                self.window_time_series_statistics(points, size, step, "integrate")
+            }
             ("chunk", [_, _])
             | (
                 "flatten" | "distinct" | "unique" | "pairs" | "count" | "first" | "last" | "min"
@@ -8335,6 +8347,10 @@ impl Context<'_, '_> {
             | ("__bucket_by", [_, _, _])
             | ("zip" | "zip_exact", [_, _])
             | ("window", [_, _] | [_, _, _]) => Err(error("ORNA-EVAL-TYPE")),
+            ("__strictly_ordered_time_series", [_]) => Err(error("ORNA-EVAL-TYPE")),
+            ("__window_rate" | "__window_derivative" | "__window_integrate", [_, _, _]) => {
+                Err(error("ORNA-EVAL-TYPE"))
+            }
             ("__list_length" | "__numeric_sum", [_])
             | ("__list_concat", [_, _])
             | ("__stable_sort" | "__group_by" | "__rank", [_, _])
@@ -10083,6 +10099,57 @@ impl Context<'_, '_> {
         }
         Ok(Value::List(windows))
     }
+    fn strictly_ordered_time_series(&mut self, points: &[Value]) -> Result<Value, EvaluationError> {
+        self.items(points.len())?;
+        let mut previous_time: Option<&Value> = None;
+        for point in points {
+            self.step()?;
+            let Value::Tuple(pair) = point else {
+                return Err(error("ORNA-EVAL-TYPE"));
+            };
+            let [time, _] = pair.as_slice() else {
+                return Err(error("ORNA-EVAL-TYPE"));
+            };
+            if !matches!(time, Value::Instant { .. }) {
+                return Err(error("ORNA-EVAL-TYPE"));
+            }
+            if let Some(previous_time) = previous_time
+                && compare_values(previous_time, time)?.is_ge()
+            {
+                return Ok(Value::Bool(false));
+            }
+            previous_time = Some(time);
+        }
+        Ok(Value::Bool(true))
+    }
+    fn window_time_series_statistics(
+        &mut self,
+        points: &[Value],
+        size: &BigInt,
+        step: &BigInt,
+        statistic: &str,
+    ) -> Result<Value, EvaluationError> {
+        // These loops keep long sparse series and their output windows within
+        // the evaluator's bounded step/depth model without recursive source calls.
+        let Value::List(windows) = self.windows(points, size, step)? else {
+            return Err(error("ORNA-EVAL-VALUE"));
+        };
+        let mut results = Vec::with_capacity(windows.len());
+        for window in windows {
+            self.step()?;
+            let Value::List(points) = window else {
+                return Err(error("ORNA-EVAL-VALUE"));
+            };
+            let result = self.stats(statistic, vec![Value::List(points)])?;
+            results.push(if matches!(statistic, "rate" | "integrate") {
+                Value::Option(Some(Box::new(result)))
+            } else {
+                result
+            });
+            self.items(results.len())?;
+        }
+        Ok(Value::List(results))
+    }
     fn shift_left(&self, value: &BigInt, count: &BigInt) -> Result<Value, EvaluationError> {
         if count.is_negative() {
             return Err(error("ORNA-EVAL-VALUE"));
@@ -11204,6 +11271,10 @@ fn named_arguments(
         "__stable_sort" | "__group_by" | "__rank" => &["values", "key"],
         "__asof_join" => &["left", "right", "time", "by"],
         "__bucket_by" => &["rows", "period", "zone"],
+        "__strictly_ordered_time_series" => &["points"],
+        "__window_rate" | "__window_derivative" | "__window_integrate" => {
+            &["points", "size", "step"]
+        }
         "filter" => &["rows", "predicate"],
         "partition" | "split_when" => &["values", "predicate"],
         "group_by" => &["values", "key"],
@@ -11461,6 +11532,10 @@ const STANDARD_BINDING_MODULES: &[StandardBindingModule] = &[
             "__rank",
             "__asof_join",
             "__bucket_by",
+            "__strictly_ordered_time_series",
+            "__window_rate",
+            "__window_derivative",
+            "__window_integrate",
         ],
     },
     StandardBindingModule {
@@ -12262,7 +12337,7 @@ fn ui_property_type_matches(type_name: &str, value: &Value) -> bool {
         type_name
             .strip_prefix("std.option<")
             .and_then(|inner| inner.strip_suffix('>'))
-            .is_some_and(|inner| !inner.is_empty())
+            .is_some_and(ui_type_name_is_well_formed)
     };
     match value {
         Value::Null => type_name == "std.null" || is_typed_option(),
@@ -12271,30 +12346,54 @@ fn ui_property_type_matches(type_name: &str, value: &Value) -> bool {
     }
 }
 
-fn is_ui_presentation_node(value: &Value) -> bool {
+fn ui_type_name_is_well_formed(type_name: &str) -> bool {
+    if let Some(inner) = type_name
+        .strip_prefix("std.option<")
+        .and_then(|inner| inner.strip_suffix('>'))
+    {
+        return ui_type_name_is_well_formed(inner);
+    }
+    !type_name.is_empty()
+        && type_name.split('.').all(|part| {
+            let mut chars = part.chars();
+            chars
+                .next()
+                .is_some_and(|first| first == '_' || first.is_alphabetic())
+                && chars.all(|char| char == '_' || char.is_alphanumeric())
+        })
+}
+
+fn is_ui_presentation_node(
+    value: &Value,
+    depth: usize,
+    max_depth: usize,
+) -> Result<bool, EvaluationError> {
+    if depth > max_depth {
+        return Err(error("ORNA-EVAL-LIMIT"));
+    }
     let Value::Record(fields) = value else {
-        return false;
+        return Ok(false);
     };
     if !matches!(fields.get("kind"), Some(Value::String(kind)) if kind == "node") {
-        return false;
+        return Ok(false);
     }
     let Some(Value::Record(contract)) = fields.get("contract") else {
-        return false;
+        return Ok(false);
     };
-    if !["id", "name", "version"].into_iter().all(|name| {
-        matches!(contract.get(name), Some(Value::String(value)) if !value.is_empty())
-    }) {
-        return false;
+    if !["id", "name", "version"]
+        .into_iter()
+        .all(|name| matches!(contract.get(name), Some(Value::String(value)) if !value.is_empty()))
+    {
+        return Ok(false);
     }
     let Some(Value::Record(properties)) = fields.get("properties") else {
-        return false;
+        return Ok(false);
     };
     if !properties.iter().all(|(name, property)| {
         let Value::Record(typed) = property else {
             return false;
         };
-        let (Some(Value::String(type_name)), Some(value)) =
-            (typed.get("type"), typed.get("value"))
+        let (Some(Value::String(type_name)), Some(value)) = (typed.get("type"), typed.get("value"))
         else {
             return false;
         };
@@ -12302,23 +12401,28 @@ fn is_ui_presentation_node(value: &Value) -> bool {
             && ui_property_type_matches(type_name, value)
             && value.clone().canonical().is_ok()
     }) {
-        return false;
+        return Ok(false);
     }
     let Some(Value::Record(slots)) = fields.get("slots") else {
-        return false;
+        return Ok(false);
     };
-    if !slots.values().all(|slot| {
+    let child_depth = depth
+        .checked_add(1)
+        .ok_or_else(|| error("ORNA-EVAL-LIMIT"))?;
+    for slot in slots.values() {
         let Value::List(children) = slot else {
-            return false;
+            return Ok(false);
         };
-        children.iter().all(is_ui_presentation_node)
-    }) {
-        return false;
+        for child in children {
+            if !is_ui_presentation_node(child, child_depth, max_depth)? {
+                return Ok(false);
+            }
+        }
     }
     let Some(Value::Record(actions)) = fields.get("actions") else {
-        return false;
+        return Ok(false);
     };
-    actions.values().all(is_ui_action_descriptor)
+    Ok(actions.values().all(is_ui_action_descriptor))
 }
 
 fn is_ui_action_descriptor(value: &Value) -> bool {
@@ -14903,7 +15007,16 @@ mod tests {
         }
 
         let valid = node(Vec::new());
-        assert!(is_ui_presentation_node(&valid));
+        assert!(is_ui_presentation_node(&valid, 0, 1).expect("shallow node depth"));
+
+        let nested = node(vec![valid.clone()]);
+        assert!(is_ui_presentation_node(&nested, 0, 1).expect("child at depth one"));
+        assert_eq!(
+            is_ui_presentation_node(&nested, 0, 0)
+                .expect_err("depth zero must reject its child")
+                .code(),
+            "ORNA-EVAL-LIMIT"
+        );
 
         let mut invalid_child = node(Vec::new());
         let Value::Record(fields) = &mut invalid_child else {
@@ -14912,7 +15025,27 @@ mod tests {
         fields.insert("contract".into(), Value::Record(BTreeMap::new()));
 
         let parent = node(vec![invalid_child]);
-        assert!(!is_ui_presentation_node(&parent));
+        assert!(!is_ui_presentation_node(&parent, 0, 2).expect("invalid child is not too deep"));
+    }
+
+    #[test]
+    fn presentation_optional_types_preserve_nested_type_paths() {
+        assert!(ui_property_type_matches(
+            "std.option<std.option<app.Token>>",
+            &Value::Option(None)
+        ));
+        assert!(!ui_property_type_matches(
+            "std.option<>",
+            &Value::Option(None)
+        ));
+        assert!(!ui_property_type_matches(
+            "std.option<std.option<>>",
+            &Value::Null
+        ));
+        assert!(!ui_property_type_matches(
+            "std.option<std..text>",
+            &Value::Null
+        ));
     }
 
     #[test]

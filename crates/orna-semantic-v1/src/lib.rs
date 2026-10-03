@@ -18863,7 +18863,7 @@ fn merge_multi_parent_checkpoint_value_scoped(
         || !compaction_preserves_identity
     {
         if widths_match
-            && rollback_conflicting_checkpoint_siblings(
+            && rollback_conflicting_checkpoint_paths(
                 &mut merged,
                 &mut effective_parent,
                 rollback_anchor,
@@ -18938,9 +18938,9 @@ fn scoped_checkpoint_rollback(
 /// A fold can pass every child independently yet create an identity relation
 /// between two sibling paths when their maps are considered together. The
 /// reference is silent on this nested rollback boundary, so restore only the
-/// direct siblings named by that new relation; unrelated nested paths can
-/// continue accumulating labels in later rows.
-fn rollback_conflicting_checkpoint_siblings(
+/// concrete pin paths named by that new relation; unrelated depth slots keep
+/// accumulating labels in later rows.
+fn rollback_conflicting_checkpoint_paths(
     merged: &mut Type,
     effective_parent: &mut Type,
     rollback_anchor: &Type,
@@ -18963,41 +18963,138 @@ fn rollback_conflicting_checkpoint_siblings(
         ));
     }
 
-    let implicated_children = implicated_paths
-        .iter()
-        .filter_map(|scope| scope.first().cloned())
-        .collect::<BTreeSet<_>>();
-    if implicated_children.is_empty() {
+    if implicated_paths.is_empty() {
         return false;
     }
 
+    let scopes = implicated_paths
+        .into_iter()
+        .filter_map(|scope| {
+            let mut full_scope = path.to_vec();
+            full_scope.extend(scope);
+            let rollback_scope = checkpoint_rollback_scope(&full_scope)?;
+            (rollback_scope.starts_with(path) && rollback_scope.len() >= path.len())
+                .then(|| (rollback_scope.clone(), rollback_scope[path.len()..].to_vec()))
+        })
+        .collect::<BTreeMap<_, _>>();
+
     let mut rolled_back_any = false;
-    match (merged, effective_parent, rollback_anchor) {
-        (Type::Record(merged), Type::Record(effective), Type::Record(anchor)) => {
-            for child in implicated_children {
-                let SnapshotTopologyBoundary::RecordField(name) = child else {
-                    continue;
-                };
-                let Some(anchor_child) = anchor.get(&name) else {
-                    continue;
-                };
-                if !merged.contains_key(&name) || !effective.contains_key(&name) {
-                    continue;
-                }
-                let mut child_path = path.to_vec();
-                child_path.push(SnapshotTopologyBoundary::RecordField(name.clone()));
-                if rolled_back_paths.contains(&child_path) {
-                    continue;
-                }
-                rolled_back_paths.insert(child_path);
-                merged.insert(name.clone(), anchor_child.clone());
-                effective.insert(name, anchor_child.clone());
-                rolled_back_any = true;
-            }
+    for (full_scope, scope) in scopes {
+        let (Some(anchor_scope), Some(_), Some(_)) = (
+            checkpoint_value_at_scope(rollback_anchor, &scope),
+            checkpoint_value_at_scope(merged, &scope),
+            checkpoint_value_at_scope(effective_parent, &scope),
+        ) else {
+            continue;
+        };
+        let anchor_scope = anchor_scope.clone();
+        if rolled_back_paths.contains(&full_scope) {
+            continue;
         }
-        _ => {}
+        if checkpoint_replace_value_at_scope(merged, &scope, &anchor_scope)
+            && checkpoint_replace_value_at_scope(effective_parent, &scope, &anchor_scope)
+        {
+            rolled_back_paths.insert(full_scope);
+            rolled_back_any = true;
+        }
     }
     rolled_back_any
+}
+
+fn checkpoint_rollback_scope(scope: &[SnapshotTopologyBoundary]) -> Option<Vec<SnapshotTopologyBoundary>> {
+    for (index, boundary) in scope.iter().enumerate() {
+        match boundary {
+            SnapshotTopologyBoundary::FunctionParameter(_) | SnapshotTopologyBoundary::FunctionResult => {
+                return None;
+            }
+            SnapshotTopologyBoundary::AppliedArgument { base, .. }
+                if base == "sys.HistoricalCallable"
+                    || base == "sys.HistoricalNamespace" =>
+            {
+                return Some(scope[..index].to_vec());
+            }
+            _ => {}
+        }
+    }
+    // Preserve the established first structural rollback boundary for direct
+    // pin maps and aggregate dimensions. Historical callable pairs carry a
+    // coupled captured context, so their sibling tuple slot is the narrowest
+    // safe boundary and is returned above.
+    scope.first().cloned().map(|boundary| vec![boundary])
+}
+
+fn checkpoint_value_at_scope<'a>(
+    value: &'a Type,
+    scope: &[SnapshotTopologyBoundary],
+) -> Option<&'a Type> {
+    let Some((boundary, rest)) = scope.split_first() else {
+        return Some(value);
+    };
+    let child = match (value, boundary) {
+        (Type::Record(fields), SnapshotTopologyBoundary::RecordField(name)) => fields.get(name)?,
+        (Type::Tuple(slots), SnapshotTopologyBoundary::TupleElement(index)) => slots.get(*index)?,
+        (Type::List(element), SnapshotTopologyBoundary::ListElement)
+        | (Type::Range(element), SnapshotTopologyBoundary::RangeElement)
+        | (Type::Relation(element), SnapshotTopologyBoundary::RelationElement)
+        | (Type::Stream(element), SnapshotTopologyBoundary::StreamElement)
+        | (Type::Optional(element), SnapshotTopologyBoundary::OptionalValue) => element,
+        (
+            Type::Applied { base, arguments },
+            SnapshotTopologyBoundary::AppliedArgument {
+                base: boundary_base,
+                index,
+            },
+        ) if base == boundary_base => arguments.get(*index)?,
+        (
+            Type::MoneyPerUnit { currency, .. },
+            SnapshotTopologyBoundary::MoneyCurrency,
+        ) => currency,
+        (Type::MoneyPerUnit { unit, .. }, SnapshotTopologyBoundary::MoneyUnit) => unit,
+        _ => return None,
+    };
+    checkpoint_value_at_scope(child, rest)
+}
+
+fn checkpoint_replace_value_at_scope(
+    value: &mut Type,
+    scope: &[SnapshotTopologyBoundary],
+    replacement: &Type,
+) -> bool {
+    let Some((boundary, rest)) = scope.split_first() else {
+        *value = replacement.clone();
+        return true;
+    };
+    let child = match (value, boundary) {
+        (Type::Record(fields), SnapshotTopologyBoundary::RecordField(name)) => {
+            fields.get_mut(name)
+        }
+        (Type::Tuple(slots), SnapshotTopologyBoundary::TupleElement(index)) => {
+            slots.get_mut(*index)
+        }
+        (Type::List(element), SnapshotTopologyBoundary::ListElement)
+        | (Type::Range(element), SnapshotTopologyBoundary::RangeElement)
+        | (Type::Relation(element), SnapshotTopologyBoundary::RelationElement)
+        | (Type::Stream(element), SnapshotTopologyBoundary::StreamElement)
+        | (Type::Optional(element), SnapshotTopologyBoundary::OptionalValue) => {
+            Some(element.as_mut())
+        }
+        (
+            Type::Applied { base, arguments },
+            SnapshotTopologyBoundary::AppliedArgument {
+                base: boundary_base,
+                index,
+            },
+        ) if base == boundary_base => arguments.get_mut(*index),
+        (
+            Type::MoneyPerUnit { currency, .. },
+            SnapshotTopologyBoundary::MoneyCurrency,
+        ) => Some(currency.as_mut()),
+        (Type::MoneyPerUnit { unit, .. }, SnapshotTopologyBoundary::MoneyUnit) => {
+            Some(unit.as_mut())
+        }
+        _ => None,
+    };
+    child.is_some_and(|child| checkpoint_replace_value_at_scope(child, rest, replacement))
 }
 
 fn checkpoint_topology_mismatch_paths(

@@ -36,6 +36,7 @@ pub struct GeneratedSysArtifacts {
     pub schema_json: String,
     pub provider_abi_json: String,
     pub binding_modules: BTreeMap<String, String>,
+    pub binding_modules_json: String,
     pub binding_bundle: String,
 }
 
@@ -111,12 +112,18 @@ pub fn generate_sys_artifacts(
         .as_array()
         .ok_or_else(|| "generated typed provider operations must be an array".to_owned())?;
     let (binding_modules, binding_bundle) = generate_binding_bundle(operations)?;
+    let mut binding_modules_json = canonical_pretty_json(
+        &serde_json::to_value(&binding_modules).map_err(|error| error.to_string())?,
+    )
+    .map_err(|error| error.to_string())?;
+    binding_modules_json.push('\n');
 
     Ok(GeneratedSysArtifacts {
         api_json,
         schema_json,
         provider_abi_json,
         binding_modules,
+        binding_modules_json,
         binding_bundle,
     })
 }

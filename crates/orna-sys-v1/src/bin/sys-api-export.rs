@@ -4,18 +4,87 @@ use std::{
     error::Error,
     fs,
     io::{self, Write},
-    path::Path,
+    path::{Component, Path},
 };
 
 use orna_sys_v1::{
-    SystemProviderAbi, system_api_json, system_api_schema_json, system_binding_stubs,
-    system_dispatch_table, system_host_operation_registry_json,
+    SystemProviderAbi, system_api_json, system_api_schema_json, system_binding_modules_json,
+    system_binding_stubs, system_dispatch_table, system_host_operation_registry_json,
     system_host_operation_registry_schema_json, system_provider_abi_json,
     system_provider_abi_schema_json,
 };
 use serde_json::Value;
 
-const USAGE: &str = "sys-api-export [--schema|--provider-abi|--provider-abi-schema|--host-operations|--host-operations-schema|--bindings] [output-path]";
+const USAGE: &str = "sys-api-export [--schema|--provider-abi|--provider-abi-schema|--host-operations|--host-operations-schema|--bindings|--binding-modules] [output-path] | --all output-directory";
+
+fn write_export(root: &Path, relative_path: &Path, content: &str) -> Result<(), Box<dyn Error>> {
+    let path = root.join(relative_path);
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(path, content)?;
+    Ok(())
+}
+
+fn export_all(output_dir: &Path) -> Result<(), Box<dyn Error>> {
+    let api_json = system_api_json();
+    let artifacts = [
+        ("api_sys.json", api_json.as_str()),
+        ("system_api_schema.json", system_api_schema_json()),
+        ("system_provider_abi.json", system_provider_abi_json()),
+        (
+            "system_provider_abi.schema.json",
+            system_provider_abi_schema_json(),
+        ),
+        (
+            "system_host_operations.json",
+            system_host_operation_registry_json(),
+        ),
+        (
+            "system_host_operations.schema.json",
+            system_host_operation_registry_schema_json(),
+        ),
+        ("system_bindings.orna", system_binding_stubs()),
+        ("system_binding_modules.json", system_binding_modules_json()),
+    ];
+    if output_dir.exists() && fs::read_dir(output_dir)?.next().is_some() {
+        return Err(format!(
+            "complete artifact export requires an empty output directory: {}",
+            output_dir.display()
+        )
+        .into());
+    }
+    fs::create_dir_all(output_dir)?;
+    for (name, content) in artifacts {
+        write_export(output_dir, Path::new(name), content)?;
+    }
+
+    let modules: std::collections::BTreeMap<String, String> =
+        serde_json::from_str(system_binding_modules_json())?;
+    for (module_path, source) in modules {
+        let relative_path = Path::new(&module_path);
+        let valid_path = !relative_path.is_absolute()
+            && relative_path
+                .components()
+                .all(|component| matches!(component, Component::Normal(_)))
+            && relative_path
+                .extension()
+                .and_then(|extension| extension.to_str())
+                == Some("orna");
+        if !valid_path {
+            return Err(format!("invalid generated binding module path `{module_path}`").into());
+        }
+        write_export(
+            output_dir,
+            &Path::new("system_bindings").join(relative_path),
+            &source,
+        )?;
+    }
+    Ok(())
+}
 
 fn validate_embedded_schema(api_json: &str, schema_json: &str) -> Result<(), Box<dyn Error>> {
     let api: Value = serde_json::from_str(api_json)?;
@@ -112,6 +181,16 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let mut arguments = env::args_os().skip(1);
     let first = arguments.next();
+    if first.as_deref().and_then(|arg| arg.to_str()) == Some("--all") {
+        let Some(output_dir) = arguments.next() else {
+            return Err(format!("--all requires an output directory; usage: {USAGE}").into());
+        };
+        if arguments.next().is_some() {
+            return Err(format!("usage: {USAGE}").into());
+        }
+        export_all(Path::new(&output_dir))?;
+        return Ok(());
+    }
     let (content, output) = match first.as_deref().and_then(|arg| arg.to_str()) {
         Some("--schema") => (schema_json, arguments.next()),
         Some("--provider-abi") => (provider_json, arguments.next()),
@@ -122,6 +201,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             arguments.next(),
         ),
         Some("--bindings") => (system_binding_stubs(), arguments.next()),
+        Some("--binding-modules") => (system_binding_modules_json(), arguments.next()),
         Some(argument) if argument.starts_with("--") => {
             return Err(format!("unknown option `{argument}`; usage: {USAGE}").into());
         }
