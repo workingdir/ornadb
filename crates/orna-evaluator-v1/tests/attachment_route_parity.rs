@@ -2678,7 +2678,7 @@ fn sparse_nested_storm_folds_preserve_terminal_route_identity() {
     );
     let expected_chain_identities = [
         first_chain_identity.clone(),
-        middle_chain_identity,
+        middle_chain_identity.clone(),
         restored_chain_identity.clone(),
     ];
     let identity_checked_rebind_chains = resolver
@@ -2707,6 +2707,51 @@ fn sparse_nested_storm_folds_preserve_terminal_route_identity() {
         leaf_final,
         "the final sparse chain restores the actual terminal package snapshot"
     );
+    let segmented_rebind_chains = [
+        first_sparse_chain.as_slice(),
+        middle_rebind_chain.as_slice(),
+    ];
+    let segmented_omission_chains = [
+        omission_tail_chain.as_slice(),
+        omission_tail_chain.as_slice(),
+    ];
+    let (segmented_route, segment_identities) = resolver
+        .extend_nested_terminal_pair_sparse_checkpoint_storm_rebind_omission_segments_preserving_terminal_identities(
+            &first_stage,
+            &segmented_rebind_chains,
+            &segmented_omission_chains,
+        )
+        .unwrap();
+    assert_eq!(
+        segment_identities,
+        [first_chain_identity.clone(), middle_chain_identity.clone()],
+        "each paired omission segment retains the exact identity produced by its rebind"
+    );
+    assert_eq!(
+        segmented_route.terminal_route_identity(),
+        middle_chain_identity,
+        "the final sparse route fold retains the last segment's terminal identity"
+    );
+    assert_eq!(
+        segmented_route
+            .final_session()
+            .database(aliases[4])
+            .unwrap()
+            .pin()
+            .commit()
+            .as_str(),
+        leaf_middle,
+        "the final route still resolves to the computed terminal package snapshot"
+    );
+    assert!(matches!(
+        resolver
+            .extend_nested_terminal_pair_sparse_checkpoint_storm_rebind_omission_segments_preserving_terminal_identities(
+                &first_stage,
+                &segmented_rebind_chains,
+                &[omission_tail_chain.as_slice()],
+            ),
+        Err(AttachmentError::RetainedSnapshotUnavailable)
+    ));
     let stale_intermediate_identities = [
         first_chain_identity.clone(),
         first_chain_identity,
