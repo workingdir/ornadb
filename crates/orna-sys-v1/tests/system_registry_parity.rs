@@ -1209,6 +1209,147 @@ fn generated_provider_schema_rejects_root_and_nested_registry_drift() {
 }
 
 #[test]
+fn generated_provider_schema_drift_cannot_weaken_identifier_guard() {
+    let regenerated = regenerate();
+    let provider_schema_json = build_provider::generate_provider_registry_schema()
+        .expect("provider dispatch schema regenerates from its generator");
+    assert_eq!(provider_schema_json, system_provider_abi_schema_json());
+    let mut provider_schema: Value =
+        serde_json::from_str(&provider_schema_json).expect("generated provider schema is JSON");
+    let registry: Value =
+        serde_json::from_str(system_provider_abi_json()).expect("embedded provider registry JSON");
+    build_host::validate_json_against_schema(system_provider_abi_json(), &provider_schema_json)
+        .expect("embedded provider registry conforms to its generated schema");
+
+    let mut malformed_registry = registry;
+    malformed_registry["roles"][0]["name"] = Value::String("invalid role id".to_owned());
+    let malformed_json = malformed_registry.to_string();
+    assert!(
+        build_host::validate_json_against_schema(&malformed_json, &provider_schema_json)
+            .unwrap_err()
+            .contains("identifier pattern"),
+        "generated schema rejects an invalid provider role identifier"
+    );
+    assert_eq!(
+        SystemProviderAbi::from_json(&malformed_json),
+        Err(orna_sys_v1::ProviderAbiError::InvalidRoleId),
+        "typed registry parser independently rejects the malformed role"
+    );
+
+    provider_schema["$defs"]["role"]["properties"]["name"]
+        .as_object_mut()
+        .expect("provider role name schema is an object")
+        .remove("pattern")
+        .expect("generated provider role names have an identifier pattern");
+    let weakened_schema_json =
+        build_support::canonical_pretty_json(&provider_schema).unwrap() + "\n";
+    build_host::validate_json_against_schema(&malformed_json, &weakened_schema_json)
+        .expect("weakened schema exposes why the generated identifier guard matters");
+    assert_eq!(
+        SystemProviderAbi::from_json(&malformed_json),
+        Err(orna_sys_v1::ProviderAbiError::InvalidRoleId),
+        "schema weakening does not alter the typed parser's rejection"
+    );
+
+    let source_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let host_registry_json = build_host::generate_host_registry(&source_root)
+        .expect("host registry regenerates alongside the provider schema");
+    let host_schema_json = build_host::generate_host_registry_schema()
+        .expect("host operation schema regenerates alongside provider schema");
+    let provider_schema_json = build_provider::generate_provider_registry_schema().unwrap();
+    let out_dir = Path::new(env!("OUT_DIR"));
+    let temp_root = std::env::temp_dir().join(format!(
+        "orna-sys-provider-schema-drift-{}-{}",
+        std::process::id(),
+        std::thread::current().name().unwrap_or("test")
+    ));
+    let _ = fs::remove_dir_all(&temp_root);
+    copy_output_tree(out_dir, &temp_root).expect("copy generated artifacts for schema drift probe");
+    fs::write(
+        temp_root.join("system_provider_abi.schema.json"),
+        &weakened_schema_json,
+    )
+    .expect("weaken only the copied generated provider schema");
+    let drift = verify_generated_output_tree(
+        &temp_root,
+        &regenerated,
+        &host_registry_json,
+        &host_schema_json,
+        &provider_schema_json,
+    )
+    .expect_err("artifact parity rejects a weakened generated provider schema");
+    assert!(
+        drift.contains("system_provider_abi.schema.json"),
+        "schema drift diagnostic names the generated schema: {drift}"
+    );
+    fs::remove_dir_all(&temp_root).expect("remove temporary schema drift artifacts");
+
+    println!(
+        "generated_provider_schema_semantic_drift original_schema_rejected=1 weakened_schema_acceptances=1 typed_parser_rejections=2 artifact_drift_rejections=1 total_cases=5"
+    );
+}
+
+#[test]
+fn generated_dispatch_metadata_rejects_provider_role_version_source_drift() {
+    let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let collector = build_support::collect_rust_sources(&manifest.join("src"))
+        .expect("annotated implementation methods form a valid provider registry");
+    let registry = collector
+        .type_graph
+        .clone()
+        .expect("annotated provider registry owns its type graph");
+    let schema = collector
+        .schema
+        .clone()
+        .expect("annotated provider registry owns its schema");
+    let mut functions = collector.functions;
+    let baseline = build_support::generate_sys_artifacts(&functions, registry.clone(), &schema)
+        .expect("typed source generates provider dispatch metadata");
+    assert_eq!(baseline.provider_abi_json, system_provider_abi_json());
+    let provider_schema = build_provider::generate_provider_registry_schema()
+        .expect("generated dispatch metadata schema is reproducible");
+    build_host::validate_json_against_schema(&baseline.provider_abi_json, &provider_schema)
+        .expect("generated dispatch metadata conforms to its schema");
+    let parsed = SystemProviderAbi::from_json(&baseline.provider_abi_json)
+        .expect("generated provider metadata parses into the runtime dispatch table");
+    assert_eq!(&parsed, system_dispatch_table());
+
+    let mut role_members = BTreeMap::<String, Vec<(usize, u16, u16)>>::new();
+    for (index, function) in functions.iter().enumerate() {
+        let Some(role) = &function.role else {
+            continue;
+        };
+        let (name, major, minor) =
+            build_support::parse_role_version(role).expect("source role has a parsed version");
+        role_members
+            .entry(name.to_owned())
+            .or_default()
+            .push((index, major, minor));
+    }
+    let (role_name, members) = role_members
+        .into_iter()
+        .find(|(_, members)| members.len() > 1)
+        .expect("provider registry includes a role shared by multiple operations");
+    let (changed_index, major, minor) = members[0];
+    let changed_minor = minor
+        .checked_add(1)
+        .expect("source provider role minor version can be advanced for the drift probe");
+    functions[changed_index].role = Some(format!("{role_name}@{major}.{changed_minor}"));
+
+    let drift = build_support::generate_sys_artifacts(&functions, registry, &schema)
+        .expect_err("inconsistent source role versions stop dispatch metadata generation");
+    assert!(
+        drift.contains(&format!(
+            "semantic role `{role_name}` declares multiple versions"
+        )),
+        "generation diagnostic identifies the inconsistent provider role: {drift}"
+    );
+    println!(
+        "generated_dispatch_metadata_source_validation baseline_parity=embedded,schema,runtime inconsistent_role_versions_rejected=1 total_cases=4"
+    );
+}
+
+#[test]
 fn generated_artifact_drift_probe_rejects_tampered_outputs_and_stale_modules() {
     let regenerated = regenerate();
     let source_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");

@@ -18367,7 +18367,6 @@ fn paired_sparse_restoration_fold_chain_replays_saved_identity() {
         BTreeSet::from(["selector:HEAD~6001".to_owned()])
     );
 }
-
 #[test]
 fn paired_sparse_compaction_fold_chain_keeps_learned_omission_identity() {
     let source = include_str!("fixtures/historical-paired-sparse-compaction-fold-chain.orna");
