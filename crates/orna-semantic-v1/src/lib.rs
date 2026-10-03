@@ -8993,9 +8993,14 @@ fn infer_assignment(
                         // incompatible structured checkpoint resets. Keep the
                         // local unchanged and explain why this source cannot
                         // continue the pin-stable chain.
+                        let message = if paired_dynamic_snapshot_reset(&expected, &value.ty) {
+                            "paired checkpoint reset must preserve each omitted lane's snapshot identity"
+                        } else {
+                            "checkpoint reset source must preserve nested snapshot pin topology and callable contracts"
+                        };
                         diagnostics.push(diag(
                             DIAG_TYPE,
-                            "checkpoint reset source must preserve nested snapshot pin topology and callable contracts",
+                            message,
                         ));
                     } else {
                         require_same(&expected, &value.ty, diagnostics);
@@ -18638,6 +18643,42 @@ fn collect_reset_maps_at_boundary(
 
 fn type_contains_pinned_snapshot_identity(ty: &Type) -> bool {
     checkpoint_snapshot_maps_are_valid(ty) && type_contains_valid_pinned_snapshot_identity(ty)
+}
+
+/// Paired reset chains can contain symbolic selectors for omitted closure
+/// inputs. Keep their lane-specific failure actionable; the reference is
+/// silent on diagnostics for incompatible local checkpoint resets.
+fn paired_dynamic_snapshot_reset(expected: &Type, selected: &Type) -> bool {
+    matches!((expected, selected), (Type::Tuple(expected), Type::Tuple(selected))
+        if expected.len() > 1
+            && expected.len() == selected.len()
+            && expected.iter().any(type_contains_dynamic_snapshot_identity)
+            && selected.iter().any(type_contains_dynamic_snapshot_identity))
+}
+
+fn type_contains_dynamic_snapshot_identity(ty: &Type) -> bool {
+    match ty {
+        Type::Applied { base, arguments } if base == "sys.SnapshotRefContext" => {
+            matches!(arguments.as_slice(), [Type::Named(selector)] if selector.starts_with("selector:dynamic-call:"))
+        }
+        Type::List(inner)
+        | Type::Range(inner)
+        | Type::Relation(inner)
+        | Type::Stream(inner)
+        | Type::Optional(inner) => type_contains_dynamic_snapshot_identity(inner),
+        Type::Tuple(elements) => elements.iter().any(type_contains_dynamic_snapshot_identity),
+        Type::Record(fields) => fields.values().any(type_contains_dynamic_snapshot_identity),
+        Type::Applied { arguments, .. } => arguments.iter().any(type_contains_dynamic_snapshot_identity),
+        Type::Function { parameters, result, .. } => {
+            parameters.iter().any(type_contains_dynamic_snapshot_identity)
+                || type_contains_dynamic_snapshot_identity(result)
+        }
+        Type::MoneyPerUnit { currency, unit } => {
+            type_contains_dynamic_snapshot_identity(currency)
+                || type_contains_dynamic_snapshot_identity(unit)
+        }
+        _ => false,
+    }
 }
 
 fn type_contains_valid_pinned_snapshot_identity(ty: &Type) -> bool {
