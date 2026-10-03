@@ -1,0 +1,38 @@
+pub fn factory_at(pin: sys.SnapshotRef) =
+    sys.database.as_of(pin).energy.factory;
+
+// When a fold crosses the two omitted first-depth pins together, retain both
+// rollback anchors and keep each unaffected depth's selectors in its own slot.
+pub fn paired_rollback_extension_depths(failure: Error) {
+    let parents = [
+        {
+            nested: {
+                left: { pins: ((fail(failure), factory_at(sys.snapshot("HEAD~11"))), (factory_at(sys.snapshot("HEAD~20")), factory_at(sys.snapshot("HEAD~21")))) },
+                right: { pins: ((fail(failure), factory_at(sys.snapshot("HEAD~31"))), (factory_at(sys.snapshot("HEAD~40")), factory_at(sys.snapshot("HEAD~41")))) },
+                steady: { pins: ((factory_at(sys.snapshot("HEAD~800")), factory_at(sys.snapshot("HEAD~801"))), (factory_at(sys.snapshot("HEAD~810")), factory_at(sys.snapshot("HEAD~811")))) },
+            },
+        },
+        {
+            nested: {
+                left: { pins: ((factory_at(sys.snapshot("HEAD~50")), factory_at(sys.snapshot("HEAD~11"))), (factory_at(sys.snapshot("HEAD~20")), factory_at(sys.snapshot("HEAD~21")))) },
+                right: { pins: ((factory_at(sys.snapshot("HEAD~70")), factory_at(sys.snapshot("HEAD~31"))), (factory_at(sys.snapshot("HEAD~40")), factory_at(sys.snapshot("HEAD~41")))) },
+                steady: { pins: ((factory_at(sys.snapshot("HEAD~900")), factory_at(sys.snapshot("HEAD~901"))), (factory_at(sys.snapshot("HEAD~910")), factory_at(sys.snapshot("HEAD~911")))) },
+            },
+        },
+        {
+            nested: {
+                left: { pins: ((factory_at(sys.snapshot("HEAD~70")), factory_at(sys.snapshot("HEAD~11"))), (factory_at(sys.snapshot("HEAD~20")), factory_at(sys.snapshot("HEAD~21")))) },
+                right: { pins: ((factory_at(sys.snapshot("HEAD~50")), factory_at(sys.snapshot("HEAD~31"))), (factory_at(sys.snapshot("HEAD~40")), factory_at(sys.snapshot("HEAD~41")))) },
+                steady: { pins: ((factory_at(sys.snapshot("HEAD~1000")), factory_at(sys.snapshot("HEAD~1001"))), (factory_at(sys.snapshot("HEAD~1010")), factory_at(sys.snapshot("HEAD~1011")))) },
+            },
+        },
+        {
+            nested: {
+                left: { pins: ((factory_at(sys.snapshot("HEAD~90")), factory_at(sys.snapshot("HEAD~11"))), (factory_at(sys.snapshot("HEAD~120")), factory_at(sys.snapshot("HEAD~121")))) },
+                right: { pins: ((factory_at(sys.snapshot("HEAD~110")), factory_at(sys.snapshot("HEAD~31"))), (factory_at(sys.snapshot("HEAD~140")), factory_at(sys.snapshot("HEAD~141")))) },
+                steady: { pins: ((factory_at(sys.snapshot("HEAD~1100")), factory_at(sys.snapshot("HEAD~1101"))), (factory_at(sys.snapshot("HEAD~1110")), factory_at(sys.snapshot("HEAD~1111")))) },
+            },
+        },
+    ];
+    { parent_fold: parents }
+}
