@@ -1,0 +1,29 @@
+pub fn factory_at(pin: sys.SnapshotRef) =
+    sys.database.as_of(pin).energy.factory;
+
+pub fn late_paired_omission_sibling_fold(failure: Error) {
+    let parents = [
+        {
+            nested: {
+                left: { pins: ((factory_at(sys.snapshot("HEAD~100")), factory_at(sys.snapshot("HEAD~101"))), (factory_at(sys.snapshot("HEAD~110")), factory_at(sys.snapshot("HEAD~111")))) },
+                right: { pins: ((factory_at(sys.snapshot("HEAD~200")), factory_at(sys.snapshot("HEAD~201"))), (factory_at(sys.snapshot("HEAD~210")), factory_at(sys.snapshot("HEAD~211")))) },
+                steady: { pins: ((factory_at(sys.snapshot("HEAD~800")), factory_at(sys.snapshot("HEAD~801"))), (factory_at(sys.snapshot("HEAD~810")), factory_at(sys.snapshot("HEAD~811")))) },
+            },
+        },
+        {
+            nested: {
+                left: { pins: ((factory_at(sys.snapshot("HEAD~200")), factory_at(sys.snapshot("HEAD~301"))), (factory_at(sys.snapshot("HEAD~310")), factory_at(sys.snapshot("HEAD~311")))) },
+                right: { pins: ((fail(failure), fail(failure)), (factory_at(sys.snapshot("HEAD~410")), factory_at(sys.snapshot("HEAD~411")))) },
+                steady: { pins: ((factory_at(sys.snapshot("HEAD~900")), factory_at(sys.snapshot("HEAD~901"))), (factory_at(sys.snapshot("HEAD~910")), factory_at(sys.snapshot("HEAD~911")))) },
+            },
+        },
+        {
+            nested: {
+                left: { pins: ((factory_at(sys.snapshot("HEAD~600")), factory_at(sys.snapshot("HEAD~601"))), (factory_at(sys.snapshot("HEAD~610")), factory_at(sys.snapshot("HEAD~611")))) },
+                right: { pins: ((factory_at(sys.snapshot("HEAD~700")), factory_at(sys.snapshot("HEAD~701"))), (factory_at(sys.snapshot("HEAD~710")), factory_at(sys.snapshot("HEAD~711")))) },
+                steady: { pins: ((factory_at(sys.snapshot("HEAD~1000")), factory_at(sys.snapshot("HEAD~1001"))), (factory_at(sys.snapshot("HEAD~1010")), factory_at(sys.snapshot("HEAD~1011")))) },
+            },
+        },
+    ];
+    { parent_fold: parents }
+}
