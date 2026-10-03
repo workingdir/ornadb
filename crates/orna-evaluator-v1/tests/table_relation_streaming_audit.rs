@@ -1333,6 +1333,106 @@ fn paired_view_long_cursor_spill_chains_keep_refresh_identity() {
     );
 }
 
+#[test]
+fn paired_view_prefix_spill_cursors_keep_scope_across_handoffs() {
+    let cursor_prefix = vec![0x61; 96];
+    let mut cursor_one = cursor_prefix.clone();
+    cursor_one.push(0);
+    let mut cursor_two = cursor_one.clone();
+    cursor_two.push(1);
+    assert!(cursor_prefix.as_slice() < cursor_one.as_slice());
+    assert!(cursor_one.as_slice() < cursor_two.as_slice());
+    let subscriptions = [
+        (
+            "View.Left",
+            vec![page(&[3], Some(cursor_prefix.clone())), page(&[1], None)],
+        ),
+        ("View.Left", vec![page(&[4], None)]),
+        (
+            "View.Right",
+            vec![
+                page(&[-1], Some(cursor_prefix.clone())),
+                page(&[1], Some(cursor_one.clone())),
+                page(&[3], None),
+            ],
+        ),
+        (
+            "View.Right",
+            vec![page(&[6], Some(cursor_prefix.clone())), page(&[7], None)],
+        ),
+        ("View.Left", vec![page(&[1], None)]),
+        (
+            "View.Left",
+            vec![
+                page(&[2], Some(cursor_prefix.clone())),
+                page(&[4], Some(cursor_one.clone())),
+                page(&[6], Some(cursor_two.clone())),
+                page(&[8], None),
+            ],
+        ),
+        (
+            "View.Right",
+            vec![page(&[-3], Some(cursor_prefix.clone())), page(&[5], None)],
+        ),
+        (
+            "View.Right",
+            vec![page(&[2], Some(cursor_prefix.clone())), page(&[6], None)],
+        ),
+        (
+            "View.Left",
+            vec![page(&[-1], Some(cursor_prefix.clone())), page(&[3], None)],
+        ),
+        (
+            "View.Left",
+            vec![page(&[2], Some(cursor_prefix.clone())), page(&[4], None)],
+        ),
+        (
+            "View.Right",
+            vec![
+                page(&[1], Some(cursor_prefix.clone())),
+                page(&[3], Some(cursor_one.clone())),
+                page(&[5], Some(cursor_two.clone())),
+                page(&[7], None),
+            ],
+        ),
+        (
+            "View.Right",
+            vec![
+                page(&[2], Some(cursor_prefix.clone())),
+                page(&[4], Some(cursor_one.clone())),
+                page(&[6], None),
+            ],
+        ),
+    ];
+    let mut source = PairedViewRefreshSource::new(subscriptions);
+
+    let first = run_with_fixture_functions(paired_scoped_view_refresh_body(), &mut source).unwrap();
+    assert_eq!(first, integer(24));
+    let second = run_with_fixture_functions(paired_scoped_view_refresh_body(), &mut source).unwrap();
+    assert_eq!(second, integer(27));
+    let third = run_with_fixture_functions(paired_scoped_view_refresh_body(), &mut source).unwrap();
+    assert_eq!(third, integer(33));
+    assert_eq!(first, integer(24), "the first prefix-spill fold remains captured");
+    assert_eq!(second, integer(27), "the middle prefix-spill fold remains captured");
+
+    assert_eq!(source.lanes.len(), 12, "four pagination scopes bind per refresh");
+    for generation in 0..3 {
+        let start = generation * 4;
+        assert_eq!(source.lanes[start].0, "View.Left");
+        assert_eq!(source.lanes[start + 1].0, "View.Left");
+        assert_eq!(source.lanes[start + 2].0, "View.Right");
+        assert_eq!(source.lanes[start + 3].0, "View.Right");
+    }
+    let scopes = source.lanes.iter().map(|(_, scope, _)| *scope).collect::<Vec<_>>();
+    for (index, scope) in scopes.iter().enumerate() {
+        assert!(
+            !scopes[..index].contains(scope),
+            "nested-prefix cursor payloads remain bound to distinct scopes: {scope:?}"
+        );
+    }
+    assert_eq!(source.cursors.len(), 28, "all prefix-spill page chains are consumed");
+}
+
 fn paired_subscription_cascade_body() -> Expr {
     let left = relation_stage(
         relation_stage(
