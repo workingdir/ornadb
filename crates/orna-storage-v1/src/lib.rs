@@ -5,72 +5,63 @@
 //! adapter must supply observations and enact returned plans.  Unknown or
 //! changed external state is a typed conflict, never permission to overwrite.
 
+mod branch_merge;
 mod compact;
 mod compact_parquet;
-mod branch_merge;
 mod maintenance;
 mod placement;
-mod scan_planner;
 mod publication_policy;
+mod scan_planner;
 
 pub use branch_merge::{
     BranchMergeBudget, BranchMergeColumnDepthEvent, BranchMergeColumnDepthFragmentSnapshot,
     BranchMergeColumnDepthFragments, BranchMergeColumnDepthLadderEvent,
     BranchMergeColumnDepthLadderSnapshot, BranchMergeColumnDepthLadderWaveSnapshot,
-    BranchMergeColumnRestoreLadderFoldSnapshot,
-    BranchMergeColumnRestoreLadderTimelineSnapshot,
-    BranchMergeColumnRestoreLadderWaveSlotSnapshot,
-    BranchMergeColumnRestoreStormSnapshot,
-    BranchMergeConflict, BranchMergeDepthFragmentRecovery,
-    BranchMergeDepthWaveRecovery, BranchMergeError, BranchMergePlan,
-    BranchMergeMultiParentColumnDepthLadderWaveEvent,
-    BranchMergeMultiParentColumnRestoreWaveSnapshot,
-    BranchMergeMultiParentTabularColumnDepthWave, BranchMergeParentColumnDepthEvent,
-    BranchMergeParentColumnDepthFragmentSnapshot,
+    BranchMergeColumnRestoreLadderFoldSnapshot, BranchMergeColumnRestoreLadderTimelineSnapshot,
+    BranchMergeColumnRestoreLadderWaveSlotSnapshot, BranchMergeColumnRestoreStormFoldSnapshot,
+    BranchMergeColumnRestoreStormLadderSnapshot, BranchMergeColumnRestoreStormSnapshot,
+    BranchMergeConflict, BranchMergeDepthFragmentRecovery, BranchMergeDepthWaveRecovery,
+    BranchMergeError, BranchMergeMultiParentColumnDepthLadderWaveEvent,
+    BranchMergeMultiParentColumnRestoreWaveSnapshot, BranchMergeMultiParentTabularColumnDepthWave,
+    BranchMergeParentColumnDepthEvent, BranchMergeParentColumnDepthFragmentSnapshot,
     BranchMergeParentColumnDepthLadderEvent, BranchMergeParentColumnDepthLadderSnapshot,
+    BranchMergePlan, BranchMergePlanSequenceError, BranchMergePlanSequencer, BranchMergeReport,
+    BranchMergeTableDepthFragments, BranchMergeTableDepthLadderEvent,
     BranchMergeTabularColumnDepthWave, BranchMergeTabularColumnRestoreWaveSnapshot,
-    BranchMergeTabularDepthWave,
-    BranchMergeTableDepthFragments,
-    BranchMergeTombstoneEvent, BranchMergeTombstoneHistory,
-    BranchMergeTombstoneHistoryError,
-    BranchMergePlanSequenceError, BranchMergePlanSequencer, BranchMergeReport,
-    BranchMergeTableDepthLadderEvent, SequencedBranchMergePlan,
-    BranchRowSource, CheckpointId, KeyRange, MergeSide, MergedSegment, MergedTable,
-    RowSegmentManifest, TableManifest, ThreeWaySnapshot, merge_three_way_snapshots,
+    BranchMergeTabularDepthWave, BranchMergeTombstoneEvent, BranchMergeTombstoneHistory,
+    BranchMergeTombstoneHistoryError, BranchRowSource, CheckpointId, KeyRange, MergeSide,
+    MergedSegment, MergedTable, RowSegmentManifest, SequencedBranchMergePlan, TableManifest,
+    ThreeWaySnapshot, merge_three_way_snapshots,
 };
 
 pub use compact::{
-    apply_migration_plan_to_compact, fold_compact_committed_base, lower_publication_freeze,
-    CompactBaseProjectionError, CompactBaseRow, CompactBaseState, CompactEditableRekey,
-    CompactExactKeyIndex, CompactExactKeySource, CompactHybridEvolution, CompactHybridRekey,
-    CompactKeyError, CompactKeyIdentity, CompactLogicalKeyError, CompactLogicalReader,
-    CompactLoweringError, CompactOvbProfile, CompactWriterInput, CompactWriterMutation,
-    CompactWriterMutationState, CompactWriterBatch, CompactWriterRow, COMPACT_STORAGE_PROFILE,
-    EditableBaseRow, HybridBaseState, OVB_PROFILE,
+    COMPACT_STORAGE_PROFILE, CompactBaseProjectionError, CompactBaseRow, CompactBaseState,
+    CompactEditableRekey, CompactExactKeyIndex, CompactExactKeySource, CompactHybridEvolution,
+    CompactHybridRekey, CompactKeyError, CompactKeyIdentity, CompactLogicalKeyError,
+    CompactLogicalReader, CompactLoweringError, CompactOvbProfile, CompactWriterBatch,
+    CompactWriterInput, CompactWriterMutation, CompactWriterMutationState, CompactWriterRow,
+    EditableBaseRow, HybridBaseState, OVB_PROFILE, apply_migration_plan_to_compact,
+    fold_compact_committed_base, lower_publication_freeze,
 };
 pub use compact_parquet::{CompactParquetError, CompactParquetKeySource};
 pub use maintenance::{
-    plan_compact_consolidation, CompactConsolidationError, CompactConsolidationPlan,
-    ConsolidatedRow, ConsolidationVerification, MIN_OVERLAY_BYTES_SHARE_PERCENT,
-    MIN_OVERLAY_SEGMENTS_FOR_CONSOLIDATION,
+    CompactConsolidationError, CompactConsolidationPlan, ConsolidatedRow,
+    ConsolidationVerification, MIN_OVERLAY_BYTES_SHARE_PERCENT,
+    MIN_OVERLAY_SEGMENTS_FOR_CONSOLIDATION, plan_compact_consolidation,
 };
 pub use placement::{
-    plan_storage_placement, plan_storage_rewrite, PhysicalPlacement, PlacementAction,
-    PlacementCandidate, PlacementDecision, PlacementPlan, StoragePlacementError,
-    StoragePlacementPolicy, StoragePreference, StorageProfile, StorageRewriteError, StorageRewritePlan,
-    StorageRewriteRow, StorageRewriteTarget, StorageRewriteVerification,
-    PlacementReason, AUTOMATIC_EDITABLE_MAX_PUBLICATION_BYTES,
-    AUTOMATIC_EDITABLE_MAX_ROWS, MAX_EDITABLE_ROW_BYTES, MAX_STORAGE_REWRITE_BYTES,
-    MAX_STORAGE_REWRITE_ROWS,
-};
-pub use scan_planner::{
-    plan_compact_scan, CompactKeyRange, CompactScanPlan, CompactScanPlanError,
+    AUTOMATIC_EDITABLE_MAX_PUBLICATION_BYTES, AUTOMATIC_EDITABLE_MAX_ROWS, MAX_EDITABLE_ROW_BYTES,
+    MAX_STORAGE_REWRITE_BYTES, MAX_STORAGE_REWRITE_ROWS, PhysicalPlacement, PlacementAction,
+    PlacementCandidate, PlacementDecision, PlacementPlan, PlacementReason, StoragePlacementError,
+    StoragePlacementPolicy, StoragePreference, StorageProfile, StorageRewriteError,
+    StorageRewritePlan, StorageRewriteRow, StorageRewriteTarget, StorageRewriteVerification,
+    plan_storage_placement, plan_storage_rewrite,
 };
 pub use publication_policy::{
-    CompactPublicationPolicy, CompactPublicationPolicyError, COMPACT_FILE_BOUND_BYTES,
-    DEFAULT_COMPRESSED_TARGET_BYTES, MAX_COMPRESSED_TARGET_BYTES,
-    MIN_COMPRESSED_TARGET_BYTES,
+    COMPACT_FILE_BOUND_BYTES, CompactPublicationPolicy, CompactPublicationPolicyError,
+    DEFAULT_COMPRESSED_TARGET_BYTES, MAX_COMPRESSED_TARGET_BYTES, MIN_COMPRESSED_TARGET_BYTES,
 };
+pub use scan_planner::{CompactKeyRange, CompactScanPlan, CompactScanPlanError, plan_compact_scan};
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -362,15 +353,18 @@ where
     }
     let mut merged: BTreeMap<CompactKeyIdentity, HybridLogicalRow<'a>> = BTreeMap::new();
     for row in base.rows() {
-        let encoded = row
-            .key()
-            .encode()
-            .map_err(|_| Error::HybridBaseMismatch)?;
+        let encoded = row.key().encode().map_err(|_| Error::HybridBaseMismatch)?;
         let key = profile
             .decode_key(&encoded)
             .map_err(|_| Error::HybridBaseMismatch)?;
         if merged
-            .insert(key.clone(), HybridLogicalRow::Compact { key: key.clone(), row })
+            .insert(
+                key.clone(),
+                HybridLogicalRow::Compact {
+                    key: key.clone(),
+                    row,
+                },
+            )
             .is_some()
         {
             return Err(Error::HybridDuplicateKey { key });
@@ -1270,8 +1264,9 @@ fn verify_compact_candidate_rows_at_commit(
             |_entry, projection| Ok(projection.clone()),
         )
         .map_err(map_publication_repository_error)?;
-    let actual = fold_compact_committed_base(profile, projections.iter(), manifest.next_generation())
-        .map_err(|_| Error::InvalidTransition)?;
+    let actual =
+        fold_compact_committed_base(profile, projections.iter(), manifest.next_generation())
+            .map_err(|_| Error::InvalidTransition)?;
     if !expected.has_same_logical_rows(&actual) {
         return Err(Error::InvalidTransition);
     }
@@ -1746,10 +1741,7 @@ mod tests {
     fn repository() -> (TempDir, Repository) {
         let temp = TempDir::new().unwrap();
         git(temp.path(), &["init", "-b", "main"]);
-        git(
-            temp.path(),
-            &["config", "user.email", "kieran@drewett.dev"],
-        );
+        git(temp.path(), &["config", "user.email", "kieran@drewett.dev"]);
         git(temp.path(), &["config", "user.name", "kierandrewett"]);
         git(temp.path(), &["config", "commit.gpgsign", "false"]);
         fs::write(temp.path().join("main.orna"), "module main;\n").unwrap();
@@ -2112,14 +2104,17 @@ mod tests {
         let (_temp, repository, runtime, freeze, plan) =
             compact_runtime_unpublished_fixture().await;
         let profile = CompactOvbProfile::new(compact_schema()).unwrap();
-        assert_eq!(RuntimePublicationCoordinator::publish_compact_and_complete_validated(
-            &repository,
-            &runtime,
-            &profile,
-            &freeze,
-            plan,
-        )
-        .await, Err(Error::InvalidTransition));
+        assert_eq!(
+            RuntimePublicationCoordinator::publish_compact_and_complete_validated(
+                &repository,
+                &runtime,
+                &profile,
+                &freeze,
+                plan,
+            )
+            .await,
+            Err(Error::InvalidTransition)
+        );
 
         assert_eq!(runtime.pending().await.unwrap().len(), 2);
         assert_eq!(repository.read_publication_journal().unwrap(), None);
@@ -4155,10 +4150,7 @@ mod tests {
             .read_compact_manifest(pending.commit(), Uuid::from_u128(1))
             .unwrap()
             .unwrap_or_else(|| {
-                CompactManifest::empty(
-                    Uuid::from_u128(1),
-                    profile.schema_fingerprint(),
-                )
+                CompactManifest::empty(Uuid::from_u128(1), profile.schema_fingerprint())
             });
         let base =
             fold_compact_committed_base(&profile, projections.iter(), manifest.next_generation())
