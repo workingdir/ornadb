@@ -49,6 +49,14 @@ pub fn paired_nested_omission_reset_replay_values(failure: Error) {
         right_partial_root((sys.snapshot("HEAD~240"), (sys.snapshot("HEAD~239"), sys.snapshot("HEAD~238"))))
             ((sys.snapshot("HEAD~230"), (fail(failure), sys.snapshot("HEAD~228")))),
     );
+
+    let shared_root = nested_checkpoint_wave(sys.snapshot("HEAD~200"));
+    rolling = (
+        shared_root((sys.snapshot("HEAD~190"), (sys.snapshot("HEAD~189"), sys.snapshot("HEAD~188"))))
+            ((fail(failure), (sys.snapshot("HEAD~179"), sys.snapshot("HEAD~178")))),
+        shared_root((sys.snapshot("HEAD~170"), (sys.snapshot("HEAD~169"), sys.snapshot("HEAD~168"))))
+            ((fail(failure), (sys.snapshot("HEAD~159"), sys.snapshot("HEAD~158")))),
+    );
     rolling = saved;
 
     let (left_replay, right_replay) = rolling;

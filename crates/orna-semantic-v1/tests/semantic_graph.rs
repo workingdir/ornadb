@@ -13089,14 +13089,17 @@ fn paired_nested_omission_reset_replay_restores_lane_pin_maps() {
         )],
         &historical_nested_callable_catalogue(),
     );
-    assert!(
-        result.is_ok(),
-        "paired nested omission folds must remain resettable and replay their saved pin maps: {:?}",
+    assert_eq!(
         result
             .diagnostics
             .iter()
             .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
-            .collect::<Vec<_>>()
+            .collect::<Vec<_>>(),
+        vec![(
+            "ORNA-S021-TYPE",
+            "paired checkpoint reset must preserve each omitted lane's snapshot identity"
+        )],
+        "a reset that aliases the paired lanes' omitted identities must be rejected specifically"
     );
     let module = result
         .modules
