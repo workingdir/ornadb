@@ -18790,7 +18790,11 @@ fn merge_multi_parent_checkpoint_value_scoped(
         _ => return scoped_checkpoint_rollback(rollback_anchor, path, rolled_back_paths),
     };
 
-    if !checkpoint_pin_map_widths_match(topology_anchor, &effective_parent)
+    if !checkpoint_paired_boundary_fold_topology_matches(
+        accumulated,
+        &effective_parent,
+        topology_anchor,
+    ) || !checkpoint_pin_map_widths_match(topology_anchor, &effective_parent)
         || !checkpoint_value_pin_identity_topology_matches(topology_anchor, &effective_parent)
         || !nested_checkpoint_compaction_fold_preserves_pin_identity(accumulated, &effective_parent)
     {
@@ -18840,28 +18844,55 @@ fn scoped_checkpoint_rollback(
 }
 
 /// Compare selector topology for paired record boundaries whose values contain
-/// pinned tuples, including boundaries nested inside another record. Do not
-/// cross collection or closure boundaries: their folds have independent
-/// rollback scopes. The reference is silent on nested record pairing, so use
-/// the direct-record rule recursively. This lets a partially omitted first
-/// row acquire its depth relation, then prevents later rows in the same storm
-/// from splitting that learned pair.
+/// pinned tuples, including boundaries nested through records, tuples, and
+/// optional values. Do not cross collection or closure boundaries: their folds
+/// have independent rollback scopes. The reference is silent on these nested
+/// pairings, so use the direct-record rule recursively. This lets a partially
+/// omitted first row acquire its depth relation, then prevents later rows in
+/// the same storm from splitting that learned pair.
 fn checkpoint_paired_boundary_fold_topology_matches(
     accumulated: &Type,
     parent: &Type,
     topology_anchor: &Type,
 ) -> bool {
-    let (Type::Record(accumulated_fields), Type::Record(parent_fields), Type::Record(anchor_fields)) =
-        (accumulated, parent, topology_anchor)
-    else {
-        return true;
-    };
+    checkpoint_paired_boundary_value_topology_matches(accumulated, parent, topology_anchor)
+}
 
-    checkpoint_paired_boundary_record_maps_match(
-        accumulated_fields,
-        parent_fields,
-        anchor_fields,
-    )
+fn checkpoint_paired_boundary_value_topology_matches(
+    accumulated: &Type,
+    parent: &Type,
+    topology_anchor: &Type,
+) -> bool {
+    match (accumulated, parent, topology_anchor) {
+        (Type::Record(accumulated), Type::Record(parent), Type::Record(anchor))
+            if accumulated.keys().eq(parent.keys()) && accumulated.keys().eq(anchor.keys()) =>
+        {
+            checkpoint_paired_boundary_record_maps_match(accumulated, parent, anchor)
+        }
+        (Type::Tuple(accumulated), Type::Tuple(parent), Type::Tuple(anchor))
+            if accumulated.len() == parent.len() && accumulated.len() == anchor.len() =>
+        {
+            accumulated
+                .iter()
+                .zip(parent)
+                .zip(anchor)
+                .all(|((accumulated, parent), anchor)| {
+                    checkpoint_paired_boundary_value_topology_matches(
+                        accumulated, parent, anchor,
+                    )
+                })
+        }
+        (
+            Type::Optional(accumulated),
+            Type::Optional(parent),
+            Type::Optional(anchor),
+        ) => checkpoint_paired_boundary_value_topology_matches(
+            accumulated,
+            parent,
+            anchor,
+        ),
+        _ => true,
+    }
 }
 
 fn checkpoint_paired_boundary_record_maps_match(
@@ -18872,13 +18903,13 @@ fn checkpoint_paired_boundary_record_maps_match(
     let paired_field_names = anchor_fields
         .iter()
         .filter_map(|(name, anchor)| {
-            (type_contains_pinned_tuple_through_records(anchor)
+            (type_contains_pinned_tuple_through_boundaries(anchor)
                 && accumulated_fields
                     .get(name)
-                    .is_some_and(type_contains_pinned_tuple_through_records)
+                    .is_some_and(type_contains_pinned_tuple_through_boundaries)
                 && parent_fields
                     .get(name)
-                    .is_some_and(type_contains_pinned_tuple_through_records))
+                    .is_some_and(type_contains_pinned_tuple_through_boundaries))
             .then_some(name)
         })
         .collect::<Vec<_>>();
@@ -18983,22 +19014,20 @@ fn checkpoint_paired_boundary_record_maps_match(
         else {
             return true;
         };
-        let (Type::Record(anchor), Type::Record(accumulated), Type::Record(parent)) =
-            (anchor, accumulated, parent)
-        else {
-            return true;
-        };
-        if anchor.keys().ne(accumulated.keys()) || anchor.keys().ne(parent.keys()) {
-            return true;
-        }
-        checkpoint_paired_boundary_record_maps_match(accumulated, parent, anchor)
+        checkpoint_paired_boundary_value_topology_matches(accumulated, parent, anchor)
     })
 }
 
-fn type_contains_pinned_tuple_through_records(ty: &Type) -> bool {
+fn type_contains_pinned_tuple_through_boundaries(ty: &Type) -> bool {
     match ty {
-        Type::Record(fields) => fields.values().any(type_contains_pinned_tuple_through_records),
-        Type::Tuple(_) => type_contains_pinned_snapshot_identity(ty),
+        Type::Record(fields) => fields.values().any(type_contains_pinned_tuple_through_boundaries),
+        Type::Tuple(elements) => {
+            type_contains_pinned_snapshot_identity(ty)
+                || elements
+                    .iter()
+                    .any(type_contains_pinned_tuple_through_boundaries)
+        }
+        Type::Optional(element) => type_contains_pinned_tuple_through_boundaries(element),
         _ => false,
     }
 }
@@ -19041,7 +19070,13 @@ fn checkpoint_paths_are_paired_boundaries(
     sibling_record_field_index < shared_tuple_depth_index
         && left[sibling_record_field_index + 1..shared_tuple_depth_index]
             .iter()
-            .all(|boundary| matches!(boundary, SnapshotTopologyBoundary::RecordField(_)))
+            .all(|boundary| {
+                matches!(
+                    boundary,
+                    SnapshotTopologyBoundary::RecordField(_)
+                        | SnapshotTopologyBoundary::OptionalValue
+                )
+            })
 }
 
 /// ORNA-CP-003 and ORNA-SYS-136 define explicit snapshot selection, but do not
