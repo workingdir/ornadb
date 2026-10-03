@@ -18379,6 +18379,9 @@ fn merge_multi_parent_checkpoint_value(
     parent: &Type,
     first_parent: &Type,
 ) -> Option<Type> {
+    if !checkpoint_fold_topology_matches_known_paths(accumulated, parent) {
+        return None;
+    }
     if matches!(first_parent, Type::Tuple(_)) {
         return merge_multi_parent_checkpoint_tuple(accumulated, parent, first_parent);
     }
@@ -18390,6 +18393,52 @@ fn merge_multi_parent_checkpoint_value(
     }
 
     merge_checkpoint_field_map(accumulated, parent)
+}
+
+/// Keep topology learned after an omitted first row stable through later
+/// parents. Compare the membership shapes represented by concrete maps in the
+/// accumulated fold and incoming row; selector names may differ, and a path
+/// omitted by either side remains unconstrained until a later parent fills it.
+/// The reference is silent on these local collection-fold semantics, so this
+/// conservatively prevents a later selector storm from splitting a paired
+/// depth already established by an earlier row.
+fn checkpoint_fold_topology_matches_known_paths(accumulated: &Type, parent: &Type) -> bool {
+    let mut pin_maps = Vec::new();
+    if !collect_corresponding_snapshot_context_maps_at_path(
+        accumulated,
+        parent,
+        &mut pin_maps,
+        &mut Vec::new(),
+    ) {
+        return false;
+    }
+
+    let present = pin_maps
+        .iter()
+        .filter(|pair| !pair.expected.is_empty() && !pair.actual.is_empty())
+        .collect::<Vec<_>>();
+    let membership_shapes = |expected: bool| {
+        let mut labels = BTreeMap::<String, BTreeSet<Vec<SnapshotTopologyBoundary>>>::new();
+        for pair in &present {
+            let selectors = if expected {
+                &pair.expected
+            } else {
+                &pair.actual
+            };
+            for selector in selectors {
+                labels
+                    .entry(selector.clone())
+                    .or_default()
+                    .insert(pair.boundary_path.clone());
+            }
+        }
+        labels
+            .into_values()
+            .map(|membership| membership.into_iter().collect::<Vec<_>>())
+            .collect::<BTreeSet<_>>()
+    };
+
+    membership_shapes(true) == membership_shapes(false)
 }
 
 /// ORNA-CP-003 and ORNA-SYS-136 define explicit snapshot selection, but do not
