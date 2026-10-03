@@ -29,10 +29,22 @@ use crate::{
     REFERENCE_STANDARD_ITERATOR_PATH_V1, REFERENCE_STANDARD_LAZY_PATH_V1,
     REFERENCE_STANDARD_VIEWS_PATH_V1,
     REFERENCE_STANDARD_INTROSPECTION_PATH_V1, REFERENCE_STANDARD_REFLECTION_PATH_V1,
-    REFERENCE_STANDARD_ALGORITHM_PATH_V1,
+    REFERENCE_STANDARD_ALGORITHM_PATH_V1, REFERENCE_STANDARD_UI_PATH_V1,
     reference_standard_catalogue_v1,
     reference_standard_profile_v1, reference_standard_sources_v1,
 };
+
+#[test]
+fn pinned_ui_presentation_helpers_are_included_as_source() {
+    let sources = reference_standard_sources_v1();
+    assert_eq!(sources.len(), 50);
+    assert_eq!(sources[49].0, REFERENCE_STANDARD_UI_PATH_V1);
+    let parsed = orna_syntax_v1::parse_module_with_file(
+        &sources[49].1,
+        REFERENCE_STANDARD_UI_PATH_V1,
+    );
+    assert!(parsed.is_ok(), "{:#?}", parsed.diagnostics);
+}
 
 #[test]
 fn pinned_algorithm_module_is_part_of_the_captured_std_snapshot() {
@@ -950,7 +962,27 @@ fn reference_standard_uses_pinned_orna_1_source_and_resolves_its_imports() {
     ] {
         assert!(sources[33].1.contains(contract), "missing std.test contract `{contract}`");
     }
-    assert_eq!(sources.len(), 49);
+    assert_eq!(sources.len(), 50);
+    assert_eq!(sources[49].0, REFERENCE_STANDARD_UI_PATH_V1);
+    for declaration in [
+        "pub fn Field<T>(label: Str, value: T): UI",
+        "pub fn Text(value: Str): UI",
+        "pub fn Rows(children: [UI]): UI",
+        "pub fn Details(fields: [UI]): UI",
+        "pub fn Button<A>(label: Str, action: A): UI",
+        "pub fn Form<A>(fields: [UI], submit: A? = null): UI",
+        "pub fn Input<T, A>(",
+    ] {
+        assert!(sources[49].1.contains(declaration), "missing std.ui declaration `{declaration}`");
+    }
+    for contract in [
+        "original value and its runtime type",
+        "Inspect fallback",
+        "never execute action descriptors",
+        "expected input type checked by the server-created event handle",
+    ] {
+        assert!(sources[49].1.contains(contract), "missing std.ui contract `{contract}`");
+    }
     assert_eq!(sources[34].0, REFERENCE_STANDARD_GENERICS_PATH_V1);
     for declaration in [
         "pub fn identity<T>(value: T): T",
@@ -1392,7 +1424,7 @@ fn pinned_filesystem_effect_is_visible_to_consumers_and_forbidden_in_assertions(
 #[test]
 fn pinned_filesystem_path_and_metadata_modules_are_captured_and_typecheck() {
     let sources = reference_standard_sources_v1();
-    assert_eq!(sources.len(), 49);
+    assert_eq!(sources.len(), 50);
     for (index, path) in [
         (42, REFERENCE_STANDARD_IO_PATH_MODULE_PATH_V1),
         (43, REFERENCE_STANDARD_IO_METADATA_PATH_V1),
@@ -1456,7 +1488,7 @@ fn pinned_filesystem_path_and_metadata_modules_are_captured_and_typecheck() {
 #[test]
 fn pinned_process_and_environment_modules_are_captured_and_typecheck() {
     let sources = reference_standard_sources_v1();
-    assert_eq!(sources.len(), 49);
+    assert_eq!(sources.len(), 50);
     for (index, path) in [
         (44, REFERENCE_STANDARD_IO_PROCESS_PATH_V1),
         (45, REFERENCE_STANDARD_IO_ENVIRONMENT_PATH_V1),
