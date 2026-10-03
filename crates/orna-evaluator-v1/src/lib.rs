@@ -3779,10 +3779,8 @@ impl Context<'_, '_> {
         depth: usize,
     ) -> Option<Result<Value, EvaluationError>> {
         let resolved = self.resolve_function_name(callee, scope);
-        let statistics_operation = input
-            .is_none()
-            .then(|| portable_statistics_operation(callee, resolved.as_deref(), scope))
-            .flatten();
+        let statistics_operation =
+            portable_statistics_operation(callee, resolved.as_deref(), scope);
         let native_export = is_native_collection_binding(
             callee,
             resolved.as_deref(),
