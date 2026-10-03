@@ -1443,6 +1443,33 @@ fn distinct_identity(value: &Value) -> Result<Vec<u8>, EvaluationError> {
         .map_err(|_| error("ORNA-EVAL-VALUE"))
 }
 
+/// Keeps the first original value for each canonical collection identity.
+/// Each query invocation constructs its own fold so paired recursive queries
+/// cannot suppress one another's anchor or recursive rows.
+#[derive(Default)]
+struct DistinctValueFold {
+    identities: HashSet<Vec<u8>>,
+    values: Vec<Value>,
+}
+
+impl DistinctValueFold {
+    fn insert(&mut self, value: Value) -> Result<bool, EvaluationError> {
+        if !self.identities.insert(distinct_identity(&value)?) {
+            return Ok(false);
+        }
+        self.values.push(value);
+        Ok(true)
+    }
+
+    fn len(&self) -> usize {
+        self.values.len()
+    }
+
+    fn into_values(self) -> Vec<Value> {
+        self.values
+    }
+}
+
 fn aggregate_task_failures(failures: &[EvaluationError]) -> EvaluationError {
     let Some(primary) = failures.first() else {
         return error("ORNA-EVAL-ERROR");
@@ -8496,16 +8523,14 @@ impl Context<'_, '_> {
         recursive_term: &Value,
         depth: usize,
     ) -> Result<Value, EvaluationError> {
-        let mut seen = HashSet::new();
-        let mut result = Vec::new();
+        let mut fold = DistinctValueFold::default();
         let mut frontier = Vec::new();
         self.items(anchor.len())?;
         for value in anchor {
             self.step()?;
-            if seen.insert(distinct_identity(value)?) {
-                result.push(value.clone());
+            if fold.insert(value.clone())? {
                 frontier.push(value.clone());
-                self.items(result.len())?;
+                self.items(fold.len())?;
             }
         }
 
@@ -8520,10 +8545,9 @@ impl Context<'_, '_> {
                 self.items(candidates.len())?;
                 for value in candidates {
                     self.step()?;
-                    if seen.insert(distinct_identity(&value)?) {
-                        result.push(value.clone());
+                    if fold.insert(value.clone())? {
                         next_frontier.push(value);
-                        self.items(result.len())?;
+                        self.items(fold.len())?;
                         self.items(next_frontier.len())?;
                     }
                 }
@@ -8531,7 +8555,7 @@ impl Context<'_, '_> {
             frontier = next_frontier;
         }
 
-        Ok(Value::List(result))
+        Ok(Value::List(fold.into_values()))
     }
 
     fn map(
@@ -8665,18 +8689,16 @@ impl Context<'_, '_> {
     }
     fn distinct(&mut self, values: &[Value]) -> Result<Value, EvaluationError> {
         self.items(values.len())?;
-        let mut keys = HashSet::new();
-        let mut unique = Vec::new();
+        let mut fold = DistinctValueFold::default();
         for value in values {
             self.step()?;
-            if !keys.insert(distinct_identity(value)?) {
+            if !fold.insert(value.clone())? {
                 continue;
             }
             self.step()?;
-            unique.push(value.clone());
-            self.items(unique.len())?;
+            self.items(fold.len())?;
         }
-        Ok(Value::List(unique))
+        Ok(Value::List(fold.into_values()))
     }
     fn union(&mut self, left: &[Value], right: &[Value]) -> Result<Value, EvaluationError> {
         self.items(left.len())?;
