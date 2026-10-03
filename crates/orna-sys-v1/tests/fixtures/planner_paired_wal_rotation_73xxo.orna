@@ -1,0 +1,7 @@
+use sys.query as query_ops;
+
+pub fn explain_wal_rotation_fold(query: Int): sys.Plan =
+    query_ops.plan_hint(query);
+
+pub fn wal_rotation_coordinates(): Text =
+    "restore, handoff, stream, compaction, merge, fold, order, checkpoint sides, redo folds, paired WAL IDs, and segment incarnations";
