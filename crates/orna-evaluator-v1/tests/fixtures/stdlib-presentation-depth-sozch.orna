@@ -1,0 +1,28 @@
+[
+    std.ui.Text("report ready"),
+    std.ui.Details([
+        std.ui.Field("Count", 42),
+        std.ui.Field("Names", ["Ada", "Lin"]),
+    ]),
+    std.ui.Button("Save", std.ui.action("save-report", as: Text)),
+    std.ui.Form(
+        [
+            std.ui.Input(
+                "query",
+                "Search",
+                Some("Ada"),
+                std.ui.action("search-name", as: Text),
+                Some("Enter a name")
+            ),
+        ],
+        Some(std.ui.action("submit-search", as: Text))
+    ),
+    std.ui.Table([{ id: 7, name: "Ada" }], columns: ["id", "name"]),
+    std.ui.Tree({ name: "root", children: ["leaf"] }),
+    std.ui.Code("let answer = 42", language: Some("orna")),
+    std.ui.Diff({ added: ["new"], removed: ["old"] }),
+    std.ui.Chart({ series: "latency", points: [2, 3, 5] }, title: Some("Latency")),
+    std.ui.Rows([std.ui.Text("left"), std.ui.Text("right")]),
+    std.ui.Cols([std.ui.Text("top"), std.ui.Text("bottom")]),
+    std.ui.Stack([std.ui.Text("first"), std.ui.Text("second")]),
+]
