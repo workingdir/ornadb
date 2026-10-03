@@ -1672,6 +1672,86 @@ fn paired_cursor_restore_chains_retain_scope_and_snapshot_values() {
     assert!(source.pending["View.Paired"].is_empty(), "all six restored page maps are consumed");
 }
 
+#[test]
+fn paired_refresh_cursor_restores_preserve_source_scope_identity() {
+    let continuations = [vec![0x62], vec![0x62, 0x00], vec![0x62, 0x00, 0x00]];
+    assert!(continuations[0].as_slice() < continuations[1].as_slice());
+    assert!(continuations[1].as_slice() < continuations[2].as_slice());
+    let generations = [
+        ([1, 2, 3, 4], [5, 8, 5, 8], [4, 3, 2, 1]),
+        ([3, 4, 1, 6], [5, 8, 5, 8], [2, 4, 3, 1]),
+        ([1, 6, 3, 2], [5, 8, 5, 8], [3, 2, 4, 3]),
+    ];
+    let mut restores = Vec::new();
+    for (values, filtered_values, depths) in generations {
+        for lane in 0..4 {
+            let source_name = if lane < 2 { "View.Left" } else { "View.Right" };
+            let depth = depths[lane];
+            let restored_pages = (0..depth)
+                .map(|page_index| {
+                    let after = (page_index > 0)
+                        .then(|| continuations[page_index - 1].clone());
+                    let next = (page_index + 1 < depth)
+                        .then(|| continuations[page_index].clone());
+                    let value = if page_index == 0 {
+                        values[lane]
+                    } else {
+                        filtered_values[lane]
+                    };
+                    (after, page(&[value], next))
+                })
+                .collect::<BTreeMap<_, _>>();
+            restores.push((source_name, restored_pages));
+        }
+    }
+    let mut source = PairedCursorRestoreSource::new(restores);
+
+    let first = run_with_fixture_functions(paired_scoped_view_refresh_body(), &mut source).unwrap();
+    assert_eq!(first, integer(14), "first paired refresh folds the restored left and right pages");
+    let second = run_with_fixture_functions(paired_scoped_view_refresh_body(), &mut source).unwrap();
+    assert_eq!(second, integer(18), "second refresh uses its own cursor-keyed source snapshots");
+    let third = run_with_fixture_functions(paired_scoped_view_refresh_body(), &mut source).unwrap();
+    assert_eq!(third, integer(16), "third refresh restores its own paired page chains");
+    assert_eq!(first, integer(14), "later restores leave the first fold result captured");
+    assert_eq!(second, integer(18), "later restores leave the second fold result captured");
+
+    assert_eq!(source.lanes.len(), 12, "three refreshes bind four source scopes apiece");
+    for generation in 0..3 {
+        let start = generation * 4;
+        assert_eq!(source.lanes[start].0, "View.Left");
+        assert_eq!(source.lanes[start + 1].0, "View.Left");
+        assert_eq!(source.lanes[start + 2].0, "View.Right");
+        assert_eq!(source.lanes[start + 3].0, "View.Right");
+    }
+    let scopes = source.lanes.iter().map(|(_, scope, _)| *scope).collect::<Vec<_>>();
+    for (index, scope) in scopes.iter().enumerate() {
+        assert!(
+            !scopes[..index].contains(scope),
+            "source-qualified restored chains keep fresh scope identities: {scope:?}"
+        );
+    }
+    let depths = generations
+        .iter()
+        .flat_map(|(_, _, lane_depths)| lane_depths)
+        .copied()
+        .collect::<Vec<_>>();
+    let mut expected_cursors = Vec::new();
+    for (lane, depth) in depths.into_iter().enumerate() {
+        let (source_name, scope, _) = &source.lanes[lane];
+        expected_cursors.push((source_name.clone(), *scope, None));
+        for cursor in continuations.iter().take(depth - 1) {
+            expected_cursors.push((source_name.clone(), *scope, Some(cursor.clone())));
+        }
+    }
+    assert_eq!(
+        source.cursors,
+        expected_cursors,
+        "reused restoration cursors resolve only within their source and fresh read scope"
+    );
+    assert!(source.pending["View.Left"].is_empty());
+    assert!(source.pending["View.Right"].is_empty());
+}
+
 fn paired_subscription_cascade_body() -> Expr {
     let left = relation_stage(
         relation_stage(
