@@ -1,0 +1,9 @@
+std.iterator.fold(
+    std.iterator.zip_with(
+        std.iterator.from_list([2, 3, 5]),
+        std.iterator.from_list([10, 20]),
+        (left, right) => left * right
+    ),
+    0,
+    (sum, value) => sum + value
+) == 80
