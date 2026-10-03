@@ -541,6 +541,41 @@ pub struct PlanOrdering {
     pub null_order: PlanNullOrder,
 }
 
+/// A resolved bound on a window frame. Numeric bounds are row offsets; the
+/// planner uses explicit bounds rather than inferring frames after sparse
+/// input reordering.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case", tag = "kind", content = "rows")]
+pub enum PlanWindowFrameBound {
+    UnboundedPreceding,
+    Preceding(u64),
+    CurrentRow,
+    Following(u64),
+    UnboundedFollowing,
+}
+
+impl PlanWindowFrameBound {
+    fn ordinal(self) -> i128 {
+        match self {
+            Self::UnboundedPreceding => i128::MIN,
+            Self::Preceding(rows) => -i128::from(rows),
+            Self::CurrentRow => 0,
+            Self::Following(rows) => i128::from(rows),
+            Self::UnboundedFollowing => i128::MAX,
+        }
+    }
+
+    fn as_detail(self) -> String {
+        match self {
+            Self::UnboundedPreceding => "unbounded_preceding".to_owned(),
+            Self::Preceding(rows) => format!("preceding:{rows}"),
+            Self::CurrentRow => "current_row".to_owned(),
+            Self::Following(rows) => format!("following:{rows}"),
+            Self::UnboundedFollowing => "unbounded_following".to_owned(),
+        }
+    }
+}
+
 /// A resolved, snapshot-pinned logical query input. Expressions are opaque
 /// typed references, so plan details never echo literal query values.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -669,6 +704,20 @@ pub struct QueryPartialIndexDescription {
     pub table: ObjectRef,
     pub index: ObjectRef,
     pub partial_predicate: ExpressionRef,
+}
+
+/// A resolved window aggregate eligible at its exact source boundary.
+/// Aggregate and frame identities remain attached across sparse input
+/// reordering. ORNA-PLAN does not prescribe a window-pushdown cost, so this
+/// adapter charges one work unit per known input row and preserves cardinality.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct QueryWindowAggregatePushdownDescription {
+    pub identity: ObjectRef,
+    pub source: ObjectRef,
+    pub aggregate: ExpressionRef,
+    pub frame_identity: ExpressionRef,
+    pub frame_start: PlanWindowFrameBound,
+    pub frame_end: PlanWindowFrameBound,
 }
 
 /// A known table mutation at the tail of a query plan. Counts are estimates
@@ -1106,6 +1155,37 @@ pub fn explain_query_with_decorrelated_subqueries(
         &[],
         &[],
         subqueries,
+        &[],
+    )
+}
+
+/// Explains window aggregates pushed to their resolved input sources.
+///
+/// Pushdown is attached by exact source identity, while each aggregate and
+/// complete frame identity remain on the resulting node. A missing estimate
+/// cannot shift a frame onto a neighboring input. Bounds are resolver supplied;
+/// this adapter preserves them instead of inferring SQL frame semantics. The
+/// caller supplies only aggregates already proven movable to that source
+/// boundary; this explain adapter does not prove window algebra equivalence.
+pub fn explain_query_with_window_aggregate_pushdowns(
+    query: &QueryPlanDescription,
+    aggregates: &[QueryWindowAggregatePushdownDescription],
+) -> Result<ExplainedPlan, ExplainError> {
+    explain_query_core_with_subqueries(
+        query,
+        1,
+        None,
+        None,
+        &[],
+        &[],
+        &[],
+        None,
+        &[],
+        &[],
+        &[],
+        &[],
+        &[],
+        aggregates,
     )
 }
 
@@ -1786,6 +1866,7 @@ fn explain_query_with_predicate_pressure_and_branch_limits_and_storms_with_parti
         disjunct_storm_cascades,
         partial_indexes,
         &[],
+        &[],
     )
 }
 
@@ -1803,11 +1884,13 @@ fn explain_query_core_with_subqueries(
     disjunct_storm_cascades: &[DisjunctStormCascadeDescription],
     partial_indexes: &[QueryPartialIndexDescription],
     decorrelated_subqueries: &[QueryDecorrelatedSubqueryDescription],
+    window_aggregates: &[QueryWindowAggregatePushdownDescription],
 ) -> Result<ExplainedPlan, ExplainError> {
     if query
         .joins
         .len()
         .saturating_add(decorrelated_subqueries.len())
+        .saturating_add(window_aggregates.len())
         > MAX_PLAN_NODES
     {
         return Err(ExplainError::TooManyNodes);
@@ -1832,6 +1915,29 @@ fn explain_query_core_with_subqueries(
                 }),
         );
     let query = &expanded_query;
+
+    let mut window_identities = BTreeSet::new();
+    for aggregate in window_aggregates {
+        if invalid_reference(aggregate.identity.as_str())
+            || invalid_reference(aggregate.source.as_str())
+        {
+            return Err(ExplainError::InvalidObject);
+        }
+        if invalid_reference(aggregate.aggregate.as_str())
+            || invalid_reference(aggregate.frame_identity.as_str())
+            || aggregate.frame_start.ordinal() > aggregate.frame_end.ordinal()
+        {
+            return Err(ExplainError::InvalidExpression);
+        }
+        if !window_identities.insert(aggregate.identity.as_str()) {
+            return Err(ExplainError::InvalidObject);
+        }
+        let matching_sources = usize::from(query.source == aggregate.source)
+            + query.joins.iter().filter(|join| join.source == aggregate.source).count();
+        if matching_sources != 1 {
+            return Err(ExplainError::InvalidObject);
+        }
+    }
 
     let (storm_cascade_operators, storm_cascade_expressions, storm_cascade_predicates) =
         disjunct_storm_cascade_shape_counts(disjunct_storm_cascades)?;
@@ -1910,6 +2016,7 @@ fn explain_query_core_with_subqueries(
         .saturating_add(usize::from(post_expansion_conjunct.is_some()))
         .saturating_add(additional_limits.len())
         .saturating_add(query.mutations.len())
+        .saturating_add(window_aggregates.len())
         .saturating_add(usize::from(query.materialize_into.is_some()));
     if operator_bound > MAX_PLAN_NODES {
         return Err(ExplainError::TooManyNodes);
@@ -1928,6 +2035,9 @@ fn explain_query_core_with_subqueries(
         .chain(post_expansion_conjunct.iter().copied())
         .chain(disjunct_storms.iter().map(|storm| &storm.predicate))
         .chain(storm_cascade_predicates.iter().copied())
+        .chain(window_aggregates.iter().flat_map(|aggregate| {
+            [&aggregate.aggregate, &aggregate.frame_identity]
+        }))
         .any(|expression| invalid_reference(expression.as_str()))
     {
         return Err(ExplainError::InvalidExpression);
@@ -1936,6 +2046,7 @@ fn explain_query_core_with_subqueries(
         .projections
         .len()
         .saturating_add(query.ordering.len())
+        .saturating_add(window_aggregates.len().saturating_mul(2))
         .saturating_add(usize::from(query.predicate.is_some()))
         .saturating_add(usize::from(post_expansion_conjunct.is_some()))
         .saturating_add(query.joins.iter().filter(|join| join.predicate.is_some()).count())
@@ -1961,6 +2072,13 @@ fn explain_query_core_with_subqueries(
         query.source_statistics.as_ref(),
     );
     let mut current_cardinality = source_cardinality(query.source_statistics.as_ref());
+    current = push_window_aggregates(
+        &mut operators,
+        current,
+        &query.source,
+        current_cardinality,
+        window_aggregates,
+    );
     for (planned_position, (declared_position, join)) in
         planned_query_join_order(&query.joins).into_iter().enumerate()
     {
@@ -1972,6 +2090,13 @@ fn explain_query_core_with_subqueries(
         } else {
             push_scan(&mut operators, join.source.clone(), join.statistics.as_ref())
         };
+        let right = push_window_aggregates(
+            &mut operators,
+            right,
+            &join.source,
+            source_cardinality(join.statistics.as_ref()),
+            window_aggregates,
+        );
         if let Some(subquery) = decorrelated_subquery {
             add_decorrelated_subquery_details(&mut operators[right].details, subquery);
         }
@@ -2913,6 +3038,63 @@ fn add_decorrelated_subquery_details(
         "subquery_decorrelation".to_owned(),
         PlanDetail::Text("resolver_approved_predicate_join".to_owned()),
     );
+}
+
+fn push_window_aggregates(
+    operators: &mut Vec<Operator>,
+    mut input: usize,
+    source: &ObjectRef,
+    cardinality: Cardinality,
+    aggregates: &[QueryWindowAggregatePushdownDescription],
+) -> usize {
+    for aggregate in aggregates.iter().filter(|aggregate| aggregate.source == *source) {
+        let details = BTreeMap::from([
+            (
+                "operation".to_owned(),
+                PlanDetail::Text("window_aggregate".to_owned()),
+            ),
+            (
+                "window_aggregate_identity".to_owned(),
+                PlanDetail::Text(aggregate.identity.as_str().to_owned()),
+            ),
+            (
+                "window_source_identity".to_owned(),
+                PlanDetail::Text(aggregate.source.as_str().to_owned()),
+            ),
+            (
+                "window_frame_identity".to_owned(),
+                PlanDetail::Text(aggregate.frame_identity.as_str().to_owned()),
+            ),
+            (
+                "window_frame_start".to_owned(),
+                PlanDetail::Text(aggregate.frame_start.as_detail()),
+            ),
+            (
+                "window_frame_end".to_owned(),
+                PlanDetail::Text(aggregate.frame_end.as_detail()),
+            ),
+            (
+                "pushdown_policy".to_owned(),
+                PlanDetail::Text("exact_source_identity_before_join".to_owned()),
+            ),
+            (
+                "estimated_work_scope".to_owned(),
+                PlanDetail::Text("one_unit_per_input_row".to_owned()),
+            ),
+        ]);
+        let index = operators.len();
+        operators.push(Operator::new(
+            PlanNodeKind::Aggregate,
+            Some(aggregate.identity.clone()),
+            Some(aggregate.aggregate.clone()),
+            details,
+            vec![input],
+            cardinality,
+            cardinality.rows,
+        ));
+        input = index;
+    }
+    input
 }
 
 fn partial_index_for_join<'a>(
