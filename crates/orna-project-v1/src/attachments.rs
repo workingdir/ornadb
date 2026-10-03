@@ -852,6 +852,32 @@ impl PackageResolver {
         Ok(route)
     }
 
+    /// Applies successive checkpoint-storm batches from one exact retained
+    /// depth label. The selected label remains bound to its original route
+    /// identity and pins across every batch, even as newer closures are
+    /// appended. The reference is silent on chaining labelled storms; v1
+    /// validates the label at each batch boundary and returns no partial route
+    /// if any batch fails.
+    pub fn extend_nested_terminal_pair_storm_rounds_from_label(
+        &self,
+        previous: &ReboundPathResolution,
+        label: &NestedPairDepthLabel,
+        rounds: &[&[[PinnedDatabase; 2]]],
+    ) -> Result<ReboundPathResolution, AttachmentError> {
+        previous.validate_depth_label(label)?;
+        let mut route = previous.clone();
+        for replacement_waves in rounds {
+            route.validate_depth_label(label)?;
+            route = self.extend_nested_terminal_pair_storm_from_label(
+                &route,
+                label,
+                replacement_waves,
+            )?;
+            route.validate_depth_label(label)?;
+        }
+        Ok(route)
+    }
+
     /// Continues a nested terminal-pair chain from a saved handoff checkpoint.
     /// The first pair uses the checkpoint's exact attached pins even when
     /// `previous` has since gone through another rebind cascade; later pairs
