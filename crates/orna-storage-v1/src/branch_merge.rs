@@ -378,6 +378,39 @@ pub struct BranchMergeParentColumnDepthLadderEvent {
     pub depth_labels: Vec<usize>,
 }
 
+/// The complete parent-local ladder roster released for one multi-parent
+/// restore wave. All entries share `order` and are published as one atomic
+/// lineage step, so consumers do not need to infer a wave boundary from the
+/// flattened parent-column event stream.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BranchMergeMultiParentColumnDepthLadderWaveEvent {
+    pub order: u64,
+    pub ladders: Vec<BranchMergeParentColumnDepthLadderEvent>,
+}
+
+/// One labeled depth in a parent-local column ladder, including empty depths.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BranchMergeParentColumnDepthFragmentSnapshot {
+    pub label: usize,
+    pub cells: Vec<(CanonicalValue, CanonicalValue)>,
+}
+
+/// A parent/table/column ladder with each depth label bound to its cells.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BranchMergeParentColumnDepthLadderSnapshot {
+    pub parent: ObjectId,
+    pub table: ObjectId,
+    pub column: ObjectId,
+    pub fragments: Vec<BranchMergeParentColumnDepthFragmentSnapshot>,
+}
+
+/// A released multi-parent restore wave with complete labeled cell ladders.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BranchMergeMultiParentColumnRestoreWaveSnapshot {
+    pub order: u64,
+    pub ladders: Vec<BranchMergeParentColumnDepthLadderSnapshot>,
+}
+
 /// One exact-key tombstone event retained in committed paired history.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BranchMergeTombstoneEvent {
@@ -661,6 +694,7 @@ pub struct BranchMergeTombstoneHistory {
         BTreeMap<u64, MultiParentColumnFragmentRetryIdentity>,
     parent_column_events: Vec<BranchMergeParentColumnDepthEvent>,
     parent_column_ladder_events: Vec<BranchMergeParentColumnDepthLadderEvent>,
+    parent_column_ladder_waves: Vec<BranchMergeMultiParentColumnDepthLadderWaveEvent>,
     committed_plan_identities: BTreeMap<u64, [u8; 32]>,
     duplicate_retry_modes: BTreeMap<u64, BranchMergeTombstoneSubmissionMode>,
     applied_fragment_retry_transactions: Vec<AppliedDepthFragmentRetryTransaction>,
@@ -685,6 +719,7 @@ impl BranchMergeTombstoneHistory {
             committed_multi_parent_column_retry_identities: BTreeMap::new(),
             parent_column_events: Vec::new(),
             parent_column_ladder_events: Vec::new(),
+            parent_column_ladder_waves: Vec::new(),
             committed_plan_identities: BTreeMap::new(),
             duplicate_retry_modes: BTreeMap::new(),
             applied_fragment_retry_transactions: Vec::new(),
@@ -1174,6 +1209,94 @@ impl BranchMergeTombstoneHistory {
     /// released.
     pub fn parent_column_ladder_events(&self) -> &[BranchMergeParentColumnDepthLadderEvent] {
         &self.parent_column_ladder_events
+    }
+
+    /// Returns complete parent-local ladder rosters grouped by released wave.
+    ///
+    /// Each entry appears only after its paired lineage prefix is contiguous.
+    /// This v1 policy treats parents as independent sources and publishes all
+    /// of a wave's table-column ladders together, without aligning their depth
+    /// labels across parents.
+    pub fn parent_column_ladder_waves(
+        &self,
+    ) -> &[BranchMergeMultiParentColumnDepthLadderWaveEvent] {
+        &self.parent_column_ladder_waves
+    }
+
+    /// Returns committed multi-parent column waves with every depth label
+    /// bound to that fragment's cells.
+    ///
+    /// Empty fragment positions are returned with no cells. Ladders retain
+    /// their parent/table/column identity and do not align depths across
+    /// parents. This is a materialized snapshot over the released event
+    /// history; pending waves are not visible.
+    pub fn parent_column_restore_waves(
+        &self,
+    ) -> Vec<BranchMergeMultiParentColumnRestoreWaveSnapshot> {
+        let mut cells_by_depth = BTreeMap::new();
+        for wave in &self.parent_column_ladder_waves {
+            for ladder in &wave.ladders {
+                for label in &ladder.depth_labels {
+                    cells_by_depth.insert(
+                        (wave.order, ladder.parent, ladder.table, ladder.column, *label),
+                        Vec::new(),
+                    );
+                }
+            }
+        }
+        for event in &self.parent_column_events {
+            let cells = cells_by_depth
+                .get_mut(&(
+                    event.order,
+                    event.parent,
+                    event.table,
+                    event.column,
+                    event.fragment,
+                ))
+                .expect("released parent column cells have a retained ladder label");
+            cells.push((event.key.clone(), event.value.clone()));
+        }
+
+        self.parent_column_ladder_waves
+            .iter()
+            .map(|wave| {
+                let ladders = wave
+                    .ladders
+                    .iter()
+                    .map(|ladder| {
+                        let fragments = ladder
+                            .depth_labels
+                            .iter()
+                            .map(|label| {
+                                let cells = cells_by_depth
+                                    .remove(&(
+                                        wave.order,
+                                        ladder.parent,
+                                        ladder.table,
+                                        ladder.column,
+                                        *label,
+                                    ))
+                                    .expect("released ladder labels have a cell bucket");
+                                BranchMergeParentColumnDepthFragmentSnapshot {
+                                    label: *label,
+                                    cells,
+                                }
+                            })
+                            .collect();
+                        BranchMergeParentColumnDepthLadderSnapshot {
+                            parent: ladder.parent,
+                            table: ladder.table,
+                            column: ladder.column,
+                            fragments,
+                        }
+                    })
+                    .collect();
+                BranchMergeMultiParentColumnRestoreWaveSnapshot {
+                    order: wave.order,
+                    ladders,
+                }
+            })
+            .collect()
     }
 
     /// Associates a complete paired result with an already-complete depth
@@ -1969,6 +2092,7 @@ impl BranchMergeTombstoneHistory {
             let mut column_ladder_events = Vec::new();
             let mut parent_column_events = Vec::new();
             let mut parent_column_ladder_events = Vec::new();
+            let mut parent_column_ladder_waves = Vec::new();
             let mut table_ladder_events = Vec::new();
             let mut tombstones = match delta {
                 BufferedBranchMergeTombstoneDelta::WholePlan(tombstones) => tombstones,
@@ -1991,6 +2115,12 @@ impl BranchMergeTombstoneHistory {
                         .expect("buffered multi-parent waves were validated before insertion");
                     parent_column_ladder_events =
                         parent_column_depth_wave_ladder_events(&wave);
+                    parent_column_ladder_waves.push(
+                        BranchMergeMultiParentColumnDepthLadderWaveEvent {
+                            order: wave.order,
+                            ladders: parent_column_ladder_events.clone(),
+                        },
+                    );
                     Vec::new()
                 }
             };
@@ -2009,6 +2139,8 @@ impl BranchMergeTombstoneHistory {
             self.parent_column_events.extend(parent_column_events);
             self.parent_column_ladder_events
                 .extend(parent_column_ladder_events);
+            self.parent_column_ladder_waves
+                .extend(parent_column_ladder_waves);
             self.next_order = order.checked_add(1);
         }
 
