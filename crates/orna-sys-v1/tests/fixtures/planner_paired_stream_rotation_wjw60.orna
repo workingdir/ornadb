@@ -1,0 +1,7 @@
+use sys.query as query_ops;
+
+pub fn explain_stream_rotation_fold(query: Int): sys.Plan =
+    query_ops.plan_hint(query);
+
+pub fn stream_rotation_coordinates(): Text =
+    "checkpoint, source stream ordinal and identity, rotation identity and ordinal, fold, order, optional sides";
