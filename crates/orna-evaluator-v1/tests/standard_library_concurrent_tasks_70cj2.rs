@@ -6,9 +6,13 @@ use orna_value_v1::Raw;
 fn concurrent_collections_session() -> AdmittedReplSession {
     let sources = orna_standard::reference_standard_sources_v1()
         .into_iter()
-        .filter(|(path, _)| path == "std/concurrent/main.orna" || path == "std/collection.orna")
+        .filter(|(path, _)| {
+            path == "std/concurrent/main.orna"
+                || path == "std/collection.orna"
+                || path == "std/stream.orna"
+        })
         .collect::<Vec<_>>();
-    assert_eq!(sources.len(), 2, "the pinned modules are present");
+    assert_eq!(sources.len(), 3, "the pinned modules are present");
 
     let profile =
         StandardDependencyProfile::from_sources("orna.std/70cj2-concurrent", sources.clone())
@@ -72,6 +76,24 @@ fn parallel_map_of_an_empty_input_returns_an_empty_list_without_children() {
         ))
         .unwrap_or_else(|error| panic!("empty parallel_map failed with {}", error.code()));
     assert_eq!(actual, Some(canonical(Raw::Array(vec![]))));
+}
+
+#[test]
+fn bounded_stream_channel_preserves_values_through_backpressure() {
+    let mut session = concurrent_collections_session();
+    let actual = session
+        .submit(include_str!(
+            "fixtures/stdlib-concurrent-bounded-channel-70cj2.orna"
+        ))
+        .unwrap_or_else(|error| panic!("bounded stream channel failed with {}", error.code()));
+    assert_eq!(
+        actual,
+        Some(canonical(Raw::Array(vec![
+            Raw::Array(vec![Raw::Int(2.into())]),
+            Raw::Array(vec![Raw::Int(3.into())]),
+            Raw::Array(vec![Raw::Int(5.into())]),
+        ])))
+    );
 }
 
 #[test]
