@@ -1,0 +1,1 @@
+std.encoding.base64.decode(__BASE64_INPUT__)
