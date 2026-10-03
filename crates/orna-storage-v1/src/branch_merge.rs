@@ -1183,6 +1183,42 @@ pub fn compress_paired_checkpoint_redo_sparse_stream_chains_preserving_chain_and
         .collect()
 }
 
+/// Restores sparse checkpoint streams from compacted fold-identity runs.
+///
+/// Every integer order covered by a compacted run represents an observed input
+/// frame and expands to one slot with the run's exact checkpoint values and
+/// paired fold identity. Orders between runs remain absent, and fold ordinals
+/// remain attached so overlapping orders in different restores stay distinct.
+pub fn restore_paired_checkpoint_redo_sparse_stream_chains_preserving_fold_identity(
+    compacted: &[BranchMergePairedCheckpointRedoFoldSparseStreamChainCompactionSnapshot],
+) -> Vec<BranchMergePairedCheckpointRedoFoldSparseStreamChainSnapshot> {
+    compacted
+        .iter()
+        .map(|stream| {
+            let mut slots = stream
+                .runs
+                .iter()
+                .flat_map(|run| {
+                    (run.first_order..=run.last_order).map(move |order| {
+                        BranchMergePairedCheckpointRedoFoldSparseChainSlotSnapshot {
+                            fold_ordinal: run.fold_ordinal,
+                            order,
+                            left: run.left.clone(),
+                            right: run.right.clone(),
+                            redo_fold_identity: run.redo_fold_identity.clone(),
+                        }
+                    })
+                })
+                .collect::<Vec<_>>();
+            slots.sort_by_key(|slot| (slot.fold_ordinal, slot.order));
+            BranchMergePairedCheckpointRedoFoldSparseStreamChainSnapshot {
+                checkpoint_id: stream.checkpoint_id.clone(),
+                slots,
+            }
+        })
+        .collect()
+}
+
 /// Folds redo-chain identity with sparse write-ahead compaction observations.
 ///
 /// Known and observed checkpoint IDs are projected across every fold. Every
