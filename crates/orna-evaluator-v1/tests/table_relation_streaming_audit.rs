@@ -1083,6 +1083,34 @@ fn paired_view_refresh_filtered_page_omissions_keep_scoped_pagination() {
         );
     }
     assert_eq!(source.cursors.len(), 22, "each nonterminal page follows its own continuation");
+    assert_eq!(
+        source.cursors,
+        vec![
+            ("View.Left".into(), scopes[0], None),
+            ("View.Left".into(), scopes[0], Some(vec![71])),
+            ("View.Left".into(), scopes[1], None),
+            ("View.Right".into(), scopes[2], None),
+            ("View.Right".into(), scopes[2], Some(vec![71])),
+            ("View.Right".into(), scopes[3], None),
+            ("View.Right".into(), scopes[3], Some(vec![72])),
+            ("View.Left".into(), scopes[4], None),
+            ("View.Left".into(), scopes[4], Some(vec![71])),
+            ("View.Left".into(), scopes[5], None),
+            ("View.Left".into(), scopes[5], Some(vec![72])),
+            ("View.Right".into(), scopes[6], None),
+            ("View.Right".into(), scopes[6], Some(vec![71])),
+            ("View.Right".into(), scopes[7], None),
+            ("View.Left".into(), scopes[8], None),
+            ("View.Left".into(), scopes[8], Some(vec![71])),
+            ("View.Left".into(), scopes[9], None),
+            ("View.Left".into(), scopes[9], Some(vec![72])),
+            ("View.Right".into(), scopes[10], None),
+            ("View.Right".into(), scopes[10], Some(vec![71])),
+            ("View.Right".into(), scopes[11], None),
+            ("View.Right".into(), scopes[11], Some(vec![72])),
+        ],
+        "filtered omissions do not detach continuation tokens from their refresh scope"
+    );
 }
 
 fn paired_subscription_cascade_body() -> Expr {
