@@ -1,0 +1,17 @@
+{ id: "redo-frame/unv5t/a0", name: "wal/a-left-incarnation-0", city: "wal/a-right-incarnation-0", }
+
+{ id: "redo-frame/unv5t/a1", name: "wal/a-left-incarnation-1", city: "wal/a-right-incarnation-0", }
+
+{ id: "redo-frame/unv5t/a2", name: "wal/a-left-incarnation-1", city: "wal/a-right-incarnation-1", }
+
+{ id: "redo-frame/unv5t/a3", name: "wal/a-left-incarnation-0", city: "wal/a-right-incarnation-1", }
+
+{ id: "redo-frame/unv5t/b0", name: "wal/b-left-incarnation-0", city: "wal/b-right-incarnation-0", }
+
+{ id: "redo-frame/unv5t/b1", name: "wal/b-left-incarnation-1", city: "wal/b-right-incarnation-0", }
+
+{ id: "redo-frame/unv5t/c0", name: "wal/c-left-incarnation-0", city: "wal/c-right-incarnation-0", }
+
+{ id: "redo-frame/unv5t/c1", name: "wal/c-left-incarnation-0", city: "wal/c-right-incarnation-1", }
+
+{ id: "redo-frame/unv5t/reused", name: "wal/a-left-incarnation-0", city: "wal/a-right-incarnation-0", }
