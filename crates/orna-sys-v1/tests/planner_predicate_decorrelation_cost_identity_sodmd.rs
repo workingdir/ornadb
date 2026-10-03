@@ -9,6 +9,8 @@ use orna_sys_v1::{
 
 const FIXTURE: &str =
     include_str!("fixtures/planner_predicate_decorrelation_cost_identity_sodmd.orna");
+const CASCADE_FIXTURE: &str =
+    include_str!("fixtures/planner_decorrelated_pair_cost_cascade_k1e2d.orna");
 
 fn object(reference: &str) -> ObjectRef {
     ObjectRef::descriptive(reference)
@@ -130,6 +132,53 @@ fn indexes_with_orders_index(index: &str) -> Vec<QueryPartialIndexDescription> {
         .expect("the fixture declares the exact Orders index")
         .index = object(index);
     indexes
+}
+
+fn cascade_indexes(orders_index: &str) -> Vec<QueryPartialIndexDescription> {
+    let mut indexes = indexes_with_orders_index(orders_index);
+    indexes.push(QueryPartialIndexDescription {
+        table: object("table:Invoices"),
+        index: object("index:owner-invoices"),
+        partial_predicate: expression("expr:owner-invoices"),
+    });
+    indexes
+}
+
+fn cascade_subqueries() -> Vec<QueryDecorrelatedSubqueryDescription> {
+    vec![
+        QueryDecorrelatedSubqueryDescription {
+            identity: object("subquery:orders-owner"),
+            source: object("table:Orders"),
+            correlation_predicate: expression("expr:owner-orders"),
+            statistics: Some(statistics(4, 8_192)),
+        },
+        QueryDecorrelatedSubqueryDescription {
+            identity: object("subquery:invoices-owner"),
+            source: object("table:Invoices"),
+            correlation_predicate: expression("expr:owner-invoices"),
+            statistics: Some(statistics(2, 2_048)),
+        },
+    ]
+}
+
+fn cascade_query(order: [&str; 5]) -> QueryPlanDescription {
+    let mut query = query(order);
+    query
+        .joins
+        .iter_mut()
+        .find(|join| join.source.as_str() == "table:Orders")
+        .expect("the query includes an ordinary Orders join")
+        .predicate = Some(expression("expr:ordinary-orders"));
+    query
+}
+
+fn explain_cascade(
+    query: &QueryPlanDescription,
+    indexes: &[QueryPartialIndexDescription],
+    subqueries: &[QueryDecorrelatedSubqueryDescription],
+) -> orna_sys_v1::ExplainedPlan {
+    explain_query_with_partial_indexes_and_decorrelated_subqueries(query, indexes, subqueries)
+        .expect("each exact resolver pair selects its own partial-index input")
 }
 
 fn joins_by_label<'a>(plan: &'a orna_sys_v1::ExplainedPlan) -> BTreeMap<&'a str, &'a PlanNode> {
@@ -453,8 +502,8 @@ fn changing_the_selected_index_rekeys_the_decorrelation_cost_fold_chain() {
     let changed_decorrelated = changed_joins[decorrelated_label];
     assert_eq!(
         text(baseline_decorrelated, "join_cost_fold_identity"),
-        "join-fold:d83475a8fec991e8e4cd7308566cb8b7ba19dde2b1a8e1ba2593728c16e088ff",
-        "the fold digest directly includes the composite decorrelation/index identity"
+        "join-fold:50324da104496868a83d1a0555954d8b1743b313b8ef9b5f8c247a6846239e99",
+        "the paired decorrelation/index and anchor inputs contribute to the fold identity"
     );
     let baseline_nodes = baseline
         .nodes()
@@ -540,5 +589,190 @@ fn changing_the_selected_index_rekeys_the_decorrelation_cost_fold_chain() {
             baseline_access.estimated_work(),
         ),
         (Some(4), Some(8_192), Some(6))
+    );
+}
+
+#[test]
+fn paired_decorrelations_keep_sparse_cost_cascades_bound_through_reordering() {
+    let parsed = orna_syntax_v1::parse_module(CASCADE_FIXTURE);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+    assert_eq!(parsed.value.items.len(), 2);
+
+    let baseline_query = cascade_query([
+        "table:Expensive",
+        "table:Unknown",
+        "table:Small",
+        "table:Medium",
+        "table:Orders",
+    ]);
+    let baseline_subqueries = cascade_subqueries();
+    let baseline = explain_cascade(
+        &baseline_query,
+        &cascade_indexes("index:owner-orders"),
+        &baseline_subqueries,
+    );
+
+    let reordered_query = cascade_query([
+        "table:Medium",
+        "table:Orders",
+        "table:Unknown",
+        "table:Expensive",
+        "table:Small",
+    ]);
+    let reordered_subqueries = baseline_subqueries
+        .iter()
+        .cloned()
+        .rev()
+        .collect::<Vec<_>>();
+    let reordered_indexes = cascade_indexes("index:owner-orders")
+        .into_iter()
+        .rev()
+        .collect::<Vec<_>>();
+    let reordered = explain_cascade(&reordered_query, &reordered_indexes, &reordered_subqueries);
+
+    let baseline_joins = joins_by_label(&baseline);
+    let reordered_joins = joins_by_label(&reordered);
+    let expected_order = [
+        "subquery:invoices-owner",
+        "table:Orders",
+        "subquery:orders-owner",
+        "table:Small",
+        "table:Medium",
+        "table:Expensive",
+        "table:Unknown",
+    ];
+    let mut planned = baseline_joins
+        .iter()
+        .map(|(label, node)| (*label, *node))
+        .collect::<Vec<_>>();
+    planned.sort_by_key(|(_, node)| integer(node, "planned_input_position"));
+    assert_eq!(
+        planned.iter().map(|(label, _)| *label).collect::<Vec<_>>(),
+        expected_order
+    );
+
+    for label in expected_order {
+        let before = baseline_joins[label];
+        let after = reordered_joins[label];
+        assert_eq!(
+            text(before, "join_cost_fold_right_identity"),
+            text(after, "join_cost_fold_right_identity"),
+            "each declared subquery/input stays paired under sparse reordering at {label}"
+        );
+        assert_eq!(
+            text(before, "join_cost_fold_identity"),
+            text(after, "join_cost_fold_identity"),
+            "the complete ordered fold chain is stable at {label}"
+        );
+        assert_eq!(
+            (
+                before.estimated_rows(),
+                before.estimated_bytes(),
+                before.estimated_work(),
+            ),
+            (
+                after.estimated_rows(),
+                after.estimated_bytes(),
+                after.estimated_work(),
+            ),
+            "sparse reordering preserves the computed estimates at {label}"
+        );
+    }
+
+    let baseline_orders = baseline_joins["subquery:orders-owner"];
+    let baseline_invoices = baseline_joins["subquery:invoices-owner"];
+    let baseline_nodes = baseline
+        .nodes()
+        .iter()
+        .map(|node| (node.reference().as_str().to_owned(), node))
+        .collect::<BTreeMap<_, _>>();
+    let orders_access = baseline_nodes[baseline_orders.inputs()[1].as_str()];
+    let invoices_access = baseline_nodes[baseline_invoices.inputs()[1].as_str()];
+    assert_eq!(orders_access.kind(), PlanNodeKind::IndexLookup);
+    assert_eq!(invoices_access.kind(), PlanNodeKind::IndexLookup);
+    assert_eq!(
+        orders_access.object().map(ObjectRef::as_str),
+        Some("index:owner-orders")
+    );
+    assert_eq!(
+        invoices_access.object().map(ObjectRef::as_str),
+        Some("index:owner-invoices")
+    );
+    let orders_identity = text(baseline_orders, "decorrelated_predicate_pushdown_identity");
+    let invoices_identity = text(
+        baseline_invoices,
+        "decorrelated_predicate_pushdown_identity",
+    );
+    assert_ne!(orders_identity, invoices_identity);
+    assert_eq!(
+        text(orders_access, "decorrelated_predicate_pushdown_identity"),
+        orders_identity
+    );
+    assert_eq!(
+        text(invoices_access, "decorrelated_predicate_pushdown_identity"),
+        invoices_identity
+    );
+    assert_eq!(
+        (
+            baseline_invoices.estimated_rows(),
+            baseline_invoices.estimated_bytes(),
+            baseline_invoices.estimated_work(),
+        ),
+        (Some(20), Some(21_280), Some(102))
+    );
+    assert_eq!(
+        (
+            baseline_orders.estimated_rows(),
+            baseline_orders.estimated_bytes(),
+            baseline_orders.estimated_work(),
+        ),
+        (Some(3), Some(13_434), Some(10))
+    );
+
+    let changed = explain_cascade(
+        &baseline_query,
+        &cascade_indexes("index:owner-orders-v2"),
+        &baseline_subqueries,
+    );
+    let changed_joins = joins_by_label(&changed);
+    for label in ["subquery:invoices-owner", "table:Orders"] {
+        assert_eq!(
+            text(baseline_joins[label], "join_cost_fold_identity"),
+            text(changed_joins[label], "join_cost_fold_identity"),
+            "changing the Orders index leaves earlier unrelated folds stable at {label}"
+        );
+    }
+    for label in [
+        "subquery:orders-owner",
+        "table:Small",
+        "table:Medium",
+        "table:Expensive",
+        "table:Unknown",
+    ] {
+        assert_ne!(
+            text(baseline_joins[label], "join_cost_fold_identity"),
+            text(changed_joins[label], "join_cost_fold_identity"),
+            "the Orders pair rekeys its own fold and all subsequent folds at {label}"
+        );
+    }
+    assert_eq!(
+        text(
+            baseline_joins["subquery:invoices-owner"],
+            "decorrelated_predicate_pushdown_identity"
+        ),
+        text(
+            changed_joins["subquery:invoices-owner"],
+            "decorrelated_predicate_pushdown_identity"
+        )
+    );
+    assert_ne!(
+        text(
+            baseline_joins["subquery:orders-owner"],
+            "decorrelated_predicate_pushdown_identity"
+        ),
+        text(
+            changed_joins["subquery:orders-owner"],
+            "decorrelated_predicate_pushdown_identity"
+        )
     );
 }
