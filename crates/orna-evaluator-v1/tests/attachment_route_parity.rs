@@ -1027,6 +1027,53 @@ fn fresh_nested_route_pair_chains_evaluate_rebound_closure_values() {
         Ok(Some(Value::int(96.into())))
     );
 
+    let first_storm_round = [first_pair.clone()];
+    let second_storm_round = [same_depth_second_pair.clone()];
+    let storm_rounds = [first_storm_round.as_slice(), second_storm_round.as_slice()];
+    let chained_depth_storm = resolver
+        .extend_nested_terminal_pair_storm_rounds_from_label(
+            &first_stage,
+            &initial_depth_label,
+            &storm_rounds,
+        )
+        .unwrap_or_else(|error| panic!("chained depth-label storm failed: {error:?}"));
+    assert_eq!(
+        chained_depth_storm.retained_depth_label(0, 0).unwrap(),
+        initial_depth_label,
+        "successive storms keep the original retained snapshot identity"
+    );
+    assert_eq!(
+        chained_depth_storm
+            .final_session()
+            .primary()
+            .pin()
+            .commit()
+            .as_str(),
+        route_three_final,
+        "each storm reopens the same labeled route instead of widening its depth"
+    );
+    assert!(matches!(
+        resolver.extend_nested_terminal_pair_storm_rounds_from_label(
+            &chained_depth_storm,
+            &distinct_depth_label,
+            &[],
+        ),
+        Err(AttachmentError::RetainedSnapshotUnavailable)
+    ));
+    let mut chained_depth_evaluator = AdmittedReplSession::from_attached_database_session(
+        chained_depth_storm.final_session(),
+        Limits::default(),
+    )
+    .unwrap();
+    assert_eq!(
+        chained_depth_evaluator.submit(&format!("use {};", aliases[4])),
+        Ok(None)
+    );
+    assert_eq!(
+        chained_depth_evaluator.submit(&format!("{}.package_value()", aliases[4])),
+        Ok(Some(Value::int(96.into())))
+    );
+
     let later_cascade = resolver
         .extend_nested_terminal_pair_chain(&first_stage, &[second_pair.clone()])
         .unwrap_or_else(|error| panic!("later nested pair cascade failed: {error:?}"));
