@@ -1343,9 +1343,7 @@ impl PackageResolver {
         &self,
         previous: &ReboundPathResolution,
         chains: &[&[&[(&NestedPairDepthLabel, Option<&[[PinnedDatabase; 2]]>)]]],
-        expected_transitions: &[
-            (NestedPairTerminalRouteIdentity, NestedPairTerminalRouteIdentity),
-        ],
+        expected_transitions: &[(NestedPairTerminalRouteIdentity, NestedPairTerminalRouteIdentity)],
     ) -> Result<ReboundPathResolution, AttachmentError> {
         if chains.len() != expected_transitions.len() {
             return Err(AttachmentError::RetainedSnapshotUnavailable);
