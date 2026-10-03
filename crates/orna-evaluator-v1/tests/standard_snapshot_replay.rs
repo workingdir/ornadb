@@ -2860,6 +2860,87 @@ fn paired_snapshot_pin_replay_matches_alias_and_qualified_values_across_upgrades
 }
 
 #[test]
+fn captured_dependency_snapshots_survive_paired_pin_replay_folds() {
+    let (
+        _directory,
+        project_v1,
+        project_v2,
+        project_v3,
+        project_v4,
+        project_v5,
+        project_v6,
+        snapshots,
+    ) = module_upgrade_projects();
+    let projects = [
+        &project_v1,
+        &project_v2,
+        &project_v3,
+        &project_v4,
+        &project_v5,
+        &project_v6,
+    ];
+    let expected = [
+        [8, 3, 11, 9, 3, 12],
+        [107, 3, 110, 108, 3, 111],
+        [1_007, 3, 1_010, 1_008, 3, 1_011],
+        [1_007, 4, 1_011, 1_008, 4, 1_012],
+        [10_007, 5, 10_012, 10_008, 5, 10_013],
+        [100_007, 6, 100_013, 100_008, 6, 100_014],
+    ];
+    let use_modules = include_str!("fixtures/module-upgrade-module-pin-replay-use.orna");
+    let capture = include_str!("fixtures/module-upgrade-captured-paired-pin-capture.orna");
+    let replay = include_str!("fixtures/module-upgrade-captured-paired-pin-replay.orna");
+
+    assert!(snapshots.windows(2).all(|pair| pair[0] != pair[1]));
+    let mut sessions = Vec::with_capacity(projects.len());
+    for (index, project) in projects.iter().enumerate() {
+        assert_eq!(
+            project.standard_profile().unwrap().snapshot(),
+            &snapshots[index],
+            "project v{} must keep the dependency pin captured by its closure",
+            index + 1
+        );
+        let mut session = AdmittedReplSession::from_loaded_project(
+            project,
+            project.standard_sources().iter().cloned(),
+            Limits::default(),
+        )
+        .unwrap();
+        for import in use_modules.lines() {
+            assert_eq!(session.submit(import), Ok(None));
+        }
+        let captured = session.submit(capture);
+        assert!(
+            captured.is_ok(),
+            "snapshot {} rejected its captured paired function with {}",
+            snapshots[index],
+            captured.as_ref().unwrap_err().code()
+        );
+        assert_eq!(captured, Ok(None));
+        sessions.push(session);
+    }
+
+    for index in [5, 0, 3, 1, 4, 2, 5, 0] {
+        assert_eq!(
+            sessions[index].submit(replay),
+            Ok(Some(ints(&expected[index]))),
+            "captured closure must replay its own paired dependencies at snapshot {}",
+            snapshots[index]
+        );
+    }
+
+    let mut cloned_sessions = sessions.clone();
+    for index in [2, 4, 1, 5, 0, 3] {
+        assert_eq!(
+            cloned_sessions[index].submit(replay),
+            Ok(Some(ints(&expected[index]))),
+            "cloned captured closure must retain paired pin {}",
+            snapshots[index]
+        );
+    }
+}
+
+#[test]
 fn replayed_closure_uses_its_captured_dependency_snapshot_after_snapshot_changes() {
     let (_directory, project_v1, project_v2, snapshot_v1, snapshot_v2, sources_v1, sources_v2) =
         snapshot_projects();

@@ -2559,6 +2559,46 @@ fn sparse_nested_storm_folds_preserve_terminal_route_identity() {
         chained_terminal_identity,
         "paired omissions across a later chain preserve the computed terminal identity"
     );
+    let composed_rebind_and_omissions = resolver
+        .extend_nested_terminal_pair_sparse_checkpoint_storm_rebind_then_omission_chains_preserving_terminal_identity(
+            &first_stage,
+            &sparse_chains,
+            &omission_tail_chains,
+        )
+        .unwrap();
+    assert_eq!(
+        composed_rebind_and_omissions.terminal_route_identity(),
+        chained_terminal_identity,
+        "the computed paired rebind identity remains exact across later omission chains"
+    );
+    assert_eq!(
+        attached_pins(composed_rebind_and_omissions.final_session()),
+        attached_pins(chained_sparse_fold.final_session()),
+        "composing rebind and omission chains preserves the paired terminal pin route"
+    );
+    assert_eq!(
+        composed_rebind_and_omissions
+            .final_session()
+            .database(aliases[4])
+            .unwrap()
+            .pin()
+            .commit()
+            .as_str(),
+        leaf_final,
+        "the exact computed terminal package value survives the omission phase"
+    );
+    let active_in_omission_round = [(&outer_label, Some(outer_waves.as_slice()))];
+    let invalid_omission_chain = [active_in_omission_round.as_slice()];
+    let first_only_rebind_chains = [first_sparse_chain.as_slice()];
+    assert!(matches!(
+        resolver
+            .extend_nested_terminal_pair_sparse_checkpoint_storm_rebind_then_omission_chains_preserving_terminal_identity(
+                &first_stage,
+                &first_only_rebind_chains,
+                &[invalid_omission_chain.as_slice()],
+            ),
+        Err(AttachmentError::RetainedSnapshotUnavailable)
+    ));
 
     let middle_terminal_pair = [
         PinnedDatabase::resolve(
