@@ -1,0 +1,3 @@
+pub fn distinct_float_component(
+    rows: Relation<(Float, Int)>
+): Relation<(Float, Int)> = rows | distinct();

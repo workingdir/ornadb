@@ -2,16 +2,16 @@ use std::collections::BTreeMap;
 
 use num_bigint::BigInt;
 use orna_evaluator_v1::{
-    evaluate_expression, evaluate_expression_with_functions, evaluate_function, evaluate_parsed,
-    evaluate_parsed_with_nominals,
-    evaluate_repl, evaluate_with_functions_and_nominals, invoke_named, invoke_named_with_effects,
-    invoke_named_with_effects_and_budget, invoke_named_with_nominals, EffectHandler, Environment,
-    EvaluationError, Functions, Limits, NominalDefinition, NominalDefinitions, NominalField,
-    NominalVariant, PureFunction, RelationPage, StepBudget,
+    AdmittedReplSession, EffectHandler, Environment, EvaluationError, Functions, Limits,
+    NominalDefinition, NominalDefinitions, NominalField, NominalVariant, PureFunction,
+    RelationPage, RelationReadScope, StepBudget, evaluate_expression, evaluate_expression_with_functions,
+    evaluate_function, evaluate_parsed, evaluate_parsed_with_nominals, evaluate_repl,
+    SysHostBindingRegistry, evaluate_with_functions_and_nominals, invoke_named,
+    invoke_named_with_effects, invoke_named_with_effects_and_budget, invoke_named_with_nominals,
 };
 use orna_syntax_v1::{
-    lex, AssignmentOperator, AssignmentTarget, Expr, NameSegment, Pattern, RecordField, Statement,
-    SyntaxSpan, TokenKind,
+    lex, AssignmentOperator, AssignmentTarget, Expr, LambdaParameter, NameSegment, Pattern,
+    RecordField, Statement, SyntaxSpan, TokenKind,
 };
 use orna_value_v1::{Raw, Value, CANONICAL_NAN_BITS};
 
@@ -21,6 +21,41 @@ fn evaluate(source: &str) -> Value {
 }
 fn code(result: Result<Value, EvaluationError>) -> String {
     result.unwrap_err().code().to_owned()
+}
+
+#[test]
+fn std_environment_get_reads_current_and_absent_process_values() {
+    let expected = std::env::var("PATH").expect("test process exposes PATH");
+    let absent = "ORNA_TEST_MISSING_6TG7L_20261002";
+    let mut session = AdmittedReplSession::with_reference_standard(Limits::default()).unwrap();
+    let mut bindings = SysHostBindingRegistry::capture_environment([
+        String::from("PATH"),
+        absent.to_owned(),
+    ])
+    .expect("explicit process environment allowlist is valid");
+    assert_eq!(
+        session.submit(include_str!(
+            "fixtures/repl-inline-use-std-io-environment-6tg7l.orna"
+        )),
+        Ok(None)
+    );
+    let current = session
+        .submit_with_sys_host_bindings(
+            include_str!("fixtures/repl-inline-std-io-environment-get-path-6tg7l.orna"),
+            &mut bindings,
+        )
+        .unwrap_or_else(|error| panic!("environment get failed: {}", error.code()));
+    assert_eq!(
+        current,
+        Some(Value::option(Some(Value::new(Raw::Text(expected)).unwrap())).unwrap())
+    );
+    assert_eq!(
+        session.submit_with_sys_host_bindings(
+            include_str!("fixtures/repl-inline-std-io-environment-get-missing-6tg7l.orna"),
+            &mut bindings,
+        ),
+        Ok(Some(Value::option(None).unwrap()))
+    );
 }
 
 #[derive(Clone, Copy)]
@@ -235,6 +270,19 @@ fn relation_argument(value: Expr, span: &SyntaxSpan) -> orna_syntax_v1::Argument
     }
 }
 
+fn relation_lambda(parameter: &str, body: Expr) -> Expr {
+    let span = relation_span();
+    Expr::Lambda {
+        parameters: vec![LambdaParameter {
+            pattern: Pattern::Name(parameter.into(), span.clone()),
+            annotation: None,
+            span: span.clone(),
+        }],
+        body: Box::new(body),
+        span,
+    }
+}
+
 fn relation_source_expression(source: &str) -> Expr {
     let span = relation_span();
     Expr::Call {
@@ -292,10 +340,13 @@ fn relation_integer(value: i64) -> Expr {
 }
 
 fn relation_pair(left: i64, right: i64) -> Value {
-    Value::new(Raw::Array(vec![
-        Raw::Int(left.into()),
-        Raw::Int(right.into()),
-    ]))
+    Value::new(Raw::Tag(
+        60015,
+        Box::new(Raw::Array(vec![
+            Raw::Int(left.into()),
+            Raw::Int(right.into()),
+        ])),
+    ))
     .unwrap()
 }
 fn relation_window_row(values: &[i64]) -> Value {
@@ -446,6 +497,42 @@ struct UnionRelationEffects {
     cursors: Vec<(String, Option<Vec<u8>>)>,
 }
 
+struct LateralRelationEffects {
+    rows: BTreeMap<String, Vec<Value>>,
+    reads: Vec<(String, RelationReadScope, Option<Vec<u8>>)>,
+}
+
+struct RepeatedUnknownRelationEffects {
+    rows: Vec<Value>,
+    starts: usize,
+}
+
+impl EffectHandler for RepeatedUnknownRelationEffects {
+    fn handle(&mut self, _: &Expr, _: &[Value]) -> Result<Option<Value>, EvaluationError> {
+        Ok(None)
+    }
+
+    fn scan_relation_page(
+        &mut self,
+        source: &str,
+        after: Option<&[u8]>,
+        _: usize,
+        budget: &mut StepBudget,
+    ) -> Result<Option<RelationPage>, EvaluationError> {
+        assert_eq!(source, "sys.Storage");
+        assert!(after.is_none(), "each fixture source contains one row");
+        budget.debit(1)?;
+        let Some(row) = self.rows.get(self.starts).cloned() else {
+            panic!("unexpected extra scan for unknown source {}", self.starts);
+        };
+        self.starts += 1;
+        Ok(Some(RelationPage {
+            rows: vec![row],
+            next: None,
+        }))
+    }
+}
+
 impl UnionRelationEffects {
     fn new(left: Vec<Value>, right: Vec<Value>) -> Self {
         Self {
@@ -470,6 +557,50 @@ impl EffectHandler for UnionRelationEffects {
         budget.debit(1)?;
         self.cursors
             .push((source.into(), after.map(ToOwned::to_owned)));
+        let rows = self
+            .rows
+            .get(source)
+            .unwrap_or_else(|| panic!("unexpected relation source {source}"));
+        let index = after.map_or(0, |cursor| usize::from(cursor[0]));
+        if index >= rows.len() {
+            return Ok(Some(RelationPage {
+                rows: Vec::new(),
+                next: None,
+            }));
+        }
+        let next = (index + 1 < rows.len()).then(|| vec![(index + 1) as u8]);
+        Ok(Some(RelationPage {
+            rows: vec![rows[index].clone()],
+            next,
+        }))
+    }
+}
+
+impl LateralRelationEffects {
+    fn new(rows: BTreeMap<String, Vec<Value>>) -> Self {
+        Self {
+            rows,
+            reads: Vec::new(),
+        }
+    }
+}
+
+impl EffectHandler for LateralRelationEffects {
+    fn handle(&mut self, _: &Expr, _: &[Value]) -> Result<Option<Value>, EvaluationError> {
+        Ok(None)
+    }
+
+    fn scan_relation_page_scoped(
+        &mut self,
+        source: &str,
+        scope: RelationReadScope,
+        after: Option<&[u8]>,
+        _: usize,
+        budget: &mut StepBudget,
+    ) -> Result<Option<RelationPage>, EvaluationError> {
+        budget.debit(1)?;
+        self.reads
+            .push((source.to_owned(), scope, after.map(ToOwned::to_owned)));
         let rows = self
             .rows
             .get(source)
@@ -2421,6 +2552,10 @@ fn math_pipelines_and_mixed_named_calls_share_argument_positions() {
 
 #[test]
 fn std_bits_preserves_unbounded_signed_twos_complement_semantics() {
+    assert_eq!(
+        evaluate(include_str!("fixtures/evaluator_source_46ee2ded56c3f4e7.orna")),
+        Value::int(3.into())
+    );
     for (expression, expected) in [
         (
             include_str!("fixtures/evaluator_source_525122f16c2e379f.orna"),
@@ -2485,10 +2620,6 @@ fn std_bits_preserves_unbounded_signed_twos_complement_semantics() {
         (
             include_str!("fixtures/evaluator_source_ac55dad4bba9ad9c.orna"),
             "ORNA-EVAL-LIMIT",
-        ),
-        (
-            include_str!("fixtures/evaluator_source_46ee2ded56c3f4e7.orna"),
-            "ORNA-EVAL-UNSUPPORTED",
         ),
     ] {
         assert_eq!(
@@ -3332,6 +3463,10 @@ fn std_collection_first_returns_only_the_head_of_a_finite_list() {
 
 #[test]
 fn std_collection_first_is_callback_free_and_bounded() {
+    assert_eq!(
+        evaluate(include_str!("fixtures/evaluator_source_8149266b97333702.orna")),
+        Value::option(Some(Value::int(1.into()))).unwrap()
+    );
     for (expression, expected) in [
         (
             include_str!("fixtures/evaluator_source_d06f72238e332b7f.orna"),
@@ -3343,10 +3478,6 @@ fn std_collection_first_is_callback_free_and_bounded() {
         ),
         (
             include_str!("fixtures/evaluator_source_9008cedb3febd226.orna"),
-            "ORNA-EVAL-UNSUPPORTED",
-        ),
-        (
-            include_str!("fixtures/evaluator_source_8149266b97333702.orna"),
             "ORNA-EVAL-UNSUPPORTED",
         ),
         (
@@ -3374,7 +3505,7 @@ fn std_collection_first_is_callback_free_and_bounded() {
             },
         )
         .unwrap(),
-        Value::int(13.into())
+        Value::option(Some(Value::int(13.into()))).unwrap()
     );
     assert_eq!(
         code(evaluate_expression(
@@ -3437,6 +3568,10 @@ fn std_collection_last_returns_option_none_for_empty_finite_inputs() {
 
 #[test]
 fn std_collection_last_is_callback_free_and_respects_collection_bounds() {
+    assert_eq!(
+        evaluate(include_str!("fixtures/evaluator_source_895445bd33a0cfd0.orna")),
+        Value::option(Some(Value::int(1.into()))).unwrap()
+    );
     for (expression, expected) in [
         (
             include_str!("fixtures/evaluator_source_8f9ff585c3397bd3.orna"),
@@ -3448,10 +3583,6 @@ fn std_collection_last_is_callback_free_and_respects_collection_bounds() {
         ),
         (
             include_str!("fixtures/evaluator_source_d78ee9d2ec4a46f1.orna"),
-            "ORNA-EVAL-UNSUPPORTED",
-        ),
-        (
-            include_str!("fixtures/evaluator_source_895445bd33a0cfd0.orna"),
             "ORNA-EVAL-UNSUPPORTED",
         ),
         (
@@ -3932,9 +4063,12 @@ fn std_collection_decimal_sum_rejects_mixed_numeric_kinds() {
 
 #[test]
 fn std_collection_sum_rejects_unsupported_numeric_kinds_and_shapes() {
+    assert_eq!(
+        evaluate(include_str!("fixtures/evaluator_source_a92c58c6d0b15cfc.orna")),
+        Value::int(1.into())
+    );
     for expression in [
         include_str!("fixtures/evaluator_source_e1ba4fa7c3937d2c.orna"),
-        include_str!("fixtures/evaluator_source_a92c58c6d0b15cfc.orna"),
     ] {
         assert_eq!(
             code(evaluate_expression(
@@ -4144,8 +4278,6 @@ fn std_collection_float_aggregates_reject_mixed_inputs_callbacks_and_limits() {
     for expression in [
         include_str!("fixtures/evaluator_source_cdab6ecfce425b19.orna"),
         include_str!("fixtures/evaluator_source_fe5013414b733c91.orna"),
-        include_str!("fixtures/evaluator_source_672569f1e425be8a.orna"),
-        include_str!("fixtures/evaluator_source_4636ea68fc901968.orna"),
         include_str!("fixtures/evaluator_source_21e98e42a38aa4ca.orna"),
         include_str!("fixtures/evaluator_source_f9bcdc1230a9faa4.orna"),
     ] {
@@ -4156,6 +4288,20 @@ fn std_collection_float_aggregates_reject_mixed_inputs_callbacks_and_limits() {
                 Limits::default(),
             )),
             "ORNA-EVAL-UNSUPPORTED",
+            "{expression}"
+        );
+    }
+    for expression in [
+        include_str!("fixtures/evaluator_source_672569f1e425be8a.orna"),
+        include_str!("fixtures/evaluator_source_4636ea68fc901968.orna"),
+    ] {
+        assert_eq!(
+            code(evaluate_expression(
+                expression,
+                &Environment::new(),
+                Limits::default(),
+            )),
+            "ORNA-EVAL-TYPE",
             "{expression}"
         );
     }
@@ -4308,7 +4454,7 @@ fn std_collection_temporal_min_and_max_keep_empty_null_and_reject_mixed_types() 
                 &Environment::new(),
                 Limits::default()
             )),
-            "ORNA-EVAL-UNSUPPORTED",
+            "ORNA-EVAL-TYPE",
             "{expression}"
         );
     }
@@ -4437,6 +4583,10 @@ fn std_collection_min_and_max_optional_results_match_some_null_and_coalesce() {
 #[test]
 fn std_collection_min_and_max_fail_closed_for_unsupported_kinds_shapes_and_limits() {
     assert_eq!(
+        evaluate(include_str!("fixtures/evaluator_source_78bff71074810743.orna")),
+        Value::option(Some(Value::int(1.into()))).unwrap()
+    );
+    assert_eq!(
         evaluate(include_str!(
             "fixtures/evaluator_source_2dca5c2db4197987.orna"
         )),
@@ -4451,7 +4601,7 @@ fn std_collection_min_and_max_fail_closed_for_unsupported_kinds_shapes_and_limit
     for (expression, expected) in [
         (
             include_str!("fixtures/evaluator_source_525c395e4f9e73ad.orna"),
-            "ORNA-EVAL-UNSUPPORTED",
+            "ORNA-EVAL-TYPE",
         ),
         (
             include_str!("fixtures/evaluator_source_fe4ea82d41fb542a.orna"),
@@ -4463,10 +4613,6 @@ fn std_collection_min_and_max_fail_closed_for_unsupported_kinds_shapes_and_limit
         ),
         (
             include_str!("fixtures/evaluator_source_331bc5638c483c02.orna"),
-            "ORNA-EVAL-UNSUPPORTED",
-        ),
-        (
-            include_str!("fixtures/evaluator_source_78bff71074810743.orna"),
             "ORNA-EVAL-UNSUPPORTED",
         ),
         (
@@ -4778,6 +4924,10 @@ fn std_collection_one_evaluates_predicates_in_order_and_stops_after_second_match
 
 #[test]
 fn std_collection_one_rejects_invalid_inputs_propagates_callback_failures_and_keeps_limits() {
+    assert_eq!(
+        evaluate(include_str!("fixtures/evaluator_source_4c6049668a352465.orna")),
+        Value::int(1.into())
+    );
     for (expression, expected) in [
         (
             include_str!("fixtures/evaluator_source_1d1ee269ab24f5d6.orna"),
@@ -4801,10 +4951,6 @@ fn std_collection_one_rejects_invalid_inputs_propagates_callback_failures_and_ke
         ),
         (
             include_str!("fixtures/evaluator_source_3b12e77acdec5c03.orna"),
-            "ORNA-EVAL-UNSUPPORTED",
-        ),
-        (
-            include_str!("fixtures/evaluator_source_4c6049668a352465.orna"),
             "ORNA-EVAL-UNSUPPORTED",
         ),
         (
@@ -5684,6 +5830,19 @@ fn std_collection_partition_debits_one_step_per_scanned_value_without_duplicate_
 }
 
 #[test]
+fn generic_callback_can_precede_its_value_and_returns_the_projected_field() {
+    assert_eq!(
+        call_module(
+            include_str!("fixtures/ovc-callback-after-value-mqger.orna"),
+            "project_reordered()",
+            Limits::default(),
+        )
+        .unwrap(),
+        Value::new(Raw::Text("ada".into())).unwrap(),
+    );
+}
+
+#[test]
 fn std_collection_filter_accepts_direct_pipeline_and_named_calls() {
     let expected = Value::new(Raw::Array(vec![Raw::Int(2.into()), Raw::Int(4.into())])).unwrap();
     assert_eq!(
@@ -5928,7 +6087,7 @@ fn std_collection_sort_by_accepts_all_call_forms_and_preserves_stable_ties() {
 }
 
 #[test]
-fn std_collection_asof_join_uses_nearest_match_and_last_source_row_for_ties() {
+fn std_collection_asof_join_uses_latest_prior_match_and_canonical_row_ties() {
     let collection_source = orna_standard::reference_standard_sources_v1()
         .into_iter()
         .find(|(path, _)| path == "std/collection.orna")
@@ -5949,8 +6108,8 @@ fn std_collection_asof_join_uses_nearest_match_and_last_source_row_for_ties() {
     .expect("the pinned public function reaches the evaluator binding");
     let expected = evaluate(
         r#"[
-            ({ group: "east", at: 10, label: "left-nearest" }, { group: "east", at: 11, label: "nearest-future" }),
-            ({ group: "east", at: 20, label: "left-tie" }, { group: "east", at: 18, label: "lower-tie-later-source" }),
+            ({ group: "east", at: 10, label: "left-nearest" }, Some({ group: "east", at: 8, label: "tie-later-source" })),
+            ({ group: "east", at: 20, label: "left-tie" }, Some({ group: "east", at: 18, label: "key-zzz" })),
             ({ group: "missing", at: 10, label: "left-no-match" }, null)
         ]"#,
     );
@@ -5958,12 +6117,10 @@ fn std_collection_asof_join_uses_nearest_match_and_last_source_row_for_ties() {
 }
 
 #[test]
-fn std_collection_asof_join_measures_instant_distance_to_the_nanosecond() {
+fn std_collection_asof_join_excludes_future_instants_to_the_nanosecond() {
     assert_eq!(
         evaluate(include_str!("fixtures/asof_join_instant_nearest.orna")),
-        evaluate(
-            r#"[({ group: "g", at: 1970-01-01T00:00:00Z, label: "left" }, { group: "g", at: 1970-01-01T00:00:00.000000001Z, label: "one-nanosecond" })]"#,
-        )
+        evaluate(r#"[({ group: "g", at: 1970-01-01T00:00:00Z, label: "left" }, null)]"#,)
     );
 }
 
@@ -9204,6 +9361,23 @@ fn union_relations_preserve_declared_order_duplicates_and_bounded_terminals() {
 }
 
 #[test]
+fn cloned_filter_continuations_do_not_promote_between_equal_named_unknowns() {
+    let body = parsed_expression(include_str!(
+        "fixtures/query-cloned-continuation-unknowns-9322q.orna"
+    ));
+    let mut effects = RepeatedUnknownRelationEffects {
+        rows: vec![Value::int(1.into()), Value::int(2.into()), Value::int(3.into())],
+        starts: 0,
+    };
+
+    let result = invoke_relation(body, &mut effects, Limits::default())
+        .unwrap_or_else(|error| panic!("the chained filter query computes its count: {}", error.code()));
+
+    assert_eq!(result, Value::int(2.into()));
+    assert_eq!(effects.starts, 3, "all three unknown operands contribute");
+}
+
+#[test]
 fn materialized_list_union_remains_left_to_right_with_duplicates() {
     assert_eq!(
         evaluate(include_str!(
@@ -9221,6 +9395,10 @@ fn materialized_list_union_remains_left_to_right_with_duplicates() {
 
 #[test]
 fn std_stats_reject_mixed_or_unsupported_inputs_and_resource_overflow() {
+    assert_eq!(
+        evaluate(include_str!("fixtures/evaluator_source_0b99861bb1316192.orna")),
+        Value::decimal(15.into(), (-1).into()).unwrap()
+    );
     for (expression, expected) in [
         (
             include_str!("fixtures/evaluator_source_91637a611b83fef1.orna"),
@@ -9237,10 +9415,6 @@ fn std_stats_reject_mixed_or_unsupported_inputs_and_resource_overflow() {
         (
             include_str!("fixtures/evaluator_source_5ae40e0510743923.orna"),
             "ORNA-EVAL-TYPE",
-        ),
-        (
-            include_str!("fixtures/evaluator_source_0b99861bb1316192.orna"),
-            "ORNA-EVAL-UNSUPPORTED",
         ),
     ] {
         assert_eq!(
@@ -9336,6 +9510,109 @@ fn distinct_relation_eliminates_duplicates_and_handles_empty_input() {
         Value::int(0.into())
     );
     assert_eq!(empty.cursors, vec![None]);
+}
+
+#[test]
+fn distinct_relation_preserves_first_identity_across_sparse_filter_cascade_union() {
+    let body = parsed_expression(include_str!(
+        "fixtures/query-distinct-sparse-filter-cascade-5lya7.orna"
+    ));
+    let ints = |values: &[i64]| {
+        values
+            .iter()
+            .copied()
+            .map(|value| Value::int(value.into()))
+            .collect()
+    };
+    let mut effects = UnionRelationEffects {
+        rows: BTreeMap::from([
+            ("sys.Storage".into(), ints(&[2, 1, 2, 4, 9])),
+            ("sys.MaintenanceJob".into(), ints(&[2, 3, 4, 5, 6])),
+        ]),
+        cursors: Vec::new(),
+    };
+
+    let result = invoke_relation(body, &mut effects, Limits::default())
+        .unwrap_or_else(|error| panic!("sparse distinct cascade failed: {}", error.code()));
+
+    let first_pair = Value::new(Raw::Tag(
+        60015,
+        Box::new(Raw::Array(vec![Raw::Int(2.into()), Raw::Int(4.into())])),
+    ))
+    .expect("first pair is a canonical tuple");
+    let expected = Value::new(Raw::Array(vec![
+        Raw::Int(4.into()),
+        Value::option(Some(first_pair))
+            .expect("first pair is a canonical option")
+            .raw()
+            .clone(),
+        Value::option(Some(Value::int(3.into())))
+            .expect("third surviving identity is a canonical option")
+            .raw()
+            .clone(),
+    ]))
+    .expect("proof result is canonical");
+    assert_eq!(
+        result,
+        expected,
+        "the fold keeps the first surviving value for each identity across both union branches"
+    );
+}
+
+#[test]
+fn paired_distinct_cascades_preserve_first_values_and_stop_at_sparse_take_bounds() {
+    let body = parsed_expression(include_str!(
+        "fixtures/query-paired-distinct-sparse-cascade-8jk3e.orna"
+    ));
+    let ints = |values: &[i64]| {
+        values
+            .iter()
+            .copied()
+            .map(|value| Value::int(value.into()))
+            .collect()
+    };
+    let mut effects = UnionRelationEffects {
+        rows: BTreeMap::from([
+            ("sys.Storage".into(), ints(&[0, 2, 2, 4])),
+            ("sys.MaintenanceJob".into(), ints(&[4, 6, 5, 2])),
+        ]),
+        cursors: Vec::new(),
+    };
+
+    let result = invoke_relation(body, &mut effects, Limits::default())
+        .unwrap_or_else(|error| panic!("paired sparse distinct cascades failed: {}", error.code()));
+    let expected = Value::new(Raw::Array(vec![
+        Value::option(Some(relation_pair(2, 4)))
+            .expect("first paired identity is canonical")
+            .raw()
+            .clone(),
+        Value::option(Some(Value::int(4.into())))
+            .expect("second retained identity is canonical")
+            .raw()
+            .clone(),
+    ]))
+    .expect("paired fold result is canonical");
+    assert_eq!(
+        result,
+        expected,
+        "branch-local distinct folds keep their first values, then the sparse shared cascade folds the union in order"
+    );
+
+    let first_query_reads = vec![
+        ("sys.Storage".into(), None),
+        ("sys.Storage".into(), Some(vec![1])),
+        ("sys.Storage".into(), Some(vec![2])),
+        ("sys.MaintenanceJob".into(), None),
+    ];
+    assert_eq!(
+        effects.cursors,
+        first_query_reads
+            .iter()
+            .chain(&first_query_reads)
+            .cloned()
+            .collect::<Vec<_>>(),
+        "a duplicate rejected by a completed take must close its branch without reading another page"
+    );
 }
 
 #[test]
@@ -9654,6 +9931,287 @@ fn flat_map_relation_invokes_named_callback_once_per_row_and_preserves_inner_ord
         Value::option(Some(relation_pair(13, 1))).expect("option is canonical")
     );
 }
+
+#[test]
+fn lateral_flat_map_keeps_outer_identity_across_sparse_relation_cascades() {
+    let parents = relation_stage(
+        relation_union(
+            relation_source_expression("ParentLeft"),
+            relation_source_expression("ParentRight"),
+        ),
+        "filter",
+        vec![parsed_expression(include_str!(
+            "fixtures/query-lateral-parent-sparse-scope-cascade-0h0s9.orna"
+        ))],
+    );
+    let positive_child = parsed_expression(include_str!(
+        "fixtures/query-lateral-positive-child-0h0s9.orna"
+    ));
+    let children = relation_union(
+        relation_stage(
+            relation_source_expression("ChildLeft"),
+            "filter",
+            vec![positive_child.clone()],
+        ),
+        relation_stage(
+            relation_source_expression("ChildRight"),
+            "filter",
+            vec![positive_child],
+        ),
+    );
+    let children = relation_stage(
+        children,
+        "filter",
+        vec![parsed_expression(include_str!(
+            "fixtures/query-lateral-bound-child-0h0s9.orna"
+        ))],
+    );
+    let children = relation_stage(
+        children,
+        "map",
+        vec![parsed_expression(include_str!(
+            "fixtures/query-lateral-project-parent-0h0s9.orna"
+        ))],
+    );
+    let lateral = relation_named_flat_map_stage(parents, relation_lambda("parent", children));
+    let complete = relation_stage(
+        lateral,
+        "window",
+        vec![relation_integer(7), relation_integer(7)],
+    );
+    let body = relation_terminal(complete, "first");
+    let mut effects = LateralRelationEffects::new(BTreeMap::from([
+        (
+            "ParentLeft".into(),
+            vec![Value::int(0.into()), Value::int(2.into())],
+        ),
+        (
+            "ParentRight".into(),
+            vec![Value::int(3.into()), Value::int(0.into())],
+        ),
+        (
+            "ChildLeft".into(),
+            vec![Value::int(1.into()), Value::int(0.into()), Value::int(3.into())],
+        ),
+        (
+            "ChildRight".into(),
+            vec![Value::int(2.into()), Value::int(0.into()), Value::int(1.into())],
+        ),
+    ]));
+
+    let pair = |outer: i64, inner: i64| {
+        Raw::Tag(
+            60015,
+            Box::new(Raw::Array(vec![Raw::Int(outer.into()), Raw::Int(inner.into())])),
+        )
+    };
+    let expected_rows = Value::new(Raw::Array(vec![
+        pair(2, 1),
+        pair(2, 2),
+        pair(2, 1),
+        pair(3, 1),
+        pair(3, 3),
+        pair(3, 2),
+        pair(3, 1),
+    ]))
+    .unwrap();
+    assert_eq!(
+        invoke_relation(body, &mut effects, Limits::default()).unwrap(),
+        Value::option(Some(expected_rows)).unwrap(),
+        "lateral rows keep their parent key and left-to-right child identity"
+    );
+
+    for source in ["ChildLeft", "ChildRight"] {
+        let reads = effects
+            .reads
+            .iter()
+            .filter(|(read_source, _, _)| read_source == source)
+            .collect::<Vec<_>>();
+        let mut scopes = Vec::new();
+        for (_, scope, _) in &reads {
+            if !scopes.contains(scope) {
+                scopes.push(*scope);
+            }
+        }
+        assert_eq!(
+            scopes.len(),
+            2,
+            "only the two accepted outer rows open a {source} lateral scope"
+        );
+        for scope in scopes {
+            let cursors = reads
+                .iter()
+                .filter(|(_, read_scope, _)| *read_scope == scope)
+                .map(|(_, _, after)| after.clone())
+                .collect::<Vec<_>>();
+            assert_eq!(
+                cursors,
+                vec![None, Some(vec![1]), Some(vec![2])],
+                "each {source} child scope advances its own ordered sparse pages"
+            );
+        }
+    }
+}
+
+#[test]
+fn paired_windows_preserve_lateral_tuple_identity_across_sparse_scopes() {
+    let parents = relation_union(
+        relation_source_expression("ParentLeft"),
+        relation_source_expression("ParentRight"),
+    );
+    let positive_child = parsed_expression("child => child > 0");
+    let children = relation_union(
+        relation_stage(
+            relation_source_expression("ChildLeft"),
+            "filter",
+            vec![positive_child.clone()],
+        ),
+        relation_stage(
+            relation_source_expression("ChildRight"),
+            "filter",
+            vec![positive_child],
+        ),
+    );
+    let children = relation_stage(
+        children,
+        "filter",
+        vec![parsed_expression("child => child <= parent")],
+    );
+    let children = relation_stage(
+        children,
+        "map",
+        vec![parsed_expression(include_str!(
+            "fixtures/query-window-project-parent-ghb9w.orna"
+        ))],
+    );
+    let lateral = relation_named_flat_map_stage(parents, relation_lambda("parent", children));
+    let frames = relation_stage(
+        lateral,
+        "window",
+        vec![relation_integer(2), relation_integer(2)],
+    );
+    let unique_frames = relation_stage(frames, "distinct", Vec::new());
+    let frame_pairs = relation_stage(unique_frames, "pairs", Vec::new());
+    let body = relation_terminal(frame_pairs, "first");
+    let mut effects = LateralRelationEffects::new(BTreeMap::from([
+        (
+            "ParentLeft".into(),
+            vec![Value::int(10.into())],
+        ),
+        ("ParentRight".into(), vec![Value::int(20.into())]),
+        (
+            "ChildLeft".into(),
+            vec![Value::int(1.into()), Value::int(0.into())],
+        ),
+        (
+            "ChildRight".into(),
+            vec![Value::int(2.into()), Value::int(0.into())],
+        ),
+    ]));
+
+    let frame = |parent| {
+        Value::new(Raw::Array(vec![
+            relation_pair(parent, 1).raw().clone(),
+            relation_pair(parent, 2).raw().clone(),
+        ]))
+        .expect("lateral frame is canonical")
+    };
+    let expected = Value::option(Some(
+        Value::new(Raw::Tag(
+            60015,
+            Box::new(Raw::Array(vec![frame(10).raw().clone(), frame(20).raw().clone()])),
+        ))
+        .expect("paired lateral frames are canonical"),
+    ))
+    .expect("paired frame option is canonical");
+    assert_eq!(
+        invoke_relation(body, &mut effects, Limits::default())
+            .unwrap_or_else(|error| panic!("paired lateral windows failed: {}", error.code())),
+        expected,
+        "each complete frame keeps its original parent and child tuple identities"
+    );
+
+    for source in ["ChildLeft", "ChildRight"] {
+        let reads = effects
+            .reads
+            .iter()
+            .filter(|(read_source, _, _)| read_source == source)
+            .collect::<Vec<_>>();
+        let mut scopes = Vec::new();
+        for (_, scope, _) in &reads {
+            if !scopes.contains(scope) {
+                scopes.push(*scope);
+            }
+        }
+        assert_eq!(scopes.len(), 2, "accepted parents open separate {source} scopes");
+        for scope in scopes {
+            let cursors = reads
+                .iter()
+                .filter(|(_, read_scope, _)| *read_scope == scope)
+                .map(|(_, _, after)| after.clone())
+                .collect::<Vec<_>>();
+            assert_eq!(cursors, vec![None, Some(vec![1])]);
+        }
+    }
+}
+
+#[test]
+fn sparse_lateral_input_can_finish_short_of_a_window_larger_than_item_limit() {
+    let children = relation_union(
+        relation_stage(
+            relation_source_expression("ChildLeft"),
+            "filter",
+            vec![parsed_expression("child => child > 0")],
+        ),
+        relation_stage(
+            relation_source_expression("ChildRight"),
+            "filter",
+            vec![parsed_expression("child => child > 0")],
+        ),
+    );
+    let children = relation_stage(
+        children,
+        "filter",
+        vec![parsed_expression("child => child <= parent")],
+    );
+    let children = relation_stage(
+        children,
+        "map",
+        vec![parsed_expression(include_str!(
+            "fixtures/query-window-project-parent-ghb9w.orna"
+        ))],
+    );
+    let lateral = relation_named_flat_map_stage(
+        relation_source_expression("Parent"),
+        relation_lambda("parent", children),
+    );
+    let oversized = relation_stage(
+        lateral,
+        "window",
+        vec![relation_integer(100), relation_integer(1)],
+    );
+    let body = relation_terminal(oversized, "first");
+    let mut effects = LateralRelationEffects::new(BTreeMap::from([
+        ("Parent".into(), vec![Value::int(10.into())]),
+        ("ChildLeft".into(), vec![Value::int(1.into())]),
+        ("ChildRight".into(), vec![Value::int(2.into())]),
+    ]));
+
+    assert_eq!(
+        invoke_relation(
+            body,
+            &mut effects,
+            Limits {
+                max_collection_items: 2,
+                ..Limits::default()
+            },
+        )
+        .unwrap(),
+        Value::option(None).expect("empty complete-window result is canonical"),
+        "only retained values count against the collection bound when no complete frame exists"
+    );
+}
+
 #[test]
 fn flat_map_relation_allows_empty_inner_lists_without_skipping_source_pages() {
     let source = relation_source_expression("Note");
@@ -9839,6 +10397,57 @@ fn window_relation_handles_gaps_without_partial_windows() {
         invoke_relation(body, &mut effects, Limits::default()).unwrap(),
         Value::int(2.into()),
         "the gap after [4, 5] must not create a partial [7] window"
+    );
+}
+
+#[test]
+fn windowed_distinct_preserves_frame_identities_across_sparse_union_cascade() {
+    let body = parsed_expression(include_str!(
+        "fixtures/query-window-distinct-sparse-frame-cascade-xlnp8.orna"
+    ));
+    let ints = |values: &[i64]| {
+        values
+            .iter()
+            .copied()
+            .map(|value| Value::int(value.into()))
+            .collect()
+    };
+    let mut effects = UnionRelationEffects {
+        rows: BTreeMap::from([
+            ("sys.Storage".into(), ints(&[1, 0, 2, 0, 1])),
+            ("sys.MaintenanceJob".into(), ints(&[2, 0, 1, 0, 2])),
+        ]),
+        cursors: Vec::new(),
+    };
+
+    let result = invoke_relation(body, &mut effects, Limits::default())
+        .unwrap_or_else(|error| panic!("sparse windowed distinct failed: {}", error.code()));
+
+    let first_frame = relation_window_row(&[1, 2]);
+    let first_two_distinct_frames = Value::new(Raw::Tag(
+        60015,
+        Box::new(Raw::Array(vec![
+            Raw::Array(vec![Raw::Int(1.into()), Raw::Int(2.into())]),
+            Raw::Array(vec![Raw::Int(2.into()), Raw::Int(1.into())]),
+        ])),
+    ))
+    .expect("paired frames are a canonical tuple");
+    let expected = Value::new(Raw::Array(vec![
+        Raw::Int(1.into()),
+        Value::option(Some(first_frame))
+            .expect("first frame is a canonical option")
+            .raw()
+            .clone(),
+        Value::option(Some(first_two_distinct_frames))
+            .expect("first pair of frames is a canonical option")
+            .raw()
+            .clone(),
+    ]))
+    .expect("proof result is canonical");
+    assert_eq!(
+        result,
+        expected,
+        "sparse filters retain all frame positions across the union boundary, then distinct keeps the first original frames"
     );
 }
 

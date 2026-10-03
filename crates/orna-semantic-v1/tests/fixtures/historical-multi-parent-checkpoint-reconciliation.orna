@@ -1,0 +1,42 @@
+pub fn factory_at(pin: sys.SnapshotRef) =
+    sys.database.as_of(pin).energy.factory;
+
+pub fn rejected_middle_parent_does_not_partially_promote_later_labels() {
+    let parent_fold = [
+        (
+            factory_at(sys.snapshot("HEAD~10")),
+            factory_at(sys.snapshot("HEAD~11")),
+        ),
+        (
+            factory_at(sys.snapshot("HEAD~11")),
+            factory_at(sys.snapshot("HEAD~10")),
+        ),
+        (
+            factory_at(sys.snapshot("HEAD~20")),
+            factory_at(sys.snapshot("HEAD~20")),
+        ),
+    ];
+    {
+        parent_fold: parent_fold,
+    }
+}
+
+pub fn valid_three_parent_fold_keeps_each_parent_label() {
+    let parent_fold = [
+        (
+            factory_at(sys.snapshot("HEAD~30")),
+            factory_at(sys.snapshot("HEAD~31")),
+        ),
+        (
+            factory_at(sys.snapshot("HEAD~32")),
+            factory_at(sys.snapshot("HEAD~33")),
+        ),
+        (
+            factory_at(sys.snapshot("HEAD~34")),
+            factory_at(sys.snapshot("HEAD~35")),
+        ),
+    ];
+    {
+        parent_fold: parent_fold,
+    }
+}

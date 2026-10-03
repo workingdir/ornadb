@@ -1,0 +1,1 @@
+fail(errors.caused_by(code: "E-OUTER", message: "outer", cause: errors.caused_by(code: "E-MIDDLE", message: "middle", cause: errors.make(code: "E-LEAF", message: "leaf")))) |? (failure => failure == errors.caused_by(code: "E-OUTER", message: "outer", cause: errors.caused_by(code: "E-MIDDLE", message: "middle", cause: errors.make(code: "E-LEAF", message: "leaf"))))

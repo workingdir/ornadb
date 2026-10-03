@@ -1,0 +1,4 @@
+use std.random as random;
+use std.hash as hash;
+
+pub fn untouched_core(value: Int): Int = value;

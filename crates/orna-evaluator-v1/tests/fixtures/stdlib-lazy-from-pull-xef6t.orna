@@ -1,0 +1,1 @@
+std.iterator.fold(std.lazy.from_pull(std.iterator.from_list([3, 7]).pull), 0, (total, value) => total + value)

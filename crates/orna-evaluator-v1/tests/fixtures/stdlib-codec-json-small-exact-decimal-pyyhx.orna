@@ -1,0 +1,1 @@
+std.encoding.json.decode("0.100000000000000005", as: Decimal)

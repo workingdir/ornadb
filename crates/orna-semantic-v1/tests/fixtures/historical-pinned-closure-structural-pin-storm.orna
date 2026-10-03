@@ -1,0 +1,154 @@
+pub fn factory_at(pin: sys.SnapshotRef) =
+    sys.database.as_of(pin).energy.factory;
+
+pub fn forwarded_factory(pin: sys.SnapshotRef) = factory_at(pin);
+
+pub fn chained_factory(pin: sys.SnapshotRef) = forwarded_factory(pin);
+
+pub fn bundle_at(
+    primary_pin: sys.SnapshotRef,
+    reader_pin: sys.SnapshotRef,
+    continuation_pin: sys.SnapshotRef,
+) = {
+    primary: chained_factory(primary_pin),
+    nested: {
+        reader: chained_factory(reader_pin)().read,
+        continuation: chained_factory(continuation_pin)().read(),
+    },
+};
+
+pub fn independently_pinned_components_survive_structural_rebind_storms() {
+    let rolling = bundle_at(
+        sys.snapshot("HEAD~80"),
+        sys.snapshot("HEAD~70"),
+        sys.snapshot("HEAD~60"),
+    );
+    let stage_0 = rolling;
+    rolling = bundle_at(
+        sys.snapshot("HEAD~79"),
+        sys.snapshot("HEAD~69"),
+        sys.snapshot("HEAD~59"),
+    );
+    let stage_1 = rolling;
+    rolling = bundle_at(
+        sys.snapshot("HEAD~78"),
+        sys.snapshot("HEAD~68"),
+        sys.snapshot("HEAD~58"),
+    );
+    let stage_2 = rolling;
+    rolling = bundle_at(
+        sys.snapshot("HEAD~77"),
+        sys.snapshot("HEAD~67"),
+        sys.snapshot("HEAD~57"),
+    );
+    let stage_3 = rolling;
+    rolling = bundle_at(
+        sys.snapshot("HEAD~76"),
+        sys.snapshot("HEAD~66"),
+        sys.snapshot("HEAD~56"),
+    );
+    let stage_4 = rolling;
+    rolling = bundle_at(
+        sys.snapshot("HEAD~75"),
+        sys.snapshot("HEAD~65"),
+        sys.snapshot("HEAD~55"),
+    );
+    let stage_5 = rolling;
+    rolling = bundle_at(
+        sys.snapshot("HEAD~74"),
+        sys.snapshot("HEAD~64"),
+        sys.snapshot("HEAD~54"),
+    );
+    let stage_6 = rolling;
+    rolling = bundle_at(
+        sys.snapshot("HEAD~73"),
+        sys.snapshot("HEAD~63"),
+        sys.snapshot("HEAD~53"),
+    );
+    let stage_7 = rolling;
+    rolling = stage_0;
+    let returned_to_first = rolling;
+    {
+        stage_0: {
+            primary: [stage_0.primary, chained_factory(sys.snapshot("HEAD~80"))],
+            reader: [
+                stage_0.nested.reader,
+                chained_factory(sys.snapshot("HEAD~70"))().read,
+            ],
+            continuation: [
+                stage_0.nested.continuation,
+                chained_factory(sys.snapshot("HEAD~60"))().read(),
+            ],
+        },
+        stage_1: {
+            primary: [stage_1.primary, chained_factory(sys.snapshot("HEAD~79"))],
+            reader: [stage_1.nested.reader, chained_factory(sys.snapshot("HEAD~69"))().read],
+            continuation: [
+                stage_1.nested.continuation,
+                chained_factory(sys.snapshot("HEAD~59"))().read(),
+            ],
+        },
+        stage_2: {
+            primary: [stage_2.primary, chained_factory(sys.snapshot("HEAD~78"))],
+            reader: [stage_2.nested.reader, chained_factory(sys.snapshot("HEAD~68"))().read],
+            continuation: [
+                stage_2.nested.continuation,
+                chained_factory(sys.snapshot("HEAD~58"))().read(),
+            ],
+        },
+        stage_3: {
+            primary: [stage_3.primary, chained_factory(sys.snapshot("HEAD~77"))],
+            reader: [stage_3.nested.reader, chained_factory(sys.snapshot("HEAD~67"))().read],
+            continuation: [
+                stage_3.nested.continuation,
+                chained_factory(sys.snapshot("HEAD~57"))().read(),
+            ],
+        },
+        stage_4: {
+            primary: [stage_4.primary, chained_factory(sys.snapshot("HEAD~76"))],
+            reader: [stage_4.nested.reader, chained_factory(sys.snapshot("HEAD~66"))().read],
+            continuation: [
+                stage_4.nested.continuation,
+                chained_factory(sys.snapshot("HEAD~56"))().read(),
+            ],
+        },
+        stage_5: {
+            primary: [stage_5.primary, chained_factory(sys.snapshot("HEAD~75"))],
+            reader: [stage_5.nested.reader, chained_factory(sys.snapshot("HEAD~65"))().read],
+            continuation: [
+                stage_5.nested.continuation,
+                chained_factory(sys.snapshot("HEAD~55"))().read(),
+            ],
+        },
+        stage_6: {
+            primary: [stage_6.primary, chained_factory(sys.snapshot("HEAD~74"))],
+            reader: [stage_6.nested.reader, chained_factory(sys.snapshot("HEAD~64"))().read],
+            continuation: [
+                stage_6.nested.continuation,
+                chained_factory(sys.snapshot("HEAD~54"))().read(),
+            ],
+        },
+        stage_7: {
+            primary: [stage_7.primary, chained_factory(sys.snapshot("HEAD~73"))],
+            reader: [stage_7.nested.reader, chained_factory(sys.snapshot("HEAD~63"))().read],
+            continuation: [
+                stage_7.nested.continuation,
+                chained_factory(sys.snapshot("HEAD~53"))().read(),
+            ],
+        },
+        returned_to_first: {
+            primary: [
+                returned_to_first.primary,
+                chained_factory(sys.snapshot("HEAD~80")),
+            ],
+            reader: [
+                returned_to_first.nested.reader,
+                chained_factory(sys.snapshot("HEAD~70"))().read,
+            ],
+            continuation: [
+                returned_to_first.nested.continuation,
+                chained_factory(sys.snapshot("HEAD~60"))().read(),
+            ],
+        },
+    }
+}

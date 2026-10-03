@@ -1,0 +1,2 @@
+use std.graph.shared.{shared_base};
+pub fn value(): Int = std.graph.shared.shared_base() + 4;

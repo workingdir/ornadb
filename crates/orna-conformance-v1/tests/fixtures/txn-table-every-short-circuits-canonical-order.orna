@@ -1,0 +1,8 @@
+pub table Entry(id: Str) {
+    assert every(entry => entry.id != "a" && (1 / 0) == 0);
+}
+
+fn parent() {
+    Entry.insert({ id: "b" });
+    Entry.insert({ id: "a" });
+}

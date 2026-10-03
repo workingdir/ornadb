@@ -1,0 +1,4 @@
+case std.iterator.last(std.iterator.from_list([3, 7, 9])) {
+    Some(value): value,
+    null: -1,
+}

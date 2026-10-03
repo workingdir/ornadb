@@ -1,0 +1,45 @@
+pub fn factory_at(pin: sys.SnapshotRef) =
+    sys.database.as_of(pin).energy.factory;
+
+// The maker's pin is shadowed by the returned callback's `pin`. That callback
+// then returns a deeper callback which closes over its own selected pin.
+pub fn callback_chain_at(pin: sys.SnapshotRef) =
+    (pin: sys.SnapshotRef) =>
+        (leaf_pin: sys.SnapshotRef) => factory_at(pin);
+
+pub fn paired_shadowed_callback_depth_rebinds_preserve_selected_pins() {
+    let paired = (
+        callback_chain_at(sys.snapshot("HEAD~100")),
+        callback_chain_at(sys.snapshot("HEAD~90")),
+    );
+    let (left_root, right_root) = paired;
+    let left_bridge = left_root(sys.snapshot("HEAD~80"));
+    let right_bridge = right_root(sys.snapshot("HEAD~70"));
+    let rolling = (left_bridge, right_bridge);
+    let saved = rolling;
+    rolling = (
+        left_root(sys.snapshot("HEAD~79")),
+        right_root(sys.snapshot("HEAD~69")),
+    );
+    let rebound = rolling;
+    rolling = saved;
+    let restored = rolling;
+    let (restored_left, restored_right) = restored;
+    let (rebound_left, rebound_right) = rebound;
+
+    let left_first = restored_left(sys.snapshot("HEAD~60"));
+    let left_second = restored_left(sys.snapshot("HEAD~50"));
+    let right_first = restored_right(sys.snapshot("HEAD~40"));
+    let right_second = restored_right(sys.snapshot("HEAD~30"));
+    let rebound_left_terminal = rebound_left(sys.snapshot("HEAD~20"));
+    let rebound_right_terminal = rebound_right(sys.snapshot("HEAD~10"));
+
+    {
+        left_first: std.concurrent.parallel([() => left_first, () => left_first]),
+        left_second: std.concurrent.parallel([() => left_second, () => left_second]),
+        right_first: std.concurrent.parallel([() => right_first, () => right_first]),
+        right_second: std.concurrent.parallel([() => right_second, () => right_second]),
+        rebound_left: std.concurrent.parallel([() => rebound_left_terminal, () => rebound_left_terminal]),
+        rebound_right: std.concurrent.parallel([() => rebound_right_terminal, () => rebound_right_terminal]),
+    }
+}

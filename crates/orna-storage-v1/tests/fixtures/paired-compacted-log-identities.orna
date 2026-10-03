@@ -1,0 +1,11 @@
+{ id: "redo-frame/50", name: "wal/left-log-0", city: "wal/right-log-0", }
+
+{ id: "redo-frame/51", name: "wal/left-log-0", city: "wal/right-log-0", }
+
+{ id: "redo-frame/52", name: "wal/left-log-1", city: "wal/right-log-1", }
+
+{ id: "redo-frame/54", name: "wal/left-log-2", city: "wal/right-log-2", }
+
+{ id: "redo-frame/55", name: "wal/left-log-3", city: "wal/right-log-3", }
+
+{ id: "redo-frame/56", name: "wal/left-log-3", city: "wal/right-log-3", }

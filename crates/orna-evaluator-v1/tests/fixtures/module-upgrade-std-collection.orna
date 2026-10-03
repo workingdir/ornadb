@@ -2,3 +2,4 @@ pub fn map<T, U>(rows: [T], transform: fn(T): U): [U] = fail(error(
     code: "ORNA-EVAL-UNSUPPORTED",
     message: "std.collection.map requires its evaluator binding"
 ));
+pub fn marker(): Int = 3;

@@ -1359,6 +1359,7 @@ dependencies = [
 name = "orna-evaluator-v1"
 version = "1.0.0"
 dependencies = [
+ "base64",
  "num-bigint 0.4.8",
  "num-integer",
  "num-traits",
@@ -1368,8 +1369,13 @@ dependencies = [
  "orna-semantic-v1",
  "orna-standard",
  "orna-syntax-v1",
+ "orna-sys-v1",
  "orna-value-v1",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
  "tempfile",
+ "unicode-case-mapping",
  "unicode-normalization",
 ]
 
@@ -1551,6 +1557,7 @@ dependencies = [
  "orna-core",
  "orna-semantic-v1",
  "orna-syntax",
+ "orna-syntax-v1",
 ]
 
 [[package]]
@@ -1608,10 +1615,13 @@ dependencies = [
  "orna-security-v1",
  "orna-syntax-v1",
  "orna-sys-macros",
+ "quote",
+ "reqwest",
  "serde",
  "serde_json",
  "sha2 0.10.9",
  "syn 2.0.119",
+ "uuid",
 ]
 
 [[package]]
@@ -1980,6 +1990,7 @@ checksum = "eddd3ca559203180a307f12d114c268abf583f59b03cb906fd0b3ff8646c1147"
 dependencies = [
  "base64",
  "bytes",
+ "futures-channel",
  "futures-core",
  "futures-util",
  "h2",
@@ -2648,6 +2659,12 @@ name = "unarray"
 version = "0.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "eaea85b334db583fe3274d12b4cd1880032beab409c0d774be044d4480ab9a94"
+
+[[package]]
+name = "unicode-case-mapping"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4e9026503b74f3207a4c04e6bf4ea735daa8edf6c0bbfa044cae597bb947a9db"
 
 [[package]]
 name = "unicode-casefold"

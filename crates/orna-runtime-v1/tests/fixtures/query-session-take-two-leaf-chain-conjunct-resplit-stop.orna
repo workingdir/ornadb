@@ -1,0 +1,25 @@
+sys.Storage
+    | filter(storage => storage.id >= 7 && storage.id < 14 && storage.id != 8 && storage.id != 10)
+    | take(5)
+    | filter(storage => storage.id != 12 && storage.id >= 7 && storage.id < 14)
+    | union(
+        sys.Storage
+            | filter(storage => storage.id >= 14 && storage.id < 22 && storage.id != 16 && storage.id != 18)
+            | take(6)
+            | filter(storage => storage.id != 20 && storage.id >= 14 && storage.id < 22)
+    )
+    | union(
+        sys.Storage
+            | filter(storage => storage.id >= 22 && storage.id < 33 && storage.id != 24 && storage.id != 26 && storage.id != 28)
+            | take(8)
+            | filter(storage => storage.id != 30 && storage.id >= 22 && storage.id < 33)
+    )
+    | filter(storage => storage.id != 9 && storage.id >= 7)
+    | filter(storage => storage.id != 14 && storage.id < 33)
+    | filter(storage => storage.id != 17 && storage.id >= 7)
+    | filter(storage => storage.id != 23 && storage.id < 33)
+    | filter(storage => storage.id != 27 && storage.id >= 7)
+    | filter(storage => sys.Storage.lookup(storage.target).title == "later" && storage.id < 33)
+    | take(2)
+    | count()
+    |? (failure => failure.code)

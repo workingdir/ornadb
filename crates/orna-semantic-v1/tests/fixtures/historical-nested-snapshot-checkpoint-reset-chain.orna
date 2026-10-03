@@ -1,0 +1,55 @@
+pub fn factory_at(pin: sys.SnapshotRef) =
+    sys.database.as_of(pin).energy.factory;
+
+pub fn nested_checkpoint_at(root_pin: sys.SnapshotRef) =
+    (leaf_pin: sys.SnapshotRef) => {
+        root: factory_at(root_pin),
+        leaf: factory_at(leaf_pin),
+    };
+
+pub fn crossed_nested_checkpoint_at(root_pin: sys.SnapshotRef) =
+    (leaf_pin: sys.SnapshotRef) => {
+        root: factory_at(leaf_pin),
+        leaf: factory_at(root_pin),
+    };
+
+pub fn nested_snapshot_checkpoint_reset_chain_values() {
+    let base_checkpoint = nested_checkpoint_at(sys.snapshot("HEAD~120"));
+    let first_checkpoint = nested_checkpoint_at(sys.snapshot("HEAD~110"));
+    let second_checkpoint = nested_checkpoint_at(sys.snapshot("HEAD~100"));
+
+    let rolling = base_checkpoint;
+    rolling = first_checkpoint;
+    let first_saved = rolling;
+    rolling = second_checkpoint;
+    let second_saved = rolling;
+    rolling = first_saved;
+    let reset_first = rolling;
+    rolling = base_checkpoint;
+    let reset_base = rolling;
+    rolling = second_saved;
+    let reset_second = rolling;
+    rolling = base_checkpoint;
+    let reset_base_again = rolling;
+
+    {
+        base: base_checkpoint(sys.snapshot("HEAD~90")),
+        first_saved: first_saved(sys.snapshot("HEAD~80")),
+        second_saved: second_saved(sys.snapshot("HEAD~70")),
+        reset_first: reset_first(sys.snapshot("HEAD~60")),
+        reset_base: reset_base(sys.snapshot("HEAD~50")),
+        reset_second: reset_second(sys.snapshot("HEAD~40")),
+        reset_base_again: reset_base_again(sys.snapshot("HEAD~30")),
+    }
+}
+
+pub fn nested_snapshot_reset_recovers_after_crossed_rebind() {
+    let saved_checkpoint = nested_checkpoint_at(sys.snapshot("HEAD~220"));
+    let rolling = saved_checkpoint;
+    rolling = crossed_nested_checkpoint_at(sys.snapshot("HEAD~210"));
+    rolling = saved_checkpoint;
+    {
+        saved: saved_checkpoint(sys.snapshot("HEAD~190")),
+        restored: rolling(sys.snapshot("HEAD~180")),
+    }
+}

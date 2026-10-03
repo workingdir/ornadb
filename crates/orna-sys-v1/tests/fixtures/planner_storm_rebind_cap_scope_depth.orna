@@ -1,0 +1,33 @@
+pub table PlannerStormRebindCapScopeDepth(id: Int) {
+    first: Bool,
+    second: Bool,
+    third: Bool,
+    fourth: Bool,
+}
+pub fn rebind_cap_scope_depth() = PlannerStormRebindCapScopeDepth
+    | union(
+        PlannerStormRebindCapScopeDepth
+            | take(100)
+            | union(
+                PlannerStormRebindCapScopeDepth
+                    | take(80)
+                    | union(
+                        PlannerStormRebindCapScopeDepth
+                            | take(60)
+                            | union(
+                                PlannerStormRebindCapScopeDepth
+                                    | take(40)
+                                    | filter(row => row.fourth),
+                                PlannerStormRebindCapScopeDepth
+                                    | take(40)
+                                    | filter(row => row.fourth)
+                            )
+                            | filter(row => row.third),
+                        PlannerStormRebindCapScopeDepth | take(20) | filter(row => row.third)
+                    )
+                    | filter(row => row.second),
+                PlannerStormRebindCapScopeDepth | take(10) | filter(row => row.second)
+            )
+            | filter(row => row.first),
+        PlannerStormRebindCapScopeDepth | take(20) | filter(row => row.first)
+    );

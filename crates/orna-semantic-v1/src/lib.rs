@@ -301,6 +301,8 @@ pub enum Type {
     Text,
     Bool,
     Null,
+    /// A completed no-value expression; distinct from the portable `null` value.
+    Unit,
     List(Box<Type>),
     /// A bounded numeric range.  This semantic-only value retains its bound
     /// type without constructing an iterator or admitting generic ranges.
@@ -2297,6 +2299,7 @@ fn resolve_type_aliases(
         | Type::Text
         | Type::Bool
         | Type::Null
+        | Type::Unit
         | Type::Bottom
         | Type::Error => ty.clone(),
     }
@@ -2377,6 +2380,7 @@ fn canonicalize_type_with_identities(ty: &Type, identities: &BTreeMap<String, St
         | Type::Text
         | Type::Bool
         | Type::Null
+        | Type::Unit
         | Type::Bottom
         | Type::Error => ty.clone(),
     }
@@ -2590,6 +2594,7 @@ fn primitive(name: &str) -> Option<Type> {
         "Str" | "Text" | "String" => Type::Text,
         "Bool" => Type::Bool,
         "Null" => Type::Null,
+        "Unit" => Type::Unit,
         "BOOLEAN" | "BOOL" => Type::Bool,
         "INTEGER" | "INT" | "BIGINT" => Type::Int,
         "FLOAT" => Type::Float,
@@ -4224,7 +4229,8 @@ fn static_type_is_known(ty: &Type, scope: &Scope) -> bool {
         | Type::Instant
         | Type::Text
         | Type::Bool
-        | Type::Null => true,
+        | Type::Null
+        | Type::Unit => true,
         Type::Named(name) => {
             matches!(
                 name.as_str(),
@@ -5810,9 +5816,19 @@ fn type_mentions_generic(ty: &Type, generic_names: &BTreeSet<String>) -> bool {
         | Type::Text
         | Type::Bool
         | Type::Null
+        | Type::Unit
         | Type::Bottom
         | Type::Error => false,
     }
+}
+
+fn function_parameters_are_concrete(ty: &Type, generic_names: &BTreeSet<String>) -> bool {
+    let Type::Function { parameters, .. } = ty else {
+        return false;
+    };
+    parameters
+        .iter()
+        .all(|parameter| !type_mentions_generic(parameter, generic_names))
 }
 
 fn substitute_generic_type(ty: &Type, substitutions: &BTreeMap<String, Type>) -> Type {
@@ -5877,6 +5893,7 @@ fn substitute_generic_type(ty: &Type, substitutions: &BTreeMap<String, Type>) ->
         | Type::Text
         | Type::Bool
         | Type::Null
+        | Type::Unit
         | Type::Bottom
         | Type::Error => ty.clone(),
     }
@@ -5908,6 +5925,29 @@ fn constrain_generic_type(
         | (Type::Stream(expected), Type::Stream(actual))
         | (Type::Optional(expected), Type::Optional(actual)) => {
             constrain_generic_type(expected, actual, generic_names, substitutions, diagnostics)
+        }
+        (
+            Type::Function {
+                parameters: expected_parameters,
+                result: expected_result,
+                ..
+            },
+            Type::Function {
+                parameters: actual_parameters,
+                result: actual_result,
+                ..
+            },
+        ) if expected_parameters.len() == actual_parameters.len() => {
+            for (expected, actual) in expected_parameters.iter().zip(actual_parameters) {
+                constrain_generic_type(expected, actual, generic_names, substitutions, diagnostics);
+            }
+            constrain_generic_type(
+                expected_result,
+                actual_result,
+                generic_names,
+                substitutions,
+                diagnostics,
+            );
         }
         (
             Type::Applied {
@@ -6136,47 +6176,96 @@ fn infer_local_generic_call(
     }
     let mut effects = intrinsic_call_effects(callee);
     effects.join(&symbol.effects);
-    let values = arguments
-        .iter()
-        .enumerate()
-        .map(|(index, argument)| {
-            let expected = expected_call_parameter(
-                raw_parameters,
-                parameter_names.as_deref(),
-                arguments,
-                index,
-            );
-            let local_constructor_scope = expected.is_some_and(|expected| {
-                matches!(expected, Type::Named(name) if bounded_generic_names.contains(name))
+    let mut values = vec![Type::Error; arguments.len()];
+    let mut argument_diagnostics = vec![Vec::new(); arguments.len()];
+    // Generic value arguments establish callback input types. Infer them
+    // before lambdas so named argument order cannot leave a predicate's
+    // parameter unbound when its source value appears later in the call.
+    let inference_order = (0..arguments.len())
+        .filter(|index| !matches!(arguments[*index].value, Expr::Lambda { .. }))
+        .chain((0..arguments.len()).filter(|index| {
+            matches!(arguments[*index].value, Expr::Lambda { .. })
+        }));
+    for index in inference_order {
+        let argument = &arguments[index];
+        let expected = expected_call_parameter(
+            raw_parameters,
+            parameter_names.as_deref(),
+            arguments,
+            index,
+        );
+        let contextual_expected =
+            expected.map(|expected| substitute_generic_type(expected, &substitutions));
+        let explicit_context = explicit_type_arguments
+            .is_some()
+            .then(|| contextual_expected.clone())
+            .flatten();
+        let local_constructor_scope = expected.is_some_and(|expected| {
+            matches!(expected, Type::Named(name) if bounded_generic_names.contains(name))
+        });
+        let contextual_callback = matches!(argument.value, Expr::Lambda { .. })
+            && contextual_expected.as_ref().is_some_and(|expected| {
+                function_parameters_are_concrete(expected, &generic_names)
             });
-            let inferred = if let Some(expected) = expected {
-                if type_mentions_generic(expected, &generic_names) {
-                    if local_constructor_scope {
-                        let mut argument_scope = scope.clone();
-                        argument_scope.allow_local_private_nominal_construction = true;
-                        infer(&argument.value, &argument_scope, local, diagnostics)
-                    } else {
-                        infer(&argument.value, scope, local, diagnostics)
-                    }
+        let diagnostics_for_argument = &mut argument_diagnostics[index];
+        let inferred = if let Some(expected) = explicit_context.as_ref() {
+            infer_contextual(&argument.value, expected, scope, local, diagnostics_for_argument)
+        } else if let (true, Some(contextual_expected)) =
+            (expected.is_some(), contextual_expected.as_ref())
+        {
+            if type_mentions_generic(contextual_expected, &generic_names) {
+                if local_constructor_scope {
+                    let mut argument_scope = scope.clone();
+                    argument_scope.allow_local_private_nominal_construction = true;
+                    infer(&argument.value, &argument_scope, local, diagnostics_for_argument)
+                } else if contextual_callback {
+                    // The callback's input can be concrete while its result
+                    // still determines another generic. Leave only those
+                    // result variables open for inference after contextualizing.
+                    let unresolved = generic_names
+                        .iter()
+                        .filter(|name| !substitutions.contains_key(*name))
+                        .map(|name| (name.clone(), Type::Error))
+                        .collect::<BTreeMap<_, _>>();
+                    let callback_context =
+                        substitute_generic_type(contextual_expected, &unresolved);
+                    infer_contextual(
+                        &argument.value,
+                        &callback_context,
+                        scope,
+                        local,
+                        diagnostics_for_argument,
+                    )
                 } else {
-                    infer_contextual(&argument.value, expected, scope, local, diagnostics)
+                    infer(&argument.value, scope, local, diagnostics_for_argument)
                 }
             } else {
-                infer(&argument.value, scope, local, diagnostics)
-            };
-            effects.join(&inferred.effects);
-            if let Some(expected) = expected {
-                constrain_generic_type(
-                    expected,
-                    &inferred.ty,
-                    &generic_names,
-                    &mut substitutions,
-                    diagnostics,
-                );
+                infer_contextual(
+                    &argument.value,
+                    contextual_expected,
+                    scope,
+                    local,
+                    diagnostics_for_argument,
+                )
             }
-            inferred.ty
-        })
-        .collect::<Vec<_>>();
+        } else {
+            infer(&argument.value, scope, local, diagnostics_for_argument)
+        };
+        effects.join(&inferred.effects);
+        if let Some(expected) = expected {
+            constrain_generic_type(
+                expected,
+                &inferred.ty,
+                &generic_names,
+                &mut substitutions,
+                diagnostics_for_argument,
+            );
+        }
+        values[index] = inferred.ty;
+    }
+    for diagnostics_for_argument in argument_diagnostics {
+        diagnostics.extend(diagnostics_for_argument);
+    }
     for generic in &generic_parameters {
         let Some(actual) = substitutions.get(&generic.name) else {
             diagnostics.push(diag(DIAG_TYPE, "generic type argument cannot be inferred"));
@@ -6219,6 +6308,86 @@ fn infer_local_generic_call(
         },
         effects,
     })
+}
+
+/// Codec decoders take their generic result type through the language's
+/// `as: T` type-witness argument. That argument is syntax, not a runtime
+/// value, so remove it before checking the codec's ordinary data/options
+/// parameters and use it as the call result type.
+fn infer_codec_decode_call(
+    callee: &Expr,
+    arguments: &[orna_syntax_v1::Argument],
+    scope: &Scope,
+    local: &BTreeMap<String, Symbol>,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Option<Inferred> {
+    let path = qualified_path(callee)?;
+    let root = *path.first()?;
+    if local.contains_key(root) {
+        return None;
+    }
+    let resolved = if root == "std" {
+        if !scope.modules.contains_key("std") {
+            return None;
+        }
+        path.iter().map(|part| (*part).to_owned()).collect::<Vec<_>>()
+    } else {
+        let namespace = scope.modules.get(root)?;
+        namespace
+            .0
+            .iter()
+            .cloned()
+            .chain(path[1..].iter().map(|part| (*part).to_owned()))
+            .collect::<Vec<_>>()
+    };
+    let operation = match resolved.join(".").as_str() {
+        "std.encoding.json.decode" => (Type::Text, false),
+        "std.encoding.json.decode_with_options" => (Type::Text, true),
+        "std.encoding.orna.decode" => (Type::Text, false),
+        "std.encoding.ovb.decode" => (Type::Named("std.BINARY_LARGE_OBJECT".into()), false),
+        _ => return None,
+    };
+
+    let mut witness = None;
+    let mut input = None;
+    let mut saw_options = false;
+    let mut positional_seen = false;
+    let mut effects = EffectSummary::default();
+    for argument in arguments {
+        match argument.name.as_deref() {
+            Some("as") if witness.is_none() => {
+                witness = start_type_witness(&argument.value, scope);
+                if witness.is_none() {
+                    diagnostics.push(diag(DIAG_TYPE, "codec result type witness is not a known static type"));
+                }
+            }
+            Some("input") if input.is_none() => {
+                let inferred = infer_contextual(&argument.value, &operation.0, scope, local, diagnostics);
+                effects.join(&inferred.effects);
+                input = Some(inferred.ty);
+            }
+            Some("ignore_unknown_fields") if operation.1 && !saw_options => {
+                let inferred = infer_contextual(&argument.value, &Type::Bool, scope, local, diagnostics);
+                effects.join(&inferred.effects);
+                saw_options = true;
+            }
+            None if input.is_none() && !positional_seen => {
+                let inferred = infer_contextual(&argument.value, &operation.0, scope, local, diagnostics);
+                effects.join(&inferred.effects);
+                input = Some(inferred.ty);
+                positional_seen = true;
+            }
+            _ => diagnostics.push(diag(DIAG_TYPE, "codec decode arguments do not match the documented signature")),
+        }
+    }
+    let Some(witness) = witness else {
+        diagnostics.push(diag(DIAG_TYPE, "codec decode requires an explicit `as: T` type witness"));
+        return Some(Inferred { ty: Type::Error, effects });
+    };
+    if input.is_none() {
+        diagnostics.push(diag(DIAG_TYPE, "codec decode requires an input value"));
+    }
+    Some(Inferred { ty: witness, effects })
 }
 
 /// Validate transfer statements after ordinary expression inference. `for` and
@@ -6934,7 +7103,7 @@ fn infer_contextual_lambda(
             .map(type_of)
             .or_else(|| expected_parameters.get(index).cloned())
             .unwrap_or(Type::Error);
-        bind_pattern(
+        bind_parameter_pattern(
             &parameter.pattern,
             ty.clone(),
             scope,
@@ -7068,20 +7237,178 @@ fn infer(
             infer_nominal(path, fields, scope, local, diagnostics)
         }
         Expr::List { elements, .. } => {
-            let mut ty = None;
+            let mut element_types = Vec::with_capacity(elements.len());
             let mut effects = EffectSummary::default();
             for element in elements {
                 let value = infer(element, scope, local, diagnostics);
                 effects.join(&value.effects);
+                element_types.push(value.ty);
+            }
+
+            let omitted_pinned_tuple_path =
+                type_sequence_has_omitted_pinned_checkpoint_tuple(&element_types);
+            if omitted_pinned_tuple_path {
+                seed_omitted_pinned_checkpoint_tuple_paths(&mut element_types);
+            }
+            let first_parent = element_types.first().cloned();
+            let transactional_checkpoint_fold = element_types.len() > 2
+                && first_parent.as_ref().is_some_and(|first| {
+                    type_contains_pinned_checkpoint_tuple(first)
+                        || (type_contains_omitted_checkpoint_tuple(first)
+                            && element_types
+                                .iter()
+                                .any(type_contains_pinned_checkpoint_tuple))
+                        || omitted_pinned_tuple_path
+                });
+            let mut checkpoint_topology_parent = element_types
+                .iter()
+                .find(|parent| type_contains_pinned_checkpoint_tuple(parent))
+                .cloned()
+                .or_else(|| first_parent.clone());
+            // A sparse paired first row has no complete pin map to roll back
+            // to. Recover one as the first fully populated row is accepted,
+            // then retain the accepted sparse-chain map for later local rollback.
+            let paired_omission_recovery = first_parent
+                .as_ref()
+                .is_some_and(type_contains_paired_checkpoint_omissions);
+            // A complete anchor, or one concrete lane of a partial first
+            // pair, can grow into a recoverable checkpoint map as later rows
+            // fill omitted pins. Retain the latest accepted map so a later
+            // crossed row cannot erase that sparse-chain identity.
+            let first_parent_can_grow_checkpoint_map = first_parent.as_ref().is_some_and(|parent| {
+                type_contains_pinned_checkpoint_tuple(parent)
+                    && (!type_contains_omitted_checkpoint_tuple(parent)
+                        || type_contains_partially_omitted_pinned_tuple(parent))
+            });
+            let checkpoint_reanchor_recovery = paired_omission_recovery
+                || (omitted_pinned_tuple_path
+                    && first_parent_can_grow_checkpoint_map);
+            let mut checkpoint_recovery_parent = first_parent.clone();
+            // Any omitted row can expose a cross-sibling selector collision.
+            // Sparse pinned tuples anywhere in the fold need a local scope so
+            // a later rebind can roll back only the crossed tuple path.
+            let scoped_checkpoint_rollback = element_types
+                .iter()
+                .any(type_contains_omitted_checkpoint_tuple)
+                || element_types
+                    .iter()
+                    .any(type_contains_partially_omitted_pinned_tuple)
+                || omitted_pinned_tuple_path
+                || element_types
+                    .iter()
+                    .any(type_contains_paired_pinned_checkpoint_siblings);
+            let mut rolled_back_checkpoint_paths = BTreeSet::new();
+            let mut rejected_checkpoint_parent = false;
+            let mut ty = None;
+            for value in element_types {
                 if let Some(prior) = &ty {
-                    if let Some(merged) = merge_list_element_types(prior, &value.ty) {
+                    // Paired sparse anchors evolve as accepted rows teach more
+                    // topology, so reject a bad row locally and retry later
+                    // rows. Folds without that recovery anchor retain their
+                    // original fold-wide freeze for a rejected path.
+                    let mut parent_rollback_paths = if checkpoint_reanchor_recovery {
+                        BTreeSet::new()
+                    } else {
+                        rolled_back_checkpoint_paths.clone()
+                    };
+                    let merged = if transactional_checkpoint_fold && scoped_checkpoint_rollback {
+                        merge_multi_parent_checkpoint_value_scoped(
+                            prior,
+                            &value,
+                            if checkpoint_reanchor_recovery {
+                                checkpoint_recovery_parent
+                                    .as_ref()
+                                    .expect("checkpoint re-anchor fold has a recovery anchor")
+                            } else {
+                                first_parent
+                                    .as_ref()
+                                    .expect("scoped fold has a rollback anchor")
+                            },
+                            checkpoint_topology_parent
+                                .as_ref()
+                                .expect("transactional fold has a topology parent"),
+                            &mut Vec::new(),
+                            &mut parent_rollback_paths,
+                        )
+                        .map(|mut fold| {
+                            if fold.rejected_scope {
+                                require_same(prior, &value, diagnostics);
+                                if checkpoint_reanchor_recovery {
+                                    fold.merged = merge_unpaired_checkpoint_record_siblings(
+                                        &fold.merged,
+                                        &value,
+                                    )
+                                    .unwrap_or(fold.merged);
+                                    fold.effective_parent =
+                                        merge_unpaired_checkpoint_record_siblings(
+                                            &fold.effective_parent,
+                                            &value,
+                                        )
+                                        .unwrap_or(fold.effective_parent);
+                                }
+                            }
+                            // An omitted tuple path has no identity topology in
+                            // the original anchor. Remember the first accepted
+                            // parent's concrete pins at those paths so later
+                            // parents cannot silently rebind them differently.
+                            checkpoint_topology_parent = Some(
+                                checkpoint_topology_parent
+                                    .as_ref()
+                                    .map(|anchor| {
+                                        checkpoint_topology_anchor_with_first_pins(
+                                            anchor,
+                                            &fold.effective_parent,
+                                        )
+                                    })
+                                    .unwrap_or_else(|| fold.effective_parent.clone()),
+                            );
+                            if checkpoint_reanchor_recovery
+                                && let Some(next_recovery_parent) = checkpoint_recovery_parent
+                                    .as_ref()
+                                    .and_then(|anchor| {
+                                        merge_checkpoint_field_map_multi_parent(
+                                            anchor,
+                                            &fold.effective_parent,
+                                        )
+                                    })
+                            {
+                                checkpoint_recovery_parent = Some(next_recovery_parent);
+                            }
+                            fold.merged
+                        })
+                    } else if transactional_checkpoint_fold {
+                        merge_multi_parent_checkpoint_value(
+                            prior,
+                            &value,
+                            checkpoint_topology_parent
+                                .as_ref()
+                                .expect("transactional fold has a topology parent"),
+                        )
+                    } else {
+                        merge_list_element_types(prior, &value)
+                    };
+                    if !checkpoint_reanchor_recovery {
+                        rolled_back_checkpoint_paths = parent_rollback_paths;
+                    }
+                    if let Some(merged) = merged {
                         ty = Some(merged);
                     } else {
-                        require_same(prior, &value.ty, diagnostics);
+                        require_same(prior, &value, diagnostics);
+                        rejected_checkpoint_parent |= transactional_checkpoint_fold;
                     }
                 } else {
-                    ty = Some(value.ty);
+                    ty = Some(value);
                 }
+            }
+
+            // The reference does not define recovery when one parent in a
+            // multi-parent checkpoint fold cannot reconcile. For ordinary
+            // pinned folds, keep the whole first parent as the recovery
+            // anchor. When the first parent has omitted nested tuples, the
+            // scoped fold above freezes rejected paths at that anchor while
+            // allowing independent sibling paths to complete.
+            if rejected_checkpoint_parent {
+                ty = first_parent;
             }
             if ty.is_none() {
                 diagnostics.push(diag(
@@ -7291,6 +7618,7 @@ fn infer(
                             Type::Error
                         }
                     });
+                let ty = scope_snapshot_ref_parameter_pattern(&parameter.pattern, &ty);
                 if ty == Type::Error {
                     // Keep an underconstrained lambda parameter in scope as
                     // an error-typed local. This lets the annotation
@@ -7299,9 +7627,18 @@ fn infer(
                     // unresolved-name diagnostic.
                     if let Pattern::Name(name, _) = &parameter.pattern {
                         insert_local_binding(name, Type::Error, &mut locals, diagnostics);
+                        if let Some(symbol) = locals.get_mut(name) {
+                            symbol.kind = SymbolKind::Parameter;
+                        }
                     }
                 } else {
-                    bind_pattern(&parameter.pattern, ty.clone(), scope, &mut locals, diagnostics);
+                    bind_parameter_pattern(
+                        &parameter.pattern,
+                        ty.clone(),
+                        scope,
+                        &mut locals,
+                        diagnostics,
+                    );
                 }
                 types.push(ty);
             }
@@ -7352,6 +7689,30 @@ fn infer(
                 && !scope.names.contains_key("error")
             {
                 return infer_error_call(arguments, scope, local, diagnostics);
+            }
+            if matches!(callee.as_ref(), Expr::Name { text, .. } if text == "Some")
+                && !local.contains_key("Some")
+                && !scope.names.contains_key("Some")
+            {
+                if let [argument] = arguments.as_slice()
+                    && argument.name.is_none()
+                {
+                    let value = infer(&argument.value, scope, local, diagnostics);
+                    return Inferred {
+                        ty: Type::Optional(Box::new(value.ty)),
+                        effects: value.effects,
+                    };
+                }
+                let mut effects = EffectSummary::default();
+                for argument in arguments {
+                    let value = infer(&argument.value, scope, local, diagnostics);
+                    effects.join(&value.effects);
+                }
+                diagnostics.push(diag(DIAG_TYPE, "Some requires exactly one positional value"));
+                return Inferred {
+                    ty: Type::Error,
+                    effects,
+                };
             }
             if qualified_path(callee)
                 .as_deref()
@@ -7470,6 +7831,11 @@ fn infer(
                 return inferred;
             }
             if let Some(inferred) =
+                infer_relation_statistics_call(callee, arguments, None, scope, local, diagnostics)
+            {
+                return inferred;
+            }
+            if let Some(inferred) =
                 infer_relation_call(callee, arguments, scope, local, diagnostics)
             {
                 return inferred;
@@ -7496,6 +7862,11 @@ fn infer(
             }
             if let Some(inferred) =
                 infer_table_operation(callee, arguments, scope, local, diagnostics)
+            {
+                return inferred;
+            }
+            if let Some(inferred) =
+                infer_codec_decode_call(callee, arguments, scope, local, diagnostics)
             {
                 return inferred;
             }
@@ -7563,16 +7934,25 @@ fn infer(
                         None,
                         diagnostics,
                     );
-                    let result = specialize_historical_database_result(&result, &values)
-                        .unwrap_or_else(|| result.as_ref().clone());
-                    let result = specialize_dynamic_parameter_snapshot_contexts(
+                    let historical_database = specialize_historical_database_result(
                         &result,
-                        parameter_names.as_deref(),
-                        arguments,
                         &values,
+                        arguments,
                         local,
-                        span,
                     );
+                    let result = historical_database.unwrap_or_else(|| {
+                        specialize_dynamic_parameter_snapshot_contexts(
+                            &result,
+                            &parameters,
+                            &default_parameters,
+                            parameter_names.as_deref(),
+                            arguments,
+                            &values,
+                            local,
+                            span,
+                            historical_context.as_ref(),
+                        )
+                    });
                     Inferred {
                         ty: historical_context.as_ref().map_or_else(
                             || result.clone(),
@@ -7918,7 +8298,9 @@ fn infer(
                             infer(value, scope, &locals, diagnostics)
                         };
                         effects.join(&x.effects);
-                        let ty = x.ty;
+                        // A local alias of a typed pin keeps the source
+                        // parameter identity for later rebinding and capture.
+                        let ty = specialize_snapshot_ref_parameter(value, &x.ty, &locals);
                         if ty == Type::Bottom {
                             final_control = Some(Inferred {
                                 ty,
@@ -8354,6 +8736,7 @@ fn type_contains_error(ty: &Type) -> bool {
         | Type::Text
         | Type::Bool
         | Type::Null
+        | Type::Unit
         | Type::Named(_)
         | Type::Bottom => false,
     }
@@ -8607,7 +8990,7 @@ fn infer_while(
     let mut effects = condition.effects;
     effects.join(&body.effects);
     Inferred {
-        ty: Type::Null,
+        ty: Type::Unit,
         effects,
     }
 }
@@ -8620,15 +9003,77 @@ fn infer_assignment(
     local: &mut BTreeMap<String, Symbol>,
     diagnostics: &mut Vec<Diagnostic>,
 ) -> EffectSummary {
-    let value = infer(value, scope, local, diagnostics);
+    let value_expression = value;
+    let value = infer(value_expression, scope, local, diagnostics);
     match (target, operator) {
-        (AssignmentTarget::Name { name, .. }, AssignmentOperator::Set) => match local.get(name) {
-            Some(symbol) => require_same(&symbol.ty, &value.ty, diagnostics),
-            None => diagnostics.push(diag(
-                DIAG_UNRESOLVED,
-                "assignment target cannot be resolved",
-            )),
-        },
+        (AssignmentTarget::Name { name, .. }, AssignmentOperator::Set) => {
+            let expected = local.get(name).map(|symbol| symbol.ty.clone());
+            match expected {
+                Some(expected)
+                    if is_snapshot_ref_value(&expected) && is_snapshot_ref_value(&value.ty) =>
+                {
+                    // Rebinding changes the pin seen by later reads of this local;
+                    // inferred closure types retain the previous snapshot value.
+                    let rebound_type = specialize_snapshot_ref_parameter(
+                        value_expression,
+                        &value.ty,
+                        local,
+                    );
+                    if let Some(symbol) = local.get_mut(name) {
+                        // When a parameter is rebound from another snapshot
+                        // parameter, preserve the source identity so returned
+                        // closure chains specialize against that caller input.
+                        symbol.ty = rebound_type;
+                    }
+                }
+                Some(expected)
+                    if !checkpoint_snapshot_maps_are_valid(&expected)
+                        || !checkpoint_snapshot_maps_are_valid(&value.ty) =>
+                {
+                    diagnostics.push(diag(
+                        DIAG_TYPE,
+                        "snapshot context maps must contain canonical selector sets",
+                    ));
+                }
+                Some(expected) => {
+                    if let Some(reset_type) = pinned_snapshot_reset_type(&expected, &value.ty) {
+                        // A checkpoint reset replaces the local with the exact
+                        // selected value. Do not merge it with intermediate
+                        // rebinds: saved aliases keep their own identities, and
+                        // a later reset must recover the source map unchanged.
+                        if let Some(symbol) = local.get_mut(name) {
+                            symbol.ty = reset_type;
+                        }
+                    } else if contains_type_error(&expected) || contains_type_error(&value.ty) {
+                        // Error recovery cannot prove that a checkpoint source
+                        // carries a stable pin map. Keep the last valid local
+                        // identity and avoid cascading a second type diagnostic.
+                    } else if type_contains_pinned_snapshot_identity(&expected)
+                        && type_contains_pinned_snapshot_identity(&value.ty)
+                    {
+                        // The reference does not specify diagnostics for
+                        // incompatible structured checkpoint resets. Keep the
+                        // local unchanged and explain why this source cannot
+                        // continue the pin-stable chain.
+                        let message = if paired_dynamic_snapshot_reset(&expected, &value.ty) {
+                            "paired checkpoint reset must preserve each omitted lane's snapshot identity"
+                        } else {
+                            "checkpoint reset source must preserve nested snapshot pin topology and callable contracts"
+                        };
+                        diagnostics.push(diag(
+                            DIAG_TYPE,
+                            message,
+                        ));
+                    } else {
+                        require_same(&expected, &value.ty, diagnostics);
+                    }
+                }
+                None => diagnostics.push(diag(
+                    DIAG_UNRESOLVED,
+                    "assignment target cannot be resolved",
+                )),
+            }
+        }
         (AssignmentTarget::Name { name, .. }, _) => match local.get(name) {
             Some(symbol) => require_same(&symbol.ty, &value.ty, diagnostics),
             None => diagnostics.push(diag(
@@ -8712,7 +9157,7 @@ fn infer_for(
     let mut effects = iterable.effects;
     effects.join(&body.effects);
     Inferred {
-        ty: Type::Null,
+        ty: Type::Unit,
         effects,
     }
 }
@@ -9271,43 +9716,420 @@ fn infer_case_arm_body(
 }
 
 fn merge_list_element_types(left: &Type, right: &Type) -> Option<Type> {
-    let (
-        Type::Function {
-            parameters: left_parameters,
-            parameter_names: left_names,
-            result: left_result,
-            default_parameters: left_defaults,
-        },
-        Type::Function {
-            parameters: right_parameters,
-            parameter_names: right_names,
-            result: right_result,
-            default_parameters: right_defaults,
-        },
-    ) = (left, right)
-    else {
+    if !checkpoint_snapshot_maps_are_valid(left) || !checkpoint_snapshot_maps_are_valid(right) {
         return None;
-    };
-    if left_result != right_result
-        || left_parameters.len() != right_parameters.len()
-        || left_parameters
-            .iter()
-            .zip(right_parameters)
-            .any(|(left, right)| left != right)
+    }
+    if left == right {
+        return Some(left.clone());
+    }
+    if is_terminal_historical_callable(left) && is_terminal_historical_callable(right) {
+        // Completed zero-argument closures have no continuation boundary to
+        // keep paired lane identity. Preserve their exact pins so a list
+        // cannot silently combine terminal values from separate lanes.
+        return None;
+    }
+    if (type_contains_pinned_checkpoint_tuple(left)
+        || type_contains_pinned_checkpoint_tuple(right))
+        && (!checkpoint_pin_map_widths_match(left, right)
+            || !checkpoint_value_pin_identity_topology_matches(left, right)
+            || !nested_checkpoint_compaction_fold_preserves_pin_identity(left, right))
     {
         return None;
     }
-    Some(Type::Function {
-        parameters: left_parameters.clone(),
-        default_parameters: left_defaults
-            .intersection(right_defaults)
-            .copied()
-            .collect(),
-        parameter_names: (left_names == right_names)
-            .then(|| left_names.clone())
-            .flatten(),
-        result: left_result.clone(),
-    })
+    if let (Type::Tuple(left), Type::Tuple(right)) = (left, right)
+        && !tuple_checkpoint_promotion_matches(left, right)
+    {
+        return None;
+    }
+    if let (Type::Record(left), Type::Record(right)) = (left, right)
+        && !record_checkpoint_promotion_matches(left, right)
+    {
+        return None;
+    }
+    merge_checkpoint_field_map(left, right)
+}
+
+fn is_terminal_historical_callable(ty: &Type) -> bool {
+    matches!(
+        ty,
+        Type::Applied { base, arguments }
+            if base == "sys.HistoricalCallable"
+                && matches!(
+                    arguments.as_slice(),
+                    [_, Type::Function { parameters, .. }] if parameters.is_empty()
+                )
+    )
+}
+
+fn merge_checkpoint_field_map(left: &Type, right: &Type) -> Option<Type> {
+    merge_checkpoint_field_map_inner(left, right, false)
+}
+
+/// Multi-parent folds validate source rows against the first accepted parent
+/// before merging. The accumulated value may therefore have wider context
+/// maps than the next row; retain structural and binder checks while allowing
+/// those already-validated identities to grow through nested callable results.
+fn merge_checkpoint_field_map_multi_parent(left: &Type, right: &Type) -> Option<Type> {
+    merge_checkpoint_field_map_inner(left, right, true)
+}
+
+/// A rejected paired-pin scope must not discard unrelated checkpoint values
+/// from the same sparse row. Keep pinned tuple fields at their recovery anchor,
+/// while allowing independent record siblings to continue contributing pins.
+fn merge_unpaired_checkpoint_record_siblings(
+    accumulated: &Type,
+    parent: &Type,
+) -> Option<Type> {
+    let (Type::Record(accumulated), Type::Record(parent)) = (accumulated, parent) else {
+        return None;
+    };
+    let mut merged = BTreeMap::new();
+    for (name, accumulated_value) in accumulated {
+        let Some(parent_value) = parent.get(name) else {
+            merged.insert(name.clone(), accumulated_value.clone());
+            continue;
+        };
+        let value = if type_contains_pinned_checkpoint_tuple(accumulated_value)
+            || type_contains_pinned_checkpoint_tuple(parent_value)
+        {
+            accumulated_value.clone()
+        } else {
+            merge_checkpoint_field_map_multi_parent(accumulated_value, parent_value)
+                .unwrap_or_else(|| accumulated_value.clone())
+        };
+        merged.insert(name.clone(), value);
+    }
+    Some(Type::Record(merged))
+}
+
+fn merge_checkpoint_field_map_inner(
+    left: &Type,
+    right: &Type,
+    source_topology_validated: bool,
+) -> Option<Type> {
+    if !checkpoint_snapshot_maps_are_valid(left) || !checkpoint_snapshot_maps_are_valid(right) {
+        return None;
+    }
+    // Bottom contributes no value to a collection fold. Keep the concrete
+    // sibling type when the other row omitted that slot; tuple promotion has
+    // already checked that doing so cannot collapse distinct pin identities.
+    if matches!(left, Type::Bottom) {
+        return Some(right.clone());
+    }
+    if matches!(right, Type::Bottom) {
+        return Some(left.clone());
+    }
+    if is_snapshot_context_type(left) || is_snapshot_context_type(right) {
+        if !is_snapshot_context_map_shape(left) || !is_snapshot_context_map_shape(right) {
+            return None;
+        }
+        return merge_snapshot_context_map(left, right);
+    }
+    if left == right {
+        return Some(left.clone());
+    }
+    match (left, right) {
+        (
+            Type::Applied {
+                base: left_base,
+                arguments: left_arguments,
+            },
+            Type::Applied {
+                base: right_base,
+                arguments: right_arguments,
+            },
+        ) if left_base == "sys.HistoricalCallable" && right_base == "sys.HistoricalCallable" => {
+            match (left_arguments.as_slice(), right_arguments.as_slice()) {
+                ([left_snapshot, left_callable], [right_snapshot, right_callable]) => Some(
+                    historical_callable_type(
+                        &merge_snapshot_context_map(left_snapshot, right_snapshot)?,
+                        &merge_checkpoint_field_map_inner(
+                            left_callable,
+                            right_callable,
+                            source_topology_validated,
+                        )?,
+                    ),
+                ),
+                _ => None,
+            }
+        }
+        (
+            Type::Function {
+                parameters: left_parameters,
+                parameter_names: left_names,
+                result: left_result,
+                default_parameters: left_defaults,
+            },
+            Type::Function {
+                parameters: right_parameters,
+                parameter_names: right_names,
+                result: right_result,
+                default_parameters: right_defaults,
+            },
+        ) => {
+            if left_parameters.len() != right_parameters.len() {
+                return None;
+            }
+            if !source_topology_validated
+                && !function_snapshot_pin_identity_topology_matches(
+                    left_parameters,
+                    left_result,
+                    right_parameters,
+                    right_result,
+                )
+            {
+                return None;
+            }
+            // Distinct checkpoint closures can have the same callable shape
+            // while their SnapshotRef parameters carry different lexical
+            // binder IDs. Merge only those pinned parameter shapes, retaining
+            // their context map; keep all other parameter contracts exact.
+            let parameters = left_parameters
+                .iter()
+                .zip(right_parameters)
+                .map(|(left, right)| {
+                    if left == right {
+                        Some(left.clone())
+                    } else if type_contains_pinned_snapshot_identity(left)
+                        && type_contains_pinned_snapshot_identity(right)
+                        && pinned_snapshot_shape_matches(left, right)
+                    {
+                        merge_checkpoint_field_map_inner(
+                            left,
+                            right,
+                            source_topology_validated,
+                        )
+                    } else {
+                        None
+                    }
+                })
+                .collect::<Option<Vec<_>>>()?;
+            Some(Type::Function {
+                parameters,
+                default_parameters: left_defaults
+                    .intersection(right_defaults)
+                    .copied()
+                    .collect(),
+                parameter_names: (left_names == right_names)
+                    .then(|| left_names.clone())
+                    .flatten(),
+                result: Box::new(merge_checkpoint_field_map_inner(
+                    left_result,
+                    right_result,
+                    source_topology_validated,
+                )?),
+            })
+        }
+        (Type::List(left), Type::List(right)) => {
+            if !source_topology_validated
+                && (type_contains_pinned_checkpoint_tuple(left)
+                    || type_contains_pinned_checkpoint_tuple(right))
+                && (!checkpoint_pin_map_widths_match(left, right)
+                    || !checkpoint_value_pin_identity_topology_matches(left, right)
+                    || !nested_checkpoint_compaction_fold_preserves_pin_identity(left, right))
+            {
+                return None;
+            }
+            // Tuple shape is a list-element promotion contract: otherwise a
+            // later row with narrower checkpoint maps can widen the already
+            // inferred tuple slots. Keep this check at collection promotion
+            // so ordinary tuple rebinding (including Bottom recovery) retains
+            // its existing binder semantics.
+            if !source_topology_validated
+                && let (Type::Tuple(left), Type::Tuple(right)) = (left.as_ref(), right.as_ref())
+                && !tuple_checkpoint_promotion_matches(left, right)
+            {
+                return None;
+            }
+            if !source_topology_validated
+                && let (Type::Record(left), Type::Record(right)) = (left.as_ref(), right.as_ref())
+                && !record_checkpoint_promotion_matches(left, right)
+            {
+                return None;
+            }
+            Some(Type::List(Box::new(merge_checkpoint_field_map_inner(
+                left,
+                right,
+                source_topology_validated,
+            )?)))
+        }
+        (Type::Range(left), Type::Range(right)) => {
+            Some(Type::Range(Box::new(merge_checkpoint_field_map_inner(
+                left,
+                right,
+                source_topology_validated,
+            )?)))
+        }
+        (Type::Relation(left), Type::Relation(right)) => Some(Type::Relation(Box::new(
+            merge_checkpoint_field_map_inner(left, right, source_topology_validated)?,
+        ))),
+        (Type::Stream(left), Type::Stream(right)) => Some(Type::Stream(Box::new(
+            merge_checkpoint_field_map_inner(left, right, source_topology_validated)?,
+        ))),
+        (Type::Optional(left), Type::Optional(right)) => Some(Type::Optional(Box::new(
+            merge_checkpoint_field_map_inner(left, right, source_topology_validated)?,
+        ))),
+        (Type::Record(left), Type::Record(right)) if left.len() == right.len() => {
+            Some(Type::Record(
+                left.iter()
+                    .map(|(name, left)| {
+                        Some((
+                            name.clone(),
+                            merge_checkpoint_field_map_inner(
+                                left,
+                                right.get(name)?,
+                                source_topology_validated,
+                            )?,
+                        ))
+                    })
+                    .collect::<Option<BTreeMap<_, _>>>()?,
+            ))
+        }
+        (Type::Tuple(left), Type::Tuple(right)) if left.len() == right.len() => {
+            Some(Type::Tuple(
+                left.iter()
+                    .zip(right)
+                    .map(|(left, right)| {
+                        merge_checkpoint_field_map_inner(left, right, source_topology_validated)
+                    })
+                    .collect::<Option<Vec<_>>>()?,
+            ))
+        }
+        (
+            Type::Applied {
+                base: left_base,
+                arguments: left_arguments,
+            },
+            Type::Applied {
+                base: right_base,
+                arguments: right_arguments,
+            },
+        ) if left_base == right_base && left_arguments.len() == right_arguments.len() => {
+            Some(Type::Applied {
+                base: left_base.clone(),
+                arguments: left_arguments
+                    .iter()
+                    .zip(right_arguments)
+                    .map(|(left, right)| {
+                        merge_checkpoint_field_map_inner(left, right, source_topology_validated)
+                    })
+                    .collect::<Option<Vec<_>>>()?,
+            })
+        }
+        (
+            Type::MoneyPerUnit {
+                currency: left_currency,
+                unit: left_unit,
+            },
+            Type::MoneyPerUnit {
+                currency: right_currency,
+                unit: right_unit,
+            },
+        ) => Some(Type::MoneyPerUnit {
+            currency: Box::new(merge_checkpoint_field_map_inner(
+                left_currency,
+                right_currency,
+                source_topology_validated,
+            )?),
+            unit: Box::new(merge_checkpoint_field_map_inner(
+                left_unit,
+                right_unit,
+                source_topology_validated,
+            )?),
+        }),
+        _ => None,
+    }
+}
+
+/// Keep distinct pins in matching fields when homogeneous lists collect
+/// checkpoints from different snapshots. The reference defines pin identity
+/// for historical reads but is silent on local checkpoint collections.
+fn merge_snapshot_context_map(left: &Type, right: &Type) -> Option<Type> {
+    const CONTEXT_MAP: &str = "semantic.SnapshotContextMap";
+
+    if !is_snapshot_context_map_shape(left) || !is_snapshot_context_map_shape(right) {
+        return None;
+    }
+
+    fn collect_contexts(ty: &Type, contexts: &mut BTreeSet<String>) {
+        match ty {
+            Type::Applied { base, arguments } if base == "sys.SnapshotRefContext" => {
+                if let [Type::Named(selector)] = arguments.as_slice()
+                    && is_snapshot_selector_context(selector)
+                {
+                    contexts.insert(selector.clone());
+                }
+            }
+            Type::Applied { base, arguments } if base == CONTEXT_MAP => {
+                contexts.extend(arguments.iter().filter_map(|argument| match argument {
+                    Type::Named(selector) if is_snapshot_selector_context(selector) => {
+                        Some(selector.clone())
+                    }
+                    _ => None,
+                }));
+            }
+            _ => {}
+        }
+    }
+
+    let mut contexts = BTreeSet::new();
+    collect_contexts(left, &mut contexts);
+    collect_contexts(right, &mut contexts);
+    match contexts.len() {
+        0 => None,
+        1 => contexts
+            .into_iter()
+            .next()
+            .map(|selector| contextual_snapshot_ref(&selector)),
+        _ => Some(Type::Applied {
+            base: CONTEXT_MAP.into(),
+            arguments: contexts.into_iter().map(Type::Named).collect(),
+        }),
+    }
+}
+
+fn is_snapshot_context_type(ty: &Type) -> bool {
+    matches!(
+        ty,
+        Type::Applied { base, .. }
+            if base == "sys.SnapshotRefContext" || base == "semantic.SnapshotContextMap"
+    )
+}
+
+/// Synthetic checkpoint maps only represent canonical snapshot selectors.
+/// The reference does not specify local checkpoint-map merging, so reject
+/// malformed map identities instead of letting equality or an enclosing
+/// product hide them during a rebind storm.
+fn checkpoint_snapshot_maps_are_valid(ty: &Type) -> bool {
+    match ty {
+        Type::Applied { base, .. } if base == "sys.SnapshotRefContext" => {
+            is_contextual_snapshot_ref(ty)
+        }
+        Type::Applied { base, .. } if base == "semantic.SnapshotContextMap" => {
+            is_snapshot_context_map_shape(ty)
+        }
+        Type::Applied { arguments, .. } => {
+            arguments.iter().all(checkpoint_snapshot_maps_are_valid)
+        }
+        Type::List(element)
+        | Type::Range(element)
+        | Type::Relation(element)
+        | Type::Stream(element)
+        | Type::Optional(element) => checkpoint_snapshot_maps_are_valid(element),
+        Type::Record(fields) => fields.values().all(checkpoint_snapshot_maps_are_valid),
+        Type::Tuple(elements) => elements.iter().all(checkpoint_snapshot_maps_are_valid),
+        Type::Function {
+            parameters, result, ..
+        } => {
+            parameters.iter().all(checkpoint_snapshot_maps_are_valid)
+                && checkpoint_snapshot_maps_are_valid(result)
+        }
+        Type::MoneyPerUnit { currency, unit } => {
+            checkpoint_snapshot_maps_are_valid(currency)
+                && checkpoint_snapshot_maps_are_valid(unit)
+        }
+        _ => true,
+    }
 }
 
 fn infer_nominal(
@@ -9601,6 +10423,63 @@ fn standard_collection_module_operation<'a>(
     }
 }
 
+fn standard_statistics_module_operation<'a>(
+    callee: &'a Expr,
+    scope: &Scope,
+    local: &BTreeMap<String, Symbol>,
+) -> Option<&'a str> {
+    let path = qualified_path(callee)?;
+    match path.as_slice() {
+        ["std", "stats", operation]
+            if !local.contains_key("std") && is_portable_statistics_operation(operation) =>
+        {
+            Some(*operation)
+        }
+        [alias, operation] if !local.contains_key(*alias) => {
+            let namespace = scope.modules.get(*alias)?;
+            if namespace.0.len() == 2
+                && namespace.0[0] == "std"
+                && namespace.0[1] == "stats"
+                && is_portable_statistics_operation(operation)
+                && scope
+                    .available_modules
+                    .get(namespace)
+                    .is_some_and(|module| {
+                        module
+                            .exports
+                            .get(*operation)
+                            .is_some_and(|symbol| symbol.kind == SymbolKind::Function)
+                    })
+            {
+                Some(*operation)
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
+fn is_portable_statistics_operation(operation: &str) -> bool {
+    matches!(
+        operation,
+        "mean"
+            | "median"
+            | "percentile"
+            | "sum"
+            | "min"
+            | "max"
+            | "range"
+            | "mode"
+            | "variance"
+            | "standard_deviation"
+            | "histogram"
+            | "rate"
+            | "derivative"
+            | "integrate"
+    )
+}
+
 // The pinned collection source declares one generic finite-list signature.
 // Nonempty calls get their element type from the rows; empty aggregates use
 // the caller's context where available and otherwise keep the Int zero rule.
@@ -9700,19 +10579,50 @@ fn infer_finite_list_collection_call(
                 | "union" | "count" | "first" | "one" | "sum" | "min" | "max"
                 | "every" | "exists" | "chunk" | "flatten" | "partition" | "zip"
                 | "zip_exact" | "unique" | "group_by" | "pairs" | "window"
-                | "split_when" | "rank" | "asof_join"
+                | "split_when" | "rank" | "asof_join" | "bucket_by"
         ),
         _ => standard_collection_module_operation(callee, scope, local).is_some(),
     };
     if portable_collection_call && let Some(argument) = arguments
         .iter()
         .find(|argument| argument.name.as_deref() == Some("rows"))
+        .or_else(|| {
+            arguments
+                .iter()
+                .find(|argument| argument.name.as_deref() == Some("values"))
+        })
+        .or_else(|| {
+            arguments
+                .iter()
+                .find(|argument| argument.name.as_deref() == Some("left"))
+        })
         .or_else(|| arguments.first())
     {
         let mut probe_diagnostics = Vec::new();
         let inferred = infer(&argument.value, scope, local, &mut probe_diagnostics);
         if matches!(inferred.ty, Type::Relation(_)) {
-            return None;
+            let operation = standard_collection_module_operation(callee, scope, local)
+                .or_else(|| path.first().copied());
+            if !operation.is_some_and(|operation| {
+                matches!(
+                    operation,
+                    "chunk"
+                        | "flatten"
+                        | "partition"
+                        | "zip"
+                        | "zip_exact"
+                        | "unique"
+                        | "group_by"
+                        | "pairs"
+                        | "window"
+                        | "split_when"
+                        | "rank"
+                        | "asof_join"
+                        | "bucket_by"
+                )
+            }) {
+                return None;
+            }
         }
     }
     let operation = match path.as_slice() {
@@ -9751,16 +10661,6 @@ fn infer_finite_list_collection(
     local: &BTreeMap<String, Symbol>,
     diagnostics: &mut Vec<Diagnostic>,
 ) -> Inferred {
-    if operation == "bucket_by" {
-        diagnostics.push(diag(
-            DIAG_TYPE,
-            "bucket_by requires a relation with an explicit time source",
-        ));
-        return Inferred {
-            ty: Type::Error,
-            effects: input.map_or_else(EffectSummary::default, |input| input.effects),
-        };
-    }
     if matches!(
         operation,
         "chunk"
@@ -9775,6 +10675,7 @@ fn infer_finite_list_collection(
             | "split_when"
             | "rank"
             | "asof_join"
+            | "bucket_by"
     ) {
         return infer_finite_list_helper_collection(
             operation,
@@ -9985,6 +10886,7 @@ fn infer_finite_list_helper_collection(
         "group_by" | "rank" => &["values", "key"],
         "window" => &["values", "size", "step"],
         "asof_join" => &["left", "right", "time", "by"],
+        "bucket_by" => &["rows", "period", "zone"],
         _ => unreachable!("finite-list helper was checked"),
     };
     let pipeline = input.is_some();
@@ -10056,9 +10958,17 @@ fn infer_finite_list_helper_collection(
         ));
     }
 
+    let relation_input = matches!(values.first().and_then(Option::as_ref), Some(Type::Relation(_)));
+    let container = |element: Type| {
+        if relation_input {
+            Type::Relation(Box::new(element))
+        } else {
+            Type::List(Box::new(element))
+        }
+    };
     let list_element = |index: usize, name: &str, diagnostics: &mut Vec<Diagnostic>| {
         match values.get(index).and_then(Option::as_ref) {
-            Some(Type::List(element)) => element.as_ref().clone(),
+            Some(Type::List(element) | Type::Relation(element)) => element.as_ref().clone(),
             Some(Type::Error) | None => Type::Error,
             Some(_) => {
                 diagnostics.push(diag(
@@ -10079,10 +10989,10 @@ fn infer_finite_list_helper_collection(
             {
                 diagnostics.push(diag(DIAG_TYPE, "chunk size must be positive"));
             }
-            Type::List(Box::new(Type::List(Box::new(first))))
+            container(Type::List(Box::new(first)))
         }
         "flatten" => match first {
-            Type::List(inner) => Type::List(inner),
+            Type::List(inner) => container(*inner),
             Type::Error => Type::Error,
             _ => {
                 diagnostics.push(diag(DIAG_TYPE, "flatten requires a list of finite lists"));
@@ -10103,16 +11013,29 @@ fn infer_finite_list_helper_collection(
             }
             if operation == "partition" {
                 Type::Tuple(vec![
-                    Type::List(Box::new(first.clone())),
-                    Type::List(Box::new(first)),
+                    container(first.clone()),
+                    container(first),
                 ])
             } else {
-                Type::List(Box::new(Type::List(Box::new(first))))
+                container(Type::List(Box::new(first)))
             }
         }
         "zip" | "zip_exact" => {
+            let right_is_relation = matches!(
+                values.get(1).and_then(Option::as_ref),
+                Some(Type::Relation(_))
+            );
+            if right_is_relation != relation_input {
+                diagnostics.push(diag(
+                    DIAG_TYPE,
+                    format!("std.collection {operation} inputs must use the same collection kind"),
+                ));
+            }
             let right = list_element(1, "right input", diagnostics);
-            Type::List(Box::new(Type::Tuple(vec![first, right])))
+            if operation == "zip_exact" {
+                effects.may_fail = true;
+            }
+            container(Type::Tuple(vec![first, right]))
         }
         "unique" => {
             if is_default_float_equality_type(&first) {
@@ -10122,10 +11045,10 @@ fn infer_finite_list_helper_collection(
                 ));
                 Type::Error
             } else {
-                Type::List(Box::new(first))
+                container(first)
             }
         }
-        "pairs" => Type::List(Box::new(Type::Tuple(vec![first.clone(), first]))),
+        "pairs" => container(Type::Tuple(vec![first.clone(), first])),
         "group_by" | "rank" => {
             let key_type = if let Some(index) = slots.get(1).and_then(|slot| *slot) {
                 let callback = infer_finite_list_callback(
@@ -10148,12 +11071,12 @@ fn infer_finite_list_helper_collection(
                 ));
             }
             if operation == "group_by" {
-                Type::List(Box::new(Type::Tuple(vec![
+                container(Type::Tuple(vec![
                     key_type,
                     Type::List(Box::new(first)),
-                ])))
+                ]))
             } else {
-                Type::List(Box::new(Type::Tuple(vec![first, Type::Int])))
+                container(Type::Tuple(vec![first, Type::Int]))
             }
         }
         "window" => {
@@ -10166,7 +11089,7 @@ fn infer_finite_list_helper_collection(
                     diagnostics.push(diag(DIAG_TYPE, "window size and step must be positive"));
                 }
             }
-            Type::List(Box::new(Type::List(Box::new(first))))
+            container(Type::List(Box::new(first)))
         }
         "asof_join" => {
             let right = list_element(1, "right input", diagnostics);
@@ -10190,10 +11113,31 @@ fn infer_finite_list_helper_collection(
                     }
                 }
             }
-            Type::List(Box::new(Type::Tuple(vec![
+            let right_is_relation = matches!(
+                values.get(1).and_then(Option::as_ref),
+                Some(Type::Relation(_))
+            );
+            if right_is_relation != relation_input {
+                diagnostics.push(diag(
+                    DIAG_TYPE,
+                    "std.collection asof_join inputs must use the same collection kind",
+                ));
+            }
+            container(Type::Tuple(vec![
                 first.clone(),
                 Type::Optional(Box::new(first)),
-            ])))
+            ]))
+        }
+        "bucket_by" => {
+            let time_shape = matches!(&first, Type::Instant)
+                || matches!(&first, Type::Record(fields) if fields.get("time") == Some(&Type::Instant));
+            if !time_shape && first != Type::Error {
+                diagnostics.push(diag(
+                    DIAG_TYPE,
+                    "bucket_by requires Instant values or rows with an Instant time field",
+                ));
+            }
+            container(Type::List(Box::new(first)))
         }
         _ => unreachable!("finite-list helper was checked"),
     };
@@ -10509,6 +11453,7 @@ fn is_sort_key_type(ty: &Type) -> bool {
         | Type::Record(_)
         | Type::Optional(_)
         | Type::Null
+        | Type::Unit
         | Type::MoneyPerUnit { .. }
         | Type::Function { .. } => false,
     }
@@ -11133,6 +12078,291 @@ fn infer_relation_call(
     })
 }
 
+/// Applies the pinned statistics signatures to relation rows and points.
+/// Finite-list calls keep using the standard module's generic source signatures.
+fn infer_relation_statistics_call(
+    callee: &Expr,
+    arguments: &[orna_syntax_v1::Argument],
+    input: Option<Inferred>,
+    scope: &Scope,
+    local: &BTreeMap<String, Symbol>,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Option<Inferred> {
+    let operation = standard_statistics_module_operation(callee, scope, local)?;
+    let (parameters, required) = match operation {
+        "mean" | "median" | "variance" | "standard_deviation" => {
+            (&["rows", "scale", "rounding"][..], 1)
+        }
+        "percentile" => (&["rows", "p", "interpolation", "scale", "rounding"][..], 3),
+        "sum" | "min" | "max" | "range" | "mode" => (&["rows"][..], 1),
+        "histogram" => (&["rows", "bins", "include_final_upper"][..], 2),
+        "rate" | "derivative" | "integrate" => (&["points"][..], 1),
+        _ => return None,
+    };
+    let implicit = usize::from(input.is_some());
+    let mut malformed = arguments.len() + implicit > parameters.len();
+    let mut slots = vec![None; parameters.len()];
+    if input.is_some() {
+        slots[0] = Some(usize::MAX);
+    }
+    let mut positional = implicit;
+    let mut named_started = false;
+    for (index, argument) in arguments.iter().enumerate() {
+        let slot = match argument.name.as_deref() {
+            Some(name) => {
+                named_started = true;
+                parameters.iter().position(|parameter| *parameter == name)
+            }
+            None if named_started => None,
+            None => {
+                let slot = Some(positional);
+                positional += 1;
+                slot
+            }
+        };
+        match slot {
+            Some(0) if implicit > 0 => malformed = true,
+            Some(slot) if slot < slots.len() && slots[slot].is_none() => {
+                slots[slot] = Some(index);
+            }
+            _ => malformed = true,
+        }
+    }
+    if slots[..required].iter().any(Option::is_none) {
+        malformed = true;
+    }
+
+    if implicit == 0 {
+        let Some(index) = slots[0] else {
+            return None;
+        };
+        let mut probe_diagnostics = Vec::new();
+        if !matches!(
+            infer(
+                &arguments[index].value,
+                scope,
+                local,
+                &mut probe_diagnostics
+            )
+            .ty,
+            Type::Relation(_)
+        ) {
+            return None;
+        }
+    } else if !matches!(
+        input.as_ref().map(|input| &input.ty),
+        Some(Type::Relation(_))
+    ) {
+        return None;
+    }
+
+    let mut effects = input
+        .as_ref()
+        .map_or_else(EffectSummary::default, |input| input.effects.clone());
+    let mut values = vec![None; parameters.len()];
+    if let Some(input) = input {
+        values[0] = Some(input);
+    }
+    for (index, argument) in arguments.iter().enumerate() {
+        let Some(slot) = slots.iter().position(|slot| *slot == Some(index)) else {
+            continue;
+        };
+        let inferred = infer(&argument.value, scope, local, diagnostics);
+        effects.join(&inferred.effects);
+        values[slot] = Some(inferred);
+    }
+
+    let Some(Type::Relation(element)) = values[0].as_ref().map(|value| &value.ty) else {
+        return None;
+    };
+    let element = element.as_ref().clone();
+    let mut valid = !malformed;
+    if malformed {
+        diagnostics.push(diag(
+            DIAG_TYPE,
+            format!("std.stats.{operation} relation arguments do not match its static signature"),
+        ));
+    }
+    let argument_type = |slot: usize| {
+        values
+            .get(slot)
+            .and_then(Option::as_ref)
+            .map(|value| &value.ty)
+    };
+    let numeric = is_statistics_numeric_type(&element);
+    match operation {
+        "mean" | "median" | "variance" | "standard_deviation" | "percentile" => {
+            if !numeric {
+                diagnostics.push(diag(
+                    DIAG_TYPE,
+                    format!("std.stats.{operation} requires numeric relation rows"),
+                ));
+                valid = false;
+            }
+        }
+        "sum" if !is_sum_element_type(&element) => {
+            diagnostics.push(diag(
+                DIAG_TYPE,
+                "std.stats.sum requires numeric relation rows",
+            ));
+            valid = false;
+        }
+        "min" | "max" if !is_sort_key_type(&element) => {
+            diagnostics.push(diag(
+                DIAG_TYPE,
+                format!("std.stats.{operation} requires ordered relation rows"),
+            ));
+            valid = false;
+        }
+        "range" if !numeric => {
+            diagnostics.push(diag(
+                DIAG_TYPE,
+                "std.stats.range requires numeric relation rows",
+            ));
+            valid = false;
+        }
+        "mode" if is_default_float_equality_type(&element) => {
+            diagnostics.push(diag(
+                DIAG_TYPE,
+                "std.stats.mode requires a lawful equality relation; default Float equality is unavailable",
+            ));
+            valid = false;
+        }
+        "histogram" if !is_sort_key_type(&element) => {
+            diagnostics.push(diag(
+                DIAG_TYPE,
+                "std.stats.histogram requires ordered relation rows",
+            ));
+            valid = false;
+        }
+        "rate" | "derivative" | "integrate" => match &element {
+            Type::Tuple(parts)
+                if parts.len() == 2
+                    && parts[0] == Type::Instant
+                    && is_statistics_numeric_type(&parts[1]) => {}
+            _ => {
+                diagnostics.push(diag(
+                    DIAG_TYPE,
+                    format!("std.stats.{operation} requires (Instant, numeric) relation rows"),
+                ));
+                valid = false;
+            }
+        },
+        _ => {}
+    }
+
+    let numeric_argument_slots = match operation {
+        "percentile" => &[1][..],
+        _ => &[][..],
+    };
+    for slot in numeric_argument_slots {
+        if let Some(ty) = argument_type(*slot)
+            && *ty != Type::Error
+            && !is_statistics_numeric_type(ty)
+        {
+            diagnostics.push(diag(
+                DIAG_TYPE,
+                "std.stats.percentile probability must be numeric",
+            ));
+            valid = false;
+        }
+    }
+    if operation == "percentile"
+        && let Some(ty) = argument_type(2)
+        && !matches!(ty, Type::Text | Type::Error)
+    {
+        diagnostics.push(diag(
+            DIAG_TYPE,
+            "std.stats.percentile interpolation must be Str",
+        ));
+        valid = false;
+    }
+    for (slot, base) in [(1, Type::Int), (2, Type::Text)] {
+        let applies = matches!(
+            operation,
+            "mean" | "median" | "variance" | "standard_deviation"
+        ) && slot < parameters.len();
+        if applies
+            && let Some(ty) = argument_type(slot)
+            && *ty != Type::Error
+            && !is_optional_stat_argument(ty, &base)
+        {
+            diagnostics.push(diag(
+                DIAG_TYPE,
+                "statistics scale and rounding options have invalid types",
+            ));
+            valid = false;
+        }
+    }
+    if operation == "percentile" {
+        for (slot, base) in [(3, Type::Int), (4, Type::Text)] {
+            if let Some(ty) = argument_type(slot)
+                && *ty != Type::Error
+                && !is_optional_stat_argument(ty, &base)
+            {
+                diagnostics.push(diag(
+                    DIAG_TYPE,
+                    "statistics scale and rounding options have invalid types",
+                ));
+                valid = false;
+            }
+        }
+    }
+    if operation == "histogram" {
+        if let Some(ty) = argument_type(1)
+            && !matches!(ty, Type::List(bins) if matches!(bins.as_ref(), Type::Tuple(parts) if parts.len() == 2 && parts[0] == element && parts[1] == element))
+            && *ty != Type::Error
+        {
+            diagnostics.push(diag(
+                DIAG_TYPE,
+                "std.stats.histogram bins must be a list of matching boundary pairs",
+            ));
+            valid = false;
+        }
+        if let Some(ty) = argument_type(2)
+            && !matches!(ty, Type::Bool | Type::Error)
+        {
+            diagnostics.push(diag(
+                DIAG_TYPE,
+                "std.stats.histogram include_final_upper must be Bool",
+            ));
+            valid = false;
+        }
+    }
+    effects.may_fail = true;
+    let result = match operation {
+        "sum" => element.clone(),
+        "mode" => Type::List(Box::new(element.clone())),
+        "histogram" => Type::List(Box::new(Type::Int)),
+        "derivative" => Type::List(Box::new(element.clone())),
+        "mean" | "median" | "percentile" | "min" | "max" | "range" | "variance"
+        | "standard_deviation" | "rate" | "integrate" => {
+            Type::Optional(Box::new(if matches!(operation, "rate" | "integrate") {
+                match element {
+                    Type::Tuple(parts) if parts.len() == 2 => parts[1].clone(),
+                    _ => Type::Error,
+                }
+            } else {
+                element.clone()
+            }))
+        }
+        _ => Type::Error,
+    };
+    Some(Inferred {
+        ty: if valid { result } else { Type::Error },
+        effects,
+    })
+}
+
+fn is_statistics_numeric_type(ty: &Type) -> bool {
+    matches!(ty, Type::Int | Type::Decimal | Type::Float)
+        || matches!(ty, Type::Applied { base, .. } if base == "Float")
+}
+
+fn is_optional_stat_argument(ty: &Type, inner: &Type) -> bool {
+    ty == inner || ty == &Type::Null || ty == &Type::Optional(Box::new(inner.clone()))
+}
+
 /// Checks the direct core relation overloads. The finite-list overloads are
 /// intentionally checked by their existing source/profile path; this helper
 /// only claims an unqualified intrinsic when its rows argument is a relation.
@@ -11322,6 +12552,31 @@ fn infer_relation_collection_pipeline(
     local: &BTreeMap<String, Symbol>,
     diagnostics: &mut Vec<Diagnostic>,
 ) -> Inferred {
+    if matches!(
+        operation,
+        "chunk"
+            | "flatten"
+            | "partition"
+            | "zip"
+            | "zip_exact"
+            | "unique"
+            | "group_by"
+            | "pairs"
+            | "window"
+            | "split_when"
+            | "rank"
+            | "asof_join"
+            | "bucket_by"
+    ) {
+        return infer_finite_list_helper_collection(
+            operation,
+            Some(input),
+            arguments,
+            scope,
+            local,
+            diagnostics,
+        );
+    }
     let Type::Relation(element) = input.ty else {
         unreachable!("qualified relation pipeline is selected for Relation<T>")
     };
@@ -12029,6 +13284,22 @@ fn infer_success_pipeline(
             ty: Type::Error,
             effects: input.effects,
         };
+    }
+    if matches!(&input.ty, Type::Relation(_))
+        && let Expr::Call {
+            callee, arguments, ..
+        } = rhs
+        && standard_statistics_module_operation(callee, scope, local).is_some()
+    {
+        return infer_relation_statistics_call(
+            callee,
+            arguments,
+            Some(input),
+            scope,
+            local,
+            diagnostics,
+        )
+        .expect("recognized statistics module operation has relation input");
     }
     if matches!(&input.ty, Type::Relation(_))
         && let Expr::Call {
@@ -12751,7 +14022,32 @@ fn infer_success_pipeline(
 }
 
 fn is_default_float_equality_type(ty: &Type) -> bool {
-    matches!(ty, Type::Float) || matches!(ty, Type::Applied { base, .. } if base == "Float")
+    match ty {
+        Type::Float => true,
+        Type::Applied { base, arguments } => {
+            base == "Float" || arguments.iter().any(is_default_float_equality_type)
+        }
+        Type::List(element) | Type::Optional(element) | Type::Range(element) => {
+            is_default_float_equality_type(element)
+        }
+        Type::Tuple(elements) => elements.iter().any(is_default_float_equality_type),
+        Type::Record(fields) => fields.values().any(is_default_float_equality_type),
+        Type::MoneyPerUnit { currency, unit } => {
+            is_default_float_equality_type(currency) || is_default_float_equality_type(unit)
+        }
+        Type::Relation(_) | Type::Stream(_) | Type::Function { .. } => false,
+        Type::Int
+        | Type::Decimal
+        | Type::Date
+        | Type::Instant
+        | Type::Text
+        | Type::Bool
+        | Type::Null
+        | Type::Unit
+        | Type::Named(_)
+        | Type::Bottom
+        | Type::Error => false,
+    }
 }
 
 fn infer_recovery_pipeline(
@@ -13902,8 +15198,13 @@ fn require_same(expected: &Type, actual: &Type, diagnostics: &mut Vec<Diagnostic
 }
 
 fn types_match(expected: &Type, actual: &Type) -> bool {
+    if !checkpoint_snapshot_maps_are_valid(expected)
+        || !checkpoint_snapshot_maps_are_valid(actual)
+    {
+        return false;
+    }
     if expected == actual {
-        return true;
+        return checkpoint_snapshot_maps_are_valid(expected);
     }
     if matches!(actual, Type::Bottom) {
         return true;
@@ -13914,6 +15215,15 @@ fn types_match(expected: &Type, actual: &Type) -> bool {
     if matches!(expected, Type::Error) || matches!(actual, Type::Error) {
         return true;
     }
+    // A shadowing lambda's contextual parameter key identifies its binder in
+    // returned callback types; callers may still supply any SnapshotRef value.
+    if snapshot_ref_context_key(expected)
+        .and_then(snapshot_ref_binder_id)
+        .is_some()
+        && is_snapshot_ref_value(actual)
+    {
+        return true;
+    }
     if expected == &Type::Named("sys.SnapshotRef".into())
         && is_contextual_snapshot_ref(actual)
     {
@@ -13921,9 +15231,22 @@ fn types_match(expected: &Type, actual: &Type) -> bool {
     }
     match (expected, actual) {
         (Type::Optional(_), Type::Null) => true,
+        (Type::List(expected), Type::List(actual))
+        | (Type::Range(expected), Type::Range(actual))
+        | (Type::Relation(expected), Type::Relation(actual))
+        | (Type::Stream(expected), Type::Stream(actual)) => types_match(expected, actual),
         // Optional parameters accept their non-null payload directly; callers
         // do not need to wrap ordinary values in a nullable constructor.
         (Type::Optional(expected), actual) => types_match(expected, actual),
+        // Tuple parameters bind their component types recursively, including
+        // contextual SnapshotRef leaves.
+        (Type::Tuple(expected), Type::Tuple(actual)) => {
+            expected.len() == actual.len()
+                && expected
+                    .iter()
+                    .zip(actual)
+                    .all(|(expected, actual)| types_match(expected, actual))
+        }
         (
             Type::Applied {
                 base: expected_base,
@@ -13961,6 +15284,115 @@ fn types_match(expected: &Type, actual: &Type) -> bool {
                         && actual_unit.rsplit('.').next() == Some("kWh")
             )
         }
+        (
+            Type::Function {
+                parameters: expected_parameters,
+                default_parameters: expected_defaults,
+                result: expected_result,
+                ..
+            },
+            Type::Function {
+                parameters: actual_parameters,
+                default_parameters: actual_defaults,
+                result: actual_result,
+                ..
+            },
+        ) => {
+            expected_parameters.len() == actual_parameters.len()
+                && expected_defaults == actual_defaults
+                && expected_parameters
+                    .iter()
+                    .zip(actual_parameters)
+                    .all(|(expected, actual)| types_match(expected, actual))
+                && types_match(expected_result, actual_result)
+        }
+        _ => false,
+    }
+}
+
+/// `types_match` intentionally treats `Error` as compatible to avoid
+/// cascading diagnostics. Tuple pin specialization must instead fail closed
+/// when recovery left an invalid component, or valid siblings could leak a
+/// partial set of capture identities into a later wave.
+fn contains_type_error(ty: &Type) -> bool {
+    match ty {
+        Type::Error => true,
+        Type::List(element)
+        | Type::Range(element)
+        | Type::Relation(element)
+        | Type::Stream(element)
+        | Type::Optional(element) => contains_type_error(element),
+        Type::Record(fields) => fields.values().any(contains_type_error),
+        Type::Tuple(elements) => elements.iter().any(contains_type_error),
+        Type::Applied { arguments, .. } => arguments.iter().any(contains_type_error),
+        Type::MoneyPerUnit { currency, unit } => {
+            contains_type_error(currency) || contains_type_error(unit)
+        }
+        Type::Function {
+            parameters, result, ..
+        } => parameters.iter().any(contains_type_error) || contains_type_error(result),
+        Type::Int
+        | Type::Decimal
+        | Type::Float
+        | Type::Date
+        | Type::Instant
+        | Type::Text
+        | Type::Bool
+        | Type::Null
+        | Type::Unit
+        | Type::Named(_)
+        | Type::Bottom => false,
+    }
+}
+
+/// Tuple widths in callback signatures are part of the binding wave even when
+/// the tuple is nested under a higher-order function or aggregate parameter.
+/// If a nested width is unknown during recovery, do not partially promote pins
+/// from sibling arguments.
+fn contains_tuple_type(ty: &Type) -> bool {
+    match ty {
+        Type::Tuple(_) => true,
+        Type::List(element)
+        | Type::Range(element)
+        | Type::Relation(element)
+        | Type::Stream(element)
+        | Type::Optional(element) => contains_tuple_type(element),
+        Type::Record(fields) => fields.values().any(contains_tuple_type),
+        Type::Applied { arguments, .. } => arguments.iter().any(contains_tuple_type),
+        Type::Function {
+            parameters, result, ..
+        } => parameters.iter().any(contains_tuple_type) || contains_tuple_type(result),
+        Type::MoneyPerUnit { currency, unit } => {
+            contains_tuple_type(currency) || contains_tuple_type(unit)
+        }
+        Type::Int
+        | Type::Decimal
+        | Type::Float
+        | Type::Date
+        | Type::Instant
+        | Type::Text
+        | Type::Bool
+        | Type::Null
+        | Type::Unit
+        | Type::Named(_)
+        | Type::Bottom
+        | Type::Error => false,
+    }
+}
+
+/// `Bottom` is compatible during ordinary contextual checking, but a value
+/// containing a non-returning tuple or record component is never produced as
+/// an argument. Walk only value aggregates: a callback's Bottom result or an
+/// empty collection's element type does not make that value incomplete.
+fn contains_nonreturning_aggregate_component(ty: &Type) -> bool {
+    match ty {
+        Type::Bottom => true,
+        Type::Record(fields) => fields
+            .values()
+            .any(contains_nonreturning_aggregate_component),
+        Type::Tuple(elements) => elements
+            .iter()
+            .any(contains_nonreturning_aggregate_component),
         _ => false,
     }
 }
@@ -14474,9 +15906,9 @@ fn infer_descriptor_system_call(
     let result = descriptor_call_type(&function.result, &function.type_parameters)
         .expect("supported descriptor functions have concrete types");
     let result = if path == ["sys", "snapshot"] {
-        arguments
-            .first()
-            .map(|argument| snapshot_selector_context(&argument.value, local))
+        arguments.first().map(|argument| {
+            snapshot_selector_context(&argument.value, values.first(), local)
+        })
             .unwrap_or(result)
     } else {
         result
@@ -16022,6 +17454,12 @@ fn infer_nominal_conversion_call(
     })
 }
 
+fn is_snapshot_selector_context(selector: &str) -> bool {
+    selector
+        .strip_prefix("selector:")
+        .is_some_and(|identity| !identity.is_empty())
+}
+
 fn contextual_snapshot_ref(selector: &str) -> Type {
     Type::Applied {
         base: "sys.SnapshotRefContext".into(),
@@ -16033,18 +17471,96 @@ fn is_contextual_snapshot_ref(ty: &Type) -> bool {
     matches!(
         ty,
         Type::Applied { base, arguments }
-            if base == "sys.SnapshotRefContext" && arguments.len() == 1
+            if base == "sys.SnapshotRefContext"
+                && matches!(arguments.as_slice(), [Type::Named(selector)] if is_snapshot_selector_context(selector))
     )
+}
+
+fn is_snapshot_ref_value(ty: &Type) -> bool {
+    ty == &Type::Named("sys.SnapshotRef".into()) || is_contextual_snapshot_ref(ty)
+}
+
+/// Give every SnapshotRef lambda parameter a lexical identity, including each
+/// component of a tuple pattern. This preserves the direct-binder scope used by
+/// current main and extends it to destructured pins, whose identity mechanics
+/// are unspecified by the reference.
+fn scope_snapshot_ref_parameter_pattern(pattern: &Pattern, ty: &Type) -> Type {
+    match (pattern, ty) {
+        (Pattern::Name(name, span), ty) if is_snapshot_ref_value(ty) => {
+            let source = span.file.as_deref().unwrap_or("<unknown>");
+            contextual_snapshot_ref(&format!(
+                "selector:binder:{source}@{}..{}:parameter:{name}",
+                span.start, span.end
+            ))
+        }
+        (Pattern::Tuple { elements, .. }, Type::Tuple(types)) if elements.len() == types.len() => {
+            Type::Tuple(
+                elements
+                    .iter()
+                    .zip(types)
+                    .map(|(pattern, ty)| scope_snapshot_ref_parameter_pattern(pattern, ty))
+                    .collect(),
+            )
+        }
+        _ => ty.clone(),
+    }
+}
+
+fn snapshot_ref_context_key(ty: &Type) -> Option<&str> {
+    let Type::Applied { base, arguments } = ty else {
+        return None;
+    };
+    if base != "sys.SnapshotRefContext" {
+        return None;
+    }
+    match arguments.as_slice() {
+        [Type::Named(selector)] => Some(selector),
+        _ => None,
+    }
+}
+
+fn snapshot_ref_binder_id(selector: &str) -> Option<&str> {
+    selector
+        .strip_prefix("selector:binder:")?
+        .split_once(":parameter:")
+        .map(|(binder, _)| binder)
+}
+
+fn snapshot_parameter_context(
+    selector: &str,
+) -> Option<(Option<&str>, &str, bool)> {
+    let selector = selector.strip_prefix("selector:")?;
+    let (captured, selector) = if let Some(selector) = selector.strip_prefix("capture:") {
+        (true, selector)
+    } else {
+        (false, selector)
+    };
+    if let Some(parameter) = selector.strip_prefix("parameter:") {
+        return Some((None, parameter, captured));
+    }
+    let selector = selector.strip_prefix("binder:")?;
+    let (binder, parameter) = selector.split_once(":parameter:")?;
+    Some((Some(binder), parameter, captured))
 }
 
 /// Gives a selected history root a type-level context key so decomposing its
 /// namespace or callable path does not erase which selected snapshot it came
 /// from. Literal selectors use their decoded value; dynamic selectors use
 /// their file and source expression identity because this semantic slice does not
-/// execute or constant-fold selector expressions. Reusing one `SnapshotRef`
-/// binding retains its identity; separate dynamic selector calls are not
-/// assumed to resolve to the same pin.
-fn snapshot_selector_context(expression: &Expr, local: &BTreeMap<String, Symbol>) -> Type {
+/// execute or constant-fold selector expressions. An already contextualized
+/// `SnapshotRef` keeps that identity across `sys.snapshot` calls and closure
+/// chains; a typed snapshot parameter receives a parameter-scoped identity,
+/// then callers specialize it from their actual pinned argument.
+fn snapshot_selector_context(
+    expression: &Expr,
+    argument_type: Option<&Type>,
+    local: &BTreeMap<String, Symbol>,
+) -> Type {
+    if let Some(argument_type) = argument_type
+        && is_contextual_snapshot_ref(argument_type)
+    {
+        return argument_type.clone();
+    }
     let selector = match expression {
         Expr::Literal {
             text,
@@ -16067,7 +17583,7 @@ fn snapshot_selector_context(expression: &Expr, local: &BTreeMap<String, Symbol>
             span.end
         ),
         Expr::Group { inner, .. } => {
-            return snapshot_selector_context(inner, local);
+            return snapshot_selector_context(inner, argument_type, local);
         }
         _ => format!("dynamic:{expression:?}"),
     };
@@ -16077,40 +17593,202 @@ fn snapshot_selector_context(expression: &Expr, local: &BTreeMap<String, Symbol>
 /// Substitute a selector parameter in a function result with the caller's
 /// selector identity. Literal and built-in selectors retain canonical
 /// identities. Dynamic arguments use the call occurrence because this pass
-/// does not evaluate selector values.
+/// does not evaluate selector values. Returned function parameters shadow
+/// same-named selectors from the caller throughout the returned signature;
+/// shadowing SnapshotRef lambda parameters also retain a binder identity so a
+/// captured alias is specialized at the depth where it was introduced.
 fn specialize_dynamic_parameter_snapshot_contexts(
+    ty: &Type,
+    formal_parameters: &[Type],
+    default_parameters: &BTreeSet<usize>,
+    parameter_names: Option<&[String]>,
+    arguments: &[orna_syntax_v1::Argument],
+    argument_types: &[Type],
+    local: &BTreeMap<String, Symbol>,
+    call_span: &SyntaxSpan,
+    historical_context: Option<&Type>,
+) -> Type {
+    let mut binder_contexts = BTreeMap::new();
+    let nonreturning_argument = argument_types
+        .iter()
+        .any(contains_nonreturning_aggregate_component);
+    let incomplete_argument = formal_parameters
+        .iter()
+        .enumerate()
+        .any(|(parameter_index, formal)| {
+            let Some(argument_index) = call_argument_index_for_position(
+                parameter_names,
+                parameter_index,
+                arguments,
+            ) else {
+                return !default_parameters.contains(&parameter_index);
+            };
+            let Some(actual) = argument_types.get(argument_index) else {
+                return true;
+            };
+            contains_tuple_type(formal)
+                && (contains_type_error(formal)
+                    || contains_type_error(actual)
+                    || !types_match(formal, actual))
+        });
+    let paired_direct_binders = formal_parameters
+        .iter()
+        .filter_map(|formal| snapshot_ref_context_key(formal).and_then(snapshot_ref_binder_id))
+        .collect::<BTreeSet<_>>();
+    let incomplete_paired_direct_rebind = paired_direct_binders.len() > 1
+        && formal_parameters
+            .iter()
+            .enumerate()
+            .any(|(parameter_index, formal)| {
+                if snapshot_ref_context_key(formal)
+                    .and_then(snapshot_ref_binder_id)
+                    .is_none()
+                {
+                    return false;
+                }
+                let Some(argument_index) = call_argument_index_for_position(
+                    parameter_names,
+                    parameter_index,
+                    arguments,
+                ) else {
+                    return false;
+                };
+                argument_types
+                    .get(argument_index)
+                    .is_none_or(|actual| !is_contextual_snapshot_ref(actual))
+            });
+    // The reference specifies pin identity but leaves recovery after a call
+    // that cannot reach the callee unspecified. Treat its binding wave
+    // transactionally:
+    // a malformed tuple at any depth in an argument signature, or any missing
+    // required argument, must not rebind otherwise valid siblings captured by
+    // the returned callable. Paired direct pin parameters share that wave too;
+    // an unknown sibling must not promote the other pin alone. Omitted defaults
+    // are valid.
+    let suppress_rebinding =
+        nonreturning_argument || incomplete_argument || incomplete_paired_direct_rebind;
+    if !suppress_rebinding {
+        for (parameter_index, formal) in formal_parameters.iter().enumerate() {
+            let Some(argument_index) = call_argument_index_for_position(
+                parameter_names,
+                parameter_index,
+                arguments,
+            ) else {
+                continue;
+            };
+            let Some(actual) = argument_types.get(argument_index) else {
+                continue;
+            };
+            // A destructured parameter is one callback argument. Do not partially
+            // bind its pins if recovery or shape checking found an invalid leaf.
+            if matches!(formal, Type::Tuple(_))
+                && (contains_type_error(formal)
+                    || contains_type_error(actual)
+                    || !types_match(formal, actual))
+            {
+                continue;
+            }
+            collect_snapshot_binder_contexts(formal, actual, &mut binder_contexts);
+        }
+    }
+
+    // A call with a non-returning argument, malformed tuple, or missing required
+    // argument never reaches the callee. Keep its result symbolic instead of
+    // leaking sibling pins.
+    let (parameter_names, arguments, argument_types) = if suppress_rebinding {
+        (None, &[][..], &[][..])
+    } else {
+        (parameter_names, arguments, argument_types)
+    };
+    specialize_dynamic_parameter_snapshot_contexts_scoped(
+        ty,
+        parameter_names,
+        arguments,
+        argument_types,
+        local,
+        call_span,
+        historical_context,
+        &BTreeSet::new(),
+        &binder_contexts,
+    )
+}
+
+fn specialize_dynamic_parameter_snapshot_contexts_scoped(
     ty: &Type,
     parameter_names: Option<&[String]>,
     arguments: &[orna_syntax_v1::Argument],
     argument_types: &[Type],
     local: &BTreeMap<String, Symbol>,
     call_span: &SyntaxSpan,
+    historical_context: Option<&Type>,
+    shadowed_parameters: &BTreeSet<String>,
+    binder_contexts: &BTreeMap<String, Type>,
 ) -> Type {
     match ty {
         Type::Applied { base, arguments: values }
             if base == "sys.SnapshotRefContext"
                 && let [Type::Named(selector)] = values.as_slice()
-                && let Some(parameter) = selector.strip_prefix("selector:parameter:") =>
+                && let Some((binder, parameter, captured)) = snapshot_parameter_context(selector)
+                && match binder {
+                    Some(binder) => {
+                        !shadowed_parameters.contains(&format!("binder:{binder}"))
+                    }
+                    None => captured || !shadowed_parameters.contains(parameter),
+                } =>
         {
-            let argument = parameter_names
-                .and_then(|names| names.iter().position(|name| name == parameter))
-                .and_then(|index| call_argument_for_parameter(parameter_names, index, arguments));
-            if let Some(argument) = argument {
-                call_argument_snapshot_context(argument, call_span, local)
-            } else if argument_types
-                .iter()
-                .any(|actual| contains_snapshot_context_key(actual, selector))
+            if let Some(binder) = binder
+                && let Some(actual) = binder_contexts.get(binder)
             {
-                // `database.as_of(pin)` forwards the context already carried
-                // by its argument instead of selecting a new dynamic pin.
-                ty.clone()
+                actual.clone()
             } else {
-                contextual_snapshot_ref(&format!(
-                    "selector:dynamic-call:{}:{}..{}:parameter:{parameter}",
-                    call_span.file.as_deref().unwrap_or("<unknown>"),
-                    call_span.start,
-                    call_span.end,
-                ))
+                let argument_index = parameter_names
+                    .and_then(|names| names.iter().position(|name| name == parameter))
+                    .and_then(|index| {
+                        call_argument_index_for_parameter(parameter_names, index, arguments)
+                    });
+                if let Some(argument_index) = argument_index
+                    && let Some(argument) = arguments.get(argument_index)
+                {
+                    call_argument_snapshot_context(
+                        &argument.value,
+                        argument_types.get(argument_index),
+                        call_span,
+                        local,
+                    )
+                } else if historical_context.is_some_and(|context| context == ty)
+                    || argument_types
+                        .iter()
+                        .any(|actual| contains_snapshot_context_key(actual, selector))
+                    || parameter_names.is_some_and(|names| names.iter().all(|name| name != parameter))
+                {
+                    // A closure's result may mention its captured selector even
+                    // when the current zero-argument call has no parameter to
+                    // substitute. Preserve that exact context instead of
+                    // inventing a call-site identity. A selector name absent from
+                    // this call's parameters belongs to a nested callable and
+                    // stays symbolic until that callable is invoked. The reference
+                    // requires exact SnapshotRef pinning but leaves this nested
+                    // closure specialization detail unspecified. `database.as_of(pin)`
+                    // also forwards the context already carried by its argument.
+                    ty.clone()
+                } else {
+                    // An omitted sibling suppresses the entire binding wave.
+                    // Keep separate same-named tuple slots separate in the
+                    // resulting symbolic pin map by carrying their formal
+                    // binder identity alongside the shared call site.
+                    // Binderless captured and live selectors can share a
+                    // parameter name. Preserve their source identity too, or
+                    // a suppressed rebind can collapse distinct map slots.
+                    let formal_identity = binder
+                        .map(|binder| format!(":formal-binder:{binder}"))
+                        .unwrap_or_else(|| format!(":formal-selector:{selector}"));
+                    contextual_snapshot_ref(&format!(
+                        "selector:dynamic-call:{}:{}..{}:parameter:{parameter}{formal_identity}",
+                        call_span.file.as_deref().unwrap_or("<unknown>"),
+                        call_span.start,
+                        call_span.end,
+                    ))
+                }
             }
         }
         Type::Function {
@@ -16118,79 +17796,146 @@ fn specialize_dynamic_parameter_snapshot_contexts(
             parameter_names: function_parameter_names,
             default_parameters,
             result,
-        } => Type::Function {
-            parameters: parameters
-                .iter()
-                .map(|parameter| {
-                    specialize_dynamic_parameter_snapshot_contexts(
-                        parameter,
-                        parameter_names,
-                        arguments,
-                        argument_types,
-                        local,
-                        call_span,
-                    )
-                })
-                .collect(),
-            parameter_names: function_parameter_names.clone(),
-            default_parameters: default_parameters.clone(),
-            result: Box::new(specialize_dynamic_parameter_snapshot_contexts(
-                result,
-                parameter_names,
-                arguments,
-                argument_types,
-                local,
-                call_span,
-            )),
+        } => {
+            let mut nested_shadowed_parameters = shadowed_parameters.clone();
+            if let Some(names) = function_parameter_names {
+                nested_shadowed_parameters.extend(names.iter().cloned());
+            }
+            for parameter in parameters {
+                collect_snapshot_ref_binder_ids(parameter, &mut nested_shadowed_parameters);
+            }
+            Type::Function {
+                parameters: parameters
+                    .iter()
+                    .map(|parameter| {
+                        specialize_dynamic_parameter_snapshot_contexts_scoped(
+                            parameter,
+                            parameter_names,
+                            arguments,
+                            argument_types,
+                            local,
+                            call_span,
+                            historical_context,
+                            &nested_shadowed_parameters,
+                            binder_contexts,
+                        )
+                    })
+                    .collect(),
+                parameter_names: function_parameter_names.clone(),
+                default_parameters: default_parameters.clone(),
+                result: Box::new(specialize_dynamic_parameter_snapshot_contexts_scoped(
+                    result,
+                    parameter_names,
+                    arguments,
+                    argument_types,
+                    local,
+                    call_span,
+                    historical_context,
+                    &nested_shadowed_parameters,
+                    binder_contexts,
+                )),
+            }
         },
+        // The reference leaves checkpoint-map recovery after a failed call
+        // unspecified. Rebind each stored selector as its original pin slot
+        // so an omitted sibling cannot collapse same-named paired binders.
+        Type::Applied {
+            base,
+            arguments: map_arguments,
+        }
+            if base == "semantic.SnapshotContextMap"
+                && is_snapshot_context_map_shape(ty) =>
+        {
+            let mut merged: Option<Type> = None;
+            for selector in map_arguments {
+                let Type::Named(selector) = selector else {
+                    return ty.clone();
+                };
+                let context = contextual_snapshot_ref(selector);
+                let context = specialize_dynamic_parameter_snapshot_contexts_scoped(
+                    &context,
+                    parameter_names,
+                    arguments,
+                    argument_types,
+                    local,
+                    call_span,
+                    historical_context,
+                    shadowed_parameters,
+                    binder_contexts,
+                );
+                merged = Some(match merged {
+                    Some(previous) => match merge_snapshot_context_map(&previous, &context) {
+                        Some(merged) => merged,
+                        None => return ty.clone(),
+                    },
+                    None => context,
+                });
+            }
+            merged.unwrap_or_else(|| ty.clone())
+        }
         Type::List(element) => Type::List(Box::new(
-            specialize_dynamic_parameter_snapshot_contexts(
+            specialize_dynamic_parameter_snapshot_contexts_scoped(
                 element,
                 parameter_names,
                 arguments,
                 argument_types,
                 local,
                 call_span,
+                historical_context,
+                shadowed_parameters,
+                binder_contexts,
             ),
         )),
         Type::Range(element) => Type::Range(Box::new(
-            specialize_dynamic_parameter_snapshot_contexts(
+            specialize_dynamic_parameter_snapshot_contexts_scoped(
                 element,
                 parameter_names,
                 arguments,
                 argument_types,
                 local,
                 call_span,
+                historical_context,
+                shadowed_parameters,
+                binder_contexts,
             ),
         )),
         Type::Relation(element) => Type::Relation(Box::new(
-            specialize_dynamic_parameter_snapshot_contexts(
+            specialize_dynamic_parameter_snapshot_contexts_scoped(
                 element,
                 parameter_names,
                 arguments,
                 argument_types,
                 local,
                 call_span,
+                historical_context,
+                shadowed_parameters,
+                binder_contexts,
             ),
         )),
         Type::Stream(element) => Type::Stream(Box::new(
-            specialize_dynamic_parameter_snapshot_contexts(
+            specialize_dynamic_parameter_snapshot_contexts_scoped(
                 element,
                 parameter_names,
                 arguments,
                 argument_types,
                 local,
                 call_span,
+                historical_context,
+                shadowed_parameters,
+                binder_contexts,
             ),
         )),
         Type::Optional(element) => Type::Optional(Box::new(
-            specialize_dynamic_parameter_snapshot_contexts(
+            specialize_dynamic_parameter_snapshot_contexts_scoped(
                 element,
                 parameter_names,
                 arguments,
                 argument_types,
                 local,
                 call_span,
+                historical_context,
+                shadowed_parameters,
+                binder_contexts,
             ),
         )),
         Type::Record(fields) => Type::Record(
@@ -16199,13 +17944,16 @@ fn specialize_dynamic_parameter_snapshot_contexts(
                 .map(|(name, value)| {
                     (
                         name.clone(),
-                        specialize_dynamic_parameter_snapshot_contexts(
+                        specialize_dynamic_parameter_snapshot_contexts_scoped(
                             value,
                             parameter_names,
                             arguments,
                             argument_types,
                             local,
                             call_span,
+                            historical_context,
+                            shadowed_parameters,
+                            binder_contexts,
                         ),
                     )
                 })
@@ -16215,13 +17963,16 @@ fn specialize_dynamic_parameter_snapshot_contexts(
             elements
                 .iter()
                 .map(|element| {
-                    specialize_dynamic_parameter_snapshot_contexts(
+                    specialize_dynamic_parameter_snapshot_contexts_scoped(
                         element,
                         parameter_names,
                         arguments,
                         argument_types,
                         local,
                         call_span,
+                        historical_context,
+                        shadowed_parameters,
+                        binder_contexts,
                     )
                 })
                 .collect(),
@@ -16231,18 +17982,129 @@ fn specialize_dynamic_parameter_snapshot_contexts(
             arguments: values
                 .iter()
                 .map(|value| {
-                    specialize_dynamic_parameter_snapshot_contexts(
+                    specialize_dynamic_parameter_snapshot_contexts_scoped(
                         value,
                         parameter_names,
                         arguments,
                         argument_types,
                         local,
                         call_span,
+                        historical_context,
+                        shadowed_parameters,
+                        binder_contexts,
                     )
                 })
                 .collect(),
         },
         _ => ty.clone(),
+    }
+}
+
+fn call_argument_index_for_position(
+    parameter_names: Option<&[String]>,
+    parameter_index: usize,
+    arguments: &[orna_syntax_v1::Argument],
+) -> Option<usize> {
+    if parameter_names.is_some() {
+        return call_argument_index_for_parameter(parameter_names, parameter_index, arguments);
+    }
+    arguments
+        .iter()
+        .enumerate()
+        .filter(|(_, argument)| argument.name.is_none())
+        .nth(parameter_index)
+        .map(|(argument_index, _)| argument_index)
+}
+
+/// Pair binder-scoped SnapshotRef leaves in a callable's formal argument
+/// shape with the exact contextual values supplied at this call site.
+fn collect_snapshot_binder_contexts(
+    formal: &Type,
+    actual: &Type,
+    into: &mut BTreeMap<String, Type>,
+) {
+    if is_contextual_snapshot_ref(formal) && is_contextual_snapshot_ref(actual) {
+        if let Some(binder) = snapshot_ref_context_key(formal).and_then(snapshot_ref_binder_id) {
+            into.insert(binder.to_owned(), actual.clone());
+        }
+        return;
+    }
+    match (formal, actual) {
+        (Type::List(formal), Type::List(actual))
+        | (Type::Range(formal), Type::Range(actual))
+        | (Type::Relation(formal), Type::Relation(actual))
+        | (Type::Stream(formal), Type::Stream(actual))
+        | (Type::Optional(formal), Type::Optional(actual)) => {
+            collect_snapshot_binder_contexts(formal, actual, into);
+        }
+        (Type::Record(formal), Type::Record(actual)) => {
+            for (name, formal) in formal {
+                if let Some(actual) = actual.get(name) {
+                    collect_snapshot_binder_contexts(formal, actual, into);
+                }
+            }
+        }
+        (Type::Tuple(formal), Type::Tuple(actual)) if formal.len() == actual.len() => {
+            for (formal, actual) in formal.iter().zip(actual) {
+                collect_snapshot_binder_contexts(formal, actual, into);
+            }
+        }
+        (
+            Type::Applied {
+                base: formal_base,
+                arguments: formal,
+            },
+            Type::Applied {
+                base: actual_base,
+                arguments: actual,
+            },
+        ) if formal_base == actual_base => {
+            for (formal, actual) in formal.iter().zip(actual) {
+                collect_snapshot_binder_contexts(formal, actual, into);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Nested callable parameters shadow matching binder identities through their
+/// result type. Walk aggregate patterns as well as direct SnapshotRef values.
+fn collect_snapshot_ref_binder_ids(ty: &Type, into: &mut BTreeSet<String>) {
+    if is_contextual_snapshot_ref(ty) {
+        if let Some((Some(binder), _, _)) = snapshot_ref_context_key(ty)
+            .and_then(snapshot_parameter_context)
+        {
+            into.insert(format!("binder:{binder}"));
+        }
+        return;
+    }
+    match ty {
+        Type::List(element)
+        | Type::Range(element)
+        | Type::Relation(element)
+        | Type::Stream(element)
+        | Type::Optional(element) => collect_snapshot_ref_binder_ids(element, into),
+        Type::Record(fields) => {
+            for value in fields.values() {
+                collect_snapshot_ref_binder_ids(value, into);
+            }
+        }
+        Type::Tuple(elements) => {
+            for element in elements {
+                collect_snapshot_ref_binder_ids(element, into);
+            }
+        }
+        Type::Applied { arguments, .. } => {
+            for argument in arguments {
+                collect_snapshot_ref_binder_ids(argument, into);
+            }
+        }
+        Type::MoneyPerUnit { currency, unit } => {
+            collect_snapshot_ref_binder_ids(currency, into);
+            collect_snapshot_ref_binder_ids(unit, into);
+        }
+        // A callable nested inside a parameter has its own lexical scope.
+        _ => {}
     }
 }
 
@@ -16278,29 +18140,39 @@ fn contains_snapshot_context_key(ty: &Type, key: &str) -> bool {
     }
 }
 
-fn call_argument_for_parameter<'a>(
+fn call_argument_index_for_parameter(
     parameter_names: Option<&[String]>,
     parameter_index: usize,
-    arguments: &'a [orna_syntax_v1::Argument],
-) -> Option<&'a Expr> {
-    let parameter_name = parameter_names?.get(parameter_index)?;
-    let mut positional_index = 0usize;
-    arguments.iter().find_map(|argument| {
-        if let Some(name) = argument.name.as_deref() {
-            (name == parameter_name).then_some(&argument.value)
+    arguments: &[orna_syntax_v1::Argument],
+) -> Option<usize> {
+    let names = parameter_names?;
+    names.get(parameter_index)?;
+    let mut assigned = BTreeSet::new();
+    for (argument_index, argument) in arguments.iter().enumerate() {
+        let index = if let Some(name) = argument.name.as_deref() {
+            names.iter().position(|parameter| parameter == name)
         } else {
-            let matches = positional_index == parameter_index;
-            positional_index += 1;
-            matches.then_some(&argument.value)
+            (0..names.len()).find(|index| !assigned.contains(index))
+        }?;
+        if index == parameter_index {
+            return Some(argument_index);
         }
-    })
+        assigned.insert(index);
+    }
+    None
 }
 
 fn call_argument_snapshot_context(
     argument: &Expr,
+    argument_type: Option<&Type>,
     call_span: &SyntaxSpan,
     local: &BTreeMap<String, Symbol>,
 ) -> Type {
+    if let Some(argument_type) = argument_type
+        && is_contextual_snapshot_ref(argument_type)
+    {
+        return argument_type.clone();
+    }
     let selector = match argument {
         Expr::Literal {
             text,
@@ -16317,7 +18189,7 @@ fn call_argument_snapshot_context(
             format!("parameter:{text}")
         }
         Expr::Group { inner, .. } => {
-            return call_argument_snapshot_context(inner, call_span, local);
+            return call_argument_snapshot_context(inner, argument_type, call_span, local);
         }
         _ => format!(
             "dynamic-call:{}:{}..{}",
@@ -16329,19 +18201,77 @@ fn call_argument_snapshot_context(
     contextual_snapshot_ref(&format!("selector:{selector}"))
 }
 
-fn specialize_historical_database_result(result: &Type, arguments: &[Type]) -> Option<Type> {
-    let Type::Applied { base, arguments: result_arguments } = result else {
+/// A typed `SnapshotRef` parameter has no concrete identity while its body is
+/// summarized. Parameter references use a caller-specialized key; local aliases
+/// use capture keys so same-named nested parameters cannot retarget them, with
+/// a lexical binder identity for aliases of shadowing lambda parameters or
+/// local SnapshotRef bindings.
+/// Uncontextualized non-parameter references stay generic because this semantic
+/// pass cannot infer their runtime pin.
+fn specialize_snapshot_ref_parameter(
+    expression: &Expr,
+    snapshot: &Type,
+    local: &BTreeMap<String, Symbol>,
+) -> Type {
+    if is_contextual_snapshot_ref(snapshot) {
+        if let Expr::Name { text, .. } = expression
+            && local
+                .get(text)
+                .is_some_and(|symbol| symbol.kind == SymbolKind::Parameter)
+            && let Some(selector) = snapshot_ref_context_key(snapshot)
+            && let Some(binder) = snapshot_ref_binder_id(selector)
+        {
+            return contextual_snapshot_ref(&format!(
+                "selector:capture:binder:{binder}:parameter:{text}"
+            ));
+        }
+        return snapshot.clone();
+    }
+    match expression {
+        Expr::Name { text, .. }
+            if local
+                .get(text)
+                .is_some_and(|symbol| symbol.kind == SymbolKind::Parameter)
+                && snapshot == &Type::Named("sys.SnapshotRef".into()) =>
+        {
+            // Preserve the captured binding separately from same-named
+            // parameters introduced by callbacks returned from this scope.
+            contextual_snapshot_ref(&format!("selector:capture:parameter:{text}"))
+        }
+        Expr::Group { inner, .. } => specialize_snapshot_ref_parameter(inner, snapshot, local),
+        _ => snapshot.clone(),
+    }
+}
+
+fn specialize_historical_database_result(
+    result: &Type,
+    argument_types: &[Type],
+    arguments: &[orna_syntax_v1::Argument],
+    local: &BTreeMap<String, Symbol>,
+) -> Option<Type> {
+    let Type::Applied {
+        base,
+        arguments: result_arguments,
+    } = result
+    else {
         return None;
     };
-    if base != "sys.DatabaseSnapshot" || result_arguments.len() != 1 {
+    if base != "sys.DatabaseSnapshot"
+        || !matches!(result_arguments.as_slice(), [Type::Named(snapshot)] if snapshot == "sys.SnapshotRef")
+    {
         return None;
     }
-    Some(historical_database_type(
-        arguments
-            .first()
-            .cloned()
-            .unwrap_or_else(|| Type::Named("sys.SnapshotRef".into())),
-    ))
+    let snapshot = argument_types
+        .first()
+        .cloned()
+        .map(|snapshot| {
+            let argument = arguments.first().map(|argument| &argument.value);
+            argument.map_or(snapshot.clone(), |argument| {
+                specialize_snapshot_ref_parameter(argument, &snapshot, local)
+            })
+        })
+        .unwrap_or_else(|| Type::Named("sys.SnapshotRef".into()));
+    Some(historical_database_type(snapshot))
 }
 
 fn historical_database_type(snapshot: Type) -> Type {
@@ -16394,6 +18324,3529 @@ fn callable_function_type(ty: &Type) -> Option<&Type> {
             }
         }
         _ => None,
+    }
+}
+
+/// A compatible local checkpoint reset adopts the selected source value's
+/// exact identity map. The reference is silent on structured local reset
+/// chains; replacement preserves saved selector identities without unioning
+/// them with intermediate checkpoints. Error-recovered values are not valid
+/// reset sources because their nested pin maps have not been established.
+fn pinned_snapshot_reset_type(expected: &Type, selected: &Type) -> Option<Type> {
+    (checkpoint_snapshot_maps_are_valid(expected)
+        && checkpoint_snapshot_maps_are_valid(selected)
+        && !contains_type_error(expected)
+        && !contains_type_error(selected)
+        && type_contains_pinned_snapshot_identity(expected)
+        && type_contains_pinned_snapshot_identity(selected)
+        && pinned_snapshot_reset_shape_matches(expected, selected))
+    .then(|| selected.clone())
+}
+
+/// A saved source may fill a nested Bottom boundary when another checkpoint
+/// boundary gives the local a concrete shape. Bottom has no selector identity,
+/// so ignore that path while preserving the topology of concrete maps. The
+/// selected source supplies the exact complete map for the reset value.
+fn pinned_snapshot_reset_shape_matches(expected: &Type, selected: &Type) -> bool {
+    if !checkpoint_snapshot_maps_are_valid(expected)
+        || !checkpoint_snapshot_maps_are_valid(selected)
+    {
+        return false;
+    }
+    let mut maps = Vec::new();
+    let mut path = Vec::new();
+    if !collect_reset_snapshot_context_maps(expected, selected, &mut maps, &mut path) {
+        return false;
+    }
+
+    // Keep the established exact-topology rule for ordinary checkpoint resets.
+    if snapshot_context_topology_matches(&maps)
+        && pinned_snapshot_reset_shape_matches_at_path(expected, selected, false)
+    {
+        return true;
+    }
+
+    // Retain the established sparse-pair reset rule first. The narrow
+    // restoration exception handles a multi-field record with both partial
+    // and wholly omitted checkpoint pairs.
+    if snapshot_context_paired_tuple_identity_shapes_match(&maps, false)
+        && pinned_snapshot_sparse_tuple_shape_matches_at_path(expected, selected, false)
+    {
+        return true;
+    }
+
+    record_has_partial_and_empty_checkpoint_pairs(selected)
+        && snapshot_context_paired_tuple_identity_shapes_match(&maps, true)
+        && pinned_snapshot_sparse_restoration_shape_matches_at_path(expected, selected, false)
+}
+
+/// A sparse checkpoint rebind may add or omit singleton selectors while
+/// preserving paired tuple identities. Compare tuple sibling lane paths and
+/// ignore selector counts; record-field sharing has a separate rollback rule
+/// and must still pass the exact reset topology check.
+fn snapshot_context_paired_tuple_identity_shapes_match(
+    pin_maps: &[SnapshotContextMapPair],
+    allow_omitted_source_lanes: bool,
+) -> bool {
+    fn paired_shapes(
+        pin_maps: &[SnapshotContextMapPair],
+        use_expected: bool,
+    ) -> BTreeSet<BTreeSet<(Vec<SnapshotTopologyBoundary>, BTreeSet<SnapshotTopologyBoundary>)>> {
+        let mut memberships = BTreeMap::<
+            String,
+            BTreeMap<Vec<SnapshotTopologyBoundary>, BTreeSet<SnapshotTopologyBoundary>>,
+        >::new();
+        for pair in pin_maps {
+            let selectors = if use_expected {
+                &pair.expected
+            } else {
+                &pair.actual
+            };
+            let tuple_lanes = pair
+                .boundary_path
+                .iter()
+                .enumerate()
+                .filter_map(|(index, boundary)| match boundary {
+                    SnapshotTopologyBoundary::TupleElement(_) => Some((
+                        pair.boundary_path[..index].to_vec(),
+                        boundary.clone(),
+                    )),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            for selector in selectors {
+                for (parent, lane) in &tuple_lanes {
+                    memberships
+                        .entry(selector.clone())
+                        .or_default()
+                        .entry(parent.clone())
+                        .or_default()
+                        .insert(lane.clone());
+                }
+            }
+        }
+        memberships
+            .into_values()
+            .filter_map(|parent_memberships| {
+                let paired = parent_memberships
+                    .into_iter()
+                    .filter(|(_, lanes)| lanes.len() > 1)
+                    .collect::<BTreeSet<_>>();
+                (!paired.is_empty()).then_some(paired)
+            })
+            .collect()
+    }
+
+    let expected = paired_shapes(pin_maps, true);
+    let selected = paired_shapes(pin_maps, false);
+    if allow_omitted_source_lanes {
+        // A fully omitted paired checkpoint field can be restored from its
+        // sparse saved source after a dense fold, dropping only learned maps.
+        selected.is_subset(&expected)
+    } else {
+        !expected.is_empty() && expected == selected
+    }
+}
+
+/// The reference is silent about map-width restoration for a record that
+/// stores several paired checkpoint fields. Support the family-40 shape
+/// narrowly: one pair field is partly omitted and a sibling pair is wholly
+/// omitted. Closure capture and single-pair rollback behavior stays strict.
+fn record_has_partial_and_empty_checkpoint_pairs(ty: &Type) -> bool {
+    match ty {
+        Type::Record(fields) => {
+            let pair_slots = fields
+                .values()
+                .filter_map(|field| match field {
+                    Type::Tuple(slots) if slots.len() > 1 => Some(slots),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            let has_empty_pair = pair_slots
+                .iter()
+                .any(|slots| slots.iter().all(|slot| matches!(slot, Type::Bottom)));
+            let has_partial_pair = pair_slots.iter().any(|slots| {
+                slots.iter().any(|slot| matches!(slot, Type::Bottom))
+                    && slots.iter().any(|slot| !matches!(slot, Type::Bottom))
+            });
+            (has_empty_pair && has_partial_pair)
+                || fields
+                    .values()
+                    .any(record_has_partial_and_empty_checkpoint_pairs)
+        }
+        Type::List(inner)
+        | Type::Range(inner)
+        | Type::Relation(inner)
+        | Type::Stream(inner)
+        | Type::Optional(inner) => record_has_partial_and_empty_checkpoint_pairs(inner),
+        _ => false,
+    }
+}
+
+fn pinned_snapshot_reset_shape_matches_at_path(
+    expected: &Type,
+    selected: &Type,
+    input_position: bool,
+) -> bool {
+    pinned_snapshot_reset_shape_matches_at_path_mode(expected, selected, input_position, false)
+}
+
+fn pinned_snapshot_sparse_tuple_shape_matches_at_path(
+    expected: &Type,
+    selected: &Type,
+    input_position: bool,
+) -> bool {
+    pinned_snapshot_reset_shape_matches_at_path_mode(expected, selected, input_position, true)
+}
+
+fn pinned_snapshot_sparse_restoration_shape_matches_at_path(
+    expected: &Type,
+    selected: &Type,
+    input_position: bool,
+) -> bool {
+    pinned_snapshot_reset_shape_matches_at_path_with_width(
+        expected,
+        selected,
+        input_position,
+        true,
+        true,
+    )
+}
+
+fn pinned_snapshot_reset_shape_matches_at_path_mode(
+    expected: &Type,
+    selected: &Type,
+    input_position: bool,
+    allow_sparse_tuple_identities: bool,
+) -> bool {
+    pinned_snapshot_reset_shape_matches_at_path_with_width(
+        expected,
+        selected,
+        input_position,
+        allow_sparse_tuple_identities,
+        false,
+    )
+}
+
+fn pinned_snapshot_reset_shape_matches_at_path_with_width(
+    expected: &Type,
+    selected: &Type,
+    input_position: bool,
+    allow_sparse_tuple_identities: bool,
+    allow_snapshot_context_width_drift: bool,
+) -> bool {
+    if input_position && matches!(selected, Type::Bottom) && !matches!(expected, Type::Bottom) {
+        // A reset cannot narrow an established callable input to Bottom: a
+        // previously valid nested snapshot argument would stop being accepted.
+        return false;
+    }
+    if matches!(expected, Type::Bottom) || matches!(selected, Type::Bottom) {
+        return true;
+    }
+    if expected == selected {
+        return true;
+    }
+    if allow_sparse_tuple_identities {
+        if is_contextual_snapshot_ref(expected) || is_contextual_snapshot_ref(selected) {
+            return is_contextual_snapshot_ref(expected) && is_contextual_snapshot_ref(selected)
+                || (allow_snapshot_context_width_drift
+                    && is_snapshot_context_map_shape(expected)
+                    && is_snapshot_context_map_shape(selected));
+        }
+        if is_snapshot_context_map_shape(expected) || is_snapshot_context_map_shape(selected) {
+            return is_snapshot_context_map_shape(expected) && is_snapshot_context_map_shape(selected);
+        }
+    }
+    if !allow_sparse_tuple_identities
+        && !type_contains_bottom(expected)
+        && !type_contains_bottom(selected)
+    {
+        return pinned_snapshot_shape_matches(expected, selected);
+    }
+    match (expected, selected) {
+        (Type::List(expected), Type::List(selected))
+        | (Type::Range(expected), Type::Range(selected))
+        | (Type::Relation(expected), Type::Relation(selected))
+        | (Type::Stream(expected), Type::Stream(selected))
+        | (Type::Optional(expected), Type::Optional(selected)) => {
+            pinned_snapshot_reset_shape_matches_at_path_with_width(
+                expected,
+                selected,
+                input_position,
+                allow_sparse_tuple_identities,
+                allow_snapshot_context_width_drift,
+            )
+        }
+        (Type::Tuple(expected), Type::Tuple(selected)) if expected.len() == selected.len() => {
+            expected.iter().zip(selected).all(|(expected, selected)| {
+                pinned_snapshot_reset_shape_matches_at_path_with_width(
+                    expected,
+                    selected,
+                    input_position,
+                    allow_sparse_tuple_identities,
+                    allow_snapshot_context_width_drift,
+                )
+            })
+        }
+        (Type::Record(expected), Type::Record(selected)) if expected.len() == selected.len() => {
+            expected.iter().all(|(name, expected)| {
+                selected.get(name).is_some_and(|selected| {
+                    pinned_snapshot_reset_shape_matches_at_path_with_width(
+                        expected,
+                        selected,
+                        input_position,
+                        allow_sparse_tuple_identities,
+                        allow_snapshot_context_width_drift,
+                    )
+                })
+            })
+        }
+        (
+            Type::Function {
+                parameters: expected_parameters,
+                parameter_names: expected_names,
+                default_parameters: expected_defaults,
+                result: expected_result,
+            },
+            Type::Function {
+                parameters: selected_parameters,
+                parameter_names: selected_names,
+                default_parameters: selected_defaults,
+                result: selected_result,
+            },
+        ) => {
+            expected_names == selected_names
+                && expected_defaults == selected_defaults
+                && expected_parameters.len() == selected_parameters.len()
+                && expected_parameters
+                    .iter()
+                    .zip(selected_parameters)
+                    .all(|(expected, selected)| {
+                        pinned_snapshot_reset_shape_matches_at_path_with_width(
+                            expected,
+                            selected,
+                            !input_position,
+                            allow_sparse_tuple_identities,
+                            allow_snapshot_context_width_drift,
+                        )
+                    })
+                && pinned_snapshot_reset_shape_matches_at_path_with_width(
+                    expected_result,
+                    selected_result,
+                    input_position,
+                    allow_sparse_tuple_identities,
+                    allow_snapshot_context_width_drift,
+                )
+        }
+        (
+            Type::Applied {
+                base: expected_base,
+                arguments: expected_arguments,
+            },
+            Type::Applied {
+                base: selected_base,
+                arguments: selected_arguments,
+            },
+        ) if expected_base == selected_base && expected_arguments.len() == selected_arguments.len() => {
+            expected_arguments
+                .iter()
+                .zip(selected_arguments)
+                .all(|(expected, selected)| {
+                    pinned_snapshot_reset_shape_matches_at_path_with_width(
+                        expected,
+                        selected,
+                        input_position,
+                        allow_sparse_tuple_identities,
+                        allow_snapshot_context_width_drift,
+                    )
+                })
+        }
+        (
+            Type::MoneyPerUnit {
+                currency: expected_currency,
+                unit: expected_unit,
+            },
+            Type::MoneyPerUnit {
+                currency: selected_currency,
+                unit: selected_unit,
+            },
+        ) => {
+            pinned_snapshot_reset_shape_matches_at_path_with_width(
+                expected_currency,
+                selected_currency,
+                input_position,
+                allow_sparse_tuple_identities,
+                allow_snapshot_context_width_drift,
+            ) && pinned_snapshot_reset_shape_matches_at_path_with_width(
+                expected_unit,
+                selected_unit,
+                input_position,
+                allow_sparse_tuple_identities,
+                allow_snapshot_context_width_drift,
+            )
+        }
+        _ => expected == selected,
+    }
+}
+
+fn type_contains_bottom(ty: &Type) -> bool {
+    match ty {
+        Type::Bottom => true,
+        Type::List(inner)
+        | Type::Range(inner)
+        | Type::Relation(inner)
+        | Type::Stream(inner)
+        | Type::Optional(inner) => type_contains_bottom(inner),
+        Type::Tuple(elements) => elements.iter().any(type_contains_bottom),
+        Type::Record(fields) => fields.values().any(type_contains_bottom),
+        Type::Applied { arguments, .. } => arguments.iter().any(type_contains_bottom),
+        Type::Function {
+            parameters, result, ..
+        } => parameters.iter().any(type_contains_bottom) || type_contains_bottom(result),
+        Type::MoneyPerUnit { currency, unit } => {
+            type_contains_bottom(currency) || type_contains_bottom(unit)
+        }
+        _ => false,
+    }
+}
+
+fn collect_reset_snapshot_context_maps(
+    expected: &Type,
+    selected: &Type,
+    maps: &mut Vec<SnapshotContextMapPair>,
+    path: &mut Vec<SnapshotTopologyBoundary>,
+) -> bool {
+    if matches!(expected, Type::Bottom) || matches!(selected, Type::Bottom) {
+        return true;
+    }
+    if !type_contains_bottom(expected) && !type_contains_bottom(selected) {
+        return collect_corresponding_snapshot_context_maps_at_path(expected, selected, maps, path);
+    }
+    match (expected, selected) {
+        (Type::List(expected), Type::List(selected)) => collect_reset_maps_at_boundary(
+            expected,
+            selected,
+            maps,
+            path,
+            SnapshotTopologyBoundary::ListElement,
+        ),
+        (Type::Range(expected), Type::Range(selected)) => collect_reset_maps_at_boundary(
+            expected,
+            selected,
+            maps,
+            path,
+            SnapshotTopologyBoundary::RangeElement,
+        ),
+        (Type::Relation(expected), Type::Relation(selected)) => collect_reset_maps_at_boundary(
+            expected,
+            selected,
+            maps,
+            path,
+            SnapshotTopologyBoundary::RelationElement,
+        ),
+        (Type::Stream(expected), Type::Stream(selected)) => collect_reset_maps_at_boundary(
+            expected,
+            selected,
+            maps,
+            path,
+            SnapshotTopologyBoundary::StreamElement,
+        ),
+        (Type::Optional(expected), Type::Optional(selected)) => collect_reset_maps_at_boundary(
+            expected,
+            selected,
+            maps,
+            path,
+            SnapshotTopologyBoundary::OptionalValue,
+        ),
+        (Type::Tuple(expected), Type::Tuple(selected)) if expected.len() == selected.len() => {
+            expected.iter().zip(selected).enumerate().all(|(index, (expected, selected))| {
+                collect_reset_maps_at_boundary(
+                    expected,
+                    selected,
+                    maps,
+                    path,
+                    SnapshotTopologyBoundary::TupleElement(index),
+                )
+            })
+        }
+        (Type::Record(expected), Type::Record(selected)) if expected.len() == selected.len() => {
+            expected.iter().all(|(name, expected)| {
+                selected.get(name).is_some_and(|selected| {
+                    collect_reset_maps_at_boundary(
+                        expected,
+                        selected,
+                        maps,
+                        path,
+                        SnapshotTopologyBoundary::RecordField(name.clone()),
+                    )
+                })
+            })
+        }
+        (
+            Type::Function {
+                parameters: expected_parameters,
+                result: expected_result,
+                ..
+            },
+            Type::Function {
+                parameters: selected_parameters,
+                result: selected_result,
+                ..
+            },
+        ) if expected_parameters.len() == selected_parameters.len() => {
+            expected_parameters
+                .iter()
+                .zip(selected_parameters)
+                .enumerate()
+                .all(|(index, (expected, selected))| {
+                    collect_reset_maps_at_boundary(
+                        expected,
+                        selected,
+                        maps,
+                        path,
+                        SnapshotTopologyBoundary::FunctionParameter(index),
+                    )
+                }) && collect_reset_maps_at_boundary(
+                expected_result,
+                selected_result,
+                maps,
+                path,
+                SnapshotTopologyBoundary::FunctionResult,
+            )
+        }
+        (
+            Type::Applied {
+                base: expected_base,
+                arguments: expected_arguments,
+            },
+            Type::Applied {
+                base: selected_base,
+                arguments: selected_arguments,
+            },
+        ) if expected_base == selected_base && expected_arguments.len() == selected_arguments.len() => {
+            expected_arguments
+                .iter()
+                .zip(selected_arguments)
+                .enumerate()
+                .all(|(index, (expected, selected))| {
+                    collect_reset_maps_at_boundary(
+                        expected,
+                        selected,
+                        maps,
+                        path,
+                        SnapshotTopologyBoundary::AppliedArgument {
+                            base: expected_base.clone(),
+                            index,
+                        },
+                    )
+                })
+        }
+        (
+            Type::MoneyPerUnit {
+                currency: expected_currency,
+                unit: expected_unit,
+            },
+            Type::MoneyPerUnit {
+                currency: selected_currency,
+                unit: selected_unit,
+            },
+        ) => {
+            collect_reset_maps_at_boundary(
+                expected_currency,
+                selected_currency,
+                maps,
+                path,
+                SnapshotTopologyBoundary::MoneyCurrency,
+            ) && collect_reset_maps_at_boundary(
+                expected_unit,
+                selected_unit,
+                maps,
+                path,
+                SnapshotTopologyBoundary::MoneyUnit,
+            )
+        }
+        _ => true,
+    }
+}
+
+fn collect_reset_maps_at_boundary(
+    expected: &Type,
+    selected: &Type,
+    maps: &mut Vec<SnapshotContextMapPair>,
+    path: &mut Vec<SnapshotTopologyBoundary>,
+    boundary: SnapshotTopologyBoundary,
+) -> bool {
+    path.push(boundary);
+    let matched = collect_reset_snapshot_context_maps(expected, selected, maps, path);
+    path.pop();
+    matched
+}
+
+fn type_contains_pinned_snapshot_identity(ty: &Type) -> bool {
+    checkpoint_snapshot_maps_are_valid(ty) && type_contains_valid_pinned_snapshot_identity(ty)
+}
+
+/// Paired reset chains can contain symbolic selectors for omitted closure
+/// inputs. Keep their lane-specific failure actionable; the reference is
+/// silent on diagnostics for incompatible local checkpoint resets.
+fn paired_dynamic_snapshot_reset(expected: &Type, selected: &Type) -> bool {
+    matches!((expected, selected), (Type::Tuple(expected), Type::Tuple(selected))
+        if expected.len() > 1
+            && expected.len() == selected.len()
+            && expected.iter().any(type_contains_dynamic_snapshot_identity)
+            && selected.iter().any(type_contains_dynamic_snapshot_identity))
+}
+
+fn type_contains_dynamic_snapshot_identity(ty: &Type) -> bool {
+    match ty {
+        Type::Applied { base, arguments } if base == "sys.SnapshotRefContext" => {
+            matches!(arguments.as_slice(), [Type::Named(selector)] if selector.starts_with("selector:dynamic-call:"))
+        }
+        Type::List(inner)
+        | Type::Range(inner)
+        | Type::Relation(inner)
+        | Type::Stream(inner)
+        | Type::Optional(inner) => type_contains_dynamic_snapshot_identity(inner),
+        Type::Tuple(elements) => elements.iter().any(type_contains_dynamic_snapshot_identity),
+        Type::Record(fields) => fields.values().any(type_contains_dynamic_snapshot_identity),
+        Type::Applied { arguments, .. } => arguments.iter().any(type_contains_dynamic_snapshot_identity),
+        Type::Function { parameters, result, .. } => {
+            parameters.iter().any(type_contains_dynamic_snapshot_identity)
+                || type_contains_dynamic_snapshot_identity(result)
+        }
+        Type::MoneyPerUnit { currency, unit } => {
+            type_contains_dynamic_snapshot_identity(currency)
+                || type_contains_dynamic_snapshot_identity(unit)
+        }
+        _ => false,
+    }
+}
+
+fn type_contains_valid_pinned_snapshot_identity(ty: &Type) -> bool {
+    match ty {
+        Type::Applied { base, .. } if base == "sys.SnapshotRefContext" => {
+            is_contextual_snapshot_ref(ty)
+        }
+        Type::Applied { base, .. } if base == "sys.HistoricalCallable" => {
+            historical_callable_context(ty).is_some()
+        }
+        Type::Applied { base, .. } if base == "semantic.SnapshotContextMap" => {
+            is_snapshot_context_map_shape(ty)
+        }
+        Type::List(element)
+        | Type::Range(element)
+        | Type::Relation(element)
+        | Type::Stream(element)
+        | Type::Optional(element) => type_contains_valid_pinned_snapshot_identity(element),
+        Type::Record(fields) => fields.values().any(type_contains_valid_pinned_snapshot_identity),
+        Type::Tuple(elements) => elements
+            .iter()
+            .any(type_contains_valid_pinned_snapshot_identity),
+        Type::Applied { arguments, .. } => {
+            arguments
+                .iter()
+                .any(type_contains_valid_pinned_snapshot_identity)
+        }
+        Type::MoneyPerUnit { currency, unit } => {
+            type_contains_valid_pinned_snapshot_identity(currency)
+                || type_contains_valid_pinned_snapshot_identity(unit)
+        }
+        Type::Function {
+            parameters, result, ..
+        } => {
+            parameters
+                .iter()
+                .any(type_contains_valid_pinned_snapshot_identity)
+                || type_contains_valid_pinned_snapshot_identity(result)
+        }
+        _ => false,
+    }
+}
+
+/// Rebinding a local aggregate may change contextual `SnapshotRef` identities
+/// or historical callable pins while preserving its structural shape. The
+/// reference fixes identity for historical reads but is silent about structured
+/// local rebinding; permit it when the only differences are selector contexts
+/// on pinned snapshot values. Saved aliases retain their original identities.
+fn pinned_snapshot_shape_matches(expected: &Type, actual: &Type) -> bool {
+    if !checkpoint_snapshot_maps_are_valid(expected)
+        || !checkpoint_snapshot_maps_are_valid(actual)
+    {
+        return false;
+    }
+    if expected == actual {
+        return true;
+    }
+    if is_snapshot_context_map_shape(expected) && is_snapshot_context_map_shape(actual) {
+        return snapshot_context_map_cardinality(expected)
+            == snapshot_context_map_cardinality(actual);
+    }
+    match (expected, actual) {
+        (
+            Type::Applied {
+                base: expected_base,
+                arguments: expected_arguments,
+            },
+            Type::Applied {
+                base: actual_base,
+                arguments: actual_arguments,
+            },
+        ) if expected_base == "sys.HistoricalCallable"
+            && actual_base == "sys.HistoricalCallable" =>
+        {
+            match (expected_arguments.as_slice(), actual_arguments.as_slice()) {
+                ([expected_snapshot, expected_callable], [actual_snapshot, actual_callable]) => {
+                    // The captured context is part of the callable's pin-map
+                    // shape: rebinding may replace selectors, but must retain
+                    // the same number of captured pins.
+                    pinned_snapshot_shape_matches(expected_snapshot, actual_snapshot)
+                        && pinned_snapshot_shape_matches(expected_callable, actual_callable)
+                }
+                _ => false,
+            }
+        }
+        (
+            Type::Applied {
+                base: expected_base,
+                arguments: expected_arguments,
+            },
+            Type::Applied {
+                base: actual_base,
+                arguments: actual_arguments,
+            },
+        ) if expected_base == "sys.SnapshotRefContext"
+            && actual_base == "sys.SnapshotRefContext" =>
+        {
+            matches!(
+                (expected_arguments.as_slice(), actual_arguments.as_slice()),
+                ([Type::Named(_)], [Type::Named(_)])
+            )
+        }
+        (
+            Type::Function {
+                parameters: expected_parameters,
+                parameter_names: expected_names,
+                default_parameters: expected_defaults,
+                result: expected_result,
+            },
+            Type::Function {
+                parameters: actual_parameters,
+                parameter_names: actual_names,
+                default_parameters: actual_defaults,
+                result: actual_result,
+            },
+        ) => {
+            expected_names == actual_names
+                && expected_defaults == actual_defaults
+                && expected_parameters.len() == actual_parameters.len()
+                && function_snapshot_pin_identity_topology_matches(
+                    expected_parameters,
+                    expected_result,
+                    actual_parameters,
+                    actual_result,
+                )
+                && expected_parameters
+                    .iter()
+                    .zip(actual_parameters)
+                    .all(|(expected, actual)| {
+                        pinned_snapshot_shape_matches(expected, actual)
+                    })
+                && pinned_snapshot_shape_matches(expected_result, actual_result)
+        }
+        (Type::List(expected), Type::List(actual))
+        | (Type::Range(expected), Type::Range(actual))
+        | (Type::Relation(expected), Type::Relation(actual))
+        | (Type::Stream(expected), Type::Stream(actual))
+        | (Type::Optional(expected), Type::Optional(actual)) => {
+            pinned_snapshot_shape_matches(expected, actual)
+        }
+        (Type::Record(expected), Type::Record(actual)) => {
+            expected.len() == actual.len()
+                && record_pin_identity_topology_matches(expected, actual)
+                && expected.iter().all(|(name, expected)| {
+                    actual.get(name).is_some_and(|actual| {
+                        pinned_snapshot_shape_matches(expected, actual)
+                    })
+                })
+        }
+        (Type::Tuple(expected), Type::Tuple(actual)) => {
+            tuple_checkpoint_shape_matches(expected, actual)
+        }
+        (
+            Type::Applied {
+                base: expected_base,
+                arguments: expected_arguments,
+            },
+            Type::Applied {
+                base: actual_base,
+                arguments: actual_arguments,
+            },
+        ) => {
+            expected_base == actual_base
+                && expected_arguments.len() == actual_arguments.len()
+                && expected_arguments
+                    .iter()
+                    .zip(actual_arguments)
+                    .all(|(expected, actual)| {
+                        pinned_snapshot_shape_matches(expected, actual)
+                    })
+        }
+        (
+            Type::MoneyPerUnit {
+                currency: expected_currency,
+                unit: expected_unit,
+            },
+            Type::MoneyPerUnit {
+                currency: actual_currency,
+                unit: actual_unit,
+            },
+        ) => {
+            pinned_snapshot_shape_matches(expected_currency, actual_currency)
+                && pinned_snapshot_shape_matches(expected_unit, actual_unit)
+        }
+        _ => false,
+    }
+}
+
+/// A function's pinned value boundaries include its inputs and every nested
+/// result. Compare them as one topology so rebinding cannot preserve each
+/// field's shape while swapping which parameter supplies a nested snapshot.
+/// The reference specifies explicit snapshot selection but does not define
+/// local function-value rebinds, so preserve the complete boundary relation.
+fn function_snapshot_pin_identity_topology_matches(
+    expected_parameters: &[Type],
+    expected_result: &Type,
+    actual_parameters: &[Type],
+    actual_result: &Type,
+) -> bool {
+    if expected_parameters.len() != actual_parameters.len() {
+        return false;
+    }
+    let mut pin_maps = Vec::new();
+    let mut path = Vec::new();
+    for (index, (expected, actual)) in expected_parameters
+        .iter()
+        .zip(actual_parameters)
+        .enumerate()
+    {
+        if !collect_corresponding_snapshot_context_maps_at_boundary(
+            expected,
+            actual,
+            &mut pin_maps,
+            &mut path,
+            SnapshotTopologyBoundary::FunctionParameter(index),
+        ) {
+            return false;
+        }
+    }
+    let boundaries_match = collect_corresponding_snapshot_context_maps_at_boundary(
+        expected_result,
+        actual_result,
+        &mut pin_maps,
+        &mut path,
+        SnapshotTopologyBoundary::FunctionResult,
+    );
+    let topology_matches = boundaries_match && snapshot_context_topology_matches(&pin_maps);
+    topology_matches
+}
+
+fn tuple_checkpoint_shape_matches(expected: &[Type], actual: &[Type]) -> bool {
+    expected.len() == actual.len()
+        && tuple_pin_identity_topology_matches(expected, actual)
+        && expected
+            .iter()
+            .zip(actual)
+            .all(|(expected, actual)| pinned_snapshot_shape_matches(expected, actual))
+}
+
+/// Preserve the first tuple row's checkpoint-map width during local list
+/// promotion. The history reference defines pin identity but not widening a
+/// tuple slot when a later row has a different map width, so this edge fails
+/// closed instead of silently unioning incompatible slot maps.
+fn tuple_checkpoint_promotion_matches(left: &[Type], right: &[Type]) -> bool {
+    left.len() == right.len()
+        && left
+            .iter()
+            .zip(right)
+            .all(|(left, right)| checkpoint_pin_map_widths_match(left, right))
+        && checkpoint_tuple_pin_identity_topology_matches(left, right)
+        && tuple_checkpoint_compaction_fold_preserves_pin_identity(left, right)
+}
+
+/// Extend a static fold anchor with the first concrete checkpoint subtree at
+/// each omitted path. When a tuple has an omitted slot, learn its paired pin
+/// topology from the first accepted row as a unit so later parents cannot
+/// rebind sharing between its slots. If paired record siblings also contain
+/// omissions, leave tuple promotion pathwise so the enclosing sibling rollback
+/// remains atomic. The reference does not specify sequential multi-parent tuple
+/// folds, so retain the first accepted topology as the conservative rule.
+fn checkpoint_topology_anchor_with_first_pins(anchor: &Type, source: &Type) -> Type {
+    if type_contains_paired_checkpoint_omissions(anchor) {
+        // Promote every complete tuple lane from this parent in one structural
+        // pass. An unrelated still-sparse lane must not prevent its complete
+        // siblings from teaching the paired topology for later snapshot folds.
+        return checkpoint_topology_anchor_with_first_complete_pins(anchor, source);
+    }
+    checkpoint_topology_anchor_with_first_pins_local(anchor, source)
+}
+
+fn checkpoint_topology_anchor_with_first_complete_pins(anchor: &Type, source: &Type) -> Type {
+    match (anchor, source) {
+        (Type::Record(anchor), Type::Record(source))
+            if anchor.keys().eq(source.keys()) =>
+        {
+            Type::Record(
+                anchor
+                    .iter()
+                    .filter_map(|(name, anchor)| {
+                        source.get(name).map(|source| {
+                            (
+                                name.clone(),
+                                checkpoint_topology_anchor_with_first_complete_pins(
+                                    anchor, source,
+                                ),
+                            )
+                        })
+                    })
+                    .collect(),
+            )
+        }
+        (Type::Tuple(anchor), Type::Tuple(source)) if anchor.len() == source.len() => {
+            let anchor_has_omission = type_contains_partially_omitted_pinned_tuple(&Type::Tuple(
+                anchor.clone(),
+            )) || type_contains_omitted_checkpoint_tuple(&Type::Tuple(anchor.clone()));
+            if anchor_has_omission {
+                let source_is_complete = !type_contains_partially_omitted_pinned_tuple(
+                    &Type::Tuple(source.clone()),
+                ) && !type_contains_omitted_checkpoint_tuple(&Type::Tuple(source.clone()));
+                if source_is_complete
+                    && type_contains_pinned_checkpoint_tuple(&Type::Tuple(source.clone()))
+                {
+                    Type::Tuple(source.clone())
+                } else {
+                    // Keep an incomplete lane's original anchor. A sibling
+                    // tuple can still be promoted independently in this pass.
+                    Type::Tuple(anchor.clone())
+                }
+            } else {
+                Type::Tuple(
+                    anchor
+                        .iter()
+                        .zip(source)
+                        .map(|(anchor, source)| {
+                            checkpoint_topology_anchor_with_first_complete_pins(anchor, source)
+                        })
+                        .collect(),
+                )
+            }
+        }
+        (Type::List(anchor), Type::List(source)) => Type::List(Box::new(
+            checkpoint_topology_anchor_with_first_complete_pins(anchor, source),
+        )),
+        (Type::Range(anchor), Type::Range(source)) => Type::Range(Box::new(
+            checkpoint_topology_anchor_with_first_complete_pins(anchor, source),
+        )),
+        (Type::Relation(anchor), Type::Relation(source)) => Type::Relation(Box::new(
+            checkpoint_topology_anchor_with_first_complete_pins(anchor, source),
+        )),
+        (Type::Stream(anchor), Type::Stream(source)) => Type::Stream(Box::new(
+            checkpoint_topology_anchor_with_first_complete_pins(anchor, source),
+        )),
+        (Type::Optional(anchor), Type::Optional(source)) => Type::Optional(Box::new(
+            checkpoint_topology_anchor_with_first_complete_pins(anchor, source),
+        )),
+        (
+            Type::Applied {
+                base: anchor_base,
+                arguments: anchor_arguments,
+            },
+            Type::Applied {
+                base: source_base,
+                arguments: source_arguments,
+            },
+        ) if anchor_base == source_base && anchor_arguments.len() == source_arguments.len() => {
+            Type::Applied {
+                base: anchor_base.clone(),
+                arguments: anchor_arguments
+                    .iter()
+                    .zip(source_arguments)
+                    .map(|(anchor, source)| {
+                        checkpoint_topology_anchor_with_first_complete_pins(anchor, source)
+                    })
+                    .collect(),
+            }
+        }
+        (
+            Type::Function {
+                parameters: anchor_parameters,
+                parameter_names,
+                result: anchor_result,
+                default_parameters,
+            },
+            Type::Function {
+                parameters: source_parameters,
+                result: source_result,
+                ..
+            },
+        ) if anchor_parameters.len() == source_parameters.len() => Type::Function {
+            parameters: anchor_parameters
+                .iter()
+                .zip(source_parameters)
+                .map(|(anchor, source)| {
+                    checkpoint_topology_anchor_with_first_complete_pins(anchor, source)
+                })
+                .collect(),
+            parameter_names: parameter_names.clone(),
+            result: Box::new(checkpoint_topology_anchor_with_first_complete_pins(
+                anchor_result,
+                source_result,
+            )),
+            default_parameters: default_parameters.clone(),
+        },
+        (
+            Type::MoneyPerUnit {
+                currency: anchor_currency,
+                unit: anchor_unit,
+            },
+            Type::MoneyPerUnit {
+                currency: source_currency,
+                unit: source_unit,
+            },
+        ) => Type::MoneyPerUnit {
+            currency: Box::new(checkpoint_topology_anchor_with_first_complete_pins(
+                anchor_currency,
+                source_currency,
+            )),
+            unit: Box::new(checkpoint_topology_anchor_with_first_complete_pins(
+                anchor_unit,
+                source_unit,
+            )),
+        },
+        _ => anchor.clone(),
+    }
+}
+
+fn checkpoint_topology_anchor_with_first_pins_local(anchor: &Type, source: &Type) -> Type {
+    if matches!(anchor, Type::Bottom) {
+        return if type_contains_pinned_snapshot_identity(source) {
+            source.clone()
+        } else {
+            anchor.clone()
+        };
+    }
+
+    match (anchor, source) {
+        (Type::Tuple(anchor), Type::Tuple(source)) if anchor.len() == source.len() => {
+            // If any paired slot was omitted, filling just that slot loses
+            // selector sharing with concrete siblings. Learn the tuple's
+            // paired topology from the first accepted row as one unit; later
+            // rows may alpha-rename it but cannot split or join the pair.
+            if anchor.iter().any(checkpoint_value_is_omitted)
+                && source.iter().any(type_contains_pinned_snapshot_identity)
+            {
+                Type::Tuple(source.clone())
+            } else {
+                Type::Tuple(
+                    anchor
+                        .iter()
+                        .zip(source)
+                        .map(|(anchor, source)| {
+                            checkpoint_topology_anchor_with_first_pins_local(anchor, source)
+                        })
+                        .collect(),
+                )
+            }
+        }
+        (Type::Record(anchor), Type::Record(source))
+            if anchor.keys().eq(source.keys()) =>
+        {
+            Type::Record(
+                anchor
+                    .iter()
+                    .filter_map(|(name, anchor)| {
+                        source.get(name).map(|source| {
+                            (
+                                name.clone(),
+                                checkpoint_topology_anchor_with_first_pins_local(anchor, source),
+                            )
+                        })
+                    })
+                    .collect(),
+            )
+        }
+        (Type::List(anchor), Type::List(source)) => Type::List(Box::new(
+            checkpoint_topology_anchor_with_first_pins_local(anchor, source),
+        )),
+        (Type::Range(anchor), Type::Range(source)) => Type::Range(Box::new(
+            checkpoint_topology_anchor_with_first_pins_local(anchor, source),
+        )),
+        (Type::Relation(anchor), Type::Relation(source)) => Type::Relation(Box::new(
+            checkpoint_topology_anchor_with_first_pins_local(anchor, source),
+        )),
+        (Type::Stream(anchor), Type::Stream(source)) => Type::Stream(Box::new(
+            checkpoint_topology_anchor_with_first_pins_local(anchor, source),
+        )),
+        (Type::Optional(anchor), Type::Optional(source)) => Type::Optional(Box::new(
+            checkpoint_topology_anchor_with_first_pins_local(anchor, source),
+        )),
+        (
+            Type::Applied {
+                base: anchor_base,
+                arguments: anchor_arguments,
+            },
+            Type::Applied {
+                base: source_base,
+                arguments: source_arguments,
+            },
+        ) if anchor_base == source_base && anchor_arguments.len() == source_arguments.len() => {
+            Type::Applied {
+                base: anchor_base.clone(),
+                arguments: anchor_arguments
+                    .iter()
+                    .zip(source_arguments)
+                    .map(|(anchor, source)| {
+                        checkpoint_topology_anchor_with_first_pins_local(anchor, source)
+                    })
+                    .collect(),
+            }
+        }
+        (
+            Type::Function {
+                parameters: anchor_parameters,
+                parameter_names,
+                result: anchor_result,
+                default_parameters,
+            },
+            Type::Function {
+                parameters: source_parameters,
+                result: source_result,
+                ..
+            },
+        ) if anchor_parameters.len() == source_parameters.len() => Type::Function {
+            parameters: anchor_parameters
+                .iter()
+                .zip(source_parameters)
+                .map(|(anchor, source)| {
+                    checkpoint_topology_anchor_with_first_pins_local(anchor, source)
+                })
+                .collect(),
+            parameter_names: parameter_names.clone(),
+            result: Box::new(checkpoint_topology_anchor_with_first_pins_local(
+                anchor_result,
+                source_result,
+            )),
+            default_parameters: default_parameters.clone(),
+        },
+        (
+            Type::MoneyPerUnit {
+                currency: anchor_currency,
+                unit: anchor_unit,
+            },
+            Type::MoneyPerUnit {
+                currency: source_currency,
+                unit: source_unit,
+            },
+        ) => Type::MoneyPerUnit {
+            currency: Box::new(checkpoint_topology_anchor_with_first_pins_local(
+                anchor_currency,
+                source_currency,
+            )),
+            unit: Box::new(checkpoint_topology_anchor_with_first_pins_local(
+                anchor_unit,
+                source_unit,
+            )),
+        },
+        _ => anchor.clone(),
+    }
+}
+
+/// Reconcile another parent into a multi-parent tuple checkpoint fold. Source
+/// parents keep the same paired selector paths, while singleton labels may be
+/// contributed by different sparse lanes. The fold guard rejects any new
+/// cross-slot identity introduced by the accumulated union.
+fn merge_multi_parent_checkpoint_tuple(
+    accumulated: &Type,
+    parent: &Type,
+    first_parent: &Type,
+) -> Option<Type> {
+    let (Type::Tuple(accumulated), Type::Tuple(parent), Type::Tuple(first_parent)) =
+        (accumulated, parent, first_parent)
+    else {
+        return None;
+    };
+    if accumulated.len() != first_parent.len() || parent.len() != first_parent.len() {
+        return None;
+    }
+    let first_parent_value = Type::Tuple(first_parent.clone());
+    let parent_value = Type::Tuple(parent.clone());
+    if (!checkpoint_value_pin_identity_topology_matches(&first_parent_value, &parent_value)
+        && !checkpoint_value_paired_pin_membership_matches(&first_parent_value, &parent_value))
+        || !tuple_checkpoint_compaction_fold_preserves_pin_identity(accumulated, parent)
+    {
+        return None;
+    }
+
+    merge_checkpoint_field_map_multi_parent(&Type::Tuple(accumulated.clone()), &parent_value)
+}
+
+/// Find a pinned tuple at any structural depth so parent-list inference can
+/// make its reconciliation transactional even when records wrap the tuple.
+fn type_contains_pinned_checkpoint_tuple(ty: &Type) -> bool {
+    match ty {
+        Type::Tuple(_) => type_contains_pinned_snapshot_identity(ty),
+        Type::List(element)
+        | Type::Range(element)
+        | Type::Relation(element)
+        | Type::Stream(element)
+        | Type::Optional(element) => type_contains_pinned_checkpoint_tuple(element),
+        Type::Record(fields) => fields.values().any(type_contains_pinned_checkpoint_tuple),
+        Type::Applied { arguments, .. } => arguments
+            .iter()
+            .any(type_contains_pinned_checkpoint_tuple),
+        Type::Function {
+            parameters, result, ..
+        } => {
+            parameters
+                .iter()
+                .any(type_contains_pinned_checkpoint_tuple)
+                || type_contains_pinned_checkpoint_tuple(result)
+        }
+        Type::MoneyPerUnit { currency, unit } => {
+            type_contains_pinned_checkpoint_tuple(currency)
+                || type_contains_pinned_checkpoint_tuple(unit)
+        }
+        _ => false,
+    }
+}
+
+/// A tuple whose checkpoint leaves are all omitted still fixes the fold shape.
+/// When later rows supply real pins, keep that first-row boundary as the
+/// transactional recovery point instead of letting a failed parent leave a
+/// partially promoted map behind.
+fn type_contains_omitted_checkpoint_tuple(ty: &Type) -> bool {
+    match ty {
+        Type::Tuple(elements) => {
+            checkpoint_value_is_omitted(ty)
+                || elements
+                    .iter()
+                    .any(type_contains_omitted_checkpoint_tuple)
+        }
+        Type::List(element)
+        | Type::Range(element)
+        | Type::Relation(element)
+        | Type::Stream(element)
+        | Type::Optional(element) => type_contains_omitted_checkpoint_tuple(element),
+        Type::Record(fields) => fields.values().any(type_contains_omitted_checkpoint_tuple),
+        Type::Applied { arguments, .. } => arguments
+            .iter()
+            .any(type_contains_omitted_checkpoint_tuple),
+        Type::Function {
+            parameters, result, ..
+        } => {
+            parameters
+                .iter()
+                .any(type_contains_omitted_checkpoint_tuple)
+                || type_contains_omitted_checkpoint_tuple(result)
+        }
+        Type::MoneyPerUnit { currency, unit } => {
+            type_contains_omitted_checkpoint_tuple(currency)
+                || type_contains_omitted_checkpoint_tuple(unit)
+        }
+        _ => false,
+    }
+}
+
+/// Find a tuple path that is absent in some parents while carrying snapshot
+/// identities in others. Record-field omission is not represented as a tuple
+/// of `Bottom` slots, so compare aligned structural paths across the fold.
+fn type_sequence_has_omitted_pinned_checkpoint_tuple(types: &[Type]) -> bool {
+    let aligned = types.iter().map(Some).collect::<Vec<_>>();
+    type_sequence_has_omitted_pinned_checkpoint_tuple_at_path(&aligned)
+}
+
+fn type_sequence_has_omitted_pinned_checkpoint_tuple_at_path(
+    types: &[Option<&Type>],
+) -> bool {
+    let contains_pinned_tuple = types
+        .iter()
+        .flatten()
+        .any(|ty| type_contains_pinned_checkpoint_tuple(ty));
+    let contains_omission = types
+        .iter()
+        .any(|ty| ty.is_none_or(|ty| checkpoint_value_is_omitted(ty)));
+    if contains_pinned_tuple && contains_omission {
+        return true;
+    }
+    if types.iter().any(Option::is_none) {
+        return false;
+    }
+    let present = types
+        .iter()
+        .map(|ty| ty.expect("checked aligned parent type"))
+        .collect::<Vec<_>>();
+    let Some(first) = present.first() else {
+        return false;
+    };
+
+    match first {
+        Type::Record(_) if present.iter().all(|ty| matches!(ty, Type::Record(_))) => {
+            let names = present
+                .iter()
+                .flat_map(|ty| match ty {
+                    Type::Record(fields) => fields.keys().cloned().collect::<Vec<_>>(),
+                    _ => Vec::new(),
+                })
+                .collect::<BTreeSet<_>>();
+            names.into_iter().any(|name| {
+                let fields = present
+                    .iter()
+                    .map(|ty| match ty {
+                        Type::Record(fields) => fields.get(&name),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>();
+                type_sequence_has_omitted_pinned_checkpoint_tuple_at_path(&fields)
+            })
+        }
+        Type::Tuple(_) if present.iter().all(|ty| matches!(ty, Type::Tuple(_))) => {
+            let width = present
+                .iter()
+                .filter_map(|ty| match ty {
+                    Type::Tuple(elements) => Some(elements.len()),
+                    _ => None,
+                })
+                .max()
+                .unwrap_or_default();
+            (0..width).any(|index| {
+                let elements = present
+                    .iter()
+                    .map(|ty| match ty {
+                        Type::Tuple(elements) => elements.get(index),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>();
+                type_sequence_has_omitted_pinned_checkpoint_tuple_at_path(&elements)
+            })
+        }
+        Type::List(_) if present.iter().all(|ty| matches!(ty, Type::List(_))) => {
+            let elements = present
+                .iter()
+                .map(|ty| match ty {
+                    Type::List(element) => Some(element.as_ref()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            type_sequence_has_omitted_pinned_checkpoint_tuple_at_path(&elements)
+        }
+        Type::Optional(_) if present.iter().all(|ty| matches!(ty, Type::Optional(_))) => {
+            let elements = present
+                .iter()
+                .map(|ty| match ty {
+                    Type::Optional(element) => Some(element.as_ref()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            type_sequence_has_omitted_pinned_checkpoint_tuple_at_path(&elements)
+        }
+        _ => false,
+    }
+}
+
+/// Give recursively nested fold rows a neutral shape for pinned tuple paths
+/// absent from a sibling. Supplied values still anchor their own fields, while
+/// an omitted pinned tuple starts as Bottom at each structural leaf so a
+/// concrete row can establish its identity topology. The reference does not
+/// define local sparse-record tuple folds; treat omission as an empty
+/// contribution and retain the tuple path for later scoped rollback.
+fn seed_omitted_pinned_checkpoint_tuple_paths(types: &mut [Type]) {
+    fn omitted_shape(value: &Type) -> Type {
+        match value {
+            Type::Tuple(elements) => Type::Tuple(elements.iter().map(omitted_shape).collect()),
+            Type::Record(fields) => Type::Record(
+                fields
+                    .iter()
+                    .map(|(name, value)| (name.clone(), omitted_shape(value)))
+                    .collect(),
+            ),
+            Type::List(element) => Type::List(Box::new(omitted_shape(element))),
+            Type::Optional(element) => Type::Optional(Box::new(omitted_shape(element))),
+            _ => Type::Bottom,
+        }
+    }
+
+    fn seed_aligned_paths(types: &mut [&mut Type]) {
+        let Some(first) = types.first() else {
+            return;
+        };
+        match &**first {
+            Type::Record(_) if types.iter().all(|ty| matches!(**ty, Type::Record(_))) => {
+                let names = types
+                    .iter()
+                    .flat_map(|ty| match &**ty {
+                        Type::Record(fields) => fields.keys().cloned().collect::<Vec<_>>(),
+                        _ => Vec::new(),
+                    })
+                    .collect::<BTreeSet<_>>();
+                for name in names {
+                    let template = types.iter().find_map(|ty| {
+                        let Type::Record(fields) = &**ty else {
+                            return None;
+                        };
+                        let field = fields.get(&name)?;
+                        type_contains_pinned_checkpoint_tuple(field).then(|| field.clone())
+                    });
+                    if let Some(template) = template {
+                        if types.iter().any(|ty| match &**ty {
+                            Type::Record(fields) => fields
+                                .get(&name)
+                                .is_none_or(|field| matches!(field, Type::Bottom)),
+                            _ => false,
+                        }) {
+                            let omitted = omitted_shape(&template);
+                            for ty in types.iter_mut() {
+                                let Type::Record(fields) = &mut **ty else {
+                                    continue;
+                                };
+                                if fields
+                                    .get(&name)
+                                    .is_none_or(|field| matches!(field, Type::Bottom))
+                                {
+                                    fields.insert(name.clone(), omitted.clone());
+                                }
+                            }
+                        }
+                    }
+
+                    let mut children = types
+                        .iter_mut()
+                        .filter_map(|ty| match &mut **ty {
+                            Type::Record(fields) => fields.get_mut(&name),
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>();
+                    seed_aligned_paths(&mut children);
+                }
+            }
+            Type::Tuple(_) if types.iter().all(|ty| matches!(**ty, Type::Tuple(_))) => {
+                let width = types
+                    .iter()
+                    .filter_map(|ty| match &**ty {
+                        Type::Tuple(elements) => Some(elements.len()),
+                        _ => None,
+                    })
+                    .max()
+                    .unwrap_or_default();
+                for index in 0..width {
+                    let template = types.iter().find_map(|ty| {
+                        let Type::Tuple(elements) = &**ty else {
+                            return None;
+                        };
+                        let element = elements.get(index)?;
+                        type_contains_pinned_checkpoint_tuple(element)
+                            .then(|| element.clone())
+                    });
+                    if let Some(template) = template {
+                        if types.iter().any(|ty| match &**ty {
+                            Type::Tuple(elements) => elements
+                                .get(index)
+                                .is_none_or(|element| matches!(element, Type::Bottom)),
+                            _ => false,
+                        }) {
+                            let omitted = omitted_shape(&template);
+                            for ty in types.iter_mut() {
+                                let Type::Tuple(elements) = &mut **ty else {
+                                    continue;
+                                };
+                                if matches!(elements.get(index), Some(Type::Bottom)) {
+                                    elements[index] = omitted.clone();
+                                }
+                            }
+                        }
+                    }
+
+                    let mut children = types
+                        .iter_mut()
+                        .filter_map(|ty| match &mut **ty {
+                            Type::Tuple(elements) => elements.get_mut(index),
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>();
+                    seed_aligned_paths(&mut children);
+                }
+            }
+            Type::List(_) if types.iter().all(|ty| matches!(**ty, Type::List(_))) => {
+                let mut children = types
+                    .iter_mut()
+                    .filter_map(|ty| match &mut **ty {
+                        Type::List(element) => Some(element.as_mut()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>();
+                seed_aligned_paths(&mut children);
+            }
+            Type::Optional(_) if types.iter().all(|ty| matches!(**ty, Type::Optional(_))) => {
+                let mut children = types
+                    .iter_mut()
+                    .filter_map(|ty| match &mut **ty {
+                        Type::Optional(element) => Some(element.as_mut()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>();
+                seed_aligned_paths(&mut children);
+            }
+            _ => {}
+        }
+    }
+
+    let mut aligned = types.iter_mut().collect::<Vec<_>>();
+    seed_aligned_paths(&mut aligned);
+}
+
+/// Paired records can also anchor a scoped rollback when both contain a
+/// partially omitted pinned tuple. A single partial tuple has concrete slots
+/// to continue folding, but paired omissions establish a relationship between
+/// sibling paths; reject a later cross-path rebind locally so unaffected
+/// depths and record siblings can still accumulate labels.
+fn type_contains_paired_checkpoint_omissions(ty: &Type) -> bool {
+    match ty {
+        Type::Record(fields) => {
+            let omitted_siblings = fields
+                .values()
+                .filter(|field| type_contains_partially_omitted_pinned_tuple(field))
+                .count();
+            omitted_siblings >= 2
+                || fields
+                    .values()
+                    .any(type_contains_paired_checkpoint_omissions)
+        }
+        Type::Tuple(elements) => elements
+            .iter()
+            .any(type_contains_paired_checkpoint_omissions),
+        Type::List(element)
+        | Type::Range(element)
+        | Type::Relation(element)
+        | Type::Stream(element)
+        | Type::Optional(element) => type_contains_paired_checkpoint_omissions(element),
+        Type::Applied { arguments, .. } => arguments
+            .iter()
+            .any(type_contains_paired_checkpoint_omissions),
+        Type::Function {
+            parameters, result, ..
+        } => {
+            parameters
+                .iter()
+                .any(type_contains_paired_checkpoint_omissions)
+                || type_contains_paired_checkpoint_omissions(result)
+        }
+        Type::MoneyPerUnit { currency, unit } => {
+            type_contains_paired_checkpoint_omissions(currency)
+                || type_contains_paired_checkpoint_omissions(unit)
+        }
+        _ => false,
+    }
+}
+
+/// Dense records and tuples can carry a paired tuple fold alongside another
+/// pinned identity sibling even when no parent omits a slot. Scope a late
+/// rebind failure to the conflicting tuple so the independent sibling keeps
+/// the values accumulated through the storm. The reference is silent about
+/// this mixed-shape boundary; use the smallest failing tuple as the rollback
+/// scope and preserve other computed values.
+fn type_contains_paired_pinned_checkpoint_siblings(ty: &Type) -> bool {
+    match ty {
+        Type::Record(fields) => {
+            let tuple_siblings = fields
+                .values()
+                .filter(|field| type_contains_pinned_checkpoint_tuple(field))
+                .count();
+            let pinned_siblings = fields
+                .values()
+                .filter(|field| type_contains_pinned_snapshot_identity(field))
+                .count();
+            (tuple_siblings > 0 && pinned_siblings > 1)
+                || fields
+                    .values()
+                    .any(type_contains_paired_pinned_checkpoint_siblings)
+        }
+        Type::Tuple(elements) => {
+            let tuple_siblings = elements
+                .iter()
+                .filter(|element| type_contains_pinned_checkpoint_tuple(element))
+                .count();
+            let pinned_siblings = elements
+                .iter()
+                .filter(|element| type_contains_pinned_snapshot_identity(element))
+                .count();
+            (tuple_siblings > 0 && pinned_siblings > 1)
+                || elements
+                    .iter()
+                    .any(type_contains_paired_pinned_checkpoint_siblings)
+        }
+        Type::List(element)
+        | Type::Range(element)
+        | Type::Relation(element)
+        | Type::Stream(element)
+        | Type::Optional(element) => type_contains_paired_pinned_checkpoint_siblings(element),
+        Type::Applied { arguments, .. } => arguments
+            .iter()
+            .any(type_contains_paired_pinned_checkpoint_siblings),
+        Type::Function {
+            parameters, result, ..
+        } => {
+            parameters
+                .iter()
+                .any(type_contains_paired_pinned_checkpoint_siblings)
+                || type_contains_paired_pinned_checkpoint_siblings(result)
+        }
+        Type::MoneyPerUnit { currency, unit } => {
+            type_contains_paired_pinned_checkpoint_siblings(currency)
+                || type_contains_paired_pinned_checkpoint_siblings(unit)
+        }
+        _ => false,
+    }
+}
+
+fn type_contains_partially_omitted_pinned_tuple(ty: &Type) -> bool {
+    match ty {
+        Type::Tuple(elements) => {
+            (elements.iter().any(checkpoint_value_is_omitted)
+                && elements.iter().any(type_contains_pinned_snapshot_identity))
+                || elements
+                    .iter()
+                    .any(type_contains_partially_omitted_pinned_tuple)
+        }
+        Type::List(element)
+        | Type::Range(element)
+        | Type::Relation(element)
+        | Type::Stream(element)
+        | Type::Optional(element) => type_contains_partially_omitted_pinned_tuple(element),
+        Type::Record(fields) => fields
+            .values()
+            .any(type_contains_partially_omitted_pinned_tuple),
+        Type::Applied { arguments, .. } => arguments
+            .iter()
+            .any(type_contains_partially_omitted_pinned_tuple),
+        Type::Function {
+            parameters, result, ..
+        } => {
+            parameters
+                .iter()
+                .any(type_contains_partially_omitted_pinned_tuple)
+                || type_contains_partially_omitted_pinned_tuple(result)
+        }
+        Type::MoneyPerUnit { currency, unit } => {
+            type_contains_partially_omitted_pinned_tuple(currency)
+                || type_contains_partially_omitted_pinned_tuple(unit)
+        }
+        _ => false,
+    }
+}
+
+/// A partial tuple still has concrete checkpoint depth labels to fold. Only a
+/// tuple whose every slot is omitted anchors the transactional recovery point;
+/// nested records and tuples can carry that all-omitted shape at any depth.
+fn checkpoint_value_is_omitted(ty: &Type) -> bool {
+    match ty {
+        Type::Bottom => true,
+        Type::Tuple(elements) => {
+            !elements.is_empty() && elements.iter().all(checkpoint_value_is_omitted)
+        }
+        Type::Record(fields) => {
+            !fields.is_empty() && fields.values().all(checkpoint_value_is_omitted)
+        }
+        _ => false,
+    }
+}
+
+/// Reconcile another parent into a nested checkpoint fold. Source parents
+/// retain the first parent's paired selector membership, while singleton
+/// labels may come from different sparse tuple lanes. Accumulated maps may
+/// grow only without introducing new cross-path identity between siblings.
+fn merge_multi_parent_checkpoint_value(
+    accumulated: &Type,
+    parent: &Type,
+    first_parent: &Type,
+) -> Option<Type> {
+    let paired = checkpoint_paired_boundary_fold_topology_matches(accumulated, parent, first_parent);
+    let source_topology_matches = checkpoint_value_pin_identity_topology_matches(first_parent, parent)
+        || checkpoint_value_paired_pin_membership_matches(first_parent, parent);
+    let compaction = nested_checkpoint_compaction_fold_preserves_pin_identity(accumulated, parent);
+    if !paired || !source_topology_matches || !compaction {
+        return None;
+    }
+    if matches!(first_parent, Type::Tuple(_)) {
+        return merge_multi_parent_checkpoint_tuple(accumulated, parent, first_parent);
+    }
+
+    merge_checkpoint_field_map_multi_parent(accumulated, parent)
+}
+
+struct ScopedCheckpointFold {
+    merged: Type,
+    effective_parent: Type,
+    rejected_scope: bool,
+}
+
+/// Reconcile one parent while allowing sparse paired folds to recover locally.
+/// A rejected nested scope is restored at its smallest boundary across record,
+/// tuple, collection-element, generic applied-argument, and money-dimension
+/// paths; unaffected sibling paths keep folding. The caller controls whether
+/// that scope stays frozen for later parents or is retried against a learned
+/// paired topology. The reference is silent on rollback through these local structures,
+/// so use the same smallest-failing-scope rule. Snapshot context maps,
+/// historical callable/namespace pairs, and function contracts remain atomic
+/// because their identities or binder rules are coupled. Rebuild the effective
+/// parent with restored paths before rechecking cross-path pin identity, so
+/// local recovery cannot manufacture sharing.
+fn merge_multi_parent_checkpoint_value_scoped(
+    accumulated: &Type,
+    parent: &Type,
+    rollback_anchor: &Type,
+    topology_anchor: &Type,
+    path: &mut Vec<SnapshotTopologyBoundary>,
+    rolled_back_paths: &mut BTreeSet<Vec<SnapshotTopologyBoundary>>,
+) -> Option<ScopedCheckpointFold> {
+    if rolled_back_paths.contains(path) {
+        return Some(ScopedCheckpointFold {
+            merged: rollback_anchor.clone(),
+            effective_parent: rollback_anchor.clone(),
+            rejected_scope: false,
+        });
+    }
+
+    // A parent that omits a pinned tuple path contributes no identity. Keep
+    // the accumulated value and topology anchor so a later rebind continues
+    // the same fold instead of freezing the tuple at the omission.
+    if checkpoint_value_is_omitted(parent)
+        && type_contains_pinned_checkpoint_tuple(topology_anchor)
+    {
+        return Some(ScopedCheckpointFold {
+            merged: accumulated.clone(),
+            effective_parent: topology_anchor.clone(),
+            rejected_scope: false,
+        });
+    }
+
+    let has_rolled_back_descendant = rolled_back_paths
+        .iter()
+        .any(|rolled_back| rolled_back.len() > path.len() && rolled_back.starts_with(path));
+    if !has_rolled_back_descendant
+        && let Some(merged) =
+            merge_multi_parent_checkpoint_value(accumulated, parent, topology_anchor)
+    {
+        return Some(ScopedCheckpointFold {
+            merged,
+            effective_parent: parent.clone(),
+            rejected_scope: false,
+        });
+    }
+
+    let mut rejected_scope = false;
+    let (mut merged, mut effective_parent) =
+        match (accumulated, parent, rollback_anchor, topology_anchor) {
+        (
+            Type::Record(accumulated_fields),
+            Type::Record(parent_fields),
+            Type::Record(rollback_fields),
+            Type::Record(topology_fields),
+        ) if accumulated_fields.keys().eq(rollback_fields.keys())
+            && accumulated_fields.keys().eq(topology_fields.keys())
+            && parent_fields
+                .keys()
+                .all(|name| accumulated_fields.contains_key(name)) =>
+        {
+            let mut merged_fields = BTreeMap::new();
+            let mut effective_fields = BTreeMap::new();
+            for (name, accumulated_field) in accumulated_fields {
+                let (Some(rollback_field), Some(topology_field)) =
+                    (rollback_fields.get(name), topology_fields.get(name))
+                else {
+                    return scoped_checkpoint_rollback(rollback_anchor, path, rolled_back_paths);
+                };
+                let Some(parent_field) = parent_fields.get(name) else {
+                    if type_contains_pinned_checkpoint_tuple(rollback_field)
+                        || type_contains_pinned_checkpoint_tuple(topology_field)
+                    {
+                        merged_fields.insert(name.clone(), accumulated_field.clone());
+                        effective_fields.insert(name.clone(), topology_field.clone());
+                        continue;
+                    }
+                    return scoped_checkpoint_rollback(rollback_anchor, path, rolled_back_paths);
+                };
+                path.push(SnapshotTopologyBoundary::RecordField(name.clone()));
+                let field = merge_multi_parent_checkpoint_value_scoped(
+                    accumulated_field,
+                    parent_field,
+                    rollback_field,
+                    topology_field,
+                    path,
+                    rolled_back_paths,
+                );
+                path.pop();
+                let Some(field) = field else {
+                    return scoped_checkpoint_rollback(rollback_anchor, path, rolled_back_paths);
+                };
+                rejected_scope |= field.rejected_scope;
+                merged_fields.insert(name.clone(), field.merged);
+                effective_fields.insert(name.clone(), field.effective_parent);
+            }
+            (Type::Record(merged_fields), Type::Record(effective_fields))
+        }
+        (
+            Type::Tuple(accumulated_slots),
+            Type::Tuple(parent_slots),
+            Type::Tuple(rollback_slots),
+            Type::Tuple(topology_slots),
+        ) if accumulated_slots.len() == parent_slots.len()
+            && accumulated_slots.len() == rollback_slots.len()
+            && accumulated_slots.len() == topology_slots.len() =>
+        {
+            let mut merged_slots = Vec::with_capacity(accumulated_slots.len());
+            let mut effective_slots = Vec::with_capacity(accumulated_slots.len());
+            for (index, ((accumulated_slot, parent_slot), (rollback_slot, topology_slot))) in
+                accumulated_slots
+                    .iter()
+                    .zip(parent_slots)
+                    .zip(rollback_slots.iter().zip(topology_slots))
+                    .enumerate()
+            {
+                path.push(SnapshotTopologyBoundary::TupleElement(index));
+                let slot = merge_multi_parent_checkpoint_value_scoped(
+                    accumulated_slot,
+                    parent_slot,
+                    rollback_slot,
+                    topology_slot,
+                    path,
+                    rolled_back_paths,
+                );
+                path.pop();
+                let Some(slot) = slot else {
+                    return scoped_checkpoint_rollback(rollback_anchor, path, rolled_back_paths);
+                };
+                rejected_scope |= slot.rejected_scope;
+                merged_slots.push(slot.merged);
+                effective_slots.push(slot.effective_parent);
+            }
+            (Type::Tuple(merged_slots), Type::Tuple(effective_slots))
+        }
+        (
+            Type::List(accumulated_element),
+            Type::List(parent_element),
+            Type::List(rollback_element),
+            Type::List(topology_element),
+        ) => {
+            let child = merge_scoped_checkpoint_child(
+                accumulated_element,
+                parent_element,
+                rollback_element,
+                topology_element,
+                SnapshotTopologyBoundary::ListElement,
+                path,
+                rolled_back_paths,
+            );
+            let Some(child) = child else {
+                return scoped_checkpoint_rollback(rollback_anchor, path, rolled_back_paths);
+            };
+            rejected_scope |= child.rejected_scope;
+            (
+                Type::List(Box::new(child.merged)),
+                Type::List(Box::new(child.effective_parent)),
+            )
+        }
+        (
+            Type::Range(accumulated_element),
+            Type::Range(parent_element),
+            Type::Range(rollback_element),
+            Type::Range(topology_element),
+        ) => {
+            let child = merge_scoped_checkpoint_child(
+                accumulated_element,
+                parent_element,
+                rollback_element,
+                topology_element,
+                SnapshotTopologyBoundary::RangeElement,
+                path,
+                rolled_back_paths,
+            );
+            let Some(child) = child else {
+                return scoped_checkpoint_rollback(rollback_anchor, path, rolled_back_paths);
+            };
+            rejected_scope |= child.rejected_scope;
+            (
+                Type::Range(Box::new(child.merged)),
+                Type::Range(Box::new(child.effective_parent)),
+            )
+        }
+        (
+            Type::Relation(accumulated_element),
+            Type::Relation(parent_element),
+            Type::Relation(rollback_element),
+            Type::Relation(topology_element),
+        ) => {
+            let child = merge_scoped_checkpoint_child(
+                accumulated_element,
+                parent_element,
+                rollback_element,
+                topology_element,
+                SnapshotTopologyBoundary::RelationElement,
+                path,
+                rolled_back_paths,
+            );
+            let Some(child) = child else {
+                return scoped_checkpoint_rollback(rollback_anchor, path, rolled_back_paths);
+            };
+            rejected_scope |= child.rejected_scope;
+            (
+                Type::Relation(Box::new(child.merged)),
+                Type::Relation(Box::new(child.effective_parent)),
+            )
+        }
+        (
+            Type::Stream(accumulated_element),
+            Type::Stream(parent_element),
+            Type::Stream(rollback_element),
+            Type::Stream(topology_element),
+        ) => {
+            let child = merge_scoped_checkpoint_child(
+                accumulated_element,
+                parent_element,
+                rollback_element,
+                topology_element,
+                SnapshotTopologyBoundary::StreamElement,
+                path,
+                rolled_back_paths,
+            );
+            let Some(child) = child else {
+                return scoped_checkpoint_rollback(rollback_anchor, path, rolled_back_paths);
+            };
+            rejected_scope |= child.rejected_scope;
+            (
+                Type::Stream(Box::new(child.merged)),
+                Type::Stream(Box::new(child.effective_parent)),
+            )
+        }
+        (
+            Type::Optional(accumulated_value),
+            Type::Optional(parent_value),
+            Type::Optional(rollback_value),
+            Type::Optional(topology_value),
+        ) => {
+            let child = merge_scoped_checkpoint_child(
+                accumulated_value,
+                parent_value,
+                rollback_value,
+                topology_value,
+                SnapshotTopologyBoundary::OptionalValue,
+                path,
+                rolled_back_paths,
+            );
+            let Some(child) = child else {
+                return scoped_checkpoint_rollback(rollback_anchor, path, rolled_back_paths);
+            };
+            rejected_scope |= child.rejected_scope;
+            (
+                Type::Optional(Box::new(child.merged)),
+                Type::Optional(Box::new(child.effective_parent)),
+            )
+        }
+        (
+            Type::Applied {
+                base: accumulated_base,
+                arguments: accumulated_arguments,
+            },
+            Type::Applied {
+                base: parent_base,
+                arguments: parent_arguments,
+            },
+            Type::Applied {
+                base: rollback_base,
+                arguments: rollback_arguments,
+            },
+            Type::Applied {
+                base: topology_base,
+                arguments: topology_arguments,
+            },
+        ) if accumulated_base == parent_base
+            && accumulated_base == rollback_base
+            && accumulated_base == topology_base
+            && accumulated_arguments.len() == parent_arguments.len()
+            && accumulated_arguments.len() == rollback_arguments.len()
+            && accumulated_arguments.len() == topology_arguments.len()
+            && accumulated_base != "sys.HistoricalCallable"
+            && accumulated_base != "sys.HistoricalNamespace"
+            && !is_snapshot_context_type(accumulated) =>
+        {
+            let mut merged_arguments = Vec::with_capacity(accumulated_arguments.len());
+            let mut effective_arguments = Vec::with_capacity(accumulated_arguments.len());
+            for (index, arguments) in accumulated_arguments
+                .iter()
+                .zip(parent_arguments)
+                .zip(rollback_arguments)
+                .zip(topology_arguments)
+                .enumerate()
+            {
+                let (((accumulated_argument, parent_argument), rollback_argument), topology_argument) =
+                    arguments;
+                let child = merge_scoped_checkpoint_child(
+                    accumulated_argument,
+                    parent_argument,
+                    rollback_argument,
+                    topology_argument,
+                    SnapshotTopologyBoundary::AppliedArgument {
+                        base: accumulated_base.clone(),
+                        index,
+                    },
+                    path,
+                    rolled_back_paths,
+                );
+                let Some(child) = child else {
+                    return scoped_checkpoint_rollback(rollback_anchor, path, rolled_back_paths);
+                };
+                rejected_scope |= child.rejected_scope;
+                merged_arguments.push(child.merged);
+                effective_arguments.push(child.effective_parent);
+            }
+            (
+                Type::Applied {
+                    base: accumulated_base.clone(),
+                    arguments: merged_arguments,
+                },
+                Type::Applied {
+                    base: accumulated_base.clone(),
+                    arguments: effective_arguments,
+                },
+            )
+        }
+        (
+            Type::MoneyPerUnit {
+                currency: accumulated_currency,
+                unit: accumulated_unit,
+            },
+            Type::MoneyPerUnit {
+                currency: parent_currency,
+                unit: parent_unit,
+            },
+            Type::MoneyPerUnit {
+                currency: rollback_currency,
+                unit: rollback_unit,
+            },
+            Type::MoneyPerUnit {
+                currency: topology_currency,
+                unit: topology_unit,
+            },
+        ) => {
+            let currency = merge_scoped_checkpoint_child(
+                accumulated_currency,
+                parent_currency,
+                rollback_currency,
+                topology_currency,
+                SnapshotTopologyBoundary::MoneyCurrency,
+                path,
+                rolled_back_paths,
+            );
+            let Some(currency) = currency else {
+                return scoped_checkpoint_rollback(rollback_anchor, path, rolled_back_paths);
+            };
+            let unit = merge_scoped_checkpoint_child(
+                accumulated_unit,
+                parent_unit,
+                rollback_unit,
+                topology_unit,
+                SnapshotTopologyBoundary::MoneyUnit,
+                path,
+                rolled_back_paths,
+            );
+            let Some(unit) = unit else {
+                return scoped_checkpoint_rollback(rollback_anchor, path, rolled_back_paths);
+            };
+            rejected_scope |= currency.rejected_scope || unit.rejected_scope;
+            (
+                Type::MoneyPerUnit {
+                    currency: Box::new(currency.merged),
+                    unit: Box::new(unit.merged),
+                },
+                Type::MoneyPerUnit {
+                    currency: Box::new(currency.effective_parent),
+                    unit: Box::new(unit.effective_parent),
+                },
+            )
+        }
+        _ => return scoped_checkpoint_rollback(rollback_anchor, path, rolled_back_paths),
+    };
+
+    let paired_boundaries_match = checkpoint_paired_boundary_fold_topology_matches(
+        accumulated,
+        &effective_parent,
+        topology_anchor,
+    );
+    let widths_match = checkpoint_pin_map_widths_match(topology_anchor, &effective_parent);
+    let topology_matches =
+        checkpoint_value_pin_identity_topology_matches(topology_anchor, &effective_parent);
+    let compaction_preserves_identity =
+        nested_checkpoint_compaction_fold_preserves_pin_identity(accumulated, &effective_parent);
+    if !paired_boundaries_match
+        || !widths_match
+        || !topology_matches
+        || !compaction_preserves_identity
+    {
+        // A late omission can change widths along with identity topology.
+        // Let concrete mismatch paths roll back first, then revalidate widths.
+        if rollback_conflicting_checkpoint_paths(
+                &mut merged,
+                &mut effective_parent,
+                rollback_anchor,
+                accumulated,
+                topology_anchor,
+                path,
+                rolled_back_paths,
+            )
+            && checkpoint_paired_boundary_fold_topology_matches(
+                accumulated,
+                &effective_parent,
+                topology_anchor,
+            )
+            && checkpoint_pin_map_widths_match(topology_anchor, &effective_parent)
+            && checkpoint_value_pin_identity_topology_matches(topology_anchor, &effective_parent)
+            && nested_checkpoint_compaction_fold_preserves_pin_identity(
+                accumulated,
+                &effective_parent,
+            )
+        {
+            return Some(ScopedCheckpointFold {
+                merged,
+                effective_parent,
+                rejected_scope: true,
+            });
+        }
+        return scoped_checkpoint_rollback(rollback_anchor, path, rolled_back_paths);
+    }
+
+    Some(ScopedCheckpointFold {
+        merged,
+        effective_parent,
+        rejected_scope,
+    })
+}
+
+fn merge_scoped_checkpoint_child(
+    accumulated: &Type,
+    parent: &Type,
+    rollback_anchor: &Type,
+    topology_anchor: &Type,
+    boundary: SnapshotTopologyBoundary,
+    path: &mut Vec<SnapshotTopologyBoundary>,
+    rolled_back_paths: &mut BTreeSet<Vec<SnapshotTopologyBoundary>>,
+) -> Option<ScopedCheckpointFold> {
+    path.push(boundary);
+    let child = merge_multi_parent_checkpoint_value_scoped(
+        accumulated,
+        parent,
+        rollback_anchor,
+        topology_anchor,
+        path,
+        rolled_back_paths,
+    );
+    path.pop();
+    child
+}
+
+fn scoped_checkpoint_rollback(
+    rollback_anchor: &Type,
+    path: &[SnapshotTopologyBoundary],
+    rolled_back_paths: &mut BTreeSet<Vec<SnapshotTopologyBoundary>>,
+) -> Option<ScopedCheckpointFold> {
+    rolled_back_paths.insert(path.to_vec());
+    Some(ScopedCheckpointFold {
+        merged: rollback_anchor.clone(),
+        effective_parent: rollback_anchor.clone(),
+        rejected_scope: true,
+    })
+}
+
+/// A fold can pass every child independently yet create an identity relation
+/// between two sibling paths when their maps are considered together. The
+/// reference is silent on this nested rollback boundary, so restore only the
+/// concrete pin paths named by that new relation; unrelated depth slots keep
+/// accumulating labels in later rows.
+fn rollback_conflicting_checkpoint_paths(
+    merged: &mut Type,
+    effective_parent: &mut Type,
+    rollback_anchor: &Type,
+    accumulated: &Type,
+    topology_anchor: &Type,
+    path: &[SnapshotTopologyBoundary],
+    rolled_back_paths: &mut BTreeSet<Vec<SnapshotTopologyBoundary>>,
+) -> bool {
+    let mut implicated_paths = BTreeSet::new();
+    if !checkpoint_value_pin_identity_topology_matches(topology_anchor, effective_parent) {
+        implicated_paths.extend(checkpoint_topology_mismatch_paths(
+            topology_anchor,
+            effective_parent,
+        ));
+    }
+    if !nested_checkpoint_compaction_fold_preserves_pin_identity(accumulated, effective_parent) {
+        implicated_paths.extend(checkpoint_compaction_mismatch_paths(
+            accumulated,
+            effective_parent,
+        ));
+    }
+
+    if implicated_paths.is_empty() {
+        return false;
+    }
+    let scopes = implicated_paths
+        .into_iter()
+        .filter_map(|scope| {
+            let mut full_scope = path.to_vec();
+            full_scope.extend(scope);
+            let mut rollback_scope = checkpoint_rollback_scope(&full_scope)?;
+            if !rollback_scope.starts_with(path) || rollback_scope.len() < path.len() {
+                return None;
+            }
+            let mut relative_scope = rollback_scope[path.len()..].to_vec();
+            // An earlier parent can omit the whole callback slot, so a deep
+            // result boundary may not exist in the rollback anchor. Fall back
+            // only as far as the nearest boundary present on all three sides.
+            while checkpoint_value_at_scope(rollback_anchor, &relative_scope).is_none()
+                || checkpoint_value_at_scope(merged, &relative_scope).is_none()
+                || checkpoint_value_at_scope(effective_parent, &relative_scope).is_none()
+            {
+                if rollback_scope.len() <= path.len() {
+                    return None;
+                }
+                rollback_scope.pop();
+                relative_scope.pop();
+            }
+            Some((rollback_scope, relative_scope))
+        })
+        .collect::<BTreeMap<_, _>>();
+    let mut rolled_back_any = false;
+    for (full_scope, scope) in scopes {
+        let (Some(anchor_scope), Some(_), Some(_)) = (
+            checkpoint_value_at_scope(rollback_anchor, &scope),
+            checkpoint_value_at_scope(merged, &scope),
+            checkpoint_value_at_scope(effective_parent, &scope),
+        ) else {
+            continue;
+        };
+        let anchor_scope = anchor_scope.clone();
+        if rolled_back_paths.contains(&full_scope) {
+            continue;
+        }
+        if checkpoint_replace_value_at_scope(merged, &scope, &anchor_scope)
+            && checkpoint_replace_value_at_scope(effective_parent, &scope, &anchor_scope)
+        {
+            rolled_back_paths.insert(full_scope);
+            rolled_back_any = true;
+        }
+    }
+    rolled_back_any
+}
+
+fn checkpoint_rollback_scope(scope: &[SnapshotTopologyBoundary]) -> Option<Vec<SnapshotTopologyBoundary>> {
+    for (index, boundary) in scope.iter().enumerate() {
+        match boundary {
+            SnapshotTopologyBoundary::FunctionParameter(_) | SnapshotTopologyBoundary::FunctionResult => {
+                return None;
+            }
+            SnapshotTopologyBoundary::AppliedArgument { base, .. }
+                if base == "sys.HistoricalCallable"
+                    || base == "sys.HistoricalNamespace" =>
+            {
+                return Some(scope[..index].to_vec());
+            }
+            _ => {}
+        }
+    }
+    // Preserve the established first structural rollback boundary for direct
+    // pin maps and aggregate dimensions. Historical callable pairs carry a
+    // coupled captured context, so their sibling tuple slot is the narrowest
+    // safe boundary and is returned above.
+    scope.first().cloned().map(|boundary| vec![boundary])
+}
+
+fn checkpoint_value_at_scope<'a>(
+    value: &'a Type,
+    scope: &[SnapshotTopologyBoundary],
+) -> Option<&'a Type> {
+    let Some((boundary, rest)) = scope.split_first() else {
+        return Some(value);
+    };
+    let child = match (value, boundary) {
+        (Type::Record(fields), SnapshotTopologyBoundary::RecordField(name)) => fields.get(name)?,
+        (Type::Tuple(slots), SnapshotTopologyBoundary::TupleElement(index)) => slots.get(*index)?,
+        (Type::List(element), SnapshotTopologyBoundary::ListElement)
+        | (Type::Range(element), SnapshotTopologyBoundary::RangeElement)
+        | (Type::Relation(element), SnapshotTopologyBoundary::RelationElement)
+        | (Type::Stream(element), SnapshotTopologyBoundary::StreamElement)
+        | (Type::Optional(element), SnapshotTopologyBoundary::OptionalValue) => element,
+        (
+            Type::Applied { base, arguments },
+            SnapshotTopologyBoundary::AppliedArgument {
+                base: boundary_base,
+                index,
+            },
+        ) if base == boundary_base => arguments.get(*index)?,
+        (
+            Type::MoneyPerUnit { currency, .. },
+            SnapshotTopologyBoundary::MoneyCurrency,
+        ) => currency,
+        (Type::MoneyPerUnit { unit, .. }, SnapshotTopologyBoundary::MoneyUnit) => unit,
+        _ => return None,
+    };
+    checkpoint_value_at_scope(child, rest)
+}
+
+fn checkpoint_replace_value_at_scope(
+    value: &mut Type,
+    scope: &[SnapshotTopologyBoundary],
+    replacement: &Type,
+) -> bool {
+    let Some((boundary, rest)) = scope.split_first() else {
+        *value = replacement.clone();
+        return true;
+    };
+    let child = match (value, boundary) {
+        (Type::Record(fields), SnapshotTopologyBoundary::RecordField(name)) => {
+            fields.get_mut(name)
+        }
+        (Type::Tuple(slots), SnapshotTopologyBoundary::TupleElement(index)) => {
+            slots.get_mut(*index)
+        }
+        (Type::List(element), SnapshotTopologyBoundary::ListElement)
+        | (Type::Range(element), SnapshotTopologyBoundary::RangeElement)
+        | (Type::Relation(element), SnapshotTopologyBoundary::RelationElement)
+        | (Type::Stream(element), SnapshotTopologyBoundary::StreamElement)
+        | (Type::Optional(element), SnapshotTopologyBoundary::OptionalValue) => {
+            Some(element.as_mut())
+        }
+        (
+            Type::Applied { base, arguments },
+            SnapshotTopologyBoundary::AppliedArgument {
+                base: boundary_base,
+                index,
+            },
+        ) if base == boundary_base => arguments.get_mut(*index),
+        (
+            Type::MoneyPerUnit { currency, .. },
+            SnapshotTopologyBoundary::MoneyCurrency,
+        ) => Some(currency.as_mut()),
+        (Type::MoneyPerUnit { unit, .. }, SnapshotTopologyBoundary::MoneyUnit) => {
+            Some(unit.as_mut())
+        }
+        _ => None,
+    };
+    child.is_some_and(|child| checkpoint_replace_value_at_scope(child, rest, replacement))
+}
+
+fn checkpoint_topology_mismatch_paths(
+    expected: &Type,
+    actual: &Type,
+) -> BTreeSet<Vec<SnapshotTopologyBoundary>> {
+    let mut pin_maps = Vec::new();
+    if !collect_corresponding_snapshot_context_maps_at_path(
+        expected,
+        actual,
+        &mut pin_maps,
+        &mut Vec::new(),
+    ) {
+        return BTreeSet::new();
+    }
+
+    let signatures = |expected_side: bool| {
+        let mut labels = BTreeMap::<String, BTreeSet<Vec<SnapshotTopologyBoundary>>>::new();
+        for pair in pin_maps
+            .iter()
+            .filter(|pair| !pair.expected.is_empty() && !pair.actual.is_empty())
+        {
+            let selectors = if expected_side {
+                &pair.expected
+            } else {
+                &pair.actual
+            };
+            for selector in selectors {
+                labels
+                    .entry(selector.clone())
+                    .or_default()
+                    .insert(pair.boundary_path.clone());
+            }
+        }
+        let mut signatures = BTreeMap::<Vec<Vec<SnapshotTopologyBoundary>>, usize>::new();
+        for membership in labels.into_values() {
+            *signatures
+                .entry(membership.into_iter().collect())
+                .or_default() += 1;
+        }
+        signatures
+    };
+
+    let expected = signatures(true);
+    let actual = signatures(false);
+    expected
+        .iter()
+        .chain(actual.iter())
+        .filter(|(membership, _)| expected.get(*membership) != actual.get(*membership))
+        .flat_map(|(membership, _)| membership.iter().cloned())
+        .collect()
+}
+
+fn checkpoint_compaction_mismatch_paths(
+    accumulated: &Type,
+    parent: &Type,
+) -> BTreeSet<Vec<SnapshotTopologyBoundary>> {
+    let mut pin_maps = Vec::new();
+    if !collect_corresponding_snapshot_context_maps_at_path(
+        accumulated,
+        parent,
+        &mut pin_maps,
+        &mut Vec::new(),
+    ) {
+        return BTreeSet::new();
+    }
+
+    let mut mismatched = BTreeSet::new();
+    for (index, pair) in pin_maps.iter().enumerate() {
+        let folded = pair
+            .expected
+            .union(&pair.actual)
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        for other in &pin_maps[index + 1..] {
+            let other_folded = other
+                .expected
+                .union(&other.actual)
+                .cloned()
+                .collect::<BTreeSet<_>>();
+            let shared_before = pair
+                .expected
+                .intersection(&other.expected)
+                .chain(pair.actual.intersection(&other.actual))
+                .cloned()
+                .collect::<BTreeSet<_>>();
+            if folded.intersection(&other_folded).cloned().collect::<BTreeSet<_>>()
+                != shared_before
+            {
+                mismatched.insert(pair.boundary_path.clone());
+                mismatched.insert(other.boundary_path.clone());
+            }
+        }
+    }
+    mismatched
+}
+
+/// Compare selector topology for paired record boundaries whose values contain
+/// pinned tuples, including boundaries nested through records, tuples, and
+/// optional values. Do not cross collection or closure boundaries: their folds
+/// have independent rollback scopes. The reference is silent on these nested
+/// pairings, so use the direct-record rule recursively. This lets a partially
+/// omitted first row acquire its depth relation, then prevents later rows in
+/// the same storm from splitting that learned pair.
+fn checkpoint_paired_boundary_fold_topology_matches(
+    accumulated: &Type,
+    parent: &Type,
+    topology_anchor: &Type,
+) -> bool {
+    checkpoint_paired_boundary_value_topology_matches(accumulated, parent, topology_anchor)
+}
+
+fn checkpoint_paired_boundary_value_topology_matches(
+    accumulated: &Type,
+    parent: &Type,
+    topology_anchor: &Type,
+) -> bool {
+    match (accumulated, parent, topology_anchor) {
+        (Type::Record(accumulated), Type::Record(parent), Type::Record(anchor))
+            if accumulated.keys().eq(parent.keys()) && accumulated.keys().eq(anchor.keys()) =>
+        {
+            checkpoint_paired_boundary_record_maps_match(accumulated, parent, anchor)
+        }
+        (Type::Tuple(accumulated), Type::Tuple(parent), Type::Tuple(anchor))
+            if accumulated.len() == parent.len() && accumulated.len() == anchor.len() =>
+        {
+            accumulated
+                .iter()
+                .zip(parent)
+                .zip(anchor)
+                .all(|((accumulated, parent), anchor)| {
+                    checkpoint_paired_boundary_value_topology_matches(
+                        accumulated, parent, anchor,
+                    )
+                })
+        }
+        (
+            Type::Optional(accumulated),
+            Type::Optional(parent),
+            Type::Optional(anchor),
+        ) => checkpoint_paired_boundary_value_topology_matches(
+            accumulated,
+            parent,
+            anchor,
+        ),
+        _ => true,
+    }
+}
+
+fn checkpoint_paired_boundary_record_maps_match(
+    accumulated_fields: &BTreeMap<String, Type>,
+    parent_fields: &BTreeMap<String, Type>,
+    anchor_fields: &BTreeMap<String, Type>,
+) -> bool {
+    let paired_field_names = anchor_fields
+        .iter()
+        .filter_map(|(name, anchor)| {
+            (type_contains_pinned_tuple_through_boundaries(anchor)
+                && accumulated_fields
+                    .get(name)
+                    .is_some_and(type_contains_pinned_tuple_through_boundaries)
+                && parent_fields
+                    .get(name)
+                    .is_some_and(type_contains_pinned_tuple_through_boundaries))
+            .then_some(name)
+        })
+        .collect::<Vec<_>>();
+    let has_paired_fields = paired_field_names.len() >= 2;
+
+    let mut learned = Vec::new();
+    for name in paired_field_names.iter().copied() {
+        let (Some(anchor), Some(accumulated), Some(parent)) = (
+            anchor_fields.get(name),
+            accumulated_fields.get(name),
+            parent_fields.get(name),
+        ) else {
+            continue;
+        };
+        let mut anchor_to_accumulated = Vec::new();
+        let mut anchor_to_parent = Vec::new();
+        // A nested shape mismatch is handled by the existing scoped fold. Use
+        // only the corresponding maps collected before that boundary.
+        let _ = collect_corresponding_snapshot_context_maps_at_path(
+            anchor,
+            accumulated,
+            &mut anchor_to_accumulated,
+            &mut Vec::new(),
+        );
+        let _ = collect_corresponding_snapshot_context_maps_at_path(
+            anchor,
+            parent,
+            &mut anchor_to_parent,
+            &mut Vec::new(),
+        );
+        for pair in &mut anchor_to_accumulated {
+            pair.boundary_path
+                .insert(0, SnapshotTopologyBoundary::RecordField(name.clone()));
+        }
+        let parent_maps = anchor_to_parent
+            .into_iter()
+            .map(|mut pair| {
+                pair.boundary_path
+                    .insert(0, SnapshotTopologyBoundary::RecordField(name.clone()));
+                (pair.boundary_path.clone(), pair)
+            })
+            .collect::<BTreeMap<_, _>>();
+        learned.extend(anchor_to_accumulated.iter().filter_map(|accumulated| {
+            let parent = parent_maps.get(&accumulated.boundary_path)?;
+            (accumulated.expected.is_empty()
+                && !accumulated.actual.is_empty()
+                && !parent.actual.is_empty())
+            .then(|| SnapshotContextMapPair {
+                boundary_path: accumulated.boundary_path.clone(),
+                expected: accumulated.actual.clone(),
+                actual: parent.actual.clone(),
+            })
+        }));
+    }
+
+    if has_paired_fields {
+        let paired_maps = learned
+            .iter()
+            .filter(|candidate| {
+                learned.iter().any(|other| {
+                    other.boundary_path != candidate.boundary_path
+                        && checkpoint_paths_are_paired_boundaries(
+                            &candidate.boundary_path,
+                            &other.boundary_path,
+                        )
+                })
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        if paired_maps.len() >= 2 {
+            let membership_shapes = |expected: bool| {
+                let mut labels =
+                    BTreeMap::<String, BTreeSet<Vec<SnapshotTopologyBoundary>>>::new();
+                for pair in &paired_maps {
+                    let selectors = if expected {
+                        &pair.expected
+                    } else {
+                        &pair.actual
+                    };
+                    for selector in selectors {
+                        labels
+                            .entry(selector.clone())
+                            .or_default()
+                            .insert(pair.boundary_path.clone());
+                    }
+                }
+                labels
+                    .into_values()
+                    .map(|membership| membership.into_iter().collect::<Vec<_>>())
+                    .collect::<BTreeSet<_>>()
+            };
+
+            if membership_shapes(true) != membership_shapes(false) {
+                return false;
+            }
+        }
+    }
+
+    anchor_fields.iter().all(|(name, anchor)| {
+        let (Some(accumulated), Some(parent)) =
+            (accumulated_fields.get(name), parent_fields.get(name))
+        else {
+            return true;
+        };
+        checkpoint_paired_boundary_value_topology_matches(accumulated, parent, anchor)
+    })
+}
+
+fn type_contains_pinned_tuple_through_boundaries(ty: &Type) -> bool {
+    match ty {
+        Type::Record(fields) => fields.values().any(type_contains_pinned_tuple_through_boundaries),
+        Type::Tuple(elements) => {
+            type_contains_pinned_snapshot_identity(ty)
+                || elements
+                    .iter()
+                    .any(type_contains_pinned_tuple_through_boundaries)
+        }
+        Type::Optional(element) => type_contains_pinned_tuple_through_boundaries(element),
+        _ => false,
+    }
+}
+
+fn checkpoint_paths_are_paired_boundaries(
+    left: &[SnapshotTopologyBoundary],
+    right: &[SnapshotTopologyBoundary],
+) -> bool {
+    if left.len() != right.len() {
+        return false;
+    }
+    let mut has_sibling_record_path = false;
+    let mut shared_tuple_depth = None;
+    for (index, (left, right)) in left.iter().zip(right).enumerate() {
+        if left == right {
+            if matches!(left, SnapshotTopologyBoundary::TupleElement(_))
+                && shared_tuple_depth.is_none()
+            {
+                shared_tuple_depth = Some(index);
+            }
+        } else if matches!(
+            (left, right),
+            (
+                SnapshotTopologyBoundary::RecordField(_),
+                SnapshotTopologyBoundary::RecordField(_)
+            )
+        ) {
+            if shared_tuple_depth.is_some() {
+                return false;
+            }
+            has_sibling_record_path = true;
+        } else {
+            return false;
+        }
+    }
+    let Some(shared_tuple_depth_index) = shared_tuple_depth else {
+        return false;
+    };
+    has_sibling_record_path
+        && left[..shared_tuple_depth_index]
+            .iter()
+            .all(|boundary| {
+                matches!(
+                    boundary,
+                    SnapshotTopologyBoundary::RecordField(_)
+                        | SnapshotTopologyBoundary::OptionalValue
+                )
+            })
+}
+
+/// ORNA-CP-003 and ORNA-SYS-136 define explicit snapshot selection, but do not
+/// specify multi-parent collection folds. Require each source row to preserve
+/// the first row's alpha-equivalent selector membership across structural
+/// paths before unioning its maps; this prevents a pin label from changing
+/// depth merely because different rows use disjoint selector strings.
+fn checkpoint_value_pin_identity_topology_matches(expected: &Type, actual: &Type) -> bool {
+    if !checkpoint_pin_map_widths_match(expected, actual) {
+        return false;
+    }
+    let mut pin_maps = Vec::new();
+    collect_corresponding_snapshot_context_maps_at_path(
+        expected,
+        actual,
+        &mut pin_maps,
+        &mut Vec::new(),
+    ) && snapshot_context_topology_matches_over_present_maps(&pin_maps)
+}
+
+/// Sparse parent folds may contribute different counts of selector labels to
+/// otherwise paired tuple slots or sibling record fields. Keep paired paths
+/// stable, but let singleton labels remain in the concrete lane where each
+/// sparse source supplied them. The enclosing compaction guard still rejects
+/// new cross-path identity. The reference does not specify these local sparse
+/// multi-parent folds.
+fn checkpoint_value_paired_pin_membership_matches(expected: &Type, actual: &Type) -> bool {
+    fn paired_membership_patterns(
+        pin_maps: &[SnapshotContextMapPair],
+        expected: bool,
+    ) -> BTreeMap<
+        BTreeSet<(Vec<SnapshotTopologyBoundary>, BTreeSet<SnapshotTopologyBoundary>)>,
+        usize,
+    > {
+        let mut memberships = BTreeMap::<
+            String,
+            BTreeMap<Vec<SnapshotTopologyBoundary>, BTreeSet<SnapshotTopologyBoundary>>,
+        >::new();
+        for pair in pin_maps {
+            let selectors = if expected {
+                &pair.expected
+            } else {
+                &pair.actual
+            };
+            let sibling_lanes = pair
+                .boundary_path
+                .iter()
+                .enumerate()
+                .filter_map(|(index, boundary)| match boundary {
+                    SnapshotTopologyBoundary::TupleElement(_)
+                    | SnapshotTopologyBoundary::RecordField(_) => Some((
+                        pair.boundary_path[..index].to_vec(),
+                        boundary.clone(),
+                    )),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            for selector in selectors {
+                for (parent, lane) in &sibling_lanes {
+                    memberships
+                        .entry(selector.clone())
+                        .or_default()
+                        .entry(parent.clone())
+                        .or_default()
+                        .insert(lane.clone());
+                }
+            }
+        }
+        let mut patterns = BTreeMap::new();
+        for parent_memberships in memberships.into_values() {
+            let paired_membership = parent_memberships
+                .into_iter()
+                .filter(|(_, siblings)| siblings.len() > 1)
+                .collect::<BTreeSet<_>>();
+            if !paired_membership.is_empty() {
+                *patterns.entry(paired_membership).or_insert(0) += 1;
+            }
+        }
+        patterns
+    }
+
+    let mut pin_maps = Vec::new();
+    if !collect_corresponding_snapshot_context_maps_at_path(
+        expected,
+        actual,
+        &mut pin_maps,
+        &mut Vec::new(),
+    ) {
+        return false;
+    }
+    let expected_patterns = paired_membership_patterns(&pin_maps, true);
+    let actual_patterns = paired_membership_patterns(&pin_maps, false);
+    !expected_patterns.is_empty() && expected_patterns == actual_patterns
+}
+
+fn checkpoint_tuple_pin_identity_topology_matches(expected: &[Type], actual: &[Type]) -> bool {
+    if expected.len() != actual.len() {
+        return false;
+    }
+    let mut pin_maps = Vec::new();
+    let mut path = Vec::new();
+    for (index, (expected, actual)) in expected.iter().zip(actual).enumerate() {
+        if !collect_corresponding_snapshot_context_maps_at_boundary(
+            expected,
+            actual,
+            &mut pin_maps,
+            &mut path,
+            SnapshotTopologyBoundary::TupleElement(index),
+        ) {
+            return false;
+        }
+    }
+    snapshot_context_topology_matches_over_present_maps(&pin_maps)
+}
+
+/// Ignore a structural path where either source parent omitted a pin. The
+/// accumulated-fold guard still prevents later concrete labels from creating
+/// cross-path identity; this lets an omitted first row acquire its first real
+/// selector topology before subsequent rows are compared against it.
+fn snapshot_context_topology_matches_over_present_maps(
+    pin_maps: &[SnapshotContextMapPair],
+) -> bool {
+    let present = pin_maps
+        .iter()
+        .filter(|pair| !pair.expected.is_empty() && !pair.actual.is_empty())
+        .cloned()
+        .collect::<Vec<_>>();
+    snapshot_context_topology_matches(&present)
+}
+
+fn nested_checkpoint_compaction_fold_preserves_pin_identity(left: &Type, right: &Type) -> bool {
+    let mut pin_maps = Vec::new();
+    if !collect_corresponding_snapshot_context_maps_at_path(
+        left,
+        right,
+        &mut pin_maps,
+        &mut Vec::new(),
+    ) {
+        return false;
+    }
+    checkpoint_snapshot_fold_preserves_pin_identity(&pin_maps)
+}
+
+/// A folded tuple map must not invent cross-slot identity by unioning maps
+/// from opposite rows. The reference does not define that compaction case;
+/// only promote when every identity shared after the fold was shared within
+/// at least one input row.
+fn tuple_checkpoint_compaction_fold_preserves_pin_identity(
+    left: &[Type],
+    right: &[Type],
+) -> bool {
+    let mut pin_maps = Vec::new();
+    let mut path = Vec::new();
+    for (index, (left, right)) in left.iter().zip(right).enumerate() {
+        if !collect_corresponding_snapshot_context_maps_at_boundary(
+            left,
+            right,
+            &mut pin_maps,
+            &mut path,
+            SnapshotTopologyBoundary::TupleElement(index),
+        ) {
+            return false;
+        }
+    }
+
+    checkpoint_snapshot_fold_preserves_pin_identity(&pin_maps)
+}
+
+fn record_checkpoint_promotion_matches(
+    left: &BTreeMap<String, Type>,
+    right: &BTreeMap<String, Type>,
+) -> bool {
+    left.len() == right.len()
+        && left.iter().all(|(name, left)| {
+            right.get(name).is_some_and(|right| {
+                checkpoint_pin_map_widths_match(left, right)
+            })
+        })
+        && checkpoint_record_pin_identity_topology_matches(left, right)
+        && record_checkpoint_compaction_fold_preserves_pin_identity(left, right)
+}
+
+fn checkpoint_record_pin_identity_topology_matches(
+    expected: &BTreeMap<String, Type>,
+    actual: &BTreeMap<String, Type>,
+) -> bool {
+    if expected.len() != actual.len() {
+        return false;
+    }
+    let mut pin_maps = Vec::new();
+    let mut path = Vec::new();
+    for (name, expected) in expected {
+        let Some(actual) = actual.get(name) else {
+            return false;
+        };
+        if !collect_corresponding_snapshot_context_maps_at_boundary(
+            expected,
+            actual,
+            &mut pin_maps,
+            &mut path,
+            SnapshotTopologyBoundary::RecordField(name.clone()),
+        ) {
+            return false;
+        }
+    }
+    snapshot_context_topology_matches_over_present_maps(&pin_maps)
+}
+
+fn record_checkpoint_compaction_fold_preserves_pin_identity(
+    left: &BTreeMap<String, Type>,
+    right: &BTreeMap<String, Type>,
+) -> bool {
+    if left.len() != right.len() {
+        return false;
+    }
+    let mut pin_maps = Vec::new();
+    let mut path = Vec::new();
+    for (name, left) in left {
+        let Some(right) = right.get(name) else {
+            return false;
+        };
+        if !collect_corresponding_snapshot_context_maps_at_boundary(
+            left,
+            right,
+            &mut pin_maps,
+            &mut path,
+            SnapshotTopologyBoundary::RecordField(name.clone()),
+        ) {
+            return false;
+        }
+    }
+
+    checkpoint_snapshot_fold_preserves_pin_identity(&pin_maps)
+}
+
+/// Folding selector maps across collection rows must not invent sharing
+/// between structural checkpoint slots that were independent in both rows.
+fn checkpoint_snapshot_fold_preserves_pin_identity(
+    pin_maps: &[SnapshotContextMapPair],
+) -> bool {
+    pin_maps.iter().enumerate().all(|(index, pair)| {
+        let folded = pair
+            .expected
+            .union(&pair.actual)
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        pin_maps[index + 1..].iter().all(|other| {
+            let folded_other = other
+                .expected
+                .union(&other.actual)
+                .cloned()
+                .collect::<BTreeSet<_>>();
+            let shared_before = pair
+                .expected
+                .intersection(&other.expected)
+                .chain(pair.actual.intersection(&other.actual))
+                .cloned()
+                .collect::<BTreeSet<_>>();
+            let shared_after = folded
+                .intersection(&folded_other)
+                .cloned()
+                .collect::<BTreeSet<_>>();
+            shared_after == shared_before
+        })
+    })
+}
+
+fn checkpoint_pin_map_widths_match(left: &Type, right: &Type) -> bool {
+    if matches!(left, Type::Bottom)
+        || matches!(right, Type::Bottom)
+        || left == &Type::Named("sys.SnapshotRef".into())
+        || right == &Type::Named("sys.SnapshotRef".into())
+    {
+        return true;
+    }
+    if is_snapshot_context_type(left) || is_snapshot_context_type(right) {
+        return is_snapshot_context_map_shape(left)
+            && is_snapshot_context_map_shape(right)
+            && snapshot_context_map_cardinality(left) == snapshot_context_map_cardinality(right);
+    }
+
+    match (left, right) {
+        (Type::List(left), Type::List(right))
+        | (Type::Range(left), Type::Range(right))
+        | (Type::Relation(left), Type::Relation(right))
+        | (Type::Optional(left), Type::Optional(right)) => {
+            checkpoint_pin_map_widths_match(left, right)
+        }
+        // Stream element identities are scoped to their callback waves and
+        // are validated by stream inference; they are not checkpoint tuple
+        // data slots for this promotion guard.
+        (Type::Stream(_), Type::Stream(_)) => true,
+        (Type::Tuple(left), Type::Tuple(right)) if left.len() == right.len() => left
+            .iter()
+            .zip(right)
+            .all(|(left, right)| checkpoint_pin_map_widths_match(left, right)),
+        (Type::Record(left), Type::Record(right)) if left.len() == right.len() => left
+            .iter()
+            .all(|(name, left)| right.get(name).is_some_and(|right| checkpoint_pin_map_widths_match(left, right))),
+        // Function parameter/result compatibility is checked by the function
+        // merge arm itself. Tuple promotion only needs to guard data slots;
+        // recursively treating callable binders as tuple data breaks
+        // transactional recovery for a Bottom call wave.
+        (Type::Function { .. }, Type::Function { .. }) => true,
+        (
+            Type::Applied {
+                base: left_base,
+                arguments: left_arguments,
+            },
+            Type::Applied {
+                base: right_base,
+                arguments: right_arguments,
+            },
+        ) if left_base == right_base && left_arguments.len() == right_arguments.len() => left_arguments
+            .iter()
+            .zip(right_arguments)
+            .all(|(left, right)| checkpoint_pin_map_widths_match(left, right)),
+        (
+            Type::MoneyPerUnit {
+                currency: left_currency,
+                unit: left_unit,
+            },
+            Type::MoneyPerUnit {
+                currency: right_currency,
+                unit: right_unit,
+            },
+        ) => {
+            checkpoint_pin_map_widths_match(left_currency, right_currency)
+                && checkpoint_pin_map_widths_match(left_unit, right_unit)
+        }
+        _ => true,
+    }
+}
+
+/// Structural boundaries for checkpoint selector maps. ORNA-CP-003 exposes
+/// historical checkpoint selection and ORNA-SYS-136 resolves explicit
+/// selectors, but neither specifies local record/tuple folds; preserve the
+/// complete boundary path as the conservative local rule.
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+enum SnapshotTopologyBoundary {
+    ListElement,
+    RangeElement,
+    RelationElement,
+    StreamElement,
+    OptionalValue,
+    TupleElement(usize),
+    RecordField(String),
+    FunctionParameter(usize),
+    FunctionResult,
+    AppliedArgument { base: String, index: usize },
+    MoneyCurrency,
+    MoneyUnit,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct SnapshotContextMapPair {
+    boundary_path: Vec<SnapshotTopologyBoundary>,
+    expected: BTreeSet<String>,
+    actual: BTreeSet<String>,
+}
+
+fn tuple_pin_identity_topology_matches(expected: &[Type], actual: &[Type]) -> bool {
+    if expected.len() != actual.len() {
+        return false;
+    }
+    let mut pin_maps = Vec::new();
+    let mut path = Vec::new();
+    for (index, (expected, actual)) in expected.iter().zip(actual).enumerate() {
+        if !collect_corresponding_snapshot_context_maps_at_boundary(
+            expected,
+            actual,
+            &mut pin_maps,
+            &mut path,
+            SnapshotTopologyBoundary::TupleElement(index),
+        ) {
+            return false;
+        }
+    }
+
+    snapshot_context_topology_matches(&pin_maps)
+}
+
+/// Record fields form sibling slots just like tuple positions. A rebind may
+/// rename concrete selectors, but it must preserve which fields share a
+/// captured pin across every nested depth. The reference is silent about this
+/// local record-rebind edge, so use the same conservative topology rule as
+/// tuple rebinding rather than allowing equal-width fields to split or merge.
+fn record_pin_identity_topology_matches(
+    expected: &BTreeMap<String, Type>,
+    actual: &BTreeMap<String, Type>,
+) -> bool {
+    let mut pin_maps = Vec::new();
+    let mut path = Vec::new();
+    for (name, expected) in expected {
+        let Some(actual) = actual.get(name) else {
+            return false;
+        };
+        if !collect_corresponding_snapshot_context_maps_at_boundary(
+            expected,
+            actual,
+            &mut pin_maps,
+            &mut path,
+            SnapshotTopologyBoundary::RecordField(name.clone()),
+        ) {
+            return false;
+        }
+    }
+
+    snapshot_context_topology_matches(&pin_maps)
+}
+
+fn snapshot_context_topology_matches(
+    pin_maps: &[SnapshotContextMapPair],
+) -> bool {
+    fn membership_signatures(
+        pin_maps: &[SnapshotContextMapPair],
+        expected: bool,
+    ) -> BTreeMap<Vec<Vec<SnapshotTopologyBoundary>>, usize> {
+        let mut labels = BTreeMap::<String, BTreeSet<Vec<SnapshotTopologyBoundary>>>::new();
+        for pair in pin_maps {
+            let selectors = if expected {
+                &pair.expected
+            } else {
+                &pair.actual
+            };
+            for selector in selectors {
+                labels
+                    .entry(selector.clone())
+                    .or_default()
+                    .insert(pair.boundary_path.clone());
+            }
+        }
+
+        let mut signatures = BTreeMap::new();
+        for membership in labels.into_values() {
+            let membership = membership.into_iter().collect::<Vec<_>>();
+            *signatures.entry(membership).or_insert(0) += 1;
+        }
+        signatures
+    }
+
+    pin_maps
+        .iter()
+        .all(|pair| pair.expected.len() == pair.actual.len())
+        && membership_signatures(pin_maps, true) == membership_signatures(pin_maps, false)
+}
+
+fn collect_corresponding_snapshot_context_maps_at_boundary(
+    expected: &Type,
+    actual: &Type,
+    into: &mut Vec<SnapshotContextMapPair>,
+    path: &mut Vec<SnapshotTopologyBoundary>,
+    boundary: SnapshotTopologyBoundary,
+) -> bool {
+    path.push(boundary);
+    let matched = collect_corresponding_snapshot_context_maps_at_path(expected, actual, into, path);
+    path.pop();
+    matched
+}
+
+fn collect_corresponding_snapshot_context_maps_at_path(
+    expected: &Type,
+    actual: &Type,
+    into: &mut Vec<SnapshotContextMapPair>,
+    path: &mut Vec<SnapshotTopologyBoundary>,
+) -> bool {
+    // Generic SnapshotRef formals have no concrete checkpoint identity to
+    // preserve. A Bottom on one side of a compaction fold is different: its
+    // sibling slot still exists, so retain an empty map for that side. The
+    // empty map lets the fold detect when a live pin from the other row would
+    // make two previously distinct depth labels overlap.
+    if matches!(expected, Type::Bottom) && matches!(actual, Type::Bottom) {
+        return true;
+    }
+    if matches!(expected, Type::Bottom) {
+        return collect_snapshot_context_maps_from_omitted_value_at_path(actual, true, into, path);
+    }
+    if matches!(actual, Type::Bottom) {
+        return collect_snapshot_context_maps_from_omitted_value_at_path(expected, false, into, path);
+    }
+    if expected == &Type::Named("sys.SnapshotRef".into())
+        || actual == &Type::Named("sys.SnapshotRef".into())
+    {
+        return true;
+    }
+    if is_contextual_snapshot_ref(expected) || is_contextual_snapshot_ref(actual) {
+        let (
+            Type::Applied {
+                arguments: expected,
+                ..
+            },
+            Type::Applied {
+                arguments: actual,
+                ..
+            },
+        ) = (expected, actual)
+        else {
+            return false;
+        };
+        let (Some(Type::Named(expected)), Some(Type::Named(actual))) =
+            (expected.first(), actual.first())
+        else {
+            return false;
+        };
+        into.push(SnapshotContextMapPair {
+            boundary_path: path.clone(),
+            expected: BTreeSet::from([expected.clone()]),
+            actual: BTreeSet::from([actual.clone()]),
+        });
+        return true;
+    }
+    if is_snapshot_context_map_shape(expected) || is_snapshot_context_map_shape(actual) {
+        let (
+            Type::Applied {
+                arguments: expected,
+                ..
+            },
+            Type::Applied {
+                arguments: actual,
+                ..
+            },
+        ) = (expected, actual)
+        else {
+            return false;
+        };
+        let selectors = |arguments: &[Type]| {
+            arguments
+                .iter()
+                .filter_map(|argument| match argument {
+                    Type::Named(selector) => Some(selector.clone()),
+                    _ => None,
+                })
+                .collect::<BTreeSet<_>>()
+        };
+        let expected = selectors(expected);
+        let actual = selectors(actual);
+        into.push(SnapshotContextMapPair {
+            boundary_path: path.clone(),
+            expected,
+            actual,
+        });
+        return true;
+    }
+
+    match (expected, actual) {
+        (Type::List(expected), Type::List(actual)) => collect_corresponding_snapshot_context_maps_at_boundary(
+            expected,
+            actual,
+            into,
+            path,
+            SnapshotTopologyBoundary::ListElement,
+        ),
+        (Type::Range(expected), Type::Range(actual)) => collect_corresponding_snapshot_context_maps_at_boundary(
+            expected,
+            actual,
+            into,
+            path,
+            SnapshotTopologyBoundary::RangeElement,
+        ),
+        (Type::Relation(expected), Type::Relation(actual)) => collect_corresponding_snapshot_context_maps_at_boundary(
+            expected,
+            actual,
+            into,
+            path,
+            SnapshotTopologyBoundary::RelationElement,
+        ),
+        (Type::Stream(expected), Type::Stream(actual)) => collect_corresponding_snapshot_context_maps_at_boundary(
+            expected,
+            actual,
+            into,
+            path,
+            SnapshotTopologyBoundary::StreamElement,
+        ),
+        (Type::Optional(expected), Type::Optional(actual)) => collect_corresponding_snapshot_context_maps_at_boundary(
+            expected,
+            actual,
+            into,
+            path,
+            SnapshotTopologyBoundary::OptionalValue,
+        ),
+        (Type::Tuple(expected), Type::Tuple(actual)) if expected.len() == actual.len() => {
+            expected.iter().zip(actual).enumerate().all(|(index, (expected, actual))| {
+                collect_corresponding_snapshot_context_maps_at_boundary(
+                    expected,
+                    actual,
+                    into,
+                    path,
+                    SnapshotTopologyBoundary::TupleElement(index),
+                )
+            })
+        }
+        (Type::Record(expected), Type::Record(actual)) if expected.len() == actual.len() => {
+            expected.iter().all(|(name, expected)| {
+                actual.get(name).is_some_and(|actual| collect_corresponding_snapshot_context_maps_at_boundary(
+                    expected,
+                    actual,
+                    into,
+                    path,
+                    SnapshotTopologyBoundary::RecordField(name.clone()),
+                ))
+            })
+        }
+        (
+            Type::Function {
+                parameters: expected_parameters,
+                result: expected_result,
+                ..
+            },
+            Type::Function {
+                parameters: actual_parameters,
+                result: actual_result,
+                ..
+            },
+        ) if expected_parameters.len() == actual_parameters.len() => {
+            expected_parameters.iter().zip(actual_parameters).enumerate().all(
+                |(index, (expected, actual))| {
+                    collect_corresponding_snapshot_context_maps_at_boundary(
+                        expected,
+                        actual,
+                        into,
+                        path,
+                        SnapshotTopologyBoundary::FunctionParameter(index),
+                    )
+                },
+            ) && collect_corresponding_snapshot_context_maps_at_boundary(
+                expected_result,
+                actual_result,
+                into,
+                path,
+                SnapshotTopologyBoundary::FunctionResult,
+            )
+        }
+        (
+            Type::Applied {
+                base: expected_base,
+                arguments: expected_arguments,
+            },
+            Type::Applied {
+                base: actual_base,
+                arguments: actual_arguments,
+            },
+        ) if expected_base == actual_base && expected_arguments.len() == actual_arguments.len() => {
+            expected_arguments.iter().zip(actual_arguments).enumerate().all(
+                |(index, (expected, actual))| {
+                    collect_corresponding_snapshot_context_maps_at_boundary(
+                        expected,
+                        actual,
+                        into,
+                        path,
+                        SnapshotTopologyBoundary::AppliedArgument {
+                            base: expected_base.clone(),
+                            index,
+                        },
+                    )
+                },
+            )
+        }
+        (
+            Type::MoneyPerUnit {
+                currency: expected_currency,
+                unit: expected_unit,
+            },
+            Type::MoneyPerUnit {
+                currency: actual_currency,
+                unit: actual_unit,
+            },
+        ) => {
+            collect_corresponding_snapshot_context_maps_at_boundary(
+                expected_currency,
+                actual_currency,
+                into,
+                path,
+                SnapshotTopologyBoundary::MoneyCurrency,
+            ) && collect_corresponding_snapshot_context_maps_at_boundary(
+                expected_unit,
+                actual_unit,
+                into,
+                path,
+                SnapshotTopologyBoundary::MoneyUnit,
+            )
+        }
+        _ => true,
+    }
+}
+
+fn collect_snapshot_context_maps_from_omitted_value_at_path(
+    value: &Type,
+    omitted_on_left: bool,
+    into: &mut Vec<SnapshotContextMapPair>,
+    path: &mut Vec<SnapshotTopologyBoundary>,
+) -> bool {
+    if matches!(value, Type::Bottom) || value == &Type::Named("sys.SnapshotRef".into()) {
+        return true;
+    }
+    if is_contextual_snapshot_ref(value) || is_snapshot_context_map_shape(value) {
+        let Type::Applied { arguments, .. } = value else {
+            return false;
+        };
+        let selectors = arguments
+            .iter()
+            .filter_map(|argument| match argument {
+                Type::Named(selector) => Some(selector.clone()),
+                _ => None,
+            })
+            .collect::<BTreeSet<_>>();
+        if selectors.is_empty() {
+            return false;
+        }
+        let empty = BTreeSet::new();
+        let (expected, actual) = if omitted_on_left {
+            (empty, selectors)
+        } else {
+            (selectors, empty)
+        };
+        into.push(SnapshotContextMapPair {
+            boundary_path: path.clone(),
+            expected,
+            actual,
+        });
+        return true;
+    }
+
+    match value {
+        Type::List(value) => collect_omitted_at_boundary(
+            value,
+            omitted_on_left,
+            into,
+            path,
+            SnapshotTopologyBoundary::ListElement,
+        ),
+        Type::Range(value) => collect_omitted_at_boundary(
+            value,
+            omitted_on_left,
+            into,
+            path,
+            SnapshotTopologyBoundary::RangeElement,
+        ),
+        Type::Relation(value) => collect_omitted_at_boundary(
+            value,
+            omitted_on_left,
+            into,
+            path,
+            SnapshotTopologyBoundary::RelationElement,
+        ),
+        Type::Stream(value) => collect_omitted_at_boundary(
+            value,
+            omitted_on_left,
+            into,
+            path,
+            SnapshotTopologyBoundary::StreamElement,
+        ),
+        Type::Optional(value) => collect_omitted_at_boundary(
+            value,
+            omitted_on_left,
+            into,
+            path,
+            SnapshotTopologyBoundary::OptionalValue,
+        ),
+        Type::Record(fields) => fields.iter().all(|(name, value)| {
+            collect_omitted_at_boundary(
+                value,
+                omitted_on_left,
+                into,
+                path,
+                SnapshotTopologyBoundary::RecordField(name.clone()),
+            )
+        }),
+        Type::Tuple(elements) => elements.iter().enumerate().all(|(index, value)| {
+            collect_omitted_at_boundary(
+                value,
+                omitted_on_left,
+                into,
+                path,
+                SnapshotTopologyBoundary::TupleElement(index),
+            )
+        }),
+        Type::Applied { base, arguments } => arguments.iter().enumerate().all(|(index, value)| {
+            collect_omitted_at_boundary(
+                value,
+                omitted_on_left,
+                into,
+                path,
+                SnapshotTopologyBoundary::AppliedArgument {
+                    base: base.clone(),
+                    index,
+                },
+            )
+        }),
+        Type::Function {
+            parameters, result, ..
+        } => {
+            parameters.iter().enumerate().all(|(index, value)| {
+                collect_omitted_at_boundary(
+                    value,
+                    omitted_on_left,
+                    into,
+                    path,
+                    SnapshotTopologyBoundary::FunctionParameter(index),
+                )
+            }) && collect_omitted_at_boundary(
+                result,
+                omitted_on_left,
+                into,
+                path,
+                SnapshotTopologyBoundary::FunctionResult,
+            )
+        }
+        Type::MoneyPerUnit { currency, unit } => {
+            collect_omitted_at_boundary(
+                currency,
+                omitted_on_left,
+                into,
+                path,
+                SnapshotTopologyBoundary::MoneyCurrency,
+            ) && collect_omitted_at_boundary(
+                unit,
+                omitted_on_left,
+                into,
+                path,
+                SnapshotTopologyBoundary::MoneyUnit,
+            )
+        }
+        _ => true,
+    }
+}
+
+fn collect_omitted_at_boundary(
+    value: &Type,
+    omitted_on_left: bool,
+    into: &mut Vec<SnapshotContextMapPair>,
+    path: &mut Vec<SnapshotTopologyBoundary>,
+    boundary: SnapshotTopologyBoundary,
+) -> bool {
+    path.push(boundary);
+    let collected = collect_snapshot_context_maps_from_omitted_value_at_path(
+        value,
+        omitted_on_left,
+        into,
+        path,
+    );
+    path.pop();
+    collected
+}
+
+/// Selector identities may change during a local rebind, but the number of
+/// captured selector slots is part of the pinned shape. The reference is
+/// silent about local map rebinds; preserving cardinality avoids silently
+/// adding or dropping captured pins.
+fn snapshot_context_map_cardinality(ty: &Type) -> Option<usize> {
+    match ty {
+        Type::Applied { base, arguments }
+            if base == "sys.SnapshotRefContext" || base == "semantic.SnapshotContextMap" =>
+        {
+            Some(arguments.len())
+        }
+        _ => None,
+    }
+}
+
+fn is_snapshot_context_map_shape(ty: &Type) -> bool {
+    match ty {
+        Type::Applied { base, arguments } if base == "sys.SnapshotRefContext" => {
+            is_contextual_snapshot_ref(ty)
+        }
+        Type::Applied { base, arguments } if base == "semantic.SnapshotContextMap" => {
+            // SnapshotContextMap is the canonical encoding of a set with at
+            // least two selectors; singleton sets use SnapshotRefContext.
+            // Require sorted unique entries so repeated pairwise merges do
+            // not hide a non-canonical map behind equality.
+            arguments.len() > 1
+                && arguments
+                    .iter()
+                    .all(|argument| {
+                        matches!(argument, Type::Named(selector) if is_snapshot_selector_context(selector))
+                    })
+                && arguments.windows(2).all(|pair| {
+                    matches!(pair, [Type::Named(left), Type::Named(right)] if left < right)
+                })
+        }
+        _ => false,
     }
 }
 
@@ -16893,6 +22346,7 @@ fn contains_secret_value_type(ty: &Type) -> bool {
         | Type::Text
         | Type::Bool
         | Type::Null
+        | Type::Unit
         | Type::Bottom
         | Type::Error => false,
     }
@@ -17173,11 +22627,103 @@ fn infer_table_assertion(
     let mut local = BTreeMap::new();
     insert_local_binding(name, row.clone(), &mut local, diagnostics);
     let inferred = infer(body, scope, &local, diagnostics);
-    let valid = text == "all_unique" || inferred.ty == Type::Bool;
+    let valid = match text.as_str() {
+        "every" => inferred.ty == Type::Bool,
+        "all_unique" => is_lawful_all_unique_key_type(&inferred.ty, scope),
+        _ => unreachable!("table predicate constructors were matched above"),
+    };
+    if text == "all_unique" && inferred.ty != Type::Error && !valid {
+        diagnostics.push(diag(
+            DIAG_TYPE,
+            "all_unique selector must return a lawful equality key; Float and noncanonical values are not valid keys",
+        ));
+    }
     Inferred {
         ty: if valid { Type::Bool } else { Type::Error },
         effects: inferred.effects,
     }
+}
+
+/// `all_unique` compares complete canonical selected values. Function and
+/// relation values have no stable value identity, and default Float equality
+/// is intentionally unavailable; nested and locally described named keys
+/// inherit those restrictions. Opaque imported values retain the equality
+/// contract of their pinned declaration.
+fn is_lawful_all_unique_key_type(ty: &Type, scope: &Scope) -> bool {
+    fn unique_short_match<'a>(
+        values: &'a BTreeMap<String, Type>,
+        short_name: &str,
+    ) -> Option<&'a Type> {
+        let mut matching = values
+            .iter()
+            .filter(|(candidate, _)| candidate.rsplit('.').next() == Some(short_name));
+        let first = matching.next().map(|(_, ty)| ty);
+        if matching.next().is_some() {
+            None
+        } else {
+            first
+        }
+    }
+
+    fn visit(ty: &Type, scope: &Scope, expanding: &mut BTreeSet<String>) -> bool {
+        match ty {
+            Type::Error | Type::Float => false,
+            Type::Applied { base, arguments } => {
+                base != "Float"
+                    && arguments
+                        .iter()
+                        .all(|argument| visit(argument, scope, expanding))
+            }
+            Type::List(element) | Type::Optional(element) => visit(element, scope, expanding),
+            Type::Tuple(elements) => elements
+                .iter()
+                .all(|element| visit(element, scope, expanding)),
+            Type::Record(fields) => fields.values().all(|field| visit(field, scope, expanding)),
+            Type::Range(_)
+            | Type::Relation(_)
+            | Type::Stream(_)
+            | Type::Function { .. }
+            | Type::MoneyPerUnit { .. } => false,
+            Type::Named(name) => {
+                if !expanding.insert(name.clone()) {
+                    return true;
+                }
+                let short_name = name.rsplit('.').next().unwrap_or(name);
+                let shape = scope
+                    .nominal_rows
+                    .get(name)
+                    .or_else(|| unique_short_match(&scope.nominal_rows, short_name))
+                    .or_else(|| scope.type_aliases.get(name))
+                    .or_else(|| scope.refined_types.get(name))
+                    .or_else(|| scope.type_aliases.get(short_name))
+                    .or_else(|| scope.refined_types.get(short_name));
+                let shape_is_lawful = shape.is_none_or(|shape| visit(shape, scope, expanding));
+                let enum_payloads_are_lawful = scope
+                    .enum_variants
+                    .get(name)
+                    .or_else(|| scope.enum_variants.get(short_name))
+                    .is_none_or(|variants| {
+                        variants
+                            .values()
+                            .flat_map(BTreeMap::values)
+                            .all(|field| visit(field, scope, expanding))
+                    });
+                expanding.remove(name);
+                shape_is_lawful && enum_payloads_are_lawful
+            }
+            Type::Int
+            | Type::Decimal
+            | Type::Date
+            | Type::Instant
+            | Type::Text
+            | Type::Bool
+            | Type::Null
+            | Type::Unit
+            | Type::Bottom => true,
+        }
+    }
+
+    visit(ty, scope, &mut BTreeSet::new())
 }
 
 /// A table assertion may name an ordinary pure predicate function. Its
@@ -17243,6 +22789,168 @@ fn infer_module_relation(
     local: &BTreeMap<String, Symbol>,
     diagnostics: &mut Vec<Diagnostic>,
 ) -> Inferred {
+    match value {
+        Expr::Group { inner, .. } => {
+            return infer_module_relation(inner, table_rows, scope, local, diagnostics);
+        }
+        Expr::Block {
+            statements, tail, ..
+        } => {
+            let mut locals = local.clone();
+            let mut effects = EffectSummary::default();
+            for statement in statements {
+                match statement {
+                    Statement::Let {
+                        pattern,
+                        annotation,
+                        value,
+                        ..
+                    } => {
+                        let expected = annotation.as_ref().map(|annotation| {
+                            validate_type_annotation(
+                                annotation,
+                                scope,
+                                &BTreeSet::new(),
+                                diagnostics,
+                            );
+                            resolved_type_of(annotation, scope)
+                        });
+                        let is_lambda = matches!(value, Expr::Lambda { .. });
+                        let inferred = if is_lambda {
+                            expected
+                                .as_ref()
+                                .and_then(|expected| {
+                                    infer_module_lambda(
+                                        value,
+                                        expected,
+                                        table_rows,
+                                        scope,
+                                        &locals,
+                                        diagnostics,
+                                    )
+                                })
+                                .unwrap_or_else(|| infer(value, scope, &locals, diagnostics))
+                        } else {
+                            infer_module_relation(value, table_rows, scope, &locals, diagnostics)
+                        };
+                        if let Some(expected) = &expected {
+                            require_same(expected, &inferred.ty, diagnostics);
+                        }
+                        // A lambda's body effects are latent until the bound
+                        // continuation is invoked; its value is pure to bind.
+                        if !is_lambda {
+                            effects.join(&inferred.effects);
+                        }
+                        bind_pattern(pattern, inferred.ty, scope, &mut locals, diagnostics);
+                        if is_lambda
+                            && let Pattern::Name(name, _) = pattern
+                            && let Some(symbol) = locals.get_mut(name)
+                        {
+                            symbol.effects = inferred.effects;
+                        }
+                    }
+                    Statement::Assert { value, .. } => {
+                        let inferred = infer_module_relation(
+                            value,
+                            table_rows,
+                            scope,
+                            &locals,
+                            diagnostics,
+                        );
+                        require_same(&Type::Bool, &inferred.ty, diagnostics);
+                        effects.join(&inferred.effects);
+                    }
+                    Statement::Expression { value, .. } | Statement::Control { value, .. } => {
+                        let inferred = infer_module_relation(
+                            value,
+                            table_rows,
+                            scope,
+                            &locals,
+                            diagnostics,
+                        );
+                        effects.join(&inferred.effects);
+                    }
+                    Statement::Return { .. }
+                    | Statement::Break { .. }
+                    | Statement::Continue { .. }
+                    | Statement::Assignment { .. } => {
+                        diagnostics.push(diag(
+                            DIAG_UNSUPPORTED,
+                            "module predicate continuations do not support control transfer or assignment",
+                        ));
+                    }
+                }
+            }
+            let mut inferred = tail.as_ref().map_or_else(
+                || Inferred {
+                    ty: Type::Tuple(Vec::new()),
+                    effects: EffectSummary::default(),
+                },
+                |tail| infer_module_relation(tail, table_rows, scope, &locals, diagnostics),
+            );
+            effects.join(&inferred.effects);
+            inferred.effects = effects;
+            return inferred;
+        }
+        Expr::Unary { op, rhs, .. } if op == "!" => {
+            let operand = infer_module_relation(rhs, table_rows, scope, local, diagnostics);
+            return Inferred {
+                ty: if operand.ty == Type::Bool {
+                    Type::Bool
+                } else {
+                    Type::Error
+                },
+                effects: operand.effects,
+            };
+        }
+        // Section 9 predicates compose through ordinary short-circuit Boolean
+        // continuations; keep resolving relation folds in each continuation
+        // instead of treating nested table names as ordinary values.
+        Expr::Binary { lhs, op, rhs, .. } if op == "&&" || op == "||" => {
+            let left = infer_module_relation(lhs, table_rows, scope, local, diagnostics);
+            let right = infer_module_relation(rhs, table_rows, scope, local, diagnostics);
+            let mut effects = left.effects;
+            effects.join(&right.effects);
+            return Inferred {
+                ty: if left.ty == Type::Bool && right.ty == Type::Bool {
+                    Type::Bool
+                } else {
+                    Type::Error
+                },
+                effects,
+            };
+        }
+        Expr::Control {
+            kind: ControlKind::If,
+            binding: None,
+            condition: Some(condition),
+            body: Some(body),
+            arms,
+            alternate: Some(alternate),
+            ..
+        } if arms.is_empty() => {
+            let condition =
+                infer_module_relation(condition, table_rows, scope, local, diagnostics);
+            let body = infer_module_relation(body, table_rows, scope, local, diagnostics);
+            let alternate =
+                infer_module_relation(alternate, table_rows, scope, local, diagnostics);
+            let mut effects = condition.effects;
+            effects.join(&body.effects);
+            effects.join(&alternate.effects);
+            return Inferred {
+                ty: if condition.ty == Type::Bool
+                    && body.ty == Type::Bool
+                    && alternate.ty == Type::Bool
+                {
+                    Type::Bool
+                } else {
+                    Type::Error
+                },
+                effects,
+            };
+        }
+        _ => {}
+    }
     let Expr::Call {
         callee, arguments, ..
     } = value
@@ -17267,30 +22975,65 @@ fn infer_module_relation(
             effects: EffectSummary::default(),
         };
     };
-    let Expr::Lambda {
-        parameters, body, ..
-    } = &arguments[1].value
-    else {
-        return Inferred {
-            ty: Type::Error,
-            effects: EffectSummary::default(),
-        };
+    let inferred = match &arguments[1].value {
+        Expr::Lambda {
+            parameters, body, ..
+        } => {
+            let [parameter] = parameters.as_slice() else {
+                return Inferred {
+                    ty: Type::Error,
+                    effects: EffectSummary::default(),
+                };
+            };
+            let Pattern::Name(name, _) = &parameter.pattern else {
+                return Inferred {
+                    ty: Type::Error,
+                    effects: EffectSummary::default(),
+                };
+            };
+            let mut locals = local.clone();
+            insert_local_binding(name, row.clone(), &mut locals, diagnostics);
+            infer_module_relation(body, table_rows, scope, &locals, diagnostics)
+        }
+        Expr::Name { text, .. } => {
+            let Some(symbol) = local.get(text) else {
+                return Inferred {
+                    ty: Type::Error,
+                    effects: EffectSummary::default(),
+                };
+            };
+            let Type::Function {
+                parameters,
+                result,
+                ..
+            } = &symbol.ty
+            else {
+                return Inferred {
+                    ty: Type::Error,
+                    effects: EffectSummary::default(),
+                };
+            };
+            if parameters.len() != 1 {
+                diagnostics.push(diag(
+                    DIAG_TYPE,
+                    "module relation continuation must take exactly one row",
+                ));
+            } else {
+                require_same(row, &parameters[0], diagnostics);
+            }
+            require_same(&Type::Bool, result, diagnostics);
+            Inferred {
+                ty: result.as_ref().clone(),
+                effects: symbol.effects.clone(),
+            }
+        }
+        _ => {
+            return Inferred {
+                ty: Type::Error,
+                effects: EffectSummary::default(),
+            };
+        }
     };
-    let [parameter] = parameters.as_slice() else {
-        return Inferred {
-            ty: Type::Error,
-            effects: EffectSummary::default(),
-        };
-    };
-    let Pattern::Name(name, _) = &parameter.pattern else {
-        return Inferred {
-            ty: Type::Error,
-            effects: EffectSummary::default(),
-        };
-    };
-    let mut locals = local.clone();
-    insert_local_binding(name, row.clone(), &mut locals, diagnostics);
-    let inferred = infer_module_relation(body, table_rows, scope, &locals, diagnostics);
     Inferred {
         ty: if inferred.ty == Type::Bool {
             Type::Bool
@@ -17299,6 +23042,72 @@ fn infer_module_relation(
         },
         effects: inferred.effects,
     }
+}
+
+fn infer_module_lambda(
+    value: &Expr,
+    expected: &Type,
+    table_rows: &BTreeMap<String, Type>,
+    scope: &Scope,
+    local: &BTreeMap<String, Symbol>,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Option<Inferred> {
+    let Expr::Lambda {
+        parameters, body, ..
+    } = value
+    else {
+        return None;
+    };
+    let Type::Function {
+        parameters: expected_parameters,
+        result: expected_result,
+        ..
+    } = expected
+    else {
+        return None;
+    };
+    if parameters.len() != expected_parameters.len() {
+        diagnostics.push(diag(
+            DIAG_TYPE,
+            "module relation continuation parameter count does not match its annotation",
+        ));
+    }
+    let mut locals = local.clone();
+    for (index, parameter) in parameters.iter().enumerate() {
+        let Some(expected_parameter) = expected_parameters.get(index) else {
+            continue;
+        };
+        let parameter_type = parameter
+            .annotation
+            .as_ref()
+            .map(type_of)
+            .unwrap_or_else(|| expected_parameter.clone());
+        require_same(expected_parameter, &parameter_type, diagnostics);
+        bind_pattern(
+            &parameter.pattern,
+            parameter_type,
+            scope,
+            &mut locals,
+            diagnostics,
+        );
+    }
+    let inferred = infer_module_relation(body, table_rows, scope, &locals, diagnostics);
+    require_same(expected_result, &inferred.ty, diagnostics);
+    Some(Inferred {
+        ty: Type::Function {
+            parameters: expected_parameters.clone(),
+            default_parameters: BTreeSet::new(),
+            parameter_names: parameters
+                .iter()
+                .map(|parameter| match &parameter.pattern {
+                    Pattern::Name(name, _) if name != "_" => Some(name.clone()),
+                    _ => None,
+                })
+                .collect::<Option<Vec<_>>>(),
+            result: Box::new(inferred.ty),
+        },
+        effects: inferred.effects,
+    })
 }
 
 fn declared_nominal_schema(item: &Item) -> Option<TableSchema> {
@@ -18200,6 +24009,735 @@ fn diag(code: &'static str, message: impl Into<String>) -> Diagnostic {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn suppressed_paired_rebind_keeps_same_named_tuple_pins_distinct() {
+        let left_selector = "selector:binder:pair.orna@10..18:parameter:selected";
+        let right_selector = "selector:binder:pair.orna@20..28:parameter:selected";
+        let formal_pair = Type::Tuple(vec![
+            contextual_snapshot_ref(left_selector),
+            contextual_snapshot_ref(right_selector),
+        ]);
+        let result = Type::Record(BTreeMap::from([
+            ("left".into(), contextual_snapshot_ref(left_selector)),
+            ("right".into(), contextual_snapshot_ref(right_selector)),
+            (
+                "paired_map".into(),
+                Type::Applied {
+                    base: "semantic.SnapshotContextMap".into(),
+                    arguments: vec![
+                        Type::Named(left_selector.into()),
+                        Type::Named(right_selector.into()),
+                    ],
+                },
+            ),
+        ]));
+        let call_span = SyntaxSpan::new(40, 72);
+        let arguments = vec![orna_syntax_v1::Argument {
+            name: None,
+            value: Expr::Name {
+                text: "pins".into(),
+                span: SyntaxSpan::new(48, 52),
+            },
+            span: SyntaxSpan::new(48, 52),
+        }];
+
+        let specialized = specialize_dynamic_parameter_snapshot_contexts(
+            &result,
+            &[formal_pair, Type::Text],
+            &BTreeSet::new(),
+            None,
+            &arguments,
+            &[Type::Tuple(vec![
+                contextual_snapshot_ref("selector:HEAD~2"),
+                contextual_snapshot_ref("selector:HEAD~1"),
+            ])],
+            &BTreeMap::new(),
+            &call_span,
+            None,
+        );
+        let Type::Record(fields) = specialized else {
+            panic!("suppressed paired rebind must retain its record result");
+        };
+        let mut left = BTreeSet::new();
+        collect_test_snapshot_contexts(&fields["left"], &mut left);
+        let mut right = BTreeSet::new();
+        collect_test_snapshot_contexts(&fields["right"], &mut right);
+        assert_eq!(left.len(), 1, "left pin slot must retain one identity: {left:?}");
+        assert_eq!(right.len(), 1, "right pin slot must retain one identity: {right:?}");
+        assert!(
+            left.iter().next().is_some_and(|selector| selector.contains("pair.orna@10..18")),
+            "the left symbolic pin must keep its formal binder: {left:?}"
+        );
+        assert!(
+            right.iter().next().is_some_and(|selector| selector.contains("pair.orna@20..28")),
+            "the right symbolic pin must keep its formal binder: {right:?}"
+        );
+        let Type::Applied {
+            base,
+            arguments: paired_map,
+        } = &fields["paired_map"]
+        else {
+            panic!("the suppressed paired checkpoint must retain a context map");
+        };
+        assert_eq!(base, "semantic.SnapshotContextMap");
+        assert_eq!(
+            paired_map.len(),
+            2,
+            "the paired symbolic map must retain its formal width: {paired_map:?}"
+        );
+        assert!(is_snapshot_context_map_shape(&fields["paired_map"]));
+        assert_ne!(
+            left, right,
+            "suppression must keep same-named paired pin slots at distinct widths"
+        );
+    }
+
+    #[test]
+    fn unknown_direct_pair_sibling_suppresses_valid_pin_promotion() {
+        let left = contextual_snapshot_ref(
+            "selector:binder:pair.orna@10..18:parameter:left_pin",
+        );
+        let right = contextual_snapshot_ref(
+            "selector:binder:pair.orna@20..28:parameter:right_pin",
+        );
+        let result = Type::Record(BTreeMap::from([
+            ("left".into(), left.clone()),
+            ("right".into(), right.clone()),
+        ]));
+        let arguments = (0..2)
+            .map(|index| orna_syntax_v1::Argument {
+                name: None,
+                value: Expr::Name {
+                    text: format!("pair_pin_{index}"),
+                    span: SyntaxSpan::new(40 + index * 12, 48 + index * 12),
+                },
+                span: SyntaxSpan::new(40 + index * 12, 48 + index * 12),
+            })
+            .collect::<Vec<_>>();
+
+        let specialized = specialize_dynamic_parameter_snapshot_contexts(
+            &result,
+            &[left, right],
+            &BTreeSet::new(),
+            None,
+            &arguments,
+            &[contextual_snapshot_ref("selector:HEAD~12"), Type::Error],
+            &BTreeMap::new(),
+            &SyntaxSpan::new(30, 68),
+            None,
+        );
+
+        let mut contexts = BTreeSet::new();
+        collect_test_snapshot_contexts(&specialized, &mut contexts);
+        assert_eq!(contexts.len(), 2, "both pins must remain represented: {contexts:?}");
+        assert!(
+            contexts
+                .iter()
+                .all(|context| context.starts_with("selector:dynamic-call:")),
+            "an unknown pair sibling must suppress every sibling promotion: {contexts:?}"
+        );
+        assert!(
+            !contexts.iter().any(|context| context.contains("HEAD~12")),
+            "the valid sibling must not be promoted independently: {contexts:?}"
+        );
+    }
+
+    #[test]
+    fn unknown_nested_paired_width_suppresses_sibling_identity_promotion() {
+        let callback_selected =
+            contextual_snapshot_ref("selector:binder:callback.orna@10..18:parameter:selected");
+        let callback_sibling =
+            contextual_snapshot_ref("selector:binder:callback.orna@20..28:parameter:sibling");
+        let paired_selected =
+            contextual_snapshot_ref("selector:binder:pair.orna@30..38:parameter:selected");
+        let paired_sibling =
+            contextual_snapshot_ref("selector:binder:pair.orna@40..48:parameter:sibling");
+        let formal_callback = Type::Function {
+            parameters: vec![Type::Tuple(vec![
+                callback_selected.clone(),
+                callback_sibling.clone(),
+            ])],
+            parameter_names: None,
+            default_parameters: BTreeSet::new(),
+            result: Box::new(Type::Text),
+        };
+        let formal_pair = Type::Tuple(vec![paired_selected.clone(), paired_sibling.clone()]);
+        let actual_callback = Type::Function {
+            parameters: vec![Type::Tuple(vec![
+                contextual_snapshot_ref("selector:HEAD~12"),
+                Type::Error,
+            ])],
+            parameter_names: None,
+            default_parameters: BTreeSet::new(),
+            result: Box::new(Type::Text),
+        };
+        let arguments = (0..2)
+            .map(|index| orna_syntax_v1::Argument {
+                name: None,
+                value: Expr::Name {
+                    text: format!("argument_{index}"),
+                    span: SyntaxSpan::new(50 + index * 10, 55 + index * 10),
+                },
+                span: SyntaxSpan::new(50 + index * 10, 55 + index * 10),
+            })
+            .collect::<Vec<_>>();
+        let result = Type::Record(BTreeMap::from([
+            ("callback_selected".into(), callback_selected),
+            ("callback_sibling".into(), callback_sibling),
+            ("paired_selected".into(), paired_selected),
+            ("paired_sibling".into(), paired_sibling),
+        ]));
+
+        let specialized = specialize_dynamic_parameter_snapshot_contexts(
+            &result,
+            &[formal_callback, formal_pair],
+            &BTreeSet::new(),
+            None,
+            &arguments,
+            &[
+                actual_callback,
+                Type::Tuple(vec![
+                    contextual_snapshot_ref("selector:HEAD~10"),
+                    contextual_snapshot_ref("selector:HEAD~9"),
+                ]),
+            ],
+            &BTreeMap::new(),
+            &SyntaxSpan::new(45, 75),
+            None,
+        );
+
+        let mut contexts = BTreeSet::new();
+        collect_test_snapshot_contexts(&specialized, &mut contexts);
+        assert_eq!(
+            contexts.len(),
+            4,
+            "all paired pins must remain represented after an unknown nested width: {contexts:?}"
+        );
+        assert!(
+            contexts
+                .iter()
+                .all(|context| context.starts_with("selector:dynamic-call:")),
+            "no valid callback or sibling pin may be promoted independently: {contexts:?}"
+        );
+        assert!(
+            !contexts.iter().any(|context| context.contains("HEAD~")),
+            "unknown paired width must suppress all concrete identities in this wave: {contexts:?}"
+        );
+    }
+
+    #[test]
+    fn binder_context_collector_rejects_partial_tuple_widths() {
+        let formal = Type::Tuple(vec![
+            contextual_snapshot_ref("selector:binder:pair.orna@10..18:parameter:selected"),
+            contextual_snapshot_ref("selector:binder:pair.orna@20..28:parameter:sibling"),
+        ]);
+        let actual = Type::Tuple(vec![contextual_snapshot_ref("selector:HEAD~12")]);
+        let mut binder_contexts = BTreeMap::new();
+
+        collect_snapshot_binder_contexts(&formal, &actual, &mut binder_contexts);
+
+        assert!(
+            binder_contexts.is_empty(),
+            "an unpaired width must not collect even the valid tuple prefix: {binder_contexts:?}"
+        );
+    }
+
+    #[test]
+    fn omitted_sibling_keeps_same_named_captured_and_live_slots_distinct() {
+        let result = Type::Applied {
+            base: "semantic.SnapshotContextMap".into(),
+            arguments: vec![
+                Type::Named("selector:capture:parameter:pin".into()),
+                Type::Named("selector:parameter:pin".into()),
+            ],
+        };
+        let arguments = vec![orna_syntax_v1::Argument {
+            name: None,
+            value: Expr::Name {
+                text: "supplied_pin".into(),
+                span: SyntaxSpan::new(10, 22),
+            },
+            span: SyntaxSpan::new(10, 22),
+        }];
+        let specialized = specialize_dynamic_parameter_snapshot_contexts(
+            &result,
+            &[
+                Type::Named("sys.SnapshotRef".into()),
+                Type::Tuple(vec![
+                    Type::Named("sys.SnapshotRef".into()),
+                    Type::Named("sys.SnapshotRef".into()),
+                ]),
+            ],
+            &BTreeSet::new(),
+            None,
+            &arguments,
+            &[contextual_snapshot_ref("selector:HEAD~12")],
+            &BTreeMap::new(),
+            &SyntaxSpan::new(5, 30),
+            None,
+        );
+
+        let Type::Applied { base, arguments } = &specialized else {
+            panic!("omission must preserve the pair rather than collapse it: {specialized:?}");
+        };
+        assert_eq!(base, "semantic.SnapshotContextMap");
+        assert!(is_snapshot_context_map_shape(&specialized));
+        assert_eq!(
+            arguments.len(),
+            2,
+            "both paired slots must remain distinct: {arguments:?}"
+        );
+        let Type::Named(left) = &arguments[0] else {
+            panic!("the first suppressed slot must retain a selector identity: {arguments:?}");
+        };
+        let Type::Named(right) = &arguments[1] else {
+            panic!("the second suppressed slot must retain a selector identity: {arguments:?}");
+        };
+        assert!(
+            left.starts_with("selector:dynamic-call:")
+                && right.starts_with("selector:dynamic-call:"),
+            "the failed call must preserve symbolic identities: {arguments:?}"
+        );
+        assert_ne!(left, right, "captured and live slots must not collapse");
+    }
+
+    fn collect_test_snapshot_contexts(ty: &Type, into: &mut BTreeSet<String>) {
+        if let Some(selector) = snapshot_ref_context_key(ty) {
+            into.insert(selector.to_owned());
+            return;
+        }
+        match ty {
+            Type::Record(fields) => {
+                for field in fields.values() {
+                    collect_test_snapshot_contexts(field, into);
+                }
+            }
+            Type::Tuple(elements) => {
+                for element in elements {
+                    collect_test_snapshot_contexts(element, into);
+                }
+            }
+            Type::Applied { arguments, .. } => {
+                for argument in arguments {
+                    collect_test_snapshot_contexts(argument, into);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    #[test]
+    fn omitted_generic_argument_rollback_keeps_sibling_depth_identities() {
+        let wrapped = |arguments| Type::Applied {
+            base: "domain.CheckpointBundle".into(),
+            arguments,
+        };
+        let omitted_pair = || Type::Tuple(vec![Type::Bottom, Type::Bottom]);
+        let pin_pair = |left: &str, right: &str| {
+            Type::Tuple(vec![
+                contextual_snapshot_ref(left),
+                contextual_snapshot_ref(right),
+            ])
+        };
+        let anchor = wrapped(vec![omitted_pair(), omitted_pair()]);
+        let accumulated = wrapped(vec![
+            pin_pair("selector:HEAD~101", "selector:HEAD~102"),
+            pin_pair("selector:HEAD~201", "selector:HEAD~202"),
+        ]);
+        let parent = wrapped(vec![
+            pin_pair("selector:HEAD~102", "selector:HEAD~101"),
+            pin_pair("selector:HEAD~301", "selector:HEAD~302"),
+        ]);
+        let mut rolled_back_paths = BTreeSet::new();
+        let folded = merge_multi_parent_checkpoint_value_scoped(
+            &accumulated,
+            &parent,
+            &anchor,
+            &anchor,
+            &mut Vec::new(),
+            &mut rolled_back_paths,
+        )
+        .expect("same applied wrapper and tuple widths should fold transactionally");
+        let Type::Applied { arguments, .. } = folded.merged else {
+            panic!("the successful sibling argument must remain computed");
+        };
+        assert_eq!(
+            arguments[0],
+            omitted_pair(),
+            "the crossed argument rolls back"
+        );
+        assert_eq!(
+            arguments[1],
+            Type::Tuple(vec![
+                Type::Applied {
+                    base: "semantic.SnapshotContextMap".into(),
+                    arguments: vec![
+                        Type::Named("selector:HEAD~201".into()),
+                        Type::Named("selector:HEAD~301".into()),
+                    ],
+                },
+                Type::Applied {
+                    base: "semantic.SnapshotContextMap".into(),
+                    arguments: vec![
+                        Type::Named("selector:HEAD~202".into()),
+                        Type::Named("selector:HEAD~302".into()),
+                    ],
+                },
+            ]),
+            "the unaffected applied argument retains real folded depth identities"
+        );
+        assert_eq!(
+            folded.effective_parent,
+            wrapped(vec![
+                omitted_pair(),
+                pin_pair("selector:HEAD~301", "selector:HEAD~302"),
+            ]),
+            "the rejected argument is removed from the effective parent before later folds"
+        );
+        assert!(
+            folded.rejected_scope,
+            "a rejected argument must be reported"
+        );
+        assert_eq!(
+            rolled_back_paths,
+            BTreeSet::from([vec![SnapshotTopologyBoundary::AppliedArgument {
+                base: "domain.CheckpointBundle".into(),
+                index: 0,
+            }]]),
+            "rollback is frozen at the smallest failing applied-argument boundary"
+        );
+    }
+
+    #[test]
+    fn omitted_money_dimension_rollback_keeps_sibling_depth_identities() {
+        let omitted_pair = || Type::Tuple(vec![Type::Bottom, Type::Bottom]);
+        let pin_pair = |left: &str, right: &str| {
+            Type::Tuple(vec![
+                contextual_snapshot_ref(left),
+                contextual_snapshot_ref(right),
+            ])
+        };
+        let money = |currency, unit| Type::MoneyPerUnit {
+            currency: Box::new(currency),
+            unit: Box::new(unit),
+        };
+        let anchor = money(omitted_pair(), omitted_pair());
+        let accumulated = money(
+            pin_pair("selector:HEAD~401", "selector:HEAD~402"),
+            pin_pair("selector:HEAD~501", "selector:HEAD~502"),
+        );
+        let parent = money(
+            pin_pair("selector:HEAD~402", "selector:HEAD~401"),
+            pin_pair("selector:HEAD~601", "selector:HEAD~602"),
+        );
+        let mut rolled_back_paths = BTreeSet::new();
+        let folded = merge_multi_parent_checkpoint_value_scoped(
+            &accumulated,
+            &parent,
+            &anchor,
+            &anchor,
+            &mut Vec::new(),
+            &mut rolled_back_paths,
+        )
+        .expect("money dimensions should recover independently");
+
+        let Type::MoneyPerUnit { currency, unit } = folded.merged else {
+            panic!("the money result must retain its computed type");
+        };
+        assert_eq!(*currency, omitted_pair(), "the crossed currency rolls back");
+        assert_eq!(
+            *unit,
+            Type::Tuple(vec![
+                Type::Applied {
+                    base: "semantic.SnapshotContextMap".into(),
+                    arguments: vec![
+                        Type::Named("selector:HEAD~501".into()),
+                        Type::Named("selector:HEAD~601".into()),
+                    ],
+                },
+                Type::Applied {
+                    base: "semantic.SnapshotContextMap".into(),
+                    arguments: vec![
+                        Type::Named("selector:HEAD~502".into()),
+                        Type::Named("selector:HEAD~602".into()),
+                    ],
+                },
+            ]),
+            "the unaffected unit keeps both computed depth identities"
+        );
+        assert_eq!(
+            folded.effective_parent,
+            money(
+                omitted_pair(),
+                pin_pair("selector:HEAD~601", "selector:HEAD~602")
+            ),
+            "the rejected currency is removed from the effective parent before later folds"
+        );
+        assert!(folded.rejected_scope);
+        assert_eq!(
+            rolled_back_paths,
+            BTreeSet::from([vec![SnapshotTopologyBoundary::MoneyCurrency]]),
+            "rollback is frozen at the smallest failing money dimension"
+        );
+    }
+
+    #[test]
+    fn checkpoint_rebinds_require_canonical_snapshot_selector_maps() {
+        let first = Type::Applied {
+            base: "semantic.SnapshotContextMap".into(),
+            arguments: vec![
+                Type::Named("selector:HEAD~5".into()),
+                Type::Named("selector:binder:first".into()),
+            ],
+        };
+        let second = Type::Applied {
+            base: "semantic.SnapshotContextMap".into(),
+            arguments: vec![
+                Type::Named("selector:HEAD~4".into()),
+                Type::Named("selector:binder:second".into()),
+            ],
+        };
+        let wider = Type::Applied {
+            base: "semantic.SnapshotContextMap".into(),
+            arguments: vec![
+                Type::Named("selector:HEAD~4".into()),
+                Type::Named("selector:HEAD~5".into()),
+                Type::Named("selector:HEAD~6".into()),
+            ],
+        };
+        let malformed = Type::Applied {
+            base: "semantic.SnapshotContextMap".into(),
+            arguments: vec![Type::Named("domain.Factory".into())],
+        };
+        let singleton = Type::Applied {
+            base: "semantic.SnapshotContextMap".into(),
+            arguments: vec![Type::Named("selector:HEAD~3".into())],
+        };
+        let unsorted = Type::Applied {
+            base: "semantic.SnapshotContextMap".into(),
+            arguments: vec![
+                Type::Named("selector:binder:z".into()),
+                Type::Named("selector:binder:a".into()),
+            ],
+        };
+        let duplicate = Type::Applied {
+            base: "semantic.SnapshotContextMap".into(),
+            arguments: vec![
+                Type::Named("selector:HEAD~3".into()),
+                Type::Named("selector:HEAD~3".into()),
+            ],
+        };
+        let nested_malformed = Type::Record(BTreeMap::from([
+            (
+                "pin".into(),
+                contextual_snapshot_ref("selector:HEAD~3"),
+            ),
+            ("map".into(), malformed.clone()),
+        ]));
+
+        assert!(is_snapshot_context_map_shape(&first));
+        assert!(types_match(&first, &first));
+        assert!(types_match(&first, &Type::Bottom));
+        assert!(pinned_snapshot_shape_matches(&first, &first));
+        assert!(pinned_snapshot_shape_matches(&first, &second));
+        assert!(!pinned_snapshot_shape_matches(&first, &wider));
+        assert!(!pinned_snapshot_shape_matches(
+            &contextual_snapshot_ref("selector:HEAD~3"),
+            &first
+        ));
+        assert!(type_contains_pinned_snapshot_identity(&first));
+        assert!(pinned_snapshot_reset_type(&first, &second).is_some());
+        assert!(pinned_snapshot_reset_type(&first, &wider).is_none());
+        let terminal_factory = Type::Function {
+            parameters: vec![],
+            parameter_names: Some(vec![]),
+            default_parameters: BTreeSet::new(),
+            result: Box::new(Type::Named("domain.Factory".into())),
+        };
+        let first_pinned_factory = historical_callable_type(&first, &terminal_factory);
+        let second_pinned_factory = historical_callable_type(&second, &terminal_factory);
+        let wider_pinned_factory = historical_callable_type(&wider, &terminal_factory);
+        assert!(pinned_snapshot_shape_matches(
+            &first_pinned_factory,
+            &second_pinned_factory
+        ));
+        assert!(!pinned_snapshot_shape_matches(
+            &first_pinned_factory,
+            &wider_pinned_factory
+        ));
+        assert!(
+            pinned_snapshot_reset_type(&first_pinned_factory, &second_pinned_factory).is_some()
+        );
+        assert!(
+            pinned_snapshot_reset_type(&first_pinned_factory, &wider_pinned_factory).is_none()
+        );
+        assert!(!is_snapshot_context_map_shape(&malformed));
+        assert!(!types_match(&malformed, &malformed));
+        assert!(!types_match(&malformed, &Type::Bottom));
+        assert!(!pinned_snapshot_shape_matches(&malformed, &malformed));
+        assert!(!type_contains_pinned_snapshot_identity(&malformed));
+        assert!(pinned_snapshot_reset_type(&malformed, &second).is_none());
+        assert!(!is_snapshot_context_map_shape(&singleton));
+        assert!(!is_snapshot_context_map_shape(&unsorted));
+        assert!(!is_snapshot_context_map_shape(&duplicate));
+        assert_eq!(merge_list_element_types(&first, &first), Some(first.clone()));
+        assert!(merge_list_element_types(&malformed, &malformed).is_none());
+        assert!(merge_checkpoint_field_map(&malformed, &malformed).is_none());
+        assert!(merge_checkpoint_field_map(&malformed, &first).is_none());
+        assert!(!checkpoint_snapshot_maps_are_valid(&nested_malformed));
+        assert!(!types_match(&nested_malformed, &nested_malformed));
+        assert!(!types_match(&nested_malformed, &Type::Bottom));
+        assert!(!pinned_snapshot_shape_matches(
+            &nested_malformed,
+            &nested_malformed
+        ));
+        assert!(!type_contains_pinned_snapshot_identity(&nested_malformed));
+        assert!(merge_list_element_types(&nested_malformed, &nested_malformed).is_none());
+        assert!(merge_checkpoint_field_map(&nested_malformed, &nested_malformed).is_none());
+        assert!(pinned_snapshot_reset_type(&nested_malformed, &nested_malformed).is_none());
+    }
+
+    #[test]
+    fn checkpoint_resets_preserve_nested_callable_input_contracts() {
+        let callable = |parameter: Type, result_selector: &str| Type::Function {
+            parameters: vec![parameter],
+            parameter_names: Some(vec!["nested_pin".into()]),
+            default_parameters: BTreeSet::new(),
+            result: Box::new(contextual_snapshot_ref(result_selector)),
+        };
+        let concrete_input = callable(
+            contextual_snapshot_ref("selector:input:checkpoint"),
+            "selector:result:checkpoint",
+        );
+        let omitted_input = callable(Type::Bottom, "selector:result:omitted-input");
+
+        assert!(pinned_snapshot_reset_type(&omitted_input, &concrete_input).is_some());
+        assert!(
+            pinned_snapshot_reset_type(&concrete_input, &omitted_input).is_none(),
+            "restoring a nested checkpoint must not remove an input boundary that the local accepted"
+        );
+    }
+
+    #[test]
+    fn tuple_checkpoint_rebind_preserves_full_selector_membership_signatures() {
+        let context_map = |selectors: &[&str]| Type::Applied {
+            base: "semantic.SnapshotContextMap".into(),
+            arguments: selectors
+                .iter()
+                .map(|selector| Type::Named((*selector).into()))
+                .collect(),
+        };
+        let saved = vec![
+            context_map(&["selector:pin:a", "selector:pin:b"]),
+            context_map(&["selector:pin:a", "selector:pin:c"]),
+            context_map(&["selector:pin:b", "selector:pin:c"]),
+        ];
+        let relabeled = vec![
+            context_map(&["selector:pin:d", "selector:pin:e"]),
+            context_map(&["selector:pin:d", "selector:pin:f"]),
+            context_map(&["selector:pin:d", "selector:pin:g"]),
+        ];
+        let same_topology = vec![
+            context_map(&["selector:pin:u", "selector:pin:v"]),
+            context_map(&["selector:pin:u", "selector:pin:w"]),
+            context_map(&["selector:pin:v", "selector:pin:w"]),
+        ];
+        let pairwise_overlaps = |maps: &[Type]| {
+            let selector_sets = maps
+                .iter()
+                .map(|map| {
+                    let Type::Applied { arguments, .. } = map else {
+                        panic!("checkpoint selector map must be applied");
+                    };
+                    arguments
+                        .iter()
+                        .filter_map(|argument| match argument {
+                            Type::Named(selector) => Some(selector.clone()),
+                            _ => None,
+                        })
+                        .collect::<BTreeSet<_>>()
+                })
+                .collect::<Vec<_>>();
+            let mut overlaps = Vec::new();
+            for index in 0..selector_sets.len() {
+                for other in index + 1..selector_sets.len() {
+                    overlaps.push(
+                        selector_sets[index]
+                            .intersection(&selector_sets[other])
+                            .count(),
+                    );
+                }
+            }
+            overlaps
+        };
+
+        assert!(saved.iter().all(is_snapshot_context_map_shape));
+        assert!(relabeled.iter().all(is_snapshot_context_map_shape));
+        assert_eq!(pairwise_overlaps(&saved), vec![1, 1, 1]);
+        assert_eq!(pairwise_overlaps(&relabeled), vec![1, 1, 1]);
+        assert!(tuple_pin_identity_topology_matches(&saved, &same_topology));
+        assert!(!tuple_pin_identity_topology_matches(&saved, &relabeled));
+        assert!(!pinned_snapshot_shape_matches(
+            &Type::Tuple(saved),
+            &Type::Tuple(relabeled)
+        ));
+    }
+
+    #[test]
+    fn record_checkpoint_compaction_rejects_cross_depth_selector_aliases() {
+        let pin = |selector: &str| contextual_snapshot_ref(selector);
+        let stacked = |root: &str, middle: &str, leaf: &str| {
+            BTreeMap::from([
+                ("root".into(), pin(root)),
+                (
+                    "stack".into(),
+                    Type::Tuple(vec![
+                        pin(middle),
+                        Type::Record(BTreeMap::from([("leaf".into(), pin(leaf))])),
+                    ]),
+                ),
+            ])
+        };
+        let first = stacked("selector:HEAD~501", "selector:HEAD~502", "selector:HEAD~503");
+        let cross_depth =
+            stacked("selector:HEAD~504", "selector:HEAD~501", "selector:HEAD~505");
+        let depth_stable =
+            stacked("selector:HEAD~601", "selector:HEAD~602", "selector:HEAD~603");
+
+        assert!(record_checkpoint_promotion_matches(&first, &depth_stable));
+        assert!(!record_checkpoint_promotion_matches(&first, &cross_depth));
+        assert!(merge_list_element_types(
+            &Type::Record(first),
+            &Type::Record(cross_depth)
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn paired_omission_folds_do_not_collapse_distinct_depth_labels() {
+        let pin = |selector: &str| contextual_snapshot_ref(selector);
+        let before = [Type::Tuple(vec![
+            pin("selector:HEAD~depth-a"),
+            pin("selector:HEAD~depth-b"),
+        ])];
+        let after = [Type::Tuple(vec![Type::Bottom, pin("selector:HEAD~depth-a")])];
+
+        assert!(checkpoint_pin_map_widths_match(&before[0], &after[0]));
+        assert!(
+            !tuple_checkpoint_compaction_fold_preserves_pin_identity(&before, &after),
+            "an omitted first slot must not hide the later fold merging depth-a with depth-b"
+        );
+
+        let stable_after = [Type::Tuple(vec![
+            Type::Bottom,
+            pin("selector:HEAD~depth-c"),
+        ])];
+        assert!(tuple_checkpoint_compaction_fold_preserves_pin_identity(
+            &before,
+            &stable_after
+        ));
+    }
+
     fn checked(inputs: &[ModuleInput]) -> Analysis {
         analyze(inputs)
     }

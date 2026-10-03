@@ -1,0 +1,26 @@
+pub table PlannerStormUnknownLimitChainOutputAncestry(id: Int) {
+    first: Bool,
+    second: Bool,
+    leaf: Bool,
+    prior: Bool,
+}
+
+pub fn unknown_limit_chain_output_ancestry() = PlannerStormUnknownLimitChainOutputAncestry
+    | take(80)
+    | union(
+        PlannerStormUnknownLimitChainOutputAncestry
+            | take(60)
+            | union(
+                PlannerStormUnknownLimitChainOutputAncestry | take(40) | filter(row => row.leaf),
+                PlannerStormUnknownLimitChainOutputAncestry | take(30) | filter(row => row.leaf)
+            )
+            | take(40)
+            | filter(row => row.first),
+        PlannerStormUnknownLimitChainOutputAncestry | take(20) | filter(row => row.prior)
+    )
+    | union(
+        PlannerStormUnknownLimitChainOutputAncestry
+            | take(20)
+            | filter(row => row.second),
+        PlannerStormUnknownLimitChainOutputAncestry | take(10) | filter(row => row.prior)
+    );

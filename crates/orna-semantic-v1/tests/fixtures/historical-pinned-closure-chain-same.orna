@@ -1,0 +1,16 @@
+pub fn factory_at(pin: sys.SnapshotRef) =
+    sys.database.as_of(pin).energy.factory;
+
+pub fn forwarded_factory(pin: sys.SnapshotRef) = factory_at(pin);
+
+pub fn chained_factory(pin: sys.SnapshotRef) = forwarded_factory(pin);
+
+pub fn the_same_resolved_pin_survives_a_closure_chain() {
+    let pin = sys.snapshot("HEAD~10");
+    let alias = sys.snapshot(pin);
+    let first_factory = chained_factory(pin);
+    let second_factory = forwarded_factory(alias);
+    let first_product = first_factory();
+    let second_product = second_factory();
+    [first_product.read, second_product.read]
+}

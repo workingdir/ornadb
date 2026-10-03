@@ -1,0 +1,17 @@
+pub table PlannerNestedInputBranchConjunctCascade(id: Int) {
+    first: Bool,
+    second: Bool,
+    third: Bool,
+    fourth: Bool,
+    fifth: Bool,
+    sixth: Bool,
+}
+pub fn after_nested_limit_cascades() = PlannerNestedInputBranchConjunctCascade
+    | take(80)
+    | take(50)
+    | filter((row.first && row.second) || (row.third && row.fourth))
+    | take(12)
+    | take(8)
+    | filter(row.fifth && row.sixth)
+    | take(1)
+    | take(0);

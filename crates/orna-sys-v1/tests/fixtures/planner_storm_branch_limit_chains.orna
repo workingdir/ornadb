@@ -1,0 +1,45 @@
+pub table PlannerStormBranchLimitChains(id: Int) {
+    first: Bool,
+    second: Bool,
+    third: Bool,
+    fourth: Bool,
+    fifth: Bool,
+    sixth: Bool,
+}
+pub fn first_cascade() = PlannerStormBranchLimitChains
+    | union(
+        PlannerStormBranchLimitChains
+            | take(120)
+            | take(30)
+            | filter(row => row.first && row.second)
+    )
+    | union(
+        PlannerStormBranchLimitChains
+            | take(90)
+            | take(20)
+            | take(10)
+            | filter(row => row.third)
+            | union(
+                PlannerStormBranchLimitChains
+                    | take(60)
+                    | filter(row => row.fourth && row.fifth && row.sixth)
+            )
+    );
+pub fn second_cascade() = PlannerStormBranchLimitChains
+    | union(
+        PlannerStormBranchLimitChains
+            | take(12)
+            | take(7)
+            | filter(row => row.first)
+    )
+    | union(
+        PlannerStormBranchLimitChains
+            | take(9)
+            | filter(row => row.second && row.third)
+            | union(
+                PlannerStormBranchLimitChains
+                    | take(5)
+                    | take(2)
+                    | filter(row => row.fourth && row.fifth)
+            )
+    );

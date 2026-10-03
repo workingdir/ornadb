@@ -1,7 +1,10 @@
 use std::{fs, path::Path, process::Command};
 
 use orna_evaluator_v1::{AdmittedReplSession, Limits};
-use orna_project_v1::{AttachmentError, AttachedDatabaseSession, PinnedDatabase, ProjectLoader};
+use orna_project_v1::{
+    AttachedDatabaseSession, AttachmentError, PackageResolver, PinnedDatabase, ProjectLoader,
+    ReboundPathCheckpoint, PACKAGE_PIN_MANIFEST_PATH,
+};
 use orna_repository_v1::Repository;
 use orna_value_v1::Value;
 use tempfile::TempDir;
@@ -55,6 +58,25 @@ fn commit_module_source(directory: &Path, logical_path: &str, source: &str) -> S
         directory,
         &["commit", "--quiet", "-m", "advance nested module snapshot"],
     );
+    git(directory, &["rev-parse", "HEAD"])
+}
+
+fn commit_snapshot(
+    directory: &Path,
+    main_source: &str,
+    manifest: Option<&str>,
+    message: &str,
+) -> String {
+    fs::write(directory.join("main.orna"), main_source).unwrap();
+    let manifest_path = directory.join(PACKAGE_PIN_MANIFEST_PATH);
+    if let Some(manifest) = manifest {
+        fs::create_dir_all(manifest_path.parent().unwrap()).unwrap();
+        fs::write(manifest_path, manifest).unwrap();
+    } else if manifest_path.exists() {
+        fs::remove_file(manifest_path).unwrap();
+    }
+    git(directory, &["add", "--all"]);
+    git(directory, &["commit", "--quiet", "-m", message]);
     git(directory, &["rev-parse", "HEAD"])
 }
 
@@ -687,4 +709,2794 @@ fn nested_admitted_clones_preserve_archive_pin_identity_after_alias_churn() {
             Ok(Some(Value::int(43.into())))
         );
     }
+}
+
+#[test]
+fn fresh_nested_route_pair_chains_evaluate_rebound_closure_values() {
+    let package_source = include_str!("fixtures/attachment-route-package.orna");
+    let primary_source = include_str!("fixtures/attachment-route-primary.orna");
+    let (package_dir, package_repository, _) = repository(package_source);
+    let aliases = [
+        "archive",
+        "archive_copy",
+        "archive_copy_archive",
+        "archive_copy_archive_archive",
+        "archive_copy_archive_archive_archive",
+    ];
+    let snapshot = |value: &str, manifest: Option<&str>, message: &str| {
+        let source = package_source.replace("42", value);
+        commit_snapshot(package_dir.path(), &source, manifest, message)
+    };
+
+    let leaf_initial = snapshot("93", None, "initial terminal leaf");
+    let leaf_middle = snapshot("94", None, "first pair terminal leaf");
+    let leaf_final = snapshot("96", None, "final terminal leaf");
+    let route_three_initial_manifest = format!("{} {}\n", aliases[4], leaf_initial);
+    let route_three_initial = snapshot(
+        "83",
+        Some(&route_three_initial_manifest),
+        "initial third-depth route",
+    );
+    let route_three_middle_manifest = format!("{} {}\n", aliases[4], leaf_middle);
+    let route_three_middle = snapshot(
+        "84",
+        Some(&route_three_middle_manifest),
+        "first pair third-depth route",
+    );
+    let route_three_final_manifest = format!("{} {}\n", aliases[4], leaf_final);
+    let route_three_final = snapshot(
+        "85",
+        Some(&route_three_final_manifest),
+        "second pair third-depth route",
+    );
+    let terminal_initial_manifest = format!("{} {}\n", aliases[3], route_three_initial);
+    let terminal_initial = snapshot(
+        "80",
+        Some(&terminal_initial_manifest),
+        "initial second-depth route",
+    );
+    let terminal_middle_manifest = format!("{} {}\n", aliases[3], route_three_middle);
+    let terminal_middle = snapshot(
+        "81",
+        Some(&terminal_middle_manifest),
+        "first pair second-depth route",
+    );
+    let deep_initial_manifest = format!("{} {}\n", aliases[2], terminal_initial);
+    let deep_initial = snapshot("70", Some(&deep_initial_manifest), "initial nested route");
+    let middle_manifest = format!("{} {}\n", aliases[1], deep_initial);
+    let middle = snapshot("60", Some(&middle_manifest), "fresh route root");
+
+    let (primary_dir, primary_repository, _) = repository(primary_source);
+    let parent_manifest = format!("{} {}\n", aliases[0], middle);
+    let parent_commit = commit_snapshot(
+        primary_dir.path(),
+        primary_source,
+        Some(&parent_manifest),
+        "primary attachment root",
+    );
+    let loader = ProjectLoader::default();
+    let resolver = PackageResolver::new(
+        aliases
+            .iter()
+            .map(|alias| ((*alias).to_owned(), package_repository.clone())),
+        loader,
+    )
+    .unwrap();
+    let parent = resolver
+        .resolve_for_parent(
+            PinnedDatabase::resolve("app", primary_repository, &parent_commit, loader).unwrap(),
+        )
+        .unwrap();
+    let nested_parent = resolver
+        .resolve_nested_path(&parent, &[aliases[0], aliases[1]])
+        .unwrap();
+    let fresh_route = resolver
+        .resolve_nested_rebind_path(&nested_parent, &[])
+        .unwrap();
+    assert!(fresh_route.retained_sessions().is_empty());
+    let mut initial_evaluator = AdmittedReplSession::from_attached_database_session(
+        fresh_route.final_session(),
+        Limits::default(),
+    )
+    .unwrap();
+    assert_eq!(
+        initial_evaluator.submit(&format!("use {};", aliases[2])),
+        Ok(None)
+    );
+    assert_eq!(
+        initial_evaluator.submit(&format!("{}.package_value()", aliases[2])),
+        Ok(Some(Value::int(80.into())))
+    );
+
+    let first_pair = [
+        PinnedDatabase::resolve(
+            aliases[2],
+            package_repository.clone(),
+            &terminal_middle,
+            loader,
+        )
+        .unwrap(),
+        PinnedDatabase::resolve(
+            aliases[3],
+            package_repository.clone(),
+            &route_three_middle,
+            loader,
+        )
+        .unwrap(),
+    ];
+    let second_pair = [
+        PinnedDatabase::resolve(
+            aliases[3],
+            package_repository.clone(),
+            &route_three_final,
+            loader,
+        )
+        .unwrap(),
+        PinnedDatabase::resolve(
+            aliases[4],
+            package_repository.clone(),
+            &leaf_final,
+            loader,
+        )
+        .unwrap(),
+    ];
+    let same_depth_second_pair = [
+        PinnedDatabase::resolve(
+            aliases[2],
+            package_repository.clone(),
+            &terminal_middle,
+            loader,
+        )
+        .unwrap(),
+        PinnedDatabase::resolve(
+            aliases[3],
+            package_repository.clone(),
+            &route_three_final,
+            loader,
+        )
+        .unwrap(),
+    ];
+    let first_stage = resolver
+        .extend_nested_terminal_pair_chain(&fresh_route, &[first_pair.clone()])
+        .unwrap_or_else(|error| panic!("first nested pair failed: {error:?}"));
+    assert_eq!(first_stage.retained_wave(0).unwrap().len(), 2);
+    let saved_handoff = first_stage.handoff_checkpoint(0, 0).unwrap();
+    let saved_middle_handoff = first_stage.handoff_checkpoint(0, 1).unwrap();
+    assert_eq!(saved_handoff.depth_label().wave(), 0);
+    assert_eq!(saved_handoff.depth_label().depth(), 0);
+    assert_eq!(saved_middle_handoff.depth_label().wave(), 0);
+    assert_eq!(saved_middle_handoff.depth_label().depth(), 1);
+    assert_eq!(
+        saved_handoff.depth_label(),
+        &first_stage.retained_depth_label(0, 0).unwrap()
+    );
+    assert_eq!(
+        saved_handoff
+            .handoff()
+            .database(aliases[2])
+            .unwrap()
+            .pin()
+            .commit()
+            .as_str(),
+        terminal_initial
+    );
+    let mut first_evaluator = AdmittedReplSession::from_attached_database_session(
+        &first_stage.retained_wave(0).unwrap()[1],
+        Limits::default(),
+    )
+    .unwrap();
+    assert_eq!(
+        first_evaluator.submit(&format!("use {};", aliases[3])),
+        Ok(None)
+    );
+    assert_eq!(
+        first_evaluator.submit(&format!("{}.package_value()", aliases[3])),
+        Ok(Some(Value::int(84.into())))
+    );
+
+    let chained = resolver
+        .extend_nested_terminal_pair_chain(&first_stage, &[second_pair.clone()])
+        .unwrap_or_else(|error| panic!("continued nested pair failed: {error:?}"));
+
+    let mut evaluator = AdmittedReplSession::from_attached_database_session(
+        &chained.retained_wave(2).unwrap()[1],
+        Limits::default(),
+    )
+    .unwrap();
+    assert_eq!(
+        evaluator.submit(&format!("use {};", aliases[4])),
+        Ok(None)
+    );
+    assert_eq!(
+        evaluator.submit(&format!("{}.package_value()", aliases[4])),
+        Ok(Some(Value::int(96.into())))
+    );
+
+    let historical_handoff = resolver
+        .extend_nested_terminal_pair_chain_from_wave(
+            &first_stage,
+            0,
+            0,
+            &[first_pair.clone(), second_pair.clone()],
+        )
+        .unwrap_or_else(|error| panic!("historical handoff chain failed: {error:?}"));
+    let mut selected_root = AdmittedReplSession::from_attached_database_session(
+        &historical_handoff.retained_wave(2).unwrap()[0],
+        Limits::default(),
+    )
+    .unwrap();
+    assert_eq!(
+        selected_root.submit(&format!("use {};", aliases[2])),
+        Ok(None)
+    );
+    assert_eq!(
+        selected_root.submit(&format!("{}.package_value()", aliases[2])),
+        Ok(Some(Value::int(80.into())))
+    );
+
+    let mut handoff = AdmittedReplSession::from_attached_database_session(
+        &historical_handoff.retained_wave(2).unwrap()[1],
+        Limits::default(),
+    )
+    .unwrap();
+    assert_eq!(handoff.submit(&format!("use {};", aliases[3])), Ok(None));
+    assert_eq!(
+        handoff.submit(&format!("{}.package_value()", aliases[3])),
+        Ok(Some(Value::int(84.into())))
+    );
+
+    let mut continued = AdmittedReplSession::from_attached_database_session(
+        &historical_handoff.retained_wave(4).unwrap()[1],
+        Limits::default(),
+    )
+    .unwrap();
+    assert_eq!(continued.submit(&format!("use {};", aliases[4])), Ok(None));
+    assert_eq!(
+        continued.submit(&format!("{}.package_value()", aliases[4])),
+        Ok(Some(Value::int(96.into())))
+    );
+
+    let initial_depth_label = first_stage.retained_depth_label(0, 0).unwrap();
+    assert_eq!(initial_depth_label.wave(), 0);
+    assert_eq!(initial_depth_label.depth(), 0);
+    assert!(matches!(
+        resolver.extend_nested_terminal_pair_storm_from_wave(&first_stage, 0, 9, &[]),
+        Err(AttachmentError::RetainedSnapshotUnavailable)
+    ));
+    let distinct_depth_route = resolver
+        .resolve_nested_rebind_path(
+            &first_stage.retained_wave(0).unwrap()[1],
+            &[PinnedDatabase::resolve(
+                aliases[3],
+                package_repository.clone(),
+                &route_three_final,
+                loader,
+            )
+            .unwrap()],
+        )
+        .unwrap();
+    let distinct_depth_label = distinct_depth_route.retained_depth_label(0, 0).unwrap();
+    assert_ne!(distinct_depth_label, initial_depth_label);
+    assert!(matches!(
+        resolver.extend_nested_terminal_pair_storm_from_label(
+            &first_stage,
+            &distinct_depth_label,
+            &[],
+        ),
+        Err(AttachmentError::RetainedSnapshotUnavailable)
+    ));
+
+    let fixed_depth_storm = resolver
+        .extend_nested_terminal_pair_storm_from_label(
+            &first_stage,
+            &initial_depth_label,
+            &[first_pair.clone(), same_depth_second_pair.clone()],
+        )
+        .unwrap_or_else(|error| panic!("fixed-depth pair storm failed: {error:?}"));
+    assert_eq!(
+        fixed_depth_storm.retained_depth_label(0, 0).unwrap(),
+        initial_depth_label,
+        "the source depth label retains its exact pin route across each fold"
+    );
+    assert_eq!(
+        fixed_depth_storm.final_session().primary().pin().name(),
+        aliases[3]
+    );
+    assert_eq!(
+        fixed_depth_storm
+            .final_session()
+            .primary()
+            .pin()
+            .commit()
+            .as_str(),
+        route_three_final
+    );
+    assert_eq!(fixed_depth_storm.final_session().attached().count(), 1);
+    assert_eq!(chained.final_session().primary().pin().name(), aliases[4]);
+    let mut fixed_depth_evaluator = AdmittedReplSession::from_attached_database_session(
+        fixed_depth_storm.final_session(),
+        Limits::default(),
+    )
+    .unwrap();
+    assert_eq!(
+        fixed_depth_evaluator.submit(&format!("use {};", aliases[4])),
+        Ok(None)
+    );
+    assert_eq!(
+        fixed_depth_evaluator.submit(&format!("{}.package_value()", aliases[4])),
+        Ok(Some(Value::int(96.into())))
+    );
+
+    let first_storm_round = [first_pair.clone()];
+    let second_storm_round = [same_depth_second_pair.clone()];
+    let storm_rounds = [first_storm_round.as_slice(), second_storm_round.as_slice()];
+    let chained_depth_storm = resolver
+        .extend_nested_terminal_pair_storm_rounds_from_label(
+            &first_stage,
+            &initial_depth_label,
+            &storm_rounds,
+        )
+        .unwrap_or_else(|error| panic!("chained depth-label storm failed: {error:?}"));
+    assert_eq!(
+        chained_depth_storm.retained_depth_label(0, 0).unwrap(),
+        initial_depth_label,
+        "successive storms keep the original retained snapshot identity"
+    );
+    assert_eq!(
+        chained_depth_storm
+            .final_session()
+            .primary()
+            .pin()
+            .commit()
+            .as_str(),
+        route_three_final,
+        "each storm reopens the same labeled route instead of widening its depth"
+    );
+    assert!(matches!(
+        resolver.extend_nested_terminal_pair_storm_rounds_from_label(
+            &chained_depth_storm,
+            &distinct_depth_label,
+            &[],
+        ),
+        Err(AttachmentError::RetainedSnapshotUnavailable)
+    ));
+    let mut chained_depth_evaluator = AdmittedReplSession::from_attached_database_session(
+        chained_depth_storm.final_session(),
+        Limits::default(),
+    )
+    .unwrap();
+    assert_eq!(
+        chained_depth_evaluator.submit(&format!("use {};", aliases[4])),
+        Ok(None)
+    );
+    assert_eq!(
+        chained_depth_evaluator.submit(&format!("{}.package_value()", aliases[4])),
+        Ok(Some(Value::int(96.into())))
+    );
+
+    let independent_first_stage = resolver
+        .extend_nested_terminal_pair_chain(&fresh_route, &[first_pair.clone()])
+        .unwrap_or_else(|error| panic!("independent nested pair failed: {error:?}"));
+    let same_pin_foreign_label = independent_first_stage.retained_depth_label(0, 0).unwrap();
+    let attached_pin_route = |session: &AttachedDatabaseSession| {
+        session
+            .attached()
+            .map(|(alias, database)| (alias.to_owned(), database.pin().clone()))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        same_pin_foreign_label.wave(),
+        initial_depth_label.wave()
+    );
+    assert_eq!(
+        same_pin_foreign_label.depth(),
+        initial_depth_label.depth()
+    );
+    assert_eq!(
+        independent_first_stage.retained_wave(0).unwrap()[0]
+            .primary()
+            .pin(),
+        first_stage.retained_wave(0).unwrap()[0].primary().pin()
+    );
+    assert_eq!(
+        attached_pin_route(&independent_first_stage.retained_wave(0).unwrap()[0]),
+        attached_pin_route(&first_stage.retained_wave(0).unwrap()[0])
+    );
+    assert_ne!(same_pin_foreign_label, initial_depth_label);
+
+    let depth_zero_waves = [first_pair.clone()];
+    let depth_one_waves = [second_pair.clone()];
+    let depth_zero_plans = [(&initial_depth_label, depth_zero_waves.as_slice())];
+    let depth_one_plans = [(saved_middle_handoff.depth_label(), depth_one_waves.as_slice())];
+    let depth_label_rounds = [depth_zero_plans.as_slice(), depth_one_plans.as_slice()];
+    let nested_depth_folds = resolver
+        .extend_nested_terminal_pair_checkpoint_storm_rounds_from_depth_labels(
+            &first_stage,
+            &depth_label_rounds,
+        )
+        .unwrap_or_else(|error| panic!("nested depth-label folds failed: {error:?}"));
+    assert_eq!(
+        nested_depth_folds.retained_depth_label(0, 0).unwrap(),
+        initial_depth_label,
+        "the outer source identity survives a later nested-depth fold"
+    );
+    assert_eq!(
+        nested_depth_folds.retained_depth_label(0, 1).unwrap(),
+        *saved_middle_handoff.depth_label(),
+        "the nested handoff identity remains attached to its captured depth"
+    );
+    let foreign_depth_round = [(&same_pin_foreign_label, depth_one_waves.as_slice())];
+    let crossed_depth_rounds = [depth_zero_plans.as_slice(), foreign_depth_round.as_slice()];
+    assert!(matches!(
+        resolver.extend_nested_terminal_pair_checkpoint_storm_rounds_from_depth_labels(
+            &first_stage,
+            &crossed_depth_rounds,
+        ),
+        Err(AttachmentError::RetainedSnapshotUnavailable)
+    ));
+
+    let depth_slot_round_zero = [Some((&initial_depth_label, depth_zero_waves.as_slice())), None];
+    let depth_slot_round_one = [
+        None,
+        Some((saved_middle_handoff.depth_label(), depth_one_waves.as_slice())),
+    ];
+    let nested_omission_rounds = [
+        depth_slot_round_zero.as_slice(),
+        depth_slot_round_one.as_slice(),
+    ];
+    let nested_omissions = resolver
+        .extend_nested_terminal_pair_checkpoint_storm_rounds_from_depth_labels_with_omissions(
+            &first_stage,
+            &nested_omission_rounds,
+        )
+        .unwrap_or_else(|error| panic!("nested paired omissions failed: {error:?}"));
+    assert_eq!(
+        nested_omissions.retained_depth_label(0, 0).unwrap(),
+        initial_depth_label,
+        "omitting slot zero later retains its original outer route identity"
+    );
+    assert_eq!(
+        nested_omissions.retained_depth_label(0, 1).unwrap(),
+        *saved_middle_handoff.depth_label(),
+        "the delayed slot-one rebind keeps its captured nested route identity"
+    );
+    assert_eq!(
+        nested_omissions
+            .final_session()
+            .database(aliases[4])
+            .unwrap()
+            .pin()
+            .commit()
+            .as_str(),
+        leaf_final,
+        "paired omission slots still produce the final nested terminal pin"
+    );
+    let mut omission_evaluation_session =
+        AttachedDatabaseSession::new(parent.primary().clone()).unwrap();
+    omission_evaluation_session
+        .attach_database(
+            nested_omissions
+                .final_session()
+                .database(aliases[4])
+                .unwrap()
+                .clone(),
+        )
+        .unwrap();
+    let mut omission_evaluator = AdmittedReplSession::from_attached_database_session(
+        &omission_evaluation_session,
+        Limits::default(),
+    )
+    .unwrap();
+    assert_eq!(
+        omission_evaluator.submit(&format!("use {};", aliases[4])),
+        Ok(None)
+    );
+    assert_eq!(
+        omission_evaluator.submit(&format!("{}.package_value()", aliases[4])),
+        Ok(Some(Value::int(96.into())))
+    );
+    let crossed_omission_slot = [
+        Some((saved_middle_handoff.depth_label(), depth_one_waves.as_slice())),
+        None,
+    ];
+    let crossed_omission_rounds = [
+        depth_slot_round_zero.as_slice(),
+        crossed_omission_slot.as_slice(),
+    ];
+    assert!(matches!(
+        resolver.extend_nested_terminal_pair_checkpoint_storm_rounds_from_depth_labels_with_omissions(
+            &first_stage,
+            &crossed_omission_rounds,
+        ),
+        Err(AttachmentError::RetainedSnapshotUnavailable)
+    ));
+
+    assert_eq!(
+        nested_depth_folds
+            .final_session()
+            .database(aliases[4])
+            .unwrap()
+            .pin()
+            .commit()
+            .as_str(),
+        leaf_final
+    );
+    let mut nested_depth_evaluation_session =
+        AttachedDatabaseSession::new(parent.primary().clone()).unwrap();
+    nested_depth_evaluation_session
+        .attach_database(
+            nested_depth_folds
+                .final_session()
+                .database(aliases[4])
+                .unwrap()
+                .clone(),
+        )
+        .unwrap();
+    let mut nested_depth_evaluator = AdmittedReplSession::from_attached_database_session(
+        &nested_depth_evaluation_session,
+        Limits::default(),
+    )
+    .unwrap();
+    assert_eq!(
+        nested_depth_evaluator.submit(&format!("use {};", aliases[4])),
+        Ok(None)
+    );
+    assert_eq!(
+        nested_depth_evaluator.submit(&format!("{}.package_value()", aliases[4])),
+        Ok(Some(Value::int(96.into())))
+    );
+
+    let later_cascade = resolver
+        .extend_nested_terminal_pair_chain(&first_stage, &[second_pair.clone()])
+        .unwrap_or_else(|error| panic!("later nested pair cascade failed: {error:?}"));
+    let checkpoint_storm = resolver
+        .extend_nested_terminal_pair_storm_from_checkpoint(
+            &later_cascade,
+            &saved_handoff,
+            &[
+                first_pair.clone(),
+                same_depth_second_pair.clone(),
+                first_pair.clone(),
+            ],
+        )
+        .unwrap_or_else(|error| panic!("checkpoint pair storm failed: {error:?}"));
+    let pin_route = |session: &AttachedDatabaseSession| {
+        (
+            (
+                session.primary().pin().name().to_owned(),
+                session.primary().pin().commit().as_str().to_owned(),
+            ),
+            session
+                .attached()
+                .map(|(alias, database)| {
+                    (
+                        alias.to_owned(),
+                        database.pin().name().to_owned(),
+                        database.pin().commit().as_str().to_owned(),
+                    )
+                })
+                .collect::<Vec<_>>(),
+        )
+    };
+    for wave in [4, 6, 8] {
+        let retained = checkpoint_storm.retained_wave(wave).unwrap();
+        assert_eq!(pin_route(&retained[0]), pin_route(saved_handoff.handoff()));
+        let label = checkpoint_storm.retained_depth_label(wave, 0).unwrap();
+        assert_eq!(label.wave(), wave);
+        assert_eq!(label.depth(), 0);
+
+        let mut checkpoint_root = AdmittedReplSession::from_attached_database_session(
+            &retained[0],
+            Limits::default(),
+        )
+        .unwrap();
+        assert_eq!(checkpoint_root.submit(&format!("use {};", aliases[2])), Ok(None));
+        assert_eq!(
+            checkpoint_root.submit(&format!("{}.package_value()", aliases[2])),
+            Ok(Some(Value::int(80.into())))
+        );
+
+        let mut after_first_rebind = AdmittedReplSession::from_attached_database_session(
+            &retained[1],
+            Limits::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            after_first_rebind.submit(&format!("use {};", aliases[3])),
+            Ok(None)
+        );
+        assert_eq!(
+            after_first_rebind.submit(&format!("{}.package_value()", aliases[3])),
+            Ok(Some(Value::int(84.into())))
+        );
+    }
+
+    assert!(matches!(
+        resolver.extend_nested_terminal_pair_storm_from_checkpoint(
+            &fresh_route,
+            &saved_middle_handoff,
+            &[],
+        ),
+        Err(AttachmentError::RetainedSnapshotUnavailable)
+    ));
+    let nested_checkpoint_storm = resolver
+        .extend_nested_terminal_pair_storm_from_checkpoint(
+            &later_cascade,
+            &saved_middle_handoff,
+            &[
+                second_pair.clone(),
+                second_pair.clone(),
+                second_pair.clone(),
+            ],
+        )
+        .unwrap_or_else(|error| panic!("depth-one checkpoint storm failed: {error:?}"));
+    assert_eq!(
+        nested_checkpoint_storm.retained_depth_label(0, 1).unwrap(),
+        saved_middle_handoff.depth_label().clone(),
+        "the source depth-one handoff remains bound to its original pins"
+    );
+    for wave in [4, 6, 8] {
+        let retained = nested_checkpoint_storm.retained_wave(wave).unwrap();
+        assert_eq!(pin_route(&retained[0]), pin_route(saved_middle_handoff.handoff()));
+        let label = nested_checkpoint_storm.retained_depth_label(wave, 0).unwrap();
+        assert_eq!(label.wave(), wave);
+        assert_eq!(label.depth(), 0);
+    }
+    let nested_root = &nested_checkpoint_storm.retained_wave(8).unwrap()[0];
+    let mut nested_root_value =
+        AdmittedReplSession::from_attached_database_session(nested_root, Limits::default())
+            .unwrap();
+    assert_eq!(
+        nested_root_value.submit(&format!("use {};", aliases[3])),
+        Ok(None)
+    );
+    assert_eq!(
+        nested_root_value.submit(&format!("{}.package_value()", aliases[3])),
+        Ok(Some(Value::int(84.into())))
+    );
+    let nested_rebound = &nested_checkpoint_storm.retained_wave(8).unwrap()[1];
+    let mut nested_rebound_value =
+        AdmittedReplSession::from_attached_database_session(nested_rebound, Limits::default())
+            .unwrap();
+    assert_eq!(
+        nested_rebound_value.submit(&format!("use {};", aliases[4])),
+        Ok(None)
+    );
+    assert_eq!(
+        nested_rebound_value.submit(&format!("{}.package_value()", aliases[4])),
+        Ok(Some(Value::int(96.into())))
+    );
+
+    let anchor_a_waves = [first_pair.clone()];
+    let anchor_b_waves = [second_pair.clone()];
+    let anchor_a_return_waves = [first_pair.clone()];
+    let cyclic_anchor_plans = [
+        (&saved_handoff, anchor_a_waves.as_slice()),
+        (&saved_middle_handoff, anchor_b_waves.as_slice()),
+        (&saved_handoff, anchor_a_return_waves.as_slice()),
+    ];
+    let cyclic_anchor_storm = resolver
+        .extend_nested_terminal_pair_checkpoint_storms(&later_cascade, &cyclic_anchor_plans)
+        .unwrap_or_else(|error| panic!("cyclic anchor storm failed: {error:?}"));
+    assert_eq!(
+        cyclic_anchor_storm.retained_depth_label(0, 0).unwrap(),
+        saved_handoff.depth_label().clone()
+    );
+    assert_eq!(
+        cyclic_anchor_storm.retained_depth_label(0, 1).unwrap(),
+        saved_middle_handoff.depth_label().clone()
+    );
+    for (wave, checkpoint) in [
+        (4, &saved_handoff),
+        (6, &saved_middle_handoff),
+        (8, &saved_handoff),
+    ] {
+        let root = &cyclic_anchor_storm.retained_wave(wave).unwrap()[0];
+        assert_eq!(pin_route(root), pin_route(checkpoint.handoff()));
+        let label = cyclic_anchor_storm.retained_depth_label(wave, 0).unwrap();
+        assert_eq!(label.wave(), wave);
+        assert_eq!(label.depth(), 0);
+    }
+    let checkpoint_replay = resolver
+        .extend_nested_terminal_pair_chain_from_checkpoint(
+            &later_cascade,
+            &saved_handoff,
+            &[first_pair.clone(), second_pair.clone()],
+        )
+        .unwrap_or_else(|error| panic!("checkpoint pair cascade failed: {error:?}"));
+
+    let first_checkpoint_waves = [first_pair.clone(), second_pair.clone()];
+    let middle_checkpoint_waves = [second_pair.clone()];
+    let checkpoint_plans = [
+        (&saved_handoff, first_checkpoint_waves.as_slice()),
+        (&saved_middle_handoff, middle_checkpoint_waves.as_slice()),
+    ];
+    let checkpoint_cascades = resolver
+        .extend_nested_terminal_pair_checkpoint_cascades(&later_cascade, &checkpoint_plans)
+        .unwrap_or_else(|error| panic!("nested checkpoint cascades failed: {error:?}"));
+    let first_cascade_root = &checkpoint_cascades.retained_wave(4).unwrap()[0];
+    let first_cascade_label = checkpoint_cascades.retained_depth_label(4, 0).unwrap();
+    assert_eq!(first_cascade_label.wave(), 4);
+    assert_eq!(first_cascade_label.depth(), 0);
+    assert_eq!(pin_route(first_cascade_root), pin_route(saved_handoff.handoff()));
+
+    let middle_cascade_root = &checkpoint_cascades.retained_wave(8).unwrap()[0];
+    let middle_cascade_label = checkpoint_cascades.retained_depth_label(8, 0).unwrap();
+    assert_eq!(middle_cascade_label.wave(), 8);
+    assert_eq!(middle_cascade_label.depth(), 0);
+    assert_eq!(
+        pin_route(middle_cascade_root),
+        pin_route(saved_middle_handoff.handoff())
+    );
+    let mut middle_cascade_eval = AdmittedReplSession::from_attached_database_session(
+        middle_cascade_root,
+        Limits::default(),
+    )
+    .unwrap();
+    assert_eq!(
+        middle_cascade_eval.submit(&format!("use {};", aliases[3])),
+        Ok(None)
+    );
+    assert_eq!(
+        middle_cascade_eval.submit(&format!("{}.package_value()", aliases[3])),
+        Ok(Some(Value::int(84.into())))
+    );
+    let mut cascade_terminal_eval = AdmittedReplSession::from_attached_database_session(
+        &checkpoint_cascades.retained_wave(8).unwrap()[1],
+        Limits::default(),
+    )
+    .unwrap();
+    assert_eq!(
+        cascade_terminal_eval.submit(&format!("use {};", aliases[4])),
+        Ok(None)
+    );
+    assert_eq!(
+        cascade_terminal_eval.submit(&format!("{}.package_value()", aliases[4])),
+        Ok(Some(Value::int(96.into())))
+    );
+
+    let first_terminal_anchor_chain = resolver
+        .extend_nested_terminal_pair_checkpoint_cascades(
+            &first_stage,
+            &[checkpoint_plans[0]],
+        )
+        .unwrap_or_else(|error| panic!("first terminal anchor chain failed: {error:?}"));
+    let final_terminal_anchor_chain = resolver
+        .extend_nested_terminal_pair_checkpoint_cascades(
+            &first_terminal_anchor_chain,
+            &[checkpoint_plans[1]],
+        )
+        .unwrap_or_else(|error| panic!("nested terminal anchor chain failed: {error:?}"));
+    let first_terminal_anchor_identity = first_terminal_anchor_chain.terminal_route_identity();
+    let final_terminal_anchor_identity = final_terminal_anchor_chain.terminal_route_identity();
+    let expected_terminal_anchor_transitions = [
+        (
+            first_stage.terminal_route_identity(),
+            first_terminal_anchor_identity.clone(),
+        ),
+        (
+            first_terminal_anchor_identity,
+            final_terminal_anchor_identity.clone(),
+        ),
+    ];
+    assert_ne!(
+        expected_terminal_anchor_transitions[0].0,
+        expected_terminal_anchor_transitions[0].1,
+        "the first checkpoint anchor rebinds the terminal nested pin"
+    );
+    let (validated_terminal_anchor_chains, observed_terminal_anchor_transitions) = resolver
+        .extend_nested_terminal_pair_checkpoint_cascades_validating_terminal_identity_transitions(
+            &first_stage,
+            &checkpoint_plans,
+            &expected_terminal_anchor_transitions,
+        )
+        .unwrap();
+    assert_eq!(
+        observed_terminal_anchor_transitions,
+        expected_terminal_anchor_transitions,
+        "each paired terminal anchor chain reports its computed identity edge"
+    );
+    assert_eq!(
+        validated_terminal_anchor_chains.terminal_route_identity(),
+        final_terminal_anchor_identity,
+        "the final nested anchor chain keeps the computed terminal route identity"
+    );
+    assert_eq!(
+        validated_terminal_anchor_chains.retained_depth_label(0, 1).unwrap(),
+        saved_middle_handoff.depth_label().clone(),
+        "the nested anchor remains bound to its original retained depth"
+    );
+    assert_eq!(
+        validated_terminal_anchor_chains
+            .final_session()
+            .database(aliases[4])
+            .unwrap()
+            .pin()
+            .commit()
+            .as_str(),
+        leaf_final,
+        "validated terminal anchor chains resolve the real final package commit"
+    );
+    let mut stale_terminal_anchor_transitions = expected_terminal_anchor_transitions.clone();
+    stale_terminal_anchor_transitions[1].0 = expected_terminal_anchor_transitions[0].0.clone();
+    assert!(matches!(
+        resolver
+            .extend_nested_terminal_pair_checkpoint_cascades_validating_terminal_identity_transitions(
+                &first_stage,
+                &checkpoint_plans,
+                &stale_terminal_anchor_transitions,
+        ),
+        Err(AttachmentError::RetainedSnapshotUnavailable)
+    ));
+
+    let terminal_excursion_plan = [(
+        &saved_middle_handoff,
+        middle_checkpoint_waves.as_slice(),
+    )];
+    let terminal_restore_plan = [(&saved_handoff, anchor_a_waves.as_slice())];
+    let first_restoration_excursion = resolver
+        .extend_nested_terminal_pair_checkpoint_cascades(
+            &first_stage,
+            &terminal_excursion_plan,
+        )
+        .unwrap();
+    let first_restoration_return = resolver
+        .extend_nested_terminal_pair_checkpoint_cascades(
+            &first_restoration_excursion,
+            &terminal_restore_plan,
+        )
+        .unwrap();
+    let starting_terminal_identity = first_stage.terminal_route_identity();
+    let excursion_terminal_identity = first_restoration_excursion.terminal_route_identity();
+    let restored_terminal_identity = first_restoration_return.terminal_route_identity();
+    assert_ne!(
+        starting_terminal_identity,
+        excursion_terminal_identity,
+        "the middle checkpoint moves the terminal route away from its starting pin"
+    );
+    assert_eq!(
+        starting_terminal_identity,
+        restored_terminal_identity,
+        "the paired root checkpoint restores the exact original terminal route identity"
+    );
+    let single_restoration_transitions = [
+        (
+            first_stage.terminal_route_identity(),
+            excursion_terminal_identity.clone(),
+        ),
+        (
+            excursion_terminal_identity.clone(),
+            restored_terminal_identity.clone(),
+        ),
+    ];
+    let restoration_anchor_pair = [
+        terminal_excursion_plan[0],
+        terminal_restore_plan[0],
+    ];
+    let repeated_restoration_folds = [restoration_anchor_pair, restoration_anchor_pair];
+    let expected_restoration_transitions = [
+        single_restoration_transitions.clone(),
+        single_restoration_transitions,
+    ];
+    let (restored_anchor_route, observed_restoration_transitions) = resolver
+        .extend_nested_terminal_pair_checkpoint_restoration_folds_validating_terminal_identity_transitions(
+            &first_stage,
+            &repeated_restoration_folds,
+            &expected_restoration_transitions,
+        )
+        .unwrap();
+    assert_eq!(
+        observed_restoration_transitions,
+        expected_restoration_transitions,
+        "each repeated paired restoration fold records its actual excursion and return edges"
+    );
+    assert_eq!(
+        restored_anchor_route.terminal_route_identity(),
+        starting_terminal_identity,
+        "repeated terminal restoration folds preserve the exact starting identity"
+    );
+    assert_eq!(
+        restored_anchor_route.retained_depth_label(0, 0).unwrap(),
+        saved_handoff.depth_label().clone(),
+        "the root checkpoint label remains attached across repeated restorations"
+    );
+    assert_eq!(
+        restored_anchor_route.retained_depth_label(0, 1).unwrap(),
+        saved_middle_handoff.depth_label().clone(),
+        "the middle checkpoint label remains attached across repeated restorations"
+    );
+    assert_eq!(
+        restored_anchor_route
+            .final_session()
+            .database(aliases[4])
+            .unwrap()
+            .pin()
+            .commit()
+            .as_str(),
+        leaf_middle,
+        "the restored nested route retains its actual starting package commit"
+    );
+
+    let non_restoring_pair = [
+        terminal_excursion_plan[0],
+        terminal_excursion_plan[0],
+    ];
+    let non_restoring_fold = [non_restoring_pair];
+    let non_restoring_transitions = [[
+        (
+            starting_terminal_identity.clone(),
+            excursion_terminal_identity.clone(),
+        ),
+        (
+            excursion_terminal_identity.clone(),
+            excursion_terminal_identity.clone(),
+        ),
+    ]];
+    assert!(matches!(
+        resolver
+            .extend_nested_terminal_pair_checkpoint_restoration_folds_validating_terminal_identity_transitions(
+                &first_stage,
+                &non_restoring_fold,
+                &non_restoring_transitions,
+            ),
+        Err(AttachmentError::RetainedSnapshotUnavailable)
+    ));
+
+    let replay_handoff = checkpoint_replay.retained_wave(4).unwrap()[0].clone();
+    let replay_depth_label = checkpoint_replay.retained_depth_label(4, 0).unwrap();
+    assert_eq!(replay_depth_label.wave(), 4);
+    assert_eq!(replay_depth_label.depth(), 0);
+    assert_eq!(
+        pin_route(&replay_handoff),
+        pin_route(saved_handoff.handoff()),
+        "the checkpoint depth label still identifies every exact pin after later pair folds"
+    );
+    assert_eq!(
+        replay_handoff.primary().pin().name(),
+        saved_handoff.handoff().primary().pin().name()
+    );
+    assert_eq!(
+        replay_handoff
+            .database(aliases[2])
+            .unwrap()
+            .pin()
+            .commit()
+            .as_str(),
+        terminal_initial
+    );
+    let mut replay_handoff_eval = AdmittedReplSession::from_attached_database_session(
+        &replay_handoff,
+        Limits::default(),
+    )
+    .unwrap();
+    assert_eq!(
+        replay_handoff_eval.submit(&format!("use {};", aliases[2])),
+        Ok(None)
+    );
+    assert_eq!(
+        replay_handoff_eval.submit(&format!("{}.package_value()", aliases[2])),
+        Ok(Some(Value::int(80.into())))
+    );
+
+    let mut replay_terminal_eval = AdmittedReplSession::from_attached_database_session(
+        &checkpoint_replay.retained_wave(6).unwrap()[1],
+        Limits::default(),
+    )
+    .unwrap();
+    assert_eq!(
+        replay_terminal_eval.submit(&format!("use {};", aliases[4])),
+        Ok(None)
+    );
+    assert_eq!(
+        replay_terminal_eval.submit(&format!("{}.package_value()", aliases[4])),
+        Ok(Some(Value::int(96.into())))
+    );
+}
+
+#[test]
+fn sibling_checkpoint_folds_keep_tabular_anchor_identities() {
+    let package_source = include_str!("fixtures/attachment-route-package.orna");
+    let primary_source = include_str!("fixtures/attachment-route-primary.orna");
+    let aliases = [
+        "archive",
+        "archive_copy",
+        "archive_copy_archive",
+        "archive_copy_archive_archive",
+        "archive_copy_archive_archive_archive",
+    ];
+    let (package_dir, package_repository, _) = repository(package_source);
+    let snapshot = |value: &str, manifest: Option<&str>, message: &str| {
+        commit_snapshot(
+            package_dir.path(),
+            &package_source.replace("42", value),
+            manifest,
+            message,
+        )
+    };
+
+    let leaf_a = snapshot("91", None, "sibling A terminal leaf");
+    let leaf_b = snapshot("92", None, "sibling B terminal leaf");
+    let route_three_a_manifest = format!("{} {}\n", aliases[4], leaf_a);
+    let route_three_a = snapshot(
+        "81",
+        Some(&route_three_a_manifest),
+        "sibling A third-depth route",
+    );
+    let route_three_b_manifest = format!("{} {}\n", aliases[4], leaf_b);
+    let route_three_b = snapshot(
+        "82",
+        Some(&route_three_b_manifest),
+        "sibling B third-depth route",
+    );
+    let route_two_a_manifest = format!("{} {}\n", aliases[3], route_three_a);
+    let route_two_a = snapshot(
+        "71",
+        Some(&route_two_a_manifest),
+        "sibling A second-depth route",
+    );
+    let route_two_b_manifest = format!("{} {}\n", aliases[3], route_three_b);
+    let route_two_b = snapshot(
+        "72",
+        Some(&route_two_b_manifest),
+        "sibling B second-depth route",
+    );
+    let deep_a_manifest = format!("{} {}\n", aliases[2], route_two_a);
+    let deep_a = snapshot("61", Some(&deep_a_manifest), "sibling A first-depth route");
+    let deep_b_manifest = format!("{} {}\n", aliases[2], route_two_b);
+    let deep_b = snapshot("62", Some(&deep_b_manifest), "sibling B first-depth route");
+    let middle_a_manifest = format!("{} {}\n", aliases[1], deep_a);
+    let middle_a = snapshot("51", Some(&middle_a_manifest), "sibling A middle route");
+    let middle_b_manifest = format!("{} {}\n", aliases[1], deep_b);
+    let middle_b = snapshot("52", Some(&middle_b_manifest), "sibling B middle route");
+
+    let (primary_a_dir, primary_a_repository, _) = repository(primary_source);
+    let primary_a_manifest = format!("{} {}\n", aliases[0], middle_a);
+    let primary_a_commit = commit_snapshot(
+        primary_a_dir.path(),
+        primary_source,
+        Some(&primary_a_manifest),
+        "sibling A primary route",
+    );
+    let (primary_b_dir, primary_b_repository, _) = repository(primary_source);
+    let primary_b_manifest = format!("{} {}\n", aliases[0], middle_b);
+    let primary_b_commit = commit_snapshot(
+        primary_b_dir.path(),
+        primary_source,
+        Some(&primary_b_manifest),
+        "sibling B primary route",
+    );
+
+    let loader = ProjectLoader::default();
+    let resolver = PackageResolver::new(
+        aliases
+            .iter()
+            .map(|alias| ((*alias).to_owned(), package_repository.clone())),
+        loader,
+    )
+    .unwrap();
+    let parent_a = resolver
+        .resolve_for_parent(
+            PinnedDatabase::resolve("app_a", primary_a_repository, &primary_a_commit, loader)
+                .unwrap(),
+        )
+        .unwrap();
+    let parent_b = resolver
+        .resolve_for_parent(
+            PinnedDatabase::resolve("app_b", primary_b_repository, &primary_b_commit, loader)
+                .unwrap(),
+        )
+        .unwrap();
+    let nested_a = resolver
+        .resolve_nested_path(&parent_a, &[aliases[0], aliases[1]])
+        .unwrap();
+    let nested_b = resolver
+        .resolve_nested_path(&parent_b, &[aliases[0], aliases[1]])
+        .unwrap();
+    let pair_a = [
+        PinnedDatabase::resolve(aliases[2], package_repository.clone(), &route_two_a, loader)
+            .unwrap(),
+        PinnedDatabase::resolve(
+            aliases[3],
+            package_repository.clone(),
+            &route_three_a,
+            loader,
+        )
+        .unwrap(),
+    ];
+    let pair_b = [
+        PinnedDatabase::resolve(aliases[2], package_repository.clone(), &route_two_b, loader)
+            .unwrap(),
+        PinnedDatabase::resolve(
+            aliases[3],
+            package_repository.clone(),
+            &route_three_b,
+            loader,
+        )
+        .unwrap(),
+    ];
+    let stage_a = resolver
+        .resolve_nested_terminal_pair(&nested_a, pair_a.clone())
+        .unwrap();
+    let stage_b = resolver
+        .resolve_nested_terminal_pair(&nested_b, pair_b.clone())
+        .unwrap();
+    let independent_stage_a = resolver
+        .resolve_nested_terminal_pair(&nested_a, pair_a.clone())
+        .unwrap();
+    let root_a = stage_a.handoff_checkpoint(0, 0).unwrap();
+    let middle_a_checkpoint = stage_a.handoff_checkpoint(0, 1).unwrap();
+    let root_b = stage_b.handoff_checkpoint(0, 0).unwrap();
+    let middle_b_checkpoint = stage_b.handoff_checkpoint(0, 1).unwrap();
+    let independent_root_a = independent_stage_a.handoff_checkpoint(0, 0).unwrap();
+    let independent_middle_a_checkpoint = independent_stage_a.handoff_checkpoint(0, 1).unwrap();
+    assert_eq!(
+        root_a.handoff().primary().pin().commit(),
+        independent_root_a.handoff().primary().pin().commit(),
+        "independent routes can retain the same exact pins"
+    );
+    assert_ne!(root_a.depth_label(), independent_root_a.depth_label());
+
+    let terminal_pair_a = [
+        PinnedDatabase::resolve(
+            aliases[3],
+            package_repository.clone(),
+            &route_three_a,
+            loader,
+        )
+        .unwrap(),
+        PinnedDatabase::resolve(aliases[4], package_repository.clone(), &leaf_a, loader).unwrap(),
+    ];
+    let terminal_pair_b = [
+        PinnedDatabase::resolve(
+            aliases[3],
+            package_repository.clone(),
+            &route_three_b,
+            loader,
+        )
+        .unwrap(),
+        PinnedDatabase::resolve(aliases[4], package_repository.clone(), &leaf_b, loader).unwrap(),
+    ];
+    let root_waves_a = [pair_a.clone()];
+    let middle_waves_a = [terminal_pair_a.clone()];
+    let root_return_waves_a = [pair_a.clone()];
+    let root_waves_b = [pair_b.clone()];
+    let middle_waves_b = [terminal_pair_b.clone()];
+    let root_return_waves_b = [pair_b.clone()];
+    let storms_a = [
+        (&root_a, root_waves_a.as_slice()),
+        (&middle_a_checkpoint, middle_waves_a.as_slice()),
+        (&root_a, root_return_waves_a.as_slice()),
+    ];
+    let storms_b = [
+        (&root_b, root_waves_b.as_slice()),
+        (&middle_b_checkpoint, middle_waves_b.as_slice()),
+        (&root_b, root_return_waves_b.as_slice()),
+    ];
+    let storms_independent_a = [
+        (&independent_root_a, root_waves_a.as_slice()),
+        (&independent_middle_a_checkpoint, middle_waves_a.as_slice()),
+        (&independent_root_a, root_return_waves_a.as_slice()),
+    ];
+    let paths = [
+        (&stage_a, storms_a.as_slice()),
+        (&stage_b, storms_b.as_slice()),
+        (&independent_stage_a, storms_independent_a.as_slice()),
+    ];
+
+    assert!(matches!(
+        resolver.extend_sibling_terminal_pair_checkpoint_storms(&[(
+            &stage_a,
+            [(&independent_root_a, root_waves_a.as_slice())].as_slice()
+        ),]),
+        Err(AttachmentError::RetainedSnapshotUnavailable)
+    ));
+
+    let one_root_storm = [(&root_a, root_waves_a.as_slice())];
+    let folded_branch_a = resolver
+        .extend_nested_terminal_pair_checkpoint_storms(&stage_a, &one_root_storm)
+        .unwrap();
+    let folded_branch_b = resolver
+        .extend_nested_terminal_pair_checkpoint_storms(&stage_a, &one_root_storm)
+        .unwrap();
+    let branch_a_anchor = folded_branch_a.retained_wave(2).unwrap().first().unwrap();
+    let branch_b_anchor = folded_branch_b.retained_wave(2).unwrap().first().unwrap();
+    assert_eq!(
+        branch_a_anchor.primary().pin().commit().as_str(),
+        branch_b_anchor.primary().pin().commit().as_str()
+    );
+    assert_eq!(
+        branch_a_anchor
+            .attached()
+            .map(|(name, database)| (name.to_owned(), database.pin().commit().as_str().to_owned()))
+            .collect::<Vec<_>>(),
+        branch_b_anchor
+            .attached()
+            .map(|(name, database)| (name.to_owned(), database.pin().commit().as_str().to_owned()))
+            .collect::<Vec<_>>()
+    );
+    let branch_a_label = folded_branch_a.retained_depth_label(2, 0).unwrap();
+    let branch_b_label = folded_branch_b.retained_depth_label(2, 0).unwrap();
+    assert_ne!(
+        branch_a_label, branch_b_label,
+        "separate folds assign distinct identities to matching route snapshots"
+    );
+    let branch_a_checkpoint = folded_branch_a.handoff_checkpoint(2, 0).unwrap();
+    let no_pair_waves: [[PinnedDatabase; 2]; 0] = [];
+    assert!(resolver
+        .extend_nested_terminal_pair_checkpoint_storms(
+            &folded_branch_a,
+            &[(
+                &branch_a_checkpoint,
+                no_pair_waves.as_slice(),
+            )],
+        )
+        .is_ok());
+    assert!(matches!(
+        resolver.extend_nested_terminal_pair_checkpoint_storms(
+            &folded_branch_b,
+            &[(
+                &branch_a_checkpoint,
+                no_pair_waves.as_slice(),
+            )],
+        ),
+        Err(AttachmentError::RetainedSnapshotUnavailable)
+    ));
+
+    let folded = resolver
+        .extend_sibling_terminal_pair_checkpoint_storms(&paths)
+        .unwrap_or_else(|error| panic!("sibling checkpoint folds failed: {error:?}"));
+    assert_eq!(folded.routes().len(), 3);
+    for (route, expected_anchor, expected_leaf, expected_value, expected_root) in [
+        (
+            &folded.routes()[0],
+            &middle_a_checkpoint,
+            &leaf_a,
+            91,
+            &root_a,
+        ),
+        (
+            &folded.routes()[1],
+            &middle_b_checkpoint,
+            &leaf_b,
+            92,
+            &root_b,
+        ),
+        (
+            &folded.routes()[2],
+            &independent_middle_a_checkpoint,
+            &leaf_a,
+            91,
+            &independent_root_a,
+        ),
+    ] {
+        let retained_anchor = route.retained_wave(4).unwrap().first().unwrap();
+        assert_eq!(
+            retained_anchor.primary().pin().commit().as_str(),
+            expected_anchor.handoff().primary().pin().commit().as_str(),
+            "each table row retains its own middle checkpoint anchor"
+        );
+        assert_eq!(route.retained_depth_label(4, 0).unwrap().wave(), 4);
+        assert_eq!(
+            route.retained_depth_label(0, 0).unwrap(),
+            expected_root.depth_label().clone(),
+            "the first anchor label survives the A-to-B-to-A cycle"
+        );
+        let returned_anchor = route.retained_wave(6).unwrap().first().unwrap();
+        assert_eq!(
+            returned_anchor.primary().pin().commit().as_str(),
+            expected_root.handoff().primary().pin().commit().as_str()
+        );
+        assert_eq!(
+            route
+                .final_session()
+                .database(aliases[4])
+                .unwrap()
+                .pin()
+                .commit()
+                .as_str(),
+            expected_leaf.as_str()
+        );
+        let mut evaluator = AdmittedReplSession::from_attached_database_session(
+            route.final_session(),
+            Limits::default(),
+        )
+        .unwrap();
+        assert_eq!(evaluator.submit(&format!("use {};", aliases[4])), Ok(None));
+        assert_eq!(
+            evaluator.submit(&format!("{}.package_value()", aliases[4])),
+            Ok(Some(Value::int(expected_value.into())))
+        );
+    }
+
+    let anchor_a = folded.handoff_checkpoint(0, 4, 0).unwrap();
+    let anchor_independent_a = folded.handoff_checkpoint(2, 4, 0).unwrap();
+    assert_eq!(
+        folded.retained_depth_label(0, 4, 0).unwrap(),
+        *anchor_a.depth_label(),
+        "row-indexed label selection preserves the checkpoint identity"
+    );
+    assert!(matches!(
+        folded.retained_depth_label(3, 4, 0),
+        Err(AttachmentError::RetainedSnapshotUnavailable)
+    ));
+    assert_eq!(
+        anchor_a.handoff().primary().pin(),
+        anchor_independent_a.handoff().primary().pin(),
+        "independent parent rows may retain exactly matching anchor pins"
+    );
+    let attached_pins = |checkpoint: &ReboundPathCheckpoint| {
+        checkpoint
+            .handoff()
+            .attached()
+            .map(|(name, database)| {
+                (name.to_owned(), database.pin().commit().as_str().to_owned())
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        attached_pins(&anchor_a),
+        attached_pins(&anchor_independent_a),
+        "independent parent rows may retain exactly matching attached pins"
+    );
+    assert_ne!(
+        anchor_a.depth_label(),
+        anchor_independent_a.depth_label(),
+        "row-indexed checkpoints preserve distinct anchor identities"
+    );
+    assert!(folded.validate_handoff_checkpoint(0, &anchor_a).is_ok());
+    assert!(matches!(
+        folded.validate_handoff_checkpoint(2, &anchor_a),
+        Err(AttachmentError::RetainedSnapshotUnavailable)
+    ));
+    assert!(matches!(
+        resolver.extend_nested_terminal_pair_checkpoint_storms(
+            &folded.routes()[2],
+            &[(&anchor_a, no_pair_waves.as_slice())],
+        ),
+        Err(AttachmentError::RetainedSnapshotUnavailable)
+    ));
+
+    let continuation_root_a = folded.handoff_checkpoint(0, 6, 0).unwrap();
+    let continuation_root_b = folded.handoff_checkpoint(1, 6, 0).unwrap();
+    let continuation_root_independent_a = folded.handoff_checkpoint(2, 6, 0).unwrap();
+    let continuation_a = [(&continuation_root_a, root_waves_a.as_slice())];
+    let continuation_b = [(&continuation_root_b, root_waves_b.as_slice())];
+    let continuation_independent_a = [(
+        &continuation_root_independent_a,
+        root_return_waves_a.as_slice(),
+    )];
+    let continuation_plans = [
+        continuation_a.as_slice(),
+        continuation_b.as_slice(),
+        continuation_independent_a.as_slice(),
+    ];
+    assert!(matches!(
+        resolver.extend_sibling_terminal_pair_checkpoint_storms_from_siblings(
+            &folded,
+            &continuation_plans[..2],
+        ),
+        Err(AttachmentError::RetainedSnapshotUnavailable)
+    ));
+    let nested_folded = resolver
+        .extend_sibling_terminal_pair_checkpoint_storms_from_siblings(
+            &folded,
+            &continuation_plans,
+        )
+        .unwrap_or_else(|error| panic!("nested sibling checkpoint folds failed: {error:?}"));
+    assert_eq!(nested_folded.routes().len(), 3);
+    for row in 0..3 {
+        assert_eq!(
+            nested_folded.retained_depth_label(row, 4, 0).unwrap(),
+            folded.retained_depth_label(row, 4, 0).unwrap(),
+            "nested folds preserve the parent's earlier anchor identity"
+        );
+    }
+    let nested_anchor_a = nested_folded.handoff_checkpoint(0, 8, 0).unwrap();
+    let nested_anchor_independent_a = nested_folded.handoff_checkpoint(2, 8, 0).unwrap();
+    assert_eq!(
+        nested_anchor_a.handoff().primary().pin(),
+        nested_anchor_independent_a.handoff().primary().pin()
+    );
+    assert_eq!(
+        attached_pins(&nested_anchor_a),
+        attached_pins(&nested_anchor_independent_a)
+    );
+    assert_ne!(
+        nested_anchor_a.depth_label(),
+        nested_anchor_independent_a.depth_label(),
+        "new nested anchors keep independent row identities despite equal pins"
+    );
+    assert!(matches!(
+        resolver.extend_nested_terminal_pair_checkpoint_storms(
+            &nested_folded.routes()[2],
+            &[(&nested_anchor_a, no_pair_waves.as_slice())],
+        ),
+        Err(AttachmentError::RetainedSnapshotUnavailable)
+    ));
+    for (row, expected_value) in [(0, 91), (1, 92), (2, 91)] {
+        let final_session = nested_folded.routes()[row].final_session();
+        assert_eq!(
+            final_session
+                .database(aliases[4])
+                .unwrap()
+                .pin()
+                .commit()
+                .as_str(),
+            if expected_value == 91 {
+                leaf_a.as_str()
+            } else {
+                leaf_b.as_str()
+            },
+            "the nested row keeps the expected terminal pin"
+        );
+        let mut evaluator = AdmittedReplSession::from_attached_database_session(
+            final_session,
+            Limits::default(),
+        )
+        .unwrap();
+        assert_eq!(evaluator.submit(&format!("use {};", aliases[4])), Ok(None));
+        assert_eq!(
+            evaluator.submit(&format!("{}.package_value()", aliases[4])),
+            Ok(Some(Value::int(expected_value.into())))
+        );
+    }
+
+    let depth_label_a = nested_folded.retained_depth_label(0, 6, 1).unwrap();
+    let depth_label_b = nested_folded.retained_depth_label(1, 6, 0).unwrap();
+    let depth_label_independent_a = nested_folded.retained_depth_label(2, 6, 1).unwrap();
+    let evaluate_terminal_pin = |session: &AttachedDatabaseSession, alias: &str| {
+        let mut evaluation_session =
+            AttachedDatabaseSession::new(parent_a.primary().clone()).unwrap();
+        evaluation_session
+            .attach_database(session.database(alias).unwrap().clone())
+            .unwrap();
+        let mut evaluator = AdmittedReplSession::from_attached_database_session(
+            &evaluation_session,
+            Limits::default(),
+        )
+        .unwrap();
+        assert_eq!(evaluator.submit(&format!("use {alias};")), Ok(None));
+        evaluator.submit(&format!("{alias}.package_value()"))
+    };
+    assert_eq!(depth_label_a.depth(), 1);
+    assert_eq!(depth_label_b.depth(), 0);
+    assert_ne!(
+        depth_label_a, depth_label_independent_a,
+        "equal pins at equal coordinates remain distinct across sibling rows"
+    );
+    let depth_storms_a = [(6, 1, middle_waves_a.as_slice())];
+    let depth_storms_b = [(6, 0, root_waves_b.as_slice())];
+    let depth_storms_independent_a = [(6, 1, middle_waves_a.as_slice())];
+    let depth_plans = [
+        depth_storms_a.as_slice(),
+        depth_storms_b.as_slice(),
+        depth_storms_independent_a.as_slice(),
+    ];
+    let label_storms_a = [(&depth_label_a, middle_waves_a.as_slice())];
+    let label_storms_b = [(&depth_label_b, root_waves_b.as_slice())];
+    let label_storms_independent_a =
+        [(&depth_label_independent_a, middle_waves_a.as_slice())];
+    let label_plans = [
+        label_storms_a.as_slice(),
+        label_storms_b.as_slice(),
+        label_storms_independent_a.as_slice(),
+    ];
+    let equal_pin_crossed_labels = [
+        [(&depth_label_independent_a, middle_waves_a.as_slice())],
+        label_storms_b,
+        [(&depth_label_a, middle_waves_a.as_slice())],
+    ];
+    assert!(matches!(
+        resolver.extend_sibling_terminal_pair_checkpoint_storms_from_depth_labels(
+            &nested_folded,
+            &equal_pin_crossed_labels.each_ref().map(|row| row.as_slice()),
+        ),
+        Err(AttachmentError::RetainedSnapshotUnavailable)
+    ));
+    let label_continued = resolver
+        .extend_sibling_terminal_pair_checkpoint_storms_from_depth_labels(
+            &nested_folded,
+            &label_plans,
+        )
+        .unwrap_or_else(|error| panic!("label-selected sibling continuation failed: {error:?}"));
+    for (row, source_depth, source_label, expected_value) in [
+        (0, 1, &depth_label_a, 91),
+        (1, 0, &depth_label_b, 92),
+        (2, 1, &depth_label_independent_a, 91),
+    ] {
+        assert_eq!(
+            label_continued
+                .retained_depth_label(row, 6, source_depth)
+                .unwrap(),
+            *source_label,
+            "label-selected folds retain the exact paired parent anchor"
+        );
+        let final_session = label_continued.routes()[row].final_session();
+        assert_eq!(
+            final_session
+                .database(aliases[4])
+                .unwrap()
+                .pin()
+                .commit()
+                .as_str(),
+            if expected_value == 91 {
+                leaf_a.as_str()
+            } else {
+                leaf_b.as_str()
+            },
+            "each exact depth label resolves its row's terminal package"
+        );
+        assert_eq!(
+            evaluate_terminal_pin(final_session, aliases[4]),
+            Ok(Some(Value::int(expected_value.into()))),
+            "label-selected row {row} evaluates the selected terminal primary"
+        );
+    }
+    assert!(matches!(
+        resolver.extend_sibling_terminal_pair_checkpoint_storms_from_depths(
+            &nested_folded,
+            &depth_plans[..2],
+        ),
+        Err(AttachmentError::RetainedSnapshotUnavailable)
+    ));
+    let depth_continued = resolver
+        .extend_sibling_terminal_pair_checkpoint_storms_from_depths(
+            &nested_folded,
+            &depth_plans,
+        )
+        .unwrap_or_else(|error| panic!("depth-selected sibling continuation failed: {error:?}"));
+    for (row, depth, original_label, expected_value) in [
+        (0, 1, &depth_label_a, 91),
+        (1, 0, &depth_label_b, 92),
+        (2, 1, &depth_label_independent_a, 91),
+    ] {
+        assert_eq!(
+            depth_continued.retained_depth_label(row, 6, depth).unwrap(),
+            *original_label,
+            "the selected nonuniform depth identity survives another multi-parent fold"
+        );
+        let final_session = depth_continued.routes()[row].final_session();
+        assert_eq!(
+            final_session
+                .database(aliases[4])
+                .unwrap()
+                .pin()
+                .commit()
+                .as_str(),
+            if expected_value == 91 {
+                leaf_a.as_str()
+            } else {
+                leaf_b.as_str()
+            },
+            "continuation follows the pin selected by this row's exact depth"
+        );
+    }
+
+    let continued_label_a = depth_continued.retained_depth_label(0, 10, 1).unwrap();
+    let continued_label_b = depth_continued.retained_depth_label(1, 10, 0).unwrap();
+    let continued_label_independent_a = depth_continued.retained_depth_label(2, 10, 1).unwrap();
+    let second_depth_storms_a = [(10, 1, no_pair_waves.as_slice())];
+    let second_depth_storms_b = [(10, 0, no_pair_waves.as_slice())];
+    let second_depth_storms_independent_a = [(10, 1, no_pair_waves.as_slice())];
+    let second_depth_plans = [
+        second_depth_storms_a.as_slice(),
+        second_depth_storms_b.as_slice(),
+        second_depth_storms_independent_a.as_slice(),
+    ];
+    let storm_rounds = [depth_plans.as_slice(), second_depth_plans.as_slice()];
+    let label_storm_rounds = [label_plans.as_slice(), label_plans.as_slice()];
+    let twice_label_continued = resolver
+        .extend_sibling_terminal_pair_checkpoint_storm_rounds_from_depth_labels(
+            &nested_folded,
+            &label_storm_rounds,
+        )
+        .unwrap_or_else(|error| panic!("multi-round label storm failed: {error:?}"));
+    for (row, source_depth, source_label, expected_value) in [
+        (0, 1, &depth_label_a, 91),
+        (1, 0, &depth_label_b, 92),
+        (2, 1, &depth_label_independent_a, 91),
+    ] {
+        assert_eq!(
+            twice_label_continued
+                .retained_depth_label(row, 6, source_depth)
+                .unwrap(),
+            *source_label,
+            "repeated folds keep resolving their captured row anchor identity"
+        );
+        let final_session = twice_label_continued.routes()[row].final_session();
+        assert_eq!(
+            evaluate_terminal_pin(final_session, aliases[4]),
+            Ok(Some(Value::int(expected_value.into()))),
+            "repeated folds return the value computed by each paired parent route"
+        );
+    }
+
+    let omission_round = [
+        Some((&depth_label_a, middle_waves_a.as_slice())),
+        None,
+        Some((&depth_label_independent_a, middle_waves_a.as_slice())),
+    ];
+    let followup_round = [
+        Some((&depth_label_a, no_pair_waves.as_slice())),
+        Some((&depth_label_b, root_waves_b.as_slice())),
+        None,
+    ];
+    let omission_rounds = [omission_round.as_slice(), followup_round.as_slice()];
+    let omission_continued = resolver
+        .extend_sibling_terminal_pair_checkpoint_storm_rounds_from_depth_labels_with_omissions(
+            &nested_folded,
+            &omission_rounds,
+        )
+        .unwrap_or_else(|error| panic!("paired closure omissions failed: {error:?}"));
+    for (row, depth, source_label, expected_value) in [
+        (0, 1, &depth_label_a, 91),
+        (1, 0, &depth_label_b, 92),
+        (2, 1, &depth_label_independent_a, 91),
+    ] {
+        assert_eq!(
+            omission_continued.retained_depth_label(row, 6, depth).unwrap(),
+            *source_label,
+            "an omitted paired closure does not shift the row's retained depth identity"
+        );
+        assert_eq!(
+            evaluate_terminal_pin(omission_continued.routes()[row].final_session(), aliases[4]),
+            Ok(Some(Value::int(expected_value.into()))),
+            "the paired omission keeps row {row}'s terminal route value"
+        );
+    }
+    let crossed_equal_pin_omission_round = [
+        Some((&depth_label_a, middle_waves_a.as_slice())),
+        None,
+        Some((&depth_label_a, middle_waves_a.as_slice())),
+    ];
+    assert!(matches!(
+        resolver.extend_sibling_terminal_pair_checkpoint_storm_rounds_from_depth_labels_with_omissions(
+            &nested_folded,
+            &[crossed_equal_pin_omission_round.as_slice()],
+        ),
+        Err(AttachmentError::RetainedSnapshotUnavailable)
+    ));
+
+    let twice_continued = resolver
+        .extend_sibling_terminal_pair_checkpoint_storm_rounds_from_depths(
+            &nested_folded,
+            &storm_rounds,
+        )
+        .unwrap_or_else(|error| panic!("multi-round sibling depth storm failed: {error:?}"));
+    let twice_continued_by_steps = resolver
+        .extend_sibling_terminal_pair_checkpoint_storms_from_depths(
+            &depth_continued,
+            &second_depth_plans,
+        )
+        .unwrap_or_else(|error| panic!("continued sibling depth replay failed: {error:?}"));
+    for (row, source_depth, source_label, next_depth, next_label, expected_value) in [
+        (0, 1, &depth_label_a, 1, &continued_label_a, 91),
+        (1, 0, &depth_label_b, 0, &continued_label_b, 92),
+        (
+            2,
+            1,
+            &depth_label_independent_a,
+            1,
+            &continued_label_independent_a,
+            91,
+        ),
+    ] {
+        assert_eq!(
+            twice_continued_by_steps
+                .retained_depth_label(row, 6, source_depth)
+                .unwrap(),
+            *source_label,
+            "the first-round source anchor remains bound to its original depth"
+        );
+        assert_eq!(
+            twice_continued_by_steps
+                .retained_depth_label(row, 10, next_depth)
+                .unwrap(),
+            *next_label,
+            "the next round retains the checkpoint identity selected from its predecessor"
+        );
+        assert_eq!(
+            twice_continued_by_steps.routes()[row]
+                .final_session()
+                .database(aliases[4])
+                .unwrap()
+                .pin()
+                .commit()
+                .as_str(),
+            if expected_value == 91 {
+                leaf_a.as_str()
+            } else {
+                leaf_b.as_str()
+            }
+        );
+        let batch_label = twice_continued.retained_depth_label(row, 10, next_depth).unwrap();
+        assert_eq!(batch_label.wave(), 10);
+        assert_eq!(batch_label.depth(), next_depth);
+        assert_eq!(
+            twice_continued.routes()[row]
+                .final_session()
+                .database(aliases[4])
+                .unwrap()
+                .pin(),
+            twice_continued_by_steps.routes()[row]
+                .final_session()
+                .database(aliases[4])
+                .unwrap()
+                .pin(),
+            "atomic round composition matches the explicitly stepped continuation"
+        );
+    }
+}
+
+#[test]
+fn sparse_nested_storm_folds_preserve_terminal_route_identity() {
+    let package_source = include_str!("fixtures/attachment-route-package.orna");
+    let primary_source = include_str!("fixtures/attachment-route-primary.orna");
+    let aliases = [
+        "archive",
+        "archive_copy",
+        "archive_copy_archive",
+        "archive_copy_archive_archive",
+        "archive_copy_archive_archive_archive",
+    ];
+    let (package_dir, package_repository, _) = repository(package_source);
+    let snapshot = |value: &str, manifest: Option<&str>, message: &str| {
+        let source = package_source.replace("42", value);
+        commit_snapshot(package_dir.path(), &source, manifest, message)
+    };
+
+    let leaf_initial = snapshot("93", None, "initial terminal leaf");
+    let leaf_middle = snapshot("94", None, "middle terminal leaf");
+    let leaf_final = snapshot("96", None, "final terminal leaf");
+    let route_three_initial = snapshot(
+        "83",
+        Some(&format!("{} {}\n", aliases[4], leaf_initial)),
+        "initial third-depth route",
+    );
+    let route_three_middle = snapshot(
+        "84",
+        Some(&format!("{} {}\n", aliases[4], leaf_middle)),
+        "middle third-depth route",
+    );
+    let route_three_final = snapshot(
+        "85",
+        Some(&format!("{} {}\n", aliases[4], leaf_final)),
+        "final third-depth route",
+    );
+    let terminal_initial = snapshot(
+        "80",
+        Some(&format!("{} {}\n", aliases[3], route_three_initial)),
+        "initial second-depth route",
+    );
+    let deep_initial = snapshot(
+        "70",
+        Some(&format!("{} {}\n", aliases[2], terminal_initial)),
+        "initial nested route",
+    );
+    let middle = snapshot(
+        "60",
+        Some(&format!("{} {}\n", aliases[1], deep_initial)),
+        "nested route root",
+    );
+    let (primary_dir, primary_repository, _) = repository(primary_source);
+    let parent_commit = commit_snapshot(
+        primary_dir.path(),
+        primary_source,
+        Some(&format!("{} {}\n", aliases[0], middle)),
+        "primary attachment root",
+    );
+    let loader = ProjectLoader::default();
+    let resolver = PackageResolver::new(
+        aliases
+            .iter()
+            .map(|alias| ((*alias).to_owned(), package_repository.clone())),
+        loader,
+    )
+    .unwrap();
+    let parent = resolver
+        .resolve_for_parent(
+            PinnedDatabase::resolve("app", primary_repository, &parent_commit, loader).unwrap(),
+        )
+        .unwrap();
+    let nested_parent = resolver
+        .resolve_nested_path(&parent, &[aliases[0], aliases[1]])
+        .unwrap();
+    let initial_route = resolver
+        .resolve_nested_rebind_path(&nested_parent, &[])
+        .unwrap();
+
+    let first_pair = [
+        PinnedDatabase::resolve(
+            aliases[2],
+            package_repository.clone(),
+            &snapshot("71", Some(&format!("{} {}\n", aliases[3], route_three_middle)), "outer pair route"),
+            loader,
+        )
+        .unwrap(),
+        PinnedDatabase::resolve(
+            aliases[3],
+            package_repository.clone(),
+            &route_three_middle,
+            loader,
+        )
+        .unwrap(),
+    ];
+    let second_pair = [
+        PinnedDatabase::resolve(
+            aliases[3],
+            package_repository.clone(),
+            &route_three_final,
+            loader,
+        )
+        .unwrap(),
+        PinnedDatabase::resolve(
+            aliases[4],
+            package_repository.clone(),
+            &leaf_final,
+            loader,
+        )
+        .unwrap(),
+    ];
+    let first_stage = resolver
+        .extend_nested_terminal_pair_chain(&initial_route, &[first_pair.clone()])
+        .unwrap();
+    let outer_label = first_stage.retained_depth_label(0, 0).unwrap();
+    let nested_label = first_stage.retained_depth_label(0, 1).unwrap();
+    let outer_waves = [first_pair.clone()];
+    let nested_waves = [second_pair.clone()];
+    let outer_slot = [Some((&outer_label, outer_waves.as_slice())), None];
+    let nested_slot = [None, Some((&nested_label, nested_waves.as_slice()))];
+    let omission_rounds = [outer_slot.as_slice(), nested_slot.as_slice()];
+    let folded = resolver
+        .extend_nested_terminal_pair_checkpoint_storm_rounds_from_depth_labels_with_omissions(
+            &first_stage,
+            &omission_rounds,
+        )
+        .unwrap();
+    assert_eq!(
+        folded
+            .final_session()
+            .database(aliases[4])
+            .unwrap()
+            .pin()
+            .commit()
+            .as_str(),
+        leaf_final
+    );
+
+    let sparse_outer_round = [(&outer_label, Some(outer_waves.as_slice()))];
+    let sparse_mixed_round = [
+        (&outer_label, None),
+        (&nested_label, Some(nested_waves.as_slice())),
+    ];
+    let sparse_tail_round = [(&outer_label, None)];
+    let sparse_rounds = [
+        sparse_outer_round.as_slice(),
+        sparse_mixed_round.as_slice(),
+        sparse_tail_round.as_slice(),
+    ];
+    let sparse_folded = resolver
+        .extend_nested_terminal_pair_sparse_checkpoint_storm_rounds_from_depth_labels(
+            &first_stage,
+            &sparse_rounds,
+        )
+        .unwrap();
+    let attached_pins = |session: &AttachedDatabaseSession| {
+        session
+            .attached()
+            .map(|(alias, database)| (alias.to_owned(), database.pin().clone()))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        sparse_folded.retained_depth_label(0, 0).unwrap(),
+        outer_label,
+        "varying sparse round widths keep the outer route identity keyed by label"
+    );
+    assert_eq!(
+        sparse_folded.retained_depth_label(0, 1).unwrap(),
+        nested_label,
+        "a nested label remains valid even when omitted from the later sparse round"
+    );
+    assert_eq!(
+        sparse_folded
+            .final_session()
+            .database(aliases[4])
+            .unwrap()
+            .pin()
+            .commit()
+            .as_str(),
+        leaf_final
+    );
+    assert_eq!(
+        sparse_folded.terminal_route_identity(),
+        folded.terminal_route_identity(),
+        "sparse and positional folds select the same terminal identity"
+    );
+
+    let forward_pair_round = [
+        (&outer_label, Some(outer_waves.as_slice())),
+        (&nested_label, Some(nested_waves.as_slice())),
+    ];
+    let reverse_pair_round = [
+        (&nested_label, Some(nested_waves.as_slice())),
+        (&outer_label, Some(outer_waves.as_slice())),
+    ];
+    let forward_pair_fold = resolver
+        .extend_nested_terminal_pair_sparse_checkpoint_storm_rounds_from_depth_labels(
+            &first_stage,
+            &[forward_pair_round.as_slice()],
+        )
+        .unwrap();
+    let reverse_pair_fold = resolver
+        .extend_nested_terminal_pair_sparse_checkpoint_storm_rounds_from_depth_labels(
+            &first_stage,
+            &[reverse_pair_round.as_slice()],
+        )
+        .unwrap();
+    assert_eq!(
+        forward_pair_fold.final_session().primary().pin(),
+        reverse_pair_fold.final_session().primary().pin(),
+        "paired sparse rebinds use label order, not caller entry order"
+    );
+    assert_eq!(
+        attached_pins(forward_pair_fold.final_session()),
+        attached_pins(reverse_pair_fold.final_session()),
+        "reversing a paired round keeps the exact terminal pin route"
+    );
+    assert_eq!(
+        forward_pair_fold
+            .final_session()
+            .database(aliases[4])
+            .unwrap()
+            .pin()
+            .commit()
+            .as_str(),
+        leaf_final,
+        "canonical paired folding keeps the computed terminal package snapshot"
+    );
+
+    let forward_omission_pair = [
+        (&outer_label, None),
+        (&nested_label, Some(nested_waves.as_slice())),
+    ];
+    let reverse_omission_pair = [
+        (&nested_label, Some(nested_waves.as_slice())),
+        (&outer_label, None),
+    ];
+    let forward_omission_fold = resolver
+        .extend_nested_terminal_pair_sparse_checkpoint_storm_rounds_from_depth_labels(
+            &first_stage,
+            &[forward_omission_pair.as_slice()],
+        )
+        .unwrap();
+    let reverse_omission_fold = resolver
+        .extend_nested_terminal_pair_sparse_checkpoint_storm_rounds_from_depth_labels(
+            &first_stage,
+            &[reverse_omission_pair.as_slice()],
+        )
+        .unwrap();
+    assert_eq!(
+        attached_pins(forward_omission_fold.final_session()),
+        attached_pins(reverse_omission_fold.final_session()),
+        "omitting the paired outer route is stable under sparse entry permutation"
+    );
+    assert_eq!(
+        forward_omission_fold.retained_depth_label(0, 0).unwrap(),
+        outer_label,
+        "an omitted depth keeps its original checkpoint identity"
+    );
+    assert_eq!(
+        forward_omission_fold.retained_depth_label(0, 1).unwrap(),
+        nested_label,
+        "the paired active depth remains attached to its original checkpoint"
+    );
+
+    let first_sparse_chain = [forward_pair_round.as_slice()];
+    let second_sparse_chain = [forward_omission_pair.as_slice()];
+    let sparse_chains = [
+        first_sparse_chain.as_slice(),
+        second_sparse_chain.as_slice(),
+    ];
+    let chained_sparse_fold = resolver
+        .extend_nested_terminal_pair_sparse_checkpoint_storm_chains_from_depth_labels(
+            &first_stage,
+            &sparse_chains,
+        )
+        .unwrap();
+    assert_eq!(
+        chained_sparse_fold.terminal_route_identity(),
+        folded.terminal_route_identity(),
+        "separate sparse fold chains retain the exact paired terminal identity"
+    );
+    assert_eq!(
+        chained_sparse_fold.retained_depth_label(0, 0).unwrap(),
+        outer_label,
+        "the outer checkpoint identity survives a later sparse chain"
+    );
+    assert_eq!(
+        chained_sparse_fold.retained_depth_label(0, 1).unwrap(),
+        nested_label,
+        "the nested checkpoint identity survives a later sparse chain"
+    );
+    let chained_terminal_identity = chained_sparse_fold.terminal_route_identity();
+    let empty_replacement_waves: [[PinnedDatabase; 2]; 0] = [];
+    let paired_none_omission = [(&outer_label, None), (&nested_label, None)];
+    let paired_omission_tail = [
+        (&outer_label, Some(empty_replacement_waves.as_slice())),
+        (&nested_label, None),
+    ];
+    let first_omission_tail_chain = [paired_none_omission.as_slice()];
+    let omission_tail_chain = [paired_omission_tail.as_slice()];
+    let omission_tail_chains = [
+        first_omission_tail_chain.as_slice(),
+        omission_tail_chain.as_slice(),
+    ];
+    let chained_after_omissions = resolver
+        .extend_nested_terminal_pair_sparse_checkpoint_storm_chains_preserving_terminal_identity(
+            &chained_sparse_fold,
+            &chained_terminal_identity,
+            &omission_tail_chains,
+        )
+        .unwrap();
+    chained_after_omissions
+        .validate_terminal_route_identity(&chained_terminal_identity)
+        .unwrap();
+    assert_eq!(
+        chained_after_omissions.terminal_route_identity(),
+        chained_terminal_identity,
+        "paired omissions across a later chain preserve the computed terminal identity"
+    );
+    let composed_rebind_and_omissions = resolver
+        .extend_nested_terminal_pair_sparse_checkpoint_storm_rebind_then_omission_chains_preserving_terminal_identity(
+            &first_stage,
+            &sparse_chains,
+            &omission_tail_chains,
+        )
+        .unwrap();
+    assert_eq!(
+        composed_rebind_and_omissions.terminal_route_identity(),
+        chained_terminal_identity,
+        "the computed paired rebind identity remains exact across later omission chains"
+    );
+    assert_eq!(
+        attached_pins(composed_rebind_and_omissions.final_session()),
+        attached_pins(chained_sparse_fold.final_session()),
+        "composing rebind and omission chains preserves the paired terminal pin route"
+    );
+    assert_eq!(
+        composed_rebind_and_omissions
+            .final_session()
+            .database(aliases[4])
+            .unwrap()
+            .pin()
+            .commit()
+            .as_str(),
+        leaf_final,
+        "the exact computed terminal package value survives the omission phase"
+    );
+    let active_in_omission_round = [(&outer_label, Some(outer_waves.as_slice()))];
+    let invalid_omission_chain = [active_in_omission_round.as_slice()];
+    let first_only_rebind_chains = [first_sparse_chain.as_slice()];
+    assert!(matches!(
+        resolver
+            .extend_nested_terminal_pair_sparse_checkpoint_storm_rebind_then_omission_chains_preserving_terminal_identity(
+                &first_stage,
+                &first_only_rebind_chains,
+                &[invalid_omission_chain.as_slice()],
+            ),
+        Err(AttachmentError::RetainedSnapshotUnavailable)
+    ));
+
+    let middle_terminal_pair = [
+        PinnedDatabase::resolve(
+            aliases[3],
+            package_repository.clone(),
+            &route_three_middle,
+            loader,
+        )
+        .unwrap(),
+        PinnedDatabase::resolve(
+            aliases[4],
+            package_repository.clone(),
+            &leaf_middle,
+            loader,
+        )
+        .unwrap(),
+    ];
+    let middle_waves = [middle_terminal_pair];
+    let active_terminal_round = [
+        (&outer_label, None),
+        (&nested_label, Some(middle_waves.as_slice())),
+    ];
+    let active_terminal_route = resolver
+        .extend_nested_terminal_pair_sparse_checkpoint_storm_rounds_from_depth_labels(
+            &first_stage,
+            &[active_terminal_round.as_slice()],
+        )
+        .unwrap();
+    let active_terminal_identity = active_terminal_route.terminal_route_identity();
+    let middle_rebind_chain = [active_terminal_round.as_slice()];
+    let paired_rebind_chains = [
+        first_sparse_chain.as_slice(),
+        middle_rebind_chain.as_slice(),
+        first_sparse_chain.as_slice(),
+    ];
+    let after_first_rebind_chain = resolver
+        .extend_nested_terminal_pair_sparse_checkpoint_storm_chains_from_depth_labels(
+            &first_stage,
+            &[first_sparse_chain.as_slice()],
+        )
+        .unwrap();
+    let after_middle_rebind_chain = resolver
+        .extend_nested_terminal_pair_sparse_checkpoint_storm_chains_from_depth_labels(
+            &after_first_rebind_chain,
+            &[middle_rebind_chain.as_slice()],
+        )
+        .unwrap();
+    let after_restoring_rebind_chain = resolver
+        .extend_nested_terminal_pair_sparse_checkpoint_storm_chains_from_depth_labels(
+            &after_middle_rebind_chain,
+            &[first_sparse_chain.as_slice()],
+        )
+        .unwrap();
+    let first_chain_identity = after_first_rebind_chain.terminal_route_identity();
+    let middle_chain_identity = after_middle_rebind_chain.terminal_route_identity();
+    let restored_chain_identity = after_restoring_rebind_chain.terminal_route_identity();
+    assert_ne!(
+        first_chain_identity,
+        middle_chain_identity,
+        "the nested rebind changes the terminal identity at its chain boundary"
+    );
+    assert_eq!(
+        first_chain_identity,
+        restored_chain_identity,
+        "rebinding back to the same pins on the same route restores its terminal identity"
+    );
+    assert_eq!(
+        after_middle_rebind_chain
+            .final_session()
+            .database(aliases[4])
+            .unwrap()
+            .pin()
+            .commit()
+            .as_str(),
+        leaf_middle,
+        "the intermediate paired chain selects the computed middle package snapshot"
+    );
+    let identity_guarded_omission_fold = resolver
+        .extend_nested_terminal_pair_sparse_checkpoint_storm_rebind_then_omission_chains_validating_rebound_terminal_identity(
+            &first_stage,
+            &first_only_rebind_chains,
+            &first_chain_identity,
+            &omission_tail_chains,
+        )
+        .unwrap();
+    assert_eq!(
+        identity_guarded_omission_fold.terminal_route_identity(),
+        first_chain_identity,
+        "the expected rebind identity remains exact through nested omission chains"
+    );
+    assert_eq!(
+        identity_guarded_omission_fold
+            .final_session()
+            .database(aliases[4])
+            .unwrap()
+            .pin()
+            .commit()
+            .as_str(),
+        leaf_final,
+        "identity validation preserves the actual terminal package snapshot"
+    );
+    let (audited_omission_fold, omission_identity_transitions) = resolver
+        .extend_nested_terminal_pair_sparse_checkpoint_storm_rebind_then_omission_chains_capturing_terminal_identity_transitions(
+            &first_stage,
+            &first_only_rebind_chains,
+            &first_chain_identity,
+            &omission_tail_chains,
+        )
+        .unwrap();
+    assert_eq!(
+        omission_identity_transitions,
+        vec![
+            (first_chain_identity.clone(), first_chain_identity.clone()),
+            (first_chain_identity.clone(), first_chain_identity.clone()),
+        ],
+        "each paired omission chain reports its exact unchanged terminal identity"
+    );
+    assert_eq!(
+        audited_omission_fold.terminal_route_identity(),
+        first_chain_identity,
+        "the audited omission fold retains its computed rebound identity"
+    );
+    assert_eq!(
+        audited_omission_fold
+            .final_session()
+            .database(aliases[4])
+            .unwrap()
+            .pin()
+            .commit()
+            .as_str(),
+        leaf_final,
+        "auditing identity edges retains the computed terminal package value"
+    );
+    assert!(matches!(
+        resolver
+            .extend_nested_terminal_pair_sparse_checkpoint_storm_rebind_then_omission_chains_capturing_terminal_identity_transitions(
+                &first_stage,
+                &first_only_rebind_chains,
+                &middle_chain_identity,
+                &omission_tail_chains,
+            ),
+        Err(AttachmentError::RetainedSnapshotUnavailable)
+    ));
+    assert!(matches!(
+        resolver
+            .extend_nested_terminal_pair_sparse_checkpoint_storm_rebind_then_omission_chains_capturing_terminal_identity_transitions(
+                &first_stage,
+                &first_only_rebind_chains,
+                &first_chain_identity,
+                &[invalid_omission_chain.as_slice()],
+            ),
+        Err(AttachmentError::RetainedSnapshotUnavailable)
+    ));
+    assert!(matches!(
+        resolver
+            .extend_nested_terminal_pair_sparse_checkpoint_storm_rebind_then_omission_chains_validating_rebound_terminal_identity(
+                &first_stage,
+                &first_only_rebind_chains,
+                &middle_chain_identity,
+                &omission_tail_chains,
+            ),
+        Err(AttachmentError::RetainedSnapshotUnavailable)
+    ));
+    let expected_chain_identities = [
+        first_chain_identity.clone(),
+        middle_chain_identity.clone(),
+        restored_chain_identity.clone(),
+    ];
+    let identity_checked_rebind_chains = resolver
+        .extend_nested_terminal_pair_sparse_checkpoint_storm_chains_validating_terminal_identities(
+            &first_stage,
+            &paired_rebind_chains,
+            &expected_chain_identities,
+        )
+        .unwrap();
+    identity_checked_rebind_chains
+        .validate_terminal_route_identity(&restored_chain_identity)
+        .unwrap();
+    assert_eq!(
+        identity_checked_rebind_chains.terminal_route_identity(),
+        restored_chain_identity,
+        "the paired fold returns the verified identity for its final sparse chain"
+    );
+    assert_eq!(
+        identity_checked_rebind_chains
+            .final_session()
+            .database(aliases[4])
+            .unwrap()
+            .pin()
+            .commit()
+            .as_str(),
+        leaf_final,
+        "the final sparse chain restores the actual terminal package snapshot"
+    );
+    let initial_chain_identity = first_stage.terminal_route_identity();
+    let expected_identity_transitions = [
+        (initial_chain_identity, first_chain_identity.clone()),
+        (first_chain_identity.clone(), middle_chain_identity.clone()),
+        (middle_chain_identity.clone(), restored_chain_identity.clone()),
+    ];
+    let (transition_fold, observed_identity_transitions) = resolver
+        .extend_nested_terminal_pair_sparse_checkpoint_storm_chains_capturing_terminal_identity_transitions(
+            &first_stage,
+            &paired_rebind_chains,
+        )
+        .unwrap();
+    assert_eq!(
+        observed_identity_transitions,
+        expected_identity_transitions,
+        "each sparse rebind chain records its exact before/after terminal identities"
+    );
+    assert_eq!(
+        transition_fold.terminal_route_identity(),
+        restored_chain_identity,
+        "the final route identity matches the last transition destination"
+    );
+    assert_eq!(
+        transition_fold
+            .final_session()
+            .database(aliases[4])
+            .unwrap()
+            .pin()
+            .commit()
+            .as_str(),
+        leaf_final,
+        "the transition fold ends at the concrete final terminal package pin"
+    );
+    let transition_validated_fold = resolver
+        .extend_nested_terminal_pair_sparse_checkpoint_storm_chains_validating_terminal_identity_transitions(
+            &first_stage,
+            &paired_rebind_chains,
+            &expected_identity_transitions,
+        )
+        .unwrap();
+    assert_eq!(
+        transition_validated_fold.terminal_route_identity(),
+        restored_chain_identity,
+        "validating paired identity edges returns the expected terminal route"
+    );
+    assert_eq!(
+        transition_validated_fold
+            .final_session()
+            .database(aliases[4])
+            .unwrap()
+            .pin()
+            .commit()
+            .as_str(),
+        leaf_final,
+        "identity-edge validation preserves the exact final nested package value"
+    );
+    let paired_terminal_pin_folds = [
+        forward_pair_round.as_slice(),
+        active_terminal_round.as_slice(),
+        forward_pair_round.as_slice(),
+    ];
+    let pin_fold_identity_checked = resolver
+        .extend_nested_terminal_pair_sparse_checkpoint_storm_pin_folds_validating_terminal_identity_transitions(
+            &first_stage,
+            &paired_terminal_pin_folds,
+            &expected_identity_transitions,
+        )
+        .unwrap();
+    assert_eq!(
+        pin_fold_identity_checked.terminal_route_identity(),
+        restored_chain_identity,
+        "each paired terminal pin fold follows its exact identity transition"
+    );
+    assert_eq!(
+        pin_fold_identity_checked.retained_depth_label(0, 1).unwrap(),
+        nested_label,
+        "nested depth identity stays attached through each terminal pin fold"
+    );
+    assert_eq!(
+        pin_fold_identity_checked
+            .final_session()
+            .database(aliases[4])
+            .unwrap()
+            .pin()
+            .commit()
+            .as_str(),
+        leaf_final,
+        "validated terminal pin folds resolve the actual restored package commit"
+    );
+    let mut stale_pin_fold_transitions = expected_identity_transitions.clone();
+    stale_pin_fold_transitions[1].1 = first_chain_identity.clone();
+    assert!(matches!(
+        resolver
+            .extend_nested_terminal_pair_sparse_checkpoint_storm_pin_folds_validating_terminal_identity_transitions(
+                &first_stage,
+                &paired_terminal_pin_folds,
+                &stale_pin_fold_transitions,
+            ),
+        Err(AttachmentError::RetainedSnapshotUnavailable)
+    ));
+    let first_rebind_cascade = [
+        first_sparse_chain.as_slice(),
+        middle_rebind_chain.as_slice(),
+    ];
+    let restoring_rebind_cascade = [first_sparse_chain.as_slice()];
+    let paired_rebind_cascades = [
+        first_rebind_cascade.as_slice(),
+        restoring_rebind_cascade.as_slice(),
+    ];
+    let expected_cascade_identity_transitions = [
+        (
+            first_stage.terminal_route_identity(),
+            middle_chain_identity.clone(),
+        ),
+        (
+            middle_chain_identity.clone(),
+            restored_chain_identity.clone(),
+        ),
+    ];
+    let (cascade_fold, observed_cascade_transitions) = resolver
+        .extend_nested_terminal_pair_sparse_checkpoint_storm_rebind_cascades_validating_terminal_identity_transitions(
+            &first_stage,
+            &paired_rebind_cascades,
+            &expected_cascade_identity_transitions,
+        )
+        .unwrap();
+    assert_eq!(
+        observed_cascade_transitions,
+        expected_cascade_identity_transitions,
+        "each multi-chain rebind cascade validates and reports its exact paired terminal identity edge"
+    );
+    assert_eq!(
+        cascade_fold.terminal_route_identity(),
+        restored_chain_identity,
+        "the final cascaded route retains the restored identity"
+    );
+    assert_eq!(
+        cascade_fold
+            .final_session()
+            .database(aliases[4])
+            .unwrap()
+            .pin()
+            .commit()
+            .as_str(),
+        leaf_final,
+        "the cascaded identity proof reaches the concrete final package pin"
+    );
+    let stale_cascade_transitions = [
+        expected_cascade_identity_transitions[0].clone(),
+        (middle_chain_identity.clone(), middle_chain_identity.clone()),
+    ];
+    assert!(matches!(
+        resolver
+            .extend_nested_terminal_pair_sparse_checkpoint_storm_rebind_cascades_validating_terminal_identity_transitions(
+                &first_stage,
+                &paired_rebind_cascades,
+                &stale_cascade_transitions,
+            ),
+        Err(AttachmentError::RetainedSnapshotUnavailable)
+    ));
+    let paired_omission_segment_chain = [
+        paired_none_omission.as_slice(),
+        paired_omission_tail.as_slice(),
+    ];
+    let paired_omission_segments = [
+        paired_omission_segment_chain.as_slice(),
+        paired_omission_segment_chain.as_slice(),
+        paired_omission_segment_chain.as_slice(),
+    ];
+    let (paired_terminal_omission_fold, segment_identity_transitions) = resolver
+        .extend_nested_terminal_pair_sparse_checkpoint_storm_rebind_omission_segments_capturing_terminal_identity_transitions(
+            &first_stage,
+            &paired_rebind_chains,
+            &paired_omission_segments,
+        )
+        .unwrap();
+    assert_eq!(
+        segment_identity_transitions,
+        vec![
+            (
+                first_stage.terminal_route_identity(),
+                first_chain_identity.clone(),
+                first_chain_identity.clone(),
+            ),
+            (
+                first_chain_identity.clone(),
+                middle_chain_identity.clone(),
+                middle_chain_identity.clone(),
+            ),
+            (
+                middle_chain_identity.clone(),
+                restored_chain_identity.clone(),
+                restored_chain_identity.clone(),
+            ),
+        ],
+        "each rebind transition may change identity while its paired omission keeps that exact identity"
+    );
+    assert_eq!(
+        paired_terminal_omission_fold.terminal_route_identity(),
+        restored_chain_identity,
+        "the paired terminal omission fold returns the final rebound identity"
+    );
+    assert_eq!(
+        paired_terminal_omission_fold
+            .final_session()
+            .database(aliases[4])
+            .unwrap()
+            .pin()
+            .commit()
+            .as_str(),
+        leaf_final,
+        "the final audited segment retains its concrete terminal package pin"
+    );
+    assert!(matches!(
+        resolver
+            .extend_nested_terminal_pair_sparse_checkpoint_storm_rebind_omission_segments_capturing_terminal_identity_transitions(
+                &first_stage,
+                &first_only_rebind_chains,
+                &[invalid_omission_chain.as_slice()],
+        ),
+        Err(AttachmentError::RetainedSnapshotUnavailable)
+    ));
+    let validated_terminal_omission_fold = resolver
+        .extend_nested_terminal_pair_sparse_checkpoint_storm_rebind_omission_segments_validating_terminal_identity_transitions(
+            &first_stage,
+            &paired_rebind_chains,
+            &paired_omission_segments,
+            &segment_identity_transitions,
+        )
+        .unwrap();
+    assert_eq!(
+        validated_terminal_omission_fold.terminal_route_identity(),
+        restored_chain_identity,
+        "all expected rebind and omission boundaries validate through the paired fold"
+    );
+    assert_eq!(
+        validated_terminal_omission_fold
+            .final_session()
+            .database(aliases[4])
+            .unwrap()
+            .pin()
+            .commit()
+            .as_str(),
+        leaf_final,
+        "validated identity edges preserve the concrete final terminal package pin"
+    );
+    let stale_segment_identity_transitions = [
+        segment_identity_transitions[0].clone(),
+        (
+            first_chain_identity.clone(),
+            first_chain_identity.clone(),
+            middle_chain_identity.clone(),
+        ),
+        segment_identity_transitions[2].clone(),
+    ];
+    assert!(matches!(
+        resolver
+            .extend_nested_terminal_pair_sparse_checkpoint_storm_rebind_omission_segments_validating_terminal_identity_transitions(
+                &first_stage,
+                &paired_rebind_chains,
+                &paired_omission_segments,
+                &stale_segment_identity_transitions,
+            ),
+        Err(AttachmentError::RetainedSnapshotUnavailable)
+    ));
+    let expected_single_segment_transition = [(
+        first_stage.terminal_route_identity(),
+        first_chain_identity.clone(),
+        first_chain_identity.clone(),
+    )];
+    assert!(matches!(
+        resolver
+            .extend_nested_terminal_pair_sparse_checkpoint_storm_rebind_omission_segments_validating_terminal_identity_transitions(
+                &first_stage,
+                &first_only_rebind_chains,
+                &[invalid_omission_chain.as_slice()],
+                &expected_single_segment_transition,
+            ),
+        Err(AttachmentError::RetainedSnapshotUnavailable)
+    ));
+    let stale_identity_transitions = [
+        expected_identity_transitions[0].clone(),
+        (middle_chain_identity.clone(), middle_chain_identity.clone()),
+        expected_identity_transitions[2].clone(),
+    ];
+    assert!(matches!(
+        resolver
+            .extend_nested_terminal_pair_sparse_checkpoint_storm_chains_validating_terminal_identity_transitions(
+                &first_stage,
+                &paired_rebind_chains,
+                &stale_identity_transitions,
+            ),
+        Err(AttachmentError::RetainedSnapshotUnavailable)
+    ));
+    assert!(matches!(
+        resolver
+            .extend_nested_terminal_pair_sparse_checkpoint_storm_chains_validating_terminal_identity_transitions(
+                &first_stage,
+                &paired_rebind_chains,
+                &expected_identity_transitions[..2],
+        ),
+        Err(AttachmentError::RetainedSnapshotUnavailable)
+    ));
+    let (captured_chain_fold, captured_chain_identities) = resolver
+        .extend_nested_terminal_pair_sparse_checkpoint_storm_chains_capturing_terminal_identities(
+            &first_stage,
+            &paired_rebind_chains,
+        )
+        .unwrap();
+    assert_eq!(
+        captured_chain_identities,
+        expected_chain_identities,
+        "the fold captures each sparse nested rebind chain's computed terminal identity"
+    );
+    assert_eq!(
+        captured_chain_fold.terminal_route_identity(),
+        restored_chain_identity,
+        "the final folded route identity matches the last captured chain boundary"
+    );
+    assert_eq!(
+        captured_chain_fold
+            .final_session()
+            .database(aliases[4])
+            .unwrap()
+            .pin()
+            .commit()
+            .as_str(),
+        leaf_final,
+        "the identity-capturing fold resolves to the concrete final terminal pin"
+    );
+    let segmented_rebind_chains = [
+        first_sparse_chain.as_slice(),
+        middle_rebind_chain.as_slice(),
+    ];
+    let segmented_omission_chains = [
+        omission_tail_chain.as_slice(),
+        omission_tail_chain.as_slice(),
+    ];
+    let (segmented_route, segment_identities) = resolver
+        .extend_nested_terminal_pair_sparse_checkpoint_storm_rebind_omission_segments_preserving_terminal_identities(
+            &first_stage,
+            &segmented_rebind_chains,
+            &segmented_omission_chains,
+        )
+        .unwrap();
+    assert_eq!(
+        segment_identities,
+        [first_chain_identity.clone(), middle_chain_identity.clone()],
+        "each paired omission segment retains the exact identity produced by its rebind"
+    );
+    assert_eq!(
+        segmented_route.terminal_route_identity(),
+        middle_chain_identity,
+        "the final sparse route fold retains the last segment's terminal identity"
+    );
+    assert_eq!(
+        segmented_route
+            .final_session()
+            .database(aliases[4])
+            .unwrap()
+            .pin()
+            .commit()
+            .as_str(),
+        leaf_middle,
+        "the final route still resolves to the computed terminal package snapshot"
+    );
+    assert!(matches!(
+        resolver
+            .extend_nested_terminal_pair_sparse_checkpoint_storm_rebind_omission_segments_preserving_terminal_identities(
+                &first_stage,
+                &segmented_rebind_chains,
+                &[omission_tail_chain.as_slice()],
+            ),
+        Err(AttachmentError::RetainedSnapshotUnavailable)
+    ));
+    let stale_intermediate_identities = [
+        first_chain_identity.clone(),
+        first_chain_identity,
+        restored_chain_identity.clone(),
+    ];
+    assert!(matches!(
+        resolver
+            .extend_nested_terminal_pair_sparse_checkpoint_storm_chains_validating_terminal_identities(
+                &first_stage,
+                &paired_rebind_chains,
+                &stale_intermediate_identities,
+            ),
+        Err(AttachmentError::RetainedSnapshotUnavailable)
+    ));
+    let following_paired_omission = [(&outer_label, None), (&nested_label, None)];
+    let active_then_omission_chain = [
+        active_terminal_round.as_slice(),
+        following_paired_omission.as_slice(),
+    ];
+    let active_then_omission_chains = [active_then_omission_chain.as_slice()];
+    let route_after_active_then_omission = resolver
+        .extend_nested_terminal_pair_sparse_checkpoint_storm_chains_from_depth_labels(
+            &first_stage,
+            &active_then_omission_chains,
+        )
+        .unwrap();
+    route_after_active_then_omission
+        .validate_terminal_route_identity(&active_terminal_identity)
+        .unwrap();
+    assert_eq!(
+        route_after_active_then_omission.terminal_route_identity(),
+        active_terminal_identity,
+        "paired omissions in the same chain preserve the preceding terminal rebind identity"
+    );
+    assert_eq!(
+        route_after_active_then_omission
+            .final_session()
+            .database(aliases[4])
+            .unwrap()
+            .pin()
+            .commit()
+            .as_str(),
+        leaf_middle,
+        "the omission round keeps the computed terminal package selected by its preceding rebind"
+    );
+
+    let duplicate_sparse_round = [(&outer_label, None), (&outer_label, None)];
+    assert!(matches!(
+        resolver.extend_nested_terminal_pair_sparse_checkpoint_storm_rounds_from_depth_labels(
+            &first_stage,
+            &[duplicate_sparse_round.as_slice()],
+        ),
+        Err(AttachmentError::RetainedSnapshotUnavailable)
+    ));
+
+    let terminal_identity = sparse_folded.terminal_route_identity();
+    let sparse_omission = [(&nested_label, None)];
+    let sparse_omission_rounds = [sparse_omission.as_slice()];
+    let after_omissions = resolver
+        .extend_nested_terminal_pair_sparse_checkpoint_storm_rounds_from_depth_labels(
+            &sparse_folded,
+            &sparse_omission_rounds,
+        )
+        .unwrap();
+    after_omissions
+        .validate_terminal_route_identity(&terminal_identity)
+        .unwrap();
+    assert_eq!(after_omissions.terminal_route_identity(), terminal_identity);
+
+    let independent_root = resolver
+        .resolve_nested_rebind_path(&nested_parent, &[])
+        .unwrap();
+    let independent_terminal = resolver
+        .extend_nested_terminal_pair_chain(
+            &independent_root,
+            &[first_pair.clone(), second_pair.clone()],
+        )
+        .unwrap();
+    assert_eq!(
+        after_omissions.final_session().primary().pin(),
+        independent_terminal.final_session().primary().pin()
+    );
+    assert_eq!(
+        attached_pins(after_omissions.final_session()),
+        attached_pins(independent_terminal.final_session())
+    );
+    let independent_identity = independent_terminal.terminal_route_identity();
+    assert_ne!(terminal_identity, independent_identity);
+    assert!(matches!(
+        after_omissions.validate_terminal_route_identity(&independent_identity),
+        Err(AttachmentError::RetainedSnapshotUnavailable)
+    ));
+    assert!(matches!(
+        resolver
+            .extend_nested_terminal_pair_sparse_checkpoint_storm_chains_preserving_terminal_identity(
+                &chained_sparse_fold,
+                &independent_identity,
+                &omission_tail_chains,
+            ),
+        Err(AttachmentError::RetainedSnapshotUnavailable)
+    ));
+
+    let mut middle_evaluation_session =
+        AttachedDatabaseSession::new(parent.primary().clone()).unwrap();
+    middle_evaluation_session
+        .attach_database(
+            route_after_active_then_omission
+                .final_session()
+                .database(aliases[4])
+                .unwrap()
+                .clone(),
+        )
+        .unwrap();
+    let mut middle_evaluator = AdmittedReplSession::from_attached_database_session(
+        &middle_evaluation_session,
+        Limits::default(),
+    )
+    .unwrap();
+    assert_eq!(middle_evaluator.submit(&format!("use {};", aliases[4])), Ok(None));
+    assert_eq!(
+        middle_evaluator.submit(&format!("{}.package_value()", aliases[4])),
+        Ok(Some(Value::int(94.into())))
+    );
+
+    let mut evaluation_session = AttachedDatabaseSession::new(parent.primary().clone()).unwrap();
+    evaluation_session
+        .attach_database(
+            chained_after_omissions
+                .final_session()
+                .database(aliases[4])
+                .unwrap()
+                .clone(),
+        )
+        .unwrap();
+    let mut evaluator = AdmittedReplSession::from_attached_database_session(
+        &evaluation_session,
+        Limits::default(),
+    )
+    .unwrap();
+    assert_eq!(evaluator.submit(&format!("use {};", aliases[4])), Ok(None));
+    assert_eq!(
+        evaluator.submit(&format!("{}.package_value()", aliases[4])),
+        Ok(Some(Value::int(96.into())))
+    );
 }

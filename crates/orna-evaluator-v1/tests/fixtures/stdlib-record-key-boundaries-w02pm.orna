@@ -1,0 +1,1 @@
+std.encoding.ovb.encode({ bbbbbbbbbbbbbbbbbbbbbbbb: 24, aaaaaaaaaaaaaaaaaaaaaaa: 23, é: 2, aa: 1 })

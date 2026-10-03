@@ -1,0 +1,1 @@
+concurrent.parallel([() => 2, () => 3, () => 5])
