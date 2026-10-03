@@ -278,6 +278,48 @@ fn base64_binary_input_survives_real_process_stdin_and_stdout() {
 }
 
 #[test]
+fn base64_binary_input_is_preserved_on_both_process_output_pipes() {
+    let mut session = AdmittedReplSession::with_reference_standard(Limits::default())
+        .unwrap_or_else(|error| panic!("reference std failed to load: {}", error.code()));
+    session
+        .submit(include_str!("fixtures/stdlib-use-io-t7auz.orna"))
+        .unwrap_or_else(|error| panic!("std.io import failed: {}", error.code()));
+    session
+        .submit(include_str!("fixtures/stdlib-use-encoding-6u13r.orna"))
+        .unwrap_or_else(|error| panic!("std.encoding import failed: {}", error.code()));
+
+    let mut process =
+        ProcessProvider::new(Duration::from_secs(2), 64).expect("valid process limits");
+    process
+        .allow_command("/usr/bin/tee", env::current_dir().unwrap(), [])
+        .expect("allowlisted tee executable and current directory");
+    let mut bindings = SysHostBindingRegistry::new(EnvironmentProvider::default())
+        .with_process_provider(process);
+
+    let bytes = vec![0, 255, 0, b'A'];
+    assert_eq!(
+        session.submit_with_sys_host_bindings(
+            include_str!("fixtures/stdlib-io-process-codec-both-pipes-bwdq0.orna"),
+            &mut bindings,
+        ),
+        Ok(Some(
+            CanonicalValue::new(OvbRaw::Array(vec![
+                OvbRaw::Tag(
+                    60013,
+                    Box::new(OvbRaw::Array(vec![
+                        OvbRaw::Int(1.into()),
+                        OvbRaw::Int(0.into()),
+                    ])),
+                ),
+                OvbRaw::Bytes(bytes.clone()),
+                OvbRaw::Bytes(bytes),
+            ]))
+            .unwrap()
+        ))
+    );
+}
+
+#[test]
 fn process_arguments_keep_shell_metacharacters_as_literal_text() {
     let mut session = AdmittedReplSession::with_reference_standard(Limits::default())
         .unwrap_or_else(|error| panic!("reference std failed to load: {}", error.code()));
@@ -308,6 +350,72 @@ fn process_arguments_keep_shell_metacharacters_as_literal_text() {
                     ])),
                 ),
                 OvbRaw::Bytes(b"$HOME;$(must-not-run)".to_vec()),
+                OvbRaw::Bytes(Vec::new()),
+            ]))
+            .unwrap()
+        ))
+    );
+}
+
+#[test]
+fn process_child_environment_and_nonzero_status_are_exact_values() {
+    let mut session = AdmittedReplSession::with_reference_standard(Limits::default())
+        .unwrap_or_else(|error| panic!("reference std failed to load: {}", error.code()));
+    session
+        .submit(include_str!("fixtures/stdlib-use-io-t7auz.orna"))
+        .unwrap_or_else(|error| panic!("std.io import failed: {}", error.code()));
+
+    let working_directory = env::current_dir().unwrap();
+    let mut process =
+        ProcessProvider::new(Duration::from_secs(2), 128).expect("valid process limits");
+    process
+        .allow_command(
+            "/usr/bin/env",
+            &working_directory,
+            ["ORNA_PROOF".to_owned()],
+        )
+        .expect("allowlisted env executable and one child variable");
+    process
+        .allow_command("/usr/bin/false", &working_directory, [])
+        .expect("allowlisted false executable");
+    let mut bindings = SysHostBindingRegistry::new(EnvironmentProvider::default())
+        .with_process_provider(process);
+
+    assert_eq!(
+        session.submit_with_sys_host_bindings(
+            include_str!("fixtures/stdlib-io-process-explicit-environment-bwdq0.orna"),
+            &mut bindings,
+        ),
+        Ok(Some(
+            CanonicalValue::new(OvbRaw::Array(vec![
+                OvbRaw::Tag(
+                    60013,
+                    Box::new(OvbRaw::Array(vec![
+                        OvbRaw::Int(1.into()),
+                        OvbRaw::Int(0.into()),
+                    ])),
+                ),
+                OvbRaw::Bytes(b"ORNA_PROOF=isolated-child\n".to_vec()),
+                OvbRaw::Bytes(Vec::new()),
+            ]))
+            .unwrap()
+        ))
+    );
+    assert_eq!(
+        session.submit_with_sys_host_bindings(
+            include_str!("fixtures/stdlib-io-process-nonzero-status-bwdq0.orna"),
+            &mut bindings,
+        ),
+        Ok(Some(
+            CanonicalValue::new(OvbRaw::Array(vec![
+                OvbRaw::Tag(
+                    60013,
+                    Box::new(OvbRaw::Array(vec![
+                        OvbRaw::Int(1.into()),
+                        OvbRaw::Int(1.into()),
+                    ])),
+                ),
+                OvbRaw::Bytes(Vec::new()),
                 OvbRaw::Bytes(Vec::new()),
             ]))
             .unwrap()
