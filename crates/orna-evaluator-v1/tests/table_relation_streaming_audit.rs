@@ -1730,7 +1730,24 @@ fn paired_refresh_cursor_restores_preserve_source_scope_identity() {
             "source-qualified restored chains keep fresh scope identities: {scope:?}"
         );
     }
-    assert_eq!(source.cursors.len(), 32, "all variable-depth restores are requested");
+    let depths = generations
+        .iter()
+        .flat_map(|(_, _, lane_depths)| lane_depths)
+        .copied()
+        .collect::<Vec<_>>();
+    let mut expected_cursors = Vec::new();
+    for (lane, depth) in depths.into_iter().enumerate() {
+        let (source_name, scope, _) = &source.lanes[lane];
+        expected_cursors.push((source_name.clone(), *scope, None));
+        for cursor in continuations.iter().take(depth - 1) {
+            expected_cursors.push((source_name.clone(), *scope, Some(cursor.clone())));
+        }
+    }
+    assert_eq!(
+        source.cursors,
+        expected_cursors,
+        "reused restoration cursors resolve only within their source and fresh read scope"
+    );
     assert!(source.pending["View.Left"].is_empty());
     assert!(source.pending["View.Right"].is_empty());
 }
