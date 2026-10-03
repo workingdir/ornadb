@@ -2493,13 +2493,23 @@ fn admitted_snapshot_app_session(project: &LoadedProject) -> AdmittedReplSession
 }
 
 fn standard_source<'a>(project: &'a LoadedProject, path: &str) -> &'a str {
-    project
+    let Some((_, source)) = project
         .standard_sources()
         .iter()
         .find(|(logical_path, _)| logical_path == path)
-        .unwrap()
-        .1
-        .as_str()
+    else {
+        let available = project
+            .standard_sources()
+            .iter()
+            .map(|(logical_path, _)| logical_path.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        panic!(
+            "standard source {path:?} missing at captured pin {:?}; available sources: {available}",
+            project.standard_profile().map(|profile| profile.snapshot())
+        );
+    };
+    source.as_str()
 }
 
 #[test]
@@ -4292,6 +4302,13 @@ fn captured_snapshot_identity_survives_paired_divergence_refold_chains() {
             "each refold must extend one captured pin"
         );
         assert_eq!(ancestry[1], parent);
+    }
+    for (index, project) in projects.iter().enumerate() {
+        assert!(
+            project.standard_profile().is_some(),
+            "refold project {index} at pin {} must load its standard profile",
+            pins[index]
+        );
     }
     for index in [3, 4, 8] {
         for path in ["std/math.orna", "std/collection.orna"] {
