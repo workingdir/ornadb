@@ -681,7 +681,9 @@ pub struct QueryJoinDescription {
 
 /// Resolver-supplied identity for the logical pair folded by a join. It is
 /// associated by exact right-source and predicate identity, so physical cost
-/// reordering cannot shift a pair label onto a neighboring join.
+/// reordering cannot shift a pair label onto a neighboring join. The explain
+/// adapter also derives an anchor-fold identity for the pair, so each join
+/// remains scoped to its accumulated left-side chain.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct QueryJoinPairIdentityDescription {
     pub identity: ObjectRef,
@@ -2375,6 +2377,20 @@ fn explain_query_core_with_subqueries(
                 chain_identity,
             )
         });
+        let join_pair_anchor_fold_id = join_pair_identity.map(|pair| {
+            query_join_pair_anchor_fold_identity(
+                &left_fold_identity,
+                &right_fold_identity,
+                pair,
+            )
+        });
+        if let Some(identity) = join_pair_anchor_fold_id.as_deref() {
+            let mut pair_nodes = BTreeSet::from([right_access, right]);
+            pair_nodes.extend(right_window_operator_start..operators.len());
+            for index in pair_nodes {
+                add_join_pair_anchor_fold_details(&mut operators[index].details, identity);
+            }
+        }
         if let Some(identity) = window_anchor_fold_id.as_deref() {
             let mut chain_nodes = BTreeSet::from([right_access, right]);
             chain_nodes.extend(right_window_operator_start..operators.len());
@@ -2403,6 +2419,7 @@ fn explain_query_core_with_subqueries(
             decorrelated_predicate_identity.as_deref(),
             decorrelated_anchor_fold_id.as_deref(),
             window_anchor_fold_id.as_deref(),
+            join_pair_anchor_fold_id.as_deref(),
             cardinality,
             work,
             work_overflow,
@@ -2459,6 +2476,9 @@ fn explain_query_core_with_subqueries(
         if let Some(identity) = window_anchor_fold_id.as_deref() {
             add_window_anchor_fold_details(&mut details, identity);
         }
+        if let Some(identity) = join_pair_anchor_fold_id.as_deref() {
+            add_join_pair_anchor_fold_details(&mut details, identity);
+        }
         if let Some(pair_identity) = join_pair_identity {
             add_join_pair_identity_details(&mut details, pair_identity);
         }
@@ -2470,6 +2490,7 @@ fn explain_query_core_with_subqueries(
         }
         if let Some(candidate) = selected_partial_index {
             add_partial_index_pair_identity_details(&mut details, candidate);
+            add_partial_index_selection_tie_break_details(&mut details);
         }
         add_join_cost_fold_details(
             &mut details,
@@ -3489,6 +3510,11 @@ fn partial_index_for_join<'a>(
     candidates: &'a [QueryPartialIndexDescription],
 ) -> Option<&'a QueryPartialIndexDescription> {
     let predicate = join.predicate.as_ref()?;
+    // The reference names explain node kinds but is silent on partial-index
+    // matching and tie-breaking. This adapter requires an exact table/predicate
+    // match, then selects the lexicographically smallest index identity so the
+    // explain-only choice is independent of catalog order. A missing exact
+    // match stays a scan rather than inferring predicate implication.
     candidates
         .iter()
         .filter(|candidate| {
@@ -3518,6 +3544,7 @@ fn push_index_lookup(
         ),
     ]);
     add_partial_index_pair_identity_details(&mut details, candidate);
+    add_partial_index_selection_tie_break_details(&mut details);
     if let Some(branch) = statistics.and_then(|stats| stats.mutable_branch.as_ref()) {
         details.insert(
             "mutable_branch".to_owned(),
@@ -3695,6 +3722,42 @@ fn add_window_anchor_fold_details(details: &mut BTreeMap<String, PlanDetail>, id
     );
 }
 
+/// Combines the exact resolver pair and right-input identity with the
+/// accumulated sparse left anchor. ORNA permits internal join reordering but
+/// leaves this explain-only digest format unspecified.
+fn query_join_pair_anchor_fold_identity(
+    anchor_fold_identity: &str,
+    input_identity: &str,
+    pair: &QueryJoinPairIdentityDescription,
+) -> String {
+    let mut hash = Sha256::new();
+    hash.update(b"orna.sys.query-join-pair-anchor-fold.v1\0");
+    hash_part(&mut hash, anchor_fold_identity.as_bytes());
+    hash_part(&mut hash, input_identity.as_bytes());
+    hash_part(&mut hash, pair.identity.as_str().as_bytes());
+    hash_part(&mut hash, pair.left_source.as_str().as_bytes());
+    hash_part(&mut hash, pair.right_source.as_str().as_bytes());
+    hash_optional_text(
+        &mut hash,
+        pair.predicate.as_ref().map(ExpressionRef::as_str),
+    );
+    format!("join-pair-anchor-fold:{}", hex(&hash.finalize()))
+}
+
+fn add_join_pair_anchor_fold_details(
+    details: &mut BTreeMap<String, PlanDetail>,
+    identity: &str,
+) {
+    details.insert(
+        "join_pair_anchor_fold_identity".to_owned(),
+        PlanDetail::Text(identity.to_owned()),
+    );
+    details.insert(
+        "join_pair_anchor_fold_pairing".to_owned(),
+        PlanDetail::Text("sparse_anchor_fold_and_resolved_join_pair".to_owned()),
+    );
+}
+
 fn add_decorrelated_predicate_pushdown_details(
     details: &mut BTreeMap<String, PlanDetail>,
     identity: &str,
@@ -3720,6 +3783,13 @@ fn add_partial_index_pair_identity_details(
     details.insert(
         "predicate_pushdown_pairing".to_owned(),
         PlanDetail::Text("exact_table_index_and_predicate".to_owned()),
+    );
+}
+
+fn add_partial_index_selection_tie_break_details(details: &mut BTreeMap<String, PlanDetail>) {
+    details.insert(
+        "index_selection_tie_break".to_owned(),
+        PlanDetail::Text("lexicographically_smallest_matching_index_identity".to_owned()),
     );
 }
 
@@ -3795,6 +3865,7 @@ fn query_join_cost_fold(
     decorrelated_predicate_pushdown_identity: Option<&str>,
     decorrelated_anchor_fold_identity: Option<&str>,
     window_anchor_fold_identity: Option<&str>,
+    join_pair_anchor_fold_identity: Option<&str>,
     cardinality: Cardinality,
     work: Option<u64>,
     work_overflow: bool,
@@ -3819,6 +3890,7 @@ fn query_join_cost_fold(
     hash_optional_text(&mut hash, decorrelated_predicate_pushdown_identity);
     hash_optional_text(&mut hash, decorrelated_anchor_fold_identity);
     hash_optional_text(&mut hash, window_anchor_fold_identity);
+    hash_optional_text(&mut hash, join_pair_anchor_fold_identity);
     hash_optional_u64(&mut hash, cardinality.rows);
     hash_optional_u64(&mut hash, cardinality.bytes);
     hash_optional_u64(&mut hash, work);
