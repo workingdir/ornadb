@@ -1,0 +1,8 @@
+pub table Note(id: Int) { text: Str, computed: Int, }
+
+pub fn main(stream: sys.StreamRef): Int {
+  let id = 3 * 4;
+  let value = id + 5;
+  Note.insert({ id: id, text: "staged before pause", computed: value * 2 });
+  value * 2
+}

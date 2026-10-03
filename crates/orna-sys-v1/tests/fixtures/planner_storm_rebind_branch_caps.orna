@@ -1,0 +1,25 @@
+pub table PlannerStormRebindBranchCaps(id: Int) {
+    first: Bool,
+    child: Bool,
+    sibling: Bool,
+}
+pub fn rebind_branch_caps() = PlannerStormRebindBranchCaps
+    | union(
+        PlannerStormRebindBranchCaps
+            | take(4)
+            | union(
+                PlannerStormRebindBranchCaps
+                    | take(20)
+                    | filter(row => row.first),
+                PlannerStormRebindBranchCaps
+                    | take(20)
+                    | filter(row => row.child)
+            )
+            | take(100)
+            | filter(row => row.sibling)
+    )
+    | union(
+        PlannerStormRebindBranchCaps
+            | take(12)
+            | filter(row => row.first && row.sibling)
+    );

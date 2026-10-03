@@ -9,7 +9,7 @@ use std::{
     fmt,
 };
 
-use serde::Serialize;
+use serde::{Serialize, ser::SerializeStruct};
 use sha2::{Digest, Sha256};
 
 use super::{Diagnostic, ObjectRef, PlanRef};
@@ -19,6 +19,7 @@ pub const MAX_DEPENDENCY_EDGES: usize = 1_000_000;
 pub const MAX_PLAN_NODES: usize = 16_384;
 pub const MAX_PLAN_EXPRESSIONS: usize = 8_192;
 pub const MAX_REFERENCE_BYTES: usize = 4_096;
+const MAX_DISJUNCT_STORM_DEPTH: usize = 64;
 
 macro_rules! descriptive_reference {
     ($name:ident) => {
@@ -540,6 +541,41 @@ pub struct PlanOrdering {
     pub null_order: PlanNullOrder,
 }
 
+/// A resolved bound on a window frame. Numeric bounds are row offsets; the
+/// planner uses explicit bounds rather than inferring frames after sparse
+/// input reordering.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case", tag = "kind", content = "rows")]
+pub enum PlanWindowFrameBound {
+    UnboundedPreceding,
+    Preceding(u64),
+    CurrentRow,
+    Following(u64),
+    UnboundedFollowing,
+}
+
+impl PlanWindowFrameBound {
+    fn ordinal(self) -> i128 {
+        match self {
+            Self::UnboundedPreceding => i128::MIN,
+            Self::Preceding(rows) => -i128::from(rows),
+            Self::CurrentRow => 0,
+            Self::Following(rows) => i128::from(rows),
+            Self::UnboundedFollowing => i128::MAX,
+        }
+    }
+
+    fn as_detail(self) -> String {
+        match self {
+            Self::UnboundedPreceding => "unbounded_preceding".to_owned(),
+            Self::Preceding(rows) => format!("preceding:{rows}"),
+            Self::CurrentRow => "current_row".to_owned(),
+            Self::Following(rows) => format!("following:{rows}"),
+            Self::UnboundedFollowing => "unbounded_following".to_owned(),
+        }
+    }
+}
+
 /// A resolved, snapshot-pinned logical query input. Expressions are opaque
 /// typed references, so plan details never echo literal query values.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -549,7 +585,9 @@ pub struct QueryPlanDescription {
     /// Snapshot statistics for `source`. If `mutable_branch` is set, counts
     /// must include the branch's current uncommitted overlay at `generation`.
     pub source_statistics: Option<QuerySourceStatistics>,
-    /// Additional inputs joined in order after `source`.
+    /// Additional inputs joined after `source`. The explain adapter may
+    /// reorder these physical join inputs using complete scan-work estimates;
+    /// unknown-cost inputs and equal-cost inputs keep declaration order.
     pub joins: Vec<QueryJoinDescription>,
     pub predicate: Option<ExpressionRef>,
     pub projections: Vec<ExpressionRef>,
@@ -561,6 +599,60 @@ pub struct QueryPlanDescription {
     /// Optional destination for an explicit result materialization. Explain
     /// estimates the write work but never performs this operation.
     pub materialize_into: Option<ObjectRef>,
+}
+
+/// One nested disjunct storm stage whose branches each have their own limit
+/// cascade and conjunct chain.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DisjunctStormDescription {
+    /// Resolved predicate reference for this expansion stage.
+    pub predicate: ExpressionRef,
+    /// Number of independent OR branches expanded at this stage.
+    pub disjunct_count: u64,
+    /// Ordered limits applied independently inside every branch.
+    pub nested_branch_limits: Vec<u64>,
+    /// Ordered AND terms evaluated inside each branch after its limits.
+    pub conjunct_count_per_disjunct: u64,
+}
+
+/// One branch in a storm whose branch-local limit chain differs from its
+/// siblings.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DisjunctStormBranchDescription {
+    /// Ordered limits applied to this branch before its conjuncts.
+    pub nested_limits: Vec<u64>,
+    /// Ordered AND terms evaluated in this branch after its limits.
+    pub conjunct_count: u64,
+    /// Nested cascades rebound after one-based positions in `nested_limits`.
+    /// List entries must be ordered by position; entries at one position run
+    /// in declaration order. Each cascade consumes current branch rows, and
+    /// its output feeds the next limit in the chain. A rebind at a later
+    /// position starts from the branch output after all earlier limits and
+    /// rebinds; it never restarts from the enclosing storm input.
+    pub limit_rebinds: Vec<DisjunctStormLimitRebindDescription>,
+    /// Nested disjunct storms evaluated against this branch's filtered output.
+    pub nested_storms: Vec<DisjunctStormCascadeDescription>,
+}
+
+/// A group of cascades rebound at a specific point in a branch-local limit chain.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DisjunctStormLimitRebindDescription {
+    /// One-based position in the enclosing branch's `nested_limits` chain.
+    pub after_limit: usize,
+    /// Cascades to run in declaration order after this limit. The first uses
+    /// the branch rows and bytes after the limit; each later cascade uses the
+    /// previous cascade's bounded output, which ultimately feeds the next
+    /// limit in the enclosing branch.
+    pub storms: Vec<DisjunctStormCascadeDescription>,
+}
+
+/// A disjunct storm stage with independently described branch pipelines.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DisjunctStormCascadeDescription {
+    /// Resolved predicate reference for this expansion stage.
+    pub predicate: ExpressionRef,
+    /// Branch pipelines are combined in declaration order.
+    pub branches: Vec<DisjunctStormBranchDescription>,
 }
 
 /// Statistics supplied by the snapshot/catalogue adapter, never measured by
@@ -585,6 +677,94 @@ pub struct QueryJoinDescription {
     pub source: ObjectRef,
     pub statistics: Option<QuerySourceStatistics>,
     pub predicate: Option<ExpressionRef>,
+}
+
+/// Resolver-supplied identity for the logical pair folded by a join. It is
+/// associated by exact right-source and predicate identity, so physical cost
+/// reordering cannot shift a pair label onto a neighboring join. The explain
+/// adapter also derives an anchor-fold identity for the pair, so each join
+/// remains scoped to its accumulated left-side chain.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct QueryJoinPairIdentityDescription {
+    pub identity: ObjectRef,
+    pub left_source: ObjectRef,
+    pub right_source: ObjectRef,
+    pub predicate: Option<ExpressionRef>,
+}
+
+/// A resolver-approved input limit attached to one exact logical join pair.
+/// Multiple entries for the same pair form an ordered limit chain in slice
+/// order. Explain applies the chain after source access and before the join;
+/// it preserves the supplied limit and does not infer pushdown eligibility.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct QueryLimitPushdownDescription {
+    pub identity: ObjectRef,
+    pub join_pair_identity: ObjectRef,
+    pub source: ObjectRef,
+    pub limit: u64,
+}
+
+/// A correlated subquery that the resolver has already approved for
+/// decorrelation into a predicate join. The planner keeps the subquery and
+/// correlation identities on both the join and its input while cost ordering
+/// moves known inputs across sparse unknown-cost entries. Its decorrelated
+/// anchor-fold identity additionally binds that input to the accumulated
+/// anchor side of the join, so separate sparse lateral anchors cannot share a
+/// fold identity. ORNA does not define decorrelation eligibility, a
+/// subquery-specific cost model, or this explain-only identity encoding; the
+/// adapter uses supplied pinned statistics and the ordinary predicate-join
+/// estimate.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct QueryDecorrelatedSubqueryDescription {
+    pub identity: ObjectRef,
+    pub source: ObjectRef,
+    pub correlation_predicate: ExpressionRef,
+    pub statistics: Option<QuerySourceStatistics>,
+}
+
+/// A partial index that may accelerate a join predicate when both the input
+/// table and the predicate reference match exactly. Sparse predicate cascades
+/// therefore cannot shift an index candidate onto a neighboring join.
+/// The lookup reuses the matching join input's pinned statistics because this
+/// descriptor carries identity, not an independent index cardinality.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct QueryPartialIndexDescription {
+    pub table: ObjectRef,
+    pub index: ObjectRef,
+    pub partial_predicate: ExpressionRef,
+}
+
+/// A resolved window aggregate eligible at its exact source boundary.
+/// Aggregate and frame identities remain attached across sparse input
+/// reordering. The planner also binds each right-side frame chain to its
+/// accumulated sparse anchor fold. ORNA-PLAN does not prescribe a
+/// window-pushdown cost or this explain identity encoding, so this adapter
+/// charges one work unit per known input row and preserves cardinality.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct QueryWindowAggregatePushdownDescription {
+    pub identity: ObjectRef,
+    pub source: ObjectRef,
+    pub aggregate: ExpressionRef,
+    pub frame_identity: ExpressionRef,
+    pub frame_start: PlanWindowFrameBound,
+    pub frame_end: PlanWindowFrameBound,
+}
+
+/// Resolver-supplied working-set and memory budget for one exact window
+/// aggregate on one exact join pair. The explain adapter computes bytes above
+/// budget and models each 4 KiB spill block as one write plus one read work
+/// unit. A missing working-set estimate remains unknown; explain never
+/// executes or infers a spill. ORNA does not prescribe a spill threshold or
+/// cost model, so these are planner-local estimates carried on the existing
+/// window aggregate node, not runtime spill instructions.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct QueryWindowSpillDescription {
+    pub identity: ObjectRef,
+    pub join_pair_identity: ObjectRef,
+    pub source: ObjectRef,
+    pub window_aggregate_identity: ObjectRef,
+    pub estimated_working_set_bytes: Option<u64>,
+    pub memory_budget_bytes: u64,
 }
 
 /// A known table mutation at the tail of a query plan. Counts are estimates
@@ -638,6 +818,180 @@ pub enum PlanDetail {
     Boolean(bool),
     Expressions(Vec<ExpressionRef>),
     Ordering(Vec<PlanOrdering>),
+    /// Routes are ordered by nesting depth, typed input path, then typed
+    /// output path.
+    ByteCapHandoffRoutes(Vec<PlanByteCapHandoffRoute>),
+}
+
+/// One typed source-to-destination byte-cap handoff reported by a planner
+/// storm rebind. Unknown byte estimates remain `None`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PlanByteCapHandoffRoute {
+    /// One-based nesting depth of the storm scope containing the rebind.
+    pub depth: usize,
+    /// Typed path to the branch scope supplying the byte estimate.
+    pub input_path: Vec<PlanByteCapScopeSegment>,
+    /// Typed path to the nested cascade receiving the byte estimate.
+    pub output_path: Vec<PlanByteCapScopeSegment>,
+    /// Human-readable label derived from the complete typed input ancestry.
+    pub input_scope: String,
+    /// Human-readable label derived from the complete typed output ancestry.
+    pub output_scope: String,
+    /// Known input byte estimate; `None` means the estimate is unknown.
+    pub input_bytes: Option<u64>,
+    /// Known capped output byte estimate; `None` means the estimate is unknown.
+    pub output_bytes: Option<u64>,
+}
+
+impl PlanByteCapHandoffRoute {
+    /// Creates a handoff route whose display labels derive from its typed paths.
+    pub fn from_typed_paths(
+        depth: usize,
+        input_path: Vec<PlanByteCapScopeSegment>,
+        output_path: Vec<PlanByteCapScopeSegment>,
+        input_bytes: Option<u64>,
+        output_bytes: Option<u64>,
+    ) -> Self {
+        Self {
+            depth,
+            input_scope: byte_cap_scope_path_label(&input_path),
+            output_scope: byte_cap_scope_path_label(&output_path),
+            input_path,
+            output_path,
+            input_bytes,
+            output_bytes,
+        }
+    }
+
+    /// Returns the canonical input label derived from `input_path`.
+    ///
+    /// The typed path is authoritative even if the public `input_scope` field
+    /// was changed after this route was constructed.
+    pub fn input_scope_label(&self) -> String {
+        byte_cap_scope_path_label(&self.input_path)
+    }
+
+    /// Returns the canonical output label derived from `output_path`.
+    ///
+    /// The typed path is authoritative even if the public `output_scope`
+    /// field was changed after this route was constructed.
+    pub fn output_scope_label(&self) -> String {
+        byte_cap_scope_path_label(&self.output_path)
+    }
+
+    /// Returns both canonical labels from this route's typed paths.
+    ///
+    /// Keeping the input and output labels together is useful when presenting
+    /// a route across post-storm ancestry, where the source path may include
+    /// outputs from preceding stages.
+    pub fn scope_labels(&self) -> (String, String) {
+        (
+            byte_cap_scope_path_label(&self.input_path),
+            byte_cap_scope_path_label(&self.output_path),
+        )
+    }
+
+    /// Returns the canonical labels as an explicitly named input/output pair.
+    fn named_scope_labels(&self) -> PlanByteCapScopeLabels {
+        let (input, output) = self.scope_labels();
+        PlanByteCapScopeLabels { input, output }
+    }
+
+    /// Returns the canonical input-to-output scope label for this route.
+    pub fn paired_scope_label(&self) -> String {
+        let (input_scope, output_scope) = self.scope_labels();
+        format!("{input_scope}=>{output_scope}")
+    }
+}
+
+/// Serialized canonical byte-cap handoff labels with explicit input/output names.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+struct PlanByteCapScopeLabels {
+    /// Label derived from the route's typed input ancestry.
+    pub input: String,
+    /// Label derived from the route's typed output ancestry.
+    pub output: String,
+}
+
+impl Serialize for PlanByteCapHandoffRoute {
+    // The typed paths are authoritative; derive serialized labels instead of
+    // trusting duplicated strings that may be stale on a manually built route.
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let mut route = serializer.serialize_struct("PlanByteCapHandoffRoute", 9)?;
+        route.serialize_field("depth", &self.depth)?;
+        route.serialize_field("input_path", &self.input_path)?;
+        route.serialize_field("output_path", &self.output_path)?;
+        let (input_scope, output_scope) = self.scope_labels();
+        route.serialize_field("input_scope", &input_scope)?;
+        route.serialize_field("output_scope", &output_scope)?;
+        route.serialize_field("paired_scope_label", &self.paired_scope_label())?;
+        route.serialize_field("scope_labels", &self.named_scope_labels())?;
+        route.serialize_field("input_bytes", &self.input_bytes)?;
+        route.serialize_field("output_bytes", &self.output_bytes)?;
+        route.end()
+    }
+}
+
+/// One typed step in a nested storm byte-cap handoff route. A route path
+/// preserves every preceding handoff output in its ancestry, including when a
+/// later limit or cascade consumes that bounded result.
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum PlanByteCapScopeSegment {
+    /// A one-based top-level storm stage.
+    StormStage { index: usize },
+    /// The bounded output of a one-based top-level storm stage.
+    StormStageOutput { index: usize },
+    /// A one-based branch within a storm.
+    Branch { index: usize },
+    /// A one-based nested limit position within a branch.
+    Limit { position: usize },
+    /// The bounded output of a one-based branch after its limits, rebinds,
+    /// and conjuncts, before that branch's nested storms.
+    BranchOutput { index: usize },
+    /// A one-based rebind declaration position within a branch.
+    Rebind { position: usize },
+    /// A one-based cascade position within a rebind.
+    Cascade { index: usize },
+    /// The bounded output of a one-based cascade at a rebind position.
+    RebindCascadeOutput { position: usize, index: usize },
+    /// A one-based nested storm position within a branch.
+    NestedStorm { index: usize },
+    /// The bounded output of a one-based nested storm within a branch.
+    NestedStormOutput { index: usize },
+}
+
+impl PlanByteCapScopeSegment {
+    /// Returns the canonical display component for this typed scope segment.
+    ///
+    /// ORNA-PLAN specifies typed planner ancestry but does not prescribe its
+    /// text spelling. The local stable mapping is `StormStage` to `stormN`,
+    /// `StormStageOutput` to `storm_stage_outputN`, `Branch` to `branchN`,
+    /// `Limit` to `limitN`, `BranchOutput` to `branch_outputN`, `Rebind` to
+    /// `rebindN`, `Cascade` to `cascadeN`, `RebindCascadeOutput` to
+    /// `rebind_outputP_C`, `NestedStorm` to `nestedN`, and
+    /// `NestedStormOutput` to `nested_outputN`. `N` is a one-based index or
+    /// position; `P_C` is the rebind position and cascade index. The typed
+    /// segment remains authoritative when a display stem is abbreviated.
+    pub fn scope_component_label(&self) -> String {
+        match self {
+            Self::StormStage { index } => format!("storm{index}"),
+            Self::StormStageOutput { index } => format!("storm_stage_output{index}"),
+            Self::Branch { index } => format!("branch{index}"),
+            Self::Limit { position } => format!("limit{position}"),
+            Self::BranchOutput { index } => format!("branch_output{index}"),
+            Self::Rebind { position } => format!("rebind{position}"),
+            Self::Cascade { index } => format!("cascade{index}"),
+            Self::RebindCascadeOutput { position, index } => {
+                format!("rebind_output{position}_{index}")
+            }
+            Self::NestedStorm { index } => format!("nested{index}"),
+            Self::NestedStormOutput { index } => format!("nested_output{index}"),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -825,6 +1179,334 @@ pub fn explain_query(query: &QueryPlanDescription) -> Result<ExplainedPlan, Expl
     explain_query_with_limit_chain(query, &[])
 }
 
+/// Explains a query while folding resolver-approved correlated subqueries into
+/// predicate joins. Subquery identity remains attached to its source input and
+/// resulting join if cost ordering moves it across known or unknown-cost
+/// boundaries. Unknown-cost inputs remain after fully estimated inputs in
+/// declaration order.
+pub fn explain_query_with_decorrelated_subqueries(
+    query: &QueryPlanDescription,
+    subqueries: &[QueryDecorrelatedSubqueryDescription],
+) -> Result<ExplainedPlan, ExplainError> {
+    explain_query_core_with_subqueries(
+        query,
+        1,
+        None,
+        None,
+        &[],
+        &[],
+        &[],
+        None,
+        &[],
+        &[],
+        &[],
+        &[],
+        subqueries,
+        &[],
+        &[],
+    )
+}
+
+/// Explains a query with stable identities for resolver-approved logical
+/// join pairs. Pair metadata is looked up using the pair's exact right source
+/// and optional predicate, then copied to both the source access node and its
+/// join fold after physical cost ordering.
+pub fn explain_query_with_join_pair_identities(
+    query: &QueryPlanDescription,
+    pairs: &[QueryJoinPairIdentityDescription],
+) -> Result<ExplainedPlan, ExplainError> {
+    explain_query_core_with_subqueries(
+        query,
+        1,
+        None,
+        None,
+        &[],
+        &[],
+        &[],
+        None,
+        &[],
+        &[],
+        &[],
+        &[],
+        &[],
+        &[],
+        pairs,
+    )
+}
+
+/// Explains sparse joins with resolver-approved input limit pushdowns.
+///
+/// Each limit stage is matched to its exact logical pair identity and right
+/// source, applied before that join, and included in an anchor-scoped fold
+/// identity. The resolver supplies stages in their semantic order; this
+/// adapter preserves that order while reordering known-cost join inputs.
+pub fn explain_query_with_join_pair_identities_and_limit_pushdowns(
+    query: &QueryPlanDescription,
+    pairs: &[QueryJoinPairIdentityDescription],
+    limit_pushdowns: &[QueryLimitPushdownDescription],
+) -> Result<ExplainedPlan, ExplainError> {
+    explain_query_core_with_limit_pushdowns(
+        query,
+        1,
+        None,
+        None,
+        &[],
+        &[],
+        &[],
+        None,
+        &[],
+        &[],
+        &[],
+        &[],
+        &[],
+        &[],
+        pairs,
+        limit_pushdowns,
+        &[],
+    )
+}
+
+/// Explains paired input limits composed with resolver-approved window
+/// aggregate chains. Limits are applied before their exact-source window
+/// stages; the combined identity binds both chains to the sparse join anchor.
+/// The cumulative fold carries through joins where either chain is absent.
+/// ORNA leaves this explain-only digest encoding unspecified.
+pub fn explain_query_with_join_pair_identities_and_limit_window_aggregate_pushdowns(
+    query: &QueryPlanDescription,
+    pairs: &[QueryJoinPairIdentityDescription],
+    limit_pushdowns: &[QueryLimitPushdownDescription],
+    aggregates: &[QueryWindowAggregatePushdownDescription],
+) -> Result<ExplainedPlan, ExplainError> {
+    explain_query_core_with_limit_pushdowns(
+        query,
+        1,
+        None,
+        None,
+        &[],
+        &[],
+        &[],
+        None,
+        &[],
+        &[],
+        &[],
+        &[],
+        &[],
+        aggregates,
+        pairs,
+        limit_pushdowns,
+        &[],
+    )
+}
+
+/// Explains a sparse join cascade while retaining logical join-pair,
+/// window-pushdown, and paired aggregate-pushdown identities through physical
+/// cost reordering. Window aggregates remain attached to their exact source
+/// and ordered chain; each join fold includes that source chain in its
+/// right-input identity and sparse anchor fold.
+///
+/// ORNA specifies structured plan rows but leaves window-chain identity
+/// encoding open. This adapter uses a domain-separated digest of the source
+/// reference and the resolver-ordered aggregate/frame tuples.
+pub fn explain_query_with_join_pair_identities_and_window_aggregate_pushdowns(
+    query: &QueryPlanDescription,
+    pairs: &[QueryJoinPairIdentityDescription],
+    aggregates: &[QueryWindowAggregatePushdownDescription],
+) -> Result<ExplainedPlan, ExplainError> {
+    explain_query_core_with_subqueries(
+        query,
+        1,
+        None,
+        None,
+        &[],
+        &[],
+        &[],
+        None,
+        &[],
+        &[],
+        &[],
+        &[],
+        &[],
+        aggregates,
+        pairs,
+    )
+}
+
+/// Explains sparse joins with resolver-approved window aggregates and working
+/// set spill estimates. Each spill is bound to one exact join pair, source,
+/// and window aggregate. The adapter calculates estimated bytes beyond the
+/// supplied memory budget, folds aggregate-chain spill byte/block/I/O totals
+/// into an anchor-scoped identity, and preserves unknown estimates. It also
+/// rolls those pair folds across the planned sparse join sequence, carrying
+/// the latest identity through joins without spill stages. ORNA does not
+/// prescribe this explain-only estimate or either fold encoding.
+pub fn explain_query_with_join_pair_identities_window_aggregate_and_spill_pushdowns(
+    query: &QueryPlanDescription,
+    pairs: &[QueryJoinPairIdentityDescription],
+    aggregates: &[QueryWindowAggregatePushdownDescription],
+    spills: &[QueryWindowSpillDescription],
+) -> Result<ExplainedPlan, ExplainError> {
+    explain_query_core_with_limit_pushdowns(
+        query,
+        1,
+        None,
+        None,
+        &[],
+        &[],
+        &[],
+        None,
+        &[],
+        &[],
+        &[],
+        &[],
+        &[],
+        aggregates,
+        pairs,
+        &[],
+        spills,
+    )
+}
+
+/// Explains window aggregates pushed to their resolved input sources.
+///
+/// Pushdown is attached by exact source identity, while each aggregate and
+/// complete frame identity remain on the resulting node. A missing estimate
+/// cannot shift a frame onto a neighboring input. Bounds are resolver supplied;
+/// this adapter preserves them instead of inferring SQL frame semantics. The
+/// caller supplies only aggregates already proven movable to that source
+/// boundary; this explain adapter does not prove window algebra equivalence.
+pub fn explain_query_with_window_aggregate_pushdowns(
+    query: &QueryPlanDescription,
+    aggregates: &[QueryWindowAggregatePushdownDescription],
+) -> Result<ExplainedPlan, ExplainError> {
+    explain_query_core_with_subqueries(
+        query,
+        1,
+        None,
+        None,
+        &[],
+        &[],
+        &[],
+        None,
+        &[],
+        &[],
+        &[],
+        &[],
+        &[],
+        aggregates,
+        &[],
+    )
+}
+
+/// Explains a query while choosing exact-identity partial indexes for join
+/// inputs. A candidate is selected only when both its table and partial
+/// predicate equal the join input's table and predicate. For duplicate exact
+/// matches, the lexicographically smallest index reference wins. Unmatched or
+/// predicate-free joins retain their table scan.
+pub fn explain_query_with_partial_indexes(
+    query: &QueryPlanDescription,
+    indexes: &[QueryPartialIndexDescription],
+) -> Result<ExplainedPlan, ExplainError> {
+    explain_query_with_predicate_pressure_and_branch_limits_and_storms_with_partial_indexes(
+        query,
+        1,
+        None,
+        None,
+        &[],
+        &[],
+        &[],
+        None,
+        &[],
+        &[],
+        &[],
+        indexes,
+    )
+}
+
+/// Explains exact partial-index selection together with resolver-supplied
+/// logical join-pair identities. The pair and its selected predicate/index
+/// identity move together through physical cost ordering and the fold chain.
+pub fn explain_query_with_partial_indexes_and_join_pair_identities(
+    query: &QueryPlanDescription,
+    indexes: &[QueryPartialIndexDescription],
+    pairs: &[QueryJoinPairIdentityDescription],
+) -> Result<ExplainedPlan, ExplainError> {
+    explain_query_core_with_subqueries(
+        query,
+        1,
+        None,
+        None,
+        &[],
+        &[],
+        &[],
+        None,
+        &[],
+        &[],
+        &[],
+        indexes,
+        &[],
+        &[],
+        pairs,
+    )
+}
+
+/// Explains exact partial-index pushdowns and resolver-approved correlated
+/// subqueries in one sparse cost cascade. Predicate and subquery identities
+/// remain paired to their exact right input as physical ordering moves known
+/// inputs ahead of sparse unknown-cost inputs.
+pub fn explain_query_with_partial_indexes_and_decorrelated_subqueries(
+    query: &QueryPlanDescription,
+    indexes: &[QueryPartialIndexDescription],
+    subqueries: &[QueryDecorrelatedSubqueryDescription],
+) -> Result<ExplainedPlan, ExplainError> {
+    explain_query_core_with_subqueries(
+        query,
+        1,
+        None,
+        None,
+        &[],
+        &[],
+        &[],
+        None,
+        &[],
+        &[],
+        &[],
+        indexes,
+        subqueries,
+        &[],
+        &[],
+    )
+}
+
+/// Explains partial-index routes and resolver-approved decorrelated inputs
+/// together with their logical join-pair identities. A shared restoration
+/// chain records both event kinds in planned cost order, carrying through
+/// joins with no route or decorrelation descriptor so sparse inputs cannot
+/// detach a later outcome from its ancestry.
+pub fn explain_query_with_partial_indexes_and_decorrelated_subqueries_and_join_pair_identities(
+    query: &QueryPlanDescription,
+    indexes: &[QueryPartialIndexDescription],
+    subqueries: &[QueryDecorrelatedSubqueryDescription],
+    pairs: &[QueryJoinPairIdentityDescription],
+) -> Result<ExplainedPlan, ExplainError> {
+    explain_query_core_with_subqueries(
+        query,
+        1,
+        None,
+        None,
+        &[],
+        &[],
+        &[],
+        None,
+        &[],
+        &[],
+        &[],
+        indexes,
+        subqueries,
+        &[],
+        pairs,
+    )
+}
+
 /// Explains a query followed by additional ordered limit stages.
 ///
 /// The optional `query.limit` is applied first, followed by each value in
@@ -852,7 +1534,16 @@ pub fn explain_query_with_disjunct_limit_chain(
     disjunct_count: u64,
     additional_limits: &[u64],
 ) -> Result<ExplainedPlan, ExplainError> {
-    explain_query_with_predicate_pressure(query, disjunct_count, None, None, additional_limits)
+    explain_query_with_predicate_pressure(
+        query,
+        disjunct_count,
+        None,
+        None,
+        &[],
+        &[],
+        None,
+        additional_limits,
+    )
 }
 
 /// Explains a disjunction followed by a left-to-right chain of conjunctive
@@ -876,6 +1567,9 @@ pub fn explain_query_with_disjunct_conjunct_limit_chain(
         query,
         disjunct_count,
         Some(conjunct_count),
+        None,
+        &[],
+        &[],
         None,
         additional_limits,
     )
@@ -909,6 +1603,391 @@ pub fn explain_query_with_conjunct_disjunct_limit_chain(
         disjunct_count,
         None,
         Some(conjunct_count_per_disjunct),
+        &[],
+        &[],
+        None,
+        additional_limits,
+    )
+}
+
+/// Explains disjunct expansion whose individual branches each run a nested
+/// limit chain followed by a left-to-right conjunct chain, then applies the
+/// query's outer limit and any additional limit stages.
+///
+/// Each branch starts from the same source/join input. Its nested limits run
+/// in order before its conjuncts; limit work is charged once per disjunct.
+/// The disjunction then combines the branch estimates. ORNA-PLAN leaves this
+/// estimate composition unspecified, so the adapter uses the deterministic
+/// 50%-per-conjunct, independent-branch fallback and rounds each branch's
+/// surviving rows upward. The query's `limit` and `additional_limits` run
+/// after the disjunction and retain all branch work. `disjunct_count`,
+/// and `conjunct_count_per_disjunct` must be positive; `nested_branch_limits`
+/// must be nonempty and the query must have a predicate.
+pub fn explain_query_with_disjunct_branch_limit_conjunct_cascade(
+    query: &QueryPlanDescription,
+    disjunct_count: u64,
+    nested_branch_limits: &[u64],
+    conjunct_count_per_disjunct: u64,
+    additional_limits: &[u64],
+) -> Result<ExplainedPlan, ExplainError> {
+    if disjunct_count == 0
+        || nested_branch_limits.is_empty()
+        || conjunct_count_per_disjunct == 0
+        || query.predicate.is_none()
+    {
+        return Err(ExplainError::InvalidExpression);
+    }
+    if disjunct_count.saturating_mul(conjunct_count_per_disjunct)
+        > MAX_PLAN_EXPRESSIONS as u64
+    {
+        return Err(ExplainError::TooManyExpressions);
+    }
+    explain_query_with_predicate_pressure_and_branch_limits(
+        query,
+        disjunct_count,
+        None,
+        Some(conjunct_count_per_disjunct),
+        &[],
+        nested_branch_limits,
+        &[],
+        None,
+        additional_limits,
+    )
+}
+
+/// Explains a sequence of nested disjunct storms. Every stage starts from the
+/// previous stage's estimated output, expands its own disjuncts, applies an
+/// ordered limit cascade to each branch, evaluates that branch's conjunct
+/// chain, and combines the surviving branch estimates before feeding the
+/// next storm. The query's outer limit and `additional_limits` run after all
+/// storms.
+///
+/// ORNA-PLAN leaves estimate aggregation unspecified for this composition.
+/// The adapter uses independent branches with 50% selectivity per conjunct,
+/// rounds branch matches upward, and charges every branch limit for each
+/// disjunct. It retains work and known overflow from earlier storms through
+/// later stages and zero limits. The query-level predicate must be absent;
+/// each `DisjunctStormDescription` supplies the predicate for its stage.
+pub fn explain_query_with_disjunct_storm_chain(
+    query: &QueryPlanDescription,
+    storms: &[DisjunctStormDescription],
+    additional_limits: &[u64],
+) -> Result<ExplainedPlan, ExplainError> {
+    if storms.is_empty() || query.predicate.is_some() {
+        return Err(ExplainError::InvalidExpression);
+    }
+    if storms.iter().any(|storm| {
+        storm.disjunct_count == 0
+            || storm.nested_branch_limits.is_empty()
+            || storm.conjunct_count_per_disjunct == 0
+    }) {
+        return Err(ExplainError::InvalidExpression);
+    }
+    explain_query_with_predicate_pressure_and_branch_limits_and_storms(
+        query,
+        1,
+        None,
+        None,
+        &[],
+        &[],
+        &[],
+        None,
+        additional_limits,
+        storms,
+        &[],
+    )
+}
+
+/// Explains ordered disjunct-storm stages whose branches may use different
+/// nested limit chains and conjunct counts.
+///
+/// ORNA-PLAN does not specify estimates for branch-local limit chains inside
+/// nested disjunctions or where nested cascades rebind within those chains.
+/// This adapter applies each branch's limits and 50%-per-conjunct fallback
+/// independently from the same stage input, combines branch matches in
+/// declaration order without counting more rows or bytes than that input, and
+/// feeds the bounded result to the next storm stage. Every cascade result is
+/// capped to its immediate input at every nesting depth, so a nested rebind
+/// cannot expand beyond its ancestor branch's bounded estimate. The immediate
+/// cap at a rebind is the current branch's bounded rows and bytes. An explicit
+/// rebind runs just after its one-based limit position and feeds its capped
+/// output to the following limit. Rebinds at the same position run in
+/// declaration order, each consuming the previous rebind's bounded result.
+/// Row and byte estimates are capped independently; an unknown dimension stays
+/// unknown while a known dimension continues to use its immediate input cap.
+/// Unknown row-based work does not erase a known byte estimate.
+/// A rebind nested inside a cascade uses that nested branch's own post-limit
+/// estimate as its cap, so nested work cannot borrow a wider ancestor cap.
+/// The known byte cap therefore follows the immediate branch input at every
+/// rebind depth, even when every row-based work estimate is unknown.
+/// Plan details report the deepest cascade level that contains a rebind so the
+/// nested cap boundary is visible alongside the recursive branch shape.
+/// Since
+/// `sys.PlanNodeKind` has no union node, each storm is one aggregate filter
+/// node whose details retain the exact branch chains and rebind points; this
+/// avoids presenting sibling limits as a false serial pipeline. The
+/// query-level predicate must be absent because every stage supplies its own
+/// predicate.
+pub fn explain_query_with_disjunct_storm_branch_limit_chains(
+    query: &QueryPlanDescription,
+    storms: &[DisjunctStormCascadeDescription],
+    additional_limits: &[u64],
+) -> Result<ExplainedPlan, ExplainError> {
+    if storms.is_empty() || query.predicate.is_some() {
+        return Err(ExplainError::InvalidExpression);
+    }
+    explain_query_with_predicate_pressure_and_branch_limits_and_storms(
+        query,
+        1,
+        None,
+        None,
+        &[],
+        &[],
+        &[],
+        None,
+        additional_limits,
+        &[],
+        storms,
+    )
+}
+
+/// Explains nested input limits, one expanded disjunctive filter, and then
+/// the query's outer limit followed by any additional limits.
+///
+/// The input limits model an already nested relation and run after source and
+/// join work but before the predicate. Each limit is charged for its immediate
+/// input rows; disjunct expansion then charges each arm for the bounded rows
+/// that remain. ORNA-PLAN leaves cost aggregation unspecified, so this keeps
+/// the same documented independent 50%-per-arm fallback as
+/// [`explain_query_with_disjunct_limit_chain`].
+pub fn explain_query_with_input_limit_disjunct_chain(
+    query: &QueryPlanDescription,
+    disjunct_count: u64,
+    nested_input_limits: &[u64],
+    additional_limits: &[u64],
+) -> Result<ExplainedPlan, ExplainError> {
+    if disjunct_count == 0 || query.predicate.is_none() {
+        return Err(ExplainError::InvalidExpression);
+    }
+    explain_query_with_predicate_pressure(
+        query,
+        disjunct_count,
+        None,
+        None,
+        nested_input_limits,
+        &[],
+        None,
+        additional_limits,
+    )
+}
+
+/// Explains nested input limits, expanded disjuncts with a conjunct chain in
+/// each arm, and then the query's outer limit followed by any additional
+/// limits.
+///
+/// Each nested input limit runs after source and join work but before the
+/// predicate, and is charged for its immediate input rows. Every disjunct arm
+/// then starts from the capped rows and evaluates its conjuncts
+/// left-to-right, charging later conjuncts only for rows surviving earlier
+/// ones. ORNA-PLAN leaves estimate aggregation unspecified, so the documented
+/// independent 50%-per-conjunct fallback is applied within each arm; each arm
+/// is charged against the full capped input.
+pub fn explain_query_with_input_limit_conjunct_disjunct_chain(
+    query: &QueryPlanDescription,
+    disjunct_count: u64,
+    conjunct_count_per_disjunct: u64,
+    nested_input_limits: &[u64],
+    additional_limits: &[u64],
+) -> Result<ExplainedPlan, ExplainError> {
+    if disjunct_count == 0 || conjunct_count_per_disjunct == 0 || query.predicate.is_none() {
+        return Err(ExplainError::InvalidExpression);
+    }
+    if disjunct_count.saturating_mul(conjunct_count_per_disjunct)
+        > MAX_PLAN_EXPRESSIONS as u64
+    {
+        return Err(ExplainError::TooManyExpressions);
+    }
+    explain_query_with_predicate_pressure(
+        query,
+        disjunct_count,
+        None,
+        Some(conjunct_count_per_disjunct),
+        nested_input_limits,
+        &[],
+        None,
+        additional_limits,
+    )
+}
+
+/// Explains nested input limits, disjunct expansion, and then a separate
+/// left-to-right conjunct chain followed by the query's outer limit and any
+/// additional limits.
+///
+/// The input limits run once after source and join work and before the
+/// disjunctive predicate. Disjunct expansion charges each arm for the capped
+/// input; the conjunct chain then charges each term for the rows surviving
+/// its predecessors. ORNA-PLAN leaves these estimates unspecified, so the
+/// same deterministic 50%-per-arm and 50%-per-conjunct fallback is used.
+/// `query.predicate` describes the disjunction and `conjunct_predicate`
+/// describes the later AND chain. At least one nested limit, one disjunct,
+/// and one conjunct are required.
+pub fn explain_query_with_input_limit_disjunct_conjunct_chain(
+    query: &QueryPlanDescription,
+    disjunct_count: u64,
+    nested_input_limits: &[u64],
+    conjunct_predicate: ExpressionRef,
+    conjunct_count: u64,
+    additional_limits: &[u64],
+) -> Result<ExplainedPlan, ExplainError> {
+    if disjunct_count == 0
+        || nested_input_limits.is_empty()
+        || conjunct_count == 0
+        || query.predicate.is_none()
+    {
+        return Err(ExplainError::InvalidExpression);
+    }
+    explain_query_with_predicate_pressure(
+        query,
+        disjunct_count,
+        Some(conjunct_count),
+        None,
+        nested_input_limits,
+        &[],
+        Some(&conjunct_predicate),
+        additional_limits,
+    )
+}
+
+/// Explains nested input limits, disjunct expansion, a nested limit chain,
+/// and then a left-to-right conjunct chain followed by the query's outer
+/// limit and any additional limits.
+///
+/// Input limits run after source and join work, before disjunct expansion.
+/// Each expanded disjunct is charged against the capped input; the nested
+/// disjunct limits run after expansion and charge their immediate input. The
+/// conjunct chain runs after those limits and charges each term for rows
+/// surviving earlier terms. ORNA-PLAN leaves these estimate choices
+/// unspecified, so this adapter uses independent 50% selectivity per OR arm
+/// and left-to-right 50% selectivity per conjunct. Earlier work remains
+/// charged when later limits reduce the estimated rows. At least one input
+/// limit, one disjunct, one post-expansion limit, and one conjunct are
+/// required. `query.predicate` describes the disjunction and
+/// `conjunct_predicate` describes the later AND chain.
+pub fn explain_query_with_input_disjunct_limit_conjunct_chain(
+    query: &QueryPlanDescription,
+    disjunct_count: u64,
+    nested_input_limits: &[u64],
+    nested_disjunct_limits: &[u64],
+    conjunct_predicate: ExpressionRef,
+    conjunct_count: u64,
+    additional_limits: &[u64],
+) -> Result<ExplainedPlan, ExplainError> {
+    if disjunct_count == 0
+        || nested_input_limits.is_empty()
+        || nested_disjunct_limits.is_empty()
+        || conjunct_count == 0
+        || query.predicate.is_none()
+    {
+        return Err(ExplainError::InvalidExpression);
+    }
+    explain_query_with_predicate_pressure(
+        query,
+        disjunct_count,
+        Some(conjunct_count),
+        None,
+        nested_input_limits,
+        nested_disjunct_limits,
+        Some(&conjunct_predicate),
+        additional_limits,
+    )
+}
+
+/// Explains nested input limits, expanded disjuncts whose arms each contain a
+/// conjunct chain, a nested disjunct limit cascade, and then a separate
+/// conjunct chain followed by the query's outer limit and any additional
+/// limits.
+///
+/// Input limits run after source and join work and before disjunct expansion.
+/// Each disjunct arm evaluates its conjuncts left-to-right against the capped
+/// input. The nested disjunct limits then charge their immediate input before
+/// the separate final conjunct chain runs. ORNA-PLAN leaves selectivity and
+/// estimate aggregation unspecified, so this adapter uses independent 50%
+/// selectivity per arm and per conjunct, rounds branch row estimates upward,
+/// and keeps prior work charged after later caps. At least one input limit,
+/// one disjunct, one per-arm conjunct, one post-disjunct limit, and one final
+/// conjunct are required. `query.predicate` describes the disjunction with
+/// its per-arm conjuncts; `conjunct_predicate` describes the later AND chain.
+pub fn explain_query_with_input_limit_conjunct_disjunct_limit_conjunct_chain(
+    query: &QueryPlanDescription,
+    disjunct_count: u64,
+    conjunct_count_per_disjunct: u64,
+    nested_input_limits: &[u64],
+    nested_disjunct_limits: &[u64],
+    conjunct_predicate: ExpressionRef,
+    conjunct_count: u64,
+    additional_limits: &[u64],
+) -> Result<ExplainedPlan, ExplainError> {
+    if disjunct_count == 0
+        || conjunct_count_per_disjunct == 0
+        || nested_input_limits.is_empty()
+        || nested_disjunct_limits.is_empty()
+        || conjunct_count == 0
+        || query.predicate.is_none()
+    {
+        return Err(ExplainError::InvalidExpression);
+    }
+    if disjunct_count.saturating_mul(conjunct_count_per_disjunct)
+        > MAX_PLAN_EXPRESSIONS as u64
+    {
+        return Err(ExplainError::TooManyExpressions);
+    }
+    explain_query_with_predicate_pressure(
+        query,
+        disjunct_count,
+        Some(conjunct_count),
+        Some(conjunct_count_per_disjunct),
+        nested_input_limits,
+        nested_disjunct_limits,
+        Some(&conjunct_predicate),
+        additional_limits,
+    )
+}
+
+/// Explains an expanded disjunction, a nested limit chain, and then a
+/// left-to-right conjunct chain followed by the query's outer limit and any
+/// additional limits.
+///
+/// Each disjunct is estimated at 50% selectivity and charged against the full
+/// input. The nested limits run after that expansion, retain its work, and
+/// charge each immediate input. The subsequent conjuncts use the same
+/// deterministic 50%-per-term fallback, with each term charged only for rows
+/// surviving its predecessors. `query.predicate` describes the disjunctive
+/// predicate, and `conjunct_predicate` describes the post-limit conjunct
+/// chain. ORNA-PLAN does not specify these estimate aggregation choices. At
+/// least one nested limit, one disjunct, and one conjunct are required.
+pub fn explain_query_with_disjunct_limit_conjunct_chain(
+    query: &QueryPlanDescription,
+    disjunct_count: u64,
+    nested_limits: &[u64],
+    conjunct_predicate: ExpressionRef,
+    conjunct_count: u64,
+    additional_limits: &[u64],
+) -> Result<ExplainedPlan, ExplainError> {
+    if disjunct_count == 0
+        || nested_limits.is_empty()
+        || conjunct_count == 0
+        || query.predicate.is_none()
+    {
+        return Err(ExplainError::InvalidExpression);
+    }
+    explain_query_with_predicate_pressure(
+        query,
+        disjunct_count,
+        Some(conjunct_count),
+        None,
+        &[],
+        nested_limits,
+        Some(&conjunct_predicate),
         additional_limits,
     )
 }
@@ -918,15 +1997,411 @@ fn explain_query_with_predicate_pressure(
     disjunct_count: u64,
     conjunct_count: Option<u64>,
     conjunct_count_per_disjunct: Option<u64>,
+    nested_input_limits: &[u64],
+    limits_between_disjunct_and_conjunct: &[u64],
+    post_expansion_conjunct: Option<&ExpressionRef>,
     additional_limits: &[u64],
 ) -> Result<ExplainedPlan, ExplainError> {
+    explain_query_with_predicate_pressure_and_branch_limits(
+        query,
+        disjunct_count,
+        conjunct_count,
+        conjunct_count_per_disjunct,
+        nested_input_limits,
+        &[],
+        limits_between_disjunct_and_conjunct,
+        post_expansion_conjunct,
+        additional_limits,
+    )
+}
+
+fn explain_query_with_predicate_pressure_and_branch_limits(
+    query: &QueryPlanDescription,
+    disjunct_count: u64,
+    conjunct_count: Option<u64>,
+    conjunct_count_per_disjunct: Option<u64>,
+    nested_input_limits: &[u64],
+    nested_branch_limits: &[u64],
+    limits_between_disjunct_and_conjunct: &[u64],
+    post_expansion_conjunct: Option<&ExpressionRef>,
+    additional_limits: &[u64],
+) -> Result<ExplainedPlan, ExplainError> {
+    explain_query_with_predicate_pressure_and_branch_limits_and_storms(
+        query,
+        disjunct_count,
+        conjunct_count,
+        conjunct_count_per_disjunct,
+        nested_input_limits,
+        nested_branch_limits,
+        limits_between_disjunct_and_conjunct,
+        post_expansion_conjunct,
+        additional_limits,
+        &[],
+        &[],
+    )
+}
+
+fn disjunct_storm_cascade_shape_counts<'a>(
+    storms: &'a [DisjunctStormCascadeDescription],
+) -> Result<(usize, usize, Vec<&'a ExpressionRef>), ExplainError> {
+    let mut pending = storms.iter().map(|storm| (storm, 1usize)).collect::<Vec<_>>();
+    let mut operators = 0usize;
+    let mut expressions = 0usize;
+    let mut predicates = Vec::new();
+    while let Some((storm, depth)) = pending.pop() {
+        if depth > MAX_DISJUNCT_STORM_DEPTH {
+            return Err(ExplainError::TooManyNodes);
+        }
+        if storm.branches.is_empty() {
+            return Err(ExplainError::InvalidExpression);
+        }
+        operators = operators.saturating_add(1);
+        predicates.push(&storm.predicate);
+        for branch in &storm.branches {
+            if branch.nested_limits.is_empty() || branch.conjunct_count == 0 {
+                return Err(ExplainError::InvalidExpression);
+            }
+            operators = operators
+                .saturating_add(branch.nested_limits.len())
+                .saturating_add(branch.limit_rebinds.len());
+            expressions = expressions.saturating_add(
+                usize::try_from(branch.conjunct_count).unwrap_or(usize::MAX),
+            );
+            let mut previous_rebind_position = 0;
+            for rebind in &branch.limit_rebinds {
+                if rebind.after_limit == 0
+                    || rebind.after_limit > branch.nested_limits.len()
+                    || rebind.after_limit < previous_rebind_position
+                    || rebind.storms.is_empty()
+                {
+                    return Err(ExplainError::InvalidExpression);
+                }
+                previous_rebind_position = rebind.after_limit;
+            }
+            pending.extend(
+                branch
+                    .limit_rebinds
+                    .iter()
+                    .flat_map(|rebind| rebind.storms.iter())
+                    .map(|nested| (nested, depth.saturating_add(1))),
+            );
+            pending.extend(
+                branch
+                    .nested_storms
+                    .iter()
+                    .map(|nested| (nested, depth.saturating_add(1))),
+            );
+            if operators > MAX_PLAN_NODES {
+                return Err(ExplainError::TooManyNodes);
+            }
+            if expressions > MAX_PLAN_EXPRESSIONS {
+                return Err(ExplainError::TooManyExpressions);
+            }
+        }
+    }
+    Ok((operators, expressions, predicates))
+}
+
+fn explain_query_with_predicate_pressure_and_branch_limits_and_storms(
+    query: &QueryPlanDescription,
+    disjunct_count: u64,
+    conjunct_count: Option<u64>,
+    conjunct_count_per_disjunct: Option<u64>,
+    nested_input_limits: &[u64],
+    nested_branch_limits: &[u64],
+    limits_between_disjunct_and_conjunct: &[u64],
+    post_expansion_conjunct: Option<&ExpressionRef>,
+    additional_limits: &[u64],
+    disjunct_storms: &[DisjunctStormDescription],
+    disjunct_storm_cascades: &[DisjunctStormCascadeDescription],
+) -> Result<ExplainedPlan, ExplainError> {
+    explain_query_with_predicate_pressure_and_branch_limits_and_storms_with_partial_indexes(
+        query,
+        disjunct_count,
+        conjunct_count,
+        conjunct_count_per_disjunct,
+        nested_input_limits,
+        nested_branch_limits,
+        limits_between_disjunct_and_conjunct,
+        post_expansion_conjunct,
+        additional_limits,
+        disjunct_storms,
+        disjunct_storm_cascades,
+        &[],
+    )
+}
+
+fn explain_query_with_predicate_pressure_and_branch_limits_and_storms_with_partial_indexes(
+    query: &QueryPlanDescription,
+    disjunct_count: u64,
+    conjunct_count: Option<u64>,
+    conjunct_count_per_disjunct: Option<u64>,
+    nested_input_limits: &[u64],
+    nested_branch_limits: &[u64],
+    limits_between_disjunct_and_conjunct: &[u64],
+    post_expansion_conjunct: Option<&ExpressionRef>,
+    additional_limits: &[u64],
+    disjunct_storms: &[DisjunctStormDescription],
+    disjunct_storm_cascades: &[DisjunctStormCascadeDescription],
+    partial_indexes: &[QueryPartialIndexDescription],
+) -> Result<ExplainedPlan, ExplainError> {
+    explain_query_core_with_subqueries(
+        query,
+        disjunct_count,
+        conjunct_count,
+        conjunct_count_per_disjunct,
+        nested_input_limits,
+        nested_branch_limits,
+        limits_between_disjunct_and_conjunct,
+        post_expansion_conjunct,
+        additional_limits,
+        disjunct_storms,
+        disjunct_storm_cascades,
+        partial_indexes,
+        &[],
+        &[],
+        &[],
+    )
+}
+
+fn explain_query_core_with_subqueries(
+    query: &QueryPlanDescription,
+    disjunct_count: u64,
+    conjunct_count: Option<u64>,
+    conjunct_count_per_disjunct: Option<u64>,
+    nested_input_limits: &[u64],
+    nested_branch_limits: &[u64],
+    limits_between_disjunct_and_conjunct: &[u64],
+    post_expansion_conjunct: Option<&ExpressionRef>,
+    additional_limits: &[u64],
+    disjunct_storms: &[DisjunctStormDescription],
+    disjunct_storm_cascades: &[DisjunctStormCascadeDescription],
+    partial_indexes: &[QueryPartialIndexDescription],
+    decorrelated_subqueries: &[QueryDecorrelatedSubqueryDescription],
+    window_aggregates: &[QueryWindowAggregatePushdownDescription],
+    join_pair_identities: &[QueryJoinPairIdentityDescription],
+) -> Result<ExplainedPlan, ExplainError> {
+    explain_query_core_with_limit_pushdowns(
+        query,
+        disjunct_count,
+        conjunct_count,
+        conjunct_count_per_disjunct,
+        nested_input_limits,
+        nested_branch_limits,
+        limits_between_disjunct_and_conjunct,
+        post_expansion_conjunct,
+        additional_limits,
+        disjunct_storms,
+        disjunct_storm_cascades,
+        partial_indexes,
+        decorrelated_subqueries,
+        window_aggregates,
+        join_pair_identities,
+        &[],
+        &[],
+    )
+}
+
+fn explain_query_core_with_limit_pushdowns(
+    query: &QueryPlanDescription,
+    disjunct_count: u64,
+    conjunct_count: Option<u64>,
+    conjunct_count_per_disjunct: Option<u64>,
+    nested_input_limits: &[u64],
+    nested_branch_limits: &[u64],
+    limits_between_disjunct_and_conjunct: &[u64],
+    post_expansion_conjunct: Option<&ExpressionRef>,
+    additional_limits: &[u64],
+    disjunct_storms: &[DisjunctStormDescription],
+    disjunct_storm_cascades: &[DisjunctStormCascadeDescription],
+    partial_indexes: &[QueryPartialIndexDescription],
+    decorrelated_subqueries: &[QueryDecorrelatedSubqueryDescription],
+    window_aggregates: &[QueryWindowAggregatePushdownDescription],
+    join_pair_identities: &[QueryJoinPairIdentityDescription],
+    input_limit_pushdowns: &[QueryLimitPushdownDescription],
+    window_spills: &[QueryWindowSpillDescription],
+) -> Result<ExplainedPlan, ExplainError> {
+    if query
+        .joins
+        .len()
+        .saturating_add(decorrelated_subqueries.len())
+        .saturating_add(window_aggregates.len())
+        .saturating_add(join_pair_identities.len())
+        .saturating_add(input_limit_pushdowns.len())
+        .saturating_add(window_spills.len())
+        > MAX_PLAN_NODES
+    {
+        return Err(ExplainError::TooManyNodes);
+    }
+    if decorrelated_subqueries
+        .iter()
+        .any(|subquery| invalid_reference(subquery.identity.as_str()))
+    {
+        return Err(ExplainError::InvalidObject);
+    }
+    let declared_join_count = query.joins.len();
+    let mut expanded_query = query.clone();
+    expanded_query
+        .joins
+        .extend(
+            decorrelated_subqueries
+                .iter()
+                .map(|subquery| QueryJoinDescription {
+                    source: subquery.source.clone(),
+                    statistics: subquery.statistics.clone(),
+                    predicate: Some(subquery.correlation_predicate.clone()),
+                }),
+        );
+    let query = &expanded_query;
+
+    let mut window_identities = BTreeSet::new();
+    for aggregate in window_aggregates {
+        if invalid_reference(aggregate.identity.as_str())
+            || invalid_reference(aggregate.source.as_str())
+        {
+            return Err(ExplainError::InvalidObject);
+        }
+        if invalid_reference(aggregate.aggregate.as_str())
+            || invalid_reference(aggregate.frame_identity.as_str())
+            || aggregate.frame_start.ordinal() > aggregate.frame_end.ordinal()
+        {
+            return Err(ExplainError::InvalidExpression);
+        }
+        if !window_identities.insert(aggregate.identity.as_str()) {
+            return Err(ExplainError::InvalidObject);
+        }
+        let matching_sources = usize::from(query.source == aggregate.source)
+            + query.joins.iter().filter(|join| join.source == aggregate.source).count();
+        if matching_sources != 1 {
+            return Err(ExplainError::InvalidObject);
+        }
+    }
+
+    let mut input_limit_identities_seen = BTreeSet::new();
+    for limit_pushdown in input_limit_pushdowns {
+        if invalid_reference(limit_pushdown.identity.as_str())
+            || invalid_reference(limit_pushdown.join_pair_identity.as_str())
+            || invalid_reference(limit_pushdown.source.as_str())
+        {
+            return Err(ExplainError::InvalidObject);
+        }
+        if !input_limit_identities_seen.insert(limit_pushdown.identity.as_str()) {
+            return Err(ExplainError::InvalidObject);
+        }
+    }
+
+    let mut join_pair_identities_seen = BTreeSet::new();
+    let mut join_pair_targets_seen = BTreeSet::new();
+    for pair in join_pair_identities {
+        if invalid_reference(pair.identity.as_str())
+            || invalid_reference(pair.left_source.as_str())
+            || invalid_reference(pair.right_source.as_str())
+        {
+            return Err(ExplainError::InvalidObject);
+        }
+        if pair
+            .predicate
+            .as_ref()
+            .is_some_and(|predicate| invalid_reference(predicate.as_str()))
+        {
+            return Err(ExplainError::InvalidExpression);
+        }
+        if pair.left_source == pair.right_source
+            || !join_pair_identities_seen.insert(pair.identity.as_str())
+        {
+            return Err(ExplainError::InvalidObject);
+        }
+        let left_source_count = usize::from(query.source == pair.left_source)
+            + query
+                .joins
+                .iter()
+                .filter(|join| join.source == pair.left_source)
+                .count();
+        let matching_joins = query
+            .joins
+            .iter()
+            .filter(|join| {
+                join.source == pair.right_source && join.predicate == pair.predicate
+            })
+            .count();
+        if left_source_count != 1 || matching_joins != 1 {
+            return Err(ExplainError::InvalidObject);
+        }
+        let target = (
+            pair.right_source.as_str().to_owned(),
+            pair.predicate
+                .as_ref()
+                .map(|predicate| predicate.as_str().to_owned()),
+        );
+        if !join_pair_targets_seen.insert(target) {
+            return Err(ExplainError::InvalidObject);
+        }
+    }
+    for limit_pushdown in input_limit_pushdowns {
+        let matching_pairs = join_pair_identities
+            .iter()
+            .filter(|pair| {
+                pair.identity == limit_pushdown.join_pair_identity
+                    && pair.right_source == limit_pushdown.source
+            })
+            .count();
+        if matching_pairs != 1 {
+            return Err(ExplainError::InvalidObject);
+        }
+    }
+    let mut window_spill_identities_seen = BTreeSet::new();
+    let mut window_spill_targets_seen = BTreeSet::new();
+    for spill in window_spills {
+        if invalid_reference(spill.identity.as_str())
+            || invalid_reference(spill.join_pair_identity.as_str())
+            || invalid_reference(spill.source.as_str())
+            || invalid_reference(spill.window_aggregate_identity.as_str())
+        {
+            return Err(ExplainError::InvalidObject);
+        }
+        if !window_spill_identities_seen.insert(spill.identity.as_str())
+            || !window_spill_targets_seen.insert((
+                spill.join_pair_identity.as_str(),
+                spill.window_aggregate_identity.as_str(),
+            ))
+        {
+            return Err(ExplainError::InvalidObject);
+        }
+        let matching_pairs = join_pair_identities
+            .iter()
+            .filter(|pair| {
+                pair.identity == spill.join_pair_identity && pair.right_source == spill.source
+            })
+            .count();
+        let matching_aggregates = window_aggregates
+            .iter()
+            .filter(|aggregate| {
+                aggregate.identity == spill.window_aggregate_identity
+                    && aggregate.source == spill.source
+            })
+            .count();
+        if matching_pairs != 1 || matching_aggregates != 1 {
+            return Err(ExplainError::InvalidObject);
+        }
+    }
+
+    let (storm_cascade_operators, storm_cascade_expressions, storm_cascade_predicates) =
+        disjunct_storm_cascade_shape_counts(disjunct_storm_cascades)?;
     if disjunct_count == 0
         || conjunct_count == Some(0)
         || conjunct_count_per_disjunct == Some(0)
+        || (!nested_branch_limits.is_empty() && conjunct_count_per_disjunct.is_none())
         || ((disjunct_count > 1
             || conjunct_count.is_some()
             || conjunct_count_per_disjunct.is_some())
             && query.predicate.is_none())
+        || (!disjunct_storm_cascades.is_empty() && query.predicate.is_some())
+        || (!limits_between_disjunct_and_conjunct.is_empty()
+            && post_expansion_conjunct.is_none())
+        || (post_expansion_conjunct.is_some() && conjunct_count.is_none())
+        || (post_expansion_conjunct.is_none()
+            && conjunct_count.is_some()
+            && conjunct_count_per_disjunct.is_some())
     {
         return Err(ExplainError::InvalidExpression);
     }
@@ -957,15 +2432,38 @@ fn explain_query_with_predicate_pressure(
     {
         return Err(ExplainError::InvalidObject);
     }
+    if partial_indexes.len() > MAX_PLAN_NODES {
+        return Err(ExplainError::TooManyNodes);
+    }
+    if partial_indexes
+        .iter()
+        .any(|candidate| {
+            invalid_reference(candidate.table.as_str())
+                || invalid_reference(candidate.index.as_str())
+        })
+    {
+        return Err(ExplainError::InvalidObject);
+    }
     let operator_bound = 1usize
         .saturating_add(query.joins.len().saturating_mul(2))
         .saturating_add(usize::from(query.predicate.is_some()))
+        .saturating_add(disjunct_storms.len())
         .saturating_add(usize::from(!query.projections.is_empty()))
         .saturating_add(usize::from(query.distinct))
         .saturating_add(usize::from(!query.ordering.is_empty()))
         .saturating_add(usize::from(query.limit.is_some()))
+        .saturating_add(nested_input_limits.len())
+        .saturating_add(nested_branch_limits.len())
+        .saturating_add(disjunct_storms.iter().fold(0usize, |total, storm| {
+            total.saturating_add(storm.nested_branch_limits.len())
+        }))
+        .saturating_add(storm_cascade_operators)
+        .saturating_add(limits_between_disjunct_and_conjunct.len())
+        .saturating_add(usize::from(post_expansion_conjunct.is_some()))
         .saturating_add(additional_limits.len())
         .saturating_add(query.mutations.len())
+        .saturating_add(window_aggregates.len())
+        .saturating_add(input_limit_pushdowns.len())
         .saturating_add(usize::from(query.materialize_into.is_some()));
     if operator_bound > MAX_PLAN_NODES {
         return Err(ExplainError::TooManyNodes);
@@ -976,6 +2474,18 @@ fn explain_query_with_predicate_pressure(
         .chain(query.projections.iter())
         .chain(query.ordering.iter().map(|ordering| &ordering.expression))
         .chain(query.joins.iter().filter_map(|join| join.predicate.as_ref()))
+        .chain(
+            partial_indexes
+                .iter()
+                .map(|candidate| &candidate.partial_predicate),
+        )
+        .chain(post_expansion_conjunct.iter().copied())
+        .chain(disjunct_storms.iter().map(|storm| &storm.predicate))
+        .chain(storm_cascade_predicates.iter().copied())
+        .chain(window_aggregates.iter().flat_map(|aggregate| {
+            [&aggregate.aggregate, &aggregate.frame_identity]
+        }))
+        .chain(join_pair_identities.iter().filter_map(|pair| pair.predicate.as_ref()))
         .any(|expression| invalid_reference(expression.as_str()))
     {
         return Err(ExplainError::InvalidExpression);
@@ -984,8 +2494,26 @@ fn explain_query_with_predicate_pressure(
         .projections
         .len()
         .saturating_add(query.ordering.len())
+        .saturating_add(window_aggregates.len().saturating_mul(2))
+        .saturating_add(
+            join_pair_identities
+                .iter()
+                .filter(|pair| pair.predicate.is_some())
+                .count(),
+        )
         .saturating_add(usize::from(query.predicate.is_some()))
+        .saturating_add(usize::from(post_expansion_conjunct.is_some()))
         .saturating_add(query.joins.iter().filter(|join| join.predicate.is_some()).count())
+        .saturating_add(disjunct_storms.iter().fold(0usize, |total, storm| {
+            let stage = usize::try_from(
+                storm
+                    .disjunct_count
+                    .saturating_mul(storm.conjunct_count_per_disjunct),
+            )
+            .unwrap_or(usize::MAX);
+            total.saturating_add(stage)
+        }))
+        .saturating_add(storm_cascade_expressions)
         > MAX_PLAN_EXPRESSIONS
     {
         return Err(ExplainError::TooManyExpressions);
@@ -998,9 +2526,169 @@ fn explain_query_with_predicate_pressure(
         query.source_statistics.as_ref(),
     );
     let mut current_cardinality = source_cardinality(query.source_statistics.as_ref());
-    for join in &query.joins {
-        let right = push_scan(&mut operators, join.source.clone(), join.statistics.as_ref());
-        let right_cardinality = source_cardinality(join.statistics.as_ref());
+    current = push_window_aggregates(
+        &mut operators,
+        current,
+        &query.source,
+        current_cardinality,
+        window_aggregates,
+    );
+    let mut join_cost_fold_identity = query_join_cost_fold_seed(
+        &query.snapshot,
+        &query.source,
+        query.source_statistics.as_ref(),
+        window_aggregates,
+    );
+    let mut decorrelated_pin_chain_identity: Option<String> = None;
+    let mut paired_index_anchor_chain_identity: Option<String> = None;
+    let mut paired_index_cost_restoration_chain_identity: Option<String> = None;
+    let mut paired_index_cost_compaction_chain: Option<(String, u64, u64, u64)> = None;
+    let mut paired_decorrelation_cost_restoration_chain_identity: Option<String> = None;
+    let mut paired_window_spill_cascade_fold: Option<QueryWindowSpillCascadeFold> = None;
+    let mut paired_aggregate_anchor_cascade_fold: Option<QueryPairedAggregateAnchorCascadeFold> =
+        None;
+    let mut paired_limit_aggregate_restoration_fold:
+        Option<QueryPairedLimitAggregateRestorationFold> = None;
+    let mut paired_aggregate_spill_restoration_fold: Option<
+        QueryPairedAggregateSpillRestorationFold,
+    > = None;
+    let mut paired_window_compaction_spill_fold: Option<
+        QueryPairedWindowCompactionSpillFold,
+    > = None;
+    let mut paired_join_limit_anchor_cascade_fold: Option<QueryJoinLimitAnchorCascadeFold> = None;
+    let mut paired_limit_window_cascade_fold: Option<QueryLimitWindowCascadeFold> = None;
+    add_join_cost_fold_seed_details(
+        &mut operators[current].details,
+        &join_cost_fold_identity,
+    );
+    if let Some(window_identity) = query_window_pushdown_chain_identity(
+        &query.source,
+        window_aggregates,
+    ) {
+        add_window_pushdown_chain_details(&mut operators[current].details, &window_identity);
+    }
+    for (planned_position, (declared_position, join)) in
+        planned_query_join_order(&query.joins).into_iter().enumerate()
+    {
+        let decorrelated_subquery = declared_position
+            .checked_sub(declared_join_count)
+            .and_then(|offset| decorrelated_subqueries.get(offset));
+        let selected_partial_index = partial_index_for_join(join, partial_indexes);
+        let join_pair_identity = join_pair_identity_for_join(join, join_pair_identities);
+        let paired_index_selection_id = join_pair_identity
+            .map(|pair| paired_index_selection_identity(pair, selected_partial_index));
+        let decorrelated_index_omission_identity = decorrelated_subquery
+            .filter(|_| selected_partial_index.is_none())
+            .map(decorrelated_index_selection_omission_identity);
+        let decorrelated_index_fold_id = decorrelated_subquery.map(|subquery| {
+            decorrelated_index_selection_fold_identity(
+                subquery,
+                selected_partial_index,
+                decorrelated_index_omission_identity.as_deref(),
+            )
+        });
+        let right_access = if let Some(candidate) = selected_partial_index {
+            push_index_lookup(&mut operators, candidate, join.statistics.as_ref())
+        } else {
+            push_scan(&mut operators, join.source.clone(), join.statistics.as_ref())
+        };
+        let right_limit_operator_start = operators.len();
+        let (right_after_limits, right_cardinality, right_limit_chain_identity) =
+            push_query_limit_pushdowns(
+                &mut operators,
+                right_access,
+                &join.source,
+                source_cardinality(join.statistics.as_ref()),
+                join_pair_identity,
+                input_limit_pushdowns,
+            );
+        let right_limit_operator_end = operators.len();
+        if let Some(identity) = right_limit_chain_identity.as_deref() {
+            let mut limit_nodes = BTreeSet::from([right_access]);
+            limit_nodes.extend(right_limit_operator_start..right_limit_operator_end);
+            for index in limit_nodes {
+                add_query_limit_pushdown_chain_details(&mut operators[index].details, identity);
+            }
+        }
+        let right_window_operator_start = operators.len();
+        let right = push_window_aggregates(
+            &mut operators,
+            right_after_limits,
+            &join.source,
+            right_cardinality,
+            window_aggregates,
+        );
+        let right_window_identity =
+            query_window_pushdown_chain_identity(&join.source, window_aggregates);
+        let right_window_spill_chain_identity = join_pair_identity.and_then(|pair| {
+            query_window_spill_chain_identity(
+                pair,
+                &join.source,
+                window_aggregates,
+                window_spills,
+            )
+        });
+        if let Some(spill_chain_identity) = right_window_spill_chain_identity.as_deref() {
+            let right_window_operator_end = operators.len();
+            apply_query_window_spills(
+                &mut operators,
+                right_window_operator_start..right_window_operator_end,
+                join_pair_identity.expect("spill descriptors require a resolved join pair"),
+                spill_chain_identity,
+                &join.source,
+                window_spills,
+            );
+            let mut spill_nodes = BTreeSet::from([right_access]);
+            spill_nodes.extend(right_window_operator_start..right_window_operator_end);
+            for index in spill_nodes {
+                add_window_spill_chain_details(
+                    &mut operators[index].details,
+                    spill_chain_identity,
+                );
+            }
+        }
+        if let Some(window_identity) = right_window_identity.as_deref() {
+            for index in BTreeSet::from([right_access, right]) {
+                add_window_pushdown_chain_details(&mut operators[index].details, window_identity);
+            }
+        }
+        if let Some(subquery) = decorrelated_subquery {
+            for index in BTreeSet::from([right_access, right]) {
+                add_decorrelated_subquery_details(&mut operators[index].details, subquery);
+            }
+        }
+        if let Some(identity) = decorrelated_index_omission_identity.as_deref() {
+            for index in BTreeSet::from([right_access, right]) {
+                add_decorrelated_index_selection_omission_details(
+                    &mut operators[index].details,
+                    identity,
+                );
+            }
+        }
+        if let Some(pair_identity) = join_pair_identity {
+            let mut pair_nodes = BTreeSet::from([right_access, right]);
+            pair_nodes.extend(right_limit_operator_start..right_limit_operator_end);
+            for index in pair_nodes {
+                add_join_pair_identity_details(&mut operators[index].details, pair_identity);
+            }
+        }
+        if let Some(identity) = paired_index_selection_id.as_deref() {
+            let mut index_nodes = BTreeSet::from([right_access, right]);
+            index_nodes.extend(right_limit_operator_start..right_limit_operator_end);
+            for index in index_nodes {
+                add_paired_index_selection_details(&mut operators[index].details, identity);
+            }
+        }
+        let paired_predicate_pushdown_identity = join_pair_identity
+            .zip(selected_partial_index)
+            .map(|(pair, index)| paired_predicate_pushdown_identity(pair, index));
+        if let Some(identity) = paired_predicate_pushdown_identity.as_deref() {
+            let mut predicate_nodes = BTreeSet::from([right_access, right]);
+            predicate_nodes.extend(right_limit_operator_start..right_limit_operator_end);
+            for index in predicate_nodes {
+                add_paired_predicate_pushdown_details(&mut operators[index].details, identity);
+            }
+        }
         let cardinality = join_cardinality(
             current_cardinality,
             right_cardinality,
@@ -1017,10 +2705,997 @@ fn explain_query_with_predicate_pressure(
             .rows
             .zip(right_cardinality.rows)
             .is_some_and(|(left, right)| left.checked_add(right).is_none());
+        let left_fold_identity = join_cost_fold_identity.clone();
+        let decorrelated_predicate_identity = decorrelated_subquery
+            .zip(selected_partial_index)
+            .map(|(subquery, index)| decorrelated_predicate_pushdown_identity(subquery, index));
+        let right_fold_identity = query_join_cost_input_identity(
+            &query.snapshot,
+            join,
+            selected_partial_index,
+            window_aggregates,
+            decorrelated_subquery,
+            decorrelated_predicate_identity.as_deref(),
+            decorrelated_index_omission_identity.as_deref(),
+            right_limit_chain_identity.as_deref(),
+            right_window_spill_chain_identity.as_deref(),
+        );
+        let paired_index_refold_id = join_pair_identity
+            .zip(paired_index_selection_id.as_deref())
+            .map(|(pair, selection_identity)| {
+                query_paired_index_refold_identity(
+                    &left_fold_identity,
+                    &right_fold_identity,
+                    pair,
+                    selection_identity,
+                    paired_predicate_pushdown_identity.as_deref(),
+                    cardinality,
+                    work,
+                    work_overflow,
+                )
+            });
+        let paired_index_anchor_chain_advance = join_pair_identity
+            .zip(selected_partial_index)
+            .zip(paired_index_refold_id.as_deref())
+            .zip(paired_index_selection_id.as_deref())
+            .map(|(((pair, _index), refold_identity), selection_identity)| {
+                let parent_chain_identity = paired_index_anchor_chain_identity
+                    .clone()
+                    .unwrap_or_else(|| {
+                        query_paired_index_anchor_chain_seed_identity(&left_fold_identity)
+                    });
+                let identity = query_paired_index_anchor_chain_identity(
+                    &parent_chain_identity,
+                    &left_fold_identity,
+                    pair,
+                    selection_identity,
+                    refold_identity,
+                );
+                (
+                    parent_chain_identity,
+                    identity,
+                    refold_identity.to_owned(),
+                    selection_identity.to_owned(),
+                )
+            });
+        let next_paired_index_anchor_chain_identity = paired_index_anchor_chain_advance
+            .as_ref()
+            .map(|(_, identity, _, _)| identity.clone())
+            .or_else(|| paired_index_anchor_chain_identity.clone());
+        let paired_index_anchor_chain_parent_identity = paired_index_anchor_chain_advance
+            .as_ref()
+            .map(|(parent_identity, _, _, _)| parent_identity.as_str())
+            .or(paired_index_anchor_chain_identity.as_deref());
+        let paired_index_anchor_chain_transition = if paired_index_anchor_chain_advance.is_some() {
+            Some("append_exact_index_refold")
+        } else if next_paired_index_anchor_chain_identity.is_some() {
+            Some("carry_through_sparse_cost_fold")
+        } else {
+            None
+        };
+        let paired_index_anchor_chain_step_refold_identity = paired_index_anchor_chain_advance
+            .as_ref()
+            .map(|(_, _, identity, _)| identity.as_str());
+        let paired_index_anchor_chain_step_selection_identity = paired_index_anchor_chain_advance
+            .as_ref()
+            .map(|(_, _, _, identity)| identity.as_str());
+        // Every logical pair contributes its exact index-or-scan outcome to a
+        // separate restoration chain. This keeps a no-index pair observable
+        // between indexed pairs, and lets the optimized fold be mapped back to
+        // declared positions without losing sparse pair slots.
+        let paired_index_cost_restoration_advance = join_pair_identity
+            .zip(paired_index_selection_id.as_deref())
+            .zip(paired_index_refold_id.as_deref())
+            .map(|((pair, selection_identity), refold_identity)| {
+                let parent_chain_identity = paired_index_cost_restoration_chain_identity
+                    .clone()
+                    .unwrap_or_else(|| {
+                        query_paired_index_cost_restoration_seed_identity(&left_fold_identity)
+                    });
+                let identity = query_paired_index_cost_restoration_chain_identity(
+                    &parent_chain_identity,
+                    &left_fold_identity,
+                    pair,
+                    selection_identity,
+                    refold_identity,
+                );
+                (
+                    parent_chain_identity,
+                    identity,
+                    pair.identity.as_str(),
+                    refold_identity,
+                    selection_identity,
+                    selected_partial_index.is_some(),
+                )
+            });
+        let next_paired_index_cost_restoration_chain_identity =
+            paired_index_cost_restoration_advance
+                .as_ref()
+                .map(|(_, identity, _, _, _, _)| identity.clone())
+                .or_else(|| paired_index_cost_restoration_chain_identity.clone());
+        let paired_index_cost_restoration_parent_identity =
+            paired_index_cost_restoration_advance
+                .as_ref()
+                .map(|(parent_identity, _, _, _, _, _)| parent_identity.as_str())
+                .or(paired_index_cost_restoration_chain_identity.as_deref());
+        let paired_index_cost_restoration_transition =
+            if paired_index_cost_restoration_advance.is_some() {
+                Some(if selected_partial_index.is_some() {
+                    "append_exact_index_outcome"
+                } else {
+                    "append_scan_outcome"
+                })
+            } else if next_paired_index_cost_restoration_chain_identity.is_some() {
+                Some("carry_through_unpaired_cost_fold")
+            } else {
+                None
+            };
+        // ORNA does not define compact index-route explain metadata. Compact
+        // pair outcomes to a bounded digest and counts; a sparse unpaired
+        // fold carries that summary without consuming a route slot.
+        let paired_index_cost_compaction_advance = join_pair_identity
+            .zip(paired_index_selection_id.as_deref())
+            .zip(paired_index_refold_id.as_deref())
+            .map(|((pair, selection_identity), refold_identity)| {
+                let (
+                    parent_chain_identity,
+                    previous_pair_count,
+                    previous_index_count,
+                    previous_scan_count,
+                ) = paired_index_cost_compaction_chain.as_ref().map_or_else(
+                        || {
+                            (
+                                query_paired_index_cost_compaction_seed_identity(
+                                    &left_fold_identity,
+                                ),
+                                0,
+                                0,
+                                0,
+                            )
+                        },
+                        |(identity, pair_count, index_count, scan_count)| {
+                            (
+                                identity.clone(),
+                                *pair_count,
+                                *index_count,
+                                *scan_count,
+                            )
+                        },
+                    );
+                let has_index = selected_partial_index.is_some();
+                let identity = query_paired_index_cost_compaction_chain_identity(
+                    &parent_chain_identity,
+                    &left_fold_identity,
+                    pair,
+                    selection_identity,
+                    refold_identity,
+                    has_index,
+                );
+                (
+                    parent_chain_identity,
+                    identity,
+                    previous_pair_count.saturating_add(1),
+                    previous_index_count.saturating_add(u64::from(has_index)),
+                    previous_scan_count.saturating_add(u64::from(!has_index)),
+                )
+            });
+        let next_paired_index_cost_compaction_chain = paired_index_cost_compaction_advance
+            .as_ref()
+            .map(|(_, identity, pair_count, index_count, scan_count)| {
+                (identity.clone(), *pair_count, *index_count, *scan_count)
+            })
+            .or_else(|| paired_index_cost_compaction_chain.clone());
+        let paired_index_cost_compaction_parent_identity =
+            paired_index_cost_compaction_advance
+                .as_ref()
+                .map(|(parent_identity, _, _, _, _)| parent_identity.as_str())
+                .or_else(|| {
+                    paired_index_cost_compaction_chain
+                        .as_ref()
+                        .map(|(identity, _, _, _)| identity.as_str())
+                });
+        let paired_index_cost_compaction_transition =
+            if paired_index_cost_compaction_advance.is_some() {
+                Some(if selected_partial_index.is_some() {
+                    "append_exact_index_outcome"
+                } else {
+                    "append_scan_outcome"
+                })
+            } else if next_paired_index_cost_compaction_chain.is_some() {
+                Some("carry_through_sparse_cost_fold")
+            } else {
+                None
+            };
+        let paired_index_cost_compaction_counts = paired_index_cost_compaction_advance
+            .as_ref()
+            .map(|(_, _, pair_count, index_count, scan_count)| {
+                (*pair_count, *index_count, *scan_count)
+            })
+            .or_else(|| {
+                next_paired_index_cost_compaction_chain
+                    .as_ref()
+                    .map(|(_, pair_count, index_count, scan_count)| {
+                        (*pair_count, *index_count, *scan_count)
+                    })
+            });
+        let decorrelated_anchor_fold_id = decorrelated_subquery.map(|subquery| {
+            query_decorrelated_anchor_fold_identity(
+                &left_fold_identity,
+                &right_fold_identity,
+                subquery,
+                decorrelated_predicate_identity.as_deref(),
+                decorrelated_index_fold_id.as_deref(),
+            )
+        });
+        let decorrelated_omission_refold_id = decorrelated_subquery
+            .zip(decorrelated_index_omission_identity.as_deref())
+            .zip(decorrelated_index_fold_id.as_deref())
+            .map(|((subquery, omission_identity), selection_identity)| {
+                query_decorrelated_omission_refold_identity(
+                    &left_fold_identity,
+                    &right_fold_identity,
+                    subquery,
+                    omission_identity,
+                    selection_identity,
+                    cardinality,
+                    work,
+                    work_overflow,
+                )
+            });
+        let decorrelated_pin_chain_advance = decorrelated_subquery
+            .zip(decorrelated_index_fold_id.as_deref())
+            .zip(decorrelated_anchor_fold_id.as_deref())
+            .map(|((subquery, selection_identity), anchor_fold_identity)| {
+                let parent_pin_identity = decorrelated_pin_chain_identity
+                    .clone()
+                    .unwrap_or_else(|| {
+                        query_decorrelated_pin_chain_seed_identity(
+                            &query.snapshot,
+                            &left_fold_identity,
+                        )
+                    });
+                let identity = query_decorrelated_pin_chain_identity(
+                    &parent_pin_identity,
+                    &query.snapshot,
+                    &left_fold_identity,
+                    &right_fold_identity,
+                    subquery,
+                    selection_identity,
+                    anchor_fold_identity,
+                    decorrelated_omission_refold_id.as_deref(),
+                    cardinality,
+                    work,
+                    work_overflow,
+                );
+                (
+                    parent_pin_identity,
+                    identity,
+                    subquery.identity.as_str().to_owned(),
+                    selection_identity.to_owned(),
+                    anchor_fold_identity.to_owned(),
+                    decorrelated_omission_refold_id.clone(),
+                )
+            });
+        let next_decorrelated_pin_chain_identity = decorrelated_pin_chain_advance
+            .as_ref()
+            .map(|(_, identity, _, _, _, _)| identity.clone())
+            .or_else(|| decorrelated_pin_chain_identity.clone());
+        let decorrelated_pin_chain_parent_identity = decorrelated_pin_chain_advance
+            .as_ref()
+            .map(|(parent_identity, _, _, _, _, _)| parent_identity.as_str())
+            .or(decorrelated_pin_chain_identity.as_deref());
+        let decorrelated_pin_chain_transition = if decorrelated_pin_chain_advance.is_some() {
+            Some("append_resolved_subquery_pin")
+        } else if next_decorrelated_pin_chain_identity.is_some() {
+            Some("carry_through_sparse_cost_fold")
+        } else {
+            None
+        };
+        let decorrelated_pin_chain_step_subquery_identity = decorrelated_pin_chain_advance
+            .as_ref()
+            .map(|(_, _, identity, _, _, _)| identity.as_str());
+        let decorrelated_pin_chain_step_selection_identity = decorrelated_pin_chain_advance
+            .as_ref()
+            .map(|(_, _, _, identity, _, _)| identity.as_str());
+        let decorrelated_pin_chain_step_anchor_fold_identity = decorrelated_pin_chain_advance
+            .as_ref()
+            .map(|(_, _, _, _, identity, _)| identity.as_str());
+        let decorrelated_pin_chain_step_omission_refold_identity = decorrelated_pin_chain_advance
+            .as_ref()
+            .and_then(|(_, _, _, _, _, identity)| identity.as_deref());
+        let paired_decorrelation_cost_restoration_advance =
+            if paired_index_cost_restoration_advance.is_some()
+                || decorrelated_pin_chain_advance.is_some()
+            {
+                let parent_identity = paired_decorrelation_cost_restoration_chain_identity
+                    .clone()
+                    .unwrap_or_else(|| {
+                        query_paired_decorrelation_cost_restoration_seed_identity(
+                            &left_fold_identity,
+                        )
+                    });
+                let identity = query_paired_decorrelation_cost_restoration_chain_identity(
+                    &parent_identity,
+                    &left_fold_identity,
+                    join_pair_identity,
+                    paired_index_selection_id.as_deref(),
+                    paired_index_refold_id.as_deref(),
+                    decorrelated_subquery,
+                    next_decorrelated_pin_chain_identity.as_deref(),
+                    decorrelated_anchor_fold_id.as_deref(),
+                    decorrelated_omission_refold_id.as_deref(),
+                );
+                Some((parent_identity, identity))
+            } else {
+                None
+            };
+        let next_paired_decorrelation_cost_restoration_chain_identity =
+            paired_decorrelation_cost_restoration_advance
+                .as_ref()
+                .map(|(_, identity)| identity.clone())
+                .or_else(|| paired_decorrelation_cost_restoration_chain_identity.clone());
+        let paired_decorrelation_cost_restoration_parent_identity =
+            paired_decorrelation_cost_restoration_advance
+                .as_ref()
+                .map(|(parent_identity, _)| parent_identity.as_str())
+                .or(paired_decorrelation_cost_restoration_chain_identity.as_deref());
+        let paired_decorrelation_cost_restoration_transition =
+            match (
+                paired_index_cost_restoration_advance.is_some(),
+                decorrelated_pin_chain_advance.is_some(),
+            ) {
+                (true, true) => Some("append_paired_route_and_decorrelation"),
+                (true, false) => Some("append_paired_route"),
+                (false, true) => Some("append_decorrelation"),
+                (false, false)
+                    if next_paired_decorrelation_cost_restoration_chain_identity.is_some() =>
+                {
+                    Some("carry_through_sparse_cost_fold")
+                }
+                (false, false) => None,
+            };
+        let window_anchor_fold_id = right_window_identity.as_deref().map(|chain_identity| {
+            query_window_anchor_fold_identity(
+                &left_fold_identity,
+                &right_fold_identity,
+                chain_identity,
+            )
+        });
+        let join_pair_anchor_fold_id = join_pair_identity.map(|pair| {
+            query_join_pair_anchor_fold_identity(
+                &left_fold_identity,
+                &right_fold_identity,
+                pair,
+            )
+        });
+        let paired_limit_pushdown_anchor_fold_id = join_pair_identity
+            .zip(right_limit_chain_identity.as_deref())
+            .map(|(pair, chain_identity)| {
+                query_paired_limit_pushdown_anchor_fold_identity(
+                    &left_fold_identity,
+                    &right_fold_identity,
+                    pair,
+                    chain_identity,
+                )
+            });
+        let paired_join_limit_anchor_fold_id = join_pair_identity
+            .zip(join_pair_anchor_fold_id.as_deref())
+            .zip(paired_limit_pushdown_anchor_fold_id.as_deref())
+            .map(|((pair, join_anchor_identity), limit_anchor_identity)| {
+                query_paired_join_limit_anchor_fold_identity(
+                    pair,
+                    join_anchor_identity,
+                    limit_anchor_identity,
+                )
+            });
+        if let Some(identity) = paired_join_limit_anchor_fold_id.as_deref() {
+            let mut fold_nodes = BTreeSet::from([right_access, right]);
+            fold_nodes.extend(right_limit_operator_start..right_limit_operator_end);
+            fold_nodes.extend(right_window_operator_start..operators.len());
+            for index in fold_nodes {
+                add_paired_join_limit_anchor_fold_details(
+                    &mut operators[index].details,
+                    identity,
+                );
+            }
+            let limit_stage_count =
+                u64::try_from(right_limit_operator_end - right_limit_operator_start)
+                    .unwrap_or(u64::MAX);
+            paired_join_limit_anchor_cascade_fold =
+                Some(query_paired_join_limit_anchor_cascade_fold(
+                    paired_join_limit_anchor_cascade_fold.as_ref(),
+                    identity,
+                    limit_stage_count,
+                ));
+        }
+        if let Some(cascade_fold) = paired_join_limit_anchor_cascade_fold.as_ref() {
+            let mut fold_nodes = BTreeSet::from([right_access, right]);
+            fold_nodes.extend(right_limit_operator_start..right_limit_operator_end);
+            fold_nodes.extend(right_window_operator_start..operators.len());
+            for index in fold_nodes {
+                add_paired_join_limit_anchor_cascade_fold_details(
+                    &mut operators[index].details,
+                    cascade_fold,
+                );
+            }
+        }
+        let paired_limit_window_anchor_fold_id = join_pair_identity
+            .zip(paired_limit_pushdown_anchor_fold_id.as_deref())
+            .zip(right_window_identity.as_deref())
+            .map(|((pair, limit_anchor_fold_identity), window_chain_identity)| {
+                query_paired_limit_window_anchor_fold_identity(
+                    pair,
+                    limit_anchor_fold_identity,
+                    window_chain_identity,
+                )
+            });
+        if let Some(identity) = paired_limit_window_anchor_fold_id.as_deref() {
+            let mut fold_nodes = BTreeSet::from([right_access, right]);
+            fold_nodes.extend(right_limit_operator_start..right_limit_operator_end);
+            fold_nodes.extend(right_window_operator_start..operators.len());
+            for index in fold_nodes {
+                add_paired_limit_window_anchor_fold_details(
+                    &mut operators[index].details,
+                    identity,
+                );
+            }
+            let limit_stage_count =
+                u64::try_from(right_limit_operator_end - right_limit_operator_start)
+                    .unwrap_or(u64::MAX);
+            paired_limit_window_cascade_fold = Some(query_paired_limit_window_cascade_fold(
+                paired_limit_window_cascade_fold.as_ref(),
+                identity,
+                limit_stage_count,
+                right_cardinality,
+            ));
+        }
+        if let Some(cascade_fold) = paired_limit_window_cascade_fold.as_ref() {
+            let mut fold_nodes = BTreeSet::from([right_access, right]);
+            fold_nodes.extend(right_limit_operator_start..right_limit_operator_end);
+            fold_nodes.extend(right_window_operator_start..operators.len());
+            for index in fold_nodes {
+                add_paired_limit_window_cascade_fold_details(
+                    &mut operators[index].details,
+                    cascade_fold,
+                );
+            }
+        }
+        if let Some(identity) = paired_limit_pushdown_anchor_fold_id.as_deref() {
+            let mut limit_nodes = BTreeSet::from([right_access, right]);
+            limit_nodes.extend(right_limit_operator_start..right_limit_operator_end);
+            limit_nodes.extend(right_window_operator_start..operators.len());
+            for index in limit_nodes {
+                add_paired_limit_pushdown_anchor_fold_details(
+                    &mut operators[index].details,
+                    identity,
+                );
+            }
+        }
+        let paired_aggregate_pushdown_anchor_fold_id = join_pair_identity
+            .zip(right_window_identity.as_deref())
+            .map(|(pair, chain_identity)| {
+                query_paired_aggregate_pushdown_anchor_fold_identity(
+                    &left_fold_identity,
+                    &right_fold_identity,
+                    pair,
+                    chain_identity,
+                )
+            });
+        if let Some(identity) = paired_aggregate_pushdown_anchor_fold_id.as_deref() {
+            let mut aggregate_nodes = BTreeSet::from([right_access, right]);
+            aggregate_nodes.extend(right_window_operator_start..operators.len());
+            for index in aggregate_nodes {
+                add_paired_aggregate_cascade_pair_details(&mut operators[index].details, identity);
+            }
+            let aggregate_stage_count =
+                u64::try_from(operators.len() - right_window_operator_start).unwrap_or(u64::MAX);
+            paired_aggregate_anchor_cascade_fold =
+                Some(query_paired_aggregate_anchor_cascade_fold(
+                    paired_aggregate_anchor_cascade_fold.as_ref(),
+                    identity,
+                    aggregate_stage_count,
+                ));
+        }
+        if let Some(cascade_fold) = paired_aggregate_anchor_cascade_fold.as_ref() {
+            let mut aggregate_nodes = BTreeSet::from([right_access, right]);
+            aggregate_nodes.extend(right_window_operator_start..operators.len());
+            for index in aggregate_nodes {
+                add_paired_aggregate_cascade_fold_details(
+                    &mut operators[index].details,
+                    cascade_fold,
+                );
+            }
+        }
+        let paired_limit_aggregate_restoration_pair_identity =
+            query_paired_limit_aggregate_restoration_pair_identity(
+                paired_limit_pushdown_anchor_fold_id.as_deref(),
+                paired_aggregate_pushdown_anchor_fold_id.as_deref(),
+            );
+        if let Some(pair_identity) =
+            paired_limit_aggregate_restoration_pair_identity.as_deref()
+        {
+            paired_limit_aggregate_restoration_fold = Some(
+                query_paired_limit_aggregate_restoration_fold(
+                    paired_limit_aggregate_restoration_fold.as_ref(),
+                    pair_identity,
+                    paired_join_limit_anchor_cascade_fold.as_ref(),
+                    paired_aggregate_anchor_cascade_fold.as_ref(),
+                ),
+            );
+        }
+        if let Some(identity) = paired_limit_aggregate_restoration_pair_identity.as_deref() {
+            let mut fold_nodes = BTreeSet::from([right_access, right]);
+            fold_nodes.extend(right_limit_operator_start..right_limit_operator_end);
+            fold_nodes.extend(right_window_operator_start..operators.len());
+            for index in fold_nodes {
+                add_paired_limit_aggregate_restoration_pair_details(
+                    &mut operators[index].details,
+                    identity,
+                    paired_limit_pushdown_anchor_fold_id.as_deref(),
+                    paired_aggregate_pushdown_anchor_fold_id.as_deref(),
+                );
+            }
+        }
+        if let Some(fold) = paired_limit_aggregate_restoration_fold.as_ref() {
+            let mut fold_nodes = BTreeSet::from([right_access, right]);
+            fold_nodes.extend(right_limit_operator_start..right_limit_operator_end);
+            fold_nodes.extend(right_window_operator_start..operators.len());
+            for index in fold_nodes {
+                add_paired_limit_aggregate_restoration_fold_details(
+                    &mut operators[index].details,
+                    fold,
+                );
+            }
+        }
+        let paired_window_spill_anchor_fold_id = join_pair_identity
+            .zip(right_window_identity.as_deref())
+            .zip(right_window_spill_chain_identity.as_deref())
+            .map(|((pair, window_chain_identity), spill_chain_identity)| {
+                query_paired_window_spill_anchor_fold_identity(
+                    &left_fold_identity,
+                    &right_fold_identity,
+                    pair,
+                    window_chain_identity,
+                    spill_chain_identity,
+                )
+            });
+        let paired_aggregate_spill_fold = join_pair_identity
+            .zip(right_window_identity.as_deref())
+            .zip(right_window_spill_chain_identity.as_deref())
+            .and_then(|((pair, aggregate_chain_identity), spill_chain_identity)| {
+                query_aggregate_spill_totals(
+                    pair,
+                    &join.source,
+                    window_aggregates,
+                    window_spills,
+                )
+                .map(|totals| {
+                    let identity = query_paired_aggregate_spill_anchor_fold_identity(
+                        &left_fold_identity,
+                        &right_fold_identity,
+                        pair,
+                        aggregate_chain_identity,
+                        spill_chain_identity,
+                        totals,
+                    );
+                    (identity, totals)
+                })
+            });
+        if let Some((pair_spill_fold_identity, totals)) = paired_aggregate_spill_fold.as_ref() {
+            paired_window_spill_cascade_fold = Some(
+                query_paired_window_spill_cascade_fold(
+                    paired_window_spill_cascade_fold.as_ref(),
+                    pair_spill_fold_identity,
+                    *totals,
+                ),
+            );
+        }
+        let paired_window_compaction_spill_pair_identity = join_pair_identity
+            .zip(paired_aggregate_pushdown_anchor_fold_id.as_deref())
+            .zip(right_window_identity.as_deref())
+            .map(|((pair, window_anchor_fold_identity), window_chain_identity)| {
+                query_paired_window_compaction_spill_pair_identity(
+                    pair,
+                    window_anchor_fold_identity,
+                    window_chain_identity,
+                    right_window_spill_chain_identity.as_deref(),
+                )
+            });
+        if let (Some(pair_identity), Some(window_fold)) = (
+            paired_window_compaction_spill_pair_identity.as_deref(),
+            paired_aggregate_anchor_cascade_fold.as_ref(),
+        ) {
+            paired_window_compaction_spill_fold = Some(
+                query_paired_window_compaction_spill_fold(
+                    paired_window_compaction_spill_fold.as_ref(),
+                    pair_identity,
+                    window_fold,
+                    paired_window_spill_cascade_fold.as_ref(),
+                ),
+            );
+        }
+        let paired_aggregate_spill_restoration_pair_identity =
+            query_paired_aggregate_spill_restoration_pair_identity(
+                paired_aggregate_pushdown_anchor_fold_id.as_deref(),
+                paired_aggregate_spill_fold
+                    .as_ref()
+                    .map(|(identity, _)| identity.as_str()),
+            );
+        if let (Some(pair_identity), Some(aggregate_fold)) = (
+            paired_aggregate_spill_restoration_pair_identity.as_deref(),
+            paired_aggregate_anchor_cascade_fold.as_ref(),
+        ) {
+            paired_aggregate_spill_restoration_fold = Some(
+                query_paired_aggregate_spill_restoration_fold(
+                    paired_aggregate_spill_restoration_fold.as_ref(),
+                    pair_identity,
+                    aggregate_fold,
+                    paired_window_spill_cascade_fold.as_ref(),
+                ),
+            );
+        }
+        if let Some(identity) = paired_window_spill_anchor_fold_id.as_deref() {
+            let mut spill_nodes = BTreeSet::from([right_access, right]);
+            spill_nodes.extend(right_window_operator_start..operators.len());
+            for index in spill_nodes {
+                add_paired_window_spill_anchor_fold_details(
+                    &mut operators[index].details,
+                    identity,
+                );
+            }
+        }
+        if let Some((identity, totals)) = paired_aggregate_spill_fold.as_ref() {
+            let mut spill_nodes = BTreeSet::from([right_access, right]);
+            spill_nodes.extend(right_window_operator_start..operators.len());
+            for index in spill_nodes {
+                add_paired_aggregate_spill_fold_details(
+                    &mut operators[index].details,
+                    identity,
+                    totals,
+                );
+            }
+        }
+        if let Some(cascade_fold) = paired_window_spill_cascade_fold.as_ref() {
+            let mut spill_nodes = BTreeSet::from([right_access, right]);
+            spill_nodes.extend(right_window_operator_start..operators.len());
+            for index in spill_nodes {
+                add_paired_window_spill_cascade_fold_details(
+                    &mut operators[index].details,
+                    cascade_fold,
+                );
+            }
+        }
+        if let Some(identity) = paired_aggregate_spill_restoration_pair_identity.as_deref() {
+            let mut fold_nodes = BTreeSet::from([right_access, right]);
+            fold_nodes.extend(right_window_operator_start..operators.len());
+            for index in fold_nodes {
+                add_paired_aggregate_spill_restoration_pair_details(
+                    &mut operators[index].details,
+                    identity,
+                    paired_aggregate_pushdown_anchor_fold_id.as_deref(),
+                    paired_aggregate_spill_fold
+                        .as_ref()
+                        .map(|(identity, _)| identity.as_str()),
+                );
+            }
+        }
+        if let Some(fold) = paired_aggregate_spill_restoration_fold.as_ref() {
+            let mut fold_nodes = BTreeSet::from([right_access, right]);
+            fold_nodes.extend(right_window_operator_start..operators.len());
+            for index in fold_nodes {
+                add_paired_aggregate_spill_restoration_fold_details(
+                    &mut operators[index].details,
+                    fold,
+                );
+            }
+        }
+        if let Some(identity) = paired_window_compaction_spill_pair_identity.as_deref() {
+            let mut fold_nodes = BTreeSet::from([right_access, right]);
+            fold_nodes.extend(right_window_operator_start..operators.len());
+            for index in fold_nodes {
+                add_paired_window_compaction_spill_pair_details(
+                    &mut operators[index].details,
+                    identity,
+                );
+            }
+        }
+        if let Some(fold) = paired_window_compaction_spill_fold.as_ref() {
+            let mut fold_nodes = BTreeSet::from([right_access, right]);
+            fold_nodes.extend(right_window_operator_start..operators.len());
+            for index in fold_nodes {
+                add_paired_window_compaction_spill_fold_details(
+                    &mut operators[index].details,
+                    fold,
+                    paired_window_compaction_spill_pair_identity.is_some(),
+                );
+            }
+        }
+        if let Some(identity) = paired_aggregate_pushdown_anchor_fold_id.as_deref() {
+            let mut aggregate_nodes = BTreeSet::from([right_access, right]);
+            aggregate_nodes.extend(right_window_operator_start..operators.len());
+            for index in aggregate_nodes {
+                add_paired_aggregate_pushdown_anchor_fold_details(
+                    &mut operators[index].details,
+                    identity,
+                );
+            }
+        }
+        if let Some(identity) = join_pair_anchor_fold_id.as_deref() {
+            let mut pair_nodes = BTreeSet::from([right_access, right]);
+            pair_nodes.extend(right_window_operator_start..operators.len());
+            for index in pair_nodes {
+                add_join_pair_anchor_fold_details(&mut operators[index].details, identity);
+            }
+        }
+        if let Some(identity) = window_anchor_fold_id.as_deref() {
+            let mut chain_nodes = BTreeSet::from([right_access, right]);
+            chain_nodes.extend(right_window_operator_start..operators.len());
+            for index in chain_nodes {
+                add_window_anchor_fold_details(&mut operators[index].details, identity);
+            }
+        }
+        if let Some(identity) = decorrelated_predicate_identity.as_deref() {
+            for index in BTreeSet::from([right_access, right]) {
+                add_decorrelated_predicate_pushdown_details(
+                    &mut operators[index].details,
+                    identity,
+                );
+            }
+        }
+        if let (Some(identity), Some(index_selection_identity)) = (
+            decorrelated_anchor_fold_id.as_deref(),
+            decorrelated_index_fold_id.as_deref(),
+        ) {
+            for index in BTreeSet::from([right_access, right]) {
+                add_decorrelated_anchor_fold_details(
+                    &mut operators[index].details,
+                    identity,
+                    &left_fold_identity,
+                    &right_fold_identity,
+                    index_selection_identity,
+                );
+            }
+        }
+        if let (
+            Some(identity),
+            Some(subquery),
+            Some(omission_identity),
+            Some(selection_identity),
+        ) = (
+            decorrelated_omission_refold_id.as_deref(),
+            decorrelated_subquery,
+            decorrelated_index_omission_identity.as_deref(),
+            decorrelated_index_fold_id.as_deref(),
+        ) {
+            for index in BTreeSet::from([right_access, right]) {
+                add_decorrelated_omission_refold_details(
+                    &mut operators[index].details,
+                    identity,
+                    &left_fold_identity,
+                    &right_fold_identity,
+                    subquery,
+                    omission_identity,
+                    selection_identity,
+                );
+            }
+        }
+        if let (Some(identity), Some(parent_identity), Some(transition)) = (
+            next_decorrelated_pin_chain_identity.as_deref(),
+            decorrelated_pin_chain_parent_identity,
+            decorrelated_pin_chain_transition,
+        ) {
+            for index in BTreeSet::from([right_access, right]) {
+                add_decorrelated_pin_chain_details(
+                    &mut operators[index].details,
+                    identity,
+                    parent_identity,
+                    &query.snapshot,
+                    &left_fold_identity,
+                    transition,
+                    decorrelated_pin_chain_step_subquery_identity,
+                    decorrelated_pin_chain_step_selection_identity,
+                    decorrelated_pin_chain_step_anchor_fold_identity,
+                    decorrelated_pin_chain_step_omission_refold_identity,
+                );
+            }
+        }
+        if let (Some(identity), Some(pair), Some(selection_identity)) = (
+            paired_index_refold_id.as_deref(),
+            join_pair_identity,
+            paired_index_selection_id.as_deref(),
+        ) {
+            let mut refold_nodes = BTreeSet::from([right_access, right]);
+            refold_nodes.extend(right_limit_operator_start..right_limit_operator_end);
+            for index in refold_nodes {
+                add_paired_index_refold_details(
+                    &mut operators[index].details,
+                    identity,
+                    &left_fold_identity,
+                    &right_fold_identity,
+                    pair,
+                    selection_identity,
+                );
+            }
+        }
+        if let (Some(identity), Some(parent_identity), Some(transition)) = (
+            next_paired_index_anchor_chain_identity.as_deref(),
+            paired_index_anchor_chain_parent_identity,
+            paired_index_anchor_chain_transition,
+        ) {
+            let pair_identity = join_pair_identity.map(|pair| pair.identity.as_str());
+            for index in BTreeSet::from([right_access, right]) {
+                add_paired_index_anchor_chain_details(
+                    &mut operators[index].details,
+                    identity,
+                    parent_identity,
+                    &left_fold_identity,
+                    transition,
+                    pair_identity,
+                    paired_index_anchor_chain_step_refold_identity,
+                    paired_index_anchor_chain_step_selection_identity,
+                );
+            }
+        }
+        if let (Some(identity), Some(parent_identity), Some(transition)) = (
+            next_paired_index_cost_restoration_chain_identity.as_deref(),
+            paired_index_cost_restoration_parent_identity,
+            paired_index_cost_restoration_transition,
+        ) {
+            let step = paired_index_cost_restoration_advance.as_ref();
+            let mut restoration_nodes = BTreeSet::from([right_access, right]);
+            restoration_nodes.extend(right_limit_operator_start..right_limit_operator_end);
+            restoration_nodes.extend(right_window_operator_start..operators.len());
+            for index in restoration_nodes {
+                add_paired_index_cost_restoration_details(
+                    &mut operators[index].details,
+                    identity,
+                    parent_identity,
+                    &left_fold_identity,
+                    declared_position,
+                    planned_position,
+                    transition,
+                    step.map(|(_, _, pair, _, _, _)| *pair),
+                    step.map(|(_, _, _, refold, _, _)| *refold),
+                    step.map(|(_, _, _, _, selection, _)| *selection),
+                    step.map(|(_, _, _, _, _, has_index)| *has_index),
+                );
+            }
+        }
+        if let (
+            Some((identity, _, _, _)),
+            Some(parent_identity),
+            Some(transition),
+            Some((pair_count, index_count, scan_count)),
+        ) = (
+            next_paired_index_cost_compaction_chain.as_ref(),
+            paired_index_cost_compaction_parent_identity,
+            paired_index_cost_compaction_transition,
+            paired_index_cost_compaction_counts,
+        ) {
+            let mut compaction_nodes = BTreeSet::from([right_access, right]);
+            compaction_nodes.extend(right_limit_operator_start..right_limit_operator_end);
+            compaction_nodes.extend(right_window_operator_start..operators.len());
+            for index in compaction_nodes {
+                add_paired_index_cost_compaction_details(
+                    &mut operators[index].details,
+                    identity,
+                    parent_identity,
+                    &left_fold_identity,
+                    declared_position,
+                    planned_position,
+                    transition,
+                    join_pair_identity.map(|pair| pair.identity.as_str()),
+                    paired_index_selection_id.as_deref(),
+                    paired_index_refold_id.as_deref(),
+                    join_pair_identity.map(|_| {
+                        if selected_partial_index.is_some() {
+                            "exact_index"
+                        } else {
+                            "scan"
+                        }
+                    }),
+                    pair_count,
+                    index_count,
+                    scan_count,
+                );
+            }
+        }
+        if let (Some(identity), Some(parent_identity), Some(transition)) = (
+            next_paired_decorrelation_cost_restoration_chain_identity.as_deref(),
+            paired_decorrelation_cost_restoration_parent_identity,
+            paired_decorrelation_cost_restoration_transition,
+        ) {
+            let mut restoration_nodes = BTreeSet::from([right_access, right]);
+            restoration_nodes.extend(right_limit_operator_start..right_limit_operator_end);
+            restoration_nodes.extend(right_window_operator_start..operators.len());
+            for index in restoration_nodes {
+                add_paired_decorrelation_cost_restoration_details(
+                    &mut operators[index].details,
+                    identity,
+                    parent_identity,
+                    &left_fold_identity,
+                    declared_position,
+                    planned_position,
+                    transition,
+                    join_pair_identity,
+                    paired_index_refold_id.as_deref(),
+                    paired_index_selection_id.as_deref(),
+                    join_pair_identity.map(|_| selected_partial_index.is_some()),
+                    decorrelated_subquery,
+                    next_decorrelated_pin_chain_identity.as_deref(),
+                    decorrelated_anchor_fold_id.as_deref(),
+                    decorrelated_omission_refold_id.as_deref(),
+                );
+            }
+        }
+        let next_join_cost_fold_identity = query_join_cost_fold(
+            &left_fold_identity,
+            &right_fold_identity,
+            join_pair_identity,
+            paired_predicate_pushdown_identity.as_deref(),
+            paired_index_refold_id.as_deref(),
+            decorrelated_predicate_identity.as_deref(),
+            decorrelated_anchor_fold_id.as_deref(),
+            decorrelated_omission_refold_id.as_deref(),
+            window_anchor_fold_id.as_deref(),
+            join_pair_anchor_fold_id.as_deref(),
+            paired_limit_pushdown_anchor_fold_id.as_deref(),
+            paired_aggregate_pushdown_anchor_fold_id.as_deref(),
+            paired_window_spill_anchor_fold_id.as_deref(),
+            paired_aggregate_spill_fold
+                .as_ref()
+                .map(|(identity, _)| identity.as_str()),
+            paired_aggregate_anchor_cascade_fold
+                .as_ref()
+                .map(|fold| fold.identity.as_str()),
+            paired_window_spill_cascade_fold
+                .as_ref()
+                .map(|fold| fold.identity.as_str()),
+            paired_aggregate_spill_restoration_fold
+                .as_ref()
+                .map(|fold| fold.identity.as_str()),
+            paired_window_compaction_spill_fold
+                .as_ref()
+                .map(|fold| fold.identity.as_str()),
+            paired_limit_aggregate_restoration_fold
+                .as_ref()
+                .map(|fold| fold.identity.as_str()),
+            paired_limit_window_cascade_fold
+                .as_ref()
+                .map(|fold| fold.identity.as_str()),
+            paired_join_limit_anchor_cascade_fold
+                .as_ref()
+                .map(|fold| fold.identity.as_str()),
+            cardinality,
+            work,
+            work_overflow,
+        );
+        for index in BTreeSet::from([right_access, right]) {
+            operators[index].details.insert(
+                "paired_join_cost_fold_identity".to_owned(),
+                PlanDetail::Text(next_join_cost_fold_identity.clone()),
+            );
+        }
         let mut details = BTreeMap::from([(
             "strategy".to_owned(),
             PlanDetail::Text("hash".to_owned()),
         )]);
+        details.insert(
+            "declared_input_position".to_owned(),
+            PlanDetail::Integer(
+                u64::try_from(declared_position + 1).map_err(|_| ExplainError::TooManyNodes)?,
+            ),
+        );
+        details.insert(
+            "planned_input_position".to_owned(),
+            PlanDetail::Integer(
+                u64::try_from(planned_position + 1).map_err(|_| ExplainError::TooManyNodes)?,
+            ),
+        );
+        details.insert(
+            "join_order_policy".to_owned(),
+            PlanDetail::Text("known_scan_work_then_declared".to_owned()),
+        );
         if work_overflow {
             record_work_overflow(&mut details);
         }
@@ -1035,6 +3710,272 @@ fn explain_query_with_predicate_pressure(
                 PlanDetail::Text("cross".to_owned()),
             );
         }
+        if let Some(subquery) = decorrelated_subquery {
+            add_decorrelated_subquery_details(&mut details, subquery);
+        }
+        if let Some(identity) = decorrelated_predicate_identity.as_deref() {
+            add_decorrelated_predicate_pushdown_details(&mut details, identity);
+        }
+        if let Some(identity) = decorrelated_index_omission_identity.as_deref() {
+            add_decorrelated_index_selection_omission_details(&mut details, identity);
+        }
+        if let (Some(identity), Some(index_selection_identity)) = (
+            decorrelated_anchor_fold_id.as_deref(),
+            decorrelated_index_fold_id.as_deref(),
+        ) {
+            add_decorrelated_anchor_fold_details(
+                &mut details,
+                identity,
+                &left_fold_identity,
+                &right_fold_identity,
+                index_selection_identity,
+            );
+        }
+        if let (
+            Some(identity),
+            Some(subquery),
+            Some(omission_identity),
+            Some(selection_identity),
+        ) = (
+            decorrelated_omission_refold_id.as_deref(),
+            decorrelated_subquery,
+            decorrelated_index_omission_identity.as_deref(),
+            decorrelated_index_fold_id.as_deref(),
+        ) {
+            add_decorrelated_omission_refold_details(
+                &mut details,
+                identity,
+                &left_fold_identity,
+                &right_fold_identity,
+                subquery,
+                omission_identity,
+                selection_identity,
+            );
+        }
+        if let (Some(identity), Some(parent_identity), Some(transition)) = (
+            next_decorrelated_pin_chain_identity.as_deref(),
+            decorrelated_pin_chain_parent_identity,
+            decorrelated_pin_chain_transition,
+        ) {
+            add_decorrelated_pin_chain_details(
+                &mut details,
+                identity,
+                parent_identity,
+                &query.snapshot,
+                &left_fold_identity,
+                transition,
+                decorrelated_pin_chain_step_subquery_identity,
+                decorrelated_pin_chain_step_selection_identity,
+                decorrelated_pin_chain_step_anchor_fold_identity,
+                decorrelated_pin_chain_step_omission_refold_identity,
+            );
+        }
+        if let Some(identity) = window_anchor_fold_id.as_deref() {
+            add_window_anchor_fold_details(&mut details, identity);
+        }
+        if let Some(identity) = join_pair_anchor_fold_id.as_deref() {
+            add_join_pair_anchor_fold_details(&mut details, identity);
+        }
+        if let Some(identity) = paired_aggregate_pushdown_anchor_fold_id.as_deref() {
+            add_paired_aggregate_pushdown_anchor_fold_details(&mut details, identity);
+        }
+        if let Some(cascade_fold) = paired_aggregate_anchor_cascade_fold.as_ref() {
+            add_paired_aggregate_cascade_fold_details(&mut details, cascade_fold);
+        }
+        if let Some(identity) = paired_window_spill_anchor_fold_id.as_deref() {
+            add_paired_window_spill_anchor_fold_details(&mut details, identity);
+        }
+        if let Some((identity, totals)) = paired_aggregate_spill_fold.as_ref() {
+            add_paired_aggregate_spill_fold_details(&mut details, identity, totals);
+        }
+        if let Some(cascade_fold) = paired_window_spill_cascade_fold.as_ref() {
+            add_paired_window_spill_cascade_fold_details(&mut details, cascade_fold);
+        }
+        if let Some(identity) = paired_aggregate_spill_restoration_pair_identity.as_deref() {
+            add_paired_aggregate_spill_restoration_pair_details(
+                &mut details,
+                identity,
+                paired_aggregate_pushdown_anchor_fold_id.as_deref(),
+                paired_aggregate_spill_fold
+                    .as_ref()
+                    .map(|(identity, _)| identity.as_str()),
+            );
+        }
+        if let Some(fold) = paired_aggregate_spill_restoration_fold.as_ref() {
+            add_paired_aggregate_spill_restoration_fold_details(&mut details, fold);
+        }
+        if let Some(identity) = paired_window_compaction_spill_pair_identity.as_deref() {
+            add_paired_window_compaction_spill_pair_details(&mut details, identity);
+        }
+        if let Some(fold) = paired_window_compaction_spill_fold.as_ref() {
+            add_paired_window_compaction_spill_fold_details(
+                &mut details,
+                fold,
+                paired_window_compaction_spill_pair_identity.is_some(),
+            );
+        }
+        if let Some(identity) = paired_limit_aggregate_restoration_pair_identity.as_deref() {
+            add_paired_limit_aggregate_restoration_pair_details(
+                &mut details,
+                identity,
+                paired_limit_pushdown_anchor_fold_id.as_deref(),
+                paired_aggregate_pushdown_anchor_fold_id.as_deref(),
+            );
+        }
+        if let Some(fold) = paired_limit_aggregate_restoration_fold.as_ref() {
+            add_paired_limit_aggregate_restoration_fold_details(&mut details, fold);
+        }
+        if let Some(identity) = paired_limit_pushdown_anchor_fold_id.as_deref() {
+            add_paired_limit_pushdown_anchor_fold_details(&mut details, identity);
+        }
+        if let Some(identity) = paired_join_limit_anchor_fold_id.as_deref() {
+            add_paired_join_limit_anchor_fold_details(&mut details, identity);
+        }
+        if let Some(cascade_fold) = paired_join_limit_anchor_cascade_fold.as_ref() {
+            add_paired_join_limit_anchor_cascade_fold_details(&mut details, cascade_fold);
+        }
+        if let Some(identity) = paired_limit_window_anchor_fold_id.as_deref() {
+            add_paired_limit_window_anchor_fold_details(&mut details, identity);
+        }
+        if let Some(cascade_fold) = paired_limit_window_cascade_fold.as_ref() {
+            add_paired_limit_window_cascade_fold_details(&mut details, cascade_fold);
+        }
+        if let Some(identity) = right_limit_chain_identity.as_deref() {
+            add_query_limit_pushdown_chain_details(&mut details, identity);
+        }
+        if let Some(pair_identity) = join_pair_identity {
+            add_join_pair_identity_details(&mut details, pair_identity);
+        }
+        if let Some(identity) = paired_predicate_pushdown_identity.as_deref() {
+            add_paired_predicate_pushdown_details(&mut details, identity);
+        }
+        if let Some(identity) = paired_index_selection_id.as_deref() {
+            add_paired_index_selection_details(&mut details, identity);
+        }
+        if let (Some(identity), Some(pair), Some(selection_identity)) = (
+            paired_index_refold_id.as_deref(),
+            join_pair_identity,
+            paired_index_selection_id.as_deref(),
+        ) {
+            add_paired_index_refold_details(
+                &mut details,
+                identity,
+                &left_fold_identity,
+                &right_fold_identity,
+                pair,
+                selection_identity,
+            );
+        }
+        if let (Some(identity), Some(parent_identity), Some(transition)) = (
+            next_paired_index_anchor_chain_identity.as_deref(),
+            paired_index_anchor_chain_parent_identity,
+            paired_index_anchor_chain_transition,
+        ) {
+            let pair_identity = join_pair_identity.map(|pair| pair.identity.as_str());
+            add_paired_index_anchor_chain_details(
+                &mut details,
+                identity,
+                parent_identity,
+                &left_fold_identity,
+                transition,
+                pair_identity,
+                paired_index_anchor_chain_step_refold_identity,
+                paired_index_anchor_chain_step_selection_identity,
+            );
+        }
+        if let (Some(identity), Some(parent_identity), Some(transition)) = (
+            next_paired_index_cost_restoration_chain_identity.as_deref(),
+            paired_index_cost_restoration_parent_identity,
+            paired_index_cost_restoration_transition,
+        ) {
+            let step = paired_index_cost_restoration_advance.as_ref();
+            add_paired_index_cost_restoration_details(
+                &mut details,
+                identity,
+                parent_identity,
+                &left_fold_identity,
+                declared_position,
+                planned_position,
+                transition,
+                step.map(|(_, _, pair, _, _, _)| *pair),
+                step.map(|(_, _, _, refold, _, _)| *refold),
+                step.map(|(_, _, _, _, selection, _)| *selection),
+                step.map(|(_, _, _, _, _, has_index)| *has_index),
+            );
+        }
+        if let (
+            Some((identity, _, _, _)),
+            Some(parent_identity),
+            Some(transition),
+            Some((pair_count, index_count, scan_count)),
+        ) = (
+            next_paired_index_cost_compaction_chain.as_ref(),
+            paired_index_cost_compaction_parent_identity,
+            paired_index_cost_compaction_transition,
+            paired_index_cost_compaction_counts,
+        ) {
+            add_paired_index_cost_compaction_details(
+                &mut details,
+                identity,
+                parent_identity,
+                &left_fold_identity,
+                declared_position,
+                planned_position,
+                transition,
+                join_pair_identity.map(|pair| pair.identity.as_str()),
+                paired_index_selection_id.as_deref(),
+                paired_index_refold_id.as_deref(),
+                join_pair_identity.map(|_| {
+                    if selected_partial_index.is_some() {
+                        "exact_index"
+                    } else {
+                        "scan"
+                    }
+                }),
+                pair_count,
+                index_count,
+                scan_count,
+            );
+        }
+        if let (Some(identity), Some(parent_identity), Some(transition)) = (
+            next_paired_decorrelation_cost_restoration_chain_identity.as_deref(),
+            paired_decorrelation_cost_restoration_parent_identity,
+            paired_decorrelation_cost_restoration_transition,
+        ) {
+            add_paired_decorrelation_cost_restoration_details(
+                &mut details,
+                identity,
+                parent_identity,
+                &left_fold_identity,
+                declared_position,
+                planned_position,
+                transition,
+                join_pair_identity,
+                paired_index_refold_id.as_deref(),
+                paired_index_selection_id.as_deref(),
+                join_pair_identity.map(|_| selected_partial_index.is_some()),
+                decorrelated_subquery,
+                next_decorrelated_pin_chain_identity.as_deref(),
+                decorrelated_anchor_fold_id.as_deref(),
+                decorrelated_omission_refold_id.as_deref(),
+            );
+        }
+        if let Some(window_identity) = right_window_identity.as_deref() {
+            add_window_pushdown_chain_details(&mut details, window_identity);
+        }
+        if let Some(spill_chain_identity) = right_window_spill_chain_identity.as_deref() {
+            add_window_spill_chain_details(&mut details, spill_chain_identity);
+        }
+        if let Some(candidate) = selected_partial_index {
+            add_partial_index_pair_identity_details(&mut details, candidate);
+            add_partial_index_selection_tie_break_details(&mut details);
+        }
+        add_join_cost_fold_details(
+            &mut details,
+            &left_fold_identity,
+            &right_fold_identity,
+            &next_join_cost_fold_identity,
+        );
         let prior = current;
         current = operators.len();
         operators.push(Operator::new(
@@ -1047,14 +3988,87 @@ fn explain_query_with_predicate_pressure(
             work,
         ));
         current_cardinality = cardinality;
+        join_cost_fold_identity = next_join_cost_fold_identity;
+        decorrelated_pin_chain_identity = next_decorrelated_pin_chain_identity;
+        paired_index_anchor_chain_identity = next_paired_index_anchor_chain_identity;
+        paired_index_cost_restoration_chain_identity =
+            next_paired_index_cost_restoration_chain_identity;
+        paired_index_cost_compaction_chain = next_paired_index_cost_compaction_chain;
+        paired_decorrelation_cost_restoration_chain_identity =
+            next_paired_decorrelation_cost_restoration_chain_identity;
+    }
+    for limit in nested_input_limits {
+        let cardinality = limit_cardinality(current_cardinality, *limit);
+        let work = current_cardinality.rows;
+        current = push_unary(
+            &mut operators,
+            current,
+            PlanNodeKind::Limit,
+            None,
+            BTreeMap::from([("limit".to_owned(), PlanDetail::Integer(*limit))]),
+            cardinality,
+            work,
+        );
+        current_cardinality = cardinality;
+    }
+    for limit in nested_branch_limits {
+        let cardinality = limit_cardinality(current_cardinality, *limit);
+        let work = current_cardinality
+            .rows
+            .and_then(|rows| rows.checked_mul(disjunct_count));
+        let mut details = BTreeMap::from([
+            ("limit".to_owned(), PlanDetail::Integer(*limit)),
+            (
+                "limit_scope".to_owned(),
+                PlanDetail::Text("per_disjunct_branch".to_owned()),
+            ),
+            (
+                "disjunct_count".to_owned(),
+                PlanDetail::Integer(disjunct_count),
+            ),
+        ]);
+        if current_cardinality.rows.is_some() && work.is_none() {
+            record_work_overflow(&mut details);
+        }
+        current = push_unary(
+            &mut operators,
+            current,
+            PlanNodeKind::Limit,
+            None,
+            details,
+            cardinality,
+            work,
+        );
+        current_cardinality = cardinality;
     }
     if let Some(predicate) = &query.predicate {
         // Expression references are opaque to this planner. The selected API
         // shape supplies any branch/conjunct counts; the default count of one
         // preserves the historical single-filter fallback.
-        let (cardinality, work, mut details) = if let Some(conjunct_count) =
-            conjunct_count_per_disjunct
+        let (cardinality, work, mut details) = if post_expansion_conjunct.is_some()
+            && conjunct_count_per_disjunct.is_none()
         {
+            (
+                disjunction_cardinality(current_cardinality, disjunct_count),
+                current_cardinality
+                    .rows
+                    .and_then(|rows| rows.checked_mul(disjunct_count)),
+                BTreeMap::from([
+                    (
+                        "selectivity_assumption".to_owned(),
+                        PlanDetail::Text("0.5_per_disjunct_independent_or".to_owned()),
+                    ),
+                    (
+                        "disjunct_count".to_owned(),
+                        PlanDetail::Integer(disjunct_count),
+                    ),
+                    (
+                        "expansion_work".to_owned(),
+                        PlanDetail::Text("full_input_per_disjunct".to_owned()),
+                    ),
+                ]),
+            )
+        } else if let Some(conjunct_count) = conjunct_count_per_disjunct {
             let (cardinality, work) = conjunctive_disjunction_cardinality_and_work(
                 current_cardinality,
                 disjunct_count,
@@ -1158,6 +4172,449 @@ fn explain_query_with_predicate_pressure(
             work,
         );
         current_cardinality = cardinality;
+        if post_expansion_conjunct.is_some() {
+            for limit in limits_between_disjunct_and_conjunct {
+                let cardinality = limit_cardinality(current_cardinality, *limit);
+                let work = current_cardinality.rows;
+                current = push_unary(
+                    &mut operators,
+                    current,
+                    PlanNodeKind::Limit,
+                    None,
+                    BTreeMap::from([("limit".to_owned(), PlanDetail::Integer(*limit))]),
+                    cardinality,
+                    work,
+                );
+                current_cardinality = cardinality;
+            }
+
+            let conjunct_count = conjunct_count.expect("nested disjunct limits require conjuncts");
+            let (cardinality, work) = conjunctive_disjunction_cardinality_and_work(
+                current_cardinality,
+                1,
+                conjunct_count,
+            );
+            let mut details = BTreeMap::from([
+                (
+                    "selectivity_assumption".to_owned(),
+                    PlanDetail::Text("0.5_per_left_to_right_conjunct".to_owned()),
+                ),
+                (
+                    "conjunct_count".to_owned(),
+                    PlanDetail::Integer(conjunct_count),
+                ),
+                (
+                    "conjunct_order".to_owned(),
+                    PlanDetail::Text("left_to_right_short_circuit".to_owned()),
+                ),
+            ]);
+            if current_cardinality.rows.is_some() && work.is_none() {
+                record_work_overflow(&mut details);
+            }
+            current = push_unary(
+                &mut operators,
+                current,
+                PlanNodeKind::Filter,
+                Some(
+                    post_expansion_conjunct
+                        .expect("nested disjunct limits require a conjunct predicate")
+                        .clone(),
+                ),
+                details,
+                cardinality,
+                work,
+            );
+            current_cardinality = cardinality;
+        }
+    }
+    for (storm_index, storm) in disjunct_storms.iter().enumerate() {
+        let storm_index = u64::try_from(storm_index + 1).map_err(|_| ExplainError::TooManyNodes)?;
+        for limit in &storm.nested_branch_limits {
+            let cardinality = limit_cardinality(current_cardinality, *limit);
+            let work = current_cardinality
+                .rows
+                .and_then(|rows| rows.checked_mul(storm.disjunct_count));
+            let mut details = BTreeMap::from([
+                ("limit".to_owned(), PlanDetail::Integer(*limit)),
+                (
+                    "limit_scope".to_owned(),
+                    PlanDetail::Text("per_disjunct_branch".to_owned()),
+                ),
+                (
+                    "disjunct_count".to_owned(),
+                    PlanDetail::Integer(storm.disjunct_count),
+                ),
+                (
+                    "disjunct_storm".to_owned(),
+                    PlanDetail::Integer(storm_index),
+                ),
+            ]);
+            if current_cardinality.rows.is_some() && work.is_none() {
+                record_work_overflow(&mut details);
+            }
+            current = push_unary(
+                &mut operators,
+                current,
+                PlanNodeKind::Limit,
+                None,
+                details,
+                cardinality,
+                work,
+            );
+            current_cardinality = cardinality;
+        }
+        let (cardinality, work) = conjunctive_disjunction_cardinality_and_work(
+            current_cardinality,
+            storm.disjunct_count,
+            storm.conjunct_count_per_disjunct,
+        );
+        let mut details = BTreeMap::from([
+            (
+                "selectivity_assumption".to_owned(),
+                PlanDetail::Text(
+                    "0.5_per_branch_conjunct_then_independent_disjuncts".to_owned(),
+                ),
+            ),
+            (
+                "disjunct_count".to_owned(),
+                PlanDetail::Integer(storm.disjunct_count),
+            ),
+            (
+                "conjunct_count_per_disjunct".to_owned(),
+                PlanDetail::Integer(storm.conjunct_count_per_disjunct),
+            ),
+            (
+                "conjunct_order".to_owned(),
+                PlanDetail::Text("left_to_right_short_circuit".to_owned()),
+            ),
+            (
+                "expansion_work".to_owned(),
+                PlanDetail::Text("full_input_per_disjunct_after_branch_limits".to_owned()),
+            ),
+            (
+                "disjunct_storm".to_owned(),
+                PlanDetail::Integer(storm_index),
+            ),
+        ]);
+        if current_cardinality.rows.is_some() && work.is_none() {
+            record_work_overflow(&mut details);
+        }
+        current = push_unary(
+            &mut operators,
+            current,
+            PlanNodeKind::Filter,
+            Some(storm.predicate.clone()),
+            details,
+            cardinality,
+            work,
+        );
+        current_cardinality = cardinality;
+    }
+    let mut prior_storm_stage_path = Vec::new();
+    for (storm_index, storm) in disjunct_storm_cascades.iter().enumerate() {
+        let storm_stage_index = storm_index + 1;
+        let storm_index =
+            u64::try_from(storm_stage_index).map_err(|_| ExplainError::TooManyNodes)?;
+        let branch_count =
+            u64::try_from(storm.branches.len()).map_err(|_| ExplainError::TooManyNodes)?;
+        let mut byte_cap_handoff_estimates_by_depth = BTreeMap::new();
+        let mut storm_scope_path = prior_storm_stage_path.clone();
+        storm_scope_path.push(PlanByteCapScopeSegment::StormStage {
+            index: storm_stage_index,
+        });
+        let (cardinality, work, overflowed) = disjunct_storm_cascade_cardinality_and_work(
+            current_cardinality,
+            storm,
+            1,
+            &storm_scope_path,
+            &mut byte_cap_handoff_estimates_by_depth,
+        );
+        stabilize_rebind_byte_cap_handoff_routes(&mut byte_cap_handoff_estimates_by_depth);
+        let branch_limits = storm
+            .branches
+            .iter()
+            .enumerate()
+            .map(|(index, branch)| {
+                format!(
+                    "{}:[{}]",
+                    index + 1,
+                    branch
+                        .nested_limits
+                        .iter()
+                        .map(u64::to_string)
+                        .collect::<Vec<_>>()
+                        .join(",")
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(";");
+        let conjunct_counts = storm
+            .branches
+            .iter()
+            .map(|branch| branch.conjunct_count.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        let nested_cascade_shapes = storm
+            .branches
+            .iter()
+            .enumerate()
+            .filter(|(_, branch)| !branch.nested_storms.is_empty())
+            .map(|(index, branch)| {
+                format!(
+                    "{}:{}",
+                    index + 1,
+                    branch
+                        .nested_storms
+                        .iter()
+                        .map(disjunct_storm_shape_text)
+                        .collect::<Vec<_>>()
+                        .join(">")
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(";");
+        let nested_cascade_predicates = storm
+            .branches
+            .iter()
+            .flat_map(|branch| disjunct_storm_predicates(&branch.nested_storms))
+            .collect::<Vec<_>>();
+        let has_nested_cascades = storm
+            .branches
+            .iter()
+            .any(|branch| !branch.nested_storms.is_empty());
+        let limit_chain_rebind_shapes = storm
+            .branches
+            .iter()
+            .enumerate()
+            .flat_map(|(branch_index, branch)| {
+                branch.limit_rebinds.iter().map(move |rebind| {
+                    format!(
+                        "{}@{}:{}",
+                        branch_index + 1,
+                        rebind.after_limit,
+                        rebind
+                            .storms
+                            .iter()
+                            .map(disjunct_storm_shape_text)
+                            .collect::<Vec<_>>()
+                            .join(">")
+                    )
+                })
+            })
+            .collect::<Vec<_>>()
+            .join(";");
+        let limit_chain_rebind_byte_cap_handoffs_by_depth =
+            disjunct_storm_rebind_cascade_counts_by_depth(storm);
+        let limit_chain_rebind_byte_cap_depths = limit_chain_rebind_byte_cap_handoffs_by_depth
+            .keys()
+            .copied()
+            .collect::<Vec<_>>();
+        let limit_chain_rebind_max_nested_depth = limit_chain_rebind_byte_cap_depths
+            .last()
+            .copied()
+            .unwrap_or_default();
+        let limit_chain_rebind_byte_cap_depths_text = limit_chain_rebind_byte_cap_depths
+            .iter()
+            .map(usize::to_string)
+            .collect::<Vec<_>>()
+            .join(",");
+        let limit_chain_rebind_byte_cap_handoffs_by_depth_text =
+            limit_chain_rebind_byte_cap_handoffs_by_depth
+                .iter()
+                .map(|(depth, count)| format!("{depth}:{count}"))
+                .collect::<Vec<_>>()
+                .join(",");
+        let limit_chain_rebind_byte_cap_handoff_estimates_by_depth_text =
+            rebind_byte_cap_handoff_estimates_by_depth_text(
+                &byte_cap_handoff_estimates_by_depth,
+            );
+        let limit_chain_rebind_byte_cap_handoff_route_records =
+            rebind_byte_cap_handoff_route_records(&byte_cap_handoff_estimates_by_depth);
+        // Derive both scoped handoff summaries from the serialized typed routes
+        // so their stage-output labels cannot diverge from route ancestry.
+        let limit_chain_rebind_byte_cap_handoff_scopes_by_depth_text =
+            rebind_byte_cap_handoff_scopes_by_depth_text(
+                &limit_chain_rebind_byte_cap_handoff_route_records,
+            );
+        let limit_chain_rebind_byte_cap_handoff_routes_by_depth_text =
+            rebind_byte_cap_handoff_routes_by_depth_text(
+                &limit_chain_rebind_byte_cap_handoff_route_records,
+            );
+        let has_limit_chain_rebind_byte_cap_handoff_routes =
+            !limit_chain_rebind_byte_cap_handoff_route_records.is_empty();
+        let limit_chain_rebind_predicates = storm
+            .branches
+            .iter()
+            .flat_map(|branch| {
+                branch
+                    .limit_rebinds
+                    .iter()
+                    .flat_map(|rebind| disjunct_storm_predicates(&rebind.storms))
+            })
+            .collect::<Vec<_>>();
+        let mut details = BTreeMap::from([
+            (
+                "selectivity_assumption".to_owned(),
+                PlanDetail::Text("0.5_per_branch_conjunct_then_ordered_independent_or".to_owned()),
+            ),
+            ("disjunct_count".to_owned(), PlanDetail::Integer(branch_count)),
+            (
+                "branch_limit_chains".to_owned(),
+                PlanDetail::Text(branch_limits),
+            ),
+            (
+                "branch_conjunct_counts".to_owned(),
+                PlanDetail::Text(conjunct_counts),
+            ),
+            (
+                "nested_cascade_shapes".to_owned(),
+                PlanDetail::Text(nested_cascade_shapes),
+            ),
+            (
+                "nested_cascade_predicates".to_owned(),
+                PlanDetail::Expressions(nested_cascade_predicates),
+            ),
+            (
+                "limit_chain_rebind_shapes".to_owned(),
+                PlanDetail::Text(limit_chain_rebind_shapes),
+            ),
+            (
+                "limit_chain_rebind_max_nested_depth".to_owned(),
+                PlanDetail::Integer(
+                    u64::try_from(limit_chain_rebind_max_nested_depth).unwrap_or(u64::MAX),
+                ),
+            ),
+            (
+                "limit_chain_rebind_byte_cap_depths".to_owned(),
+                PlanDetail::Text(limit_chain_rebind_byte_cap_depths_text),
+            ),
+            (
+                "limit_chain_rebind_byte_cap_handoffs_by_depth".to_owned(),
+                PlanDetail::Text(limit_chain_rebind_byte_cap_handoffs_by_depth_text),
+            ),
+            (
+                "limit_chain_rebind_byte_cap_handoff_estimates_by_depth".to_owned(),
+                PlanDetail::Text(limit_chain_rebind_byte_cap_handoff_estimates_by_depth_text),
+            ),
+            (
+                "limit_chain_rebind_byte_cap_handoff_scopes_by_depth".to_owned(),
+                PlanDetail::Text(limit_chain_rebind_byte_cap_handoff_scopes_by_depth_text),
+            ),
+            (
+                "limit_chain_rebind_byte_cap_handoff_routes_by_depth".to_owned(),
+                PlanDetail::Text(limit_chain_rebind_byte_cap_handoff_routes_by_depth_text),
+            ),
+            (
+                "limit_chain_rebind_byte_cap_handoff_route_records".to_owned(),
+                PlanDetail::ByteCapHandoffRoutes(
+                    limit_chain_rebind_byte_cap_handoff_route_records,
+                ),
+            ),
+            (
+                "limit_chain_rebind_predicates".to_owned(),
+                PlanDetail::Expressions(limit_chain_rebind_predicates),
+            ),
+            (
+                "storm_stage_input_scope".to_owned(),
+                PlanDetail::Text(
+                    "query_input_then_previous_stage_bounded_rows_and_bytes".to_owned(),
+                ),
+            ),
+            (
+                "limit_chain_rebind_stage_input_scope".to_owned(),
+                PlanDetail::Text(
+                    "post_limit_branch_input_then_previous_rebind_stage_bounded_rows_and_bytes"
+                        .to_owned(),
+                ),
+            ),
+            (
+                "limit_chain_rebind_stage_order".to_owned(),
+                PlanDetail::Text(
+                    "declaration_order_each_rebind_output_capped_before_next_rebind".to_owned(),
+                ),
+            ),
+            (
+                "limit_chain_rebind_dimension_scope".to_owned(),
+                PlanDetail::Text(
+                    "rows_and_bytes_capped_independently_unknown_dimensions_remain_unknown"
+                        .to_owned(),
+                ),
+            ),
+            (
+                "limit_chain_rebind_work_scope".to_owned(),
+                PlanDetail::Text(
+                    "unknown_row_work_does_not_erase_known_byte_estimates".to_owned(),
+                ),
+            ),
+            (
+                "nested_limit_chain_rebind_byte_cap_scope".to_owned(),
+                PlanDetail::Text(
+                    "immediate_post_limit_branch_bytes_at_every_rebind_nesting_depth".to_owned(),
+                ),
+            ),
+            (
+                "limit_chain_rebind_position_input_scope".to_owned(),
+                PlanDetail::Text(
+                    "current_branch_rows_and_bytes_after_prior_limits_and_rebind_cascades"
+                        .to_owned(),
+                ),
+            ),
+            (
+                "branch_local_storm_cap_scope".to_owned(),
+                PlanDetail::Text(
+                    "each_cascade_output_capped_to_immediate_input_rows_and_bytes_at_every_nesting_depth"
+                        .to_owned(),
+                ),
+            ),
+            (
+                "limit_chain_rebind_cap_scope".to_owned(),
+                PlanDetail::Text(
+                    "post_limit_branch_rows_and_bytes_at_every_rebind_nesting_depth".to_owned(),
+                ),
+            ),
+            (
+                "expansion_work".to_owned(),
+                PlanDetail::Text("sum_of_branch_limit_and_conjunct_inputs".to_owned()),
+            ),
+            (
+                "disjunct_storm".to_owned(),
+                PlanDetail::Integer(storm_index),
+            ),
+        ]);
+        if has_nested_cascades {
+            details.insert(
+                "nested_storm_input_scope".to_owned(),
+                PlanDetail::Text(
+                    "bounded_branch_output_after_limits_rebinds_and_conjuncts_then_prior_nested_storm_outputs"
+                        .to_owned(),
+                ),
+            );
+        }
+        if has_limit_chain_rebind_byte_cap_handoff_routes {
+            details.insert(
+                "limit_chain_rebind_byte_cap_handoff_route_order".to_owned(),
+                PlanDetail::Text(
+                    "ascending_depth_then_typed_input_path_then_typed_output_path".to_owned(),
+                ),
+            );
+        }
+        if overflowed {
+            record_work_overflow(&mut details);
+        }
+        current = push_unary(
+            &mut operators,
+            current,
+            PlanNodeKind::Filter,
+            Some(storm.predicate.clone()),
+            details,
+            cardinality,
+            work,
+        );
+        current_cardinality = cardinality;
+        prior_storm_stage_path = storm_scope_path;
+        prior_storm_stage_path.push(PlanByteCapScopeSegment::StormStageOutput {
+            index: storm_stage_index,
+        });
     }
     if !query.projections.is_empty() {
         let cardinality = current_cardinality;
@@ -1350,6 +4807,17 @@ fn explain_query_with_predicate_pressure(
         );
         operators[current].object = Some(target.clone());
     }
+    if let Some((identity, pair_count, index_count, scan_count)) =
+        paired_index_cost_compaction_chain.as_ref()
+    {
+        add_paired_index_cost_compaction_output_details(
+            &mut operators[current].details,
+            identity,
+            *pair_count,
+            *index_count,
+            *scan_count,
+        );
+    }
     build_plan(query.snapshot.clone(), operators, current)
 }
 
@@ -1359,11 +4827,3259 @@ struct Cardinality {
     bytes: Option<u64>,
 }
 
+struct RebindByteCapHandoffEstimate {
+    input_path: Vec<PlanByteCapScopeSegment>,
+    output_path: Vec<PlanByteCapScopeSegment>,
+    input_bytes: Option<u64>,
+    output_bytes: Option<u64>,
+}
+
+type RebindByteCapHandoffEstimatesByDepth =
+    BTreeMap<usize, Vec<RebindByteCapHandoffEstimate>>;
+
 fn source_cardinality(statistics: Option<&QuerySourceStatistics>) -> Cardinality {
     statistics.map_or_else(Cardinality::default, |statistics| Cardinality {
         rows: statistics.estimated_rows,
         bytes: statistics.estimated_bytes,
     })
+}
+
+/// Selects a deterministic physical order for the right-hand join inputs.
+/// ORNA permits internal reordering when results and observable order are
+/// preserved, but does not prescribe a cost heuristic. This explain-only
+/// adapter ranks fully estimated scans by rows plus 4-KiB byte blocks, then
+/// keeps tied and sparse inputs in declaration order. The executor remains
+/// responsible for restoring any declared result ordering.
+fn planned_query_join_order(joins: &[QueryJoinDescription]) -> Vec<(usize, &QueryJoinDescription)> {
+    let mut ordered = joins.iter().enumerate().collect::<Vec<_>>();
+    ordered.sort_by_key(|(declared_position, join)| {
+        let work = join
+            .statistics
+            .as_ref()
+            .and_then(|statistics| statistics.estimated_rows.zip(statistics.estimated_bytes))
+            .map(|(rows, bytes)| u128::from(rows) + u128::from(ceil_div(bytes, 4096)));
+        (work.is_none(), work.unwrap_or_default(), *declared_position)
+    });
+    ordered
+}
+
+fn add_decorrelated_subquery_details(
+    details: &mut BTreeMap<String, PlanDetail>,
+    subquery: &QueryDecorrelatedSubqueryDescription,
+) {
+    details.insert(
+        "subquery_identity".to_owned(),
+        PlanDetail::Text(subquery.identity.as_str().to_owned()),
+    );
+    details.insert(
+        "correlation_predicate_identity".to_owned(),
+        PlanDetail::Text(subquery.correlation_predicate.as_str().to_owned()),
+    );
+    details.insert(
+        "subquery_decorrelation".to_owned(),
+        PlanDetail::Text("resolver_approved_predicate_join".to_owned()),
+    );
+}
+
+fn join_pair_identity_for_join<'a>(
+    join: &QueryJoinDescription,
+    pairs: &'a [QueryJoinPairIdentityDescription],
+) -> Option<&'a QueryJoinPairIdentityDescription> {
+    pairs.iter().find(|pair| {
+        pair.right_source == join.source && pair.predicate == join.predicate
+    })
+}
+
+fn add_join_pair_identity_details(
+    details: &mut BTreeMap<String, PlanDetail>,
+    pair: &QueryJoinPairIdentityDescription,
+) {
+    details.insert(
+        "join_pair_identity".to_owned(),
+        PlanDetail::Text(pair.identity.as_str().to_owned()),
+    );
+    details.insert(
+        "logical_left_source_identity".to_owned(),
+        PlanDetail::Text(pair.left_source.as_str().to_owned()),
+    );
+    details.insert(
+        "logical_right_source_identity".to_owned(),
+        PlanDetail::Text(pair.right_source.as_str().to_owned()),
+    );
+    details.insert(
+        "join_pair_identity_resolution".to_owned(),
+        PlanDetail::Text("exact_right_source_and_predicate".to_owned()),
+    );
+    if let Some(predicate) = &pair.predicate {
+        details.insert(
+            "logical_predicate_identity".to_owned(),
+            PlanDetail::Text(predicate.as_str().to_owned()),
+        );
+    }
+}
+
+fn push_query_limit_pushdowns(
+    operators: &mut Vec<Operator>,
+    mut input: usize,
+    source: &ObjectRef,
+    mut cardinality: Cardinality,
+    pair: Option<&QueryJoinPairIdentityDescription>,
+    limit_pushdowns: &[QueryLimitPushdownDescription],
+) -> (usize, Cardinality, Option<String>) {
+    let Some(pair) = pair else {
+        return (input, cardinality, None);
+    };
+    let Some(chain_identity) = query_limit_pushdown_chain_identity(pair, source, limit_pushdowns)
+    else {
+        return (input, cardinality, None);
+    };
+
+    for (position, pushdown) in limit_pushdowns
+        .iter()
+        .filter(|pushdown| {
+            pushdown.join_pair_identity == pair.identity && pushdown.source == *source
+        })
+        .enumerate()
+    {
+        let next_cardinality = limit_cardinality(cardinality, pushdown.limit);
+        let mut details = BTreeMap::from([
+            (
+                "limit".to_owned(),
+                PlanDetail::Integer(pushdown.limit),
+            ),
+            (
+                "limit_pushdown_identity".to_owned(),
+                PlanDetail::Text(pushdown.identity.as_str().to_owned()),
+            ),
+            (
+                "limit_pushdown_pair_identity".to_owned(),
+                PlanDetail::Text(pair.identity.as_str().to_owned()),
+            ),
+            (
+                "limit_pushdown_source_identity".to_owned(),
+                PlanDetail::Text(source.as_str().to_owned()),
+            ),
+            (
+                "limit_pushdown_chain_position".to_owned(),
+                PlanDetail::Integer(u64::try_from(position + 1).unwrap_or(u64::MAX)),
+            ),
+        ]);
+        add_query_limit_pushdown_chain_details(&mut details, &chain_identity);
+        input = push_unary(
+            operators,
+            input,
+            PlanNodeKind::Limit,
+            None,
+            details,
+            next_cardinality,
+            cardinality.rows,
+        );
+        cardinality = next_cardinality;
+    }
+    (input, cardinality, Some(chain_identity))
+}
+
+fn query_limit_pushdown_chain_identity(
+    pair: &QueryJoinPairIdentityDescription,
+    source: &ObjectRef,
+    limit_pushdowns: &[QueryLimitPushdownDescription],
+) -> Option<String> {
+    let matching = limit_pushdowns
+        .iter()
+        .filter(|pushdown| {
+            pushdown.join_pair_identity == pair.identity && pushdown.source == *source
+        })
+        .collect::<Vec<_>>();
+    if matching.is_empty() {
+        return None;
+    }
+
+    let mut hash = Sha256::new();
+    hash.update(b"orna.sys.query-limit-pushdown-chain.v1\0");
+    hash_part(&mut hash, pair.identity.as_str().as_bytes());
+    hash_part(&mut hash, source.as_str().as_bytes());
+    hash.update((matching.len() as u64).to_be_bytes());
+    for pushdown in matching {
+        hash_part(&mut hash, pushdown.identity.as_str().as_bytes());
+        hash.update(pushdown.limit.to_be_bytes());
+    }
+    Some(format!("limit-pushdown-chain:{}", hex(&hash.finalize())))
+}
+
+fn add_query_limit_pushdown_chain_details(
+    details: &mut BTreeMap<String, PlanDetail>,
+    identity: &str,
+) {
+    details.insert(
+        "limit_pushdown_chain_identity".to_owned(),
+        PlanDetail::Text(identity.to_owned()),
+    );
+    details.insert(
+        "limit_pushdown_chain_policy".to_owned(),
+        PlanDetail::Text("resolver_ordered_per_exact_join_pair".to_owned()),
+    );
+}
+
+fn push_window_aggregates(
+    operators: &mut Vec<Operator>,
+    mut input: usize,
+    source: &ObjectRef,
+    cardinality: Cardinality,
+    aggregates: &[QueryWindowAggregatePushdownDescription],
+) -> usize {
+    let matching = aggregates
+        .iter()
+        .filter(|aggregate| aggregate.source == *source)
+        .collect::<Vec<_>>();
+    if matching.is_empty() {
+        return input;
+    }
+    let chain_identity = query_window_pushdown_chain_identity(source, aggregates)
+        .expect("a nonempty matching window chain has an identity");
+    let chain_length = u64::try_from(matching.len()).unwrap_or(u64::MAX);
+    for (position, aggregate) in matching.into_iter().enumerate() {
+        let details = BTreeMap::from([
+            (
+                "operation".to_owned(),
+                PlanDetail::Text("window_aggregate".to_owned()),
+            ),
+            (
+                "window_aggregate_identity".to_owned(),
+                PlanDetail::Text(aggregate.identity.as_str().to_owned()),
+            ),
+            (
+                "window_source_identity".to_owned(),
+                PlanDetail::Text(aggregate.source.as_str().to_owned()),
+            ),
+            (
+                "window_frame_identity".to_owned(),
+                PlanDetail::Text(aggregate.frame_identity.as_str().to_owned()),
+            ),
+            (
+                "window_frame_start".to_owned(),
+                PlanDetail::Text(aggregate.frame_start.as_detail()),
+            ),
+            (
+                "window_frame_end".to_owned(),
+                PlanDetail::Text(aggregate.frame_end.as_detail()),
+            ),
+            (
+                "window_pushdown_chain_identity".to_owned(),
+                PlanDetail::Text(chain_identity.clone()),
+            ),
+            (
+                "window_pushdown_chain_position".to_owned(),
+                PlanDetail::Integer(u64::try_from(position + 1).unwrap_or(u64::MAX)),
+            ),
+            (
+                "window_pushdown_chain_length".to_owned(),
+                PlanDetail::Integer(chain_length),
+            ),
+            (
+                "window_pushdown_identity_policy".to_owned(),
+                PlanDetail::Text("source_ordered_sha256_v1".to_owned()),
+            ),
+            (
+                "pushdown_policy".to_owned(),
+                PlanDetail::Text("exact_source_identity_before_join".to_owned()),
+            ),
+            (
+                "estimated_work_scope".to_owned(),
+                PlanDetail::Text("one_unit_per_input_row".to_owned()),
+            ),
+        ]);
+        let index = operators.len();
+        operators.push(Operator::new(
+            PlanNodeKind::Aggregate,
+            Some(aggregate.identity.clone()),
+            Some(aggregate.aggregate.clone()),
+            details,
+            vec![input],
+            cardinality,
+            cardinality.rows,
+        ));
+        input = index;
+    }
+    input
+}
+
+fn partial_index_for_join<'a>(
+    join: &QueryJoinDescription,
+    candidates: &'a [QueryPartialIndexDescription],
+) -> Option<&'a QueryPartialIndexDescription> {
+    let predicate = join.predicate.as_ref()?;
+    // The reference names explain node kinds but is silent on partial-index
+    // matching and tie-breaking. This adapter requires an exact table/predicate
+    // match, then selects the lexicographically smallest index identity so the
+    // explain-only choice is independent of catalog order. A missing exact
+    // match stays a scan rather than inferring predicate implication.
+    candidates
+        .iter()
+        .filter(|candidate| {
+            candidate.table == join.source && candidate.partial_predicate == *predicate
+        })
+        .min_by(|left, right| left.index.as_str().cmp(right.index.as_str()))
+}
+
+fn push_index_lookup(
+    operators: &mut Vec<Operator>,
+    candidate: &QueryPartialIndexDescription,
+    statistics: Option<&QuerySourceStatistics>,
+) -> usize {
+    let cardinality = source_cardinality(statistics);
+    let mut details = BTreeMap::from([
+        (
+            "table".to_owned(),
+            PlanDetail::Text(candidate.table.as_str().to_owned()),
+        ),
+        (
+            "partial_predicate_identity".to_owned(),
+            PlanDetail::Text(candidate.partial_predicate.as_str().to_owned()),
+        ),
+        (
+            "index_selection".to_owned(),
+            PlanDetail::Text("exact_table_and_predicate_identity".to_owned()),
+        ),
+    ]);
+    add_partial_index_pair_identity_details(&mut details, candidate);
+    add_partial_index_selection_tie_break_details(&mut details);
+    if let Some(branch) = statistics.and_then(|stats| stats.mutable_branch.as_ref()) {
+        details.insert(
+            "mutable_branch".to_owned(),
+            PlanDetail::Text(branch.name.clone()),
+        );
+        details.insert(
+            "branch_generation".to_owned(),
+            PlanDetail::Integer(branch.generation),
+        );
+        details.insert(
+            "statistics_scope".to_owned(),
+            PlanDetail::Text("overlay_inclusive".to_owned()),
+        );
+    }
+    let work = cardinality
+        .rows
+        .zip(cardinality.bytes)
+        .and_then(|(rows, bytes)| rows.checked_add(ceil_div(bytes, 4096)));
+    if cardinality
+        .rows
+        .zip(cardinality.bytes)
+        .is_some_and(|(rows, bytes)| rows.checked_add(ceil_div(bytes, 4096)).is_none())
+    {
+        record_work_overflow(&mut details);
+    }
+    let index = operators.len();
+    operators.push(Operator::new(
+        PlanNodeKind::IndexLookup,
+        Some(candidate.index.clone()),
+        Some(candidate.partial_predicate.clone()),
+        details,
+        Vec::new(),
+        cardinality,
+        work,
+    ));
+    index
+}
+
+/// Returns the stable identity of the exact logical predicate pushdown and
+/// selected index pair. ORNA specifies the `index_lookup` node kind but does
+/// not prescribe its identity encoding, so the explain adapter hashes the
+/// table/index/predicate tuple. Cost reordering may move its join fold, but
+/// cannot change this value while that tuple stays fixed.
+fn partial_index_pair_identity(candidate: &QueryPartialIndexDescription) -> String {
+    let mut hash = Sha256::new();
+    hash.update(b"orna.sys.partial-index-pair.v1\0");
+    hash_part(&mut hash, candidate.table.as_str().as_bytes());
+    hash_part(&mut hash, candidate.index.as_str().as_bytes());
+    hash_part(&mut hash, candidate.partial_predicate.as_str().as_bytes());
+    format!("index-pair:{}", hex(&hash.finalize()))
+}
+
+/// Binds a logical join pair to the exact partial index selected for its
+/// right source and predicate. ORNA leaves this combined planner identity
+/// encoding open, so use a domain-separated deterministic digest.
+fn paired_predicate_pushdown_identity(
+    pair: &QueryJoinPairIdentityDescription,
+    candidate: &QueryPartialIndexDescription,
+) -> String {
+    let mut hash = Sha256::new();
+    hash.update(b"orna.sys.join-predicate-pushdown-pair.v1\0");
+    hash_part(&mut hash, pair.identity.as_str().as_bytes());
+    hash_part(&mut hash, pair.left_source.as_str().as_bytes());
+    hash_part(&mut hash, pair.right_source.as_str().as_bytes());
+    hash_optional_text(
+        &mut hash,
+        pair.predicate.as_ref().map(ExpressionRef::as_str),
+    );
+    hash_part(
+        &mut hash,
+        partial_index_pair_identity(candidate).as_bytes(),
+    );
+    format!("join-predicate-pair:{}", hex(&hash.finalize()))
+}
+
+/// Records the selected exact index tuple, or a typed no-match outcome, for a
+/// logical pair. ORNA leaves explain-only index identity encoding open; this
+/// value keeps sparse pair slots from disappearing during later cost refolds.
+fn paired_index_selection_identity(
+    pair: &QueryJoinPairIdentityDescription,
+    candidate: Option<&QueryPartialIndexDescription>,
+) -> String {
+    let mut hash = Sha256::new();
+    hash.update(b"orna.sys.paired-index-selection.v1\0");
+    hash_part(&mut hash, pair.identity.as_str().as_bytes());
+    hash_part(&mut hash, pair.left_source.as_str().as_bytes());
+    hash_part(&mut hash, pair.right_source.as_str().as_bytes());
+    hash_optional_text(
+        &mut hash,
+        pair.predicate.as_ref().map(ExpressionRef::as_str),
+    );
+    if let Some(candidate) = candidate {
+        hash.update([1]);
+        hash_part(
+            &mut hash,
+            partial_index_pair_identity(candidate).as_bytes(),
+        );
+    } else {
+        hash.update([0]);
+    }
+    format!("paired-index-selection:{}", hex(&hash.finalize()))
+}
+
+fn add_paired_index_selection_details(
+    details: &mut BTreeMap<String, PlanDetail>,
+    identity: &str,
+) {
+    details.insert(
+        "paired_index_selection_identity".to_owned(),
+        PlanDetail::Text(identity.to_owned()),
+    );
+    details.insert(
+        "paired_index_selection_policy".to_owned(),
+        PlanDetail::Text("exact_pair_index_or_no_match".to_owned()),
+    );
+}
+
+fn add_paired_index_refold_details(
+    details: &mut BTreeMap<String, PlanDetail>,
+    identity: &str,
+    parent_identity: &str,
+    input_identity: &str,
+    pair: &QueryJoinPairIdentityDescription,
+    selection_identity: &str,
+) {
+    details.insert(
+        "paired_index_refold_identity".to_owned(),
+        PlanDetail::Text(identity.to_owned()),
+    );
+    details.insert(
+        "paired_index_refold_parent_identity".to_owned(),
+        PlanDetail::Text(parent_identity.to_owned()),
+    );
+    details.insert(
+        "paired_index_refold_input_identity".to_owned(),
+        PlanDetail::Text(input_identity.to_owned()),
+    );
+    details.insert(
+        "paired_index_refold_pair_identity".to_owned(),
+        PlanDetail::Text(pair.identity.as_str().to_owned()),
+    );
+    details.insert(
+        "paired_index_refold_selection_identity".to_owned(),
+        PlanDetail::Text(selection_identity.to_owned()),
+    );
+    details.insert(
+        "paired_index_refold_pairing".to_owned(),
+        PlanDetail::Text("sparse_parent_fold_pair_and_exact_index_outcome".to_owned()),
+    );
+}
+
+fn add_paired_index_anchor_chain_details(
+    details: &mut BTreeMap<String, PlanDetail>,
+    identity: &str,
+    parent_identity: &str,
+    parent_cost_identity: &str,
+    transition: &str,
+    pair_identity: Option<&str>,
+    step_refold_identity: Option<&str>,
+    step_selection_identity: Option<&str>,
+) {
+    details.insert(
+        "paired_index_anchor_chain_identity".to_owned(),
+        PlanDetail::Text(identity.to_owned()),
+    );
+    details.insert(
+        "paired_index_anchor_chain_parent_identity".to_owned(),
+        PlanDetail::Text(parent_identity.to_owned()),
+    );
+    details.insert(
+        "paired_index_anchor_chain_parent_cost_identity".to_owned(),
+        PlanDetail::Text(parent_cost_identity.to_owned()),
+    );
+    details.insert(
+        "paired_index_anchor_chain_transition".to_owned(),
+        PlanDetail::Text(transition.to_owned()),
+    );
+    if let Some(pair_identity) = pair_identity {
+        details.insert(
+            "paired_index_anchor_chain_pair_identity".to_owned(),
+            PlanDetail::Text(pair_identity.to_owned()),
+        );
+    }
+    if let Some(refold_identity) = step_refold_identity {
+        details.insert(
+            "paired_index_anchor_chain_step_refold_identity".to_owned(),
+            PlanDetail::Text(refold_identity.to_owned()),
+        );
+    }
+    if let Some(selection_identity) = step_selection_identity {
+        details.insert(
+            "paired_index_anchor_chain_step_selection_identity".to_owned(),
+            PlanDetail::Text(selection_identity.to_owned()),
+        );
+    }
+}
+
+fn add_paired_index_cost_restoration_details(
+    details: &mut BTreeMap<String, PlanDetail>,
+    identity: &str,
+    parent_identity: &str,
+    parent_cost_identity: &str,
+    declared_position: usize,
+    planned_position: usize,
+    transition: &str,
+    pair_identity: Option<&str>,
+    step_refold_identity: Option<&str>,
+    step_selection_identity: Option<&str>,
+    has_index: Option<bool>,
+) {
+    details.insert(
+        "paired_index_cost_restoration_chain_identity".to_owned(),
+        PlanDetail::Text(identity.to_owned()),
+    );
+    details.insert(
+        "paired_index_cost_restoration_parent_identity".to_owned(),
+        PlanDetail::Text(parent_identity.to_owned()),
+    );
+    details.insert(
+        "paired_index_cost_restoration_parent_cost_identity".to_owned(),
+        PlanDetail::Text(parent_cost_identity.to_owned()),
+    );
+    details.insert(
+        "paired_index_cost_restoration_transition".to_owned(),
+        PlanDetail::Text(transition.to_owned()),
+    );
+    details.insert(
+        "paired_index_cost_restoration_declared_input_position".to_owned(),
+        PlanDetail::Integer(u64::try_from(declared_position + 1).unwrap_or(u64::MAX)),
+    );
+    details.insert(
+        "paired_index_cost_restoration_planned_input_position".to_owned(),
+        PlanDetail::Integer(u64::try_from(planned_position + 1).unwrap_or(u64::MAX)),
+    );
+    if let Some(pair_identity) = pair_identity {
+        details.insert(
+            "paired_index_cost_restoration_pair_identity".to_owned(),
+            PlanDetail::Text(pair_identity.to_owned()),
+        );
+    }
+    if let Some(identity) = step_refold_identity {
+        details.insert(
+            "paired_index_cost_restoration_step_refold_identity".to_owned(),
+            PlanDetail::Text(identity.to_owned()),
+        );
+    }
+    if let Some(identity) = step_selection_identity {
+        details.insert(
+            "paired_index_cost_restoration_step_selection_identity".to_owned(),
+            PlanDetail::Text(identity.to_owned()),
+        );
+    }
+    if let Some(has_index) = has_index {
+        details.insert(
+            "paired_index_cost_restoration_outcome".to_owned(),
+            PlanDetail::Text(if has_index { "exact_index" } else { "scan" }.to_owned()),
+        );
+    }
+}
+
+fn add_paired_index_cost_compaction_details(
+    details: &mut BTreeMap<String, PlanDetail>,
+    identity: &str,
+    parent_identity: &str,
+    parent_cost_identity: &str,
+    declared_position: usize,
+    planned_position: usize,
+    transition: &str,
+    pair_identity: Option<&str>,
+    selection_identity: Option<&str>,
+    refold_identity: Option<&str>,
+    route_outcome: Option<&str>,
+    pair_count: u64,
+    index_count: u64,
+    scan_count: u64,
+) {
+    details.insert(
+        "paired_index_cost_compaction_chain_identity".to_owned(),
+        PlanDetail::Text(identity.to_owned()),
+    );
+    details.insert(
+        "paired_index_cost_compaction_parent_identity".to_owned(),
+        PlanDetail::Text(parent_identity.to_owned()),
+    );
+    details.insert(
+        "paired_index_cost_compaction_parent_cost_identity".to_owned(),
+        PlanDetail::Text(parent_cost_identity.to_owned()),
+    );
+    details.insert(
+        "paired_index_cost_compaction_transition".to_owned(),
+        PlanDetail::Text(transition.to_owned()),
+    );
+    details.insert(
+        "paired_index_cost_compaction_declared_input_position".to_owned(),
+        PlanDetail::Integer(u64::try_from(declared_position + 1).unwrap_or(u64::MAX)),
+    );
+    details.insert(
+        "paired_index_cost_compaction_planned_input_position".to_owned(),
+        PlanDetail::Integer(u64::try_from(planned_position + 1).unwrap_or(u64::MAX)),
+    );
+    details.insert(
+        "paired_index_cost_compaction_pair_count".to_owned(),
+        PlanDetail::Integer(pair_count),
+    );
+    details.insert(
+        "paired_index_cost_compaction_exact_index_count".to_owned(),
+        PlanDetail::Integer(index_count),
+    );
+    details.insert(
+        "paired_index_cost_compaction_scan_count".to_owned(),
+        PlanDetail::Integer(scan_count),
+    );
+    details.insert(
+        "paired_index_cost_compaction_policy".to_owned(),
+        PlanDetail::Text(
+            "bounded_pair_route_digest_with_sparse_fold_carry".to_owned(),
+        ),
+    );
+    if let Some(pair_identity) = pair_identity {
+        details.insert(
+            "paired_index_cost_compaction_pair_identity".to_owned(),
+            PlanDetail::Text(pair_identity.to_owned()),
+        );
+    }
+    if let Some(selection_identity) = selection_identity {
+        details.insert(
+            "paired_index_cost_compaction_step_selection_identity".to_owned(),
+            PlanDetail::Text(selection_identity.to_owned()),
+        );
+    }
+    if let Some(refold_identity) = refold_identity {
+        details.insert(
+            "paired_index_cost_compaction_step_refold_identity".to_owned(),
+            PlanDetail::Text(refold_identity.to_owned()),
+        );
+    }
+    if let Some(route_outcome) = route_outcome {
+        details.insert(
+            "paired_index_cost_compaction_route_outcome".to_owned(),
+            PlanDetail::Text(route_outcome.to_owned()),
+        );
+    }
+}
+
+fn add_paired_index_cost_compaction_output_details(
+    details: &mut BTreeMap<String, PlanDetail>,
+    identity: &str,
+    pair_count: u64,
+    index_count: u64,
+    scan_count: u64,
+) {
+    details.insert(
+        "paired_index_cost_compaction_output_chain_identity".to_owned(),
+        PlanDetail::Text(identity.to_owned()),
+    );
+    details.insert(
+        "paired_index_cost_compaction_output_pair_count".to_owned(),
+        PlanDetail::Integer(pair_count),
+    );
+    details.insert(
+        "paired_index_cost_compaction_output_exact_index_count".to_owned(),
+        PlanDetail::Integer(index_count),
+    );
+    details.insert(
+        "paired_index_cost_compaction_output_scan_count".to_owned(),
+        PlanDetail::Integer(scan_count),
+    );
+    details.insert(
+        "paired_index_cost_compaction_output_policy".to_owned(),
+        PlanDetail::Text("retain_route_digest_and_counts_on_plan_output".to_owned()),
+    );
+}
+
+fn add_paired_decorrelation_cost_restoration_details(
+    details: &mut BTreeMap<String, PlanDetail>,
+    identity: &str,
+    parent_identity: &str,
+    parent_cost_identity: &str,
+    declared_position: usize,
+    planned_position: usize,
+    transition: &str,
+    pair: Option<&QueryJoinPairIdentityDescription>,
+    refold_identity: Option<&str>,
+    selection_identity: Option<&str>,
+    has_index: Option<bool>,
+    subquery: Option<&QueryDecorrelatedSubqueryDescription>,
+    pin_chain_identity: Option<&str>,
+    anchor_fold_identity: Option<&str>,
+    omission_refold_identity: Option<&str>,
+) {
+    details.insert(
+        "paired_decorrelation_cost_restoration_chain_identity".to_owned(),
+        PlanDetail::Text(identity.to_owned()),
+    );
+    details.insert(
+        "paired_decorrelation_cost_restoration_parent_identity".to_owned(),
+        PlanDetail::Text(parent_identity.to_owned()),
+    );
+    details.insert(
+        "paired_decorrelation_cost_restoration_parent_cost_identity".to_owned(),
+        PlanDetail::Text(parent_cost_identity.to_owned()),
+    );
+    details.insert(
+        "paired_decorrelation_cost_restoration_transition".to_owned(),
+        PlanDetail::Text(transition.to_owned()),
+    );
+    details.insert(
+        "paired_decorrelation_cost_restoration_declared_input_position".to_owned(),
+        PlanDetail::Integer(u64::try_from(declared_position + 1).unwrap_or(u64::MAX)),
+    );
+    details.insert(
+        "paired_decorrelation_cost_restoration_planned_input_position".to_owned(),
+        PlanDetail::Integer(u64::try_from(planned_position + 1).unwrap_or(u64::MAX)),
+    );
+    details.insert(
+        "paired_decorrelation_cost_restoration_pairing".to_owned(),
+        PlanDetail::Text("paired_routes_and_decorrelated_pins_across_sparse_cost_folds".to_owned()),
+    );
+    if let Some(pair) = pair {
+        details.insert(
+            "paired_decorrelation_cost_restoration_pair_identity".to_owned(),
+            PlanDetail::Text(pair.identity.as_str().to_owned()),
+        );
+    }
+    if let Some(identity) = refold_identity {
+        details.insert(
+            "paired_decorrelation_cost_restoration_step_refold_identity".to_owned(),
+            PlanDetail::Text(identity.to_owned()),
+        );
+    }
+    if let Some(identity) = selection_identity {
+        details.insert(
+            "paired_decorrelation_cost_restoration_step_selection_identity".to_owned(),
+            PlanDetail::Text(identity.to_owned()),
+        );
+    }
+    if let Some(has_index) = has_index {
+        details.insert(
+            "paired_decorrelation_cost_restoration_route_outcome".to_owned(),
+            PlanDetail::Text(if has_index { "exact_index" } else { "scan" }.to_owned()),
+        );
+    }
+    if let Some(subquery) = subquery {
+        details.insert(
+            "paired_decorrelation_cost_restoration_subquery_identity".to_owned(),
+            PlanDetail::Text(subquery.identity.as_str().to_owned()),
+        );
+    }
+    if let Some(identity) = pin_chain_identity {
+        details.insert(
+            "paired_decorrelation_cost_restoration_pin_chain_identity".to_owned(),
+            PlanDetail::Text(identity.to_owned()),
+        );
+    }
+    if let Some(identity) = anchor_fold_identity {
+        details.insert(
+            "paired_decorrelation_cost_restoration_anchor_fold_identity".to_owned(),
+            PlanDetail::Text(identity.to_owned()),
+        );
+    }
+    if let Some(identity) = omission_refold_identity {
+        details.insert(
+            "paired_decorrelation_cost_restoration_omission_refold_identity".to_owned(),
+            PlanDetail::Text(identity.to_owned()),
+        );
+    }
+}
+
+fn add_paired_predicate_pushdown_details(
+    details: &mut BTreeMap<String, PlanDetail>,
+    identity: &str,
+) {
+    details.insert(
+        "paired_predicate_pushdown_identity".to_owned(),
+        PlanDetail::Text(identity.to_owned()),
+    );
+    details.insert(
+        "paired_predicate_pushdown_policy".to_owned(),
+        PlanDetail::Text("logical_join_and_exact_table_index_predicate".to_owned()),
+    );
+}
+
+/// Combines the resolver-approved subquery/correlation tuple with the exact
+/// selected partial-index tuple. The reference leaves this combined identity
+/// encoding open, so use a domain-separated deterministic digest.
+fn decorrelated_predicate_pushdown_identity(
+    subquery: &QueryDecorrelatedSubqueryDescription,
+    candidate: &QueryPartialIndexDescription,
+) -> String {
+    let mut hash = Sha256::new();
+    hash.update(b"orna.sys.decorrelated-predicate-pushdown.v1\0");
+    hash_part(&mut hash, subquery.identity.as_str().as_bytes());
+    hash_part(&mut hash, subquery.source.as_str().as_bytes());
+    hash_part(
+        &mut hash,
+        subquery.correlation_predicate.as_str().as_bytes(),
+    );
+    hash_part(
+        &mut hash,
+        partial_index_pair_identity(candidate).as_bytes(),
+    );
+    format!("decorrelated-pushdown:{}", hex(&hash.finalize()))
+}
+
+/// Gives an unindexed resolver-approved subquery a stable identity. The
+/// reference does not define an identity for this explain-only scan case, so
+/// bind the exact omitted source/predicate tuple to the subquery and preserve
+/// that omission in later sparse cost folds.
+fn decorrelated_index_selection_omission_identity(
+    subquery: &QueryDecorrelatedSubqueryDescription,
+) -> String {
+    let mut hash = Sha256::new();
+    hash.update(b"orna.sys.decorrelated-index-omission.v1\0");
+    hash_part(&mut hash, subquery.identity.as_str().as_bytes());
+    hash_part(&mut hash, subquery.source.as_str().as_bytes());
+    hash_part(
+        &mut hash,
+        subquery.correlation_predicate.as_str().as_bytes(),
+    );
+    format!("decorrelated-index-omission:{}", hex(&hash.finalize()))
+}
+
+/// Binds each decorrelated fold to its exact sparse index outcome. The
+/// reference does not define this planner-local identity; keep indexed and
+/// omitted inputs distinct while retaining the subquery tuple in either case.
+fn decorrelated_index_selection_fold_identity(
+    subquery: &QueryDecorrelatedSubqueryDescription,
+    selected_index: Option<&QueryPartialIndexDescription>,
+    omission_identity: Option<&str>,
+) -> String {
+    let mut hash = Sha256::new();
+    hash.update(b"orna.sys.decorrelated-index-selection-fold.v1\0");
+    hash_part(&mut hash, subquery.identity.as_str().as_bytes());
+    hash_part(&mut hash, subquery.source.as_str().as_bytes());
+    hash_part(
+        &mut hash,
+        subquery.correlation_predicate.as_str().as_bytes(),
+    );
+    match (selected_index, omission_identity) {
+        (Some(index), None) => {
+            hash.update([1]);
+            hash_part(&mut hash, partial_index_pair_identity(index).as_bytes());
+        }
+        (None, Some(identity)) => {
+            hash.update([0]);
+            hash_part(&mut hash, identity.as_bytes());
+        }
+        (Some(index), Some(identity)) => {
+            // Retain both inputs if a future planner path reports an omission
+            // alongside a selected index instead of silently collapsing them.
+            hash.update([2]);
+            hash_part(&mut hash, partial_index_pair_identity(index).as_bytes());
+            hash_part(&mut hash, identity.as_bytes());
+        }
+        (None, None) => {
+            // This is unreachable for current decorrelated inputs, which
+            // always carry either an exact selected index or an omission.
+            hash.update([0]);
+            hash.update([0]);
+        }
+    }
+    format!("decorrelated-index-fold:{}", hex(&hash.finalize()))
+}
+
+/// Refolds an omitted decorrelated index outcome against its sparse cost
+/// ancestry. ORNA leaves this explain-only identity encoding open; retaining
+/// the omission tuple here prevents later decorrelated folds from shifting
+/// across an unindexed input.
+fn query_decorrelated_omission_refold_identity(
+    parent_identity: &str,
+    input_identity: &str,
+    subquery: &QueryDecorrelatedSubqueryDescription,
+    omission_identity: &str,
+    selection_identity: &str,
+    cardinality: Cardinality,
+    work: Option<u64>,
+    work_overflow: bool,
+) -> String {
+    let mut hash = Sha256::new();
+    hash.update(b"orna.sys.query-decorrelated-omission-refold.v1\0");
+    hash_part(&mut hash, parent_identity.as_bytes());
+    hash_part(&mut hash, input_identity.as_bytes());
+    hash_part(&mut hash, subquery.identity.as_str().as_bytes());
+    hash_part(&mut hash, subquery.source.as_str().as_bytes());
+    hash_part(
+        &mut hash,
+        subquery.correlation_predicate.as_str().as_bytes(),
+    );
+    hash_part(&mut hash, omission_identity.as_bytes());
+    hash_part(&mut hash, selection_identity.as_bytes());
+    hash_optional_u64(&mut hash, cardinality.rows);
+    hash_optional_u64(&mut hash, cardinality.bytes);
+    hash_optional_u64(&mut hash, work);
+    hash.update([u8::from(work_overflow)]);
+    format!("decorrelated-omission-refold:{}", hex(&hash.finalize()))
+}
+
+/// Starts a snapshot-pinned chain for resolver-approved decorrelated inputs.
+fn query_decorrelated_pin_chain_seed_identity(
+    snapshot: &SnapshotRef,
+    parent_cost_identity: &str,
+) -> String {
+    let mut hash = Sha256::new();
+    hash.update(b"orna.sys.query-decorrelated-pin-chain-seed.v1\0");
+    hash_part(&mut hash, snapshot.as_str().as_bytes());
+    hash_part(&mut hash, parent_cost_identity.as_bytes());
+    format!("decorrelated-pin-chain:{}", hex(&hash.finalize()))
+}
+
+/// Accumulates pinned subquery outcomes across sparse cost folds. ORNA leaves
+/// this explain-only encoding open; include the snapshot, resolver tuple,
+/// selected-or-omitted index fold, and accumulated parent so rebinds cannot
+/// detach a later subquery from its earlier pin ancestry.
+fn query_decorrelated_pin_chain_identity(
+    parent_pin_identity: &str,
+    snapshot: &SnapshotRef,
+    parent_cost_identity: &str,
+    input_identity: &str,
+    subquery: &QueryDecorrelatedSubqueryDescription,
+    selection_identity: &str,
+    anchor_fold_identity: &str,
+    omission_refold_identity: Option<&str>,
+    cardinality: Cardinality,
+    work: Option<u64>,
+    work_overflow: bool,
+) -> String {
+    let mut hash = Sha256::new();
+    hash.update(b"orna.sys.query-decorrelated-pin-chain.v1\0");
+    hash_part(&mut hash, parent_pin_identity.as_bytes());
+    hash_part(&mut hash, snapshot.as_str().as_bytes());
+    hash_part(&mut hash, parent_cost_identity.as_bytes());
+    hash_part(&mut hash, input_identity.as_bytes());
+    hash_part(&mut hash, subquery.identity.as_str().as_bytes());
+    hash_part(&mut hash, subquery.source.as_str().as_bytes());
+    hash_part(
+        &mut hash,
+        subquery.correlation_predicate.as_str().as_bytes(),
+    );
+    hash_part(&mut hash, selection_identity.as_bytes());
+    hash_part(&mut hash, anchor_fold_identity.as_bytes());
+    hash_optional_text(&mut hash, omission_refold_identity);
+    hash_optional_u64(&mut hash, cardinality.rows);
+    hash_optional_u64(&mut hash, cardinality.bytes);
+    hash_optional_u64(&mut hash, work);
+    hash.update([u8::from(work_overflow)]);
+    format!("decorrelated-pin-chain:{}", hex(&hash.finalize()))
+}
+
+/// Binds a resolver-approved decorrelation to the sparse fold accumulated on
+/// its lateral anchor. The reference leaves explain identity encoding open;
+/// this domain-separated digest prevents equal child subqueries under distinct
+/// anchors from being reported as the same paired fold.
+fn query_decorrelated_anchor_fold_identity(
+    anchor_fold_identity: &str,
+    input_identity: &str,
+    subquery: &QueryDecorrelatedSubqueryDescription,
+    predicate_pushdown_identity: Option<&str>,
+    index_selection_fold_identity: Option<&str>,
+) -> String {
+    let mut hash = Sha256::new();
+    hash.update(b"orna.sys.decorrelated-anchor-fold.v1\0");
+    hash_part(&mut hash, anchor_fold_identity.as_bytes());
+    hash_part(&mut hash, input_identity.as_bytes());
+    hash_part(&mut hash, subquery.identity.as_str().as_bytes());
+    hash_part(&mut hash, subquery.source.as_str().as_bytes());
+    hash_part(
+        &mut hash,
+        subquery.correlation_predicate.as_str().as_bytes(),
+    );
+    hash_optional_text(&mut hash, predicate_pushdown_identity);
+    hash_optional_text(&mut hash, index_selection_fold_identity);
+    format!("decorrelated-anchor-fold:{}", hex(&hash.finalize()))
+}
+
+fn add_decorrelated_anchor_fold_details(
+    details: &mut BTreeMap<String, PlanDetail>,
+    identity: &str,
+    parent_identity: &str,
+    input_identity: &str,
+    index_selection_identity: &str,
+) {
+    details.insert(
+        "decorrelated_anchor_fold_identity".to_owned(),
+        PlanDetail::Text(identity.to_owned()),
+    );
+    details.insert(
+        "decorrelated_anchor_fold_parent_identity".to_owned(),
+        PlanDetail::Text(parent_identity.to_owned()),
+    );
+    details.insert(
+        "decorrelated_anchor_fold_input_identity".to_owned(),
+        PlanDetail::Text(input_identity.to_owned()),
+    );
+    details.insert(
+        "decorrelated_anchor_fold_index_selection_identity".to_owned(),
+        PlanDetail::Text(index_selection_identity.to_owned()),
+    );
+    details.insert(
+        "decorrelated_anchor_fold_pairing".to_owned(),
+        PlanDetail::Text("sparse_anchor_fold_and_resolved_subquery_input".to_owned()),
+    );
+}
+
+fn add_decorrelated_omission_refold_details(
+    details: &mut BTreeMap<String, PlanDetail>,
+    identity: &str,
+    parent_identity: &str,
+    input_identity: &str,
+    subquery: &QueryDecorrelatedSubqueryDescription,
+    omission_identity: &str,
+    selection_identity: &str,
+) {
+    details.insert(
+        "decorrelated_omission_refold_identity".to_owned(),
+        PlanDetail::Text(identity.to_owned()),
+    );
+    details.insert(
+        "decorrelated_omission_refold_parent_identity".to_owned(),
+        PlanDetail::Text(parent_identity.to_owned()),
+    );
+    details.insert(
+        "decorrelated_omission_refold_input_identity".to_owned(),
+        PlanDetail::Text(input_identity.to_owned()),
+    );
+    details.insert(
+        "decorrelated_omission_refold_subquery_identity".to_owned(),
+        PlanDetail::Text(subquery.identity.as_str().to_owned()),
+    );
+    details.insert(
+        "decorrelated_omission_refold_omission_identity".to_owned(),
+        PlanDetail::Text(omission_identity.to_owned()),
+    );
+    details.insert(
+        "decorrelated_omission_refold_selection_identity".to_owned(),
+        PlanDetail::Text(selection_identity.to_owned()),
+    );
+    details.insert(
+        "decorrelated_omission_refold_pairing".to_owned(),
+        PlanDetail::Text("sparse_parent_fold_and_unindexed_subquery_input".to_owned()),
+    );
+}
+
+fn add_decorrelated_pin_chain_details(
+    details: &mut BTreeMap<String, PlanDetail>,
+    identity: &str,
+    parent_identity: &str,
+    snapshot: &SnapshotRef,
+    parent_cost_identity: &str,
+    transition: &str,
+    subquery_identity: Option<&str>,
+    selection_identity: Option<&str>,
+    anchor_fold_identity: Option<&str>,
+    omission_refold_identity: Option<&str>,
+) {
+    details.insert(
+        "decorrelated_pin_chain_identity".to_owned(),
+        PlanDetail::Text(identity.to_owned()),
+    );
+    details.insert(
+        "decorrelated_pin_chain_parent_identity".to_owned(),
+        PlanDetail::Text(parent_identity.to_owned()),
+    );
+    details.insert(
+        "decorrelated_pin_chain_snapshot".to_owned(),
+        PlanDetail::Text(snapshot.as_str().to_owned()),
+    );
+    details.insert(
+        "decorrelated_pin_chain_parent_cost_identity".to_owned(),
+        PlanDetail::Text(parent_cost_identity.to_owned()),
+    );
+    details.insert(
+        "decorrelated_pin_chain_transition".to_owned(),
+        PlanDetail::Text(transition.to_owned()),
+    );
+    details.insert(
+        "decorrelated_pin_chain_pairing".to_owned(),
+        PlanDetail::Text("snapshot_pin_subquery_outcome_and_sparse_cost_parent".to_owned()),
+    );
+    if let Some(identity) = subquery_identity {
+        details.insert(
+            "decorrelated_pin_chain_subquery_identity".to_owned(),
+            PlanDetail::Text(identity.to_owned()),
+        );
+    }
+    if let Some(identity) = selection_identity {
+        details.insert(
+            "decorrelated_pin_chain_selection_identity".to_owned(),
+            PlanDetail::Text(identity.to_owned()),
+        );
+    }
+    if let Some(identity) = anchor_fold_identity {
+        details.insert(
+            "decorrelated_pin_chain_anchor_fold_identity".to_owned(),
+            PlanDetail::Text(identity.to_owned()),
+        );
+    }
+    if let Some(identity) = omission_refold_identity {
+        details.insert(
+            "decorrelated_pin_chain_omission_refold_identity".to_owned(),
+            PlanDetail::Text(identity.to_owned()),
+        );
+    }
+}
+
+/// Binds a source's complete resolver-ordered window chain to the accumulated
+/// sparse anchor fold and exact right input. The reference leaves this
+/// explain-only identity encoding open; domain separation makes the pairing
+/// explicit in plans and cost-fold digests.
+fn query_window_anchor_fold_identity(
+    anchor_fold_identity: &str,
+    input_identity: &str,
+    window_chain_identity: &str,
+) -> String {
+    let mut hash = Sha256::new();
+    hash.update(b"orna.sys.query-window-anchor-fold.v1\0");
+    hash_part(&mut hash, anchor_fold_identity.as_bytes());
+    hash_part(&mut hash, input_identity.as_bytes());
+    hash_part(&mut hash, window_chain_identity.as_bytes());
+    format!("window-anchor-fold:{}", hex(&hash.finalize()))
+}
+
+fn add_window_anchor_fold_details(details: &mut BTreeMap<String, PlanDetail>, identity: &str) {
+    details.insert(
+        "window_anchor_fold_identity".to_owned(),
+        PlanDetail::Text(identity.to_owned()),
+    );
+    details.insert(
+        "window_anchor_fold_pairing".to_owned(),
+        PlanDetail::Text("sparse_anchor_fold_and_exact_source_frame_chain".to_owned()),
+    );
+}
+
+/// Combines the exact resolver pair and right-input identity with the
+/// accumulated sparse left anchor. ORNA permits internal join reordering but
+/// leaves this explain-only digest format unspecified.
+fn query_join_pair_anchor_fold_identity(
+    anchor_fold_identity: &str,
+    input_identity: &str,
+    pair: &QueryJoinPairIdentityDescription,
+) -> String {
+    let mut hash = Sha256::new();
+    hash.update(b"orna.sys.query-join-pair-anchor-fold.v1\0");
+    hash_part(&mut hash, anchor_fold_identity.as_bytes());
+    hash_part(&mut hash, input_identity.as_bytes());
+    hash_part(&mut hash, pair.identity.as_str().as_bytes());
+    hash_part(&mut hash, pair.left_source.as_str().as_bytes());
+    hash_part(&mut hash, pair.right_source.as_str().as_bytes());
+    hash_optional_text(
+        &mut hash,
+        pair.predicate.as_ref().map(ExpressionRef::as_str),
+    );
+    format!("join-pair-anchor-fold:{}", hex(&hash.finalize()))
+}
+
+fn add_join_pair_anchor_fold_details(
+    details: &mut BTreeMap<String, PlanDetail>,
+    identity: &str,
+) {
+    details.insert(
+        "join_pair_anchor_fold_identity".to_owned(),
+        PlanDetail::Text(identity.to_owned()),
+    );
+    details.insert(
+        "join_pair_anchor_fold_pairing".to_owned(),
+        PlanDetail::Text("sparse_anchor_fold_and_resolved_join_pair".to_owned()),
+    );
+}
+
+/// Binds an ordered pushed aggregate chain to both its exact resolver join
+/// pair and the accumulated sparse left anchor. The explain identity encoding
+/// is planner-local; including the pair and chain prevents pushdown identity
+/// from drifting when sparse cost order changes.
+fn query_paired_aggregate_pushdown_anchor_fold_identity(
+    anchor_fold_identity: &str,
+    input_identity: &str,
+    pair: &QueryJoinPairIdentityDescription,
+    aggregate_chain_identity: &str,
+) -> String {
+    let mut hash = Sha256::new();
+    hash.update(b"orna.sys.query-paired-aggregate-pushdown-anchor-fold.v1\0");
+    hash_part(&mut hash, anchor_fold_identity.as_bytes());
+    hash_part(&mut hash, input_identity.as_bytes());
+    hash_part(&mut hash, pair.identity.as_str().as_bytes());
+    hash_part(&mut hash, pair.left_source.as_str().as_bytes());
+    hash_part(&mut hash, pair.right_source.as_str().as_bytes());
+    hash_optional_text(
+        &mut hash,
+        pair.predicate.as_ref().map(ExpressionRef::as_str),
+    );
+    hash_part(&mut hash, aggregate_chain_identity.as_bytes());
+    format!(
+        "paired-aggregate-pushdown-anchor-fold:{}",
+        hex(&hash.finalize())
+    )
+}
+
+fn add_paired_aggregate_pushdown_anchor_fold_details(
+    details: &mut BTreeMap<String, PlanDetail>,
+    identity: &str,
+) {
+    details.insert(
+        "paired_aggregate_pushdown_anchor_fold_identity".to_owned(),
+        PlanDetail::Text(identity.to_owned()),
+    );
+    details.insert(
+        "paired_aggregate_pushdown_anchor_fold_pairing".to_owned(),
+        PlanDetail::Text(
+            "sparse_anchor_fold_resolved_join_pair_and_aggregate_chain".to_owned(),
+        ),
+    );
+}
+
+fn add_paired_aggregate_cascade_pair_details(
+    details: &mut BTreeMap<String, PlanDetail>,
+    identity: &str,
+) {
+    details.insert(
+        "paired_aggregate_cascade_pair_identity".to_owned(),
+        PlanDetail::Text(identity.to_owned()),
+    );
+    details.insert(
+        "paired_aggregate_cascade_pairing".to_owned(),
+        PlanDetail::Text("exact_join_pair_and_ordered_window_aggregate_chain".to_owned()),
+    );
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct QueryPairedAggregateAnchorCascadeFold {
+    identity: String,
+    pair_count: u64,
+    aggregate_stage_count: u64,
+    overflowed: bool,
+}
+
+/// Appends an exact paired aggregate chain to the sparse planned sequence.
+/// Inputs without a window chain carry the previous identity through; the
+/// next aggregate chain restores it by folding the new exact pair.
+fn query_paired_aggregate_anchor_cascade_fold(
+    previous: Option<&QueryPairedAggregateAnchorCascadeFold>,
+    pair_aggregate_anchor_fold_identity: &str,
+    aggregate_stage_count: u64,
+) -> QueryPairedAggregateAnchorCascadeFold {
+    let mut overflowed = previous.is_some_and(|previous| previous.overflowed);
+    let (pair_count, aggregate_stage_count) = if let Some(previous) = previous {
+        let pair_count = previous.pair_count.checked_add(1).unwrap_or_else(|| {
+            overflowed = true;
+            u64::MAX
+        });
+        let aggregate_stage_count = previous
+            .aggregate_stage_count
+            .checked_add(aggregate_stage_count)
+            .unwrap_or_else(|| {
+                overflowed = true;
+                u64::MAX
+            });
+        (pair_count, aggregate_stage_count)
+    } else {
+        (1, aggregate_stage_count)
+    };
+    let mut hash = Sha256::new();
+    hash.update(b"orna.sys.query-paired-aggregate-anchor-cascade-fold.v1\0");
+    hash_optional_text(
+        &mut hash,
+        previous.map(|previous| previous.identity.as_str()),
+    );
+    hash_part(&mut hash, pair_aggregate_anchor_fold_identity.as_bytes());
+    hash.update(pair_count.to_be_bytes());
+    hash.update(aggregate_stage_count.to_be_bytes());
+    hash.update([u8::from(overflowed)]);
+    QueryPairedAggregateAnchorCascadeFold {
+        identity: format!(
+            "paired-aggregate-anchor-cascade-fold:{}",
+            hex(&hash.finalize())
+        ),
+        pair_count,
+        aggregate_stage_count,
+        overflowed,
+    }
+}
+
+fn add_paired_aggregate_cascade_fold_details(
+    details: &mut BTreeMap<String, PlanDetail>,
+    fold: &QueryPairedAggregateAnchorCascadeFold,
+) {
+    details.insert(
+        "paired_aggregate_anchor_cascade_fold_identity".to_owned(),
+        PlanDetail::Text(fold.identity.clone()),
+    );
+    details.insert(
+        "paired_aggregate_anchor_cascade_pairing".to_owned(),
+        PlanDetail::Text("planned_pair_order_sparse_window_restoration_chains".to_owned()),
+    );
+    details.insert(
+        "paired_aggregate_anchor_cascade_pair_count".to_owned(),
+        PlanDetail::Integer(fold.pair_count),
+    );
+    details.insert(
+        "paired_aggregate_anchor_cascade_stage_count".to_owned(),
+        PlanDetail::Integer(fold.aggregate_stage_count),
+    );
+    details.insert(
+        "paired_aggregate_anchor_cascade_overflowed".to_owned(),
+        PlanDetail::Boolean(fold.overflowed),
+    );
+}
+
+fn query_paired_window_spill_anchor_fold_identity(
+    anchor_fold_identity: &str,
+    input_identity: &str,
+    pair: &QueryJoinPairIdentityDescription,
+    window_chain_identity: &str,
+    spill_chain_identity: &str,
+) -> String {
+    let mut hash = Sha256::new();
+    hash.update(b"orna.sys.query-paired-window-spill-anchor-fold.v1\0");
+    hash_part(&mut hash, anchor_fold_identity.as_bytes());
+    hash_part(&mut hash, input_identity.as_bytes());
+    hash_part(&mut hash, pair.identity.as_str().as_bytes());
+    hash_part(&mut hash, pair.left_source.as_str().as_bytes());
+    hash_part(&mut hash, pair.right_source.as_str().as_bytes());
+    hash_optional_text(
+        &mut hash,
+        pair.predicate.as_ref().map(ExpressionRef::as_str),
+    );
+    hash_part(&mut hash, window_chain_identity.as_bytes());
+    hash_part(&mut hash, spill_chain_identity.as_bytes());
+    format!("paired-window-spill-anchor-fold:{}", hex(&hash.finalize()))
+}
+
+fn add_paired_window_spill_anchor_fold_details(
+    details: &mut BTreeMap<String, PlanDetail>,
+    identity: &str,
+) {
+    details.insert(
+        "paired_window_spill_anchor_fold_identity".to_owned(),
+        PlanDetail::Text(identity.to_owned()),
+    );
+    details.insert(
+        "paired_window_spill_anchor_fold_pairing".to_owned(),
+        PlanDetail::Text(
+            "sparse_anchor_fold_resolved_join_pair_window_chain_and_spill_chain".to_owned(),
+        ),
+    );
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct QueryAggregateSpillTotals {
+    stage_count: u64,
+    unknown_working_set_count: u64,
+    estimated_bytes: Option<u64>,
+    estimated_io_blocks: Option<u64>,
+    estimated_io_work: Option<u64>,
+    overflowed: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct QueryWindowSpillCascadeFold {
+    identity: String,
+    spill_pair_count: u64,
+    totals: QueryAggregateSpillTotals,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct QueryPairedAggregateSpillRestorationFold {
+    identity: String,
+    aggregate_pair_count: u64,
+    aggregate_stage_count: u64,
+    spill_pair_count: u64,
+    spill_totals: Option<QueryAggregateSpillTotals>,
+    overflowed: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct QueryPairedWindowCompactionSpillFold {
+    identity: String,
+    window_pair_count: u64,
+    window_stage_count: u64,
+    spill_pair_count: u64,
+    spill_totals: Option<QueryAggregateSpillTotals>,
+    overflowed: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct QueryPairedLimitAggregateRestorationFold {
+    identity: String,
+    aggregate_pair_count: u64,
+    aggregate_stage_count: u64,
+    limit_pair_count: u64,
+    limit_stage_count: u64,
+    overflowed: bool,
+}
+
+fn query_paired_window_spill_cascade_fold(
+    previous: Option<&QueryWindowSpillCascadeFold>,
+    pair_spill_fold_identity: &str,
+    pair_totals: QueryAggregateSpillTotals,
+) -> QueryWindowSpillCascadeFold {
+    let mut overflowed = pair_totals.overflowed;
+    let (spill_pair_count, mut totals) = if let Some(previous) = previous {
+        let spill_pair_count = previous.spill_pair_count.checked_add(1).unwrap_or_else(|| {
+            overflowed = true;
+            u64::MAX
+        });
+        let prior = previous.totals;
+        let mut totals = QueryAggregateSpillTotals {
+            stage_count: prior.stage_count.checked_add(pair_totals.stage_count).unwrap_or_else(|| {
+                overflowed = true;
+                u64::MAX
+            }),
+            unknown_working_set_count: prior
+                .unknown_working_set_count
+                .checked_add(pair_totals.unknown_working_set_count)
+                .unwrap_or_else(|| {
+                    overflowed = true;
+                    u64::MAX
+                }),
+            estimated_bytes: merge_query_spill_estimate(
+                prior.estimated_bytes,
+                pair_totals.estimated_bytes,
+                &mut overflowed,
+            ),
+            estimated_io_blocks: merge_query_spill_estimate(
+                prior.estimated_io_blocks,
+                pair_totals.estimated_io_blocks,
+                &mut overflowed,
+            ),
+            estimated_io_work: merge_query_spill_estimate(
+                prior.estimated_io_work,
+                pair_totals.estimated_io_work,
+                &mut overflowed,
+            ),
+            overflowed: prior.overflowed || pair_totals.overflowed,
+        };
+        totals.overflowed |= overflowed;
+        (spill_pair_count, totals)
+    } else {
+        (1, pair_totals)
+    };
+    totals.overflowed |= overflowed;
+
+    let mut hash = Sha256::new();
+    hash.update(b"orna.sys.query-paired-window-spill-cascade-fold.v1\0");
+    hash_optional_text(
+        &mut hash,
+        previous.map(|previous| previous.identity.as_str()),
+    );
+    hash_part(&mut hash, pair_spill_fold_identity.as_bytes());
+    hash.update(spill_pair_count.to_be_bytes());
+    hash_query_aggregate_spill_totals(&mut hash, totals);
+    QueryWindowSpillCascadeFold {
+        identity: format!("paired-window-spill-cascade-fold:{}", hex(&hash.finalize())),
+        spill_pair_count,
+        totals,
+    }
+}
+
+fn merge_query_spill_estimate(
+    prior: Option<u64>,
+    next: Option<u64>,
+    overflowed: &mut bool,
+) -> Option<u64> {
+    match (prior, next) {
+        (Some(prior), Some(next)) => prior.checked_add(next).or_else(|| {
+            *overflowed = true;
+            None
+        }),
+        _ => None,
+    }
+}
+
+fn hash_query_aggregate_spill_totals(hash: &mut Sha256, totals: QueryAggregateSpillTotals) {
+    hash.update(totals.stage_count.to_be_bytes());
+    hash.update(totals.unknown_working_set_count.to_be_bytes());
+    hash_optional_u64(hash, totals.estimated_bytes);
+    hash_optional_u64(hash, totals.estimated_io_blocks);
+    hash_optional_u64(hash, totals.estimated_io_work);
+    hash.update([u8::from(totals.overflowed)]);
+}
+
+fn add_paired_window_spill_cascade_fold_details(
+    details: &mut BTreeMap<String, PlanDetail>,
+    fold: &QueryWindowSpillCascadeFold,
+) {
+    details.insert(
+        "paired_window_spill_cascade_fold_identity".to_owned(),
+        PlanDetail::Text(fold.identity.clone()),
+    );
+    details.insert(
+        "paired_window_spill_cascade_fold_pairing".to_owned(),
+        PlanDetail::Text("planned_pair_order_sparse_spill_anchor_chains".to_owned()),
+    );
+    details.insert(
+        "window_spill_cascade_pair_count".to_owned(),
+        PlanDetail::Integer(fold.spill_pair_count),
+    );
+    details.insert(
+        "window_spill_cascade_stage_count".to_owned(),
+        PlanDetail::Integer(fold.totals.stage_count),
+    );
+    details.insert(
+        "window_spill_cascade_unknown_working_set_count".to_owned(),
+        PlanDetail::Integer(fold.totals.unknown_working_set_count),
+    );
+    details.insert(
+        "window_spill_cascade_overflowed".to_owned(),
+        PlanDetail::Boolean(fold.totals.overflowed),
+    );
+    for (key, value) in [
+        (
+            "window_spill_cascade_estimated_bytes",
+            fold.totals.estimated_bytes,
+        ),
+        (
+            "window_spill_cascade_estimated_io_blocks",
+            fold.totals.estimated_io_blocks,
+        ),
+        (
+            "window_spill_cascade_estimated_io_work",
+            fold.totals.estimated_io_work,
+        ),
+    ] {
+        if let Some(value) = value {
+            details.insert(key.to_owned(), PlanDetail::Integer(value));
+        } else {
+            details.remove(key);
+        }
+    }
+    details.insert(
+        "window_spill_cascade_estimate_status".to_owned(),
+        PlanDetail::Text(if fold.totals.overflowed {
+            "overflow".to_owned()
+        } else if fold.totals.unknown_working_set_count > 0 {
+            "unknown_working_set".to_owned()
+        } else {
+            "computed".to_owned()
+        }),
+    );
+}
+
+/// Folds each exact paired window chain together with the cumulative spill
+/// history observed at its compaction boundaries. Window chains without a
+/// spill still advance the pair identity, while sparse joins without a window
+/// chain carry the last combined identity and estimates unchanged.
+fn query_paired_window_compaction_spill_pair_identity(
+    pair: &QueryJoinPairIdentityDescription,
+    window_anchor_fold_identity: &str,
+    window_chain_identity: &str,
+    spill_chain_identity: Option<&str>,
+) -> String {
+    let mut hash = Sha256::new();
+    hash.update(b"orna.sys.query-paired-window-compaction-spill-pair.v1\0");
+    hash_part(&mut hash, window_anchor_fold_identity.as_bytes());
+    hash_part(&mut hash, pair.identity.as_str().as_bytes());
+    hash_part(&mut hash, pair.left_source.as_str().as_bytes());
+    hash_part(&mut hash, pair.right_source.as_str().as_bytes());
+    hash_optional_text(
+        &mut hash,
+        pair.predicate.as_ref().map(ExpressionRef::as_str),
+    );
+    hash_part(&mut hash, window_chain_identity.as_bytes());
+    hash_optional_text(&mut hash, spill_chain_identity);
+    format!(
+        "paired-window-compaction-spill-pair:{}",
+        hex(&hash.finalize())
+    )
+}
+
+fn query_paired_window_compaction_spill_fold(
+    previous: Option<&QueryPairedWindowCompactionSpillFold>,
+    pair_identity: &str,
+    window_fold: &QueryPairedAggregateAnchorCascadeFold,
+    spill_fold: Option<&QueryWindowSpillCascadeFold>,
+) -> QueryPairedWindowCompactionSpillFold {
+    let spill_totals = spill_fold.map(|fold| fold.totals);
+    let spill_pair_count = spill_fold.map_or(0, |fold| fold.spill_pair_count);
+    let overflowed = window_fold.overflowed
+        || spill_totals.is_some_and(|totals| totals.overflowed);
+
+    let mut hash = Sha256::new();
+    hash.update(b"orna.sys.query-paired-window-compaction-spill-fold.v1\0");
+    hash_optional_text(
+        &mut hash,
+        previous.map(|previous| previous.identity.as_str()),
+    );
+    hash_part(&mut hash, pair_identity.as_bytes());
+    hash_part(&mut hash, window_fold.identity.as_bytes());
+    hash_optional_text(&mut hash, spill_fold.map(|fold| fold.identity.as_str()));
+    hash.update(window_fold.pair_count.to_be_bytes());
+    hash.update(window_fold.aggregate_stage_count.to_be_bytes());
+    hash.update(spill_pair_count.to_be_bytes());
+    if let Some(totals) = spill_totals {
+        hash.update([1]);
+        hash_query_aggregate_spill_totals(&mut hash, totals);
+    } else {
+        hash.update([0]);
+    }
+    hash.update([u8::from(overflowed)]);
+
+    QueryPairedWindowCompactionSpillFold {
+        identity: format!(
+            "paired-window-compaction-spill-fold:{}",
+            hex(&hash.finalize())
+        ),
+        window_pair_count: window_fold.pair_count,
+        window_stage_count: window_fold.aggregate_stage_count,
+        spill_pair_count,
+        spill_totals,
+        overflowed,
+    }
+}
+
+fn add_paired_window_compaction_spill_pair_details(
+    details: &mut BTreeMap<String, PlanDetail>,
+    identity: &str,
+) {
+    details.insert(
+        "paired_window_compaction_spill_pair_identity".to_owned(),
+        PlanDetail::Text(identity.to_owned()),
+    );
+    details.insert(
+        "paired_window_compaction_spill_pairing".to_owned(),
+        PlanDetail::Text(
+            "exact_join_pair_window_chain_and_optional_compaction_spill_chain".to_owned(),
+        ),
+    );
+}
+
+fn add_paired_window_compaction_spill_fold_details(
+    details: &mut BTreeMap<String, PlanDetail>,
+    fold: &QueryPairedWindowCompactionSpillFold,
+    advanced_on_window_pair: bool,
+) {
+    details.insert(
+        "paired_window_compaction_spill_fold_identity".to_owned(),
+        PlanDetail::Text(fold.identity.clone()),
+    );
+    details.insert(
+        "paired_window_compaction_spill_fold_pairing".to_owned(),
+        PlanDetail::Text(
+            "sparse_paired_window_chains_with_cumulative_compaction_spill_history".to_owned(),
+        ),
+    );
+    details.insert(
+        "paired_window_compaction_spill_fold_transition".to_owned(),
+        PlanDetail::Text(if advanced_on_window_pair {
+            "advanced_window_pair".to_owned()
+        } else {
+            "carried_across_sparse_input".to_owned()
+        }),
+    );
+    details.insert(
+        "paired_window_compaction_spill_window_pair_count".to_owned(),
+        PlanDetail::Integer(fold.window_pair_count),
+    );
+    details.insert(
+        "paired_window_compaction_spill_window_stage_count".to_owned(),
+        PlanDetail::Integer(fold.window_stage_count),
+    );
+    details.insert(
+        "paired_window_compaction_spill_pair_count".to_owned(),
+        PlanDetail::Integer(fold.spill_pair_count),
+    );
+    let totals = fold.spill_totals;
+    details.insert(
+        "paired_window_compaction_spill_stage_count".to_owned(),
+        PlanDetail::Integer(totals.map_or(0, |totals| totals.stage_count)),
+    );
+    details.insert(
+        "paired_window_compaction_spill_unknown_working_set_count".to_owned(),
+        PlanDetail::Integer(totals.map_or(0, |totals| totals.unknown_working_set_count)),
+    );
+    details.insert(
+        "paired_window_compaction_spill_overflowed".to_owned(),
+        PlanDetail::Boolean(fold.overflowed),
+    );
+    let status = match totals {
+        None => "no_spill_pairs",
+        Some(totals) if fold.overflowed || totals.overflowed => "overflow",
+        Some(totals) if totals.unknown_working_set_count > 0 => "unknown_working_set",
+        Some(_) => "computed",
+    };
+    details.insert(
+        "paired_window_compaction_spill_estimate_status".to_owned(),
+        PlanDetail::Text(status.to_owned()),
+    );
+    for (key, value) in [
+        (
+            "paired_window_compaction_spill_estimated_bytes",
+            totals.and_then(|totals| totals.estimated_bytes),
+        ),
+        (
+            "paired_window_compaction_spill_estimated_io_blocks",
+            totals.and_then(|totals| totals.estimated_io_blocks),
+        ),
+        (
+            "paired_window_compaction_spill_estimated_io_work",
+            totals.and_then(|totals| totals.estimated_io_work),
+        ),
+    ] {
+        if let Some(value) = value {
+            details.insert(key.to_owned(), PlanDetail::Integer(value));
+        } else {
+            details.remove(key);
+        }
+    }
+}
+
+/// Joins sparse aggregate restoration and spill histories into one identity.
+/// Each exact aggregate chain advances the fold; spill counts and estimates
+/// remain the accumulated values from the last and any later spill pairs.
+fn query_paired_aggregate_spill_restoration_fold(
+    previous: Option<&QueryPairedAggregateSpillRestorationFold>,
+    pair_identity: &str,
+    aggregate_fold: &QueryPairedAggregateAnchorCascadeFold,
+    spill_fold: Option<&QueryWindowSpillCascadeFold>,
+) -> QueryPairedAggregateSpillRestorationFold {
+    let spill_totals = spill_fold.map(|fold| fold.totals);
+    let spill_pair_count = spill_fold.map_or(0, |fold| fold.spill_pair_count);
+    let overflowed = aggregate_fold.overflowed
+        || spill_totals.is_some_and(|totals| totals.overflowed);
+
+    let mut hash = Sha256::new();
+    hash.update(b"orna.sys.query-paired-aggregate-spill-restoration-fold.v1\0");
+    hash_optional_text(
+        &mut hash,
+        previous.map(|previous| previous.identity.as_str()),
+    );
+    hash_part(&mut hash, pair_identity.as_bytes());
+    hash_part(&mut hash, aggregate_fold.identity.as_bytes());
+    hash_optional_text(&mut hash, spill_fold.map(|fold| fold.identity.as_str()));
+    hash.update(aggregate_fold.pair_count.to_be_bytes());
+    hash.update(aggregate_fold.aggregate_stage_count.to_be_bytes());
+    hash.update(spill_pair_count.to_be_bytes());
+    if let Some(totals) = spill_totals {
+        hash.update([1]);
+        hash_query_aggregate_spill_totals(&mut hash, totals);
+    } else {
+        hash.update([0]);
+    }
+    hash.update([u8::from(overflowed)]);
+
+    QueryPairedAggregateSpillRestorationFold {
+        identity: format!(
+            "paired-aggregate-spill-restoration-fold:{}",
+            hex(&hash.finalize())
+        ),
+        aggregate_pair_count: aggregate_fold.pair_count,
+        aggregate_stage_count: aggregate_fold.aggregate_stage_count,
+        spill_pair_count,
+        spill_totals,
+        overflowed,
+    }
+}
+
+fn add_paired_aggregate_spill_restoration_fold_details(
+    details: &mut BTreeMap<String, PlanDetail>,
+    fold: &QueryPairedAggregateSpillRestorationFold,
+) {
+    details.insert(
+        "paired_aggregate_spill_restoration_fold_identity".to_owned(),
+        PlanDetail::Text(fold.identity.clone()),
+    );
+    details.insert(
+        "paired_aggregate_spill_restoration_fold_pairing".to_owned(),
+        PlanDetail::Text(
+            "planned_sparse_aggregate_restoration_chains_with_accumulated_exact_spill_pairs"
+                .to_owned(),
+        ),
+    );
+    details.insert(
+        "paired_aggregate_spill_restoration_aggregate_pair_count".to_owned(),
+        PlanDetail::Integer(fold.aggregate_pair_count),
+    );
+    details.insert(
+        "paired_aggregate_spill_restoration_aggregate_stage_count".to_owned(),
+        PlanDetail::Integer(fold.aggregate_stage_count),
+    );
+    details.insert(
+        "paired_aggregate_spill_restoration_spill_pair_count".to_owned(),
+        PlanDetail::Integer(fold.spill_pair_count),
+    );
+    details.insert(
+        "paired_aggregate_spill_restoration_overflowed".to_owned(),
+        PlanDetail::Boolean(fold.overflowed),
+    );
+    let status = match fold.spill_totals {
+        None => "no_spill_pairs",
+        Some(totals) if fold.overflowed || totals.overflowed => "overflowed",
+        Some(totals) if totals.unknown_working_set_count > 0 => "unknown_working_set",
+        Some(_) => "computed",
+    };
+    details.insert(
+        "paired_aggregate_spill_restoration_estimate_status".to_owned(),
+        PlanDetail::Text(status.to_owned()),
+    );
+    let totals = fold.spill_totals;
+    details.insert(
+        "paired_aggregate_spill_restoration_spill_stage_count".to_owned(),
+        PlanDetail::Integer(totals.map_or(0, |totals| totals.stage_count)),
+    );
+    details.insert(
+        "paired_aggregate_spill_restoration_unknown_working_set_count".to_owned(),
+        PlanDetail::Integer(totals.map_or(0, |totals| totals.unknown_working_set_count)),
+    );
+    for (key, value) in [
+        (
+            "paired_aggregate_spill_restoration_estimated_bytes",
+            totals.and_then(|totals| totals.estimated_bytes),
+        ),
+        (
+            "paired_aggregate_spill_restoration_estimated_io_blocks",
+            totals.and_then(|totals| totals.estimated_io_blocks),
+        ),
+        (
+            "paired_aggregate_spill_restoration_estimated_io_work",
+            totals.and_then(|totals| totals.estimated_io_work),
+        ),
+    ] {
+        if let Some(value) = value {
+            details.insert(key.to_owned(), PlanDetail::Integer(value));
+        } else {
+            details.remove(key);
+        }
+    }
+}
+
+/// Folds exact paired limit chains and aggregate restoration chains together.
+/// An event from either chain advances identity while the other chain's
+/// cumulative identity and counts carry unchanged through sparse joins.
+fn query_paired_limit_aggregate_restoration_fold(
+    previous: Option<&QueryPairedLimitAggregateRestorationFold>,
+    pair_identity: &str,
+    limit_fold: Option<&QueryJoinLimitAnchorCascadeFold>,
+    aggregate_fold: Option<&QueryPairedAggregateAnchorCascadeFold>,
+) -> QueryPairedLimitAggregateRestorationFold {
+    let aggregate_pair_count = aggregate_fold.map_or(0, |fold| fold.pair_count);
+    let aggregate_stage_count = aggregate_fold.map_or(0, |fold| fold.aggregate_stage_count);
+    let limit_pair_count = limit_fold.map_or(0, |fold| fold.pair_count);
+    let limit_stage_count = limit_fold.map_or(0, |fold| fold.stage_count);
+    let overflowed = limit_fold.is_some_and(|fold| fold.overflowed)
+        || aggregate_fold.is_some_and(|fold| fold.overflowed);
+
+    let mut hash = Sha256::new();
+    hash.update(b"orna.sys.query-paired-limit-aggregate-restoration-fold.v1\0");
+    hash_optional_text(
+        &mut hash,
+        previous.map(|previous| previous.identity.as_str()),
+    );
+    hash_part(&mut hash, pair_identity.as_bytes());
+    hash_optional_text(&mut hash, limit_fold.map(|fold| fold.identity.as_str()));
+    hash_optional_text(
+        &mut hash,
+        aggregate_fold.map(|fold| fold.identity.as_str()),
+    );
+    hash.update(aggregate_pair_count.to_be_bytes());
+    hash.update(aggregate_stage_count.to_be_bytes());
+    hash.update(limit_pair_count.to_be_bytes());
+    hash.update(limit_stage_count.to_be_bytes());
+    hash.update([u8::from(overflowed)]);
+
+    QueryPairedLimitAggregateRestorationFold {
+        identity: format!(
+            "paired-limit-aggregate-restoration-fold:{}",
+            hex(&hash.finalize())
+        ),
+        aggregate_pair_count,
+        aggregate_stage_count,
+        limit_pair_count,
+        limit_stage_count,
+        overflowed,
+    }
+}
+
+fn add_paired_limit_aggregate_restoration_fold_details(
+    details: &mut BTreeMap<String, PlanDetail>,
+    fold: &QueryPairedLimitAggregateRestorationFold,
+) {
+    details.insert(
+        "paired_limit_aggregate_restoration_fold_identity".to_owned(),
+        PlanDetail::Text(fold.identity.clone()),
+    );
+    details.insert(
+        "paired_limit_aggregate_restoration_fold_pairing".to_owned(),
+        PlanDetail::Text(
+            "planned_aggregate_restoration_chains_with_accumulated_exact_limit_pairs".to_owned(),
+        ),
+    );
+    details.insert(
+        "paired_limit_aggregate_restoration_aggregate_pair_count".to_owned(),
+        PlanDetail::Integer(fold.aggregate_pair_count),
+    );
+    details.insert(
+        "paired_limit_aggregate_restoration_aggregate_stage_count".to_owned(),
+        PlanDetail::Integer(fold.aggregate_stage_count),
+    );
+    details.insert(
+        "paired_limit_aggregate_restoration_limit_pair_count".to_owned(),
+        PlanDetail::Integer(fold.limit_pair_count),
+    );
+    details.insert(
+        "paired_limit_aggregate_restoration_limit_stage_count".to_owned(),
+        PlanDetail::Integer(fold.limit_stage_count),
+    );
+    details.insert(
+        "paired_limit_aggregate_restoration_overflowed".to_owned(),
+        PlanDetail::Boolean(fold.overflowed),
+    );
+}
+
+/// Sums spill estimates in the resolver-ordered aggregate chain for one
+/// resolved pair. Missing working sets keep each corresponding total unknown;
+/// checked arithmetic avoids turning overflow into a plausible cost.
+fn query_aggregate_spill_totals(
+    pair: &QueryJoinPairIdentityDescription,
+    source: &ObjectRef,
+    window_aggregates: &[QueryWindowAggregatePushdownDescription],
+    window_spills: &[QueryWindowSpillDescription],
+) -> Option<QueryAggregateSpillTotals> {
+    let matching = window_aggregates
+        .iter()
+        .filter(|aggregate| aggregate.source == *source)
+        .filter_map(|aggregate| {
+            window_spills.iter().find(|spill| {
+                spill.join_pair_identity == pair.identity
+                    && spill.source == *source
+                    && spill.window_aggregate_identity == aggregate.identity
+            })
+            .map(|spill| (aggregate, spill))
+        })
+        .collect::<Vec<_>>();
+    if matching.is_empty() {
+        return None;
+    }
+
+    let mut estimated_bytes = Some(0_u64);
+    let mut estimated_io_blocks = Some(0_u64);
+    let mut estimated_io_work = Some(0_u64);
+    let mut unknown_working_set_count = 0_u64;
+    let mut overflowed = false;
+    for (_, spill) in &matching {
+        if spill.estimated_working_set_bytes.is_none() {
+            unknown_working_set_count = unknown_working_set_count.saturating_add(1);
+        }
+        let (bytes, blocks, work) = query_window_spill_estimate(spill);
+        for (total, next) in [
+            (&mut estimated_bytes, bytes),
+            (&mut estimated_io_blocks, blocks),
+            (&mut estimated_io_work, work),
+        ] {
+            *total = match (*total, next) {
+                (Some(total), Some(next)) => match total.checked_add(next) {
+                    Some(sum) => Some(sum),
+                    None => {
+                        overflowed = true;
+                        None
+                    }
+                },
+                _ => None,
+            };
+        }
+        if spill.estimated_working_set_bytes.is_some() && work.is_none() {
+            overflowed = true;
+        }
+    }
+    Some(QueryAggregateSpillTotals {
+        stage_count: u64::try_from(matching.len()).unwrap_or(u64::MAX),
+        unknown_working_set_count,
+        estimated_bytes,
+        estimated_io_blocks,
+        estimated_io_work,
+        overflowed,
+    })
+}
+
+/// Binds an exact aggregate restoration pair to its optional exact spill pair.
+fn query_paired_aggregate_spill_restoration_pair_identity(
+    aggregate_pair_identity: Option<&str>,
+    spill_pair_identity: Option<&str>,
+) -> Option<String> {
+    if aggregate_pair_identity.is_none() && spill_pair_identity.is_none() {
+        return None;
+    }
+    let mut hash = Sha256::new();
+    hash.update(b"orna.sys.query-paired-aggregate-spill-restoration-pair.v1\0");
+    hash_optional_text(&mut hash, aggregate_pair_identity);
+    hash_optional_text(&mut hash, spill_pair_identity);
+    Some(format!(
+        "paired-aggregate-spill-restoration-pair:{}",
+        hex(&hash.finalize())
+    ))
+}
+
+fn add_paired_aggregate_spill_restoration_pair_details(
+    details: &mut BTreeMap<String, PlanDetail>,
+    identity: &str,
+    aggregate_pair_identity: Option<&str>,
+    spill_pair_identity: Option<&str>,
+) {
+    details.insert(
+        "paired_aggregate_spill_restoration_pair_identity".to_owned(),
+        PlanDetail::Text(identity.to_owned()),
+    );
+    details.insert(
+        "paired_aggregate_spill_restoration_pair_resolution".to_owned(),
+        PlanDetail::Text("exact_aggregate_chain_with_optional_exact_spill_chain".to_owned()),
+    );
+    details.insert(
+        "paired_aggregate_spill_restoration_pair_has_spill".to_owned(),
+        PlanDetail::Boolean(spill_pair_identity.is_some()),
+    );
+    for (key, value) in [
+        (
+            "paired_aggregate_spill_restoration_pair_aggregate_identity",
+            aggregate_pair_identity,
+        ),
+        (
+            "paired_aggregate_spill_restoration_pair_spill_identity",
+            spill_pair_identity,
+        ),
+    ] {
+        if let Some(value) = value {
+            details.insert(key.to_owned(), PlanDetail::Text(value.to_owned()));
+        } else {
+            details.remove(key);
+        }
+    }
+}
+
+fn query_paired_aggregate_spill_anchor_fold_identity(
+    anchor_fold_identity: &str,
+    input_identity: &str,
+    pair: &QueryJoinPairIdentityDescription,
+    aggregate_chain_identity: &str,
+    spill_chain_identity: &str,
+    totals: QueryAggregateSpillTotals,
+) -> String {
+    let mut hash = Sha256::new();
+    hash.update(b"orna.sys.query-paired-aggregate-spill-anchor-fold.v1\0");
+    hash_part(&mut hash, anchor_fold_identity.as_bytes());
+    hash_part(&mut hash, input_identity.as_bytes());
+    hash_part(&mut hash, pair.identity.as_str().as_bytes());
+    hash_part(&mut hash, pair.left_source.as_str().as_bytes());
+    hash_part(&mut hash, pair.right_source.as_str().as_bytes());
+    hash_optional_text(
+        &mut hash,
+        pair.predicate.as_ref().map(ExpressionRef::as_str),
+    );
+    hash_part(&mut hash, aggregate_chain_identity.as_bytes());
+    hash_part(&mut hash, spill_chain_identity.as_bytes());
+    hash.update(totals.stage_count.to_be_bytes());
+    hash.update(totals.unknown_working_set_count.to_be_bytes());
+    hash_optional_u64(&mut hash, totals.estimated_bytes);
+    hash_optional_u64(&mut hash, totals.estimated_io_blocks);
+    hash_optional_u64(&mut hash, totals.estimated_io_work);
+    hash.update([u8::from(totals.overflowed)]);
+    format!("paired-aggregate-spill-anchor-fold:{}", hex(&hash.finalize()))
+}
+
+fn add_paired_aggregate_spill_fold_details(
+    details: &mut BTreeMap<String, PlanDetail>,
+    identity: &str,
+    totals: &QueryAggregateSpillTotals,
+) {
+    details.insert(
+        "paired_aggregate_spill_anchor_fold_identity".to_owned(),
+        PlanDetail::Text(identity.to_owned()),
+    );
+    details.insert(
+        "paired_aggregate_spill_anchor_fold_pairing".to_owned(),
+        PlanDetail::Text(
+            "sparse_anchor_fold_resolved_join_pair_aggregate_chain_and_spill_totals".to_owned(),
+        ),
+    );
+    details.insert(
+        "aggregate_spill_stage_count".to_owned(),
+        PlanDetail::Integer(totals.stage_count),
+    );
+    details.insert(
+        "aggregate_spill_unknown_working_set_count".to_owned(),
+        PlanDetail::Integer(totals.unknown_working_set_count),
+    );
+    details.insert(
+        "aggregate_spill_overflowed".to_owned(),
+        PlanDetail::Boolean(totals.overflowed),
+    );
+    for (key, value) in [
+        ("aggregate_spill_estimated_bytes", totals.estimated_bytes),
+        (
+            "aggregate_spill_estimated_io_blocks",
+            totals.estimated_io_blocks,
+        ),
+        (
+            "aggregate_spill_estimated_io_work",
+            totals.estimated_io_work,
+        ),
+    ] {
+        if let Some(value) = value {
+            details.insert(key.to_owned(), PlanDetail::Integer(value));
+        } else {
+            details.remove(key);
+        }
+    }
+    details.insert(
+        "aggregate_spill_estimate_status".to_owned(),
+        PlanDetail::Text(if totals.overflowed {
+            "overflow".to_owned()
+        } else if totals.unknown_working_set_count > 0 {
+            "unknown_working_set".to_owned()
+        } else {
+            "computed".to_owned()
+        }),
+    );
+}
+
+/// Binds the exact limit chain to the optional aggregate chain on that pair.
+fn query_paired_limit_aggregate_restoration_pair_identity(
+    limit_pair_identity: Option<&str>,
+    aggregate_pair_identity: Option<&str>,
+) -> Option<String> {
+    if limit_pair_identity.is_none() && aggregate_pair_identity.is_none() {
+        return None;
+    }
+    let mut hash = Sha256::new();
+    hash.update(b"orna.sys.query-paired-limit-aggregate-restoration-pair.v1\0");
+    hash_optional_text(&mut hash, limit_pair_identity);
+    hash_optional_text(&mut hash, aggregate_pair_identity);
+    Some(format!(
+        "paired-limit-aggregate-restoration-pair:{}",
+        hex(&hash.finalize())
+    ))
+}
+
+fn add_paired_limit_aggregate_restoration_pair_details(
+    details: &mut BTreeMap<String, PlanDetail>,
+    identity: &str,
+    limit_pair_identity: Option<&str>,
+    aggregate_pair_identity: Option<&str>,
+) {
+    details.insert(
+        "paired_limit_aggregate_restoration_pair_identity".to_owned(),
+        PlanDetail::Text(identity.to_owned()),
+    );
+    details.insert(
+        "paired_limit_aggregate_restoration_pair_resolution".to_owned(),
+        PlanDetail::Text("exact_limit_chain_with_optional_exact_aggregate_chain".to_owned()),
+    );
+    details.insert(
+        "paired_limit_aggregate_restoration_pair_has_limit".to_owned(),
+        PlanDetail::Boolean(limit_pair_identity.is_some()),
+    );
+    details.insert(
+        "paired_limit_aggregate_restoration_pair_has_aggregate".to_owned(),
+        PlanDetail::Boolean(aggregate_pair_identity.is_some()),
+    );
+    for (key, value) in [
+        (
+            "paired_limit_aggregate_restoration_pair_limit_identity",
+            limit_pair_identity,
+        ),
+        (
+            "paired_limit_aggregate_restoration_pair_aggregate_identity",
+            aggregate_pair_identity,
+        ),
+    ] {
+        if let Some(value) = value {
+            details.insert(key.to_owned(), PlanDetail::Text(value.to_owned()));
+        } else {
+            details.remove(key);
+        }
+    }
+}
+
+/// Binds an exact pair's ordered limit chain to its right-input identity and
+/// the accumulated sparse left anchor. ORNA leaves this explain-only digest
+/// encoding open; the domain-separated result stays stable as known joins are
+/// cost-reordered around an unknown tail.
+fn query_paired_limit_pushdown_anchor_fold_identity(
+    anchor_fold_identity: &str,
+    input_identity: &str,
+    pair: &QueryJoinPairIdentityDescription,
+    limit_chain_identity: &str,
+) -> String {
+    let mut hash = Sha256::new();
+    hash.update(b"orna.sys.query-paired-limit-pushdown-anchor-fold.v1\0");
+    hash_part(&mut hash, anchor_fold_identity.as_bytes());
+    hash_part(&mut hash, input_identity.as_bytes());
+    hash_part(&mut hash, pair.identity.as_str().as_bytes());
+    hash_part(&mut hash, pair.left_source.as_str().as_bytes());
+    hash_part(&mut hash, pair.right_source.as_str().as_bytes());
+    hash_optional_text(
+        &mut hash,
+        pair.predicate.as_ref().map(ExpressionRef::as_str),
+    );
+    hash_part(&mut hash, limit_chain_identity.as_bytes());
+    format!(
+        "paired-limit-pushdown-anchor-fold:{}",
+        hex(&hash.finalize())
+    )
+}
+
+fn add_paired_limit_pushdown_anchor_fold_details(
+    details: &mut BTreeMap<String, PlanDetail>,
+    identity: &str,
+) {
+    details.insert(
+        "paired_limit_pushdown_anchor_fold_identity".to_owned(),
+        PlanDetail::Text(identity.to_owned()),
+    );
+    details.insert(
+        "paired_limit_pushdown_anchor_fold_pairing".to_owned(),
+        PlanDetail::Text("sparse_anchor_fold_resolved_join_pair_and_limit_chain".to_owned()),
+    );
+}
+
+/// Binds a logical join fold to the exact pair's ordered input-limit fold.
+/// ORNA leaves this explain-only identity encoding open; hashing both parent
+/// digests keeps a limit chain from being reassociated with another join.
+fn query_paired_join_limit_anchor_fold_identity(
+    pair: &QueryJoinPairIdentityDescription,
+    join_anchor_fold_identity: &str,
+    limit_anchor_fold_identity: &str,
+) -> String {
+    let mut hash = Sha256::new();
+    hash.update(b"orna.sys.query-paired-join-limit-anchor-fold.v1\0");
+    hash_part(&mut hash, pair.identity.as_str().as_bytes());
+    hash_part(&mut hash, pair.left_source.as_str().as_bytes());
+    hash_part(&mut hash, pair.right_source.as_str().as_bytes());
+    hash_optional_text(&mut hash, pair.predicate.as_ref().map(ExpressionRef::as_str));
+    hash_part(&mut hash, join_anchor_fold_identity.as_bytes());
+    hash_part(&mut hash, limit_anchor_fold_identity.as_bytes());
+    format!(
+        "paired-join-limit-anchor-fold:{}",
+        hex(&hash.finalize())
+    )
+}
+
+fn add_paired_join_limit_anchor_fold_details(
+    details: &mut BTreeMap<String, PlanDetail>,
+    identity: &str,
+) {
+    details.insert(
+        "paired_join_limit_anchor_fold_identity".to_owned(),
+        PlanDetail::Text(identity.to_owned()),
+    );
+    details.insert(
+        "paired_join_limit_anchor_fold_pairing".to_owned(),
+        PlanDetail::Text("sparse_join_pair_anchor_and_exact_limit_anchor_chain".to_owned()),
+    );
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct QueryJoinLimitAnchorCascadeFold {
+    identity: String,
+    pair_count: u64,
+    stage_count: u64,
+    overflowed: bool,
+}
+
+fn query_paired_join_limit_anchor_cascade_fold(
+    previous: Option<&QueryJoinLimitAnchorCascadeFold>,
+    pair_anchor_fold_identity: &str,
+    limit_stage_count: u64,
+) -> QueryJoinLimitAnchorCascadeFold {
+    let mut overflowed = previous.is_some_and(|previous| previous.overflowed);
+    let (pair_count, stage_count) = if let Some(previous) = previous {
+        let pair_count = previous.pair_count.checked_add(1).unwrap_or_else(|| {
+            overflowed = true;
+            u64::MAX
+        });
+        let stage_count = previous
+            .stage_count
+            .checked_add(limit_stage_count)
+            .unwrap_or_else(|| {
+                overflowed = true;
+                u64::MAX
+            });
+        (pair_count, stage_count)
+    } else {
+        (1, limit_stage_count)
+    };
+    let mut hash = Sha256::new();
+    hash.update(b"orna.sys.query-paired-join-limit-anchor-cascade-fold.v1\0");
+    hash_optional_text(
+        &mut hash,
+        previous.map(|previous| previous.identity.as_str()),
+    );
+    hash_part(&mut hash, pair_anchor_fold_identity.as_bytes());
+    hash.update(pair_count.to_be_bytes());
+    hash.update(stage_count.to_be_bytes());
+    hash.update([u8::from(overflowed)]);
+    QueryJoinLimitAnchorCascadeFold {
+        identity: format!(
+            "paired-join-limit-anchor-cascade-fold:{}",
+            hex(&hash.finalize())
+        ),
+        pair_count,
+        stage_count,
+        overflowed,
+    }
+}
+
+fn add_paired_join_limit_anchor_cascade_fold_details(
+    details: &mut BTreeMap<String, PlanDetail>,
+    fold: &QueryJoinLimitAnchorCascadeFold,
+) {
+    details.insert(
+        "paired_join_limit_anchor_cascade_fold_identity".to_owned(),
+        PlanDetail::Text(fold.identity.clone()),
+    );
+    details.insert(
+        "paired_join_limit_anchor_cascade_pairing".to_owned(),
+        PlanDetail::Text("planned_pair_order_sparse_limit_anchor_chains".to_owned()),
+    );
+    details.insert(
+        "paired_join_limit_anchor_cascade_pair_count".to_owned(),
+        PlanDetail::Integer(fold.pair_count),
+    );
+    details.insert(
+        "paired_join_limit_anchor_cascade_stage_count".to_owned(),
+        PlanDetail::Integer(fold.stage_count),
+    );
+    details.insert(
+        "paired_join_limit_anchor_cascade_overflowed".to_owned(),
+        PlanDetail::Boolean(fold.overflowed),
+    );
+}
+
+/// Combines the exact pair's anchored ordered limit chain with the window
+/// chain attached to that same right input. ORNA leaves this explain-only
+/// digest open; the input identities prevent either chain from sliding across
+/// a sparse join boundary.
+fn query_paired_limit_window_anchor_fold_identity(
+    pair: &QueryJoinPairIdentityDescription,
+    limit_anchor_fold_identity: &str,
+    window_chain_identity: &str,
+) -> String {
+    let mut hash = Sha256::new();
+    hash.update(b"orna.sys.query-paired-limit-window-anchor-fold.v1\0");
+    hash_part(&mut hash, pair.identity.as_str().as_bytes());
+    hash_part(&mut hash, pair.left_source.as_str().as_bytes());
+    hash_part(&mut hash, pair.right_source.as_str().as_bytes());
+    hash_optional_text(&mut hash, pair.predicate.as_ref().map(ExpressionRef::as_str));
+    hash_part(&mut hash, limit_anchor_fold_identity.as_bytes());
+    hash_part(&mut hash, window_chain_identity.as_bytes());
+    format!(
+        "paired-limit-window-anchor-fold:{}",
+        hex(&hash.finalize())
+    )
+}
+
+fn add_paired_limit_window_anchor_fold_details(
+    details: &mut BTreeMap<String, PlanDetail>,
+    identity: &str,
+) {
+    details.insert(
+        "paired_limit_window_anchor_fold_identity".to_owned(),
+        PlanDetail::Text(identity.to_owned()),
+    );
+    details.insert(
+        "paired_limit_window_anchor_fold_pairing".to_owned(),
+        PlanDetail::Text(
+            "exact_join_pair_ordered_limit_chain_and_right_window_chain".to_owned(),
+        ),
+    );
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct QueryLimitWindowCascadeFold {
+    identity: String,
+    pair_count: u64,
+    stage_count: u64,
+    estimated_post_limit_rows: Option<u64>,
+    estimated_post_limit_bytes: Option<u64>,
+    unknown_estimate_pair_count: u64,
+    overflowed: bool,
+}
+
+/// Appends a pair only when it has both an ordered input-limit chain and a
+/// window chain. Pairs without both continue to carry the accumulated fold
+/// through the surrounding sparse join plan.
+fn query_paired_limit_window_cascade_fold(
+    previous: Option<&QueryLimitWindowCascadeFold>,
+    pair_anchor_fold_identity: &str,
+    limit_stage_count: u64,
+    post_limit_cardinality: Cardinality,
+) -> QueryLimitWindowCascadeFold {
+    let mut overflowed = false;
+    let (pair_count, stage_count, rows, bytes, unknown_estimate_pair_count) =
+        if let Some(previous) = previous {
+            let pair_count = previous.pair_count.checked_add(1).unwrap_or_else(|| {
+                overflowed = true;
+                u64::MAX
+            });
+            let stage_count = previous
+                .stage_count
+                .checked_add(limit_stage_count)
+                .unwrap_or_else(|| {
+                    overflowed = true;
+                    u64::MAX
+                });
+            let unknown_estimate_pair_count = previous
+                .unknown_estimate_pair_count
+                .checked_add(if post_limit_cardinality.rows.is_none()
+                    || post_limit_cardinality.bytes.is_none()
+                {
+                    1
+                } else {
+                    0
+                })
+                .unwrap_or_else(|| {
+                    overflowed = true;
+                    u64::MAX
+                });
+            (
+                pair_count,
+                stage_count,
+                merge_limit_window_estimate(
+                    previous.estimated_post_limit_rows,
+                    post_limit_cardinality.rows,
+                    &mut overflowed,
+                ),
+                merge_limit_window_estimate(
+                    previous.estimated_post_limit_bytes,
+                    post_limit_cardinality.bytes,
+                    &mut overflowed,
+                ),
+                unknown_estimate_pair_count,
+            )
+        } else {
+            (
+                1,
+                limit_stage_count,
+                post_limit_cardinality.rows,
+                post_limit_cardinality.bytes,
+                if post_limit_cardinality.rows.is_none()
+                    || post_limit_cardinality.bytes.is_none()
+                {
+                    1
+                } else {
+                    0
+                },
+            )
+        };
+    let overflowed = overflowed || previous.is_some_and(|previous| previous.overflowed);
+    let mut hash = Sha256::new();
+    hash.update(b"orna.sys.query-paired-limit-window-cascade-fold.v1\0");
+    hash_optional_text(
+        &mut hash,
+        previous.map(|previous| previous.identity.as_str()),
+    );
+    hash_part(&mut hash, pair_anchor_fold_identity.as_bytes());
+    hash.update(pair_count.to_be_bytes());
+    hash.update(stage_count.to_be_bytes());
+    hash_optional_u64(&mut hash, rows);
+    hash_optional_u64(&mut hash, bytes);
+    hash.update(unknown_estimate_pair_count.to_be_bytes());
+    hash.update([u8::from(overflowed)]);
+    QueryLimitWindowCascadeFold {
+        identity: format!(
+            "paired-limit-window-cascade-fold:{}",
+            hex(&hash.finalize())
+        ),
+        pair_count,
+        stage_count,
+        estimated_post_limit_rows: rows,
+        estimated_post_limit_bytes: bytes,
+        unknown_estimate_pair_count,
+        overflowed,
+    }
+}
+
+fn merge_limit_window_estimate(
+    previous: Option<u64>,
+    current: Option<u64>,
+    overflowed: &mut bool,
+) -> Option<u64> {
+    match (previous, current) {
+        (Some(previous), Some(current)) => previous.checked_add(current).or_else(|| {
+            *overflowed = true;
+            None
+        }),
+        _ => None,
+    }
+}
+
+fn add_paired_limit_window_cascade_fold_details(
+    details: &mut BTreeMap<String, PlanDetail>,
+    fold: &QueryLimitWindowCascadeFold,
+) {
+    details.insert(
+        "paired_limit_window_cascade_fold_identity".to_owned(),
+        PlanDetail::Text(fold.identity.clone()),
+    );
+    details.insert(
+        "paired_limit_window_cascade_fold_pairing".to_owned(),
+        PlanDetail::Text("planned_pair_order_sparse_window_anchor_chains".to_owned()),
+    );
+    details.insert(
+        "limit_window_cascade_pair_count".to_owned(),
+        PlanDetail::Integer(fold.pair_count),
+    );
+    details.insert(
+        "limit_window_cascade_stage_count".to_owned(),
+        PlanDetail::Integer(fold.stage_count),
+    );
+    details.insert(
+        "limit_window_cascade_unknown_estimate_pair_count".to_owned(),
+        PlanDetail::Integer(fold.unknown_estimate_pair_count),
+    );
+    details.insert(
+        "limit_window_cascade_overflowed".to_owned(),
+        PlanDetail::Boolean(fold.overflowed),
+    );
+    for (key, value) in [
+        (
+            "limit_window_cascade_estimated_post_limit_rows",
+            fold.estimated_post_limit_rows,
+        ),
+        (
+            "limit_window_cascade_estimated_post_limit_bytes",
+            fold.estimated_post_limit_bytes,
+        ),
+    ] {
+        if let Some(value) = value {
+            details.insert(key.to_owned(), PlanDetail::Integer(value));
+        } else {
+            details.remove(key);
+        }
+    }
+    details.insert(
+        "limit_window_cascade_estimate_status".to_owned(),
+        PlanDetail::Text(if fold.overflowed {
+            "overflow".to_owned()
+        } else if fold.unknown_estimate_pair_count > 0 {
+            "unknown_estimate".to_owned()
+        } else {
+            "computed".to_owned()
+        }),
+    );
+}
+
+fn add_decorrelated_predicate_pushdown_details(
+    details: &mut BTreeMap<String, PlanDetail>,
+    identity: &str,
+) {
+    details.insert(
+        "decorrelated_predicate_pushdown_identity".to_owned(),
+        PlanDetail::Text(identity.to_owned()),
+    );
+    details.insert(
+        "decorrelated_predicate_pushdown_pairing".to_owned(),
+        PlanDetail::Text("resolver_subquery_and_exact_index_pair".to_owned()),
+    );
+}
+
+fn add_decorrelated_index_selection_omission_details(
+    details: &mut BTreeMap<String, PlanDetail>,
+    identity: &str,
+) {
+    details.insert(
+        "decorrelated_index_selection_omission_identity".to_owned(),
+        PlanDetail::Text(identity.to_owned()),
+    );
+    details.insert(
+        "decorrelated_index_selection_omission_reason".to_owned(),
+        PlanDetail::Text("no_exact_table_and_predicate_candidate".to_owned()),
+    );
+}
+
+fn add_partial_index_pair_identity_details(
+    details: &mut BTreeMap<String, PlanDetail>,
+    candidate: &QueryPartialIndexDescription,
+) {
+    details.insert(
+        "predicate_pushdown_identity".to_owned(),
+        PlanDetail::Text(partial_index_pair_identity(candidate)),
+    );
+    details.insert(
+        "predicate_pushdown_pairing".to_owned(),
+        PlanDetail::Text("exact_table_index_and_predicate".to_owned()),
+    );
+}
+
+fn add_partial_index_selection_tie_break_details(details: &mut BTreeMap<String, PlanDetail>) {
+    details.insert(
+        "index_selection_tie_break".to_owned(),
+        PlanDetail::Text("lexicographically_smallest_matching_index_identity".to_owned()),
+    );
+}
+
+/// The reference defines structured plan rows and a digest of plan inputs,
+/// but leaves join-fold identity open. Seed a cascade from the pinned source
+/// and any aggregate work already attached to that source.
+fn query_join_cost_fold_seed(
+    snapshot: &SnapshotRef,
+    source: &ObjectRef,
+    statistics: Option<&QuerySourceStatistics>,
+    window_aggregates: &[QueryWindowAggregatePushdownDescription],
+) -> String {
+    let mut hash = Sha256::new();
+    hash.update(b"orna.sys.query-join-cost-seed.v1\0");
+    hash_part(&mut hash, snapshot.as_str().as_bytes());
+    hash_part(&mut hash, source.as_str().as_bytes());
+    hash_query_statistics(&mut hash, statistics);
+    hash_query_window_inputs(&mut hash, source, window_aggregates);
+    format!("join-seed:{}", hex(&hash.finalize()))
+}
+
+fn query_join_cost_input_identity(
+    snapshot: &SnapshotRef,
+    join: &QueryJoinDescription,
+    selected_index: Option<&QueryPartialIndexDescription>,
+    window_aggregates: &[QueryWindowAggregatePushdownDescription],
+    decorrelated_subquery: Option<&QueryDecorrelatedSubqueryDescription>,
+    decorrelated_predicate_pushdown_identity: Option<&str>,
+    decorrelated_index_omission_identity: Option<&str>,
+    limit_pushdown_chain_identity: Option<&str>,
+    window_spill_chain_identity: Option<&str>,
+) -> String {
+    let mut hash = Sha256::new();
+    hash.update(b"orna.sys.query-join-cost-input.v1\0");
+    hash_part(&mut hash, snapshot.as_str().as_bytes());
+    hash_part(&mut hash, join.source.as_str().as_bytes());
+    hash_optional_text(
+        &mut hash,
+        join.predicate.as_ref().map(ExpressionRef::as_str),
+    );
+    hash_query_statistics(&mut hash, join.statistics.as_ref());
+    if let Some(identity) = decorrelated_predicate_pushdown_identity {
+        hash.update([2]);
+        hash_part(&mut hash, identity.as_bytes());
+    } else {
+        if let Some(subquery) = decorrelated_subquery {
+            hash.update([1]);
+            hash_part(&mut hash, subquery.identity.as_str().as_bytes());
+            hash_part(&mut hash, subquery.source.as_str().as_bytes());
+            hash_part(
+                &mut hash,
+                subquery.correlation_predicate.as_str().as_bytes(),
+            );
+        } else {
+            hash.update([0]);
+        }
+        if let Some(index) = selected_index {
+            hash.update([1]);
+            hash_part(
+                &mut hash,
+                partial_index_pair_identity(index).as_bytes(),
+            );
+        } else {
+            hash.update([0]);
+        }
+    }
+    if let Some(identity) = decorrelated_index_omission_identity {
+        hash.update([3]);
+        hash_part(&mut hash, identity.as_bytes());
+    }
+    hash_query_window_inputs(&mut hash, &join.source, window_aggregates);
+    if let Some(identity) = limit_pushdown_chain_identity {
+        hash.update([1]);
+        hash_part(&mut hash, identity.as_bytes());
+    }
+    if let Some(identity) = window_spill_chain_identity {
+        hash.update([4]);
+        hash_part(&mut hash, identity.as_bytes());
+    }
+    format!("join-input:{}", hex(&hash.finalize()))
+}
+
+/// Starts the paired-index anchor chain at its current sparse cost ancestry.
+fn query_paired_index_anchor_chain_seed_identity(parent_cost_identity: &str) -> String {
+    let mut hash = Sha256::new();
+    hash.update(b"orna.sys.query-paired-index-anchor-chain-seed.v1\0");
+    hash_part(&mut hash, parent_cost_identity.as_bytes());
+    format!("paired-index-anchor-chain:{}", hex(&hash.finalize()))
+}
+
+/// Seeds a route-restoration chain from the planned cost ancestry. The
+/// explain contract does not prescribe how reordered pair routes are restored;
+/// this digest keeps the route outcomes keyed by their stable logical pairs.
+fn query_paired_index_cost_restoration_seed_identity(parent_cost_identity: &str) -> String {
+    let mut hash = Sha256::new();
+    hash.update(b"orna.sys.query-paired-index-cost-restoration-seed.v1\0");
+    hash_part(&mut hash, parent_cost_identity.as_bytes());
+    format!(
+        "paired-index-cost-restoration:{}",
+        hex(&hash.finalize())
+    )
+}
+
+fn query_paired_index_cost_compaction_seed_identity(parent_cost_identity: &str) -> String {
+    let mut hash = Sha256::new();
+    hash.update(b"orna.sys.query-paired-index-cost-compaction-seed.v1\0");
+    hash_part(&mut hash, parent_cost_identity.as_bytes());
+    format!(
+        "paired-index-cost-compaction:{}",
+        hex(&hash.finalize())
+    )
+}
+
+/// Compacts one resolver-paired route into a bounded identity chain. The
+/// explain reference does not prescribe compaction metadata, so this adapter
+/// commits both indexed and scan outcomes, their logical pair tuple, and the
+/// current cost ancestry. Sparse non-paired folds carry the chain unchanged.
+fn query_paired_index_cost_compaction_chain_identity(
+    parent_chain_identity: &str,
+    parent_cost_identity: &str,
+    pair: &QueryJoinPairIdentityDescription,
+    selection_identity: &str,
+    refold_identity: &str,
+    has_index: bool,
+) -> String {
+    let mut hash = Sha256::new();
+    hash.update(b"orna.sys.query-paired-index-cost-compaction.v1\0");
+    hash_part(&mut hash, parent_chain_identity.as_bytes());
+    hash_part(&mut hash, parent_cost_identity.as_bytes());
+    hash_part(&mut hash, pair.identity.as_str().as_bytes());
+    hash_part(&mut hash, pair.left_source.as_str().as_bytes());
+    hash_part(&mut hash, pair.right_source.as_str().as_bytes());
+    hash_optional_text(
+        &mut hash,
+        pair.predicate.as_ref().map(ExpressionRef::as_str),
+    );
+    hash_part(&mut hash, selection_identity.as_bytes());
+    hash_part(&mut hash, refold_identity.as_bytes());
+    hash.update([u8::from(has_index)]);
+    format!(
+        "paired-index-cost-compaction:{}",
+        hex(&hash.finalize())
+    )
+}
+
+fn query_paired_decorrelation_cost_restoration_seed_identity(
+    parent_cost_identity: &str,
+) -> String {
+    let mut hash = Sha256::new();
+    hash.update(b"orna.sys.query-paired-decorrelation-cost-restoration-seed.v1\0");
+    hash_part(&mut hash, parent_cost_identity.as_bytes());
+    format!(
+        "paired-decorrelation-cost-restoration:{}",
+        hex(&hash.finalize())
+    )
+}
+
+/// Restores paired route and decorrelation outcomes in one sparse planned-cost
+/// sequence. Either event can advance the digest; joins with neither event
+/// leave it unchanged. ORNA leaves this explain-only digest unspecified, so
+/// include each resolver tuple and its already-computed refold identity under
+/// a dedicated domain.
+fn query_paired_decorrelation_cost_restoration_chain_identity(
+    parent_chain_identity: &str,
+    parent_cost_identity: &str,
+    pair: Option<&QueryJoinPairIdentityDescription>,
+    selection_identity: Option<&str>,
+    refold_identity: Option<&str>,
+    subquery: Option<&QueryDecorrelatedSubqueryDescription>,
+    pin_chain_identity: Option<&str>,
+    anchor_fold_identity: Option<&str>,
+    omission_refold_identity: Option<&str>,
+) -> String {
+    let mut hash = Sha256::new();
+    hash.update(b"orna.sys.query-paired-decorrelation-cost-restoration.v1\0");
+    hash_part(&mut hash, parent_chain_identity.as_bytes());
+    hash_part(&mut hash, parent_cost_identity.as_bytes());
+    if let Some(pair) = pair {
+        hash.update([1]);
+        hash_part(&mut hash, pair.identity.as_str().as_bytes());
+        hash_part(&mut hash, pair.left_source.as_str().as_bytes());
+        hash_part(&mut hash, pair.right_source.as_str().as_bytes());
+        hash_optional_text(
+            &mut hash,
+            pair.predicate.as_ref().map(ExpressionRef::as_str),
+        );
+        hash_optional_text(&mut hash, selection_identity);
+        hash_optional_text(&mut hash, refold_identity);
+    } else {
+        hash.update([0]);
+    }
+    if let Some(subquery) = subquery {
+        hash.update([1]);
+        hash_part(&mut hash, subquery.identity.as_str().as_bytes());
+        hash_part(&mut hash, subquery.source.as_str().as_bytes());
+        hash_part(
+            &mut hash,
+            subquery.correlation_predicate.as_str().as_bytes(),
+        );
+        hash_optional_text(&mut hash, pin_chain_identity);
+        hash_optional_text(&mut hash, anchor_fold_identity);
+        hash_optional_text(&mut hash, omission_refold_identity);
+    } else {
+        hash.update([0]);
+    }
+    format!(
+        "paired-decorrelation-cost-restoration:{}",
+        hex(&hash.finalize())
+    )
+}
+
+/// Appends one paired index-or-scan outcome after a planned cost fold. Unlike
+/// the exact-index anchor chain, this also appends paired scans: retaining the
+/// no-match slot prevents later exact-index identities from shifting across a
+/// sparse restoration.
+fn query_paired_index_cost_restoration_chain_identity(
+    parent_chain_identity: &str,
+    parent_cost_identity: &str,
+    pair: &QueryJoinPairIdentityDescription,
+    selection_identity: &str,
+    refold_identity: &str,
+) -> String {
+    let mut hash = Sha256::new();
+    hash.update(b"orna.sys.query-paired-index-cost-restoration.v1\0");
+    hash_part(&mut hash, parent_chain_identity.as_bytes());
+    hash_part(&mut hash, parent_cost_identity.as_bytes());
+    hash_part(&mut hash, pair.identity.as_str().as_bytes());
+    hash_part(&mut hash, pair.left_source.as_str().as_bytes());
+    hash_part(&mut hash, pair.right_source.as_str().as_bytes());
+    hash_optional_text(
+        &mut hash,
+        pair.predicate.as_ref().map(ExpressionRef::as_str),
+    );
+    hash_part(&mut hash, selection_identity.as_bytes());
+    hash_part(&mut hash, refold_identity.as_bytes());
+    format!(
+        "paired-index-cost-restoration:{}",
+        hex(&hash.finalize())
+    )
+}
+
+/// Accumulates exact paired-index refolds on the current sparse cost ancestry.
+/// The reference leaves this explain-only identity open; keep each selected
+/// route attached to its prior paired anchor while allowing scan-only joins to
+/// pass the chain through unchanged.
+fn query_paired_index_anchor_chain_identity(
+    parent_chain_identity: &str,
+    parent_cost_identity: &str,
+    pair: &QueryJoinPairIdentityDescription,
+    selection_identity: &str,
+    refold_identity: &str,
+) -> String {
+    let mut hash = Sha256::new();
+    hash.update(b"orna.sys.query-paired-index-anchor-chain.v1\0");
+    hash_part(&mut hash, parent_chain_identity.as_bytes());
+    hash_part(&mut hash, parent_cost_identity.as_bytes());
+    hash_part(&mut hash, pair.identity.as_str().as_bytes());
+    hash_part(&mut hash, pair.left_source.as_str().as_bytes());
+    hash_part(&mut hash, pair.right_source.as_str().as_bytes());
+    hash_optional_text(
+        &mut hash,
+        pair.predicate.as_ref().map(ExpressionRef::as_str),
+    );
+    hash_part(&mut hash, selection_identity.as_bytes());
+    hash_part(&mut hash, refold_identity.as_bytes());
+    format!("paired-index-anchor-chain:{}", hex(&hash.finalize()))
+}
+
+/// Refolds a paired exact-index outcome against the current sparse cost
+/// ancestry. The reference does not define this plan-detail digest; carrying
+/// both parent and child identities makes later refolds auditable by pair.
+fn query_paired_index_refold_identity(
+    parent_identity: &str,
+    input_identity: &str,
+    pair: &QueryJoinPairIdentityDescription,
+    selection_identity: &str,
+    paired_predicate_identity: Option<&str>,
+    cardinality: Cardinality,
+    work: Option<u64>,
+    work_overflow: bool,
+) -> String {
+    let mut hash = Sha256::new();
+    hash.update(b"orna.sys.query-paired-index-refold.v1\0");
+    hash_part(&mut hash, parent_identity.as_bytes());
+    hash_part(&mut hash, input_identity.as_bytes());
+    hash_part(&mut hash, pair.identity.as_str().as_bytes());
+    hash_part(&mut hash, pair.left_source.as_str().as_bytes());
+    hash_part(&mut hash, pair.right_source.as_str().as_bytes());
+    hash_optional_text(
+        &mut hash,
+        pair.predicate.as_ref().map(ExpressionRef::as_str),
+    );
+    hash_part(&mut hash, selection_identity.as_bytes());
+    hash_optional_text(&mut hash, paired_predicate_identity);
+    hash_optional_u64(&mut hash, cardinality.rows);
+    hash_optional_u64(&mut hash, cardinality.bytes);
+    hash_optional_u64(&mut hash, work);
+    hash.update([u8::from(work_overflow)]);
+    format!("paired-index-refold:{}", hex(&hash.finalize()))
+}
+
+fn query_join_cost_fold(
+    left_identity: &str,
+    right_identity: &str,
+    pair: Option<&QueryJoinPairIdentityDescription>,
+    paired_predicate_pushdown_identity: Option<&str>,
+    paired_index_refold_identity: Option<&str>,
+    decorrelated_predicate_pushdown_identity: Option<&str>,
+    decorrelated_anchor_fold_identity: Option<&str>,
+    decorrelated_omission_refold_identity: Option<&str>,
+    window_anchor_fold_identity: Option<&str>,
+    join_pair_anchor_fold_identity: Option<&str>,
+    paired_limit_pushdown_anchor_fold_identity: Option<&str>,
+    paired_aggregate_pushdown_anchor_fold_identity: Option<&str>,
+    paired_window_spill_anchor_fold_identity: Option<&str>,
+    paired_aggregate_spill_anchor_fold_identity: Option<&str>,
+    paired_aggregate_anchor_cascade_fold_identity: Option<&str>,
+    paired_window_spill_cascade_fold_identity: Option<&str>,
+    paired_aggregate_spill_restoration_fold_identity: Option<&str>,
+    paired_window_compaction_spill_fold_identity: Option<&str>,
+    paired_limit_aggregate_restoration_fold_identity: Option<&str>,
+    paired_limit_window_cascade_fold_identity: Option<&str>,
+    paired_join_limit_anchor_cascade_fold_identity: Option<&str>,
+    cardinality: Cardinality,
+    work: Option<u64>,
+    work_overflow: bool,
+) -> String {
+    let mut hash = Sha256::new();
+    hash.update(b"orna.sys.query-join-cost-fold.v1\0");
+    hash_part(&mut hash, left_identity.as_bytes());
+    hash_part(&mut hash, right_identity.as_bytes());
+    if let Some(pair) = pair {
+        hash.update([1]);
+        hash_part(&mut hash, pair.identity.as_str().as_bytes());
+        hash_part(&mut hash, pair.left_source.as_str().as_bytes());
+        hash_part(&mut hash, pair.right_source.as_str().as_bytes());
+        hash_optional_text(
+            &mut hash,
+            pair.predicate.as_ref().map(ExpressionRef::as_str),
+        );
+    } else {
+        hash.update([0]);
+    }
+    hash_optional_text(&mut hash, paired_predicate_pushdown_identity);
+    hash_optional_text(&mut hash, paired_index_refold_identity);
+    hash_optional_text(&mut hash, decorrelated_predicate_pushdown_identity);
+    hash_optional_text(&mut hash, decorrelated_anchor_fold_identity);
+    hash_optional_text(&mut hash, decorrelated_omission_refold_identity);
+    hash_optional_text(&mut hash, window_anchor_fold_identity);
+    hash_optional_text(&mut hash, join_pair_anchor_fold_identity);
+    if let Some(identity) = paired_limit_pushdown_anchor_fold_identity {
+        hash.update([1]);
+        hash_part(&mut hash, identity.as_bytes());
+    }
+    hash_optional_text(&mut hash, paired_aggregate_pushdown_anchor_fold_identity);
+    if let Some(identity) = paired_window_spill_anchor_fold_identity {
+        hash.update([1]);
+        hash_part(&mut hash, identity.as_bytes());
+    }
+    hash_optional_text(&mut hash, paired_aggregate_spill_anchor_fold_identity);
+    hash_optional_text(&mut hash, paired_aggregate_anchor_cascade_fold_identity);
+    hash_optional_text(&mut hash, paired_window_spill_cascade_fold_identity);
+    hash_optional_text(
+        &mut hash,
+        paired_aggregate_spill_restoration_fold_identity,
+    );
+    hash_optional_text(&mut hash, paired_window_compaction_spill_fold_identity);
+    hash_optional_text(
+        &mut hash,
+        paired_limit_aggregate_restoration_fold_identity,
+    );
+    hash_optional_text(&mut hash, paired_limit_window_cascade_fold_identity);
+    hash_optional_text(&mut hash, paired_join_limit_anchor_cascade_fold_identity);
+    hash_optional_u64(&mut hash, cardinality.rows);
+    hash_optional_u64(&mut hash, cardinality.bytes);
+    hash_optional_u64(&mut hash, work);
+    hash.update([u8::from(work_overflow)]);
+    format!("join-fold:{}", hex(&hash.finalize()))
+}
+
+fn hash_query_statistics(hash: &mut Sha256, statistics: Option<&QuerySourceStatistics>) {
+    if let Some(statistics) = statistics {
+        hash.update([1]);
+        hash_optional_u64(hash, statistics.estimated_rows);
+        hash_optional_u64(hash, statistics.estimated_bytes);
+        if let Some(branch) = &statistics.mutable_branch {
+            hash.update([1]);
+            hash_part(hash, branch.name.as_bytes());
+            hash.update(branch.generation.to_be_bytes());
+        } else {
+            hash.update([0]);
+        }
+    } else {
+        hash.update([0]);
+    }
+}
+
+fn hash_query_window_inputs(
+    hash: &mut Sha256,
+    source: &ObjectRef,
+    window_aggregates: &[QueryWindowAggregatePushdownDescription],
+) {
+    if let Some(identity) = query_window_pushdown_chain_identity(source, window_aggregates) {
+        hash.update([1]);
+        hash_part(hash, identity.as_bytes());
+    } else {
+        hash.update([0]);
+    }
+}
+
+/// ORNA leaves this planner-local chain identity encoding unspecified. Keep
+/// the source and resolver-ordered members in the digest so sparse cost
+/// reordering cannot transfer an aggregate chain to a neighboring input.
+fn query_window_pushdown_chain_identity(
+    source: &ObjectRef,
+    window_aggregates: &[QueryWindowAggregatePushdownDescription],
+) -> Option<String> {
+    let matching = window_aggregates
+        .iter()
+        .filter(|aggregate| aggregate.source == *source)
+        .collect::<Vec<_>>();
+    if matching.is_empty() {
+        return None;
+    }
+    let mut hash = Sha256::new();
+    hash.update(b"orna.sys.query-window-pushdown-chain.v1\0");
+    hash_part(&mut hash, source.as_str().as_bytes());
+    hash.update((matching.len() as u64).to_be_bytes());
+    for aggregate in matching {
+        hash_part(&mut hash, aggregate.identity.as_str().as_bytes());
+        hash_part(&mut hash, aggregate.aggregate.as_str().as_bytes());
+        hash_part(&mut hash, aggregate.frame_identity.as_str().as_bytes());
+        hash_part(&mut hash, aggregate.frame_start.as_detail().as_bytes());
+        hash_part(&mut hash, aggregate.frame_end.as_detail().as_bytes());
+    }
+    Some(format!("window-chain:{}", hex(&hash.finalize())))
+}
+
+fn add_window_pushdown_chain_details(
+    details: &mut BTreeMap<String, PlanDetail>,
+    identity: &str,
+) {
+    details.insert(
+        "window_pushdown_chain_identity".to_owned(),
+        PlanDetail::Text(identity.to_owned()),
+    );
+    details.insert(
+        "window_pushdown_identity_policy".to_owned(),
+        PlanDetail::Text("source_ordered_sha256_v1".to_owned()),
+    );
+}
+
+fn query_window_spill_estimate(spill: &QueryWindowSpillDescription) -> (Option<u64>, Option<u64>, Option<u64>) {
+    let spilled_bytes = spill
+        .estimated_working_set_bytes
+        .map(|working_set| working_set.saturating_sub(spill.memory_budget_bytes));
+    let io_blocks = spilled_bytes.map(|bytes| ceil_div(bytes, 4096));
+    let io_work = io_blocks.and_then(|blocks| blocks.checked_mul(2));
+    (spilled_bytes, io_blocks, io_work)
+}
+
+/// Describes spill stages in resolver order of their window aggregate chain,
+/// independent of the order in which the spill descriptors were supplied.
+fn query_window_spill_chain_identity(
+    pair: &QueryJoinPairIdentityDescription,
+    source: &ObjectRef,
+    window_aggregates: &[QueryWindowAggregatePushdownDescription],
+    window_spills: &[QueryWindowSpillDescription],
+) -> Option<String> {
+    let matching = window_aggregates
+        .iter()
+        .filter(|aggregate| aggregate.source == *source)
+        .filter_map(|aggregate| {
+            window_spills.iter().find(|spill| {
+                spill.join_pair_identity == pair.identity
+                    && spill.source == *source
+                    && spill.window_aggregate_identity == aggregate.identity
+            })
+            .map(|spill| (aggregate, spill))
+        })
+        .collect::<Vec<_>>();
+    if matching.is_empty() {
+        return None;
+    }
+
+    let mut hash = Sha256::new();
+    hash.update(b"orna.sys.query-window-spill-chain.v1\0");
+    hash_part(&mut hash, pair.identity.as_str().as_bytes());
+    hash_part(&mut hash, source.as_str().as_bytes());
+    hash.update((matching.len() as u64).to_be_bytes());
+    for (aggregate, spill) in matching {
+        let (spilled_bytes, io_blocks, io_work) = query_window_spill_estimate(spill);
+        hash_part(&mut hash, aggregate.identity.as_str().as_bytes());
+        hash_part(&mut hash, spill.identity.as_str().as_bytes());
+        hash_optional_u64(&mut hash, spill.estimated_working_set_bytes);
+        hash.update(spill.memory_budget_bytes.to_be_bytes());
+        hash_optional_u64(&mut hash, spilled_bytes);
+        hash_optional_u64(&mut hash, io_blocks);
+        hash_optional_u64(&mut hash, io_work);
+    }
+    Some(format!("window-spill-chain:{}", hex(&hash.finalize())))
+}
+
+fn apply_query_window_spills(
+    operators: &mut [Operator],
+    aggregate_range: std::ops::Range<usize>,
+    pair: &QueryJoinPairIdentityDescription,
+    chain_identity: &str,
+    source: &ObjectRef,
+    window_spills: &[QueryWindowSpillDescription],
+) {
+    for index in aggregate_range {
+        let aggregate_identity = match operators[index].details.get("window_aggregate_identity") {
+            Some(PlanDetail::Text(identity)) => identity,
+            _ => continue,
+        };
+        let Some(spill) = window_spills.iter().find(|spill| {
+            spill.join_pair_identity == pair.identity
+                && spill.source == *source
+                && spill.window_aggregate_identity.as_str() == aggregate_identity
+        }) else {
+            continue;
+        };
+        let (spilled_bytes, io_blocks, io_work) = query_window_spill_estimate(spill);
+        let prior_work = operators[index].work;
+        let new_work = prior_work.zip(io_work).and_then(|(work, io)| work.checked_add(io));
+        let overflowed = prior_work.zip(io_work).is_some_and(|(work, io)| work.checked_add(io).is_none());
+        operators[index].work = new_work;
+        let details = &mut operators[index].details;
+        details.insert(
+            "window_spill_identity".to_owned(),
+            PlanDetail::Text(spill.identity.as_str().to_owned()),
+        );
+        details.insert(
+            "window_spill_pair_identity".to_owned(),
+            PlanDetail::Text(pair.identity.as_str().to_owned()),
+        );
+        details.insert(
+            "window_spill_estimate_policy".to_owned(),
+            PlanDetail::Text("working_set_bytes_above_memory_budget".to_owned()),
+        );
+        details.insert(
+            "window_spill_memory_budget_bytes".to_owned(),
+            PlanDetail::Integer(spill.memory_budget_bytes),
+        );
+        details.insert(
+            "window_spill_io_policy".to_owned(),
+            PlanDetail::Text("one_write_and_one_read_per_4k_block".to_owned()),
+        );
+        details.insert(
+            "window_spill_chain_identity".to_owned(),
+            PlanDetail::Text(chain_identity.to_owned()),
+        );
+        if let Some(working_set_bytes) = spill.estimated_working_set_bytes {
+            details.insert(
+                "window_spill_working_set_bytes".to_owned(),
+                PlanDetail::Integer(working_set_bytes),
+            );
+        } else {
+            details.insert(
+                "window_spill_estimate_status".to_owned(),
+                PlanDetail::Text("unknown_working_set".to_owned()),
+            );
+        }
+        if let Some(spilled_bytes) = spilled_bytes {
+            details.insert(
+                "window_spill_estimated_bytes".to_owned(),
+                PlanDetail::Integer(spilled_bytes),
+            );
+            details.insert(
+                "window_spill_required".to_owned(),
+                PlanDetail::Boolean(spilled_bytes > 0),
+            );
+        }
+        if let Some(io_blocks) = io_blocks {
+            details.insert(
+                "window_spill_estimated_io_blocks".to_owned(),
+                PlanDetail::Integer(io_blocks),
+            );
+        }
+        if let Some(io_work) = io_work {
+            details.insert(
+                "window_spill_estimated_io_work".to_owned(),
+                PlanDetail::Integer(io_work),
+            );
+        }
+        details.insert(
+            "estimated_work_scope".to_owned(),
+            PlanDetail::Text("one_unit_per_input_row_plus_spill_read_write_blocks".to_owned()),
+        );
+        if overflowed {
+            record_work_overflow(details);
+        }
+    }
+}
+
+fn add_window_spill_chain_details(details: &mut BTreeMap<String, PlanDetail>, identity: &str) {
+    details.insert(
+        "window_spill_chain_identity".to_owned(),
+        PlanDetail::Text(identity.to_owned()),
+    );
+    details.insert(
+        "window_spill_chain_policy".to_owned(),
+        PlanDetail::Text("exact_pair_and_resolved_window_order".to_owned()),
+    );
+}
+
+fn hash_optional_text(hash: &mut Sha256, value: Option<&str>) {
+    match value {
+        Some(value) => {
+            hash.update([1]);
+            hash_part(hash, value.as_bytes());
+        }
+        None => hash.update([0]),
+    }
+}
+
+fn add_join_cost_fold_seed_details(details: &mut BTreeMap<String, PlanDetail>, identity: &str) {
+    details.insert(
+        "join_cost_fold_identity".to_owned(),
+        PlanDetail::Text(identity.to_owned()),
+    );
+    details.insert(
+        "join_cost_fold_identity_policy".to_owned(),
+        PlanDetail::Text("snapshot_seed_then_planned_left_fold".to_owned()),
+    );
+}
+
+fn add_join_cost_fold_details(
+    details: &mut BTreeMap<String, PlanDetail>,
+    left_identity: &str,
+    right_identity: &str,
+    fold_identity: &str,
+) {
+    details.insert(
+        "join_cost_fold_identity".to_owned(),
+        PlanDetail::Text(fold_identity.to_owned()),
+    );
+    details.insert(
+        "join_cost_fold_left_identity".to_owned(),
+        PlanDetail::Text(left_identity.to_owned()),
+    );
+    details.insert(
+        "join_cost_fold_right_identity".to_owned(),
+        PlanDetail::Text(right_identity.to_owned()),
+    );
+    details.insert(
+        "join_cost_fold_identity_policy".to_owned(),
+        PlanDetail::Text("snapshot_seed_then_planned_left_fold".to_owned()),
+    );
 }
 
 fn push_scan(
@@ -1588,6 +8304,430 @@ fn conjunctive_disjunction_cardinality_and_work(
         conjunctive_disjunction_rows(bytes, disjunct_count, conjunct_count_per_disjunct)
     });
     (Cardinality { rows, bytes }, work)
+}
+
+fn disjunct_storm_shape_text(storm: &DisjunctStormCascadeDescription) -> String {
+    let branches = storm
+        .branches
+        .iter()
+        .enumerate()
+        .map(|(index, branch)| {
+            let limits = branch
+                .nested_limits
+                .iter()
+                .map(u64::to_string)
+                .collect::<Vec<_>>()
+                .join(",");
+            let rebinds = branch
+                .limit_rebinds
+                .iter()
+                .map(|rebind| {
+                    format!(
+                        "@{}={}",
+                        rebind.after_limit,
+                        rebind
+                            .storms
+                            .iter()
+                            .map(disjunct_storm_shape_text)
+                            .collect::<Vec<_>>()
+                            .join(">")
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("");
+            let nested = branch
+                .nested_storms
+                .iter()
+                .map(disjunct_storm_shape_text)
+                .collect::<Vec<_>>()
+                .join(">");
+            if nested.is_empty() {
+                format!(
+                    "{}:[{}]/{}{}",
+                    index + 1,
+                    limits,
+                    branch.conjunct_count,
+                    rebinds
+                )
+            } else {
+                format!(
+                    "{}:[{}]/{}{}{{{}}}",
+                    index + 1,
+                    limits,
+                    branch.conjunct_count,
+                    rebinds,
+                    nested
+                )
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(";");
+    format!("[{branches}]")
+}
+
+fn disjunct_storm_predicates(storms: &[DisjunctStormCascadeDescription]) -> Vec<ExpressionRef> {
+    let mut pending = storms.iter().rev().collect::<Vec<_>>();
+    let mut predicates = Vec::new();
+    while let Some(storm) = pending.pop() {
+        predicates.push(storm.predicate.clone());
+        for branch in storm.branches.iter().rev() {
+            pending.extend(branch.nested_storms.iter().rev());
+            for rebind in branch.limit_rebinds.iter().rev() {
+                pending.extend(rebind.storms.iter().rev());
+            }
+        }
+    }
+    predicates
+}
+
+/// Returns the number of rebound cascades at each one-based storm nesting
+/// level. Every counted cascade has a byte-cap handoff from its immediate
+/// post-limit branch estimate or the previous rebound output.
+fn disjunct_storm_rebind_cascade_counts_by_depth(
+    storm: &DisjunctStormCascadeDescription,
+) -> BTreeMap<usize, usize> {
+    let mut pending = vec![(storm, 1usize)];
+    let mut rebind_counts = BTreeMap::new();
+    while let Some((storm, depth)) = pending.pop() {
+        for branch in &storm.branches {
+            for rebind in &branch.limit_rebinds {
+                if !rebind.storms.is_empty() {
+                    let count = rebind_counts.entry(depth).or_insert(0usize);
+                    *count = count.saturating_add(rebind.storms.len());
+                }
+            }
+            pending.extend(
+                branch
+                    .limit_rebinds
+                    .iter()
+                    .flat_map(|rebind| rebind.storms.iter())
+                    .chain(branch.nested_storms.iter())
+                    .map(|nested| (nested, depth.saturating_add(1))),
+            );
+        }
+    }
+    rebind_counts
+}
+
+fn rebind_byte_cap_handoff_estimates_by_depth_text(
+    estimates: &RebindByteCapHandoffEstimatesByDepth,
+) -> String {
+    estimates
+        .iter()
+        .map(|(depth, handoffs)| {
+            let handoffs = handoffs
+                .iter()
+                .map(|handoff| {
+                    let input_bytes = handoff
+                        .input_bytes
+                        .map_or_else(|| "?".to_owned(), |bytes| bytes.to_string());
+                    let output_bytes = handoff
+                        .output_bytes
+                        .map_or_else(|| "?".to_owned(), |bytes| bytes.to_string());
+                    format!("{input_bytes}>{output_bytes}")
+                })
+                .collect::<Vec<_>>()
+                .join(",");
+            format!("{depth}:{handoffs}")
+        })
+        .collect::<Vec<_>>()
+        .join(";")
+}
+
+fn rebind_byte_cap_handoff_scopes_by_depth_text(
+    routes: &[PlanByteCapHandoffRoute],
+) -> String {
+    let mut by_depth = BTreeMap::<usize, Vec<String>>::new();
+    for route in routes {
+        let input_bytes = route
+            .input_bytes
+            .map_or_else(|| "?".to_owned(), |bytes| bytes.to_string());
+        let output_bytes = route
+            .output_bytes
+            .map_or_else(|| "?".to_owned(), |bytes| bytes.to_string());
+        let (_, output_scope) = route.scope_labels();
+        by_depth.entry(route.depth).or_default().push(format!(
+            "{}={input_bytes}>{output_bytes}",
+            output_scope
+        ));
+    }
+    by_depth
+        .into_iter()
+        .map(|(depth, handoffs)| format!("{depth}:{}", handoffs.join(",")))
+        .collect::<Vec<_>>()
+        .join(";")
+}
+
+fn rebind_byte_cap_handoff_routes_by_depth_text(
+    routes: &[PlanByteCapHandoffRoute],
+) -> String {
+    let mut by_depth = BTreeMap::<usize, Vec<String>>::new();
+    for route in routes {
+        let input_bytes = route
+            .input_bytes
+            .map_or_else(|| "?".to_owned(), |bytes| bytes.to_string());
+        let output_bytes = route
+            .output_bytes
+            .map_or_else(|| "?".to_owned(), |bytes| bytes.to_string());
+        by_depth.entry(route.depth).or_default().push(format!(
+            "{}={input_bytes}>{output_bytes}",
+            route.paired_scope_label()
+        ));
+    }
+    by_depth
+        .into_iter()
+        .map(|(depth, handoffs)| format!("{depth}:{}", handoffs.join(",")))
+        .collect::<Vec<_>>()
+        .join(";")
+}
+
+fn rebind_byte_cap_handoff_route_records(
+    estimates: &RebindByteCapHandoffEstimatesByDepth,
+) -> Vec<PlanByteCapHandoffRoute> {
+    estimates
+        .iter()
+        .flat_map(|(depth, handoffs)| {
+            handoffs.iter().map(|handoff| {
+                PlanByteCapHandoffRoute::from_typed_paths(
+                    *depth,
+                    handoff.input_path.clone(),
+                    handoff.output_path.clone(),
+                    handoff.input_bytes,
+                    handoff.output_bytes,
+                )
+            })
+        })
+        .collect()
+}
+
+fn byte_cap_scope_path_label(path: &[PlanByteCapScopeSegment]) -> String {
+    let mut scope = "root".to_owned();
+    for segment in path {
+        scope.push('/');
+        scope.push_str(&segment.scope_component_label());
+    }
+    scope
+}
+
+fn stabilize_rebind_byte_cap_handoff_routes(
+    estimates: &mut RebindByteCapHandoffEstimatesByDepth,
+) {
+    for handoffs in estimates.values_mut() {
+        handoffs.sort_by(|left, right| {
+            left.input_path
+                .cmp(&right.input_path)
+                .then_with(|| left.output_path.cmp(&right.output_path))
+        });
+    }
+}
+
+fn disjunct_storm_cascade_cardinality_and_work(
+    input: Cardinality,
+    storm: &DisjunctStormCascadeDescription,
+    storm_depth: usize,
+    storm_scope_path: &[PlanByteCapScopeSegment],
+    byte_cap_handoff_estimates_by_depth: &mut RebindByteCapHandoffEstimatesByDepth,
+) -> (Cardinality, Option<u64>, bool) {
+    let (estimated, work, overflowed) = disjunct_storm_branch_cascade_cardinality_and_work(
+        input,
+        &storm.branches,
+        storm_depth,
+        storm_scope_path,
+        byte_cap_handoff_estimates_by_depth,
+    );
+    (cap_cardinality_to_input(estimated, input), work, overflowed)
+}
+
+fn cap_cardinality_to_input(estimated: Cardinality, input: Cardinality) -> Cardinality {
+    // Apply the cap independently per dimension, retaining unknown estimates
+    // as unknown. Recursive callers pass their already bounded branch output
+    // as the next input, so these immediate caps compose through nested rebinds.
+    let rows = match (estimated.rows, input.rows) {
+        (Some(estimated), Some(cap)) => Some(estimated.min(cap)),
+        _ => None,
+    };
+    let bytes = match (estimated.bytes, input.bytes) {
+        (Some(estimated), Some(cap)) => Some(estimated.min(cap)),
+        _ => None,
+    };
+    Cardinality { rows, bytes }
+}
+
+fn disjunct_storm_branch_cascade_cardinality_and_work(
+    input: Cardinality,
+    branches: &[DisjunctStormBranchDescription],
+    storm_depth: usize,
+    storm_scope_path: &[PlanByteCapScopeSegment],
+    byte_cap_handoff_estimates_by_depth: &mut RebindByteCapHandoffEstimatesByDepth,
+) -> (Cardinality, Option<u64>, bool) {
+    let mut work = Some(0u64);
+    let mut overflowed = false;
+    let mut remaining_rows = input.rows;
+    let mut rows = input.rows.map(|_| 0u64);
+    let mut remaining_bytes = input.bytes;
+    let mut bytes = input.bytes.map(|_| 0u64);
+
+    for (branch_index, branch) in branches.iter().enumerate() {
+        let mut branch_cardinality = input;
+        let mut branch_byte_scope_path = storm_scope_path.to_vec();
+        branch_byte_scope_path.push(PlanByteCapScopeSegment::Branch {
+            index: branch_index + 1,
+        });
+        for (limit_index, limit) in branch.nested_limits.iter().enumerate() {
+            match (work, branch_cardinality.rows) {
+                (Some(total), Some(limit_work)) => match total.checked_add(limit_work) {
+                    Some(total) => work = Some(total),
+                    None => {
+                        work = None;
+                        overflowed = true;
+                    }
+                },
+                (Some(_), None) => work = None,
+                (None, _) => {}
+            }
+            branch_cardinality = limit_cardinality(branch_cardinality, *limit);
+            branch_byte_scope_path.push(PlanByteCapScopeSegment::Limit {
+                position: limit_index + 1,
+            });
+            for (rebind_index, rebind) in branch
+                .limit_rebinds
+                .iter()
+                .enumerate()
+                .filter(|(_, rebind)| rebind.after_limit == limit_index + 1)
+            {
+                for (cascade_index, rebind_storm) in rebind.storms.iter().enumerate() {
+                    let handoff_input_bytes = branch_cardinality.bytes;
+                    let handoff_input_path = branch_byte_scope_path.clone();
+                    // The typed destination path extends the actual bounded
+                    // source path. This carries earlier cascade outputs
+                    // through later cascades and limit positions.
+                    let mut handoff_scope_path = handoff_input_path.clone();
+                    handoff_scope_path.push(PlanByteCapScopeSegment::Rebind {
+                        position: rebind_index + 1,
+                    });
+                    handoff_scope_path.push(PlanByteCapScopeSegment::Cascade {
+                        index: cascade_index + 1,
+                    });
+                    let (rebound, rebound_work, rebound_overflowed) =
+                        disjunct_storm_cascade_cardinality_and_work(
+                            branch_cardinality,
+                            rebind_storm,
+                            storm_depth.saturating_add(1),
+                            &handoff_scope_path,
+                            byte_cap_handoff_estimates_by_depth,
+                        );
+                    byte_cap_handoff_estimates_by_depth
+                        .entry(storm_depth)
+                        .or_default()
+                        .push(RebindByteCapHandoffEstimate {
+                            input_path: handoff_input_path,
+                            output_path: handoff_scope_path.clone(),
+                            input_bytes: handoff_input_bytes,
+                            output_bytes: rebound.bytes,
+                        });
+                    overflowed |= rebound_overflowed;
+                    match (work, rebound_work) {
+                        (Some(total), Some(rebound_work)) => match total.checked_add(rebound_work) {
+                            Some(total) => work = Some(total),
+                            None => {
+                                work = None;
+                                overflowed = true;
+                            }
+                        },
+                        (Some(_), None) => work = None,
+                        (None, _) => {}
+                    }
+                    branch_cardinality = rebound;
+                    branch_byte_scope_path = handoff_scope_path;
+                    // Keep produced outputs distinct from cascade targets so later handoffs
+                    // retain provenance even when their estimates are unknown.
+                    branch_byte_scope_path.push(
+                        PlanByteCapScopeSegment::RebindCascadeOutput {
+                            position: rebind_index + 1,
+                            index: cascade_index + 1,
+                        },
+                    );
+                }
+            }
+        }
+
+        let (mut branch_output, branch_work) =
+            conjunctive_disjunction_cardinality_and_work(branch_cardinality, 1, branch.conjunct_count);
+        if branch_cardinality.rows.is_some() && branch_work.is_none() {
+            overflowed = true;
+        }
+        match (work, branch_work) {
+            (Some(total), Some(branch_work)) => match total.checked_add(branch_work) {
+                Some(total) => work = Some(total),
+                None => {
+                    work = None;
+                    overflowed = true;
+                }
+            },
+            (Some(_), None) => work = None,
+            (None, _) => {}
+        }
+
+        let mut prior_nested_storm_path = branch_byte_scope_path.clone();
+        if !branch.nested_storms.is_empty() {
+            // ORNA-PLAN does not name this intermediate scope. Keep a typed
+            // boundary so unknown estimates still preserve the bounded
+            // parent-branch output consumed by nested storms.
+            prior_nested_storm_path.push(PlanByteCapScopeSegment::BranchOutput {
+                index: branch_index + 1,
+            });
+        }
+        for (nested_index, nested_storm) in branch.nested_storms.iter().enumerate() {
+            let mut nested_scope_path = prior_nested_storm_path.clone();
+            nested_scope_path.push(PlanByteCapScopeSegment::NestedStorm {
+                index: nested_index + 1,
+            });
+            let (nested_output, nested_work, nested_overflowed) =
+                disjunct_storm_cascade_cardinality_and_work(
+                    branch_output,
+                    nested_storm,
+                    storm_depth.saturating_add(1),
+                    &nested_scope_path,
+                    byte_cap_handoff_estimates_by_depth,
+                );
+            overflowed |= nested_overflowed;
+            match (work, nested_work) {
+                (Some(total), Some(nested_work)) => match total.checked_add(nested_work) {
+                    Some(total) => work = Some(total),
+                    None => {
+                        work = None;
+                        overflowed = true;
+                    }
+                },
+                (Some(_), None) => work = None,
+                (None, _) => {}
+            }
+            branch_output = nested_output;
+            prior_nested_storm_path = nested_scope_path;
+            prior_nested_storm_path.push(PlanByteCapScopeSegment::NestedStormOutput {
+                index: nested_index + 1,
+            });
+        }
+
+        add_capped_estimate(&mut rows, &mut remaining_rows, branch_output.rows);
+        add_capped_estimate(&mut bytes, &mut remaining_bytes, branch_output.bytes);
+    }
+
+    (Cardinality { rows, bytes }, work, overflowed)
+}
+
+fn add_capped_estimate(total: &mut Option<u64>, remaining: &mut Option<u64>, branch: Option<u64>) {
+    match (*total, *remaining, branch) {
+        (Some(total_rows), Some(remaining_rows), Some(branch_rows)) => {
+            let matched = branch_rows.min(remaining_rows);
+            *total = Some(total_rows + matched);
+            *remaining = Some(remaining_rows - matched);
+        }
+        _ => {
+            *total = None;
+            *remaining = None;
+        }
+    }
 }
 
 fn conjunctive_disjunction_rows(
@@ -2033,6 +9173,69 @@ fn hash_plan_detail(hash: &mut Sha256, detail: &PlanDetail) {
                 hash_part(hash, item.null_order.as_ref_str().as_bytes());
             }
         }
+        PlanDetail::ByteCapHandoffRoutes(routes) => {
+            hash.update([5]);
+            hash.update((routes.len() as u64).to_be_bytes());
+            for route in routes {
+                hash.update((route.depth as u64).to_be_bytes());
+                hash_byte_cap_scope_path(hash, &route.input_path);
+                hash_byte_cap_scope_path(hash, &route.output_path);
+                let (input_scope, output_scope) = route.scope_labels();
+                hash_part(hash, input_scope.as_bytes());
+                hash_part(hash, output_scope.as_bytes());
+                hash_optional_u64(hash, route.input_bytes);
+                hash_optional_u64(hash, route.output_bytes);
+            }
+        }
+    }
+}
+
+fn hash_byte_cap_scope_path(hash: &mut Sha256, path: &[PlanByteCapScopeSegment]) {
+    hash.update((path.len() as u64).to_be_bytes());
+    for segment in path {
+        match segment {
+            PlanByteCapScopeSegment::StormStage { index } => {
+                hash.update([0]);
+                hash.update((*index as u64).to_be_bytes());
+            }
+            PlanByteCapScopeSegment::StormStageOutput { index } => {
+                hash.update([6]);
+                hash.update((*index as u64).to_be_bytes());
+            }
+            PlanByteCapScopeSegment::Branch { index } => {
+                hash.update([1]);
+                hash.update((*index as u64).to_be_bytes());
+            }
+            PlanByteCapScopeSegment::Limit { position } => {
+                hash.update([2]);
+                hash.update((*position as u64).to_be_bytes());
+            }
+            PlanByteCapScopeSegment::BranchOutput { index } => {
+                hash.update([9]);
+                hash.update((*index as u64).to_be_bytes());
+            }
+            PlanByteCapScopeSegment::Rebind { position } => {
+                hash.update([3]);
+                hash.update((*position as u64).to_be_bytes());
+            }
+            PlanByteCapScopeSegment::Cascade { index } => {
+                hash.update([4]);
+                hash.update((*index as u64).to_be_bytes());
+            }
+            PlanByteCapScopeSegment::RebindCascadeOutput { position, index } => {
+                hash.update([8]);
+                hash.update((*position as u64).to_be_bytes());
+                hash.update((*index as u64).to_be_bytes());
+            }
+            PlanByteCapScopeSegment::NestedStorm { index } => {
+                hash.update([5]);
+                hash.update((*index as u64).to_be_bytes());
+            }
+            PlanByteCapScopeSegment::NestedStormOutput { index } => {
+                hash.update([7]);
+                hash.update((*index as u64).to_be_bytes());
+            }
+        }
     }
 }
 
@@ -2053,5 +9256,108 @@ impl PlanNodeKind {
             Self::CheckpointUpdate => "checkpoint_update",
             Self::External => "external",
         }
+    }
+}
+
+#[cfg(test)]
+mod byte_cap_handoff_route_scope_tests {
+    use super::*;
+
+    #[test]
+    fn scope_component_labels_preserve_each_typed_segment() {
+        let segments = [
+            (PlanByteCapScopeSegment::StormStage { index: 2 }, "storm2"),
+            (
+                PlanByteCapScopeSegment::StormStageOutput { index: 3 },
+                "storm_stage_output3",
+            ),
+            (PlanByteCapScopeSegment::Branch { index: 4 }, "branch4"),
+            (PlanByteCapScopeSegment::Limit { position: 5 }, "limit5"),
+            (
+                PlanByteCapScopeSegment::BranchOutput { index: 6 },
+                "branch_output6",
+            ),
+            (PlanByteCapScopeSegment::Rebind { position: 7 }, "rebind7"),
+            (PlanByteCapScopeSegment::Cascade { index: 8 }, "cascade8"),
+            (
+                PlanByteCapScopeSegment::RebindCascadeOutput {
+                    position: 9,
+                    index: 10,
+                },
+                "rebind_output9_10",
+            ),
+            (PlanByteCapScopeSegment::NestedStorm { index: 11 }, "nested11"),
+            (
+                PlanByteCapScopeSegment::NestedStormOutput { index: 12 },
+                "nested_output12",
+            ),
+        ];
+
+        for (segment, expected) in segments {
+            assert_eq!(segment.scope_component_label(), expected);
+        }
+    }
+
+    #[test]
+    fn typed_paths_drive_scope_summaries_and_route_fingerprint() {
+        let input_path = vec![
+            PlanByteCapScopeSegment::StormStage { index: 1 },
+            PlanByteCapScopeSegment::StormStageOutput { index: 1 },
+            PlanByteCapScopeSegment::StormStage { index: 2 },
+            PlanByteCapScopeSegment::Branch { index: 1 },
+            PlanByteCapScopeSegment::Limit { position: 1 },
+        ];
+        let mut output_path = input_path.clone();
+        output_path.extend([
+            PlanByteCapScopeSegment::Rebind { position: 1 },
+            PlanByteCapScopeSegment::Cascade { index: 1 },
+        ]);
+        let mut stale_route = PlanByteCapHandoffRoute::from_typed_paths(
+            2,
+            input_path,
+            output_path,
+            None,
+            None,
+        );
+        stale_route.input_scope = "stale input scope".to_owned();
+        stale_route.output_scope = "stale output scope".to_owned();
+
+        let input_scope = "root/storm1/storm_stage_output1/storm2/branch1/limit1";
+        let output_scope = format!("{input_scope}/rebind1/cascade1");
+        assert_eq!(
+            stale_route.paired_scope_label(),
+            format!("{input_scope}=>{output_scope}")
+        );
+        assert_eq!(
+            stale_route.named_scope_labels(),
+            PlanByteCapScopeLabels {
+                input: input_scope.to_owned(),
+                output: output_scope.clone(),
+            }
+        );
+        let serialized_route = serde_json::to_value(&stale_route).unwrap();
+        assert_eq!(
+            serialized_route["scope_labels"],
+            serde_json::json!({ "input": input_scope, "output": output_scope })
+        );
+        assert!(serialized_route["scope_labels"].is_object());
+        assert_eq!(
+            rebind_byte_cap_handoff_scopes_by_depth_text(&[stale_route.clone()]),
+            format!("2:{output_scope}=?>?")
+        );
+        assert_eq!(
+            rebind_byte_cap_handoff_routes_by_depth_text(&[stale_route.clone()]),
+            format!("2:{input_scope}=>{output_scope}=?>?")
+        );
+
+        let mut canonical_route = stale_route.clone();
+        canonical_route.input_scope = input_scope.to_owned();
+        canonical_route.output_scope = output_scope;
+        let fingerprint = |route| {
+            let mut hash = Sha256::new();
+            hash_plan_detail(&mut hash, &PlanDetail::ByteCapHandoffRoutes(vec![route]));
+            hash.finalize()
+        };
+        assert_eq!(fingerprint(stale_route), fingerprint(canonical_route));
     }
 }

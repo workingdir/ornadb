@@ -1,0 +1,6 @@
+use std.io.path as path;
+use std.io.metadata as metadata;
+
+pub fn child_path(prefix_path: Str, child: Str): Str = path.join(prefix_path, child);
+pub fn entry_kind(value: (Str, Int?, Instant?, Instant?)): Str = metadata.kind(value);
+pub fn entry_size(value: (Str, Int?, Instant?, Instant?)): Int? = metadata.size_bytes(value);

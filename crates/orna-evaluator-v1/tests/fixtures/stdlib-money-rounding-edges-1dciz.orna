@@ -1,0 +1,24 @@
+std.money.quantize(1.005, 2, "half_even") == 1.00
+&& std.money.quantize(1.015, 2, "half_even") == 1.02
+&& std.money.quantize(-1.005, 2, "half_even") == -1.00
+&& std.money.quantize(-1.015, 2, "half_even") == -1.02
+&& std.money.quantize(1.005, 2, "half_up") == 1.01
+&& std.money.quantize(-1.005, 2, "half_up") == -1.01
+&& std.money.quantize(1.009, 2, "toward_zero") == 1.00
+&& std.money.quantize(-1.009, 2, "toward_zero") == -1.00
+&& std.money.quantize(1.009, 2, "away_from_zero") == 1.01
+&& std.money.quantize(-1.009, 2, "away_from_zero") == -1.01
+&& std.money.quantize(1.001, 2, "floor") == 1.00
+&& std.money.quantize(-1.001, 2, "floor") == -1.01
+&& std.money.quantize(1.001, 2, "ceil") == 1.01
+&& std.money.quantize(-1.001, 2, "ceil") == -1.00
+&& std.money.quantize(123456789012345.675, 2, "half_even") == 123456789012345.68
+&& std.money.quantize(148.5, 0, "half_even") == 148.0
+&& std.money.quantize(-148.5, 0, "half_even") == -148.0
+&& std.money.quantize(149.5, 0, "half_even") == 150.0
+&& std.money.quantize(-149.5, 0, "half_even") == -150.0
+&& std.money.quantize(999999999999999999.995, 2, "half_even") == 1000000000000000000.00
+&& std.money.quantize(-999999999999999999.995, 2, "half_even") == -1000000000000000000.00
+&& std.money.allocate(1.005, [1, 1], 2, "half_even") == [0.50, 0.50]
+&& std.money.allocate(1.005, [1, 1], 2, "half_up") == [0.51, 0.50]
+&& std.money.allocate(-1.005, [1, 1], 2, "half_up") == [-0.51, -0.50]

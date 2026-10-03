@@ -1,0 +1,30 @@
+pub table Family(id: Int) { expected: Str, }
+pub table Branch(id: Int) { family_id: Int, }
+pub table Leaf(id: Int) { branch_id: Int, }
+pub table Proof(id: Int) { family_id: Int, branch_id: Int, leaf_id: Int, token: Str, }
+
+assert every(Family, family =>
+    every(Branch, branch =>
+        branch.family_id != family.id ||
+            every(Leaf, leaf =>
+                leaf.branch_id != branch.id ||
+                    exists(Proof, proof =>
+                        proof.family_id == family.id &&
+                            proof.branch_id == branch.id &&
+                            proof.leaf_id == leaf.id &&
+                            proof.token == family.expected
+                    )
+            )
+    )
+);
+
+fn parent() {
+    Family.insert({ id: 1, expected: "amber" });
+    Family.insert({ id: 2, expected: "blue" });
+    Branch.insert({ id: 10, family_id: 1 });
+    Branch.insert({ id: 20, family_id: 2 });
+    Leaf.insert({ id: 100, branch_id: 10 });
+    Leaf.insert({ id: 200, branch_id: 20 });
+    Proof.insert({ id: 1000, family_id: 1, branch_id: 10, leaf_id: 100, token: "amber" });
+    Proof.insert({ id: 2000, family_id: 2, branch_id: 20, leaf_id: 200, token: "amber" });
+}

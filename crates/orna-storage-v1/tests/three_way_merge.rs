@@ -1,17 +1,134 @@
 use orna_evolution_v1::{
-    CanonicalValue, CheckpointGeneration, Field, FieldRole, FieldType, KeyedRow, ObjectId,
-    RowKeyKind, Schema, Table,
+    CanonicalValue, CheckpointGeneration, EvolutionVersion, Field, FieldRole, FieldType, KeyedRow,
+    ObjectId,
+    RowKeyKind, RowMergeConflict, Schema, Table,
 };
 use orna_foundation_v1::OvbRaw;
 use orna_storage_v1::{
-    BranchMergeBudget, BranchMergeConflict, BranchMergeError, BranchMergePlan, BranchRowSource,
-    KeyRange, MergeSide, MergedSegment, RowSegmentManifest, TableManifest, ThreeWaySnapshot,
-    merge_three_way_snapshots,
+    BranchMergePairedCheckpointRedoIdentityFrame,
+    BranchMergePairedCheckpointRedoFrame,
+    BranchMergePairedRedoFoldIdentity,
+    BranchMergePairedCheckpointRedoSparseFold,
+    BranchMergePairedCheckpointRedoFoldSegmentRotationFold,
+    BranchMergePairedCheckpointRedoFoldSegmentRotationCompactionRunSnapshot,
+    BranchMergePairedCheckpointRedoFoldSegmentRotationCompactionSnapshot,
+    BranchMergePairedCheckpointRedoFoldSegmentRotationSparseMergeChainRestoreError,
+    BranchMergePairedCheckpointRedoFoldSegmentRotationSparseMergeChainCompactionRunSnapshot,
+    BranchMergePairedCheckpointRedoFoldSegmentRotationSparseMergeChainCompactionSnapshot,
+    BranchMergePairedCheckpointRedoFoldSparseCompactionHandoffRunSnapshot,
+    BranchMergePairedCheckpointRedoFoldSparseCompactionHandoffSnapshot,
+    BranchMergePairedCheckpointRedoFoldSparseStreamChainCompactionRunSnapshot,
+    BranchMergePairedCheckpointRedoFoldSparseStreamChainCompactionSnapshot,
+    BranchMergePairedCheckpointPinIdentity,
+    BranchMergePairedCheckpointRedoFoldLogSegmentIdentityFold,
+    BranchMergePairedCheckpointRedoFoldLogSegmentIdentityCompactionRunSnapshot,
+    BranchMergePairedCheckpointRedoFoldLogSegmentIdentityCompactionSnapshot,
+    BranchMergePairedCheckpointRedoFoldWalSparseMergeChainCompactionRunSnapshot,
+    BranchMergePairedCheckpointRedoFoldWalSparseMergeChainCompactionSnapshot,
+    BranchMergePairedCheckpointRedoFoldChainCompactionIdentityFold,
+    BranchMergePairedCheckpointRedoUndoFrame,
+    BranchMergePairedCheckpointRedoUndoCompactionIdentityFrame,
+    BranchMergePairedWriteAheadIdentity,
+    BranchMergePairedWriteAheadSegmentIdentity,
+    BranchMergePairedUndoChainIdentity,
+    BranchMergePairedCheckpointRedoSegmentFrame,
+    BranchMergePairedCheckpointRedoLogSegmentFrame,
+    BranchMergePairedLogSegmentIdentity,
+    BranchMergePairedRedoChainIdentity,
+    BranchMergePairedCheckpointRedoChainIdentityFrame,
+    BranchMergePairedCheckpointRedoChainCompactionIdentityFrame,
+    BranchMergePairedCompactionIdentity,
+    BranchMergePairedCheckpointRedoCompactionIdentityFrame,
+    BranchMergeBudget, BranchMergeColumnDepthEvent, BranchMergeColumnDepthFragments,
+    BranchMergeColumnDepthFragmentSnapshot, BranchMergeColumnDepthLadderEvent,
+    BranchMergeColumnDepthLadderSnapshot, BranchMergeColumnDepthLadderWaveSnapshot,
+    BranchMergeColumnRestoreLadderFoldSnapshot,
+    BranchMergeColumnRestoreLadderTimelineSnapshot,
+    BranchMergeColumnRestoreLadderWaveSlotSnapshot,
+    BranchMergeColumnRestoreStormFoldSnapshot,
+    BranchMergeColumnRestoreStormLadderSnapshot,
+    BranchMergeColumnRestoreStormSnapshot,
+    BranchMergeColumnRestoreStormDepthLabelWaveSnapshot,
+    BranchMergeColumnRestoreStormDepthPathSnapshot,
+    BranchMergeColumnRestoreStormDepthPathFragmentSnapshot,
+    BranchMergeColumnRestoreStormDepthPathWaveSlotSnapshot,
+    BranchMergeColumnRestoreStormSnapshotPathFoldSnapshot,
+    BranchMergeColumnRestoreStormSnapshotPathWaveSlotSnapshot,
+    BranchMergeColumnRestoreSnapshotPathChainFoldSnapshot,
+    BranchMergeColumnRestoreSnapshotPathStormSnapshot,
+    BranchMergeColumnRestorePairedSnapshotPathColumnFoldSnapshot,
+    BranchMergeColumnRestorePairedSnapshotPathChainFoldSnapshot,
+    BranchMergeColumnRestorePairedPathExtensionWaveSlotSnapshot,
+    BranchMergeColumnRestorePairedPathExtensionStormSnapshot,
+    BranchMergeColumnRestorePairedPathExtensionColumnFoldSnapshot,
+    BranchMergeColumnRestorePairedPathExtensionFoldSnapshot,
+    BranchMergeSnapshotPathOccurrence,
+    BranchMergeConflict, BranchMergeDepthFragmentRecovery,
+    BranchMergeDepthWaveRecovery, BranchMergeError, BranchMergePlan,
+    BranchMergeMultiParentColumnDepthLadderWaveEvent,
+    BranchMergeMultiParentTabularColumnDepthWave,
+    BranchMergeParentColumnDepthFragmentSnapshot,
+    BranchMergeParentColumnDepthLadderSnapshot,
+    BranchMergeParentColumnDepthLadderEvent,
+    BranchMergeTombstoneEvent, BranchRowSource,
+    BranchMergePlanSequenceError, BranchMergePlanSequencer, BranchMergeTombstoneHistory,
+    BranchMergeTabularColumnDepthWave, BranchMergeTabularColumnRestoreWaveSnapshot,
+    BranchMergeTabularDepthWave,
+    BranchMergeTableDepthFragments, BranchMergeTableDepthLadderEvent,
+    BranchMergeTombstoneHistoryError, KeyRange, MergeSide, MergedSegment, RowSegmentManifest,
+    SequencedBranchMergePlan, TableManifest, ThreeWaySnapshot,
+    compress_paired_checkpoint_redo_chain, merge_three_way_snapshots,
+    compress_paired_checkpoint_redo_chain_preserving_write_ahead_identity,
+    fold_paired_checkpoint_redo_sparse_streams,
+    fold_paired_checkpoint_redo_sparse_stream_chains_preserving_write_ahead_identity,
+    fold_paired_checkpoint_redo_sparse_stream_chains_preserving_fold_identity,
+    merge_paired_checkpoint_redo_sparse_stream_chains_preserving_fold_identity,
+    merge_paired_checkpoint_redo_sparse_stream_chains_preserving_checkpoint_pin_identity,
+    compress_paired_checkpoint_redo_sparse_stream_chains_preserving_fold_identity,
+    restore_paired_checkpoint_redo_sparse_stream_chains_preserving_fold_identity,
+    restore_paired_checkpoint_redo_sparse_compaction_handoff_chains_preserving_restore_identity,
+    restore_paired_checkpoint_redo_sparse_compaction_handoff_chains_preserving_source_identity,
+    restore_paired_checkpoint_redo_sparse_wal_handoff_chains_preserving_identity,
+    restore_paired_checkpoint_redo_sparse_wal_merge_handoff_chains_preserving_identity,
+    restore_paired_checkpoint_redo_sparse_wal_merge_handoff_chains_preserving_pin_identity,
+    restore_paired_checkpoint_redo_sparse_segment_rotation_handoff_chains_preserving_fold_identity,
+    restore_paired_checkpoint_redo_sparse_segment_rotation_compaction_handoffs_preserving_identity,
+    restore_paired_checkpoint_redo_sparse_segment_rotation_merge_handoffs_preserving_identity,
+    fold_paired_checkpoint_redo_sparse_stream_chains_preserving_fold_and_chain_compaction_identity,
+    compress_paired_checkpoint_redo_sparse_stream_chains_preserving_fold_and_chain_compaction_identity,
+    fold_paired_checkpoint_redo_sparse_stream_chains_preserving_fold_and_segment_rotation_identity,
+    compress_paired_checkpoint_redo_sparse_stream_chains_preserving_fold_and_segment_rotation_identity,
+    compress_paired_checkpoint_redo_sparse_merge_chains_preserving_fold_and_segment_rotation_identity,
+    merge_paired_checkpoint_redo_sparse_stream_chains_preserving_fold_and_segment_rotation_identity,
+    merge_paired_checkpoint_redo_sparse_compaction_handoff_chains_preserving_fold_identity,
+    restore_paired_checkpoint_redo_sparse_merge_chains_preserving_fold_and_segment_rotation_identity,
+    restore_paired_checkpoint_redo_sparse_compaction_handoff_chains_preserving_fold_identity,
+    restore_paired_checkpoint_redo_sparse_stream_chains_preserving_fold_and_segment_rotation_identity,
+    fold_paired_checkpoint_redo_sparse_stream_chains_preserving_fold_and_log_segment_identity,
+    compress_paired_checkpoint_redo_sparse_stream_chains_preserving_fold_and_log_segment_identity,
+    restore_paired_checkpoint_redo_sparse_stream_chains_preserving_fold_and_log_segment_identity,
+    fold_paired_checkpoint_redo_sparse_streams_preserving_undo_chain_identity,
+    fold_paired_checkpoint_redo_sparse_stream_chains_preserving_undo_chain_identity,
+    compress_paired_checkpoint_redo_sparse_stream_chains_preserving_undo_chain_identity,
+    fold_paired_checkpoint_redo_sparse_stream_chains_preserving_undo_and_compaction_identity,
+    compress_paired_checkpoint_redo_sparse_stream_chains_preserving_undo_and_compaction_identity,
+    fold_paired_checkpoint_redo_sparse_streams_preserving_segment_rotation_identity,
+    fold_paired_checkpoint_redo_sparse_stream_chains_preserving_segment_rotation_identity,
+    compress_paired_checkpoint_redo_sparse_stream_chains_preserving_segment_rotation_identity,
+    fold_paired_checkpoint_redo_sparse_stream_chains_preserving_log_segment_identity,
+    fold_paired_checkpoint_redo_sparse_stream_chains_preserving_chain_and_log_segment_identity,
+    compress_paired_checkpoint_redo_sparse_stream_chains_preserving_chain_and_log_segment_identity,
+    fold_paired_checkpoint_redo_sparse_stream_chains_preserving_chain_and_compaction_identity,
+    compress_paired_checkpoint_redo_sparse_stream_chains_preserving_chain_and_compaction_identity,
+    compress_paired_checkpoint_redo_sparse_chains_preserving_segment_rotation_identity,
+    compress_paired_checkpoint_redo_sparse_chains_preserving_log_segment_identity,
+    compress_paired_checkpoint_redo_sparse_chains_preserving_chain_and_log_segment_identity,
+    compress_paired_checkpoint_redo_sparse_chains_preserving_compaction_identity,
 };
 use orna_syntax_v1::{Expr, LiteralKind, parse_row};
 use std::{
     collections::BTreeMap,
-    sync::{Arc, Barrier},
+    sync::{Arc, Barrier, mpsc},
 };
 
 const BASE: &str = include_str!("fixtures/merge-contact-base.orna");
@@ -26,9 +143,96 @@ const CHECKPOINT_RESET: &str = include_str!("fixtures/merge-checkpoint-reset.orn
 const CHECKPOINT_TAIL_BASE: &str = include_str!("fixtures/merge-checkpoint-tail-base.orna");
 const CHECKPOINT_TAIL_LEFT: &str = include_str!("fixtures/merge-checkpoint-tail-left.orna");
 const CHECKPOINT_TAIL_RIGHT: &str = include_str!("fixtures/merge-checkpoint-tail-right.orna");
+const PAIRED_CHECKPOINT_REDO: &str =
+    include_str!("fixtures/merge-paired-checkpoint-redo.orna");
+const PAIRED_REDO_FOLD_IDENTITIES: &str =
+    include_str!("fixtures/paired-redo-fold-identities.orna");
+const PAIRED_SPARSE_COMPACTION_PIN_FOLDS: &str =
+    include_str!("fixtures/paired-sparse-compaction-pin-folds.orna");
+const PAIRED_SPARSE_COMPACTION_PIN_GENERATIONS: &str =
+    include_str!("fixtures/paired-sparse-compaction-pin-generations.orna");
+const PAIRED_WRITE_AHEAD_REDO_IDENTITIES: &str =
+    include_str!("fixtures/paired-write-ahead-redo-identities.orna");
+const PAIRED_SPARSE_CHECKPOINT_REDO: &str =
+    include_str!("fixtures/paired-sparse-checkpoint-redo.orna");
+const PAIRED_WRITE_AHEAD_FOLD_CHAIN: &str =
+    include_str!("fixtures/paired-write-ahead-fold-chain.orna");
+const PAIRED_SPARSE_UNDO_CHAIN_IDENTITIES: &str =
+    include_str!("fixtures/paired-sparse-undo-chain-identities.orna");
+const PAIRED_UNDO_CHAIN_FOLD_ROTATIONS: &str =
+    include_str!("fixtures/paired-undo-chain-fold-rotations.orna");
+const PAIRED_SPARSE_SEGMENT_ROTATIONS: &str =
+    include_str!("fixtures/paired-sparse-segment-rotations.orna");
+const PAIRED_SPARSE_SEGMENT_MERGE_CHAINS: &str =
+    include_str!("fixtures/paired-sparse-segment-merge-chains.orna");
+const PAIRED_SPARSE_SEGMENT_PIN_CHAINS: &str =
+    include_str!("fixtures/paired-sparse-segment-pin-chains.orna");
+const PAIRED_SPARSE_CHECKPOINT_RESTORE_CHAINS: &str =
+    include_str!("fixtures/paired-sparse-checkpoint-restore-chains.orna");
+const PAIRED_SPARSE_CHECKPOINT_COMPACTION_HANDOFFS: &str =
+    include_str!("fixtures/paired-sparse-checkpoint-compaction-handoffs.orna");
+const PAIRED_SPARSE_SEGMENT_PIN_RESTORES: &str =
+    include_str!("fixtures/paired-sparse-segment-pin-restores.orna");
+const PAIRED_SPARSE_CHECKPOINT_PIN_CHAINS: &str =
+    include_str!("fixtures/paired-sparse-checkpoint-pin-chains.orna");
+const PAIRED_SEGMENT_FOLD_CHAIN: &str = include_str!("fixtures/paired-segment-fold-chain.orna");
+const PAIRED_COMPACTED_SEGMENT_ROTATIONS: &str =
+    include_str!("fixtures/paired-compacted-segment-rotations.orna");
+const PAIRED_COMPACTED_LOG_IDENTITIES: &str =
+    include_str!("fixtures/paired-compacted-log-identities.orna");
+const PAIRED_COMPACTED_REDO_CHAIN_IDENTITIES: &str =
+    include_str!("fixtures/paired-compacted-redo-chain-identities.orna");
+const PAIRED_COMPACTED_COMPACTION_IDENTITIES: &str =
+    include_str!("fixtures/paired-compacted-compaction-identities.orna");
+const PAIRED_SPARSE_WRITE_AHEAD_COMPACTION_IDENTITIES: &str =
+    include_str!("fixtures/paired-sparse-write-ahead-compaction-identities.orna");
+const PAIRED_SPARSE_WAL_HANDOFF_RESTORE: &str =
+    include_str!("fixtures/paired-sparse-wal-handoff-restore.orna");
+const PAIRED_SPARSE_WAL_MERGE_ROTATION_RESTORES: &str =
+    include_str!("fixtures/paired-sparse-wal-merge-rotation-restores.orna");
+const PAIRED_SPARSE_CHECKPOINT_ROTATION_HANDOFFS: &str =
+    include_str!("fixtures/paired-sparse-checkpoint-rotation-handoffs.orna");
+const PAIRED_SPARSE_SEGMENT_ROTATION_RESTORES: &str =
+    include_str!("fixtures/paired-sparse-segment-rotation-restores.orna");
+const PAIRED_SPARSE_SEGMENT_ROTATION_STREAM_ORDINALS: &str =
+    include_str!("fixtures/paired-sparse-segment-rotation-stream-ordinals.orna");
+const PAIRED_SPARSE_COMPACTION_ROTATION_RESTORES: &str =
+    include_str!("fixtures/paired-sparse-compaction-rotation-restores.orna");
+const PAIRED_UNDO_CHAIN_COMPACTION_ROTATIONS: &str =
+    include_str!("fixtures/paired-undo-chain-compaction-rotations.orna");
 const TOMBSTONE_DEPTH_SHALLOW: &str = include_str!("fixtures/merge-tombstone-depth-shallow.orna");
 const TOMBSTONE_DEPTH_MIDDLE: &str = include_str!("fixtures/merge-tombstone-depth-middle.orna");
 const TOMBSTONE_DEPTH_DEEP: &str = include_str!("fixtures/merge-tombstone-depth-deep.orna");
+const TOMBSTONE_CHAIN: &str = include_str!("fixtures/merge-tombstone-chain.orna");
+const TOMBSTONE_DELTA_RESTORES: &str = include_str!("fixtures/merge-tombstone-delta-restores.orna");
+const TOMBSTONE_DELTA_CONFLICTING_RESTORES: &str =
+    include_str!("fixtures/merge-tombstone-delta-conflicting-restores.orna");
+const TOMBSTONE_PAIRED_CHAIN: &str = include_str!("fixtures/merge-tombstone-paired-chain.orna");
+const TOMBSTONE_RECOVERY_STORM: &str = include_str!("fixtures/merge-tombstone-recovery-storm.orna");
+const TOMBSTONE_DEPTH_COMMIT_ORDER: &str =
+    include_str!("fixtures/merge-tombstone-depth-commit-order.orna");
+const COLUMN_RESTORE_LADDER: &str = include_str!("fixtures/merge-column-restore-ladder.orna");
+const COLUMN_RESTORE_EXTENSIONS: &str =
+    include_str!("fixtures/merge-column-restore-extensions.orna");
+const PAIRED_SNAPSHOT_OMISSIONS: &str =
+    include_str!("fixtures/merge-paired-snapshot-omissions.orna");
+const PAIRED_EXTENSION_OMISSIONS: &str =
+    include_str!("fixtures/merge-paired-extension-omissions.orna");
+const MULTI_PARENT_COLUMN_DEPTH: &str =
+    include_str!("fixtures/merge-multiparent-column-depth.orna");
+const TOMBSTONE_STORM_KEYS: &[&str] = &[
+    "a",
+    "root",
+    "root/child",
+    "root/child/deep",
+    "root/child/deep/storm/a",
+    "root/child/deep/storm/b",
+    "root/child/deep/storm/c",
+    "root/child/deep/storm/d",
+    "root/child/deep/storm/e",
+    "root/child/deep/storm/f",
+    "z",
+];
 
 fn id(value: u8) -> ObjectId {
     ObjectId::new([value; 16])
@@ -171,6 +375,138 @@ fn snapshot(schema: Schema, manifest: TableManifest, checkpoint: Option<Checkpoi
     ThreeWaySnapshot { schema, tables, checkpoints }
 }
 
+fn paired_depth_schema() -> Schema {
+    let mut schema = string_key_schema();
+    let mut paired_table = schema.tables[0].clone();
+    paired_table.id = id(2);
+    paired_table.name = "PairedContact".into();
+    schema.tables.push(paired_table);
+    schema
+}
+
+fn paired_depth_recovery_inputs(
+    reverse_rows: bool,
+) -> (
+    ThreeWaySnapshot,
+    ThreeWaySnapshot,
+    ThreeWaySnapshot,
+    FixtureRows,
+) {
+    let shallow = parse_fixture(TOMBSTONE_DEPTH_SHALLOW, RowKeyKind::Explicit);
+    let middle = parse_fixture(TOMBSTONE_DEPTH_MIDDLE, RowKeyKind::Explicit);
+    let deep = parse_fixture(TOMBSTONE_DEPTH_DEEP, RowKeyKind::Explicit);
+    let mut paired_shallow = shallow.clone();
+    paired_shallow.table = id(2);
+    let mut paired_middle = middle.clone();
+    paired_middle.table = id(2);
+    let mut paired_deep = deep.clone();
+    paired_deep.table = id(2);
+
+    let mut source = FixtureRows::default();
+    source.add(
+        MergeSide::Base,
+        b"pair-a-base-root",
+        vec![shallow.clone()],
+    );
+    source.add(
+        MergeSide::Base,
+        b"pair-a-base-middle",
+        vec![middle.clone()],
+    );
+    source.add(MergeSide::Base, b"pair-a-base-deep", vec![deep.clone()]);
+    source.add(MergeSide::Left, b"pair-a-left-root", Vec::new());
+    source.add(MergeSide::Left, b"pair-a-left-middle", vec![middle]);
+    source.add(MergeSide::Left, b"pair-a-left-deep", Vec::new());
+    source.add(MergeSide::Right, b"pair-a-right-root", Vec::new());
+    source.add(MergeSide::Right, b"pair-a-right-middle", Vec::new());
+    source.add(MergeSide::Right, b"pair-a-right-deep", vec![deep]);
+
+    source.add(
+        MergeSide::Base,
+        b"pair-b-base-root",
+        vec![paired_shallow.clone()],
+    );
+    source.add(
+        MergeSide::Base,
+        b"pair-b-base-middle",
+        vec![paired_middle.clone()],
+    );
+    source.add(
+        MergeSide::Base,
+        b"pair-b-base-deep",
+        vec![paired_deep.clone()],
+    );
+    source.add(MergeSide::Left, b"pair-b-left-root", Vec::new());
+    source.add(
+        MergeSide::Left,
+        b"pair-b-left-middle",
+        vec![paired_middle.clone()],
+    );
+    source.add(
+        MergeSide::Left,
+        b"pair-b-left-deep",
+        vec![paired_deep],
+    );
+    source.add(MergeSide::Right, b"pair-b-right-root", Vec::new());
+    source.add(
+        MergeSide::Right,
+        b"pair-b-right-middle",
+        vec![paired_middle],
+    );
+    source.add(MergeSide::Right, b"pair-b-right-deep", Vec::new());
+
+    if reverse_rows {
+        for rows in source.rows.values_mut() {
+            rows.reverse();
+        }
+    }
+
+    let schema = paired_depth_schema();
+    let make_snapshot = |first, second| {
+        let mut tables = BTreeMap::new();
+        tables.insert(id(1), first);
+        tables.insert(id(2), second);
+        ThreeWaySnapshot { schema: schema.clone(), tables, checkpoints: BTreeMap::new() }
+    };
+    let base = make_snapshot(
+        depth_split_manifest(
+            41,
+            [41, 42, 43],
+            [b"pair-a-base-root", b"pair-a-base-middle", b"pair-a-base-deep"],
+        ),
+        depth_split_manifest(
+            51,
+            [51, 52, 53],
+            [b"pair-b-base-root", b"pair-b-base-middle", b"pair-b-base-deep"],
+        ),
+    );
+    let left = make_snapshot(
+        depth_split_manifest(
+            61,
+            [61, 62, 63],
+            [b"pair-a-left-root", b"pair-a-left-middle", b"pair-a-left-deep"],
+        ),
+        depth_split_manifest(
+            71,
+            [71, 72, 73],
+            [b"pair-b-left-root", b"pair-b-left-middle", b"pair-b-left-deep"],
+        ),
+    );
+    let right = make_snapshot(
+        depth_split_manifest(
+            81,
+            [81, 82, 83],
+            [b"pair-a-right-root", b"pair-a-right-middle", b"pair-a-right-deep"],
+        ),
+        depth_split_manifest(
+            91,
+            [91, 92, 93],
+            [b"pair-b-right-root", b"pair-b-right-middle", b"pair-b-right-deep"],
+        ),
+    );
+    (base, left, right, source)
+}
+
 #[derive(Default)]
 struct FixtureRows {
     rows: BTreeMap<(MergeSide, Vec<u8>), Vec<KeyedRow>>,
@@ -211,6 +547,165 @@ struct BarrierFixtureRows {
 }
 
 impl BranchRowSource for BarrierFixtureRows {
+    fn visit_rows(
+        &mut self,
+        side: MergeSide,
+        table: ObjectId,
+        segment: Option<&RowSegmentManifest>,
+        range: &KeyRange,
+        visitor: &mut dyn FnMut(KeyedRow) -> bool,
+    ) -> Result<(), String> {
+        if let Some(first_load) = self.first_load.take() {
+            first_load.wait();
+        }
+        self.source.visit_rows(side, table, segment, range, visitor)
+    }
+}
+
+struct RecoveringFixtureRows {
+    source: FixtureRows,
+    fail_first_load: bool,
+}
+
+impl BranchRowSource for RecoveringFixtureRows {
+    fn visit_rows(
+        &mut self,
+        side: MergeSide,
+        table: ObjectId,
+        segment: Option<&RowSegmentManifest>,
+        range: &KeyRange,
+        visitor: &mut dyn FnMut(KeyedRow) -> bool,
+    ) -> Result<(), String> {
+        if self.fail_first_load {
+            self.fail_first_load = false;
+            return Err("fixture row source stopped at recovery boundary".into());
+        }
+        self.source.visit_rows(side, table, segment, range, visitor)
+    }
+}
+
+struct PartialRecoveringFixtureRows {
+    source: FixtureRows,
+    fail_after_rows: Option<usize>,
+    rows_delivered_before_failure: usize,
+}
+
+impl BranchRowSource for PartialRecoveringFixtureRows {
+    fn visit_rows(
+        &mut self,
+        side: MergeSide,
+        table: ObjectId,
+        segment: Option<&RowSegmentManifest>,
+        range: &KeyRange,
+        visitor: &mut dyn FnMut(KeyedRow) -> bool,
+    ) -> Result<(), String> {
+        if let Some(limit) = self.fail_after_rows.take() {
+            let mut delivered = 0;
+            let mut partial_visitor = |row| {
+                if delivered == limit {
+                    return false;
+                }
+                delivered += 1;
+                visitor(row)
+            };
+            self.source
+                .visit_rows(side, table, segment, range, &mut partial_visitor)?;
+            self.rows_delivered_before_failure = delivered;
+            return Err("fixture row source failed after partial storm delivery".into());
+        }
+        self.source.visit_rows(side, table, segment, range, visitor)
+    }
+}
+
+struct FailAfterRowsFixtureRows {
+    source: FixtureRows,
+    fail_after_rows: usize,
+    rows_delivered: usize,
+    failed_at: Option<(ObjectId, MergeSide, Vec<u8>)>,
+}
+
+impl BranchRowSource for FailAfterRowsFixtureRows {
+    fn visit_rows(
+        &mut self,
+        side: MergeSide,
+        table: ObjectId,
+        segment: Option<&RowSegmentManifest>,
+        range: &KeyRange,
+        visitor: &mut dyn FnMut(KeyedRow) -> bool,
+    ) -> Result<(), String> {
+        let locator = segment.map(|segment| segment.locator.clone()).unwrap_or_default();
+        let mut delivered = self.rows_delivered;
+        let fail_after_rows = self.fail_after_rows;
+        let mut stopped_at_failure = false;
+        self.source.visit_rows(side, table, segment, range, &mut |row| {
+            if delivered == fail_after_rows {
+                stopped_at_failure = true;
+                return false;
+            }
+            delivered += 1;
+            visitor(row)
+        })?;
+        self.rows_delivered = delivered;
+        if stopped_at_failure {
+            self.failed_at = Some((table, side, locator));
+            return Err("fixture row source failed after a partial row prefix".into());
+        }
+        Ok(())
+    }
+}
+
+struct FailOnTableAfterRowsFixtureRows {
+    source: FixtureRows,
+    table: ObjectId,
+    side: MergeSide,
+    fail_after_rows: usize,
+    rows_delivered: usize,
+    rows_seen: Vec<CanonicalValue>,
+    failed_at: Option<(ObjectId, MergeSide, Vec<u8>)>,
+}
+
+impl BranchRowSource for FailOnTableAfterRowsFixtureRows {
+    fn visit_rows(
+        &mut self,
+        side: MergeSide,
+        table: ObjectId,
+        segment: Option<&RowSegmentManifest>,
+        range: &KeyRange,
+        visitor: &mut dyn FnMut(KeyedRow) -> bool,
+    ) -> Result<(), String> {
+        if table != self.table || side != self.side {
+            return self.source.visit_rows(side, table, segment, range, visitor);
+        }
+
+        let locator = segment.map(|segment| segment.locator.clone()).unwrap_or_default();
+        let mut delivered = self.rows_delivered;
+        let mut rows_seen = Vec::new();
+        let mut stopped_at_failure = false;
+        self.source.visit_rows(side, table, segment, range, &mut |row| {
+            if delivered == self.fail_after_rows {
+                stopped_at_failure = true;
+                return false;
+            }
+            delivered += 1;
+            rows_seen.push(row.key.clone());
+            visitor(row)
+        })?;
+        self.rows_delivered = delivered;
+        self.rows_seen.extend(rows_seen);
+        if stopped_at_failure {
+            self.failed_at = Some((table, side, locator));
+            return Err("fixture row source failed after a partial row prefix".into());
+        }
+        Ok(())
+    }
+}
+
+struct BarrierFailOnTableAfterRowsFixtureRows {
+    source: FailOnTableAfterRowsFixtureRows,
+    first_load: Option<Arc<Barrier>>,
+}
+
+impl BranchRowSource for BarrierFailOnTableAfterRowsFixtureRows {
     fn visit_rows(
         &mut self,
         side: MergeSide,
@@ -15582,6 +16077,483 @@ fn split_cross_depth_load_inputs(
     (base, left, right, source)
 }
 
+fn chain_split_manifest(
+    digest: u8,
+    segment_digest_start: u8,
+    boundaries: &[Vec<u8>],
+    locator_prefix: &str,
+) -> (TableManifest, Vec<Vec<u8>>) {
+    let mut segments = Vec::with_capacity(boundaries.len() + 1);
+    let mut locators = Vec::with_capacity(boundaries.len() + 1);
+    for index in 0..=boundaries.len() {
+        let locator = format!("{locator_prefix}-{index}").into_bytes();
+        locators.push(locator.clone());
+        segments.push(RowSegmentManifest {
+            locator,
+            range: KeyRange::new(
+                index.checked_sub(1).map(|previous| boundaries[previous].clone()),
+                boundaries.get(index).cloned(),
+            )
+            .expect("fixture chain boundaries are in logical key order"),
+            digest: [segment_digest_start + index as u8; 32],
+        });
+    }
+    (TableManifest { digest: [digest; 32], segments }, locators)
+}
+
+fn tombstone_chain_load_inputs(
+    split_layout: bool,
+    left_keeps_even_chain_keys: bool,
+    reverse_whole_loads: bool,
+) -> (
+    ThreeWaySnapshot,
+    ThreeWaySnapshot,
+    ThreeWaySnapshot,
+    FixtureRows,
+) {
+    let chain_rows = TOMBSTONE_CHAIN
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    assert_eq!(chain_rows.len(), 7);
+    let sibling_index = chain_rows.len() - 1;
+    let left_keeps = |index: usize| {
+        index == sibling_index || (index % 2 == 0) == left_keeps_even_chain_keys
+    };
+    let right_keeps = |index: usize| index == sibling_index || !left_keeps(index);
+    let mut source = FixtureRows::default();
+
+    if split_layout {
+        let boundaries = chain_rows
+            .iter()
+            .skip(1)
+            .map(|row| row.key.encode().unwrap())
+            .collect::<Vec<_>>();
+        let (base_manifest, base_locators) = chain_split_manifest(31, 31, &boundaries, "chain-base");
+        let (left_manifest, left_locators) = chain_split_manifest(32, 41, &boundaries, "chain-left");
+        let (right_manifest, right_locators) = chain_split_manifest(33, 51, &boundaries, "chain-right");
+        for (index, row) in chain_rows.iter().enumerate() {
+            source.add(MergeSide::Base, &base_locators[index], vec![row.clone()]);
+            source.add(
+                MergeSide::Left,
+                &left_locators[index],
+                if left_keeps(index) { vec![row.clone()] } else { Vec::new() },
+            );
+            source.add(
+                MergeSide::Right,
+                &right_locators[index],
+                if right_keeps(index) { vec![row.clone()] } else { Vec::new() },
+            );
+        }
+        (
+            snapshot(string_key_schema(), base_manifest, None),
+            snapshot(string_key_schema(), left_manifest, None),
+            snapshot(string_key_schema(), right_manifest, None),
+            source,
+        )
+    } else {
+        let mut base_rows = chain_rows.clone();
+        let mut left_rows = chain_rows
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| left_keeps(*index))
+            .map(|(_, row)| row.clone())
+            .collect::<Vec<_>>();
+        let mut right_rows = chain_rows
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| right_keeps(*index))
+            .map(|(_, row)| row.clone())
+            .collect::<Vec<_>>();
+        if reverse_whole_loads {
+            base_rows.reverse();
+            left_rows.reverse();
+            right_rows.reverse();
+        }
+        source.add(MergeSide::Base, b"chain-whole-base", base_rows);
+        source.add(MergeSide::Left, b"chain-whole-left", left_rows);
+        source.add(MergeSide::Right, b"chain-whole-right", right_rows);
+        (
+            snapshot(string_key_schema(), manifest(61, 61, b"chain-whole-base"), None),
+            snapshot(string_key_schema(), manifest(62, 62, b"chain-whole-left"), None),
+            snapshot(string_key_schema(), manifest(63, 63, b"chain-whole-right"), None),
+            source,
+        )
+    }
+}
+
+fn paired_tombstone_chain_load_inputs(
+    first_table_split: bool,
+    first_left_keeps_even: bool,
+    second_left_keeps_even: bool,
+) -> (
+    ThreeWaySnapshot,
+    ThreeWaySnapshot,
+    ThreeWaySnapshot,
+    FixtureRows,
+) {
+    let (mut base, mut left, mut right, mut source) =
+        tombstone_chain_load_inputs(first_table_split, first_left_keeps_even, false);
+    let (mut paired_base, mut paired_left, mut paired_right, paired_source) =
+        tombstone_chain_load_inputs(!first_table_split, second_left_keeps_even, false);
+
+    let mut second_table = paired_base.schema.tables[0].clone();
+    second_table.id = id(2);
+    second_table.name = "PairedContact".into();
+    for snapshot in [&mut base, &mut left, &mut right] {
+        snapshot.schema.tables.push(second_table.clone());
+    }
+
+    for (primary, paired) in [
+        (&mut base, &mut paired_base),
+        (&mut left, &mut paired_left),
+        (&mut right, &mut paired_right),
+    ] {
+        let mut manifest = paired.tables.remove(&id(1)).expect("paired table manifest exists");
+        for segment in &mut manifest.segments {
+            let mut locator = b"paired-".to_vec();
+            locator.extend_from_slice(&segment.locator);
+            segment.locator = locator;
+        }
+        primary.tables.insert(id(2), manifest);
+    }
+
+    for ((side, locator), mut rows) in paired_source.rows {
+        let mut paired_locator = b"paired-".to_vec();
+        paired_locator.extend_from_slice(&locator);
+        for row in &mut rows {
+            row.table = id(2);
+        }
+        source.rows.insert((side, paired_locator), rows);
+    }
+
+    (base, left, right, source)
+}
+
+fn paired_tombstone_storm_inputs(
+    layout: usize,
+    reverse_rows: bool,
+) -> (
+    ThreeWaySnapshot,
+    ThreeWaySnapshot,
+    ThreeWaySnapshot,
+    FixtureRows,
+) {
+    let template = parse_fixture(TOMBSTONE_RECOVERY_STORM, RowKeyKind::Explicit);
+    let make_rows = |table| {
+        TOMBSTONE_STORM_KEYS
+            .iter()
+            .map(|key| {
+                let mut row = rekey_row(&template, key);
+                row.table = table;
+                row
+            })
+            .collect::<Vec<_>>()
+    };
+    let table_one_rows = make_rows(id(1));
+    let table_two_rows = make_rows(id(2));
+    let (table_one_bounds, table_two_bounds): (&[&str], &[&str]) = if layout % 2 == 0 {
+        (
+            &["root/child", "root/child/deep", "root/child/deep/storm/c", "z"],
+            &["root/child/deep", "root/child/deep/storm/e"],
+        )
+    } else {
+        (
+            &["root", "root/child/deep/storm/d"],
+            &["root/child", "root/child/deep", "root/child/deep/storm/f"],
+        )
+    };
+
+    let mut base_tables = BTreeMap::new();
+    let mut left_tables = BTreeMap::new();
+    let mut right_tables = BTreeMap::new();
+    let mut source = FixtureRows::default();
+    for (table, rows, boundaries, locator_prefix, digest) in [
+        (id(1), table_one_rows, table_one_bounds, "paired-storm-a", 101_u8),
+        (id(2), table_two_rows, table_two_bounds, "paired-storm-b", 131_u8),
+    ] {
+        let encoded_boundaries = boundaries
+            .iter()
+            .map(|boundary| string(boundary).encode().unwrap())
+            .collect::<Vec<_>>();
+        let (base_manifest, base_locators) =
+            chain_split_manifest(digest, digest, &encoded_boundaries, &format!("{locator_prefix}-base"));
+        let (left_manifest, left_locators) = chain_split_manifest(
+            digest + 1,
+            digest + 16,
+            &encoded_boundaries,
+            &format!("{locator_prefix}-left"),
+        );
+        let (right_manifest, right_locators) = chain_split_manifest(
+            digest + 2,
+            digest + 32,
+            &encoded_boundaries,
+            &format!("{locator_prefix}-right"),
+        );
+
+        for index in 0..base_manifest.segments.len() {
+            let range = &base_manifest.segments[index].range;
+            let rows_in_range = rows
+                .iter()
+                .filter(|row| range.contains(&row.key.encode().unwrap()))
+                .cloned()
+                .collect::<Vec<_>>();
+            source.add(MergeSide::Base, &base_locators[index], rows_in_range);
+            source.add(MergeSide::Left, &left_locators[index], Vec::new());
+            source.add(MergeSide::Right, &right_locators[index], Vec::new());
+        }
+        base_tables.insert(table, base_manifest);
+        left_tables.insert(table, left_manifest);
+        right_tables.insert(table, right_manifest);
+    }
+    if reverse_rows {
+        for rows in source.rows.values_mut() {
+            rows.reverse();
+        }
+    }
+
+    let schema = paired_depth_schema();
+    let base = ThreeWaySnapshot { schema: schema.clone(), tables: base_tables, checkpoints: BTreeMap::new() };
+    let left = ThreeWaySnapshot { schema: schema.clone(), tables: left_tables, checkpoints: BTreeMap::new() };
+    let right = ThreeWaySnapshot { schema, tables: right_tables, checkpoints: BTreeMap::new() };
+    (base, left, right, source)
+}
+
+fn paired_chained_storm_inputs(
+    base_rows: &[KeyedRow],
+    left_deleted: &[&str],
+    right_deleted: &[&str],
+    layout: usize,
+    reverse_rows: bool,
+    locator_prefix: &str,
+) -> (
+    ThreeWaySnapshot,
+    ThreeWaySnapshot,
+    ThreeWaySnapshot,
+    FixtureRows,
+) {
+    paired_chained_storm_inputs_by_table(
+        &[base_rows, base_rows],
+        left_deleted,
+        right_deleted,
+        layout,
+        reverse_rows,
+        locator_prefix,
+    )
+}
+
+fn paired_chained_storm_inputs_by_table(
+    base_rows_by_table: &[&[KeyedRow]; 2],
+    left_deleted: &[&str],
+    right_deleted: &[&str],
+    layout: usize,
+    reverse_rows: bool,
+    locator_prefix: &str,
+) -> (
+    ThreeWaySnapshot,
+    ThreeWaySnapshot,
+    ThreeWaySnapshot,
+    FixtureRows,
+) {
+    let mut base_tables = BTreeMap::new();
+    let mut left_tables = BTreeMap::new();
+    let mut right_tables = BTreeMap::new();
+    let mut source = FixtureRows::default();
+    for (table_index, table) in [id(1), id(2)].into_iter().enumerate() {
+        let mut table_rows = base_rows_by_table[table_index].to_vec();
+        for row in &mut table_rows {
+            row.table = table;
+        }
+        let left_rows = table_rows
+            .iter()
+            .filter(|row| !left_deleted.iter().any(|key| row.key == string(key)))
+            .cloned()
+            .collect::<Vec<_>>();
+        let right_rows = table_rows
+            .iter()
+            .filter(|row| !right_deleted.iter().any(|key| row.key == string(key)))
+            .cloned()
+            .collect::<Vec<_>>();
+        let boundaries: &[&str] = if (layout + table_index) % 2 == 0 {
+            &["root/child", "root/child/deep/leaf/twig", "z"]
+        } else {
+            &["root/child/deep", "root/child/deep/leaf/twig/bud", "z"]
+        };
+        let encoded_boundaries = boundaries
+            .iter()
+            .map(|boundary| string(boundary).encode().unwrap())
+            .collect::<Vec<_>>();
+        let prefix = format!("{locator_prefix}-table-{table_index}");
+        let (base_manifest, base_locators) = chain_split_manifest(
+            171 + table_index as u8,
+            181 + table_index as u8,
+            &encoded_boundaries,
+            &format!("{prefix}-base"),
+        );
+        let (left_manifest, left_locators) = chain_split_manifest(
+            191 + table_index as u8,
+            201 + table_index as u8,
+            &encoded_boundaries,
+            &format!("{prefix}-left"),
+        );
+        let (right_manifest, right_locators) = chain_split_manifest(
+            211 + table_index as u8,
+            221 + table_index as u8,
+            &encoded_boundaries,
+            &format!("{prefix}-right"),
+        );
+
+        for (side, manifest, locators, rows) in [
+            (MergeSide::Base, &base_manifest, &base_locators, &table_rows),
+            (MergeSide::Left, &left_manifest, &left_locators, &left_rows),
+            (
+                MergeSide::Right,
+                &right_manifest,
+                &right_locators,
+                &right_rows,
+            ),
+        ] {
+            for (segment, locator) in manifest.segments.iter().zip(locators) {
+                let mut rows_in_range = rows
+                    .iter()
+                    .filter(|row| segment.range.contains(&row.key.encode().unwrap()))
+                    .cloned()
+                    .collect::<Vec<_>>();
+                if reverse_rows {
+                    rows_in_range.reverse();
+                }
+                source.add(side, locator, rows_in_range);
+            }
+        }
+        base_tables.insert(table, base_manifest);
+        left_tables.insert(table, left_manifest);
+        right_tables.insert(table, right_manifest);
+    }
+
+    let schema = paired_depth_schema();
+    let base = ThreeWaySnapshot {
+        schema: schema.clone(),
+        tables: base_tables,
+        checkpoints: BTreeMap::new(),
+    };
+    let left = ThreeWaySnapshot {
+        schema: schema.clone(),
+        tables: left_tables,
+        checkpoints: BTreeMap::new(),
+    };
+    let right = ThreeWaySnapshot {
+        schema,
+        tables: right_tables,
+        checkpoints: BTreeMap::new(),
+    };
+    (base, left, right, source)
+}
+
+fn add_chained_storm_fixture_rows(
+    snapshot: &ThreeWaySnapshot,
+    source: &mut FixtureRows,
+    side: MergeSide,
+    table: ObjectId,
+    rows: &[KeyedRow],
+) {
+    let manifest = snapshot.tables.get(&table).expect("paired table manifest exists");
+    for row in rows {
+        let mut row = row.clone();
+        row.table = table;
+        let encoded_key = row.key.encode().expect("fixture keys remain encodable");
+        let segment = manifest
+            .segments
+            .iter()
+            .find(|segment| segment.range.contains(&encoded_key))
+            .expect("the fixture key belongs to a paired depth range");
+        source
+            .rows
+            .entry((side, segment.locator.clone()))
+            .or_default()
+            .push(row);
+    }
+}
+
+fn paired_distinct_depth_chain_inputs(
+    first_table_split: bool,
+    first_left_keeps_even: bool,
+    second_left_keeps_even: bool,
+) -> (
+    ThreeWaySnapshot,
+    ThreeWaySnapshot,
+    ThreeWaySnapshot,
+    FixtureRows,
+) {
+    let (mut base, mut left, mut right, mut source) = paired_tombstone_chain_load_inputs(
+        first_table_split,
+        first_left_keeps_even,
+        second_left_keeps_even,
+    );
+    let mut second_rows = TOMBSTONE_PAIRED_CHAIN
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    assert_eq!(second_rows.len(), 7);
+    for row in &mut second_rows {
+        row.table = id(2);
+    }
+
+    let second_table_split = !first_table_split;
+    let boundaries = second_rows
+        .iter()
+        .skip(1)
+        .map(|row| row.key.encode().unwrap())
+        .collect::<Vec<_>>();
+    for snapshot in [&mut base, &mut left, &mut right] {
+        let manifest = snapshot.tables.get_mut(&id(2)).expect("second table manifest exists");
+        if second_table_split {
+            assert_eq!(manifest.segments.len(), second_rows.len());
+            for (index, segment) in manifest.segments.iter_mut().enumerate() {
+                segment.range = KeyRange::new(
+                    index.checked_sub(1).map(|previous| boundaries[previous].clone()),
+                    boundaries.get(index).cloned(),
+                )
+                .expect("paired fixture chain boundaries are in logical key order");
+            }
+        }
+    }
+
+    let keeps = |side: MergeSide, index: usize| match side {
+        MergeSide::Base => true,
+        MergeSide::Left => index >= 3 || (index % 2 == 0) == second_left_keeps_even,
+        MergeSide::Right => index >= 3 || (index % 2 == 0) != second_left_keeps_even,
+    };
+    for (side, snapshot) in [
+        (MergeSide::Base, &base),
+        (MergeSide::Left, &left),
+        (MergeSide::Right, &right),
+    ] {
+        let locators = snapshot.tables[&id(2)]
+            .segments
+            .iter()
+            .map(|segment| segment.locator.clone())
+            .collect::<Vec<_>>();
+        if second_table_split {
+            for (index, locator) in locators.into_iter().enumerate() {
+                source.rows.insert(
+                    (side, locator),
+                    if keeps(side, index) { vec![second_rows[index].clone()] } else { Vec::new() },
+                );
+            }
+        } else {
+            let rows = second_rows
+                .iter()
+                .enumerate()
+                .filter(|(index, _)| keeps(side, *index))
+                .map(|(_, row)| row.clone())
+                .collect();
+            source.rows.insert((side, locators[0].clone()), rows);
+        }
+    }
+
+    (base, left, right, source)
+}
+
 fn flattened_row_tombstones(plan: &BranchMergePlan) -> Vec<CanonicalValue> {
     plan.tables[&id(1)]
         .segments
@@ -15589,6 +16561,52 @@ fn flattened_row_tombstones(plan: &BranchMergePlan) -> Vec<CanonicalValue> {
         .flat_map(|segment| match segment {
             MergedSegment::Rows { tombstones, .. } => tombstones.clone(),
             other => panic!("expected materialized cross-depth rows, got {other:?}"),
+        })
+        .collect()
+}
+
+fn flattened_live_row_keys(plan: &BranchMergePlan) -> Vec<CanonicalValue> {
+    plan.tables[&id(1)]
+        .segments
+        .iter()
+        .flat_map(|segment| match segment {
+            MergedSegment::Rows { rows, .. } => rows
+                .iter()
+                .map(|row| row.key.clone())
+                .collect::<Vec<_>>(),
+            other => panic!("expected materialized chain rows, got {other:?}"),
+        })
+        .collect()
+}
+
+fn table_row_tombstones(plan: &BranchMergePlan, table: ObjectId) -> Vec<CanonicalValue> {
+    let mut tombstones = Vec::new();
+    for segment in &plan.tables[&table].segments {
+        if let MergedSegment::Rows { tombstones: segment_tombstones, .. } = segment {
+            tombstones.extend(segment_tombstones.iter().cloned());
+        }
+    }
+    tombstones
+}
+
+fn table_live_row_keys(plan: &BranchMergePlan, table: ObjectId) -> Vec<CanonicalValue> {
+    plan.tables[&table]
+        .segments
+        .iter()
+        .flat_map(|segment| match segment {
+            MergedSegment::Rows { rows, .. } => rows.iter().map(|row| row.key.clone()).collect::<Vec<_>>(),
+            other => panic!("expected materialized chain rows, got {other:?}"),
+        })
+        .collect()
+}
+
+fn table_live_rows(plan: &BranchMergePlan, table: ObjectId) -> Vec<KeyedRow> {
+    plan.tables[&table]
+        .segments
+        .iter()
+        .flat_map(|segment| match segment {
+            MergedSegment::Rows { rows, .. } => rows.clone(),
+            other => panic!("expected materialized chained rows, got {other:?}"),
         })
         .collect()
 }
@@ -15675,6 +16693,66 @@ fn unaligned_tombstone_inputs(
     let mut source = FixtureRows::default();
     // An absent segment locator denotes the complete logical table for this
     // adapter fixture, as required by the row-source contract.
+    source.add(MergeSide::Base, b"", base_rows);
+    source.add(MergeSide::Left, b"", left_rows);
+    source.add(MergeSide::Right, b"", right_rows);
+    (base, left, right, source)
+}
+
+fn recovery_tombstone_storm_inputs(
+    layout: u8,
+    edit_right: bool,
+    reverse_rows: bool,
+) -> (
+    ThreeWaySnapshot,
+    ThreeWaySnapshot,
+    ThreeWaySnapshot,
+    FixtureRows,
+) {
+    let template = parse_fixture(TOMBSTONE_RECOVERY_STORM, RowKeyKind::Explicit);
+    let mut base_rows = TOMBSTONE_STORM_KEYS
+        .iter()
+        .map(|key| rekey_row(&template, key))
+        .collect::<Vec<_>>();
+    let mut left_rows = Vec::new();
+    let mut right_rows = if edit_right {
+        base_rows
+            .iter()
+            .enumerate()
+            .map(|(index, row)| edit_name(row, &format!("right edit {index}")))
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
+    if reverse_rows {
+        base_rows.reverse();
+        left_rows.reverse();
+        right_rows.reverse();
+    }
+
+    // Each layout uses different boundaries so recovery retries exercise the
+    // complete-table fallback as well as different source visitation orders.
+    let (base_bounds, left_bounds, right_bounds) = if layout == 0 {
+        (&["root/child"][..], &[][..], &["root/child/deep"][..])
+    } else {
+        (&[][..], &["root/child/deep"][..], &["root/child"][..])
+    };
+    let base = snapshot(
+        string_key_schema(),
+        logical_split_manifest(81 + layout * 3, base_bounds),
+        None,
+    );
+    let left = snapshot(
+        string_key_schema(),
+        logical_split_manifest(82 + layout * 3, left_bounds),
+        None,
+    );
+    let right = snapshot(
+        string_key_schema(),
+        logical_split_manifest(83 + layout * 3, right_bounds),
+        None,
+    );
+    let mut source = FixtureRows::default();
     source.add(MergeSide::Base, b"", base_rows);
     source.add(MergeSide::Left, b"", left_rows);
     source.add(MergeSide::Right, b"", right_rows);
@@ -15818,6 +16896,351 @@ fn concurrent_unaligned_tombstones_and_conflicts_follow_one_logical_order() {
 }
 
 #[test]
+fn concurrent_recovery_retries_preserve_tombstone_conflict_order() {
+    // The reference requires an unavailable row history to fail closed but is
+    // silent on retry scheduling. After row recovery, fresh plans restart from
+    // canonical range/key order and must not inherit partial work from the
+    // failed attempt.
+    let (base, left, right, source) = unaligned_tombstone_inputs(0, true, false);
+    let mut interrupted = RecoveringFixtureRows {
+        source,
+        fail_first_load: true,
+    };
+    let error = merge_three_way_snapshots(
+        &base,
+        &left,
+        &right,
+        &mut interrupted,
+        BranchMergeBudget { max_rows_examined: 8, max_conflicts: 2 },
+    )
+    .unwrap_err();
+    assert_eq!(
+        error,
+        BranchMergeError::RowRead {
+            message: "fixture row source stopped at recovery boundary".into(),
+        },
+    );
+    assert!(interrupted.source.visited.is_empty(), "the failed source yielded no partial rows");
+
+    let (base_a, left_a, right_a, source_a) = unaligned_tombstone_inputs(0, true, false);
+    let (base_b, left_b, right_b, source_b) = unaligned_tombstone_inputs(1, true, true);
+    let start = Arc::new(Barrier::new(2));
+    let start_a = Arc::clone(&start);
+    let retry_a = std::thread::spawn(move || {
+        let mut source = BarrierFixtureRows {
+            source: source_a,
+            first_load: Some(start_a),
+        };
+        merge_three_way_snapshots(
+            &base_a,
+            &left_a,
+            &right_a,
+            &mut source,
+            BranchMergeBudget { max_rows_examined: 8, max_conflicts: 2 },
+        )
+    });
+    let retry_b = std::thread::spawn(move || {
+        let mut source = BarrierFixtureRows {
+            source: source_b,
+            first_load: Some(start),
+        };
+        merge_three_way_snapshots(
+            &base_b,
+            &left_b,
+            &right_b,
+            &mut source,
+            BranchMergeBudget { max_rows_examined: 8, max_conflicts: 2 },
+        )
+    });
+    let result_a = retry_a.join().expect("first recovered retry completes");
+    let result_b = retry_b.join().expect("second recovered retry completes");
+    assert_eq!(result_a, result_b, "recovery and concurrent scheduling preserve the same result");
+    let BranchMergeError::Conflicts { conflicts, report } = result_a.unwrap_err() else {
+        panic!("recovered row history retains its ordered delete/edit conflicts")
+    };
+    let conflict_keys = conflicts
+        .iter()
+        .map(|conflict| match conflict {
+            BranchMergeConflict::Row {
+                conflict: orna_evolution_v1::RowMergeConflict::DeleteAndEdit { key, .. },
+                ..
+            } => key.clone(),
+            other => panic!("unexpected recovered merge conflict: {other:?}"),
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(conflict_keys, vec![string("root/child"), string("z")]);
+    assert_eq!(report.rows_examined, 8);
+    assert_eq!(report.conflicts_lower_bound, 2);
+    assert_eq!(report.affected_ranges, [(id(1), KeyRange::all())].into_iter().collect());
+}
+
+#[test]
+fn concurrent_recovery_tombstone_storms_keep_canonical_key_order() {
+    // MERGE-005 bounds work but does not prescribe output ordering after a
+    // partial row-source recovery. Fresh retries use canonical key order.
+    let row_budget = TOMBSTONE_STORM_KEYS.len();
+    let (base, left, right, source) = recovery_tombstone_storm_inputs(0, false, false);
+    let mut interrupted = PartialRecoveringFixtureRows {
+        source,
+        fail_after_rows: Some(4),
+        rows_delivered_before_failure: 0,
+    };
+    assert_eq!(
+        merge_three_way_snapshots(
+            &base,
+            &left,
+            &right,
+            &mut interrupted,
+            BranchMergeBudget { max_rows_examined: row_budget, max_conflicts: 0 },
+        ),
+        Err(BranchMergeError::RowRead {
+            message: "fixture row source failed after partial storm delivery".into(),
+        }),
+    );
+    assert_eq!(interrupted.rows_delivered_before_failure, 4);
+
+    let (base_a, left_a, right_a, source_a) = recovery_tombstone_storm_inputs(0, false, false);
+    let (base_b, left_b, right_b, source_b) = recovery_tombstone_storm_inputs(1, false, true);
+    let start = Arc::new(Barrier::new(2));
+    let start_a = Arc::clone(&start);
+    let retry_a = std::thread::spawn(move || {
+        let mut source = BarrierFixtureRows {
+            source: source_a,
+            first_load: Some(start_a),
+        };
+        merge_three_way_snapshots(
+            &base_a,
+            &left_a,
+            &right_a,
+            &mut source,
+            BranchMergeBudget { max_rows_examined: row_budget, max_conflicts: 0 },
+        )
+    });
+    let retry_b = std::thread::spawn(move || {
+        let mut source = BarrierFixtureRows {
+            source: source_b,
+            first_load: Some(start),
+        };
+        merge_three_way_snapshots(
+            &base_b,
+            &left_b,
+            &right_b,
+            &mut source,
+            BranchMergeBudget { max_rows_examined: row_budget, max_conflicts: 0 },
+        )
+    });
+    let plan_a = retry_a.join().expect("first storm retry completes").unwrap();
+    let plan_b = retry_b.join().expect("second storm retry completes").unwrap();
+    assert_eq!(plan_a, plan_b, "layout and concurrent row visitation do not reorder tombstones");
+    let [MergedSegment::Rows { range, rows, tombstones }] =
+        plan_a.tables[&id(1)].segments.as_slice()
+    else {
+        panic!("the recovered storm materializes one complete key range")
+    };
+    assert_eq!(*range, KeyRange::all());
+    assert!(rows.is_empty());
+    assert_eq!(
+        tombstones,
+        &TOMBSTONE_STORM_KEYS.iter().map(|key| string(key)).collect::<Vec<_>>(),
+    );
+    assert_eq!(plan_a.report.rows_examined, row_budget);
+    assert_eq!(plan_a.report.conflicts_lower_bound, 0);
+}
+
+#[test]
+fn paired_depth_recovery_retries_keep_table_and_tombstone_order() {
+    // MERGE-1 requires a complete isolated result but leaves paired table and
+    // depth-range ordering open. The v1 policy discards earlier tombstones
+    // when a later pair range fails, then retries the ordered walk from its
+    // first table after recovery.
+    let (base, left, right, source) = paired_depth_recovery_inputs(false);
+    let mut interrupted = FailAfterRowsFixtureRows {
+        source,
+        fail_after_rows: 6,
+        rows_delivered: 0,
+        failed_at: None,
+    };
+    assert_eq!(
+        merge_three_way_snapshots(
+            &base,
+            &left,
+            &right,
+            &mut interrupted,
+            BranchMergeBudget { max_rows_examined: 11, max_conflicts: 0 },
+        ),
+        Err(BranchMergeError::RowRead {
+            message: "fixture row source failed after a partial row prefix".into(),
+        }),
+    );
+    assert_eq!(interrupted.rows_delivered, 6);
+    assert_eq!(
+        interrupted.failed_at,
+        Some((id(2), MergeSide::Base, b"pair-b-base-middle".to_vec())),
+        "the first table completed before the paired table failed at its middle depth",
+    );
+
+    let (base_a, left_a, right_a, source_a) = paired_depth_recovery_inputs(false);
+    let (base_b, left_b, right_b, source_b) = paired_depth_recovery_inputs(true);
+    let start = Arc::new(Barrier::new(2));
+    let start_a = Arc::clone(&start);
+    let retry_a = std::thread::spawn(move || {
+        let mut source = BarrierFixtureRows { source: source_a, first_load: Some(start_a) };
+        merge_three_way_snapshots(
+            &base_a,
+            &left_a,
+            &right_a,
+            &mut source,
+            BranchMergeBudget { max_rows_examined: 11, max_conflicts: 0 },
+        )
+    });
+    let retry_b = std::thread::spawn(move || {
+        let mut source = BarrierFixtureRows { source: source_b, first_load: Some(start) };
+        merge_three_way_snapshots(
+            &base_b,
+            &left_b,
+            &right_b,
+            &mut source,
+            BranchMergeBudget { max_rows_examined: 11, max_conflicts: 0 },
+        )
+    });
+
+    let plan_a = retry_a.join().expect("first paired-depth retry completes").unwrap();
+    let plan_b = retry_b.join().expect("second paired-depth retry completes").unwrap();
+    assert_eq!(plan_a, plan_b, "recovered paired depth merges ignore row visitation order");
+    assert_eq!(plan_a.tables.keys().copied().collect::<Vec<_>>(), vec![id(1), id(2)]);
+    assert_eq!(plan_a.report.rows_examined, 11);
+    assert_eq!(plan_a.report.conflicts_lower_bound, 0);
+
+    let table_one_tombstones = plan_a.tables[&id(1)]
+        .segments
+        .iter()
+        .flat_map(|segment| match segment {
+            MergedSegment::Rows { tombstones, .. } => tombstones.clone(),
+            other => panic!("first paired depth range is materialized: {other:?}"),
+        })
+        .collect::<Vec<_>>();
+    let table_two_tombstones = plan_a.tables[&id(2)]
+        .segments
+        .iter()
+        .flat_map(|segment| match segment {
+            MergedSegment::Rows { tombstones, .. } => tombstones.clone(),
+            other => panic!("second paired depth range is materialized: {other:?}"),
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        table_one_tombstones,
+        vec![string("root"), string("root/child"), string("root/child/deep")],
+    );
+    assert_eq!(table_two_tombstones, vec![string("root"), string("root/child/deep")]);
+    let table_two_rows = plan_a.tables[&id(2)]
+        .segments
+        .iter()
+        .flat_map(|segment| match segment {
+            MergedSegment::Rows { rows, .. } => rows.clone(),
+            other => panic!("second paired depth range is materialized: {other:?}"),
+        })
+        .collect::<Vec<_>>();
+    let mut expected_table_two_row = parse_fixture(TOMBSTONE_DEPTH_MIDDLE, RowKeyKind::Explicit);
+    expected_table_two_row.table = id(2);
+    assert_eq!(table_two_rows, vec![expected_table_two_row]);
+}
+
+#[test]
+fn concurrent_recovery_tombstone_conflict_storm_respects_the_detail_budget() {
+    // A recovered conflict storm reports its full canonical sequence when it
+    // fits; over budget, the first omitted conflict still advances the lower
+    // bound and leaves the candidate unavailable.
+    let row_budget = TOMBSTONE_STORM_KEYS.len() * 2;
+    let conflict_budget = TOMBSTONE_STORM_KEYS.len();
+    let (base, left, right, source) = recovery_tombstone_storm_inputs(0, true, false);
+    let mut interrupted = PartialRecoveringFixtureRows {
+        source,
+        fail_after_rows: Some(4),
+        rows_delivered_before_failure: 0,
+    };
+    assert!(matches!(
+        merge_three_way_snapshots(
+            &base,
+            &left,
+            &right,
+            &mut interrupted,
+            BranchMergeBudget { max_rows_examined: row_budget, max_conflicts: conflict_budget },
+        ),
+        Err(BranchMergeError::RowRead { .. }),
+    ));
+    assert_eq!(interrupted.rows_delivered_before_failure, 4);
+
+    let (base_a, left_a, right_a, source_a) = recovery_tombstone_storm_inputs(0, true, false);
+    let (base_b, left_b, right_b, source_b) = recovery_tombstone_storm_inputs(1, true, true);
+    let start = Arc::new(Barrier::new(2));
+    let start_a = Arc::clone(&start);
+    let retry_a = std::thread::spawn(move || {
+        let mut source = BarrierFixtureRows {
+            source: source_a,
+            first_load: Some(start_a),
+        };
+        merge_three_way_snapshots(
+            &base_a,
+            &left_a,
+            &right_a,
+            &mut source,
+            BranchMergeBudget { max_rows_examined: row_budget, max_conflicts: conflict_budget },
+        )
+    });
+    let retry_b = std::thread::spawn(move || {
+        let mut source = BarrierFixtureRows {
+            source: source_b,
+            first_load: Some(start),
+        };
+        merge_three_way_snapshots(
+            &base_b,
+            &left_b,
+            &right_b,
+            &mut source,
+            BranchMergeBudget { max_rows_examined: row_budget, max_conflicts: conflict_budget },
+        )
+    });
+    let result_a = retry_a.join().expect("first conflict storm retry completes");
+    let result_b = retry_b.join().expect("second conflict storm retry completes");
+    assert_eq!(result_a, result_b, "recovery and source order preserve conflict diagnostics");
+    let BranchMergeError::Conflicts { conflicts, report } = result_a.unwrap_err() else {
+        panic!("the exact conflict detail budget retains the full storm")
+    };
+    let conflict_keys = conflicts
+        .iter()
+        .map(|conflict| match conflict {
+            BranchMergeConflict::Row {
+                conflict: orna_evolution_v1::RowMergeConflict::DeleteAndEdit { key, .. },
+                ..
+            } => key.clone(),
+            other => panic!("unexpected recovery storm conflict: {other:?}"),
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        conflict_keys,
+        TOMBSTONE_STORM_KEYS.iter().map(|key| string(key)).collect::<Vec<_>>(),
+    );
+    assert_eq!(report.rows_examined, row_budget);
+    assert_eq!(report.conflicts_lower_bound, conflict_budget);
+
+    let (base, left, right, mut source) = recovery_tombstone_storm_inputs(1, true, true);
+    let error = merge_three_way_snapshots(
+        &base,
+        &left,
+        &right,
+        &mut source,
+        BranchMergeBudget { max_rows_examined: row_budget, max_conflicts: 3 },
+    )
+    .unwrap_err();
+    let BranchMergeError::BudgetExceeded { report } = error else {
+        panic!("the first storm conflict above budget stops planning")
+    };
+    assert_eq!(report.rows_examined, row_budget);
+    assert_eq!(report.conflicts_lower_bound, 4);
+    assert_eq!(report.affected_ranges, [(id(1), KeyRange::all())].into_iter().collect());
+}
+
+#[test]
 fn fixture_cross_depth_tombstones_keep_order_at_exact_load_budget() {
     // ORNA-MERGE-005 requires bounded work and an isolated complete result,
     // but is silent on path-depth ordering. A complete load therefore emits
@@ -15938,6 +17361,11303 @@ fn concurrent_split_and_whole_loads_keep_the_same_tombstone_order() {
     assert_eq!(whole_plan.report.rows_examined, 5);
     assert_eq!(split_plan.tables[&id(1)].segments.len(), 3);
     assert_eq!(whole_plan.tables[&id(1)].segments.len(), 1);
+}
+
+#[test]
+fn sustained_concurrent_depth_loads_keep_tombstone_boundary_order() {
+    // The reference is silent on sustained concurrent scheduling. Pin the
+    // local policy that every complete load retains canonical table-key
+    // ordering across both aligned segment boundaries and whole-table scans.
+    const LOADS_PER_WAVE: usize = 8;
+    const WAVES: usize = 6;
+    let expected = vec![string("root"), string("root/child"), string("root/child/deep")];
+    let mut completed = 0;
+
+    for wave in 0..WAVES {
+        let start = Arc::new(Barrier::new(LOADS_PER_WAVE));
+        let mut workers = Vec::with_capacity(LOADS_PER_WAVE);
+        for load in 0..LOADS_PER_WAVE {
+            let split_layout = (wave + load) % 2 == 0;
+            let (base, left, right, mut source) = if split_layout {
+                split_cross_depth_load_inputs((wave + load) % 4 == 0)
+            } else {
+                cross_depth_load_inputs()
+            };
+            if (wave + load) % 3 == 0 {
+                for rows in source.rows.values_mut() {
+                    rows.reverse();
+                }
+            }
+            let gate = Arc::clone(&start);
+            workers.push(std::thread::spawn(move || {
+                let mut source = BarrierFixtureRows { source, first_load: Some(gate) };
+                let plan = merge_three_way_snapshots(
+                    &base,
+                    &left,
+                    &right,
+                    &mut source,
+                    BranchMergeBudget { max_rows_examined: 5, max_conflicts: 0 },
+                )
+                .expect("each synchronized load fits its private exact budget");
+                (plan, split_layout)
+            }));
+        }
+
+        for worker in workers {
+            let (plan, split_layout) = worker.join().expect("sustained load worker completes");
+            assert_eq!(plan.report.rows_examined, 5);
+            assert_eq!(flattened_row_tombstones(&plan), expected);
+            assert_eq!(plan.tables[&id(1)].segments.len(), if split_layout { 3 } else { 1 });
+            completed += 1;
+        }
+    }
+
+    assert_eq!(completed, LOADS_PER_WAVE * WAVES);
+}
+
+#[test]
+fn sustained_concurrent_budget_stops_leave_complete_boundary_orders_isolated() {
+    // A capped concurrent load reports its own incomplete range while its
+    // peers still produce complete, canonically ordered tombstones.
+    const LOADS_PER_WAVE: usize = 8;
+    const WAVES: usize = 6;
+    let expected = vec![string("root"), string("root/child"), string("root/child/deep")];
+    let mut complete_loads = 0;
+    let mut capped_loads = 0;
+
+    for wave in 0..WAVES {
+        let start = Arc::new(Barrier::new(LOADS_PER_WAVE));
+        let mut workers = Vec::with_capacity(LOADS_PER_WAVE);
+        for load in 0..LOADS_PER_WAVE {
+            let split_layout = (wave + load) % 2 == 0;
+            let capped = (wave + load) % 4 == 0;
+            let (base, left, right, mut source) = if split_layout {
+                split_cross_depth_load_inputs((wave + load) % 3 == 0)
+            } else {
+                cross_depth_load_inputs()
+            };
+            if (wave + load) % 3 == 1 {
+                for rows in source.rows.values_mut() {
+                    rows.reverse();
+                }
+            }
+            let gate = Arc::clone(&start);
+            workers.push(std::thread::spawn(move || {
+                let mut source = BarrierFixtureRows { source, first_load: Some(gate) };
+                let row_cap = if capped { 4 } else { 5 };
+                let result = merge_three_way_snapshots(
+                    &base,
+                    &left,
+                    &right,
+                    &mut source,
+                    BranchMergeBudget { max_rows_examined: row_cap, max_conflicts: 0 },
+                );
+                (result, capped, split_layout)
+            }));
+        }
+
+        for worker in workers {
+            let (result, capped, split_layout) =
+                worker.join().expect("budgeted sustained-load worker completes");
+            if capped {
+                let Err(BranchMergeError::BudgetExceeded { report }) = result else {
+                    panic!("a four-row cap stops without returning a partial tombstone plan")
+                };
+                assert_eq!(report.rows_examined, 5);
+                assert_eq!(report.conflicts_lower_bound, 0);
+                assert!(report.affected_tables.contains(&id(1)));
+                capped_loads += 1;
+            } else {
+                let plan = result.expect("an exact-budget peer remains independent");
+                assert_eq!(plan.report.rows_examined, 5);
+                assert_eq!(flattened_row_tombstones(&plan), expected);
+                assert_eq!(
+                    plan.tables[&id(1)].segments.len(),
+                    if split_layout { 3 } else { 1 },
+                );
+                complete_loads += 1;
+            }
+        }
+    }
+
+    assert_eq!(complete_loads, 36);
+    assert_eq!(capped_loads, 12);
+}
+
+#[test]
+fn sustained_concurrent_tombstone_chains_keep_logical_boundary_order() {
+    // The reference does not prescribe concurrent scheduling for nested
+    // tombstone chains. Pin canonical table-key order across every boundary.
+    const LOADS_PER_WAVE: usize = 8;
+    const WAVES: usize = 6;
+    let expected_tombstones = [
+        "root",
+        "root/child",
+        "root/child/deep",
+        "root/child/deep/leaf",
+        "root/child/deep/leaf/twig",
+        "root/child/deep/leaf/twig/bud",
+    ]
+    .into_iter()
+    .map(string)
+    .collect::<Vec<_>>();
+    let expected_live_rows = vec![string("z")];
+    let mut completed = 0;
+
+    for wave in 0..WAVES {
+        let start = Arc::new(Barrier::new(LOADS_PER_WAVE));
+        let mut workers = Vec::with_capacity(LOADS_PER_WAVE);
+        for load in 0..LOADS_PER_WAVE {
+            let split_layout = (wave + load) % 2 == 0;
+            let (base, left, right, source) = tombstone_chain_load_inputs(
+                split_layout,
+                (wave + load) % 3 == 0,
+                (wave + load) % 2 == 1,
+            );
+            let gate = Arc::clone(&start);
+            workers.push(std::thread::spawn(move || {
+                let mut source = BarrierFixtureRows { source, first_load: Some(gate) };
+                let plan = merge_three_way_snapshots(
+                    &base,
+                    &left,
+                    &right,
+                    &mut source,
+                    BranchMergeBudget { max_rows_examined: 15, max_conflicts: 0 },
+                )
+                .expect("each synchronized chain load fits the exact fixture budget");
+                (plan, split_layout)
+            }));
+        }
+
+        for worker in workers {
+            let (plan, split_layout) = worker.join().expect("chain load worker completes");
+            assert_eq!(plan.report.rows_examined, 15);
+            assert_eq!(flattened_row_tombstones(&plan), expected_tombstones);
+            assert_eq!(flattened_live_row_keys(&plan), expected_live_rows);
+            assert_eq!(plan.tables[&id(1)].segments.len(), if split_layout { 7 } else { 1 });
+            completed += 1;
+        }
+    }
+
+    assert_eq!(completed, LOADS_PER_WAVE * WAVES);
+}
+
+#[test]
+fn recovered_tombstone_chain_merges_keep_order_across_depth_layouts() {
+    // The reference requires a complete isolated result but leaves chain
+    // ordering after partial recovery open. Pin the local policy across a
+    // split retry and a whole-table retry of the same nested chain.
+    let (base, left, right, source) = tombstone_chain_load_inputs(true, true, false);
+    let mut interrupted = FailAfterRowsFixtureRows {
+        source,
+        fail_after_rows: 9,
+        rows_delivered: 0,
+        failed_at: None,
+    };
+    assert_eq!(
+        merge_three_way_snapshots(
+            &base,
+            &left,
+            &right,
+            &mut interrupted,
+            BranchMergeBudget { max_rows_examined: 15, max_conflicts: 0 },
+        ),
+        Err(BranchMergeError::RowRead {
+            message: "fixture row source failed after a partial row prefix".into(),
+        }),
+    );
+    assert_eq!(interrupted.rows_delivered, 9);
+    assert_eq!(
+        interrupted.failed_at,
+        Some((id(1), MergeSide::Left, b"chain-left-4".to_vec())),
+        "recovery stops after four complete ranges and part of the next chain range",
+    );
+
+    let (split_base, split_left, split_right, split_source) =
+        tombstone_chain_load_inputs(true, true, false);
+    let (whole_base, whole_left, whole_right, whole_source) =
+        tombstone_chain_load_inputs(false, false, true);
+    let start = Arc::new(Barrier::new(2));
+    let split_start = Arc::clone(&start);
+    let split_retry = std::thread::spawn(move || {
+        let mut source = BarrierFixtureRows { source: split_source, first_load: Some(split_start) };
+        merge_three_way_snapshots(
+            &split_base,
+            &split_left,
+            &split_right,
+            &mut source,
+            BranchMergeBudget { max_rows_examined: 15, max_conflicts: 0 },
+        )
+        .expect("recovered split chain retry completes")
+    });
+    let whole_retry = std::thread::spawn(move || {
+        let mut source = BarrierFixtureRows { source: whole_source, first_load: Some(start) };
+        merge_three_way_snapshots(
+            &whole_base,
+            &whole_left,
+            &whole_right,
+            &mut source,
+            BranchMergeBudget { max_rows_examined: 15, max_conflicts: 0 },
+        )
+        .expect("recovered whole-table chain retry completes")
+    });
+
+    let split_plan = split_retry.join().expect("split chain worker completes");
+    let whole_plan = whole_retry.join().expect("whole-table chain worker completes");
+    let expected_tombstones = [
+        "root",
+        "root/child",
+        "root/child/deep",
+        "root/child/deep/leaf",
+        "root/child/deep/leaf/twig",
+        "root/child/deep/leaf/twig/bud",
+    ]
+    .into_iter()
+    .map(string)
+    .collect::<Vec<_>>();
+    let expected_live_rows = vec![string("z")];
+    for (plan, expected_segments) in [(&split_plan, 7), (&whole_plan, 1)] {
+        assert_eq!(plan.report.rows_examined, 15);
+        assert_eq!(plan.report.conflicts_lower_bound, 0);
+        assert_eq!(flattened_row_tombstones(plan), expected_tombstones);
+        assert_eq!(flattened_live_row_keys(plan), expected_live_rows);
+        assert_eq!(plan.tables[&id(1)].segments.len(), expected_segments);
+    }
+}
+
+#[test]
+fn sustained_concurrent_chain_budget_stops_do_not_disturb_tombstone_order() {
+    // Under the same synchronized load, a one-row-short chain scan must stop
+    // privately while exact-budget peers return the full ordered chain.
+    const LOADS_PER_WAVE: usize = 8;
+    const WAVES: usize = 6;
+    let expected_tombstones = [
+        "root",
+        "root/child",
+        "root/child/deep",
+        "root/child/deep/leaf",
+        "root/child/deep/leaf/twig",
+        "root/child/deep/leaf/twig/bud",
+    ]
+    .into_iter()
+    .map(string)
+    .collect::<Vec<_>>();
+    let expected_live_rows = vec![string("z")];
+    let mut complete_loads = 0;
+    let mut capped_loads = 0;
+
+    for wave in 0..WAVES {
+        let start = Arc::new(Barrier::new(LOADS_PER_WAVE));
+        let mut workers = Vec::with_capacity(LOADS_PER_WAVE);
+        for load in 0..LOADS_PER_WAVE {
+            let split_layout = (wave + load) % 2 == 0;
+            let capped = (wave + load) % 4 == 0;
+            let (base, left, right, source) = tombstone_chain_load_inputs(
+                split_layout,
+                (wave + load) % 3 == 1,
+                (wave + load) % 2 == 0,
+            );
+            let gate = Arc::clone(&start);
+            workers.push(std::thread::spawn(move || {
+                let mut source = BarrierFixtureRows { source, first_load: Some(gate) };
+                let row_cap = if capped { 14 } else { 15 };
+                let result = merge_three_way_snapshots(
+                    &base,
+                    &left,
+                    &right,
+                    &mut source,
+                    BranchMergeBudget { max_rows_examined: row_cap, max_conflicts: 0 },
+                );
+                (result, capped, split_layout)
+            }));
+        }
+
+        for worker in workers {
+            let (result, capped, split_layout) =
+                worker.join().expect("budgeted chain worker completes");
+            if capped {
+                let Err(BranchMergeError::BudgetExceeded { report }) = result else {
+                    panic!("a one-row-short chain budget never returns a partial plan")
+                };
+                assert_eq!(report.rows_examined, 15);
+                assert_eq!(report.conflicts_lower_bound, 0);
+                assert!(report.affected_tables.contains(&id(1)));
+                capped_loads += 1;
+            } else {
+                let plan = result.expect("the exact-budget peer remains independent");
+                assert_eq!(plan.report.rows_examined, 15);
+                assert_eq!(flattened_row_tombstones(&plan), expected_tombstones);
+                assert_eq!(flattened_live_row_keys(&plan), expected_live_rows);
+                assert_eq!(
+                    plan.tables[&id(1)].segments.len(),
+                    if split_layout { 7 } else { 1 },
+                );
+                complete_loads += 1;
+            }
+        }
+    }
+
+    assert_eq!(complete_loads, 36);
+    assert_eq!(capped_loads, 12);
+}
+
+#[test]
+fn sustained_paired_depth_merges_keep_chain_order_isolated() {
+    // The reference leaves concurrent scheduling open. Pin each table's
+    // nested chain order while opposite split and whole-table layouts run
+    // together, including one-row-short scans beside complete peers.
+    const LOADS_PER_WAVE: usize = 8;
+    const WAVES: usize = 6;
+    let expected_tombstones = [
+        "root",
+        "root/child",
+        "root/child/deep",
+        "root/child/deep/leaf",
+        "root/child/deep/leaf/twig",
+        "root/child/deep/leaf/twig/bud",
+    ]
+    .into_iter()
+    .map(string)
+    .collect::<Vec<_>>();
+    let expected_live_rows = vec![string("z")];
+    let mut complete_loads = 0;
+    let mut capped_loads = 0;
+
+    for wave in 0..WAVES {
+        let start = Arc::new(Barrier::new(LOADS_PER_WAVE));
+        let mut workers = Vec::with_capacity(LOADS_PER_WAVE);
+        for load in 0..LOADS_PER_WAVE {
+            let first_table_split = (wave + load) % 2 == 0;
+            let capped = (wave + load) % 4 == 0;
+            let (base, left, right, mut source) = paired_tombstone_chain_load_inputs(
+                first_table_split,
+                (wave + load) % 3 == 0,
+                (wave + load) % 3 != 0,
+            );
+            if (wave + load) % 3 == 1 {
+                for rows in source.rows.values_mut() {
+                    rows.reverse();
+                }
+            }
+            let gate = Arc::clone(&start);
+            workers.push(std::thread::spawn(move || {
+                let mut source = BarrierFixtureRows { source, first_load: Some(gate) };
+                let row_cap = if capped { 29 } else { 30 };
+                let result = merge_three_way_snapshots(
+                    &base,
+                    &left,
+                    &right,
+                    &mut source,
+                    BranchMergeBudget { max_rows_examined: row_cap, max_conflicts: 0 },
+                );
+                (result, capped, first_table_split)
+            }));
+        }
+
+        for worker in workers {
+            let (result, capped, first_table_split) =
+                worker.join().expect("paired-depth worker completes");
+            if capped {
+                let Err(BranchMergeError::BudgetExceeded { report }) = result else {
+                    panic!("a one-row-short paired scan cannot return either partial table plan")
+                };
+                assert_eq!(report.rows_examined, 30);
+                assert_eq!(report.conflicts_lower_bound, 0);
+                assert!(report.affected_tables.contains(&id(2)));
+                capped_loads += 1;
+            } else {
+                let plan = result.expect("an exact-budget peer remains independent");
+                assert_eq!(plan.report.rows_examined, 30);
+                assert_eq!(table_row_tombstones(&plan, id(1)), expected_tombstones);
+                assert_eq!(table_row_tombstones(&plan, id(2)), expected_tombstones);
+                assert_eq!(table_live_row_keys(&plan, id(1)), expected_live_rows);
+                assert_eq!(table_live_row_keys(&plan, id(2)), expected_live_rows);
+                assert_eq!(
+                    plan.tables[&id(1)].segments.len(),
+                    if first_table_split { 7 } else { 1 },
+                );
+                assert_eq!(
+                    plan.tables[&id(2)].segments.len(),
+                    if first_table_split { 1 } else { 7 },
+                );
+                complete_loads += 1;
+            }
+        }
+    }
+
+    assert_eq!(complete_loads, 36);
+    assert_eq!(capped_loads, 12);
+}
+
+#[test]
+fn recovery_storms_keep_paired_tombstone_chain_order() {
+    // MERGE-1 leaves concurrent retry scheduling for paired chain storms
+    // open. Fail after one table and part of the second table, then require a
+    // synchronized storm of fresh retries to recover complete local results.
+    let (base, left, right, source) = paired_tombstone_chain_load_inputs(true, true, false);
+    let mut interrupted = FailAfterRowsFixtureRows {
+        source,
+        fail_after_rows: 24,
+        rows_delivered: 0,
+        failed_at: None,
+    };
+    assert_eq!(
+        merge_three_way_snapshots(
+            &base,
+            &left,
+            &right,
+            &mut interrupted,
+            BranchMergeBudget { max_rows_examined: 30, max_conflicts: 0 },
+        ),
+        Err(BranchMergeError::RowRead {
+            message: "fixture row source failed after a partial row prefix".into(),
+        }),
+    );
+    assert_eq!(interrupted.rows_delivered, 24);
+    assert_eq!(
+        interrupted.failed_at,
+        Some((id(2), MergeSide::Left, b"paired-chain-whole-left".to_vec())),
+        "the first table is complete before recovery stops partway through the paired chain",
+    );
+
+    const RECOVERY_RETRIES: usize = 8;
+    let start = Arc::new(Barrier::new(RECOVERY_RETRIES));
+    let mut workers = Vec::with_capacity(RECOVERY_RETRIES);
+    for retry in 0..RECOVERY_RETRIES {
+        let first_table_split = retry % 2 == 0;
+        let (base, left, right, mut source) = paired_tombstone_chain_load_inputs(
+            first_table_split,
+            retry % 3 == 0,
+            retry % 3 != 0,
+        );
+        if retry % 3 == 1 {
+            for rows in source.rows.values_mut() {
+                rows.reverse();
+            }
+        }
+        let gate = Arc::clone(&start);
+        workers.push(std::thread::spawn(move || {
+            let mut source = BarrierFixtureRows { source, first_load: Some(gate) };
+            let plan = merge_three_way_snapshots(
+                &base,
+                &left,
+                &right,
+                &mut source,
+                BranchMergeBudget { max_rows_examined: 30, max_conflicts: 0 },
+            )
+            .expect("each concurrent retry fits its private exact budget");
+            (plan, first_table_split)
+        }));
+    }
+
+    let expected_tombstones = [
+        "root",
+        "root/child",
+        "root/child/deep",
+        "root/child/deep/leaf",
+        "root/child/deep/leaf/twig",
+        "root/child/deep/leaf/twig/bud",
+    ]
+    .into_iter()
+    .map(string)
+    .collect::<Vec<_>>();
+    let expected_live_rows = vec![string("z")];
+    for worker in workers {
+        let (plan, first_table_split) = worker.join().expect("paired chain retry worker completes");
+        assert_eq!(plan.report.rows_examined, 30);
+        assert_eq!(plan.report.conflicts_lower_bound, 0);
+        for table in [id(1), id(2)] {
+            assert_eq!(table_row_tombstones(&plan, table), expected_tombstones);
+            assert_eq!(table_live_row_keys(&plan, table), expected_live_rows);
+        }
+        assert_eq!(
+            plan.tables[&id(1)].segments.len(),
+            if first_table_split { 7 } else { 1 },
+        );
+        assert_eq!(
+            plan.tables[&id(2)].segments.len(),
+            if first_table_split { 1 } else { 7 },
+        );
+    }
+}
+
+#[test]
+fn recovery_storms_keep_paired_depth_tombstone_order() {
+    // MERGE-1 leaves ordering for wide paired-depth recovery storms open. The
+    // v1 policy discards a partial second-table scan, then gives synchronized
+    // retries the same table-local canonical tombstone order.
+    let (base, left, right, source) = paired_tombstone_storm_inputs(0, false);
+    let mut interrupted = FailAfterRowsFixtureRows {
+        source,
+        fail_after_rows: 13,
+        rows_delivered: 0,
+        failed_at: None,
+    };
+    assert_eq!(
+        merge_three_way_snapshots(
+            &base,
+            &left,
+            &right,
+            &mut interrupted,
+            BranchMergeBudget { max_rows_examined: 22, max_conflicts: 0 },
+        ),
+        Err(BranchMergeError::RowRead {
+            message: "fixture row source failed after a partial row prefix".into(),
+        }),
+    );
+    assert_eq!(interrupted.rows_delivered, 13);
+    assert_eq!(
+        interrupted.failed_at,
+        Some((id(2), MergeSide::Base, b"paired-storm-b-base-0".to_vec())),
+        "the first table completes before the second table fails within its first depth range",
+    );
+
+    const RECOVERY_RETRIES: usize = 8;
+    let start = Arc::new(Barrier::new(RECOVERY_RETRIES));
+    let mut workers = Vec::with_capacity(RECOVERY_RETRIES);
+    for retry in 0..RECOVERY_RETRIES {
+        let layout = (retry / 2) % 2;
+        let (base, left, right, source) = paired_tombstone_storm_inputs(layout, retry % 2 == 1);
+        let gate = Arc::clone(&start);
+        workers.push(std::thread::spawn(move || {
+            let mut source = BarrierFixtureRows { source, first_load: Some(gate) };
+            let plan = merge_three_way_snapshots(
+                &base,
+                &left,
+                &right,
+                &mut source,
+                BranchMergeBudget { max_rows_examined: 22, max_conflicts: 0 },
+            )
+            .expect("each concurrent storm retry fits its private exact budget");
+            (plan, layout)
+        }));
+    }
+
+    let expected_tombstones = TOMBSTONE_STORM_KEYS
+        .iter()
+        .map(|key| string(key))
+        .collect::<Vec<_>>();
+    for worker in workers {
+        let (plan, layout) = worker.join().expect("paired storm retry worker completes");
+        assert_eq!(plan.tables.keys().copied().collect::<Vec<_>>(), vec![id(1), id(2)]);
+        assert_eq!(plan.report.rows_examined, 22);
+        assert_eq!(plan.report.conflicts_lower_bound, 0);
+        for table in [id(1), id(2)] {
+            assert_eq!(table_row_tombstones(&plan, table), expected_tombstones);
+            assert!(table_live_row_keys(&plan, table).is_empty());
+        }
+        let expected_segment_counts = if layout == 0 { (5, 3) } else { (3, 4) };
+        assert_eq!(plan.tables[&id(1)].segments.len(), expected_segment_counts.0);
+        assert_eq!(plan.tables[&id(2)].segments.len(), expected_segment_counts.1);
+    }
+}
+
+#[test]
+fn recovery_storms_keep_tombstone_order_across_chained_paired_merges() {
+    // MERGE-1 is silent on tombstone accumulation across committed plans. Each
+    // completed plan becomes the next base; a later wave reports only new
+    // exact-key deletions, while earlier deletions stay absent and do not mask
+    // their still-live descendants.
+    let fixture_rows = TOMBSTONE_CHAIN
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    assert_eq!(fixture_rows.len(), 7);
+
+    let (base, left, right, mut source) = paired_chained_storm_inputs(
+        &fixture_rows,
+        &["root", "root/child"],
+        &[],
+        0,
+        false,
+        "chained-wave-one",
+    );
+    let wave_one = merge_three_way_snapshots(
+        &base,
+        &left,
+        &right,
+        &mut source,
+        BranchMergeBudget {
+            max_rows_examined: 38,
+            max_conflicts: 0,
+        },
+    )
+    .expect("the first paired chain wave completes within its exact budget");
+    let wave_one_tombstones = ["root", "root/child"]
+        .into_iter()
+        .map(string)
+        .collect::<Vec<_>>();
+    let wave_one_live = [
+        "root/child/deep",
+        "root/child/deep/leaf",
+        "root/child/deep/leaf/twig",
+        "root/child/deep/leaf/twig/bud",
+        "z",
+    ]
+    .into_iter()
+    .map(string)
+    .collect::<Vec<_>>();
+    assert_eq!(wave_one.report.rows_examined, 38);
+    for table in [id(1), id(2)] {
+        assert_eq!(table_row_tombstones(&wave_one, table), wave_one_tombstones);
+        assert_eq!(table_live_row_keys(&wave_one, table), wave_one_live);
+    }
+
+    let wave_two_base = table_live_rows(&wave_one, id(1));
+    let (base, left, right, source) = paired_chained_storm_inputs(
+        &wave_two_base,
+        &["root/child/deep", "root/child/deep/leaf"],
+        &[],
+        1,
+        true,
+        "chained-wave-two-failure",
+    );
+    let mut failed_source = FailAfterRowsFixtureRows {
+        source,
+        fail_after_rows: 13,
+        rows_delivered: 0,
+        failed_at: None,
+    };
+    assert_eq!(
+        merge_three_way_snapshots(
+            &base,
+            &left,
+            &right,
+            &mut failed_source,
+            BranchMergeBudget {
+                max_rows_examined: 26,
+                max_conflicts: 0
+            },
+        ),
+        Err(BranchMergeError::RowRead {
+            message: "fixture row source failed after a partial row prefix".into(),
+        }),
+    );
+    assert_eq!(failed_source.rows_delivered, 13);
+    assert_eq!(
+        failed_source
+            .failed_at
+            .as_ref()
+            .map(|(table, side, _)| (*table, *side)),
+        Some((id(2), MergeSide::Base)),
+        "a later-wave read failure discards the first table's new tombstones",
+    );
+
+    const RECOVERY_RETRIES: usize = 8;
+    let start = Arc::new(Barrier::new(RECOVERY_RETRIES));
+    let mut workers = Vec::with_capacity(RECOVERY_RETRIES);
+    for retry in 0..RECOVERY_RETRIES {
+        let layout = retry % 2;
+        let (base, left, right, source) = paired_chained_storm_inputs(
+            &wave_two_base,
+            &["root/child/deep", "root/child/deep/leaf"],
+            &[],
+            layout,
+            retry % 2 == 1,
+            "chained-wave-two-retry",
+        );
+        let gate = Arc::clone(&start);
+        workers.push(std::thread::spawn(move || {
+            let mut source = BarrierFixtureRows {
+                source,
+                first_load: Some(gate),
+            };
+            let plan = merge_three_way_snapshots(
+                &base,
+                &left,
+                &right,
+                &mut source,
+                BranchMergeBudget {
+                    max_rows_examined: 26,
+                    max_conflicts: 0,
+                },
+            )
+            .expect("each recovered chained wave fits its private exact budget");
+            (plan, layout)
+        }));
+    }
+
+    let wave_two_tombstones = ["root/child/deep", "root/child/deep/leaf"]
+        .into_iter()
+        .map(string)
+        .collect::<Vec<_>>();
+    let wave_two_live = [
+        "root/child/deep/leaf/twig",
+        "root/child/deep/leaf/twig/bud",
+        "z",
+    ]
+    .into_iter()
+    .map(string)
+    .collect::<Vec<_>>();
+    let mut recovered_wave = None;
+    for worker in workers {
+        let (plan, _layout) = worker
+            .join()
+            .expect("chained recovery retry worker completes");
+        assert_eq!(plan.report.rows_examined, 26);
+        assert_eq!(plan.report.conflicts_lower_bound, 0);
+        for table in [id(1), id(2)] {
+            assert_eq!(table_row_tombstones(&plan, table), wave_two_tombstones);
+            assert_eq!(table_live_row_keys(&plan, table), wave_two_live);
+        }
+        if recovered_wave.is_none() {
+            recovered_wave = Some(plan);
+        }
+    }
+
+    let wave_two = recovered_wave.expect("at least one synchronized retry completes");
+    let wave_three_base = table_live_rows(&wave_two, id(1));
+    let (base, left, right, mut source) = paired_chained_storm_inputs(
+        &wave_three_base,
+        &["root/child/deep/leaf/twig"],
+        &["root/child/deep/leaf/twig/bud"],
+        0,
+        true,
+        "chained-wave-three",
+    );
+    let wave_three = merge_three_way_snapshots(
+        &base,
+        &left,
+        &right,
+        &mut source,
+        BranchMergeBudget {
+            max_rows_examined: 14,
+            max_conflicts: 0,
+        },
+    )
+    .expect("the final paired chain wave deletes distinct exact keys");
+    let wave_three_tombstones = ["root/child/deep/leaf/twig", "root/child/deep/leaf/twig/bud"]
+        .into_iter()
+        .map(string)
+        .collect::<Vec<_>>();
+    let final_live = ["z"].into_iter().map(string).collect::<Vec<_>>();
+    assert_eq!(wave_three.report.rows_examined, 14);
+    for table in [id(1), id(2)] {
+        assert_eq!(
+            table_row_tombstones(&wave_three, table),
+            wave_three_tombstones
+        );
+        assert_eq!(table_live_row_keys(&wave_three, table), final_live);
+    }
+}
+
+#[test]
+fn paired_depth_delta_storms_restore_then_redelete_exact_keys() {
+    // MERGE-1 leaves cross-plan tombstone history open. Each paired table
+    // commits only its current wave's delta: a restored key is live without
+    // replaying its earlier delete, and deleting it again records a new event.
+    let fixture_rows = TOMBSTONE_CHAIN
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    let restored_rows = TOMBSTONE_DELTA_RESTORES
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    assert_eq!(fixture_rows.len(), 7);
+    assert_eq!(restored_rows.len(), 2);
+    assert_eq!(restored_rows[0].key, string("root"));
+    assert_eq!(restored_rows[1].key, string("root/child"));
+
+    let (base, left, right, mut source) = paired_chained_storm_inputs(
+        &fixture_rows,
+        &["root"],
+        &["root/child"],
+        0,
+        false,
+        "delta-history-wave-one",
+    );
+    let wave_one = merge_three_way_snapshots(
+        &base,
+        &left,
+        &right,
+        &mut source,
+        BranchMergeBudget { max_rows_examined: 38, max_conflicts: 0 },
+    )
+    .expect("the first paired depth wave commits its initial deletes");
+    let first_delta = ["root", "root/child"].map(string);
+    let first_live = [
+        "root/child/deep",
+        "root/child/deep/leaf",
+        "root/child/deep/leaf/twig",
+        "root/child/deep/leaf/twig/bud",
+        "z",
+    ]
+    .map(string);
+    for table in [id(1), id(2)] {
+        assert_eq!(table_row_tombstones(&wave_one, table), first_delta);
+        assert_eq!(table_live_row_keys(&wave_one, table), first_live);
+    }
+
+    let wave_two_base = table_live_rows(&wave_one, id(1));
+    const RECOVERY_RETRIES: usize = 8;
+    let start = Arc::new(Barrier::new(RECOVERY_RETRIES));
+    let mut workers = Vec::with_capacity(RECOVERY_RETRIES);
+    for retry in 0..RECOVERY_RETRIES {
+        let (base, left, right, mut source) = paired_chained_storm_inputs(
+            &wave_two_base,
+            &["root/child/deep"],
+            &["root/child/deep/leaf"],
+            retry % 2,
+            false,
+            "delta-history-wave-two",
+        );
+        add_chained_storm_fixture_rows(
+            &left,
+            &mut source,
+            MergeSide::Left,
+            id(1),
+            &[restored_rows[0].clone()],
+        );
+        add_chained_storm_fixture_rows(
+            &right,
+            &mut source,
+            MergeSide::Right,
+            id(2),
+            &[restored_rows[1].clone()],
+        );
+        if retry % 2 == 1 {
+            for rows in source.rows.values_mut() {
+                rows.reverse();
+            }
+        }
+        let gate = Arc::clone(&start);
+        workers.push(std::thread::spawn(move || {
+            let mut source = BarrierFixtureRows { source, first_load: Some(gate) };
+            let plan = merge_three_way_snapshots(
+                &base,
+                &left,
+                &right,
+                &mut source,
+                BranchMergeBudget { max_rows_examined: 28, max_conflicts: 0 },
+            )
+            .expect("each restored-key retry fits its private exact budget");
+            plan
+        }));
+    }
+
+    let second_delta = ["root/child/deep", "root/child/deep/leaf"].map(string);
+    let table_one_live = [
+        "root",
+        "root/child/deep/leaf/twig",
+        "root/child/deep/leaf/twig/bud",
+        "z",
+    ]
+    .map(string);
+    let table_two_live = [
+        "root/child",
+        "root/child/deep/leaf/twig",
+        "root/child/deep/leaf/twig/bud",
+        "z",
+    ]
+    .map(string);
+    let mut recovered_wave = None;
+    for worker in workers {
+        let plan = worker.join().expect("restored-key retry worker completes");
+        assert_eq!(plan.report.rows_examined, 28);
+        assert_eq!(plan.report.conflicts_lower_bound, 0);
+        assert_eq!(table_row_tombstones(&plan, id(1)), second_delta);
+        assert_eq!(table_row_tombstones(&plan, id(2)), second_delta);
+        assert_eq!(table_live_row_keys(&plan, id(1)), table_one_live);
+        assert_eq!(table_live_row_keys(&plan, id(2)), table_two_live);
+        let mut expected_root = restored_rows[0].clone();
+        expected_root.table = id(1);
+        let mut expected_child = restored_rows[1].clone();
+        expected_child.table = id(2);
+        assert!(table_live_rows(&plan, id(1)).contains(&expected_root));
+        assert!(table_live_rows(&plan, id(2)).contains(&expected_child));
+        if recovered_wave.is_none() {
+            recovered_wave = Some(plan);
+        }
+    }
+    let wave_two = recovered_wave.expect("at least one paired recovery retry completes");
+
+    let table_one_base = table_live_rows(&wave_two, id(1));
+    let table_two_base = table_live_rows(&wave_two, id(2));
+    let (base, left, right, mut source) = paired_chained_storm_inputs_by_table(
+        &[&table_one_base, &table_two_base],
+        &["root", "root/child/deep/leaf/twig"],
+        &["root/child", "root/child/deep/leaf/twig/bud"],
+        1,
+        true,
+        "delta-history-wave-three",
+    );
+    let wave_three = merge_three_way_snapshots(
+        &base,
+        &left,
+        &right,
+        &mut source,
+        BranchMergeBudget { max_rows_examined: 18, max_conflicts: 0 },
+    )
+    .expect("the final paired wave emits new deletes for restored exact keys");
+    let table_one_final_delta = [
+        "root",
+        "root/child/deep/leaf/twig",
+        "root/child/deep/leaf/twig/bud",
+    ]
+    .map(string);
+    let table_two_final_delta = [
+        "root/child",
+        "root/child/deep/leaf/twig",
+        "root/child/deep/leaf/twig/bud",
+    ]
+    .map(string);
+    for (table, expected_delta) in [
+        (id(1), table_one_final_delta),
+        (id(2), table_two_final_delta),
+    ] {
+        assert_eq!(table_row_tombstones(&wave_three, table), expected_delta);
+        assert_eq!(table_live_row_keys(&wave_three, table), vec![string("z")]);
+    }
+
+    let mut table_one_history = table_row_tombstones(&wave_one, id(1));
+    table_one_history.extend(table_row_tombstones(&wave_two, id(1)));
+    table_one_history.extend(table_row_tombstones(&wave_three, id(1)));
+    assert_eq!(
+        table_one_history,
+        [
+            "root",
+            "root/child",
+            "root/child/deep",
+            "root/child/deep/leaf",
+            "root",
+            "root/child/deep/leaf/twig",
+            "root/child/deep/leaf/twig/bud",
+        ]
+        .map(string),
+        "committed deltas append in wave order, including a re-delete after restore",
+    );
+    let mut table_two_history = table_row_tombstones(&wave_one, id(2));
+    table_two_history.extend(table_row_tombstones(&wave_two, id(2)));
+    table_two_history.extend(table_row_tombstones(&wave_three, id(2)));
+    assert_eq!(
+        table_two_history,
+        [
+            "root",
+            "root/child",
+            "root/child/deep",
+            "root/child/deep/leaf",
+            "root/child",
+            "root/child/deep/leaf/twig",
+            "root/child/deep/leaf/twig/bud",
+        ]
+        .map(string),
+        "each paired table retains its own ordered delete history",
+    );
+}
+
+#[test]
+fn paired_depth_chain_reinsert_conflicts_ignore_prior_tombstones() {
+    // Once a delete is committed, later plans use the now-absent row as their
+    // base. Two unequal explicit-row restorations conflict as ordinary creates;
+    // the old tombstone cannot prefer either branch or reorder the conflicts.
+    let fixture_rows = TOMBSTONE_CHAIN
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    let conflicting_restores = TOMBSTONE_DELTA_CONFLICTING_RESTORES
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    let identical_restores = TOMBSTONE_DELTA_RESTORES
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    assert_eq!(fixture_rows.len(), 7);
+    assert_eq!(conflicting_restores.len(), 4);
+    assert_eq!(identical_restores.len(), 2);
+    assert_eq!(conflicting_restores[0].key, string("root"));
+    assert_eq!(conflicting_restores[1].key, string("root"));
+    assert_eq!(conflicting_restores[2].key, string("root/child"));
+    assert_eq!(conflicting_restores[3].key, string("root/child"));
+
+    let (base, left, right, mut source) = paired_chained_storm_inputs(
+        &fixture_rows,
+        &["root"],
+        &["root/child"],
+        0,
+        false,
+        "competing-restore-wave-one",
+    );
+    let deleted = merge_three_way_snapshots(
+        &base,
+        &left,
+        &right,
+        &mut source,
+        BranchMergeBudget { max_rows_examined: 38, max_conflicts: 0 },
+    )
+    .expect("the first wave commits the two chain tombstones");
+    let prior_delta = ["root", "root/child"].map(string);
+    for table in [id(1), id(2)] {
+        assert_eq!(table_row_tombstones(&deleted, table), prior_delta);
+        assert!(!table_live_row_keys(&deleted, table).contains(&string("root")));
+        assert!(!table_live_row_keys(&deleted, table).contains(&string("root/child")));
+    }
+
+    let next_base_rows = table_live_rows(&deleted, id(1));
+    // Equal explicit restorations converge from the absent post-delete base.
+    // This plan is an alternative to the conflicting branch inputs below.
+    let (base, left, right, mut source) = paired_chained_storm_inputs(
+        &next_base_rows,
+        &[],
+        &[],
+        1,
+        true,
+        "equal-restore-wave-two",
+    );
+    add_chained_storm_fixture_rows(
+        &left,
+        &mut source,
+        MergeSide::Left,
+        id(1),
+        &[identical_restores[0].clone()],
+    );
+    add_chained_storm_fixture_rows(
+        &right,
+        &mut source,
+        MergeSide::Right,
+        id(1),
+        &[identical_restores[0].clone()],
+    );
+    add_chained_storm_fixture_rows(
+        &left,
+        &mut source,
+        MergeSide::Left,
+        id(2),
+        &[identical_restores[1].clone()],
+    );
+    add_chained_storm_fixture_rows(
+        &right,
+        &mut source,
+        MergeSide::Right,
+        id(2),
+        &[identical_restores[1].clone()],
+    );
+    let converged = merge_three_way_snapshots(
+        &base,
+        &left,
+        &right,
+        &mut source,
+        BranchMergeBudget { max_rows_examined: 64, max_conflicts: 8 },
+    )
+    .expect("equal explicit restorations of prior tombstones converge");
+    for table in [id(1), id(2)] {
+        assert!(table_row_tombstones(&converged, table).is_empty());
+    }
+    let mut expected_root = identical_restores[0].clone();
+    expected_root.table = id(1);
+    let mut expected_child = identical_restores[1].clone();
+    expected_child.table = id(2);
+    assert!(table_live_rows(&converged, id(1)).contains(&expected_root));
+    assert!(table_live_rows(&converged, id(2)).contains(&expected_child));
+
+    const RETRIES: usize = 8;
+    let start = Arc::new(Barrier::new(RETRIES));
+    let mut workers = Vec::with_capacity(RETRIES);
+    for retry in 0..RETRIES {
+        let (base, left, right, mut source) = paired_chained_storm_inputs(
+            &next_base_rows,
+            &[],
+            &[],
+            retry % 2,
+            false,
+            "competing-restore-wave-two",
+        );
+        add_chained_storm_fixture_rows(
+            &left,
+            &mut source,
+            MergeSide::Left,
+            id(1),
+            &[conflicting_restores[0].clone()],
+        );
+        add_chained_storm_fixture_rows(
+            &right,
+            &mut source,
+            MergeSide::Right,
+            id(1),
+            &[conflicting_restores[1].clone()],
+        );
+        add_chained_storm_fixture_rows(
+            &left,
+            &mut source,
+            MergeSide::Left,
+            id(2),
+            &[conflicting_restores[2].clone()],
+        );
+        add_chained_storm_fixture_rows(
+            &right,
+            &mut source,
+            MergeSide::Right,
+            id(2),
+            &[conflicting_restores[3].clone()],
+        );
+        if retry % 2 == 1 {
+            for rows in source.rows.values_mut() {
+                rows.reverse();
+            }
+        }
+        let gate = Arc::clone(&start);
+        workers.push(std::thread::spawn(move || {
+            let mut source = BarrierFixtureRows { source, first_load: Some(gate) };
+            merge_three_way_snapshots(
+                &base,
+                &left,
+                &right,
+                &mut source,
+                BranchMergeBudget { max_rows_examined: 64, max_conflicts: 8 },
+            )
+        }));
+    }
+
+    let expected_conflicts = vec![
+        (id(1), string("root")),
+        (id(2), string("root/child")),
+    ];
+    for worker in workers {
+        let result = worker.join().expect("competing restore retry completes");
+        let Err(BranchMergeError::Conflicts { conflicts, report }) = result else {
+            panic!("unequal paired restorations of prior tombstones must conflict")
+        };
+        assert_eq!(report.conflicts_lower_bound, 2);
+        assert!(report.rows_examined > 0);
+        assert!(report.affected_tables.contains(&id(1)));
+        assert!(report.affected_tables.contains(&id(2)));
+        let observed_conflicts = conflicts
+            .into_iter()
+            .map(|conflict| {
+                let BranchMergeConflict::Row {
+                    conflict: RowMergeConflict::KeyCollision { table, key },
+                    ..
+                } = conflict
+                else {
+                    panic!("reinserted explicit keys use ordinary key-collision conflicts")
+                };
+                (table, key)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            observed_conflicts,
+            expected_conflicts,
+            "paired retries retain ascending table and exact chain-key order",
+        );
+    }
+}
+
+#[test]
+fn paired_depth_chain_restore_conflicts_keep_order_when_branches_swap() {
+    // The same competing restores must report the same exact-key conflicts if
+    // left/right inputs are exchanged, regardless of chain split layout or row
+    // source visitation order.
+    let fixture_rows = TOMBSTONE_CHAIN
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    let conflicting_restores = TOMBSTONE_DELTA_CONFLICTING_RESTORES
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    let (base, left, right, mut source) = paired_chained_storm_inputs(
+        &fixture_rows,
+        &["root"],
+        &["root/child"],
+        0,
+        false,
+        "branch-symmetric-restore-wave-one",
+    );
+    let deleted = merge_three_way_snapshots(
+        &base,
+        &left,
+        &right,
+        &mut source,
+        BranchMergeBudget { max_rows_examined: 38, max_conflicts: 0 },
+    )
+    .expect("the setup wave commits the same prior chain tombstones");
+    let next_base_rows = table_live_rows(&deleted, id(1));
+
+    // The first table will have discovered its create conflict before the
+    // second table's base scan fails. That prefix must remain unobservable.
+    let (base, left, right, mut source) = paired_chained_storm_inputs(
+        &next_base_rows,
+        &[],
+        &[],
+        0,
+        false,
+        "branch-symmetric-restore-failed-wave",
+    );
+    add_chained_storm_fixture_rows(
+        &left,
+        &mut source,
+        MergeSide::Left,
+        id(1),
+        &[conflicting_restores[0].clone()],
+    );
+    add_chained_storm_fixture_rows(
+        &right,
+        &mut source,
+        MergeSide::Right,
+        id(1),
+        &[conflicting_restores[1].clone()],
+    );
+    add_chained_storm_fixture_rows(
+        &left,
+        &mut source,
+        MergeSide::Left,
+        id(2),
+        &[conflicting_restores[2].clone()],
+    );
+    add_chained_storm_fixture_rows(
+        &right,
+        &mut source,
+        MergeSide::Right,
+        id(2),
+        &[conflicting_restores[3].clone()],
+    );
+    let mut interrupted = FailAfterRowsFixtureRows {
+        source,
+        fail_after_rows: 17,
+        rows_delivered: 0,
+        failed_at: None,
+    };
+    assert_eq!(
+        merge_three_way_snapshots(
+            &base,
+            &left,
+            &right,
+            &mut interrupted,
+            BranchMergeBudget { max_rows_examined: 64, max_conflicts: 8 },
+        ),
+        Err(BranchMergeError::RowRead {
+            message: "fixture row source failed after a partial row prefix".into(),
+        }),
+    );
+    assert_eq!(interrupted.rows_delivered, 17);
+    assert_eq!(
+        interrupted.failed_at.as_ref().map(|(table, side, _)| (*table, *side)),
+        Some((id(2), MergeSide::Left)),
+        "failure follows the first table's conflict but prevents returning it",
+    );
+
+    const RETRIES: usize = 8;
+    let start = Arc::new(Barrier::new(RETRIES));
+    let mut workers = Vec::with_capacity(RETRIES);
+    for retry in 0..RETRIES {
+        let (base, left, right, mut source) = paired_chained_storm_inputs(
+            &next_base_rows,
+            &[],
+            &[],
+            (retry / 2) % 2,
+            false,
+            "branch-symmetric-restore-wave-two",
+        );
+        add_chained_storm_fixture_rows(
+            &left,
+            &mut source,
+            MergeSide::Left,
+            id(1),
+            &[conflicting_restores[0].clone()],
+        );
+        add_chained_storm_fixture_rows(
+            &right,
+            &mut source,
+            MergeSide::Right,
+            id(1),
+            &[conflicting_restores[1].clone()],
+        );
+        add_chained_storm_fixture_rows(
+            &left,
+            &mut source,
+            MergeSide::Left,
+            id(2),
+            &[conflicting_restores[2].clone()],
+        );
+        add_chained_storm_fixture_rows(
+            &right,
+            &mut source,
+            MergeSide::Right,
+            id(2),
+            &[conflicting_restores[3].clone()],
+        );
+        let reverse_branches = retry % 2 == 1;
+        if retry % 4 >= 2 {
+            for rows in source.rows.values_mut() {
+                rows.reverse();
+            }
+        }
+        if reverse_branches {
+            let original_rows = std::mem::take(&mut source.rows);
+            source.rows = original_rows
+                .into_iter()
+                .map(|((side, locator), rows)| {
+                    let side = match side {
+                        MergeSide::Left => MergeSide::Right,
+                        MergeSide::Right => MergeSide::Left,
+                        MergeSide::Base => MergeSide::Base,
+                    };
+                    ((side, locator), rows)
+                })
+                .collect();
+        }
+        let gate = Arc::clone(&start);
+        workers.push(std::thread::spawn(move || {
+            let mut source = BarrierFixtureRows { source, first_load: Some(gate) };
+            let (merge_left, merge_right) = if reverse_branches {
+                (&right, &left)
+            } else {
+                (&left, &right)
+            };
+            merge_three_way_snapshots(
+                &base,
+                merge_left,
+                merge_right,
+                &mut source,
+                BranchMergeBudget { max_rows_examined: 64, max_conflicts: 8 },
+            )
+        }));
+    }
+
+    let expected_conflicts = vec![
+        (id(1), string("root")),
+        (id(2), string("root/child")),
+    ];
+    for worker in workers {
+        let result = worker.join().expect("branch-swap conflict retry completes");
+        let Err(BranchMergeError::Conflicts { conflicts, report }) = result else {
+            panic!("competing restores remain conflicts after exchanging branch orientation")
+        };
+        assert_eq!(report.conflicts_lower_bound, 2);
+        let observed = conflicts
+            .into_iter()
+            .map(|conflict| {
+                let BranchMergeConflict::Row {
+                    conflict: RowMergeConflict::KeyCollision { table, key },
+                    ..
+                } = conflict
+                else {
+                    panic!("branch swapping preserves ordinary exact-key create conflicts")
+                };
+                (table, key)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(observed, expected_conflicts);
+    }
+}
+
+#[test]
+fn paired_depth_restore_storm_retries_rebuild_after_later_table_failure() {
+    // A failed restoration storm has no partial upsert plan. Every concurrent
+    // retry starts from the same post-delete base and reconstructs the same
+    // restored rows without replaying the already committed tombstones.
+    let fixture_rows = TOMBSTONE_CHAIN
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    let restored_rows = TOMBSTONE_DELTA_RESTORES
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    assert_eq!(fixture_rows.len(), 7);
+    assert_eq!(restored_rows.len(), 2);
+
+    let (base, left, right, mut source) = paired_chained_storm_inputs(
+        &fixture_rows,
+        &["root"],
+        &["root/child"],
+        0,
+        false,
+        "restore-retry-wave-one",
+    );
+    let deleted = merge_three_way_snapshots(
+        &base,
+        &left,
+        &right,
+        &mut source,
+        BranchMergeBudget { max_rows_examined: 38, max_conflicts: 0 },
+    )
+    .expect("the setup wave commits the paired chain deletes");
+    let committed_tombstones = ["root", "root/child"].map(string);
+    for table in [id(1), id(2)] {
+        assert_eq!(table_row_tombstones(&deleted, table), committed_tombstones);
+    }
+    let post_delete_base = table_live_rows(&deleted, id(1));
+
+    let (base, left, right, mut source) = paired_chained_storm_inputs(
+        &post_delete_base,
+        &[],
+        &[],
+        0,
+        false,
+        "restore-retry-failed-wave",
+    );
+    for table in [id(1), id(2)] {
+        let restored = if table == id(1) { &restored_rows[0] } else { &restored_rows[1] };
+        add_chained_storm_fixture_rows(&left, &mut source, MergeSide::Left, table, &[restored.clone()]);
+        add_chained_storm_fixture_rows(&right, &mut source, MergeSide::Right, table, &[restored.clone()]);
+    }
+    let mut interrupted = FailOnTableAfterRowsFixtureRows {
+        source,
+        table: id(2),
+        side: MergeSide::Base,
+        fail_after_rows: 2,
+        rows_delivered: 0,
+        rows_seen: Vec::new(),
+        failed_at: None,
+    };
+    assert_eq!(
+        merge_three_way_snapshots(
+            &base,
+            &left,
+            &right,
+            &mut interrupted,
+            BranchMergeBudget { max_rows_examined: 64, max_conflicts: 0 },
+        ),
+        Err(BranchMergeError::RowRead {
+            message: "fixture row source failed after a partial row prefix".into(),
+        }),
+    );
+    assert_eq!(interrupted.rows_delivered, 2);
+    assert_eq!(
+        interrupted.failed_at.as_ref().map(|(table, side, _)| (*table, *side)),
+        Some((id(2), MergeSide::Base)),
+    );
+    assert!(
+        interrupted.source.visited.iter().any(|(_, locator)| {
+            locator.starts_with(b"restore-retry-failed-wave-table-0-")
+        }),
+        "the first paired table's restored candidate was scanned before the second table failed",
+    );
+
+    const RETRIES: usize = 8;
+    let start = Arc::new(Barrier::new(RETRIES));
+    let mut workers = Vec::with_capacity(RETRIES);
+    for retry in 0..RETRIES {
+        let (base, left, right, mut source) = paired_chained_storm_inputs(
+            &post_delete_base,
+            &[],
+            &[],
+            (retry / 2) % 2,
+            false,
+            "restore-retry-wave-recovered",
+        );
+        for table in [id(1), id(2)] {
+            let restored = if table == id(1) { &restored_rows[0] } else { &restored_rows[1] };
+            add_chained_storm_fixture_rows(&left, &mut source, MergeSide::Left, table, &[restored.clone()]);
+            add_chained_storm_fixture_rows(&right, &mut source, MergeSide::Right, table, &[restored.clone()]);
+        }
+        if retry % 4 >= 2 {
+            for rows in source.rows.values_mut() {
+                rows.reverse();
+            }
+        }
+        let reverse_branches = retry % 2 == 1;
+        if reverse_branches {
+            let original_rows = std::mem::take(&mut source.rows);
+            source.rows = original_rows
+                .into_iter()
+                .map(|((side, locator), rows)| {
+                    let side = match side {
+                        MergeSide::Left => MergeSide::Right,
+                        MergeSide::Right => MergeSide::Left,
+                        MergeSide::Base => MergeSide::Base,
+                    };
+                    ((side, locator), rows)
+                })
+                .collect();
+        }
+        let gate = Arc::clone(&start);
+        workers.push(std::thread::spawn(move || {
+            let mut source = BarrierFixtureRows { source, first_load: Some(gate) };
+            let (merge_left, merge_right) = if reverse_branches {
+                (&right, &left)
+            } else {
+                (&left, &right)
+            };
+            merge_three_way_snapshots(
+                &base,
+                merge_left,
+                merge_right,
+                &mut source,
+                BranchMergeBudget { max_rows_examined: 64, max_conflicts: 0 },
+            )
+            .expect("recovered restoration retry fits its private budget")
+        }));
+    }
+
+    let expected_table_one_keys = [
+        "root",
+        "root/child/deep",
+        "root/child/deep/leaf",
+        "root/child/deep/leaf/twig",
+        "root/child/deep/leaf/twig/bud",
+        "z",
+    ]
+    .map(string);
+    let expected_table_two_keys = [
+        "root/child",
+        "root/child/deep",
+        "root/child/deep/leaf",
+        "root/child/deep/leaf/twig",
+        "root/child/deep/leaf/twig/bud",
+        "z",
+    ]
+    .map(string);
+    let mut committed_retry = None;
+    for worker in workers {
+        let plan = worker.join().expect("restoration storm retry worker completes");
+        assert!(plan.report.rows_examined > 0);
+        assert_eq!(plan.report.conflicts_lower_bound, 0);
+        for (table, expected_keys) in [
+            (id(1), &expected_table_one_keys),
+            (id(2), &expected_table_two_keys),
+        ] {
+            assert!(table_row_tombstones(&plan, table).is_empty());
+            assert_eq!(table_live_row_keys(&plan, table), *expected_keys);
+        }
+        let mut expected_root = restored_rows[0].clone();
+        expected_root.table = id(1);
+        let mut expected_child = restored_rows[1].clone();
+        expected_child.table = id(2);
+        assert!(table_live_rows(&plan, id(1)).contains(&expected_root));
+        assert!(table_live_rows(&plan, id(2)).contains(&expected_child));
+        if committed_retry.is_none() {
+            committed_retry = Some(plan);
+        }
+    }
+    let selected = committed_retry.expect("at least one recovered retry completes");
+    for table in [id(1), id(2)] {
+        let mut history = table_row_tombstones(&deleted, table);
+        history.extend(table_row_tombstones(&selected, table));
+        assert_eq!(
+            history,
+            committed_tombstones,
+            "commit one restored retry without replaying the prior delete delta",
+        );
+    }
+}
+
+#[test]
+fn paired_depth_restore_retries_rebuild_after_chained_merge_waves() {
+    // Each completed wave becomes the next base. A later failed restoration
+    // storm must restart from that chained base, retaining prior restores and
+    // emitting only the current wave's exact tombstone delta.
+    let chain_rows = TOMBSTONE_CHAIN
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    let restored_rows = TOMBSTONE_DELTA_RESTORES
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    assert_eq!(chain_rows.len(), 7);
+    assert_eq!(restored_rows.len(), 2);
+    let deep_restore = chain_rows
+        .iter()
+        .find(|row| row.key == string("root/child/deep"))
+        .expect("the in-crate chain fixture includes the deep row")
+        .clone();
+    let leaf_restore = chain_rows
+        .iter()
+        .find(|row| row.key == string("root/child/deep/leaf"))
+        .expect("the in-crate chain fixture includes the leaf row")
+        .clone();
+
+    let (base, left, right, mut source) = paired_chained_storm_inputs(
+        &chain_rows,
+        &["root"],
+        &["root/child"],
+        0,
+        false,
+        "chained-restore-wave-one",
+    );
+    let wave_one = merge_three_way_snapshots(
+        &base,
+        &left,
+        &right,
+        &mut source,
+        BranchMergeBudget { max_rows_examined: 38, max_conflicts: 0 },
+    )
+    .expect("the first wave commits the paired ancestor deletions");
+    let first_delta = ["root", "root/child"].map(string);
+    for table in [id(1), id(2)] {
+        assert_eq!(table_row_tombstones(&wave_one, table), first_delta);
+    }
+
+    let table_one_wave_one = table_live_rows(&wave_one, id(1));
+    let table_two_wave_one = table_live_rows(&wave_one, id(2));
+    let (base, left, right, mut source) = paired_chained_storm_inputs_by_table(
+        &[&table_one_wave_one, &table_two_wave_one],
+        &["root/child/deep"],
+        &["root/child/deep/leaf"],
+        1,
+        true,
+        "chained-restore-wave-two",
+    );
+    add_chained_storm_fixture_rows(
+        &left,
+        &mut source,
+        MergeSide::Left,
+        id(1),
+        &[restored_rows[0].clone()],
+    );
+    add_chained_storm_fixture_rows(
+        &right,
+        &mut source,
+        MergeSide::Right,
+        id(1),
+        &[restored_rows[0].clone()],
+    );
+    add_chained_storm_fixture_rows(
+        &left,
+        &mut source,
+        MergeSide::Left,
+        id(2),
+        &[restored_rows[1].clone()],
+    );
+    add_chained_storm_fixture_rows(
+        &right,
+        &mut source,
+        MergeSide::Right,
+        id(2),
+        &[restored_rows[1].clone()],
+    );
+    let wave_two = merge_three_way_snapshots(
+        &base,
+        &left,
+        &right,
+        &mut source,
+        BranchMergeBudget { max_rows_examined: 64, max_conflicts: 0 },
+    )
+    .expect("the second wave restores ancestors and deletes deeper keys");
+    let second_delta = ["root/child/deep", "root/child/deep/leaf"].map(string);
+    for table in [id(1), id(2)] {
+        assert_eq!(table_row_tombstones(&wave_two, table), second_delta);
+    }
+    let mut expected_root = restored_rows[0].clone();
+    expected_root.table = id(1);
+    let mut expected_child = restored_rows[1].clone();
+    expected_child.table = id(2);
+    assert!(table_live_rows(&wave_two, id(1)).contains(&expected_root));
+    assert!(table_live_rows(&wave_two, id(2)).contains(&expected_child));
+
+    let table_one_wave_two = table_live_rows(&wave_two, id(1));
+    let table_two_wave_two = table_live_rows(&wave_two, id(2));
+    let (base, left, right, mut source) = paired_chained_storm_inputs_by_table(
+        &[&table_one_wave_two, &table_two_wave_two],
+        &["root/child/deep/leaf/twig"],
+        &["root/child/deep/leaf/twig/bud"],
+        0,
+        false,
+        "chained-restore-wave-three-failed",
+    );
+    for (table, restored) in [(id(1), &deep_restore), (id(2), &leaf_restore)] {
+        add_chained_storm_fixture_rows(
+            &left,
+            &mut source,
+            MergeSide::Left,
+            table,
+            &[restored.clone()],
+        );
+        add_chained_storm_fixture_rows(
+            &right,
+            &mut source,
+            MergeSide::Right,
+            table,
+            &[restored.clone()],
+        );
+    }
+    let mut interrupted = FailOnTableAfterRowsFixtureRows {
+        source,
+        table: id(2),
+        side: MergeSide::Base,
+        fail_after_rows: 1,
+        rows_delivered: 0,
+        rows_seen: Vec::new(),
+        failed_at: None,
+    };
+    assert_eq!(
+        merge_three_way_snapshots(
+            &base,
+            &left,
+            &right,
+            &mut interrupted,
+            BranchMergeBudget { max_rows_examined: 64, max_conflicts: 0 },
+        ),
+        Err(BranchMergeError::RowRead {
+            message: "fixture row source failed after a partial row prefix".into(),
+        }),
+    );
+    assert_eq!(interrupted.rows_delivered, 1);
+    assert_eq!(
+        interrupted.failed_at.as_ref().map(|(table, side, _)| (*table, *side)),
+        Some((id(2), MergeSide::Base)),
+    );
+    assert!(interrupted.source.visited.iter().any(|(_, locator)| {
+        locator.starts_with(b"chained-restore-wave-three-failed-table-0-")
+    }));
+
+    const RETRIES: usize = 8;
+    let start = Arc::new(Barrier::new(RETRIES));
+    let mut workers = Vec::with_capacity(RETRIES);
+    for retry in 0..RETRIES {
+        let (base, left, right, mut source) = paired_chained_storm_inputs_by_table(
+            &[&table_one_wave_two, &table_two_wave_two],
+            &["root/child/deep/leaf/twig"],
+            &["root/child/deep/leaf/twig/bud"],
+            (retry / 2) % 2,
+            false,
+            "chained-restore-wave-three-recovered",
+        );
+        for (table, restored) in [(id(1), &deep_restore), (id(2), &leaf_restore)] {
+            add_chained_storm_fixture_rows(
+                &left,
+                &mut source,
+                MergeSide::Left,
+                table,
+                &[restored.clone()],
+            );
+            add_chained_storm_fixture_rows(
+                &right,
+                &mut source,
+                MergeSide::Right,
+                table,
+                &[restored.clone()],
+            );
+        }
+        if retry % 4 >= 2 {
+            for rows in source.rows.values_mut() {
+                rows.reverse();
+            }
+        }
+        let reverse_branches = retry % 2 == 1;
+        if reverse_branches {
+            let original_rows = std::mem::take(&mut source.rows);
+            source.rows = original_rows
+                .into_iter()
+                .map(|((side, locator), rows)| {
+                    let side = match side {
+                        MergeSide::Left => MergeSide::Right,
+                        MergeSide::Right => MergeSide::Left,
+                        MergeSide::Base => MergeSide::Base,
+                    };
+                    ((side, locator), rows)
+                })
+                .collect();
+        }
+        let gate = Arc::clone(&start);
+        workers.push(std::thread::spawn(move || {
+            let mut source = BarrierFixtureRows { source, first_load: Some(gate) };
+            let (merge_left, merge_right) = if reverse_branches {
+                (&right, &left)
+            } else {
+                (&left, &right)
+            };
+            merge_three_way_snapshots(
+                &base,
+                merge_left,
+                merge_right,
+                &mut source,
+                BranchMergeBudget { max_rows_examined: 64, max_conflicts: 0 },
+            )
+            .expect("the recovered chained restoration retry fits its budget")
+        }));
+    }
+
+    let final_delta = [
+        "root/child/deep/leaf/twig",
+        "root/child/deep/leaf/twig/bud",
+    ]
+    .map(string);
+    let expected_table_one = ["root", "root/child/deep", "z"].map(string);
+    let expected_table_two = ["root/child", "root/child/deep/leaf", "z"].map(string);
+    let mut committed_wave_three = None;
+    for worker in workers {
+        let plan = worker.join().expect("chained restoration retry worker completes");
+        assert_eq!(plan.report.conflicts_lower_bound, 0);
+        for (table, expected_keys) in [
+            (id(1), &expected_table_one),
+            (id(2), &expected_table_two),
+        ] {
+            assert_eq!(table_row_tombstones(&plan, table), final_delta);
+            assert_eq!(table_live_row_keys(&plan, table), *expected_keys);
+        }
+        let mut expected_deep = deep_restore.clone();
+        expected_deep.table = id(1);
+        let mut expected_leaf = leaf_restore.clone();
+        expected_leaf.table = id(2);
+        assert!(table_live_rows(&plan, id(1)).contains(&expected_deep));
+        assert!(table_live_rows(&plan, id(2)).contains(&expected_leaf));
+        if committed_wave_three.is_none() {
+            committed_wave_three = Some(plan);
+        }
+    }
+    let wave_three = committed_wave_three.expect("a chained restore retry completes");
+    let expected_history = [
+        "root",
+        "root/child",
+        "root/child/deep",
+        "root/child/deep/leaf",
+        "root/child/deep/leaf/twig",
+        "root/child/deep/leaf/twig/bud",
+    ]
+    .map(string);
+    for table in [id(1), id(2)] {
+        let mut history = table_row_tombstones(&wave_one, table);
+        history.extend(table_row_tombstones(&wave_two, table));
+        history.extend(table_row_tombstones(&wave_three, table));
+        assert_eq!(history, expected_history);
+    }
+}
+
+#[test]
+fn paired_unequal_depth_restore_storms_rebuild_table_local_chains() {
+    // The paired bases have different path depths: one has a six-key root
+    // chain, the other a three-key anchor chain plus siblings. After those
+    // chains are tombstoned, a failed restore scan in the second table must
+    // not hide the first table's candidate or bias retries across split layouts.
+    let root_rows = TOMBSTONE_CHAIN
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    let root_restores = TOMBSTONE_DELTA_RESTORES
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    let anchor_rows = TOMBSTONE_PAIRED_CHAIN
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    let anchor_restores = anchor_rows.iter().take(3).cloned().collect::<Vec<_>>();
+    assert_eq!(root_rows.len(), 7);
+    assert_eq!(root_restores.len(), 2);
+    assert_eq!(anchor_rows.len(), 7);
+    assert_eq!(
+        anchor_restores.iter().map(|row| row.key.clone()).collect::<Vec<_>>(),
+        ["a", "a/child", "a/child/deep"].map(string),
+    );
+
+    let (base, left, right, mut source) = paired_distinct_depth_chain_inputs(true, true, false);
+    let deleted = merge_three_way_snapshots(
+        &base,
+        &left,
+        &right,
+        &mut source,
+        BranchMergeBudget { max_rows_examined: 33, max_conflicts: 0 },
+    )
+    .expect("the unequal-depth setup wave commits each table's chain tombstones");
+    assert_eq!(deleted.report.rows_examined, 33);
+    let root_delta = [
+        "root",
+        "root/child",
+        "root/child/deep",
+        "root/child/deep/leaf",
+        "root/child/deep/leaf/twig",
+        "root/child/deep/leaf/twig/bud",
+    ]
+    .map(string);
+    let anchor_delta = ["a", "a/child", "a/child/deep"].map(string);
+    assert_eq!(table_row_tombstones(&deleted, id(1)), root_delta);
+    assert_eq!(table_row_tombstones(&deleted, id(2)), anchor_delta);
+    assert_eq!(table_live_row_keys(&deleted, id(1)), vec![string("z")]);
+    assert_eq!(
+        table_live_row_keys(&deleted, id(2)),
+        ["b", "c", "d", "zz"].map(string),
+    );
+
+    let table_one_base = table_live_rows(&deleted, id(1));
+    let table_two_base = table_live_rows(&deleted, id(2));
+    let (base, left, right, mut source) = paired_chained_storm_inputs_by_table(
+        &[&table_one_base, &table_two_base],
+        &[],
+        &[],
+        0,
+        false,
+        "unequal-restore-retry-failed",
+    );
+    for row in &root_restores {
+        add_chained_storm_fixture_rows(&left, &mut source, MergeSide::Left, id(1), &[row.clone()]);
+        add_chained_storm_fixture_rows(&right, &mut source, MergeSide::Right, id(1), &[row.clone()]);
+    }
+    for row in &anchor_restores {
+        add_chained_storm_fixture_rows(&left, &mut source, MergeSide::Left, id(2), &[row.clone()]);
+        add_chained_storm_fixture_rows(&right, &mut source, MergeSide::Right, id(2), &[row.clone()]);
+    }
+    let mut interrupted = FailOnTableAfterRowsFixtureRows {
+        source,
+        table: id(2),
+        side: MergeSide::Left,
+        fail_after_rows: 4,
+        rows_delivered: 0,
+        rows_seen: Vec::new(),
+        failed_at: None,
+    };
+    assert_eq!(
+        merge_three_way_snapshots(
+            &base,
+            &left,
+            &right,
+            &mut interrupted,
+            BranchMergeBudget { max_rows_examined: 80, max_conflicts: 0 },
+        ),
+        Err(BranchMergeError::RowRead {
+            message: "fixture row source failed after a partial row prefix".into(),
+        }),
+    );
+    assert_eq!(interrupted.rows_delivered, 4);
+    assert!(interrupted.rows_seen.contains(&string("a")));
+    assert_eq!(
+        interrupted.failed_at.as_ref().map(|(table, side, _)| (*table, *side)),
+        Some((id(2), MergeSide::Left)),
+    );
+    assert!(interrupted.source.visited.iter().any(|(_, locator)| {
+        locator.starts_with(b"unequal-restore-retry-failed-table-0-")
+    }));
+
+    const RETRIES: usize = 8;
+    let start = Arc::new(Barrier::new(RETRIES));
+    let mut workers = Vec::with_capacity(RETRIES);
+    for retry in 0..RETRIES {
+        let (base, left, right, mut source) = paired_chained_storm_inputs_by_table(
+            &[&table_one_base, &table_two_base],
+            &[],
+            &[],
+            retry % 2,
+            false,
+            "unequal-restore-retry-recovered",
+        );
+        for row in &root_restores {
+            add_chained_storm_fixture_rows(&left, &mut source, MergeSide::Left, id(1), &[row.clone()]);
+            add_chained_storm_fixture_rows(&right, &mut source, MergeSide::Right, id(1), &[row.clone()]);
+        }
+        for row in &anchor_restores {
+            add_chained_storm_fixture_rows(&left, &mut source, MergeSide::Left, id(2), &[row.clone()]);
+            add_chained_storm_fixture_rows(&right, &mut source, MergeSide::Right, id(2), &[row.clone()]);
+        }
+        if retry >= RETRIES / 2 {
+            for rows in source.rows.values_mut() {
+                rows.reverse();
+            }
+        }
+        let reverse_branches = retry % 2 == 1;
+        if reverse_branches {
+            let original_rows = std::mem::take(&mut source.rows);
+            source.rows = original_rows
+                .into_iter()
+                .map(|((side, locator), rows)| {
+                    let side = match side {
+                        MergeSide::Left => MergeSide::Right,
+                        MergeSide::Right => MergeSide::Left,
+                        MergeSide::Base => MergeSide::Base,
+                    };
+                    ((side, locator), rows)
+                })
+                .collect();
+        }
+        let gate = Arc::clone(&start);
+        workers.push(std::thread::spawn(move || {
+            let mut source = BarrierFixtureRows { source, first_load: Some(gate) };
+            let (merge_left, merge_right) = if reverse_branches {
+                (&right, &left)
+            } else {
+                (&left, &right)
+            };
+            merge_three_way_snapshots(
+                &base,
+                merge_left,
+                merge_right,
+                &mut source,
+                BranchMergeBudget { max_rows_examined: 80, max_conflicts: 0 },
+            )
+            .expect("unequal paired-chain restores retry within their private budget")
+        }));
+    }
+
+    let expected_root_keys = ["root", "root/child", "z"].map(string);
+    let expected_anchor_keys = ["a", "a/child", "a/child/deep", "b", "c", "d", "zz"]
+        .map(string);
+    let mut selected_retry = None;
+    for worker in workers {
+        let plan = worker.join().expect("unequal paired-chain retry completes");
+        assert_eq!(plan.report.conflicts_lower_bound, 0);
+        assert!(table_row_tombstones(&plan, id(1)).is_empty());
+        assert!(table_row_tombstones(&plan, id(2)).is_empty());
+        assert_eq!(table_live_row_keys(&plan, id(1)), expected_root_keys);
+        assert_eq!(table_live_row_keys(&plan, id(2)), expected_anchor_keys);
+        assert_ne!(
+            match &plan.tables[&id(1)].segments[0] {
+                MergedSegment::Rows { range, .. } => range,
+                other => panic!("changed first table range must materialize: {other:?}"),
+            },
+            match &plan.tables[&id(2)].segments[0] {
+                MergedSegment::Rows { range, .. } => range,
+                other => panic!("changed paired range must materialize: {other:?}"),
+            },
+            "paired tables retain their different physical depth cuts",
+        );
+        let mut expected_root = root_restores[0].clone();
+        expected_root.table = id(1);
+        let mut expected_root_child = root_restores[1].clone();
+        expected_root_child.table = id(1);
+        assert!(table_live_rows(&plan, id(1)).contains(&expected_root));
+        assert!(table_live_rows(&plan, id(1)).contains(&expected_root_child));
+        for restored in &anchor_restores {
+            let mut expected = restored.clone();
+            expected.table = id(2);
+            assert!(table_live_rows(&plan, id(2)).contains(&expected));
+        }
+        if selected_retry.is_none() {
+            selected_retry = Some(plan);
+        }
+    }
+    let selected = selected_retry.expect("at least one paired restore retry completes");
+    assert_eq!(table_row_tombstones(&deleted, id(1)), root_delta);
+    assert_eq!(table_row_tombstones(&deleted, id(2)), anchor_delta);
+    assert!(table_row_tombstones(&selected, id(1)).is_empty());
+    assert!(table_row_tombstones(&selected, id(2)).is_empty());
+}
+
+#[test]
+fn paired_depth_storm_restore_retries_preserve_uneven_chain_history_across_three_waves() {
+    // A deep storm chain is paired with a shorter anchor chain. After both
+    // chains' deletions are committed, a restore wave also deletes surviving
+    // keys; failure after the peer has read a restore row must not leak either
+    // table's candidate or replay the older storm tombstones on retry.
+    let storm_template = parse_fixture(TOMBSTONE_RECOVERY_STORM, RowKeyKind::Explicit);
+    let storm_rows = TOMBSTONE_STORM_KEYS
+        .iter()
+        .map(|key| rekey_row(&storm_template, key))
+        .collect::<Vec<_>>();
+    let anchor_rows = TOMBSTONE_PAIRED_CHAIN
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    let storm_restores = storm_rows
+        .iter()
+        .filter(|row| row.key != string("z"))
+        .cloned()
+        .collect::<Vec<_>>();
+    let anchor_restores = anchor_rows.iter().take(3).cloned().collect::<Vec<_>>();
+    assert_eq!(storm_rows.len(), TOMBSTONE_STORM_KEYS.len());
+    assert_eq!(storm_restores.len(), TOMBSTONE_STORM_KEYS.len() - 1);
+    assert_eq!(anchor_restores.len(), 3);
+
+    let wave_one_deletes = [
+        "a",
+        "a/child",
+        "a/child/deep",
+        "root",
+        "root/child",
+        "root/child/deep",
+        "root/child/deep/storm/a",
+        "root/child/deep/storm/b",
+        "root/child/deep/storm/c",
+        "root/child/deep/storm/d",
+        "root/child/deep/storm/e",
+        "root/child/deep/storm/f",
+    ];
+    let (base, left, right, mut source) = paired_chained_storm_inputs_by_table(
+        &[&storm_rows, &anchor_rows],
+        &wave_one_deletes,
+        &wave_one_deletes,
+        0,
+        false,
+        "uneven-depth-storm-wave-one",
+    );
+    let wave_one = merge_three_way_snapshots(
+        &base,
+        &left,
+        &right,
+        &mut source,
+        BranchMergeBudget { max_rows_examined: 40, max_conflicts: 0 },
+    )
+    .expect("the setup wave commits the deep storm and short-chain tombstones");
+    let first_storm_delta = TOMBSTONE_STORM_KEYS[..TOMBSTONE_STORM_KEYS.len() - 1]
+        .iter()
+        .map(|key| string(key))
+        .collect::<Vec<_>>();
+    let first_anchor_delta = ["a", "a/child", "a/child/deep"].map(string);
+    assert_eq!(table_row_tombstones(&wave_one, id(1)), first_storm_delta);
+    assert_eq!(table_row_tombstones(&wave_one, id(2)), first_anchor_delta);
+    assert_eq!(table_live_row_keys(&wave_one, id(1)), vec![string("z")]);
+    assert_eq!(
+        table_live_row_keys(&wave_one, id(2)),
+        ["b", "c", "d", "zz"].map(string),
+    );
+
+    let table_one_base = table_live_rows(&wave_one, id(1));
+    let table_two_base = table_live_rows(&wave_one, id(2));
+    let second_wave_deletes = ["b", "z"];
+    let (base, left, right, mut source) = paired_chained_storm_inputs_by_table(
+        &[&table_one_base, &table_two_base],
+        &second_wave_deletes,
+        &second_wave_deletes,
+        0,
+        false,
+        "uneven-depth-storm-wave-two-failed",
+    );
+    for row in &storm_restores {
+        add_chained_storm_fixture_rows(&left, &mut source, MergeSide::Left, id(1), &[row.clone()]);
+        add_chained_storm_fixture_rows(&right, &mut source, MergeSide::Right, id(1), &[row.clone()]);
+    }
+    for row in &anchor_restores {
+        add_chained_storm_fixture_rows(&left, &mut source, MergeSide::Left, id(2), &[row.clone()]);
+        add_chained_storm_fixture_rows(&right, &mut source, MergeSide::Right, id(2), &[row.clone()]);
+    }
+    let mut interrupted = FailOnTableAfterRowsFixtureRows {
+        source,
+        table: id(2),
+        side: MergeSide::Left,
+        fail_after_rows: 4,
+        rows_delivered: 0,
+        rows_seen: Vec::new(),
+        failed_at: None,
+    };
+    assert_eq!(
+        merge_three_way_snapshots(
+            &base,
+            &left,
+            &right,
+            &mut interrupted,
+            BranchMergeBudget { max_rows_examined: 80, max_conflicts: 0 },
+        ),
+        Err(BranchMergeError::RowRead {
+            message: "fixture row source failed after a partial row prefix".into(),
+        }),
+    );
+    assert_eq!(interrupted.rows_delivered, 4);
+    assert!(interrupted.rows_seen.contains(&string("a")));
+    assert_eq!(
+        interrupted.failed_at.as_ref().map(|(table, side, _)| (*table, *side)),
+        Some((id(2), MergeSide::Left)),
+    );
+    assert!(interrupted.source.visited.iter().any(|(_, locator)| {
+        locator.starts_with(b"uneven-depth-storm-wave-two-failed-table-0-")
+    }));
+
+    const RETRIES: usize = 8;
+    let start = Arc::new(Barrier::new(RETRIES));
+    let mut workers = Vec::with_capacity(RETRIES);
+    for retry in 0..RETRIES {
+        let (base, left, right, mut source) = paired_chained_storm_inputs_by_table(
+            &[&table_one_base, &table_two_base],
+            &second_wave_deletes,
+            &second_wave_deletes,
+            retry % 2,
+            false,
+            "uneven-depth-storm-wave-two-recovered",
+        );
+        for row in &storm_restores {
+            add_chained_storm_fixture_rows(&left, &mut source, MergeSide::Left, id(1), &[row.clone()]);
+            add_chained_storm_fixture_rows(&right, &mut source, MergeSide::Right, id(1), &[row.clone()]);
+        }
+        for row in &anchor_restores {
+            add_chained_storm_fixture_rows(&left, &mut source, MergeSide::Left, id(2), &[row.clone()]);
+            add_chained_storm_fixture_rows(&right, &mut source, MergeSide::Right, id(2), &[row.clone()]);
+        }
+        if retry >= RETRIES / 2 {
+            for rows in source.rows.values_mut() {
+                rows.reverse();
+            }
+        }
+        let reverse_branches = retry % 2 == 1;
+        if reverse_branches {
+            let original_rows = std::mem::take(&mut source.rows);
+            source.rows = original_rows
+                .into_iter()
+                .map(|((side, locator), rows)| {
+                    let side = match side {
+                        MergeSide::Left => MergeSide::Right,
+                        MergeSide::Right => MergeSide::Left,
+                        MergeSide::Base => MergeSide::Base,
+                    };
+                    ((side, locator), rows)
+                })
+                .collect();
+        }
+        let gate = Arc::clone(&start);
+        workers.push(std::thread::spawn(move || {
+            let mut source = BarrierFixtureRows { source, first_load: Some(gate) };
+            let (merge_left, merge_right) = if reverse_branches {
+                (&right, &left)
+            } else {
+                (&left, &right)
+            };
+            merge_three_way_snapshots(
+                &base,
+                merge_left,
+                merge_right,
+                &mut source,
+                BranchMergeBudget { max_rows_examined: 80, max_conflicts: 0 },
+            )
+            .expect("uneven depth-storm restores retry within their private budget")
+        }));
+    }
+
+    let expected_storm_keys = TOMBSTONE_STORM_KEYS[..TOMBSTONE_STORM_KEYS.len() - 1]
+        .iter()
+        .map(|key| string(key))
+        .collect::<Vec<_>>();
+    let expected_anchor_keys = ["a", "a/child", "a/child/deep", "c", "d", "zz"].map(string);
+    let second_storm_delta = ["z"].map(string);
+    let second_anchor_delta = ["b"].map(string);
+    let mut selected_retry = None;
+    for worker in workers {
+        let plan = worker.join().expect("depth-storm restore retry completes");
+        assert_eq!(plan.report.conflicts_lower_bound, 0);
+        assert_eq!(table_row_tombstones(&plan, id(1)), second_storm_delta);
+        assert_eq!(table_row_tombstones(&plan, id(2)), second_anchor_delta);
+        assert_eq!(table_live_row_keys(&plan, id(1)), expected_storm_keys);
+        assert_eq!(table_live_row_keys(&plan, id(2)), expected_anchor_keys);
+        assert_ne!(
+            match &plan.tables[&id(1)].segments[0] {
+                MergedSegment::Rows { range, .. } => range,
+                other => panic!("deep storm split must materialize: {other:?}"),
+            },
+            match &plan.tables[&id(2)].segments[0] {
+                MergedSegment::Rows { range, .. } => range,
+                other => panic!("short paired-chain split must materialize: {other:?}"),
+            },
+            "the two chain shapes keep different split boundaries",
+        );
+        for row in &storm_restores {
+            let mut expected = row.clone();
+            expected.table = id(1);
+            assert!(table_live_rows(&plan, id(1)).contains(&expected));
+        }
+        for row in &anchor_restores {
+            let mut expected = row.clone();
+            expected.table = id(2);
+            assert!(table_live_rows(&plan, id(2)).contains(&expected));
+        }
+        if selected_retry.is_none() {
+            selected_retry = Some(plan);
+        }
+    }
+    let selected = selected_retry.expect("at least one depth-storm restore retry completes");
+    let expected_storm_history = TOMBSTONE_STORM_KEYS
+        .iter()
+        .map(|key| string(key))
+        .collect::<Vec<_>>();
+    let expected_anchor_history = ["a", "a/child", "a/child/deep", "b"].map(string);
+    let mut storm_history = table_row_tombstones(&wave_one, id(1));
+    storm_history.extend(table_row_tombstones(&selected, id(1)));
+    let mut anchor_history = table_row_tombstones(&wave_one, id(2));
+    anchor_history.extend(table_row_tombstones(&selected, id(2)));
+    assert_eq!(storm_history, expected_storm_history);
+    assert_eq!(anchor_history, expected_anchor_history);
+    // A third wave restores the keys removed in wave two while re-deleting
+    // storm descendants and one restored anchor. Failed and concurrent retries
+    // must append only this wave's exact deltas to the uneven paired histories.
+    let table_one_wave_two_live = table_live_rows(&selected, id(1));
+    let table_two_wave_two_live = table_live_rows(&selected, id(2));
+    let third_wave_deletes = [
+        "a/child/deep",
+        "root/child/deep/storm/b",
+        "root/child/deep/storm/e",
+    ];
+    let storm_z = storm_rows
+        .iter()
+        .find(|row| row.key == string("z"))
+        .expect("the recovery-storm fixture includes the shallow z key");
+    let anchor_b = anchor_rows
+        .iter()
+        .find(|row| row.key == string("b"))
+        .expect("the paired-chain fixture includes anchor b");
+    let (base, left, right, mut source) = paired_chained_storm_inputs_by_table(
+        &[&table_one_wave_two_live, &table_two_wave_two_live],
+        &third_wave_deletes,
+        &third_wave_deletes,
+        0,
+        false,
+        "uneven-depth-storm-wave-three-failed",
+    );
+    for row in [storm_z, anchor_b] {
+        let table = if row.key == string("z") { id(1) } else { id(2) };
+        add_chained_storm_fixture_rows(&left, &mut source, MergeSide::Left, table, &[row.clone()]);
+        add_chained_storm_fixture_rows(
+            &right,
+            &mut source,
+            MergeSide::Right,
+            table,
+            &[row.clone()],
+        );
+    }
+    let mut interrupted = FailOnTableAfterRowsFixtureRows {
+        source,
+        table: id(2),
+        side: MergeSide::Left,
+        fail_after_rows: 5,
+        rows_delivered: 0,
+        rows_seen: Vec::new(),
+        failed_at: None,
+    };
+    assert_eq!(
+        merge_three_way_snapshots(
+            &base,
+            &left,
+            &right,
+            &mut interrupted,
+            BranchMergeBudget {
+                max_rows_examined: 80,
+                max_conflicts: 0
+            },
+        ),
+        Err(BranchMergeError::RowRead {
+            message: "fixture row source failed after a partial row prefix".into(),
+        }),
+    );
+    assert_eq!(interrupted.rows_delivered, 5);
+    assert!(interrupted.rows_seen.contains(&string("b")));
+    assert_eq!(
+        interrupted
+            .failed_at
+            .as_ref()
+            .map(|(table, side, _)| (*table, *side)),
+        Some((id(2), MergeSide::Left)),
+    );
+    assert!(interrupted.source.visited.iter().any(|(_, locator)| {
+        locator.starts_with(b"uneven-depth-storm-wave-three-failed-table-0-")
+    }));
+
+    const THIRD_WAVE_RETRIES: usize = 8;
+    let start = Arc::new(Barrier::new(THIRD_WAVE_RETRIES));
+    let mut workers = Vec::with_capacity(THIRD_WAVE_RETRIES);
+    for retry in 0..THIRD_WAVE_RETRIES {
+        let (base, left, right, mut source) = paired_chained_storm_inputs_by_table(
+            &[&table_one_wave_two_live, &table_two_wave_two_live],
+            &third_wave_deletes,
+            &third_wave_deletes,
+            retry % 2,
+            false,
+            "uneven-depth-storm-wave-three-recovered",
+        );
+        for row in [storm_z, anchor_b] {
+            let table = if row.key == string("z") { id(1) } else { id(2) };
+            add_chained_storm_fixture_rows(
+                &left,
+                &mut source,
+                MergeSide::Left,
+                table,
+                &[row.clone()],
+            );
+            add_chained_storm_fixture_rows(
+                &right,
+                &mut source,
+                MergeSide::Right,
+                table,
+                &[row.clone()],
+            );
+        }
+        if retry >= THIRD_WAVE_RETRIES / 2 {
+            for rows in source.rows.values_mut() {
+                rows.reverse();
+            }
+        }
+        let reverse_branches = retry % 2 == 1;
+        if reverse_branches {
+            let original_rows = std::mem::take(&mut source.rows);
+            source.rows = original_rows
+                .into_iter()
+                .map(|((side, locator), rows)| {
+                    let side = match side {
+                        MergeSide::Left => MergeSide::Right,
+                        MergeSide::Right => MergeSide::Left,
+                        MergeSide::Base => MergeSide::Base,
+                    };
+                    ((side, locator), rows)
+                })
+                .collect();
+        }
+        let gate = Arc::clone(&start);
+        workers.push(std::thread::spawn(move || {
+            let mut source = BarrierFixtureRows {
+                source,
+                first_load: Some(gate),
+            };
+            let (merge_left, merge_right) = if reverse_branches {
+                (&right, &left)
+            } else {
+                (&left, &right)
+            };
+            merge_three_way_snapshots(
+                &base,
+                merge_left,
+                merge_right,
+                &mut source,
+                BranchMergeBudget {
+                    max_rows_examined: 80,
+                    max_conflicts: 0,
+                },
+            )
+            .expect("uneven chain storm retries recover the latest paired base")
+        }));
+    }
+
+    let expected_third_storm_delta =
+        ["root/child/deep/storm/b", "root/child/deep/storm/e"].map(string);
+    let expected_third_anchor_delta = ["a/child/deep"].map(string);
+    let expected_third_storm_live = [
+        "a",
+        "root",
+        "root/child",
+        "root/child/deep",
+        "root/child/deep/storm/a",
+        "root/child/deep/storm/c",
+        "root/child/deep/storm/d",
+        "root/child/deep/storm/f",
+        "z",
+    ]
+    .map(string);
+    let expected_third_anchor_live = ["a", "a/child", "b", "c", "d", "zz"].map(string);
+    let mut third_wave_retry = None;
+    for worker in workers {
+        let plan = worker.join().expect("third-wave paired retry completes");
+        assert_eq!(plan.report.conflicts_lower_bound, 0);
+        assert_eq!(
+            table_row_tombstones(&plan, id(1)),
+            expected_third_storm_delta
+        );
+        assert_eq!(
+            table_row_tombstones(&plan, id(2)),
+            expected_third_anchor_delta
+        );
+        assert_eq!(table_live_row_keys(&plan, id(1)), expected_third_storm_live);
+        assert_eq!(
+            table_live_row_keys(&plan, id(2)),
+            expected_third_anchor_live
+        );
+        let mut expected_z = storm_z.clone();
+        expected_z.table = id(1);
+        assert!(table_live_rows(&plan, id(1)).contains(&expected_z));
+        let mut expected_b = anchor_b.clone();
+        expected_b.table = id(2);
+        assert!(table_live_rows(&plan, id(2)).contains(&expected_b));
+        assert_ne!(
+            match &plan.tables[&id(1)].segments[0] {
+                MergedSegment::Rows { range, .. } => range,
+                other => panic!("third-wave deep storm range must materialize: {other:?}"),
+            },
+            match &plan.tables[&id(2)].segments[0] {
+                MergedSegment::Rows { range, .. } => range,
+                other => panic!("third-wave paired anchor range must materialize: {other:?}"),
+            },
+            "uneven split boundaries remain table-local through restore retries",
+        );
+        if third_wave_retry.is_none() {
+            third_wave_retry = Some(plan);
+        }
+    }
+    let third_wave = third_wave_retry.expect("at least one third-wave retry completes");
+    let mut storm_history = expected_storm_history;
+    storm_history.extend(expected_third_storm_delta.clone());
+    let mut anchor_history = expected_anchor_history.to_vec();
+    anchor_history.extend(expected_third_anchor_delta);
+    assert_eq!(
+        storm_history,
+        [
+            "a",
+            "root",
+            "root/child",
+            "root/child/deep",
+            "root/child/deep/storm/a",
+            "root/child/deep/storm/b",
+            "root/child/deep/storm/c",
+            "root/child/deep/storm/d",
+            "root/child/deep/storm/e",
+            "root/child/deep/storm/f",
+            "z",
+            "root/child/deep/storm/b",
+            "root/child/deep/storm/e",
+        ]
+        .map(string),
+        "storm restore and re-delete events append once without replaying old deltas",
+    );
+    assert_eq!(
+        anchor_history,
+        ["a", "a/child", "a/child/deep", "b", "a/child/deep"].map(string),
+        "restored deep anchor history records its later deletion as a new event",
+    );
+    assert_eq!(
+        table_row_tombstones(&third_wave, id(1)),
+        expected_third_storm_delta,
+    );
+}
+
+#[test]
+fn concurrent_uneven_depth_restore_retries_isolate_failed_attempts() {
+    const RETRIES: usize = 8;
+    let storm_template = parse_fixture(TOMBSTONE_RECOVERY_STORM, RowKeyKind::Explicit);
+    let storm_rows = TOMBSTONE_STORM_KEYS
+        .iter()
+        .map(|key| rekey_row(&storm_template, key))
+        .collect::<Vec<_>>();
+    let anchor_rows = TOMBSTONE_PAIRED_CHAIN
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+
+    // These fixture rows represent the committed second-wave state: the deep
+    // storm chain is restored while the short paired chain still has b deleted.
+    let storm_base = storm_rows
+        .iter()
+        .filter(|row| row.key != string("z"))
+        .cloned()
+        .collect::<Vec<_>>();
+    let anchor_base = anchor_rows
+        .iter()
+        .filter(|row| row.key != string("b"))
+        .cloned()
+        .collect::<Vec<_>>();
+    assert_eq!(
+        storm_base.iter().map(|row| row.key.clone()).collect::<Vec<_>>(),
+        TOMBSTONE_STORM_KEYS[..TOMBSTONE_STORM_KEYS.len() - 1]
+            .iter()
+            .map(|key| string(key))
+            .collect::<Vec<_>>(),
+    );
+    assert_eq!(
+        anchor_base.iter().map(|row| row.key.clone()).collect::<Vec<_>>(),
+        ["a", "a/child", "a/child/deep", "c", "d", "zz"].map(string),
+    );
+
+    let storm_z = storm_rows
+        .iter()
+        .find(|row| row.key == string("z"))
+        .expect("the recovery-storm fixture includes z");
+    let anchor_b = anchor_rows
+        .iter()
+        .find(|row| row.key == string("b"))
+        .expect("the paired-chain fixture includes b");
+    let wave_deletes = [
+        "a/child/deep",
+        "root/child/deep/storm/b",
+        "root/child/deep/storm/e",
+    ];
+    let start = Arc::new(Barrier::new(RETRIES));
+    let mut workers = Vec::with_capacity(RETRIES);
+    for retry in 0..RETRIES {
+        let (base, left, right, mut source) = paired_chained_storm_inputs_by_table(
+            &[&storm_base, &anchor_base],
+            &wave_deletes,
+            &wave_deletes,
+            retry % 2,
+            false,
+            "concurrent-uneven-storm-isolation",
+        );
+        for row in [storm_z, anchor_b] {
+            let table = if row.key == string("z") { id(1) } else { id(2) };
+            add_chained_storm_fixture_rows(
+                &left,
+                &mut source,
+                MergeSide::Left,
+                table,
+                &[row.clone()],
+            );
+            add_chained_storm_fixture_rows(
+                &right,
+                &mut source,
+                MergeSide::Right,
+                table,
+                &[row.clone()],
+            );
+        }
+        if retry >= RETRIES / 2 {
+            for rows in source.rows.values_mut() {
+                rows.reverse();
+            }
+        }
+        let reverse_branches = retry % 2 == 1;
+        if reverse_branches {
+            let original_rows = std::mem::take(&mut source.rows);
+            source.rows = original_rows
+                .into_iter()
+                .map(|((side, locator), rows)| {
+                    let side = match side {
+                        MergeSide::Left => MergeSide::Right,
+                        MergeSide::Right => MergeSide::Left,
+                        MergeSide::Base => MergeSide::Base,
+                    };
+                    ((side, locator), rows)
+                })
+                .collect();
+        }
+
+        let gate = Arc::clone(&start);
+        let fail_after_rows = if retry == 0 { 5 } else { usize::MAX };
+        workers.push(std::thread::spawn(move || {
+            let mut source = BarrierFailOnTableAfterRowsFixtureRows {
+                source: FailOnTableAfterRowsFixtureRows {
+                    source,
+                    table: id(2),
+                    side: MergeSide::Left,
+                    fail_after_rows,
+                    rows_delivered: 0,
+                    rows_seen: Vec::new(),
+                    failed_at: None,
+                },
+                first_load: Some(gate),
+            };
+            let (merge_left, merge_right) = if reverse_branches {
+                (&right, &left)
+            } else {
+                (&left, &right)
+            };
+            let result = merge_three_way_snapshots(
+                &base,
+                merge_left,
+                merge_right,
+                &mut source,
+                BranchMergeBudget {
+                    max_rows_examined: 80,
+                    max_conflicts: 0,
+                },
+            );
+            (retry, result, source.source)
+        }));
+    }
+
+    let expected_storm_delta =
+        ["root/child/deep/storm/b", "root/child/deep/storm/e"].map(string);
+    let expected_anchor_delta = ["a/child/deep"].map(string);
+    let expected_storm_live = [
+        "a",
+        "root",
+        "root/child",
+        "root/child/deep",
+        "root/child/deep/storm/a",
+        "root/child/deep/storm/c",
+        "root/child/deep/storm/d",
+        "root/child/deep/storm/f",
+        "z",
+    ]
+    .map(string);
+    let expected_anchor_live = ["a", "a/child", "b", "c", "d", "zz"].map(string);
+    let mut failed_attempts = 0;
+    let mut completed_retries = 0;
+    for worker in workers {
+        let (retry, result, source) = worker.join().expect("concurrent retry worker completes");
+        if retry == 0 {
+            match result {
+                Err(BranchMergeError::RowRead { message }) => assert_eq!(
+                    message,
+                    "fixture row source failed after a partial row prefix",
+                ),
+                Err(error) => panic!("only the injected row-read attempt should fail: {error:?}"),
+                Ok(_) => panic!("a partial paired-table read must not return a plan"),
+            }
+            assert_eq!(source.rows_delivered, 5);
+            assert!(source.rows_seen.contains(&string("b")));
+            assert_eq!(
+                source.failed_at.as_ref().map(|(table, side, _)| (*table, *side)),
+                Some((id(2), MergeSide::Left)),
+            );
+            assert!(source.source.visited.iter().any(|(_, locator)| {
+                locator.starts_with(b"concurrent-uneven-storm-isolation-table-0-")
+            }));
+            failed_attempts += 1;
+            continue;
+        }
+
+        let plan = result.expect("a peer retry succeeds despite another attempt's failure");
+        assert_eq!(plan.report.conflicts_lower_bound, 0);
+        assert_eq!(table_row_tombstones(&plan, id(1)), expected_storm_delta);
+        assert_eq!(table_row_tombstones(&plan, id(2)), expected_anchor_delta);
+        assert_eq!(table_live_row_keys(&plan, id(1)), expected_storm_live);
+        assert_eq!(table_live_row_keys(&plan, id(2)), expected_anchor_live);
+        let mut expected_z = storm_z.clone();
+        expected_z.table = id(1);
+        assert!(table_live_rows(&plan, id(1)).contains(&expected_z));
+        let mut expected_b = anchor_b.clone();
+        expected_b.table = id(2);
+        assert!(table_live_rows(&plan, id(2)).contains(&expected_b));
+        assert_ne!(
+            match &plan.tables[&id(1)].segments[0] {
+                MergedSegment::Rows { range, .. } => range,
+                other => panic!("concurrent deep storm range must materialize: {other:?}"),
+            },
+            match &plan.tables[&id(2)].segments[0] {
+                MergedSegment::Rows { range, .. } => range,
+                other => panic!("concurrent short chain range must materialize: {other:?}"),
+            },
+            "each retry preserves the paired tables' distinct depth cuts",
+        );
+        completed_retries += 1;
+    }
+    assert_eq!(failed_attempts, 1);
+    assert_eq!(completed_retries, RETRIES - 1);
+}
+
+#[test]
+fn duplicate_tombstones_are_scoped_to_each_concurrent_fragment_wave() {
+    let fixture_rows = TOMBSTONE_DEPTH_COMMIT_ORDER
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    let repeated_key = fixture_rows
+        .iter()
+        .find(|row| row.key == string("a/child/deep"))
+        .expect("the in-crate depth fixture supplies the repeated tombstone")
+        .key
+        .clone();
+    let distinct_key = fixture_rows
+        .iter()
+        .find(|row| row.key == string("z"))
+        .expect("the in-crate depth fixture supplies a distinct tombstone")
+        .key
+        .clone();
+    let repeated_tombstone = [(id(1), repeated_key.clone())];
+
+    let mut history = BranchMergeTombstoneHistory::new(0);
+    history
+        .submit_depth_merge_fragment(2, 0, 2, &repeated_tombstone)
+        .unwrap();
+    history
+        .submit_depth_merge_fragment(1, 0, 1, &[])
+        .unwrap();
+    history
+        .submit_depth_merge_fragment(0, 0, 1, &repeated_tombstone)
+        .unwrap();
+    let before_duplicate = history.clone();
+    assert_eq!(
+        history.submit_depth_merge_fragment(2, 1, 2, &repeated_tombstone),
+        Err(BranchMergeTombstoneHistoryError::DuplicateTombstone { order: 2 }),
+        "same-wave duplicates are rejected while a clean restore separates other waves",
+    );
+    assert_eq!(history, before_duplicate, "rejected fragments leave every wave untouched");
+
+    let emitted = history
+        .submit_depth_merge_fragment(2, 1, 2, &[(id(1), distinct_key.clone())])
+        .unwrap();
+    assert_eq!(emitted.len(), 2, "the final fragment releases its wave");
+    assert!(emitted.iter().any(|event| event.key == repeated_key));
+    assert!(emitted.iter().any(|event| event.key == distinct_key));
+    let repeated_orders = history
+        .events()
+        .iter()
+        .filter(|event| event.table == id(1) && event.key == repeated_key)
+        .map(|event| event.order)
+        .collect::<Vec<_>>();
+    assert_eq!(repeated_orders, [0, 2], "the empty restore wave permits a later re-delete");
+    assert_eq!(history.next_order(), Some(3));
+}
+
+#[test]
+fn paired_restore_waves_reject_pending_logical_tombstone_duplicates() {
+    let fixture_rows = TOMBSTONE_DEPTH_COMMIT_ORDER
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    assert!(fixture_rows.iter().any(|row| row.key == string("a/child/deep")));
+    assert!(fixture_rows.iter().any(|row| row.key == string("z")));
+
+    // The storage key comparator accepts both ordinary arrays and the tagged
+    // tuple encoding as the same logical one-component key. Their canonical
+    // bytes differ, so duplicate detection must use key comparison.
+    let components = vec![OvbRaw::Text("a/child/deep".into())];
+    let array_key = CanonicalValue::new(OvbRaw::Array(components.clone())).unwrap();
+    let tuple_key = CanonicalValue::new(OvbRaw::Tag(
+        60015,
+        Box::new(OvbRaw::Array(components)),
+    ))
+    .unwrap();
+    assert_ne!(array_key, tuple_key);
+    assert_eq!(
+        orna_foundation_v1::compare_primary_keys(&array_key, &tuple_key),
+        Ok(std::cmp::Ordering::Equal),
+    );
+    let whole_plan = |order, key| SequencedBranchMergePlan {
+        order,
+        plan: BranchMergePlan {
+            schema: Schema { version: EvolutionVersion::V1_0, tables: Vec::new() },
+            tables: BTreeMap::new(),
+            checkpoints: BTreeMap::new(),
+            report: Default::default(),
+        },
+        ordered_row_tombstones: vec![(id(1), key)],
+    };
+
+    let mut history = BranchMergeTombstoneHistory::new(0);
+    history
+        .submit_depth_merge_fragment(2, 0, 2, &[(id(1), array_key.clone())])
+        .unwrap();
+    let before_cross_wave_duplicate = history.clone();
+    assert_eq!(
+        history.submit_depth_merge_fragment(1, 0, 1, &[(id(1), tuple_key.clone())]),
+        Err(BranchMergeTombstoneHistoryError::ConcurrentDuplicateTombstone {
+            first_order: 1,
+            second_order: 2,
+        }),
+        "different pending restore waves cannot both claim one logical tombstone",
+    );
+    assert_eq!(history.events(), before_cross_wave_duplicate.events());
+    assert_eq!(history.next_order(), before_cross_wave_duplicate.next_order());
+    assert_eq!(
+        history.submit(&whole_plan(1, tuple_key.clone())),
+        Err(BranchMergeTombstoneHistoryError::ConflictingSubmission { order: 1 }),
+        "the first rejected fragment fixes this position's retry mode",
+    );
+    let after_reserved_mode = history.clone();
+
+    assert_eq!(
+        history.submit_depth_merge_fragment(2, 1, 2, &[(id(1), tuple_key.clone())]),
+        Err(BranchMergeTombstoneHistoryError::DuplicateTombstone { order: 2 }),
+        "one wave also rejects alternate canonical encodings of its key",
+    );
+    assert_eq!(history, after_reserved_mode);
+
+    history
+        .submit_depth_merge_fragment(1, 0, 1, &[(id(1), string("root"))])
+        .unwrap();
+    history
+        .submit_depth_merge_fragment(2, 1, 2, &[(id(1), string("z"))])
+        .unwrap();
+    let emitted = history.submit_depth_merge_fragment(0, 0, 1, &[]).unwrap();
+    assert_eq!(emitted.len(), 3, "releasing the missing prefix drains ready waves");
+    assert_eq!(history.next_order(), Some(3));
+
+    let emitted = history
+        .submit_depth_merge_fragment(3, 0, 1, &[(id(1), tuple_key.clone())])
+        .unwrap();
+    assert_eq!(emitted.len(), 1, "a later released position may record a new event");
+    let repeated_orders = history
+        .events()
+        .iter()
+        .filter(|event| {
+            event.table == id(1)
+                && orna_foundation_v1::compare_primary_keys(&event.key, &array_key)
+                    == Ok(std::cmp::Ordering::Equal)
+        })
+        .map(|event| event.order)
+        .collect::<Vec<_>>();
+    assert_eq!(repeated_orders, [2, 3]);
+    assert_eq!(history.next_order(), Some(4));
+}
+
+#[test]
+fn paired_restore_waves_reject_logical_duplicates_across_submission_modes() {
+    let fixture_rows = TOMBSTONE_DEPTH_COMMIT_ORDER
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    let repeated_key = fixture_rows
+        .iter()
+        .find(|row| row.key == string("a/child/deep"))
+        .expect("the in-crate depth fixture supplies the repeated tombstone")
+        .key
+        .clone();
+    let components = vec![OvbRaw::Text("a/child/deep".into())];
+    let equivalent_key = CanonicalValue::new(OvbRaw::Tag(
+        60015,
+        Box::new(OvbRaw::Array(components)),
+    ))
+    .unwrap();
+    assert_ne!(repeated_key, equivalent_key);
+    assert_eq!(
+        orna_foundation_v1::compare_primary_keys(&repeated_key, &equivalent_key),
+        Ok(std::cmp::Ordering::Equal),
+    );
+
+    let empty_plan = || BranchMergePlan {
+        schema: Schema { version: EvolutionVersion::V1_0, tables: Vec::new() },
+        tables: BTreeMap::new(),
+        checkpoints: BTreeMap::new(),
+        report: Default::default(),
+    };
+    let whole_plan = |order, key| SequencedBranchMergePlan {
+        order,
+        plan: empty_plan(),
+        ordered_row_tombstones: vec![(id(1), key)],
+    };
+
+    // A later whole paired plan can be in flight while an earlier depth wave
+    // arrives. The logical duplicate must be rejected independent of the
+    // submission API used for each position.
+    let mut whole_then_fragments = BranchMergeTombstoneHistory::new(0);
+    assert!(whole_then_fragments
+        .submit(&whole_plan(2, repeated_key.clone()))
+        .unwrap()
+        .is_empty());
+    let before_duplicate = whole_then_fragments.clone();
+    assert_eq!(
+        whole_then_fragments.submit_depth_merge_fragment(
+            1,
+            0,
+            2,
+            &[(id(1), equivalent_key.clone())],
+        ),
+        Err(BranchMergeTombstoneHistoryError::ConcurrentDuplicateTombstone {
+            first_order: 1,
+            second_order: 2,
+        }),
+    );
+    assert_eq!(whole_then_fragments.events(), before_duplicate.events());
+    assert_eq!(whole_then_fragments.next_order(), before_duplicate.next_order());
+    assert_eq!(
+        whole_then_fragments.submit(&whole_plan(1, repeated_key.clone())),
+        Err(BranchMergeTombstoneHistoryError::ConflictingSubmission { order: 1 }),
+        "a rejected fragment reserves fragment mode without buffering tombstones",
+    );
+
+    // The reverse arrival order follows the same logical-key rule.
+    let mut fragments_then_whole = BranchMergeTombstoneHistory::new(0);
+    assert!(fragments_then_whole
+        .submit_depth_merge_fragment(2, 0, 2, &[(id(1), repeated_key.clone())])
+        .unwrap()
+        .is_empty());
+    let before_duplicate = fragments_then_whole.clone();
+    assert_eq!(
+        fragments_then_whole.submit(&whole_plan(1, equivalent_key.clone())),
+        Err(BranchMergeTombstoneHistoryError::ConcurrentDuplicateTombstone {
+            first_order: 1,
+            second_order: 2,
+        }),
+    );
+    assert_eq!(fragments_then_whole.events(), before_duplicate.events());
+    assert_eq!(fragments_then_whole.next_order(), before_duplicate.next_order());
+    assert_eq!(
+        fragments_then_whole.submit_depth_merge_fragment(1, 0, 1, &[(id(1), equivalent_key.clone())]),
+        Err(BranchMergeTombstoneHistoryError::ConflictingSubmission { order: 1 }),
+        "a rejected whole plan reserves whole-plan mode without buffering tombstones",
+    );
+
+    // Mixing APIs for the same position is a conflicting submission in both
+    // directions, distinct from replaying a whole plan or stale lineage.
+    let mut same_position = BranchMergeTombstoneHistory::new(0);
+    same_position
+        .submit_depth_merge_fragment(0, 0, 2, &[(id(1), repeated_key)])
+        .unwrap();
+    let before_conflict = same_position.clone();
+    assert_eq!(
+        same_position.submit(&whole_plan(0, equivalent_key)),
+        Err(BranchMergeTombstoneHistoryError::ConflictingSubmission { order: 0 }),
+    );
+    assert_eq!(same_position, before_conflict);
+}
+
+#[test]
+fn paired_whole_plan_conflict_precedes_invalid_fragment_classification() {
+    let fixture_rows = TOMBSTONE_DEPTH_COMMIT_ORDER
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    let repeated_key = fixture_rows
+        .iter()
+        .find(|row| row.key == string("a/child/deep"))
+        .expect("the in-crate depth fixture supplies the repeated tombstone")
+        .key
+        .clone();
+    let whole_plan = SequencedBranchMergePlan {
+        order: 2,
+        plan: BranchMergePlan {
+            schema: Schema { version: EvolutionVersion::V1_0, tables: Vec::new() },
+            tables: BTreeMap::new(),
+            checkpoints: BTreeMap::new(),
+            report: Default::default(),
+        },
+        ordered_row_tombstones: vec![(id(1), repeated_key)],
+    };
+    let mut history = BranchMergeTombstoneHistory::new(0);
+    assert!(history.submit(&whole_plan).unwrap().is_empty());
+    let before_conflict = history.clone();
+
+    for (fragment, fragment_count) in [(0, 0), (1, 1)] {
+        assert_eq!(
+            history.submit_depth_merge_fragment(2, fragment, fragment_count, &[]),
+            Err(BranchMergeTombstoneHistoryError::ConflictingSubmission { order: 2 }),
+            "a pending whole plan owns its submission mode even when fragment metadata is invalid",
+        );
+        assert_eq!(history, before_conflict);
+    }
+}
+
+#[test]
+fn paired_mixed_mode_conflicts_precede_logical_duplicate_validation() {
+    let fixture_rows = TOMBSTONE_DEPTH_COMMIT_ORDER
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    let fixture_key = fixture_rows
+        .iter()
+        .find(|row| row.key == string("a/child/deep"))
+        .expect("the in-crate depth fixture supplies the repeated tombstone")
+        .key
+        .clone();
+    let tuple_key = CanonicalValue::new(OvbRaw::Tag(
+        60015,
+        Box::new(OvbRaw::Array(vec![OvbRaw::Text("a/child/deep".into())])),
+    ))
+    .unwrap();
+    assert_eq!(
+        orna_foundation_v1::compare_primary_keys(&fixture_key, &tuple_key),
+        Ok(std::cmp::Ordering::Equal),
+    );
+
+    let whole_plan = |keys: Vec<CanonicalValue>| SequencedBranchMergePlan {
+        order: 2,
+        plan: BranchMergePlan {
+            schema: Schema { version: EvolutionVersion::V1_0, tables: Vec::new() },
+            tables: BTreeMap::new(),
+            checkpoints: BTreeMap::new(),
+            report: Default::default(),
+        },
+        ordered_row_tombstones: keys.into_iter().map(|key| (id(1), key)).collect(),
+    };
+
+    let mut fragment_first = BranchMergeTombstoneHistory::new(0);
+    fragment_first
+        .submit_depth_merge_fragment(2, 0, 2, &[(id(1), fixture_key.clone())])
+        .unwrap();
+    let before_conflict = fragment_first.clone();
+    assert_eq!(
+        fragment_first.submit(&whole_plan(vec![fixture_key.clone(), tuple_key.clone()])),
+        Err(BranchMergeTombstoneHistoryError::ConflictingSubmission { order: 2 }),
+        "mode conflict takes precedence over duplicates in a whole-plan payload",
+    );
+    assert_eq!(fragment_first, before_conflict);
+
+    let mut whole_plan_first = BranchMergeTombstoneHistory::new(0);
+    whole_plan_first.submit(&whole_plan(vec![fixture_key.clone()])).unwrap();
+    let before_conflict = whole_plan_first.clone();
+    assert_eq!(
+        whole_plan_first.submit_depth_merge_fragment(
+            2,
+            0,
+            2,
+            &[(id(1), fixture_key), (id(1), tuple_key)],
+        ),
+        Err(BranchMergeTombstoneHistoryError::ConflictingSubmission { order: 2 }),
+        "mode conflict takes precedence over duplicates in a fragment payload",
+    );
+    assert_eq!(whole_plan_first, before_conflict);
+}
+
+#[test]
+fn paired_tombstone_position_priority_is_shared_by_both_submission_modes() {
+    let fixture_key = TOMBSTONE_DEPTH_COMMIT_ORDER
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .find(|row| row.key == string("a/child/deep"))
+        .expect("the in-crate depth fixture supplies a tombstone key")
+        .key
+        .clone();
+    let whole_plan = |order, keys: Vec<CanonicalValue>| SequencedBranchMergePlan {
+        order,
+        plan: BranchMergePlan {
+            schema: Schema { version: EvolutionVersion::V1_0, tables: Vec::new() },
+            tables: BTreeMap::new(),
+            checkpoints: BTreeMap::new(),
+            report: Default::default(),
+        },
+        ordered_row_tombstones: keys.into_iter().map(|key| (id(1), key)).collect(),
+    };
+
+    let mut stale_history = BranchMergeTombstoneHistory::new(0);
+    stale_history
+        .submit(&whole_plan(0, vec![fixture_key.clone()]))
+        .unwrap();
+    let before_stale = stale_history.clone();
+    assert_eq!(
+        stale_history.submit(&whole_plan(0, vec![fixture_key.clone(), fixture_key.clone()])),
+        Err(BranchMergeTombstoneHistoryError::DuplicateOrStale { order: 0 }),
+        "stale position classification precedes whole-plan content validation",
+    );
+    let mut stale_fragment_history = BranchMergeTombstoneHistory::new(0);
+    stale_fragment_history
+        .submit_depth_merge_fragment(0, 0, 1, &[(id(1), fixture_key.clone())])
+        .unwrap();
+    let before_stale_fragment = stale_fragment_history.clone();
+    assert_eq!(
+        stale_fragment_history.submit_depth_merge_fragment(0, 0, 0, &[(id(1), fixture_key.clone())]),
+        Err(BranchMergeTombstoneHistoryError::DuplicateOrStale { order: 0 }),
+        "same-mode stale classification precedes fragment metadata validation",
+    );
+    assert_eq!(stale_fragment_history, before_stale_fragment);
+    assert_eq!(stale_history, before_stale);
+
+    let mut exhausted_history = BranchMergeTombstoneHistory::new(u64::MAX);
+    exhausted_history.submit(&whole_plan(u64::MAX, Vec::new())).unwrap();
+    let before_exhausted = exhausted_history.clone();
+    assert_eq!(
+        exhausted_history.submit(&whole_plan(
+            u64::MAX,
+            vec![fixture_key.clone(), fixture_key.clone()],
+        )),
+        Err(BranchMergeTombstoneHistoryError::OrderExhausted),
+        "exhaustion classification precedes whole-plan content validation",
+    );
+    assert_eq!(
+        exhausted_history.submit_depth_merge_fragment(u64::MAX, 0, 0, &[(id(1), fixture_key)]),
+        Err(BranchMergeTombstoneHistoryError::OrderExhausted),
+        "exhaustion classification precedes fragment metadata validation",
+    );
+    assert_eq!(exhausted_history, before_exhausted);
+}
+
+#[test]
+fn paired_mixed_mode_priority_survives_completed_depth_restore_waves() {
+    let fixture_key = TOMBSTONE_DEPTH_COMMIT_ORDER
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .find(|row| row.key == string("a/child/deep"))
+        .expect("the in-crate depth fixture supplies a tombstone key")
+        .key
+        .clone();
+    let whole_plan = |order, keys: Vec<CanonicalValue>| SequencedBranchMergePlan {
+        order,
+        plan: BranchMergePlan {
+            schema: Schema { version: EvolutionVersion::V1_0, tables: Vec::new() },
+            tables: BTreeMap::new(),
+            checkpoints: BTreeMap::new(),
+            report: Default::default(),
+        },
+        ordered_row_tombstones: keys.into_iter().map(|key| (id(1), key)).collect(),
+    };
+
+    let invalid_whole_plan = || {
+        whole_plan(2, vec![fixture_key.clone(), fixture_key.clone()])
+    };
+    let mut fragment_wave = BranchMergeTombstoneHistory::new(0);
+    fragment_wave
+        .submit_depth_merge_fragment(2, 0, 2, &[(id(1), fixture_key.clone())])
+        .unwrap();
+    let before_pending_conflict = fragment_wave.clone();
+    assert_eq!(
+        fragment_wave.submit(&invalid_whole_plan()),
+        Err(BranchMergeTombstoneHistoryError::ConflictingSubmission { order: 2 }),
+        "a pending fragment wave rejects a whole-plan retry before content validation",
+    );
+    assert_eq!(fragment_wave, before_pending_conflict);
+
+    assert!(fragment_wave
+        .submit_depth_merge_fragment(2, 1, 2, &[])
+        .unwrap()
+        .is_empty());
+    assert!(fragment_wave.submit(&whole_plan(0, Vec::new())).unwrap().is_empty());
+    let released = fragment_wave.submit(&whole_plan(1, Vec::new())).unwrap();
+    assert_eq!(released.len(), 1);
+    assert_eq!(released[0].order, 2);
+    let before_released_conflict = fragment_wave.clone();
+    assert_eq!(
+        fragment_wave.submit(&invalid_whole_plan()),
+        Err(BranchMergeTombstoneHistoryError::ConflictingSubmission { order: 2 }),
+        "the accepted fragment mode remains authoritative after its wave is released",
+    );
+    assert_eq!(fragment_wave, before_released_conflict);
+    assert_eq!(
+        fragment_wave.submit_depth_merge_fragment(2, 0, 2, &[]),
+        Err(BranchMergeTombstoneHistoryError::DuplicateOrStale { order: 2 }),
+        "same-mode replay after release remains stale",
+    );
+    assert_eq!(fragment_wave, before_released_conflict);
+
+    let mut whole_plan_wave = BranchMergeTombstoneHistory::new(0);
+    whole_plan_wave
+        .submit(&whole_plan(2, vec![fixture_key.clone()]))
+        .unwrap();
+    assert_eq!(
+        whole_plan_wave.submit_depth_merge_fragment(
+            2,
+            0,
+            0,
+            &[(id(1), fixture_key.clone()), (id(1), fixture_key.clone())],
+        ),
+        Err(BranchMergeTombstoneHistoryError::ConflictingSubmission { order: 2 }),
+        "the priority is symmetric when a whole-plan wave arrives first",
+    );
+    assert!(whole_plan_wave.submit(&whole_plan(0, Vec::new())).unwrap().is_empty());
+    let released = whole_plan_wave.submit(&whole_plan(1, Vec::new())).unwrap();
+    assert_eq!(released.len(), 1);
+    assert_eq!(released[0].order, 2);
+    let before_released_conflict = whole_plan_wave.clone();
+    assert_eq!(
+        whole_plan_wave.submit_depth_merge_fragment(2, 0, 0, &[]),
+        Err(BranchMergeTombstoneHistoryError::ConflictingSubmission { order: 2 }),
+        "the accepted whole-plan mode remains authoritative after release",
+    );
+    assert_eq!(whole_plan_wave, before_released_conflict);
+    assert_eq!(
+        whole_plan_wave.submit(&whole_plan(2, vec![fixture_key])),
+        Err(BranchMergeTombstoneHistoryError::DuplicateOrStale { order: 2 }),
+        "same-mode whole-plan replay after release remains stale",
+    );
+    assert_eq!(whole_plan_wave, before_released_conflict);
+}
+
+#[test]
+fn paired_append_keeps_mixed_mode_priority_after_wave_release() {
+    let fixture_key = TOMBSTONE_DEPTH_COMMIT_ORDER
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .find(|row| row.key == string("a/child/deep"))
+        .expect("the in-crate depth fixture supplies a tombstone key")
+        .key
+        .clone();
+    let whole_plan = SequencedBranchMergePlan {
+        order: 0,
+        plan: BranchMergePlan {
+            schema: Schema { version: EvolutionVersion::V1_0, tables: Vec::new() },
+            tables: BTreeMap::new(),
+            checkpoints: BTreeMap::new(),
+            report: Default::default(),
+        },
+        ordered_row_tombstones: vec![(id(1), fixture_key)],
+    };
+
+    let mut fragment_history = BranchMergeTombstoneHistory::new(0);
+    assert_eq!(
+        fragment_history
+            .submit_depth_merge_fragment(0, 0, 1, &whole_plan.ordered_row_tombstones)
+            .unwrap()
+            .len(),
+        1,
+    );
+    let before_conflict = fragment_history.clone();
+    assert_eq!(
+        fragment_history.append(&whole_plan),
+        Err(BranchMergeTombstoneHistoryError::ConflictingSubmission { order: 0 }),
+        "append checks committed mode before returning its strict order error",
+    );
+    assert_eq!(fragment_history, before_conflict);
+
+    let mut whole_plan_history = BranchMergeTombstoneHistory::new(0);
+    whole_plan_history.append(&whole_plan).unwrap();
+    let before_stale = whole_plan_history.clone();
+    assert_eq!(
+        whole_plan_history.append(&whole_plan),
+        Err(BranchMergeTombstoneHistoryError::OutOfOrder {
+            expected: 1,
+            actual: 0,
+        }),
+        "same-mode append replays preserve the strict append ordering contract",
+    );
+    assert_eq!(whole_plan_history, before_stale);
+}
+
+#[test]
+fn paired_append_preserves_mixed_mode_priority_through_pending_wave_release() {
+    let fixture_key = TOMBSTONE_DEPTH_COMMIT_ORDER
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .find(|row| row.key == string("a/child/deep"))
+        .expect("the in-crate depth fixture supplies a tombstone key")
+        .key
+        .clone();
+    let whole_plan = |order, keys: Vec<CanonicalValue>| SequencedBranchMergePlan {
+        order,
+        plan: BranchMergePlan {
+            schema: Schema { version: EvolutionVersion::V1_0, tables: Vec::new() },
+            tables: BTreeMap::new(),
+            checkpoints: BTreeMap::new(),
+            report: Default::default(),
+        },
+        ordered_row_tombstones: keys.into_iter().map(|key| (id(1), key)).collect(),
+    };
+    let invalid_whole_plan =
+        whole_plan(2, vec![fixture_key.clone(), fixture_key.clone()]);
+
+    let mut history = BranchMergeTombstoneHistory::new(0);
+    history
+        .submit_depth_merge_fragment(2, 0, 2, &[(id(1), fixture_key)])
+        .unwrap();
+    let before_pending_conflict = history.clone();
+    assert_eq!(
+        history.append(&invalid_whole_plan),
+        Err(BranchMergeTombstoneHistoryError::ConflictingSubmission { order: 2 }),
+        "append checks a buffered future mode before its out-of-order result",
+    );
+    assert_eq!(history, before_pending_conflict);
+
+    history.submit_depth_merge_fragment(2, 1, 2, &[]).unwrap();
+    history.append(&whole_plan(0, Vec::new())).unwrap();
+    let released = history.append(&whole_plan(1, Vec::new()));
+    assert_eq!(released, Ok(()));
+    let before_released_conflict = history.clone();
+    assert_eq!(
+        history.append(&invalid_whole_plan),
+        Err(BranchMergeTombstoneHistoryError::ConflictingSubmission { order: 2 }),
+        "append preserves the same conflict after the depth wave is released",
+    );
+    assert_eq!(history, before_released_conflict);
+
+    let mut unoccupied_history = BranchMergeTombstoneHistory::new(0);
+    assert_eq!(
+        unoccupied_history.append(&whole_plan(2, Vec::new())),
+        Err(BranchMergeTombstoneHistoryError::OutOfOrder {
+            expected: 0,
+            actual: 2,
+        }),
+        "unoccupied future positions remain strict out-of-order errors",
+    );
+}
+
+#[test]
+fn paired_append_duplicate_failure_is_atomic_during_depth_wave_interleaving() {
+    let fixture_rows = TOMBSTONE_DEPTH_COMMIT_ORDER
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    let duplicate_key = fixture_rows
+        .iter()
+        .find(|row| row.key == string("a/child/deep"))
+        .expect("the in-crate depth fixture supplies the pending storm tombstone")
+        .key
+        .clone();
+    let corrected_key = fixture_rows
+        .iter()
+        .find(|row| row.key == string("root/child/deep"))
+        .expect("the in-crate depth fixture supplies a distinct retry tombstone")
+        .key
+        .clone();
+    let whole_plan = |order, keys: Vec<CanonicalValue>| SequencedBranchMergePlan {
+        order,
+        plan: BranchMergePlan {
+            schema: Schema { version: EvolutionVersion::V1_0, tables: Vec::new() },
+            tables: BTreeMap::new(),
+            checkpoints: BTreeMap::new(),
+            report: Default::default(),
+        },
+        ordered_row_tombstones: keys.into_iter().map(|key| (id(1), key)).collect(),
+    };
+
+    let mut history = BranchMergeTombstoneHistory::new(0);
+    history.append(&whole_plan(0, Vec::new())).unwrap();
+    history
+        .submit_depth_merge_fragment(2, 0, 2, &[(id(1), duplicate_key.clone())])
+        .unwrap();
+    let before_rejected_append = history.clone();
+    assert_eq!(
+        history.append(&whole_plan(1, vec![duplicate_key.clone()])),
+        Err(BranchMergeTombstoneHistoryError::ConcurrentDuplicateTombstone {
+            first_order: 1,
+            second_order: 2,
+        }),
+        "a transaction append detects a duplicate with the pending post-storm depth wave",
+    );
+    assert_eq!(
+        history, before_rejected_append,
+        "a rejected append cannot partially reserve mode or change paired history",
+    );
+
+    let released = history
+        .submit_depth_merge_fragment(1, 0, 1, &[(id(1), corrected_key.clone())])
+        .unwrap();
+    assert_eq!(released.len(), 1);
+    assert_eq!(released[0].order, 1);
+    let released = history
+        .submit_depth_merge_fragment(2, 1, 2, &[])
+        .unwrap();
+    assert_eq!(
+        released,
+        vec![BranchMergeTombstoneEvent {
+            order: 2,
+            table: id(1),
+            key: duplicate_key,
+        }],
+        "the original storm wave remains intact after the failed transaction append",
+    );
+    assert_eq!(history.events()[0].order, 1);
+    assert_eq!(history.events()[0].key, corrected_key);
+    assert_eq!(history.next_order(), Some(3));
+}
+
+#[test]
+fn paired_append_storms_queue_behind_uneven_depth_waves_in_lineage_order() {
+    let fixture_rows = TOMBSTONE_DEPTH_COMMIT_ORDER
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    let fixture_key = |path: &str| {
+        fixture_rows
+            .iter()
+            .find(|row| row.key == string(path))
+            .unwrap_or_else(|| panic!("the in-crate depth fixture supplies {path}"))
+            .key
+            .clone()
+    };
+    let whole_plan = |order, keys: Vec<CanonicalValue>| SequencedBranchMergePlan {
+        order,
+        plan: BranchMergePlan {
+            schema: Schema { version: EvolutionVersion::V1_0, tables: Vec::new() },
+            tables: BTreeMap::new(),
+            checkpoints: BTreeMap::new(),
+            report: Default::default(),
+        },
+        ordered_row_tombstones: keys.into_iter().map(|key| (id(1), key)).collect(),
+    };
+
+    let mut history = BranchMergeTombstoneHistory::new(0);
+    assert!(history
+        .submit_depth_merge_fragment(0, 2, 3, &[(id(1), fixture_key("root/child/deep"))])
+        .unwrap()
+        .is_empty());
+    assert!(history
+        .submit_depth_merge_fragment(
+            1,
+            0,
+            2,
+            &[(id(1), fixture_key("root/child/deep/leaf/twig"))],
+        )
+        .unwrap()
+        .is_empty());
+
+    history.append(&whole_plan(2, vec![fixture_key("a/child")])).unwrap();
+    history.append(&whole_plan(3, vec![fixture_key("root/child")])).unwrap();
+    history.append(&whole_plan(4, Vec::new())).unwrap();
+    assert_eq!(history.next_order(), Some(0));
+    assert!(history.events().is_empty());
+
+    let before_gap = history.clone();
+    assert_eq!(
+        history.append(&whole_plan(6, vec![fixture_key("z")])),
+        Err(BranchMergeTombstoneHistoryError::OutOfOrder {
+            expected: 5,
+            actual: 6,
+        }),
+        "queued appends still cannot cross an unbuffered lineage position",
+    );
+    assert_eq!(history, before_gap);
+
+    assert!(history
+        .submit_depth_merge_fragment(0, 0, 3, &[(id(1), fixture_key("a"))])
+        .unwrap()
+        .is_empty());
+    let first_wave = history
+        .submit_depth_merge_fragment(0, 1, 3, &[(id(1), fixture_key("a/child/deep"))])
+        .unwrap();
+    assert_eq!(first_wave.iter().map(|event| event.order).collect::<Vec<_>>(), [0, 0, 0]);
+    assert_eq!(history.next_order(), Some(1));
+    assert!(history.events().iter().all(|event| event.order == 0));
+
+    let remaining_waves = history
+        .submit_depth_merge_fragment(
+            1,
+            1,
+            2,
+            &[(id(1), fixture_key("root/child/deep/leaf/twig/bud"))],
+        )
+        .unwrap();
+    assert_eq!(
+        remaining_waves.iter().map(|event| event.order).collect::<Vec<_>>(),
+        [1, 1, 2, 3],
+        "finishing the shorter depth wave releases queued whole plans in lineage order",
+    );
+    assert_eq!(
+        history.events().iter().map(|event| event.order).collect::<Vec<_>>(),
+        [0, 0, 0, 1, 1, 2, 3],
+    );
+    assert_eq!(history.next_order(), Some(5));
+    assert_eq!(history.events()[0].key, fixture_key("a"));
+    assert_eq!(history.events()[1].key, fixture_key("a/child/deep"));
+    assert_eq!(history.events()[2].key, fixture_key("root/child/deep"));
+    assert_eq!(history.events()[3].key, fixture_key("root/child/deep/leaf/twig"));
+    assert_eq!(history.events()[4].key, fixture_key("root/child/deep/leaf/twig/bud"));
+    assert_eq!(history.events()[5].key, fixture_key("a/child"));
+    assert_eq!(history.events()[6].key, fixture_key("root/child"));
+}
+
+#[test]
+fn paired_append_queue_recovers_after_uneven_wave_restarts() {
+    let fixture_rows = TOMBSTONE_DEPTH_COMMIT_ORDER
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    let fixture_key = |path: &str| {
+        fixture_rows
+            .iter()
+            .find(|row| row.key == string(path))
+            .unwrap_or_else(|| panic!("the in-crate depth fixture supplies {path}"))
+            .key
+            .clone()
+    };
+    let whole_plan = |order, keys: Vec<CanonicalValue>| SequencedBranchMergePlan {
+        order,
+        plan: BranchMergePlan {
+            schema: Schema { version: EvolutionVersion::V1_0, tables: Vec::new() },
+            tables: BTreeMap::new(),
+            checkpoints: BTreeMap::new(),
+            report: Default::default(),
+        },
+        ordered_row_tombstones: keys.into_iter().map(|key| (id(1), key)).collect(),
+    };
+
+    let mut history = BranchMergeTombstoneHistory::new(0);
+    history
+        .submit_depth_merge_fragment(0, 0, 4, &[(id(1), fixture_key("a"))])
+        .unwrap();
+    history
+        .submit_depth_merge_fragment(0, 1, 4, &[(id(1), fixture_key("z"))])
+        .unwrap();
+    history
+        .submit_depth_merge_fragment(1, 1, 3, &[(id(1), fixture_key("root/child/deep"))])
+        .unwrap();
+    history.append(&whole_plan(2, vec![fixture_key("a/child/deep/leaf")])).unwrap();
+    history
+        .append(&whole_plan(3, vec![fixture_key("root/child/deep/leaf/twig")]))
+        .unwrap();
+    history.append(&whole_plan(4, Vec::new())).unwrap();
+    assert!(history.events().is_empty());
+
+    let before_invalid_restart = history.clone();
+    assert_eq!(
+        history.restart_depth_merge_wave(0, 0),
+        Err(BranchMergeTombstoneHistoryError::InvalidFragment {
+            fragment: 0,
+            fragment_count: 0,
+        }),
+        "a recovery must declare at least one replacement fragment",
+    );
+    assert_eq!(history, before_invalid_restart);
+    assert_eq!(
+        history.restart_depth_merge_wave(3, 2),
+        Err(BranchMergeTombstoneHistoryError::ConflictingSubmission { order: 3 }),
+        "a whole-plan append cannot be restarted as a depth wave",
+    );
+    assert_eq!(history, before_invalid_restart);
+    assert_eq!(
+        history.restart_depth_merge_wave(5, 2),
+        Err(BranchMergeTombstoneHistoryError::NoIncompleteDepthWave { order: 5 }),
+    );
+    assert_eq!(history, before_invalid_restart);
+
+    history.restart_depth_merge_wave(0, 2).unwrap();
+    history.restart_depth_merge_wave(1, 2).unwrap();
+    assert_eq!(history.next_order(), Some(0));
+    assert!(history.events().is_empty());
+    assert!(history
+        .submit_depth_merge_fragment(0, 1, 2, &[(id(1), fixture_key("a/child/deep"))])
+        .unwrap()
+        .is_empty());
+    let first_wave = history
+        .submit_depth_merge_fragment(0, 0, 2, &[(id(1), fixture_key("a"))])
+        .unwrap();
+    assert_eq!(first_wave.iter().map(|event| event.order).collect::<Vec<_>>(), [0, 0]);
+
+    assert!(history
+        .submit_depth_merge_fragment(
+            1,
+            1,
+            2,
+            &[(id(1), fixture_key("root/child/deep"))],
+        )
+        .unwrap()
+        .is_empty());
+    let recovered_queue = history
+        .submit_depth_merge_fragment(1, 0, 2, &[(id(1), fixture_key("root/child"))])
+        .unwrap();
+    assert_eq!(
+        recovered_queue.iter().map(|event| event.order).collect::<Vec<_>>(),
+        [1, 1, 2, 3],
+        "restarted uneven waves release their queued transaction storm in order",
+    );
+    assert_eq!(
+        history.events().iter().map(|event| event.order).collect::<Vec<_>>(),
+        [0, 0, 1, 1, 2, 3],
+    );
+    assert_eq!(history.events()[0].key, fixture_key("a"));
+    assert_eq!(history.events()[1].key, fixture_key("a/child/deep"));
+    assert_eq!(history.events()[2].key, fixture_key("root/child"));
+    assert_eq!(history.events()[3].key, fixture_key("root/child/deep"));
+    assert_eq!(history.events()[4].key, fixture_key("a/child/deep/leaf"));
+    assert_eq!(history.events()[5].key, fixture_key("root/child/deep/leaf/twig"));
+    assert_eq!(history.next_order(), Some(5));
+}
+
+#[test]
+fn paired_wave_recovery_is_atomic_across_uneven_append_storms() {
+    let fixture_rows = TOMBSTONE_DEPTH_COMMIT_ORDER
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    let fixture_key = |path: &str| {
+        fixture_rows
+            .iter()
+            .find(|row| row.key == string(path))
+            .unwrap_or_else(|| panic!("the in-crate depth fixture supplies {path}"))
+            .key
+            .clone()
+    };
+    let whole_plan = |order, keys: Vec<CanonicalValue>| SequencedBranchMergePlan {
+        order,
+        plan: BranchMergePlan {
+            schema: Schema { version: EvolutionVersion::V1_0, tables: Vec::new() },
+            tables: BTreeMap::new(),
+            checkpoints: BTreeMap::new(),
+            report: Default::default(),
+        },
+        ordered_row_tombstones: keys.into_iter().map(|key| (id(1), key)).collect(),
+    };
+
+    let mut history = BranchMergeTombstoneHistory::new(0);
+    history
+        .submit_depth_merge_fragment(0, 0, 4, &[(id(1), fixture_key("a"))])
+        .unwrap();
+    history
+        .submit_depth_merge_fragment(0, 2, 4, &[(id(1), fixture_key("z"))])
+        .unwrap();
+    history
+        .submit_depth_merge_fragment(1, 1, 3, &[(id(1), fixture_key("root/child/deep"))])
+        .unwrap();
+    history.append(&whole_plan(2, vec![fixture_key("a/child/deep/leaf")])).unwrap();
+    history
+        .append(&whole_plan(3, vec![fixture_key("root/child/deep/leaf/twig")]))
+        .unwrap();
+    history.append(&whole_plan(4, Vec::new())).unwrap();
+    assert!(history.events().is_empty());
+
+    let before_failed_recovery = history.clone();
+    assert_eq!(
+        history.restart_depth_merge_waves(&[]),
+        Err(BranchMergeTombstoneHistoryError::EmptyDepthWaveRestartBatch),
+    );
+    assert_eq!(
+        history.restart_depth_merge_waves(&[(1, 2), (0, 0)]),
+        Err(BranchMergeTombstoneHistoryError::InvalidFragment {
+            fragment: 0,
+            fragment_count: 0,
+        }),
+        "batch validation follows lineage order rather than caller order",
+    );
+    assert_eq!(
+        history.restart_depth_merge_waves(&[(0, 2), (0, 3)]),
+        Err(BranchMergeTombstoneHistoryError::DuplicateDepthWaveRestart { order: 0 }),
+    );
+    assert_eq!(
+        history.restart_depth_merge_waves(&[(0, 2), (3, 2)]),
+        Err(BranchMergeTombstoneHistoryError::ConflictingSubmission { order: 3 }),
+        "a later whole-plan append aborts the earlier wave restart in the same batch",
+    );
+    assert_eq!(
+        history.restart_depth_merge_waves(&[(0, 2), (5, 2)]),
+        Err(BranchMergeTombstoneHistoryError::NoIncompleteDepthWave { order: 5 }),
+    );
+    assert_eq!(history, before_failed_recovery);
+
+    history.restart_depth_merge_waves(&[(1, 2), (0, 2)]).unwrap();
+    assert_eq!(history.next_order(), Some(0));
+    assert!(history.events().is_empty());
+    assert!(history
+        .submit_depth_merge_fragment(0, 1, 2, &[(id(1), fixture_key("a/child/deep"))])
+        .unwrap()
+        .is_empty());
+    assert_eq!(
+        history
+            .submit_depth_merge_fragment(0, 0, 2, &[(id(1), fixture_key("a"))])
+            .unwrap()
+            .iter()
+            .map(|event| event.order)
+            .collect::<Vec<_>>(),
+        [0, 0],
+    );
+    assert!(history
+        .submit_depth_merge_fragment(1, 1, 2, &[(id(1), fixture_key("root/child/deep"))])
+        .unwrap()
+        .is_empty());
+    let released_storm = history
+        .submit_depth_merge_fragment(1, 0, 2, &[(id(1), fixture_key("root/child"))])
+        .unwrap();
+    assert_eq!(
+        released_storm.iter().map(|event| event.order).collect::<Vec<_>>(),
+        [1, 1, 2, 3],
+    );
+    assert_eq!(
+        history.events().iter().map(|event| event.order).collect::<Vec<_>>(),
+        [0, 0, 1, 1, 2, 3],
+    );
+    assert_eq!(history.next_order(), Some(5));
+}
+
+#[test]
+fn paired_wave_recovery_and_append_batch_roll_back_together() {
+    let fixture_rows = TOMBSTONE_DEPTH_COMMIT_ORDER
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    let fixture_key = |path: &str| {
+        fixture_rows
+            .iter()
+            .find(|row| row.key == string(path))
+            .unwrap_or_else(|| panic!("the in-crate depth fixture supplies {path}"))
+            .key
+            .clone()
+    };
+    let whole_plan = |order, keys: Vec<CanonicalValue>| SequencedBranchMergePlan {
+        order,
+        plan: BranchMergePlan {
+            schema: Schema { version: EvolutionVersion::V1_0, tables: Vec::new() },
+            tables: BTreeMap::new(),
+            checkpoints: BTreeMap::new(),
+            report: Default::default(),
+        },
+        ordered_row_tombstones: keys.into_iter().map(|key| (id(1), key)).collect(),
+    };
+
+    let mut history = BranchMergeTombstoneHistory::new(0);
+    history
+        .submit_depth_merge_fragment(0, 0, 4, &[(id(1), fixture_key("a"))])
+        .unwrap();
+    history
+        .submit_depth_merge_fragment(0, 2, 4, &[(id(1), fixture_key("z"))])
+        .unwrap();
+    history
+        .submit_depth_merge_fragment(1, 1, 3, &[(id(1), fixture_key("root/child/deep"))])
+        .unwrap();
+    history.append(&whole_plan(2, vec![fixture_key("a/child/deep/leaf")])).unwrap();
+    history
+        .append(&whole_plan(3, vec![fixture_key("root/child/deep/leaf/twig")]))
+        .unwrap();
+    history.append(&whole_plan(4, Vec::new())).unwrap();
+    assert!(history.events().is_empty());
+
+    let before_failed_batch = history.clone();
+    assert_eq!(
+        history.restart_depth_merge_waves_with_appends(
+            &[(1, 2), (0, 2)],
+            &[
+                whole_plan(5, vec![fixture_key("root/child/deep/leaf/twig/bud")]),
+                whole_plan(7, vec![fixture_key("root/child/deep/leaf/twig/bud/seed")]),
+            ],
+        ),
+        Err(BranchMergeTombstoneHistoryError::OutOfOrder {
+            expected: 6,
+            actual: 7,
+        }),
+        "a bad later append rolls back earlier queued plans and every wave restart",
+    );
+    assert_eq!(history, before_failed_batch);
+
+    history
+        .restart_depth_merge_waves_with_appends(
+            &[(1, 2), (0, 2)],
+            &[
+                whole_plan(6, vec![fixture_key("root/child/deep/leaf/twig/bud/seed")]),
+                whole_plan(5, vec![fixture_key("root/child/deep/leaf/twig/bud")]),
+            ],
+        )
+        .unwrap();
+    assert_eq!(history.next_order(), Some(0));
+    assert!(history.events().is_empty());
+    assert!(history
+        .submit_depth_merge_fragment(0, 1, 2, &[(id(1), fixture_key("a/child/deep"))])
+        .unwrap()
+        .is_empty());
+    assert_eq!(
+        history
+            .submit_depth_merge_fragment(0, 0, 2, &[(id(1), fixture_key("a"))])
+            .unwrap()
+            .iter()
+            .map(|event| event.order)
+            .collect::<Vec<_>>(),
+        [0, 0],
+    );
+    assert!(history
+        .submit_depth_merge_fragment(1, 1, 2, &[(id(1), fixture_key("root/child/deep"))])
+        .unwrap()
+        .is_empty());
+    let released_storm = history
+        .submit_depth_merge_fragment(1, 0, 2, &[(id(1), fixture_key("root/child"))])
+        .unwrap();
+    assert_eq!(
+        released_storm.iter().map(|event| event.order).collect::<Vec<_>>(),
+        [1, 1, 2, 3, 5, 6],
+        "the recovered prefix releases prior and newly appended transactions together",
+    );
+    assert_eq!(
+        history.events().iter().map(|event| event.order).collect::<Vec<_>>(),
+        [0, 0, 1, 1, 2, 3, 5, 6],
+    );
+    assert_eq!(
+        history.events()[6].key,
+        fixture_key("root/child/deep/leaf/twig/bud"),
+    );
+    assert_eq!(
+        history.events()[7].key,
+        fixture_key("root/child/deep/leaf/twig/bud/seed"),
+    );
+    assert_eq!(history.next_order(), Some(7));
+}
+
+#[test]
+fn paired_wave_recovery_batches_replacement_fragments_and_appends() {
+    let fixture_rows = TOMBSTONE_DEPTH_COMMIT_ORDER
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    let fixture_key = |path: &str| {
+        fixture_rows
+            .iter()
+            .find(|row| row.key == string(path))
+            .unwrap_or_else(|| panic!("the in-crate depth fixture supplies {path}"))
+            .key
+            .clone()
+    };
+    let whole_plan = |order, keys: Vec<CanonicalValue>| SequencedBranchMergePlan {
+        order,
+        plan: BranchMergePlan {
+            schema: Schema { version: EvolutionVersion::V1_0, tables: Vec::new() },
+            tables: BTreeMap::new(),
+            checkpoints: BTreeMap::new(),
+            report: Default::default(),
+        },
+        ordered_row_tombstones: keys.into_iter().map(|key| (id(1), key)).collect(),
+    };
+    let recovery = |order, fragment_count, fragments| BranchMergeDepthWaveRecovery {
+        order,
+        fragment_count,
+        fragments,
+    };
+
+    let mut history = BranchMergeTombstoneHistory::new(0);
+    history
+        .submit_depth_merge_fragment(0, 0, 4, &[(id(1), fixture_key("a"))])
+        .unwrap();
+    history
+        .submit_depth_merge_fragment(0, 2, 4, &[(id(1), fixture_key("z"))])
+        .unwrap();
+    history
+        .submit_depth_merge_fragment(1, 1, 3, &[(id(1), fixture_key("root/child/deep"))])
+        .unwrap();
+    history.append(&whole_plan(2, vec![fixture_key("a/child/deep/leaf")])).unwrap();
+    history
+        .append(&whole_plan(3, vec![fixture_key("root/child/deep/leaf/twig")]))
+        .unwrap();
+    history.append(&whole_plan(4, Vec::new())).unwrap();
+    assert!(history.events().is_empty());
+
+    let before_failed_recovery = history.clone();
+    let invalid_recoveries = [
+        recovery(
+            0,
+            2,
+            BTreeMap::from([
+                (0, vec![(id(1), fixture_key("a"))]),
+                (1, vec![(id(1), fixture_key("a/child/deep"))]),
+            ]),
+        ),
+        recovery(1, 1, BTreeMap::from([(1, vec![(id(1), fixture_key("root/child"))])])),
+    ];
+    assert_eq!(
+        history.recover_depth_merge_waves_with_appends(
+            &invalid_recoveries,
+            &[
+                whole_plan(6, vec![fixture_key("root/child/deep/leaf/twig/bud/seed")]),
+                whole_plan(5, vec![fixture_key("root/child/deep/leaf/twig/bud")]),
+            ],
+        ),
+        Err(BranchMergeTombstoneHistoryError::InvalidFragment {
+            fragment: 1,
+            fragment_count: 1,
+        }),
+        "a replacement-fragment failure discards restart, release, and append mutations",
+    );
+    assert_eq!(history, before_failed_recovery);
+
+    let replacement_recoveries = [
+        recovery(
+            0,
+            2,
+            BTreeMap::from([
+                (0, vec![(id(1), fixture_key("a"))]),
+                (1, vec![(id(1), fixture_key("a/child/deep"))]),
+            ]),
+        ),
+        recovery(
+            1,
+            1,
+            BTreeMap::from([(
+                0,
+                vec![
+                    (id(1), fixture_key("root/child")),
+                    (id(1), fixture_key("root/child/deep")),
+                ],
+            )]),
+        ),
+    ];
+    let released_storm = history
+        .recover_depth_merge_waves_with_appends(
+            &replacement_recoveries,
+            &[
+                whole_plan(6, vec![fixture_key("root/child/deep/leaf/twig/bud/seed")]),
+                whole_plan(5, vec![fixture_key("root/child/deep/leaf/twig/bud")]),
+            ],
+        )
+        .unwrap();
+    assert_eq!(
+        released_storm.iter().map(|event| event.order).collect::<Vec<_>>(),
+        [0, 0, 1, 1, 2, 3, 5, 6],
+        "committed recovery returns events only after all replacement waves and appends succeed",
+    );
+    assert_eq!(
+        history.events().iter().map(|event| event.order).collect::<Vec<_>>(),
+        [0, 0, 1, 1, 2, 3, 5, 6],
+    );
+    assert_eq!(
+        history.events()[6].key,
+        fixture_key("root/child/deep/leaf/twig/bud"),
+    );
+    assert_eq!(
+        history.events()[7].key,
+        fixture_key("root/child/deep/leaf/twig/bud/seed"),
+    );
+    assert_eq!(history.next_order(), Some(7));
+}
+
+#[test]
+fn paired_wave_fragment_recovery_retains_siblings_and_append_queue() {
+    let fixture_rows = TOMBSTONE_DEPTH_COMMIT_ORDER
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    let fixture_key = |path: &str| {
+        fixture_rows
+            .iter()
+            .find(|row| row.key == string(path))
+            .unwrap_or_else(|| panic!("the in-crate depth fixture supplies {path}"))
+            .key
+            .clone()
+    };
+    let whole_plan = |order, keys: Vec<CanonicalValue>| SequencedBranchMergePlan {
+        order,
+        plan: BranchMergePlan {
+            schema: Schema { version: EvolutionVersion::V1_0, tables: Vec::new() },
+            tables: BTreeMap::new(),
+            checkpoints: BTreeMap::new(),
+            report: Default::default(),
+        },
+        ordered_row_tombstones: keys.into_iter().map(|key| (id(1), key)).collect(),
+    };
+    let fragment = |order, fragment, fragment_count, key| BranchMergeDepthFragmentRecovery {
+        order,
+        fragment,
+        fragment_count,
+        tombstones: vec![(id(1), fixture_key(key))],
+    };
+
+    let mut history = BranchMergeTombstoneHistory::new(0);
+    history
+        .submit_depth_merge_fragment(0, 0, 4, &[(id(1), fixture_key("a"))])
+        .unwrap();
+    history
+        .submit_depth_merge_fragment(0, 2, 4, &[(id(1), fixture_key("z"))])
+        .unwrap();
+    history
+        .submit_depth_merge_fragment(1, 1, 3, &[(id(1), fixture_key("root/child/deep"))])
+        .unwrap();
+    history
+        .append(&whole_plan(2, vec![fixture_key("root/child/deep/leaf/twig/bud/seed")]))
+        .unwrap();
+    history
+        .append(&whole_plan(3, vec![fixture_key("root/child/deep/leaf/twig/bud")]))
+        .unwrap();
+    history.append(&whole_plan(4, Vec::new())).unwrap();
+
+    let before_failed_recovery = history.clone();
+    assert_eq!(
+        history.recover_depth_merge_fragments_with_appends(&[], &[]),
+        Err(BranchMergeTombstoneHistoryError::EmptyDepthFragmentRecoveryBatch),
+    );
+    assert_eq!(
+        history.recover_depth_merge_fragments_with_appends(
+            &[fragment(0, 2, 4, "a/child/deep"), fragment(0, 2, 4, "z")],
+            &[whole_plan(5, vec![fixture_key("z")])],
+        ),
+        Err(BranchMergeTombstoneHistoryError::DuplicateDepthFragmentRecovery {
+            order: 0,
+            fragment: 2,
+        }),
+    );
+    assert_eq!(history, before_failed_recovery);
+    assert_eq!(
+        history.recover_depth_merge_fragments_with_appends(
+            &[
+                fragment(1, 1, 2, "root/child"),
+                fragment(0, 3, 4, "a/child/deep/leaf"),
+                fragment(0, 2, 4, "a/child/deep"),
+                fragment(0, 1, 4, "a/child"),
+            ],
+            &[whole_plan(5, vec![fixture_key("z")])],
+        ),
+        Err(BranchMergeTombstoneHistoryError::FragmentCountMismatch {
+            order: 1,
+            expected: 3,
+            actual: 2,
+        }),
+        "a later wave mismatch rolls back earlier fragment replacements, release, and append",
+    );
+    assert_eq!(history, before_failed_recovery);
+
+    let released_storm = history
+        .recover_depth_merge_fragments_with_appends(
+            &[
+                fragment(1, 2, 3, "root/child/deep/leaf/twig"),
+                fragment(0, 1, 4, "a/child"),
+                fragment(1, 0, 3, "root"),
+                fragment(0, 3, 4, "a/child/deep/leaf"),
+                fragment(1, 1, 3, "root/child"),
+                fragment(0, 2, 4, "a/child/deep"),
+            ],
+            &[whole_plan(5, vec![fixture_key("z")])],
+        )
+        .unwrap();
+    assert_eq!(
+        released_storm.iter().map(|event| event.order).collect::<Vec<_>>(),
+        [0, 0, 0, 0, 1, 1, 1, 2, 3, 5],
+    );
+    assert_eq!(
+        history.events().iter().map(|event| event.order).collect::<Vec<_>>(),
+        [0, 0, 0, 0, 1, 1, 1, 2, 3, 5],
+    );
+    assert_eq!(history.events()[0].key, fixture_key("a"));
+    assert_eq!(history.events()[1].key, fixture_key("a/child"));
+    assert_eq!(history.events()[2].key, fixture_key("a/child/deep"));
+    assert_eq!(history.events()[3].key, fixture_key("a/child/deep/leaf"));
+    assert_eq!(history.events()[4].key, fixture_key("root"));
+    assert_eq!(history.events()[5].key, fixture_key("root/child"));
+    assert_eq!(history.events()[6].key, fixture_key("root/child/deep/leaf/twig"));
+    assert_eq!(history.events()[9].key, fixture_key("z"));
+    assert_eq!(history.next_order(), Some(6));
+}
+
+#[test]
+fn paired_wave_fragment_recovery_retries_appends_without_duplicate_chain_events() {
+    let fixture_rows = TOMBSTONE_DEPTH_COMMIT_ORDER
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    let fixture_key = |path: &str| {
+        fixture_rows
+            .iter()
+            .find(|row| row.key == string(path))
+            .unwrap_or_else(|| panic!("the in-crate depth fixture supplies {path}"))
+            .key
+            .clone()
+    };
+    let whole_plan = |order, keys: Vec<CanonicalValue>| SequencedBranchMergePlan {
+        order,
+        plan: BranchMergePlan {
+            schema: Schema { version: EvolutionVersion::V1_0, tables: Vec::new() },
+            tables: BTreeMap::new(),
+            checkpoints: BTreeMap::new(),
+            report: Default::default(),
+        },
+        ordered_row_tombstones: keys.into_iter().map(|key| (id(1), key)).collect(),
+    };
+    let fragment = |order, fragment, fragment_count, key| BranchMergeDepthFragmentRecovery {
+        order,
+        fragment,
+        fragment_count,
+        tombstones: vec![(id(1), fixture_key(key))],
+    };
+
+    let mut history = BranchMergeTombstoneHistory::new(0);
+    history
+        .submit_depth_merge_fragment(0, 0, 4, &[(id(1), fixture_key("a"))])
+        .unwrap();
+    history
+        .submit_depth_merge_fragment(0, 2, 4, &[(id(1), fixture_key("z"))])
+        .unwrap();
+    history
+        .submit_depth_merge_fragment(1, 1, 3, &[(id(1), fixture_key("root/child/deep"))])
+        .unwrap();
+    history
+        .append(&whole_plan(2, vec![fixture_key("root/child/deep/leaf/twig/bud/seed")]))
+        .unwrap();
+    history
+        .append(&whole_plan(3, vec![fixture_key("root/child/deep/leaf/twig/bud")]))
+        .unwrap();
+    history.append(&whole_plan(4, Vec::new())).unwrap();
+    history
+        .append(&whole_plan(5, vec![fixture_key("z"), fixture_key("a")]))
+        .unwrap();
+
+    let before_changed_queued_retry = history.clone();
+    assert_eq!(
+        history.append(&whole_plan(5, vec![fixture_key("a"), fixture_key("z")])),
+        Err(BranchMergeTombstoneHistoryError::OutOfOrder {
+            expected: 6,
+            actual: 5,
+        }),
+        "standalone append keeps strict ordering for a reused queue position",
+    );
+    assert_eq!(history, before_changed_queued_retry);
+    assert_eq!(
+        history.recover_depth_merge_fragments_with_appends(
+            &[fragment(0, 1, 4, "a/child")],
+            &[whole_plan(5, vec![fixture_key("root")])],
+        ),
+        Err(BranchMergeTombstoneHistoryError::AppendRetryMismatch { order: 5 }),
+        "a changed queued delta aborts the accompanying fragment repair",
+    );
+    assert_eq!(history, before_changed_queued_retry);
+
+    let released = history
+        .recover_depth_merge_fragments_with_appends(
+            &[
+                fragment(1, 2, 3, "root/child/deep/leaf/twig"),
+                fragment(0, 1, 4, "a/child"),
+                fragment(1, 0, 3, "root"),
+                fragment(0, 3, 4, "a/child/deep/leaf"),
+                fragment(1, 1, 3, "root/child"),
+                fragment(0, 2, 4, "a/child/deep"),
+            ],
+            &[
+                whole_plan(5, vec![fixture_key("a"), fixture_key("z")]),
+                whole_plan(6, vec![fixture_key("root/child/deep/leaf/twig/bud/seed")]),
+                whole_plan(5, vec![fixture_key("z"), fixture_key("a")]),
+            ],
+        )
+        .unwrap();
+    assert_eq!(
+        released.iter().map(|event| event.order).collect::<Vec<_>>(),
+        [0, 0, 0, 0, 1, 1, 1, 2, 3, 5, 5, 6],
+    );
+    assert_eq!(history.events(), released.as_slice());
+    assert_eq!(history.events()[9].key, fixture_key("a"));
+    assert_eq!(history.events()[10].key, fixture_key("z"));
+    assert_eq!(history.events()[11].key, fixture_key("root/child/deep/leaf/twig/bud/seed"));
+    assert_eq!(history.next_order(), Some(7));
+
+    history
+        .submit_depth_merge_fragment(7, 0, 2, &[(id(1), fixture_key("root"))])
+        .unwrap();
+    let before_changed_committed_retry = history.clone();
+    assert_eq!(
+        history.recover_depth_merge_fragments_with_appends(
+            &[fragment(7, 1, 2, "root/child")],
+            &[
+                whole_plan(4, Vec::new()),
+                whole_plan(6, vec![fixture_key("root/child/deep/leaf/twig/bud")]),
+                whole_plan(8, vec![fixture_key("root/child/deep/leaf/twig/bud/seed")]),
+            ],
+        ),
+        Err(BranchMergeTombstoneHistoryError::AppendRetryMismatch { order: 6 }),
+        "a changed committed delta rolls back an empty retry, the next append, and fragment recovery",
+    );
+    assert_eq!(history, before_changed_committed_retry);
+
+    let released_tail = history
+        .recover_depth_merge_fragments_with_appends(
+            &[fragment(7, 1, 2, "root/child")],
+            &[
+                whole_plan(4, Vec::new()),
+                whole_plan(6, vec![fixture_key("root/child/deep/leaf/twig/bud/seed")]),
+                whole_plan(6, vec![fixture_key("root/child/deep/leaf/twig/bud/seed")]),
+                whole_plan(8, vec![fixture_key("root/child/deep/leaf/twig/bud/seed")]),
+            ],
+        )
+        .unwrap();
+    assert_eq!(
+        released_tail.iter().map(|event| event.order).collect::<Vec<_>>(),
+        [7, 7, 8],
+    );
+    assert_eq!(history.events().len(), 15);
+    assert_eq!(history.events()[12].key, fixture_key("root"));
+    assert_eq!(history.events()[13].key, fixture_key("root/child"));
+    assert_eq!(
+        history.events()[14].key,
+        fixture_key("root/child/deep/leaf/twig/bud/seed"),
+    );
+    assert_eq!(history.next_order(), Some(9));
+}
+
+#[test]
+fn paired_wave_fragment_recovery_deduplicates_appends_across_uneven_fragments() {
+    let fixture_rows = TOMBSTONE_DEPTH_COMMIT_ORDER
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    let fixture_key = |path: &str| {
+        fixture_rows
+            .iter()
+            .find(|row| row.key == string(path))
+            .unwrap_or_else(|| panic!("the in-crate depth fixture supplies {path}"))
+            .key
+            .clone()
+    };
+    let whole_plan = |order, keys: Vec<CanonicalValue>| SequencedBranchMergePlan {
+        order,
+        plan: BranchMergePlan {
+            schema: Schema { version: EvolutionVersion::V1_0, tables: Vec::new() },
+            tables: BTreeMap::new(),
+            checkpoints: BTreeMap::new(),
+            report: Default::default(),
+        },
+        ordered_row_tombstones: keys.into_iter().map(|key| (id(1), key)).collect(),
+    };
+    let fragment = |order, fragment, fragment_count, key| BranchMergeDepthFragmentRecovery {
+        order,
+        fragment,
+        fragment_count,
+        tombstones: vec![(id(1), fixture_key(key))],
+    };
+
+    let mut history = BranchMergeTombstoneHistory::new(0);
+    history
+        .submit_depth_merge_fragment(0, 0, 4, &[(id(1), fixture_key("a"))])
+        .unwrap();
+    history
+        .submit_depth_merge_fragment(1, 0, 3, &[(id(1), fixture_key("root"))])
+        .unwrap();
+    history
+        .submit_depth_merge_fragment(1, 1, 3, &[(id(1), fixture_key("root/child"))])
+        .unwrap();
+    history
+        .submit_depth_merge_fragment(
+            1,
+            2,
+            3,
+            &[(id(1), fixture_key("root/child/deep/leaf/twig"))],
+        )
+        .unwrap();
+    history
+        .append(&whole_plan(2, vec![fixture_key("root/child/deep/leaf/twig/bud/seed")]))
+        .unwrap();
+    history
+        .submit_depth_merge_fragment(3, 0, 2, &[(id(1), fixture_key("z"))])
+        .unwrap();
+
+    let before_incomplete_retry = history.clone();
+    assert_eq!(
+        history.recover_depth_merge_fragments_with_appends(
+            &[fragment(0, 1, 4, "a/child")],
+            &[
+                whole_plan(
+                    1,
+                    vec![
+                        fixture_key("root"),
+                        fixture_key("root/child"),
+                        fixture_key("root/child/deep/leaf/twig"),
+                    ],
+                ),
+                whole_plan(3, vec![fixture_key("z")]),
+            ],
+        ),
+        Err(BranchMergeTombstoneHistoryError::ConflictingSubmission { order: 3 }),
+        "an incomplete later wave is not accepted as a whole-plan replay",
+    );
+    assert_eq!(history, before_incomplete_retry);
+    assert_eq!(
+        history.recover_depth_merge_fragments_with_appends(
+            &[fragment(1, 1, 3, "root/child")],
+            &[whole_plan(1, vec![fixture_key("root/child")])],
+        ),
+        Err(BranchMergeTombstoneHistoryError::ConflictingSubmission { order: 1 }),
+        "a batch replacing fragments at the same order cannot also claim a whole-plan retry",
+    );
+    assert_eq!(history, before_incomplete_retry);
+    assert_eq!(
+        history.recover_depth_merge_fragments_with_appends(
+            &[fragment(0, 1, 4, "a/child")],
+            &[whole_plan(1, vec![fixture_key("z")])],
+        ),
+        Err(BranchMergeTombstoneHistoryError::ConflictingSubmission { order: 1 }),
+        "a changed cross-mode delta remains a conflict",
+    );
+    assert_eq!(history, before_incomplete_retry);
+
+    let released = history
+        .recover_depth_merge_fragments_with_appends(
+            &[
+                fragment(0, 1, 4, "a/child"),
+                fragment(0, 2, 4, "a/child/deep"),
+                fragment(0, 3, 4, "a/child/deep/leaf"),
+            ],
+            &[whole_plan(
+                1,
+                vec![
+                    fixture_key("root/child/deep/leaf/twig"),
+                    fixture_key("root/child"),
+                    fixture_key("root"),
+                ],
+            )],
+        )
+        .unwrap();
+    assert_eq!(
+        released.iter().map(|event| event.order).collect::<Vec<_>>(),
+        [0, 0, 0, 0, 1, 1, 1, 2],
+    );
+    assert_eq!(history.events(), released.as_slice());
+    assert_eq!(history.events()[4].key, fixture_key("root"));
+    assert_eq!(history.events()[5].key, fixture_key("root/child"));
+    assert_eq!(history.events()[6].key, fixture_key("root/child/deep/leaf/twig"));
+    assert_eq!(history.next_order(), Some(3));
+
+    let before_changed_committed_retry = history.clone();
+    assert_eq!(
+        history.recover_depth_merge_fragments_with_appends(
+            &[fragment(3, 1, 2, "root/child")],
+            &[
+                whole_plan(1, vec![fixture_key("z")]),
+                whole_plan(4, vec![fixture_key("root/child/deep/leaf/twig/bud")]),
+            ],
+        ),
+        Err(BranchMergeTombstoneHistoryError::ConflictingSubmission { order: 1 }),
+        "a changed retry against a committed depth chain rolls back the next wave and append",
+    );
+    assert_eq!(history, before_changed_committed_retry);
+
+    let released_tail = history
+        .recover_depth_merge_fragments_with_appends(
+            &[fragment(3, 1, 2, "root/child")],
+            &[
+                whole_plan(
+                    1,
+                    vec![
+                        fixture_key("root"),
+                        fixture_key("root/child"),
+                        fixture_key("root/child/deep/leaf/twig"),
+                    ],
+                ),
+                whole_plan(4, vec![fixture_key("root/child/deep/leaf/twig/bud")]),
+            ],
+        )
+        .unwrap();
+    assert_eq!(
+        released_tail.iter().map(|event| event.order).collect::<Vec<_>>(),
+        [3, 3, 4],
+    );
+    assert_eq!(history.events().iter().filter(|event| event.order == 1).count(), 3);
+    assert_eq!(history.events()[8].key, fixture_key("root/child"));
+    assert_eq!(history.events()[9].key, fixture_key("z"));
+    assert_eq!(
+        history.events()[10].key,
+        fixture_key("root/child/deep/leaf/twig/bud"),
+    );
+    assert_eq!(history.next_order(), Some(5));
+}
+
+#[test]
+fn paired_recovery_retry_identity_tracks_results_across_uneven_row_segments() {
+    let fixture_rows = TOMBSTONE_DEPTH_COMMIT_ORDER
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    let fixture_key = |path: &str| {
+        fixture_rows
+            .iter()
+            .find(|row| row.key == string(path))
+            .unwrap_or_else(|| panic!("the in-crate depth fixture supplies {path}"))
+            .key
+            .clone()
+    };
+    let make_step = |order, split_rows, generation, change_row| {
+        let mut rows = fixture_rows[..fixture_rows.len() - 1].to_vec();
+        if change_row {
+            rows[0].fields.insert(id(2), string("changed paired row"));
+        }
+        let tombstone = fixture_key("z");
+        let segments = if split_rows {
+            let boundary = fixture_rows[4].key.encode().unwrap();
+            vec![
+                MergedSegment::Rows {
+                    range: KeyRange::new(None, Some(boundary.clone())).unwrap(),
+                    rows: rows[..4].to_vec(),
+                    tombstones: Vec::new(),
+                },
+                MergedSegment::Rows {
+                    range: KeyRange::new(Some(boundary), None).unwrap(),
+                    rows: rows[4..].to_vec(),
+                    tombstones: vec![tombstone.clone()],
+                },
+            ]
+        } else {
+            vec![MergedSegment::Rows {
+                range: KeyRange::all(),
+                rows,
+                tombstones: vec![tombstone.clone()],
+            }]
+        };
+        let mut report = orna_storage_v1::BranchMergeReport::default();
+        report.rows_examined = if split_rows { 99 } else { 10 };
+        SequencedBranchMergePlan {
+            order,
+            plan: BranchMergePlan {
+                schema: schema(true, FieldType::Str),
+                tables: BTreeMap::from([(
+                    id(1),
+                    orna_storage_v1::MergedTable {
+                        id: id(1),
+                        whole_table_reuse: None,
+                        segments,
+                    },
+                )]),
+                checkpoints: BTreeMap::from([(
+                    b"stream".to_vec(),
+                    CheckpointGeneration {
+                        generation,
+                        position: Some(b"position-1".to_vec()),
+                    },
+                )]),
+                report,
+            },
+            ordered_row_tombstones: vec![(id(1), tombstone)],
+        }
+    };
+    let repair = |fragment, tombstone: Option<&str>| BranchMergeDepthFragmentRecovery {
+        order: 0,
+        fragment,
+        fragment_count: 2,
+        tombstones: tombstone
+            .map(|key| vec![(id(1), fixture_key(key))])
+            .unwrap_or_default(),
+    };
+
+    let mut history = BranchMergeTombstoneHistory::new(0);
+    history.submit_depth_merge_fragment(0, 0, 2, &[]).unwrap();
+    history.append(&make_step(1, false, 1, false)).unwrap();
+    let before_changed_queued_retry = history.clone();
+    assert_eq!(
+        history.recover_depth_merge_fragments_with_appends(
+            &[repair(1, None)],
+            &[make_step(1, true, 2, false)],
+        ),
+        Err(BranchMergeTombstoneHistoryError::AppendRetryMismatch { order: 1 }),
+        "same tombstones with a changed checkpoint are not the same paired plan",
+    );
+    assert_eq!(history, before_changed_queued_retry);
+
+    let released = history
+        .recover_depth_merge_fragments_with_appends(
+            &[repair(1, None)],
+            &[make_step(1, true, 1, false)],
+        )
+        .unwrap();
+    assert_eq!(
+        released,
+        vec![BranchMergeTombstoneEvent {
+            order: 1,
+            table: id(1),
+            key: fixture_key("z"),
+        }],
+        "equivalent materialized rows deduplicate across different depth partitions",
+    );
+    history.submit_depth_merge_fragment(2, 0, 2, &[]).unwrap();
+
+    let before_changed_committed_retry = history.clone();
+    assert_eq!(
+        history.recover_depth_merge_fragments_with_appends(
+            &[BranchMergeDepthFragmentRecovery {
+                order: 2,
+                fragment: 1,
+                fragment_count: 2,
+                tombstones: Vec::new(),
+            }],
+            &[make_step(1, false, 1, true)],
+        ),
+        Err(BranchMergeTombstoneHistoryError::AppendRetryMismatch { order: 1 }),
+        "same checkpoint and tombstones with a changed materialized row are not identical",
+    );
+    assert_eq!(history, before_changed_committed_retry);
+
+    history
+        .recover_depth_merge_fragments_with_appends(
+            &[BranchMergeDepthFragmentRecovery {
+                order: 2,
+                fragment: 1,
+                fragment_count: 2,
+                tombstones: Vec::new(),
+            }],
+            &[make_step(1, true, 1, false)],
+        )
+        .unwrap();
+    assert_eq!(history.next_order(), Some(3));
+}
+
+#[test]
+fn paired_fragment_retry_identity_preserves_tuple_depth_across_restores() {
+    let fixture_rows = TOMBSTONE_DEPTH_COMMIT_ORDER
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    assert!(fixture_rows.iter().any(|row| row.key == string("root")));
+    assert!(fixture_rows.iter().any(|row| row.key == string("root/child")));
+
+    let shallow = CanonicalValue::new(OvbRaw::Tag(
+        60015,
+        Box::new(OvbRaw::Array(vec![OvbRaw::Text("root".into())])),
+    ))
+    .unwrap();
+    let deep = CanonicalValue::new(OvbRaw::Tag(
+        60015,
+        Box::new(OvbRaw::Array(vec![
+            OvbRaw::Text("root".into()),
+            OvbRaw::Text("child".into()),
+        ])),
+    ))
+    .unwrap();
+    assert!(orna_foundation_v1::compare_primary_keys(&shallow, &deep).is_err());
+
+    let make_step = |order, reverse_segments| {
+        let keys = if reverse_segments {
+            vec![deep.clone(), shallow.clone()]
+        } else {
+            vec![shallow.clone(), deep.clone()]
+        };
+        let plan = BranchMergePlan {
+            schema: schema(true, FieldType::Str),
+            tables: BTreeMap::from([(
+                id(1),
+                orna_storage_v1::MergedTable {
+                    id: id(1),
+                    whole_table_reuse: None,
+                    segments: keys
+                        .into_iter()
+                        .map(|key| MergedSegment::Rows {
+                            range: KeyRange::all(),
+                            rows: Vec::new(),
+                            tombstones: vec![key],
+                        })
+                        .collect(),
+                },
+            )]),
+            checkpoints: BTreeMap::from([(
+                b"stream".to_vec(),
+                CheckpointGeneration {
+                    generation: 4,
+                    position: Some(b"paired-restore".to_vec()),
+                },
+            )]),
+            report: Default::default(),
+        };
+        SequencedBranchMergePlan {
+            order,
+            ordered_row_tombstones: plan.ordered_row_tombstones(),
+            plan,
+        }
+    };
+
+    let mut history = BranchMergeTombstoneHistory::new(0);
+    history.submit_depth_merge_fragment(0, 0, 2, &[]).unwrap();
+    history
+        .submit_depth_merge_fragment(1, 0, 2, &[(id(1), shallow.clone())])
+        .unwrap();
+    history
+        .submit_depth_merge_fragment(1, 1, 2, &[(id(1), deep.clone())])
+        .unwrap();
+    history
+        .bind_depth_fragment_retry_plan(&make_step(1, true))
+        .unwrap();
+
+    let released = history
+        .recover_depth_merge_fragments_with_appends(
+            &[BranchMergeDepthFragmentRecovery {
+                order: 0,
+                fragment: 1,
+                fragment_count: 2,
+                tombstones: Vec::new(),
+            }],
+            &[make_step(1, false)],
+        )
+        .expect("the same paired retry survives tuple-depth and segment-layout changes");
+    assert_eq!(
+        released.iter().map(|event| event.order).collect::<Vec<_>>(),
+        [1, 1],
+    );
+    let expected_keys = vec![shallow, deep];
+    assert_eq!(
+        released.iter().map(|event| event.key.clone()).collect::<Vec<_>>(),
+        expected_keys,
+        "released tuple-depth tombstones retain ascending tuple arity across fragment boundaries",
+    );
+    assert_eq!(history.next_order(), Some(2));
+}
+
+#[test]
+fn paired_fragment_retries_bind_full_identity_across_uneven_chains() {
+    let fixture_rows = TOMBSTONE_DEPTH_COMMIT_ORDER
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    let fixture_key = |path: &str| {
+        fixture_rows
+            .iter()
+            .find(|row| row.key == string(path))
+            .unwrap_or_else(|| panic!("the in-crate depth fixture supplies {path}"))
+            .key
+            .clone()
+    };
+    let make_step = |order, split_rows, generation| {
+        let rows = fixture_rows[..fixture_rows.len() - 1].to_vec();
+        let tombstone = fixture_key("z");
+        let segments = if split_rows {
+            let boundary = fixture_rows[4].key.encode().unwrap();
+            vec![
+                MergedSegment::Rows {
+                    range: KeyRange::new(None, Some(boundary.clone())).unwrap(),
+                    rows: rows[..4].to_vec(),
+                    tombstones: Vec::new(),
+                },
+                MergedSegment::Rows {
+                    range: KeyRange::new(Some(boundary), None).unwrap(),
+                    rows: rows[4..].to_vec(),
+                    tombstones: vec![tombstone.clone()],
+                },
+            ]
+        } else {
+            vec![MergedSegment::Rows {
+                range: KeyRange::all(),
+                rows,
+                tombstones: vec![tombstone.clone()],
+            }]
+        };
+        SequencedBranchMergePlan {
+            order,
+            plan: BranchMergePlan {
+                schema: schema(true, FieldType::Str),
+                tables: BTreeMap::from([(
+                    id(1),
+                    orna_storage_v1::MergedTable {
+                        id: id(1),
+                        whole_table_reuse: None,
+                        segments,
+                    },
+                )]),
+                checkpoints: BTreeMap::from([(
+                    b"stream".to_vec(),
+                    CheckpointGeneration {
+                        generation,
+                        position: Some(b"position-1".to_vec()),
+                    },
+                )]),
+                report: Default::default(),
+            },
+            ordered_row_tombstones: vec![(id(1), tombstone)],
+        }
+    };
+    let empty_repair = |order, fragment| BranchMergeDepthFragmentRecovery {
+        order,
+        fragment,
+        fragment_count: 2,
+        tombstones: Vec::new(),
+    };
+    let tombstone = (id(1), fixture_key("z"));
+
+    let mut history = BranchMergeTombstoneHistory::new(0);
+    history.submit_depth_merge_fragment(0, 0, 2, &[]).unwrap();
+    history
+        .submit_depth_merge_fragment(1, 0, 2, std::slice::from_ref(&tombstone))
+        .unwrap();
+    history.submit_depth_merge_fragment(1, 1, 2, &[]).unwrap();
+    history.bind_depth_fragment_retry_plan(&make_step(1, false, 7)).unwrap();
+
+    let logical_alias = CanonicalValue::new(OvbRaw::Tag(
+        60015,
+        Box::new(OvbRaw::Array(vec![OvbRaw::Text("z".into())])),
+    ))
+    .unwrap();
+    assert_eq!(
+        orna_foundation_v1::compare_primary_keys(&logical_alias, &tombstone.1),
+        Ok(std::cmp::Ordering::Equal),
+    );
+    let before_changed_key_encoding = history.clone();
+    assert_eq!(
+        history.recover_depth_merge_fragments_with_appends(
+            &[BranchMergeDepthFragmentRecovery {
+                order: 1,
+                fragment: 0,
+                fragment_count: 2,
+                tombstones: vec![(id(1), logical_alias)],
+            }],
+            &[],
+        ),
+        Err(BranchMergeTombstoneHistoryError::ConflictingSubmission { order: 1 }),
+        "a bound wave retains the exact key representation included in its paired retry identity",
+    );
+    assert_eq!(history, before_changed_key_encoding);
+
+    let before_changed_bound_wave = history.clone();
+    assert_eq!(
+        history.recover_depth_merge_fragments_with_appends(
+            &[BranchMergeDepthFragmentRecovery {
+                order: 1,
+                fragment: 0,
+                fragment_count: 2,
+                tombstones: vec![(id(1), fixture_key("root"))],
+            }],
+            &[],
+        ),
+        Err(BranchMergeTombstoneHistoryError::ConflictingSubmission { order: 1 }),
+        "recovery cannot mutate a bound fragment wave to a different tombstone result",
+    );
+    assert_eq!(history, before_changed_bound_wave);
+
+    let before_changed_pending_retry = history.clone();
+    assert_eq!(
+        history.recover_depth_merge_fragments_with_appends(
+            &[empty_repair(0, 1)],
+            &[make_step(1, true, 8)],
+        ),
+        Err(BranchMergeTombstoneHistoryError::ConflictingSubmission { order: 1 }),
+        "a bound fragment wave rejects a same-tombstone retry with changed checkpoint state",
+    );
+    assert_eq!(history, before_changed_pending_retry);
+
+    let released = history
+        .recover_depth_merge_fragments_with_appends(
+            &[empty_repair(0, 1)],
+            &[make_step(1, true, 7)],
+        )
+        .unwrap();
+    assert_eq!(
+        released.iter().map(|event| event.order).collect::<Vec<_>>(),
+        [1],
+        "the same paired identity deduplicates even when its row chain uses different segment boundaries",
+    );
+    assert_eq!(released[0].key, fixture_key("z"));
+
+    history
+        .submit_depth_merge_fragment(2, 0, 1, std::slice::from_ref(&tombstone))
+        .unwrap();
+    history.bind_depth_fragment_retry_plan(&make_step(2, false, 9)).unwrap();
+    history.submit_depth_merge_fragment(3, 0, 2, &[]).unwrap();
+    let before_changed_committed_retry = history.clone();
+    assert_eq!(
+        history.recover_depth_merge_fragments_with_appends(
+            &[empty_repair(3, 1)],
+            &[make_step(2, true, 10)],
+        ),
+        Err(BranchMergeTombstoneHistoryError::ConflictingSubmission { order: 2 }),
+        "a committed fragment binding keeps rejecting a different paired checkpoint",
+    );
+    assert_eq!(history, before_changed_committed_retry);
+
+    let released = history
+        .recover_depth_merge_fragments_with_appends(
+            &[empty_repair(3, 1)],
+            &[make_step(2, true, 9)],
+        )
+        .unwrap();
+    assert_eq!(released, Vec::<BranchMergeTombstoneEvent>::new());
+    assert_eq!(history.next_order(), Some(4));
+}
+
+#[test]
+fn paired_fragment_retry_bindings_are_atomic_across_uneven_chains() {
+    let fixture_rows = TOMBSTONE_DEPTH_COMMIT_ORDER
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    let fixture_key = |path: &str| {
+        fixture_rows
+            .iter()
+            .find(|row| row.key == string(path))
+            .unwrap_or_else(|| panic!("the in-crate depth fixture supplies {path}"))
+            .key
+            .clone()
+    };
+    let make_step = |order, paths: &[&str], generation, split_tombstones| {
+        let keys = paths.iter().map(|path| fixture_key(path)).collect::<Vec<_>>();
+        let partitions = if split_tombstones && keys.len() > 1 {
+            vec![vec![keys[0].clone()], keys[1..].to_vec()]
+        } else {
+            vec![keys.clone()]
+        };
+        let segments = partitions
+            .into_iter()
+            .map(|tombstones| MergedSegment::Rows {
+                range: KeyRange::all(),
+                rows: Vec::new(),
+                tombstones,
+            })
+            .collect();
+        SequencedBranchMergePlan {
+            order,
+            plan: BranchMergePlan {
+                schema: schema(true, FieldType::Str),
+                tables: BTreeMap::from([(
+                    id(1),
+                    orna_storage_v1::MergedTable {
+                        id: id(1),
+                        whole_table_reuse: None,
+                        segments,
+                    },
+                )]),
+                checkpoints: BTreeMap::from([(
+                    b"stream".to_vec(),
+                    CheckpointGeneration {
+                        generation,
+                        position: Some(b"position-1".to_vec()),
+                    },
+                )]),
+                report: Default::default(),
+            },
+            ordered_row_tombstones: keys.into_iter().map(|key| (id(1), key)).collect(),
+        }
+    };
+    let empty_repair = |order, fragment, fragment_count| BranchMergeDepthFragmentRecovery {
+        order,
+        fragment,
+        fragment_count,
+        tombstones: Vec::new(),
+    };
+
+    let mut history = BranchMergeTombstoneHistory::new(0);
+    history.submit_depth_merge_fragment(0, 0, 2, &[]).unwrap();
+    history
+        .submit_depth_merge_fragment(1, 0, 3, &[(id(1), fixture_key("root"))])
+        .unwrap();
+    history
+        .submit_depth_merge_fragment(1, 1, 3, &[(id(1), fixture_key("root/child"))])
+        .unwrap();
+    history.submit_depth_merge_fragment(1, 2, 3, &[]).unwrap();
+    history.submit_depth_merge_fragment(2, 0, 4, &[]).unwrap();
+    history
+        .submit_depth_merge_fragment(3, 1, 2, &[(id(1), fixture_key("z"))])
+        .unwrap();
+    history.submit_depth_merge_fragment(3, 0, 2, &[]).unwrap();
+
+    let first = make_step(1, &["root", "root/child"], 7, false);
+    let third = make_step(3, &["z"], 9, false);
+    assert_eq!(
+        history.bind_depth_fragment_retry_plans(&[]),
+        Err(BranchMergeTombstoneHistoryError::EmptyDepthFragmentRetryPlanBindingBatch),
+    );
+    let before_duplicate_batch = history.clone();
+    assert_eq!(
+        history.bind_depth_fragment_retry_plans(&[first.clone(), first.clone()]),
+        Err(BranchMergeTombstoneHistoryError::DuplicateDepthFragmentRetryPlanBinding {
+            order: 1,
+        }),
+    );
+    assert_eq!(history, before_duplicate_batch);
+
+    let before_mismatched_batch = history.clone();
+    assert_eq!(
+        history.bind_depth_fragment_retry_plans(&[
+            make_step(3, &["root"], 10, true),
+            first.clone(),
+        ]),
+        Err(BranchMergeTombstoneHistoryError::ConflictingSubmission { order: 3 }),
+        "a mismatch later in the chain rolls back earlier candidate bindings",
+    );
+    assert_eq!(history, before_mismatched_batch);
+
+    let mut unbound_probe = history.clone();
+    let released = unbound_probe
+        .recover_depth_merge_fragments_with_appends(
+            &[empty_repair(0, 1, 2)],
+            &[make_step(1, &["root", "root/child"], 8, true)],
+        )
+        .unwrap();
+    assert_eq!(
+        released.iter().map(|event| event.order).collect::<Vec<_>>(),
+        [1, 1],
+        "a rejected binding batch leaves earlier positions in legacy unbound retry mode",
+    );
+
+    history
+        .bind_depth_fragment_retry_plans(&[third.clone(), first.clone()])
+        .unwrap();
+    history
+        .bind_depth_fragment_retry_plans(&[first.clone(), third.clone()])
+        .unwrap();
+    let released = history
+        .recover_depth_merge_fragments_with_appends(
+            &[
+                empty_repair(0, 1, 2),
+                empty_repair(2, 1, 4),
+                empty_repair(2, 2, 4),
+                empty_repair(2, 3, 4),
+            ],
+            &[],
+        )
+        .unwrap();
+    assert_eq!(
+        released.iter().map(|event| event.order).collect::<Vec<_>>(),
+        [1, 1, 3],
+        "independently bound waves release in their original paired lineage order",
+    );
+    assert_eq!(history.next_order(), Some(4));
+
+    history.submit_depth_merge_fragment(4, 0, 2, &[]).unwrap();
+    history.submit_depth_merge_fragment(5, 0, 3, &[]).unwrap();
+    let released = history
+        .recover_depth_merge_fragments_with_appends(
+            &[
+                empty_repair(4, 1, 2),
+                empty_repair(5, 1, 3),
+                empty_repair(5, 2, 3),
+            ],
+            &[
+                make_step(1, &["root", "root/child"], 7, true),
+                make_step(3, &["z"], 9, true),
+            ],
+        )
+        .unwrap();
+    assert!(released.is_empty());
+    assert_eq!(history.next_order(), Some(6));
+}
+
+#[test]
+fn paired_storm_recovery_reports_stale_depth_labels_before_bad_indices() {
+    let fixture_rows = TOMBSTONE_DEPTH_COMMIT_ORDER
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    let fixture_key = |path: &str| {
+        fixture_rows
+            .iter()
+            .find(|row| row.key == string(path))
+            .unwrap_or_else(|| panic!("the in-crate depth fixture supplies {path}"))
+            .key
+            .clone()
+    };
+
+    let mut history = BranchMergeTombstoneHistory::new(0);
+    history
+        .submit_depth_merge_fragment(0, 0, 3, &[(id(1), fixture_key("root"))])
+        .unwrap();
+    history
+        .submit_depth_merge_fragment(1, 0, 4, &[(id(1), fixture_key("root/child"))])
+        .unwrap();
+
+    let before_stale_submit_label = history.clone();
+    assert_eq!(
+        history.submit_depth_merge_fragment(0, 2, 2, &[]),
+        Err(BranchMergeTombstoneHistoryError::FragmentCountMismatch {
+            order: 0,
+            expected: 3,
+            actual: 2,
+        }),
+        "the existing wave count identifies a stale depth label even when its index is out of range",
+    );
+    assert_eq!(history, before_stale_submit_label);
+
+    let before_stale_recovery_label = history.clone();
+    assert_eq!(
+        history.recover_depth_merge_fragments_with_appends(
+            &[BranchMergeDepthFragmentRecovery {
+                order: 1,
+                fragment: 3,
+                fragment_count: 3,
+                tombstones: Vec::new(),
+            }],
+            &[],
+        ),
+        Err(BranchMergeTombstoneHistoryError::FragmentCountMismatch {
+            order: 1,
+            expected: 4,
+            actual: 3,
+        }),
+        "recovery retains the paired wave's own uneven depth label instead of reporting only a bad index",
+    );
+    assert_eq!(history, before_stale_recovery_label);
+}
+
+#[test]
+fn uneven_cascade_checks_stale_labels_before_paired_retry_conflicts() {
+    let fixture_rows = TOMBSTONE_DEPTH_COMMIT_ORDER
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    let fixture_key = |path: &str| {
+        fixture_rows
+            .iter()
+            .find(|row| row.key == string(path))
+            .unwrap_or_else(|| panic!("the in-crate depth fixture supplies {path}"))
+            .key
+            .clone()
+    };
+    let make_step = |generation| {
+        let key = fixture_key("root/child");
+        SequencedBranchMergePlan {
+            order: 1,
+            plan: BranchMergePlan {
+                schema: schema(true, FieldType::Str),
+                tables: BTreeMap::from([(
+                    id(1),
+                    orna_storage_v1::MergedTable {
+                        id: id(1),
+                        whole_table_reuse: None,
+                        segments: vec![MergedSegment::Rows {
+                            range: KeyRange::all(),
+                            rows: Vec::new(),
+                            tombstones: vec![key.clone()],
+                        }],
+                    },
+                )]),
+                checkpoints: BTreeMap::from([(
+                    b"stream".to_vec(),
+                    CheckpointGeneration {
+                        generation,
+                        position: Some(b"uneven-cascade".to_vec()),
+                    },
+                )]),
+                report: Default::default(),
+            },
+            ordered_row_tombstones: vec![(id(1), key)],
+        }
+    };
+
+    let mut history = BranchMergeTombstoneHistory::new(0);
+    history
+        .submit_depth_merge_fragment(0, 0, 3, &[(id(1), fixture_key("root"))])
+        .unwrap();
+    history
+        .submit_depth_merge_fragment(1, 0, 1, &[(id(1), fixture_key("root/child"))])
+        .unwrap();
+    history
+        .submit_depth_merge_fragment(2, 0, 4, &[(id(1), fixture_key("z"))])
+        .unwrap();
+    history.bind_depth_fragment_retry_plan(&make_step(7)).unwrap();
+
+    let recoveries = [
+        BranchMergeDepthFragmentRecovery {
+            order: 2,
+            fragment: 2,
+            fragment_count: 3,
+            tombstones: Vec::new(),
+        },
+        BranchMergeDepthFragmentRecovery {
+            order: 0,
+            fragment: 2,
+            fragment_count: 2,
+            tombstones: Vec::new(),
+        },
+    ];
+    let changed_pair = make_step(8);
+    let before_cascade = history.clone();
+
+    assert_eq!(
+        history.recover_depth_merge_fragments_with_appends(
+            &recoveries,
+            std::slice::from_ref(&changed_pair),
+        ),
+        Err(BranchMergeTombstoneHistoryError::FragmentCountMismatch {
+            order: 0,
+            expected: 3,
+            actual: 2,
+        }),
+        "the earliest stale label in an uneven cascade wins over a later append conflict",
+    );
+    assert_eq!(history, before_cascade);
+
+    assert_eq!(
+        history.bind_depth_fragment_retry_plans_with_recovery(
+            std::slice::from_ref(&changed_pair),
+            &recoveries,
+            &[],
+        ),
+        Err(BranchMergeTombstoneHistoryError::FragmentCountMismatch {
+            order: 0,
+            expected: 3,
+            actual: 2,
+        }),
+        "the earliest stale label is validated before a later paired identity conflict",
+    );
+    assert_eq!(history, before_cascade);
+}
+
+#[test]
+fn paired_fragment_retry_binding_recovery_and_replay_are_atomic() {
+    let fixture_rows = TOMBSTONE_DEPTH_COMMIT_ORDER
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    let fixture_key = |path: &str| {
+        fixture_rows
+            .iter()
+            .find(|row| row.key == string(path))
+            .unwrap_or_else(|| panic!("the in-crate depth fixture supplies {path}"))
+            .key
+            .clone()
+    };
+    let make_step = |order, generation, split_rows| {
+        let rows = fixture_rows[..fixture_rows.len() - 1].to_vec();
+        let tombstone = fixture_key("z");
+        let segments = if split_rows {
+            let boundary = fixture_rows[4].key.encode().unwrap();
+            vec![
+                MergedSegment::Rows {
+                    range: KeyRange::new(None, Some(boundary.clone())).unwrap(),
+                    rows: rows[..4].to_vec(),
+                    tombstones: Vec::new(),
+                },
+                MergedSegment::Rows {
+                    range: KeyRange::new(Some(boundary), None).unwrap(),
+                    rows: rows[4..].to_vec(),
+                    tombstones: vec![tombstone.clone()],
+                },
+            ]
+        } else {
+            vec![MergedSegment::Rows {
+                range: KeyRange::all(),
+                rows,
+                tombstones: vec![tombstone.clone()],
+            }]
+        };
+        SequencedBranchMergePlan {
+            order,
+            plan: BranchMergePlan {
+                schema: schema(true, FieldType::Str),
+                tables: BTreeMap::from([(
+                    id(1),
+                    orna_storage_v1::MergedTable {
+                        id: id(1),
+                        whole_table_reuse: None,
+                        segments,
+                    },
+                )]),
+                checkpoints: BTreeMap::from([(
+                    b"stream".to_vec(),
+                    CheckpointGeneration {
+                        generation,
+                        position: Some(b"position-1".to_vec()),
+                    },
+                )]),
+                report: Default::default(),
+            },
+            ordered_row_tombstones: vec![(id(1), tombstone)],
+        }
+    };
+    let repair = |order, fragment, fragment_count| BranchMergeDepthFragmentRecovery {
+        order,
+        fragment,
+        fragment_count,
+        tombstones: Vec::new(),
+    };
+    let tombstone = (id(1), fixture_key("z"));
+
+    let mut history = BranchMergeTombstoneHistory::new(0);
+    history.submit_depth_merge_fragment(0, 0, 2, &[]).unwrap();
+    history
+        .submit_depth_merge_fragment(1, 0, 2, std::slice::from_ref(&tombstone))
+        .unwrap();
+    history.submit_depth_merge_fragment(1, 1, 2, &[]).unwrap();
+    history.submit_depth_merge_fragment(2, 0, 3, &[]).unwrap();
+
+    let before_late_recovery_failure = history.clone();
+    assert_eq!(
+        history.bind_depth_fragment_retry_plans_with_recovery(
+            &[make_step(1, 7, false)],
+            &[repair(0, 1, 2), repair(2, 1, 2)],
+            &[make_step(1, 7, true)],
+        ),
+        Err(BranchMergeTombstoneHistoryError::FragmentCountMismatch {
+            order: 2,
+            expected: 3,
+            actual: 2,
+        }),
+        "a late recovery error rolls back both earlier releases and paired retry binding",
+    );
+    assert_eq!(history, before_late_recovery_failure);
+
+    let released = history
+        .bind_depth_fragment_retry_plans_with_recovery(
+            &[make_step(1, 8, false)],
+            &[repair(0, 1, 2), repair(2, 1, 3), repair(2, 2, 3)],
+            &[make_step(1, 8, true)],
+        )
+        .unwrap();
+    assert_eq!(
+        released.iter().map(|event| event.order).collect::<Vec<_>>(),
+        [1],
+        "the paired retry append deduplicates against the bound wave in the same transaction",
+    );
+    assert_eq!(released[0].key, fixture_key("z"));
+    assert_eq!(history.events(), released);
+    assert_eq!(history.next_order(), Some(3));
+
+    let committed = history.clone();
+    let replayed = history
+        .bind_depth_fragment_retry_plans_with_recovery(
+            &[make_step(1, 8, true)],
+            &[repair(2, 2, 3), repair(0, 1, 2), repair(2, 1, 3)],
+            &[make_step(1, 8, false)],
+        )
+        .unwrap();
+    assert!(replayed.is_empty(), "a committed transaction replay emits no duplicate events");
+    assert_eq!(history, committed);
+    assert_eq!(
+        history.events(),
+        &[BranchMergeTombstoneEvent {
+            order: 1,
+            table: id(1),
+            key: fixture_key("z"),
+        }],
+        "the successful transaction exposes the real paired tombstone event exactly once",
+    );
+
+    let before_changed_replay = history.clone();
+    assert_eq!(
+        history.bind_depth_fragment_retry_plans_with_recovery(
+            &[make_step(1, 9, false)],
+            &[repair(0, 1, 2), repair(2, 1, 3), repair(2, 2, 3)],
+            &[make_step(1, 9, true)],
+        ),
+        Err(BranchMergeTombstoneHistoryError::ConflictingSubmission { order: 1 }),
+        "a changed checkpoint identity is not treated as a replay",
+    );
+    assert_eq!(history, before_changed_replay);
+}
+
+#[test]
+fn paired_restore_fold_keeps_uneven_fragment_retry_labels() {
+    let fixture_rows = TOMBSTONE_DEPTH_COMMIT_ORDER
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    let fixture_key = |path: &str| {
+        fixture_rows
+            .iter()
+            .find(|row| row.key == string(path))
+            .unwrap_or_else(|| panic!("the in-crate depth fixture supplies {path}"))
+            .key
+            .clone()
+    };
+    let make_step = |generation| {
+        let key = fixture_key("root/child");
+        SequencedBranchMergePlan {
+            order: 1,
+            plan: BranchMergePlan {
+                schema: schema(true, FieldType::Str),
+                tables: BTreeMap::from([(
+                    id(1),
+                    orna_storage_v1::MergedTable {
+                        id: id(1),
+                        whole_table_reuse: None,
+                        segments: vec![MergedSegment::Rows {
+                            range: KeyRange::all(),
+                            rows: Vec::new(),
+                            tombstones: vec![key.clone()],
+                        }],
+                    },
+                )]),
+                checkpoints: BTreeMap::from([(
+                    b"stream".to_vec(),
+                    CheckpointGeneration {
+                        generation,
+                        position: Some(b"uneven-fold".to_vec()),
+                    },
+                )]),
+                report: Default::default(),
+            },
+            ordered_row_tombstones: vec![(id(1), key)],
+        }
+    };
+    let repair = |order, fragment, fragment_count| BranchMergeDepthFragmentRecovery {
+        order,
+        fragment,
+        fragment_count,
+        tombstones: Vec::new(),
+    };
+    let key = fixture_key("root/child");
+    let paired = make_step(7);
+
+    let mut history = BranchMergeTombstoneHistory::new(0);
+    history.submit_depth_merge_fragment(0, 0, 2, &[]).unwrap();
+    history.submit_depth_merge_fragment(1, 0, 3, &[]).unwrap();
+    history
+        .submit_depth_merge_fragment(1, 1, 3, &[(id(1), key.clone())])
+        .unwrap();
+    history.submit_depth_merge_fragment(1, 2, 3, &[]).unwrap();
+    history.bind_depth_fragment_retry_plan(&paired).unwrap();
+
+    let recoveries = [repair(0, 1, 2)];
+    let bindings = [paired.clone()];
+    let first_fold = history
+        .bind_depth_fragment_retry_plans_with_recovery(&bindings, &recoveries, &bindings)
+        .unwrap();
+    assert_eq!(
+        first_fold,
+        vec![BranchMergeTombstoneEvent {
+            order: 1,
+            table: id(1),
+            key: fixture_key("root/child"),
+        }],
+        "the uneven two- and three-fragment waves fold to the paired fixture event once",
+    );
+    assert_eq!(history.next_order(), Some(2));
+
+    let committed = history.clone();
+    assert!(history
+        .bind_depth_fragment_retry_plans_with_recovery(&bindings, &recoveries, &bindings)
+        .unwrap()
+        .is_empty(), "an exact replay stays idempotent after the fold");
+    assert_eq!(history, committed);
+
+    assert_eq!(
+        history.bind_depth_fragment_retry_plans_with_recovery(
+            &bindings,
+            &[repair(0, 1, 3)],
+            &bindings,
+        ),
+        Err(BranchMergeTombstoneHistoryError::FragmentCountMismatch {
+            order: 0,
+            expected: 2,
+            actual: 3,
+        }),
+        "the committed earlier wave keeps its own retry label across the uneven fold",
+    );
+    assert_eq!(history, committed);
+
+    assert_eq!(
+        history.recover_depth_merge_fragments_with_appends(&[repair(1, 0, 4)], &[]),
+        Err(BranchMergeTombstoneHistoryError::FragmentCountMismatch {
+            order: 1,
+            expected: 3,
+            actual: 4,
+        }),
+        "the later wave retains its different label after both positions commit",
+    );
+    assert_eq!(history, committed);
+
+    assert_eq!(
+        history.submit_depth_merge_fragment(0, 1, 3, &[]),
+        Err(BranchMergeTombstoneHistoryError::FragmentCountMismatch {
+            order: 0,
+            expected: 2,
+            actual: 3,
+        }),
+        "direct submission validates the earlier folded wave's own label before stale order",
+    );
+    assert_eq!(history, committed);
+
+    assert_eq!(
+        history.submit_depth_merge_fragment(1, 0, 4, &[]),
+        Err(BranchMergeTombstoneHistoryError::FragmentCountMismatch {
+            order: 1,
+            expected: 3,
+            actual: 4,
+        }),
+        "direct submission validates the later folded wave's different label before stale order",
+    );
+    assert_eq!(history, committed);
+
+    assert_eq!(
+        history.submit_depth_merge_fragment(0, 2, 2, &[]),
+        Err(BranchMergeTombstoneHistoryError::InvalidFragment {
+            fragment: 2,
+            fragment_count: 2,
+        }),
+        "the earlier folded wave rejects an out-of-range member of its retry-label pair",
+    );
+    assert_eq!(history, committed);
+
+    assert_eq!(
+        history.submit_depth_merge_fragment(1, 3, 3, &[]),
+        Err(BranchMergeTombstoneHistoryError::InvalidFragment {
+            fragment: 3,
+            fragment_count: 3,
+        }),
+        "the later folded wave rejects an out-of-range member of its different retry-label pair",
+    );
+    assert_eq!(history, committed);
+
+    assert_eq!(
+        history.submit_depth_merge_fragment(1, 0, 3, &[]),
+        Err(BranchMergeTombstoneHistoryError::DuplicateOrStale { order: 1 }),
+        "the original label still reaches the existing stale-position result",
+    );
+    assert_eq!(history, committed);
+}
+
+#[test]
+fn paired_undo_identity_survives_compaction_rotations_across_sparse_folds() {
+    let undo_rows = PAIRED_UNDO_CHAIN_COMPACTION_ROTATIONS
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    let compaction_rows = PAIRED_COMPACTED_COMPACTION_IDENTITIES
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    let checkpoint_states = PAIRED_CHECKPOINT_REDO
+        .split("\n\n")
+        .map(parse_checkpoint_fixture)
+        .collect::<Vec<_>>();
+    assert_eq!(undo_rows.len(), 6);
+    assert_eq!(compaction_rows.len(), 6);
+    assert_eq!(
+        undo_rows.iter().map(|row| row.key.clone()).collect::<Vec<_>>(),
+        compaction_rows.iter().map(|row| row.key.clone()).collect::<Vec<_>>(),
+        "undo and compaction fixture rows bind by exact transaction order",
+    );
+
+    let undo_chains = undo_rows
+        .iter()
+        .map(|row| BranchMergePairedUndoChainIdentity {
+            left_chain: row.fields[&id(2)].encode().unwrap(),
+            right_chain: row.fields[&id(3)].encode().unwrap(),
+        })
+        .collect::<Vec<_>>();
+    let compactions = compaction_rows
+        .iter()
+        .map(|row| BranchMergePairedCompactionIdentity {
+            left_compaction: row.fields[&id(2)].encode().unwrap(),
+            right_compaction: row.fields[&id(3)].encode().unwrap(),
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(undo_chains[0], undo_chains[1]);
+    assert_ne!(undo_chains[1], undo_chains[2]);
+    assert_ne!(undo_chains[3], undo_chains[4]);
+    assert_eq!(undo_chains[5], undo_chains[0]);
+    assert_ne!(compactions[0], compactions[1]);
+    assert_ne!(compactions[3], compactions[4]);
+
+    let alpha = b"undo-compaction/alpha".to_vec();
+    let beta = b"undo-compaction/beta".to_vec();
+    let catalog_only = b"undo-compaction/catalog-only".to_vec();
+    let observed_late = b"undo-compaction/observed-late".to_vec();
+    let left_base = checkpoint_states[0].clone();
+    let right_base = checkpoint_states[1].clone();
+    let left_redo = checkpoint_states[2].clone();
+    let right_redo = checkpoint_states[3].clone();
+    let positionless = checkpoint_states[4].clone();
+    let checkpoints = |checkpoint_id: &[u8], generation: CheckpointGeneration| {
+        BTreeMap::from([(checkpoint_id.to_vec(), generation)])
+    };
+    let frame = |index: usize,
+                 left: BTreeMap<Vec<u8>, CheckpointGeneration>,
+                 right: BTreeMap<Vec<u8>, CheckpointGeneration>| {
+        BranchMergePairedCheckpointRedoUndoCompactionIdentityFrame {
+            checkpoints: BranchMergePairedCheckpointRedoFrame { left, right },
+            undo_chain_identity: undo_chains[index].clone(),
+            compaction_identity: compactions[index].clone(),
+        }
+    };
+
+    let mut first_fold = BTreeMap::new();
+    first_fold.insert(
+        80,
+        frame(
+            0,
+            checkpoints(&alpha, left_base.clone()),
+            checkpoints(&alpha, right_base.clone()),
+        ),
+    );
+    first_fold.insert(
+        81,
+        frame(
+            1,
+            checkpoints(&alpha, left_base.clone()),
+            checkpoints(&alpha, right_base.clone()),
+        ),
+    );
+    let mut left_at_83 = checkpoints(&alpha, left_base.clone());
+    left_at_83.insert(beta.clone(), positionless.clone());
+    first_fold.insert(
+        83,
+        frame(2, left_at_83, checkpoints(&alpha, right_base.clone())),
+    );
+
+    let mut second_fold = BTreeMap::new();
+    second_fold.insert(
+        83,
+        frame(
+            3,
+            checkpoints(&alpha, left_redo.clone()),
+            checkpoints(&alpha, right_redo.clone()),
+        ),
+    );
+    let mut right_at_84 = checkpoints(&alpha, right_redo.clone());
+    right_at_84.insert(beta.clone(), positionless.clone());
+    second_fold.insert(
+        84,
+        frame(4, checkpoints(&alpha, left_redo.clone()), right_at_84),
+    );
+
+    let mut left_at_86 = checkpoints(&alpha, left_base.clone());
+    left_at_86.insert(observed_late.clone(), positionless.clone());
+    let third_fold = BTreeMap::from([(
+        86,
+        frame(5, left_at_86, checkpoints(&alpha, right_base.clone())),
+    )]);
+
+    let streams = fold_paired_checkpoint_redo_sparse_stream_chains_preserving_undo_and_compaction_identity(
+        &[alpha.clone(), beta.clone(), catalog_only.clone()],
+        &[first_fold, second_fold, third_fold],
+    );
+    assert_eq!(
+        streams
+            .iter()
+            .map(|stream| stream.checkpoint_id.clone())
+            .collect::<Vec<_>>(),
+        vec![alpha.clone(), beta.clone(), catalog_only.clone(), observed_late.clone()],
+    );
+    let slots = |checkpoint_id: &[u8]| {
+        &streams
+            .iter()
+            .find(|stream| stream.checkpoint_id == checkpoint_id)
+            .unwrap()
+            .slots
+    };
+    let expected_slots = [(0, 80), (0, 81), (0, 83), (1, 83), (1, 84), (2, 86)];
+    for stream in &streams {
+        assert_eq!(
+            stream
+                .slots
+                .iter()
+                .map(|slot| (slot.fold_ordinal, slot.order))
+                .collect::<Vec<_>>(),
+            expected_slots,
+            "each observed order stays attached to its sparse fold, including repeated order 83",
+        );
+        for (index, slot) in stream.slots.iter().enumerate() {
+            assert_eq!(slot.undo_chain_identity, undo_chains[index]);
+            assert_eq!(slot.compaction_identity, compactions[index]);
+        }
+    }
+    assert_eq!(slots(&beta)[2].left, Some(positionless.clone()));
+    assert_eq!(slots(&beta)[4].right, Some(positionless.clone()));
+    assert!(slots(&catalog_only)
+        .iter()
+        .all(|slot| slot.left.is_none() && slot.right.is_none()));
+
+    let compacted = compress_paired_checkpoint_redo_sparse_stream_chains_preserving_undo_and_compaction_identity(&streams);
+    let runs = |checkpoint_id: &[u8]| {
+        &compacted
+            .iter()
+            .find(|snapshot| snapshot.checkpoint_id == checkpoint_id)
+            .unwrap()
+            .runs
+    };
+    assert_eq!(
+        runs(&alpha)
+            .iter()
+            .map(|run| (
+                run.fold_ordinal,
+                run.first_order,
+                run.last_order,
+                run.left.clone(),
+                run.right.clone(),
+            ))
+            .collect::<Vec<_>>(),
+        vec![
+            (0, 80, 81, Some(left_base.clone()), Some(right_base.clone())),
+            (0, 83, 83, Some(left_base.clone()), Some(right_base.clone())),
+            (1, 83, 84, Some(left_redo.clone()), Some(right_redo.clone())),
+            (2, 86, 86, Some(left_base), Some(right_base)),
+        ],
+        "compaction keeps fold rotations and sparse gaps while grouping only equal adjacent state",
+    );
+    assert_eq!(
+        runs(&alpha)
+            .iter()
+            .map(|run| run.undo_chain_identities.clone())
+            .collect::<Vec<_>>(),
+        vec![
+            undo_chains[0..2].to_vec(),
+            undo_chains[2..3].to_vec(),
+            undo_chains[3..5].to_vec(),
+            undo_chains[5..6].to_vec(),
+        ],
+        "each compacted range retains its per-order directional undo-chain pair",
+    );
+    assert_eq!(
+        runs(&alpha)
+            .iter()
+            .map(|run| run.compaction_identities.clone())
+            .collect::<Vec<_>>(),
+        vec![
+            compactions[0..2].to_vec(),
+            compactions[2..3].to_vec(),
+            compactions[3..5].to_vec(),
+            compactions[5..6].to_vec(),
+        ],
+        "undo rotations and compaction rotations remain aligned at every compacted order",
+    );
+    for run in runs(&alpha) {
+        assert_eq!(run.undo_chain_identities.len(), run.compaction_identities.len());
+        assert_eq!(run.compaction_identities.len(), (run.last_order - run.first_order + 1) as usize);
+    }
+    assert_eq!(
+        runs(&beta)
+            .iter()
+            .map(|run| (run.fold_ordinal, run.first_order, run.last_order, run.left.clone(), run.right.clone()))
+            .collect::<Vec<_>>(),
+        vec![
+            (0, 80, 81, None, None),
+            (0, 83, 83, Some(positionless.clone()), None),
+            (1, 83, 83, None, None),
+            (1, 84, 84, None, Some(positionless)),
+            (2, 86, 86, None, None),
+        ],
+        "omission and positionless states keep their own undo and compaction lineage",
+    );
+    assert_eq!(runs(&catalog_only).len(), 4);
+    assert_eq!(runs(&catalog_only)[0].compaction_identities, compactions[0..2]);
+    assert_eq!(runs(&catalog_only)[2].undo_chain_identities, undo_chains[3..5]);
+    assert_eq!(runs(&observed_late).len(), 4);
+    assert_eq!(runs(&observed_late)[0].first_order, 80);
+    assert_eq!(runs(&observed_late)[0].last_order, 81);
+    assert_eq!(runs(&observed_late)[0].left, None);
+    assert_eq!(runs(&observed_late)[3].first_order, 86);
+    assert_eq!(runs(&observed_late)[3].left, Some(checkpoint_states[4].clone()));
+}
+
+#[test]
+fn paired_redo_fold_identity_survives_sparse_segment_compaction_chains() {
+    let fold_rows = PAIRED_REDO_FOLD_IDENTITIES
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    let chain_rows = PAIRED_COMPACTED_REDO_CHAIN_IDENTITIES
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    let log_rows = PAIRED_COMPACTED_LOG_IDENTITIES
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    let segment_rows = PAIRED_COMPACTED_SEGMENT_ROTATIONS
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    let compaction_rows = PAIRED_SPARSE_WRITE_AHEAD_COMPACTION_IDENTITIES
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    let checkpoint_states = PAIRED_CHECKPOINT_REDO
+        .split("\n\n")
+        .map(parse_checkpoint_fixture)
+        .collect::<Vec<_>>();
+    assert_eq!(fold_rows.len(), 3);
+    assert_eq!(chain_rows.len(), 6);
+    assert_eq!(log_rows.len(), 6);
+    assert_eq!(segment_rows.len(), 6);
+    assert_eq!(compaction_rows.len(), 3);
+
+    let fold_identities = fold_rows
+        .iter()
+        .map(|row| BranchMergePairedRedoFoldIdentity {
+            left_fold: row.fields[&id(2)].encode().unwrap(),
+            right_fold: row.fields[&id(3)].encode().unwrap(),
+        })
+        .collect::<Vec<_>>();
+    let redo_chains = chain_rows
+        .iter()
+        .map(|row| BranchMergePairedRedoChainIdentity {
+            left_chain: row.fields[&id(2)].encode().unwrap(),
+            right_chain: row.fields[&id(3)].encode().unwrap(),
+        })
+        .collect::<Vec<_>>();
+    let log_segments = log_rows
+        .iter()
+        .zip(&segment_rows)
+        .map(|(log_row, segment_row)| BranchMergePairedLogSegmentIdentity {
+            write_ahead_identity: BranchMergePairedWriteAheadIdentity {
+                left_log: log_row.fields[&id(2)].encode().unwrap(),
+                right_log: log_row.fields[&id(3)].encode().unwrap(),
+            },
+            segment_identity: BranchMergePairedWriteAheadSegmentIdentity {
+                left_segment: segment_row.fields[&id(2)].encode().unwrap(),
+                right_segment: segment_row.fields[&id(3)].encode().unwrap(),
+            },
+        })
+        .collect::<Vec<_>>();
+    let compactions = chain_rows
+        .iter()
+        .map(|chain_row| {
+            compaction_rows
+                .iter()
+                .find(|compaction_row| compaction_row.key == chain_row.key)
+                .map(|row| BranchMergePairedCompactionIdentity {
+                    left_compaction: row.fields[&id(2)].encode().unwrap(),
+                    right_compaction: row.fields[&id(3)].encode().unwrap(),
+                })
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(fold_identities[0], fold_identities[2]);
+    assert_ne!(fold_identities[0], fold_identities[1]);
+    assert_eq!(redo_chains[0], redo_chains[1]);
+    assert_eq!(redo_chains[2], redo_chains[3]);
+    assert_eq!(redo_chains[3], redo_chains[4]);
+    assert_ne!(redo_chains[4], redo_chains[5]);
+    assert_eq!(
+        compactions.iter().map(Option::is_some).collect::<Vec<_>>(),
+        vec![true, false, true, false, true, false],
+        "missing segment compaction observations bind to their source orders",
+    );
+
+    let alpha = b"redo-fold-compaction/alpha".to_vec();
+    let beta = b"redo-fold-compaction/beta".to_vec();
+    let catalog_only = b"redo-fold-compaction/catalog-only".to_vec();
+    let observed_late = b"redo-fold-compaction/observed-late".to_vec();
+    let left_base = checkpoint_states[0].clone();
+    let right_base = checkpoint_states[1].clone();
+    let left_redo = checkpoint_states[2].clone();
+    let right_redo = checkpoint_states[3].clone();
+    let positionless = checkpoint_states[4].clone();
+    assert_eq!(positionless.position, None);
+    let checkpoints = |checkpoint_id: &[u8], state: CheckpointGeneration| {
+        BTreeMap::from([(checkpoint_id.to_vec(), state)])
+    };
+    let frame = |index: usize, left, right| {
+        BranchMergePairedCheckpointRedoChainCompactionIdentityFrame {
+            checkpoints: BranchMergePairedCheckpointRedoFrame { left, right },
+            redo_chain_identity: redo_chains[index].clone(),
+            log_segment_identity: log_segments[index].clone(),
+            compaction_identity: compactions[index].clone(),
+        }
+    };
+
+    let mut first_fold = BTreeMap::new();
+    first_fold.insert(
+        100,
+        frame(
+            0,
+            checkpoints(&alpha, left_base.clone()),
+            checkpoints(&alpha, right_base.clone()),
+        ),
+    );
+    let mut left_at_101 = checkpoints(&alpha, left_base.clone());
+    left_at_101.insert(beta.clone(), positionless.clone());
+    first_fold.insert(
+        101,
+        frame(1, left_at_101, checkpoints(&alpha, right_base.clone())),
+    );
+    first_fold.insert(
+        103,
+        frame(
+            2,
+            checkpoints(&alpha, left_base.clone()),
+            checkpoints(&alpha, right_base.clone()),
+        ),
+    );
+
+    let mut second_fold = BTreeMap::new();
+    second_fold.insert(
+        103,
+        frame(
+            3,
+            checkpoints(&alpha, left_redo.clone()),
+            checkpoints(&alpha, right_redo.clone()),
+        ),
+    );
+    let mut right_at_104 = checkpoints(&alpha, right_redo.clone());
+    right_at_104.insert(beta.clone(), positionless.clone());
+    second_fold.insert(
+        104,
+        frame(4, checkpoints(&alpha, left_redo.clone()), right_at_104),
+    );
+
+    let mut left_at_106 = checkpoints(&alpha, left_base.clone());
+    left_at_106.insert(observed_late.clone(), positionless.clone());
+    let third_fold = BTreeMap::from([(
+        106,
+        frame(5, left_at_106, checkpoints(&alpha, right_base.clone())),
+    )]);
+
+    let streams = fold_paired_checkpoint_redo_sparse_stream_chains_preserving_fold_and_chain_compaction_identity(
+        &[alpha.clone(), beta.clone(), catalog_only.clone()],
+        &[
+            BranchMergePairedCheckpointRedoFoldChainCompactionIdentityFold {
+                redo_fold_identity: fold_identities[0].clone(),
+                frames: first_fold,
+            },
+            BranchMergePairedCheckpointRedoFoldChainCompactionIdentityFold {
+                redo_fold_identity: fold_identities[1].clone(),
+                frames: second_fold,
+            },
+            BranchMergePairedCheckpointRedoFoldChainCompactionIdentityFold {
+                redo_fold_identity: fold_identities[2].clone(),
+                frames: third_fold,
+            },
+        ],
+    );
+    assert_eq!(
+        streams
+            .iter()
+            .map(|stream| stream.checkpoint_id.clone())
+            .collect::<Vec<_>>(),
+        vec![alpha.clone(), beta.clone(), catalog_only.clone(), observed_late.clone()],
+    );
+    let slots = |checkpoint_id: &[u8]| {
+        &streams
+            .iter()
+            .find(|stream| stream.checkpoint_id == checkpoint_id)
+            .unwrap()
+            .slots
+    };
+    let expected_slots = [(0, 100), (0, 101), (0, 103), (1, 103), (1, 104), (2, 106)];
+    for stream in &streams {
+        assert_eq!(
+            stream
+                .slots
+                .iter()
+                .map(|slot| (slot.fold_ordinal, slot.order))
+                .collect::<Vec<_>>(),
+            expected_slots,
+        );
+        for (index, slot) in stream.slots.iter().enumerate() {
+            assert_eq!(slot.redo_fold_identity, fold_identities[[0, 0, 0, 1, 1, 2][index]]);
+            assert_eq!(slot.redo_chain_identity, redo_chains[index]);
+            assert_eq!(slot.log_segment_identity, log_segments[index]);
+            assert_eq!(slot.compaction_identity, compactions[index]);
+        }
+    }
+    assert!(slots(&catalog_only)
+        .iter()
+        .all(|slot| slot.left.is_none() && slot.right.is_none()));
+    assert_eq!(slots(&catalog_only)[1].compaction_identity, None);
+    assert_eq!(slots(&beta)[1].left, Some(positionless.clone()));
+    assert_eq!(slots(&beta)[4].right, Some(positionless.clone()));
+    assert_eq!(slots(&observed_late)[5].left, Some(positionless.clone()));
+
+    let compacted = compress_paired_checkpoint_redo_sparse_stream_chains_preserving_fold_and_chain_compaction_identity(&streams);
+    let runs = |checkpoint_id: &[u8]| {
+        &compacted
+            .iter()
+            .find(|stream| stream.checkpoint_id == checkpoint_id)
+            .unwrap()
+            .runs
+    };
+    assert_eq!(
+        runs(&alpha)
+            .iter()
+            .map(|run| (run.fold_ordinal, run.first_order, run.last_order, run.redo_chain_identity.clone()))
+            .collect::<Vec<_>>(),
+        vec![
+            (0, 100, 101, redo_chains[0].clone()),
+            (0, 103, 103, redo_chains[2].clone()),
+            (1, 103, 104, redo_chains[3].clone()),
+            (2, 106, 106, redo_chains[5].clone()),
+        ],
+        "fold boundaries, state changes, chain changes, and gaps remain distinct",
+    );
+    assert_eq!(
+        runs(&alpha)
+            .iter()
+            .map(|run| run.redo_fold_identity.clone())
+            .collect::<Vec<_>>(),
+        vec![
+            fold_identities[0].clone(),
+            fold_identities[0].clone(),
+            fold_identities[1].clone(),
+            fold_identities[2].clone(),
+        ],
+    );
+    assert_eq!(runs(&alpha)[0].compaction_identities, compactions[0..2]);
+    assert_eq!(runs(&alpha)[2].compaction_identities, compactions[3..5]);
+    assert_eq!(runs(&alpha)[0].log_segment_identities, log_segments[0..2]);
+    assert_eq!(runs(&alpha)[2].log_segment_identities, log_segments[3..5]);
+    assert_eq!(runs(&beta)[1].left, Some(positionless.clone()));
+    assert_eq!(runs(&beta)[4].right, Some(positionless));
+    assert_eq!(runs(&catalog_only).len(), 4);
+    assert_eq!(runs(&observed_late).len(), 4);
+    assert_eq!(runs(&observed_late)[3].left, Some(checkpoint_states[4].clone()));
+}
+
+#[test]
+fn paired_redo_chain_identity_survives_sparse_write_ahead_compaction_omissions() {
+    let chain_rows = PAIRED_COMPACTED_REDO_CHAIN_IDENTITIES
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    let log_rows = PAIRED_COMPACTED_LOG_IDENTITIES
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    let segment_rows = PAIRED_COMPACTED_SEGMENT_ROTATIONS
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    let compaction_rows = PAIRED_SPARSE_WRITE_AHEAD_COMPACTION_IDENTITIES
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    let checkpoint_states = PAIRED_CHECKPOINT_REDO
+        .split("\n\n")
+        .map(parse_checkpoint_fixture)
+        .collect::<Vec<_>>();
+    assert_eq!(chain_rows.len(), 6);
+    assert_eq!(log_rows.len(), 6);
+    assert_eq!(segment_rows.len(), 6);
+    assert_eq!(compaction_rows.len(), 3);
+    let keys = |rows: &[KeyedRow]| rows.iter().map(|row| row.key.clone()).collect::<Vec<_>>();
+    assert_eq!(keys(&chain_rows), keys(&log_rows));
+    assert_eq!(keys(&chain_rows), keys(&segment_rows));
+
+    let redo_chains = chain_rows
+        .iter()
+        .map(|row| BranchMergePairedRedoChainIdentity {
+            left_chain: row.fields[&id(2)].encode().unwrap(),
+            right_chain: row.fields[&id(3)].encode().unwrap(),
+        })
+        .collect::<Vec<_>>();
+    let log_segments = log_rows
+        .iter()
+        .zip(&segment_rows)
+        .map(|(log_row, segment_row)| BranchMergePairedLogSegmentIdentity {
+            write_ahead_identity: BranchMergePairedWriteAheadIdentity {
+                left_log: log_row.fields[&id(2)].encode().unwrap(),
+                right_log: log_row.fields[&id(3)].encode().unwrap(),
+            },
+            segment_identity: BranchMergePairedWriteAheadSegmentIdentity {
+                left_segment: segment_row.fields[&id(2)].encode().unwrap(),
+                right_segment: segment_row.fields[&id(3)].encode().unwrap(),
+            },
+        })
+        .collect::<Vec<_>>();
+    let compactions = chain_rows
+        .iter()
+        .map(|chain_row| {
+            compaction_rows
+                .iter()
+                .find(|compaction_row| compaction_row.key == chain_row.key)
+                .map(|row| BranchMergePairedCompactionIdentity {
+                    left_compaction: row.fields[&id(2)].encode().unwrap(),
+                    right_compaction: row.fields[&id(3)].encode().unwrap(),
+                })
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        compactions.iter().map(Option::is_some).collect::<Vec<_>>(),
+        vec![true, false, true, false, true, false],
+        "fixture omissions are aligned to transaction keys rather than shifting later observations",
+    );
+    assert_eq!(redo_chains[0], redo_chains[1]);
+    assert_eq!(redo_chains[2], redo_chains[3]);
+    assert_eq!(redo_chains[3], redo_chains[4]);
+    assert_ne!(redo_chains[4], redo_chains[5]);
+
+    let alpha = b"redo-compaction/alpha".to_vec();
+    let beta = b"redo-compaction/beta".to_vec();
+    let catalog_only = b"redo-compaction/catalog-only".to_vec();
+    let observed_late = b"redo-compaction/observed-late".to_vec();
+    let left_base = checkpoint_states[0].clone();
+    let right_base = checkpoint_states[1].clone();
+    let left_redo = checkpoint_states[2].clone();
+    let right_redo = checkpoint_states[3].clone();
+    let positionless = checkpoint_states[4].clone();
+    let checkpoints = |checkpoint_id: &[u8], generation: CheckpointGeneration| {
+        BTreeMap::from([(checkpoint_id.to_vec(), generation)])
+    };
+    let frame = |index: usize,
+                 left: BTreeMap<Vec<u8>, CheckpointGeneration>,
+                 right: BTreeMap<Vec<u8>, CheckpointGeneration>| {
+        BranchMergePairedCheckpointRedoChainCompactionIdentityFrame {
+            checkpoints: BranchMergePairedCheckpointRedoFrame { left, right },
+            redo_chain_identity: redo_chains[index].clone(),
+            log_segment_identity: log_segments[index].clone(),
+            compaction_identity: compactions[index].clone(),
+        }
+    };
+
+    let mut first_fold = BTreeMap::new();
+    first_fold.insert(
+        100,
+        frame(
+            0,
+            checkpoints(&alpha, left_base.clone()),
+            checkpoints(&alpha, right_base.clone()),
+        ),
+    );
+    let mut left_at_101 = checkpoints(&alpha, left_base.clone());
+    left_at_101.insert(beta.clone(), positionless.clone());
+    first_fold.insert(
+        101,
+        frame(1, left_at_101, checkpoints(&alpha, right_base.clone())),
+    );
+    first_fold.insert(
+        103,
+        frame(
+            2,
+            checkpoints(&alpha, left_base.clone()),
+            checkpoints(&alpha, right_base.clone()),
+        ),
+    );
+
+    let mut second_fold = BTreeMap::new();
+    second_fold.insert(
+        103,
+        frame(
+            3,
+            checkpoints(&alpha, left_redo.clone()),
+            checkpoints(&alpha, right_redo.clone()),
+        ),
+    );
+    let mut right_at_104 = checkpoints(&alpha, right_redo.clone());
+    right_at_104.insert(beta.clone(), positionless.clone());
+    second_fold.insert(
+        104,
+        frame(4, checkpoints(&alpha, left_redo.clone()), right_at_104),
+    );
+
+    let mut left_at_106 = checkpoints(&alpha, left_base.clone());
+    left_at_106.insert(observed_late.clone(), positionless.clone());
+    let third_fold = BTreeMap::from([(
+        106,
+        frame(5, left_at_106, checkpoints(&alpha, right_base.clone())),
+    )]);
+
+    let streams = fold_paired_checkpoint_redo_sparse_stream_chains_preserving_chain_and_compaction_identity(
+        &[alpha.clone(), beta.clone(), catalog_only.clone()],
+        &[first_fold, second_fold, third_fold],
+    );
+    assert_eq!(
+        streams
+            .iter()
+            .map(|stream| stream.checkpoint_id.clone())
+            .collect::<Vec<_>>(),
+        vec![alpha.clone(), beta.clone(), catalog_only.clone(), observed_late.clone()],
+    );
+    let slots = |checkpoint_id: &[u8]| {
+        &streams
+            .iter()
+            .find(|stream| stream.checkpoint_id == checkpoint_id)
+            .unwrap()
+            .slots
+    };
+    let expected_slots = [(0, 100), (0, 101), (0, 103), (1, 103), (1, 104), (2, 106)];
+    for stream in &streams {
+        assert_eq!(
+            stream
+                .slots
+                .iter()
+                .map(|slot| (slot.fold_ordinal, slot.order))
+                .collect::<Vec<_>>(),
+            expected_slots,
+        );
+        for (index, slot) in stream.slots.iter().enumerate() {
+            assert_eq!(slot.redo_chain_identity, redo_chains[index]);
+            assert_eq!(slot.log_segment_identity, log_segments[index]);
+            assert_eq!(slot.compaction_identity, compactions[index]);
+        }
+    }
+    assert!(slots(&catalog_only)
+        .iter()
+        .all(|slot| slot.left.is_none() && slot.right.is_none()));
+    assert_eq!(slots(&catalog_only)[1].compaction_identity, None);
+    assert_eq!(slots(&beta)[1].left, Some(positionless.clone()));
+    assert_eq!(slots(&beta)[4].right, Some(positionless.clone()));
+
+    let compacted = compress_paired_checkpoint_redo_sparse_stream_chains_preserving_chain_and_compaction_identity(&streams);
+    let runs = |checkpoint_id: &[u8]| {
+        &compacted
+            .iter()
+            .find(|snapshot| snapshot.checkpoint_id == checkpoint_id)
+            .unwrap()
+            .runs
+    };
+    assert_eq!(
+        runs(&alpha)
+            .iter()
+            .map(|run| (
+                run.fold_ordinal,
+                run.first_order,
+                run.last_order,
+                run.redo_chain_identity.clone(),
+            ))
+            .collect::<Vec<_>>(),
+        vec![
+            (0, 100, 101, redo_chains[0].clone()),
+            (0, 103, 103, redo_chains[2].clone()),
+            (1, 103, 104, redo_chains[3].clone()),
+            (2, 106, 106, redo_chains[5].clone()),
+        ],
+        "redo-chain identity and fold boundaries survive compaction omissions",
+    );
+    assert_eq!(
+        runs(&alpha)[0].compaction_identities,
+        vec![compactions[0].clone(), compactions[1].clone()],
+        "an omitted compaction observation does not split a stable redo-chain run",
+    );
+    assert_eq!(
+        runs(&alpha)[2].compaction_identities,
+        vec![compactions[3].clone(), compactions[4].clone()],
+        "a later compaction observation remains aligned after an omission",
+    );
+    assert_eq!(runs(&alpha)[0].log_segment_identities, log_segments[0..2]);
+    assert_eq!(runs(&alpha)[2].log_segment_identities, log_segments[3..5]);
+    for run in runs(&alpha) {
+        assert_eq!(run.log_segment_identities.len(), run.compaction_identities.len());
+        assert_eq!(run.compaction_identities.len(), (run.last_order - run.first_order + 1) as usize);
+    }
+    assert_eq!(runs(&catalog_only).len(), 4);
+    assert_eq!(runs(&catalog_only)[0].redo_chain_identity, redo_chains[0]);
+    assert_eq!(runs(&catalog_only)[0].compaction_identities, vec![compactions[0].clone(), compactions[1].clone()]);
+    assert_eq!(runs(&observed_late).len(), 4);
+    assert_eq!(runs(&observed_late)[0].left, None);
+    assert_eq!(runs(&observed_late)[3].left, Some(positionless));
+}
+
+#[test]
+fn paired_checkpoint_redo_compression_keeps_state_changes_and_order_gaps() {
+    let fixture_states = PAIRED_CHECKPOINT_REDO
+        .split("\n\n")
+        .map(parse_checkpoint_fixture)
+        .collect::<Vec<_>>();
+    assert_eq!(fixture_states.len(), 5);
+    let left_base = fixture_states[0].clone();
+    let right_base = fixture_states[1].clone();
+    let left_redo = fixture_states[2].clone();
+    let right_redo = fixture_states[3].clone();
+    let positionless = fixture_states[4].clone();
+    assert_eq!(positionless.position, None);
+
+    let alpha = b"consumer/alpha".to_vec();
+    let beta = b"consumer/beta".to_vec();
+    let frame = |left: Vec<(Vec<u8>, CheckpointGeneration)>,
+                 right: Vec<(Vec<u8>, CheckpointGeneration)>| {
+        BranchMergePairedCheckpointRedoFrame {
+            left: left.into_iter().collect(),
+            right: right.into_iter().collect(),
+        }
+    };
+    let frames = BTreeMap::from([
+        (
+            10,
+            frame(
+                vec![(alpha.clone(), left_base.clone())],
+                vec![(alpha.clone(), right_base.clone())],
+            ),
+        ),
+        (
+            11,
+            frame(
+                vec![
+                    (alpha.clone(), left_base.clone()),
+                    (beta.clone(), positionless.clone()),
+                ],
+                vec![(alpha.clone(), right_base.clone())],
+            ),
+        ),
+        (
+            12,
+            frame(
+                vec![
+                    (alpha.clone(), left_redo.clone()),
+                    (beta.clone(), positionless.clone()),
+                ],
+                vec![(alpha.clone(), right_base.clone())],
+            ),
+        ),
+        (
+            13,
+            frame(
+                vec![(alpha.clone(), left_redo.clone())],
+                vec![(alpha.clone(), right_redo.clone())],
+            ),
+        ),
+        (
+            14,
+            frame(
+                vec![(alpha.clone(), left_redo.clone())],
+                vec![(alpha.clone(), right_redo.clone())],
+            ),
+        ),
+        (
+            16,
+            frame(
+                vec![(alpha.clone(), left_redo.clone())],
+                vec![(alpha.clone(), right_redo.clone())],
+            ),
+        ),
+    ]);
+
+    let chains = compress_paired_checkpoint_redo_chain(&frames);
+    assert_eq!(
+        chains.iter().map(|chain| chain.checkpoint_id.clone()).collect::<Vec<_>>(),
+        vec![alpha.clone(), beta.clone()],
+    );
+    let runs = |checkpoint_id: &[u8]| {
+        chains
+            .iter()
+            .find(|chain| chain.checkpoint_id == checkpoint_id)
+            .unwrap()
+            .runs
+            .iter()
+            .map(|run| (run.first_order, run.last_order, run.left.clone(), run.right.clone()))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        runs(&alpha),
+        vec![
+            (10, 11, Some(left_base.clone()), Some(right_base.clone())),
+            (12, 12, Some(left_redo.clone()), Some(right_base.clone())),
+            (13, 14, Some(left_redo.clone()), Some(right_redo.clone())),
+            (16, 16, Some(left_redo.clone()), Some(right_redo.clone())),
+        ],
+        "a change on either log splits its run, while only adjacent identical pairs compress",
+    );
+    assert_eq!(
+        runs(&beta),
+        vec![
+            (10, 10, None, None),
+            (11, 12, Some(positionless.clone()), None),
+            (13, 14, None, None),
+            (16, 16, None, None),
+        ],
+        "an absent checkpoint differs from a present positionless checkpoint and order gaps stay explicit",
+    );
+}
+
+#[test]
+fn paired_redo_fold_identity_survives_sparse_checkpoint_chains() {
+    let identity_rows = PAIRED_REDO_FOLD_IDENTITIES
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    let checkpoint_states = PAIRED_CHECKPOINT_REDO
+        .split("\n\n")
+        .map(parse_checkpoint_fixture)
+        .collect::<Vec<_>>();
+    assert_eq!(identity_rows.len(), 3);
+    assert_eq!(checkpoint_states.len(), 5);
+
+    let identities = identity_rows
+        .iter()
+        .map(|row| BranchMergePairedRedoFoldIdentity {
+            left_fold: row.fields[&id(2)].encode().unwrap(),
+            right_fold: row.fields[&id(3)].encode().unwrap(),
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(identities[0], identities[2]);
+    assert_ne!(identities[0], identities[1]);
+
+    let alpha = b"redo-fold/alpha".to_vec();
+    let beta = b"redo-fold/beta".to_vec();
+    let catalog_only = b"redo-fold/catalog-only".to_vec();
+    let observed_late = b"redo-fold/observed-late".to_vec();
+    let left_base = checkpoint_states[0].clone();
+    let right_base = checkpoint_states[1].clone();
+    let left_redo = checkpoint_states[2].clone();
+    let right_redo = checkpoint_states[3].clone();
+    let positionless = checkpoint_states[4].clone();
+    assert_eq!(positionless.position, None);
+
+    let checkpoints = |checkpoint_id: &[u8], generation: CheckpointGeneration| {
+        BTreeMap::from([(checkpoint_id.to_vec(), generation)])
+    };
+    let frame = |left, right| BranchMergePairedCheckpointRedoFrame { left, right };
+
+    let mut first_fold = BTreeMap::new();
+    first_fold.insert(
+        200,
+        frame(
+            checkpoints(&alpha, left_base.clone()),
+            checkpoints(&alpha, right_base.clone()),
+        ),
+    );
+    first_fold.insert(
+        201,
+        frame(
+            checkpoints(&alpha, left_base.clone()),
+            checkpoints(&alpha, right_base.clone()),
+        ),
+    );
+    let mut left_at_203 = checkpoints(&alpha, left_base.clone());
+    left_at_203.insert(beta.clone(), positionless.clone());
+    first_fold.insert(
+        203,
+        frame(left_at_203, checkpoints(&alpha, right_base.clone())),
+    );
+
+    let mut second_fold = BTreeMap::new();
+    second_fold.insert(
+        203,
+        frame(
+            checkpoints(&alpha, left_redo.clone()),
+            checkpoints(&alpha, right_redo.clone()),
+        ),
+    );
+    let mut right_at_204 = checkpoints(&alpha, right_redo.clone());
+    right_at_204.insert(beta.clone(), positionless.clone());
+    second_fold.insert(
+        204,
+        frame(checkpoints(&alpha, left_redo.clone()), right_at_204),
+    );
+
+    let mut left_at_206 = checkpoints(&alpha, left_base.clone());
+    left_at_206.insert(observed_late.clone(), positionless.clone());
+    let third_fold = BTreeMap::from([(
+        206,
+        frame(left_at_206, checkpoints(&alpha, right_base.clone())),
+    )]);
+
+    let streams = fold_paired_checkpoint_redo_sparse_stream_chains_preserving_fold_identity(
+        &[alpha.clone(), beta.clone(), catalog_only.clone()],
+        &[
+            BranchMergePairedCheckpointRedoSparseFold {
+                redo_fold_identity: identities[0].clone(),
+                frames: first_fold,
+            },
+            BranchMergePairedCheckpointRedoSparseFold {
+                redo_fold_identity: identities[1].clone(),
+                frames: second_fold,
+            },
+            BranchMergePairedCheckpointRedoSparseFold {
+                redo_fold_identity: identities[2].clone(),
+                frames: third_fold,
+            },
+        ],
+    );
+    assert_eq!(
+        streams
+            .iter()
+            .map(|stream| stream.checkpoint_id.clone())
+            .collect::<Vec<_>>(),
+        vec![alpha.clone(), beta.clone(), catalog_only.clone(), observed_late.clone()],
+    );
+
+    let slots = |checkpoint_id: &[u8]| {
+        &streams
+            .iter()
+            .find(|stream| stream.checkpoint_id == checkpoint_id)
+            .unwrap()
+            .slots
+    };
+    let expected_slots = [(0, 200), (0, 201), (0, 203), (1, 203), (1, 204), (2, 206)];
+    for stream in &streams {
+        assert_eq!(
+            stream
+                .slots
+                .iter()
+                .map(|slot| (slot.fold_ordinal, slot.order))
+                .collect::<Vec<_>>(),
+            expected_slots,
+            "reused order 203 remains distinguishable by fold ordinal",
+        );
+        for (index, slot) in stream.slots.iter().enumerate() {
+            assert_eq!(slot.redo_fold_identity, identities[[0, 0, 0, 1, 1, 2][index]]);
+        }
+    }
+    assert_eq!(slots(&alpha)[0].left, Some(left_base.clone()));
+    assert_eq!(slots(&alpha)[3].left, Some(left_redo.clone()));
+    assert_eq!(slots(&beta)[2].left, Some(positionless.clone()));
+    assert_eq!(slots(&beta)[4].right, Some(positionless.clone()));
+    assert!(slots(&catalog_only)
+        .iter()
+        .all(|slot| slot.left.is_none() && slot.right.is_none()));
+    assert_eq!(slots(&observed_late)[5].left, Some(positionless.clone()));
+
+    let compacted =
+        compress_paired_checkpoint_redo_sparse_stream_chains_preserving_fold_identity(&streams);
+    let runs = |checkpoint_id: &[u8]| {
+        &compacted
+            .iter()
+            .find(|snapshot| snapshot.checkpoint_id == checkpoint_id)
+            .unwrap()
+            .runs
+    };
+    assert_eq!(
+        runs(&alpha)
+            .iter()
+            .map(|run| (run.fold_ordinal, run.first_order, run.last_order))
+            .collect::<Vec<_>>(),
+        vec![(0, 200, 201), (0, 203, 203), (1, 203, 204), (2, 206, 206)],
+        "sparse gaps and fold boundaries split compressed ranges",
+    );
+    assert_eq!(
+        runs(&alpha)
+            .iter()
+            .map(|run| run.redo_fold_identity.clone())
+            .collect::<Vec<_>>(),
+        vec![identities[0].clone(), identities[0].clone(), identities[1].clone(), identities[2].clone()],
+        "a reused pair remains attached to its separate fold occurrences",
+    );
+    assert_eq!(runs(&beta).len(), 5);
+    assert_eq!(runs(&beta)[1].left, Some(positionless.clone()));
+    assert_eq!(runs(&beta)[3].right, Some(positionless.clone()));
+    assert_eq!(runs(&catalog_only).len(), 4);
+    assert_eq!(runs(&observed_late).len(), 4);
+    assert_eq!(runs(&observed_late)[3].left, Some(positionless));
+}
+
+#[test]
+fn restores_paired_redo_fold_identity_across_sparse_checkpoint_chains() {
+    let identity_rows = PAIRED_REDO_FOLD_IDENTITIES
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    let checkpoint_states = PAIRED_CHECKPOINT_REDO
+        .split("\n\n")
+        .map(parse_checkpoint_fixture)
+        .collect::<Vec<_>>();
+    assert_eq!(identity_rows.len(), 3);
+    assert_eq!(checkpoint_states.len(), 5);
+    let identities = identity_rows
+        .iter()
+        .map(|row| BranchMergePairedRedoFoldIdentity {
+            left_fold: row.fields[&id(2)].encode().unwrap(),
+            right_fold: row.fields[&id(3)].encode().unwrap(),
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(identities[0], identities[2]);
+    assert_ne!(identities[0], identities[1]);
+    let alpha = b"restore-chain/alpha".to_vec();
+    let beta = b"restore-chain/beta".to_vec();
+    let catalog_only = b"restore-chain/catalog-only".to_vec();
+    let observed_late = b"restore-chain/observed-late".to_vec();
+    let left_base = checkpoint_states[0].clone();
+    let right_base = checkpoint_states[1].clone();
+    let positionless = checkpoint_states[4].clone();
+    assert_eq!(positionless.position, None);
+    let checkpoints = |checkpoint_id: &[u8], state: CheckpointGeneration| {
+        BTreeMap::from([(checkpoint_id.to_vec(), state)])
+    };
+    let frame = |left, right| BranchMergePairedCheckpointRedoFrame { left, right };
+
+    let mut first_fold = BTreeMap::new();
+    first_fold.insert(
+        10,
+        frame(
+            checkpoints(&alpha, left_base.clone()),
+            checkpoints(&alpha, right_base.clone()),
+        ),
+    );
+    first_fold.insert(
+        11,
+        frame(
+            checkpoints(&alpha, left_base.clone()),
+            checkpoints(&alpha, right_base.clone()),
+        ),
+    );
+    let mut left_at_13 = checkpoints(&alpha, positionless.clone());
+    left_at_13.insert(beta.clone(), positionless.clone());
+    first_fold.insert(13, frame(left_at_13, checkpoints(&alpha, right_base.clone())));
+
+    let mut second_fold = BTreeMap::new();
+    second_fold.insert(
+        13,
+        frame(
+            checkpoints(&alpha, left_base.clone()),
+            checkpoints(&alpha, right_base.clone()),
+        ),
+    );
+    let mut right_at_14 = checkpoints(&alpha, right_base.clone());
+    right_at_14.insert(beta.clone(), positionless.clone());
+    second_fold.insert(
+        14,
+        frame(checkpoints(&alpha, left_base.clone()), right_at_14),
+    );
+
+    let mut left_at_16 = checkpoints(&alpha, left_base.clone());
+    left_at_16.insert(observed_late.clone(), positionless.clone());
+    let third_fold = BTreeMap::from([(
+        16,
+        frame(left_at_16, checkpoints(&alpha, right_base.clone())),
+    )]);
+
+    let streams = fold_paired_checkpoint_redo_sparse_stream_chains_preserving_fold_identity(
+        &[alpha.clone(), beta.clone(), catalog_only.clone()],
+        &[
+            BranchMergePairedCheckpointRedoSparseFold {
+                redo_fold_identity: identities[0].clone(),
+                frames: first_fold,
+            },
+            BranchMergePairedCheckpointRedoSparseFold {
+                redo_fold_identity: identities[1].clone(),
+                frames: second_fold,
+            },
+            BranchMergePairedCheckpointRedoSparseFold {
+                redo_fold_identity: identities[2].clone(),
+                frames: third_fold,
+            },
+        ],
+    );
+    let compacted =
+        compress_paired_checkpoint_redo_sparse_stream_chains_preserving_fold_identity(&streams);
+    let restored =
+        restore_paired_checkpoint_redo_sparse_stream_chains_preserving_fold_identity(&compacted);
+
+    assert_eq!(restored, streams, "restore reconstructs the exact sparse streams");
+    assert_eq!(
+        compacted
+            .iter()
+            .find(|stream| stream.checkpoint_id == alpha)
+            .unwrap()
+            .runs
+            .iter()
+            .map(|run| (run.fold_ordinal, run.first_order, run.last_order))
+            .collect::<Vec<_>>(),
+        vec![(0, 10, 11), (0, 13, 13), (1, 13, 14), (2, 16, 16)],
+        "the missing order 12 and fold boundaries remain gaps after restore",
+    );
+    let restored_slots = |checkpoint_id: &[u8]| {
+        &restored
+            .iter()
+            .find(|stream| stream.checkpoint_id == checkpoint_id)
+            .unwrap()
+            .slots
+    };
+    let expected_orders = [(0, 10), (0, 11), (0, 13), (1, 13), (1, 14), (2, 16)];
+    for stream in &restored {
+        assert_eq!(
+            stream
+                .slots
+                .iter()
+                .map(|slot| (slot.fold_ordinal, slot.order))
+                .collect::<Vec<_>>(),
+            expected_orders,
+        );
+        assert_eq!(
+            stream
+                .slots
+                .iter()
+                .map(|slot| slot.redo_fold_identity.clone())
+                .collect::<Vec<_>>(),
+            vec![
+                identities[0].clone(),
+                identities[0].clone(),
+                identities[0].clone(),
+                identities[1].clone(),
+                identities[1].clone(),
+                identities[2].clone(),
+            ],
+        );
+    }
+    assert_eq!(restored_slots(&alpha)[0].left, Some(left_base.clone()));
+    assert_eq!(restored_slots(&alpha)[2].left, Some(positionless.clone()));
+    assert_eq!(restored_slots(&alpha)[3].right, Some(right_base));
+    assert_eq!(restored_slots(&beta)[2].left, Some(positionless.clone()));
+    assert_eq!(restored_slots(&beta)[4].right, Some(positionless.clone()));
+    assert!(restored_slots(&catalog_only)
+        .iter()
+        .all(|slot| slot.left.is_none() && slot.right.is_none()));
+    assert_eq!(restored_slots(&observed_late)[5].left, Some(positionless));
+}
+
+#[test]
+fn paired_checkpoint_redo_compaction_preserves_write_ahead_identities() {
+    let identity_rows = PAIRED_WRITE_AHEAD_REDO_IDENTITIES
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    let checkpoint_states = PAIRED_CHECKPOINT_REDO
+        .split("\n\n")
+        .map(parse_checkpoint_fixture)
+        .collect::<Vec<_>>();
+    assert_eq!(identity_rows.len(), 6);
+    assert_eq!(checkpoint_states.len(), 5);
+    let left_base = checkpoint_states[0].clone();
+    let right_base = checkpoint_states[1].clone();
+    let left_redo = checkpoint_states[2].clone();
+    let right_redo = checkpoint_states[3].clone();
+    let checkpoint_id = b"consumer/paired-log".to_vec();
+    let orders = [10_u64, 11, 12, 13, 14, 16];
+    let identities = identity_rows
+        .iter()
+        .map(|row| BranchMergePairedWriteAheadIdentity {
+            left_log: row.fields[&id(2)].encode().unwrap(),
+            right_log: row.fields[&id(3)].encode().unwrap(),
+        })
+        .collect::<Vec<_>>();
+    let mut frames = BTreeMap::new();
+    for (index, (order, identity)) in orders.into_iter().zip(identities.iter()).enumerate() {
+        let (left, right) = match index {
+            0 | 1 => (&left_base, &right_base),
+            2 => (&left_redo, &right_base),
+            _ => (&left_redo, &right_redo),
+        };
+        frames.insert(
+            order,
+            BranchMergePairedCheckpointRedoIdentityFrame {
+                checkpoints: BranchMergePairedCheckpointRedoFrame {
+                    left: BTreeMap::from([(checkpoint_id.clone(), left.clone())]),
+                    right: BTreeMap::from([(checkpoint_id.clone(), right.clone())]),
+                },
+                write_ahead_identity: identity.clone(),
+            },
+        );
+    }
+
+    let chains = compress_paired_checkpoint_redo_chain_preserving_write_ahead_identity(&frames);
+    assert_eq!(chains.len(), 1);
+    assert_eq!(chains[0].checkpoint_id, checkpoint_id);
+    let runs = &chains[0].runs;
+    assert_eq!(runs.len(), 4);
+    assert_eq!(
+        runs.iter()
+            .map(|run| (run.first_order, run.last_order))
+            .collect::<Vec<_>>(),
+        vec![(10, 11), (12, 12), (13, 14), (16, 16)],
+    );
+    assert_eq!(runs[0].left, Some(left_base.clone()));
+    assert_eq!(runs[0].right, Some(right_base.clone()));
+    assert_eq!(runs[1].left, Some(left_redo.clone()));
+    assert_eq!(runs[1].right, Some(right_base));
+    assert_eq!(runs[2].left, Some(left_redo.clone()));
+    assert_eq!(runs[2].right, Some(right_redo.clone()));
+    assert_eq!(runs[3].left, Some(left_redo));
+    assert_eq!(runs[3].right, Some(right_redo));
+    assert_eq!(runs[0].write_ahead_identities, identities[..2]);
+    assert_eq!(runs[1].write_ahead_identities, identities[2..3]);
+    assert_eq!(runs[2].write_ahead_identities, identities[3..5]);
+    assert_eq!(
+        runs[2].write_ahead_identities[0],
+        runs[2].write_ahead_identities[1],
+        "repeated write-ahead identities remain present at both committed orders",
+    );
+    assert_eq!(runs[3].write_ahead_identities, identities[5..6]);
+}
+
+#[test]
+fn paired_sparse_checkpoint_fold_preserves_streams_across_omissions() {
+    let identity_rows = PAIRED_SPARSE_CHECKPOINT_REDO
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    let checkpoint_states = PAIRED_CHECKPOINT_REDO
+        .split("\n\n")
+        .map(parse_checkpoint_fixture)
+        .collect::<Vec<_>>();
+    assert_eq!(identity_rows.len(), 4);
+    let alpha_left_base = checkpoint_states[0].clone();
+    let alpha_right_base = checkpoint_states[1].clone();
+    let alpha_left_redo = checkpoint_states[2].clone();
+    let alpha_right_redo = checkpoint_states[3].clone();
+    let beta_positionless = checkpoint_states[4].clone();
+    assert_eq!(beta_positionless, CheckpointGeneration { generation: 7, position: None });
+
+    let orders = [20_u64, 21, 22, 24];
+    let identities = identity_rows
+        .iter()
+        .map(|row| BranchMergePairedWriteAheadIdentity {
+            left_log: row.fields[&id(2)].encode().unwrap(),
+            right_log: row.fields[&id(3)].encode().unwrap(),
+        })
+        .collect::<Vec<_>>();
+    let alpha = b"stream/alpha".to_vec();
+    let beta = b"stream/beta".to_vec();
+    let never_present = b"stream/catalog-only".to_vec();
+    let observed_without_catalog = b"stream/unlisted".to_vec();
+    let mut frames = BTreeMap::new();
+    for (index, (order, identity)) in orders.into_iter().zip(&identities).enumerate() {
+        let (left, right) = match index {
+            0 => (
+                BTreeMap::from([(alpha.clone(), alpha_left_base.clone())]),
+                BTreeMap::from([(alpha.clone(), alpha_right_base.clone())]),
+            ),
+            1 => (
+                BTreeMap::from([(
+                    observed_without_catalog.clone(),
+                    beta_positionless.clone(),
+                )]),
+                BTreeMap::from([(alpha.clone(), alpha_right_redo.clone())]),
+            ),
+            2 => (
+                BTreeMap::from([(beta.clone(), beta_positionless.clone())]),
+                BTreeMap::new(),
+            ),
+            3 => (
+                BTreeMap::from([(alpha.clone(), alpha_left_redo.clone())]),
+                BTreeMap::from([(alpha.clone(), alpha_right_redo.clone())]),
+            ),
+            _ => unreachable!(),
+        };
+        frames.insert(
+            order,
+            BranchMergePairedCheckpointRedoIdentityFrame {
+                checkpoints: BranchMergePairedCheckpointRedoFrame { left, right },
+                write_ahead_identity: identity.clone(),
+            },
+        );
+    }
+
+    let streams = fold_paired_checkpoint_redo_sparse_streams(
+        &[alpha.clone(), beta.clone(), never_present.clone()],
+        &frames,
+    );
+    assert_eq!(
+        streams.iter().map(|stream| stream.checkpoint_id.clone()).collect::<Vec<_>>(),
+        vec![alpha.clone(), beta.clone(), never_present.clone(), observed_without_catalog.clone()],
+        "known identities survive total omission and observed IDs survive a stale catalog",
+    );
+    let slots = |checkpoint_id: &[u8]| {
+        &streams
+            .iter()
+            .find(|stream| stream.checkpoint_id == checkpoint_id)
+            .unwrap()
+            .slots
+    };
+    assert_eq!(
+        slots(&alpha)
+            .iter()
+            .map(|slot| (slot.order, slot.left.clone(), slot.right.clone()))
+            .collect::<Vec<_>>(),
+        vec![
+            (20, Some(alpha_left_base), Some(alpha_right_base)),
+            (21, None, Some(alpha_right_redo.clone())),
+            (22, None, None),
+            (24, Some(alpha_left_redo.clone()), Some(alpha_right_redo.clone())),
+        ],
+        "one-sided and two-sided omissions retain their exact sparse slots before reappearance",
+    );
+    assert_eq!(
+        slots(&beta)
+            .iter()
+            .map(|slot| (slot.order, slot.left.clone(), slot.right.clone()))
+            .collect::<Vec<_>>(),
+        vec![
+            (20, None, None),
+            (21, None, None),
+            (22, Some(beta_positionless.clone()), None),
+            (24, None, None),
+        ],
+        "a present positionless checkpoint remains distinct from both sides omitting it",
+    );
+    assert!(slots(&never_present).iter().all(|slot| slot.left.is_none() && slot.right.is_none()));
+    assert_eq!(
+        slots(&observed_without_catalog)[1].left,
+        Some(beta_positionless),
+        "an observed stream outside the supplied catalog is not discarded",
+    );
+    for (index, order) in orders.into_iter().enumerate() {
+        for stream_id in [&alpha, &beta, &never_present, &observed_without_catalog] {
+            let slot = slots(stream_id)
+                .iter()
+                .find(|slot| slot.order == order)
+                .unwrap();
+            assert_eq!(slot.write_ahead_identity, identities[index]);
+        }
+    }
+    assert_eq!(slots(&alpha).iter().map(|slot| slot.order).collect::<Vec<_>>(), orders);
+}
+
+#[test]
+fn paired_write_ahead_identity_survives_sparse_checkpoint_stream_fold_chains() {
+    let first_fold_rows = PAIRED_SPARSE_CHECKPOINT_REDO
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    let second_fold_rows = PAIRED_WRITE_AHEAD_FOLD_CHAIN
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    let checkpoint_states = PAIRED_CHECKPOINT_REDO
+        .split("\n\n")
+        .map(parse_checkpoint_fixture)
+        .collect::<Vec<_>>();
+    assert_eq!(first_fold_rows.len(), 4);
+    assert_eq!(second_fold_rows.len(), 3);
+    let identity = |row: &KeyedRow| BranchMergePairedWriteAheadIdentity {
+        left_log: row.fields[&id(2)].encode().unwrap(),
+        right_log: row.fields[&id(3)].encode().unwrap(),
+    };
+    let first_identities = first_fold_rows.iter().map(identity).collect::<Vec<_>>();
+    let second_identities = second_fold_rows.iter().map(identity).collect::<Vec<_>>();
+    assert_eq!(first_identities[2], second_identities[0]);
+    assert_eq!(first_identities[0], second_identities[2]);
+
+    let alpha = b"chain/alpha".to_vec();
+    let beta = b"chain/beta".to_vec();
+    let catalog_only = b"chain/catalog-only".to_vec();
+    let observed_late = b"chain/observed-late".to_vec();
+    let positionless = checkpoint_states[4].clone();
+    let mut first_fold = BTreeMap::new();
+    let first_states = [
+        (
+            BTreeMap::from([(alpha.clone(), checkpoint_states[0].clone())]),
+            BTreeMap::from([(alpha.clone(), checkpoint_states[1].clone())]),
+        ),
+        (BTreeMap::new(), BTreeMap::from([(alpha.clone(), checkpoint_states[3].clone())])),
+        (BTreeMap::from([(beta.clone(), positionless.clone())]), BTreeMap::new()),
+        (
+            BTreeMap::from([(alpha.clone(), checkpoint_states[2].clone())]),
+            BTreeMap::from([(alpha.clone(), checkpoint_states[3].clone())]),
+        ),
+    ];
+    for (order, (states, write_ahead_identity)) in [20_u64, 21, 22, 24]
+        .into_iter()
+        .zip(first_states.into_iter().zip(&first_identities))
+    {
+        first_fold.insert(
+            order,
+            BranchMergePairedCheckpointRedoIdentityFrame {
+                checkpoints: BranchMergePairedCheckpointRedoFrame {
+                    left: states.0,
+                    right: states.1,
+                },
+                write_ahead_identity: write_ahead_identity.clone(),
+            },
+        );
+    }
+
+    let mut second_fold = BTreeMap::new();
+    let second_states = [
+        (
+            BTreeMap::from([(alpha.clone(), checkpoint_states[2].clone())]),
+            BTreeMap::from([(alpha.clone(), checkpoint_states[3].clone())]),
+        ),
+        (
+            BTreeMap::from([(observed_late.clone(), positionless.clone())]),
+            BTreeMap::from([(alpha.clone(), checkpoint_states[3].clone())]),
+        ),
+        (BTreeMap::new(), BTreeMap::from([(beta.clone(), positionless.clone())])),
+    ];
+    for (order, (states, write_ahead_identity)) in [22_u64, 23, 25]
+        .into_iter()
+        .zip(second_states.into_iter().zip(&second_identities))
+    {
+        second_fold.insert(
+            order,
+            BranchMergePairedCheckpointRedoIdentityFrame {
+                checkpoints: BranchMergePairedCheckpointRedoFrame {
+                    left: states.0,
+                    right: states.1,
+                },
+                write_ahead_identity: write_ahead_identity.clone(),
+            },
+        );
+    }
+
+    let streams = fold_paired_checkpoint_redo_sparse_stream_chains_preserving_write_ahead_identity(
+        &[alpha.clone(), beta.clone(), catalog_only.clone()],
+        &[first_fold, second_fold],
+    );
+    assert_eq!(
+        streams.iter().map(|stream| stream.checkpoint_id.clone()).collect::<Vec<_>>(),
+        vec![alpha.clone(), beta.clone(), catalog_only.clone(), observed_late.clone()],
+        "checkpoint IDs observed in any fold join the known catalog",
+    );
+    let slots = |checkpoint_id: &[u8]| {
+        &streams
+            .iter()
+            .find(|stream| stream.checkpoint_id == checkpoint_id)
+            .unwrap()
+            .slots
+    };
+    let expected_orders = [(0, 20), (0, 21), (0, 22), (0, 24), (1, 22), (1, 23), (1, 25)];
+    let all_identities = first_identities
+        .iter()
+        .chain(&second_identities)
+        .cloned()
+        .collect::<Vec<_>>();
+    for stream in &streams {
+        assert_eq!(
+            stream.slots.iter().map(|slot| (slot.fold_ordinal, slot.order)).collect::<Vec<_>>(),
+            expected_orders,
+            "every observed order is distinguished by its fold ordinal",
+        );
+        assert_eq!(
+            stream.slots.iter().map(|slot| slot.write_ahead_identity.clone()).collect::<Vec<_>>(),
+            all_identities,
+            "each fold occurrence retains its complete left/right write-ahead pair",
+        );
+    }
+    assert_eq!(
+        slots(&alpha)
+            .iter()
+            .map(|slot| (slot.left.clone(), slot.right.clone()))
+            .collect::<Vec<_>>(),
+        vec![
+            (Some(checkpoint_states[0].clone()), Some(checkpoint_states[1].clone())),
+            (None, Some(checkpoint_states[3].clone())),
+            (None, None),
+            (Some(checkpoint_states[2].clone()), Some(checkpoint_states[3].clone())),
+            (Some(checkpoint_states[2].clone()), Some(checkpoint_states[3].clone())),
+            (None, Some(checkpoint_states[3].clone())),
+            (None, None),
+        ],
+        "repeated frame order 22 across folds keeps separate checkpoint states and log pairs",
+    );
+    assert_eq!(slots(&beta)[2].left, Some(positionless.clone()));
+    assert_eq!(slots(&beta)[6].right, Some(positionless.clone()));
+    assert_eq!(slots(&observed_late)[5].left, Some(positionless));
+    assert!(slots(&catalog_only)
+        .iter()
+        .all(|slot| slot.left.is_none() && slot.right.is_none()));
+}
+
+#[test]
+fn paired_sparse_redo_fold_preserves_undo_chain_identities() {
+    let identity_rows = PAIRED_SPARSE_UNDO_CHAIN_IDENTITIES
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    let checkpoint_states = PAIRED_CHECKPOINT_REDO
+        .split("\n\n")
+        .map(parse_checkpoint_fixture)
+        .collect::<Vec<_>>();
+    assert_eq!(identity_rows.len(), 4);
+    let left_base = checkpoint_states[0].clone();
+    let right_base = checkpoint_states[1].clone();
+    let left_redo = checkpoint_states[2].clone();
+    let right_redo = checkpoint_states[3].clone();
+    let positionless = checkpoint_states[4].clone();
+    let alpha = b"undo-stream/alpha".to_vec();
+    let beta = b"undo-stream/beta".to_vec();
+    let catalog_only = b"undo-stream/catalog-only".to_vec();
+    let orders = [30_u64, 31, 32, 34];
+    let undo_identities = identity_rows
+        .iter()
+        .map(|row| BranchMergePairedUndoChainIdentity {
+            left_chain: row.fields[&id(2)].encode().unwrap(),
+            right_chain: row.fields[&id(3)].encode().unwrap(),
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(undo_identities[0], undo_identities[1]);
+
+    let mut frames = BTreeMap::new();
+    for (index, (order, undo_chain_identity)) in orders.into_iter().zip(&undo_identities).enumerate() {
+        let (left, right) = match index {
+            0 => (
+                BTreeMap::from([(alpha.clone(), left_base.clone())]),
+                BTreeMap::from([(alpha.clone(), right_base.clone())]),
+            ),
+            1 => (BTreeMap::new(), BTreeMap::new()),
+            2 => (
+                BTreeMap::from([
+                    (alpha.clone(), left_redo.clone()),
+                    (beta.clone(), positionless.clone()),
+                ]),
+                BTreeMap::new(),
+            ),
+            3 => (
+                BTreeMap::from([(alpha.clone(), left_redo.clone())]),
+                BTreeMap::from([(alpha.clone(), right_redo.clone())]),
+            ),
+            _ => unreachable!(),
+        };
+        frames.insert(
+            order,
+            BranchMergePairedCheckpointRedoUndoFrame {
+                checkpoints: BranchMergePairedCheckpointRedoFrame { left, right },
+                undo_chain_identity: undo_chain_identity.clone(),
+            },
+        );
+    }
+
+    let streams = fold_paired_checkpoint_redo_sparse_streams_preserving_undo_chain_identity(
+        &[alpha.clone(), beta.clone(), catalog_only.clone()],
+        &frames,
+    );
+    assert_eq!(
+        streams.iter().map(|stream| stream.checkpoint_id.clone()).collect::<Vec<_>>(),
+        vec![alpha.clone(), beta.clone(), catalog_only.clone()],
+    );
+    let slots = |checkpoint_id: &[u8]| {
+        &streams
+            .iter()
+            .find(|stream| stream.checkpoint_id == checkpoint_id)
+            .unwrap()
+            .slots
+    };
+    assert_eq!(
+        slots(&alpha)
+            .iter()
+            .map(|slot| (slot.order, slot.left.clone(), slot.right.clone()))
+            .collect::<Vec<_>>(),
+        vec![
+            (30, Some(left_base), Some(right_base)),
+            (31, None, None),
+            (32, Some(left_redo.clone()), None),
+            (34, Some(left_redo), Some(right_redo)),
+        ],
+        "paired undo lineage survives total checkpoint omission and asymmetric restoration",
+    );
+    assert_eq!(
+        slots(&beta)[2].left,
+        Some(positionless),
+        "a positionless checkpoint remains present beside its undo-chain pair",
+    );
+    assert!(slots(&catalog_only)
+        .iter()
+        .all(|slot| slot.left.is_none() && slot.right.is_none()));
+    for (index, order) in orders.into_iter().enumerate() {
+        for checkpoint_id in [&alpha, &beta, &catalog_only] {
+            let slot = slots(checkpoint_id)
+                .iter()
+                .find(|slot| slot.order == order)
+                .unwrap();
+            assert_eq!(slot.undo_chain_identity, undo_identities[index]);
+        }
+    }
+    assert_eq!(slots(&alpha)[0].undo_chain_identity, slots(&alpha)[1].undo_chain_identity);
+    assert_eq!(slots(&alpha).iter().map(|slot| slot.order).collect::<Vec<_>>(), orders);
+}
+
+#[test]
+fn paired_undo_compaction_fold_identity_survives_sparse_rotation_folds() {
+    let first_identity_rows = PAIRED_SPARSE_UNDO_CHAIN_IDENTITIES
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    let later_identity_rows = PAIRED_UNDO_CHAIN_FOLD_ROTATIONS
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    let checkpoint_states = PAIRED_CHECKPOINT_REDO
+        .split("\n\n")
+        .map(parse_checkpoint_fixture)
+        .collect::<Vec<_>>();
+    assert_eq!(first_identity_rows.len(), 4);
+    assert_eq!(later_identity_rows.len(), 3);
+    let identities = |rows: &[KeyedRow]| {
+        rows.iter()
+            .map(|row| BranchMergePairedUndoChainIdentity {
+                left_chain: row.fields[&id(2)].encode().unwrap(),
+                right_chain: row.fields[&id(3)].encode().unwrap(),
+            })
+            .collect::<Vec<_>>()
+    };
+    let first_identities = identities(&first_identity_rows);
+    let later_identities = identities(&later_identity_rows);
+    assert_eq!(first_identities[3], later_identities[0]);
+    assert_eq!(first_identities[0], later_identities[2]);
+    assert_ne!(later_identities[0], later_identities[1]);
+
+    let alpha = b"undo-fold/alpha".to_vec();
+    let beta = b"undo-fold/beta".to_vec();
+    let catalog_only = b"undo-fold/catalog-only".to_vec();
+    let observed_late = b"undo-fold/observed-late".to_vec();
+    let positionless = checkpoint_states[4].clone();
+    let first_states = [
+        (
+            BTreeMap::from([(alpha.clone(), checkpoint_states[0].clone())]),
+            BTreeMap::from([(alpha.clone(), checkpoint_states[1].clone())]),
+        ),
+        (
+            BTreeMap::from([(alpha.clone(), checkpoint_states[0].clone())]),
+            BTreeMap::from([
+                (alpha.clone(), checkpoint_states[1].clone()),
+                (beta.clone(), positionless.clone()),
+            ]),
+        ),
+        (
+            BTreeMap::from([(alpha.clone(), checkpoint_states[2].clone())]),
+            BTreeMap::new(),
+        ),
+        (
+            BTreeMap::from([(alpha.clone(), checkpoint_states[2].clone())]),
+            BTreeMap::from([(alpha.clone(), checkpoint_states[3].clone())]),
+        ),
+    ];
+    let mut first_fold = BTreeMap::new();
+    for ((order, (left, right)), undo_chain_identity) in [30_u64, 31, 33, 34]
+        .into_iter()
+        .zip(first_states)
+        .zip(&first_identities)
+    {
+        first_fold.insert(
+            order,
+            BranchMergePairedCheckpointRedoUndoFrame {
+                checkpoints: BranchMergePairedCheckpointRedoFrame { left, right },
+                undo_chain_identity: undo_chain_identity.clone(),
+            },
+        );
+    }
+
+    let later_states = [
+        (
+            BTreeMap::from([(alpha.clone(), checkpoint_states[2].clone())]),
+            BTreeMap::from([(alpha.clone(), checkpoint_states[3].clone())]),
+        ),
+        (
+            BTreeMap::from([(alpha.clone(), checkpoint_states[2].clone())]),
+            BTreeMap::from([(alpha.clone(), checkpoint_states[3].clone())]),
+        ),
+        (
+            BTreeMap::from([
+                (beta.clone(), positionless.clone()),
+                (observed_late.clone(), positionless.clone()),
+            ]),
+            BTreeMap::new(),
+        ),
+    ];
+    let mut later_fold = BTreeMap::new();
+    for ((order, (left, right)), undo_chain_identity) in [34_u64, 35, 36]
+        .into_iter()
+        .zip(later_states)
+        .zip(&later_identities)
+    {
+        later_fold.insert(
+            order,
+            BranchMergePairedCheckpointRedoUndoFrame {
+                checkpoints: BranchMergePairedCheckpointRedoFrame { left, right },
+                undo_chain_identity: undo_chain_identity.clone(),
+            },
+        );
+    }
+
+    let streams = fold_paired_checkpoint_redo_sparse_stream_chains_preserving_undo_chain_identity(
+        &[alpha.clone(), beta.clone(), catalog_only.clone()],
+        &[first_fold, later_fold],
+    );
+    assert_eq!(
+        streams
+            .iter()
+            .map(|stream| stream.checkpoint_id.clone())
+            .collect::<Vec<_>>(),
+        vec![alpha.clone(), beta.clone(), catalog_only.clone(), observed_late.clone()],
+    );
+    let slots = |checkpoint_id: &[u8]| {
+        &streams
+            .iter()
+            .find(|stream| stream.checkpoint_id == checkpoint_id)
+            .unwrap()
+            .slots
+    };
+    let expected_orders = [(0, 30), (0, 31), (0, 33), (0, 34), (1, 34), (1, 35), (1, 36)];
+    let expected_identities = first_identities
+        .iter()
+        .chain(&later_identities)
+        .cloned()
+        .collect::<Vec<_>>();
+    for stream in &streams {
+        assert_eq!(
+            stream
+                .slots
+                .iter()
+                .map(|slot| (slot.fold_ordinal, slot.order))
+                .collect::<Vec<_>>(),
+            expected_orders,
+        );
+        assert_eq!(
+            stream
+                .slots
+                .iter()
+                .map(|slot| slot.undo_chain_identity.clone())
+                .collect::<Vec<_>>(),
+            expected_identities,
+            "paired undo labels survive omissions and repeated in-fold order numbers",
+        );
+    }
+    assert_eq!(slots(&alpha)[0].left, Some(checkpoint_states[0].clone()));
+    assert_eq!(slots(&alpha)[0].right, Some(checkpoint_states[1].clone()));
+    assert_eq!(slots(&alpha)[4].left, Some(checkpoint_states[2].clone()));
+    assert_eq!(slots(&alpha)[4].right, Some(checkpoint_states[3].clone()));
+    assert_eq!(slots(&beta)[1].right, Some(positionless.clone()));
+    assert_eq!(slots(&observed_late)[6].left, Some(positionless.clone()));
+    assert!(slots(&catalog_only)
+        .iter()
+        .all(|slot| slot.left.is_none() && slot.right.is_none()));
+
+    let compacted =
+        compress_paired_checkpoint_redo_sparse_stream_chains_preserving_undo_chain_identity(
+            &streams,
+        );
+    assert_eq!(
+        compacted
+            .iter()
+            .map(|stream| stream.checkpoint_id.clone())
+            .collect::<Vec<_>>(),
+        vec![alpha.clone(), beta.clone(), catalog_only.clone(), observed_late.clone()],
+    );
+    let runs = |checkpoint_id: &[u8]| {
+        &compacted
+            .iter()
+            .find(|stream| stream.checkpoint_id == checkpoint_id)
+            .unwrap()
+            .runs
+    };
+    assert_eq!(
+        runs(&alpha)
+            .iter()
+            .map(|run| (run.fold_ordinal, run.first_order, run.last_order, run.left.clone(), run.right.clone()))
+            .collect::<Vec<_>>(),
+        vec![
+            (0, 30, 31, Some(checkpoint_states[0].clone()), Some(checkpoint_states[1].clone())),
+            (0, 33, 33, Some(checkpoint_states[2].clone()), None),
+            (0, 34, 34, Some(checkpoint_states[2].clone()), Some(checkpoint_states[3].clone())),
+            (1, 34, 35, Some(checkpoint_states[2].clone()), Some(checkpoint_states[3].clone())),
+            (1, 36, 36, None, None),
+        ],
+        "equal state compacts within a fold while overlapping folds, state changes, and gaps stay split",
+    );
+    assert_eq!(runs(&alpha)[0].undo_chain_identities, first_identities[0..2]);
+    assert_eq!(runs(&alpha)[1].undo_chain_identities, first_identities[2..3]);
+    assert_eq!(runs(&alpha)[2].undo_chain_identities, first_identities[3..4]);
+    assert_eq!(runs(&alpha)[3].undo_chain_identities, later_identities[0..2]);
+    assert_eq!(runs(&alpha)[4].undo_chain_identities, later_identities[2..3]);
+    assert_eq!(
+        runs(&catalog_only)
+            .iter()
+            .map(|run| (run.fold_ordinal, run.first_order, run.last_order))
+            .collect::<Vec<_>>(),
+        vec![(0, 30, 31), (0, 33, 34), (1, 34, 36)],
+        "known-only streams preserve sparse folds and do not coalesce at the fold boundary",
+    );
+    assert_eq!(runs(&catalog_only)[2].undo_chain_identities, later_identities);
+    assert_eq!(
+        runs(&beta)
+            .iter()
+            .map(|run| (run.fold_ordinal, run.first_order, run.last_order, run.left.clone(), run.right.clone()))
+            .collect::<Vec<_>>(),
+        vec![
+            (0, 30, 30, None, None),
+            (0, 31, 31, None, Some(positionless.clone())),
+            (0, 33, 34, None, None),
+            (1, 34, 35, None, None),
+            (1, 36, 36, Some(positionless.clone()), None),
+        ],
+        "positionless values remain distinct from missing values while undo pairs remain attached",
+    );
+    assert_eq!(runs(&beta)[2].undo_chain_identities, first_identities[2..4]);
+    assert_eq!(runs(&beta)[3].undo_chain_identities, later_identities[0..2]);
+    assert_eq!(
+        runs(&observed_late)
+            .iter()
+            .map(|run| (run.fold_ordinal, run.first_order, run.last_order, run.left.clone(), run.right.clone()))
+            .collect::<Vec<_>>(),
+        vec![
+            (0, 30, 31, None, None),
+            (0, 33, 34, None, None),
+            (1, 34, 35, None, None),
+            (1, 36, 36, Some(positionless), None),
+        ],
+        "later stream observation leaves its earlier omission folds and surrounding gaps intact",
+    );
+    assert_eq!(runs(&observed_late)[2].undo_chain_identities, later_identities[0..2]);
+}
+
+#[test]
+fn paired_sparse_redo_fold_preserves_segment_rotation_identities() {
+    let segment_rows = PAIRED_SPARSE_SEGMENT_ROTATIONS
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    let checkpoint_states = PAIRED_CHECKPOINT_REDO
+        .split("\n\n")
+        .map(parse_checkpoint_fixture)
+        .collect::<Vec<_>>();
+    assert_eq!(segment_rows.len(), 4);
+    let left_base = checkpoint_states[0].clone();
+    let right_base = checkpoint_states[1].clone();
+    let left_redo = checkpoint_states[2].clone();
+    let right_redo = checkpoint_states[3].clone();
+    let positionless = checkpoint_states[4].clone();
+    let alpha = b"redo-stream/alpha".to_vec();
+    let beta = b"redo-stream/beta".to_vec();
+    let catalog_only = b"redo-stream/catalog-only".to_vec();
+    let orders = [40_u64, 41, 43, 44];
+    let segments = segment_rows
+        .iter()
+        .map(|row| BranchMergePairedWriteAheadSegmentIdentity {
+            left_segment: row.fields[&id(2)].encode().unwrap(),
+            right_segment: row.fields[&id(3)].encode().unwrap(),
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(segments[1].right_segment, segments[0].right_segment);
+    assert_ne!(segments[1].left_segment, segments[0].left_segment);
+    assert_ne!(segments[3].left_segment, segments[0].left_segment);
+
+    let mut frames = BTreeMap::new();
+    for (index, (order, segment_identity)) in orders.into_iter().zip(&segments).enumerate() {
+        let (left, right) = match index {
+            0 => (
+                BTreeMap::from([(alpha.clone(), left_base.clone())]),
+                BTreeMap::from([(alpha.clone(), right_base.clone())]),
+            ),
+            1 => (
+                BTreeMap::new(),
+                BTreeMap::from([(beta.clone(), positionless.clone())]),
+            ),
+            2 => (
+                BTreeMap::from([(alpha.clone(), left_redo.clone())]),
+                BTreeMap::new(),
+            ),
+            3 => (
+                BTreeMap::from([(alpha.clone(), left_redo.clone())]),
+                BTreeMap::from([(alpha.clone(), right_redo.clone())]),
+            ),
+            _ => unreachable!(),
+        };
+        frames.insert(
+            order,
+            BranchMergePairedCheckpointRedoSegmentFrame {
+                checkpoints: BranchMergePairedCheckpointRedoFrame { left, right },
+                segment_identity: segment_identity.clone(),
+            },
+        );
+    }
+
+    let streams = fold_paired_checkpoint_redo_sparse_streams_preserving_segment_rotation_identity(
+        &[alpha.clone(), beta.clone(), catalog_only.clone()],
+        &frames,
+    );
+    assert_eq!(
+        streams.iter().map(|stream| stream.checkpoint_id.clone()).collect::<Vec<_>>(),
+        vec![alpha.clone(), beta.clone(), catalog_only.clone()],
+    );
+    let slots = |checkpoint_id: &[u8]| {
+        &streams
+            .iter()
+            .find(|stream| stream.checkpoint_id == checkpoint_id)
+            .unwrap()
+            .slots
+    };
+    assert_eq!(
+        slots(&alpha)
+            .iter()
+            .map(|slot| (slot.order, slot.left.clone(), slot.right.clone()))
+            .collect::<Vec<_>>(),
+        vec![
+            (40, Some(left_base), Some(right_base)),
+            (41, None, None),
+            (43, Some(left_redo.clone()), None),
+            (44, Some(left_redo), Some(right_redo)),
+        ],
+        "segment rotation remains visible through total and one-sided checkpoint omissions",
+    );
+    assert_eq!(slots(&beta)[1].right, Some(positionless));
+    assert!(slots(&catalog_only)
+        .iter()
+        .all(|slot| slot.left.is_none() && slot.right.is_none()));
+    for (index, order) in orders.into_iter().enumerate() {
+        for checkpoint_id in [&alpha, &beta, &catalog_only] {
+            let slot = slots(checkpoint_id)
+                .iter()
+                .find(|slot| slot.order == order)
+                .unwrap();
+            assert_eq!(slot.segment_identity, segments[index]);
+        }
+    }
+    assert_eq!(slots(&alpha)[0].segment_identity.left_segment, segments[0].left_segment);
+    assert_eq!(slots(&alpha)[1].segment_identity.left_segment, segments[1].left_segment);
+    assert_eq!(slots(&alpha)[2].segment_identity.left_segment, segments[2].left_segment);
+    assert_eq!(slots(&alpha)[3].segment_identity.left_segment, segments[3].left_segment);
+    assert_eq!(slots(&alpha).iter().map(|slot| slot.order).collect::<Vec<_>>(), orders);
+}
+
+#[test]
+fn paired_segment_rotation_identity_survives_sparse_checkpoint_fold_compaction_chains() {
+    let first_segment_rows = PAIRED_SPARSE_SEGMENT_ROTATIONS
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    let second_segment_rows = PAIRED_SEGMENT_FOLD_CHAIN
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    let checkpoint_states = PAIRED_CHECKPOINT_REDO
+        .split("\n\n")
+        .map(parse_checkpoint_fixture)
+        .collect::<Vec<_>>();
+    assert_eq!(first_segment_rows.len(), 4);
+    assert_eq!(second_segment_rows.len(), 3);
+    let segments = |rows: &[KeyedRow]| {
+        rows.iter()
+            .map(|row| BranchMergePairedWriteAheadSegmentIdentity {
+                left_segment: row.fields[&id(2)].encode().unwrap(),
+                right_segment: row.fields[&id(3)].encode().unwrap(),
+            })
+            .collect::<Vec<_>>()
+    };
+    let first_segments = segments(&first_segment_rows);
+    let second_segments = segments(&second_segment_rows);
+    assert_eq!(first_segments[2], second_segments[0]);
+    assert_eq!(first_segments[0], second_segments[2]);
+
+    let alpha = b"segment-chain/alpha".to_vec();
+    let beta = b"segment-chain/beta".to_vec();
+    let catalog_only = b"segment-chain/catalog-only".to_vec();
+    let observed_late = b"segment-chain/observed-late".to_vec();
+    let positionless = checkpoint_states[4].clone();
+    let first_states = [
+        (
+            BTreeMap::from([(alpha.clone(), checkpoint_states[0].clone())]),
+            BTreeMap::from([(alpha.clone(), checkpoint_states[1].clone())]),
+        ),
+        (
+            BTreeMap::new(),
+            BTreeMap::from([(beta.clone(), positionless.clone())]),
+        ),
+        (
+            BTreeMap::from([(alpha.clone(), checkpoint_states[2].clone())]),
+            BTreeMap::new(),
+        ),
+        (
+            BTreeMap::from([(alpha.clone(), checkpoint_states[2].clone())]),
+            BTreeMap::from([(alpha.clone(), checkpoint_states[3].clone())]),
+        ),
+    ];
+    let mut first_fold = BTreeMap::new();
+    for ((order, (left, right)), segment_identity) in [40_u64, 41, 43, 44]
+        .into_iter()
+        .zip(first_states)
+        .zip(&first_segments)
+    {
+        first_fold.insert(
+            order,
+            BranchMergePairedCheckpointRedoSegmentFrame {
+                checkpoints: BranchMergePairedCheckpointRedoFrame { left, right },
+                segment_identity: segment_identity.clone(),
+            },
+        );
+    }
+
+    let second_states = [
+        (
+            BTreeMap::from([(alpha.clone(), checkpoint_states[2].clone())]),
+            BTreeMap::from([(alpha.clone(), checkpoint_states[3].clone())]),
+        ),
+        (
+            BTreeMap::from([(observed_late.clone(), positionless.clone())]),
+            BTreeMap::from([(alpha.clone(), checkpoint_states[3].clone())]),
+        ),
+        (
+            BTreeMap::from([(beta.clone(), positionless.clone())]),
+            BTreeMap::new(),
+        ),
+    ];
+    let mut second_fold = BTreeMap::new();
+    for ((order, (left, right)), segment_identity) in [43_u64, 44, 45]
+        .into_iter()
+        .zip(second_states)
+        .zip(&second_segments)
+    {
+        second_fold.insert(
+            order,
+            BranchMergePairedCheckpointRedoSegmentFrame {
+                checkpoints: BranchMergePairedCheckpointRedoFrame { left, right },
+                segment_identity: segment_identity.clone(),
+            },
+        );
+    }
+
+    let streams = fold_paired_checkpoint_redo_sparse_stream_chains_preserving_segment_rotation_identity(
+        &[alpha.clone(), beta.clone(), catalog_only.clone()],
+        &[first_fold, second_fold],
+    );
+    assert_eq!(
+        streams.iter().map(|stream| stream.checkpoint_id.clone()).collect::<Vec<_>>(),
+        vec![alpha.clone(), beta.clone(), catalog_only.clone(), observed_late.clone()],
+        "checkpoint streams first observed in a later fold are retained",
+    );
+    let slots = |checkpoint_id: &[u8]| {
+        &streams
+            .iter()
+            .find(|stream| stream.checkpoint_id == checkpoint_id)
+            .unwrap()
+            .slots
+    };
+    let expected_orders = [(0, 40), (0, 41), (0, 43), (0, 44), (1, 43), (1, 44), (1, 45)];
+    let expected_segments = first_segments
+        .iter()
+        .chain(&second_segments)
+        .cloned()
+        .collect::<Vec<_>>();
+    for stream in &streams {
+        assert_eq!(
+            stream.slots.iter().map(|slot| (slot.fold_ordinal, slot.order)).collect::<Vec<_>>(),
+            expected_orders,
+            "fold ordinal keeps repeated redo order 43 distinct",
+        );
+        assert_eq!(
+            stream.slots.iter().map(|slot| slot.segment_identity.clone()).collect::<Vec<_>>(),
+            expected_segments,
+            "the exact directional segment pair survives every slot, including omissions",
+        );
+    }
+    assert_eq!(
+        slots(&alpha)
+            .iter()
+            .map(|slot| (slot.left.clone(), slot.right.clone()))
+            .collect::<Vec<_>>(),
+        vec![
+            (Some(checkpoint_states[0].clone()), Some(checkpoint_states[1].clone())),
+            (None, None),
+            (Some(checkpoint_states[2].clone()), None),
+            (Some(checkpoint_states[2].clone()), Some(checkpoint_states[3].clone())),
+            (Some(checkpoint_states[2].clone()), Some(checkpoint_states[3].clone())),
+            (None, Some(checkpoint_states[3].clone())),
+            (None, None),
+        ],
+    );
+    assert_eq!(slots(&beta)[1].right, Some(positionless.clone()));
+    assert_eq!(slots(&beta)[6].left, Some(positionless.clone()));
+    assert_eq!(slots(&observed_late)[5].left, Some(positionless.clone()));
+    assert!(slots(&catalog_only)
+        .iter()
+        .all(|slot| slot.left.is_none() && slot.right.is_none()));
+
+    let compacted =
+        compress_paired_checkpoint_redo_sparse_stream_chains_preserving_segment_rotation_identity(
+            &streams,
+        );
+    assert_eq!(
+        compacted
+            .iter()
+            .map(|stream| stream.checkpoint_id.clone())
+            .collect::<Vec<_>>(),
+        vec![alpha.clone(), beta.clone(), catalog_only.clone(), observed_late.clone()],
+        "compaction retains the complete sparse checkpoint catalog",
+    );
+    let runs = |checkpoint_id: &[u8]| {
+        &compacted
+            .iter()
+            .find(|stream| stream.checkpoint_id == checkpoint_id)
+            .unwrap()
+            .runs
+    };
+    assert_eq!(
+        runs(&catalog_only)
+            .iter()
+            .map(|run| (run.fold_ordinal, run.first_order, run.last_order, run.left.clone(), run.right.clone()))
+            .collect::<Vec<_>>(),
+        vec![
+            (0, 40, 41, None, None),
+            (0, 43, 44, None, None),
+            (1, 43, 45, None, None),
+        ],
+        "equal state compacts through segment rotations but not across gaps or fold boundaries",
+    );
+    assert_eq!(runs(&catalog_only)[0].segment_identities, first_segments[0..2]);
+    assert_eq!(runs(&catalog_only)[1].segment_identities, first_segments[2..4]);
+    assert_eq!(runs(&catalog_only)[2].segment_identities, second_segments.clone());
+    assert_eq!(
+        runs(&beta)
+            .iter()
+            .map(|run| (run.fold_ordinal, run.first_order, run.last_order, run.left.clone(), run.right.clone()))
+            .collect::<Vec<_>>(),
+        vec![
+            (0, 40, 40, None, None),
+            (0, 41, 41, None, Some(positionless.clone())),
+            (0, 43, 44, None, None),
+            (1, 43, 44, None, None),
+            (1, 45, 45, Some(positionless.clone()), None),
+        ],
+        "positionless states remain distinct from omitted values and repeated orders stay fold-scoped",
+    );
+    assert_eq!(runs(&beta)[2].segment_identities, first_segments[2..4]);
+    assert_eq!(runs(&beta)[3].segment_identities, second_segments[0..2]);
+    assert_eq!(
+        runs(&observed_late)
+            .iter()
+            .map(|run| (run.fold_ordinal, run.first_order, run.last_order, run.left.clone(), run.right.clone()))
+            .collect::<Vec<_>>(),
+        vec![
+            (0, 40, 41, None, None),
+            (0, 43, 44, None, None),
+            (1, 43, 43, None, None),
+            (1, 44, 44, Some(positionless), None),
+            (1, 45, 45, None, None),
+        ],
+        "later observations retain earlier and surrounding omission runs",
+    );
+    assert_eq!(runs(&observed_late)[0].segment_identities, first_segments[0..2]);
+    assert_eq!(runs(&observed_late)[1].segment_identities, first_segments[2..4]);
+    assert_eq!(runs(&observed_late)[2].segment_identities, second_segments[0..1]);
+    assert_eq!(runs(&observed_late)[3].segment_identities, second_segments[1..2]);
+    assert_eq!(runs(&observed_late)[4].segment_identities, second_segments[2..3]);
+}
+
+#[test]
+fn paired_redo_fold_identity_restores_sparse_segment_compaction_chains() {
+    let fold_rows = PAIRED_REDO_FOLD_IDENTITIES
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    let first_segment_rows = PAIRED_SPARSE_SEGMENT_ROTATIONS
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    let later_segment_rows = PAIRED_SEGMENT_FOLD_CHAIN
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    let checkpoint_states = PAIRED_CHECKPOINT_REDO
+        .split("\n\n")
+        .map(parse_checkpoint_fixture)
+        .collect::<Vec<_>>();
+    assert_eq!(fold_rows.len(), 3);
+    assert_eq!(first_segment_rows.len(), 4);
+    assert_eq!(later_segment_rows.len(), 3);
+    assert_eq!(checkpoint_states.len(), 5);
+
+    let fold_identities = fold_rows
+        .iter()
+        .map(|row| BranchMergePairedRedoFoldIdentity {
+            left_fold: row.fields[&id(2)].encode().unwrap(),
+            right_fold: row.fields[&id(3)].encode().unwrap(),
+        })
+        .collect::<Vec<_>>();
+    let segment_identities = |rows: &[KeyedRow]| {
+        rows.iter()
+            .map(|row| BranchMergePairedWriteAheadSegmentIdentity {
+                left_segment: row.fields[&id(2)].encode().unwrap(),
+                right_segment: row.fields[&id(3)].encode().unwrap(),
+            })
+            .collect::<Vec<_>>()
+    };
+    let first_segments = segment_identities(&first_segment_rows);
+    let later_segments = segment_identities(&later_segment_rows);
+    assert_eq!(fold_identities[0], fold_identities[2]);
+    assert_ne!(fold_identities[0], fold_identities[1]);
+    assert_ne!(first_segments[0], first_segments[1]);
+    assert_eq!(first_segments[2], later_segments[0]);
+    assert_eq!(first_segments[0], later_segments[2]);
+
+    let alpha = b"fold-segment/alpha".to_vec();
+    let beta = b"fold-segment/beta".to_vec();
+    let catalog_only = b"fold-segment/catalog-only".to_vec();
+    let observed_late = b"fold-segment/observed-late".to_vec();
+    let left_base = checkpoint_states[0].clone();
+    let right_base = checkpoint_states[1].clone();
+    let left_redo = checkpoint_states[2].clone();
+    let right_redo = checkpoint_states[3].clone();
+    let positionless = checkpoint_states[4].clone();
+    assert_eq!(positionless.position, None);
+    let checkpoints = |checkpoint_id: &[u8], state: CheckpointGeneration| {
+        BTreeMap::from([(checkpoint_id.to_vec(), state)])
+    };
+    let frame = |left, right, segment_identity| BranchMergePairedCheckpointRedoSegmentFrame {
+        checkpoints: BranchMergePairedCheckpointRedoFrame { left, right },
+        segment_identity,
+    };
+
+    let first_states = [
+        (
+            checkpoints(&alpha, left_base.clone()),
+            checkpoints(&alpha, right_base.clone()),
+        ),
+        (
+            checkpoints(&alpha, left_base.clone()),
+            checkpoints(&alpha, right_base.clone()),
+        ),
+        (checkpoints(&beta, positionless.clone()), BTreeMap::new()),
+        (
+            checkpoints(&alpha, left_redo.clone()),
+            checkpoints(&alpha, right_redo.clone()),
+        ),
+    ];
+    let mut first_fold = BTreeMap::new();
+    for ((order, (left, right)), segment_identity) in [40_u64, 41, 43, 44]
+        .into_iter()
+        .zip(first_states)
+        .zip(&first_segments)
+    {
+        first_fold.insert(order, frame(left, right, segment_identity.clone()));
+    }
+
+    let later_states = [
+        (
+            checkpoints(&alpha, left_redo.clone()),
+            checkpoints(&alpha, right_redo.clone()),
+        ),
+        (
+            checkpoints(&alpha, left_redo.clone()),
+            checkpoints(&alpha, right_redo.clone()),
+        ),
+        (BTreeMap::new(), checkpoints(&beta, positionless.clone())),
+    ];
+    let mut later_fold = BTreeMap::new();
+    for ((order, (left, right)), segment_identity) in [43_u64, 44, 45]
+        .into_iter()
+        .zip(later_states)
+        .zip(&later_segments)
+    {
+        later_fold.insert(order, frame(left, right, segment_identity.clone()));
+    }
+
+    let mut left_at_46 = checkpoints(&alpha, left_base.clone());
+    left_at_46.insert(observed_late.clone(), positionless.clone());
+    let third_fold = BTreeMap::from([(
+        46,
+        frame(
+            left_at_46,
+            checkpoints(&alpha, right_base.clone()),
+            first_segments[0].clone(),
+        ),
+    )]);
+
+    let streams = fold_paired_checkpoint_redo_sparse_stream_chains_preserving_fold_and_segment_rotation_identity(
+        &[alpha.clone(), beta.clone(), catalog_only.clone()],
+        &[
+            BranchMergePairedCheckpointRedoFoldSegmentRotationFold {
+                redo_fold_identity: fold_identities[0].clone(),
+                frames: first_fold,
+            },
+            BranchMergePairedCheckpointRedoFoldSegmentRotationFold {
+                redo_fold_identity: fold_identities[1].clone(),
+                frames: later_fold,
+            },
+            BranchMergePairedCheckpointRedoFoldSegmentRotationFold {
+                redo_fold_identity: fold_identities[2].clone(),
+                frames: third_fold,
+            },
+        ],
+    );
+    assert_eq!(
+        streams
+            .iter()
+            .map(|stream| stream.checkpoint_id.clone())
+            .collect::<Vec<_>>(),
+        vec![alpha.clone(), beta.clone(), catalog_only.clone(), observed_late.clone()],
+    );
+    let slots = |checkpoint_id: &[u8]| {
+        &streams
+            .iter()
+            .find(|stream| stream.checkpoint_id == checkpoint_id)
+            .unwrap()
+            .slots
+    };
+    let expected_orders = [
+        (0, 40), (0, 41), (0, 43), (0, 44), (1, 43), (1, 44), (1, 45), (2, 46),
+    ];
+    let expected_folds = [0, 0, 0, 0, 1, 1, 1, 2]
+        .map(|fold| fold_identities[fold].clone());
+    let expected_segments = first_segments
+        .iter()
+        .chain(&later_segments)
+        .cloned()
+        .chain([first_segments[0].clone()])
+        .collect::<Vec<_>>();
+    for stream in &streams {
+        assert_eq!(
+            stream
+                .slots
+                .iter()
+                .map(|slot| (slot.fold_ordinal, slot.order))
+                .collect::<Vec<_>>(),
+            expected_orders,
+            "overlapping order 43 stays scoped to its sparse fold",
+        );
+        assert_eq!(
+            stream
+                .slots
+                .iter()
+                .map(|slot| slot.redo_fold_identity.clone())
+                .collect::<Vec<_>>(),
+            expected_folds,
+            "the exact directional fold pair accompanies each checkpoint observation",
+        );
+        assert_eq!(
+            stream
+                .slots
+                .iter()
+                .map(|slot| slot.segment_identity.clone())
+                .collect::<Vec<_>>(),
+            expected_segments,
+            "the exact directional segment rotation accompanies each observation",
+        );
+    }
+    assert_eq!(slots(&alpha)[0].left, Some(left_base.clone()));
+    assert_eq!(slots(&alpha)[2].left, None);
+    assert_eq!(slots(&alpha)[3].right, Some(right_redo.clone()));
+    assert_eq!(slots(&alpha)[4].left, Some(left_redo.clone()));
+    assert_eq!(slots(&beta)[2].left, Some(positionless.clone()));
+    assert_eq!(slots(&beta)[6].right, Some(positionless.clone()));
+    assert!(slots(&catalog_only)
+        .iter()
+        .all(|slot| slot.left.is_none() && slot.right.is_none()));
+    assert_eq!(slots(&observed_late)[7].left, Some(positionless.clone()));
+
+    let compacted =
+        compress_paired_checkpoint_redo_sparse_stream_chains_preserving_fold_and_segment_rotation_identity(
+            &streams,
+        );
+    let runs = |checkpoint_id: &[u8]| {
+        &compacted
+            .iter()
+            .find(|stream| stream.checkpoint_id == checkpoint_id)
+            .unwrap()
+            .runs
+    };
+    assert_eq!(
+        runs(&alpha)
+            .iter()
+            .map(|run| (
+                run.fold_ordinal,
+                run.first_order,
+                run.last_order,
+                run.left.clone(),
+                run.right.clone(),
+            ))
+            .collect::<Vec<_>>(),
+        vec![
+            (0, 40, 41, Some(left_base.clone()), Some(right_base.clone())),
+            (0, 43, 43, None, None),
+            (0, 44, 44, Some(left_redo.clone()), Some(right_redo.clone())),
+            (1, 43, 44, Some(left_redo), Some(right_redo)),
+            (1, 45, 45, None, None),
+            (2, 46, 46, Some(left_base), Some(right_base)),
+        ],
+        "gaps, state changes, and fold boundaries produce distinct state runs",
+    );
+    assert_eq!(
+        runs(&alpha)
+            .iter()
+            .map(|run| run.redo_fold_identity.clone())
+            .collect::<Vec<_>>(),
+        vec![
+            fold_identities[0].clone(),
+            fold_identities[0].clone(),
+            fold_identities[0].clone(),
+            fold_identities[1].clone(),
+            fold_identities[1].clone(),
+            fold_identities[2].clone(),
+        ],
+    );
+    assert_eq!(runs(&alpha)[0].segment_identities, first_segments[0..2]);
+    assert_eq!(runs(&alpha)[3].segment_identities, later_segments[0..2]);
+    assert_eq!(runs(&alpha)[5].segment_identities, vec![first_segments[0].clone()]);
+    assert_eq!(runs(&beta)[1].left, Some(positionless.clone()));
+    assert_eq!(runs(&beta)[4].right, Some(positionless.clone()));
+    assert_eq!(
+        runs(&catalog_only)
+            .iter()
+            .map(|run| (run.fold_ordinal, run.first_order, run.last_order))
+            .collect::<Vec<_>>(),
+        vec![(0, 40, 41), (0, 43, 44), (1, 43, 45), (2, 46, 46)],
+        "the order gap splits while adjacent omitted orders compact within each fold",
+    );
+    assert_eq!(
+        runs(&catalog_only)[1].segment_identities,
+        first_segments[2..4],
+        "segment rotations survive omission-run compaction",
+    );
+    assert_eq!(runs(&observed_late).len(), 4);
+    assert_eq!(runs(&observed_late)[3].left, Some(positionless));
+
+    let restored = restore_paired_checkpoint_redo_sparse_stream_chains_preserving_fold_and_segment_rotation_identity(
+        &compacted,
+    )
+    .unwrap();
+    assert_eq!(restored, streams, "all checkpoint and directional identity values roundtrip");
+
+    let mut truncated = compacted.clone();
+    let first_run = &mut truncated
+        .iter_mut()
+        .find(|stream| stream.checkpoint_id == alpha)
+        .unwrap()
+        .runs[0];
+    first_run.segment_identities.pop();
+    assert!(
+        matches!(
+            restore_paired_checkpoint_redo_sparse_stream_chains_preserving_fold_and_segment_rotation_identity(
+                &truncated,
+            ),
+            Err(orna_storage_v1::BranchMergePairedCheckpointRedoFoldSegmentRotationRestoreError::SegmentIdentityCountMismatch {
+                fold_ordinal: 0,
+                first_order: 40,
+                last_order: 41,
+                expected: 2,
+                actual: 1,
+            })
+        ),
+        "a truncated compacted rotation cannot silently lose a segment incarnation",
+    );
+}
+
+#[test]
+fn paired_checkpoint_fold_identity_survives_sparse_segment_rotation_chains() {
+    let first_log_rows = PAIRED_SPARSE_CHECKPOINT_REDO
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    let first_segment_rows = PAIRED_SPARSE_SEGMENT_ROTATIONS
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    let later_log_rows = PAIRED_WRITE_AHEAD_FOLD_CHAIN
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    let later_segment_rows = PAIRED_SEGMENT_FOLD_CHAIN
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    let checkpoint_states = PAIRED_CHECKPOINT_REDO
+        .split("\n\n")
+        .map(parse_checkpoint_fixture)
+        .collect::<Vec<_>>();
+    assert_eq!(first_log_rows.len(), 4);
+    assert_eq!(first_segment_rows.len(), 4);
+    assert_eq!(later_log_rows.len(), 3);
+    assert_eq!(later_segment_rows.len(), 3);
+    let lineages = |log_rows: &[KeyedRow], segment_rows: &[KeyedRow]| {
+        assert_eq!(log_rows.len(), segment_rows.len());
+        log_rows
+            .iter()
+            .zip(segment_rows)
+            .map(|(log_row, segment_row)| BranchMergePairedLogSegmentIdentity {
+                write_ahead_identity: BranchMergePairedWriteAheadIdentity {
+                    left_log: log_row.fields[&id(2)].encode().unwrap(),
+                    right_log: log_row.fields[&id(3)].encode().unwrap(),
+                },
+                segment_identity: BranchMergePairedWriteAheadSegmentIdentity {
+                    left_segment: segment_row.fields[&id(2)].encode().unwrap(),
+                    right_segment: segment_row.fields[&id(3)].encode().unwrap(),
+                },
+            })
+            .collect::<Vec<_>>()
+    };
+    let first_lineages = lineages(&first_log_rows, &first_segment_rows);
+    let later_lineages = lineages(&later_log_rows, &later_segment_rows);
+    assert_eq!(first_lineages[2], later_lineages[0]);
+    assert_eq!(first_lineages[0], later_lineages[2]);
+
+    let alpha = b"log-segment-chain/alpha".to_vec();
+    let beta = b"log-segment-chain/beta".to_vec();
+    let catalog_only = b"log-segment-chain/catalog-only".to_vec();
+    let observed_late = b"log-segment-chain/observed-late".to_vec();
+    let positionless = checkpoint_states[4].clone();
+    let first_states = [
+        (
+            BTreeMap::from([(alpha.clone(), checkpoint_states[0].clone())]),
+            BTreeMap::from([(alpha.clone(), checkpoint_states[1].clone())]),
+        ),
+        (
+            BTreeMap::new(),
+            BTreeMap::from([(alpha.clone(), checkpoint_states[3].clone())]),
+        ),
+        (
+            BTreeMap::from([(beta.clone(), positionless.clone())]),
+            BTreeMap::new(),
+        ),
+        (
+            BTreeMap::from([(alpha.clone(), checkpoint_states[2].clone())]),
+            BTreeMap::from([(alpha.clone(), checkpoint_states[3].clone())]),
+        ),
+    ];
+    let mut first_fold = BTreeMap::new();
+    for ((order, (left, right)), log_segment_identity) in [20_u64, 21, 22, 24]
+        .into_iter()
+        .zip(first_states)
+        .zip(&first_lineages)
+    {
+        first_fold.insert(
+            order,
+            BranchMergePairedCheckpointRedoLogSegmentFrame {
+                checkpoints: BranchMergePairedCheckpointRedoFrame { left, right },
+                log_segment_identity: log_segment_identity.clone(),
+            },
+        );
+    }
+
+    let later_states = [
+        (
+            BTreeMap::from([(alpha.clone(), checkpoint_states[2].clone())]),
+            BTreeMap::from([(alpha.clone(), checkpoint_states[3].clone())]),
+        ),
+        (
+            BTreeMap::from([(observed_late.clone(), positionless.clone())]),
+            BTreeMap::from([(alpha.clone(), checkpoint_states[3].clone())]),
+        ),
+        (
+            BTreeMap::new(),
+            BTreeMap::from([(beta.clone(), positionless.clone())]),
+        ),
+    ];
+    let mut later_fold = BTreeMap::new();
+    for ((order, (left, right)), log_segment_identity) in [22_u64, 23, 25]
+        .into_iter()
+        .zip(later_states)
+        .zip(&later_lineages)
+    {
+        later_fold.insert(
+            order,
+            BranchMergePairedCheckpointRedoLogSegmentFrame {
+                checkpoints: BranchMergePairedCheckpointRedoFrame { left, right },
+                log_segment_identity: log_segment_identity.clone(),
+            },
+        );
+    }
+
+    let streams = fold_paired_checkpoint_redo_sparse_stream_chains_preserving_log_segment_identity(
+        &[alpha.clone(), beta.clone(), catalog_only.clone()],
+        &[first_fold, later_fold],
+    );
+    assert_eq!(
+        streams.iter().map(|stream| stream.checkpoint_id.clone()).collect::<Vec<_>>(),
+        vec![alpha.clone(), beta.clone(), catalog_only.clone(), observed_late.clone()],
+        "checkpoint streams observed in the later rotation fold remain in the output catalog",
+    );
+    let slots = |checkpoint_id: &[u8]| {
+        &streams
+            .iter()
+            .find(|stream| stream.checkpoint_id == checkpoint_id)
+            .unwrap()
+            .slots
+    };
+    let expected_orders = [(0, 20), (0, 21), (0, 22), (0, 24), (1, 22), (1, 23), (1, 25)];
+    let expected_lineages = first_lineages
+        .iter()
+        .chain(&later_lineages)
+        .cloned()
+        .collect::<Vec<_>>();
+    for stream in &streams {
+        assert_eq!(
+            stream.slots.iter().map(|slot| (slot.fold_ordinal, slot.order)).collect::<Vec<_>>(),
+            expected_orders,
+            "fold ordinal preserves overlapping in-fold checkpoint orders",
+        );
+        assert_eq!(
+            stream.slots.iter().map(|slot| slot.log_segment_identity.clone()).collect::<Vec<_>>(),
+            expected_lineages,
+            "each checkpoint occurrence retains the bound paired WAL and segment IDs",
+        );
+    }
+    assert_eq!(slots(&alpha)[0].left, Some(checkpoint_states[0].clone()));
+    assert_eq!(slots(&alpha)[0].right, Some(checkpoint_states[1].clone()));
+    assert_eq!(slots(&alpha)[4].left, Some(checkpoint_states[2].clone()));
+    assert_eq!(slots(&alpha)[4].right, Some(checkpoint_states[3].clone()));
+    assert_eq!(slots(&beta)[2].left, Some(positionless.clone()));
+    assert_eq!(slots(&beta)[6].right, Some(positionless.clone()));
+    assert_eq!(slots(&observed_late)[5].left, Some(positionless));
+    assert!(slots(&catalog_only)
+        .iter()
+        .all(|slot| slot.left.is_none() && slot.right.is_none()));
+}
+
+#[test]
+fn paired_sparse_redo_compaction_preserves_segment_rotation_chains() {
+    let segment_rows = PAIRED_COMPACTED_SEGMENT_ROTATIONS
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    let checkpoint_states = PAIRED_CHECKPOINT_REDO
+        .split("\n\n")
+        .map(parse_checkpoint_fixture)
+        .collect::<Vec<_>>();
+    assert_eq!(segment_rows.len(), 6);
+    let left_base = checkpoint_states[0].clone();
+    let right_base = checkpoint_states[1].clone();
+    let left_redo = checkpoint_states[2].clone();
+    let right_redo = checkpoint_states[3].clone();
+    let positionless = checkpoint_states[4].clone();
+    let alpha = b"compact-stream/alpha".to_vec();
+    let beta = b"compact-stream/beta".to_vec();
+    let catalog_only = b"compact-stream/catalog-only".to_vec();
+    let orders = [50_u64, 51, 52, 54, 55, 56];
+    let segments = segment_rows
+        .iter()
+        .map(|row| BranchMergePairedWriteAheadSegmentIdentity {
+            left_segment: row.fields[&id(2)].encode().unwrap(),
+            right_segment: row.fields[&id(3)].encode().unwrap(),
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(segments[4], segments[5], "stable segment pair repeats at two orders");
+
+    let mut frames = BTreeMap::new();
+    for (index, (order, segment_identity)) in orders.into_iter().zip(&segments).enumerate() {
+        let (left, right) = match index {
+            0 | 1 => (
+                BTreeMap::from([(alpha.clone(), left_base.clone())]),
+                BTreeMap::from([(alpha.clone(), right_base.clone())]),
+            ),
+            2 => (
+                BTreeMap::new(),
+                BTreeMap::from([(beta.clone(), positionless.clone())]),
+            ),
+            _ => (
+                BTreeMap::from([(alpha.clone(), left_redo.clone())]),
+                BTreeMap::from([(alpha.clone(), right_redo.clone())]),
+            ),
+        };
+        frames.insert(
+            order,
+            BranchMergePairedCheckpointRedoSegmentFrame {
+                checkpoints: BranchMergePairedCheckpointRedoFrame { left, right },
+                segment_identity: segment_identity.clone(),
+            },
+        );
+    }
+
+    let chains = compress_paired_checkpoint_redo_sparse_chains_preserving_segment_rotation_identity(
+        &[alpha.clone(), beta.clone(), catalog_only.clone()],
+        &frames,
+    );
+    assert_eq!(
+        chains.iter().map(|chain| chain.checkpoint_id.clone()).collect::<Vec<_>>(),
+        vec![alpha.clone(), beta.clone(), catalog_only.clone()],
+    );
+    let runs = |checkpoint_id: &[u8]| {
+        &chains
+            .iter()
+            .find(|chain| chain.checkpoint_id == checkpoint_id)
+            .unwrap()
+            .runs
+    };
+    assert_eq!(
+        runs(&alpha)
+            .iter()
+            .map(|run| (run.first_order, run.last_order, run.left.clone(), run.right.clone()))
+            .collect::<Vec<_>>(),
+        vec![
+            (50, 51, Some(left_base), Some(right_base)),
+            (52, 52, None, None),
+            (54, 56, Some(left_redo), Some(right_redo)),
+        ],
+        "only adjacent identical checkpoint pairs compact, with omissions and order gaps explicit",
+    );
+    assert_eq!(runs(&alpha)[0].segment_identities, segments[0..2]);
+    assert_eq!(runs(&alpha)[1].segment_identities, segments[2..3]);
+    assert_eq!(runs(&alpha)[2].segment_identities, segments[3..6]);
+    assert_eq!(
+        runs(&beta)
+            .iter()
+            .map(|run| (run.first_order, run.last_order, run.left.clone(), run.right.clone()))
+            .collect::<Vec<_>>(),
+        vec![
+            (50, 51, None, None),
+            (52, 52, None, Some(positionless)),
+            (54, 56, None, None),
+        ],
+        "the absent and positionless states remain distinct after compaction",
+    );
+    assert_eq!(runs(&beta)[0].segment_identities, segments[0..2]);
+    assert_eq!(runs(&beta)[1].segment_identities, segments[2..3]);
+    assert_eq!(runs(&beta)[2].segment_identities, segments[3..6]);
+    assert_eq!(runs(&catalog_only).len(), 2);
+    assert_eq!(
+        runs(&catalog_only)
+            .iter()
+            .map(|run| (run.first_order, run.last_order, run.left.clone(), run.right.clone()))
+            .collect::<Vec<_>>(),
+        vec![(50, 52, None, None), (54, 56, None, None)],
+        "known streams omitted everywhere remain represented and gaps split their runs",
+    );
+    assert_eq!(runs(&catalog_only)[0].segment_identities, segments[0..3]);
+    assert_eq!(runs(&catalog_only)[1].segment_identities, segments[3..6]);
+}
+
+#[test]
+fn paired_sparse_compaction_preserves_log_segment_identity_pairs() {
+    let log_rows = PAIRED_COMPACTED_LOG_IDENTITIES
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    let segment_rows = PAIRED_COMPACTED_SEGMENT_ROTATIONS
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    let checkpoint_states = PAIRED_CHECKPOINT_REDO
+        .split("\n\n")
+        .map(parse_checkpoint_fixture)
+        .collect::<Vec<_>>();
+    assert_eq!(log_rows.len(), 6);
+    assert_eq!(segment_rows.len(), 6);
+    assert_eq!(
+        log_rows.iter().map(|row| row.key.clone()).collect::<Vec<_>>(),
+        segment_rows.iter().map(|row| row.key.clone()).collect::<Vec<_>>(),
+        "each log identity fixture row pairs with the segment incarnation at the same redo order",
+    );
+    let left_base = checkpoint_states[0].clone();
+    let right_base = checkpoint_states[1].clone();
+    let left_redo = checkpoint_states[2].clone();
+    let right_redo = checkpoint_states[3].clone();
+    let positionless = checkpoint_states[4].clone();
+    let alpha = b"log-stream/alpha".to_vec();
+    let beta = b"log-stream/beta".to_vec();
+    let catalog_only = b"log-stream/catalog-only".to_vec();
+    let orders = [50_u64, 51, 52, 54, 55, 56];
+    let lineages = log_rows
+        .iter()
+        .zip(&segment_rows)
+        .map(|(log_row, segment_row)| BranchMergePairedLogSegmentIdentity {
+            write_ahead_identity: BranchMergePairedWriteAheadIdentity {
+                left_log: log_row.fields[&id(2)].encode().unwrap(),
+                right_log: log_row.fields[&id(3)].encode().unwrap(),
+            },
+            segment_identity: BranchMergePairedWriteAheadSegmentIdentity {
+                left_segment: segment_row.fields[&id(2)].encode().unwrap(),
+                right_segment: segment_row.fields[&id(3)].encode().unwrap(),
+            },
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(lineages[4], lineages[5], "the repeated log/segment pair is distinct at each order");
+    assert_ne!(
+        lineages[0].segment_identity.left_segment,
+        lineages[1].segment_identity.left_segment,
+        "the left segment rotates while the checkpoint state remains stable",
+    );
+    assert_eq!(
+        lineages[0].write_ahead_identity,
+        lineages[1].write_ahead_identity,
+        "the same log pair can span two different segment incarnations",
+    );
+
+    let mut frames = BTreeMap::new();
+    for (index, (order, log_segment_identity)) in orders.into_iter().zip(&lineages).enumerate() {
+        let (left, right) = match index {
+            0 | 1 => (
+                BTreeMap::from([(alpha.clone(), left_base.clone())]),
+                BTreeMap::from([(alpha.clone(), right_base.clone())]),
+            ),
+            2 => (
+                BTreeMap::new(),
+                BTreeMap::from([(beta.clone(), positionless.clone())]),
+            ),
+            _ => (
+                BTreeMap::from([(alpha.clone(), left_redo.clone())]),
+                BTreeMap::from([(alpha.clone(), right_redo.clone())]),
+            ),
+        };
+        frames.insert(
+            order,
+            BranchMergePairedCheckpointRedoLogSegmentFrame {
+                checkpoints: BranchMergePairedCheckpointRedoFrame { left, right },
+                log_segment_identity: log_segment_identity.clone(),
+            },
+        );
+    }
+
+    let chains = compress_paired_checkpoint_redo_sparse_chains_preserving_log_segment_identity(
+        &[alpha.clone(), beta.clone(), catalog_only.clone()],
+        &frames,
+    );
+    assert_eq!(
+        chains.iter().map(|chain| chain.checkpoint_id.clone()).collect::<Vec<_>>(),
+        vec![alpha.clone(), beta.clone(), catalog_only.clone()],
+    );
+    let runs = |checkpoint_id: &[u8]| {
+        &chains
+            .iter()
+            .find(|chain| chain.checkpoint_id == checkpoint_id)
+            .unwrap()
+            .runs
+    };
+    assert_eq!(
+        runs(&alpha)
+            .iter()
+            .map(|run| (run.first_order, run.last_order, run.left.clone(), run.right.clone()))
+            .collect::<Vec<_>>(),
+        vec![
+            (50, 51, Some(left_base), Some(right_base)),
+            (52, 52, None, None),
+            (54, 56, Some(left_redo), Some(right_redo)),
+        ],
+        "checkpoint states compact independently of paired log/segment identity changes",
+    );
+    assert_eq!(runs(&alpha)[0].log_segment_identities, lineages[0..2]);
+    assert_eq!(runs(&alpha)[1].log_segment_identities, lineages[2..3]);
+    assert_eq!(runs(&alpha)[2].log_segment_identities, lineages[3..6]);
+    assert_eq!(
+        runs(&beta)[1].right,
+        Some(positionless),
+        "a present positionless state remains distinct while its lineage pair is retained",
+    );
+    assert_eq!(runs(&beta)[0].log_segment_identities, lineages[0..2]);
+    assert_eq!(runs(&beta)[1].log_segment_identities, lineages[2..3]);
+    assert_eq!(runs(&beta)[2].log_segment_identities, lineages[3..6]);
+    assert_eq!(runs(&catalog_only).len(), 2);
+    assert_eq!(runs(&catalog_only)[0].log_segment_identities, lineages[0..3]);
+    assert_eq!(runs(&catalog_only)[1].log_segment_identities, lineages[3..6]);
+}
+
+#[test]
+fn paired_sparse_redo_folds_preserve_compaction_identity_across_chain_rotations() {
+    let compaction_rows = PAIRED_COMPACTED_COMPACTION_IDENTITIES
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    let chain_rows = PAIRED_COMPACTED_REDO_CHAIN_IDENTITIES
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    let log_rows = PAIRED_COMPACTED_LOG_IDENTITIES
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    let segment_rows = PAIRED_COMPACTED_SEGMENT_ROTATIONS
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    let checkpoint_states = PAIRED_CHECKPOINT_REDO
+        .split("\n\n")
+        .map(parse_checkpoint_fixture)
+        .collect::<Vec<_>>();
+    assert_eq!(compaction_rows.len(), 6);
+    assert_eq!(chain_rows.len(), 6);
+    assert_eq!(log_rows.len(), 6);
+    assert_eq!(segment_rows.len(), 6);
+    let keys = |rows: &[KeyedRow]| rows.iter().map(|row| row.key.clone()).collect::<Vec<_>>();
+    assert_eq!(keys(&compaction_rows), keys(&chain_rows));
+    assert_eq!(keys(&compaction_rows), keys(&log_rows));
+    assert_eq!(keys(&compaction_rows), keys(&segment_rows));
+
+    let compactions = compaction_rows
+        .iter()
+        .map(|row| BranchMergePairedCompactionIdentity {
+            left_compaction: row.fields[&id(2)].encode().unwrap(),
+            right_compaction: row.fields[&id(3)].encode().unwrap(),
+        })
+        .collect::<Vec<_>>();
+    let redo_chains = chain_rows
+        .iter()
+        .map(|row| BranchMergePairedRedoChainIdentity {
+            left_chain: row.fields[&id(2)].encode().unwrap(),
+            right_chain: row.fields[&id(3)].encode().unwrap(),
+        })
+        .collect::<Vec<_>>();
+    let log_segments = log_rows
+        .iter()
+        .zip(&segment_rows)
+        .map(|(log_row, segment_row)| BranchMergePairedLogSegmentIdentity {
+            write_ahead_identity: BranchMergePairedWriteAheadIdentity {
+                left_log: log_row.fields[&id(2)].encode().unwrap(),
+                right_log: log_row.fields[&id(3)].encode().unwrap(),
+            },
+            segment_identity: BranchMergePairedWriteAheadSegmentIdentity {
+                left_segment: segment_row.fields[&id(2)].encode().unwrap(),
+                right_segment: segment_row.fields[&id(3)].encode().unwrap(),
+            },
+        })
+        .collect::<Vec<_>>();
+    assert_ne!(compactions[0], compactions[1]);
+    assert_ne!(compactions[3], compactions[4]);
+    assert_ne!(redo_chains[1], redo_chains[2]);
+    assert_ne!(redo_chains[4], redo_chains[5]);
+    assert_ne!(log_segments[0].segment_identity, log_segments[1].segment_identity);
+
+    let left_base = checkpoint_states[0].clone();
+    let right_base = checkpoint_states[1].clone();
+    let left_redo = checkpoint_states[2].clone();
+    let right_redo = checkpoint_states[3].clone();
+    let positionless = checkpoint_states[4].clone();
+    let alpha = b"compaction/alpha".to_vec();
+    let beta = b"compaction/beta".to_vec();
+    let catalog_only = b"compaction/catalog-only".to_vec();
+    let orders = [90_u64, 91, 92, 94, 95, 96];
+    let mut frames = BTreeMap::new();
+    for (index, (((order, compaction_identity), redo_chain_identity), log_segment_identity)) in orders
+        .into_iter()
+        .zip(&compactions)
+        .zip(&redo_chains)
+        .zip(&log_segments)
+        .enumerate()
+    {
+        let (left, mut right) = match index {
+            0 | 1 | 2 => (
+                BTreeMap::from([(alpha.clone(), left_base.clone())]),
+                BTreeMap::from([(alpha.clone(), right_base.clone())]),
+            ),
+            3 | 4 | 5 => (
+                BTreeMap::from([(alpha.clone(), left_redo.clone())]),
+                BTreeMap::from([(alpha.clone(), right_redo.clone())]),
+            ),
+            _ => unreachable!(),
+        };
+        if index == 2 {
+            right.insert(beta.clone(), positionless.clone());
+        }
+        frames.insert(
+            order,
+            BranchMergePairedCheckpointRedoCompactionIdentityFrame {
+                checkpoints: BranchMergePairedCheckpointRedoFrame { left, right },
+                redo_chain_identity: redo_chain_identity.clone(),
+                log_segment_identity: log_segment_identity.clone(),
+                compaction_identity: compaction_identity.clone(),
+            },
+        );
+    }
+
+    let snapshots = compress_paired_checkpoint_redo_sparse_chains_preserving_compaction_identity(
+        &[alpha.clone(), beta.clone(), catalog_only.clone()],
+        &frames,
+    );
+    assert_eq!(
+        snapshots.iter().map(|snapshot| snapshot.checkpoint_id.clone()).collect::<Vec<_>>(),
+        vec![alpha.clone(), beta.clone(), catalog_only.clone()],
+    );
+    let runs = |checkpoint_id: &[u8]| {
+        &snapshots
+            .iter()
+            .find(|snapshot| snapshot.checkpoint_id == checkpoint_id)
+            .unwrap()
+            .runs
+    };
+    assert_eq!(
+        runs(&alpha)
+            .iter()
+            .map(|run| (run.first_order, run.last_order, run.left.clone(), run.right.clone()))
+            .collect::<Vec<_>>(),
+        vec![
+            (90, 91, Some(left_base), Some(right_base)),
+            (92, 92, Some(checkpoint_states[0].clone()), Some(checkpoint_states[1].clone())),
+            (94, 95, Some(left_redo.clone()), Some(right_redo.clone())),
+            (96, 96, Some(left_redo), Some(right_redo)),
+        ],
+        "redo-chain changes and sparse gaps split runs; compaction IDs do not",
+    );
+    assert_eq!(
+        runs(&alpha).iter().map(|run| run.redo_chain_identity.clone()).collect::<Vec<_>>(),
+        vec![redo_chains[0].clone(), redo_chains[2].clone(), redo_chains[3].clone(), redo_chains[5].clone()],
+    );
+    assert_eq!(runs(&alpha)[0].compaction_identities, compactions[0..2]);
+    assert_eq!(runs(&alpha)[1].compaction_identities, compactions[2..3]);
+    assert_eq!(runs(&alpha)[2].compaction_identities, compactions[3..5]);
+    assert_eq!(runs(&alpha)[3].compaction_identities, compactions[5..6]);
+    assert_eq!(runs(&alpha)[0].log_segment_identities, log_segments[0..2]);
+    assert_eq!(runs(&alpha)[1].log_segment_identities, log_segments[2..3]);
+    assert_eq!(runs(&alpha)[2].log_segment_identities, log_segments[3..5]);
+    assert_eq!(runs(&alpha)[3].log_segment_identities, log_segments[5..6]);
+
+    assert_eq!(
+        runs(&beta)
+            .iter()
+            .map(|run| (run.first_order, run.last_order, run.left.clone(), run.right.clone()))
+            .collect::<Vec<_>>(),
+        vec![
+            (90, 91, None, None),
+            (92, 92, None, Some(positionless)),
+            (94, 95, None, None),
+            (96, 96, None, None),
+        ],
+        "positionless presence remains independent of omitted checkpoint state",
+    );
+    assert_eq!(runs(&beta)[0].compaction_identities, compactions[0..2]);
+    assert_eq!(runs(&beta)[1].compaction_identities, compactions[2..3]);
+    assert_eq!(runs(&beta)[2].compaction_identities, compactions[3..5]);
+    assert_eq!(runs(&beta)[3].compaction_identities, compactions[5..6]);
+    assert_eq!(runs(&catalog_only).len(), 4);
+    assert_eq!(
+        runs(&catalog_only)
+            .iter()
+            .map(|run| (run.first_order, run.last_order, run.compaction_identities.clone()))
+            .collect::<Vec<_>>(),
+        vec![
+            (90, 91, compactions[0..2].to_vec()),
+            (92, 92, compactions[2..3].to_vec()),
+            (94, 95, compactions[3..5].to_vec()),
+            (96, 96, compactions[5..6].to_vec()),
+        ],
+        "catalog-only streams retain every paired compaction occurrence across chain folds",
+    );
+}
+
+#[test]
+fn paired_sparse_compaction_preserves_redo_chain_identity_across_segment_rotations() {
+    let chain_rows = PAIRED_COMPACTED_REDO_CHAIN_IDENTITIES
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    let log_rows = PAIRED_COMPACTED_LOG_IDENTITIES
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    let segment_rows = PAIRED_COMPACTED_SEGMENT_ROTATIONS
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    let checkpoint_states = PAIRED_CHECKPOINT_REDO
+        .split("\n\n")
+        .map(parse_checkpoint_fixture)
+        .collect::<Vec<_>>();
+    assert_eq!(chain_rows.len(), 6);
+    assert_eq!(log_rows.len(), 6);
+    assert_eq!(segment_rows.len(), 6);
+    let keys = |rows: &[KeyedRow]| rows.iter().map(|row| row.key.clone()).collect::<Vec<_>>();
+    assert_eq!(keys(&chain_rows), keys(&log_rows));
+    assert_eq!(keys(&chain_rows), keys(&segment_rows));
+
+    let chains = chain_rows
+        .iter()
+        .map(|row| BranchMergePairedRedoChainIdentity {
+            left_chain: row.fields[&id(2)].encode().unwrap(),
+            right_chain: row.fields[&id(3)].encode().unwrap(),
+        })
+        .collect::<Vec<_>>();
+    let lineages = log_rows
+        .iter()
+        .zip(&segment_rows)
+        .map(|(log_row, segment_row)| BranchMergePairedLogSegmentIdentity {
+            write_ahead_identity: BranchMergePairedWriteAheadIdentity {
+                left_log: log_row.fields[&id(2)].encode().unwrap(),
+                right_log: log_row.fields[&id(3)].encode().unwrap(),
+            },
+            segment_identity: BranchMergePairedWriteAheadSegmentIdentity {
+                left_segment: segment_row.fields[&id(2)].encode().unwrap(),
+                right_segment: segment_row.fields[&id(3)].encode().unwrap(),
+            },
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(chains[0], chains[1]);
+    assert_eq!(chains[2], chains[3]);
+    assert_eq!(chains[3], chains[4]);
+    assert_ne!(chains[1], chains[2]);
+    assert_ne!(chains[4], chains[5]);
+    assert_ne!(lineages[0].segment_identity, lineages[1].segment_identity);
+    assert_eq!(lineages[4], lineages[5]);
+
+    let left_base = checkpoint_states[0].clone();
+    let right_base = checkpoint_states[1].clone();
+    let left_redo = checkpoint_states[2].clone();
+    let right_redo = checkpoint_states[3].clone();
+    let positionless = checkpoint_states[4].clone();
+    let alpha = b"redo-chain/alpha".to_vec();
+    let beta = b"redo-chain/beta".to_vec();
+    let catalog_only = b"redo-chain/catalog-only".to_vec();
+    let orders = [80_u64, 81, 82, 84, 85, 86];
+    let mut frames = BTreeMap::new();
+    for (index, ((order, redo_chain_identity), log_segment_identity)) in orders
+        .into_iter()
+        .zip(&chains)
+        .zip(&lineages)
+        .enumerate()
+    {
+        let (left, mut right) = match index {
+            0 | 1 | 2 => (
+                BTreeMap::from([(alpha.clone(), left_base.clone())]),
+                BTreeMap::from([(alpha.clone(), right_base.clone())]),
+            ),
+            3 | 4 | 5 => (
+                BTreeMap::from([(alpha.clone(), left_redo.clone())]),
+                BTreeMap::from([(alpha.clone(), right_redo.clone())]),
+            ),
+            _ => unreachable!(),
+        };
+        if index == 2 {
+            right.insert(beta.clone(), positionless.clone());
+        }
+        frames.insert(
+            order,
+            BranchMergePairedCheckpointRedoChainIdentityFrame {
+                checkpoints: BranchMergePairedCheckpointRedoFrame { left, right },
+                redo_chain_identity: redo_chain_identity.clone(),
+                log_segment_identity: log_segment_identity.clone(),
+            },
+        );
+    }
+
+    let snapshots = compress_paired_checkpoint_redo_sparse_chains_preserving_chain_and_log_segment_identity(
+        &[alpha.clone(), beta.clone(), catalog_only.clone()],
+        &frames,
+    );
+    assert_eq!(
+        snapshots.iter().map(|snapshot| snapshot.checkpoint_id.clone()).collect::<Vec<_>>(),
+        vec![alpha.clone(), beta.clone(), catalog_only.clone()],
+    );
+    let runs = |checkpoint_id: &[u8]| {
+        &snapshots
+            .iter()
+            .find(|snapshot| snapshot.checkpoint_id == checkpoint_id)
+            .unwrap()
+            .runs
+    };
+    assert_eq!(
+        runs(&alpha)
+            .iter()
+            .map(|run| (run.first_order, run.last_order, run.left.clone(), run.right.clone()))
+            .collect::<Vec<_>>(),
+        vec![
+            (80, 81, Some(left_base), Some(right_base)),
+            (82, 82, Some(checkpoint_states[0].clone()), Some(checkpoint_states[1].clone())),
+            (84, 85, Some(left_redo.clone()), Some(right_redo.clone())),
+            (86, 86, Some(left_redo), Some(right_redo)),
+        ],
+        "chain changes split otherwise stable checkpoint state and order gaps stay visible",
+    );
+    assert_eq!(
+        runs(&alpha).iter().map(|run| run.redo_chain_identity.clone()).collect::<Vec<_>>(),
+        vec![chains[0].clone(), chains[2].clone(), chains[3].clone(), chains[5].clone()],
+    );
+    assert_eq!(runs(&alpha)[0].log_segment_identities, lineages[0..2]);
+    assert_eq!(runs(&alpha)[1].log_segment_identities, lineages[2..3]);
+    assert_eq!(runs(&alpha)[2].log_segment_identities, lineages[3..5]);
+    assert_eq!(runs(&alpha)[3].log_segment_identities, lineages[5..6]);
+
+    assert_eq!(
+        runs(&beta)
+            .iter()
+            .map(|run| (run.first_order, run.last_order, run.left.clone(), run.right.clone()))
+            .collect::<Vec<_>>(),
+        vec![
+            (80, 81, None, None),
+            (82, 82, None, Some(positionless)),
+            (84, 85, None, None),
+            (86, 86, None, None),
+        ],
+        "missing and present-positionless states retain their independent redo chain labels",
+    );
+    assert_eq!(
+        runs(&beta).iter().map(|run| run.redo_chain_identity.clone()).collect::<Vec<_>>(),
+        vec![chains[0].clone(), chains[2].clone(), chains[3].clone(), chains[5].clone()],
+    );
+    assert_eq!(runs(&beta)[0].log_segment_identities, lineages[0..2]);
+    assert_eq!(runs(&beta)[1].log_segment_identities, lineages[2..3]);
+    assert_eq!(runs(&beta)[2].log_segment_identities, lineages[3..5]);
+    assert_eq!(runs(&beta)[3].log_segment_identities, lineages[5..6]);
+    assert_eq!(runs(&catalog_only).len(), 4);
+    assert_eq!(
+        runs(&catalog_only)
+            .iter()
+            .map(|run| (run.first_order, run.last_order, run.redo_chain_identity.clone()))
+            .collect::<Vec<_>>(),
+        vec![
+            (80, 81, chains[0].clone()),
+            (82, 82, chains[2].clone()),
+            (84, 85, chains[3].clone()),
+            (86, 86, chains[5].clone()),
+        ],
+        "catalog-only streams preserve chain transitions and sparse gaps",
+    );
+}
+
+#[test]
+fn paired_checkpoint_chain_identity_survives_sparse_compaction_fold_rotations() {
+    let chain_rows = PAIRED_COMPACTED_REDO_CHAIN_IDENTITIES
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    let log_rows = PAIRED_COMPACTED_LOG_IDENTITIES
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    let segment_rows = PAIRED_COMPACTED_SEGMENT_ROTATIONS
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    let checkpoint_states = PAIRED_CHECKPOINT_REDO
+        .split("\n\n")
+        .map(parse_checkpoint_fixture)
+        .collect::<Vec<_>>();
+    assert_eq!(chain_rows.len(), 6);
+    assert_eq!(log_rows.len(), 6);
+    assert_eq!(segment_rows.len(), 6);
+    let chains = chain_rows
+        .iter()
+        .map(|row| BranchMergePairedRedoChainIdentity {
+            left_chain: row.fields[&id(2)].encode().unwrap(),
+            right_chain: row.fields[&id(3)].encode().unwrap(),
+        })
+        .collect::<Vec<_>>();
+    let lineages = log_rows
+        .iter()
+        .zip(&segment_rows)
+        .map(|(log_row, segment_row)| BranchMergePairedLogSegmentIdentity {
+            write_ahead_identity: BranchMergePairedWriteAheadIdentity {
+                left_log: log_row.fields[&id(2)].encode().unwrap(),
+                right_log: log_row.fields[&id(3)].encode().unwrap(),
+            },
+            segment_identity: BranchMergePairedWriteAheadSegmentIdentity {
+                left_segment: segment_row.fields[&id(2)].encode().unwrap(),
+                right_segment: segment_row.fields[&id(3)].encode().unwrap(),
+            },
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(chains[0], chains[1]);
+    assert_eq!(chains[2], chains[3]);
+    assert_eq!(chains[3], chains[4]);
+    assert_ne!(chains[4], chains[5]);
+    assert_ne!(lineages[3], lineages[4], "paired log/segment rotations differ inside one stable chain");
+
+    let alpha = b"redo-chain-fold/alpha".to_vec();
+    let beta = b"redo-chain-fold/beta".to_vec();
+    let catalog_only = b"redo-chain-fold/catalog-only".to_vec();
+    let observed_late = b"redo-chain-fold/observed-late".to_vec();
+    let left_base = checkpoint_states[0].clone();
+    let right_base = checkpoint_states[1].clone();
+    let positionless = checkpoint_states[4].clone();
+    let first_states = [
+        (
+            BTreeMap::from([(alpha.clone(), left_base.clone())]),
+            BTreeMap::from([(alpha.clone(), right_base.clone())]),
+        ),
+        (
+            BTreeMap::from([(alpha.clone(), left_base.clone())]),
+            BTreeMap::from([(alpha.clone(), right_base.clone())]),
+        ),
+        (
+            BTreeMap::from([(alpha.clone(), left_base.clone())]),
+            BTreeMap::from([
+                (alpha.clone(), right_base.clone()),
+                (beta.clone(), positionless.clone()),
+            ]),
+        ),
+    ];
+    let mut first_fold = BTreeMap::new();
+    for ((order, (left, right)), (redo_chain_identity, log_segment_identity)) in [80_u64, 81, 83]
+        .into_iter()
+        .zip(first_states)
+        .zip(chains.iter().zip(&lineages))
+    {
+        first_fold.insert(
+            order,
+            BranchMergePairedCheckpointRedoChainIdentityFrame {
+                checkpoints: BranchMergePairedCheckpointRedoFrame { left, right },
+                redo_chain_identity: redo_chain_identity.clone(),
+                log_segment_identity: log_segment_identity.clone(),
+            },
+        );
+    }
+
+    let later_states = [
+        (
+            BTreeMap::from([(alpha.clone(), left_base.clone())]),
+            BTreeMap::from([(alpha.clone(), right_base.clone())]),
+        ),
+        (
+            BTreeMap::from([
+                (alpha.clone(), left_base.clone()),
+                (observed_late.clone(), positionless.clone()),
+            ]),
+            BTreeMap::from([(alpha.clone(), right_base.clone())]),
+        ),
+        (
+            BTreeMap::from([(alpha.clone(), left_base.clone())]),
+            BTreeMap::from([(alpha.clone(), right_base.clone())]),
+        ),
+    ];
+    let mut later_fold = BTreeMap::new();
+    for ((order, (left, right)), (redo_chain_identity, log_segment_identity)) in [83_u64, 84, 85]
+        .into_iter()
+        .zip(later_states)
+        .zip(chains[3..].iter().zip(&lineages[3..]))
+    {
+        later_fold.insert(
+            order,
+            BranchMergePairedCheckpointRedoChainIdentityFrame {
+                checkpoints: BranchMergePairedCheckpointRedoFrame { left, right },
+                redo_chain_identity: redo_chain_identity.clone(),
+                log_segment_identity: log_segment_identity.clone(),
+            },
+        );
+    }
+
+    let streams = fold_paired_checkpoint_redo_sparse_stream_chains_preserving_chain_and_log_segment_identity(
+        &[alpha.clone(), beta.clone(), catalog_only.clone()],
+        &[first_fold, later_fold],
+    );
+    assert_eq!(
+        streams.iter().map(|stream| stream.checkpoint_id.clone()).collect::<Vec<_>>(),
+        vec![alpha.clone(), beta.clone(), catalog_only.clone(), observed_late.clone()],
+    );
+    let slots = |checkpoint_id: &[u8]| {
+        &streams
+            .iter()
+            .find(|stream| stream.checkpoint_id == checkpoint_id)
+            .unwrap()
+            .slots
+    };
+    let expected_orders = [(0, 80), (0, 81), (0, 83), (1, 83), (1, 84), (1, 85)];
+    for stream in &streams {
+        assert_eq!(
+            stream
+                .slots
+                .iter()
+                .map(|slot| (slot.fold_ordinal, slot.order))
+                .collect::<Vec<_>>(),
+            expected_orders,
+            "overlapping order 83 remains scoped to its sparse fold",
+        );
+        assert_eq!(
+            stream
+                .slots
+                .iter()
+                .map(|slot| slot.redo_chain_identity.clone())
+                .collect::<Vec<_>>(),
+            chains,
+        );
+        assert_eq!(
+            stream
+                .slots
+                .iter()
+                .map(|slot| slot.log_segment_identity.clone())
+                .collect::<Vec<_>>(),
+            lineages,
+            "each frame retains its fixture-derived paired log/segment identity",
+        );
+    }
+    assert!(slots(&catalog_only)
+        .iter()
+        .all(|slot| slot.left.is_none() && slot.right.is_none()));
+    assert_eq!(slots(&beta)[2].right, Some(positionless.clone()));
+    assert_eq!(slots(&observed_late)[4].left, Some(positionless.clone()));
+
+    let compacted = compress_paired_checkpoint_redo_sparse_stream_chains_preserving_chain_and_log_segment_identity(
+        &streams,
+    );
+    assert_eq!(
+        compacted
+            .iter()
+            .map(|stream| stream.checkpoint_id.clone())
+            .collect::<Vec<_>>(),
+        vec![alpha.clone(), beta.clone(), catalog_only.clone(), observed_late.clone()],
+    );
+    let runs = |checkpoint_id: &[u8]| {
+        &compacted
+            .iter()
+            .find(|stream| stream.checkpoint_id == checkpoint_id)
+            .unwrap()
+            .runs
+    };
+    assert_eq!(
+        runs(&alpha)
+            .iter()
+            .map(|run| (run.fold_ordinal, run.first_order, run.last_order, run.redo_chain_identity.clone()))
+            .collect::<Vec<_>>(),
+        vec![
+            (0, 80, 81, chains[0].clone()),
+            (0, 83, 83, chains[2].clone()),
+            (1, 83, 84, chains[3].clone()),
+            (1, 85, 85, chains[5].clone()),
+        ],
+        "state runs compact across stable chain identity, but not gaps, fold boundaries, or chain rotations",
+    );
+    assert_eq!(runs(&alpha)[0].log_segment_identities, lineages[0..2]);
+    assert_eq!(runs(&alpha)[1].log_segment_identities, lineages[2..3]);
+    assert_eq!(runs(&alpha)[2].log_segment_identities, lineages[3..5]);
+    assert_eq!(runs(&alpha)[3].log_segment_identities, lineages[5..6]);
+    assert_eq!(
+        runs(&catalog_only)
+            .iter()
+            .map(|run| (run.fold_ordinal, run.first_order, run.last_order))
+            .collect::<Vec<_>>(),
+        vec![(0, 80, 81), (0, 83, 83), (1, 83, 84), (1, 85, 85)],
+        "catalog-only state retains redo chain and sparse fold boundaries",
+    );
+    assert_eq!(runs(&catalog_only)[2].log_segment_identities, lineages[3..5]);
+    assert_eq!(
+        runs(&beta)
+            .iter()
+            .map(|run| (run.fold_ordinal, run.first_order, run.last_order, run.left.clone(), run.right.clone()))
+            .collect::<Vec<_>>(),
+        vec![
+            (0, 80, 81, None, None),
+            (0, 83, 83, None, Some(positionless.clone())),
+            (1, 83, 84, None, None),
+            (1, 85, 85, None, None),
+        ],
+        "a positionless checkpoint stays distinct from omission while chain labels are preserved",
+    );
+    assert_eq!(runs(&beta)[2].log_segment_identities, lineages[3..5]);
+    assert_eq!(
+        runs(&observed_late)
+            .iter()
+            .map(|run| (run.fold_ordinal, run.first_order, run.last_order, run.left.clone(), run.right.clone()))
+            .collect::<Vec<_>>(),
+        vec![
+            (0, 80, 81, None, None),
+            (0, 83, 83, None, None),
+            (1, 83, 83, None, None),
+            (1, 84, 84, Some(positionless.clone()), None),
+            (1, 85, 85, None, None),
+        ],
+        "later stream observation keeps prior omissions and its own value boundary",
+    );
+    assert_eq!(runs(&observed_late)[3].log_segment_identities, lineages[4..5]);
+}
+
+#[test]
+fn paired_storm_fold_validates_fragment_depth_identities_and_real_bodies() {
+    let fixture_rows = TOMBSTONE_DEPTH_COMMIT_ORDER
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    let fixture_key = |path: &str| {
+        fixture_rows
+            .iter()
+            .find(|row| row.key == string(path))
+            .unwrap_or_else(|| panic!("the in-crate depth fixture supplies {path}"))
+            .key
+            .clone()
+    };
+    let make_step = |order, paths: &[&str], generation, change_row| {
+        let keys = paths.iter().map(|path| fixture_key(path)).collect::<Vec<_>>();
+        let mut rows = fixture_rows[..4].to_vec();
+        if change_row {
+            rows[0].fields.insert(id(2), string("changed paired body"));
+        }
+        SequencedBranchMergePlan {
+            order,
+            plan: BranchMergePlan {
+                schema: schema(true, FieldType::Str),
+                tables: BTreeMap::from([(
+                    id(1),
+                    orna_storage_v1::MergedTable {
+                        id: id(1),
+                        whole_table_reuse: None,
+                        segments: vec![MergedSegment::Rows {
+                            range: KeyRange::all(),
+                            rows,
+                            tombstones: keys.clone(),
+                        }],
+                    },
+                )]),
+                checkpoints: BTreeMap::from([(
+                    b"stream".to_vec(),
+                    CheckpointGeneration {
+                        generation,
+                        position: Some(b"uneven-cascade".to_vec()),
+                    },
+                )]),
+                report: Default::default(),
+            },
+            ordered_row_tombstones: keys.into_iter().map(|key| (id(1), key)).collect(),
+        }
+    };
+    let repair = |order, fragment, fragment_count, tombstones| {
+        BranchMergeDepthFragmentRecovery { order, fragment, fragment_count, tombstones }
+    };
+    let root = (id(1), fixture_key("root"));
+    let child = (id(1), fixture_key("root/child"));
+    let z = (id(1), fixture_key("z"));
+    let first = make_step(1, &["root", "root/child"], 7, false);
+    let second = make_step(2, &["z"], 9, false);
+    let cascade = [first.clone(), second.clone()];
+
+    let mut history = BranchMergeTombstoneHistory::new(0);
+    history.submit_depth_merge_fragment(0, 0, 2, &[]).unwrap();
+    history.submit_depth_merge_fragment(1, 0, 3, std::slice::from_ref(&root)).unwrap();
+    history.submit_depth_merge_fragment(1, 1, 3, std::slice::from_ref(&child)).unwrap();
+    history.submit_depth_merge_fragment(1, 2, 3, &[]).unwrap();
+    history.submit_depth_merge_fragment(2, 0, 2, std::slice::from_ref(&z)).unwrap();
+    history.submit_depth_merge_fragment(2, 1, 2, &[]).unwrap();
+
+    let MergedSegment::Rows { rows, .. } = &first.plan.tables[&id(1)].segments[0] else {
+        panic!("paired proof plan carries materialized fixture rows");
+    };
+    assert_eq!(rows[0].fields[&id(2)], string("Anchor root"));
+    let released = history
+        .bind_depth_fragment_retry_plans_with_recovery(
+            &cascade,
+            &[repair(0, 1, 2, Vec::new())],
+            &cascade,
+        )
+        .unwrap();
+    assert_eq!(
+        released,
+        vec![
+            BranchMergeTombstoneEvent { order: 1, table: id(1), key: fixture_key("root") },
+            BranchMergeTombstoneEvent { order: 1, table: id(1), key: fixture_key("root/child") },
+            BranchMergeTombstoneEvent { order: 2, table: id(1), key: fixture_key("z") },
+        ],
+        "the two- and three-fragment waves release their fixture deltas in cascade order",
+    );
+    let committed = history.clone();
+    assert!(history
+        .bind_depth_fragment_retry_plans_with_recovery(
+            &cascade,
+            &[repair(0, 1, 2, Vec::new())],
+            &cascade,
+        )
+        .unwrap()
+        .is_empty(), "an exact paired cascade retry is idempotent after release");
+    assert_eq!(history, committed);
+
+    assert_eq!(
+        history.submit_depth_merge_fragment(1, 1, 3, std::slice::from_ref(&z)),
+        Err(BranchMergeTombstoneHistoryError::ConflictingSubmission { order: 1 }),
+        "a stale fragment label cannot substitute a different fixture tombstone",
+    );
+    assert_eq!(history, committed, "a changed fragment body is rejected atomically");
+
+    assert_eq!(
+        history.bind_depth_fragment_retry_plans_with_recovery(
+            &cascade,
+            &[repair(1, 1, 3, vec![z.clone()])],
+            &cascade,
+        ),
+        Err(BranchMergeTombstoneHistoryError::ConflictingSubmission { order: 1 }),
+        "combined cascade recovery validates the committed fragment body before replay",
+    );
+    assert_eq!(history, committed, "a changed combined retry leaves history untouched");
+
+    assert_eq!(
+        history.bind_depth_fragment_retry_plan(&make_step(1, &["root", "root/child"], 7, true)),
+        Err(BranchMergeTombstoneHistoryError::ConflictingSubmission { order: 1 }),
+        "the committed paired identity also rejects changed real row content",
+    );
+    assert_eq!(history, committed, "a changed paired body leaves history untouched");
+}
+
+#[test]
+fn paired_storm_retry_identity_replays_after_cascade_restore_fold() {
+    let fixture_rows = TOMBSTONE_DEPTH_COMMIT_ORDER
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    let fixture_key = |path: &str| {
+        fixture_rows
+            .iter()
+            .find(|row| row.key == string(path))
+            .unwrap_or_else(|| panic!("the in-crate depth fixture supplies {path}"))
+            .key
+            .clone()
+    };
+    let make_step = |order, path: &str, generation| {
+        let tombstone = fixture_key(path);
+        SequencedBranchMergePlan {
+            order,
+            plan: BranchMergePlan {
+                schema: schema(true, FieldType::Str),
+                tables: BTreeMap::from([(
+                    id(1),
+                    orna_storage_v1::MergedTable {
+                        id: id(1),
+                        whole_table_reuse: None,
+                        segments: vec![MergedSegment::Rows {
+                            range: KeyRange::all(),
+                            rows: Vec::new(),
+                            tombstones: vec![tombstone.clone()],
+                        }],
+                    },
+                )]),
+                checkpoints: BTreeMap::from([(
+                    b"stream".to_vec(),
+                    CheckpointGeneration {
+                        generation,
+                        position: Some(b"cascade-fold".to_vec()),
+                    },
+                )]),
+                report: Default::default(),
+            },
+            ordered_row_tombstones: vec![(id(1), tombstone)],
+        }
+    };
+    let repair = |order, fragment, fragment_count, tombstones| {
+        BranchMergeDepthFragmentRecovery {
+            order,
+            fragment,
+            fragment_count,
+            tombstones,
+        }
+    };
+    let root = (id(1), fixture_key("root"));
+    let child = (id(1), fixture_key("root/child"));
+    let z = (id(1), fixture_key("z"));
+    let first = make_step(1, "root", 7);
+    let third = make_step(3, "z", 9);
+    let bindings = [first.clone(), third.clone()];
+
+    let mut history = BranchMergeTombstoneHistory::new(0);
+    history.submit_depth_merge_fragment(0, 0, 2, &[]).unwrap();
+    history
+        .submit_depth_merge_fragment(1, 0, 2, std::slice::from_ref(&root))
+        .unwrap();
+    history.submit_depth_merge_fragment(1, 1, 2, &[]).unwrap();
+    history
+        .submit_depth_merge_fragment(2, 0, 4, std::slice::from_ref(&child))
+        .unwrap();
+    history
+        .submit_depth_merge_fragment(2, 3, 4, &[])
+        .unwrap();
+    history
+        .submit_depth_merge_fragment(3, 0, 2, std::slice::from_ref(&z))
+        .unwrap();
+    history.submit_depth_merge_fragment(3, 1, 2, &[]).unwrap();
+
+    let first_fold = history
+        .bind_depth_fragment_retry_plans_with_recovery(
+            &bindings,
+            &[repair(2, 1, 4, Vec::new())],
+            &bindings,
+        )
+        .unwrap();
+    assert!(first_fold.is_empty(), "the earlier missing wave holds the paired cascade");
+    history.restart_depth_merge_wave(2, 4).unwrap();
+
+    history
+        .bind_depth_fragment_retry_plans_with_recovery(
+            &bindings,
+            &[repair(2, 1, 4, Vec::new())],
+            &bindings,
+        )
+        .expect("replaying the paired transaction restores its fragment after the fold");
+    assert_eq!(
+        history.submit_depth_merge_fragment(2, 1, 4, &[]),
+        Err(BranchMergeTombstoneHistoryError::DuplicateFragment {
+            order: 2,
+            fragment: 1,
+        }),
+        "a successful transaction replay must have restored the recovered fragment",
+    );
+
+    let released = history
+        .recover_depth_merge_fragments_with_appends(
+            &[
+                repair(0, 1, 2, Vec::new()),
+                repair(2, 0, 4, vec![child.clone()]),
+                repair(2, 2, 4, Vec::new()),
+                repair(2, 3, 4, Vec::new()),
+            ],
+            &[],
+        )
+        .unwrap();
+    assert_eq!(
+        released,
+        vec![
+            BranchMergeTombstoneEvent {
+                order: 1,
+                table: id(1),
+                key: fixture_key("root"),
+            },
+            BranchMergeTombstoneEvent {
+                order: 2,
+                table: id(1),
+                key: fixture_key("root/child"),
+            },
+            BranchMergeTombstoneEvent {
+                order: 3,
+                table: id(1),
+                key: fixture_key("z"),
+            },
+        ],
+        "the folded restore keeps both paired identities and releases the full cascade once",
+    );
+    assert_eq!(history.next_order(), Some(4));
+}
+
+#[test]
+fn paired_cascade_restore_receipt_preserves_fragment_depth_identity() {
+    let fixture_rows = TOMBSTONE_DEPTH_COMMIT_ORDER
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    let fixture_key = |path: &str| {
+        fixture_rows
+            .iter()
+            .find(|row| row.key == string(path))
+            .unwrap_or_else(|| panic!("the in-crate depth fixture supplies {path}"))
+            .key
+            .clone()
+    };
+    let root = fixture_key("root");
+    let child = fixture_key("root/child");
+    let deep = fixture_key("root/child/deep");
+    let paired = SequencedBranchMergePlan {
+        order: 1,
+        plan: BranchMergePlan {
+            schema: schema(true, FieldType::Str),
+            tables: BTreeMap::from([(
+                id(1),
+                orna_storage_v1::MergedTable {
+                    id: id(1),
+                    whole_table_reuse: None,
+                    segments: vec![MergedSegment::Rows {
+                        range: KeyRange::all(),
+                        rows: fixture_rows[..4].to_vec(),
+                        tombstones: vec![root.clone()],
+                    }],
+                },
+            )]),
+            checkpoints: BTreeMap::from([(
+                b"stream".to_vec(),
+                CheckpointGeneration {
+                    generation: 7,
+                    position: Some(b"paired-cascade-restore".to_vec()),
+                },
+            )]),
+            report: Default::default(),
+        },
+        ordered_row_tombstones: vec![(id(1), root.clone())],
+    };
+    let repair = |order, fragment, fragment_count, tombstones| {
+        BranchMergeDepthFragmentRecovery { order, fragment, fragment_count, tombstones }
+    };
+    let bindings = [paired.clone()];
+    let appends = [paired.clone()];
+    let cascade_recoveries = [
+        repair(2, 1, 3, vec![(id(1), child.clone()), (id(1), deep.clone())]),
+        repair(0, 1, 2, Vec::new()),
+    ];
+
+    let mut history = BranchMergeTombstoneHistory::new(0);
+    history.submit_depth_merge_fragment(0, 0, 2, &[]).unwrap();
+    history
+        .submit_depth_merge_fragment(1, 0, 2, &[(id(1), root.clone())])
+        .unwrap();
+    history.submit_depth_merge_fragment(1, 1, 2, &[]).unwrap();
+    history.submit_depth_merge_fragment(2, 0, 3, &[]).unwrap();
+    history.submit_depth_merge_fragment(2, 2, 3, &[]).unwrap();
+
+    let MergedSegment::Rows { rows, .. } = &paired.plan.tables[&id(1)].segments[0] else {
+        panic!("paired cascade plan carries materialized fixture rows");
+    };
+    assert_eq!(rows[0].fields[&id(2)], string("Anchor root"));
+    let released = history
+        .bind_depth_fragment_retry_plans_with_recovery(
+            &bindings,
+            &cascade_recoveries,
+            &appends,
+        )
+        .unwrap();
+    assert_eq!(
+        released,
+        vec![
+            BranchMergeTombstoneEvent { order: 1, table: id(1), key: fixture_key("root") },
+            BranchMergeTombstoneEvent {
+                order: 2,
+                table: id(1),
+                key: fixture_key("root/child"),
+            },
+            BranchMergeTombstoneEvent {
+                order: 2,
+                table: id(1),
+                key: fixture_key("root/child/deep"),
+            },
+        ],
+        "paired recovery folds the blocker and uneven three-fragment wave once",
+    );
+    let committed = history.clone();
+
+    let reordered_recoveries = [
+        repair(0, 1, 2, Vec::new()),
+        repair(2, 1, 3, vec![(id(1), deep.clone()), (id(1), child.clone())]),
+    ];
+    assert!(history
+        .bind_depth_fragment_retry_plans_with_recovery(
+            &bindings,
+            &reordered_recoveries,
+            &appends,
+        )
+        .unwrap()
+        .is_empty(), "a reordered but set-equivalent fragment replay matches its receipt");
+    assert_eq!(history, committed, "receipt replay preserves every committed depth identity");
+
+    assert_eq!(
+        history.bind_depth_fragment_retry_plans_with_recovery(
+            &bindings,
+            &[repair(
+                2,
+                1,
+                3,
+                vec![(id(1), child.clone()), (id(1), fixture_key("z"))],
+            )],
+            &appends,
+        ),
+        Err(BranchMergeTombstoneHistoryError::ConflictingSubmission { order: 2 }),
+        "the committed fragment's depth label cannot be rebound to another tombstone set",
+    );
+    assert_eq!(history, committed, "a changed paired restore is rejected atomically");
+}
+
+#[test]
+fn paired_restore_cascade_receipt_normalizes_paired_delta_order() {
+    let fixture_rows = TOMBSTONE_DEPTH_COMMIT_ORDER
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    let fixture_key = |path: &str| {
+        fixture_rows
+            .iter()
+            .find(|row| row.key == string(path))
+            .unwrap_or_else(|| panic!("the in-crate depth fixture supplies {path}"))
+            .key
+            .clone()
+    };
+    let root = fixture_key("root");
+    let child = fixture_key("root/child");
+    let deep = fixture_key("root/child/deep");
+    let twig = fixture_key("root/child/deep/leaf/twig");
+    let make_paired = |change_row| {
+        let mut rows = fixture_rows[..4].to_vec();
+        if change_row {
+            rows[0].fields.insert(id(2), string("changed paired restore row"));
+        }
+        let tombstones = vec![root.clone(), child.clone()];
+        SequencedBranchMergePlan {
+            order: 1,
+            plan: BranchMergePlan {
+                schema: schema(true, FieldType::Str),
+                tables: BTreeMap::from([(
+                    id(1),
+                    orna_storage_v1::MergedTable {
+                        id: id(1),
+                        whole_table_reuse: None,
+                        segments: vec![MergedSegment::Rows {
+                            range: KeyRange::all(),
+                            rows,
+                            tombstones: tombstones.clone(),
+                        }],
+                    },
+                )]),
+                checkpoints: BTreeMap::from([(
+                    b"stream".to_vec(),
+                    CheckpointGeneration {
+                        generation: 11,
+                        position: Some(b"paired-retry-order".to_vec()),
+                    },
+                )]),
+                report: Default::default(),
+            },
+            ordered_row_tombstones: tombstones.into_iter().map(|key| (id(1), key)).collect(),
+        }
+    };
+    let repair = |order, fragment, fragment_count, tombstones| {
+        BranchMergeDepthFragmentRecovery { order, fragment, fragment_count, tombstones }
+    };
+    let paired = make_paired(false);
+    let bindings = [paired.clone()];
+    let appends = [paired.clone()];
+    let recoveries = [
+        repair(0, 1, 2, Vec::new()),
+        repair(2, 1, 3, vec![(id(1), deep.clone()), (id(1), twig.clone())]),
+    ];
+
+    let mut history = BranchMergeTombstoneHistory::new(0);
+    history.submit_depth_merge_fragment(0, 0, 2, &[]).unwrap();
+    history
+        .submit_depth_merge_fragment(1, 0, 2, &[(id(1), root.clone())])
+        .unwrap();
+    history
+        .submit_depth_merge_fragment(1, 1, 2, &[(id(1), child.clone())])
+        .unwrap();
+    history.submit_depth_merge_fragment(2, 0, 3, &[]).unwrap();
+    history.submit_depth_merge_fragment(2, 2, 3, &[]).unwrap();
+
+    let MergedSegment::Rows { rows, .. } = &paired.plan.tables[&id(1)].segments[0] else {
+        panic!("paired retry plan carries materialized fixture rows");
+    };
+    assert_eq!(rows[0].fields[&id(2)], string("Anchor root"));
+    let released = history
+        .bind_depth_fragment_retry_plans_with_recovery(&bindings, &recoveries, &appends)
+        .unwrap();
+    assert_eq!(
+        released,
+        vec![
+            BranchMergeTombstoneEvent { order: 1, table: id(1), key: fixture_key("root") },
+            BranchMergeTombstoneEvent {
+                order: 1,
+                table: id(1),
+                key: fixture_key("root/child"),
+            },
+            BranchMergeTombstoneEvent {
+                order: 2,
+                table: id(1),
+                key: fixture_key("root/child/deep"),
+            },
+            BranchMergeTombstoneEvent {
+                order: 2,
+                table: id(1),
+                key: fixture_key("root/child/deep/leaf/twig"),
+            },
+        ],
+        "the paired restore releases each real fixture body once across uneven depths",
+    );
+    let committed = history.clone();
+
+    let mut reordered_paired = paired.clone();
+    reordered_paired.ordered_row_tombstones.reverse();
+    let reordered_bindings = [reordered_paired.clone()];
+    let reordered_appends = [reordered_paired];
+    let reordered_recoveries = [
+        repair(2, 1, 3, vec![(id(1), twig.clone()), (id(1), deep.clone())]),
+        repair(0, 1, 2, Vec::new()),
+    ];
+    assert!(history
+        .bind_depth_fragment_retry_plans_with_recovery(
+            &reordered_bindings,
+            &reordered_recoveries,
+            &reordered_appends,
+        )
+        .unwrap()
+        .is_empty(), "reordered paired and fragment deltas match the committed receipt");
+    assert_eq!(history, committed, "equivalent cascade receipts preserve committed history");
+
+    let changed_paired = make_paired(true);
+    assert_eq!(
+        history.bind_depth_fragment_retry_plans_with_recovery(
+            &[changed_paired.clone()],
+            &recoveries,
+            &[changed_paired],
+        ),
+        Err(BranchMergeTombstoneHistoryError::ConflictingSubmission { order: 1 }),
+        "receipt normalization does not hide changed materialized paired row content",
+    );
+    assert_eq!(history, committed, "changed paired bodies are rejected atomically");
+}
+
+#[test]
+fn paired_fragment_retry_identity_rebinds_across_pending_cascade() {
+    let fixture_rows = TOMBSTONE_DEPTH_COMMIT_ORDER
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    let fixture_key = |path: &str| {
+        fixture_rows
+            .iter()
+            .find(|row| row.key == string(path))
+            .unwrap_or_else(|| panic!("the in-crate depth fixture supplies {path}"))
+            .key
+            .clone()
+    };
+    let make_step = |order, paths: &[&str], generation, split_tombstones| {
+        let keys = paths.iter().map(|path| fixture_key(path)).collect::<Vec<_>>();
+        let partitions = if split_tombstones && keys.len() > 1 {
+            vec![vec![keys[0].clone()], keys[1..].to_vec()]
+        } else {
+            vec![keys.clone()]
+        };
+        let segments = partitions
+            .into_iter()
+            .map(|tombstones| MergedSegment::Rows {
+                range: KeyRange::all(),
+                rows: Vec::new(),
+                tombstones,
+            })
+            .collect();
+        SequencedBranchMergePlan {
+            order,
+            plan: BranchMergePlan {
+                schema: schema(true, FieldType::Str),
+                tables: BTreeMap::from([(
+                    id(1),
+                    orna_storage_v1::MergedTable {
+                        id: id(1),
+                        whole_table_reuse: None,
+                        segments,
+                    },
+                )]),
+                checkpoints: BTreeMap::from([(
+                    b"stream".to_vec(),
+                    CheckpointGeneration {
+                        generation,
+                        position: Some(b"position-1".to_vec()),
+                    },
+                )]),
+                report: Default::default(),
+            },
+            ordered_row_tombstones: keys.into_iter().map(|key| (id(1), key)).collect(),
+        }
+    };
+    let repair = |order, fragment, fragment_count, tombstones| {
+        BranchMergeDepthFragmentRecovery {
+            order,
+            fragment,
+            fragment_count,
+            tombstones,
+        }
+    };
+    let root = (id(1), fixture_key("root"));
+    let child = (id(1), fixture_key("root/child"));
+    let z = (id(1), fixture_key("z"));
+
+    let mut history = BranchMergeTombstoneHistory::new(0);
+    history.submit_depth_merge_fragment(0, 0, 2, &[]).unwrap();
+    history
+        .submit_depth_merge_fragment(1, 0, 3, std::slice::from_ref(&root))
+        .unwrap();
+    history
+        .submit_depth_merge_fragment(1, 1, 3, std::slice::from_ref(&child))
+        .unwrap();
+    history.submit_depth_merge_fragment(1, 2, 3, &[]).unwrap();
+    history
+        .submit_depth_merge_fragment(2, 0, 2, std::slice::from_ref(&z))
+        .unwrap();
+    history.submit_depth_merge_fragment(2, 1, 2, &[]).unwrap();
+    history.submit_depth_merge_fragment(3, 0, 2, &[]).unwrap();
+
+    let old_first = make_step(1, &["root", "root/child"], 7, false);
+    let old_second = make_step(2, &["z"], 9, false);
+    let old_cascade = [old_first.clone(), old_second.clone()];
+    let blocked = history
+        .bind_depth_fragment_retry_plans_with_recovery(
+            &old_cascade,
+            &[repair(3, 1, 2, Vec::new())],
+            &old_cascade,
+        )
+        .unwrap();
+    assert!(blocked.is_empty(), "the missing root wave holds both paired plans");
+    assert_eq!(history.next_order(), Some(0));
+
+    let replacement_first = make_step(1, &["root", "root/child"], 8, true);
+    let replacement_second = make_step(2, &["z"], 10, false);
+    let before_failed_rebind = history.clone();
+    assert_eq!(
+        history.rebind_depth_fragment_retry_plans(&[
+            make_step(2, &["root"], 11, false),
+            replacement_first.clone(),
+        ]),
+        Err(BranchMergeTombstoneHistoryError::ConflictingSubmission { order: 2 }),
+        "a late projection mismatch rolls back earlier cascade identity changes",
+    );
+    assert_eq!(history, before_failed_rebind);
+
+    history
+        .rebind_depth_fragment_retry_plans(&[
+            replacement_second.clone(),
+            replacement_first.clone(),
+        ])
+        .unwrap();
+    assert!(history.events().is_empty());
+    assert_eq!(history.next_order(), Some(0));
+
+    let before_stale_replay = history.clone();
+    assert_eq!(
+        history.bind_depth_fragment_retry_plans_with_recovery(
+            &old_cascade,
+            &[repair(3, 1, 2, Vec::new())],
+            &old_cascade,
+        ),
+        Err(BranchMergeTombstoneHistoryError::ConflictingSubmission { order: 1 }),
+        "rebind invalidates the old combined transaction receipt",
+    );
+    assert_eq!(history, before_stale_replay);
+
+    let released = history
+        .recover_depth_merge_fragments_with_appends(&[repair(0, 1, 2, Vec::new())], &[])
+        .unwrap();
+    let expected = vec![
+        BranchMergeTombstoneEvent {
+            order: 1,
+            table: id(1),
+            key: fixture_key("root"),
+        },
+        BranchMergeTombstoneEvent {
+            order: 1,
+            table: id(1),
+            key: fixture_key("root/child"),
+        },
+        BranchMergeTombstoneEvent {
+            order: 2,
+            table: id(1),
+            key: fixture_key("z"),
+        },
+    ];
+    assert_eq!(released, expected, "the paired cascade releases the real ordered tombstones");
+    assert_eq!(history.events(), expected);
+    assert_eq!(history.next_order(), Some(4));
+
+    let before_released_rebind = history.clone();
+    assert_eq!(
+        history.rebind_depth_fragment_retry_plan(&make_step(1, &["root", "root/child"], 12, true)),
+        Err(BranchMergeTombstoneHistoryError::ConflictingSubmission { order: 1 }),
+        "a committed cascade position is immutable",
+    );
+    assert_eq!(history, before_released_rebind);
+}
+
+#[test]
+fn paired_retry_does_not_widen_uneven_restore_tombstones() {
+    let fixture_rows = TOMBSTONE_DEPTH_COMMIT_ORDER
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    let fixture_key = |path: &str| {
+        fixture_rows
+            .iter()
+            .find(|row| row.key == string(path))
+            .unwrap_or_else(|| panic!("the in-crate depth fixture supplies {path}"))
+            .key
+            .clone()
+    };
+    let paired_step = |order, plan_paths: &[&str], delta_paths: &[&str]| {
+        let plan_tombstones = plan_paths
+            .iter()
+            .map(|path| fixture_key(path))
+            .collect::<Vec<_>>();
+        let ordered_row_tombstones = delta_paths
+            .iter()
+            .map(|path| (id(1), fixture_key(path)))
+            .collect::<Vec<_>>();
+        SequencedBranchMergePlan {
+            order,
+            plan: BranchMergePlan {
+                schema: schema(true, FieldType::Str),
+                tables: BTreeMap::from([(
+                    id(1),
+                    orna_storage_v1::MergedTable {
+                        id: id(1),
+                        whole_table_reuse: None,
+                        segments: vec![MergedSegment::Rows {
+                            range: KeyRange::all(),
+                            rows: Vec::new(),
+                            tombstones: plan_tombstones,
+                        }],
+                    },
+                )]),
+                checkpoints: BTreeMap::new(),
+                report: Default::default(),
+            },
+            ordered_row_tombstones,
+        }
+    };
+    let fragment = |order, index, count, paths: &[&str]| BranchMergeDepthFragmentRecovery {
+        order,
+        fragment: index,
+        fragment_count: count,
+        tombstones: paths.iter().map(|path| (id(1), fixture_key(path))).collect(),
+    };
+
+    let mut history = BranchMergeTombstoneHistory::new(0);
+    history.submit_depth_merge_fragment(0, 0, 2, &[]).unwrap();
+    history
+        .submit_depth_merge_fragment(1, 0, 2, &[(id(1), fixture_key("root"))])
+        .unwrap();
+    history.submit_depth_merge_fragment(1, 1, 2, &[]).unwrap();
+    history
+        .submit_depth_merge_fragment(2, 0, 3, &[(id(1), fixture_key("z"))])
+        .unwrap();
+    history.submit_depth_merge_fragment(2, 1, 3, &[]).unwrap();
+    history.submit_depth_merge_fragment(2, 2, 3, &[]).unwrap();
+    history.submit_depth_merge_fragment(3, 0, 2, &[]).unwrap();
+
+    let first_retry = paired_step(1, &["root"], &["root"]);
+    let second_retry = paired_step(2, &["z"], &["z"]);
+    let accepted = history
+        .recover_depth_merge_fragments_with_appends(
+            &[fragment(3, 1, 2, &[])],
+            &[first_retry, second_retry.clone()],
+        )
+        .unwrap();
+    assert!(accepted.is_empty(), "exact paired retries remain suppressed behind the gap");
+    assert_eq!(history.next_order(), Some(0));
+
+    let before_widened_retry = history.clone();
+    assert_eq!(
+        history.recover_depth_merge_fragments_with_appends(
+            &[fragment(3, 1, 2, &[])],
+            &[
+                paired_step(1, &["root", "root/child"], &["root"]),
+                second_retry,
+            ],
+        ),
+        Err(BranchMergeTombstoneHistoryError::ConflictingSubmission { order: 1 }),
+        "a paired plan cannot widen its tombstone set beyond its retry delta",
+    );
+    assert_eq!(history, before_widened_retry);
+
+    let released = history
+        .recover_depth_merge_fragments_with_appends(&[fragment(0, 1, 2, &[])], &[])
+        .unwrap();
+    assert_eq!(
+        released,
+        vec![
+            BranchMergeTombstoneEvent {
+                order: 1,
+                table: id(1),
+                key: fixture_key("root"),
+            },
+            BranchMergeTombstoneEvent {
+                order: 2,
+                table: id(1),
+                key: fixture_key("z"),
+            },
+        ],
+        "the pending uneven chain commits only the original fragment tombstones",
+    );
+    assert_eq!(history.events(), released);
+    assert_eq!(history.next_order(), Some(4));
+}
+
+#[test]
+fn paired_mixed_mode_priority_survives_interleaved_depth_wave_release() {
+    let fixture_keys = TOMBSTONE_DEPTH_COMMIT_ORDER
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .map(|row| row.key.clone())
+        .collect::<Vec<_>>();
+    let (first_key, middle_key, last_key) = (
+        fixture_keys[0].clone(),
+        fixture_keys[1].clone(),
+        fixture_keys[2].clone(),
+    );
+    let whole_plan = |order, keys: Vec<CanonicalValue>| SequencedBranchMergePlan {
+        order,
+        plan: BranchMergePlan {
+            schema: Schema { version: EvolutionVersion::V1_0, tables: Vec::new() },
+            tables: BTreeMap::new(),
+            checkpoints: BTreeMap::new(),
+            report: Default::default(),
+        },
+        ordered_row_tombstones: keys.into_iter().map(|key| (id(1), key)).collect(),
+    };
+
+    let mut history = BranchMergeTombstoneHistory::new(0);
+    assert!(history
+        .submit_depth_merge_fragment(2, 0, 2, &[(id(1), last_key.clone())])
+        .unwrap()
+        .is_empty());
+    assert!(history
+        .submit(&whole_plan(1, vec![middle_key.clone()]))
+        .unwrap()
+        .is_empty());
+    assert!(history
+        .submit_depth_merge_fragment(0, 0, 2, &[(id(1), first_key.clone())])
+        .unwrap()
+        .is_empty());
+
+    let before_pending_conflicts = history.clone();
+    assert_eq!(
+        history.submit(&whole_plan(0, vec![first_key.clone(), first_key.clone()])),
+        Err(BranchMergeTombstoneHistoryError::ConflictingSubmission { order: 0 }),
+        "mixed-mode priority beats invalid duplicate content at the first pending wave",
+    );
+    assert_eq!(
+        history.submit_depth_merge_fragment(1, 3, 0, &[]),
+        Err(BranchMergeTombstoneHistoryError::ConflictingSubmission { order: 1 }),
+        "mixed-mode priority beats invalid fragment metadata at an adjacent whole-plan wave",
+    );
+    assert_eq!(
+        history.submit(&whole_plan(2, vec![last_key.clone(), last_key.clone()])),
+        Err(BranchMergeTombstoneHistoryError::ConflictingSubmission { order: 2 }),
+        "mixed-mode priority remains local to the later pending depth wave",
+    );
+    assert_eq!(history, before_pending_conflicts);
+
+    assert_eq!(
+        history.submit_depth_merge_fragment(0, 1, 2, &[]).unwrap(),
+        vec![
+            BranchMergeTombstoneEvent {
+                order: 0,
+                table: id(1),
+                key: first_key.clone(),
+            },
+            BranchMergeTombstoneEvent {
+                order: 1,
+                table: id(1),
+                key: middle_key,
+            },
+        ],
+        "releasing the first split wave drains the adjacent whole-plan wave in lineage order",
+    );
+    assert_eq!(
+        history.submit_depth_merge_fragment(2, 1, 2, &[]).unwrap(),
+        vec![BranchMergeTombstoneEvent {
+            order: 2,
+            table: id(1),
+            key: last_key.clone(),
+        }],
+        "the next split wave waits until its own final fragment arrives",
+    );
+
+    let before_released_conflicts = history.clone();
+    assert_eq!(
+        history.submit(&whole_plan(0, vec![first_key.clone(), first_key.clone()])),
+        Err(BranchMergeTombstoneHistoryError::ConflictingSubmission { order: 0 }),
+        "the first split wave keeps its mode after the interleaved release",
+    );
+    assert_eq!(
+        history.submit_depth_merge_fragment(1, 0, 0, &[]),
+        Err(BranchMergeTombstoneHistoryError::ConflictingSubmission { order: 1 }),
+        "the intervening whole-plan wave keeps its mode after release",
+    );
+    assert_eq!(
+        history.submit(&whole_plan(2, vec![last_key.clone(), last_key])),
+        Err(BranchMergeTombstoneHistoryError::ConflictingSubmission { order: 2 }),
+        "the later split wave keeps its mode after release",
+    );
+    assert_eq!(history, before_released_conflicts);
+}
+
+#[test]
+fn paired_mixed_mode_priority_survives_cloned_wave_snapshots() {
+    let fixture_key = TOMBSTONE_DEPTH_COMMIT_ORDER
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .find(|row| row.key == string("a/child/deep"))
+        .expect("the in-crate depth fixture supplies a tombstone key")
+        .key
+        .clone();
+    let whole_plan = |order, keys: Vec<CanonicalValue>| SequencedBranchMergePlan {
+        order,
+        plan: BranchMergePlan {
+            schema: Schema { version: EvolutionVersion::V1_0, tables: Vec::new() },
+            tables: BTreeMap::new(),
+            checkpoints: BTreeMap::new(),
+            report: Default::default(),
+        },
+        ordered_row_tombstones: keys.into_iter().map(|key| (id(1), key)).collect(),
+    };
+
+    let mut original = BranchMergeTombstoneHistory::new(0);
+    original
+        .submit_depth_merge_fragment(2, 0, 2, &[(id(1), fixture_key.clone())])
+        .unwrap();
+    let mut snapshot = original.clone();
+    let invalid_whole_plan = whole_plan(2, vec![fixture_key.clone(), fixture_key.clone()]);
+
+    let before_original_conflict = original.clone();
+    assert_eq!(
+        original.submit(&invalid_whole_plan),
+        Err(BranchMergeTombstoneHistoryError::ConflictingSubmission { order: 2 }),
+        "the original pending wave retains its depth-fragment mode",
+    );
+    assert_eq!(original, before_original_conflict);
+    assert_eq!(
+        snapshot.submit(&invalid_whole_plan),
+        Err(BranchMergeTombstoneHistoryError::ConflictingSubmission { order: 2 }),
+        "a cloned pending wave retains the same mode priority",
+    );
+
+    assert!(snapshot.submit(&whole_plan(0, Vec::new())).unwrap().is_empty());
+    assert!(snapshot.submit(&whole_plan(1, Vec::new())).unwrap().is_empty());
+    assert_eq!(
+        snapshot
+            .submit_depth_merge_fragment(2, 1, 2, &[])
+            .unwrap(),
+        vec![BranchMergeTombstoneEvent {
+            order: 2,
+            table: id(1),
+            key: fixture_key.clone(),
+        }],
+        "the cloned snapshot releases its completed depth wave after the prefix",
+    );
+    let before_snapshot_conflict = snapshot.clone();
+    assert_eq!(
+        snapshot.submit(&invalid_whole_plan),
+        Err(BranchMergeTombstoneHistoryError::ConflictingSubmission { order: 2 }),
+        "the cloned snapshot keeps its accepted mode after release",
+    );
+    assert_eq!(snapshot, before_snapshot_conflict);
+    assert_eq!(
+        original.submit(&invalid_whole_plan),
+        Err(BranchMergeTombstoneHistoryError::ConflictingSubmission { order: 2 }),
+        "releasing a clone does not alter the original pending wave",
+    );
+    assert_eq!(original, before_original_conflict);
+}
+
+#[test]
+fn paired_duplicate_rejection_reserves_whole_plan_mode() {
+    let fixture_keys = TOMBSTONE_DEPTH_COMMIT_ORDER
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .map(|row| row.key.clone())
+        .collect::<Vec<_>>();
+    let (existing_key, accepted_key) = (fixture_keys[0].clone(), fixture_keys[1].clone());
+    let whole_plan = |order, keys: Vec<CanonicalValue>| SequencedBranchMergePlan {
+        order,
+        plan: BranchMergePlan {
+            schema: Schema { version: EvolutionVersion::V1_0, tables: Vec::new() },
+            tables: BTreeMap::new(),
+            checkpoints: BTreeMap::new(),
+            report: Default::default(),
+        },
+        ordered_row_tombstones: keys.into_iter().map(|key| (id(1), key)).collect(),
+    };
+
+    let mut history = BranchMergeTombstoneHistory::new(0);
+    history
+        .submit(&whole_plan(1, vec![existing_key.clone()]))
+        .unwrap();
+    assert_eq!(
+        history.submit(&whole_plan(2, vec![existing_key])),
+        Err(BranchMergeTombstoneHistoryError::ConcurrentDuplicateTombstone {
+            first_order: 1,
+            second_order: 2,
+        }),
+        "a cross-position duplicate reports both paired positions",
+    );
+
+    let after_reserved_retry = history.clone();
+    assert_eq!(
+        history.submit_depth_merge_fragment(2, 0, 2, &[(id(1), accepted_key.clone())]),
+        Err(BranchMergeTombstoneHistoryError::ConflictingSubmission { order: 2 }),
+        "the rejected whole plan reserves its mode before fragment validation",
+    );
+    assert_eq!(history, after_reserved_retry);
+    assert!(history
+        .submit(&whole_plan(2, vec![accepted_key.clone()]))
+        .unwrap()
+        .is_empty());
+    let before_mode_conflict = history.clone();
+    assert_eq!(
+        history.submit_depth_merge_fragment(2, 0, 0, &[]),
+        Err(BranchMergeTombstoneHistoryError::ConflictingSubmission { order: 2 }),
+        "a corrected same-mode plan succeeds and then excludes fragments",
+    );
+    assert_eq!(history, before_mode_conflict);
+
+    assert_eq!(
+        history.submit(&whole_plan(0, Vec::new())).unwrap(),
+        vec![
+            BranchMergeTombstoneEvent {
+                order: 1,
+                table: id(1),
+                key: fixture_keys[0].clone(),
+            },
+            BranchMergeTombstoneEvent {
+                order: 2,
+                table: id(1),
+                key: accepted_key.clone(),
+            },
+        ],
+        "filling the prefix releases both whole-plan waves in lineage order",
+    );
+    assert_eq!(
+        history.submit_depth_merge_fragment(2, 0, 2, &[]),
+        Err(BranchMergeTombstoneHistoryError::ConflictingSubmission { order: 2 }),
+        "the released whole-plan mode remains authoritative",
+    );
+    assert_eq!(history.events()[0].key, fixture_keys[0]);
+}
+
+#[test]
+fn paired_duplicate_rejection_reserves_depth_mode() {
+    let fixture_keys = TOMBSTONE_DEPTH_COMMIT_ORDER
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .map(|row| row.key.clone())
+        .collect::<Vec<_>>();
+    let (existing_key, accepted_key) = (fixture_keys[0].clone(), fixture_keys[1].clone());
+    let whole_plan = |order, keys: Vec<CanonicalValue>| SequencedBranchMergePlan {
+        order,
+        plan: BranchMergePlan {
+            schema: Schema { version: EvolutionVersion::V1_0, tables: Vec::new() },
+            tables: BTreeMap::new(),
+            checkpoints: BTreeMap::new(),
+            report: Default::default(),
+        },
+        ordered_row_tombstones: keys.into_iter().map(|key| (id(1), key)).collect(),
+    };
+
+    let mut history = BranchMergeTombstoneHistory::new(0);
+    history
+        .submit_depth_merge_fragment(2, 0, 2, &[(id(1), existing_key.clone())])
+        .unwrap();
+    assert_eq!(
+        history.submit_depth_merge_fragment(1, 0, 1, &[(id(1), existing_key.clone())]),
+        Err(BranchMergeTombstoneHistoryError::ConcurrentDuplicateTombstone {
+            first_order: 1,
+            second_order: 2,
+        }),
+        "a cross-position duplicate reports both paired positions",
+    );
+    let after_reserved_retry = history.clone();
+    assert_eq!(
+        history.submit(&whole_plan(1, vec![accepted_key.clone()])),
+        Err(BranchMergeTombstoneHistoryError::ConflictingSubmission { order: 1 }),
+        "the rejected fragment reserves its mode before a whole-plan retry",
+    );
+    assert_eq!(history, after_reserved_retry);
+    assert!(history
+        .submit_depth_merge_fragment(1, 0, 1, &[(id(1), accepted_key.clone())])
+        .unwrap()
+        .is_empty());
+    let before_mode_conflict = history.clone();
+    assert_eq!(
+        history.submit(&whole_plan(1, vec![accepted_key.clone()])),
+        Err(BranchMergeTombstoneHistoryError::ConflictingSubmission { order: 1 }),
+        "a corrected same-mode fragment succeeds and then excludes whole plans",
+    );
+    assert_eq!(history, before_mode_conflict);
+
+    assert_eq!(
+        history.submit(&whole_plan(0, Vec::new())).unwrap(),
+        vec![BranchMergeTombstoneEvent {
+            order: 1,
+            table: id(1),
+            key: accepted_key.clone(),
+        }],
+        "filling the prefix releases the accepted split mode while the later wave waits",
+    );
+    assert_eq!(
+        history
+            .submit_depth_merge_fragment(2, 1, 2, &[])
+            .unwrap(),
+        vec![BranchMergeTombstoneEvent {
+            order: 2,
+            table: id(1),
+            key: existing_key.clone(),
+        }],
+        "the later split wave completes in lineage order",
+    );
+    assert_eq!(
+        history.submit(&whole_plan(1, vec![accepted_key.clone()])),
+        Err(BranchMergeTombstoneHistoryError::ConflictingSubmission { order: 1 }),
+        "the released fragment wave still rejects a whole-plan retry",
+    );
+    assert_eq!(
+        history.submit(&whole_plan(2, vec![existing_key.clone(), existing_key])),
+        Err(BranchMergeTombstoneHistoryError::ConflictingSubmission { order: 2 }),
+        "the released depth wave still rejects a whole-plan retry",
+    );
+}
+
+#[test]
+fn paired_depth_storm_tombstone_history_stabilizes_across_restore_waves() {
+    let fixture_rows = TOMBSTONE_DEPTH_COMMIT_ORDER
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    assert_eq!(fixture_rows.len(), 11);
+
+    let wave_zero_deletes = [
+        "a",
+        "a/child",
+        "a/child/deep",
+        "a/child/deep/leaf",
+        "root",
+        "root/child",
+        "root/child/deep",
+        "root/child/deep/leaf/twig",
+    ];
+    let wave_one_deletes: [&str; 0] = [];
+    let wave_two_deletes = ["a/child/deep", "root/child/deep"];
+    let wave_zero_restores = fixture_rows
+        .iter()
+        .filter(|row| wave_zero_deletes.iter().any(|key| row.key == string(key)))
+        .cloned()
+        .collect::<Vec<_>>();
+    let wave_one_base = fixture_rows
+        .iter()
+        .filter(|row| !wave_zero_deletes.iter().any(|key| row.key == string(key)))
+        .cloned()
+        .collect::<Vec<_>>();
+    let wave_two_base = wave_one_base
+        .iter()
+        .filter(|row| !wave_one_deletes.iter().any(|key| row.key == string(key)))
+        .cloned()
+        .chain(wave_zero_restores.iter().cloned())
+        .collect::<Vec<_>>();
+
+    // Each worker plans against its own committed paired base. Wave one
+    // restores wave zero's deletes with an empty delta; wave two then
+    // re-deletes restored mid-depth keys as new history events.
+    let specs = vec![
+        (0_u64, fixture_rows.clone(), wave_zero_deletes.to_vec(), Vec::new()),
+        (1_u64, wave_one_base, wave_one_deletes.to_vec(), wave_zero_restores),
+        (2_u64, wave_two_base, wave_two_deletes.to_vec(), Vec::new()),
+    ];
+    let mut jobs = Vec::with_capacity(specs.len());
+    let mut range_layouts = Vec::with_capacity(specs.len());
+    for (order, rows, deletes, restores) in specs {
+        let rows_by_table = [rows.as_slice(), rows.as_slice()];
+        let (base, left, right, mut source) = paired_chained_storm_inputs_by_table(
+            &rows_by_table,
+            &deletes,
+            &deletes,
+            order as usize,
+            order % 2 == 1,
+            &format!("commit-order-wave-{order}"),
+        );
+        range_layouts.push(
+            [id(1), id(2)].map(|table| {
+                base.tables[&table]
+                    .segments
+                    .iter()
+                    .map(|segment| segment.range.clone())
+                    .collect::<Vec<_>>()
+            }),
+        );
+        for table in [id(1), id(2)] {
+            for row in &restores {
+                add_chained_storm_fixture_rows(&left, &mut source, MergeSide::Left, table, &[row.clone()]);
+                add_chained_storm_fixture_rows(&right, &mut source, MergeSide::Right, table, &[row.clone()]);
+            }
+        }
+        jobs.push((order, base, left, right, source));
+    }
+    assert_ne!(range_layouts[0], range_layouts[1], "successive waves use different depth cuts");
+    assert_ne!(range_layouts[1], range_layouts[2], "the final wave changes depth cuts again");
+    for layout in &range_layouts {
+        assert_ne!(layout[0], layout[1], "paired tables retain distinct split layouts");
+    }
+
+    let (ready_tx, ready_rx) = mpsc::channel();
+    let (completed_tx, completed_rx) = mpsc::channel();
+    let mut releases = BTreeMap::new();
+    let mut workers = Vec::new();
+    for (order, base, left, right, mut source) in jobs {
+        let (release_tx, release_rx) = mpsc::channel();
+        releases.insert(order, release_tx);
+        let ready_tx = ready_tx.clone();
+        let completed_tx = completed_tx.clone();
+        workers.push(std::thread::spawn(move || {
+            let plan = merge_three_way_snapshots(
+                &base,
+                &left,
+                &right,
+                &mut source,
+                BranchMergeBudget { max_rows_examined: 128, max_conflicts: 0 },
+            )
+            .expect("each independent paired restore wave produces a plan");
+            ready_tx.send(order).expect("the coordinator remains available");
+            release_rx.recv().expect("the coordinator releases this completed wave");
+            completed_tx.send((order, plan)).expect("the coordinator collects completed plans");
+        }));
+    }
+    drop(ready_tx);
+    drop(completed_tx);
+
+    let ready_orders = (0..3).map(|_| ready_rx.recv().unwrap()).collect::<Vec<_>>();
+    assert_eq!(ready_orders.iter().copied().collect::<std::collections::BTreeSet<_>>(), [0, 1, 2].into());
+
+    // All three merge computations have finished. Publish their results in a
+    // deliberately adversarial order to model concurrent completion delivery.
+    let mut sequencer = BranchMergePlanSequencer::new(0);
+    let mut released_plans = Vec::new();
+    let mut completion_order = Vec::new();
+    let mut plans_by_order = BTreeMap::new();
+    for expected_order in [2_u64, 1, 0] {
+        releases[&expected_order].send(()).unwrap();
+        let (order, plan) = completed_rx.recv().unwrap();
+        assert_eq!(order, expected_order);
+        completion_order.push(order);
+        let ready = sequencer.submit_with_tombstone_deltas(order, &plan).unwrap();
+        if order == 0 {
+            released_plans = ready;
+        } else {
+            assert!(ready.is_empty(), "a later wave waits for every earlier commit position");
+        }
+        plans_by_order.insert(order, plan);
+    }
+    for worker in workers {
+        worker.join().expect("the paired merge worker completes");
+    }
+
+    assert_eq!(completion_order, [2, 1, 0]);
+    assert_eq!(sequencer.next_order(), Some(3));
+    assert_eq!(released_plans.len(), 3);
+    assert_eq!(
+        released_plans.iter().map(|step| step.order).collect::<Vec<_>>(),
+        [0, 1, 2],
+        "the released paired deltas retain their assigned depth-wave positions",
+    );
+    let completion_schedules = [
+        [2_u64, 1, 0],
+        [2, 0, 1],
+        [1, 2, 0],
+        [1, 0, 2],
+        [0, 2, 1],
+        [0, 1, 2],
+    ];
+    let mut replay_histories = Vec::new();
+    for schedule in completion_schedules {
+        let mut replay = BranchMergePlanSequencer::new(0);
+        let mut replay_history = BranchMergeTombstoneHistory::new(0);
+        let mut replayed_plans = Vec::new();
+        for order in schedule {
+            let plan = &plans_by_order[&order];
+            let step = SequencedBranchMergePlan {
+                order,
+                plan: plan.clone(),
+                ordered_row_tombstones: plan.ordered_row_tombstones(),
+            };
+            let expected_order = replay_history.next_order().unwrap();
+            let released_events = replay_history.submit(&step).unwrap();
+            if order > expected_order {
+                assert!(
+                    released_events.is_empty(),
+                    "a future depth merge stays buffered until the missing restore wave arrives",
+                );
+                assert_eq!(replay_history.next_order(), Some(expected_order));
+            }
+            let unchanged_history = replay_history.clone();
+            assert_eq!(
+                replay_history.submit(&step),
+                Err(BranchMergeTombstoneHistoryError::DuplicateOrStale { order }),
+                "repeated completion cannot duplicate buffered or committed events",
+            );
+            assert_eq!(replay_history, unchanged_history);
+            replayed_plans.extend(
+                replay
+                    .submit_with_tombstone_deltas(order, plan)
+                    .unwrap(),
+            );
+        }
+        assert_eq!(
+            replayed_plans,
+            released_plans,
+            "the same paired merge waves have identical depth order for every completion schedule",
+        );
+        assert_eq!(
+            replay_history.next_order(),
+            Some(3),
+            "restore-only waves still consume their lineage position",
+        );
+        replay_histories.push(replay_history);
+    }
+    assert_eq!(
+        sequencer.submit_with_tombstone_deltas(2, &released_plans[2].plan),
+        Err(BranchMergePlanSequenceError::DuplicateOrStale { order: 2 }),
+        "a competing result cannot append the already-selected wave twice",
+    );
+
+    let per_wave_deltas = released_plans
+        .iter()
+        .map(|step| {
+            (
+                table_row_tombstones(&step.plan, id(1)),
+                table_row_tombstones(&step.plan, id(2)),
+            )
+        })
+        .collect::<Vec<_>>();
+    let expected_first = [
+        "a",
+        "a/child",
+        "a/child/deep",
+        "a/child/deep/leaf",
+        "root",
+        "root/child",
+        "root/child/deep",
+        "root/child/deep/leaf/twig",
+    ]
+    .map(string)
+    .to_vec();
+    let expected_second = Vec::new();
+    let expected_third = ["a/child/deep", "root/child/deep"].map(string).to_vec();
+    assert_eq!(
+        per_wave_deltas,
+        [
+            (expected_first.clone(), expected_first),
+            (expected_second.clone(), expected_second),
+            (expected_third.clone(), expected_third),
+        ],
+        "each ordered commit preserves one atomic paired delta",
+    );
+    let storm_history = per_wave_deltas
+        .into_iter()
+        .flat_map(|(storm, _)| storm)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        storm_history,
+        [
+            "a",
+            "a/child",
+            "a/child/deep",
+            "a/child/deep/leaf",
+            "root",
+            "root/child",
+            "root/child/deep",
+            "root/child/deep/leaf/twig",
+            "a/child/deep",
+            "root/child/deep",
+        ]
+        .map(string),
+        "wave lineage order survives reverse completion, restoration, and shallower deletes",
+    );
+
+    let paired_tombstone_history = released_plans
+        .iter()
+        .flat_map(|step| step.ordered_row_tombstones.iter().cloned())
+        .collect::<Vec<_>>();
+    let expected_paired_history = [
+        (id(1), "a"),
+        (id(1), "a/child"),
+        (id(1), "a/child/deep"),
+        (id(1), "a/child/deep/leaf"),
+        (id(1), "root"),
+        (id(1), "root/child"),
+        (id(1), "root/child/deep"),
+        (id(1), "root/child/deep/leaf/twig"),
+        (id(2), "a"),
+        (id(2), "a/child"),
+        (id(2), "a/child/deep"),
+        (id(2), "a/child/deep/leaf"),
+        (id(2), "root"),
+        (id(2), "root/child"),
+        (id(2), "root/child/deep"),
+        (id(2), "root/child/deep/leaf/twig"),
+        (id(1), "a/child/deep"),
+        (id(1), "root/child/deep"),
+        (id(2), "a/child/deep"),
+        (id(2), "root/child/deep"),
+    ]
+    .map(|(table, key)| (table, string(key)));
+    assert_eq!(
+        paired_tombstone_history,
+        expected_paired_history,
+        "split-depth changes preserve each paired delta and append waves in commit lineage order",
+    );
+
+    let mut history = BranchMergeTombstoneHistory::new(0);
+    assert_eq!(
+        history.append(&released_plans[1]),
+        Err(BranchMergeTombstoneHistoryError::OutOfOrder { expected: 0, actual: 1 }),
+        "a later restore wave cannot skip the earlier paired history position",
+    );
+    assert!(history.events().is_empty(), "rejected steps leave history unchanged");
+    for step in &released_plans {
+        history.append(step).unwrap();
+    }
+    assert!(
+        released_plans[1].ordered_row_tombstones.is_empty(),
+        "restoring rows consumes the wave position without replaying old deletes",
+    );
+    assert_eq!(history.next_order(), Some(3));
+    let recorded_history = history
+        .events()
+        .iter()
+        .map(|event| (event.order, event.table, event.key.clone()))
+        .collect::<Vec<_>>();
+    let expected_recorded_history = [
+        (0, id(1), "a"),
+        (0, id(1), "a/child"),
+        (0, id(1), "a/child/deep"),
+        (0, id(1), "a/child/deep/leaf"),
+        (0, id(1), "root"),
+        (0, id(1), "root/child"),
+        (0, id(1), "root/child/deep"),
+        (0, id(1), "root/child/deep/leaf/twig"),
+        (0, id(2), "a"),
+        (0, id(2), "a/child"),
+        (0, id(2), "a/child/deep"),
+        (0, id(2), "a/child/deep/leaf"),
+        (0, id(2), "root"),
+        (0, id(2), "root/child"),
+        (0, id(2), "root/child/deep"),
+        (0, id(2), "root/child/deep/leaf/twig"),
+        (2, id(1), "a/child/deep"),
+        (2, id(1), "root/child/deep"),
+        (2, id(2), "a/child/deep"),
+        (2, id(2), "root/child/deep"),
+    ]
+    .map(|(order, table, key)| (order, table, string(key)));
+    assert_eq!(recorded_history, expected_recorded_history);
+    assert_eq!(
+        history.append(&released_plans[0]),
+        Err(BranchMergeTombstoneHistoryError::OutOfOrder { expected: 3, actual: 0 }),
+        "a repeated wave cannot duplicate its earlier tombstone events",
+    );
+    assert_eq!(
+        replay_histories,
+        vec![history.clone(); completion_schedules.len()],
+        "append-only tombstone history is stable across every completion schedule",
+    );
+
+    let depth_fragments = released_plans
+        .iter()
+        .map(|step| {
+            step.plan
+                .tables
+                .iter()
+                .flat_map(|(table, merged)| {
+                    merged.segments.iter().map(|segment| match segment {
+                        MergedSegment::Rows { tombstones, .. } => tombstones
+                            .iter()
+                            .cloned()
+                            .map(|key| (*table, key))
+                            .collect::<Vec<_>>(),
+                        MergedSegment::Reuse { .. } => Vec::new(),
+                    })
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    assert!(depth_fragments.iter().all(|fragments| !fragments.is_empty()));
+
+    // Complete each restore wave from independently delivered depth pieces.
+    // Reversing and interleaving their arrival cannot change the history.
+    let mut reverse_fragment_history = BranchMergeTombstoneHistory::new(0);
+    for wave in (0..released_plans.len()).rev() {
+        let fragments = &depth_fragments[wave];
+        for fragment in (0..fragments.len()).rev() {
+            let emitted = reverse_fragment_history
+                .submit_depth_merge_fragment(
+                    released_plans[wave].order,
+                    fragment,
+                    fragments.len(),
+                    &fragments[fragment],
+                )
+                .unwrap();
+            if wave > 0 {
+                assert!(emitted.is_empty(), "future waves wait behind the missing prefix");
+                assert_eq!(reverse_fragment_history.next_order(), Some(0));
+            }
+        }
+    }
+    assert_eq!(
+        reverse_fragment_history.events(),
+        history.events(),
+        "whole-plan and reverse-fragment delivery produce the same tombstone events",
+    );
+    assert_eq!(reverse_fragment_history.next_order(), history.next_order());
+
+    let mut interleaved_fragment_history = BranchMergeTombstoneHistory::new(0);
+    let max_fragments = depth_fragments.iter().map(Vec::len).max().unwrap_or_default();
+    for fragment in 0..max_fragments {
+        for (wave, fragments) in depth_fragments.iter().enumerate() {
+            if fragment < fragments.len() {
+                interleaved_fragment_history
+                    .submit_depth_merge_fragment(
+                        released_plans[wave].order,
+                        fragment,
+                        fragments.len(),
+                        &fragments[fragment],
+                    )
+                    .unwrap();
+            }
+        }
+    }
+    assert_eq!(
+        interleaved_fragment_history.events(),
+        history.events(),
+        "whole-plan and interleaved-fragment delivery produce the same tombstone events",
+    );
+    assert_eq!(interleaved_fragment_history.next_order(), history.next_order());
+
+    let mut fragment_guards = BranchMergeTombstoneHistory::new(0);
+    let guarded_fragments = &depth_fragments[2];
+    assert!(fragment_guards
+        .submit_depth_merge_fragment(
+            released_plans[2].order,
+            0,
+            guarded_fragments.len(),
+            &guarded_fragments[0],
+        )
+        .unwrap()
+        .is_empty());
+    let unchanged_fragment_guards = fragment_guards.clone();
+    assert_eq!(
+        fragment_guards.submit_depth_merge_fragment(
+            released_plans[2].order,
+            0,
+            guarded_fragments.len(),
+            &guarded_fragments[0],
+        ),
+        Err(BranchMergeTombstoneHistoryError::DuplicateFragment {
+            order: released_plans[2].order,
+            fragment: 0,
+        }),
+    );
+    assert_eq!(fragment_guards, unchanged_fragment_guards);
+    assert_eq!(
+        fragment_guards.submit_depth_merge_fragment(
+            released_plans[2].order,
+            1,
+            guarded_fragments.len() + 1,
+            &[],
+        ),
+        Err(BranchMergeTombstoneHistoryError::FragmentCountMismatch {
+            order: released_plans[2].order,
+            expected: guarded_fragments.len(),
+            actual: guarded_fragments.len() + 1,
+        }),
+    );
+    assert_eq!(fragment_guards, unchanged_fragment_guards);
+    assert_eq!(
+        fragment_guards.submit_depth_merge_fragment(
+            released_plans[2].order,
+            guarded_fragments.len(),
+            guarded_fragments.len(),
+            &[],
+        ),
+        Err(BranchMergeTombstoneHistoryError::InvalidFragment {
+            fragment: guarded_fragments.len(),
+            fragment_count: guarded_fragments.len(),
+        }),
+    );
+    assert_eq!(fragment_guards, unchanged_fragment_guards);
+
+    let repeated_key = string("a/child/deep");
+    let first_overlap = [(id(1), repeated_key.clone())];
+    let mut overlap_guard = BranchMergeTombstoneHistory::new(0);
+    assert!(overlap_guard
+        .submit_depth_merge_fragment(0, 0, 3, &first_overlap)
+        .unwrap()
+        .is_empty());
+    let unchanged_overlap_guard = overlap_guard.clone();
+    assert_eq!(
+        overlap_guard.submit_depth_merge_fragment(0, 1, 3, &first_overlap),
+        Err(BranchMergeTombstoneHistoryError::DuplicateTombstone { order: 0 }),
+        "overlapping depth pieces are rejected before the wave completes",
+    );
+    assert_eq!(overlap_guard, unchanged_overlap_guard);
+    let other_table_overlap = [(id(2), repeated_key.clone())];
+    overlap_guard
+        .submit_depth_merge_fragment(0, 1, 3, &other_table_overlap)
+        .unwrap();
+    let other_key = [(id(1), string("a"))];
+    overlap_guard
+        .submit_depth_merge_fragment(0, 2, 3, &other_key)
+        .unwrap();
+    overlap_guard.append(&released_plans[1]).unwrap();
+    overlap_guard.append(&released_plans[2]).unwrap();
+    assert_eq!(
+        overlap_guard
+            .events()
+            .iter()
+            .filter(|event| event.key == repeated_key)
+            .map(|event| event.order)
+            .collect::<Vec<_>>(),
+        [0, 0, 2, 2],
+        "a clean restore wave leaves later re-delete events distinct from the earlier depth wave",
+    );
+
+    let mut whole_plan_mode_guard = BranchMergeTombstoneHistory::new(0);
+    whole_plan_mode_guard.submit(&released_plans[2]).unwrap();
+    let unchanged_whole_plan_mode_guard = whole_plan_mode_guard.clone();
+    assert_eq!(
+        whole_plan_mode_guard.submit_depth_merge_fragment(
+            released_plans[2].order,
+            0,
+            guarded_fragments.len(),
+            &guarded_fragments[0],
+        ),
+        Err(BranchMergeTombstoneHistoryError::ConflictingSubmission {
+            order: released_plans[2].order,
+        }),
+    );
+    assert_eq!(whole_plan_mode_guard, unchanged_whole_plan_mode_guard);
+
+    let mut duplicate_whole_plan = released_plans[2].clone();
+    duplicate_whole_plan
+        .ordered_row_tombstones
+        .push(duplicate_whole_plan.ordered_row_tombstones[0].clone());
+    let mut whole_plan_duplicate_guard = BranchMergeTombstoneHistory::new(0);
+    assert_eq!(
+        whole_plan_duplicate_guard.submit(&duplicate_whole_plan),
+        Err(BranchMergeTombstoneHistoryError::DuplicateTombstone {
+            order: released_plans[2].order,
+        }),
+    );
+    assert_eq!(whole_plan_duplicate_guard.next_order(), Some(0));
+    assert!(whole_plan_duplicate_guard.events().is_empty());
+
+    let rows_by_table = [fixture_rows.as_slice(), fixture_rows.as_slice()];
+    let mut split_layout_deltas = Vec::new();
+    for layout in [0, 1] {
+        let (base, left, right, mut source) = paired_chained_storm_inputs_by_table(
+            &rows_by_table,
+            &wave_zero_deletes,
+            &wave_zero_deletes,
+            layout,
+            layout == 1,
+            &format!("layout-stability-{layout}"),
+        );
+        let plan = merge_three_way_snapshots(
+            &base,
+            &left,
+            &right,
+            &mut source,
+            BranchMergeBudget { max_rows_examined: 128, max_conflicts: 0 },
+        )
+        .expect("the same paired delete wave merges under either depth layout");
+        split_layout_deltas.push(plan.ordered_row_tombstones());
+    }
+    assert_eq!(
+        split_layout_deltas[0],
+        split_layout_deltas[1],
+        "paired split-layout changes cannot reorder the same depth-shaped tombstone set",
+    );
+}
+
+#[test]
+fn concurrent_paired_storm_waves_preserve_depth_event_lineage() {
+    const RETRIES_PER_WAVE: usize = 4;
+    const WAVES: usize = 4;
+    let storm_template = parse_fixture(TOMBSTONE_RECOVERY_STORM, RowKeyKind::Explicit);
+    let storm_rows = TOMBSTONE_STORM_KEYS
+        .iter()
+        .map(|key| rekey_row(&storm_template, key))
+        .collect::<Vec<_>>();
+    let anchor_rows = TOMBSTONE_PAIRED_CHAIN
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    let storm_z = storm_rows
+        .iter()
+        .find(|row| row.key == string("z"))
+        .expect("the storm fixture includes the shallow z key");
+    let anchor_deep = anchor_rows
+        .iter()
+        .find(|row| row.key == string("a/child/deep"))
+        .expect("the paired-chain fixture includes the deep anchor");
+
+    // Each following group represents the live paired rows after its
+    // predecessor committed. Their simultaneous plans retain those separate
+    // bases and lineage prefixes.
+    let wave_two_storm_base = [storm_z.clone()];
+    let wave_two_anchor_base = anchor_rows
+        .iter()
+        .filter(|row| ["b", "c", "d", "zz"].iter().any(|key| row.key == string(key)))
+        .cloned()
+        .collect::<Vec<_>>();
+    let wave_three_storm_base = storm_rows
+        .iter()
+        .filter(|row| row.key != string("z"))
+        .cloned()
+        .collect::<Vec<_>>();
+    let wave_three_anchor_base = anchor_rows
+        .iter()
+        .cloned()
+        .collect::<Vec<_>>();
+    let wave_four_storm_base = storm_rows.clone();
+    let wave_four_anchor_base = anchor_rows
+        .iter()
+        .filter(|row| row.key != string("a/child/deep"))
+        .cloned()
+        .collect::<Vec<_>>();
+    let wave_five_storm_base = wave_four_storm_base
+        .iter()
+        .filter(|row| {
+            row.key != string("root/child/deep/storm/a")
+                && row.key != string("root/child/deep/storm/d")
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    let wave_five_anchor_base = anchor_rows
+        .iter()
+        .filter(|row| row.key != string("b") && row.key != string("c"))
+        .cloned()
+        .collect::<Vec<_>>();
+    assert_eq!(wave_two_anchor_base.len(), 4);
+    assert_eq!(wave_three_storm_base.len(), TOMBSTONE_STORM_KEYS.len() - 1);
+    assert_eq!(wave_three_anchor_base.len(), 7);
+    assert_eq!(wave_four_storm_base.len(), TOMBSTONE_STORM_KEYS.len());
+    assert_eq!(wave_four_anchor_base.len(), 6);
+    assert_eq!(wave_five_storm_base.len(), TOMBSTONE_STORM_KEYS.len() - 2);
+    assert_eq!(wave_five_anchor_base.len(), 5);
+
+    // Commit deltas alternate between one-table and paired updates, then add
+    // shallow ancestor tombstones after earlier storm-descendant events.
+    let wave_two_deletes = ["z"];
+    let wave_three_deletes = ["a/child/deep"];
+    let wave_four_deletes = ["b", "c", "root/child/deep/storm/a", "root/child/deep/storm/d"];
+    let wave_five_deletes = [
+        "a/child",
+        "root/child/deep",
+        "root/child/deep/storm/b",
+        "root/child/deep/storm/f",
+    ];
+    let wave_five_right_deletes = [
+        "a/child",
+        "root/child/deep",
+        "root/child/deep/storm/f",
+    ];
+    let storm_restores = storm_rows
+        .iter()
+        .filter(|row| row.key != string("z"))
+        .cloned()
+        .collect::<Vec<_>>();
+    let anchor_restores = anchor_rows.iter().take(3).cloned().collect::<Vec<_>>();
+    let start = Arc::new(Barrier::new(RETRIES_PER_WAVE * WAVES));
+    let mut workers = Vec::with_capacity(RETRIES_PER_WAVE * WAVES);
+    for wave in 0..WAVES {
+        for retry in 0..RETRIES_PER_WAVE {
+            let (storm_base, anchor_base, deletes, restore_rows) = if wave == 0 {
+                (
+                    &wave_two_storm_base[..],
+                    &wave_two_anchor_base[..],
+                    &wave_two_deletes[..],
+                    storm_restores
+                        .iter()
+                        .cloned()
+                        .map(|row| (id(1), row))
+                        .chain(anchor_restores.iter().cloned().map(|row| (id(2), row)))
+                        .collect::<Vec<_>>(),
+                )
+            } else if wave == 1 {
+                (
+                    &wave_three_storm_base[..],
+                    &wave_three_anchor_base[..],
+                    &wave_three_deletes[..],
+                    vec![(id(1), storm_z.clone())],
+                )
+            } else if wave == 2 {
+                (
+                    &wave_four_storm_base[..],
+                    &wave_four_anchor_base[..],
+                    &wave_four_deletes[..],
+                    vec![(id(2), anchor_deep.clone())],
+                )
+            } else {
+                (
+                    &wave_five_storm_base[..],
+                    &wave_five_anchor_base[..],
+                    &wave_five_deletes[..],
+                    Vec::new(),
+                )
+            };
+            let conflict_retry = wave == 3 && retry == 1;
+            let right_deletes = if conflict_retry {
+                &wave_five_right_deletes[..]
+            } else {
+                deletes
+            };
+            let (base, left, right, mut source) = paired_chained_storm_inputs_by_table(
+                &[storm_base, anchor_base],
+                deletes,
+                right_deletes,
+                retry % 2,
+                false,
+                &format!("concurrent-paired-storm-wave-{wave}-retry-{retry}"),
+            );
+            if conflict_retry {
+                let storm_key = string("root/child/deep/storm/b");
+                let mut changed = false;
+                for ((side, _), rows) in &mut source.rows {
+                    if *side == MergeSide::Right {
+                        if let Some(row) = rows
+                            .iter_mut()
+                            .find(|row| row.table == id(1) && row.key == storm_key)
+                        {
+                            *row = edit_name(row, "concurrent branch edit");
+                            changed = true;
+                        }
+                    }
+                }
+                assert!(changed, "the storm conflict fixture row is in a right branch range");
+            }
+            for (table, row) in &restore_rows {
+                add_chained_storm_fixture_rows(
+                    &left,
+                    &mut source,
+                    MergeSide::Left,
+                    *table,
+                    &[row.clone()],
+                );
+                add_chained_storm_fixture_rows(
+                    &right,
+                    &mut source,
+                    MergeSide::Right,
+                    *table,
+                    &[row.clone()],
+                );
+            }
+            if retry >= RETRIES_PER_WAVE / 2 {
+                for rows in source.rows.values_mut() {
+                    rows.reverse();
+                }
+            }
+            let reverse_branches = retry % 2 == 1;
+            if reverse_branches {
+                let original_rows = std::mem::take(&mut source.rows);
+                source.rows = original_rows
+                    .into_iter()
+                    .map(|((side, locator), rows)| {
+                        let side = match side {
+                            MergeSide::Left => MergeSide::Right,
+                            MergeSide::Right => MergeSide::Left,
+                            MergeSide::Base => MergeSide::Base,
+                        };
+                        ((side, locator), rows)
+                    })
+                    .collect();
+            }
+
+            let gate = Arc::clone(&start);
+            let fail_after_rows = if retry == 0 {
+                match wave {
+                    2 => 4,
+                    3 => 3,
+                    _ => 5,
+                }
+            } else {
+                usize::MAX
+            };
+            workers.push(std::thread::spawn(move || {
+                let mut source = BarrierFailOnTableAfterRowsFixtureRows {
+                    source: FailOnTableAfterRowsFixtureRows {
+                        source,
+                        table: id(2),
+                        side: MergeSide::Left,
+                        fail_after_rows,
+                        rows_delivered: 0,
+                        rows_seen: Vec::new(),
+                        failed_at: None,
+                    },
+                    first_load: Some(gate),
+                };
+                let (merge_left, merge_right) = if reverse_branches {
+                    (&right, &left)
+                } else {
+                    (&left, &right)
+                };
+                let result = merge_three_way_snapshots(
+                    &base,
+                    merge_left,
+                    merge_right,
+                    &mut source,
+                    BranchMergeBudget {
+                        max_rows_examined: 80,
+                        max_conflicts: if conflict_retry { 1 } else { 0 },
+                    },
+                );
+                (wave, retry, result, source.source, restore_rows)
+            }));
+        }
+    }
+
+    let storm_wave_two_delta = ["z"].map(string);
+    let anchor_wave_two_delta = Vec::new();
+    let storm_wave_two_live = TOMBSTONE_STORM_KEYS[..TOMBSTONE_STORM_KEYS.len() - 1]
+        .iter()
+        .map(|key| string(key))
+        .collect::<Vec<_>>();
+    let anchor_wave_two_live =
+        ["a", "a/child", "a/child/deep", "b", "c", "d", "zz"].map(string);
+    let storm_wave_three_delta = Vec::new();
+    let anchor_wave_three_delta = ["a/child/deep"].map(string);
+    let storm_wave_three_live = TOMBSTONE_STORM_KEYS
+        .iter()
+        .map(|key| string(key))
+        .collect::<Vec<_>>();
+    let anchor_wave_three_live = ["a", "a/child", "b", "c", "d", "zz"].map(string);
+    let storm_wave_four_delta =
+        ["root/child/deep/storm/a", "root/child/deep/storm/d"].map(string);
+    let anchor_wave_four_delta = ["b", "c"].map(string);
+    let storm_wave_four_live = [
+        "a",
+        "root",
+        "root/child",
+        "root/child/deep",
+        "root/child/deep/storm/b",
+        "root/child/deep/storm/c",
+        "root/child/deep/storm/e",
+        "root/child/deep/storm/f",
+        "z",
+    ]
+    .map(string);
+    let anchor_wave_four_live = ["a", "a/child", "a/child/deep", "d", "zz"].map(string);
+    let storm_wave_five_delta = [
+        "root/child/deep",
+        "root/child/deep/storm/b",
+        "root/child/deep/storm/f",
+    ]
+    .map(string);
+    let anchor_wave_five_delta = ["a/child"].map(string);
+    let storm_wave_five_live = [
+        "a",
+        "root",
+        "root/child",
+        "root/child/deep/storm/c",
+        "root/child/deep/storm/e",
+        "z",
+    ]
+    .map(string);
+    let anchor_wave_five_live = ["a", "a/child/deep", "d", "zz"].map(string);
+    let mut failures_by_wave = [0; WAVES];
+    let mut conflicts_by_wave = [0; WAVES];
+    let mut successes_by_wave = [0; WAVES];
+    let mut selected_wave_plans: [Option<BranchMergePlan>; WAVES] =
+        std::array::from_fn(|_| None);
+    let mut first_observed_wave = None;
+    // Observe later-wave outcomes first. Their merge plans remain deltas of
+    // their own base; a consumer still appends selected plans by commit order.
+    for worker in workers.into_iter().rev() {
+        let (wave, retry, result, source, restore_rows) =
+            worker.join().expect("cross-wave retry worker completes");
+        if first_observed_wave.is_none() {
+            first_observed_wave = Some(wave);
+        }
+        if wave == 3 && retry == 1 {
+            let Err(BranchMergeError::Conflicts { conflicts, report }) = result else {
+                panic!("a storm delete against a concurrent edit is not appendable")
+            };
+            assert_eq!(report.conflicts_lower_bound, 1);
+            assert!(report.affected_tables.contains(&id(1)));
+            assert!(source.failed_at.is_none());
+            let observed_conflicts = conflicts
+                .into_iter()
+                .map(|conflict| {
+                    let BranchMergeConflict::Row {
+                        conflict: RowMergeConflict::DeleteAndEdit { table, key },
+                        ..
+                    } = conflict
+                    else {
+                        panic!("the competing storm edit yields a delete/edit conflict")
+                    };
+                    (table, key)
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                observed_conflicts,
+                vec![(id(1), string("root/child/deep/storm/b"))],
+            );
+            conflicts_by_wave[wave] += 1;
+            failures_by_wave[wave] += 1;
+            continue;
+        }
+        if retry == 0 {
+            match result {
+                Err(BranchMergeError::RowRead { message }) => assert_eq!(
+                    message,
+                    "fixture row source failed after a partial row prefix",
+                ),
+                Err(error) => panic!("only the injected wave failure is expected: {error:?}"),
+                Ok(_) => panic!("a failed paired retry must not publish a candidate plan"),
+            }
+            assert_eq!(
+                source.rows_delivered,
+                match wave {
+                    2 => 4,
+                    3 => 3,
+                    _ => 5,
+                }
+            );
+            assert_eq!(
+                source.failed_at.as_ref().map(|(table, side, _)| (*table, *side)),
+                Some((id(2), MergeSide::Left)),
+            );
+            assert!(source.source.visited.iter().any(|(_, locator)| {
+                locator.starts_with(format!("concurrent-paired-storm-wave-{wave}-retry-{retry}-table-0-").as_bytes())
+            }));
+            let observed_key = match wave {
+                0 => "a",
+                1 => "b",
+                _ => "a/child/deep",
+            };
+            assert!(source.rows_seen.contains(&string(observed_key)));
+            failures_by_wave[wave] += 1;
+            continue;
+        }
+
+        let plan = result.expect("a peer on either committed wave completes independently");
+        assert_eq!(plan.report.conflicts_lower_bound, 0);
+        if wave == 0 {
+            assert_eq!(table_row_tombstones(&plan, id(1)), storm_wave_two_delta);
+            assert_eq!(table_row_tombstones(&plan, id(2)), anchor_wave_two_delta);
+            assert_eq!(table_live_row_keys(&plan, id(1)), storm_wave_two_live);
+            assert_eq!(table_live_row_keys(&plan, id(2)), anchor_wave_two_live);
+        } else if wave == 1 {
+            assert_eq!(table_row_tombstones(&plan, id(1)), storm_wave_three_delta);
+            assert_eq!(table_row_tombstones(&plan, id(2)), anchor_wave_three_delta);
+            assert_eq!(table_live_row_keys(&plan, id(1)), storm_wave_three_live);
+            assert_eq!(table_live_row_keys(&plan, id(2)), anchor_wave_three_live);
+        } else if wave == 2 {
+            assert_eq!(table_row_tombstones(&plan, id(1)), storm_wave_four_delta);
+            assert_eq!(table_row_tombstones(&plan, id(2)), anchor_wave_four_delta);
+            assert_eq!(table_live_row_keys(&plan, id(1)), storm_wave_four_live);
+            assert_eq!(table_live_row_keys(&plan, id(2)), anchor_wave_four_live);
+        } else {
+            assert_eq!(table_row_tombstones(&plan, id(1)), storm_wave_five_delta);
+            assert_eq!(table_row_tombstones(&plan, id(2)), anchor_wave_five_delta);
+            assert_eq!(table_live_row_keys(&plan, id(1)), storm_wave_five_live);
+            assert_eq!(table_live_row_keys(&plan, id(2)), anchor_wave_five_live);
+        }
+        for (table, mut row) in restore_rows {
+            row.table = table;
+            assert!(table_live_rows(&plan, table).contains(&row));
+        }
+        assert_ne!(
+            match &plan.tables[&id(1)].segments[0] {
+                MergedSegment::Rows { range, .. } => range,
+                other => panic!("cross-wave storm range must materialize: {other:?}"),
+            },
+            match &plan.tables[&id(2)].segments[0] {
+                MergedSegment::Rows { range, .. } => range,
+                other => panic!("cross-wave paired range must materialize: {other:?}"),
+            },
+            "each wave retains its own paired depth split boundaries",
+        );
+        successes_by_wave[wave] += 1;
+        if selected_wave_plans[wave].is_none() {
+            selected_wave_plans[wave] = Some(plan);
+        }
+    }
+    assert_eq!(failures_by_wave, [1, 1, 1, 2]);
+    assert_eq!(conflicts_by_wave, [0, 0, 0, 1]);
+    assert_eq!(successes_by_wave, [3, 3, 3, 2]);
+    assert_eq!(first_observed_wave, Some(WAVES - 1));
+
+    let wave_two = selected_wave_plans[0]
+        .take()
+        .expect("one successful plan represents the committed second wave");
+    let wave_three = selected_wave_plans[1]
+        .take()
+        .expect("one successful plan represents the committed third wave");
+    let wave_four = selected_wave_plans[2]
+        .take()
+        .expect("one successful plan represents the committed fourth wave");
+    let wave_five = selected_wave_plans[3]
+        .take()
+        .expect("one successful plan represents the committed fifth wave");
+    let paired_commit_deltas = [&wave_two, &wave_three, &wave_four, &wave_five].map(|plan| {
+        (
+            table_row_tombstones(plan, id(1)),
+            table_row_tombstones(plan, id(2)),
+        )
+    });
+    assert_eq!(
+        paired_commit_deltas,
+        [
+            (["z"].map(string).to_vec(), Vec::new()),
+            (Vec::new(), ["a/child/deep"].map(string).to_vec()),
+            (
+                ["root/child/deep/storm/a", "root/child/deep/storm/d"]
+                    .map(string)
+                    .to_vec(),
+                ["b", "c"].map(string).to_vec(),
+            ),
+            (
+                [
+                    "root/child/deep",
+                    "root/child/deep/storm/b",
+                    "root/child/deep/storm/f",
+                ]
+                .map(string)
+                .to_vec(),
+                ["a/child"].map(string).to_vec(),
+            ),
+        ],
+        "paired commits preserve their shared order while table deltas stay local",
+    );
+    let mut storm_history = TOMBSTONE_STORM_KEYS[..TOMBSTONE_STORM_KEYS.len() - 1]
+        .iter()
+        .map(|key| string(key))
+        .collect::<Vec<_>>();
+    storm_history.extend(table_row_tombstones(&wave_two, id(1)));
+    storm_history.extend(table_row_tombstones(&wave_three, id(1)));
+    storm_history.extend(table_row_tombstones(&wave_four, id(1)));
+    storm_history.extend(table_row_tombstones(&wave_five, id(1)));
+    assert_eq!(
+        storm_history,
+        [
+            "a",
+            "root",
+            "root/child",
+            "root/child/deep",
+            "root/child/deep/storm/a",
+            "root/child/deep/storm/b",
+            "root/child/deep/storm/c",
+            "root/child/deep/storm/d",
+            "root/child/deep/storm/e",
+            "root/child/deep/storm/f",
+            "z",
+            "root/child/deep/storm/a",
+            "root/child/deep/storm/d",
+            "root/child/deep",
+            "root/child/deep/storm/b",
+            "root/child/deep/storm/f",
+        ]
+        .map(string),
+        "empty paired-table deltas do not truncate the storm history prefix",
+    );
+    let mut anchor_history = ["a", "a/child", "a/child/deep"]
+        .map(string)
+        .to_vec();
+    anchor_history.extend(table_row_tombstones(&wave_two, id(2)));
+    anchor_history.extend(table_row_tombstones(&wave_three, id(2)));
+    anchor_history.extend(table_row_tombstones(&wave_four, id(2)));
+    anchor_history.extend(table_row_tombstones(&wave_five, id(2)));
+    assert_eq!(
+        anchor_history,
+        ["a", "a/child", "a/child/deep", "a/child/deep", "b", "c", "a/child"]
+            .map(string),
+        "empty paired-table deltas do not truncate the anchor history prefix",
+    );
+}
+
+#[test]
+fn unequal_depth_paired_chain_read_failure_discards_partial_order() {
+    let (base, left, right, source) = paired_distinct_depth_chain_inputs(true, true, false);
+    let mut interrupted = FailAfterRowsFixtureRows {
+        source,
+        fail_after_rows: 24,
+        rows_delivered: 0,
+        failed_at: None,
+    };
+
+    assert_eq!(
+        merge_three_way_snapshots(
+            &base,
+            &left,
+            &right,
+            &mut interrupted,
+            BranchMergeBudget { max_rows_examined: 33, max_conflicts: 0 },
+        ),
+        Err(BranchMergeError::RowRead {
+            message: "fixture row source failed after a partial row prefix".into(),
+        }),
+    );
+    assert_eq!(interrupted.rows_delivered, 24);
+    assert_eq!(
+        interrupted.failed_at,
+        Some((id(2), MergeSide::Left, b"paired-chain-whole-left".to_vec())),
+        "the complete deep table stays private when the shallower paired table fails",
+    );
+}
+
+#[test]
+fn recovery_storms_keep_unequal_depth_paired_chain_order() {
+    const RETRIES_PER_WAVE: usize = 8;
+    const WAVES: usize = 6;
+    let expected_first_tombstones = [
+        "root",
+        "root/child",
+        "root/child/deep",
+        "root/child/deep/leaf",
+        "root/child/deep/leaf/twig",
+        "root/child/deep/leaf/twig/bud",
+    ]
+    .into_iter()
+    .map(string)
+    .collect::<Vec<_>>();
+    let expected_second_tombstones = ["a", "a/child", "a/child/deep"]
+        .into_iter()
+        .map(string)
+        .collect::<Vec<_>>();
+    let expected_first_live = vec![string("z")];
+    let expected_second_live = ["b", "c", "d", "zz"]
+        .into_iter()
+        .map(string)
+        .collect::<Vec<_>>();
+    let mut completed_retries = 0;
+
+    for wave in 0..WAVES {
+        let start = Arc::new(Barrier::new(RETRIES_PER_WAVE));
+        let mut workers = Vec::with_capacity(RETRIES_PER_WAVE);
+        for retry in 0..RETRIES_PER_WAVE {
+            let index = wave * RETRIES_PER_WAVE + retry;
+            let first_table_split = index % 2 == 0;
+            let (base, left, right, mut source) = paired_distinct_depth_chain_inputs(
+                first_table_split,
+                index % 3 == 0,
+                index % 3 != 0,
+            );
+            if index % 3 == 1 {
+                for rows in source.rows.values_mut() {
+                    rows.reverse();
+                }
+            }
+            let gate = Arc::clone(&start);
+            workers.push(std::thread::spawn(move || {
+                let mut source = BarrierFixtureRows { source, first_load: Some(gate) };
+                let plan = merge_three_way_snapshots(
+                    &base,
+                    &left,
+                    &right,
+                    &mut source,
+                    BranchMergeBudget { max_rows_examined: 33, max_conflicts: 0 },
+                )
+                .expect("each fresh paired retry fits its private exact budget");
+                (plan, first_table_split)
+            }));
+        }
+
+        for worker in workers {
+            let (plan, first_table_split) =
+                worker.join().expect("unequal-depth retry worker completes");
+            assert_eq!(plan.report.rows_examined, 33);
+            assert_eq!(plan.report.conflicts_lower_bound, 0);
+            assert_eq!(table_row_tombstones(&plan, id(1)), expected_first_tombstones);
+            assert_eq!(table_row_tombstones(&plan, id(2)), expected_second_tombstones);
+            assert_eq!(table_live_row_keys(&plan, id(1)), expected_first_live);
+            assert_eq!(table_live_row_keys(&plan, id(2)), expected_second_live);
+            assert_eq!(
+                plan.tables[&id(1)].segments.len(),
+                if first_table_split { 7 } else { 1 },
+            );
+            assert_eq!(
+                plan.tables[&id(2)].segments.len(),
+                if first_table_split { 1 } else { 7 },
+            );
+            completed_retries += 1;
+        }
+    }
+
+    assert_eq!(completed_retries, RETRIES_PER_WAVE * WAVES);
+}
+
+#[test]
+fn paired_depth_chains_keep_identical_keys_table_local() {
+    let (base, left, right, mut source) = paired_tombstone_chain_load_inputs(true, true, false);
+    let plan = merge_three_way_snapshots(
+        &base,
+        &left,
+        &right,
+        &mut source,
+        BranchMergeBudget { max_rows_examined: 30, max_conflicts: 0 },
+    )
+    .expect("paired tables with identical primary keys merge independently");
+    let expected_tombstones = [
+        "root",
+        "root/child",
+        "root/child/deep",
+        "root/child/deep/leaf",
+        "root/child/deep/leaf/twig",
+        "root/child/deep/leaf/twig/bud",
+    ]
+    .into_iter()
+    .map(string)
+    .collect::<Vec<_>>();
+
+    assert_eq!(plan.tables.keys().copied().collect::<Vec<_>>(), [id(1), id(2)]);
+    assert_eq!(plan.report.rows_examined, 30);
+    for table in [id(1), id(2)] {
+        assert_eq!(table_row_tombstones(&plan, table), expected_tombstones);
+        assert_eq!(table_live_row_keys(&plan, table), vec![string("z")]);
+    }
+}
+
+#[test]
+fn paired_depth_chains_with_different_lengths_keep_orders_local() {
+    let (base, left, right, mut source) = paired_distinct_depth_chain_inputs(true, true, false);
+    let plan = merge_three_way_snapshots(
+        &base,
+        &left,
+        &right,
+        &mut source,
+        BranchMergeBudget { max_rows_examined: 33, max_conflicts: 0 },
+    )
+    .expect("paired chain tables with different depths merge independently");
+    let expected_first_tombstones = [
+        "root",
+        "root/child",
+        "root/child/deep",
+        "root/child/deep/leaf",
+        "root/child/deep/leaf/twig",
+        "root/child/deep/leaf/twig/bud",
+    ]
+    .into_iter()
+    .map(string)
+    .collect::<Vec<_>>();
+    let expected_second_tombstones = ["a", "a/child", "a/child/deep"]
+        .into_iter()
+        .map(string)
+        .collect::<Vec<_>>();
+
+    assert_eq!(plan.report.rows_examined, 33);
+    assert_eq!(table_row_tombstones(&plan, id(1)), expected_first_tombstones);
+    assert_eq!(table_row_tombstones(&plan, id(2)), expected_second_tombstones);
+    assert_eq!(table_live_row_keys(&plan, id(1)), vec![string("z")]);
+    assert_eq!(
+        table_live_row_keys(&plan, id(2)),
+        ["b", "c", "d", "zz"].into_iter().map(string).collect::<Vec<_>>(),
+    );
+}
+
+#[test]
+fn sustained_paired_chains_of_unequal_depth_keep_order_isolated() {
+    // Scheduling is unspecified, so pin independent per-table ordering for
+    // unequal nested chains while peers scan opposite physical layouts.
+    const LOADS_PER_WAVE: usize = 8;
+    const WAVES: usize = 6;
+    let expected_first_tombstones = [
+        "root",
+        "root/child",
+        "root/child/deep",
+        "root/child/deep/leaf",
+        "root/child/deep/leaf/twig",
+        "root/child/deep/leaf/twig/bud",
+    ]
+    .into_iter()
+    .map(string)
+    .collect::<Vec<_>>();
+    let expected_second_tombstones = ["a", "a/child", "a/child/deep"]
+        .into_iter()
+        .map(string)
+        .collect::<Vec<_>>();
+    let expected_first_live = vec![string("z")];
+    let expected_second_live = ["b", "c", "d", "zz"]
+        .into_iter()
+        .map(string)
+        .collect::<Vec<_>>();
+    let mut complete_loads = 0;
+    let mut capped_loads = 0;
+
+    for wave in 0..WAVES {
+        let start = Arc::new(Barrier::new(LOADS_PER_WAVE));
+        let mut workers = Vec::with_capacity(LOADS_PER_WAVE);
+        for load in 0..LOADS_PER_WAVE {
+            let first_table_split = (wave + load) % 2 == 0;
+            let capped = (wave + load) % 4 == 0;
+            let (base, left, right, mut source) = paired_distinct_depth_chain_inputs(
+                first_table_split,
+                (wave + load) % 3 == 0,
+                (wave + load) % 3 != 0,
+            );
+            if (wave + load) % 3 == 1 {
+                for rows in source.rows.values_mut() {
+                    rows.reverse();
+                }
+            }
+            let gate = Arc::clone(&start);
+            workers.push(std::thread::spawn(move || {
+                let mut source = BarrierFixtureRows { source, first_load: Some(gate) };
+                let row_cap = if capped { 32 } else { 33 };
+                let result = merge_three_way_snapshots(
+                    &base,
+                    &left,
+                    &right,
+                    &mut source,
+                    BranchMergeBudget { max_rows_examined: row_cap, max_conflicts: 0 },
+                );
+                (result, capped, first_table_split)
+            }));
+        }
+
+        for worker in workers {
+            let (result, capped, first_table_split) =
+                worker.join().expect("unequal-depth worker completes");
+            if capped {
+                let Err(BranchMergeError::BudgetExceeded { report }) = result else {
+                    panic!("a one-row-short unequal-depth scan returns no partial plan")
+                };
+                assert_eq!(report.rows_examined, 33);
+                assert_eq!(report.conflicts_lower_bound, 0);
+                assert!(report.affected_tables.contains(&id(2)));
+                capped_loads += 1;
+            } else {
+                let plan = result.expect("an exact-budget paired peer remains complete");
+                assert_eq!(plan.report.rows_examined, 33);
+                assert_eq!(table_row_tombstones(&plan, id(1)), expected_first_tombstones);
+                assert_eq!(table_row_tombstones(&plan, id(2)), expected_second_tombstones);
+                assert_eq!(table_live_row_keys(&plan, id(1)), expected_first_live);
+                assert_eq!(table_live_row_keys(&plan, id(2)), expected_second_live);
+                assert_eq!(
+                    plan.tables[&id(1)].segments.len(),
+                    if first_table_split { 7 } else { 1 },
+                );
+                assert_eq!(
+                    plan.tables[&id(2)].segments.len(),
+                    if first_table_split { 1 } else { 7 },
+                );
+                complete_loads += 1;
+            }
+        }
+    }
+
+    assert_eq!(complete_loads, 36);
+    assert_eq!(capped_loads, 12);
 }
 
 #[test]
@@ -16587,4 +29307,7698 @@ fn fixture_depth_tombstones_between_split_conflicts_follow_logical_range_order()
             assert_eq!(conflict_keys, vec![middle.key.clone(), tail.key.clone()]);
         }
     }
+}
+
+#[test]
+fn tabular_restore_wave_preserves_peer_depth_labels_and_tombstone_identity() {
+    let fixture_rows = TOMBSTONE_DEPTH_COMMIT_ORDER
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    let fixture_key = |path: &str| {
+        fixture_rows
+            .iter()
+            .find(|row| row.key == string(path))
+            .unwrap_or_else(|| panic!("the in-crate depth fixture supplies {path}"))
+            .key
+            .clone()
+    };
+    let root = fixture_key("root");
+    let child = fixture_key("root/child");
+    assert_eq!(
+        fixture_rows
+            .iter()
+            .find(|row| row.key == root)
+            .unwrap()
+            .fields[&id(2)],
+        string("Storm root"),
+        "the proof uses the real row body from the in-crate ORNA fixture",
+    );
+    assert_eq!(
+        fixture_rows
+            .iter()
+            .find(|row| row.key == child)
+            .unwrap()
+            .fields[&id(2)],
+        string("Storm child"),
+    );
+
+    let wave = |order| BranchMergeTabularDepthWave {
+        order,
+        tables: BTreeMap::from([
+            (
+                id(1),
+                BranchMergeTableDepthFragments {
+                    fragment_count: 2,
+                    fragments: BTreeMap::from([
+                        (0, vec![root.clone()]),
+                        (1, vec![child.clone()]),
+                    ]),
+                },
+            ),
+            (
+                id(2),
+                BranchMergeTableDepthFragments {
+                    fragment_count: 3,
+                    fragments: BTreeMap::from([
+                        (0, vec![root.clone()]),
+                        (1, Vec::new()),
+                        (2, vec![child.clone()]),
+                    ]),
+                },
+            ),
+        ]),
+    };
+    let empty_plan = |order| SequencedBranchMergePlan {
+        order,
+        plan: BranchMergePlan {
+            schema: Schema { version: EvolutionVersion::V1_0, tables: Vec::new() },
+            tables: BTreeMap::new(),
+            checkpoints: BTreeMap::new(),
+            report: Default::default(),
+        },
+        ordered_row_tombstones: Vec::new(),
+    };
+    let mut history = BranchMergeTombstoneHistory::new(0);
+    assert!(
+        history.submit_tabular_depth_wave(&wave(1)).unwrap().is_empty(),
+        "a complete peer-table restore waits behind the missing paired prefix",
+    );
+    let released = history.submit(&empty_plan(0)).unwrap();
+    assert_eq!(
+        released,
+        vec![
+            BranchMergeTombstoneEvent { order: 1, table: id(1), key: root.clone() },
+            BranchMergeTombstoneEvent { order: 1, table: id(1), key: child.clone() },
+            BranchMergeTombstoneEvent { order: 1, table: id(2), key: root.clone() },
+            BranchMergeTombstoneEvent { order: 1, table: id(2), key: child.clone() },
+        ],
+        "peer tables commit their local depth deltas once in canonical tabular order",
+    );
+    assert_eq!(history.next_order(), Some(2));
+
+    let committed = history.clone();
+    let mut changed_peer_depth = wave(1);
+    let peer = changed_peer_depth.tables.get_mut(&id(2)).unwrap();
+    peer.fragment_count = 2;
+    peer.fragments = BTreeMap::from([(0, vec![root.clone()]), (1, vec![child.clone()])]);
+    assert_eq!(
+        history.submit_tabular_depth_wave(&changed_peer_depth),
+        Err(BranchMergeTombstoneHistoryError::TabularFragmentCountMismatch {
+            order: 1,
+            table: id(2),
+            expected: 3,
+            actual: 2,
+        }),
+        "a peer table cannot borrow the other table's shorter depth label after restore",
+    );
+    assert_eq!(history, committed, "a changed peer depth leaves the restored history intact");
+
+    let mut changed_peer_fragment = wave(1);
+    changed_peer_fragment
+        .tables
+        .get_mut(&id(2))
+        .unwrap()
+        .fragments
+        .insert(2, vec![fixture_key("root/child/deep")]);
+    assert_eq!(
+        history.submit_tabular_depth_wave(&changed_peer_fragment),
+        Err(BranchMergeTombstoneHistoryError::ConflictingSubmission { order: 1 }),
+        "the peer table's depth slot remains bound to its fixture tombstone",
+    );
+    assert_eq!(history, committed, "a changed peer fragment is rejected without mutation");
+
+    assert_eq!(
+        history.submit_tabular_depth_wave(&wave(1)),
+        Err(BranchMergeTombstoneHistoryError::DuplicateOrStale { order: 1 }),
+        "an exact tabular replay retains the ordinary stale-position result",
+    );
+    assert_eq!(history, committed);
+}
+
+#[test]
+fn column_restore_ladders_keep_uneven_depth_labels_and_fixture_values() {
+    let fixture_rows = COLUMN_RESTORE_LADDER
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    let row = |path: &str| {
+        fixture_rows
+            .iter()
+            .find(|row| row.key == string(path))
+            .unwrap_or_else(|| panic!("the in-crate column fixture supplies {path}"))
+            .clone()
+    };
+    let root = row("root");
+    let child = row("root/child");
+    let deep = row("root/child/deep");
+    assert_eq!(root.fields[&id(2)], string("Ladder root"));
+    assert_eq!(child.fields[&id(3)], string("Bergen"));
+    assert_eq!(deep.fields[&id(2)], string("Ladder deep"));
+
+    let wave = |order| BranchMergeTabularColumnDepthWave {
+        order,
+        columns: BTreeMap::from([
+            (
+                (id(1), id(2)),
+                BranchMergeColumnDepthFragments {
+                    fragment_count: 2,
+                    fragments: BTreeMap::from([
+                        (0, vec![(root.key.clone(), root.fields[&id(2)].clone())]),
+                        (1, vec![(child.key.clone(), child.fields[&id(2)].clone())]),
+                    ]),
+                },
+            ),
+            (
+                (id(1), id(3)),
+                BranchMergeColumnDepthFragments {
+                    fragment_count: 4,
+                    fragments: BTreeMap::from([
+                        (0, vec![(root.key.clone(), root.fields[&id(3)].clone())]),
+                        (1, Vec::new()),
+                        (2, vec![(child.key.clone(), child.fields[&id(3)].clone())]),
+                        (3, vec![(deep.key.clone(), deep.fields[&id(3)].clone())]),
+                    ]),
+                },
+            ),
+        ]),
+    };
+    let empty_plan = |order| SequencedBranchMergePlan {
+        order,
+        plan: BranchMergePlan {
+            schema: Schema { version: EvolutionVersion::V1_0, tables: Vec::new() },
+            tables: BTreeMap::new(),
+            checkpoints: BTreeMap::new(),
+            report: Default::default(),
+        },
+        ordered_row_tombstones: Vec::new(),
+    };
+
+    let mut history = BranchMergeTombstoneHistory::new(0);
+    assert!(history.submit_tabular_column_depth_wave(&wave(1)).unwrap().is_empty());
+    assert!(history.column_events().is_empty());
+    assert!(history.column_ladder_events().is_empty());
+    assert!(history.column_restore_waves().is_empty());
+    assert_eq!(history.next_order(), Some(0));
+
+    assert!(history.submit(&empty_plan(0)).unwrap().is_empty());
+    assert_eq!(
+        history.column_events(),
+        &[
+            BranchMergeColumnDepthEvent {
+                order: 1,
+                table: id(1),
+                column: id(2),
+                fragment: 0,
+                key: root.key.clone(),
+                value: string("Ladder root"),
+            },
+            BranchMergeColumnDepthEvent {
+                order: 1,
+                table: id(1),
+                column: id(2),
+                fragment: 1,
+                key: child.key.clone(),
+                value: string("Ladder child"),
+            },
+            BranchMergeColumnDepthEvent {
+                order: 1,
+                table: id(1),
+                column: id(3),
+                fragment: 0,
+                key: root.key.clone(),
+                value: string("Oslo"),
+            },
+            BranchMergeColumnDepthEvent {
+                order: 1,
+                table: id(1),
+                column: id(3),
+                fragment: 2,
+                key: child.key.clone(),
+                value: string("Bergen"),
+            },
+            BranchMergeColumnDepthEvent {
+                order: 1,
+                table: id(1),
+                column: id(3),
+                fragment: 3,
+                key: deep.key.clone(),
+                value: string("Trondheim"),
+            },
+        ],
+        "the shorter name branch and longer city branch retain independent labels and fixture-backed values",
+    );
+    assert_eq!(
+        history.column_ladder_events(),
+        &[
+            BranchMergeColumnDepthLadderEvent {
+                order: 1,
+                table: id(1),
+                column: id(2),
+                depth_labels: vec![0, 1],
+            },
+            BranchMergeColumnDepthLadderEvent {
+                order: 1,
+                table: id(1),
+                column: id(3),
+                depth_labels: vec![0, 1, 2, 3],
+            },
+        ],
+        "released ladders retain every column-local label, including the empty city depth",
+    );
+    assert_eq!(
+        history.column_restore_waves(),
+        vec![BranchMergeTabularColumnRestoreWaveSnapshot {
+            order: 1,
+            columns: vec![
+                BranchMergeColumnDepthLadderSnapshot {
+                    table: id(1),
+                    column: id(2),
+                    fragments: vec![
+                        BranchMergeColumnDepthFragmentSnapshot {
+                            label: 0,
+                            cells: vec![(root.key.clone(), string("Ladder root"))],
+                        },
+                        BranchMergeColumnDepthFragmentSnapshot {
+                            label: 1,
+                            cells: vec![(child.key.clone(), string("Ladder child"))],
+                        },
+                    ],
+                },
+                BranchMergeColumnDepthLadderSnapshot {
+                    table: id(1),
+                    column: id(3),
+                    fragments: vec![
+                        BranchMergeColumnDepthFragmentSnapshot {
+                            label: 0,
+                            cells: vec![(root.key.clone(), string("Oslo"))],
+                        },
+                        BranchMergeColumnDepthFragmentSnapshot {
+                            label: 1,
+                            cells: Vec::new(),
+                        },
+                        BranchMergeColumnDepthFragmentSnapshot {
+                            label: 2,
+                            cells: vec![(child.key.clone(), string("Bergen"))],
+                        },
+                        BranchMergeColumnDepthFragmentSnapshot {
+                            label: 3,
+                            cells: vec![(deep.key.clone(), string("Trondheim"))],
+                        },
+                    ],
+                },
+            ],
+        }],
+        "the released snapshot atomically binds each column-local depth label to fixture cells",
+    );
+    assert_eq!(history.next_order(), Some(2));
+    let committed = history.clone();
+
+    let mut shorter_city = wave(1);
+    let city = shorter_city.columns.get_mut(&(id(1), id(3))).unwrap();
+    city.fragment_count = 3;
+    city.fragments = BTreeMap::from([
+        (0, vec![(root.key.clone(), root.fields[&id(3)].clone())]),
+        (1, vec![(child.key.clone(), child.fields[&id(3)].clone())]),
+        (2, vec![(deep.key.clone(), deep.fields[&id(3)].clone())]),
+    ]);
+    assert_eq!(
+        history.submit_tabular_column_depth_wave(&shorter_city),
+        Err(BranchMergeTombstoneHistoryError::TabularColumnFragmentCountMismatch {
+            order: 1,
+            table: id(1),
+            column: id(3),
+            expected: 4,
+            actual: 3,
+        }),
+        "a sibling column cannot donate or remove the restored city's depth positions",
+    );
+    assert_eq!(history, committed);
+
+    let mut missing_empty_depth = wave(1);
+    missing_empty_depth
+        .columns
+        .get_mut(&(id(1), id(3)))
+        .unwrap()
+        .fragments
+        .remove(&1);
+    assert_eq!(
+        history.submit_tabular_column_depth_wave(&missing_empty_depth),
+        Err(BranchMergeTombstoneHistoryError::IncompleteTabularColumnDepthFragments {
+            order: 1,
+            table: id(1),
+            column: id(3),
+        }),
+        "an empty middle fragment still owns depth label one",
+    );
+    assert_eq!(history, committed);
+
+    let mut changed_cell = wave(1);
+    changed_cell
+        .columns
+        .get_mut(&(id(1), id(2)))
+        .unwrap()
+        .fragments
+        .get_mut(&1)
+        .unwrap()[0]
+        .1 = string("Different retry body");
+    assert_eq!(
+        history.submit_tabular_column_depth_wave(&changed_cell),
+        Err(BranchMergeTombstoneHistoryError::ConflictingSubmission { order: 1 }),
+        "a restored column fragment remains bound to its canonical fixture cells",
+    );
+    assert_eq!(history, committed);
+    assert_eq!(
+        history.submit_tabular_column_depth_wave(&wave(1)),
+        Err(BranchMergeTombstoneHistoryError::DuplicateOrStale { order: 1 }),
+        "an exact committed replay remains stale after the retry identity check",
+    );
+    assert_eq!(history, committed);
+}
+
+#[test]
+fn column_ladder_folds_preserve_local_depth_labels_across_uneven_waves() {
+    let fixture_rows = COLUMN_RESTORE_LADDER
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    let row = |path: &str| {
+        fixture_rows
+            .iter()
+            .find(|row| row.key == string(path))
+            .unwrap_or_else(|| panic!("the in-crate column fixture supplies {path}"))
+            .clone()
+    };
+    let root = row("root");
+    let child = row("root/child");
+    let deep = row("root/child/deep");
+    let cells = |row: &KeyedRow, column| {
+        vec![(row.key.clone(), row.fields[&id(column)].clone())]
+    };
+    let depth = |fragments: Vec<Vec<(CanonicalValue, CanonicalValue)>>| {
+        BranchMergeColumnDepthFragments {
+            fragment_count: fragments.len(),
+            fragments: fragments.into_iter().enumerate().collect(),
+        }
+    };
+    let wave = |order| {
+        let columns = match order {
+            1 => BTreeMap::from([
+                (
+                    (id(1), id(2)),
+                    depth(vec![cells(&root, 2), cells(&child, 2)]),
+                ),
+                (
+                    (id(1), id(3)),
+                    depth(vec![
+                        cells(&root, 3),
+                        Vec::new(),
+                        cells(&child, 3),
+                        cells(&deep, 3),
+                    ]),
+                ),
+            ]),
+            2 => BTreeMap::from([
+                (
+                    (id(1), id(2)),
+                    depth(vec![cells(&root, 2), Vec::new(), cells(&deep, 2)]),
+                ),
+                (
+                    (id(1), id(3)),
+                    depth(vec![cells(&root, 3), cells(&deep, 3)]),
+                ),
+            ]),
+            other => panic!("unexpected column restore order: {other}"),
+        };
+        BranchMergeTabularColumnDepthWave { order, columns }
+    };
+    let empty_plan = |order| SequencedBranchMergePlan {
+        order,
+        plan: BranchMergePlan {
+            schema: Schema { version: EvolutionVersion::V1_0, tables: Vec::new() },
+            tables: BTreeMap::new(),
+            checkpoints: BTreeMap::new(),
+            report: Default::default(),
+        },
+        ordered_row_tombstones: Vec::new(),
+    };
+
+    let mut history = BranchMergeTombstoneHistory::new(0);
+    assert!(history.submit_tabular_column_depth_wave(&wave(2)).unwrap().is_empty());
+    assert!(history.submit_tabular_column_depth_wave(&wave(1)).unwrap().is_empty());
+    assert!(history.column_restore_ladder_folds().is_empty());
+    assert!(history.submit(&empty_plan(0)).unwrap().is_empty());
+
+    assert_eq!(
+        history.column_restore_ladder_folds(),
+        vec![
+            BranchMergeColumnRestoreLadderFoldSnapshot {
+                table: id(1),
+                column: id(2),
+                waves: vec![
+                    BranchMergeColumnDepthLadderWaveSnapshot {
+                        order: 1,
+                        fragments: vec![
+                            BranchMergeColumnDepthFragmentSnapshot {
+                                label: 0,
+                                cells: vec![(root.key.clone(), string("Ladder root"))],
+                            },
+                            BranchMergeColumnDepthFragmentSnapshot {
+                                label: 1,
+                                cells: vec![(child.key.clone(), string("Ladder child"))],
+                            },
+                        ],
+                    },
+                    BranchMergeColumnDepthLadderWaveSnapshot {
+                        order: 2,
+                        fragments: vec![
+                            BranchMergeColumnDepthFragmentSnapshot {
+                                label: 0,
+                                cells: vec![(root.key.clone(), string("Ladder root"))],
+                            },
+                            BranchMergeColumnDepthFragmentSnapshot {
+                                label: 1,
+                                cells: Vec::new(),
+                            },
+                            BranchMergeColumnDepthFragmentSnapshot {
+                                label: 2,
+                                cells: vec![(deep.key.clone(), string("Ladder deep"))],
+                            },
+                        ],
+                    },
+                ],
+            },
+            BranchMergeColumnRestoreLadderFoldSnapshot {
+                table: id(1),
+                column: id(3),
+                waves: vec![
+                    BranchMergeColumnDepthLadderWaveSnapshot {
+                        order: 1,
+                        fragments: vec![
+                            BranchMergeColumnDepthFragmentSnapshot {
+                                label: 0,
+                                cells: vec![(root.key.clone(), string("Oslo"))],
+                            },
+                            BranchMergeColumnDepthFragmentSnapshot {
+                                label: 1,
+                                cells: Vec::new(),
+                            },
+                            BranchMergeColumnDepthFragmentSnapshot {
+                                label: 2,
+                                cells: vec![(child.key.clone(), string("Bergen"))],
+                            },
+                            BranchMergeColumnDepthFragmentSnapshot {
+                                label: 3,
+                                cells: vec![(deep.key.clone(), string("Trondheim"))],
+                            },
+                        ],
+                    },
+                    BranchMergeColumnDepthLadderWaveSnapshot {
+                        order: 2,
+                        fragments: vec![
+                            BranchMergeColumnDepthFragmentSnapshot {
+                                label: 0,
+                                cells: vec![(root.key.clone(), string("Oslo"))],
+                            },
+                            BranchMergeColumnDepthFragmentSnapshot {
+                                label: 1,
+                                cells: vec![(deep.key.clone(), string("Trondheim"))],
+                            },
+                        ],
+                    },
+                ],
+            },
+        ],
+        "folds keep each column's independent labels and values for each storm order",
+    );
+}
+
+#[test]
+fn column_ladder_timelines_distinguish_omitted_columns_from_empty_depths() {
+    let fixture_rows = COLUMN_RESTORE_LADDER
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    let row = |path: &str| {
+        fixture_rows
+            .iter()
+            .find(|row| row.key == string(path))
+            .unwrap_or_else(|| panic!("the in-crate column fixture supplies {path}"))
+            .clone()
+    };
+    let root = row("root");
+    let child = row("root/child");
+    let deep = row("root/child/deep");
+    let cells = |row: &KeyedRow, column| {
+        vec![(row.key.clone(), row.fields[&id(column)].clone())]
+    };
+    let depth = |fragments: Vec<Vec<(CanonicalValue, CanonicalValue)>>| {
+        BranchMergeColumnDepthFragments {
+            fragment_count: fragments.len(),
+            fragments: fragments.into_iter().enumerate().collect(),
+        }
+    };
+    let wave = |order| {
+        let columns = match order {
+            1 => BTreeMap::from([
+                (
+                    (id(1), id(2)),
+                    depth(vec![cells(&root, 2), cells(&child, 2)]),
+                ),
+                (
+                    (id(1), id(3)),
+                    depth(vec![cells(&root, 3), Vec::new(), cells(&deep, 3)]),
+                ),
+            ]),
+            2 => BTreeMap::from([(
+                (id(1), id(2)),
+                depth(vec![cells(&root, 2), Vec::new()]),
+            )]),
+            3 => BTreeMap::from([(
+                (id(1), id(3)),
+                depth(vec![Vec::new(), cells(&deep, 3)]),
+            )]),
+            other => panic!("unexpected column restore order: {other}"),
+        };
+        BranchMergeTabularColumnDepthWave { order, columns }
+    };
+    let empty_plan = |order| SequencedBranchMergePlan {
+        order,
+        plan: BranchMergePlan {
+            schema: Schema { version: EvolutionVersion::V1_0, tables: Vec::new() },
+            tables: BTreeMap::new(),
+            checkpoints: BTreeMap::new(),
+            report: Default::default(),
+        },
+        ordered_row_tombstones: Vec::new(),
+    };
+    let fragment = |label, cells| BranchMergeColumnDepthFragmentSnapshot { label, cells };
+
+    let mut history = BranchMergeTombstoneHistory::new(0);
+    assert!(history.submit_tabular_column_depth_wave(&wave(3)).unwrap().is_empty());
+    assert!(history.submit_tabular_column_depth_wave(&wave(2)).unwrap().is_empty());
+    assert!(history.submit_tabular_column_depth_wave(&wave(1)).unwrap().is_empty());
+    assert!(history.column_restore_ladder_timelines().is_empty());
+    assert!(history.submit(&empty_plan(0)).unwrap().is_empty());
+
+    let timelines = history.column_restore_ladder_timelines();
+    assert_eq!(
+        timelines,
+        vec![
+            BranchMergeColumnRestoreLadderTimelineSnapshot {
+                table: id(1),
+                column: id(2),
+                waves: vec![
+                    BranchMergeColumnRestoreLadderWaveSlotSnapshot {
+                        order: 1,
+                        fragments: Some(vec![
+                            fragment(0, cells(&root, 2)),
+                            fragment(1, cells(&child, 2)),
+                        ]),
+                    },
+                    BranchMergeColumnRestoreLadderWaveSlotSnapshot {
+                        order: 2,
+                        fragments: Some(vec![
+                            fragment(0, cells(&root, 2)),
+                            fragment(1, Vec::new()),
+                        ]),
+                    },
+                    BranchMergeColumnRestoreLadderWaveSlotSnapshot {
+                        order: 3,
+                        fragments: None,
+                    },
+                ],
+            },
+            BranchMergeColumnRestoreLadderTimelineSnapshot {
+                table: id(1),
+                column: id(3),
+                waves: vec![
+                    BranchMergeColumnRestoreLadderWaveSlotSnapshot {
+                        order: 1,
+                        fragments: Some(vec![
+                            fragment(0, cells(&root, 3)),
+                            fragment(1, Vec::new()),
+                            fragment(2, cells(&deep, 3)),
+                        ]),
+                    },
+                    BranchMergeColumnRestoreLadderWaveSlotSnapshot {
+                        order: 2,
+                        fragments: None,
+                    },
+                    BranchMergeColumnRestoreLadderWaveSlotSnapshot {
+                        order: 3,
+                        fragments: Some(vec![
+                            fragment(0, Vec::new()),
+                            fragment(1, cells(&deep, 3)),
+                        ]),
+                    },
+                ],
+            },
+        ],
+        "each stable column gets an order slot; omitted ladders differ from labeled empty fragments",
+    );
+}
+
+#[test]
+fn column_restore_storms_fold_uneven_ladders_until_a_paired_mode_boundary() {
+    let fixture_rows = COLUMN_RESTORE_LADDER
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    let row = |path: &str| {
+        fixture_rows
+            .iter()
+            .find(|row| row.key == string(path))
+            .unwrap_or_else(|| panic!("the in-crate column fixture supplies {path}"))
+            .clone()
+    };
+    let root = row("root");
+    let child = row("root/child");
+    let deep = row("root/child/deep");
+    let cells = |row: &KeyedRow, column| {
+        vec![(row.key.clone(), row.fields[&id(column)].clone())]
+    };
+    let depth = |fragments: Vec<Vec<(CanonicalValue, CanonicalValue)>>| {
+        BranchMergeColumnDepthFragments {
+            fragment_count: fragments.len(),
+            fragments: fragments.into_iter().enumerate().collect(),
+        }
+    };
+    let wave = |order| {
+        let columns = match order {
+            1 => BTreeMap::from([
+                (
+                    (id(1), id(2)),
+                    depth(vec![cells(&root, 2), cells(&child, 2)]),
+                ),
+                (
+                    (id(1), id(3)),
+                    depth(vec![cells(&root, 3), Vec::new(), cells(&deep, 3)]),
+                ),
+            ]),
+            2 => BTreeMap::from([(
+                (id(1), id(2)),
+                depth(vec![cells(&root, 2), Vec::new()]),
+            )]),
+            3 => BTreeMap::from([(
+                (id(1), id(3)),
+                depth(vec![Vec::new(), cells(&deep, 3)]),
+            )]),
+            5 => BTreeMap::from([(
+                (id(1), id(2)),
+                depth(vec![cells(&root, 2), cells(&deep, 2)]),
+            )]),
+            other => panic!("unexpected column restore order: {other}"),
+        };
+        BranchMergeTabularColumnDepthWave { order, columns }
+    };
+    let empty_plan = |order| SequencedBranchMergePlan {
+        order,
+        plan: BranchMergePlan {
+            schema: Schema { version: EvolutionVersion::V1_0, tables: Vec::new() },
+            tables: BTreeMap::new(),
+            checkpoints: BTreeMap::new(),
+            report: Default::default(),
+        },
+        ordered_row_tombstones: Vec::new(),
+    };
+    let fragment = |label, cells| BranchMergeColumnDepthFragmentSnapshot { label, cells };
+
+    let mut history = BranchMergeTombstoneHistory::new(0);
+    assert!(history.submit_tabular_column_depth_wave(&wave(5)).unwrap().is_empty());
+    assert!(history.submit_tabular_column_depth_wave(&wave(3)).unwrap().is_empty());
+    assert!(history.submit_tabular_column_depth_wave(&wave(2)).unwrap().is_empty());
+    assert!(history.submit_tabular_column_depth_wave(&wave(1)).unwrap().is_empty());
+    assert!(history.column_restore_storms().is_empty());
+    assert!(history.submit(&empty_plan(0)).unwrap().is_empty());
+
+    let first_storm = history.column_restore_storms();
+    assert_eq!(first_storm.len(), 1);
+    assert_eq!((first_storm[0].first_order, first_storm[0].last_order), (1, 3));
+    assert_eq!(
+        first_storm[0]
+            .ladders
+            .iter()
+            .map(|ladder| (ladder.table, ladder.column))
+            .collect::<Vec<_>>(),
+        vec![(id(1), id(2)), (id(1), id(3))],
+    );
+    assert_eq!(
+        first_storm[0].ladders[0].waves[1].fragments,
+        Some(vec![fragment(0, cells(&root, 2)), fragment(1, Vec::new())]),
+        "a present empty depth stays labeled within the storm fold",
+    );
+    assert!(
+        first_storm[0].ladders[0].waves[2]
+            .fragments
+            .is_none(),
+        "the column omitted at order three remains absent from the first storm",
+    );
+    assert!(
+        first_storm[0].ladders[1].waves[1]
+            .fragments
+            .is_none(),
+        "the sibling column omission does not borrow another ladder's depth",
+    );
+    assert_eq!(
+        first_storm[0].ladders[1].waves[2].fragments,
+        Some(vec![fragment(0, Vec::new()), fragment(1, cells(&deep, 3))]),
+        "the city ladder restarts its local depth labels after an omitted wave",
+    );
+
+    assert!(history.submit(&empty_plan(4)).unwrap().is_empty());
+    let storms = history.column_restore_storms();
+    assert_eq!(
+        storms
+            .iter()
+            .map(|storm| (storm.first_order, storm.last_order))
+            .collect::<Vec<_>>(),
+        vec![(1, 3), (5, 5)],
+        "a committed non-column mode separates adjacent column-restore storms",
+    );
+    assert_eq!(
+        storms[1],
+        BranchMergeColumnRestoreStormSnapshot {
+            first_order: 5,
+            last_order: 5,
+            ladders: vec![BranchMergeColumnRestoreLadderTimelineSnapshot {
+                table: id(1),
+                column: id(2),
+                waves: vec![BranchMergeColumnRestoreLadderWaveSlotSnapshot {
+                    order: 5,
+                    fragments: Some(vec![fragment(0, cells(&root, 2)), fragment(1, cells(&deep, 2))]),
+                }],
+            }],
+        },
+        "the following storm keeps its own order and depth labels",
+    );
+}
+
+#[test]
+fn column_restore_storm_folds_keep_depth_labels_local_across_grouped_storms() {
+    let fixture_rows = COLUMN_RESTORE_LADDER
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    let row = |path: &str| {
+        fixture_rows
+            .iter()
+            .find(|row| row.key == string(path))
+            .unwrap_or_else(|| panic!("the in-crate column fixture supplies {path}"))
+            .clone()
+    };
+    let root = row("root");
+    let child = row("root/child");
+    let deep = row("root/child/deep");
+    let cells = |row: &KeyedRow, column| {
+        vec![(row.key.clone(), row.fields[&id(column)].clone())]
+    };
+    let depth = |fragments: Vec<Vec<(CanonicalValue, CanonicalValue)>>| {
+        BranchMergeColumnDepthFragments {
+            fragment_count: fragments.len(),
+            fragments: fragments.into_iter().enumerate().collect(),
+        }
+    };
+    let wave = |order| {
+        let columns = match order {
+            1 => BTreeMap::from([
+                (
+                    (id(1), id(2)),
+                    depth(vec![cells(&root, 2), cells(&child, 2)]),
+                ),
+                (
+                    (id(1), id(3)),
+                    depth(vec![Vec::new(), cells(&deep, 3), cells(&child, 3)]),
+                ),
+            ]),
+            2 => BTreeMap::from([(
+                (id(1), id(2)),
+                depth(vec![cells(&root, 2), Vec::new()]),
+            )]),
+            4 => BTreeMap::from([(
+                (id(1), id(3)),
+                depth(vec![Vec::new(), cells(&deep, 3)]),
+            )]),
+            5 => BTreeMap::from([(
+                (id(1), id(3)),
+                depth(vec![cells(&child, 3)]),
+            )]),
+            other => panic!("unexpected column restore order: {other}"),
+        };
+        BranchMergeTabularColumnDepthWave { order, columns }
+    };
+    let empty_plan = |order| SequencedBranchMergePlan {
+        order,
+        plan: BranchMergePlan {
+            schema: Schema {
+                version: EvolutionVersion::V1_0,
+                tables: Vec::new(),
+            },
+            tables: BTreeMap::new(),
+            checkpoints: BTreeMap::new(),
+            report: Default::default(),
+        },
+        ordered_row_tombstones: Vec::new(),
+    };
+    let fragment = |label, cells| BranchMergeColumnDepthFragmentSnapshot { label, cells };
+
+    let mut history = BranchMergeTombstoneHistory::new(0);
+    for order in [5, 4, 2, 1] {
+        assert!(history
+            .submit_tabular_column_depth_wave(&wave(order))
+            .unwrap()
+            .is_empty());
+    }
+    assert!(history.submit(&empty_plan(3)).unwrap().is_empty());
+    assert!(history.column_restore_storm_folds().is_empty());
+    assert!(history.submit(&empty_plan(0)).unwrap().is_empty());
+
+    assert_eq!(
+        history.column_restore_storm_folds(),
+        vec![
+            BranchMergeColumnRestoreStormFoldSnapshot {
+                table: id(1),
+                column: id(2),
+                storms: vec![
+                    BranchMergeColumnRestoreStormLadderSnapshot {
+                        first_order: 1,
+                        last_order: 2,
+                        waves: vec![
+                            BranchMergeColumnRestoreLadderWaveSlotSnapshot {
+                                order: 1,
+                                fragments: Some(vec![
+                                    fragment(0, cells(&root, 2)),
+                                    fragment(1, cells(&child, 2)),
+                                ]),
+                            },
+                            BranchMergeColumnRestoreLadderWaveSlotSnapshot {
+                                order: 2,
+                                fragments: Some(vec![
+                                    fragment(0, cells(&root, 2)),
+                                    fragment(1, Vec::new()),
+                                ]),
+                            },
+                        ],
+                    },
+                    BranchMergeColumnRestoreStormLadderSnapshot {
+                        first_order: 4,
+                        last_order: 5,
+                        waves: vec![
+                            BranchMergeColumnRestoreLadderWaveSlotSnapshot {
+                                order: 4,
+                                fragments: None,
+                            },
+                            BranchMergeColumnRestoreLadderWaveSlotSnapshot {
+                                order: 5,
+                                fragments: None,
+                            },
+                        ],
+                    },
+                ],
+            },
+            BranchMergeColumnRestoreStormFoldSnapshot {
+                table: id(1),
+                column: id(3),
+                storms: vec![
+                    BranchMergeColumnRestoreStormLadderSnapshot {
+                        first_order: 1,
+                        last_order: 2,
+                        waves: vec![
+                            BranchMergeColumnRestoreLadderWaveSlotSnapshot {
+                                order: 1,
+                                fragments: Some(vec![
+                                    fragment(0, Vec::new()),
+                                    fragment(1, cells(&deep, 3)),
+                                    fragment(2, cells(&child, 3)),
+                                ]),
+                            },
+                            BranchMergeColumnRestoreLadderWaveSlotSnapshot {
+                                order: 2,
+                                fragments: None,
+                            },
+                        ],
+                    },
+                    BranchMergeColumnRestoreStormLadderSnapshot {
+                        first_order: 4,
+                        last_order: 5,
+                        waves: vec![
+                            BranchMergeColumnRestoreLadderWaveSlotSnapshot {
+                                order: 4,
+                                fragments: Some(vec![
+                                    fragment(0, Vec::new()),
+                                    fragment(1, cells(&deep, 3)),
+                                ]),
+                            },
+                            BranchMergeColumnRestoreLadderWaveSlotSnapshot {
+                                order: 5,
+                                fragments: Some(vec![fragment(0, cells(&child, 3))]),
+                            },
+                        ],
+                    },
+                ],
+            },
+        ],
+        "each paired column retains its labels inside each storm, including absent columns across a storm and labeled empty depths",
+    );
+}
+
+#[test]
+fn column_restore_storm_depth_labels_pair_local_depths_with_storm_orders() {
+    let fixture_rows = COLUMN_RESTORE_LADDER
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    let row = |path: &str| {
+        fixture_rows
+            .iter()
+            .find(|row| row.key == string(path))
+            .unwrap_or_else(|| panic!("the in-crate column fixture supplies {path}"))
+            .clone()
+    };
+    let root = row("root");
+    let child = row("root/child");
+    let deep = row("root/child/deep");
+    let cells = |row: &KeyedRow, column| {
+        vec![(row.key.clone(), row.fields[&id(column)].clone())]
+    };
+    let depth = |fragments: Vec<Vec<(CanonicalValue, CanonicalValue)>>| {
+        BranchMergeColumnDepthFragments {
+            fragment_count: fragments.len(),
+            fragments: fragments.into_iter().enumerate().collect(),
+        }
+    };
+    let wave = |order| {
+        let columns = match order {
+            1 => BTreeMap::from([
+                (
+                    (id(1), id(2)),
+                    depth(vec![cells(&root, 2), cells(&child, 2)]),
+                ),
+                (
+                    (id(1), id(3)),
+                    depth(vec![Vec::new(), cells(&deep, 3)]),
+                ),
+            ]),
+            2 => BTreeMap::from([(
+                (id(1), id(2)),
+                depth(vec![cells(&root, 2), Vec::new(), cells(&deep, 2)]),
+            )]),
+            4 => BTreeMap::from([(
+                (id(1), id(3)),
+                depth(vec![cells(&child, 3)]),
+            )]),
+            other => panic!("unexpected column restore order: {other}"),
+        };
+        BranchMergeTabularColumnDepthWave { order, columns }
+    };
+    let empty_plan = |order| SequencedBranchMergePlan {
+        order,
+        plan: BranchMergePlan {
+            schema: Schema {
+                version: EvolutionVersion::V1_0,
+                tables: Vec::new(),
+            },
+            tables: BTreeMap::new(),
+            checkpoints: BTreeMap::new(),
+            report: Default::default(),
+        },
+        ordered_row_tombstones: Vec::new(),
+    };
+    let path_record = |storm_index, first_order, last_order, order, column, label, snapshot_paths| {
+        BranchMergeColumnRestoreStormDepthPathSnapshot {
+            storm_index,
+            first_order,
+            last_order,
+            order,
+            table: id(1),
+            column: id(column),
+            label,
+            snapshot_paths,
+        }
+    };
+
+    let mut history = BranchMergeTombstoneHistory::new(0);
+    for order in [4, 2, 1] {
+        assert!(history
+            .submit_tabular_column_depth_wave(&wave(order))
+            .unwrap()
+            .is_empty());
+    }
+    assert!(history.submit(&empty_plan(3)).unwrap().is_empty());
+    assert!(history.column_restore_storm_depth_labels().is_empty());
+    assert!(history.submit(&empty_plan(0)).unwrap().is_empty());
+
+    assert_eq!(
+        history.column_restore_storm_depth_labels(),
+        vec![
+            BranchMergeColumnRestoreStormDepthLabelWaveSnapshot {
+                storm_index: 0,
+                first_order: 1,
+                last_order: 2,
+                order: 1,
+                table: id(1),
+                column: id(2),
+                depth_labels: vec![0, 1],
+            },
+            BranchMergeColumnRestoreStormDepthLabelWaveSnapshot {
+                storm_index: 0,
+                first_order: 1,
+                last_order: 2,
+                order: 2,
+                table: id(1),
+                column: id(2),
+                depth_labels: vec![0, 1, 2],
+            },
+            BranchMergeColumnRestoreStormDepthLabelWaveSnapshot {
+                storm_index: 0,
+                first_order: 1,
+                last_order: 2,
+                order: 1,
+                table: id(1),
+                column: id(3),
+                depth_labels: vec![0, 1],
+            },
+            BranchMergeColumnRestoreStormDepthLabelWaveSnapshot {
+                storm_index: 1,
+                first_order: 4,
+                last_order: 4,
+                order: 4,
+                table: id(1),
+                column: id(3),
+                depth_labels: vec![0],
+            },
+        ],
+        "each emitted label set is paired with its stable column, committed storm, and restore order",
+    );
+    assert_eq!(
+        history.column_restore_storm_folds()[0].storms[0].waves[0].fragments,
+        Some(vec![
+            BranchMergeColumnDepthFragmentSnapshot {
+                label: 0,
+                cells: cells(&root, 2),
+            },
+            BranchMergeColumnDepthFragmentSnapshot {
+                label: 1,
+                cells: cells(&child, 2),
+            },
+        ]),
+        "the paired labels remain bound to actual fixture row keys and values",
+    );
+    assert_eq!(
+        history.column_restore_storm_depth_paths(),
+        vec![
+            path_record(0, 1, 2, 1, 2, 0, vec![root.key.clone()]),
+            path_record(0, 1, 2, 1, 2, 1, vec![child.key.clone()]),
+            path_record(0, 1, 2, 2, 2, 0, vec![root.key.clone()]),
+            path_record(0, 1, 2, 2, 2, 1, Vec::new()),
+            path_record(0, 1, 2, 2, 2, 2, vec![deep.key.clone()]),
+            path_record(0, 1, 2, 1, 3, 0, Vec::new()),
+            path_record(0, 1, 2, 1, 3, 1, vec![deep.key.clone()]),
+            path_record(1, 4, 4, 4, 3, 0, vec![child.key.clone()]),
+        ],
+        "snapshot row-key paths stay attached to their exact paired label, wave, and storm, including empty labels",
+    );
+}
+
+#[test]
+fn column_restore_storm_depth_path_slots_preserve_identity_across_omissions() {
+    let fixture_rows = COLUMN_RESTORE_LADDER
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    let row = |path: &str| {
+        fixture_rows
+            .iter()
+            .find(|row| row.key == string(path))
+            .unwrap_or_else(|| panic!("the in-crate column fixture supplies {path}"))
+            .clone()
+    };
+    let root = row("root");
+    let child = row("root/child");
+    let deep = row("root/child/deep");
+    assert_eq!(root.fields[&id(2)], string("Ladder root"));
+    assert_eq!(child.fields[&id(3)], string("Bergen"));
+    assert_eq!(deep.fields[&id(3)], string("Trondheim"));
+
+    let cells = |row: &KeyedRow, column| {
+        vec![(row.key.clone(), row.fields[&id(column)].clone())]
+    };
+    let depth = |fragments: Vec<Vec<(CanonicalValue, CanonicalValue)>>| {
+        BranchMergeColumnDepthFragments {
+            fragment_count: fragments.len(),
+            fragments: fragments.into_iter().enumerate().collect(),
+        }
+    };
+    let wave = |order| {
+        let columns = match order {
+            1 => BTreeMap::from([
+                (
+                    (id(1), id(2)),
+                    depth(vec![cells(&root, 2), cells(&child, 2)]),
+                ),
+                (
+                    (id(1), id(3)),
+                    depth(vec![cells(&root, 3), Vec::new()]),
+                ),
+            ]),
+            2 => BTreeMap::from([(
+                (id(1), id(2)),
+                depth(vec![cells(&deep, 2)]),
+            )]),
+            3 => BTreeMap::from([
+                (
+                    (id(1), id(2)),
+                    depth(vec![cells(&child, 2), cells(&deep, 2), cells(&root, 2)]),
+                ),
+                (
+                    (id(1), id(3)),
+                    depth(vec![cells(&child, 3), cells(&deep, 3)]),
+                ),
+            ]),
+            other => panic!("unexpected column restore order: {other}"),
+        };
+        BranchMergeTabularColumnDepthWave { order, columns }
+    };
+    let empty_plan = |order| SequencedBranchMergePlan {
+        order,
+        plan: BranchMergePlan {
+            schema: Schema {
+                version: EvolutionVersion::V1_0,
+                tables: Vec::new(),
+            },
+            tables: BTreeMap::new(),
+            checkpoints: BTreeMap::new(),
+            report: Default::default(),
+        },
+        ordered_row_tombstones: Vec::new(),
+    };
+    let fragment = |label, snapshot_paths| {
+        BranchMergeColumnRestoreStormDepthPathFragmentSnapshot {
+            label,
+            snapshot_paths,
+        }
+    };
+    let slot = |order, column, fragments| {
+        BranchMergeColumnRestoreStormDepthPathWaveSlotSnapshot {
+            storm_index: 0,
+            first_order: 1,
+            last_order: 3,
+            order,
+            table: id(1),
+            column: id(column),
+            fragments,
+        }
+    };
+    let path_fold = |column: u8,
+                     snapshot_path: CanonicalValue,
+                     depth_labels: Vec<Option<Vec<usize>>>| {
+        BranchMergeColumnRestoreStormSnapshotPathFoldSnapshot {
+            storm_index: 0,
+            first_order: 1,
+            last_order: 3,
+            table: id(1),
+            column: id(column),
+            snapshot_path,
+            waves: depth_labels
+                .into_iter()
+                .enumerate()
+                .map(|(index, depth_labels)| {
+                    BranchMergeColumnRestoreStormSnapshotPathWaveSlotSnapshot {
+                        order: index as u64 + 1,
+                        depth_labels,
+                    }
+                })
+                .collect(),
+        }
+    };
+
+    let mut history = BranchMergeTombstoneHistory::new(0);
+    for order in [3, 2, 1] {
+        assert!(history
+            .submit_tabular_column_depth_wave(&wave(order))
+            .unwrap()
+            .is_empty());
+    }
+    assert!(history.column_restore_storm_depth_path_slots().is_empty());
+    assert!(history.submit(&empty_plan(0)).unwrap().is_empty());
+    assert_eq!(
+        history.column_restore_storm_depth_path_slots(),
+        vec![
+            slot(
+                1,
+                2,
+                Some(vec![
+                    fragment(0, vec![root.key.clone()]),
+                    fragment(1, vec![child.key.clone()]),
+                ]),
+            ),
+            slot(2, 2, Some(vec![fragment(0, vec![deep.key.clone()])])),
+            slot(
+                3,
+                2,
+                Some(vec![
+                    fragment(0, vec![child.key.clone()]),
+                    fragment(1, vec![deep.key.clone()]),
+                    fragment(2, vec![root.key.clone()]),
+                ]),
+            ),
+            slot(
+                1,
+                3,
+                Some(vec![
+                    fragment(0, vec![root.key.clone()]),
+                    fragment(1, Vec::new()),
+                ]),
+            ),
+            slot(2, 3, None),
+            slot(
+                3,
+                3,
+                Some(vec![
+                    fragment(0, vec![child.key.clone()]),
+                    fragment(1, vec![deep.key.clone()]),
+                ]),
+            ),
+        ],
+        "the omitted paired column retains its own empty wave slot and resumes with local labels and exact fixture paths",
+    );
+    assert_eq!(
+        history.column_restore_storm_snapshot_path_folds(),
+        vec![
+            path_fold(
+                2,
+                root.key.clone(),
+                vec![Some(vec![0]), Some(Vec::new()), Some(vec![2])],
+            ),
+            path_fold(
+                2,
+                child.key.clone(),
+                vec![Some(vec![1]), Some(Vec::new()), Some(vec![0])],
+            ),
+            path_fold(
+                2,
+                deep.key.clone(),
+                vec![Some(Vec::new()), Some(vec![0]), Some(vec![1])],
+            ),
+            path_fold(
+                3,
+                root.key.clone(),
+                vec![Some(vec![0]), None, Some(Vec::new())],
+            ),
+            path_fold(
+                3,
+                child.key.clone(),
+                vec![Some(Vec::new()), None, Some(vec![0])],
+            ),
+            path_fold(
+                3,
+                deep.key.clone(),
+                vec![Some(Vec::new()), None, Some(vec![1])],
+            ),
+        ],
+        "each path keeps its stable column identity, local label occurrences, and both column-level and path-level omissions",
+    );
+}
+
+#[test]
+fn snapshot_path_chain_folds_keep_depth_labels_across_restore_storms() {
+    let fixture_rows = COLUMN_RESTORE_LADDER
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    let row = |path: &str| {
+        fixture_rows
+            .iter()
+            .find(|row| row.key == string(path))
+            .unwrap_or_else(|| panic!("the in-crate column fixture supplies {path}"))
+            .clone()
+    };
+    let root = row("root");
+    let child = row("root/child");
+    let deep = row("root/child/deep");
+    assert_eq!(root.fields[&id(2)], string("Ladder root"));
+    assert_eq!(child.fields[&id(3)], string("Bergen"));
+    assert_eq!(deep.fields[&id(3)], string("Trondheim"));
+
+    let cells = |row: &KeyedRow, column| {
+        vec![(row.key.clone(), row.fields[&id(column)].clone())]
+    };
+    let depth = |fragments: Vec<Vec<(CanonicalValue, CanonicalValue)>>| {
+        BranchMergeColumnDepthFragments {
+            fragment_count: fragments.len(),
+            fragments: fragments.into_iter().enumerate().collect(),
+        }
+    };
+    let wave = |order| {
+        let columns = match order {
+            1 => BTreeMap::from([
+                (
+                    (id(1), id(2)),
+                    depth(vec![cells(&root, 2), cells(&child, 2)]),
+                ),
+                ((id(1), id(3)), depth(vec![cells(&root, 3)])),
+            ]),
+            2 => BTreeMap::from([(
+                (id(1), id(2)),
+                depth(vec![cells(&child, 2), cells(&deep, 2)]),
+            )]),
+            4 => BTreeMap::from([(
+                (id(1), id(2)),
+                depth(vec![cells(&deep, 2), cells(&child, 2)]),
+            )]),
+            5 => BTreeMap::from([((id(1), id(2)), depth(vec![cells(&child, 2)]))]),
+            7 => BTreeMap::from([
+                (
+                    (id(1), id(2)),
+                    depth(vec![cells(&child, 2), cells(&root, 2)]),
+                ),
+                ((id(1), id(3)), depth(vec![cells(&root, 3)])),
+            ]),
+            8 => BTreeMap::from([
+                ((id(1), id(2)), depth(vec![cells(&deep, 2)])),
+                ((id(1), id(3)), depth(vec![cells(&child, 3)])),
+            ]),
+            other => panic!("unexpected column restore order: {other}"),
+        };
+        BranchMergeTabularColumnDepthWave { order, columns }
+    };
+    let empty_plan = |order| SequencedBranchMergePlan {
+        order,
+        plan: BranchMergePlan {
+            schema: Schema {
+                version: EvolutionVersion::V1_0,
+                tables: Vec::new(),
+            },
+            tables: BTreeMap::new(),
+            checkpoints: BTreeMap::new(),
+            report: Default::default(),
+        },
+        ordered_row_tombstones: Vec::new(),
+    };
+    let wave_slot = |order, depth_labels| {
+        BranchMergeColumnRestoreStormSnapshotPathWaveSlotSnapshot {
+            order,
+            depth_labels,
+        }
+    };
+    let storm = |storm_index, first_order, last_order, waves| {
+        BranchMergeColumnRestoreSnapshotPathStormSnapshot {
+            storm_index,
+            first_order,
+            last_order,
+            waves,
+        }
+    };
+    let root_fold = |column, storms| {
+        BranchMergeColumnRestoreSnapshotPathChainFoldSnapshot {
+            table: id(1),
+            column: id(column),
+            snapshot_path: root.key.clone(),
+            storms,
+        }
+    };
+    let paired_wave_slot = |order, depth_labels| {
+        BranchMergeColumnRestoreStormSnapshotPathWaveSlotSnapshot {
+            order,
+            depth_labels,
+        }
+    };
+    let paired_storm = |storm_index, first_order, last_order, waves| {
+        BranchMergeColumnRestoreSnapshotPathStormSnapshot {
+            storm_index,
+            first_order,
+            last_order,
+            waves,
+        }
+    };
+    let paired_column = |column, storms| {
+        BranchMergeColumnRestorePairedSnapshotPathColumnFoldSnapshot {
+            column: id(column),
+            storms,
+        }
+    };
+
+    let mut history = BranchMergeTombstoneHistory::new(0);
+    assert!(history.submit(&empty_plan(0)).unwrap().is_empty());
+    assert!(history
+        .submit_tabular_column_depth_wave(&wave(2))
+        .unwrap()
+        .is_empty());
+    assert!(history.column_restore_snapshot_path_chain_folds().is_empty());
+    history.submit_tabular_column_depth_wave(&wave(1)).unwrap();
+    assert!(history.submit(&empty_plan(3)).unwrap().is_empty());
+    assert!(history
+        .submit_tabular_column_depth_wave(&wave(5))
+        .unwrap()
+        .is_empty());
+    history.submit_tabular_column_depth_wave(&wave(4)).unwrap();
+    assert!(history.submit(&empty_plan(6)).unwrap().is_empty());
+    assert!(history
+        .submit_tabular_column_depth_wave(&wave(8))
+        .unwrap()
+        .is_empty());
+    history.submit_tabular_column_depth_wave(&wave(7)).unwrap();
+
+    let root_folds = history
+        .column_restore_snapshot_path_chain_folds()
+        .into_iter()
+        .filter(|fold| fold.snapshot_path == root.key)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        root_folds,
+        vec![
+            root_fold(
+                2,
+                vec![
+                    storm(
+                        0,
+                        1,
+                        2,
+                        vec![
+                            wave_slot(1, Some(vec![0])),
+                            wave_slot(2, Some(Vec::new())),
+                        ],
+                    ),
+                    storm(
+                        1,
+                        4,
+                        5,
+                        vec![
+                            wave_slot(4, Some(Vec::new())),
+                            wave_slot(5, Some(Vec::new())),
+                        ],
+                    ),
+                    storm(
+                        2,
+                        7,
+                        8,
+                        vec![
+                            wave_slot(7, Some(vec![1])),
+                            wave_slot(8, Some(Vec::new())),
+                        ],
+                    ),
+                ],
+            ),
+            root_fold(
+                3,
+                vec![
+                    storm(
+                        0,
+                        1,
+                        2,
+                        vec![wave_slot(1, Some(vec![0])), wave_slot(2, None)],
+                    ),
+                    storm(
+                        1,
+                        4,
+                        5,
+                        vec![wave_slot(4, None), wave_slot(5, None)],
+                    ),
+                    storm(
+                        2,
+                        7,
+                        8,
+                        vec![
+                            wave_slot(7, Some(vec![0])),
+                            wave_slot(8, Some(Vec::new())),
+                        ],
+                    ),
+                ],
+            ),
+        ],
+        "one canonical path remains attached to each column through three folds while labels restart locally and omissions remain distinct",
+    );
+
+    let paired_root_folds = history
+        .column_restore_paired_snapshot_path_chain_folds()
+        .into_iter()
+        .filter(|fold| fold.snapshot_path == root.key)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        paired_root_folds,
+        vec![BranchMergeColumnRestorePairedSnapshotPathChainFoldSnapshot {
+            table: id(1),
+            snapshot_path: root.key.clone(),
+            columns: vec![
+                paired_column(
+                    2,
+                    vec![
+                        paired_storm(
+                            0,
+                            1,
+                            2,
+                            vec![
+                                paired_wave_slot(1, Some(vec![0])),
+                                paired_wave_slot(2, Some(Vec::new())),
+                            ],
+                        ),
+                        paired_storm(
+                            1,
+                            4,
+                            5,
+                            vec![
+                                paired_wave_slot(4, Some(Vec::new())),
+                                paired_wave_slot(5, Some(Vec::new())),
+                            ],
+                        ),
+                        paired_storm(
+                            2,
+                            7,
+                            8,
+                            vec![
+                                paired_wave_slot(7, Some(vec![1])),
+                                paired_wave_slot(8, Some(Vec::new())),
+                            ],
+                        ),
+                    ],
+                ),
+                paired_column(
+                    3,
+                    vec![
+                        paired_storm(
+                            0,
+                            1,
+                            2,
+                            vec![paired_wave_slot(1, Some(vec![0])), paired_wave_slot(2, None)],
+                        ),
+                        paired_storm(
+                            1,
+                            4,
+                            5,
+                            vec![paired_wave_slot(4, None), paired_wave_slot(5, None)],
+                        ),
+                        paired_storm(
+                            2,
+                            7,
+                            8,
+                            vec![
+                                paired_wave_slot(7, Some(vec![0])),
+                                paired_wave_slot(8, Some(Vec::new())),
+                            ],
+                        ),
+                    ],
+                ),
+            ],
+        }],
+        "the paired fold shares the fixture path while preserving each sibling column's distinct omission and local depth labels",
+    );
+}
+
+#[test]
+fn paired_path_extension_folds_keep_identity_over_depth_omissions() {
+    let fixture_rows = COLUMN_RESTORE_EXTENSIONS
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    let row = |path: &str| {
+        fixture_rows
+            .iter()
+            .find(|row| row.key == string(path))
+            .unwrap_or_else(|| panic!("the in-crate extension fixture supplies {path}"))
+            .clone()
+    };
+    let prefix = row("a");
+    let extension = row("a/child");
+    let boundary_lookalike = row("ab");
+    assert_eq!(prefix.fields[&id(2)], string("Prefix row"));
+    assert_eq!(extension.fields[&id(3)], string("Bergen"));
+    assert_eq!(boundary_lookalike.fields[&id(2)], string("Boundary lookalike"));
+
+    let cells = |row: &KeyedRow, column| {
+        vec![(row.key.clone(), row.fields[&id(column)].clone())]
+    };
+    let depth = |fragments: Vec<Vec<(CanonicalValue, CanonicalValue)>>| {
+        BranchMergeColumnDepthFragments {
+            fragment_count: fragments.len(),
+            fragments: fragments.into_iter().enumerate().collect(),
+        }
+    };
+    let wave = |order| {
+        let columns = match order {
+            1 => BTreeMap::from([
+                (
+                    (id(1), id(2)),
+                    depth(vec![
+                        cells(&prefix, 2),
+                        cells(&extension, 2),
+                        cells(&boundary_lookalike, 2),
+                    ]),
+                ),
+                ((id(1), id(3)), depth(vec![cells(&prefix, 3)])),
+            ]),
+            2 => BTreeMap::from([((id(1), id(2)), depth(vec![cells(&prefix, 2)]))]),
+            4 => BTreeMap::from([
+                (
+                    (id(1), id(2)),
+                    depth(vec![Vec::new(), Vec::new(), cells(&extension, 2)]),
+                ),
+                ((id(1), id(3)), depth(vec![cells(&extension, 3)])),
+            ]),
+            5 => BTreeMap::from([((id(1), id(3)), depth(vec![cells(&prefix, 3)]))]),
+            other => panic!("unexpected extension restore order: {other}"),
+        };
+        BranchMergeTabularColumnDepthWave { order, columns }
+    };
+    let empty_plan = |order| SequencedBranchMergePlan {
+        order,
+        plan: BranchMergePlan {
+            schema: Schema {
+                version: EvolutionVersion::V1_0,
+                tables: Vec::new(),
+            },
+            tables: BTreeMap::new(),
+            checkpoints: BTreeMap::new(),
+            report: Default::default(),
+        },
+        ordered_row_tombstones: Vec::new(),
+    };
+    let wave_slot = |order, prefix_depth_labels, extension_depth_labels| {
+        BranchMergeColumnRestorePairedPathExtensionWaveSlotSnapshot {
+            order,
+            prefix_depth_labels,
+            extension_depth_labels,
+        }
+    };
+    let storm = |storm_index, first_order, last_order, waves| {
+        BranchMergeColumnRestorePairedPathExtensionStormSnapshot {
+            storm_index,
+            first_order,
+            last_order,
+            waves,
+        }
+    };
+    let column = |column, storms| {
+        BranchMergeColumnRestorePairedPathExtensionColumnFoldSnapshot {
+            column: id(column),
+            storms,
+        }
+    };
+
+    let mut history = BranchMergeTombstoneHistory::new(0);
+    assert!(history.submit(&empty_plan(0)).unwrap().is_empty());
+    assert!(history
+        .submit_tabular_column_depth_wave(&wave(2))
+        .unwrap()
+        .is_empty());
+    history.submit_tabular_column_depth_wave(&wave(1)).unwrap();
+    assert!(history.submit(&empty_plan(3)).unwrap().is_empty());
+    assert!(history
+        .submit_tabular_column_depth_wave(&wave(5))
+        .unwrap()
+        .is_empty());
+    history.submit_tabular_column_depth_wave(&wave(4)).unwrap();
+    assert!(history.submit(&empty_plan(6)).unwrap().is_empty());
+
+    assert_eq!(
+        history.column_restore_paired_path_extension_folds(),
+        vec![BranchMergeColumnRestorePairedPathExtensionFoldSnapshot {
+            table: id(1),
+            prefix_path: prefix.key.clone(),
+            extension_path: extension.key.clone(),
+            columns: vec![
+                column(
+                    2,
+                    vec![
+                        storm(
+                            0,
+                            1,
+                            2,
+                            vec![
+                                wave_slot(1, Some(vec![0]), Some(vec![1])),
+                                wave_slot(2, Some(vec![0]), Some(Vec::new())),
+                            ],
+                        ),
+                        storm(
+                            1,
+                            4,
+                            5,
+                            vec![
+                                wave_slot(4, Some(Vec::new()), Some(vec![2])),
+                                wave_slot(5, None, None),
+                            ],
+                        ),
+                    ],
+                ),
+                column(
+                    3,
+                    vec![
+                        storm(
+                            0,
+                            1,
+                            2,
+                            vec![
+                                wave_slot(1, Some(vec![0]), Some(Vec::new())),
+                                wave_slot(2, None, None),
+                            ],
+                        ),
+                        storm(
+                            1,
+                            4,
+                            5,
+                            vec![
+                                wave_slot(4, Some(Vec::new()), Some(vec![0])),
+                                wave_slot(5, Some(vec![0]), Some(Vec::new())),
+                            ],
+                        ),
+                    ],
+                ),
+            ],
+        }],
+        "the exact slash-boundary extension keeps independent depths through absent paths and waves across paired columns",
+    );
+}
+
+#[test]
+fn paired_snapshot_path_occurrences_keep_identity_across_omitted_depths() {
+    let fixture_rows = PAIRED_SNAPSHOT_OMISSIONS
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    let row = |path: &str| {
+        fixture_rows
+            .iter()
+            .find(|row| row.key == string(path))
+            .unwrap_or_else(|| panic!("the in-crate omission fixture supplies {path}"))
+            .clone()
+    };
+    let root = row("restore/root");
+    let child = row("restore/root/child");
+    let other = row("restore/other");
+    assert_eq!(root.fields[&id(2)], string("Root identity"));
+    assert_eq!(child.fields[&id(3)], string("Bergen"));
+    assert_eq!(other.fields[&id(2)], string("Other path"));
+
+    let cells = |row: &KeyedRow, column| {
+        vec![(row.key.clone(), row.fields[&id(column)].clone())]
+    };
+    let depth = |fragments: Vec<Vec<(CanonicalValue, CanonicalValue)>>| {
+        BranchMergeColumnDepthFragments {
+            fragment_count: fragments.len(),
+            fragments: fragments.into_iter().enumerate().collect(),
+        }
+    };
+    let wave = |order| {
+        let columns = match order {
+            1 => BTreeMap::from([
+                (
+                    (id(1), id(2)),
+                    depth(vec![cells(&root, 2), cells(&child, 2)]),
+                ),
+                ((id(1), id(3)), depth(vec![cells(&root, 3)])),
+            ]),
+            2 => BTreeMap::from([((id(1), id(2)), depth(vec![cells(&root, 2)]))]),
+            4 => BTreeMap::from([
+                (
+                    (id(1), id(2)),
+                    depth(vec![Vec::new(), Vec::new(), cells(&child, 2)]),
+                ),
+                ((id(1), id(3)), depth(vec![cells(&child, 3)])),
+            ]),
+            5 => BTreeMap::from([((id(1), id(3)), depth(vec![cells(&root, 3)]))]),
+            other => panic!("unexpected paired omission restore order: {other}"),
+        };
+        BranchMergeTabularColumnDepthWave { order, columns }
+    };
+    let empty_plan = |order| SequencedBranchMergePlan {
+        order,
+        plan: BranchMergePlan {
+            schema: Schema {
+                version: EvolutionVersion::V1_0,
+                tables: Vec::new(),
+            },
+            tables: BTreeMap::new(),
+            checkpoints: BTreeMap::new(),
+            report: Default::default(),
+        },
+        ordered_row_tombstones: Vec::new(),
+    };
+
+    let mut history = BranchMergeTombstoneHistory::new(0);
+    assert!(history.submit(&empty_plan(0)).unwrap().is_empty());
+    assert!(history
+        .submit_tabular_column_depth_wave(&wave(2))
+        .unwrap()
+        .is_empty());
+    history.submit_tabular_column_depth_wave(&wave(1)).unwrap();
+    assert!(history.submit(&empty_plan(3)).unwrap().is_empty());
+    assert!(history
+        .submit_tabular_column_depth_wave(&wave(5))
+        .unwrap()
+        .is_empty());
+    history.submit_tabular_column_depth_wave(&wave(4)).unwrap();
+    assert!(history.submit(&empty_plan(6)).unwrap().is_empty());
+
+    let folds = history.column_restore_paired_snapshot_path_occurrence_folds();
+    let child_fold = folds
+        .iter()
+        .find(|fold| fold.table == id(1) && fold.snapshot_path == child.key)
+        .expect("the child path identity survives its omitted restore waves");
+    assert_eq!(
+        child_fold.columns.iter().map(|column| column.column).collect::<Vec<_>>(),
+        vec![id(2), id(3)],
+    );
+    let occurrence = |column, storm_index, order| {
+        child_fold
+            .columns
+            .iter()
+            .find(|fold| fold.column == id(column))
+            .unwrap()
+            .storms
+            .iter()
+            .find(|storm| storm.storm_index == storm_index)
+            .unwrap()
+            .waves
+            .iter()
+            .find(|wave| wave.order == order)
+            .unwrap()
+            .occurrence
+            .clone()
+    };
+    assert_eq!(
+        occurrence(2, 0, 1),
+        BranchMergeSnapshotPathOccurrence::DepthLabels(vec![1]),
+    );
+    assert_eq!(
+        occurrence(2, 0, 2),
+        BranchMergeSnapshotPathOccurrence::PathOmitted,
+    );
+    assert_eq!(
+        occurrence(3, 0, 1),
+        BranchMergeSnapshotPathOccurrence::PathOmitted,
+    );
+    assert_eq!(
+        occurrence(3, 0, 2),
+        BranchMergeSnapshotPathOccurrence::ColumnOmitted,
+    );
+    assert_eq!(
+        occurrence(2, 1, 4),
+        BranchMergeSnapshotPathOccurrence::DepthLabels(vec![2]),
+    );
+    assert_eq!(
+        occurrence(3, 1, 4),
+        BranchMergeSnapshotPathOccurrence::DepthLabels(vec![0]),
+    );
+    assert_eq!(
+        occurrence(2, 1, 5),
+        BranchMergeSnapshotPathOccurrence::ColumnOmitted,
+    );
+    assert_eq!(
+        occurrence(3, 1, 5),
+        BranchMergeSnapshotPathOccurrence::PathOmitted,
+    );
+}
+
+#[test]
+fn paired_extension_occurrences_keep_independent_depth_identities() {
+    let fixture_rows = PAIRED_EXTENSION_OMISSIONS
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    let row = |path: &str| {
+        fixture_rows
+            .iter()
+            .find(|row| row.key == string(path))
+            .unwrap_or_else(|| panic!("the in-crate extension fixture supplies {path}"))
+            .clone()
+    };
+    let prefix = row("snapshot");
+    let extension = row("snapshot/child");
+    let lookalike = row("snapshotting");
+    assert_eq!(prefix.fields[&id(2)], string("Prefix snapshot"));
+    assert_eq!(extension.fields[&id(3)], string("Bergen"));
+    assert_eq!(lookalike.fields[&id(2)], string("Boundary lookalike"));
+
+    let cells = |row: &KeyedRow, column| {
+        vec![(row.key.clone(), row.fields[&id(column)].clone())]
+    };
+    let depth = |fragments: Vec<Vec<(CanonicalValue, CanonicalValue)>>| {
+        BranchMergeColumnDepthFragments {
+            fragment_count: fragments.len(),
+            fragments: fragments.into_iter().enumerate().collect(),
+        }
+    };
+    let wave = |order| {
+        let columns = match order {
+            1 => BTreeMap::from([
+                (
+                    (id(1), id(2)),
+                    depth(vec![cells(&prefix, 2), cells(&extension, 2), cells(&lookalike, 2)]),
+                ),
+                ((id(1), id(3)), depth(vec![cells(&prefix, 3)])),
+            ]),
+            2 => BTreeMap::from([((id(1), id(2)), depth(vec![cells(&prefix, 2)]))]),
+            4 => BTreeMap::from([
+                (
+                    (id(1), id(2)),
+                    depth(vec![Vec::new(), Vec::new(), cells(&extension, 2)]),
+                ),
+                ((id(1), id(3)), depth(vec![cells(&extension, 3)])),
+            ]),
+            5 => BTreeMap::from([((id(1), id(3)), depth(vec![cells(&prefix, 3)]))]),
+            other => panic!("unexpected extension omission restore order: {other}"),
+        };
+        BranchMergeTabularColumnDepthWave { order, columns }
+    };
+    let empty_plan = |order| SequencedBranchMergePlan {
+        order,
+        plan: BranchMergePlan {
+            schema: Schema {
+                version: EvolutionVersion::V1_0,
+                tables: Vec::new(),
+            },
+            tables: BTreeMap::new(),
+            checkpoints: BTreeMap::new(),
+            report: Default::default(),
+        },
+        ordered_row_tombstones: Vec::new(),
+    };
+
+    let mut history = BranchMergeTombstoneHistory::new(0);
+    assert!(history.submit(&empty_plan(0)).unwrap().is_empty());
+    assert!(history
+        .submit_tabular_column_depth_wave(&wave(2))
+        .unwrap()
+        .is_empty());
+    history.submit_tabular_column_depth_wave(&wave(1)).unwrap();
+    assert!(history.submit(&empty_plan(3)).unwrap().is_empty());
+    assert!(history
+        .submit_tabular_column_depth_wave(&wave(5))
+        .unwrap()
+        .is_empty());
+    history.submit_tabular_column_depth_wave(&wave(4)).unwrap();
+    assert!(history.submit(&empty_plan(6)).unwrap().is_empty());
+
+    let folds = history.column_restore_paired_path_extension_occurrence_folds();
+    assert_eq!(folds.len(), 1, "slash boundary excludes snapshotting");
+    let fold = &folds[0];
+    assert_eq!(fold.table, id(1));
+    assert_eq!(fold.prefix_path, prefix.key);
+    assert_eq!(fold.extension_path, extension.key);
+    let states = |column, storm_index, order| {
+        let wave = fold
+            .columns
+            .iter()
+            .find(|fold| fold.column == id(column))
+            .unwrap()
+            .storms
+            .iter()
+            .find(|storm| storm.storm_index == storm_index)
+            .unwrap()
+            .waves
+            .iter()
+            .find(|wave| wave.order == order)
+            .unwrap();
+        (wave.prefix_occurrence.clone(), wave.extension_occurrence.clone())
+    };
+    assert_eq!(
+        states(2, 0, 1),
+        (
+            BranchMergeSnapshotPathOccurrence::DepthLabels(vec![0]),
+            BranchMergeSnapshotPathOccurrence::DepthLabels(vec![1]),
+        ),
+    );
+    assert_eq!(
+        states(2, 0, 2),
+        (
+            BranchMergeSnapshotPathOccurrence::DepthLabels(vec![0]),
+            BranchMergeSnapshotPathOccurrence::PathOmitted,
+        ),
+    );
+    assert_eq!(
+        states(3, 0, 2),
+        (
+            BranchMergeSnapshotPathOccurrence::ColumnOmitted,
+            BranchMergeSnapshotPathOccurrence::ColumnOmitted,
+        ),
+    );
+    assert_eq!(
+        states(2, 1, 4),
+        (
+            BranchMergeSnapshotPathOccurrence::PathOmitted,
+            BranchMergeSnapshotPathOccurrence::DepthLabels(vec![2]),
+        ),
+    );
+    assert_eq!(
+        states(3, 1, 4),
+        (
+            BranchMergeSnapshotPathOccurrence::PathOmitted,
+            BranchMergeSnapshotPathOccurrence::DepthLabels(vec![0]),
+        ),
+    );
+    assert_eq!(
+        states(2, 1, 5),
+        (
+            BranchMergeSnapshotPathOccurrence::ColumnOmitted,
+            BranchMergeSnapshotPathOccurrence::ColumnOmitted,
+        ),
+    );
+    assert_eq!(
+        states(3, 1, 5),
+        (
+            BranchMergeSnapshotPathOccurrence::DepthLabels(vec![0]),
+            BranchMergeSnapshotPathOccurrence::PathOmitted,
+        ),
+    );
+}
+
+#[test]
+fn multi_parent_column_restore_ladders_keep_fragment_depth_identities() {
+    let fixture_rows = MULTI_PARENT_COLUMN_DEPTH
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    let row = |path: &str| {
+        fixture_rows
+            .iter()
+            .find(|row| row.key == string(path))
+            .unwrap_or_else(|| panic!("the in-crate multi-parent fixture supplies {path}"))
+            .clone()
+    };
+    let shared = row("shared");
+    let left = row("branch/left");
+    let right = row("branch/right");
+    let deep = row("branch/right/deep");
+    assert_eq!(shared.fields[&id(2)], string("Root value"));
+    assert_eq!(left.fields[&id(3)], string("Bergen"));
+    assert_eq!(right.fields[&id(2)], string("Right leaf"));
+    assert_eq!(deep.fields[&id(3)], string("Canberra"));
+
+    let cells = |row: &KeyedRow, column: u8| {
+        (row.key.clone(), row.fields[&id(column)].clone())
+    };
+    let depth = |fragment_count: usize,
+                 fragments: BTreeMap<usize, Vec<(CanonicalValue, CanonicalValue)>>| {
+        BranchMergeColumnDepthFragments { fragment_count, fragments }
+    };
+    let wave = |order| BranchMergeMultiParentTabularColumnDepthWave {
+        order,
+        parents: BTreeMap::from([
+            (
+                id(10),
+                BTreeMap::from([
+                    (
+                        (id(1), id(2)),
+                        depth(1, BTreeMap::from([(0, vec![cells(&shared, 2)])])),
+                    ),
+                    (
+                        (id(1), id(3)),
+                        depth(1, BTreeMap::from([(0, vec![cells(&shared, 3)])])),
+                    ),
+                ]),
+            ),
+            (
+                id(20),
+                BTreeMap::from([
+                    (
+                        (id(1), id(2)),
+                        depth(
+                            2,
+                            BTreeMap::from([
+                                (0, vec![cells(&shared, 2)]),
+                                (1, vec![cells(&left, 2)]),
+                            ]),
+                        ),
+                    ),
+                    (
+                        (id(1), id(3)),
+                        depth(
+                            3,
+                            BTreeMap::from([
+                                (0, vec![cells(&shared, 3)]),
+                                (1, Vec::new()),
+                                (2, vec![cells(&left, 3)]),
+                            ]),
+                        ),
+                    ),
+                ]),
+            ),
+            (
+                id(30),
+                BTreeMap::from([
+                    (
+                        (id(1), id(2)),
+                        depth(
+                            3,
+                            BTreeMap::from([
+                                (0, vec![cells(&shared, 2)]),
+                                (1, Vec::new()),
+                                (2, vec![cells(&right, 2)]),
+                            ]),
+                        ),
+                    ),
+                    (
+                        (id(1), id(3)),
+                        depth(
+                            4,
+                            BTreeMap::from([
+                                (0, vec![cells(&shared, 3)]),
+                                (1, Vec::new()),
+                                (2, vec![cells(&right, 3)]),
+                                (3, vec![cells(&deep, 3)]),
+                            ]),
+                        ),
+                    ),
+                ]),
+            ),
+        ]),
+    };
+    let empty_plan = |order| SequencedBranchMergePlan {
+        order,
+        plan: BranchMergePlan {
+            schema: Schema { version: EvolutionVersion::V1_0, tables: Vec::new() },
+            tables: BTreeMap::new(),
+            checkpoints: BTreeMap::new(),
+            report: Default::default(),
+        },
+        ordered_row_tombstones: Vec::new(),
+    };
+
+    let mut history = BranchMergeTombstoneHistory::new(0);
+    assert!(history
+        .submit_multi_parent_tabular_column_depth_wave(&wave(2))
+        .unwrap()
+        .is_empty());
+    assert!(history.parent_column_events().is_empty());
+    assert!(history.submit(&empty_plan(0)).unwrap().is_empty());
+    assert_eq!(history.next_order(), Some(1));
+    assert!(history.submit(&empty_plan(1)).unwrap().is_empty());
+    assert_eq!(history.next_order(), Some(3));
+    assert_eq!(
+        history
+            .parent_column_events()
+            .iter()
+            .map(|event| (
+                event.parent,
+                event.table,
+                event.column,
+                event.fragment,
+                event.key.clone(),
+                event.value.clone(),
+            ))
+            .collect::<Vec<_>>(),
+        vec![
+            (id(10), id(1), id(2), 0, string("shared"), string("Root value")),
+            (id(10), id(1), id(3), 0, string("shared"), string("Oslo")),
+            (id(20), id(1), id(2), 0, string("shared"), string("Root value")),
+            (id(20), id(1), id(2), 1, string("branch/left"), string("Left leaf")),
+            (id(20), id(1), id(3), 0, string("shared"), string("Oslo")),
+            (id(20), id(1), id(3), 2, string("branch/left"), string("Bergen")),
+            (id(30), id(1), id(2), 0, string("shared"), string("Root value")),
+            (id(30), id(1), id(2), 2, string("branch/right"), string("Right leaf")),
+            (id(30), id(1), id(3), 0, string("shared"), string("Oslo")),
+            (id(30), id(1), id(3), 2, string("branch/right"), string("Melbourne")),
+            (id(30), id(1), id(3), 3, string("branch/right/deep"), string("Canberra")),
+        ],
+        "the shared fixture row remains separately attributed to all parents while uneven depth labels stay column-local",
+    );
+    let committed = history.clone();
+
+    let mut shorter_deep_city = wave(2);
+    let city = shorter_deep_city
+        .parents
+        .get_mut(&id(30))
+        .unwrap()
+        .get_mut(&(id(1), id(3)))
+        .unwrap();
+    city.fragment_count = 3;
+    city.fragments = BTreeMap::from([
+        (0, vec![cells(&shared, 3)]),
+        (1, Vec::new()),
+        (2, vec![cells(&right, 3)]),
+    ]);
+    assert_eq!(
+        history.submit_multi_parent_tabular_column_depth_wave(&shorter_deep_city),
+        Err(BranchMergeTombstoneHistoryError::ParentColumnFragmentCountMismatch {
+            order: 2,
+            parent: id(30),
+            table: id(1),
+            column: id(3),
+            expected: 4,
+            actual: 3,
+        }),
+        "the third parent's deep city ladder cannot be shortened to a sibling branch's count",
+    );
+    assert_eq!(history, committed);
+
+    let mut changed_parent_cell = wave(2);
+    changed_parent_cell
+        .parents
+        .get_mut(&id(20))
+        .unwrap()
+        .get_mut(&(id(1), id(2)))
+        .unwrap()
+        .fragments
+        .get_mut(&1)
+        .unwrap()[0]
+        .1 = string("Changed parent retry");
+    assert_eq!(
+        history.submit_multi_parent_tabular_column_depth_wave(&changed_parent_cell),
+        Err(BranchMergeTombstoneHistoryError::ConflictingSubmission { order: 2 }),
+        "a parent-local fragment keeps the retry identity of its fixture row and value",
+    );
+    assert_eq!(history, committed);
+
+    let mut missing_empty_depth = wave(2);
+    missing_empty_depth
+        .parents
+        .get_mut(&id(20))
+        .unwrap()
+        .get_mut(&(id(1), id(3)))
+        .unwrap()
+        .fragments
+        .remove(&1);
+    assert_eq!(
+        history.submit_multi_parent_tabular_column_depth_wave(&missing_empty_depth),
+        Err(BranchMergeTombstoneHistoryError::IncompleteParentColumnDepthFragments {
+            order: 2,
+            parent: id(20),
+            table: id(1),
+            column: id(3),
+        }),
+        "an empty parent-local depth remains part of the retry label",
+    );
+    assert_eq!(history, committed);
+
+    let mut changed_parent_set = wave(2);
+    changed_parent_set.parents.remove(&id(30));
+    assert_eq!(
+        history.submit_multi_parent_tabular_column_depth_wave(&changed_parent_set),
+        Err(BranchMergeTombstoneHistoryError::ConflictingSubmission { order: 2 }),
+        "a retry cannot drop a parent and widen the other parents' identities",
+    );
+    assert_eq!(history, committed);
+    assert_eq!(
+        history.submit_multi_parent_tabular_column_depth_wave(&wave(2)),
+        Err(BranchMergeTombstoneHistoryError::DuplicateOrStale { order: 2 }),
+        "an exact multi-parent retry remains stale after identity validation",
+    );
+    assert_eq!(history, committed);
+}
+
+#[test]
+fn tabular_restore_storm_releases_uneven_table_depth_identities() {
+    let fixture_rows = TOMBSTONE_DEPTH_COMMIT_ORDER
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    let fixture_row = |path: &str| {
+        fixture_rows
+            .iter()
+            .find(|row| row.key == string(path))
+            .unwrap_or_else(|| panic!("the in-crate storm fixture supplies {path}"))
+            .clone()
+    };
+    let root = fixture_row("root");
+    let child = fixture_row("root/child");
+    let deep = fixture_row("root/child/deep");
+    let leaf = fixture_row("root/child/deep/leaf/twig");
+    let anchor = fixture_row("a");
+    let anchor_child = fixture_row("a/child");
+    let anchor_deep = fixture_row("a/child/deep");
+    let anchor_leaf = fixture_row("a/child/deep/leaf");
+    assert_eq!(root.fields[&id(2)], string("Storm root"));
+    assert_eq!(leaf.fields[&id(2)], string("Storm twig"));
+    assert_eq!(anchor.fields[&id(2)], string("Anchor root"));
+    assert_eq!(anchor_leaf.fields[&id(2)], string("Anchor leaf"));
+
+    let depth = |fragment_count, fragments| BranchMergeTableDepthFragments {
+        fragment_count,
+        fragments,
+    };
+    let wave = |order| {
+        let tables = match order {
+            2 => BTreeMap::from([
+                (
+                    id(1),
+                    depth(
+                        3,
+                        BTreeMap::from([
+                            (0, vec![root.key.clone()]),
+                            (1, Vec::new()),
+                            (2, vec![child.key.clone()]),
+                        ]),
+                    ),
+                ),
+                (
+                    id(2),
+                    depth(
+                        2,
+                        BTreeMap::from([
+                            (0, vec![anchor.key.clone()]),
+                            (1, vec![anchor_deep.key.clone()]),
+                        ]),
+                    ),
+                ),
+            ]),
+            3 => BTreeMap::from([
+                (
+                    id(1),
+                    depth(
+                        2,
+                        BTreeMap::from([
+                            (0, vec![deep.key.clone()]),
+                            (1, vec![leaf.key.clone()]),
+                        ]),
+                    ),
+                ),
+                (
+                    id(2),
+                    depth(
+                        4,
+                        BTreeMap::from([
+                            (0, vec![anchor_child.key.clone()]),
+                            (1, Vec::new()),
+                            (2, vec![anchor_leaf.key.clone()]),
+                            (3, Vec::new()),
+                        ]),
+                    ),
+                ),
+            ]),
+            other => panic!("unexpected restore wave order: {other}"),
+        };
+        BranchMergeTabularDepthWave { order, tables }
+    };
+    let empty_plan = |order| SequencedBranchMergePlan {
+        order,
+        plan: BranchMergePlan {
+            schema: Schema { version: EvolutionVersion::V1_0, tables: Vec::new() },
+            tables: BTreeMap::new(),
+            checkpoints: BTreeMap::new(),
+            report: Default::default(),
+        },
+        ordered_row_tombstones: Vec::new(),
+    };
+
+    let mut history = BranchMergeTombstoneHistory::new(0);
+    assert!(history.submit_tabular_depth_wave(&wave(3)).unwrap().is_empty());
+    assert!(history.submit_tabular_depth_wave(&wave(2)).unwrap().is_empty());
+    assert!(history.table_ladder_events().is_empty());
+    assert!(history.submit(&empty_plan(0)).unwrap().is_empty());
+    assert_eq!(history.next_order(), Some(1));
+    assert!(history.table_ladder_events().is_empty());
+
+    let released = history.submit(&empty_plan(1)).unwrap();
+    assert_eq!(released.len(), 8, "the two queued storm waves release their fixture keys once");
+    assert_eq!(
+        history.table_ladder_events(),
+        &[
+            BranchMergeTableDepthLadderEvent {
+                order: 2,
+                table: id(1),
+                depth_labels: vec![0, 1, 2],
+            },
+            BranchMergeTableDepthLadderEvent {
+                order: 2,
+                table: id(2),
+                depth_labels: vec![0, 1],
+            },
+            BranchMergeTableDepthLadderEvent {
+                order: 3,
+                table: id(1),
+                depth_labels: vec![0, 1],
+            },
+            BranchMergeTableDepthLadderEvent {
+                order: 3,
+                table: id(2),
+                depth_labels: vec![0, 1, 2, 3],
+            },
+        ],
+        "out-of-order restore waves release in lineage order with independent table labels",
+    );
+    assert_eq!(
+        history.events().iter().map(|event| event.order).collect::<Vec<_>>(),
+        vec![2, 2, 2, 2, 3, 3, 3, 3],
+        "each completed storm wave keeps its own order across the shared release",
+    );
+    let committed = history.clone();
+
+    let mut shortened_retry = wave(2);
+    let table = shortened_retry.tables.get_mut(&id(1)).unwrap();
+    table.fragment_count = 2;
+    table.fragments = BTreeMap::from([
+        (0, vec![root.key.clone()]),
+        (1, vec![child.key.clone()]),
+    ]);
+    assert_eq!(
+        history.submit_tabular_depth_wave(&shortened_retry),
+        Err(BranchMergeTombstoneHistoryError::TabularFragmentCountMismatch {
+            order: 2,
+            table: id(1),
+            expected: 3,
+            actual: 2,
+        }),
+        "one table's restore retry cannot inherit a sibling table's shorter storm ladder",
+    );
+    assert_eq!(history, committed);
+
+    assert_eq!(
+        history.submit_tabular_depth_wave(&wave(2)),
+        Err(BranchMergeTombstoneHistoryError::DuplicateOrStale { order: 2 }),
+        "an exact replay after the storm release remains stale",
+    );
+    assert_eq!(history, committed);
+}
+
+#[test]
+fn multi_parent_storm_releases_parent_local_fragment_ladder_labels() {
+    let fixture_rows = MULTI_PARENT_COLUMN_DEPTH
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    let fixture_row = |path: &str| {
+        fixture_rows
+            .iter()
+            .find(|row| row.key == string(path))
+            .unwrap_or_else(|| panic!("the in-crate multi-parent fixture supplies {path}"))
+            .clone()
+    };
+    let shared = fixture_row("shared");
+    let left = fixture_row("branch/left");
+    let right = fixture_row("branch/right");
+    let deep = fixture_row("branch/right/deep");
+    assert_eq!(shared.fields[&id(2)], string("Root value"));
+    assert_eq!(left.fields[&id(3)], string("Bergen"));
+    assert_eq!(right.fields[&id(2)], string("Right leaf"));
+    assert_eq!(deep.fields[&id(2)], string("Right deep"));
+
+    let cells = |row: &KeyedRow, column| {
+        (row.key.clone(), row.fields[&id(column)].clone())
+    };
+    let depth = |fragment_count, fragments| BranchMergeColumnDepthFragments {
+        fragment_count,
+        fragments,
+    };
+    let wave = |order| {
+        let parents = match order {
+            2 => BTreeMap::from([
+                (
+                    id(10),
+                    BTreeMap::from([(
+                        (id(1), id(2)),
+                        depth(1, BTreeMap::from([(0, vec![cells(&shared, 2)])])),
+                    )]),
+                ),
+                (
+                    id(20),
+                    BTreeMap::from([(
+                        (id(1), id(2)),
+                        depth(
+                            2,
+                            BTreeMap::from([
+                                (0, vec![cells(&shared, 2)]),
+                                (1, vec![cells(&left, 2)]),
+                            ]),
+                        ),
+                    )]),
+                ),
+                (
+                    id(30),
+                    BTreeMap::from([(
+                        (id(1), id(3)),
+                        depth(
+                            3,
+                            BTreeMap::from([
+                                (0, vec![cells(&shared, 3)]),
+                                (1, Vec::new()),
+                                (2, vec![cells(&right, 3)]),
+                            ]),
+                        ),
+                    )]),
+                ),
+            ]),
+            3 => BTreeMap::from([
+                (
+                    id(10),
+                    BTreeMap::from([(
+                        (id(1), id(2)),
+                        depth(
+                            3,
+                            BTreeMap::from([
+                                (0, vec![cells(&shared, 2)]),
+                                (1, Vec::new()),
+                                (2, vec![cells(&left, 2)]),
+                            ]),
+                        ),
+                    )]),
+                ),
+                (
+                    id(20),
+                    BTreeMap::from([(
+                        (id(1), id(2)),
+                        depth(
+                            4,
+                            BTreeMap::from([
+                                (0, vec![cells(&shared, 2)]),
+                                (1, Vec::new()),
+                                (2, vec![cells(&right, 2)]),
+                                (3, vec![cells(&deep, 2)]),
+                            ]),
+                        ),
+                    )]),
+                ),
+                (
+                    id(30),
+                    BTreeMap::from([(
+                        (id(1), id(3)),
+                        depth(
+                            2,
+                            BTreeMap::from([
+                                (0, vec![cells(&shared, 3)]),
+                                (1, vec![cells(&deep, 3)]),
+                            ]),
+                        ),
+                    )]),
+                ),
+            ]),
+            other => panic!("unexpected multi-parent restore wave order: {other}"),
+        };
+        BranchMergeMultiParentTabularColumnDepthWave { order, parents }
+    };
+    let empty_plan = |order| SequencedBranchMergePlan {
+        order,
+        plan: BranchMergePlan {
+            schema: Schema { version: EvolutionVersion::V1_0, tables: Vec::new() },
+            tables: BTreeMap::new(),
+            checkpoints: BTreeMap::new(),
+            report: Default::default(),
+        },
+        ordered_row_tombstones: Vec::new(),
+    };
+
+    let mut history = BranchMergeTombstoneHistory::new(0);
+    assert!(history
+        .submit_multi_parent_tabular_column_depth_wave(&wave(3))
+        .unwrap()
+        .is_empty());
+    assert!(history
+        .submit_multi_parent_tabular_column_depth_wave(&wave(2))
+        .unwrap()
+        .is_empty());
+    assert!(history.parent_column_ladder_events().is_empty());
+    assert!(history.parent_column_ladder_waves().is_empty());
+    assert!(history.parent_column_restore_waves().is_empty());
+    assert!(history.submit(&empty_plan(0)).unwrap().is_empty());
+    assert_eq!(history.next_order(), Some(1));
+    assert!(history.parent_column_ladder_events().is_empty());
+    assert!(history.parent_column_ladder_waves().is_empty());
+    assert!(history.parent_column_restore_waves().is_empty());
+    assert!(history.submit(&empty_plan(1)).unwrap().is_empty());
+
+    assert_eq!(history.parent_column_events().len(), 12);
+    assert!(history.parent_column_events().iter().any(|event| {
+        event.order == 3
+            && event.parent == id(20)
+            && event.column == id(2)
+            && event.fragment == 3
+            && event.key == deep.key
+            && event.value == string("Right deep")
+    }));
+    assert_eq!(
+        history.parent_column_ladder_events(),
+        &[
+            BranchMergeParentColumnDepthLadderEvent {
+                order: 2,
+                parent: id(10),
+                table: id(1),
+                column: id(2),
+                depth_labels: vec![0],
+            },
+            BranchMergeParentColumnDepthLadderEvent {
+                order: 2,
+                parent: id(20),
+                table: id(1),
+                column: id(2),
+                depth_labels: vec![0, 1],
+            },
+            BranchMergeParentColumnDepthLadderEvent {
+                order: 2,
+                parent: id(30),
+                table: id(1),
+                column: id(3),
+                depth_labels: vec![0, 1, 2],
+            },
+            BranchMergeParentColumnDepthLadderEvent {
+                order: 3,
+                parent: id(10),
+                table: id(1),
+                column: id(2),
+                depth_labels: vec![0, 1, 2],
+            },
+            BranchMergeParentColumnDepthLadderEvent {
+                order: 3,
+                parent: id(20),
+                table: id(1),
+                column: id(2),
+                depth_labels: vec![0, 1, 2, 3],
+            },
+            BranchMergeParentColumnDepthLadderEvent {
+                order: 3,
+                parent: id(30),
+                table: id(1),
+                column: id(3),
+                depth_labels: vec![0, 1],
+            },
+        ],
+        "each parent retains independent fragment labels and empty positions through storm release",
+    );
+    assert_eq!(
+        history.parent_column_ladder_waves(),
+        &[
+            BranchMergeMultiParentColumnDepthLadderWaveEvent {
+                order: 2,
+                ladders: history.parent_column_ladder_events()[..3].to_vec(),
+            },
+            BranchMergeMultiParentColumnDepthLadderWaveEvent {
+                order: 3,
+                ladders: history.parent_column_ladder_events()[3..].to_vec(),
+            },
+        ],
+        "the storm exposes complete parent-local ladder rosters grouped at each released order",
+    );
+    let restore_waves = history.parent_column_restore_waves();
+    assert_eq!(
+        restore_waves
+            .iter()
+            .map(|wave| wave.order)
+            .collect::<Vec<_>>(),
+        vec![2, 3],
+        "snapshot publication follows the contiguous restore order",
+    );
+    assert_eq!(
+        restore_waves[0].ladders[2],
+        BranchMergeParentColumnDepthLadderSnapshot {
+            parent: id(30),
+            table: id(1),
+            column: id(3),
+            fragments: vec![
+                BranchMergeParentColumnDepthFragmentSnapshot {
+                    label: 0,
+                    cells: vec![(shared.key.clone(), string("Oslo"))],
+                },
+                BranchMergeParentColumnDepthFragmentSnapshot {
+                    label: 1,
+                    cells: Vec::new(),
+                },
+                BranchMergeParentColumnDepthFragmentSnapshot {
+                    label: 2,
+                    cells: vec![(right.key.clone(), string("Melbourne"))],
+                },
+            ],
+        },
+        "a parent-local empty depth and adjacent cells stay bound to their labels",
+    );
+    assert_eq!(
+        restore_waves[1].ladders[1].fragments[3],
+        BranchMergeParentColumnDepthFragmentSnapshot {
+            label: 3,
+            cells: vec![(deep.key.clone(), string("Right deep"))],
+        },
+        "later storm depth cells remain attached to the same parent's fragment label",
+    );
+    for wave in &restore_waves {
+        assert_eq!(
+            wave.ladders.iter().map(|ladder| ladder.parent).collect::<Vec<_>>(),
+            vec![id(10), id(20), id(30)],
+            "one wave snapshot contains every parent-local column ladder",
+        );
+    }
+    let committed = history.clone();
+
+    let mut shortened_parent_ladder = wave(2);
+    shortened_parent_ladder
+        .parents
+        .get_mut(&id(30))
+        .unwrap()
+        .get_mut(&(id(1), id(3)))
+        .unwrap()
+        .fragment_count = 2;
+    assert_eq!(
+        history.submit_multi_parent_tabular_column_depth_wave(&shortened_parent_ladder),
+        Err(BranchMergeTombstoneHistoryError::ParentColumnFragmentCountMismatch {
+            order: 2,
+            parent: id(30),
+            table: id(1),
+            column: id(3),
+            expected: 3,
+            actual: 2,
+        }),
+        "one parent's retry cannot borrow the shorter ladder from another branch",
+    );
+    assert_eq!(history, committed);
+
+    let mut missing_empty_depth = wave(3);
+    missing_empty_depth
+        .parents
+        .get_mut(&id(10))
+        .unwrap()
+        .get_mut(&(id(1), id(2)))
+        .unwrap()
+        .fragments
+        .remove(&1);
+    assert_eq!(
+        history.submit_multi_parent_tabular_column_depth_wave(&missing_empty_depth),
+        Err(BranchMergeTombstoneHistoryError::IncompleteParentColumnDepthFragments {
+            order: 3,
+            parent: id(10),
+            table: id(1),
+            column: id(2),
+        }),
+        "an empty parent-local label cannot be omitted from a retry",
+    );
+    assert_eq!(history, committed);
+}
+#[test]
+fn paired_redo_fold_identity_roundtrips_sparse_write_ahead_rotation_chains() {
+    let fold_rows = PAIRED_REDO_FOLD_IDENTITIES
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    let log_rows = PAIRED_COMPACTED_LOG_IDENTITIES
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    let segment_rows = PAIRED_COMPACTED_SEGMENT_ROTATIONS
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    let states = PAIRED_CHECKPOINT_REDO
+        .split("\n\n")
+        .map(parse_checkpoint_fixture)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        (
+            fold_rows.len(),
+            log_rows.len(),
+            segment_rows.len(),
+            states.len()
+        ),
+        (3, 6, 6, 5)
+    );
+
+    let folds = fold_rows
+        .iter()
+        .map(|row| BranchMergePairedRedoFoldIdentity {
+            left_fold: row.fields[&id(2)].encode().unwrap(),
+            right_fold: row.fields[&id(3)].encode().unwrap(),
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(folds[0], folds[2]);
+    assert_ne!(folds[0], folds[1]);
+    let log_segments = log_rows
+        .iter()
+        .zip(&segment_rows)
+        .map(|(log, segment)| BranchMergePairedLogSegmentIdentity {
+            write_ahead_identity: BranchMergePairedWriteAheadIdentity {
+                left_log: log.fields[&id(2)].encode().unwrap(),
+                right_log: log.fields[&id(3)].encode().unwrap(),
+            },
+            segment_identity: BranchMergePairedWriteAheadSegmentIdentity {
+                left_segment: segment.fields[&id(2)].encode().unwrap(),
+                right_segment: segment.fields[&id(3)].encode().unwrap(),
+            },
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        log_segments[0].write_ahead_identity,
+        log_segments[1].write_ahead_identity
+    );
+    assert_ne!(
+        log_segments[0].segment_identity,
+        log_segments[1].segment_identity
+    );
+
+    let alpha = b"wal-fold/alpha".to_vec();
+    let beta = b"wal-fold/beta".to_vec();
+    let catalog_only = b"wal-fold/catalog-only".to_vec();
+    let discovered_late = b"wal-fold/discovered-late".to_vec();
+    let left_base = states[0].clone();
+    let right_base = states[1].clone();
+    let left_redo = states[2].clone();
+    let right_redo = states[3].clone();
+    let positionless = states[4].clone();
+    let frame = |left: BTreeMap<Vec<u8>, CheckpointGeneration>,
+                 right: BTreeMap<Vec<u8>, CheckpointGeneration>,
+                 index: usize| BranchMergePairedCheckpointRedoLogSegmentFrame {
+        checkpoints: BranchMergePairedCheckpointRedoFrame { left, right },
+        log_segment_identity: log_segments[index].clone(),
+    };
+    let first = BTreeMap::from([
+        (
+            50,
+            frame(
+                BTreeMap::from([(alpha.clone(), left_base.clone())]),
+                BTreeMap::from([(alpha.clone(), right_base.clone())]),
+                0,
+            ),
+        ),
+        (
+            51,
+            frame(
+                BTreeMap::from([(alpha.clone(), left_base.clone())]),
+                BTreeMap::from([(alpha.clone(), right_base.clone())]),
+                1,
+            ),
+        ),
+        (
+            52,
+            frame(
+                BTreeMap::from([(alpha.clone(), left_redo.clone())]),
+                BTreeMap::from([(alpha.clone(), right_base.clone())]),
+                2,
+            ),
+        ),
+    ]);
+    let second = BTreeMap::from([
+        (
+            54,
+            frame(
+                BTreeMap::from([
+                    (alpha.clone(), left_redo.clone()),
+                    (beta.clone(), positionless.clone()),
+                ]),
+                BTreeMap::from([(alpha.clone(), right_redo.clone())]),
+                3,
+            ),
+        ),
+        (
+            55,
+            frame(
+                BTreeMap::from([
+                    (alpha.clone(), left_redo.clone()),
+                    (beta.clone(), positionless.clone()),
+                ]),
+                BTreeMap::from([(alpha.clone(), right_redo.clone())]),
+                4,
+            ),
+        ),
+    ]);
+    let third = BTreeMap::from([(
+        56,
+        frame(
+            BTreeMap::from([
+                (alpha.clone(), left_redo.clone()),
+                (discovered_late.clone(), positionless.clone()),
+            ]),
+            BTreeMap::from([(alpha.clone(), right_redo.clone())]),
+            5,
+        ),
+    )]);
+    let folds = vec![
+        BranchMergePairedCheckpointRedoFoldLogSegmentIdentityFold {
+            redo_fold_identity: folds[0].clone(),
+            frames: first,
+        },
+        BranchMergePairedCheckpointRedoFoldLogSegmentIdentityFold {
+            redo_fold_identity: folds[1].clone(),
+            frames: second,
+        },
+        BranchMergePairedCheckpointRedoFoldLogSegmentIdentityFold {
+            redo_fold_identity: folds[2].clone(),
+            frames: third,
+        },
+    ];
+
+    let streams =
+        fold_paired_checkpoint_redo_sparse_stream_chains_preserving_fold_and_log_segment_identity(
+            &[alpha.clone(), beta.clone(), catalog_only.clone()],
+            &folds,
+        );
+    let compacted = compress_paired_checkpoint_redo_sparse_stream_chains_preserving_fold_and_log_segment_identity(&streams);
+    let restored = restore_paired_checkpoint_redo_sparse_stream_chains_preserving_fold_and_log_segment_identity(&compacted).unwrap();
+    assert_eq!(restored, streams);
+
+    let alpha_runs = &compacted
+        .iter()
+        .find(|s| s.checkpoint_id == alpha)
+        .unwrap()
+        .runs;
+    assert_eq!(
+        alpha_runs
+            .iter()
+            .map(|r| (r.fold_ordinal, r.first_order, r.last_order))
+            .collect::<Vec<_>>(),
+        vec![(0, 50, 51), (0, 52, 52), (1, 54, 55), (2, 56, 56)]
+    );
+    assert_eq!(alpha_runs[0].left, Some(left_base));
+    assert_eq!(alpha_runs[0].right, Some(right_base));
+    assert_eq!(
+        alpha_runs[0].redo_fold_identity,
+        folds[0].redo_fold_identity
+    );
+    assert_eq!(alpha_runs[0].log_segment_identities, log_segments[0..2]);
+    assert_eq!(alpha_runs[2].log_segment_identities, log_segments[3..5]);
+    assert_eq!(
+        alpha_runs[3].redo_fold_identity,
+        folds[0].redo_fold_identity
+    );
+    assert_eq!(alpha_runs[3].log_segment_identities, log_segments[5..6]);
+
+    let catalog_runs = &compacted
+        .iter()
+        .find(|s| s.checkpoint_id == catalog_only)
+        .unwrap()
+        .runs;
+    assert_eq!(
+        catalog_runs
+            .iter()
+            .map(|r| (r.fold_ordinal, r.first_order, r.last_order))
+            .collect::<Vec<_>>(),
+        vec![(0, 50, 52), (1, 54, 55), (2, 56, 56)],
+        "gap 53 stays absent"
+    );
+    assert!(
+        restored
+            .iter()
+            .find(|s| s.checkpoint_id == catalog_only)
+            .unwrap()
+            .slots
+            .iter()
+            .all(|slot| slot.left.is_none() && slot.right.is_none())
+    );
+    assert_eq!(
+        restored
+            .iter()
+            .find(|s| s.checkpoint_id == beta)
+            .unwrap()
+            .slots[3]
+            .left,
+        Some(positionless.clone())
+    );
+    assert_eq!(
+        restored
+            .iter()
+            .find(|s| s.checkpoint_id == discovered_late)
+            .unwrap()
+            .slots[5]
+            .left,
+        Some(positionless)
+    );
+
+    let mut truncated = compacted.clone();
+    truncated
+        .iter_mut()
+        .find(|s| s.checkpoint_id == alpha)
+        .unwrap()
+        .runs[0]
+        .log_segment_identities
+        .pop();
+    assert!(matches!(
+        restore_paired_checkpoint_redo_sparse_stream_chains_preserving_fold_and_log_segment_identity(&truncated),
+        Err(orna_storage_v1::BranchMergePairedCheckpointRedoFoldLogSegmentIdentityRestoreError::LogSegmentIdentityCountMismatch {
+            fold_ordinal: 0, first_order: 50, last_order: 51, expected: 2, actual: 1,
+        })
+    ));
+}
+
+#[test]
+fn paired_redo_fold_identity_survives_sparse_checkpoint_merge_chains() {
+    let identity_rows = PAIRED_REDO_FOLD_IDENTITIES
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    let checkpoint_states = PAIRED_CHECKPOINT_REDO
+        .split("\n\n")
+        .map(parse_checkpoint_fixture)
+        .collect::<Vec<_>>();
+    assert_eq!(identity_rows.len(), 3);
+    assert_eq!(checkpoint_states.len(), 5);
+    let identities = identity_rows
+        .iter()
+        .map(|row| BranchMergePairedRedoFoldIdentity {
+            left_fold: row.fields[&id(2)].encode().unwrap(),
+            right_fold: row.fields[&id(3)].encode().unwrap(),
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(identities[0], identities[2]);
+    assert_ne!(identities[0], identities[1]);
+
+    let alpha = b"merge-chain/alpha".to_vec();
+    let beta = b"merge-chain/beta".to_vec();
+    let catalog_only = b"merge-chain/catalog-only".to_vec();
+    let observed_late = b"merge-chain/observed-late".to_vec();
+    let left_base = checkpoint_states[0].clone();
+    let right_base = checkpoint_states[1].clone();
+    let left_redo = checkpoint_states[2].clone();
+    let right_redo = checkpoint_states[3].clone();
+    let positionless = checkpoint_states[4].clone();
+    assert_eq!(positionless.position, None);
+
+    let checkpoints = |checkpoint_id: &[u8], state: CheckpointGeneration| {
+        BTreeMap::from([(checkpoint_id.to_vec(), state)])
+    };
+    let frame = |left, right| BranchMergePairedCheckpointRedoFrame { left, right };
+
+    let mut first_fold = BTreeMap::new();
+    first_fold.insert(
+        10,
+        frame(
+            checkpoints(&alpha, left_base.clone()),
+            checkpoints(&alpha, right_base.clone()),
+        ),
+    );
+    let mut left_at_12 = checkpoints(&alpha, left_base.clone());
+    left_at_12.insert(beta.clone(), positionless.clone());
+    first_fold.insert(12, frame(left_at_12, checkpoints(&alpha, right_base.clone())));
+
+    let mut second_fold = BTreeMap::new();
+    second_fold.insert(
+        12,
+        frame(
+            checkpoints(&alpha, left_redo.clone()),
+            checkpoints(&alpha, right_base.clone()),
+        ),
+    );
+    let mut right_at_14 = checkpoints(&alpha, right_redo.clone());
+    right_at_14.insert(beta.clone(), positionless.clone());
+    second_fold.insert(
+        14,
+        frame(checkpoints(&alpha, left_redo.clone()), right_at_14),
+    );
+    let first_chain = fold_paired_checkpoint_redo_sparse_stream_chains_preserving_fold_identity(
+        &[alpha.clone(), beta.clone()],
+        &[
+            BranchMergePairedCheckpointRedoSparseFold {
+                redo_fold_identity: identities[0].clone(),
+                frames: first_fold,
+            },
+            BranchMergePairedCheckpointRedoSparseFold {
+                redo_fold_identity: identities[1].clone(),
+                frames: second_fold,
+            },
+        ],
+    );
+
+    let mut third_fold = BTreeMap::new();
+    let mut late_at_10 = checkpoints(&alpha, positionless.clone());
+    late_at_10.insert(observed_late.clone(), positionless.clone());
+    third_fold.insert(
+        10,
+        frame(late_at_10, checkpoints(&alpha, right_redo.clone())),
+    );
+    third_fold.insert(
+        11,
+        frame(
+            checkpoints(&alpha, left_base.clone()),
+            checkpoints(&alpha, right_redo.clone()),
+        ),
+    );
+    let fourth_fold = BTreeMap::from([(
+        12,
+        frame(
+            checkpoints(&alpha, left_redo.clone()),
+            checkpoints(&alpha, right_redo.clone()),
+        ),
+    )]);
+    let second_chain = fold_paired_checkpoint_redo_sparse_stream_chains_preserving_fold_identity(
+        &[],
+        &[
+            BranchMergePairedCheckpointRedoSparseFold {
+                redo_fold_identity: identities[2].clone(),
+                frames: third_fold,
+            },
+            BranchMergePairedCheckpointRedoSparseFold {
+                redo_fold_identity: identities[1].clone(),
+                frames: fourth_fold,
+            },
+        ],
+    );
+
+    let merged = merge_paired_checkpoint_redo_sparse_stream_chains_preserving_fold_identity(
+        &[alpha.clone(), beta.clone(), catalog_only.clone()],
+        &[first_chain, second_chain],
+    );
+    assert_eq!(
+        merged
+            .iter()
+            .map(|stream| stream.checkpoint_id.clone())
+            .collect::<Vec<_>>(),
+        vec![alpha.clone(), beta.clone(), catalog_only.clone(), observed_late.clone()],
+    );
+    let slots = |checkpoint_id: &[u8]| {
+        &merged
+            .iter()
+            .find(|stream| stream.checkpoint_id == checkpoint_id)
+            .unwrap()
+            .slots
+    };
+    let alpha_slots = slots(&alpha);
+    assert_eq!(
+        alpha_slots
+            .iter()
+            .map(|slot| (slot.merge_ordinal, slot.fold_ordinal, slot.order))
+            .collect::<Vec<_>>(),
+        vec![
+            (0, 0, 10),
+            (0, 0, 12),
+            (0, 1, 12),
+            (0, 1, 14),
+            (1, 0, 10),
+            (1, 0, 11),
+            (1, 1, 12),
+        ],
+        "equal local coordinates remain distinct across source chains and folds",
+    );
+    assert_eq!(
+        alpha_slots
+            .iter()
+            .map(|slot| slot.redo_fold_identity.clone())
+            .collect::<Vec<_>>(),
+        vec![
+            identities[0].clone(),
+            identities[0].clone(),
+            identities[1].clone(),
+            identities[1].clone(),
+            identities[2].clone(),
+            identities[2].clone(),
+            identities[1].clone(),
+        ],
+    );
+    assert_eq!(alpha_slots[0].left, Some(left_base.clone()));
+    assert_eq!(alpha_slots[0].right, Some(right_base.clone()));
+    assert_eq!(alpha_slots[2].left, Some(left_redo.clone()));
+    assert_eq!(alpha_slots[3].right, Some(right_redo.clone()));
+    assert_eq!(alpha_slots[4].left, Some(positionless.clone()));
+    assert_eq!(alpha_slots[4].right, Some(right_redo.clone()));
+    assert_eq!(alpha_slots[6].left, Some(left_redo.clone()));
+
+    assert_eq!(
+        slots(&beta)
+            .iter()
+            .map(|slot| (slot.merge_ordinal, slot.fold_ordinal, slot.order))
+            .collect::<Vec<_>>(),
+        vec![(0, 0, 10), (0, 0, 12), (0, 1, 12), (0, 1, 14)],
+        "the second chain contributes no beta occurrences because it had no beta stream",
+    );
+    assert_eq!(slots(&beta)[1].left, Some(positionless.clone()));
+    assert_eq!(slots(&beta)[3].right, Some(positionless.clone()));
+    assert!(slots(&catalog_only).is_empty());
+    assert_eq!(
+        slots(&observed_late)
+            .iter()
+            .map(|slot| (slot.merge_ordinal, slot.fold_ordinal, slot.order))
+            .collect::<Vec<_>>(),
+        vec![(1, 0, 10), (1, 0, 11), (1, 1, 12)],
+    );
+    assert_eq!(slots(&observed_late)[0].left, Some(positionless));
+    assert!(slots(&observed_late)[1..]
+        .iter()
+        .all(|slot| slot.left.is_none() && slot.right.is_none()));
+}
+
+#[test]
+fn paired_fold_and_segment_identity_survive_three_sparse_chain_rebinds() {
+    let segment_rows = PAIRED_SPARSE_SEGMENT_MERGE_CHAINS
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    let fold_rows = PAIRED_REDO_FOLD_IDENTITIES
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    let checkpoint_states = PAIRED_CHECKPOINT_REDO
+        .split("\n\n")
+        .map(parse_checkpoint_fixture)
+        .collect::<Vec<_>>();
+    assert_eq!(segment_rows.len(), 9);
+    assert_eq!(fold_rows.len(), 3);
+    assert_eq!(checkpoint_states.len(), 5);
+
+    let segment_identities = segment_rows
+        .iter()
+        .map(|row| BranchMergePairedWriteAheadSegmentIdentity {
+            left_segment: row.fields[&id(2)].encode().unwrap(),
+            right_segment: row.fields[&id(3)].encode().unwrap(),
+        })
+        .collect::<Vec<_>>();
+    let fold_identities = fold_rows
+        .iter()
+        .map(|row| BranchMergePairedRedoFoldIdentity {
+            left_fold: row.fields[&id(2)].encode().unwrap(),
+            right_fold: row.fields[&id(3)].encode().unwrap(),
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(fold_identities[0], fold_identities[2]);
+    assert_ne!(fold_identities[0], fold_identities[1]);
+    assert_eq!(segment_identities[0].right_segment, segment_identities[1].right_segment);
+    assert_ne!(segment_identities[0].left_segment, segment_identities[1].left_segment);
+
+    let alpha = b"fch3w/alpha".to_vec();
+    let beta = b"fch3w/beta".to_vec();
+    let catalog_only = b"fch3w/catalog-only".to_vec();
+    let observed_late = b"fch3w/observed-late".to_vec();
+    let left_base = checkpoint_states[0].clone();
+    let right_base = checkpoint_states[1].clone();
+    let left_redo = checkpoint_states[2].clone();
+    let right_redo = checkpoint_states[3].clone();
+    let positionless = checkpoint_states[4].clone();
+    assert_eq!(positionless.position, None);
+
+    let checkpoint = |checkpoint_id: &[u8], state: &CheckpointGeneration| {
+        BTreeMap::from([(checkpoint_id.to_vec(), state.clone())])
+    };
+    let frame = |index: usize,
+                 left: BTreeMap<Vec<u8>, CheckpointGeneration>,
+                 right: BTreeMap<Vec<u8>, CheckpointGeneration>| {
+        BranchMergePairedCheckpointRedoSegmentFrame {
+            checkpoints: BranchMergePairedCheckpointRedoFrame { left, right },
+            segment_identity: segment_identities[index].clone(),
+        }
+    };
+    let fold = |identity_index: usize, frames| {
+        BranchMergePairedCheckpointRedoFoldSegmentRotationFold {
+            redo_fold_identity: fold_identities[identity_index].clone(),
+            frames,
+        }
+    };
+
+    let mut first_41_right = checkpoint(&alpha, &right_base);
+    first_41_right.insert(beta.clone(), positionless.clone());
+    let first_chain = fold_paired_checkpoint_redo_sparse_stream_chains_preserving_fold_and_segment_rotation_identity(
+        &[alpha.clone(), catalog_only.clone()],
+        &[
+            fold(
+                0,
+                BTreeMap::from([
+                    (40, frame(0, checkpoint(&alpha, &left_base), checkpoint(&alpha, &right_base))),
+                    (41, frame(1, checkpoint(&alpha, &left_base), first_41_right)),
+                    (43, frame(2, checkpoint(&alpha, &left_redo), checkpoint(&alpha, &right_base))),
+                ]),
+            ),
+            fold(
+                1,
+                BTreeMap::from([
+                    (40, frame(3, checkpoint(&alpha, &left_redo), checkpoint(&alpha, &right_redo))),
+                    (43, frame(4, checkpoint(&alpha, &left_base), checkpoint(&alpha, &right_redo))),
+                ]),
+            ),
+        ],
+    );
+
+    let mut second_41_left = checkpoint(&alpha, &left_redo);
+    second_41_left.insert(beta.clone(), positionless.clone());
+    let second_chain = fold_paired_checkpoint_redo_sparse_stream_chains_preserving_fold_and_segment_rotation_identity(
+        &[alpha.clone(), beta.clone()],
+        &[
+            fold(
+                2,
+                BTreeMap::from([
+                    (40, frame(5, checkpoint(&alpha, &left_base), checkpoint(&alpha, &right_redo))),
+                    (41, frame(6, second_41_left, checkpoint(&alpha, &right_redo))),
+                ]),
+            ),
+            fold(
+                1,
+                BTreeMap::from([(
+                    42,
+                    frame(7, checkpoint(&alpha, &left_base), checkpoint(&alpha, &right_base)),
+                )]),
+            ),
+        ],
+    );
+
+    let mut late_43_left = checkpoint(&alpha, &left_base);
+    late_43_left.insert(observed_late.clone(), positionless.clone());
+    let third_chain = fold_paired_checkpoint_redo_sparse_stream_chains_preserving_fold_and_segment_rotation_identity(
+        &[alpha.clone(), catalog_only.clone()],
+        &[
+            fold(
+                1,
+                BTreeMap::from([
+                    (40, frame(8, checkpoint(&alpha, &left_redo), checkpoint(&alpha, &right_redo))),
+                    (43, frame(0, late_43_left, checkpoint(&alpha, &right_base))),
+                ]),
+            ),
+            fold(
+                0,
+                BTreeMap::from([(
+                    40,
+                    frame(1, checkpoint(&alpha, &left_redo), checkpoint(&alpha, &right_base)),
+                )]),
+            ),
+        ],
+    );
+
+    let merged = merge_paired_checkpoint_redo_sparse_stream_chains_preserving_fold_and_segment_rotation_identity(
+        &[alpha.clone(), beta.clone(), catalog_only.clone()],
+        &[first_chain, second_chain, third_chain],
+    );
+    assert_eq!(
+        merged
+            .iter()
+            .map(|stream| stream.checkpoint_id.clone())
+            .collect::<Vec<_>>(),
+        vec![alpha.clone(), beta.clone(), catalog_only.clone(), observed_late.clone()],
+    );
+    let slots = |checkpoint_id: &[u8]| {
+        &merged
+            .iter()
+            .find(|stream| stream.checkpoint_id == checkpoint_id)
+            .unwrap()
+            .slots
+    };
+    let alpha_slots = slots(&alpha);
+    assert_eq!(
+        alpha_slots
+            .iter()
+            .map(|slot| (slot.merge_ordinal, slot.fold_ordinal, slot.order))
+            .collect::<Vec<_>>(),
+        vec![
+            (0, 0, 40), (0, 0, 41), (0, 0, 43), (0, 1, 40), (0, 1, 43),
+            (1, 0, 40), (1, 0, 41), (1, 1, 42), (2, 0, 40), (2, 0, 43),
+            (2, 1, 40),
+        ],
+        "overlapping local coordinates remain distinct across three source chains",
+    );
+    assert_eq!(
+        alpha_slots
+            .iter()
+            .map(|slot| slot.redo_fold_identity.clone())
+            .collect::<Vec<_>>(),
+        vec![
+            fold_identities[0].clone(), fold_identities[0].clone(), fold_identities[0].clone(),
+            fold_identities[1].clone(), fold_identities[1].clone(), fold_identities[2].clone(),
+            fold_identities[2].clone(), fold_identities[1].clone(), fold_identities[1].clone(),
+            fold_identities[1].clone(), fold_identities[0].clone(),
+        ],
+        "equal and rebound fold pairs stay attached to their source occurrences",
+    );
+    assert_eq!(
+        alpha_slots
+            .iter()
+            .map(|slot| slot.segment_identity.clone())
+            .collect::<Vec<_>>(),
+        vec![
+            segment_identities[0].clone(), segment_identities[1].clone(),
+            segment_identities[2].clone(), segment_identities[3].clone(),
+            segment_identities[4].clone(), segment_identities[5].clone(),
+            segment_identities[6].clone(), segment_identities[7].clone(),
+            segment_identities[8].clone(), segment_identities[0].clone(),
+            segment_identities[1].clone(),
+        ],
+        "directional segment rotations survive rebinding, including a reused pair",
+    );
+    assert_eq!(alpha_slots[0].left, Some(left_base.clone()));
+    assert_eq!(alpha_slots[0].right, Some(right_base.clone()));
+    assert_eq!(alpha_slots[2].left, Some(left_redo.clone()));
+    assert_eq!(alpha_slots[2].right, Some(right_base.clone()));
+    assert_eq!(alpha_slots[5].left, Some(left_base.clone()));
+    assert_eq!(alpha_slots[5].right, Some(right_redo.clone()));
+    assert_eq!(alpha_slots[9].left, Some(left_base.clone()));
+    assert_eq!(alpha_slots[10].left, Some(left_redo.clone()));
+
+    assert_eq!(
+        slots(&beta)
+            .iter()
+            .map(|slot| (slot.merge_ordinal, slot.fold_ordinal, slot.order))
+            .collect::<Vec<_>>(),
+        vec![
+            (0, 0, 40), (0, 0, 41), (0, 0, 43), (0, 1, 40), (0, 1, 43),
+            (1, 0, 40), (1, 0, 41), (1, 1, 42),
+        ],
+        "the third chain does not synthesize a beta stream",
+    );
+    assert_eq!(slots(&beta)[1].right, Some(positionless.clone()));
+    assert_eq!(slots(&beta)[6].left, Some(positionless.clone()));
+    assert_eq!(
+        slots(&catalog_only)
+            .iter()
+            .map(|slot| slot.merge_ordinal)
+            .collect::<Vec<_>>(),
+        vec![0, 0, 0, 0, 0, 2, 2, 2],
+        "a catalog-only stream retains source observations without filling the missing second chain",
+    );
+    assert!(slots(&catalog_only)
+        .iter()
+        .all(|slot| slot.left.is_none() && slot.right.is_none()));
+    assert_eq!(
+        slots(&observed_late)
+            .iter()
+            .map(|slot| (slot.merge_ordinal, slot.fold_ordinal, slot.order))
+            .collect::<Vec<_>>(),
+        vec![(2, 0, 40), (2, 0, 43), (2, 1, 40)],
+    );
+    assert_eq!(slots(&observed_late)[1].left, Some(positionless));
+    assert!(slots(&observed_late)[..1]
+        .iter()
+        .chain(&slots(&observed_late)[2..])
+        .all(|slot| slot.left.is_none() && slot.right.is_none()));
+
+    let compacted = compress_paired_checkpoint_redo_sparse_merge_chains_preserving_fold_and_segment_rotation_identity(&merged);
+    let restored = restore_paired_checkpoint_redo_sparse_merge_chains_preserving_fold_and_segment_rotation_identity(&compacted).unwrap();
+    assert_eq!(restored, merged, "merge, compaction, and restoration preserve every paired identity");
+    let alpha_runs = &compacted
+        .iter()
+        .find(|stream| stream.checkpoint_id == alpha)
+        .unwrap()
+        .runs;
+    assert_eq!(
+        (alpha_runs[0].merge_ordinal, alpha_runs[0].fold_ordinal, alpha_runs[0].first_order, alpha_runs[0].last_order),
+        (0, 0, 40, 41),
+        "equal adjacent state compacts while retaining two rotations",
+    );
+    assert_eq!(alpha_runs[0].segment_identities, segment_identities[0..2]);
+    let mut truncated = compacted;
+    truncated
+        .iter_mut()
+        .find(|stream| stream.checkpoint_id == alpha)
+        .unwrap()
+        .runs[0]
+        .last_order = 42;
+    assert!(matches!(
+        restore_paired_checkpoint_redo_sparse_merge_chains_preserving_fold_and_segment_rotation_identity(&truncated),
+        Err(BranchMergePairedCheckpointRedoFoldSegmentRotationSparseMergeChainRestoreError::SegmentIdentityCountMismatch {
+            merge_ordinal: 0,
+            fold_ordinal: 0,
+            first_order: 40,
+            last_order: 42,
+            expected: 3,
+            actual: 2,
+        })
+    ));
+}
+
+#[test]
+fn paired_segment_pins_keep_checkpoint_and_segment_identity_across_three_sparse_chains() {
+    let segment_rows = PAIRED_SPARSE_SEGMENT_PIN_CHAINS
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    let fold_rows = PAIRED_REDO_FOLD_IDENTITIES
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    let checkpoint_states = PAIRED_CHECKPOINT_REDO
+        .split("\n\n")
+        .map(parse_checkpoint_fixture)
+        .collect::<Vec<_>>();
+    assert_eq!(segment_rows.len(), 9);
+    assert_eq!(fold_rows.len(), 3);
+    assert_eq!(checkpoint_states.len(), 5);
+
+    let segment_identities = segment_rows
+        .iter()
+        .map(|row| BranchMergePairedWriteAheadSegmentIdentity {
+            left_segment: row.fields[&id(2)].encode().unwrap(),
+            right_segment: row.fields[&id(3)].encode().unwrap(),
+        })
+        .collect::<Vec<_>>();
+    let fold_identities = fold_rows
+        .iter()
+        .map(|row| BranchMergePairedRedoFoldIdentity {
+            left_fold: row.fields[&id(2)].encode().unwrap(),
+            right_fold: row.fields[&id(3)].encode().unwrap(),
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(fold_identities[0], fold_identities[2]);
+    assert_ne!(fold_identities[0], fold_identities[1]);
+    assert_eq!(
+        segment_identities[0].right_segment, segment_identities[1].right_segment,
+        "a repeated right incarnation must not alias the independently rebound left side",
+    );
+    assert_ne!(
+        segment_identities[0].left_segment,
+        segment_identities[1].left_segment
+    );
+
+    let alpha = b"unv5t/checkpoint/alpha".to_vec();
+    let beta = b"unv5t/checkpoint/beta".to_vec();
+    let catalog_only = b"unv5t/checkpoint/catalog-only".to_vec();
+    let observed_late = b"unv5t/checkpoint/observed-late".to_vec();
+    let slot = |fold_ordinal: usize,
+                order: u64,
+                left_state: Option<usize>,
+                right_state: Option<usize>,
+                fold_identity: usize,
+                segment_identity: usize| {
+        orna_storage_v1::BranchMergePairedCheckpointRedoFoldSegmentRotationSparseChainSlotSnapshot {
+            fold_ordinal,
+            order,
+            left: left_state.map(|index| checkpoint_states[index].clone()),
+            right: right_state.map(|index| checkpoint_states[index].clone()),
+            redo_fold_identity: fold_identities[fold_identity].clone(),
+            segment_identity: segment_identities[segment_identity].clone(),
+        }
+    };
+    let stream = |checkpoint_id, slots| {
+        orna_storage_v1::BranchMergePairedCheckpointRedoFoldSegmentRotationSparseStreamChainSnapshot {
+            checkpoint_id,
+            slots,
+        }
+    };
+
+    let chain_a = vec![
+        stream(
+            alpha.clone(),
+            vec![
+                slot(0, 4, Some(0), Some(1), 0, 0),
+                slot(0, 7, Some(2), Some(1), 0, 1),
+                slot(1, 9, Some(0), None, 1, 2),
+            ],
+        ),
+        stream(beta.clone(), vec![slot(0, 4, Some(4), None, 1, 3)]),
+    ];
+    let chain_b = vec![stream(
+        alpha.clone(),
+        vec![
+            slot(0, 4, Some(3), Some(2), 2, 4),
+            slot(1, 6, None, Some(4), 1, 5),
+        ],
+    )];
+    let chain_c = vec![
+        stream(
+            alpha.clone(),
+            vec![
+                slot(0, 4, Some(1), Some(3), 0, 6),
+                slot(1, 9, Some(4), Some(1), 2, 7),
+            ],
+        ),
+        stream(observed_late.clone(), vec![slot(1, 9, Some(4), None, 1, 8)]),
+    ];
+
+    let merged = orna_storage_v1::merge_paired_checkpoint_redo_sparse_stream_chains_preserving_fold_and_segment_pin_identity(
+        &[alpha.clone(), beta.clone(), catalog_only.clone()],
+        &[chain_a, chain_b, chain_c],
+    );
+    assert_eq!(
+        merged
+            .iter()
+            .map(|snapshot| snapshot.checkpoint_id.clone())
+            .collect::<Vec<_>>(),
+        vec![
+            alpha.clone(),
+            beta.clone(),
+            catalog_only.clone(),
+            observed_late.clone()
+        ],
+        "known IDs and IDs observed in late chains form the catalog without inventing slots",
+    );
+    let slots = |checkpoint_id: &[u8]| {
+        &merged
+            .iter()
+            .find(|snapshot| snapshot.checkpoint_id == checkpoint_id)
+            .unwrap()
+            .slots
+    };
+    let pin = |checkpoint_id: &[u8], state: usize, segment: usize, left_side: bool| {
+        orna_storage_v1::BranchMergePairedCheckpointSegmentPinIdentity {
+            checkpoint_id: checkpoint_id.to_vec(),
+            generation: checkpoint_states[state].clone(),
+            segment_id: if left_side {
+                segment_identities[segment].left_segment.clone()
+            } else {
+                segment_identities[segment].right_segment.clone()
+            },
+        }
+    };
+
+    let alpha_slots = slots(&alpha);
+    assert_eq!(
+        alpha_slots
+            .iter()
+            .map(|slot| (slot.merge_ordinal, slot.fold_ordinal, slot.order))
+            .collect::<Vec<_>>(),
+        vec![
+            (0, 0, 4),
+            (0, 0, 7),
+            (0, 1, 9),
+            (1, 0, 4),
+            (1, 1, 6),
+            (2, 0, 4),
+            (2, 1, 9),
+        ],
+        "overlapping local positions remain separate occurrences across three chains",
+    );
+    let expected_alpha_left = [
+        Some(pin(&alpha, 0, 0, true)),
+        Some(pin(&alpha, 2, 1, true)),
+        Some(pin(&alpha, 0, 2, true)),
+        Some(pin(&alpha, 3, 4, true)),
+        None,
+        Some(pin(&alpha, 1, 6, true)),
+        Some(pin(&alpha, 4, 7, true)),
+    ];
+    let expected_alpha_right = [
+        Some(pin(&alpha, 1, 0, false)),
+        Some(pin(&alpha, 1, 1, false)),
+        None,
+        Some(pin(&alpha, 2, 4, false)),
+        Some(pin(&alpha, 4, 5, false)),
+        Some(pin(&alpha, 3, 6, false)),
+        Some(pin(&alpha, 1, 7, false)),
+    ];
+    for ((slot, expected_left), expected_right) in alpha_slots
+        .iter()
+        .zip(expected_alpha_left)
+        .zip(expected_alpha_right)
+    {
+        assert_eq!(slot.left_pin, expected_left);
+        assert_eq!(slot.right_pin, expected_right);
+        assert_eq!(
+            slot.left_pin
+                .iter()
+                .chain(slot.right_pin.iter())
+                .map(|pin| pin.checkpoint_id.as_slice())
+                .collect::<Vec<_>>(),
+            vec![
+                alpha.as_slice();
+                usize::from(slot.left_pin.is_some()) + usize::from(slot.right_pin.is_some())
+            ],
+            "each directional segment pin is scoped to its enclosing checkpoint stream",
+        );
+    }
+    assert_eq!(
+        alpha_slots
+            .iter()
+            .map(|slot| slot.segment_identity.clone())
+            .collect::<Vec<_>>(),
+        vec![
+            segment_identities[0].clone(),
+            segment_identities[1].clone(),
+            segment_identities[2].clone(),
+            segment_identities[4].clone(),
+            segment_identities[5].clone(),
+            segment_identities[6].clone(),
+            segment_identities[7].clone(),
+        ],
+        "the original pair survives even where a side has no checkpoint pin",
+    );
+    assert_eq!(
+        alpha_slots
+            .iter()
+            .map(|slot| slot.redo_fold_identity.clone())
+            .collect::<Vec<_>>(),
+        vec![
+            fold_identities[0].clone(),
+            fold_identities[0].clone(),
+            fold_identities[1].clone(),
+            fold_identities[2].clone(),
+            fold_identities[1].clone(),
+            fold_identities[0].clone(),
+            fold_identities[2].clone(),
+        ],
+        "fold identity stays attached to each source occurrence despite reused coordinates",
+    );
+
+    assert_eq!(slots(&beta).len(), 1);
+    assert_eq!(slots(&beta)[0].left_pin, Some(pin(&beta, 4, 3, true)));
+    assert!(slots(&beta)[0].right_pin.is_none());
+    assert_eq!(slots(&beta)[0].segment_identity, segment_identities[3]);
+    assert!(slots(&catalog_only).is_empty());
+    assert_eq!(slots(&observed_late).len(), 1);
+    assert_eq!(
+        slots(&observed_late)[0].left_pin,
+        Some(pin(&observed_late, 4, 8, true)),
+        "a matching local coordinate in a newly observed stream keeps its own ID",
+    );
+    assert!(slots(&observed_late)[0].right_pin.is_none());
+    assert_eq!(
+        slots(&observed_late)[0].segment_identity,
+        segment_identities[8]
+    );
+}
+
+#[test]
+fn paired_segment_pin_identity_survives_three_sparse_checkpoint_restore_chains() {
+    let segment_rows = PAIRED_SPARSE_CHECKPOINT_RESTORE_CHAINS
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    let fold_rows = PAIRED_REDO_FOLD_IDENTITIES
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    let checkpoint_states = PAIRED_CHECKPOINT_REDO
+        .split("\n\n")
+        .map(parse_checkpoint_fixture)
+        .collect::<Vec<_>>();
+    assert_eq!(segment_rows.len(), 9);
+    assert_eq!(fold_rows.len(), 3);
+    assert_eq!(checkpoint_states.len(), 5);
+
+    let segment_identities = segment_rows
+        .iter()
+        .map(|row| BranchMergePairedWriteAheadSegmentIdentity {
+            left_segment: row.fields[&id(2)].encode().unwrap(),
+            right_segment: row.fields[&id(3)].encode().unwrap(),
+        })
+        .collect::<Vec<_>>();
+    let fold_identities = fold_rows
+        .iter()
+        .map(|row| BranchMergePairedRedoFoldIdentity {
+            left_fold: row.fields[&id(2)].encode().unwrap(),
+            right_fold: row.fields[&id(3)].encode().unwrap(),
+        })
+        .collect::<Vec<_>>();
+    assert_ne!(fold_identities[0], fold_identities[1]);
+
+    let alpha = b"sihod/checkpoint/alpha".to_vec();
+    let beta = b"sihod/checkpoint/beta".to_vec();
+    let catalog_only = b"sihod/checkpoint/catalog-only".to_vec();
+    let observed_late = b"sihod/checkpoint/observed-late".to_vec();
+    let run = |merge_ordinal: usize,
+               fold_ordinal: usize,
+               first_order: u64,
+               last_order: u64,
+               left_state: Option<usize>,
+               right_state: Option<usize>,
+               fold_identity: usize,
+               segment_indexes: &[usize]| {
+        orna_storage_v1::BranchMergePairedCheckpointRedoFoldSegmentRotationSparseMergeChainCompactionRunSnapshot {
+            merge_ordinal,
+            fold_ordinal,
+            first_order,
+            last_order,
+            left: left_state.map(|index| checkpoint_states[index].clone()),
+            right: right_state.map(|index| checkpoint_states[index].clone()),
+            redo_fold_identity: fold_identities[fold_identity].clone(),
+            segment_identities: segment_indexes
+                .iter()
+                .map(|index| segment_identities[*index].clone())
+                .collect(),
+        }
+    };
+    let stream = |checkpoint_id, runs| {
+        orna_storage_v1::BranchMergePairedCheckpointRedoFoldSegmentRotationSparseMergeChainCompactionSnapshot {
+            checkpoint_id,
+            runs,
+        }
+    };
+
+    let restore_a = vec![
+        stream(
+            alpha.clone(),
+            vec![
+                run(0, 0, 2, 3, Some(0), Some(1), 0, &[0, 1]),
+                run(0, 1, 5, 5, Some(2), None, 1, &[2]),
+                run(1, 0, 2, 2, None, Some(4), 2, &[3]),
+            ],
+        ),
+        stream(
+            beta.clone(),
+            vec![run(1, 0, 3, 3, None, Some(4), 2, &[4])],
+        ),
+    ];
+    let restore_b = vec![
+        stream(
+            alpha.clone(),
+            vec![run(0, 0, 2, 2, Some(3), Some(2), 2, &[5])],
+        ),
+        stream(
+            observed_late.clone(),
+            vec![run(0, 0, 2, 2, Some(4), None, 1, &[6])],
+        ),
+    ];
+    let restore_c = vec![stream(
+        alpha.clone(),
+        vec![
+            run(0, 0, 2, 2, Some(1), Some(3), 0, &[7]),
+            run(0, 1, 5, 5, Some(4), Some(0), 2, &[8]),
+        ],
+    )];
+
+    let restore_chains = vec![restore_a, restore_b, restore_c];
+    let restored = orna_storage_v1::restore_paired_checkpoint_redo_sparse_merge_chains_preserving_fold_and_segment_pin_identity(
+        &[alpha.clone(), beta.clone(), catalog_only.clone()],
+        &restore_chains,
+    )
+    .unwrap();
+    assert_eq!(
+        restored
+            .iter()
+            .map(|snapshot| snapshot.checkpoint_id.clone())
+            .collect::<Vec<_>>(),
+        vec![alpha.clone(), beta.clone(), catalog_only.clone(), observed_late.clone()],
+        "restored and known checkpoint IDs are unioned without synthesizing missing streams",
+    );
+    let slots = |checkpoint_id: &[u8]| {
+        &restored
+            .iter()
+            .find(|snapshot| snapshot.checkpoint_id == checkpoint_id)
+            .unwrap()
+            .slots
+    };
+    let pin = |checkpoint_id: &[u8], state: usize, segment: usize, left_side: bool| {
+        orna_storage_v1::BranchMergePairedCheckpointSegmentPinIdentity {
+            checkpoint_id: checkpoint_id.to_vec(),
+            generation: checkpoint_states[state].clone(),
+            segment_id: if left_side {
+                segment_identities[segment].left_segment.clone()
+            } else {
+                segment_identities[segment].right_segment.clone()
+            },
+        }
+    };
+
+    let alpha_slots = slots(&alpha);
+    assert_eq!(
+        alpha_slots
+            .iter()
+            .map(|slot| (
+                slot.restore_ordinal,
+                slot.merge_ordinal,
+                slot.fold_ordinal,
+                slot.order,
+            ))
+            .collect::<Vec<_>>(),
+        vec![
+            (0, 0, 0, 2),
+            (0, 0, 0, 3),
+            (0, 0, 1, 5),
+            (0, 1, 0, 2),
+            (1, 0, 0, 2),
+            (2, 0, 0, 2),
+            (2, 0, 1, 5),
+        ],
+        "same local coordinates from three restored chains stay distinct",
+    );
+    let expected_left = [
+        Some(pin(&alpha, 0, 0, true)),
+        Some(pin(&alpha, 0, 1, true)),
+        Some(pin(&alpha, 2, 2, true)),
+        None,
+        Some(pin(&alpha, 3, 5, true)),
+        Some(pin(&alpha, 1, 7, true)),
+        Some(pin(&alpha, 4, 8, true)),
+    ];
+    let expected_right = [
+        Some(pin(&alpha, 1, 0, false)),
+        Some(pin(&alpha, 1, 1, false)),
+        None,
+        Some(pin(&alpha, 4, 3, false)),
+        Some(pin(&alpha, 2, 5, false)),
+        Some(pin(&alpha, 3, 7, false)),
+        Some(pin(&alpha, 0, 8, false)),
+    ];
+    for ((slot, left_pin), right_pin) in alpha_slots
+        .iter()
+        .zip(expected_left)
+        .zip(expected_right)
+    {
+        assert_eq!(slot.left_pin, left_pin);
+        assert_eq!(slot.right_pin, right_pin);
+    }
+    assert_eq!(
+        alpha_slots
+            .iter()
+            .map(|slot| slot.segment_identity.clone())
+            .collect::<Vec<_>>(),
+        vec![
+            segment_identities[0].clone(),
+            segment_identities[1].clone(),
+            segment_identities[2].clone(),
+            segment_identities[3].clone(),
+            segment_identities[5].clone(),
+            segment_identities[7].clone(),
+            segment_identities[8].clone(),
+        ],
+        "every expanded order keeps its exact paired segment incarnation",
+    );
+    assert_eq!(
+        alpha_slots
+            .iter()
+            .map(|slot| slot.redo_fold_identity.clone())
+            .collect::<Vec<_>>(),
+        vec![
+            fold_identities[0].clone(),
+            fold_identities[0].clone(),
+            fold_identities[1].clone(),
+            fold_identities[2].clone(),
+            fold_identities[2].clone(),
+            fold_identities[0].clone(),
+            fold_identities[2].clone(),
+        ],
+    );
+
+    assert_eq!(slots(&beta).len(), 1, "omitted beta streams remain omitted");
+    assert_eq!(
+        (slots(&beta)[0].restore_ordinal, slots(&beta)[0].merge_ordinal),
+        (0, 1),
+    );
+    assert!(slots(&beta)[0].left_pin.is_none());
+    assert_eq!(slots(&beta)[0].right_pin, Some(pin(&beta, 4, 4, false)));
+    assert_eq!(slots(&beta)[0].segment_identity, segment_identities[4]);
+    assert!(slots(&catalog_only).is_empty());
+    assert_eq!(slots(&observed_late).len(), 1);
+    assert_eq!(slots(&observed_late)[0].restore_ordinal, 1);
+    assert_eq!(
+        slots(&observed_late)[0].left_pin,
+        Some(pin(&observed_late, 4, 6, true)),
+        "a late checkpoint stream keeps its own ID and directional segment pin",
+    );
+    assert!(slots(&observed_late)[0].right_pin.is_none());
+
+    let malformed_count = vec![
+        vec![],
+        vec![],
+        vec![stream(
+            alpha.clone(),
+            vec![run(9, 7, 12, 13, Some(0), None, 0, &[0])],
+        )],
+    ];
+    assert_eq!(
+        orna_storage_v1::restore_paired_checkpoint_redo_sparse_merge_chains_preserving_fold_and_segment_pin_identity(
+            &[alpha.clone()],
+            &malformed_count,
+        ),
+        Err(orna_storage_v1::BranchMergePairedCheckpointRedoFoldSegmentRotationSparseRestoreChainError::SegmentIdentityCountMismatch {
+            restore_ordinal: 2,
+            merge_ordinal: 9,
+            fold_ordinal: 7,
+            first_order: 12,
+            last_order: 13,
+            expected: 2,
+            actual: 1,
+        }),
+        "a missing per-order segment pair is rejected with its restore-batch identity",
+    );
+
+    let malformed = vec![
+        vec![],
+        vec![],
+        vec![stream(
+            alpha.clone(),
+            vec![run(8, 6, 9, 8, Some(0), None, 0, &[0])],
+        )],
+    ];
+    assert_eq!(
+        orna_storage_v1::restore_paired_checkpoint_redo_sparse_merge_chains_preserving_fold_and_segment_pin_identity(
+            &[alpha],
+            &malformed,
+        ),
+        Err(orna_storage_v1::BranchMergePairedCheckpointRedoFoldSegmentRotationSparseRestoreChainError::InvalidOrderRange {
+            restore_ordinal: 2,
+            merge_ordinal: 8,
+            fold_ordinal: 6,
+            first_order: 9,
+            last_order: 8,
+        }),
+        "invalid source ranges report the restore batch that contained them",
+    );
+}
+
+#[test]
+fn paired_segment_pins_survive_three_sparse_segment_restore_chains() {
+    let segment_rows = PAIRED_SPARSE_SEGMENT_PIN_RESTORES
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    let fold_rows = PAIRED_REDO_FOLD_IDENTITIES
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    let states = PAIRED_CHECKPOINT_REDO
+        .split("\n\n")
+        .map(parse_checkpoint_fixture)
+        .collect::<Vec<_>>();
+    assert_eq!(segment_rows.len(), 10);
+    assert_eq!(fold_rows.len(), 3);
+    assert_eq!(states.len(), 5);
+
+    let segments = segment_rows
+        .iter()
+        .map(|row| BranchMergePairedWriteAheadSegmentIdentity {
+            left_segment: row.fields[&id(2)].encode().unwrap(),
+            right_segment: row.fields[&id(3)].encode().unwrap(),
+        })
+        .collect::<Vec<_>>();
+    let folds = fold_rows
+        .iter()
+        .map(|row| BranchMergePairedRedoFoldIdentity {
+            left_fold: row.fields[&id(2)].encode().unwrap(),
+            right_fold: row.fields[&id(3)].encode().unwrap(),
+        })
+        .collect::<Vec<_>>();
+    assert_ne!(folds[0], folds[1]);
+
+    let alpha = b"vw336/checkpoint/alpha".to_vec();
+    let beta = b"vw336/checkpoint/beta".to_vec();
+    let catalog_only = b"vw336/checkpoint/catalog-only".to_vec();
+    let observed_late = b"vw336/checkpoint/observed-late".to_vec();
+    let run = |merge_ordinal: usize,
+               fold_ordinal: usize,
+               first_order: u64,
+               last_order: u64,
+               left: Option<CheckpointGeneration>,
+               right: Option<CheckpointGeneration>,
+               fold: usize,
+               segment_indexes: &[usize]| {
+        BranchMergePairedCheckpointRedoFoldSegmentRotationSparseMergeChainCompactionRunSnapshot {
+            merge_ordinal,
+            fold_ordinal,
+            first_order,
+            last_order,
+            left,
+            right,
+            redo_fold_identity: folds[fold].clone(),
+            segment_identities: segment_indexes
+                .iter()
+                .map(|&index| segments[index].clone())
+                .collect(),
+        }
+    };
+    let stream = |checkpoint_id, runs| {
+        BranchMergePairedCheckpointRedoFoldSegmentRotationSparseMergeChainCompactionSnapshot {
+            checkpoint_id,
+            runs,
+        }
+    };
+
+    let restore_a = vec![
+        vec![
+            stream(
+                alpha.clone(),
+                vec![run(
+                    0,
+                    0,
+                    10,
+                    11,
+                    Some(states[0].clone()),
+                    Some(states[1].clone()),
+                    0,
+                    &[0, 1],
+                )],
+            ),
+            stream(
+                beta.clone(),
+                vec![run(
+                    0,
+                    0,
+                    12,
+                    12,
+                    Some(states[4].clone()),
+                    None,
+                    2,
+                    &[3],
+                )],
+            ),
+        ],
+        vec![stream(
+            alpha.clone(),
+            vec![run(
+                1,
+                1,
+                10,
+                10,
+                Some(states[2].clone()),
+                Some(states[1].clone()),
+                1,
+                &[2],
+            )],
+        )],
+    ];
+    let restore_b = vec![
+        vec![stream(
+            alpha.clone(),
+            vec![
+                run(
+                    0,
+                    0,
+                    10,
+                    10,
+                    Some(states[4].clone()),
+                    Some(states[3].clone()),
+                    2,
+                    &[4],
+                ),
+                run(
+                    0,
+                    0,
+                    12,
+                    12,
+                    Some(states[4].clone()),
+                    Some(states[3].clone()),
+                    2,
+                    &[5],
+                ),
+            ],
+        )],
+        vec![
+            stream(
+                alpha.clone(),
+                vec![run(
+                    1,
+                    1,
+                    10,
+                    10,
+                    Some(states[0].clone()),
+                    Some(states[3].clone()),
+                    1,
+                    &[6],
+                )],
+            ),
+            stream(
+                observed_late.clone(),
+                vec![run(
+                    1,
+                    1,
+                    14,
+                    14,
+                    None,
+                    None,
+                    1,
+                    &[7],
+                )],
+            ),
+        ],
+    ];
+    let restore_c = vec![
+        vec![stream(
+            alpha.clone(),
+            vec![run(
+                0,
+                0,
+                10,
+                10,
+                Some(states[0].clone()),
+                Some(states[2].clone()),
+                0,
+                &[8],
+            )],
+        )],
+        vec![stream(
+            alpha.clone(),
+            vec![run(
+                0,
+                1,
+                10,
+                10,
+                Some(states[2].clone()),
+                None,
+                2,
+                &[9],
+            )],
+        )],
+    ];
+
+    let restored =
+        orna_storage_v1::restore_paired_checkpoint_redo_sparse_segment_rotation_merge_handoffs_preserving_pin_identity(
+            &[alpha.clone(), beta.clone(), catalog_only.clone()],
+            &[restore_a, restore_b, restore_c],
+        )
+        .unwrap();
+    assert_eq!(
+        restored
+            .iter()
+            .map(|stream| stream.checkpoint_id.clone())
+            .collect::<Vec<_>>(),
+        vec![alpha.clone(), beta.clone(), catalog_only.clone(), observed_late.clone()],
+        "known-only and late-observed checkpoint IDs retain their catalog positions",
+    );
+    let slots = |checkpoint_id: &[u8]| {
+        &restored
+            .iter()
+            .find(|stream| stream.checkpoint_id == checkpoint_id)
+            .unwrap()
+            .slots
+    };
+    let pin = |checkpoint_id: &[u8], state: usize, segment: usize, left_side: bool| {
+        orna_storage_v1::BranchMergePairedCheckpointSegmentPinIdentity {
+            checkpoint_id: checkpoint_id.to_vec(),
+            generation: states[state].clone(),
+            segment_id: if left_side {
+                segments[segment].left_segment.clone()
+            } else {
+                segments[segment].right_segment.clone()
+            },
+        }
+    };
+    let alpha_slots = slots(&alpha);
+    assert_eq!(
+        alpha_slots
+            .iter()
+            .map(|slot| (
+                slot.restore_ordinal,
+                slot.handoff_ordinal,
+                slot.merge_ordinal,
+                slot.fold_ordinal,
+                slot.order,
+            ))
+            .collect::<Vec<_>>(),
+        vec![
+            (0, 0, 0, 0, 10),
+            (0, 0, 0, 0, 11),
+            (0, 1, 1, 1, 10),
+            (1, 0, 0, 0, 10),
+            (1, 0, 0, 0, 12),
+            (1, 1, 1, 1, 10),
+            (2, 0, 0, 0, 10),
+            (2, 1, 0, 1, 10),
+        ],
+        "restore, handoff, merge, fold, and order scopes keep equal local coordinates distinct",
+    );
+    let expected_left = [
+        Some(pin(&alpha, 0, 0, true)),
+        Some(pin(&alpha, 0, 1, true)),
+        Some(pin(&alpha, 2, 2, true)),
+        Some(pin(&alpha, 4, 4, true)),
+        Some(pin(&alpha, 4, 5, true)),
+        Some(pin(&alpha, 0, 6, true)),
+        Some(pin(&alpha, 0, 8, true)),
+        Some(pin(&alpha, 2, 9, true)),
+    ];
+    let expected_right = [
+        Some(pin(&alpha, 1, 0, false)),
+        Some(pin(&alpha, 1, 1, false)),
+        Some(pin(&alpha, 1, 2, false)),
+        Some(pin(&alpha, 3, 4, false)),
+        Some(pin(&alpha, 3, 5, false)),
+        Some(pin(&alpha, 3, 6, false)),
+        Some(pin(&alpha, 2, 8, false)),
+        None,
+    ];
+    for ((slot, left_pin), right_pin) in alpha_slots
+        .iter()
+        .zip(expected_left)
+        .zip(expected_right)
+    {
+        assert_eq!(slot.left_pin, left_pin);
+        assert_eq!(slot.right_pin, right_pin);
+    }
+    assert_eq!(
+        alpha_slots
+            .iter()
+            .map(|slot| slot.segment_identity.clone())
+            .collect::<Vec<_>>(),
+        vec![
+            segments[0].clone(),
+            segments[1].clone(),
+            segments[2].clone(),
+            segments[4].clone(),
+            segments[5].clone(),
+            segments[6].clone(),
+            segments[8].clone(),
+            segments[9].clone(),
+        ],
+        "restoration keeps both segment IDs when a checkpoint side is absent",
+    );
+    assert_eq!(
+        alpha_slots
+            .iter()
+            .map(|slot| slot.redo_fold_identity.clone())
+            .collect::<Vec<_>>(),
+        vec![
+            folds[0].clone(),
+            folds[0].clone(),
+            folds[1].clone(),
+            folds[2].clone(),
+            folds[2].clone(),
+            folds[1].clone(),
+            folds[0].clone(),
+            folds[2].clone(),
+        ],
+    );
+    assert_eq!(slots(&beta).len(), 1);
+    assert_eq!(slots(&beta)[0].restore_ordinal, 0);
+    assert_eq!(slots(&beta)[0].handoff_ordinal, 0);
+    assert_eq!(slots(&beta)[0].left_pin, Some(pin(&beta, 4, 3, true)));
+    assert!(slots(&beta)[0].right_pin.is_none());
+    assert!(slots(&catalog_only).is_empty());
+    assert_eq!(slots(&observed_late).len(), 1);
+    assert_eq!(slots(&observed_late)[0].restore_ordinal, 1);
+    assert_eq!(slots(&observed_late)[0].handoff_ordinal, 1);
+    assert!(slots(&observed_late)[0].left_pin.is_none());
+    assert!(slots(&observed_late)[0].right_pin.is_none());
+    assert_eq!(slots(&observed_late)[0].segment_identity, segments[7]);
+
+    let malformed = [
+        vec![],
+        vec![],
+        vec![vec![stream(
+            alpha.clone(),
+            vec![run(4, 8, 9, 8, Some(states[0].clone()), None, 0, &[0])],
+        )]],
+    ];
+    assert_eq!(
+        orna_storage_v1::restore_paired_checkpoint_redo_sparse_segment_rotation_merge_handoffs_preserving_pin_identity(
+            &[alpha.clone()],
+            &malformed,
+        ),
+        Err(orna_storage_v1::BranchMergePairedCheckpointRedoFoldSegmentRotationMergeRestoreHandoffError::InvalidOrderRange {
+            restore_ordinal: 2,
+            handoff_ordinal: 0,
+            merge_ordinal: 4,
+            fold_ordinal: 8,
+            first_order: 9,
+            last_order: 8,
+        }),
+        "bad compacted segments report all restoring source coordinates",
+    );
+    let malformed_count = [
+        vec![],
+        vec![],
+        vec![vec![stream(
+            alpha.clone(),
+            vec![run(7, 5, 20, 21, Some(states[0].clone()), None, 0, &[0])],
+        )]],
+    ];
+    assert_eq!(
+        orna_storage_v1::restore_paired_checkpoint_redo_sparse_segment_rotation_merge_handoffs_preserving_pin_identity(
+            &[alpha],
+            &malformed_count,
+        ),
+        Err(orna_storage_v1::BranchMergePairedCheckpointRedoFoldSegmentRotationMergeRestoreHandoffError::SegmentIdentityCountMismatch {
+            restore_ordinal: 2,
+            handoff_ordinal: 0,
+            merge_ordinal: 7,
+            fold_ordinal: 5,
+            first_order: 20,
+            last_order: 21,
+            expected: 2,
+            actual: 1,
+        }),
+        "missing segment pairs are rejected with all restoration coordinates",
+    );
+}
+
+#[test]
+fn paired_redo_fold_identity_survives_sparse_compaction_handoff_chains() {
+    let identity_rows = PAIRED_REDO_FOLD_IDENTITIES
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    let checkpoint_states = PAIRED_CHECKPOINT_REDO
+        .split("\n\n")
+        .map(parse_checkpoint_fixture)
+        .collect::<Vec<_>>();
+    assert_eq!(identity_rows.len(), 3);
+    assert_eq!(checkpoint_states.len(), 5);
+    let identities = identity_rows
+        .iter()
+        .map(|row| BranchMergePairedRedoFoldIdentity {
+            left_fold: row.fields[&id(2)].encode().unwrap(),
+            right_fold: row.fields[&id(3)].encode().unwrap(),
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(identities[0], identities[2]);
+    assert_ne!(identities[0], identities[1]);
+
+    let alpha = b"handoff/alpha".to_vec();
+    let beta = b"handoff/beta".to_vec();
+    let catalog_only = b"handoff/catalog-only".to_vec();
+    let observed_late = b"handoff/observed-late".to_vec();
+    let left_base = checkpoint_states[0].clone();
+    let right_base = checkpoint_states[1].clone();
+    let left_redo = checkpoint_states[2].clone();
+    let right_redo = checkpoint_states[3].clone();
+    let positionless = checkpoint_states[4].clone();
+    assert_eq!(positionless.position, None);
+
+    let run = |fold_ordinal,
+               first_order,
+               last_order,
+               left,
+               right,
+               redo_fold_identity: &BranchMergePairedRedoFoldIdentity| {
+        BranchMergePairedCheckpointRedoFoldSparseStreamChainCompactionRunSnapshot {
+            fold_ordinal,
+            first_order,
+            last_order,
+            left,
+            right,
+            redo_fold_identity: redo_fold_identity.clone(),
+        }
+    };
+    let stream = |checkpoint_id, runs| {
+        BranchMergePairedCheckpointRedoFoldSparseStreamChainCompactionSnapshot {
+            checkpoint_id,
+            runs,
+        }
+    };
+    let first_handoff = vec![
+        stream(
+            alpha.clone(),
+            vec![
+                run(
+                    0,
+                    20,
+                    21,
+                    Some(left_base.clone()),
+                    Some(right_base.clone()),
+                    &identities[0],
+                ),
+                run(
+                    0,
+                    23,
+                    23,
+                    Some(left_redo.clone()),
+                    Some(right_base.clone()),
+                    &identities[0],
+                ),
+                run(
+                    1,
+                    23,
+                    24,
+                    Some(left_redo.clone()),
+                    Some(right_redo.clone()),
+                    &identities[1],
+                ),
+            ],
+        ),
+        stream(
+            beta.clone(),
+            vec![
+                run(
+                    0,
+                    21,
+                    21,
+                    Some(positionless.clone()),
+                    None,
+                    &identities[0],
+                ),
+                run(
+                    1,
+                    24,
+                    24,
+                    None,
+                    Some(positionless.clone()),
+                    &identities[1],
+                ),
+            ],
+        ),
+    ];
+    let second_handoff = vec![
+        stream(
+            alpha.clone(),
+            vec![
+                run(
+                    0,
+                    20,
+                    20,
+                    Some(positionless.clone()),
+                    Some(right_redo.clone()),
+                    &identities[2],
+                ),
+                run(
+                    0,
+                    22,
+                    22,
+                    Some(left_base.clone()),
+                    Some(right_redo.clone()),
+                    &identities[2],
+                ),
+                run(
+                    1,
+                    23,
+                    23,
+                    Some(left_redo.clone()),
+                    Some(right_redo.clone()),
+                    &identities[1],
+                ),
+            ],
+        ),
+        stream(
+            observed_late.clone(),
+            vec![
+                run(0, 20, 20, None, None, &identities[2]),
+                run(
+                    0,
+                    22,
+                    22,
+                    Some(positionless.clone()),
+                    None,
+                    &identities[2],
+                ),
+                run(1, 23, 23, None, None, &identities[1]),
+            ],
+        ),
+    ];
+
+    let handed_off =
+        merge_paired_checkpoint_redo_sparse_compaction_handoff_chains_preserving_fold_identity(
+            &[alpha.clone(), beta.clone(), catalog_only.clone()],
+            &[first_handoff, second_handoff],
+        );
+    assert_eq!(
+        handed_off
+            .iter()
+            .map(|snapshot| snapshot.checkpoint_id.clone())
+            .collect::<Vec<_>>(),
+        vec![alpha.clone(), beta.clone(), catalog_only.clone(), observed_late.clone()],
+    );
+    let runs = |checkpoint_id: &[u8]| {
+        &handed_off
+            .iter()
+            .find(|snapshot| snapshot.checkpoint_id == checkpoint_id)
+            .unwrap()
+            .runs
+    };
+    assert_eq!(
+        runs(&alpha)
+            .iter()
+            .map(|run| (
+                run.handoff_ordinal,
+                run.fold_ordinal,
+                run.first_order,
+                run.last_order,
+            ))
+            .collect::<Vec<_>>(),
+        vec![
+            (0, 0, 20, 21),
+            (0, 0, 23, 23),
+            (0, 1, 23, 24),
+            (1, 0, 20, 20),
+            (1, 0, 22, 22),
+            (1, 1, 23, 23),
+        ],
+        "handoffs retain overlapping folds and sparse run boundaries",
+    );
+    assert_eq!(runs(&alpha)[0].redo_fold_identity, identities[0]);
+    assert_eq!(runs(&alpha)[3].redo_fold_identity, identities[2]);
+    assert_eq!(runs(&alpha)[0].left, Some(left_base.clone()));
+    assert_eq!(runs(&alpha)[3].left, Some(positionless.clone()));
+    assert!(runs(&catalog_only).is_empty());
+
+    let restored =
+        restore_paired_checkpoint_redo_sparse_compaction_handoff_chains_preserving_fold_identity(
+            &handed_off,
+        )
+        .unwrap();
+    let slots = |checkpoint_id: &[u8]| {
+        &restored
+            .iter()
+            .find(|snapshot| snapshot.checkpoint_id == checkpoint_id)
+            .unwrap()
+            .slots
+    };
+    assert_eq!(
+        slots(&alpha)
+            .iter()
+            .map(|slot| (slot.merge_ordinal, slot.fold_ordinal, slot.order))
+            .collect::<Vec<_>>(),
+        vec![
+            (0, 0, 20),
+            (0, 0, 21),
+            (0, 0, 23),
+            (0, 1, 23),
+            (0, 1, 24),
+            (1, 0, 20),
+            (1, 0, 22),
+            (1, 1, 23),
+        ],
+    );
+    assert_eq!(slots(&alpha)[0].left, Some(left_base.clone()));
+    assert_eq!(slots(&alpha)[1].right, Some(right_base.clone()));
+    assert_eq!(slots(&alpha)[2].left, Some(left_redo.clone()));
+    assert_eq!(slots(&alpha)[3].right, Some(right_redo.clone()));
+    assert_eq!(slots(&alpha)[5].left, Some(positionless.clone()));
+    assert_eq!(slots(&alpha)[6].right, Some(right_redo.clone()));
+    assert_eq!(slots(&alpha)[7].redo_fold_identity, identities[1]);
+    assert_eq!(slots(&beta).len(), 2);
+    assert_eq!(slots(&beta)[0].left, Some(positionless.clone()));
+    assert_eq!(slots(&beta)[1].right, Some(positionless.clone()));
+    assert!(slots(&catalog_only).is_empty());
+    assert_eq!(
+        slots(&observed_late)
+            .iter()
+            .map(|slot| (slot.merge_ordinal, slot.fold_ordinal, slot.order))
+            .collect::<Vec<_>>(),
+        vec![(1, 0, 20), (1, 0, 22), (1, 1, 23)],
+    );
+    assert!(slots(&observed_late)[0].left.is_none());
+    assert_eq!(slots(&observed_late)[1].left, Some(positionless));
+    assert!(slots(&observed_late)[2].left.is_none());
+
+    let malformed = vec![BranchMergePairedCheckpointRedoFoldSparseCompactionHandoffSnapshot {
+        checkpoint_id: alpha,
+        runs: vec![BranchMergePairedCheckpointRedoFoldSparseCompactionHandoffRunSnapshot {
+            handoff_ordinal: 3,
+            fold_ordinal: 7,
+            first_order: 9,
+            last_order: 8,
+            left: None,
+            right: None,
+            redo_fold_identity: identities[0].clone(),
+        }],
+    }];
+    assert_eq!(
+        restore_paired_checkpoint_redo_sparse_compaction_handoff_chains_preserving_fold_identity(
+            &malformed,
+        ),
+        Err(orna_storage_v1::BranchMergePairedCheckpointRedoFoldSparseCompactionHandoffRestoreError::InvalidOrderRange {
+            handoff_ordinal: 3,
+            fold_ordinal: 7,
+            first_order: 9,
+            last_order: 8,
+        }),
+        "descending compacted ranges are rejected instead of dropped",
+    );
+}
+
+#[test]
+fn paired_checkpoint_pin_identity_survives_three_sparse_rebind_chains() {
+    let pin_rows = PAIRED_SPARSE_CHECKPOINT_PIN_CHAINS
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    let fold_rows = PAIRED_REDO_FOLD_IDENTITIES
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    assert_eq!(pin_rows.len(), 12);
+    assert_eq!(fold_rows.len(), 3);
+
+    let fold_identities = fold_rows
+        .iter()
+        .map(|row| BranchMergePairedRedoFoldIdentity {
+            left_fold: row.fields[&id(2)].encode().unwrap(),
+            right_fold: row.fields[&id(3)].encode().unwrap(),
+        })
+        .collect::<Vec<_>>();
+    let alpha = b"hugp3/checkpoint/alpha".to_vec();
+    let beta = b"hugp3/checkpoint/beta".to_vec();
+    let catalog_only = b"hugp3/checkpoint/catalog-only".to_vec();
+    let observed_late = b"hugp3/checkpoint/late".to_vec();
+
+    let pin = |checkpoint_id: &[u8], index: usize, field_id: ObjectId| {
+        BranchMergePairedCheckpointPinIdentity {
+            checkpoint_id: checkpoint_id.to_vec(),
+            generation: CheckpointGeneration {
+                // Deliberately non-monotone generations: they are opaque pins,
+                // not an order signal for selecting a winner.
+                generation: if field_id == id(2) {
+                    90 - (index as u64 * 3)
+                } else {
+                    7 + (index as u64 * 11)
+                },
+                position: Some(pin_rows[index].fields[&field_id].encode().unwrap()),
+            },
+        }
+    };
+    let left = |checkpoint_id: &[u8], index| Some(pin(checkpoint_id, index, id(2)));
+    let right = |checkpoint_id: &[u8], index| Some(pin(checkpoint_id, index, id(3)));
+    let slot = |fold_ordinal: usize,
+                order: u64,
+                left_pin: Option<BranchMergePairedCheckpointPinIdentity>,
+                right_pin: Option<BranchMergePairedCheckpointPinIdentity>,
+                identity_index: usize| {
+        orna_storage_v1::BranchMergePairedCheckpointRedoFoldSparseChainSlotSnapshot {
+            fold_ordinal,
+            order,
+            left: left_pin.map(|pin| pin.generation),
+            right: right_pin.map(|pin| pin.generation),
+            redo_fold_identity: fold_identities[identity_index].clone(),
+        }
+    };
+    let stream = |checkpoint_id, slots| {
+        orna_storage_v1::BranchMergePairedCheckpointRedoFoldSparseStreamChainSnapshot {
+            checkpoint_id,
+            slots,
+        }
+    };
+
+    let chain_a = vec![
+        stream(
+            alpha.clone(),
+            vec![
+                slot(0, 4, left(&alpha, 0), right(&alpha, 0), 0),
+                slot(0, 6, left(&alpha, 1), right(&alpha, 1), 0),
+                slot(1, 6, left(&alpha, 2), None, 1),
+            ],
+        ),
+        stream(beta.clone(), vec![slot(0, 6, left(&beta, 9), None, 0)]),
+    ];
+    let chain_b = vec![stream(
+        alpha.clone(),
+        vec![
+            slot(0, 4, left(&alpha, 3), right(&alpha, 3), 2),
+            slot(0, 5, None, right(&alpha, 4), 2),
+            slot(1, 7, left(&alpha, 5), right(&alpha, 5), 1),
+        ],
+    )];
+    let chain_c = vec![
+        stream(
+            alpha.clone(),
+            vec![
+                slot(0, 4, left(&alpha, 6), right(&alpha, 6), 0),
+                slot(1, 6, left(&alpha, 7), right(&alpha, 7), 1),
+                slot(1, 9, left(&alpha, 8), right(&alpha, 8), 2),
+            ],
+        ),
+        stream(beta.clone(), vec![slot(0, 4, None, right(&beta, 10), 2)]),
+        stream(observed_late.clone(), vec![slot(1, 9, left(&observed_late, 11), None, 1)]),
+    ];
+
+    let merged = merge_paired_checkpoint_redo_sparse_stream_chains_preserving_checkpoint_pin_identity(
+        &[alpha.clone(), beta.clone(), catalog_only.clone()],
+        &[chain_a, chain_b, chain_c],
+    );
+    assert_eq!(
+        merged
+            .iter()
+            .map(|snapshot| snapshot.checkpoint_id.clone())
+            .collect::<Vec<_>>(),
+        vec![alpha.clone(), beta.clone(), catalog_only.clone(), observed_late.clone()],
+    );
+    let slots = |checkpoint_id: &[u8]| {
+        &merged
+            .iter()
+            .find(|snapshot| snapshot.checkpoint_id == checkpoint_id)
+            .unwrap()
+            .slots
+    };
+    let alpha_slots = slots(&alpha);
+    assert_eq!(
+        alpha_slots
+            .iter()
+            .map(|slot| (slot.merge_ordinal, slot.fold_ordinal, slot.order))
+            .collect::<Vec<_>>(),
+        vec![
+            (0, 0, 4), (0, 0, 6), (0, 1, 6),
+            (1, 0, 4), (1, 0, 5), (1, 1, 7),
+            (2, 0, 4), (2, 1, 6), (2, 1, 9),
+        ],
+        "overlapping local positions remain distinct across three pin chains",
+    );
+    assert_eq!(
+        alpha_slots
+            .iter()
+            .map(|slot| slot.redo_fold_identity.clone())
+            .collect::<Vec<_>>(),
+        vec![
+            fold_identities[0].clone(), fold_identities[0].clone(), fold_identities[1].clone(),
+            fold_identities[2].clone(), fold_identities[2].clone(), fold_identities[1].clone(),
+            fold_identities[0].clone(), fold_identities[1].clone(), fold_identities[2].clone(),
+        ],
+    );
+    let expected_alpha_pins = [
+        (Some(pin(&alpha, 0, id(2))), Some(pin(&alpha, 0, id(3)))),
+        (Some(pin(&alpha, 1, id(2))), Some(pin(&alpha, 1, id(3)))),
+        (Some(pin(&alpha, 2, id(2))), None),
+        (Some(pin(&alpha, 3, id(2))), Some(pin(&alpha, 3, id(3)))),
+        (None, Some(pin(&alpha, 4, id(3)))),
+        (Some(pin(&alpha, 5, id(2))), Some(pin(&alpha, 5, id(3)))),
+        (Some(pin(&alpha, 6, id(2))), Some(pin(&alpha, 6, id(3)))),
+        (Some(pin(&alpha, 7, id(2))), Some(pin(&alpha, 7, id(3)))),
+        (Some(pin(&alpha, 8, id(2))), Some(pin(&alpha, 8, id(3)))),
+    ];
+    for (slot, (expected_left, expected_right)) in alpha_slots.iter().zip(expected_alpha_pins) {
+        assert_eq!(slot.left_pin, expected_left);
+        assert_eq!(slot.right_pin, expected_right);
+        assert!(slot
+            .left_pin
+            .iter()
+            .chain(slot.right_pin.iter())
+            .all(|pin| pin.checkpoint_id == alpha));
+    }
+
+    assert_eq!(
+        slots(&beta)
+            .iter()
+            .map(|slot| (slot.merge_ordinal, slot.fold_ordinal, slot.order))
+            .collect::<Vec<_>>(),
+        vec![(0, 0, 6), (2, 0, 4)],
+        "the missing middle beta stream stays omitted",
+    );
+    assert_eq!(slots(&beta)[0].left_pin, left(&beta, 9));
+    assert!(slots(&beta)[0].right_pin.is_none());
+    assert!(slots(&beta)[1].left_pin.is_none());
+    assert_eq!(slots(&beta)[1].right_pin, right(&beta, 10));
+    assert!(slots(&catalog_only).is_empty());
+    assert_eq!(
+        slots(&observed_late)[0].left_pin,
+        left(&observed_late, 11),
+    );
+    assert!(slots(&observed_late)[0].right_pin.is_none());
+}
+
+#[test]
+fn paired_redo_fold_identity_survives_sparse_restore_handoff_chains() {
+    let identity_rows = PAIRED_REDO_FOLD_IDENTITIES
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    let checkpoint_states = PAIRED_CHECKPOINT_REDO
+        .split("\n\n")
+        .map(parse_checkpoint_fixture)
+        .collect::<Vec<_>>();
+    assert_eq!(identity_rows.len(), 3);
+    assert_eq!(checkpoint_states.len(), 5);
+    let identities = identity_rows
+        .iter()
+        .map(|row| BranchMergePairedRedoFoldIdentity {
+            left_fold: row.fields[&id(2)].encode().unwrap(),
+            right_fold: row.fields[&id(3)].encode().unwrap(),
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(identities[0], identities[2]);
+    assert_ne!(identities[0], identities[1]);
+
+    let alpha = b"restore-handoff/alpha".to_vec();
+    let beta = b"restore-handoff/beta".to_vec();
+    let catalog_only = b"restore-handoff/catalog-only".to_vec();
+    let observed_late = b"restore-handoff/observed-late".to_vec();
+    let left_base = checkpoint_states[0].clone();
+    let right_base = checkpoint_states[1].clone();
+    let left_redo = checkpoint_states[2].clone();
+    let right_redo = checkpoint_states[3].clone();
+    let positionless = checkpoint_states[4].clone();
+    assert_eq!(positionless.position, None);
+
+    let run = |handoff_ordinal,
+               fold_ordinal,
+               first_order,
+               last_order,
+               left,
+               right,
+               redo_fold_identity: &BranchMergePairedRedoFoldIdentity| {
+        BranchMergePairedCheckpointRedoFoldSparseCompactionHandoffRunSnapshot {
+            handoff_ordinal,
+            fold_ordinal,
+            first_order,
+            last_order,
+            left,
+            right,
+            redo_fold_identity: redo_fold_identity.clone(),
+        }
+    };
+    let stream = |checkpoint_id, runs| {
+        BranchMergePairedCheckpointRedoFoldSparseCompactionHandoffSnapshot {
+            checkpoint_id,
+            runs,
+        }
+    };
+
+    let first_restore = vec![
+        stream(
+            alpha.clone(),
+            vec![
+                run(
+                    0,
+                    0,
+                    30,
+                    31,
+                    Some(left_base.clone()),
+                    Some(right_base.clone()),
+                    &identities[0],
+                ),
+                run(
+                    0,
+                    1,
+                    30,
+                    30,
+                    Some(left_redo.clone()),
+                    Some(right_redo.clone()),
+                    &identities[1],
+                ),
+            ],
+        ),
+        stream(
+            beta.clone(),
+            vec![run(
+                0,
+                0,
+                31,
+                31,
+                Some(positionless.clone()),
+                None,
+                &identities[0],
+            )],
+        ),
+    ];
+    let second_restore = vec![
+        stream(
+            alpha.clone(),
+            vec![
+                run(
+                    0,
+                    0,
+                    30,
+                    30,
+                    Some(positionless.clone()),
+                    Some(right_redo.clone()),
+                    &identities[2],
+                ),
+                run(
+                    0,
+                    1,
+                    30,
+                    30,
+                    Some(left_redo.clone()),
+                    Some(right_base.clone()),
+                    &identities[1],
+                ),
+            ],
+        ),
+        stream(
+            observed_late.clone(),
+            vec![
+                run(
+                    0,
+                    0,
+                    32,
+                    32,
+                    Some(positionless.clone()),
+                    None,
+                    &identities[2],
+                ),
+                run(0, 1, 30, 30, None, None, &identities[1]),
+            ],
+        ),
+    ];
+
+    let restored =
+        restore_paired_checkpoint_redo_sparse_compaction_handoff_chains_preserving_restore_identity(
+            &[alpha.clone(), beta.clone(), catalog_only.clone()],
+            &[first_restore, second_restore],
+        )
+        .unwrap();
+    assert_eq!(
+        restored
+            .iter()
+            .map(|stream| stream.checkpoint_id.clone())
+            .collect::<Vec<_>>(),
+        vec![alpha.clone(), beta.clone(), catalog_only.clone(), observed_late.clone()],
+    );
+    let slots = |checkpoint_id: &[u8]| {
+        &restored
+            .iter()
+            .find(|stream| stream.checkpoint_id == checkpoint_id)
+            .unwrap()
+            .slots
+    };
+    assert_eq!(
+        slots(&alpha)
+            .iter()
+            .map(|slot| (
+                slot.restore_ordinal,
+                slot.handoff_ordinal,
+                slot.fold_ordinal,
+                slot.order,
+            ))
+            .collect::<Vec<_>>(),
+        vec![
+            (0, 0, 0, 30),
+            (0, 0, 0, 31),
+            (0, 0, 1, 30),
+            (1, 0, 0, 30),
+            (1, 0, 1, 30),
+        ],
+        "restore batch ordinal separates otherwise identical handoff/fold/order coordinates",
+    );
+    assert_eq!(slots(&alpha)[0].left, Some(left_base.clone()));
+    assert_eq!(slots(&alpha)[1].right, Some(right_base.clone()));
+    assert_eq!(slots(&alpha)[2].redo_fold_identity, identities[1]);
+    assert_eq!(slots(&alpha)[3].left, Some(positionless.clone()));
+    assert_eq!(slots(&alpha)[3].right, Some(right_redo.clone()));
+    assert_eq!(slots(&alpha)[3].redo_fold_identity, identities[2]);
+    assert_eq!(slots(&alpha)[4].right, Some(right_base));
+    assert_eq!(slots(&beta).len(), 1);
+    assert_eq!(slots(&beta)[0].restore_ordinal, 0);
+    assert_eq!(slots(&beta)[0].left, Some(positionless.clone()));
+    assert!(slots(&catalog_only).is_empty());
+    assert_eq!(
+        slots(&observed_late)
+            .iter()
+            .map(|slot| (
+                slot.restore_ordinal,
+                slot.handoff_ordinal,
+                slot.fold_ordinal,
+                slot.order,
+            ))
+            .collect::<Vec<_>>(),
+        vec![(1, 0, 0, 32), (1, 0, 1, 30)],
+    );
+    assert_eq!(slots(&observed_late)[0].left, Some(positionless));
+    assert!(slots(&observed_late)[1].left.is_none());
+
+    let malformed_batch = vec![stream(
+        alpha,
+        vec![run(6, 4, 8, 7, None, None, &identities[0])],
+    )];
+    assert_eq!(
+        restore_paired_checkpoint_redo_sparse_compaction_handoff_chains_preserving_restore_identity(
+            &[],
+            &[Vec::new(), malformed_batch],
+        ),
+        Err(orna_storage_v1::BranchMergePairedCheckpointRedoFoldSparseRestoreHandoffError::InvalidOrderRange {
+            restore_ordinal: 1,
+            handoff_ordinal: 6,
+            fold_ordinal: 4,
+            first_order: 8,
+            last_order: 7,
+        }),
+        "invalid ranges report which restore handoff failed",
+    );
+}
+
+#[test]
+fn paired_checkpoint_pins_survive_three_sparse_compaction_handoff_restores() {
+    let fold_rows = PAIRED_SPARSE_COMPACTION_PIN_FOLDS
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    let generations = PAIRED_SPARSE_COMPACTION_PIN_GENERATIONS
+        .split("\n\n")
+        .map(parse_checkpoint_fixture)
+        .collect::<Vec<_>>();
+    assert_eq!(fold_rows.len(), 3);
+    assert_eq!(generations.len(), 5);
+
+    let folds = fold_rows
+        .iter()
+        .map(|row| BranchMergePairedRedoFoldIdentity {
+            left_fold: row.fields[&id(2)].encode().unwrap(),
+            right_fold: row.fields[&id(3)].encode().unwrap(),
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(folds[0], folds[2], "fixture includes a reused identity pair");
+    assert_ne!(folds[0], folds[1]);
+    assert_ne!(folds[1], folds[2]);
+
+    let alpha = b"n1kg3/checkpoint/alpha".to_vec();
+    let beta = b"n1kg3/checkpoint/beta".to_vec();
+    let catalog_only = b"n1kg3/checkpoint/catalog-only".to_vec();
+    let observed_late = b"n1kg3/checkpoint/late".to_vec();
+    let slot = |fold_ordinal,
+                order,
+                left: Option<CheckpointGeneration>,
+                right: Option<CheckpointGeneration>,
+                identity: &BranchMergePairedRedoFoldIdentity| {
+        orna_storage_v1::BranchMergePairedCheckpointRedoFoldSparseChainSlotSnapshot {
+            fold_ordinal,
+            order,
+            left,
+            right,
+            redo_fold_identity: identity.clone(),
+        }
+    };
+    let stream = |checkpoint_id: &[u8], slots| {
+        orna_storage_v1::BranchMergePairedCheckpointRedoFoldSparseStreamChainSnapshot {
+            checkpoint_id: checkpoint_id.to_vec(),
+            slots,
+        }
+    };
+
+    let first_left_compacted = compress_paired_checkpoint_redo_sparse_stream_chains_preserving_fold_identity(&[
+        stream(
+            &alpha,
+            vec![
+                slot(0, 20, Some(generations[0].clone()), Some(generations[1].clone()), &folds[0]),
+                slot(0, 21, Some(generations[0].clone()), Some(generations[1].clone()), &folds[0]),
+                slot(0, 23, Some(generations[2].clone()), None, &folds[1]),
+            ],
+        ),
+        stream(
+            &beta,
+            vec![slot(1, 25, Some(generations[4].clone()), None, &folds[2])],
+        ),
+    ]);
+    let first_right_compacted = compress_paired_checkpoint_redo_sparse_stream_chains_preserving_fold_identity(&[
+        stream(
+            &alpha,
+            vec![
+                slot(0, 20, Some(generations[4].clone()), Some(generations[1].clone()), &folds[2]),
+                slot(2, 20, None, Some(generations[3].clone()), &folds[1]),
+            ],
+        ),
+        stream(
+            &observed_late,
+            vec![slot(1, 31, None, None, &folds[0])],
+        ),
+    ]);
+    let first_handoff = merge_paired_checkpoint_redo_sparse_compaction_handoff_chains_preserving_fold_identity(
+        &[alpha.clone(), beta.clone(), catalog_only.clone()],
+        &[first_left_compacted, first_right_compacted],
+    );
+
+    let second_left_compacted = compress_paired_checkpoint_redo_sparse_stream_chains_preserving_fold_identity(&[
+        stream(
+            &alpha,
+            vec![
+                slot(0, 20, Some(generations[2].clone()), Some(generations[1].clone()), &folds[2]),
+                slot(0, 22, Some(generations[0].clone()), Some(generations[3].clone()), &folds[1]),
+            ],
+        ),
+        stream(
+            &observed_late,
+            vec![
+                slot(0, 30, None, Some(generations[4].clone()), &folds[0]),
+                slot(0, 31, None, Some(generations[4].clone()), &folds[0]),
+            ],
+        ),
+    ]);
+    let second_right_compacted = compress_paired_checkpoint_redo_sparse_stream_chains_preserving_fold_identity(&[
+        stream(
+            &alpha,
+            vec![slot(2, 23, Some(generations[0].clone()), None, &folds[0])],
+        ),
+        stream(
+            &beta,
+            vec![slot(0, 25, None, Some(generations[4].clone()), &folds[1])],
+        ),
+    ]);
+    let second_handoff = merge_paired_checkpoint_redo_sparse_compaction_handoff_chains_preserving_fold_identity(
+        &[alpha.clone(), beta.clone(), catalog_only.clone()],
+        &[second_left_compacted, second_right_compacted],
+    );
+
+    let third_compacted = compress_paired_checkpoint_redo_sparse_stream_chains_preserving_fold_identity(&[
+        stream(
+            &alpha,
+            vec![
+                slot(0, 21, Some(generations[4].clone()), Some(generations[0].clone()), &folds[0]),
+                slot(2, 20, None, None, &folds[2]),
+                slot(2, 21, None, None, &folds[2]),
+            ],
+        ),
+        stream(
+            &observed_late,
+            vec![slot(1, 30, Some(generations[0].clone()), Some(generations[3].clone()), &folds[1])],
+        ),
+    ]);
+    let third_handoff = merge_paired_checkpoint_redo_sparse_compaction_handoff_chains_preserving_fold_identity(
+        &[alpha.clone(), beta.clone(), catalog_only.clone()],
+        &[third_compacted],
+    );
+
+    let restored = orna_storage_v1::restore_paired_checkpoint_redo_sparse_compaction_handoff_chains_preserving_checkpoint_pin_identity(
+        &[alpha.clone(), beta.clone(), catalog_only.clone()],
+        &[first_handoff, second_handoff, third_handoff],
+    )
+    .unwrap();
+    assert_eq!(
+        restored
+            .iter()
+            .map(|snapshot| snapshot.checkpoint_id.clone())
+            .collect::<Vec<_>>(),
+        vec![alpha.clone(), beta.clone(), catalog_only.clone(), observed_late.clone()],
+        "known-only and late-observed checkpoint identities retain catalog order",
+    );
+    let slots = |checkpoint_id: &[u8]| {
+        &restored
+            .iter()
+            .find(|snapshot| snapshot.checkpoint_id == checkpoint_id)
+            .unwrap()
+            .slots
+    };
+    assert_eq!(
+        slots(&alpha)
+            .iter()
+            .map(|slot| (
+                slot.restore_ordinal,
+                slot.handoff_ordinal,
+                slot.fold_ordinal,
+                slot.order,
+            ))
+            .collect::<Vec<_>>(),
+        vec![
+            (0, 0, 0, 20),
+            (0, 0, 0, 21),
+            (0, 0, 0, 23),
+            (0, 1, 0, 20),
+            (0, 1, 2, 20),
+            (1, 0, 0, 20),
+            (1, 0, 0, 22),
+            (1, 1, 2, 23),
+            (2, 0, 0, 21),
+            (2, 0, 2, 20),
+            (2, 0, 2, 21),
+        ],
+        "restore, handoff, fold, and order distinguish colliding sparse chains",
+    );
+    let pin = |checkpoint_id: &[u8], generation: &CheckpointGeneration| {
+        Some(BranchMergePairedCheckpointPinIdentity {
+            checkpoint_id: checkpoint_id.to_vec(),
+            generation: generation.clone(),
+        })
+    };
+    assert_eq!(
+        slots(&alpha)
+            .iter()
+            .map(|slot| (slot.left_pin.clone(), slot.right_pin.clone()))
+            .collect::<Vec<_>>(),
+        vec![
+            (pin(&alpha, &generations[0]), pin(&alpha, &generations[1])),
+            (pin(&alpha, &generations[0]), pin(&alpha, &generations[1])),
+            (pin(&alpha, &generations[2]), None),
+            (pin(&alpha, &generations[4]), pin(&alpha, &generations[1])),
+            (None, pin(&alpha, &generations[3])),
+            (pin(&alpha, &generations[2]), pin(&alpha, &generations[1])),
+            (pin(&alpha, &generations[0]), pin(&alpha, &generations[3])),
+            (pin(&alpha, &generations[0]), None),
+            (pin(&alpha, &generations[4]), pin(&alpha, &generations[0])),
+            (None, None),
+            (None, None),
+        ],
+        "each side keeps its exact generation bound to the enclosing checkpoint",
+    );
+    assert_eq!(
+        slots(&alpha)
+            .iter()
+            .map(|slot| slot.redo_fold_identity.clone())
+            .collect::<Vec<_>>(),
+        vec![
+            folds[0].clone(),
+            folds[0].clone(),
+            folds[1].clone(),
+            folds[2].clone(),
+            folds[1].clone(),
+            folds[2].clone(),
+            folds[1].clone(),
+            folds[0].clone(),
+            folds[0].clone(),
+            folds[2].clone(),
+            folds[2].clone(),
+        ],
+        "fold pairs remain attached to the exact restored occurrence",
+    );
+    assert_eq!(slots(&beta).len(), 2);
+    assert_eq!(
+        (
+            slots(&beta)[0].restore_ordinal,
+            slots(&beta)[0].handoff_ordinal,
+            slots(&beta)[0].fold_ordinal,
+            slots(&beta)[0].order,
+        ),
+        (0, 0, 1, 25),
+    );
+    assert_eq!(slots(&beta)[0].left_pin, pin(&beta, &generations[4]));
+    assert!(slots(&beta)[0].right_pin.is_none());
+    assert_eq!(
+        (
+            slots(&beta)[1].restore_ordinal,
+            slots(&beta)[1].handoff_ordinal,
+            slots(&beta)[1].fold_ordinal,
+            slots(&beta)[1].order,
+        ),
+        (1, 1, 0, 25),
+    );
+    assert!(slots(&beta)[1].left_pin.is_none());
+    assert_eq!(slots(&beta)[1].right_pin, pin(&beta, &generations[4]));
+    assert!(slots(&catalog_only).is_empty());
+    assert_eq!(
+        slots(&observed_late)
+            .iter()
+            .map(|slot| (
+                slot.restore_ordinal,
+                slot.handoff_ordinal,
+                slot.fold_ordinal,
+                slot.order,
+            ))
+            .collect::<Vec<_>>(),
+        vec![(0, 1, 1, 31), (1, 0, 0, 30), (1, 0, 0, 31), (2, 0, 1, 30)],
+    );
+    assert!(slots(&observed_late)[0].left_pin.is_none());
+    assert!(slots(&observed_late)[0].right_pin.is_none());
+    assert!(slots(&observed_late)[1].left_pin.is_none());
+    assert_eq!(slots(&observed_late)[1].right_pin, pin(&observed_late, &generations[4]));
+    assert_eq!(slots(&observed_late)[3].left_pin, pin(&observed_late, &generations[0]));
+    assert_eq!(slots(&observed_late)[3].right_pin, pin(&observed_late, &generations[3]));
+
+    let malformed = vec![
+        orna_storage_v1::BranchMergePairedCheckpointRedoFoldSparseCompactionHandoffSnapshot {
+            checkpoint_id: alpha,
+            runs: vec![
+                orna_storage_v1::BranchMergePairedCheckpointRedoFoldSparseCompactionHandoffRunSnapshot {
+                    handoff_ordinal: 8,
+                    fold_ordinal: 5,
+                    first_order: 31,
+                    last_order: 30,
+                    left: None,
+                    right: None,
+                    redo_fold_identity: folds[0].clone(),
+                },
+            ],
+        },
+    ];
+    assert_eq!(
+        orna_storage_v1::restore_paired_checkpoint_redo_sparse_compaction_handoff_chains_preserving_checkpoint_pin_identity(
+            &[],
+            &[Vec::new(), Vec::new(), malformed],
+        ),
+        Err(orna_storage_v1::BranchMergePairedCheckpointRedoFoldSparseRestoreHandoffError::InvalidOrderRange {
+            restore_ordinal: 2,
+            handoff_ordinal: 8,
+            fold_ordinal: 5,
+            first_order: 31,
+            last_order: 30,
+        }),
+        "invalid compaction ranges retain their restore and source coordinates",
+    );
+}
+
+#[test]
+fn paired_redo_fold_wal_identity_survives_sparse_restore_handoff_chains() {
+    let fold_rows = PAIRED_REDO_FOLD_IDENTITIES
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    let wal_rows = PAIRED_SPARSE_WAL_HANDOFF_RESTORE
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    let states = PAIRED_CHECKPOINT_REDO
+        .split("\n\n")
+        .map(parse_checkpoint_fixture)
+        .collect::<Vec<_>>();
+    assert_eq!(fold_rows.len(), 3);
+    assert_eq!(wal_rows.len(), 14);
+    assert_eq!(states.len(), 5);
+
+    let folds = fold_rows
+        .iter()
+        .map(|row| BranchMergePairedRedoFoldIdentity {
+            left_fold: row.fields[&id(2)].encode().unwrap(),
+            right_fold: row.fields[&id(3)].encode().unwrap(),
+        })
+        .collect::<Vec<_>>();
+    let log_segments = wal_rows
+        .chunks_exact(2)
+        .map(|pair| BranchMergePairedLogSegmentIdentity {
+            write_ahead_identity: BranchMergePairedWriteAheadIdentity {
+                left_log: pair[0].fields[&id(2)].encode().unwrap(),
+                right_log: pair[0].fields[&id(3)].encode().unwrap(),
+            },
+            segment_identity: BranchMergePairedWriteAheadSegmentIdentity {
+                left_segment: pair[1].fields[&id(2)].encode().unwrap(),
+                right_segment: pair[1].fields[&id(3)].encode().unwrap(),
+            },
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(log_segments.len(), 7);
+
+    let alpha = b"wal-handoff/alpha".to_vec();
+    let beta = b"wal-handoff/beta".to_vec();
+    let catalog_only = b"wal-handoff/catalog-only".to_vec();
+    let observed_late = b"wal-handoff/observed-late".to_vec();
+    let left_base = states[0].clone();
+    let right_base = states[1].clone();
+    let left_redo = states[2].clone();
+    let right_redo = states[3].clone();
+    let positionless = states[4].clone();
+    assert_eq!(positionless.position, None);
+
+    let run = |fold_ordinal: usize,
+               first_order: u64,
+               last_order: u64,
+               left: Option<CheckpointGeneration>,
+               right: Option<CheckpointGeneration>,
+               redo_fold_identity: &BranchMergePairedRedoFoldIdentity,
+               identity_indexes: &[usize]| {
+        BranchMergePairedCheckpointRedoFoldLogSegmentIdentityCompactionRunSnapshot {
+            fold_ordinal,
+            first_order,
+            last_order,
+            left,
+            right,
+            redo_fold_identity: redo_fold_identity.clone(),
+            log_segment_identities: identity_indexes
+                .iter()
+                .map(|&index| log_segments[index].clone())
+                .collect(),
+        }
+    };
+    let stream = |checkpoint_id, runs| {
+        BranchMergePairedCheckpointRedoFoldLogSegmentIdentityCompactionSnapshot {
+            checkpoint_id,
+            runs,
+        }
+    };
+
+    let first_batch_first_handoff = vec![stream(
+        alpha.clone(),
+        vec![run(
+            0,
+            10,
+            11,
+            Some(left_base.clone()),
+            Some(right_base.clone()),
+            &folds[0],
+            &[0, 1],
+        )],
+    )];
+    let first_batch_second_handoff = vec![
+        stream(
+            alpha.clone(),
+            vec![run(
+                1,
+                10,
+                10,
+                Some(left_redo.clone()),
+                Some(right_base.clone()),
+                &folds[1],
+                &[2],
+            )],
+        ),
+        stream(
+            beta.clone(),
+            vec![run(
+                0,
+                12,
+                12,
+                Some(positionless.clone()),
+                None,
+                &folds[0],
+                &[3],
+            )],
+        ),
+    ];
+    let second_batch_first_handoff = vec![stream(
+        alpha.clone(),
+        vec![
+            run(
+                0,
+                10,
+                10,
+                Some(positionless.clone()),
+                Some(right_redo.clone()),
+                &folds[2],
+                &[4],
+            ),
+            run(
+                0,
+                12,
+                12,
+                Some(positionless.clone()),
+                Some(right_redo.clone()),
+                &folds[2],
+                &[5],
+            ),
+        ],
+    )];
+    let second_batch_second_handoff = vec![stream(
+        observed_late.clone(),
+        vec![run(
+            1,
+            14,
+            14,
+            None,
+            None,
+            &folds[1],
+            &[6],
+        )],
+    )];
+
+    let restored =
+        restore_paired_checkpoint_redo_sparse_wal_handoff_chains_preserving_identity(
+            &[alpha.clone(), beta.clone(), catalog_only.clone()],
+            &[
+                vec![first_batch_first_handoff, first_batch_second_handoff],
+                vec![second_batch_first_handoff, second_batch_second_handoff],
+            ],
+        )
+        .unwrap();
+    assert_eq!(
+        restored
+            .iter()
+            .map(|stream| stream.checkpoint_id.clone())
+            .collect::<Vec<_>>(),
+        vec![alpha.clone(), beta.clone(), catalog_only.clone(), observed_late.clone()]
+    );
+    let slots = |checkpoint_id: &[u8]| {
+        &restored
+            .iter()
+            .find(|stream| stream.checkpoint_id == checkpoint_id)
+            .unwrap()
+            .slots
+    };
+    assert_eq!(
+        slots(&alpha)
+            .iter()
+            .map(|slot| (
+                slot.restore_ordinal,
+                slot.handoff_ordinal,
+                slot.fold_ordinal,
+                slot.order,
+            ))
+            .collect::<Vec<_>>(),
+        vec![
+            (0, 0, 0, 10),
+            (0, 0, 0, 11),
+            (0, 1, 1, 10),
+            (1, 0, 0, 10),
+            (1, 0, 0, 12),
+        ],
+        "batch, handoff, fold, and sparse order remain independent coordinates",
+    );
+    assert_eq!(slots(&alpha)[0].left, Some(left_base.clone()));
+    assert_eq!(slots(&alpha)[1].right, Some(right_base.clone()));
+    assert_eq!(slots(&alpha)[2].left, Some(left_redo.clone()));
+    assert_eq!(slots(&alpha)[2].redo_fold_identity, folds[1]);
+    assert_eq!(slots(&alpha)[0].log_segment_identity, log_segments[0]);
+    assert_eq!(slots(&alpha)[1].log_segment_identity, log_segments[1]);
+    assert_eq!(slots(&alpha)[2].log_segment_identity, log_segments[2]);
+    assert_eq!(slots(&alpha)[3].left, Some(positionless.clone()));
+    assert_eq!(slots(&alpha)[3].log_segment_identity, log_segments[4]);
+    assert_eq!(slots(&alpha)[4].log_segment_identity, log_segments[5]);
+    assert_eq!(slots(&alpha)[3].redo_fold_identity, folds[0]);
+    assert!(slots(&beta)[0].right.is_none());
+    assert_eq!(slots(&beta)[0].left, Some(positionless.clone()));
+    assert_eq!(slots(&beta)[0].log_segment_identity, log_segments[3]);
+    assert!(slots(&catalog_only).is_empty());
+    assert_eq!(slots(&observed_late).len(), 1);
+    assert!(slots(&observed_late)[0].left.is_none());
+    assert!(slots(&observed_late)[0].right.is_none());
+    assert_eq!(slots(&observed_late)[0].log_segment_identity, log_segments[6]);
+
+    let malformed_run = |first_order, last_order, log_segment_identities| {
+        BranchMergePairedCheckpointRedoFoldLogSegmentIdentityCompactionSnapshot {
+            checkpoint_id: alpha.clone(),
+            runs: vec![BranchMergePairedCheckpointRedoFoldLogSegmentIdentityCompactionRunSnapshot {
+                fold_ordinal: 7,
+                first_order,
+                last_order,
+                left: None,
+                right: None,
+                redo_fold_identity: folds[0].clone(),
+                log_segment_identities,
+            }],
+        }
+    };
+    assert_eq!(
+        restore_paired_checkpoint_redo_sparse_wal_handoff_chains_preserving_identity(
+            &[],
+            &[vec![vec![], vec![malformed_run(9, 8, vec![])]]],
+        ),
+        Err(orna_storage_v1::BranchMergePairedCheckpointRedoFoldWalRestoreHandoffError::InvalidOrderRange {
+            restore_ordinal: 0,
+            handoff_ordinal: 1,
+            fold_ordinal: 7,
+            first_order: 9,
+            last_order: 8,
+        }),
+    );
+    assert_eq!(
+        restore_paired_checkpoint_redo_sparse_wal_handoff_chains_preserving_identity(
+            &[],
+            &[vec![vec![malformed_run(20, 21, vec![log_segments[0].clone()])]]],
+        ),
+        Err(orna_storage_v1::BranchMergePairedCheckpointRedoFoldWalRestoreHandoffError::LogSegmentIdentityCountMismatch {
+            restore_ordinal: 0,
+            handoff_ordinal: 0,
+            fold_ordinal: 7,
+            first_order: 20,
+            last_order: 21,
+            expected: 2,
+            actual: 1,
+        }),
+    );
+}
+
+#[test]
+fn paired_redo_fold_identity_survives_sparse_checkpoint_rotation_handoffs() {
+    let fold_rows = PAIRED_REDO_FOLD_IDENTITIES
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    let rotation_rows = PAIRED_SPARSE_CHECKPOINT_ROTATION_HANDOFFS
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    let states = PAIRED_CHECKPOINT_REDO
+        .split("\n\n")
+        .map(parse_checkpoint_fixture)
+        .collect::<Vec<_>>();
+    assert_eq!(fold_rows.len(), 3);
+    assert_eq!(rotation_rows.len(), 7);
+    assert_eq!(states.len(), 5);
+
+    let folds = fold_rows
+        .iter()
+        .map(|row| BranchMergePairedRedoFoldIdentity {
+            left_fold: row.fields[&id(2)].encode().unwrap(),
+            right_fold: row.fields[&id(3)].encode().unwrap(),
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(folds[0], folds[2]);
+    assert_ne!(folds[0], folds[1]);
+    let rotations = rotation_rows
+        .iter()
+        .map(|row| BranchMergePairedWriteAheadSegmentIdentity {
+            left_segment: row.fields[&id(2)].encode().unwrap(),
+            right_segment: row.fields[&id(3)].encode().unwrap(),
+        })
+        .collect::<Vec<_>>();
+
+    let alpha = b"checkpoint-rotation/alpha".to_vec();
+    let beta = b"checkpoint-rotation/beta".to_vec();
+    let catalog_only = b"checkpoint-rotation/catalog-only".to_vec();
+    let observed_late = b"checkpoint-rotation/observed-late".to_vec();
+    let left_base = states[0].clone();
+    let right_base = states[1].clone();
+    let left_redo = states[2].clone();
+    let right_redo = states[3].clone();
+    let positionless = states[4].clone();
+    assert_eq!(positionless.position, None);
+
+    let run = |fold_ordinal: usize,
+               first_order: u64,
+               last_order: u64,
+               left: Option<CheckpointGeneration>,
+               right: Option<CheckpointGeneration>,
+               redo_fold_identity: &BranchMergePairedRedoFoldIdentity,
+               rotation_indexes: &[usize]| {
+        BranchMergePairedCheckpointRedoFoldSegmentRotationCompactionRunSnapshot {
+            fold_ordinal,
+            first_order,
+            last_order,
+            left,
+            right,
+            redo_fold_identity: redo_fold_identity.clone(),
+            segment_identities: rotation_indexes
+                .iter()
+                .map(|&index| rotations[index].clone())
+                .collect(),
+        }
+    };
+    let stream = |checkpoint_id, runs| {
+        BranchMergePairedCheckpointRedoFoldSegmentRotationCompactionSnapshot {
+            checkpoint_id,
+            runs,
+        }
+    };
+
+    let first_batch_first_handoff = vec![stream(
+        alpha.clone(),
+        vec![run(
+            0,
+            10,
+            11,
+            Some(left_base.clone()),
+            Some(right_base.clone()),
+            &folds[0],
+            &[0, 1],
+        )],
+    )];
+    let first_batch_second_handoff = vec![
+        stream(
+            alpha.clone(),
+            vec![run(
+                1,
+                10,
+                10,
+                Some(left_redo.clone()),
+                Some(right_base.clone()),
+                &folds[1],
+                &[2],
+            )],
+        ),
+        stream(
+            beta.clone(),
+            vec![run(
+                0,
+                12,
+                12,
+                Some(positionless.clone()),
+                None,
+                &folds[0],
+                &[3],
+            )],
+        ),
+    ];
+    let second_batch_first_handoff = vec![stream(
+        alpha.clone(),
+        vec![
+            run(
+                2,
+                10,
+                10,
+                Some(positionless.clone()),
+                Some(right_redo.clone()),
+                &folds[2],
+                &[4],
+            ),
+            run(
+                2,
+                12,
+                12,
+                Some(positionless.clone()),
+                Some(right_redo.clone()),
+                &folds[2],
+                &[5],
+            ),
+        ],
+    )];
+    let second_batch_second_handoff = vec![stream(
+        observed_late.clone(),
+        vec![run(
+            1,
+            14,
+            14,
+            None,
+            None,
+            &folds[1],
+            &[6],
+        )],
+    )];
+
+    let restored =
+        restore_paired_checkpoint_redo_sparse_segment_rotation_handoff_chains_preserving_fold_identity(
+            &[alpha.clone(), beta.clone(), catalog_only.clone()],
+            &[
+                vec![first_batch_first_handoff, first_batch_second_handoff],
+                vec![second_batch_first_handoff, second_batch_second_handoff],
+            ],
+        )
+        .unwrap();
+    assert_eq!(
+        restored
+            .iter()
+            .map(|stream| stream.checkpoint_id.clone())
+            .collect::<Vec<_>>(),
+        vec![alpha.clone(), beta.clone(), catalog_only.clone(), observed_late.clone()]
+    );
+    let slots = |checkpoint_id: &[u8]| {
+        &restored
+            .iter()
+            .find(|stream| stream.checkpoint_id == checkpoint_id)
+            .unwrap()
+            .slots
+    };
+    assert_eq!(
+        slots(&alpha)
+            .iter()
+            .map(|slot| (
+                slot.restore_ordinal,
+                slot.handoff_ordinal,
+                slot.fold_ordinal,
+                slot.order,
+            ))
+            .collect::<Vec<_>>(),
+        vec![
+            (0, 0, 0, 10),
+            (0, 0, 0, 11),
+            (0, 1, 1, 10),
+            (1, 0, 2, 10),
+            (1, 0, 2, 12),
+        ],
+        "restore, handoff, fold, and order coordinates remain distinct",
+    );
+    assert_eq!(slots(&alpha)[0].left, Some(left_base.clone()));
+    assert_eq!(slots(&alpha)[1].right, Some(right_base.clone()));
+    assert_eq!(slots(&alpha)[2].left, Some(left_redo.clone()));
+    assert_eq!(slots(&alpha)[2].redo_fold_identity, folds[1]);
+    assert_eq!(slots(&alpha)[0].segment_identity, rotations[0]);
+    assert_eq!(slots(&alpha)[1].segment_identity, rotations[1]);
+    assert_eq!(slots(&alpha)[2].segment_identity, rotations[2]);
+    assert_eq!(slots(&alpha)[3].left, Some(positionless.clone()));
+    assert_eq!(slots(&alpha)[3].redo_fold_identity, folds[0]);
+    assert_eq!(slots(&alpha)[3].segment_identity, rotations[4]);
+    assert_eq!(slots(&alpha)[4].segment_identity, rotations[5]);
+    assert_eq!(slots(&beta)[0].left, Some(positionless.clone()));
+    assert!(slots(&beta)[0].right.is_none());
+    assert_eq!(slots(&beta)[0].segment_identity, rotations[3]);
+    assert!(slots(&catalog_only).is_empty());
+    assert_eq!(slots(&observed_late).len(), 1);
+    assert!(slots(&observed_late)[0].left.is_none());
+    assert!(slots(&observed_late)[0].right.is_none());
+    assert_eq!(slots(&observed_late)[0].segment_identity, rotations[6]);
+
+    let malformed_stream = |first_order, last_order, segment_identities| {
+        BranchMergePairedCheckpointRedoFoldSegmentRotationCompactionSnapshot {
+            checkpoint_id: alpha.clone(),
+            runs: vec![BranchMergePairedCheckpointRedoFoldSegmentRotationCompactionRunSnapshot {
+                fold_ordinal: 8,
+                first_order,
+                last_order,
+                left: None,
+                right: None,
+                redo_fold_identity: folds[0].clone(),
+                segment_identities,
+            }],
+        }
+    };
+    assert_eq!(
+        restore_paired_checkpoint_redo_sparse_segment_rotation_handoff_chains_preserving_fold_identity(
+            &[],
+            &[vec![vec![], vec![malformed_stream(9, 8, vec![])]]],
+        ),
+        Err(orna_storage_v1::BranchMergePairedCheckpointRedoFoldSegmentRotationRestoreHandoffError::InvalidOrderRange {
+            restore_ordinal: 0,
+            handoff_ordinal: 1,
+            stream_ordinal: 0,
+            fold_ordinal: 8,
+            first_order: 9,
+            last_order: 8,
+        }),
+    );
+    assert_eq!(
+        restore_paired_checkpoint_redo_sparse_segment_rotation_handoff_chains_preserving_fold_identity(
+            &[],
+            &[vec![vec![malformed_stream(20, 21, vec![rotations[0].clone()])]]],
+        ),
+        Err(orna_storage_v1::BranchMergePairedCheckpointRedoFoldSegmentRotationRestoreHandoffError::SegmentIdentityCountMismatch {
+            restore_ordinal: 0,
+            handoff_ordinal: 0,
+            stream_ordinal: 0,
+            fold_ordinal: 8,
+            first_order: 20,
+            last_order: 21,
+            expected: 2,
+            actual: 1,
+        }),
+    );
+}
+
+#[test]
+fn paired_redo_fold_identity_survives_sparse_segment_rotation_restore_chains() {
+    let fold_rows = PAIRED_REDO_FOLD_IDENTITIES
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    let rotation_rows = PAIRED_SPARSE_SEGMENT_ROTATION_RESTORES
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    let states = PAIRED_CHECKPOINT_REDO
+        .split("\n\n")
+        .map(parse_checkpoint_fixture)
+        .collect::<Vec<_>>();
+    assert_eq!(fold_rows.len(), 3);
+    assert_eq!(rotation_rows.len(), 7);
+    assert_eq!(states.len(), 5);
+
+    let folds = fold_rows
+        .iter()
+        .map(|row| BranchMergePairedRedoFoldIdentity {
+            left_fold: row.fields[&id(2)].encode().unwrap(),
+            right_fold: row.fields[&id(3)].encode().unwrap(),
+        })
+        .collect::<Vec<_>>();
+    let rotations = rotation_rows
+        .iter()
+        .map(|row| BranchMergePairedWriteAheadSegmentIdentity {
+            left_segment: row.fields[&id(2)].encode().unwrap(),
+            right_segment: row.fields[&id(3)].encode().unwrap(),
+        })
+        .collect::<Vec<_>>();
+
+    let alpha = b"rotation-restore/alpha".to_vec();
+    let beta = b"rotation-restore/beta".to_vec();
+    let catalog_only = b"rotation-restore/catalog-only".to_vec();
+    let observed_late = b"rotation-restore/observed-late".to_vec();
+    let left_base = states[0].clone();
+    let right_base = states[1].clone();
+    let left_redo = states[2].clone();
+    let right_redo = states[3].clone();
+    let positionless = states[4].clone();
+    assert_eq!(positionless.position, None);
+
+    let run = |merge_ordinal: usize,
+               fold_ordinal: usize,
+               first_order: u64,
+               last_order: u64,
+               left: Option<CheckpointGeneration>,
+               right: Option<CheckpointGeneration>,
+               redo_fold_identity: &BranchMergePairedRedoFoldIdentity,
+               rotation_indexes: &[usize]| {
+        BranchMergePairedCheckpointRedoFoldSegmentRotationSparseMergeChainCompactionRunSnapshot {
+            merge_ordinal,
+            fold_ordinal,
+            first_order,
+            last_order,
+            left,
+            right,
+            redo_fold_identity: redo_fold_identity.clone(),
+            segment_identities: rotation_indexes
+                .iter()
+                .map(|&index| rotations[index].clone())
+                .collect(),
+        }
+    };
+    let stream = |checkpoint_id, runs| {
+        BranchMergePairedCheckpointRedoFoldSegmentRotationSparseMergeChainCompactionSnapshot {
+            checkpoint_id,
+            runs,
+        }
+    };
+
+    let first_batch_first_handoff = vec![stream(
+        alpha.clone(),
+        vec![run(
+            0,
+            0,
+            10,
+            11,
+            Some(left_base.clone()),
+            Some(right_base.clone()),
+            &folds[0],
+            &[0, 1],
+        )],
+    )];
+    let first_batch_second_handoff = vec![
+        stream(
+            alpha.clone(),
+            vec![run(
+                0,
+                1,
+                10,
+                10,
+                Some(left_redo.clone()),
+                Some(right_base.clone()),
+                &folds[1],
+                &[2],
+            )],
+        ),
+        stream(
+            beta.clone(),
+            vec![run(
+                0,
+                0,
+                12,
+                12,
+                Some(positionless.clone()),
+                None,
+                &folds[0],
+                &[3],
+            )],
+        ),
+    ];
+    let second_batch_first_handoff = vec![stream(
+        alpha.clone(),
+        vec![
+            run(
+                0,
+                0,
+                10,
+                10,
+                Some(positionless.clone()),
+                Some(right_redo.clone()),
+                &folds[2],
+                &[4],
+            ),
+            run(
+                0,
+                0,
+                12,
+                12,
+                Some(positionless.clone()),
+                Some(right_redo.clone()),
+                &folds[2],
+                &[5],
+            ),
+        ],
+    )];
+    let second_batch_second_handoff = vec![
+        stream(
+            alpha.clone(),
+            vec![run(
+                1,
+                1,
+                10,
+                10,
+                Some(left_base.clone()),
+                Some(right_redo.clone()),
+                &folds[1],
+                &[6],
+            )],
+        ),
+        stream(
+            observed_late.clone(),
+            vec![run(
+                1,
+                1,
+                14,
+                14,
+                None,
+                None,
+                &folds[1],
+                &[6],
+            )],
+        ),
+    ];
+
+    let restored =
+        restore_paired_checkpoint_redo_sparse_segment_rotation_merge_handoffs_preserving_identity(
+            &[alpha.clone(), beta.clone(), catalog_only.clone()],
+            &[
+                vec![first_batch_first_handoff, first_batch_second_handoff],
+                vec![second_batch_first_handoff, second_batch_second_handoff],
+            ],
+        )
+        .unwrap();
+    assert_eq!(
+        restored
+            .iter()
+            .map(|stream| stream.checkpoint_id.clone())
+            .collect::<Vec<_>>(),
+        vec![alpha.clone(), beta.clone(), catalog_only.clone(), observed_late.clone()]
+    );
+    let slots = |checkpoint_id: &[u8]| {
+        &restored
+            .iter()
+            .find(|stream| stream.checkpoint_id == checkpoint_id)
+            .unwrap()
+            .slots
+    };
+    assert_eq!(
+        slots(&alpha)
+            .iter()
+            .map(|slot| (
+                slot.restore_ordinal,
+                slot.handoff_ordinal,
+                slot.merge_ordinal,
+                slot.fold_ordinal,
+                slot.order,
+            ))
+            .collect::<Vec<_>>(),
+        vec![
+            (0, 0, 0, 0, 10),
+            (0, 0, 0, 0, 11),
+            (0, 1, 0, 1, 10),
+            (1, 0, 0, 0, 10),
+            (1, 0, 0, 0, 12),
+            (1, 1, 1, 1, 10),
+        ],
+        "restore, handoff, merge, fold, and sparse order remain distinct",
+    );
+    assert_eq!(slots(&alpha)[0].left, Some(left_base.clone()));
+    assert_eq!(slots(&alpha)[1].right, Some(right_base.clone()));
+    assert_eq!(slots(&alpha)[2].left, Some(left_redo.clone()));
+    assert_eq!(slots(&alpha)[2].redo_fold_identity, folds[1]);
+    assert_eq!(slots(&alpha)[2].segment_identity, rotations[2]);
+    assert_eq!(slots(&alpha)[3].left, Some(positionless.clone()));
+    assert_eq!(slots(&alpha)[3].redo_fold_identity, folds[0]);
+    assert_eq!(slots(&alpha)[3].segment_identity, rotations[4]);
+    assert_eq!(slots(&alpha)[4].segment_identity, rotations[5]);
+    assert_eq!(slots(&alpha)[5].right, Some(right_redo.clone()));
+    assert_eq!(slots(&alpha)[5].segment_identity, rotations[6]);
+    assert_eq!(slots(&beta)[0].left, Some(positionless.clone()));
+    assert!(slots(&beta)[0].right.is_none());
+    assert_eq!(slots(&beta)[0].segment_identity, rotations[3]);
+    assert!(slots(&catalog_only).is_empty());
+    assert_eq!(slots(&observed_late).len(), 1);
+    assert!(slots(&observed_late)[0].left.is_none());
+    assert!(slots(&observed_late)[0].right.is_none());
+    assert_eq!(slots(&observed_late)[0].segment_identity, rotations[6]);
+
+    let malformed_stream = |merge_ordinal, fold_ordinal, first_order, last_order, segment_identities| {
+        BranchMergePairedCheckpointRedoFoldSegmentRotationSparseMergeChainCompactionSnapshot {
+            checkpoint_id: alpha.clone(),
+            runs: vec![BranchMergePairedCheckpointRedoFoldSegmentRotationSparseMergeChainCompactionRunSnapshot {
+                merge_ordinal,
+                fold_ordinal,
+                first_order,
+                last_order,
+                left: None,
+                right: None,
+                redo_fold_identity: folds[0].clone(),
+                segment_identities,
+            }],
+        }
+    };
+    assert_eq!(
+        restore_paired_checkpoint_redo_sparse_segment_rotation_merge_handoffs_preserving_identity(
+            &[],
+            &[vec![vec![], vec![malformed_stream(4, 8, 9, 8, vec![])]]],
+        ),
+        Err(orna_storage_v1::BranchMergePairedCheckpointRedoFoldSegmentRotationMergeRestoreHandoffError::InvalidOrderRange {
+            restore_ordinal: 0,
+            handoff_ordinal: 1,
+            merge_ordinal: 4,
+            fold_ordinal: 8,
+            first_order: 9,
+            last_order: 8,
+        }),
+    );
+    assert_eq!(
+        restore_paired_checkpoint_redo_sparse_segment_rotation_merge_handoffs_preserving_identity(
+            &[],
+            &[vec![vec![malformed_stream(2, 8, 20, 21, vec![rotations[0].clone()])]]],
+        ),
+        Err(orna_storage_v1::BranchMergePairedCheckpointRedoFoldSegmentRotationMergeRestoreHandoffError::SegmentIdentityCountMismatch {
+            restore_ordinal: 0,
+            handoff_ordinal: 0,
+            merge_ordinal: 2,
+            fold_ordinal: 8,
+            first_order: 20,
+            last_order: 21,
+            expected: 2,
+            actual: 1,
+        }),
+    );
+}
+
+#[test]
+fn paired_redo_fold_rotation_restore_retains_duplicate_stream_ordinals() {
+    let identity_rows = PAIRED_SPARSE_SEGMENT_ROTATION_STREAM_ORDINALS
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    let checkpoint_rows = PAIRED_CHECKPOINT_REDO
+        .split("\n\n")
+        .map(parse_checkpoint_fixture)
+        .collect::<Vec<_>>();
+    assert_eq!(identity_rows.len(), 4);
+    assert_eq!(checkpoint_rows.len(), 5);
+
+    let folds = identity_rows[..2]
+        .iter()
+        .map(|row| BranchMergePairedRedoFoldIdentity {
+            left_fold: row.fields[&id(2)].encode().unwrap(),
+            right_fold: row.fields[&id(3)].encode().unwrap(),
+        })
+        .collect::<Vec<_>>();
+    let rotations = identity_rows[2..]
+        .iter()
+        .map(|row| BranchMergePairedWriteAheadSegmentIdentity {
+            left_segment: row.fields[&id(2)].encode().unwrap(),
+            right_segment: row.fields[&id(3)].encode().unwrap(),
+        })
+        .collect::<Vec<_>>();
+    let checkpoint_id = b"rotation-restore/duplicate-stream".to_vec();
+    let stream = |state_index: usize, identity_index: usize| {
+        BranchMergePairedCheckpointRedoFoldSegmentRotationCompactionSnapshot {
+            checkpoint_id: checkpoint_id.clone(),
+            runs: vec![BranchMergePairedCheckpointRedoFoldSegmentRotationCompactionRunSnapshot {
+                fold_ordinal: 0,
+                first_order: 8,
+                last_order: 8,
+                left: Some(checkpoint_rows[state_index].clone()),
+                right: Some(checkpoint_rows[state_index + 1].clone()),
+                redo_fold_identity: folds[identity_index].clone(),
+                segment_identities: vec![rotations[identity_index].clone()],
+            }],
+        }
+    };
+
+    let restored = restore_paired_checkpoint_redo_sparse_segment_rotation_handoff_chains_preserving_fold_identity(
+        &[],
+        &[vec![vec![stream(0, 0), stream(2, 1)]]],
+    )
+    .unwrap();
+    assert_eq!(restored.len(), 1);
+    let slots = &restored[0].slots;
+    assert_eq!(
+        slots
+            .iter()
+            .map(|slot| (
+                slot.restore_ordinal,
+                slot.handoff_ordinal,
+                slot.stream_ordinal,
+                slot.fold_ordinal,
+                slot.order,
+            ))
+            .collect::<Vec<_>>(),
+        vec![(0, 0, 0, 0, 8), (0, 0, 1, 0, 8)],
+        "same checkpoint, fold, and order retain distinct source stream coordinates",
+    );
+    assert_eq!(slots[0].redo_fold_identity, folds[0]);
+    assert_eq!(slots[1].redo_fold_identity, folds[1]);
+    assert_eq!(slots[0].segment_identity, rotations[0]);
+    assert_eq!(slots[1].segment_identity, rotations[1]);
+    assert_eq!(slots[0].left, Some(checkpoint_rows[0].clone()));
+    assert_eq!(slots[0].right, Some(checkpoint_rows[1].clone()));
+    assert_eq!(slots[1].left, Some(checkpoint_rows[2].clone()));
+    assert_eq!(slots[1].right, Some(checkpoint_rows[3].clone()));
+
+    let malformed = BranchMergePairedCheckpointRedoFoldSegmentRotationCompactionSnapshot {
+        checkpoint_id: checkpoint_id.clone(),
+        runs: vec![BranchMergePairedCheckpointRedoFoldSegmentRotationCompactionRunSnapshot {
+            fold_ordinal: 4,
+            first_order: 9,
+            last_order: 8,
+            left: None,
+            right: None,
+            redo_fold_identity: folds[0].clone(),
+            segment_identities: vec![],
+        }],
+    };
+    assert_eq!(
+        restore_paired_checkpoint_redo_sparse_segment_rotation_handoff_chains_preserving_fold_identity(
+            &[],
+            &[vec![vec![stream(0, 0), malformed]]],
+        ),
+        Err(orna_storage_v1::BranchMergePairedCheckpointRedoFoldSegmentRotationRestoreHandoffError::InvalidOrderRange {
+            restore_ordinal: 0,
+            handoff_ordinal: 0,
+            stream_ordinal: 1,
+            fold_ordinal: 4,
+            first_order: 9,
+            last_order: 8,
+        }),
+        "invalid ranges identify the duplicate checkpoint stream that supplied them",
+    );
+}
+
+#[test]
+fn paired_redo_fold_identity_survives_sparse_wal_merge_rotation_restore_chains() {
+    let fold_rows = PAIRED_REDO_FOLD_IDENTITIES
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    let wal_rows = PAIRED_SPARSE_WAL_MERGE_ROTATION_RESTORES
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    let states = PAIRED_CHECKPOINT_REDO
+        .split("\n\n")
+        .map(parse_checkpoint_fixture)
+        .collect::<Vec<_>>();
+    assert_eq!(fold_rows.len(), 3);
+    assert_eq!(wal_rows.len(), 14);
+    assert_eq!(states.len(), 5);
+
+    let folds = fold_rows
+        .iter()
+        .map(|row| BranchMergePairedRedoFoldIdentity {
+            left_fold: row.fields[&id(2)].encode().unwrap(),
+            right_fold: row.fields[&id(3)].encode().unwrap(),
+        })
+        .collect::<Vec<_>>();
+    let log_segments = wal_rows
+        .chunks_exact(2)
+        .map(|pair| BranchMergePairedLogSegmentIdentity {
+            write_ahead_identity: BranchMergePairedWriteAheadIdentity {
+                left_log: pair[0].fields[&id(2)].encode().unwrap(),
+                right_log: pair[0].fields[&id(3)].encode().unwrap(),
+            },
+            segment_identity: BranchMergePairedWriteAheadSegmentIdentity {
+                left_segment: pair[1].fields[&id(2)].encode().unwrap(),
+                right_segment: pair[1].fields[&id(3)].encode().unwrap(),
+            },
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(log_segments.len(), 7);
+
+    let alpha = b"wal-merge-restore/alpha".to_vec();
+    let beta = b"wal-merge-restore/beta".to_vec();
+    let catalog_only = b"wal-merge-restore/catalog-only".to_vec();
+    let observed_late = b"wal-merge-restore/observed-late".to_vec();
+    let left_base = states[0].clone();
+    let right_base = states[1].clone();
+    let left_redo = states[2].clone();
+    let right_redo = states[3].clone();
+    let positionless = states[4].clone();
+    assert_eq!(positionless.position, None);
+
+    let run = |merge_ordinal: usize,
+               fold_ordinal: usize,
+               first_order: u64,
+               last_order: u64,
+               left: Option<CheckpointGeneration>,
+               right: Option<CheckpointGeneration>,
+               redo_fold_identity: &BranchMergePairedRedoFoldIdentity,
+               identity_indexes: &[usize]| {
+        BranchMergePairedCheckpointRedoFoldWalSparseMergeChainCompactionRunSnapshot {
+            merge_ordinal,
+            fold_ordinal,
+            first_order,
+            last_order,
+            left,
+            right,
+            redo_fold_identity: redo_fold_identity.clone(),
+            log_segment_identities: identity_indexes
+                .iter()
+                .map(|&index| log_segments[index].clone())
+                .collect(),
+        }
+    };
+    let stream = |checkpoint_id, runs| {
+        BranchMergePairedCheckpointRedoFoldWalSparseMergeChainCompactionSnapshot {
+            checkpoint_id,
+            runs,
+        }
+    };
+
+    let first_batch_first_handoff = vec![stream(
+        alpha.clone(),
+        vec![run(
+            2,
+            0,
+            4,
+            5,
+            Some(left_base.clone()),
+            Some(right_base.clone()),
+            &folds[0],
+            &[0, 1],
+        )],
+    )];
+    let first_batch_second_handoff = vec![
+        stream(
+            alpha.clone(),
+            vec![run(
+                5,
+                2,
+                4,
+                4,
+                Some(left_redo.clone()),
+                Some(right_base.clone()),
+                &folds[1],
+                &[2],
+            )],
+        ),
+        stream(
+            beta.clone(),
+            vec![run(
+                1,
+                1,
+                7,
+                7,
+                Some(positionless.clone()),
+                None,
+                &folds[0],
+                &[3],
+            )],
+        ),
+    ];
+    let second_batch_first_handoff = vec![stream(
+        alpha.clone(),
+        vec![run(
+            2,
+            0,
+            4,
+            4,
+            Some(positionless.clone()),
+            Some(right_redo.clone()),
+            &folds[2],
+            &[4],
+        )],
+    )];
+    let second_batch_second_handoff = vec![
+        stream(
+            alpha.clone(),
+            vec![run(
+                3,
+                2,
+                8,
+                8,
+                Some(left_base.clone()),
+                Some(right_redo.clone()),
+                &folds[1],
+                &[5],
+            )],
+        ),
+        stream(
+            observed_late.clone(),
+            vec![run(
+                0,
+                0,
+                9,
+                9,
+                None,
+                None,
+                &folds[0],
+                &[6],
+            )],
+        ),
+    ];
+
+    let restored =
+        restore_paired_checkpoint_redo_sparse_wal_merge_handoff_chains_preserving_identity(
+            &[alpha.clone(), beta.clone(), catalog_only.clone()],
+            &[
+                vec![first_batch_first_handoff, first_batch_second_handoff],
+                vec![second_batch_first_handoff, second_batch_second_handoff],
+            ],
+        )
+        .unwrap();
+    assert_eq!(
+        restored
+            .iter()
+            .map(|stream| stream.checkpoint_id.clone())
+            .collect::<Vec<_>>(),
+        vec![alpha.clone(), beta.clone(), catalog_only.clone(), observed_late.clone()]
+    );
+    let slots = |checkpoint_id: &[u8]| {
+        &restored
+            .iter()
+            .find(|stream| stream.checkpoint_id == checkpoint_id)
+            .unwrap()
+            .slots
+    };
+    assert_eq!(
+        slots(&alpha)
+            .iter()
+            .map(|slot| (
+                slot.restore_ordinal,
+                slot.handoff_ordinal,
+                slot.merge_ordinal,
+                slot.fold_ordinal,
+                slot.order,
+            ))
+            .collect::<Vec<_>>(),
+        vec![
+            (0, 0, 2, 0, 4),
+            (0, 0, 2, 0, 5),
+            (0, 1, 5, 2, 4),
+            (1, 0, 2, 0, 4),
+            (1, 1, 3, 2, 8),
+        ],
+        "restore, handoff, merge, fold, and sparse WAL order stay distinct",
+    );
+    assert_eq!(slots(&alpha)[0].left, Some(left_base.clone()));
+    assert_eq!(slots(&alpha)[1].right, Some(right_base.clone()));
+    assert_eq!(slots(&alpha)[2].left, Some(left_redo.clone()));
+    assert_eq!(slots(&alpha)[2].redo_fold_identity, folds[1]);
+    assert_eq!(slots(&alpha)[0].log_segment_identity, log_segments[0]);
+    assert_eq!(slots(&alpha)[1].log_segment_identity, log_segments[1]);
+    assert_eq!(slots(&alpha)[2].log_segment_identity, log_segments[2]);
+    assert_eq!(slots(&alpha)[3].left, Some(positionless.clone()));
+    assert_eq!(slots(&alpha)[3].log_segment_identity, log_segments[4]);
+    assert_eq!(slots(&alpha)[4].log_segment_identity, log_segments[5]);
+    assert_eq!(slots(&alpha)[3].redo_fold_identity, folds[2]);
+    assert_eq!(slots(&beta)[0].left, Some(positionless.clone()));
+    assert!(slots(&beta)[0].right.is_none());
+    assert_eq!(slots(&beta)[0].log_segment_identity, log_segments[3]);
+    assert!(slots(&catalog_only).is_empty());
+    assert_eq!(slots(&observed_late).len(), 1);
+    assert!(slots(&observed_late)[0].left.is_none());
+    assert!(slots(&observed_late)[0].right.is_none());
+    assert_eq!(slots(&observed_late)[0].log_segment_identity, log_segments[6]);
+
+    let malformed_stream = |merge_ordinal, fold_ordinal, first_order, last_order, identities| {
+        BranchMergePairedCheckpointRedoFoldWalSparseMergeChainCompactionSnapshot {
+            checkpoint_id: alpha.clone(),
+            runs: vec![BranchMergePairedCheckpointRedoFoldWalSparseMergeChainCompactionRunSnapshot {
+                merge_ordinal,
+                fold_ordinal,
+                first_order,
+                last_order,
+                left: None,
+                right: None,
+                redo_fold_identity: folds[0].clone(),
+                log_segment_identities: identities,
+            }],
+        }
+    };
+    assert_eq!(
+        restore_paired_checkpoint_redo_sparse_wal_merge_handoff_chains_preserving_identity(
+            &[],
+            &[vec![vec![], vec![malformed_stream(8, 6, 9, 8, vec![])]]],
+        ),
+        Err(orna_storage_v1::BranchMergePairedCheckpointRedoFoldWalMergeRestoreHandoffError::InvalidOrderRange {
+            restore_ordinal: 0,
+            handoff_ordinal: 1,
+            merge_ordinal: 8,
+            fold_ordinal: 6,
+            first_order: 9,
+            last_order: 8,
+        }),
+    );
+    assert_eq!(
+        restore_paired_checkpoint_redo_sparse_wal_merge_handoff_chains_preserving_identity(
+            &[],
+            &[vec![vec![malformed_stream(4, 6, 20, 21, vec![log_segments[0].clone()])]]],
+        ),
+        Err(orna_storage_v1::BranchMergePairedCheckpointRedoFoldWalMergeRestoreHandoffError::LogSegmentIdentityCountMismatch {
+            restore_ordinal: 0,
+            handoff_ordinal: 0,
+            merge_ordinal: 4,
+            fold_ordinal: 6,
+            first_order: 20,
+            last_order: 21,
+            expected: 2,
+            actual: 1,
+        }),
+    );
+}
+
+#[test]
+fn paired_redo_fold_identity_survives_sparse_compaction_rotation_restore_chains() {
+    let fold_rows = PAIRED_REDO_FOLD_IDENTITIES
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    let rotation_rows = PAIRED_SPARSE_COMPACTION_ROTATION_RESTORES
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    let states = PAIRED_CHECKPOINT_REDO
+        .split("\n\n")
+        .map(parse_checkpoint_fixture)
+        .collect::<Vec<_>>();
+    assert_eq!(fold_rows.len(), 3);
+    assert_eq!(rotation_rows.len(), 8);
+    assert_eq!(states.len(), 5);
+
+    let folds = fold_rows
+        .iter()
+        .map(|row| BranchMergePairedRedoFoldIdentity {
+            left_fold: row.fields[&id(2)].encode().unwrap(),
+            right_fold: row.fields[&id(3)].encode().unwrap(),
+        })
+        .collect::<Vec<_>>();
+    let rotations = rotation_rows
+        .iter()
+        .map(|row| BranchMergePairedWriteAheadSegmentIdentity {
+            left_segment: row.fields[&id(2)].encode().unwrap(),
+            right_segment: row.fields[&id(3)].encode().unwrap(),
+        })
+        .collect::<Vec<_>>();
+
+    let alpha = b"rotation-compaction/alpha".to_vec();
+    let beta = b"rotation-compaction/beta".to_vec();
+    let catalog_only = b"rotation-compaction/catalog-only".to_vec();
+    let observed_late = b"rotation-compaction/late".to_vec();
+    let left_base = states[0].clone();
+    let right_base = states[1].clone();
+    let left_redo = states[2].clone();
+    let right_redo = states[3].clone();
+    let positionless = states[4].clone();
+    assert_eq!(positionless.position, None);
+
+    let run = |fold_ordinal: usize,
+               first_order: u64,
+               last_order: u64,
+               left: Option<CheckpointGeneration>,
+               right: Option<CheckpointGeneration>,
+               redo_fold_identity: &BranchMergePairedRedoFoldIdentity,
+               rotation_indexes: &[usize]| {
+        BranchMergePairedCheckpointRedoFoldSegmentRotationCompactionRunSnapshot {
+            fold_ordinal,
+            first_order,
+            last_order,
+            left,
+            right,
+            redo_fold_identity: redo_fold_identity.clone(),
+            segment_identities: rotation_indexes
+                .iter()
+                .map(|&index| rotations[index].clone())
+                .collect(),
+        }
+    };
+    let stream = |checkpoint_id, runs| {
+        BranchMergePairedCheckpointRedoFoldSegmentRotationCompactionSnapshot {
+            checkpoint_id,
+            runs,
+        }
+    };
+
+    let first_batch_first_handoff = vec![
+        stream(
+            alpha.clone(),
+            vec![
+                run(
+                    2,
+                    4,
+                    5,
+                    Some(left_base.clone()),
+                    Some(right_base.clone()),
+                    &folds[0],
+                    &[0, 1],
+                ),
+                run(
+                    2,
+                    4,
+                    4,
+                    Some(left_redo.clone()),
+                    Some(right_base.clone()),
+                    &folds[1],
+                    &[2],
+                ),
+            ],
+        ),
+        stream(
+            alpha.clone(),
+            vec![run(
+                2,
+                4,
+                4,
+                Some(positionless.clone()),
+                None,
+                &folds[2],
+                &[3],
+            )],
+        ),
+        stream(
+            beta.clone(),
+            vec![run(
+                1,
+                7,
+                7,
+                Some(positionless.clone()),
+                None,
+                &folds[0],
+                &[4],
+            )],
+        ),
+    ];
+    let first_batch_second_handoff = vec![stream(
+        alpha.clone(),
+        vec![run(
+            2,
+            7,
+            7,
+            Some(left_base.clone()),
+            Some(right_redo.clone()),
+            &folds[1],
+            &[5],
+        )],
+    )];
+    let second_batch_first_handoff = vec![stream(
+        alpha.clone(),
+        vec![run(
+            2,
+            4,
+            4,
+            Some(positionless.clone()),
+            Some(right_redo.clone()),
+            &folds[2],
+            &[6],
+        )],
+    )];
+    let second_batch_second_handoff = vec![stream(
+        observed_late.clone(),
+        vec![run(
+            0,
+            10,
+            10,
+            None,
+            None,
+            &folds[0],
+            &[7],
+        )],
+    )];
+
+    let restored =
+        restore_paired_checkpoint_redo_sparse_segment_rotation_compaction_handoffs_preserving_identity(
+            &[alpha.clone(), beta.clone(), catalog_only.clone()],
+            &[
+                vec![first_batch_first_handoff, first_batch_second_handoff],
+                vec![second_batch_first_handoff, second_batch_second_handoff],
+            ],
+        )
+        .unwrap();
+    assert_eq!(
+        restored
+            .iter()
+            .map(|stream| stream.checkpoint_id.clone())
+            .collect::<Vec<_>>(),
+        vec![alpha.clone(), beta.clone(), catalog_only.clone(), observed_late.clone()]
+    );
+    let slots = |checkpoint_id: &[u8]| {
+        &restored
+            .iter()
+            .find(|stream| stream.checkpoint_id == checkpoint_id)
+            .unwrap()
+            .slots
+    };
+    assert_eq!(
+        slots(&alpha)
+            .iter()
+            .map(|slot| (
+                slot.restore_ordinal,
+                slot.handoff_ordinal,
+                slot.stream_ordinal,
+                slot.compaction_ordinal,
+                slot.fold_ordinal,
+                slot.order,
+            ))
+            .collect::<Vec<_>>(),
+        vec![
+            (0, 0, 0, 0, 2, 4),
+            (0, 0, 0, 0, 2, 5),
+            (0, 0, 0, 1, 2, 4),
+            (0, 0, 1, 0, 2, 4),
+            (0, 1, 0, 0, 2, 7),
+            (1, 0, 0, 0, 2, 4),
+        ],
+        "restore, handoff, duplicate stream, compaction, fold, and order stay distinct",
+    );
+    assert_eq!(slots(&alpha)[0].left, Some(left_base.clone()));
+    assert_eq!(slots(&alpha)[1].right, Some(right_base.clone()));
+    assert_eq!(slots(&alpha)[2].left, Some(left_redo.clone()));
+    assert_eq!(slots(&alpha)[2].redo_fold_identity, folds[1]);
+    assert_eq!(slots(&alpha)[0].segment_identity, rotations[0]);
+    assert_eq!(slots(&alpha)[1].segment_identity, rotations[1]);
+    assert_eq!(slots(&alpha)[2].segment_identity, rotations[2]);
+    assert_eq!(slots(&alpha)[3].left, Some(positionless.clone()));
+    assert!(slots(&alpha)[3].right.is_none());
+    assert_eq!(slots(&alpha)[3].segment_identity, rotations[3]);
+    assert_eq!(slots(&alpha)[4].segment_identity, rotations[5]);
+    assert_eq!(slots(&alpha)[5].segment_identity, rotations[6]);
+    assert_eq!(slots(&beta)[0].left, Some(positionless.clone()));
+    assert!(slots(&beta)[0].right.is_none());
+    assert_eq!(slots(&beta)[0].segment_identity, rotations[4]);
+    assert!(slots(&catalog_only).is_empty());
+    assert_eq!(slots(&observed_late).len(), 1);
+    assert!(slots(&observed_late)[0].left.is_none());
+    assert!(slots(&observed_late)[0].right.is_none());
+    assert_eq!(slots(&observed_late)[0].segment_identity, rotations[7]);
+
+    let malformed_stream = |runs| {
+        BranchMergePairedCheckpointRedoFoldSegmentRotationCompactionSnapshot {
+            checkpoint_id: alpha.clone(),
+            runs,
+        }
+    };
+    assert_eq!(
+        restore_paired_checkpoint_redo_sparse_segment_rotation_compaction_handoffs_preserving_identity(
+            &[],
+            &[vec![vec![], vec![malformed_stream(vec![
+                run(0, 1, 1, None, None, &folds[0], &[0]),
+                run(9, 4, 3, None, None, &folds[0], &[]),
+            ])]]],
+        ),
+        Err(orna_storage_v1::BranchMergePairedCheckpointRedoFoldSegmentRotationCompactionRestoreHandoffError::InvalidOrderRange {
+            restore_ordinal: 0,
+            handoff_ordinal: 1,
+            stream_ordinal: 0,
+            compaction_ordinal: 1,
+            fold_ordinal: 9,
+            first_order: 4,
+            last_order: 3,
+        }),
+    );
+    assert_eq!(
+        restore_paired_checkpoint_redo_sparse_segment_rotation_compaction_handoffs_preserving_identity(
+            &[],
+            &[vec![vec![
+                malformed_stream(vec![]),
+                malformed_stream(vec![run(7, 20, 21, None, None, &folds[0], &[0])]),
+            ]]],
+        ),
+        Err(orna_storage_v1::BranchMergePairedCheckpointRedoFoldSegmentRotationCompactionRestoreHandoffError::SegmentIdentityCountMismatch {
+            restore_ordinal: 0,
+            handoff_ordinal: 0,
+            stream_ordinal: 1,
+            compaction_ordinal: 0,
+            fold_ordinal: 7,
+            first_order: 20,
+            last_order: 21,
+            expected: 2,
+            actual: 1,
+        }),
+    );
+}
+
+#[test]
+fn paired_checkpoint_segment_pins_survive_three_sparse_compaction_restore_batches() {
+    let fold_rows = PAIRED_REDO_FOLD_IDENTITIES
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    let rotation_rows = PAIRED_SPARSE_COMPACTION_ROTATION_RESTORES
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    let states = PAIRED_CHECKPOINT_REDO
+        .split("\n\n")
+        .map(parse_checkpoint_fixture)
+        .collect::<Vec<_>>();
+    assert_eq!(fold_rows.len(), 3);
+    assert_eq!(rotation_rows.len(), 8);
+    assert_eq!(states.len(), 5);
+
+    let folds = fold_rows
+        .iter()
+        .map(|row| BranchMergePairedRedoFoldIdentity {
+            left_fold: row.fields[&id(2)].encode().unwrap(),
+            right_fold: row.fields[&id(3)].encode().unwrap(),
+        })
+        .collect::<Vec<_>>();
+    let rotations = rotation_rows
+        .iter()
+        .map(|row| BranchMergePairedWriteAheadSegmentIdentity {
+            left_segment: row.fields[&id(2)].encode().unwrap(),
+            right_segment: row.fields[&id(3)].encode().unwrap(),
+        })
+        .collect::<Vec<_>>();
+    let alpha = b"0o3fq/checkpoint/alpha".to_vec();
+    let beta = b"0o3fq/checkpoint/beta".to_vec();
+    let catalog_only = b"0o3fq/checkpoint/catalog-only".to_vec();
+    let observed_late = b"0o3fq/checkpoint/late".to_vec();
+    let left_base = states[0].clone();
+    let right_base = states[1].clone();
+    let left_redo = states[2].clone();
+    let right_redo = states[3].clone();
+    let positionless = states[4].clone();
+    assert_eq!(positionless.position, None);
+
+    let slot = |fold_ordinal: usize,
+                order: u64,
+                left: Option<CheckpointGeneration>,
+                right: Option<CheckpointGeneration>,
+                identity: &BranchMergePairedRedoFoldIdentity,
+                rotation_ordinal: usize| {
+        orna_storage_v1::BranchMergePairedCheckpointRedoFoldSegmentRotationSparseChainSlotSnapshot {
+            fold_ordinal,
+            order,
+            left,
+            right,
+            redo_fold_identity: identity.clone(),
+            segment_identity: rotations[rotation_ordinal].clone(),
+        }
+    };
+    let stream = |checkpoint_id: &[u8],
+                  slots: Vec<orna_storage_v1::BranchMergePairedCheckpointRedoFoldSegmentRotationSparseChainSlotSnapshot>| {
+        orna_storage_v1::BranchMergePairedCheckpointRedoFoldSegmentRotationSparseStreamChainSnapshot {
+            checkpoint_id: checkpoint_id.to_vec(),
+            slots,
+        }
+    };
+    let compact = |streams: &[orna_storage_v1::BranchMergePairedCheckpointRedoFoldSegmentRotationSparseStreamChainSnapshot]| {
+        compress_paired_checkpoint_redo_sparse_stream_chains_preserving_fold_and_segment_rotation_identity(
+            streams,
+        )
+    };
+
+    let first_handoff = compact(&[
+        stream(
+            &alpha,
+            vec![
+                slot(
+                    2,
+                    40,
+                    Some(left_base.clone()),
+                    Some(right_base.clone()),
+                    &folds[0],
+                    0,
+                ),
+                slot(
+                    2,
+                    41,
+                    Some(left_base.clone()),
+                    Some(right_base.clone()),
+                    &folds[0],
+                    1,
+                ),
+                slot(
+                    2,
+                    43,
+                    Some(left_redo.clone()),
+                    Some(right_base.clone()),
+                    &folds[1],
+                    2,
+                ),
+            ],
+        ),
+        stream(
+            &alpha,
+            vec![slot(
+                2,
+                40,
+                Some(positionless.clone()),
+                None,
+                &folds[2],
+                3,
+            )],
+        ),
+        stream(
+            &beta,
+            vec![slot(
+                1,
+                43,
+                Some(positionless.clone()),
+                None,
+                &folds[0],
+                4,
+            )],
+        ),
+    ]);
+    let second_handoff = compact(&[stream(
+        &alpha,
+        vec![slot(
+            2,
+            44,
+            Some(left_base.clone()),
+            Some(right_redo.clone()),
+            &folds[1],
+            5,
+        )],
+    )]);
+    let second_batch_first_handoff = compact(&[stream(
+        &alpha,
+        vec![slot(
+            2,
+            40,
+            Some(positionless.clone()),
+            Some(right_redo.clone()),
+            &folds[2],
+            6,
+        )],
+    )]);
+    let second_batch_second_handoff = compact(&[stream(
+        &observed_late,
+        vec![slot(0, 50, None, None, &folds[0], 7)],
+    )]);
+    let third_handoff = compact(&[
+        stream(
+            &alpha,
+            vec![
+                slot(
+                    0,
+                    40,
+                    Some(left_base.clone()),
+                    Some(right_base.clone()),
+                    &folds[0],
+                    1,
+                ),
+                slot(
+                    0,
+                    41,
+                    Some(left_base.clone()),
+                    Some(right_base.clone()),
+                    &folds[0],
+                    0,
+                ),
+            ],
+        ),
+        stream(
+            &observed_late,
+            vec![slot(
+                1,
+                50,
+                Some(positionless.clone()),
+                Some(right_redo.clone()),
+                &folds[1],
+                7,
+            )],
+        ),
+    ]);
+
+    let restored = orna_storage_v1::restore_paired_checkpoint_redo_sparse_segment_rotation_compaction_handoffs_preserving_pin_identity(
+        &[alpha.clone(), beta.clone(), catalog_only.clone()],
+        &[
+            vec![first_handoff, second_handoff],
+            vec![second_batch_first_handoff, second_batch_second_handoff],
+            vec![third_handoff],
+        ],
+    )
+    .unwrap();
+    assert_eq!(
+        restored
+            .iter()
+            .map(|snapshot| snapshot.checkpoint_id.clone())
+            .collect::<Vec<_>>(),
+        vec![alpha.clone(), beta.clone(), catalog_only.clone(), observed_late.clone()],
+        "known, omitted, and late-observed checkpoint streams retain their catalog identities",
+    );
+    let slots = |checkpoint_id: &[u8]| {
+        &restored
+            .iter()
+            .find(|snapshot| snapshot.checkpoint_id == checkpoint_id)
+            .unwrap()
+            .slots
+    };
+    assert_eq!(
+        slots(&alpha)
+            .iter()
+            .map(|slot| (
+                slot.restore_ordinal,
+                slot.handoff_ordinal,
+                slot.stream_ordinal,
+                slot.compaction_ordinal,
+                slot.fold_ordinal,
+                slot.order,
+            ))
+            .collect::<Vec<_>>(),
+        vec![
+            (0, 0, 0, 0, 2, 40),
+            (0, 0, 0, 0, 2, 41),
+            (0, 0, 0, 1, 2, 43),
+            (0, 0, 1, 0, 2, 40),
+            (0, 1, 0, 0, 2, 44),
+            (1, 0, 0, 0, 2, 40),
+            (2, 0, 0, 0, 0, 40),
+            (2, 0, 0, 0, 0, 41),
+        ],
+        "all six source coordinates disambiguate duplicate and overlapping compacted orders",
+    );
+    let pin = |checkpoint_id: &[u8],
+               generation: &CheckpointGeneration,
+               segment_id: &[u8]| {
+        Some(orna_storage_v1::BranchMergePairedCheckpointSegmentPinIdentity {
+            checkpoint_id: checkpoint_id.to_vec(),
+            generation: generation.clone(),
+            segment_id: segment_id.to_vec(),
+        })
+    };
+    assert_eq!(
+        slots(&alpha)
+            .iter()
+            .map(|slot| (slot.left_pin.clone(), slot.right_pin.clone()))
+            .collect::<Vec<_>>(),
+        vec![
+            (
+                pin(&alpha, &left_base, &rotations[0].left_segment),
+                pin(&alpha, &right_base, &rotations[0].right_segment),
+            ),
+            (
+                pin(&alpha, &left_base, &rotations[1].left_segment),
+                pin(&alpha, &right_base, &rotations[1].right_segment),
+            ),
+            (
+                pin(&alpha, &left_redo, &rotations[2].left_segment),
+                pin(&alpha, &right_base, &rotations[2].right_segment),
+            ),
+            (
+                pin(&alpha, &positionless, &rotations[3].left_segment),
+                None,
+            ),
+            (
+                pin(&alpha, &left_base, &rotations[5].left_segment),
+                pin(&alpha, &right_redo, &rotations[5].right_segment),
+            ),
+            (
+                pin(&alpha, &positionless, &rotations[6].left_segment),
+                pin(&alpha, &right_redo, &rotations[6].right_segment),
+            ),
+            (
+                pin(&alpha, &left_base, &rotations[1].left_segment),
+                pin(&alpha, &right_base, &rotations[1].right_segment),
+            ),
+            (
+                pin(&alpha, &left_base, &rotations[0].left_segment),
+                pin(&alpha, &right_base, &rotations[0].right_segment),
+            ),
+        ],
+        "pins keep stream ID, exact side generation, and that order's directional segment ID",
+    );
+    assert_eq!(
+        slots(&alpha)
+            .iter()
+            .map(|slot| slot.redo_fold_identity.clone())
+            .collect::<Vec<_>>(),
+        vec![
+            folds[0].clone(),
+            folds[0].clone(),
+            folds[1].clone(),
+            folds[2].clone(),
+            folds[1].clone(),
+            folds[2].clone(),
+            folds[0].clone(),
+            folds[0].clone(),
+        ],
+    );
+    assert_eq!(
+        slots(&alpha)
+            .iter()
+            .map(|slot| slot.segment_identity.clone())
+            .collect::<Vec<_>>(),
+        vec![
+            rotations[0].clone(),
+            rotations[1].clone(),
+            rotations[2].clone(),
+            rotations[3].clone(),
+            rotations[5].clone(),
+            rotations[6].clone(),
+            rotations[1].clone(),
+            rotations[0].clone(),
+        ],
+    );
+    assert_eq!(slots(&beta).len(), 1);
+    assert_eq!(slots(&beta)[0].restore_ordinal, 0);
+    assert_eq!(slots(&beta)[0].stream_ordinal, 2);
+    assert_eq!(
+        slots(&beta)[0].left_pin,
+        pin(&beta, &positionless, &rotations[4].left_segment),
+    );
+    assert!(slots(&beta)[0].right_pin.is_none());
+    assert!(slots(&catalog_only).is_empty());
+    assert_eq!(
+        slots(&observed_late)
+            .iter()
+            .map(|slot| (
+                slot.restore_ordinal,
+                slot.handoff_ordinal,
+                slot.stream_ordinal,
+                slot.compaction_ordinal,
+                slot.fold_ordinal,
+                slot.order,
+            ))
+            .collect::<Vec<_>>(),
+        vec![(1, 1, 0, 0, 0, 50), (2, 0, 1, 0, 1, 50)],
+    );
+    assert!(slots(&observed_late)[0].left_pin.is_none());
+    assert!(slots(&observed_late)[0].right_pin.is_none());
+    assert_eq!(
+        slots(&observed_late)[1].left_pin,
+        pin(&observed_late, &positionless, &rotations[7].left_segment),
+    );
+    assert_eq!(
+        slots(&observed_late)[1].right_pin,
+        pin(&observed_late, &right_redo, &rotations[7].right_segment),
+    );
+
+    let malformed_stream = |runs| {
+        orna_storage_v1::BranchMergePairedCheckpointRedoFoldSegmentRotationCompactionSnapshot {
+            checkpoint_id: alpha.clone(),
+            runs,
+        }
+    };
+    let malformed_run = |fold_ordinal, first_order, last_order, rotation_indexes: &[usize]| {
+        orna_storage_v1::BranchMergePairedCheckpointRedoFoldSegmentRotationCompactionRunSnapshot {
+            fold_ordinal,
+            first_order,
+            last_order,
+            left: None,
+            right: None,
+            redo_fold_identity: folds[0].clone(),
+            segment_identities: rotation_indexes
+                .iter()
+                .map(|&index| rotations[index].clone())
+                .collect(),
+        }
+    };
+    assert_eq!(
+        orna_storage_v1::restore_paired_checkpoint_redo_sparse_segment_rotation_compaction_handoffs_preserving_pin_identity(
+            &[],
+            &[vec![vec![malformed_stream(vec![malformed_run(8, 31, 30, &[])])]]],
+        ),
+        Err(orna_storage_v1::BranchMergePairedCheckpointRedoFoldSegmentRotationCompactionRestoreHandoffError::InvalidOrderRange {
+            restore_ordinal: 0,
+            handoff_ordinal: 0,
+            stream_ordinal: 0,
+            compaction_ordinal: 0,
+            fold_ordinal: 8,
+            first_order: 31,
+            last_order: 30,
+        }),
+    );
+    assert_eq!(
+        orna_storage_v1::restore_paired_checkpoint_redo_sparse_segment_rotation_compaction_handoffs_preserving_pin_identity(
+            &[],
+            &[vec![vec![malformed_stream(vec![malformed_run(4, 40, 41, &[0])])]]],
+        ),
+        Err(orna_storage_v1::BranchMergePairedCheckpointRedoFoldSegmentRotationCompactionRestoreHandoffError::SegmentIdentityCountMismatch {
+            restore_ordinal: 0,
+            handoff_ordinal: 0,
+            stream_ordinal: 0,
+            compaction_ordinal: 0,
+            fold_ordinal: 4,
+            first_order: 40,
+            last_order: 41,
+            expected: 2,
+            actual: 1,
+        }),
+    );
+}
+
+#[test]
+fn paired_checkpoint_wal_pins_survive_three_sparse_compaction_restore_batches() {
+    let fold_rows = PAIRED_REDO_FOLD_IDENTITIES
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    let wal_rows = PAIRED_SPARSE_WAL_MERGE_ROTATION_RESTORES
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    let states = PAIRED_CHECKPOINT_REDO
+        .split("\n\n")
+        .map(parse_checkpoint_fixture)
+        .collect::<Vec<_>>();
+    assert_eq!(fold_rows.len(), 3);
+    assert_eq!(wal_rows.len(), 14);
+    assert_eq!(states.len(), 5);
+
+    let folds = fold_rows
+        .iter()
+        .map(|row| BranchMergePairedRedoFoldIdentity {
+            left_fold: row.fields[&id(2)].encode().unwrap(),
+            right_fold: row.fields[&id(3)].encode().unwrap(),
+        })
+        .collect::<Vec<_>>();
+    let log_segments = wal_rows
+        .chunks_exact(2)
+        .map(|pair| BranchMergePairedLogSegmentIdentity {
+            write_ahead_identity: BranchMergePairedWriteAheadIdentity {
+                left_log: pair[0].fields[&id(2)].encode().unwrap(),
+                right_log: pair[0].fields[&id(3)].encode().unwrap(),
+            },
+            segment_identity: BranchMergePairedWriteAheadSegmentIdentity {
+                left_segment: pair[1].fields[&id(2)].encode().unwrap(),
+                right_segment: pair[1].fields[&id(3)].encode().unwrap(),
+            },
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(log_segments.len(), 7);
+
+    let alpha = b"wal-pins/alpha".to_vec();
+    let beta = b"wal-pins/beta".to_vec();
+    let catalog_only = b"wal-pins/catalog-only".to_vec();
+    let observed_late = b"wal-pins/observed-late".to_vec();
+    let left_base = states[0].clone();
+    let right_base = states[1].clone();
+    let left_redo = states[2].clone();
+    let right_redo = states[3].clone();
+    let positionless = states[4].clone();
+    assert_eq!(positionless.position, None);
+
+    let run = |merge_ordinal: usize,
+               fold_ordinal: usize,
+               first_order: u64,
+               last_order: u64,
+               left: Option<CheckpointGeneration>,
+               right: Option<CheckpointGeneration>,
+               redo_fold_identity: &BranchMergePairedRedoFoldIdentity,
+               identity_indexes: &[usize]| {
+        BranchMergePairedCheckpointRedoFoldWalSparseMergeChainCompactionRunSnapshot {
+            merge_ordinal,
+            fold_ordinal,
+            first_order,
+            last_order,
+            left,
+            right,
+            redo_fold_identity: redo_fold_identity.clone(),
+            log_segment_identities: identity_indexes
+                .iter()
+                .map(|&index| log_segments[index].clone())
+                .collect(),
+        }
+    };
+    let stream = |checkpoint_id, runs| {
+        BranchMergePairedCheckpointRedoFoldWalSparseMergeChainCompactionSnapshot {
+            checkpoint_id,
+            runs,
+        }
+    };
+
+    let restore_batches = vec![
+        vec![
+            vec![stream(
+                alpha.clone(),
+                vec![run(
+                    4,
+                    2,
+                    4,
+                    5,
+                    Some(left_base.clone()),
+                    Some(right_base.clone()),
+                    &folds[0],
+                    &[0, 1],
+                )],
+            )],
+            vec![stream(
+                alpha.clone(),
+                vec![run(
+                    9,
+                    1,
+                    4,
+                    4,
+                    Some(left_redo.clone()),
+                    Some(right_base.clone()),
+                    &folds[1],
+                    &[2],
+                )],
+            )],
+        ],
+        vec![
+            vec![stream(
+                alpha.clone(),
+                vec![run(
+                    4,
+                    2,
+                    4,
+                    4,
+                    Some(positionless.clone()),
+                    Some(right_redo.clone()),
+                    &folds[2],
+                    &[4],
+                )],
+            )],
+            vec![stream(
+                beta.clone(),
+                vec![run(
+                    1,
+                    1,
+                    7,
+                    7,
+                    Some(positionless.clone()),
+                    None,
+                    &folds[0],
+                    &[3],
+                )],
+            )],
+        ],
+        vec![vec![
+            stream(
+                alpha.clone(),
+                vec![run(
+                    5,
+                    0,
+                    8,
+                    8,
+                    Some(left_base.clone()),
+                    Some(right_redo.clone()),
+                    &folds[1],
+                    &[5],
+                )],
+            ),
+            stream(
+                observed_late.clone(),
+                vec![run(0, 0, 9, 9, None, None, &folds[0], &[6])],
+            ),
+        ]],
+    ];
+
+    let restored =
+        restore_paired_checkpoint_redo_sparse_wal_merge_handoff_chains_preserving_pin_identity(
+            &[alpha.clone(), beta.clone(), catalog_only.clone()],
+            &restore_batches,
+        )
+        .unwrap();
+    assert_eq!(
+        restored
+            .iter()
+            .map(|stream| stream.checkpoint_id.clone())
+            .collect::<Vec<_>>(),
+        vec![alpha.clone(), beta.clone(), catalog_only.clone(), observed_late.clone()]
+    );
+    let slots = |checkpoint_id: &[u8]| {
+        &restored
+            .iter()
+            .find(|stream| stream.checkpoint_id == checkpoint_id)
+            .unwrap()
+            .slots
+    };
+    assert_eq!(
+        slots(&alpha)
+            .iter()
+            .map(|slot| (
+                slot.restore_ordinal,
+                slot.handoff_ordinal,
+                slot.merge_ordinal,
+                slot.fold_ordinal,
+                slot.order,
+            ))
+            .collect::<Vec<_>>(),
+        vec![
+            (0, 0, 4, 2, 4),
+            (0, 0, 4, 2, 5),
+            (0, 1, 9, 1, 4),
+            (1, 0, 4, 2, 4),
+            (2, 0, 5, 0, 8),
+        ],
+        "restore, handoff, merge, fold, and sparse order remain distinct",
+    );
+    let assert_pin = |actual: Option<&orna_storage_v1::BranchMergePairedCheckpointWalSegmentPinIdentity>,
+                      generation: Option<&CheckpointGeneration>,
+                      checkpoint_id: &[u8],
+                      write_ahead_id: &[u8],
+                      segment_id: &[u8]| {
+        if let Some(generation) = generation {
+            assert_eq!(
+                actual,
+                Some(&orna_storage_v1::BranchMergePairedCheckpointWalSegmentPinIdentity {
+                    checkpoint_id: checkpoint_id.to_vec(),
+                    generation: generation.clone(),
+                    write_ahead_id: write_ahead_id.to_vec(),
+                    segment_id: segment_id.to_vec(),
+                }),
+            );
+        } else {
+            assert!(actual.is_none());
+        }
+    };
+    let assert_pair = |slot_index: usize,
+                       checkpoint_id: &[u8],
+                       left: Option<&CheckpointGeneration>,
+                       right: Option<&CheckpointGeneration>,
+                       identity_index: usize| {
+        let slot = &slots(checkpoint_id)[slot_index];
+        let identity = &log_segments[identity_index];
+        assert_pin(
+            slot.left_pin.as_ref(),
+            left,
+            checkpoint_id,
+            &identity.write_ahead_identity.left_log,
+            &identity.segment_identity.left_segment,
+        );
+        assert_pin(
+            slot.right_pin.as_ref(),
+            right,
+            checkpoint_id,
+            &identity.write_ahead_identity.right_log,
+            &identity.segment_identity.right_segment,
+        );
+        assert_eq!(slot.log_segment_identity, *identity);
+    };
+    assert_pair(0, &alpha, Some(&left_base), Some(&right_base), 0);
+    assert_pair(1, &alpha, Some(&left_base), Some(&right_base), 1);
+    assert_pair(2, &alpha, Some(&left_redo), Some(&right_base), 2);
+    assert_pair(3, &alpha, Some(&positionless), Some(&right_redo), 4);
+    assert_pair(4, &alpha, Some(&left_base), Some(&right_redo), 5);
+    assert_eq!(slots(&alpha)[2].redo_fold_identity, folds[1]);
+    assert_eq!(slots(&alpha)[3].redo_fold_identity, folds[2]);
+    assert_pair(0, &beta, Some(&positionless), None, 3);
+    assert!(slots(&catalog_only).is_empty());
+    assert_eq!(slots(&observed_late).len(), 1);
+    assert_pair(0, &observed_late, None, None, 6);
+
+    let malformed = |first_order, last_order, log_segment_identities| {
+        BranchMergePairedCheckpointRedoFoldWalSparseMergeChainCompactionSnapshot {
+            checkpoint_id: alpha.clone(),
+            runs: vec![BranchMergePairedCheckpointRedoFoldWalSparseMergeChainCompactionRunSnapshot {
+                merge_ordinal: 7,
+                fold_ordinal: 3,
+                first_order,
+                last_order,
+                left: Some(left_base.clone()),
+                right: None,
+                redo_fold_identity: folds[0].clone(),
+                log_segment_identities,
+            }],
+        }
+    };
+    assert_eq!(
+        restore_paired_checkpoint_redo_sparse_wal_merge_handoff_chains_preserving_pin_identity(
+            &[],
+            &[vec![vec![malformed(10, 9, vec![])]],],
+        ),
+        Err(orna_storage_v1::BranchMergePairedCheckpointRedoFoldWalMergeRestoreHandoffError::InvalidOrderRange {
+            restore_ordinal: 0,
+            handoff_ordinal: 0,
+            merge_ordinal: 7,
+            fold_ordinal: 3,
+            first_order: 10,
+            last_order: 9,
+        }),
+    );
+    assert_eq!(
+        restore_paired_checkpoint_redo_sparse_wal_merge_handoff_chains_preserving_pin_identity(
+            &[],
+            &[vec![vec![malformed(10, 11, vec![log_segments[0].clone()])]]],
+        ),
+        Err(orna_storage_v1::BranchMergePairedCheckpointRedoFoldWalMergeRestoreHandoffError::LogSegmentIdentityCountMismatch {
+            restore_ordinal: 0,
+            handoff_ordinal: 0,
+            merge_ordinal: 7,
+            fold_ordinal: 3,
+            first_order: 10,
+            last_order: 11,
+            expected: 2,
+            actual: 1,
+        }),
+    );
+}
+
+#[test]
+fn paired_redo_fold_identity_survives_sparse_checkpoint_compaction_handoff_chains() {
+    let source_rows = PAIRED_SPARSE_CHECKPOINT_COMPACTION_HANDOFFS
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    let fold_rows = PAIRED_REDO_FOLD_IDENTITIES
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    let states = PAIRED_CHECKPOINT_REDO
+        .split("\n\n")
+        .map(parse_checkpoint_fixture)
+        .collect::<Vec<_>>();
+    assert_eq!(source_rows.len(), 5);
+    assert_eq!(fold_rows.len(), 3);
+    assert_eq!(states.len(), 5);
+
+    let checkpoint_ids = source_rows
+        .iter()
+        .map(|row| row.fields[&id(2)].encode().unwrap())
+        .collect::<Vec<_>>();
+    let alpha = checkpoint_ids[0].clone();
+    let duplicate_alpha = checkpoint_ids[1].clone();
+    let beta = checkpoint_ids[2].clone();
+    let catalog_only = checkpoint_ids[3].clone();
+    let observed_late = checkpoint_ids[4].clone();
+    assert_eq!(alpha, duplicate_alpha);
+    assert_ne!(
+        source_rows[0].fields[&id(3)],
+        source_rows[1].fields[&id(3)],
+        "the fixture gives duplicate checkpoint streams distinct source labels",
+    );
+
+    let folds = fold_rows
+        .iter()
+        .map(|row| BranchMergePairedRedoFoldIdentity {
+            left_fold: row.fields[&id(2)].encode().unwrap(),
+            right_fold: row.fields[&id(3)].encode().unwrap(),
+        })
+        .collect::<Vec<_>>();
+    let left_base = states[0].clone();
+    let right_base = states[1].clone();
+    let left_redo = states[2].clone();
+    let right_redo = states[3].clone();
+    let positionless = states[4].clone();
+    assert_eq!(positionless.position, None);
+
+    let run = |handoff_ordinal: usize,
+               fold_ordinal: usize,
+               first_order: u64,
+               last_order: u64,
+               left: Option<CheckpointGeneration>,
+               right: Option<CheckpointGeneration>,
+               redo_fold_identity: &BranchMergePairedRedoFoldIdentity| {
+        BranchMergePairedCheckpointRedoFoldSparseCompactionHandoffRunSnapshot {
+            handoff_ordinal,
+            fold_ordinal,
+            first_order,
+            last_order,
+            left,
+            right,
+            redo_fold_identity: redo_fold_identity.clone(),
+        }
+    };
+    let stream = |checkpoint_id, runs| {
+        BranchMergePairedCheckpointRedoFoldSparseCompactionHandoffSnapshot {
+            checkpoint_id,
+            runs,
+        }
+    };
+
+    let first_batch = vec![
+        stream(
+            alpha.clone(),
+            vec![
+                run(
+                    0,
+                    2,
+                    4,
+                    5,
+                    Some(left_base.clone()),
+                    Some(right_base.clone()),
+                    &folds[0],
+                ),
+                run(
+                    0,
+                    2,
+                    4,
+                    4,
+                    Some(left_redo.clone()),
+                    Some(right_base.clone()),
+                    &folds[1],
+                ),
+            ],
+        ),
+        stream(
+            duplicate_alpha,
+            vec![run(
+                0,
+                2,
+                4,
+                4,
+                Some(positionless.clone()),
+                None,
+                &folds[2],
+            )],
+        ),
+        stream(
+            beta.clone(),
+            vec![run(
+                2,
+                1,
+                7,
+                7,
+                Some(positionless.clone()),
+                None,
+                &folds[0],
+            )],
+        ),
+    ];
+    let second_batch = vec![
+        stream(
+            alpha.clone(),
+            vec![run(
+                0,
+                2,
+                4,
+                4,
+                Some(positionless.clone()),
+                Some(right_redo.clone()),
+                &folds[2],
+            )],
+        ),
+        stream(
+            observed_late.clone(),
+            vec![run(1, 0, 10, 10, None, None, &folds[0])],
+        ),
+    ];
+
+    let restored =
+        restore_paired_checkpoint_redo_sparse_compaction_handoff_chains_preserving_source_identity(
+            &[alpha.clone(), beta.clone(), catalog_only.clone()],
+            &[first_batch, second_batch],
+        )
+        .unwrap();
+    let mut expected_checkpoint_ids =
+        vec![alpha.clone(), beta.clone(), catalog_only.clone(), observed_late.clone()];
+    expected_checkpoint_ids.sort();
+    assert_eq!(
+        restored
+            .iter()
+            .map(|stream| stream.checkpoint_id.clone())
+            .collect::<Vec<_>>(),
+        expected_checkpoint_ids
+    );
+    let slots = |checkpoint_id: &[u8]| {
+        &restored
+            .iter()
+            .find(|stream| stream.checkpoint_id == checkpoint_id)
+            .unwrap()
+            .slots
+    };
+    assert_eq!(
+        slots(&alpha)
+            .iter()
+            .map(|slot| (
+                slot.restore_ordinal,
+                slot.stream_ordinal,
+                slot.compaction_ordinal,
+                slot.handoff_ordinal,
+                slot.fold_ordinal,
+                slot.order,
+            ))
+            .collect::<Vec<_>>(),
+        vec![
+            (0, 0, 0, 0, 2, 4),
+            (0, 0, 0, 0, 2, 5),
+            (0, 0, 1, 0, 2, 4),
+            (0, 1, 0, 0, 2, 4),
+            (1, 0, 0, 0, 2, 4),
+        ],
+        "batch, duplicate stream, compacted run, handoff, fold, and order remain distinct",
+    );
+    assert_eq!(slots(&alpha)[0].left, Some(left_base.clone()));
+    assert_eq!(slots(&alpha)[1].right, Some(right_base.clone()));
+    assert_eq!(slots(&alpha)[2].left, Some(left_redo.clone()));
+    assert_eq!(slots(&alpha)[2].redo_fold_identity, folds[1]);
+    assert_eq!(slots(&alpha)[3].left, Some(positionless.clone()));
+    assert!(slots(&alpha)[3].right.is_none());
+    assert_eq!(slots(&alpha)[3].redo_fold_identity, folds[2]);
+    assert_eq!(slots(&alpha)[4].left, Some(positionless.clone()));
+    assert_eq!(slots(&alpha)[4].right, Some(right_redo.clone()));
+    assert!(slots(&beta)[0].right.is_none());
+    assert_eq!(slots(&beta)[0].left, Some(positionless.clone()));
+    assert!(slots(&catalog_only).is_empty());
+    assert_eq!(slots(&observed_late).len(), 1);
+    assert!(slots(&observed_late)[0].left.is_none());
+    assert!(slots(&observed_late)[0].right.is_none());
+
+    assert_eq!(
+        restore_paired_checkpoint_redo_sparse_compaction_handoff_chains_preserving_source_identity(
+            &[],
+            &[
+                vec![
+                    stream(beta.clone(), vec![]),
+                    stream(
+                        alpha.clone(),
+                        vec![
+                            run(0, 2, 1, 1, None, None, &folds[0]),
+                            run(4, 9, 8, 7, None, None, &folds[1]),
+                        ],
+                    ),
+                ],
+            ],
+        ),
+        Err(orna_storage_v1::BranchMergePairedCheckpointRedoFoldSparseCompactionRestoreHandoffError::InvalidOrderRange {
+            restore_ordinal: 0,
+            stream_ordinal: 1,
+            compaction_ordinal: 1,
+            handoff_ordinal: 4,
+            fold_ordinal: 9,
+            first_order: 8,
+            last_order: 7,
+        }),
+    );
 }

@@ -1,0 +1,4 @@
+pub fn core_assertion(): Bool {
+    assert 2 + 2 == 4;
+    true
+}

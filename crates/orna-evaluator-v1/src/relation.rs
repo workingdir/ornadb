@@ -1,4 +1,6 @@
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 
 use num_bigint::BigInt;
 use num_integer::Integer;
@@ -6,8 +8,14 @@ use num_traits::ToPrimitive;
 
 use super::{
     timezone::{resolve_time_zone, Instant, LocalDateTime, LocalTimeResolution, TimeZone, TimeZoneError},
-    Value,
+    RelationReadScope, Value,
 };
+
+static NEXT_RELATION_SOURCE_ID: AtomicU64 = AtomicU64::new(1);
+
+fn next_relation_source_id() -> RelationReadScope {
+    RelationReadScope(NEXT_RELATION_SOURCE_ID.fetch_add(1, Ordering::Relaxed))
+}
 
 /// The two boundary models admitted by `bucket_by`.
 ///
@@ -267,16 +275,199 @@ fn days_in_month(year: i32, month: u8) -> u8 {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug)]
 pub(super) struct RelationPlan {
     pub(super) source: String,
+    pub(super) source_identity: RelationReadScope,
     pub(super) source_union: Option<(Box<RelationPlan>, Box<RelationPlan>)>,
+    /// Bounded, already-materialized rows produced by finite collection
+    /// operators over a relation. Keeping these rows behind an Arc lets the
+    /// result remain a Relation<T> and replay safely through later operators.
+    pub(super) source_values: Option<Arc<Vec<Value>>>,
     pub(super) stages: Vec<RelationStage>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+impl PartialEq for RelationPlan {
+    fn eq(&self, other: &Self) -> bool {
+        self.source == other.source
+            && self.source_union == other.source_union
+            && self.source_values == other.source_values
+            && self.stages == other.stages
+    }
+}
+
+impl Eq for RelationPlan {}
+
+type FilterContinuationScope = Option<RelationReadScope>;
+
+/// Ordered filter chunks shared when a cascade fans out through a union.
+#[derive(Debug)]
+pub(super) struct FilterBatch {
+    node: FilterBatchNode,
+    flattened: OnceLock<Vec<Arc<Vec<Value>>>>,
+    // Weak entries allow cloned shared prefixes to reuse joins without cycles.
+    continuations: Mutex<HashMap<(FilterContinuationScope, usize), Weak<FilterBatch>>>,
+    // Cloned leaf plans can carry equal, separately owned filter prefixes.
+    // Keep their joins shared within the same source identity when they append
+    // the same outer suffix.
+    prefixed_batches: Mutex<Vec<(FilterContinuationScope, Weak<FilterBatch>)>>,
+}
+
+#[derive(Debug)]
+enum FilterBatchNode {
+    Values(Arc<Vec<Value>>),
+    Then(Arc<FilterBatch>, Arc<FilterBatch>),
+}
+
+impl FilterBatch {
+    fn from_values(values: Vec<Value>) -> Arc<Self> {
+        Arc::new(Self {
+            node: FilterBatchNode::Values(Arc::new(values)),
+            flattened: OnceLock::new(),
+            continuations: Mutex::new(HashMap::new()),
+            prefixed_batches: Mutex::new(Vec::new()),
+        })
+    }
+
+    fn followed_by_in_scope(
+        previous: &Arc<Self>,
+        next: &Arc<Self>,
+        scope: FilterContinuationScope,
+    ) -> Arc<Self> {
+        let key = Arc::as_ptr(next) as usize;
+        let mut continuations = previous
+            .continuations
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let scoped_key = (scope, key);
+        if let Some(batch) = continuations.get(&scoped_key).and_then(Weak::upgrade) {
+            return batch;
+        }
+        // A shared prefix may outlive the compiled joins that once used it.
+        // Prune those expired weak entries when the prefix needs a new join
+        // so repeated unknown-union compilations do not grow a dead cache.
+        continuations.retain(|_, batch| batch.strong_count() > 0);
+        let batch = Self::joined(previous, next);
+        continuations.insert(scoped_key, Arc::downgrade(&batch));
+        batch
+    }
+
+    fn joined(previous: &Arc<Self>, next: &Arc<Self>) -> Arc<Self> {
+        Arc::new(Self {
+            node: FilterBatchNode::Then(Arc::clone(previous), Arc::clone(next)),
+            flattened: OnceLock::new(),
+            continuations: Mutex::new(HashMap::new()),
+            prefixed_batches: Mutex::new(Vec::new()),
+        })
+    }
+
+    fn followed_by_shared_prefix(
+        prefix: &Arc<Self>,
+        next: &Arc<Self>,
+        source_identity: RelationReadScope,
+    ) -> Arc<Self> {
+        let scope = Some(source_identity);
+        let next_key = Arc::as_ptr(next) as usize;
+        let mut continuations = prefix
+            .continuations
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let scoped_key = (scope, next_key);
+        if let Some(batch) = continuations.get(&scoped_key).and_then(Weak::upgrade) {
+            // Cloned leaves already have an identity-keyed join; avoid taking
+            // the suffix's cross-prefix cache lock for this common path. The
+            // relation source scopes this identity so cloned unknowns cannot
+            // promote the continuation into a sibling source.
+            return batch;
+        }
+        let equivalent_continuation = continuations
+            .iter()
+            .filter(|((cached_scope, _), _)| cached_scope == &scope)
+            .filter_map(|(_, batch)| Weak::upgrade(batch))
+            .find(|batch| {
+                let FilterBatchNode::Then(previous, suffix) = &batch.node else {
+                    return false;
+                };
+                Arc::ptr_eq(previous, prefix)
+                    && (Arc::ptr_eq(suffix, next) || suffix.values().eq(next.values()))
+            });
+        if let Some(batch) = equivalent_continuation {
+            // Separately compiled suffixes with the same ordered filters are
+            // equivalent within this relation source; alias their scoped
+            // identity-keyed entries.
+            continuations.insert(scoped_key, Arc::downgrade(&batch));
+            return batch;
+        }
+        drop(continuations);
+
+        let mut prefixed_batches = next
+            .prefixed_batches
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        // Nested union leaves can carry separately compiled but equivalent
+        // prefixes. Reuse their join when appending the same suffix so the
+        // shared batch identity survives those compilation boundaries.
+        for (cached_scope, weak_batch) in prefixed_batches.iter().rev() {
+            if cached_scope != &scope {
+                continue;
+            }
+            let Some(batch) = weak_batch.upgrade() else {
+                continue;
+            };
+            let FilterBatchNode::Then(existing_prefix, suffix) = &batch.node else {
+                continue;
+            };
+            // Cloned plans retain prefix identity; use that hot path before
+            // flattening independently compiled batches for value equality.
+            if Arc::ptr_eq(suffix, next)
+                && (Arc::ptr_eq(existing_prefix, prefix)
+                    || existing_prefix.values().eq(prefix.values()))
+            {
+                return batch;
+            }
+        }
+        prefixed_batches.retain(|(_, batch)| batch.strong_count() > 0);
+        let batch = Self::followed_by_in_scope(prefix, next, scope);
+        prefixed_batches.push((scope, Arc::downgrade(&batch)));
+        batch
+    }
+
+    fn prefixed_by(
+        values: Vec<Value>,
+        next: &Arc<Self>,
+        source_identity: RelationReadScope,
+    ) -> Arc<Self> {
+        Self::followed_by_shared_prefix(&Self::from_values(values), next, source_identity)
+    }
+
+    pub(super) fn chunks(&self) -> &[Arc<Vec<Value>>] {
+        self.flattened.get_or_init(|| {
+            let mut pending = vec![self];
+            let mut chunks = Vec::new();
+            while let Some(batch) = pending.pop() {
+                match &batch.node {
+                    FilterBatchNode::Values(values) => chunks.push(Arc::clone(values)),
+                    FilterBatchNode::Then(previous, next) => {
+                        pending.push(next);
+                        pending.push(previous);
+                    }
+                }
+            }
+            chunks
+        })
+    }
+
+    pub(super) fn values(&self) -> impl Iterator<Item = &Value> {
+        self.chunks().iter().flat_map(|chunk| chunk.iter())
+    }
+}
+
+#[derive(Clone, Debug)]
 pub(super) enum RelationStage {
-    Filter(Value),
+    /// Adjacent filters, evaluated in order and short-circuited per input row.
+    Filter(Vec<Value>),
+    /// A merged batch whose predicate chunks can be shared across union leaves.
+    SharedFilter(Arc<FilterBatch>),
     Map(Value),
     /// Lazily expands each upstream value through a transform returning a
     /// finite `List`, preserving source and inner order.
@@ -299,6 +490,48 @@ pub(super) enum RelationStage {
     Drop(usize),
     Take(usize),
 }
+
+impl RelationStage {
+    fn filter_values_equal(left: &Self, right: &Self) -> Option<bool> {
+        match (left, right) {
+            (Self::Filter(left), Self::Filter(right)) => Some(left == right),
+            (Self::Filter(left), Self::SharedFilter(right)) => {
+                Some(left.iter().eq(right.values()))
+            }
+            (Self::SharedFilter(left), Self::Filter(right)) => {
+                Some(left.values().eq(right.iter()))
+            }
+            (Self::SharedFilter(left), Self::SharedFilter(right)) => {
+                Some(Arc::ptr_eq(left, right) || left.values().eq(right.values()))
+            }
+            _ => None,
+        }
+    }
+}
+
+impl PartialEq for RelationStage {
+    fn eq(&self, other: &Self) -> bool {
+        if let Some(equal) = Self::filter_values_equal(self, other) {
+            return equal;
+        }
+        match (self, other) {
+            (Self::Map(left), Self::Map(right))
+            | (Self::FlatMap(left), Self::FlatMap(right))
+            | (Self::SortBy(left), Self::SortBy(right)) => left == right,
+            (Self::BucketBy(left), Self::BucketBy(right)) => left == right,
+            (Self::Distinct, Self::Distinct) | (Self::Pairs, Self::Pairs) => true,
+            (Self::Window(left_size, left_step), Self::Window(right_size, right_step)) => {
+                left_size == right_size && left_step == right_step
+            }
+            (Self::Drop(left), Self::Drop(right)) | (Self::Take(left), Self::Take(right)) => {
+                left == right
+            }
+            _ => false,
+        }
+    }
+}
+
+impl Eq for RelationStage {}
 
 /// Incremental state for a [`RelationStage::Window`] stage.
 ///
@@ -326,6 +559,21 @@ impl RelationWindowState {
         })
     }
 
+    /// Returns the largest collection the next input could retain or emit.
+    /// An incomplete trailing frame only retains values observed so far; the
+    /// requested window size is not allocated eagerly.
+    pub(super) fn next_item_bound(&self) -> usize {
+        if self.skipped > 0 {
+            return self.pending.len();
+        }
+        let next_len = self.pending.len().saturating_add(1);
+        if next_len >= self.size {
+            self.size
+        } else {
+            next_len
+        }
+    }
+
     /// Feeds one ordered value and returns a complete window when available.
     ///
     /// The returned list owns its values, allowing the caller to pass it down
@@ -341,16 +589,20 @@ impl RelationWindowState {
             return None;
         }
 
-        let window = self.pending.iter().take(self.size).cloned().collect();
         if self.step < self.size {
+            let window = self.pending.iter().take(self.size).cloned().collect();
             for _ in 0..self.step {
                 self.pending.pop_front();
             }
+            Some(window)
         } else {
-            self.pending.clear();
             self.skipped = self.step - self.size;
+            // A non-overlapping frame owns every buffered value, so move the
+            // frame out intact instead of cloning nested row values. This
+            // keeps sparse, filtered frame boundaries on the same first-seen
+            // identities while avoiding a deep copy per complete window.
+            Some(std::mem::take(&mut self.pending).into_iter().collect())
         }
-        Some(window)
     }
 }
 /// Incremental state for a relation `last` observation.
@@ -383,21 +635,482 @@ impl RelationPlan {
     pub(super) fn new(source: String) -> Self {
         Self {
             source,
+            source_identity: next_relation_source_id(),
             source_union: None,
+            source_values: None,
+            stages: Vec::new(),
+        }
+    }
+
+    pub(super) fn from_values(values: Vec<Value>) -> Self {
+        Self {
+            source: String::new(),
+            source_identity: next_relation_source_id(),
+            source_union: None,
+            source_values: Some(Arc::new(values)),
             stages: Vec::new(),
         }
     }
 
     pub(super) fn union(left: Self, right: Self) -> Self {
+        // A nested union is a composition boundary for either operand's
+        // pending cascade. Flush each completed operand before making it a
+        // child, so its filters compile through its own union storm once.
+        let left = left.flush_filter_cascade();
+        let right = right.flush_filter_cascade();
         Self {
             source: String::new(),
+            source_identity: next_relation_source_id(),
             source_union: Some((Box::new(left), Box::new(right))),
+            source_values: None,
             stages: Vec::new(),
         }
     }
 
     pub(super) fn with_stage(mut self, stage: RelationStage) -> Self {
-        self.stages.push(stage);
+        match stage {
+            RelationStage::Drop(0) => {
+                // A zero-row drop is an identity. Remove it so a following
+                // filter cascade can still reach union leaves, while demand-
+                // changing stages such as Take remain pushdown barriers.
+                return self;
+            }
+            RelationStage::Filter(mut predicates) => {
+                match self.stages.pop() {
+                    Some(RelationStage::Filter(mut previous)) => {
+                        previous.append(&mut predicates);
+                        self.stages.push(RelationStage::Filter(previous));
+                    }
+                    Some(RelationStage::SharedFilter(previous)) => {
+                        let next = FilterBatch::from_values(predicates);
+                        let continuation = if self.source_union.is_some() {
+                            // A union-level continuation has no single
+                            // relation source yet. Keep this join local until
+                            // it is pushed into source-scoped leaves.
+                            FilterBatch::joined(&previous, &next)
+                        } else {
+                            FilterBatch::followed_by_shared_prefix(
+                                &previous,
+                                &next,
+                                self.source_identity,
+                            )
+                        };
+                        self.stages.push(RelationStage::SharedFilter(
+                            continuation,
+                        ));
+                    }
+                    Some(previous) => {
+                        self.stages.push(previous);
+                        self.stages.push(RelationStage::Filter(predicates));
+                    }
+                    None => self.stages.push(RelationStage::Filter(predicates)),
+                }
+            }
+            stage => {
+                self = self.flush_filter_cascade();
+                self.stages.push(stage);
+            }
+        }
         self
+    }
+
+    /// Pushes a pending root filter cascade into union leaves as one batch.
+    /// Adjacent filters remain together while a pipeline is assembled; a
+    /// demand-changing stage or terminal observer flushes the complete batch.
+    pub(super) fn flush_filter_cascade(mut self) -> Self {
+        if self.source_union.is_none() || self.stages.len() != 1 {
+            return self;
+        }
+        let predicates = match self.stages.pop().expect("checked filter stage") {
+            RelationStage::Filter(predicates) => FilterBatch::from_values(predicates),
+            RelationStage::SharedFilter(predicates) => predicates,
+            stage => {
+                self.stages.push(stage);
+                return self;
+            }
+        };
+        let (left, right) = self.source_union.take().expect("checked union source");
+        self.source_union = Some((
+            Box::new(left.push_filter_cascade(Arc::clone(&predicates))),
+            Box::new(right.push_filter_cascade(predicates)),
+        ));
+        self
+    }
+
+    fn push_filter_cascade(mut self, predicates: Arc<FilterBatch>) -> Self {
+        if let Some((left, right)) = self.source_union.take() {
+            if self.stages.is_empty() {
+                self.source_union = Some((
+                    Box::new(left.push_filter_cascade(Arc::clone(&predicates))),
+                    Box::new(right.push_filter_cascade(predicates)),
+                ));
+                return self;
+            }
+            if self.stages.len() == 1
+                && matches!(
+                    self.stages.first(),
+                    Some(RelationStage::Filter(_) | RelationStage::SharedFilter(_))
+                )
+            {
+                let previous = self.stages.pop().expect("checked filter stage");
+                let predicates = match previous {
+                    RelationStage::Filter(previous) => {
+                        let prefix = FilterBatch::from_values(previous);
+                        FilterBatch::joined(&prefix, &predicates)
+                    }
+                    RelationStage::SharedFilter(previous) => {
+                        FilterBatch::joined(&previous, &predicates)
+                    }
+                    _ => unreachable!("checked filter stage"),
+                };
+                self.source_union = Some((
+                    Box::new(left.push_filter_cascade(Arc::clone(&predicates))),
+                    Box::new(right.push_filter_cascade(predicates)),
+                ));
+                return self;
+            }
+            self.source_union = Some((left, right));
+        }
+        match self.stages.pop() {
+            Some(RelationStage::Filter(previous)) => {
+                self.stages.push(RelationStage::SharedFilter(
+                    FilterBatch::prefixed_by(previous, &predicates, self.source_identity),
+                ));
+            }
+            Some(RelationStage::SharedFilter(previous)) => {
+                self.stages.push(RelationStage::SharedFilter(
+                    FilterBatch::followed_by_shared_prefix(
+                        &previous,
+                        &predicates,
+                        self.source_identity,
+                    ),
+                ));
+            }
+            Some(previous) => {
+                self.stages.push(previous);
+                self.stages
+                    .push(RelationStage::SharedFilter(predicates));
+            }
+            None => self
+                .stages
+                .push(RelationStage::SharedFilter(predicates)),
+        }
+        self
+    }
+
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{FilterBatch, RelationPlan, RelationReadScope, RelationStage};
+    use crate::Value;
+    use std::sync::Arc;
+
+    #[test]
+    fn shared_filter_join_cache_discards_expired_continuations() {
+        let prefix = FilterBatch::from_values(vec![Value::Bool(true)]);
+        let abandoned_suffix = FilterBatch::from_values(vec![Value::Bool(false)]);
+        let abandoned_join = FilterBatch::followed_by_in_scope(
+            &prefix,
+            &abandoned_suffix,
+            None,
+        );
+        assert_eq!(prefix.continuations.lock().unwrap().len(), 1);
+        drop(abandoned_join);
+
+        let live_suffix = FilterBatch::from_values(vec![Value::Bool(true)]);
+        let live_join = FilterBatch::followed_by_in_scope(&prefix, &live_suffix, None);
+
+        let continuations = prefix.continuations.lock().unwrap();
+        assert_eq!(continuations.len(), 1);
+        assert!(continuations.values().all(|join| join.upgrade().is_some()));
+        assert_eq!(live_join.values().count(), 2);
+    }
+
+    #[test]
+    fn continuation_cache_does_not_cross_relation_sources() {
+        let prefix = FilterBatch::from_values(vec![Value::Bool(true)]);
+        let suffix = FilterBatch::from_values(vec![Value::Bool(false)]);
+        let left_scope = RelationReadScope(1);
+        let right_scope = RelationReadScope(2);
+        let left = FilterBatch::followed_by_shared_prefix(&prefix, &suffix, left_scope);
+        let cloned_left = FilterBatch::followed_by_shared_prefix(&prefix, &suffix, left_scope);
+        let equal_left = FilterBatch::followed_by_shared_prefix(
+            &FilterBatch::from_values(vec![Value::Bool(true)]),
+            &suffix,
+            left_scope,
+        );
+        let right = FilterBatch::followed_by_shared_prefix(&prefix, &suffix, right_scope);
+
+        assert!(Arc::ptr_eq(&left, &cloned_left));
+        assert!(Arc::ptr_eq(&left, &equal_left));
+        assert!(
+            !Arc::ptr_eq(&left, &right),
+            "equal continuations must stay separate across relation sources"
+        );
+    }
+
+    #[test]
+    fn cloned_sources_reuse_continuations_but_equal_named_unknowns_stay_local() {
+        let prefix = FilterBatch::from_values(vec![Value::Bool(true)]);
+        let source = RelationPlan::new("Unknown".into())
+            .with_stage(RelationStage::SharedFilter(Arc::clone(&prefix)));
+        let cloned_source = source.clone();
+        let sibling_source = RelationPlan::new("Unknown".into())
+            .with_stage(RelationStage::SharedFilter(prefix));
+        let append = |plan: RelationPlan| {
+            plan.with_stage(RelationStage::Filter(vec![Value::String(
+                "same continuation".into(),
+            )]))
+        };
+
+        let source_continuation = append(source);
+        let cloned_continuation = append(cloned_source);
+        let sibling_continuation = append(sibling_source);
+        let batch = |plan: &RelationPlan| match plan.stages.as_slice() {
+            [RelationStage::SharedFilter(batch)] => Arc::clone(batch),
+            stages => panic!("expected one shared batch, got {stages:?}"),
+        };
+
+        assert!(Arc::ptr_eq(
+            &batch(&source_continuation),
+            &batch(&cloned_continuation)
+        ));
+        assert!(!Arc::ptr_eq(
+            &batch(&source_continuation),
+            &batch(&sibling_continuation)
+        ));
+        assert_eq!(
+            batch(&sibling_continuation)
+                .values()
+                .cloned()
+                .collect::<Vec<_>>(),
+            vec![Value::Bool(true), Value::String("same continuation".into())]
+        );
+    }
+
+    #[test]
+    fn independently_compiled_unknown_sources_do_not_share_equal_prefix_suffixes() {
+        let first = Value::Bool(true);
+        let second = Value::Bool(false);
+        let outer = Value::String("outer".into());
+        let terminal = Value::String("terminal".into());
+        let first_prefix = FilterBatch::from_values(vec![first.clone(), second.clone()]);
+        let second_prefix = FilterBatch::joined(
+            &FilterBatch::from_values(vec![first.clone()]),
+            &FilterBatch::from_values(vec![second.clone()]),
+        );
+        let third_prefix = Arc::clone(&first_prefix);
+        let suffix = FilterBatch::from_values(vec![outer.clone(), terminal.clone()]);
+        let plan = RelationPlan::union(
+            RelationPlan::union(
+                RelationPlan::new("Unknown".into())
+                    .with_stage(RelationStage::SharedFilter(first_prefix)),
+                RelationPlan::new("Unknown".into())
+                    .with_stage(RelationStage::SharedFilter(second_prefix)),
+            ),
+            RelationPlan::new("Unknown".into())
+                .with_stage(RelationStage::SharedFilter(third_prefix)),
+        )
+        .with_stage(RelationStage::SharedFilter(suffix))
+        .flush_filter_cascade();
+
+        let batch_for = |leaf: &RelationPlan| match leaf.stages.as_slice() {
+            [RelationStage::SharedFilter(batch)] => Arc::clone(batch),
+            stages => panic!("expected one shared batch, got {stages:?}"),
+        };
+        let (nested, right) = plan.source_union.as_ref().expect("outer union remains");
+        let (left, middle) = nested.source_union.as_ref().expect("nested union remains");
+        let left_batch = batch_for(left);
+        let middle_batch = batch_for(middle);
+        let right_batch = batch_for(right);
+
+        assert!(!Arc::ptr_eq(&left_batch, &middle_batch));
+        assert!(!Arc::ptr_eq(&left_batch, &right_batch));
+        assert!(!Arc::ptr_eq(&middle_batch, &right_batch));
+        assert_eq!(
+            left_batch.values().cloned().collect::<Vec<_>>(),
+            vec![first, second, outer, terminal]
+        );
+    }
+
+    #[test]
+    fn cloned_prefixes_keep_deep_union_joins_without_flattening() {
+        let prefix = FilterBatch::from_values(vec![
+            Value::Bool(true),
+            Value::String("shared prefix".into()),
+        ]);
+        let retained_prefix = Arc::clone(&prefix);
+        let suffix = FilterBatch::from_values(vec![Value::Bool(false)]);
+        let leaf = RelationPlan::new("Unknown".into())
+            .with_stage(RelationStage::SharedFilter(Arc::clone(&prefix)));
+        let plan = RelationPlan::union(
+            RelationPlan::union(leaf.clone(), leaf.clone()),
+            RelationPlan::union(leaf.clone(), leaf),
+        )
+        .with_stage(RelationStage::SharedFilter(suffix))
+        .flush_filter_cascade();
+
+        let batch_for = |leaf: &RelationPlan| match leaf.stages.as_slice() {
+            [RelationStage::SharedFilter(batch)] => Arc::clone(batch),
+            stages => panic!("expected one shared batch, got {stages:?}"),
+        };
+        let (left, right) = plan.source_union.as_ref().expect("outer union remains");
+        let (left_left, left_right) = left.source_union.as_ref().expect("left nested union");
+        let (right_left, right_right) = right.source_union.as_ref().expect("right nested union");
+        let batches = [
+            batch_for(left_left),
+            batch_for(left_right),
+            batch_for(right_left),
+            batch_for(right_right),
+        ];
+
+        assert!(batches[1..]
+            .iter()
+            .all(|batch| Arc::ptr_eq(&batches[0], batch)));
+        assert!(
+            retained_prefix.flattened.get().is_none(),
+            "cloned prefixes should hit the identity cache before value flattening"
+        );
+    }
+
+    #[test]
+    fn cloned_prefix_continuations_survive_repeated_nested_flushes() {
+        let prefix = FilterBatch::from_values(vec![Value::Bool(true)]);
+        let retained_prefix = Arc::clone(&prefix);
+        let first_suffix = FilterBatch::from_values(vec![Value::Bool(false)]);
+        let make_leaf = RelationPlan::new("Unknown".into())
+            .with_stage(RelationStage::SharedFilter(Arc::clone(&prefix)));
+        let first_flush = RelationPlan::union(
+            RelationPlan::union(make_leaf.clone(), make_leaf.clone()),
+            RelationPlan::union(make_leaf.clone(), make_leaf),
+        )
+        .with_stage(RelationStage::SharedFilter(first_suffix))
+        .flush_filter_cascade();
+        let second_flush = first_flush
+            .with_stage(RelationStage::Filter(vec![Value::String("later".into())]))
+            .flush_filter_cascade();
+
+        let batch_for = |leaf: &RelationPlan| match leaf.stages.as_slice() {
+            [RelationStage::SharedFilter(batch)] => Arc::clone(batch),
+            stages => panic!("expected one shared batch, got {stages:?}"),
+        };
+        let (left, right) = second_flush
+            .source_union
+            .as_ref()
+            .expect("outer union remains");
+        let (left_left, left_right) = left.source_union.as_ref().expect("left nested union");
+        let (right_left, right_right) = right.source_union.as_ref().expect("right nested union");
+        let batches = [
+            batch_for(left_left),
+            batch_for(left_right),
+            batch_for(right_left),
+            batch_for(right_right),
+        ];
+
+        assert!(batches[1..]
+            .iter()
+            .all(|batch| Arc::ptr_eq(&batches[0], batch)));
+        assert!(
+            retained_prefix.flattened.get().is_none(),
+            "identity-cached continuations should preserve the unflattened prefix"
+        );
+    }
+
+    #[test]
+    fn equal_compiled_suffixes_share_cloned_nested_continuations() {
+        let prefix = FilterBatch::from_values(vec![Value::Bool(true)]);
+        let nested_prefix = RelationPlan::union(
+            RelationPlan::new("UnknownBase".into()),
+            RelationPlan::new("UnknownBase".into()),
+        )
+        .with_stage(RelationStage::SharedFilter(Arc::clone(&prefix)))
+        .flush_filter_cascade();
+        let append_suffix = |plan: RelationPlan| {
+            plan.with_stage(RelationStage::Filter(vec![Value::String(
+                "same continuation".into(),
+            )]))
+        };
+        let plan = RelationPlan::union(
+            append_suffix(nested_prefix.clone()),
+            append_suffix(nested_prefix),
+        );
+
+        let batch_for = |leaf: &RelationPlan| match leaf.stages.as_slice() {
+            [RelationStage::SharedFilter(batch)] => Arc::clone(batch),
+            stages => panic!("expected one shared batch, got {stages:?}"),
+        };
+        let (left, right) = plan.source_union.as_ref().expect("outer union remains");
+        let (left_left, left_right) = left.source_union.as_ref().expect("left nested union");
+        let (right_left, right_right) = right.source_union.as_ref().expect("right nested union");
+        let batches = [
+            batch_for(left_left),
+            batch_for(left_right),
+            batch_for(right_left),
+            batch_for(right_right),
+        ];
+
+        assert!(Arc::ptr_eq(&batches[0], &batches[2]));
+        assert!(Arc::ptr_eq(&batches[1], &batches[3]));
+        assert!(
+            !Arc::ptr_eq(&batches[0], &batches[1]),
+            "cloned continuations stay source-local across unknown union operands"
+        );
+        let continuations = prefix.continuations.lock().unwrap();
+        assert_eq!(continuations.len(), 4);
+        assert!(continuations.values().all(|continuation| {
+            continuation
+                .upgrade()
+                .is_some_and(|batch| {
+                    Arc::ptr_eq(&batch, &batches[0]) || Arc::ptr_eq(&batch, &batches[1])
+                })
+        }));
+    }
+
+    #[test]
+    fn independently_compiled_nested_unknown_continuations_stay_operand_local() {
+        let compile_prefix = || {
+            RelationPlan::union(
+                RelationPlan::new("UnknownBaseLeft".into()).with_stage(
+                    RelationStage::SharedFilter(FilterBatch::from_values(vec![Value::Bool(true)])),
+                ),
+                RelationPlan::new("UnknownBaseRight".into()).with_stage(
+                    RelationStage::SharedFilter(FilterBatch::from_values(vec![Value::Bool(true)])),
+                ),
+            )
+        };
+        let compile_continuation = || {
+            compile_prefix().with_stage(RelationStage::Filter(vec![Value::String(
+                "equal nested continuation".into(),
+            )]))
+        };
+        let plan = RelationPlan::union(compile_continuation(), compile_continuation());
+
+        let batch_for = |leaf: &RelationPlan| match leaf.stages.as_slice() {
+            [RelationStage::SharedFilter(batch)] => Arc::clone(batch),
+            stages => panic!("expected one shared batch, got {stages:?}"),
+        };
+        let (left, right) = plan.source_union.as_ref().expect("outer union remains");
+        let (left_left, left_right) = left.source_union.as_ref().expect("left nested union");
+        let (right_left, right_right) = right.source_union.as_ref().expect("right nested union");
+        let batches = [
+            batch_for(left_left),
+            batch_for(left_right),
+            batch_for(right_left),
+            batch_for(right_right),
+        ];
+
+        for left in 0..batches.len() {
+            for right in left + 1..batches.len() {
+                assert!(
+                    !Arc::ptr_eq(&batches[left], &batches[right]),
+                    "independently compiled continuations remain local before source interning"
+                );
+            }
+        }
+        assert_eq!(
+            batches[0].values().cloned().collect::<Vec<_>>(),
+            vec![Value::Bool(true), Value::String("equal nested continuation".into())]
+        );
     }
 }

@@ -103,6 +103,19 @@ impl ReplSession {
         })
     }
 
+    pub(crate) fn with_module_aliases(
+        mut self,
+        aliases: BTreeMap<String, String>,
+    ) -> Result<Self, EvaluationError> {
+        for (name, target) in aliases {
+            if self.aliases.insert(name, target).is_some() {
+                return Err(error("ORNA-EVAL-NAME"));
+            }
+        }
+        self.check_retained()?;
+        Ok(self)
+    }
+
     /// Configures statically admitted table paths which may be imported into
     /// the session for transaction-aware effect dispatch.
     pub fn with_table_names(mut self, names: impl IntoIterator<Item = String>) -> Self {

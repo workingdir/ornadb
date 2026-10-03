@@ -1,0 +1,9 @@
+pub type Profile {
+    pub label: Str,
+    pub measurements: [(Str, Float?)],
+}
+
+pub table Account(id: Int) {
+    profile: Profile?,
+    assert all_unique(account => account.profile);
+}

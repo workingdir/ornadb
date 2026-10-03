@@ -1,0 +1,95 @@
+pub fn factory_at(pin: sys.SnapshotRef) =
+    sys.database.as_of(pin).energy.factory;
+
+pub fn forwarded_factory(pin: sys.SnapshotRef) = factory_at(pin);
+pub fn chained_factory(pin: sys.SnapshotRef) = forwarded_factory(pin);
+
+pub fn final_at(root_pin: sys.SnapshotRef) =
+    (bridge_pin: sys.SnapshotRef) =>
+        (leaf_pin: sys.SnapshotRef) =>
+            (terminal_pin: sys.SnapshotRef) => {
+                root: chained_factory(root_pin),
+                bridge: chained_factory(bridge_pin)().read,
+                leaf: chained_factory(leaf_pin)().read,
+                terminal: chained_factory(terminal_pin)().read(),
+            };
+
+pub fn followup_at(root_pin: sys.SnapshotRef) =
+    (bridge_pin: sys.SnapshotRef) =>
+        (leaf_pin: sys.SnapshotRef) =>
+            (terminal_pin: sys.SnapshotRef) => {
+                root: chained_factory(root_pin),
+                bridge: chained_factory(bridge_pin)().read,
+                leaf: chained_factory(leaf_pin)().read,
+                terminal: chained_factory(terminal_pin)().read(),
+                continuation: final_at(terminal_pin),
+            };
+
+pub fn cascade_at(root_pin: sys.SnapshotRef) =
+    (bridge_pin: sys.SnapshotRef) =>
+        (leaf_pin: sys.SnapshotRef) =>
+            (terminal_pin: sys.SnapshotRef) => {
+                root: chained_factory(root_pin),
+                bridge: chained_factory(bridge_pin)().read,
+                leaf: chained_factory(leaf_pin)().read,
+                terminal: chained_factory(terminal_pin)().read(),
+                followup: followup_at(terminal_pin),
+            };
+
+// Repeatedly call freshly reconstructed paired continuations, storming and
+// restoring every depth before recording each lane's stable observations.
+pub fn paired_continuation_reproduction_consistency_across_rebind_storms() {
+    let left_origin = cascade_at(sys.snapshot("HEAD~1200"))(sys.snapshot("HEAD~1160"))(sys.snapshot("HEAD~1120"))(sys.snapshot("HEAD~1080"));
+    let right_origin = cascade_at(sys.snapshot("HEAD~1190"))(sys.snapshot("HEAD~1150"))(sys.snapshot("HEAD~1110"))(sys.snapshot("HEAD~1070"));
+    let left_followup_origin = left_origin.followup;
+    let right_followup_origin = right_origin.followup;
+    let left_followup_observation_zero = left_followup_origin(sys.snapshot("HEAD~1040"))(sys.snapshot("HEAD~1020"))(sys.snapshot("HEAD~1000"));
+    let right_followup_observation_zero = right_followup_origin(sys.snapshot("HEAD~1030"))(sys.snapshot("HEAD~1010"))(sys.snapshot("HEAD~990"));
+    let left_terminal_observation_zero = left_followup_observation_zero.continuation(sys.snapshot("HEAD~960"))(sys.snapshot("HEAD~940"))(sys.snapshot("HEAD~920"));
+    let right_terminal_observation_zero = right_followup_observation_zero.continuation(sys.snapshot("HEAD~950"))(sys.snapshot("HEAD~930"))(sys.snapshot("HEAD~910"));
+
+    let left_reproduction_one = cascade_at(sys.snapshot("HEAD~1200"))(sys.snapshot("HEAD~1160"))(sys.snapshot("HEAD~1120"))(sys.snapshot("HEAD~1080"));
+    let right_reproduction_one = cascade_at(sys.snapshot("HEAD~1190"))(sys.snapshot("HEAD~1150"))(sys.snapshot("HEAD~1110"))(sys.snapshot("HEAD~1070"));
+    let left_followup_root_one = left_reproduction_one.followup;
+    let right_followup_root_one = right_reproduction_one.followup;
+    let left_followup_probe_one = left_followup_root_one(sys.snapshot("HEAD~1041"))(sys.snapshot("HEAD~1021"))(sys.snapshot("HEAD~1001"));
+    let left_followup_probe_two = left_followup_root_one(sys.snapshot("HEAD~1042"))(sys.snapshot("HEAD~1022"))(sys.snapshot("HEAD~1002"));
+    let right_followup_probe_one = right_followup_root_one(sys.snapshot("HEAD~1031"))(sys.snapshot("HEAD~1011"))(sys.snapshot("HEAD~991"));
+    let right_followup_probe_two = right_followup_root_one(sys.snapshot("HEAD~1032"))(sys.snapshot("HEAD~1012"))(sys.snapshot("HEAD~992"));
+    let left_followup_observation_one = left_followup_root_one(sys.snapshot("HEAD~1040"))(sys.snapshot("HEAD~1020"))(sys.snapshot("HEAD~1000"));
+    let right_followup_observation_one = right_followup_root_one(sys.snapshot("HEAD~1030"))(sys.snapshot("HEAD~1010"))(sys.snapshot("HEAD~990"));
+    let left_terminal_probe_one = left_followup_observation_one.continuation(sys.snapshot("HEAD~961"))(sys.snapshot("HEAD~941"))(sys.snapshot("HEAD~921"));
+    let left_terminal_probe_two = left_followup_observation_one.continuation(sys.snapshot("HEAD~962"))(sys.snapshot("HEAD~942"))(sys.snapshot("HEAD~922"));
+    let right_terminal_probe_one = right_followup_observation_one.continuation(sys.snapshot("HEAD~951"))(sys.snapshot("HEAD~931"))(sys.snapshot("HEAD~911"));
+    let right_terminal_probe_two = right_followup_observation_one.continuation(sys.snapshot("HEAD~952"))(sys.snapshot("HEAD~932"))(sys.snapshot("HEAD~912"));
+    let left_terminal_observation_one = left_followup_observation_one.continuation(sys.snapshot("HEAD~960"))(sys.snapshot("HEAD~940"))(sys.snapshot("HEAD~920"));
+    let right_terminal_observation_one = right_followup_observation_one.continuation(sys.snapshot("HEAD~950"))(sys.snapshot("HEAD~930"))(sys.snapshot("HEAD~910"));
+
+    let left_reproduction_two = cascade_at(sys.snapshot("HEAD~1200"))(sys.snapshot("HEAD~1160"))(sys.snapshot("HEAD~1120"))(sys.snapshot("HEAD~1080"));
+    let right_reproduction_two = cascade_at(sys.snapshot("HEAD~1190"))(sys.snapshot("HEAD~1150"))(sys.snapshot("HEAD~1110"))(sys.snapshot("HEAD~1070"));
+    let left_followup_root_two = left_reproduction_two.followup;
+    let right_followup_root_two = right_reproduction_two.followup;
+    let left_followup_probe_three = left_followup_root_two(sys.snapshot("HEAD~1043"))(sys.snapshot("HEAD~1023"))(sys.snapshot("HEAD~1003"));
+    let left_followup_probe_four = left_followup_root_two(sys.snapshot("HEAD~1044"))(sys.snapshot("HEAD~1024"))(sys.snapshot("HEAD~1004"));
+    let right_followup_probe_three = right_followup_root_two(sys.snapshot("HEAD~1033"))(sys.snapshot("HEAD~1013"))(sys.snapshot("HEAD~993"));
+    let right_followup_probe_four = right_followup_root_two(sys.snapshot("HEAD~1034"))(sys.snapshot("HEAD~1014"))(sys.snapshot("HEAD~994"));
+    let left_followup_observation_two = left_followup_root_two(sys.snapshot("HEAD~1040"))(sys.snapshot("HEAD~1020"))(sys.snapshot("HEAD~1000"));
+    let right_followup_observation_two = right_followup_root_two(sys.snapshot("HEAD~1030"))(sys.snapshot("HEAD~1010"))(sys.snapshot("HEAD~990"));
+    let left_terminal_probe_three = left_followup_observation_two.continuation(sys.snapshot("HEAD~963"))(sys.snapshot("HEAD~943"))(sys.snapshot("HEAD~923"));
+    let left_terminal_probe_four = left_followup_observation_two.continuation(sys.snapshot("HEAD~964"))(sys.snapshot("HEAD~944"))(sys.snapshot("HEAD~924"));
+    let right_terminal_probe_three = right_followup_observation_two.continuation(sys.snapshot("HEAD~953"))(sys.snapshot("HEAD~933"))(sys.snapshot("HEAD~913"));
+    let right_terminal_probe_four = right_followup_observation_two.continuation(sys.snapshot("HEAD~954"))(sys.snapshot("HEAD~934"))(sys.snapshot("HEAD~914"));
+    let left_terminal_observation_two = left_followup_observation_two.continuation(sys.snapshot("HEAD~960"))(sys.snapshot("HEAD~940"))(sys.snapshot("HEAD~920"));
+    let right_terminal_observation_two = right_followup_observation_two.continuation(sys.snapshot("HEAD~950"))(sys.snapshot("HEAD~930"))(sys.snapshot("HEAD~910"));
+
+    {
+        left: {
+            followup: [left_followup_observation_zero, left_followup_observation_one, left_followup_observation_two],
+            terminal: [left_terminal_observation_zero, left_terminal_observation_one, left_terminal_observation_two],
+        },
+        right: {
+            followup: [right_followup_observation_zero, right_followup_observation_one, right_followup_observation_two],
+            terminal: [right_terminal_observation_zero, right_terminal_observation_one, right_terminal_observation_two],
+        },
+    }
+}

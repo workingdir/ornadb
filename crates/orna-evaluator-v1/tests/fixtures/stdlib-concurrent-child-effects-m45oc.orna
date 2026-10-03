@@ -1,0 +1,4 @@
+concurrent.parallel([
+    () => concurrent.sleep(0.s),
+    () => concurrent.sleep(0.s),
+])

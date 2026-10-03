@@ -1,0 +1,36 @@
+pub table Note(id: Int) { amount: Int, label: Str, }
+
+fn seed() {
+    Note.insert({ id: 1, amount: 10, label: "stable" });
+    Note.insert({ id: 2, amount: 20, label: "seed" });
+    Note.insert({ id: 3, amount: 30, label: "stable" });
+}
+
+fn total(): Int = Note | map(note => note.amount) | sum;
+
+fn seed_identity(): Int = Note
+    | filter(note => note.label == "seed")
+    | map(note => note.id * note.amount)
+    | sum;
+
+fn rebound_identity(): Int = Note
+    | filter(note => note.label == "rebound")
+    | map(note => note.id * note.amount)
+    | sum;
+
+fn parent() {
+    assert total() == 0;
+    seed();
+    // Fold results are values captured by this read scope; a later refresh
+    // changes fresh reads but does not rewrite these earlier results.
+    let seeded_total = total();
+    let seeded_identity = seed_identity();
+    assert seeded_total == 60;
+    assert seeded_identity == 40;
+    Note.update(2, { amount: 25, label: "rebound" });
+    assert seeded_total == 60;
+    assert seeded_identity == 40;
+    assert total() == 65;
+    assert seed_identity() == 0;
+    assert rebound_identity() == 50;
+}

@@ -1,0 +1,38 @@
+text.unicode_version() == "16.0.0"
+&& text.trim("  café  ") == "café"
+&& text.split("alpha,,β,", ",") == ["alpha", "", "β", ""]
+&& text.join(["a", "β", ""], ":") == "a:β:"
+&& text.starts_with("café", "ca")
+&& text.ends_with("café", "fé")
+&& text.contains("café", "afé")
+&& text.replace("a-a-a", "a", "bb") == "bb-bb-bb"
+&& text.normalise("é", "NFC") == "é"
+&& text.lower("CAFÉ") == "café"
+&& text.upper("ß") == "SS"
+&& bits.bit_or(left: 5, right: 2) == 7
+&& bits.bit_and(5, 3) == 1
+&& bits.bit_xor(5, 3) == 6
+&& bits.bit_not(0) == -1
+&& bits.shift_left(-3, 2) == -12
+&& bits.shift_right(-9, 2) == -3
+&& math.increment(9007199254740993) == 9007199254740994
+&& math.decrement(4) == 3
+&& math.is_zero(0)
+&& math.abs(-9) == 9
+&& math.signum(-9) == -1
+&& math.is_positive(1)
+&& math.is_negative(-1)
+&& math.is_even(6)
+&& math.is_odd(5)
+&& math.min(3, 1) == 1
+&& math.max(3, 1) == 3
+&& math.clamp(99, lower: 10, upper: 20) == 20
+&& math.square(9) == 81
+&& math.cube(-2) == -8
+&& math.gcd(-42, 30) == 6
+&& math.lcm(-6, 15) == 30
+&& math.pow_nonnegative(-2, 3) == first([-8])
+&& math.pow_nonnegative(2, -1) == null
+&& stats.mean([1, 2, 3]) == first([2])
+&& stats.median([9, 1, 5]) == first([5])
+&& stats.percentile([0.0, 10.0], 0.25, interpolation: "lower") == first([0.0])

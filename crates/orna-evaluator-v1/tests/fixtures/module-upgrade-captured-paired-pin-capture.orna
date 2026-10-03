@@ -1,0 +1,8 @@
+fn captured_pair(seed: Int) = [
+    math_ops.shift(seed),
+    collection_ops.marker(),
+    math_ops.shift(seed) + collection_ops.marker(),
+    std.math.shift(seed + 1),
+    std.collection.marker(),
+    std.math.shift(seed + 1) + std.collection.marker(),
+];

@@ -1,0 +1,8 @@
+std.stream.for_each(
+    std.stream.debounce(
+        std.stream.buffer(std.stream.from_provider("events", "debounce"), 3),
+        5.s,
+        "latest"
+    ),
+    (value: Str) => { std.io.environment.get(value); }
+)

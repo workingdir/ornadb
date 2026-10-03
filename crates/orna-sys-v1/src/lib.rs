@@ -30,20 +30,62 @@ mod introspection;
 pub use introspection::{
     Dependency, DependencyConfidence, DependencyGraph, DependencyGraphError, DependencyInput,
     DependencyKind,
-    DefinitionRef, ExplainedPlan, ExplainError, ExpressionRef, FileRef, FunctionPlanDescription,
-    FunctionRef, MutableBranchSnapshot, QueryJoinDescription, QueryMutationDescription,
-    QueryMutationKind, QuerySourceStatistics,
+    DefinitionRef, DisjunctStormBranchDescription, DisjunctStormCascadeDescription,
+    DisjunctStormLimitRebindDescription,
+    DisjunctStormDescription, ExplainedPlan, ExplainError, ExpressionRef, FileRef,
+    FunctionPlanDescription, FunctionRef, MutableBranchSnapshot,
+    QueryDecorrelatedSubqueryDescription, QueryJoinDescription,
+    QueryLimitPushdownDescription, QueryMutationDescription, QueryMutationKind,
+    QueryPartialIndexDescription,
+    QuerySourceStatistics, QueryJoinPairIdentityDescription,
     MAX_DEPENDENCY_EDGES, MAX_DEPENDENCY_OBJECTS, MAX_PLAN_EXPRESSIONS,
-    MAX_PLAN_NODES, MAX_REFERENCE_BYTES, Plan, PlanDetail, PlanNode, PlanNodeKind, PlanNodeRef,
+    MAX_PLAN_NODES, MAX_REFERENCE_BYTES, Plan, PlanByteCapHandoffRoute, PlanByteCapScopeSegment,
+    PlanDetail, PlanNode, PlanNodeKind, PlanNodeRef,
     PlanNullOrder,
-    PlanOrdering, PlanSortDirection, QueryPlanDescription, SnapshotRef, SourceSpan, explain_function,
-    explain_query, explain_query_with_conjunct_disjunct_limit_chain,
+    PlanOrdering, PlanSortDirection, PlanWindowFrameBound, QueryPlanDescription, SnapshotRef,
+    SourceSpan, QueryWindowAggregatePushdownDescription, QueryWindowSpillDescription,
+    explain_function,
+    explain_query, explain_query_with_decorrelated_subqueries,
+    explain_query_with_join_pair_identities_and_limit_pushdowns,
+    explain_query_with_join_pair_identities_and_limit_window_aggregate_pushdowns,
+    explain_query_with_partial_indexes,
+    explain_query_with_partial_indexes_and_decorrelated_subqueries,
+    explain_query_with_partial_indexes_and_decorrelated_subqueries_and_join_pair_identities,
+    explain_query_with_partial_indexes_and_join_pair_identities,
+    explain_query_with_window_aggregate_pushdowns,
+    explain_query_with_join_pair_identities,
+    explain_query_with_join_pair_identities_and_window_aggregate_pushdowns,
+    explain_query_with_join_pair_identities_window_aggregate_and_spill_pushdowns,
+    explain_query_with_conjunct_disjunct_limit_chain,
     explain_query_with_disjunct_conjunct_limit_chain,
-    explain_query_with_disjunct_limit_chain, explain_query_with_limit_chain,
+    explain_query_with_disjunct_limit_conjunct_chain,
+    explain_query_with_disjunct_limit_chain, explain_query_with_input_limit_conjunct_disjunct_chain,
+    explain_query_with_input_limit_disjunct_chain,
+    explain_query_with_input_disjunct_limit_conjunct_chain,
+    explain_query_with_input_limit_conjunct_disjunct_limit_conjunct_chain,
+    explain_query_with_input_limit_disjunct_conjunct_chain, explain_query_with_limit_chain,
+    explain_query_with_disjunct_branch_limit_conjunct_cascade,
+    explain_query_with_disjunct_storm_chain,
+    explain_query_with_disjunct_storm_branch_limit_chains,
 };
 
 mod provider;
 pub use provider::*;
+
+mod host_environment;
+pub use host_environment::*;
+
+mod host_process;
+pub use host_process::*;
+
+mod host_clock;
+pub use host_clock::*;
+
+mod host_filesystem;
+pub use host_filesystem::*;
+
+mod host_network;
+pub use host_network::*;
 
 pub const CANONICAL_VALUE_CODEC_V1: &str = "OVB-1";
 

@@ -1,6 +1,8 @@
 use orna_conformance_v1::{SourceUnit, StageOutcome, TransactionalEvaluator};
 use orna_evaluator_v1::Limits;
 use orna_foundation_v1::Value;
+use orna_semantic_v1::{Catalogue, ModuleInput, analyze_with_catalogue};
+use orna_value_v1::Raw;
 
 fn source(parent_body: &str) -> SourceUnit {
     SourceUnit {
@@ -20,6 +22,16 @@ fn fixture_source(source: &str) -> SourceUnit {
         parse_as: "module_unit".into(),
         source: source.into(),
     }
+}
+
+fn row_field<'a>(row: &'a Value, field: &str) -> &'a Raw {
+    let Raw::Map(fields) = row.raw() else {
+        panic!("expected a table row record, got {:?}", row.raw());
+    };
+    fields
+        .iter()
+        .find_map(|(key, value)| (key == &Raw::Text(field.into())).then_some(value))
+        .unwrap_or_else(|| panic!("table row omitted field {field}"))
 }
 
 fn decimal_key_table_assertion_source(assertion: &str, parent_body: &str) -> SourceUnit {
@@ -398,6 +410,73 @@ fn parsed_filter_count_pipeline_observes_candidate_rows_and_read_your_writes() {
 }
 
 #[test]
+fn parsed_paired_folds_observe_nested_activation_writes_and_keep_row_identity() {
+    let fixture = include_str!("fixtures/paired-read-your-writes-handoff-folds.orna");
+    let mut runtime = TransactionalEvaluator::new("parent", Limits::default());
+
+    let outcome = runtime.execute_source(&fixture_source(fixture));
+
+    assert!(matches!(outcome, StageOutcome::Passed), "{outcome:?}");
+    let row = runtime
+        .committed_row("Note", &Value::int(2.into()))
+        .expect("updated nested row is committed after both folds pass");
+    assert_eq!(row_field(row, "amount"), &Raw::Int(25.into()));
+    assert_eq!(row_field(row, "label"), &Raw::Text("rebound".into()));
+}
+
+#[test]
+fn parsed_paired_subscription_folds_compute_candidate_values() {
+    let mut runtime = TransactionalEvaluator::new("parent", Limits::default());
+    let outcome = runtime.execute_source(&fixture_source(include_str!(
+        "fixtures/paired-read-your-writes-subscription-handoff.orna"
+    )));
+
+    assert!(matches!(outcome, StageOutcome::Passed), "{outcome:?}");
+    let one = runtime
+        .committed_row("Note", &Value::int(1.into()))
+        .expect("seeded first paired row commits");
+    assert_eq!(row_field(one, "amount"), &Raw::Int(10.into()));
+    let two = runtime
+        .committed_row("Note", &Value::int(2.into()))
+        .expect("seeded second paired row commits");
+    assert_eq!(row_field(two, "amount"), &Raw::Int(25.into()));
+    assert_eq!(row_field(two, "label"), &Raw::Text("rebound".into()));
+    let three = runtime
+        .committed_row("Note", &Value::int(3.into()))
+        .expect("seeded third paired row commits");
+    assert_eq!(row_field(three, "amount"), &Raw::Int(30.into()));
+    let four = runtime
+        .committed_row("Note", &Value::int(4.into()))
+        .expect("row inserted after the first paired fold commits");
+    assert_eq!(row_field(four, "amount"), &Raw::Int(40.into()));
+    assert_eq!(row_field(four, "label"), &Raw::Text("stable".into()));
+}
+
+#[test]
+fn parsed_paired_subscription_handoffs_retain_scopes_across_read_your_writes() {
+    let mut runtime = TransactionalEvaluator::new("parent", Limits::default());
+    let outcome = runtime.execute_source(&fixture_source(include_str!(
+        "fixtures/paired-read-your-writes-sequential-handoff.orna"
+    )));
+
+    assert!(matches!(outcome, StageOutcome::Passed), "{outcome:?}");
+    let expected = [
+        (1, 11, "rebound"),
+        (2, 25, "rebound"),
+        (3, 33, "stable"),
+        (4, 40, "stable"),
+        (5, 50, "new"),
+    ];
+    for (id, amount, label) in expected {
+        let row = runtime
+            .committed_row("Note", &Value::int(id.into()))
+            .unwrap_or_else(|| panic!("paired handoff should commit Note row {id}"));
+        assert_eq!(row_field(row, "amount"), &Raw::Int(amount.into()), "row {id}");
+        assert_eq!(row_field(row, "label"), &Raw::Text(label.into()), "row {id}");
+    }
+}
+
+#[test]
 fn parsed_filter_count_failure_rolls_back_candidate_rows() {
     let mut runtime = TransactionalEvaluator::new("parent", Limits::default());
     let outcome = runtime.execute_source(&fixture_source(include_str!(
@@ -481,6 +560,23 @@ fn parsed_relation_filter_and_map_preserve_candidate_values() {
             .committed_row("Note", &Value::int(8.into()))
             .is_some()
     );
+}
+
+#[test]
+fn section9_relation_operators_return_documented_values() {
+    let mut runtime = TransactionalEvaluator::new("parent", Limits::default());
+    let fixture = include_str!("fixtures/relation-core-section9-m9f62.orna");
+    let parsed = orna_syntax_v1::parse_module(fixture);
+    assert!(parsed.is_ok(), "{:#?}", parsed.diagnostics);
+    let outcome = runtime.execute_source(&fixture_source(fixture));
+
+    assert!(matches!(outcome, StageOutcome::Passed), "{outcome:?}");
+    for id in [1, 2, 3] {
+        assert!(
+            runtime.committed_row("Reading", &Value::int(id.into())).is_some(),
+            "section 9 operations should publish the candidate row {id} after all value proofs pass"
+        );
+    }
 }
 #[test]
 fn parsed_map_window_count_preserves_order_before_late_failure_rolls_back() {
@@ -699,8 +795,201 @@ fn table_all_unique_assertion_permits_atomic_publication() {
     );
     assert!(
         runtime
-            .committed_row("Note", &Value::int(8.into()))
-            .is_some()
+        .committed_row("Note", &Value::int(8.into()))
+        .is_some()
+    );
+}
+
+#[test]
+fn all_unique_factory_treats_null_as_a_selected_key_value() {
+    let mut unique = TransactionalEvaluator::new("parent", Limits::default());
+    let outcome = unique.execute_source(&fixture_source(include_str!(
+        "fixtures/txn-table-all-unique-optional-keys.orna"
+    )));
+
+    assert!(matches!(outcome, StageOutcome::Passed), "{outcome:?}");
+    assert!(unique.committed_row("Account", &Value::int(1.into())).is_some());
+    assert!(unique.committed_row("Account", &Value::int(2.into())).is_some());
+}
+
+#[test]
+fn all_unique_factory_rejects_a_second_null_key_and_rolls_back_both_rows() {
+    let mut duplicate = TransactionalEvaluator::new("parent", Limits::default());
+    let outcome = duplicate.execute_source(&fixture_source(include_str!(
+        "fixtures/txn-table-all-unique-duplicate-null-keys.orna"
+    )));
+
+    assert!(matches!(
+        outcome,
+        StageOutcome::Failed(ref diagnostic) if diagnostic.code() == "ORNA-EVAL-TABLE-ASSERT"
+    ));
+    assert_eq!(duplicate.committed_row("Account", &Value::int(1.into())), None);
+    assert_eq!(duplicate.committed_row("Account", &Value::int(2.into())), None);
+}
+
+#[test]
+fn all_unique_factory_compares_complete_nested_record_keys() {
+    let mut runtime = TransactionalEvaluator::new("parent", Limits::default());
+    let outcome = runtime.execute_source(&fixture_source(include_str!(
+        "fixtures/txn-table-all-unique-nested-record-keys.orna"
+    )));
+
+    assert!(matches!(&outcome, StageOutcome::Passed), "{outcome:?}");
+    for id in [1, 2, 3] {
+        assert!(
+            runtime
+                .committed_row("Account", &Value::int(id.into()))
+                .is_some(),
+            "unique nested record key row {id} was not committed"
+        );
+    }
+}
+
+#[test]
+fn relation_predicate_folds_preserve_paired_optional_values() {
+    let mut runtime = TransactionalEvaluator::new("parent", Limits::default());
+    let outcome = runtime.execute_source(&fixture_source(include_str!(
+        "fixtures/txn-relation-paired-omissions-my3f3.orna"
+    )));
+
+    assert!(matches!(&outcome, StageOutcome::Passed), "{outcome:?}");
+    let expected_keys = [
+        Raw::Array(vec![
+            Raw::Null,
+            Raw::Array(vec![Raw::Int(2.into()), Raw::Text("east".into())]),
+        ]),
+        Raw::Array(vec![
+            Raw::Array(vec![Raw::Int(1.into()), Raw::Text("west".into())]),
+            Raw::Null,
+        ]),
+        Raw::Array(vec![Raw::Null, Raw::Null]),
+        Raw::Array(vec![
+            Raw::Array(vec![Raw::Int(4.into()), Raw::Text("north".into())]),
+            Raw::Array(vec![Raw::Int(5.into()), Raw::Text("south".into())]),
+        ]),
+    ];
+    for (index, expected_key) in expected_keys.iter().enumerate() {
+        let id = index as i64 + 1;
+        let row = runtime
+            .committed_row("Reading", &Value::int(id.into()))
+            .unwrap_or_else(|| panic!("unique paired key row {id} was not committed"));
+        assert_eq!(row_field(&row, "key"), expected_key);
+        assert_eq!(row_field(&row, "expected"), expected_key);
+    }
+}
+
+#[test]
+fn relation_every_rejects_a_paired_value_mismatch_after_an_omission() {
+    let mut runtime = TransactionalEvaluator::new("parent", Limits::default());
+    let outcome = runtime.execute_source(&fixture_source(include_str!(
+        "fixtures/txn-relation-paired-omissions-mismatch-my3f3.orna"
+    )));
+
+    assert!(
+        matches!(
+            &outcome,
+            StageOutcome::Failed(diagnostic)
+                if diagnostic.code() == "ORNA-EVAL-TABLE-ASSERT"
+        ),
+        "the mismatch in the present half of the pair must reject the fold: {outcome:?}"
+    );
+    for id in [1, 2] {
+        assert_eq!(
+            runtime.committed_row("Reading", &Value::int(id.into())),
+            None,
+            "failed paired-value predicate published row {id}"
+        );
+    }
+}
+
+#[test]
+fn all_unique_rejects_a_second_fully_omitted_pair_key() {
+    let mut runtime = TransactionalEvaluator::new("parent", Limits::default());
+    let outcome = runtime.execute_source(&fixture_source(include_str!(
+        "fixtures/txn-relation-paired-omissions-duplicate-my3f3.orna"
+    )));
+
+    assert!(
+        matches!(
+            &outcome,
+            StageOutcome::Failed(diagnostic)
+                if diagnostic.code() == "ORNA-EVAL-TABLE-ASSERT"
+        ),
+        "null equals null in both selected pair positions: {outcome:?}"
+    );
+    for id in [1, 2] {
+        assert_eq!(
+            runtime.committed_row("Reading", &Value::int(id.into())),
+            None,
+            "duplicate fully omitted pair key published row {id}"
+        );
+    }
+}
+
+#[test]
+fn all_unique_factory_rejects_equal_nested_record_keys_and_rolls_back_rows() {
+    let mut runtime = TransactionalEvaluator::new("parent", Limits::default());
+    let outcome = runtime.execute_source(&fixture_source(include_str!(
+        "fixtures/txn-table-all-unique-duplicate-nested-record-keys.orna"
+    )));
+
+    assert!(
+        matches!(
+            &outcome,
+            StageOutcome::Failed(diagnostic)
+                if diagnostic.code() == "ORNA-EVAL-TABLE-ASSERT"
+        ),
+        "duplicate nested projection did not reject candidate rows: {outcome:?}"
+    );
+    for id in [1, 2] {
+        assert_eq!(
+            runtime.committed_row("Account", &Value::int(id.into())),
+            None,
+            "failed nested-key assertion published row {id}"
+        );
+    }
+}
+
+#[test]
+fn every_factory_short_circuits_on_first_false_canonical_row() {
+    let mut runtime = TransactionalEvaluator::new("parent", Limits::default());
+    let outcome = runtime.execute_source(&fixture_source(include_str!(
+        "fixtures/txn-table-every-short-circuits-canonical-order.orna"
+    )));
+
+    assert!(
+        matches!(
+            &outcome,
+            StageOutcome::Failed(diagnostic)
+                if diagnostic.code() == "ORNA-EVAL-TABLE-ASSERT"
+        ),
+        "later-row divide-by-zero should not run after the first false row: {outcome:?}"
+    );
+    for id in ["a", "b"] {
+        assert_eq!(
+            runtime.committed_row(
+                "Entry",
+                &Value::new(orna_foundation_v1::OvbRaw::Text(id.into()))
+                    .expect("canonical string key"),
+            ),
+            None,
+            "failed every predicate published row {id}"
+        );
+    }
+}
+
+#[test]
+fn relation_predicate_factories_accept_an_empty_candidate_relation() {
+    let mut runtime = TransactionalEvaluator::new("parent", Limits::default());
+    let outcome = runtime.execute_source(&fixture_source(include_str!(
+        "fixtures/txn-table-predicates-empty-candidate.orna"
+    )));
+
+    assert!(matches!(&outcome, StageOutcome::Passed), "{outcome:?}");
+    assert_eq!(
+        runtime.committed_row("Entry", &Value::int(1.into())),
+        None,
+        "insert-then-delete should leave the published relation empty"
     );
 }
 
@@ -832,6 +1121,95 @@ fn module_every_exists_assertion_permits_atomic_cross_table_publication() {
             .committed_row("Loan", &Value::int(1.into()))
             .is_some()
     );
+}
+
+#[test]
+fn nested_relation_predicate_folds_publish_the_matching_candidate_values() {
+    let source = include_str!("fixtures/txn-relation-predicate-fold-depth-dch7y.orna");
+    let analysis = analyze_with_catalogue(
+        &[ModuleInput::new("relation-fold-depth.orna", source)],
+        &Catalogue::authoritative_fixture(),
+    );
+    assert!(
+        analysis.is_ok(),
+        "nested section 9 fixture must type-check: {:?}",
+        analysis
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+    let mut runtime = TransactionalEvaluator::new("parent", Limits::default());
+    let outcome = runtime.execute_source(&fixture_source(source));
+
+    assert!(matches!(outcome, StageOutcome::Passed), "{outcome:?}");
+    for (table, id) in [
+        ("Org", 1),
+        ("Org", 2),
+        ("Route", 10),
+        ("Route", 20),
+        ("Endpoint", 100),
+        ("Endpoint", 200),
+        ("Endpoint", 999),
+        ("Audit", 1000),
+        ("Audit", 2000),
+    ] {
+        assert!(
+            runtime
+                .committed_row(table, &Value::int(id.into()))
+                .is_some(),
+            "successful four-level predicate continuation omitted {table} row {id}"
+        );
+    }
+}
+
+#[test]
+fn deepest_relation_predicate_mismatch_aborts_every_candidate_table() {
+    let mut runtime = TransactionalEvaluator::new("parent", Limits::default());
+    let outcome = runtime.execute_source(&fixture_source(include_str!(
+        "fixtures/txn-relation-predicate-fold-depth-reject-dch7y.orna"
+    )));
+
+    assert!(matches!(
+        outcome,
+        StageOutcome::Failed(ref diagnostic)
+            if diagnostic.code() == "ORNA-EVAL-MODULE-ASSERT"
+    ));
+    for (table, id) in [
+        ("Org", 1),
+        ("Org", 2),
+        ("Route", 10),
+        ("Route", 20),
+        ("Endpoint", 100),
+        ("Endpoint", 200),
+        ("Audit", 1000),
+        ("Audit", 2000),
+    ] {
+        assert_eq!(
+            runtime.committed_row(table, &Value::int(id.into())),
+            None,
+            "failed deepest predicate leaked {table} row {id}"
+        );
+    }
+}
+
+#[test]
+fn nested_relation_predicate_depth_fails_with_the_evaluator_limit() {
+    let limits = Limits {
+        max_depth: 3,
+        ..Limits::default()
+    };
+    let mut runtime = TransactionalEvaluator::new("parent", limits);
+    let outcome = runtime.execute_source(&fixture_source(include_str!(
+        "fixtures/txn-relation-predicate-fold-depth-dch7y.orna"
+    )));
+
+    assert!(matches!(
+        outcome,
+        StageOutcome::Failed(ref diagnostic) if diagnostic.code() == "ORNA-EVAL-LIMIT"
+    ));
+    assert_eq!(runtime.committed_row("Org", &Value::int(1.into())), None);
+    assert_eq!(runtime.committed_row("Audit", &Value::int(1000.into())), None);
 }
 
 #[test]

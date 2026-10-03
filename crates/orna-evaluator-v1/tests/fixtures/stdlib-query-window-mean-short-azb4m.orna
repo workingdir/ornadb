@@ -1,0 +1,4 @@
+query_ops.window_mean(
+    [1, 2],
+    3
+)

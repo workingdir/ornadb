@@ -1,0 +1,20 @@
+pub fn factory_at(pin: sys.SnapshotRef) =
+    sys.database.as_of(pin).energy.factory;
+
+pub fn checkpoint_with_error(root_pin: sys.SnapshotRef) =
+    (leaf_pin: sys.SnapshotRef) => {
+        root: factory_at(root_pin),
+        leaf: factory_at(leaf_pin),
+        broken: missing_checkpoint_component,
+    };
+
+pub fn nested_snapshot_error_reset_chain_values() {
+    let saved = checkpoint_with_error(sys.snapshot("HEAD~900"));
+    let rolling = saved;
+    rolling = checkpoint_with_error(sys.snapshot("HEAD~800"));
+
+    {
+        observed: rolling(sys.snapshot("HEAD~700")),
+        saved_observed: saved(sys.snapshot("HEAD~600")),
+    }
+}

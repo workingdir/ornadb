@@ -1,0 +1,4 @@
+streams.for_each(
+    streams.from_list([1, 2, 3], "each-source"),
+    (value: Int) => while false {}
+)
