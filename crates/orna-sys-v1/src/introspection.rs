@@ -1205,10 +1205,11 @@ pub fn explain_query_with_join_pair_identities(
     )
 }
 
-/// Explains a sparse join cascade while retaining both logical join-pair and
-/// window-pushdown identities through physical cost reordering. Window
-/// aggregates remain attached to their exact source and ordered chain; each
-/// join fold includes that source chain in its right-input identity.
+/// Explains a sparse join cascade while retaining logical join-pair,
+/// window-pushdown, and paired aggregate-pushdown identities through physical
+/// cost reordering. Window aggregates remain attached to their exact source
+/// and ordered chain; each join fold includes that source chain in its
+/// right-input identity and sparse anchor fold.
 ///
 /// ORNA specifies structured plan rows but leaves window-chain identity
 /// encoding open. This adapter uses a domain-separated digest of the source
@@ -2384,6 +2385,26 @@ fn explain_query_core_with_subqueries(
                 pair,
             )
         });
+        let paired_aggregate_pushdown_anchor_fold_id = join_pair_identity
+            .zip(right_window_identity.as_deref())
+            .map(|(pair, chain_identity)| {
+                query_paired_aggregate_pushdown_anchor_fold_identity(
+                    &left_fold_identity,
+                    &right_fold_identity,
+                    pair,
+                    chain_identity,
+                )
+            });
+        if let Some(identity) = paired_aggregate_pushdown_anchor_fold_id.as_deref() {
+            let mut aggregate_nodes = BTreeSet::from([right_access, right]);
+            aggregate_nodes.extend(right_window_operator_start..operators.len());
+            for index in aggregate_nodes {
+                add_paired_aggregate_pushdown_anchor_fold_details(
+                    &mut operators[index].details,
+                    identity,
+                );
+            }
+        }
         if let Some(identity) = join_pair_anchor_fold_id.as_deref() {
             let mut pair_nodes = BTreeSet::from([right_access, right]);
             pair_nodes.extend(right_window_operator_start..operators.len());
@@ -2420,6 +2441,7 @@ fn explain_query_core_with_subqueries(
             decorrelated_anchor_fold_id.as_deref(),
             window_anchor_fold_id.as_deref(),
             join_pair_anchor_fold_id.as_deref(),
+            paired_aggregate_pushdown_anchor_fold_id.as_deref(),
             cardinality,
             work,
             work_overflow,
@@ -2478,6 +2500,9 @@ fn explain_query_core_with_subqueries(
         }
         if let Some(identity) = join_pair_anchor_fold_id.as_deref() {
             add_join_pair_anchor_fold_details(&mut details, identity);
+        }
+        if let Some(identity) = paired_aggregate_pushdown_anchor_fold_id.as_deref() {
+            add_paired_aggregate_pushdown_anchor_fold_details(&mut details, identity);
         }
         if let Some(pair_identity) = join_pair_identity {
             add_join_pair_identity_details(&mut details, pair_identity);
@@ -3751,6 +3776,50 @@ fn add_join_pair_anchor_fold_details(
     );
 }
 
+/// Binds an ordered pushed aggregate chain to both its exact resolver join
+/// pair and the accumulated sparse left anchor. The explain identity encoding
+/// is planner-local; including the pair and chain prevents pushdown identity
+/// from drifting when sparse cost order changes.
+fn query_paired_aggregate_pushdown_anchor_fold_identity(
+    anchor_fold_identity: &str,
+    input_identity: &str,
+    pair: &QueryJoinPairIdentityDescription,
+    aggregate_chain_identity: &str,
+) -> String {
+    let mut hash = Sha256::new();
+    hash.update(b"orna.sys.query-paired-aggregate-pushdown-anchor-fold.v1\0");
+    hash_part(&mut hash, anchor_fold_identity.as_bytes());
+    hash_part(&mut hash, input_identity.as_bytes());
+    hash_part(&mut hash, pair.identity.as_str().as_bytes());
+    hash_part(&mut hash, pair.left_source.as_str().as_bytes());
+    hash_part(&mut hash, pair.right_source.as_str().as_bytes());
+    hash_optional_text(
+        &mut hash,
+        pair.predicate.as_ref().map(ExpressionRef::as_str),
+    );
+    hash_part(&mut hash, aggregate_chain_identity.as_bytes());
+    format!(
+        "paired-aggregate-pushdown-anchor-fold:{}",
+        hex(&hash.finalize())
+    )
+}
+
+fn add_paired_aggregate_pushdown_anchor_fold_details(
+    details: &mut BTreeMap<String, PlanDetail>,
+    identity: &str,
+) {
+    details.insert(
+        "paired_aggregate_pushdown_anchor_fold_identity".to_owned(),
+        PlanDetail::Text(identity.to_owned()),
+    );
+    details.insert(
+        "paired_aggregate_pushdown_anchor_fold_pairing".to_owned(),
+        PlanDetail::Text(
+            "sparse_anchor_fold_resolved_join_pair_and_aggregate_chain".to_owned(),
+        ),
+    );
+}
+
 fn add_decorrelated_predicate_pushdown_details(
     details: &mut BTreeMap<String, PlanDetail>,
     identity: &str,
@@ -3852,6 +3921,7 @@ fn query_join_cost_fold(
     decorrelated_anchor_fold_identity: Option<&str>,
     window_anchor_fold_identity: Option<&str>,
     join_pair_anchor_fold_identity: Option<&str>,
+    paired_aggregate_pushdown_anchor_fold_identity: Option<&str>,
     cardinality: Cardinality,
     work: Option<u64>,
     work_overflow: bool,
@@ -3877,6 +3947,7 @@ fn query_join_cost_fold(
     hash_optional_text(&mut hash, decorrelated_anchor_fold_identity);
     hash_optional_text(&mut hash, window_anchor_fold_identity);
     hash_optional_text(&mut hash, join_pair_anchor_fold_identity);
+    hash_optional_text(&mut hash, paired_aggregate_pushdown_anchor_fold_identity);
     hash_optional_u64(&mut hash, cardinality.rows);
     hash_optional_u64(&mut hash, cardinality.bytes);
     hash_optional_u64(&mut hash, work);
