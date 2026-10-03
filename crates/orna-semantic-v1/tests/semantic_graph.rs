@@ -7869,6 +7869,259 @@ fn paired_depth_omissions_restore_each_crossed_anchor() {
 }
 
 #[test]
+fn chained_extension_omissions_keep_sibling_depth_labels_scoped() {
+    let source = include_str!("fixtures/historical-sibling-extension-omission-depth-wave.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-sibling-extension-omission-depth-wave.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    let type_diagnostics = result
+        .diagnostics
+        .iter()
+        .filter(|diagnostic| diagnostic.code() == DIAG_TYPE)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        type_diagnostics.len(),
+        1,
+        "only the row crossing an omitted extension depth into its sibling should be rejected: {:?}",
+        type_diagnostics
+            .iter()
+            .map(|diagnostic| diagnostic.message())
+            .collect::<Vec<_>>()
+    );
+    let module = result
+        .modules
+        .values()
+        .find(|module| module.symbols.contains_key("sibling_extension_omission_depth_wave"))
+        .expect("chained extension omission fixture module");
+    let Type::Function { result, .. } =
+        &module.symbols["sibling_extension_omission_depth_wave"].ty
+    else {
+        panic!("extension omission wave must retain its computed function type");
+    };
+    let Type::Record(fields) = result.as_ref() else {
+        panic!("extension omission wave must retain its computed record: {result:?}");
+    };
+    let Type::List(parent) = fields.get("parent_fold").expect("parent fold") else {
+        panic!("extension omission wave must retain its parent list");
+    };
+    let Type::Record(parent) = parent.as_ref() else {
+        panic!("folded parent must remain a record: {parent:?}");
+    };
+    let Type::Record(siblings) = parent.get("nested").expect("nested siblings") else {
+        panic!("folded nested field must remain a record");
+    };
+    let pin_contexts = |sibling: &str| {
+        let Type::Record(fields) = &siblings[sibling] else {
+            panic!("{sibling} must retain its extension record");
+        };
+        let Type::Tuple(depths) = &fields["pins"] else {
+            panic!("{sibling} must retain both extension depths");
+        };
+        depths
+            .iter()
+            .map(|depth| {
+                let Type::Tuple(slots) = depth else {
+                    panic!("{sibling} depth must retain both extension slots");
+                };
+                slots
+                    .iter()
+                    .map(|slot| {
+                        let mut contexts = BTreeSet::new();
+                        collect_snapshot_contexts(slot, &mut contexts);
+                        contexts
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>()
+    };
+    fn extension_depth_contexts(ty: &Type) -> Vec<BTreeSet<String>> {
+        fn visit(ty: &Type, into: &mut Vec<BTreeSet<String>>) {
+            match ty {
+                Type::Record(fields) => fields.values().for_each(|value| visit(value, into)),
+                Type::Applied { base, arguments } if base == "sys.HistoricalCallable" => {
+                    let [context, callable] = arguments.as_slice() else {
+                        panic!("extension must retain its context and callable: {arguments:?}");
+                    };
+                    let mut labels = BTreeSet::new();
+                    collect_snapshot_contexts(context, &mut labels);
+                    into.push(labels);
+                    visit(callable, into);
+                }
+                Type::Function { result, .. } => visit(result, into),
+                _ => {}
+            }
+        }
+        let mut result = Vec::new();
+        visit(ty, &mut result);
+        result
+    }
+
+    assert!(
+        pin_contexts("left")[0][0].is_empty(),
+        "omitted left depth stays Bottom"
+    );
+    assert_eq!(
+        pin_contexts("right")[0][0],
+        BTreeSet::from(["selector:HEAD~200".into()]),
+        "crossed right depth returns to its first extension label"
+    );
+    let continuing_left = BTreeSet::from([
+        "selector:HEAD~110".into(),
+        "selector:HEAD~310".into(),
+        "selector:HEAD~510".into(),
+        "selector:HEAD~610".into(),
+    ]);
+    assert_eq!(pin_contexts("left")[1][0], continuing_left);
+    let Type::Record(left) = &siblings["left"] else {
+        panic!("left extension record");
+    };
+    let Type::Tuple(left_depths) = &left["pins"] else {
+        panic!("left extension depth tuple");
+    };
+    let Type::Tuple(left_second_depth) = &left_depths[1] else {
+        panic!("left stable extension depth");
+    };
+    assert_eq!(
+        extension_depth_contexts(&left_second_depth[0]),
+        [continuing_left.clone(), continuing_left],
+        "each captured extension layer must keep its own accumulated depth labels"
+    );
+    let Type::Record(right) = &siblings["right"] else {
+        panic!("right extension record");
+    };
+    let Type::Tuple(right_depths) = &right["pins"] else {
+        panic!("right extension depth tuple");
+    };
+    let Type::Tuple(right_first_depth) = &right_depths[0] else {
+        panic!("right crossed extension depth");
+    };
+    let restored_right = BTreeSet::from(["selector:HEAD~200".into()]);
+    assert_eq!(
+        extension_depth_contexts(&right_first_depth[0]),
+        [restored_right.clone(), restored_right],
+        "rolling back one sibling restores its full extension depth as a unit"
+    );
+    assert_eq!(
+        pin_contexts("steady"),
+        [
+            vec![
+                BTreeSet::from([
+                    "selector:HEAD~800".into(),
+                    "selector:HEAD~900".into(),
+                    "selector:HEAD~1000".into(),
+                    "selector:HEAD~1100".into(),
+                ]),
+                BTreeSet::from([
+                    "selector:HEAD~801".into(),
+                    "selector:HEAD~901".into(),
+                    "selector:HEAD~1001".into(),
+                    "selector:HEAD~1101".into(),
+                ]),
+            ],
+            vec![
+                BTreeSet::from([
+                    "selector:HEAD~810".into(),
+                    "selector:HEAD~910".into(),
+                    "selector:HEAD~1010".into(),
+                    "selector:HEAD~1110".into(),
+                ]),
+                BTreeSet::from([
+                    "selector:HEAD~811".into(),
+                    "selector:HEAD~911".into(),
+                    "selector:HEAD~1011".into(),
+                    "selector:HEAD~1111".into(),
+                ]),
+            ],
+        ],
+        "the uninvolved sibling retains every depth label across the rejected row"
+    );
+}
+
+
+#[test]
+fn nested_extension_list_rollbacks_preserve_unaffected_depth_identities() {
+    let source = include_str!("fixtures/historical-extension-nested-list-rollback-depth-26.orna");
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-extension-nested-list-rollback-depth-26.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert_eq!(
+        result
+            .diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.code() == DIAG_TYPE)
+            .count(),
+        2,
+        "the nested extension omissions are diagnosed at both fold boundaries: {:?}",
+        result.diagnostics.iter().map(|diagnostic| diagnostic.message()).collect::<Vec<_>>()
+    );
+    let module = result
+        .modules
+        .values()
+        .find(|module| module.symbols.contains_key("nested_extension_list_rollback_depths"))
+        .expect("nested extension list fixture module");
+    let Type::Function { result, .. } =
+        &module.symbols["nested_extension_list_rollback_depths"].ty
+    else {
+        panic!("nested extension rollback must compute a function result");
+    };
+    let Type::Record(result_fields) = result.as_ref() else {
+        panic!("nested extension rollback must return its computed record: {result:?}");
+    };
+    let Type::List(batch) = result_fields.get("batches").expect("batch list") else {
+        panic!("nested rollback output must retain outer batches");
+    };
+    let Type::List(row) = batch.as_ref() else {
+        panic!("each batch must retain its inner row list: {batch:?}");
+    };
+    let Type::Record(row) = row.as_ref() else {
+        panic!("nested rows must retain their computed record: {row:?}");
+    };
+    let Type::Tuple(depths) = row.get("pins").expect("extension depths") else {
+        panic!("extension depths must remain paired: {row:?}");
+    };
+    let contexts = |pin: &Type| {
+        let mut contexts = BTreeSet::new();
+        collect_snapshot_contexts(pin, &mut contexts);
+        contexts
+    };
+    let depth_contexts = |depth: &Type| {
+        let Type::Tuple(slots) = depth else { panic!("depth pair: {depth:?}") };
+        slots.iter().map(contexts).collect::<Vec<_>>()
+    };
+    assert_eq!(
+        depth_contexts(&depths[0]),
+        [BTreeSet::new(), BTreeSet::new()],
+        "the first batch's omitted extension pair remains omitted across nested folds"
+    );
+    assert_eq!(
+        depth_contexts(&depths[1]),
+        [
+            BTreeSet::from([
+                "selector:HEAD~90".into(),
+                "selector:HEAD~92".into(),
+                "selector:HEAD~94".into(),
+            ]),
+            BTreeSet::from([
+                "selector:HEAD~91".into(),
+                "selector:HEAD~93".into(),
+                "selector:HEAD~95".into(),
+            ]),
+        ],
+        "the independently pinned depth retains its first-batch extension identities"
+    );
+}
+
+#[test]
 fn multi_parent_checkpoint_folds_preserve_labels_across_paired_omissions() {
     let source = include_str!(
         "fixtures/historical-paired-omission-multi-parent-reconciliation.orna"
@@ -7954,6 +8207,151 @@ fn multi_parent_checkpoint_folds_preserve_labels_across_paired_omissions() {
         );
     }
 }
+
+#[test]
+fn nested_paired_omissions_keep_each_reconciled_fold_depth_identity() {
+    let source = include_str!(
+        "fixtures/historical-nested-paired-reconciliation-omission-wave.orna"
+    );
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-nested-paired-reconciliation-omission-wave.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    let type_diagnostics = result
+        .diagnostics
+        .iter()
+        .filter(|diagnostic| diagnostic.code() == DIAG_TYPE)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        type_diagnostics.len(),
+        1,
+        "only the parent that folds an omitted nested pair across sibling identities should fail: {:?}",
+        type_diagnostics
+            .iter()
+            .map(|diagnostic| diagnostic.message())
+            .collect::<Vec<_>>()
+    );
+    let module = result
+        .modules
+        .values()
+        .find(|module| module.symbols.contains_key("nested_paired_reconciliation_omission_wave"))
+        .expect("nested paired omission fixture module");
+    let Type::Function { result, .. } =
+        &module.symbols["nested_paired_reconciliation_omission_wave"].ty
+    else {
+        panic!("nested paired omission must retain its computed function type");
+    };
+    let Type::Record(fields) = result.as_ref() else {
+        panic!("nested paired omission must return its computed record: {result:?}");
+    };
+    let Type::List(parent) = fields.get("parent_fold").expect("parent fold") else {
+        panic!("nested paired omission must retain its parent list");
+    };
+    let Type::Record(parent) = parent.as_ref() else {
+        panic!("folded parent must remain a record: {parent:?}");
+    };
+    let Type::Record(siblings) = parent.get("nested").expect("nested siblings") else {
+        panic!("folded nested value must retain sibling records");
+    };
+    let pin_contexts = |sibling: &str| {
+        let Type::Record(fields) = &siblings[sibling] else {
+            panic!("{sibling} must retain its nested record");
+        };
+        let Type::Tuple(depths) = &fields["pins"] else {
+            panic!("{sibling} must retain both outer depths");
+        };
+        depths
+            .iter()
+            .map(|depth| {
+                let Type::Tuple(pairs) = depth else {
+                    panic!("{sibling} outer depth must retain both pairs");
+                };
+                pairs
+                    .iter()
+                    .map(|pair| {
+                        let Type::Tuple(slots) = pair else {
+                            panic!("{sibling} nested pair must retain both positions");
+                        };
+                        slots
+                            .iter()
+                            .map(|slot| {
+                                let mut contexts = BTreeSet::new();
+                                collect_snapshot_contexts(slot, &mut contexts);
+                                contexts
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>()
+    };
+
+    let left = pin_contexts("left");
+    assert!(
+        left[0][0][0].is_empty(),
+        "the crossed left pin stays at its omitted first-parent value despite later candidates"
+    );
+    assert_eq!(
+        left[0][0][1],
+        BTreeSet::from([
+            "selector:HEAD~301".into(),
+            "selector:HEAD~501".into(),
+            "selector:HEAD~601".into(),
+        ]),
+        "the adjacent pin in the nested pair keeps labels from the accepted parents"
+    );
+    assert_eq!(
+        left[0][1][0],
+        BTreeSet::from([
+            "selector:HEAD~110".into(),
+            "selector:HEAD~310".into(),
+            "selector:HEAD~510".into(),
+            "selector:HEAD~610".into(),
+        ]),
+        "the adjacent depth keeps labels from every non-rejected parent"
+    );
+    let right = pin_contexts("right");
+    assert_eq!(
+        right[0][0][0],
+        BTreeSet::from(["selector:HEAD~200".into()]),
+        "the right pin crossed by the omitted left pair restores its first label"
+    );
+    assert_eq!(
+        right[0][0][1],
+        BTreeSet::from([
+            "selector:HEAD~201".into(),
+            "selector:HEAD~401".into(),
+            "selector:HEAD~502".into(),
+            "selector:HEAD~701".into(),
+        ]),
+        "the neighboring right pin continues folding after the crossed slot rolls back"
+    );
+    assert_eq!(
+        right[1][1][0],
+        BTreeSet::from([
+            "selector:HEAD~430".into(),
+            "selector:HEAD~570".into(),
+            "selector:HEAD~730".into(),
+        ]),
+        "the right-side omitted depth keeps labels from each accepted parent"
+    );
+    assert_eq!(
+        pin_contexts("steady")[1][1][1],
+        BTreeSet::from([
+            "selector:HEAD~831".into(),
+            "selector:HEAD~931".into(),
+            "selector:HEAD~1031".into(),
+            "selector:HEAD~1131".into(),
+        ]),
+        "a third sibling keeps its full depth history across the rejected parent"
+    );
+}
+
 
 #[test]
 fn nested_omission_checkpoint_storms_preserve_depth_labels_transactionally() {
@@ -11440,6 +11838,99 @@ fn nested_snapshot_checkpoint_reset_chains_restore_selected_values() {
                 BTreeSet::from([expected.to_owned()]),
                 "{stage}.{field} must recover its source checkpoint after the rejected reset"
             );
+        }
+    }
+}
+
+#[test]
+fn nested_snapshot_boundary_resets_fill_and_restore_omitted_checkpoint_slots() {
+    let source = include_str!("fixtures/historical-nested-snapshot-boundary-reset.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-nested-snapshot-boundary-reset.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert_eq!(
+        result
+            .diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.code() == DIAG_TYPE)
+            .count(),
+        1,
+        "a reset that merges already-distinct root and middle identities must be rejected: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+    let module = result
+        .modules
+        .values()
+        .find(|module| {
+            module
+                .symbols
+                .contains_key("nested_boundary_checkpoint_reset_values")
+        })
+        .expect("nested boundary checkpoint reset fixture module");
+    let Type::Function { result, .. } =
+        &module.symbols["nested_boundary_checkpoint_reset_values"].ty
+    else {
+        panic!("nested boundary reset must return computed values");
+    };
+    let Type::Record(stages) = result.as_ref() else {
+        panic!("nested boundary reset must expose every selected checkpoint stage");
+    };
+    for (stage, root, middle, leaf) in [
+        (
+            "saved_omitted",
+            "selector:HEAD~520",
+            "selector:HEAD~490",
+            None,
+        ),
+        (
+            "reset_omitted",
+            "selector:HEAD~520",
+            "selector:HEAD~470",
+            None,
+        ),
+        (
+            "reset_complete",
+            "selector:HEAD~510",
+            "selector:HEAD~450",
+            Some("selector:HEAD~440"),
+        ),
+    ] {
+        let Type::Record(values) = stages.get(stage).expect("reset checkpoint stage") else {
+            panic!("{stage} must remain a record of historical values");
+        };
+        for (field, expected) in [("root", root), ("middle", middle)] {
+            let value = values.get(field).expect("nested snapshot result field");
+            assert_canonical_snapshot_context_maps(value);
+            let mut contexts = BTreeSet::new();
+            collect_snapshot_contexts(value, &mut contexts);
+            assert_eq!(
+                contexts,
+                BTreeSet::from([expected.to_owned()]),
+                "{stage}.{field} must retain its selected nested checkpoint identity"
+            );
+        }
+        if let Some(expected) = leaf {
+            let value = values.get("leaf").expect("leaf checkpoint result field");
+            assert_canonical_snapshot_context_maps(value);
+            let mut contexts = BTreeSet::new();
+            collect_snapshot_contexts(value, &mut contexts);
+            assert_eq!(
+                contexts,
+                BTreeSet::from([expected.to_owned()]),
+                "{stage}.leaf must restore the selected concrete boundary"
+            );
+        } else {
+            assert_eq!(values.get("leaf"), Some(&Type::Bottom));
         }
     }
 }
