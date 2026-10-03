@@ -2366,6 +2366,7 @@ fn explain_query_core_with_subqueries(
             &right_fold_identity,
             join_pair_identity,
             paired_predicate_pushdown_identity.as_deref(),
+            decorrelated_predicate_identity.as_deref(),
             cardinality,
             work,
             work_overflow,
@@ -3677,6 +3678,7 @@ fn query_join_cost_fold(
     right_identity: &str,
     pair: Option<&QueryJoinPairIdentityDescription>,
     paired_predicate_pushdown_identity: Option<&str>,
+    decorrelated_predicate_pushdown_identity: Option<&str>,
     cardinality: Cardinality,
     work: Option<u64>,
     work_overflow: bool,
@@ -3698,6 +3700,7 @@ fn query_join_cost_fold(
         hash.update([0]);
     }
     hash_optional_text(&mut hash, paired_predicate_pushdown_identity);
+    hash_optional_text(&mut hash, decorrelated_predicate_pushdown_identity);
     hash_optional_u64(&mut hash, cardinality.rows);
     hash_optional_u64(&mut hash, cardinality.bytes);
     hash_optional_u64(&mut hash, work);
