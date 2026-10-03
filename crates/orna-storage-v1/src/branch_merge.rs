@@ -355,6 +355,28 @@ pub struct BranchMergeColumnDepthLadderEvent {
     pub depth_labels: Vec<usize>,
 }
 
+/// One labeled position in a stable table-column restore ladder.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BranchMergeColumnDepthFragmentSnapshot {
+    pub label: usize,
+    pub cells: Vec<(CanonicalValue, CanonicalValue)>,
+}
+
+/// A stable table-column ladder with each label bound to its fragment cells.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BranchMergeColumnDepthLadderSnapshot {
+    pub table: ObjectId,
+    pub column: ObjectId,
+    pub fragments: Vec<BranchMergeColumnDepthFragmentSnapshot>,
+}
+
+/// A released paired column restore wave with complete per-column ladders.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BranchMergeTabularColumnRestoreWaveSnapshot {
+    pub order: u64,
+    pub columns: Vec<BranchMergeColumnDepthLadderSnapshot>,
+}
+
 /// A canonical column cell released with its source parent identity intact.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BranchMergeParentColumnDepthEvent {
@@ -1104,6 +1126,64 @@ impl BranchMergeTombstoneHistory {
     /// is contiguous and released.
     pub fn column_ladder_events(&self) -> &[BranchMergeColumnDepthLadderEvent] {
         &self.column_ladder_events
+    }
+
+    /// Returns committed column restore waves with every depth label bound to
+    /// that fragment's cells, including empty fragments.
+    ///
+    /// Columns retain independent `(table, column)` ladders. Only waves whose
+    /// paired lineage prefix has been released are materialized; the reference
+    /// is silent about this storage view, so v1 keeps the labels independent
+    /// and presents the complete wave as one snapshot.
+    pub fn column_restore_waves(&self) -> Vec<BranchMergeTabularColumnRestoreWaveSnapshot> {
+        let mut cells_by_depth = BTreeMap::new();
+        for ladder in &self.column_ladder_events {
+            for label in &ladder.depth_labels {
+                cells_by_depth.insert(
+                    (ladder.order, ladder.table, ladder.column, *label),
+                    Vec::new(),
+                );
+            }
+        }
+        for event in &self.column_events {
+            let cells = cells_by_depth
+                .get_mut(&(event.order, event.table, event.column, event.fragment))
+                .expect("released column cells have a retained ladder label");
+            cells.push((event.key.clone(), event.value.clone()));
+        }
+
+        let mut waves = BTreeMap::new();
+        for ladder in &self.column_ladder_events {
+            let fragments = ladder
+                .depth_labels
+                .iter()
+                .map(|label| {
+                    let cells = cells_by_depth
+                        .remove(&(ladder.order, ladder.table, ladder.column, *label))
+                        .expect("released ladder labels have a cell bucket");
+                    BranchMergeColumnDepthFragmentSnapshot {
+                        label: *label,
+                        cells,
+                    }
+                })
+                .collect();
+            waves
+                .entry(ladder.order)
+                .or_insert_with(Vec::new)
+                .push(BranchMergeColumnDepthLadderSnapshot {
+                    table: ladder.table,
+                    column: ladder.column,
+                    fragments,
+                });
+        }
+
+        waves
+            .into_iter()
+            .map(|(order, columns)| BranchMergeTabularColumnRestoreWaveSnapshot {
+                order,
+                columns,
+            })
+            .collect()
     }
 
     /// Submits a complete paired restore wave from at least two distinct
