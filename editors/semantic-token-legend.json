@@ -1,0 +1,30 @@
+{
+  "language": "orna",
+  "tokenTypes": [
+    "keyword",
+    "type",
+    "function",
+    "variable",
+    "namespace",
+    "property",
+    "string",
+    "number",
+    "comment",
+    "operator"
+  ],
+  "tokenModifiers": [],
+  "highlightKinds": [
+    { "kind": "Keyword", "semanticTokenType": "keyword", "textmateScope": "keyword.control.orna" },
+    { "kind": "TypeName", "semanticTokenType": "type", "textmateScope": "storage.type.orna" },
+    { "kind": "FunctionName", "semanticTokenType": "function", "textmateScope": "entity.name.function.orna" },
+    { "kind": "VariableName", "semanticTokenType": "variable", "textmateScope": "variable.other.orna" },
+    { "kind": "NamespaceName", "semanticTokenType": "namespace", "textmateScope": "entity.name.namespace.orna" },
+    { "kind": "PropertyName", "semanticTokenType": "property", "textmateScope": "variable.other.property.orna" },
+    { "kind": "StringLiteral", "semanticTokenType": "string", "textmateScope": "string.quoted.single.orna" },
+    { "kind": "NumberLiteral", "semanticTokenType": "number", "textmateScope": "constant.numeric.orna" },
+    { "kind": "Comment", "semanticTokenType": "comment", "textmateScope": "comment.orna" },
+    { "kind": "Operator", "semanticTokenType": "operator", "textmateScope": "keyword.operator.orna" },
+    { "kind": "Punctuation", "semanticTokenType": null, "textmateScope": "punctuation.orna" },
+    { "kind": "QuotedIdentifier", "semanticTokenType": null, "textmateScope": "entity.name.quoted.orna" }
+  ]
+}
