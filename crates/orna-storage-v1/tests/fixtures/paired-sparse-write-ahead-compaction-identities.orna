@@ -1,0 +1,5 @@
+{ id: "redo-frame/50", name: "compact/left-job-a0", city: "compact/right-job-a0", }
+
+{ id: "redo-frame/52", name: "compact/left-job-b0", city: "compact/right-job-b0", }
+
+{ id: "redo-frame/55", name: "compact/left-job-b2", city: "compact/right-job-b2", }
