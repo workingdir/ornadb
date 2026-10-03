@@ -7,7 +7,8 @@ use orna_foundation_v1::OvbRaw;
 use orna_storage_v1::{
     BranchMergeBudget, BranchMergeColumnDepthEvent, BranchMergeColumnDepthFragments,
     BranchMergeColumnDepthFragmentSnapshot, BranchMergeColumnDepthLadderEvent,
-    BranchMergeColumnDepthLadderSnapshot,
+    BranchMergeColumnDepthLadderSnapshot, BranchMergeColumnDepthLadderWaveSnapshot,
+    BranchMergeColumnRestoreLadderFoldSnapshot,
     BranchMergeConflict, BranchMergeDepthFragmentRecovery,
     BranchMergeDepthWaveRecovery, BranchMergeError, BranchMergePlan,
     BranchMergeMultiParentColumnDepthLadderWaveEvent,
@@ -26047,6 +26048,163 @@ fn column_restore_ladders_keep_uneven_depth_labels_and_fixture_values() {
         "an exact committed replay remains stale after the retry identity check",
     );
     assert_eq!(history, committed);
+}
+
+#[test]
+fn column_ladder_folds_preserve_local_depth_labels_across_uneven_waves() {
+    let fixture_rows = COLUMN_RESTORE_LADDER
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    let row = |path: &str| {
+        fixture_rows
+            .iter()
+            .find(|row| row.key == string(path))
+            .unwrap_or_else(|| panic!("the in-crate column fixture supplies {path}"))
+            .clone()
+    };
+    let root = row("root");
+    let child = row("root/child");
+    let deep = row("root/child/deep");
+    let cells = |row: &KeyedRow, column| {
+        vec![(row.key.clone(), row.fields[&id(column)].clone())]
+    };
+    let depth = |fragments: Vec<Vec<(CanonicalValue, CanonicalValue)>>| {
+        BranchMergeColumnDepthFragments {
+            fragment_count: fragments.len(),
+            fragments: fragments.into_iter().enumerate().collect(),
+        }
+    };
+    let wave = |order| {
+        let columns = match order {
+            1 => BTreeMap::from([
+                (
+                    (id(1), id(2)),
+                    depth(vec![cells(&root, 2), cells(&child, 2)]),
+                ),
+                (
+                    (id(1), id(3)),
+                    depth(vec![
+                        cells(&root, 3),
+                        Vec::new(),
+                        cells(&child, 3),
+                        cells(&deep, 3),
+                    ]),
+                ),
+            ]),
+            2 => BTreeMap::from([
+                (
+                    (id(1), id(2)),
+                    depth(vec![cells(&root, 2), Vec::new(), cells(&deep, 2)]),
+                ),
+                (
+                    (id(1), id(3)),
+                    depth(vec![cells(&root, 3), cells(&deep, 3)]),
+                ),
+            ]),
+            other => panic!("unexpected column restore order: {other}"),
+        };
+        BranchMergeTabularColumnDepthWave { order, columns }
+    };
+    let empty_plan = |order| SequencedBranchMergePlan {
+        order,
+        plan: BranchMergePlan {
+            schema: Schema { version: EvolutionVersion::V1_0, tables: Vec::new() },
+            tables: BTreeMap::new(),
+            checkpoints: BTreeMap::new(),
+            report: Default::default(),
+        },
+        ordered_row_tombstones: Vec::new(),
+    };
+
+    let mut history = BranchMergeTombstoneHistory::new(0);
+    assert!(history.submit_tabular_column_depth_wave(&wave(2)).unwrap().is_empty());
+    assert!(history.submit_tabular_column_depth_wave(&wave(1)).unwrap().is_empty());
+    assert!(history.column_restore_ladder_folds().is_empty());
+    assert!(history.submit(&empty_plan(0)).unwrap().is_empty());
+
+    assert_eq!(
+        history.column_restore_ladder_folds(),
+        vec![
+            BranchMergeColumnRestoreLadderFoldSnapshot {
+                table: id(1),
+                column: id(2),
+                waves: vec![
+                    BranchMergeColumnDepthLadderWaveSnapshot {
+                        order: 1,
+                        fragments: vec![
+                            BranchMergeColumnDepthFragmentSnapshot {
+                                label: 0,
+                                cells: vec![(root.key.clone(), string("Ladder root"))],
+                            },
+                            BranchMergeColumnDepthFragmentSnapshot {
+                                label: 1,
+                                cells: vec![(child.key.clone(), string("Ladder child"))],
+                            },
+                        ],
+                    },
+                    BranchMergeColumnDepthLadderWaveSnapshot {
+                        order: 2,
+                        fragments: vec![
+                            BranchMergeColumnDepthFragmentSnapshot {
+                                label: 0,
+                                cells: vec![(root.key.clone(), string("Ladder root"))],
+                            },
+                            BranchMergeColumnDepthFragmentSnapshot {
+                                label: 1,
+                                cells: Vec::new(),
+                            },
+                            BranchMergeColumnDepthFragmentSnapshot {
+                                label: 2,
+                                cells: vec![(deep.key.clone(), string("Ladder deep"))],
+                            },
+                        ],
+                    },
+                ],
+            },
+            BranchMergeColumnRestoreLadderFoldSnapshot {
+                table: id(1),
+                column: id(3),
+                waves: vec![
+                    BranchMergeColumnDepthLadderWaveSnapshot {
+                        order: 1,
+                        fragments: vec![
+                            BranchMergeColumnDepthFragmentSnapshot {
+                                label: 0,
+                                cells: vec![(root.key.clone(), string("Oslo"))],
+                            },
+                            BranchMergeColumnDepthFragmentSnapshot {
+                                label: 1,
+                                cells: Vec::new(),
+                            },
+                            BranchMergeColumnDepthFragmentSnapshot {
+                                label: 2,
+                                cells: vec![(child.key.clone(), string("Bergen"))],
+                            },
+                            BranchMergeColumnDepthFragmentSnapshot {
+                                label: 3,
+                                cells: vec![(deep.key.clone(), string("Trondheim"))],
+                            },
+                        ],
+                    },
+                    BranchMergeColumnDepthLadderWaveSnapshot {
+                        order: 2,
+                        fragments: vec![
+                            BranchMergeColumnDepthFragmentSnapshot {
+                                label: 0,
+                                cells: vec![(root.key.clone(), string("Oslo"))],
+                            },
+                            BranchMergeColumnDepthFragmentSnapshot {
+                                label: 1,
+                                cells: vec![(deep.key.clone(), string("Trondheim"))],
+                            },
+                        ],
+                    },
+                ],
+            },
+        ],
+        "folds keep each column's independent labels and values for each storm order",
+    );
 }
 
 #[test]
