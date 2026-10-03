@@ -1,0 +1,55 @@
+pub fn factory_at(pin: sys.SnapshotRef) =
+    sys.database.as_of(pin).energy.factory;
+
+pub fn extended_factory_at(pin: sys.SnapshotRef) = factory_at(pin)();
+
+// If an outer fold cannot reconcile independently folded extension maps, keep
+// its first batch's depth labels rather than promoting a later batch's pins.
+pub fn nested_extension_list_rollback_depths(failure: Error) = {
+    batches: [
+        [
+            {
+                pins: ((fail(failure), fail(failure)), (extended_factory_at(sys.snapshot("HEAD~90")), extended_factory_at(sys.snapshot("HEAD~91")))),
+            },
+            {
+                pins: ((fail(failure), fail(failure)), (extended_factory_at(sys.snapshot("HEAD~92")), extended_factory_at(sys.snapshot("HEAD~93")))),
+            },
+            {
+                pins: ((fail(failure), fail(failure)), (extended_factory_at(sys.snapshot("HEAD~94")), extended_factory_at(sys.snapshot("HEAD~95")))),
+            },
+        ],
+        [
+            {
+                pins: ((extended_factory_at(sys.snapshot("HEAD~100")), extended_factory_at(sys.snapshot("HEAD~101"))), (extended_factory_at(sys.snapshot("HEAD~110")), extended_factory_at(sys.snapshot("HEAD~111")))),
+            },
+            {
+                pins: ((extended_factory_at(sys.snapshot("HEAD~120")), extended_factory_at(sys.snapshot("HEAD~121"))), (extended_factory_at(sys.snapshot("HEAD~130")), extended_factory_at(sys.snapshot("HEAD~131")))),
+            },
+            {
+                pins: ((extended_factory_at(sys.snapshot("HEAD~140")), extended_factory_at(sys.snapshot("HEAD~141"))), (extended_factory_at(sys.snapshot("HEAD~150")), extended_factory_at(sys.snapshot("HEAD~151")))),
+            },
+        ],
+        [
+            {
+                pins: ((extended_factory_at(sys.snapshot("HEAD~200")), extended_factory_at(sys.snapshot("HEAD~201"))), (extended_factory_at(sys.snapshot("HEAD~210")), extended_factory_at(sys.snapshot("HEAD~211")))),
+            },
+            {
+                pins: ((extended_factory_at(sys.snapshot("HEAD~220")), extended_factory_at(sys.snapshot("HEAD~221"))), (extended_factory_at(sys.snapshot("HEAD~230")), extended_factory_at(sys.snapshot("HEAD~231")))),
+            },
+            {
+                pins: ((extended_factory_at(sys.snapshot("HEAD~240")), extended_factory_at(sys.snapshot("HEAD~241"))), (extended_factory_at(sys.snapshot("HEAD~250")), extended_factory_at(sys.snapshot("HEAD~251")))),
+            },
+        ],
+        [
+            {
+                pins: ((extended_factory_at(sys.snapshot("HEAD~400")), extended_factory_at(sys.snapshot("HEAD~401"))), (extended_factory_at(sys.snapshot("HEAD~410")), extended_factory_at(sys.snapshot("HEAD~411")))),
+            },
+            {
+                pins: ((extended_factory_at(sys.snapshot("HEAD~420")), extended_factory_at(sys.snapshot("HEAD~421"))), (extended_factory_at(sys.snapshot("HEAD~430")), extended_factory_at(sys.snapshot("HEAD~431")))),
+            },
+            {
+                pins: ((extended_factory_at(sys.snapshot("HEAD~440")), extended_factory_at(sys.snapshot("HEAD~441"))), (extended_factory_at(sys.snapshot("HEAD~450")), extended_factory_at(sys.snapshot("HEAD~451")))),
+            },
+        ],
+    ],
+};
