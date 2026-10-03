@@ -1,0 +1,3 @@
+use std.math;
+
+pub fn value(): Int = std.math.shift(9);
