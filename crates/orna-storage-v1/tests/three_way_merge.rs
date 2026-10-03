@@ -5,11 +5,14 @@ use orna_evolution_v1::{
 };
 use orna_foundation_v1::OvbRaw;
 use orna_storage_v1::{
-    BranchMergeBudget, BranchMergeConflict, BranchMergeDepthFragmentRecovery,
+    BranchMergeBudget, BranchMergeColumnDepthEvent, BranchMergeColumnDepthFragments,
+    BranchMergeConflict, BranchMergeDepthFragmentRecovery,
     BranchMergeDepthWaveRecovery, BranchMergeError, BranchMergePlan,
+    BranchMergeMultiParentTabularColumnDepthWave,
     BranchMergeTombstoneEvent, BranchRowSource,
     BranchMergePlanSequenceError, BranchMergePlanSequencer, BranchMergeTombstoneHistory,
-    BranchMergeTabularDepthWave, BranchMergeTableDepthFragments,
+    BranchMergeTabularColumnDepthWave, BranchMergeTabularDepthWave,
+    BranchMergeTableDepthFragments,
     BranchMergeTombstoneHistoryError, KeyRange, MergeSide, MergedSegment, RowSegmentManifest,
     SequencedBranchMergePlan, TableManifest, ThreeWaySnapshot, merge_three_way_snapshots,
 };
@@ -42,6 +45,9 @@ const TOMBSTONE_PAIRED_CHAIN: &str = include_str!("fixtures/merge-tombstone-pair
 const TOMBSTONE_RECOVERY_STORM: &str = include_str!("fixtures/merge-tombstone-recovery-storm.orna");
 const TOMBSTONE_DEPTH_COMMIT_ORDER: &str =
     include_str!("fixtures/merge-tombstone-depth-commit-order.orna");
+const COLUMN_RESTORE_LADDER: &str = include_str!("fixtures/merge-column-restore-ladder.orna");
+const MULTI_PARENT_COLUMN_DEPTH: &str =
+    include_str!("fixtures/merge-multiparent-column-depth.orna");
 const TOMBSTONE_STORM_KEYS: &[&str] = &[
     "a",
     "root",
@@ -25792,6 +25798,415 @@ fn tabular_restore_wave_preserves_peer_depth_labels_and_tombstone_identity() {
         history.submit_tabular_depth_wave(&wave(1)),
         Err(BranchMergeTombstoneHistoryError::DuplicateOrStale { order: 1 }),
         "an exact tabular replay retains the ordinary stale-position result",
+    );
+    assert_eq!(history, committed);
+}
+
+#[test]
+fn column_restore_ladders_keep_uneven_depth_labels_and_fixture_values() {
+    let fixture_rows = COLUMN_RESTORE_LADDER
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    let row = |path: &str| {
+        fixture_rows
+            .iter()
+            .find(|row| row.key == string(path))
+            .unwrap_or_else(|| panic!("the in-crate column fixture supplies {path}"))
+            .clone()
+    };
+    let root = row("root");
+    let child = row("root/child");
+    let deep = row("root/child/deep");
+    assert_eq!(root.fields[&id(2)], string("Ladder root"));
+    assert_eq!(child.fields[&id(3)], string("Bergen"));
+    assert_eq!(deep.fields[&id(2)], string("Ladder deep"));
+
+    let wave = |order| BranchMergeTabularColumnDepthWave {
+        order,
+        columns: BTreeMap::from([
+            (
+                (id(1), id(2)),
+                BranchMergeColumnDepthFragments {
+                    fragment_count: 2,
+                    fragments: BTreeMap::from([
+                        (0, vec![(root.key.clone(), root.fields[&id(2)].clone())]),
+                        (1, vec![(child.key.clone(), child.fields[&id(2)].clone())]),
+                    ]),
+                },
+            ),
+            (
+                (id(1), id(3)),
+                BranchMergeColumnDepthFragments {
+                    fragment_count: 4,
+                    fragments: BTreeMap::from([
+                        (0, vec![(root.key.clone(), root.fields[&id(3)].clone())]),
+                        (1, Vec::new()),
+                        (2, vec![(child.key.clone(), child.fields[&id(3)].clone())]),
+                        (3, vec![(deep.key.clone(), deep.fields[&id(3)].clone())]),
+                    ]),
+                },
+            ),
+        ]),
+    };
+    let empty_plan = |order| SequencedBranchMergePlan {
+        order,
+        plan: BranchMergePlan {
+            schema: Schema { version: EvolutionVersion::V1_0, tables: Vec::new() },
+            tables: BTreeMap::new(),
+            checkpoints: BTreeMap::new(),
+            report: Default::default(),
+        },
+        ordered_row_tombstones: Vec::new(),
+    };
+
+    let mut history = BranchMergeTombstoneHistory::new(0);
+    assert!(history.submit_tabular_column_depth_wave(&wave(1)).unwrap().is_empty());
+    assert!(history.column_events().is_empty());
+    assert_eq!(history.next_order(), Some(0));
+
+    assert!(history.submit(&empty_plan(0)).unwrap().is_empty());
+    assert_eq!(
+        history.column_events(),
+        &[
+            BranchMergeColumnDepthEvent {
+                order: 1,
+                table: id(1),
+                column: id(2),
+                fragment: 0,
+                key: root.key.clone(),
+                value: string("Ladder root"),
+            },
+            BranchMergeColumnDepthEvent {
+                order: 1,
+                table: id(1),
+                column: id(2),
+                fragment: 1,
+                key: child.key.clone(),
+                value: string("Ladder child"),
+            },
+            BranchMergeColumnDepthEvent {
+                order: 1,
+                table: id(1),
+                column: id(3),
+                fragment: 0,
+                key: root.key.clone(),
+                value: string("Oslo"),
+            },
+            BranchMergeColumnDepthEvent {
+                order: 1,
+                table: id(1),
+                column: id(3),
+                fragment: 2,
+                key: child.key.clone(),
+                value: string("Bergen"),
+            },
+            BranchMergeColumnDepthEvent {
+                order: 1,
+                table: id(1),
+                column: id(3),
+                fragment: 3,
+                key: deep.key.clone(),
+                value: string("Trondheim"),
+            },
+        ],
+        "the shorter name branch and longer city branch retain independent labels and fixture-backed values",
+    );
+    assert_eq!(history.next_order(), Some(2));
+    let committed = history.clone();
+
+    let mut shorter_city = wave(1);
+    let city = shorter_city.columns.get_mut(&(id(1), id(3))).unwrap();
+    city.fragment_count = 3;
+    city.fragments = BTreeMap::from([
+        (0, vec![(root.key.clone(), root.fields[&id(3)].clone())]),
+        (1, vec![(child.key.clone(), child.fields[&id(3)].clone())]),
+        (2, vec![(deep.key.clone(), deep.fields[&id(3)].clone())]),
+    ]);
+    assert_eq!(
+        history.submit_tabular_column_depth_wave(&shorter_city),
+        Err(BranchMergeTombstoneHistoryError::TabularColumnFragmentCountMismatch {
+            order: 1,
+            table: id(1),
+            column: id(3),
+            expected: 4,
+            actual: 3,
+        }),
+        "a sibling column cannot donate or remove the restored city's depth positions",
+    );
+    assert_eq!(history, committed);
+
+    let mut missing_empty_depth = wave(1);
+    missing_empty_depth
+        .columns
+        .get_mut(&(id(1), id(3)))
+        .unwrap()
+        .fragments
+        .remove(&1);
+    assert_eq!(
+        history.submit_tabular_column_depth_wave(&missing_empty_depth),
+        Err(BranchMergeTombstoneHistoryError::IncompleteTabularColumnDepthFragments {
+            order: 1,
+            table: id(1),
+            column: id(3),
+        }),
+        "an empty middle fragment still owns depth label one",
+    );
+    assert_eq!(history, committed);
+
+    let mut changed_cell = wave(1);
+    changed_cell
+        .columns
+        .get_mut(&(id(1), id(2)))
+        .unwrap()
+        .fragments
+        .get_mut(&1)
+        .unwrap()[0]
+        .1 = string("Different retry body");
+    assert_eq!(
+        history.submit_tabular_column_depth_wave(&changed_cell),
+        Err(BranchMergeTombstoneHistoryError::ConflictingSubmission { order: 1 }),
+        "a restored column fragment remains bound to its canonical fixture cells",
+    );
+    assert_eq!(history, committed);
+    assert_eq!(
+        history.submit_tabular_column_depth_wave(&wave(1)),
+        Err(BranchMergeTombstoneHistoryError::DuplicateOrStale { order: 1 }),
+        "an exact committed replay remains stale after the retry identity check",
+    );
+    assert_eq!(history, committed);
+}
+
+#[test]
+fn multi_parent_column_restore_ladders_keep_fragment_depth_identities() {
+    let fixture_rows = MULTI_PARENT_COLUMN_DEPTH
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    let row = |path: &str| {
+        fixture_rows
+            .iter()
+            .find(|row| row.key == string(path))
+            .unwrap_or_else(|| panic!("the in-crate multi-parent fixture supplies {path}"))
+            .clone()
+    };
+    let shared = row("shared");
+    let left = row("branch/left");
+    let right = row("branch/right");
+    let deep = row("branch/right/deep");
+    assert_eq!(shared.fields[&id(2)], string("Root value"));
+    assert_eq!(left.fields[&id(3)], string("Bergen"));
+    assert_eq!(right.fields[&id(2)], string("Right leaf"));
+    assert_eq!(deep.fields[&id(3)], string("Canberra"));
+
+    let cells = |row: &KeyedRow, column: u8| {
+        (row.key.clone(), row.fields[&id(column)].clone())
+    };
+    let depth = |fragment_count: usize,
+                 fragments: BTreeMap<usize, Vec<(CanonicalValue, CanonicalValue)>>| {
+        BranchMergeColumnDepthFragments { fragment_count, fragments }
+    };
+    let wave = |order| BranchMergeMultiParentTabularColumnDepthWave {
+        order,
+        parents: BTreeMap::from([
+            (
+                id(10),
+                BTreeMap::from([
+                    (
+                        (id(1), id(2)),
+                        depth(1, BTreeMap::from([(0, vec![cells(&shared, 2)])])),
+                    ),
+                    (
+                        (id(1), id(3)),
+                        depth(1, BTreeMap::from([(0, vec![cells(&shared, 3)])])),
+                    ),
+                ]),
+            ),
+            (
+                id(20),
+                BTreeMap::from([
+                    (
+                        (id(1), id(2)),
+                        depth(
+                            2,
+                            BTreeMap::from([
+                                (0, vec![cells(&shared, 2)]),
+                                (1, vec![cells(&left, 2)]),
+                            ]),
+                        ),
+                    ),
+                    (
+                        (id(1), id(3)),
+                        depth(
+                            3,
+                            BTreeMap::from([
+                                (0, vec![cells(&shared, 3)]),
+                                (1, Vec::new()),
+                                (2, vec![cells(&left, 3)]),
+                            ]),
+                        ),
+                    ),
+                ]),
+            ),
+            (
+                id(30),
+                BTreeMap::from([
+                    (
+                        (id(1), id(2)),
+                        depth(
+                            3,
+                            BTreeMap::from([
+                                (0, vec![cells(&shared, 2)]),
+                                (1, Vec::new()),
+                                (2, vec![cells(&right, 2)]),
+                            ]),
+                        ),
+                    ),
+                    (
+                        (id(1), id(3)),
+                        depth(
+                            4,
+                            BTreeMap::from([
+                                (0, vec![cells(&shared, 3)]),
+                                (1, Vec::new()),
+                                (2, vec![cells(&right, 3)]),
+                                (3, vec![cells(&deep, 3)]),
+                            ]),
+                        ),
+                    ),
+                ]),
+            ),
+        ]),
+    };
+    let empty_plan = |order| SequencedBranchMergePlan {
+        order,
+        plan: BranchMergePlan {
+            schema: Schema { version: EvolutionVersion::V1_0, tables: Vec::new() },
+            tables: BTreeMap::new(),
+            checkpoints: BTreeMap::new(),
+            report: Default::default(),
+        },
+        ordered_row_tombstones: Vec::new(),
+    };
+
+    let mut history = BranchMergeTombstoneHistory::new(0);
+    assert!(history
+        .submit_multi_parent_tabular_column_depth_wave(&wave(2))
+        .unwrap()
+        .is_empty());
+    assert!(history.parent_column_events().is_empty());
+    assert!(history.submit(&empty_plan(0)).unwrap().is_empty());
+    assert_eq!(history.next_order(), Some(1));
+    assert!(history.submit(&empty_plan(1)).unwrap().is_empty());
+    assert_eq!(history.next_order(), Some(3));
+    assert_eq!(
+        history
+            .parent_column_events()
+            .iter()
+            .map(|event| (
+                event.parent,
+                event.table,
+                event.column,
+                event.fragment,
+                event.key.clone(),
+                event.value.clone(),
+            ))
+            .collect::<Vec<_>>(),
+        vec![
+            (id(10), id(1), id(2), 0, string("shared"), string("Root value")),
+            (id(10), id(1), id(3), 0, string("shared"), string("Oslo")),
+            (id(20), id(1), id(2), 0, string("shared"), string("Root value")),
+            (id(20), id(1), id(2), 1, string("branch/left"), string("Left leaf")),
+            (id(20), id(1), id(3), 0, string("shared"), string("Oslo")),
+            (id(20), id(1), id(3), 2, string("branch/left"), string("Bergen")),
+            (id(30), id(1), id(2), 0, string("shared"), string("Root value")),
+            (id(30), id(1), id(2), 2, string("branch/right"), string("Right leaf")),
+            (id(30), id(1), id(3), 0, string("shared"), string("Oslo")),
+            (id(30), id(1), id(3), 2, string("branch/right"), string("Melbourne")),
+            (id(30), id(1), id(3), 3, string("branch/right/deep"), string("Canberra")),
+        ],
+        "the shared fixture row remains separately attributed to all parents while uneven depth labels stay column-local",
+    );
+    let committed = history.clone();
+
+    let mut shorter_deep_city = wave(2);
+    let city = shorter_deep_city
+        .parents
+        .get_mut(&id(30))
+        .unwrap()
+        .get_mut(&(id(1), id(3)))
+        .unwrap();
+    city.fragment_count = 3;
+    city.fragments = BTreeMap::from([
+        (0, vec![cells(&shared, 3)]),
+        (1, Vec::new()),
+        (2, vec![cells(&right, 3)]),
+    ]);
+    assert_eq!(
+        history.submit_multi_parent_tabular_column_depth_wave(&shorter_deep_city),
+        Err(BranchMergeTombstoneHistoryError::ParentColumnFragmentCountMismatch {
+            order: 2,
+            parent: id(30),
+            table: id(1),
+            column: id(3),
+            expected: 4,
+            actual: 3,
+        }),
+        "the third parent's deep city ladder cannot be shortened to a sibling branch's count",
+    );
+    assert_eq!(history, committed);
+
+    let mut changed_parent_cell = wave(2);
+    changed_parent_cell
+        .parents
+        .get_mut(&id(20))
+        .unwrap()
+        .get_mut(&(id(1), id(2)))
+        .unwrap()
+        .fragments
+        .get_mut(&1)
+        .unwrap()[0]
+        .1 = string("Changed parent retry");
+    assert_eq!(
+        history.submit_multi_parent_tabular_column_depth_wave(&changed_parent_cell),
+        Err(BranchMergeTombstoneHistoryError::ConflictingSubmission { order: 2 }),
+        "a parent-local fragment keeps the retry identity of its fixture row and value",
+    );
+    assert_eq!(history, committed);
+
+    let mut missing_empty_depth = wave(2);
+    missing_empty_depth
+        .parents
+        .get_mut(&id(20))
+        .unwrap()
+        .get_mut(&(id(1), id(3)))
+        .unwrap()
+        .fragments
+        .remove(&1);
+    assert_eq!(
+        history.submit_multi_parent_tabular_column_depth_wave(&missing_empty_depth),
+        Err(BranchMergeTombstoneHistoryError::IncompleteParentColumnDepthFragments {
+            order: 2,
+            parent: id(20),
+            table: id(1),
+            column: id(3),
+        }),
+        "an empty parent-local depth remains part of the retry label",
+    );
+    assert_eq!(history, committed);
+
+    let mut changed_parent_set = wave(2);
+    changed_parent_set.parents.remove(&id(30));
+    assert_eq!(
+        history.submit_multi_parent_tabular_column_depth_wave(&changed_parent_set),
+        Err(BranchMergeTombstoneHistoryError::ConflictingSubmission { order: 2 }),
+        "a retry cannot drop a parent and widen the other parents' identities",
+    );
+    assert_eq!(history, committed);
+    assert_eq!(
+        history.submit_multi_parent_tabular_column_depth_wave(&wave(2)),
+        Err(BranchMergeTombstoneHistoryError::DuplicateOrStale { order: 2 }),
+        "an exact multi-parent retry remains stale after identity validation",
     );
     assert_eq!(history, committed);
 }

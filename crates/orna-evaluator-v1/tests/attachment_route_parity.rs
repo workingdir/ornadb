@@ -1286,3 +1286,250 @@ fn fresh_nested_route_pair_chains_evaluate_rebound_closure_values() {
         Ok(Some(Value::int(96.into())))
     );
 }
+
+#[test]
+fn sibling_checkpoint_folds_keep_tabular_anchor_identities() {
+    let package_source = include_str!("fixtures/attachment-route-package.orna");
+    let primary_source = include_str!("fixtures/attachment-route-primary.orna");
+    let aliases = [
+        "archive",
+        "archive_copy",
+        "archive_copy_archive",
+        "archive_copy_archive_archive",
+        "archive_copy_archive_archive_archive",
+    ];
+    let (package_dir, package_repository, _) = repository(package_source);
+    let snapshot = |value: &str, manifest: Option<&str>, message: &str| {
+        commit_snapshot(
+            package_dir.path(),
+            &package_source.replace("42", value),
+            manifest,
+            message,
+        )
+    };
+
+    let leaf_a = snapshot("91", None, "sibling A terminal leaf");
+    let leaf_b = snapshot("92", None, "sibling B terminal leaf");
+    let route_three_a_manifest = format!("{} {}\n", aliases[4], leaf_a);
+    let route_three_a = snapshot(
+        "81",
+        Some(&route_three_a_manifest),
+        "sibling A third-depth route",
+    );
+    let route_three_b_manifest = format!("{} {}\n", aliases[4], leaf_b);
+    let route_three_b = snapshot(
+        "82",
+        Some(&route_three_b_manifest),
+        "sibling B third-depth route",
+    );
+    let route_two_a_manifest = format!("{} {}\n", aliases[3], route_three_a);
+    let route_two_a = snapshot(
+        "71",
+        Some(&route_two_a_manifest),
+        "sibling A second-depth route",
+    );
+    let route_two_b_manifest = format!("{} {}\n", aliases[3], route_three_b);
+    let route_two_b = snapshot(
+        "72",
+        Some(&route_two_b_manifest),
+        "sibling B second-depth route",
+    );
+    let deep_a_manifest = format!("{} {}\n", aliases[2], route_two_a);
+    let deep_a = snapshot("61", Some(&deep_a_manifest), "sibling A first-depth route");
+    let deep_b_manifest = format!("{} {}\n", aliases[2], route_two_b);
+    let deep_b = snapshot("62", Some(&deep_b_manifest), "sibling B first-depth route");
+    let middle_a_manifest = format!("{} {}\n", aliases[1], deep_a);
+    let middle_a = snapshot("51", Some(&middle_a_manifest), "sibling A middle route");
+    let middle_b_manifest = format!("{} {}\n", aliases[1], deep_b);
+    let middle_b = snapshot("52", Some(&middle_b_manifest), "sibling B middle route");
+
+    let (primary_a_dir, primary_a_repository, _) = repository(primary_source);
+    let primary_a_manifest = format!("{} {}\n", aliases[0], middle_a);
+    let primary_a_commit = commit_snapshot(
+        primary_a_dir.path(),
+        primary_source,
+        Some(&primary_a_manifest),
+        "sibling A primary route",
+    );
+    let (primary_b_dir, primary_b_repository, _) = repository(primary_source);
+    let primary_b_manifest = format!("{} {}\n", aliases[0], middle_b);
+    let primary_b_commit = commit_snapshot(
+        primary_b_dir.path(),
+        primary_source,
+        Some(&primary_b_manifest),
+        "sibling B primary route",
+    );
+
+    let loader = ProjectLoader::default();
+    let resolver = PackageResolver::new(
+        aliases
+            .iter()
+            .map(|alias| ((*alias).to_owned(), package_repository.clone())),
+        loader,
+    )
+    .unwrap();
+    let parent_a = resolver
+        .resolve_for_parent(
+            PinnedDatabase::resolve("app_a", primary_a_repository, &primary_a_commit, loader)
+                .unwrap(),
+        )
+        .unwrap();
+    let parent_b = resolver
+        .resolve_for_parent(
+            PinnedDatabase::resolve("app_b", primary_b_repository, &primary_b_commit, loader)
+                .unwrap(),
+        )
+        .unwrap();
+    let nested_a = resolver
+        .resolve_nested_path(&parent_a, &[aliases[0], aliases[1]])
+        .unwrap();
+    let nested_b = resolver
+        .resolve_nested_path(&parent_b, &[aliases[0], aliases[1]])
+        .unwrap();
+    let pair_a = [
+        PinnedDatabase::resolve(aliases[2], package_repository.clone(), &route_two_a, loader)
+            .unwrap(),
+        PinnedDatabase::resolve(
+            aliases[3],
+            package_repository.clone(),
+            &route_three_a,
+            loader,
+        )
+        .unwrap(),
+    ];
+    let pair_b = [
+        PinnedDatabase::resolve(aliases[2], package_repository.clone(), &route_two_b, loader)
+            .unwrap(),
+        PinnedDatabase::resolve(
+            aliases[3],
+            package_repository.clone(),
+            &route_three_b,
+            loader,
+        )
+        .unwrap(),
+    ];
+    let stage_a = resolver
+        .resolve_nested_terminal_pair(&nested_a, pair_a.clone())
+        .unwrap();
+    let stage_b = resolver
+        .resolve_nested_terminal_pair(&nested_b, pair_b.clone())
+        .unwrap();
+    let independent_stage_a = resolver
+        .resolve_nested_terminal_pair(&nested_a, pair_a.clone())
+        .unwrap();
+    let root_a = stage_a.handoff_checkpoint(0, 0).unwrap();
+    let middle_a_checkpoint = stage_a.handoff_checkpoint(0, 1).unwrap();
+    let root_b = stage_b.handoff_checkpoint(0, 0).unwrap();
+    let middle_b_checkpoint = stage_b.handoff_checkpoint(0, 1).unwrap();
+    let independent_root_a = independent_stage_a.handoff_checkpoint(0, 0).unwrap();
+    assert_eq!(
+        root_a.handoff().primary().pin().commit(),
+        independent_root_a.handoff().primary().pin().commit(),
+        "independent routes can retain the same exact pins"
+    );
+    assert_ne!(root_a.depth_label(), independent_root_a.depth_label());
+
+    let terminal_pair_a = [
+        PinnedDatabase::resolve(
+            aliases[3],
+            package_repository.clone(),
+            &route_three_a,
+            loader,
+        )
+        .unwrap(),
+        PinnedDatabase::resolve(aliases[4], package_repository.clone(), &leaf_a, loader).unwrap(),
+    ];
+    let terminal_pair_b = [
+        PinnedDatabase::resolve(
+            aliases[3],
+            package_repository.clone(),
+            &route_three_b,
+            loader,
+        )
+        .unwrap(),
+        PinnedDatabase::resolve(aliases[4], package_repository.clone(), &leaf_b, loader).unwrap(),
+    ];
+    let root_waves_a = [pair_a.clone()];
+    let middle_waves_a = [terminal_pair_a.clone()];
+    let root_return_waves_a = [pair_a.clone()];
+    let root_waves_b = [pair_b.clone()];
+    let middle_waves_b = [terminal_pair_b.clone()];
+    let root_return_waves_b = [pair_b.clone()];
+    let storms_a = [
+        (&root_a, root_waves_a.as_slice()),
+        (&middle_a_checkpoint, middle_waves_a.as_slice()),
+        (&root_a, root_return_waves_a.as_slice()),
+    ];
+    let storms_b = [
+        (&root_b, root_waves_b.as_slice()),
+        (&middle_b_checkpoint, middle_waves_b.as_slice()),
+        (&root_b, root_return_waves_b.as_slice()),
+    ];
+    let paths = [
+        (&stage_a, storms_a.as_slice()),
+        (&stage_b, storms_b.as_slice()),
+    ];
+
+    assert!(matches!(
+        resolver.extend_sibling_terminal_pair_checkpoint_storms(&[(
+            &stage_a,
+            [(&independent_root_a, root_waves_a.as_slice())].as_slice()
+        ),]),
+        Err(AttachmentError::RetainedSnapshotUnavailable)
+    ));
+
+    let folded = resolver
+        .extend_sibling_terminal_pair_checkpoint_storms(&paths)
+        .unwrap_or_else(|error| panic!("sibling checkpoint folds failed: {error:?}"));
+    assert_eq!(folded.routes().len(), 2);
+    for (route, expected_anchor, expected_leaf, expected_value) in [
+        (&folded.routes()[0], &middle_a_checkpoint, &leaf_a, 91),
+        (&folded.routes()[1], &middle_b_checkpoint, &leaf_b, 92),
+    ] {
+        let retained_anchor = route.retained_wave(4).unwrap().first().unwrap();
+        assert_eq!(
+            retained_anchor.primary().pin().commit().as_str(),
+            expected_anchor.handoff().primary().pin().commit().as_str(),
+            "each table row retains its own middle checkpoint anchor"
+        );
+        assert_eq!(route.retained_depth_label(4, 0).unwrap().wave(), 4);
+        assert_eq!(
+            route.retained_depth_label(0, 0).unwrap(),
+            if expected_value == 91 {
+                root_a.depth_label().clone()
+            } else {
+                root_b.depth_label().clone()
+            },
+            "the first anchor label survives the A-to-B-to-A cycle"
+        );
+        let returned_anchor = route.retained_wave(6).unwrap().first().unwrap();
+        assert_eq!(
+            returned_anchor.primary().pin().commit().as_str(),
+            if expected_value == 91 {
+                root_a.handoff().primary().pin().commit().as_str()
+            } else {
+                root_b.handoff().primary().pin().commit().as_str()
+            }
+        );
+        assert_eq!(
+            route
+                .final_session()
+                .database(aliases[4])
+                .unwrap()
+                .pin()
+                .commit()
+                .as_str(),
+            expected_leaf.as_str()
+        );
+        let mut evaluator = AdmittedReplSession::from_attached_database_session(
+            route.final_session(),
+            Limits::default(),
+        )
+        .unwrap();
+        assert_eq!(evaluator.submit(&format!("use {};", aliases[4])), Ok(None));
+        assert_eq!(
+            evaluator.submit(&format!("{}.package_value()", aliases[4])),
+            Ok(Some(Value::int(expected_value.into())))
+        );
+    }
+}
