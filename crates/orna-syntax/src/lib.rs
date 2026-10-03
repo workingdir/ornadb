@@ -5,6 +5,7 @@
 
 use std::{fmt, ops::Range};
 
+pub mod grammar;
 mod highlight;
 mod lexer;
 mod parser;
