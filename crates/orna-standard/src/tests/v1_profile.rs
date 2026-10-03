@@ -1,7 +1,8 @@
-use orna_semantic_v1::{ModuleInput, analyze_with_catalogue};
+use orna_semantic_v1::{ModuleInput, Type, analyze_with_catalogue};
 
 use crate::{
     REFERENCE_STANDARD_COLLECTION_PATH_V1, REFERENCE_STANDARD_MATH_PATH_V1,
+    REFERENCE_STANDARD_MONEY_PATH_V1,
     REFERENCE_STANDARD_BITS_PATH_V1, REFERENCE_STANDARD_QUERY_PATH_V1,
     REFERENCE_STANDARD_TEXT_PATH_V1, REFERENCE_STANDARD_STATS_PATH_V1,
     REFERENCE_STANDARD_TIME_PATH_V1,
@@ -69,6 +70,7 @@ fn pinned_std_entrypoint_imports_optional_content_modules() {
     assert!(parsed.is_ok(), "{:?}", parsed.diagnostics);
     assert!(entrypoint.lines().any(|line| line.trim() == "use hash;"));
     assert!(entrypoint.lines().any(|line| line.trim() == "use random;"));
+    assert!(entrypoint.lines().any(|line| line.trim() == "use money;"));
     assert!(entrypoint.lines().any(|line| line.trim() == "use encoding;"));
     assert!(entrypoint.lines().any(|line| line.trim() == "use url;"));
     assert!(entrypoint.lines().any(|line| line.trim() == "use net;"));
@@ -104,7 +106,7 @@ fn pinned_regex_and_pattern_surfaces_are_versioned_and_snapshot_bound() {
         .enumerate()
         .find(|(_, (path, _))| path == REFERENCE_STANDARD_REGEX_PATH_V1)
         .expect("the regex package is included in the captured source bundle");
-    assert_eq!(regex_index, 46, "new source units append to preserve existing indexes");
+    assert_eq!(regex_index, 47, "new source units append to preserve existing indexes");
     assert_eq!(regex_path, REFERENCE_STANDARD_REGEX_PATH_V1);
     for declaration in [
         "pub enum Regex",
@@ -215,6 +217,84 @@ fn pinned_collection_views_and_slices_typecheck_as_an_ordinary_std_module() {
             .map(|diagnostic| format!("{}: {}", diagnostic.code(), diagnostic.message()))
             .collect::<Vec<_>>()
             .join("; ")
+    );
+}
+
+#[test]
+fn pinned_collection_overloads_preserve_relation_result_kinds() {
+    let catalogue = reference_standard_catalogue_v1().expect("the pinned std profile checks");
+    let analysis = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "relation_collection_consumer.orna",
+            include_str!("fixtures/v1_relation_collection_overloads_0re2w.orna"),
+        )],
+        &catalogue,
+    );
+    assert!(
+        analysis.is_ok(),
+        "{}",
+        analysis
+            .diagnostics
+            .iter()
+            .map(|diagnostic| format!("{}: {}", diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+            .join("; ")
+    );
+    let module = analysis
+        .modules
+        .values()
+        .find(|module| module.namespace.display() == "relation_collection_consumer")
+        .expect("fixture module");
+    let result_type = |name: &str| match &module.symbols[name].ty {
+        Type::Function { result, .. } => result.as_ref(),
+        other => panic!("{name} should be a function, got {other:?}"),
+    };
+    let sample = Type::Named("Sample".into());
+    let tag = Type::Named("Tag".into());
+    let relation = |element| Type::Relation(Box::new(element));
+
+    for name in ["chunked", "windowed", "split", "piped_chunks"] {
+        assert_eq!(
+            result_type(name),
+            &relation(Type::List(Box::new(sample.clone()))),
+            "{name} should preserve a Relation result"
+        );
+    }
+    assert_eq!(
+        result_type("bucketed"),
+        &relation(Type::List(Box::new(Type::Instant)))
+    );
+    assert_eq!(result_type("flattened"), &relation(sample.clone()));
+    assert_eq!(
+        result_type("partitioned"),
+        &Type::Tuple(vec![relation(sample.clone()), relation(sample.clone())])
+    );
+    assert_eq!(
+        result_type("zipped"),
+        &relation(Type::Tuple(vec![sample.clone(), tag]))
+    );
+    assert_eq!(result_type("unique_rows"), &relation(sample.clone()));
+    assert_eq!(
+        result_type("grouped"),
+        &relation(Type::Tuple(vec![
+            Type::Text,
+            Type::List(Box::new(sample.clone())),
+        ]))
+    );
+    assert_eq!(
+        result_type("pairs"),
+        &relation(Type::Tuple(vec![sample.clone(), sample.clone()]))
+    );
+    assert_eq!(
+        result_type("ranked"),
+        &relation(Type::Tuple(vec![sample.clone(), Type::Int]))
+    );
+    assert_eq!(
+        result_type("joined"),
+        &relation(Type::Tuple(vec![
+            sample.clone(),
+            Type::Optional(Box::new(sample)),
+        ]))
     );
 }
 
@@ -425,7 +505,8 @@ fn reference_standard_uses_pinned_orna_1_source_and_resolves_its_imports() {
         (10, REFERENCE_STANDARD_TIME_ISO_PATH_V1, "iso"),
     ] {
         assert_eq!(sources[index].0, path);
-        assert!(sources[index].1.contains(&format!("std.time.duration.{operation}.format")));
+        assert!(sources[index].1.contains("pub fn format("), "{operation} formatter export");
+        assert!(sources[index].1.contains("fn __format("), "{operation} formatter body");
     }
     assert_eq!(sources[20].0, REFERENCE_STANDARD_TIME_CALENDAR_PATH_V1);
     for declaration in [
@@ -566,7 +647,9 @@ fn reference_standard_uses_pinned_orna_1_source_and_resolves_its_imports() {
     for declaration in [
         "pub fn encode<T>(value: T): Str",
         "pub fn decode<T>(input: Str): T",
-        "pub fn decode_with_options<T>(input: Str, ignore_unknown_fields: Bool = false): T",
+        "pub fn decode_with_options<T>(",
+        "input: Str,",
+        "ignore_unknown_fields: Bool = false",
     ] {
         assert!(sources[27].1.contains(declaration), "missing JSON declaration `{declaration}`");
     }
@@ -758,7 +841,7 @@ fn reference_standard_uses_pinned_orna_1_source_and_resolves_its_imports() {
     ] {
         assert!(sources[33].1.contains(contract), "missing std.test contract `{contract}`");
     }
-    assert_eq!(sources.len(), 48);
+    assert_eq!(sources.len(), 49);
     assert_eq!(sources[34].0, REFERENCE_STANDARD_GENERICS_PATH_V1);
     for declaration in [
         "pub fn identity<T>(value: T): T",
@@ -1140,6 +1223,32 @@ fn pinned_stats_aggregate_surface_typechecks_for_consumers() {
 }
 
 #[test]
+fn pinned_money_operations_are_bound_to_the_captured_source_snapshot() {
+    let sources = reference_standard_sources_v1();
+    let (path, source) = sources
+        .iter()
+        .find(|(path, _)| path == REFERENCE_STANDARD_MONEY_PATH_V1)
+        .expect("the pinned source bundle includes std.money");
+    for declaration in [
+        "pub fn quantize<T>(amount: T, minor_digits: Int, rounding: Str): T",
+        "pub fn allocate<T>(",
+        "pub fn format<T>(",
+        "fn __quantize<T>(",
+        "fn __allocate<T>(",
+        "fn __format<T>(",
+    ] {
+        assert!(source.contains(declaration), "missing std.money declaration `{declaration}`");
+    }
+    let profile = reference_standard_profile_v1();
+    profile
+        .verify_source(path, source)
+        .expect("money source bytes belong to the captured std profile");
+    let mut changed_source = source.clone();
+    changed_source.push_str("\n// changed after snapshot capture\n");
+    assert!(profile.verify_source(path, &changed_source).is_err());
+}
+
+#[test]
 fn pinned_filesystem_effect_is_visible_to_consumers_and_forbidden_in_assertions() {
     let catalogue = reference_standard_catalogue_v1().expect("the standard module checks");
     let analysis = analyze_with_catalogue(
@@ -1174,7 +1283,7 @@ fn pinned_filesystem_effect_is_visible_to_consumers_and_forbidden_in_assertions(
 #[test]
 fn pinned_filesystem_path_and_metadata_modules_are_captured_and_typecheck() {
     let sources = reference_standard_sources_v1();
-    assert_eq!(sources.len(), 47);
+    assert_eq!(sources.len(), 49);
     for (index, path) in [
         (42, REFERENCE_STANDARD_IO_PATH_MODULE_PATH_V1),
         (43, REFERENCE_STANDARD_IO_METADATA_PATH_V1),
@@ -1238,7 +1347,7 @@ fn pinned_filesystem_path_and_metadata_modules_are_captured_and_typecheck() {
 #[test]
 fn pinned_process_and_environment_modules_are_captured_and_typecheck() {
     let sources = reference_standard_sources_v1();
-    assert_eq!(sources.len(), 47);
+    assert_eq!(sources.len(), 49);
     for (index, path) in [
         (44, REFERENCE_STANDARD_IO_PROCESS_PATH_V1),
         (45, REFERENCE_STANDARD_IO_ENVIRONMENT_PATH_V1),

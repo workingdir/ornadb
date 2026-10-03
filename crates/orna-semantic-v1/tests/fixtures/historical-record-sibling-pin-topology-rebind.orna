@@ -1,0 +1,30 @@
+pub fn factory_at(pin: sys.SnapshotRef) =
+    sys.database.as_of(pin).energy.factory;
+
+pub fn record_sibling_depth_rebind_keeps_labels() {
+    let paired = {
+        left: factory_at(sys.snapshot("HEAD~220")),
+        right: factory_at(sys.snapshot("HEAD~219")),
+    };
+    paired = {
+        left: factory_at(sys.snapshot("HEAD~210")),
+        right: factory_at(sys.snapshot("HEAD~209")),
+    };
+    paired
+}
+
+pub fn record_sibling_pin_topology_rebind() {
+    let shared_depth_pin = sys.snapshot("HEAD~120");
+    let paired = {
+        left: factory_at(shared_depth_pin),
+        right: factory_at(shared_depth_pin),
+    };
+
+    // Both replacement callables are individually well-shaped and pinned,
+    // but this rebind splits one shared depth label across sibling fields.
+    paired = {
+        left: factory_at(sys.snapshot("HEAD~110")),
+        right: factory_at(sys.snapshot("HEAD~109")),
+    };
+    paired
+}
