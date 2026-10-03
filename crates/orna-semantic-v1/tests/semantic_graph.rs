@@ -18367,3 +18367,91 @@ fn paired_sparse_restoration_fold_chain_replays_saved_identity() {
         BTreeSet::from(["selector:HEAD~6001".to_owned()])
     );
 }
+
+#[test]
+fn paired_sparse_compaction_fold_chain_keeps_learned_omission_identity() {
+    let source = include_str!("fixtures/historical-paired-sparse-compaction-fold-chain.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-paired-sparse-compaction-fold-chain.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    let type_errors = result
+        .diagnostics
+        .iter()
+        .filter(|diagnostic| diagnostic.code() == DIAG_TYPE)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        type_errors.len(),
+        1,
+        "a later split cannot rebind identity learned before a sparse compaction: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+    let module = result
+        .modules
+        .values()
+        .find(|module| module.symbols.contains_key("paired_sparse_compaction_fold_chain"))
+        .expect("paired sparse compaction fixture module");
+    let Type::Function { result, .. } =
+        &module.symbols["paired_sparse_compaction_fold_chain"].ty
+    else {
+        panic!("sparse compaction proof must return its computed checkpoint values");
+    };
+    let Type::Record(stages) = result.as_ref() else {
+        panic!("sparse compaction proof must expose saved and compacted stages: {result:?}");
+    };
+    let checkpoint_maps = |stage: &str, lane: &str| {
+        let Type::List(row) = stages.get(stage).expect("compaction stage") else {
+            panic!("{stage} must retain the folded checkpoint rows");
+        };
+        let Type::Record(fields) = row.as_ref() else {
+            panic!("{stage} rows must remain records");
+        };
+        let Type::Tuple(slots) = fields.get(lane).expect("paired checkpoint lane") else {
+            panic!("{stage}.{lane} must remain a paired tuple");
+        };
+        assert_eq!(slots.len(), 2, "{stage}.{lane} retains both slots");
+        slots
+            .iter()
+            .map(|slot| {
+                let mut selectors = BTreeSet::new();
+                collect_snapshot_contexts(slot, &mut selectors);
+                selectors
+            })
+            .collect::<Vec<_>>()
+    };
+    let selectors = |values: &[&str]| {
+        values
+            .iter()
+            .map(|value| format!("selector:HEAD~{value}"))
+            .collect::<BTreeSet<_>>()
+    };
+    assert_eq!(
+        checkpoint_maps("saved", "left_checkpoint"),
+        [selectors(&["510", "520", "530"]), selectors(&["520", "530"])],
+        "the first compaction retains its recovered left identity after an omitted row"
+    );
+    assert_eq!(
+        checkpoint_maps("saved", "right_checkpoint"),
+        [selectors(&["420", "430"]), selectors(&["410", "420", "430"])],
+        "the first compaction retains its independent right identity"
+    );
+    assert_eq!(
+        checkpoint_maps("compacted", "left_checkpoint"),
+        [selectors(&["610", "620", "640"]), selectors(&["620", "640"])],
+        "a rejected split leaves the learned left map intact while later matching pins fold"
+    );
+    assert_eq!(
+        checkpoint_maps("compacted", "right_checkpoint"),
+        [selectors(&["520", "540"]), selectors(&["510", "520", "540"])],
+        "rejecting the paired row is atomic, then the right map continues through the later row"
+    );
+}
