@@ -2,3 +2,7 @@ fn is_positive(value: Int) = value > 0;
 fn add_one(value: Int) = value + 1;
 fn parity(value: Int) = value % 2;
 fn expand(value: Int) = [value, value + 10];
+fn is_odd(value: Int) = value % 2 == 1;
+fn is_even(value: Int) = value % 2 == 0;
+fn below_five(value: Int) = value < 5;
+fn below_eight(value: Int) = value < 8;
