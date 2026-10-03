@@ -534,6 +534,24 @@ pub struct BranchMergeColumnRestoreSnapshotPathChainFoldSnapshot {
     pub storms: Vec<BranchMergeColumnRestoreSnapshotPathStormSnapshot>,
 }
 
+/// One stable column's contribution to a table-wide paired snapshot-path fold.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BranchMergeColumnRestorePairedSnapshotPathColumnFoldSnapshot {
+    pub column: ObjectId,
+    pub storms: Vec<BranchMergeColumnRestoreSnapshotPathStormSnapshot>,
+}
+
+/// One canonical snapshot path aligned across every stable column in a table.
+///
+/// Each column keeps its own storm and depth identities. An omitted column
+/// wave remains `None`; a present column where this path is absent remains
+/// `Some(Vec::new())`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BranchMergeColumnRestorePairedSnapshotPathChainFoldSnapshot {
+    pub table: ObjectId,
+    pub snapshot_path: CanonicalValue,
+    pub columns: Vec<BranchMergeColumnRestorePairedSnapshotPathColumnFoldSnapshot>,
+}
 /// A canonical column cell released with its source parent identity intact.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BranchMergeParentColumnDepthEvent {
@@ -1808,6 +1826,100 @@ impl BranchMergeTombstoneHistory {
         folds
     }
 
+    /// Pairs each canonical snapshot path across all stable columns in its
+    /// table while preserving each column's complete restore-chain timeline.
+    ///
+    /// A path observed in any column is included for every stable column in
+    /// that table. Each column retains dense storm and wave slots: `None`
+    /// means that column was omitted, while `Some(Vec::new())` means the
+    /// column was present but that path was absent. Repeated occurrences keep
+    /// their own local depth labels, and labels never migrate between sibling
+    /// columns, storms, or waves. MERGE-1 is silent about this paired inverse
+    /// view; v1 aligns only the canonical row-key identity and keeps all
+    /// column-local depth facts unchanged.
+    pub fn column_restore_paired_snapshot_path_chain_folds(
+        &self,
+    ) -> Vec<BranchMergeColumnRestorePairedSnapshotPathChainFoldSnapshot> {
+        let column_folds = self.column_restore_storm_folds();
+        let mut identities = Vec::<(ObjectId, CanonicalValue)>::new();
+
+        for column_fold in &column_folds {
+            for storm in &column_fold.storms {
+                for wave in &storm.waves {
+                    if let Some(fragments) = &wave.fragments {
+                        for (snapshot_path, _) in fragments
+                            .iter()
+                            .flat_map(|fragment| fragment.cells.iter())
+                        {
+                            let identity = (column_fold.table, snapshot_path.clone());
+                            if !identities.contains(&identity) {
+                                identities.push(identity);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        identities
+            .into_iter()
+            .map(|(table, snapshot_path)| {
+                let columns = column_folds
+                    .iter()
+                    .filter(|column_fold| column_fold.table == table)
+                    .map(|column_fold| {
+                        let storms = column_fold
+                            .storms
+                            .iter()
+                            .enumerate()
+                            .map(|(storm_index, storm)| {
+                                let waves = storm
+                                    .waves
+                                    .iter()
+                                    .map(|wave| {
+                                        let depth_labels =
+                                            wave.fragments.as_ref().map(|fragments| {
+                                                fragments
+                                                    .iter()
+                                                    .filter_map(|fragment| {
+                                                        fragment
+                                                            .cells
+                                                            .iter()
+                                                            .any(|(path, _)| {
+                                                                path == &snapshot_path
+                                                            })
+                                                            .then_some(fragment.label)
+                                                    })
+                                                    .collect()
+                                            });
+                                        BranchMergeColumnRestoreStormSnapshotPathWaveSlotSnapshot {
+                                            order: wave.order,
+                                            depth_labels,
+                                        }
+                                    })
+                                    .collect();
+                                BranchMergeColumnRestoreSnapshotPathStormSnapshot {
+                                    storm_index,
+                                    first_order: storm.first_order,
+                                    last_order: storm.last_order,
+                                    waves,
+                                }
+                            })
+                            .collect();
+                        BranchMergeColumnRestorePairedSnapshotPathColumnFoldSnapshot {
+                            column: column_fold.column,
+                            storms,
+                        }
+                    })
+                    .collect();
+                BranchMergeColumnRestorePairedSnapshotPathChainFoldSnapshot {
+                    table,
+                    snapshot_path,
+                    columns,
+                }
+            })
+            .collect()
+    }
     /// Submits a complete paired restore wave from at least two distinct
     /// parent branches. Each parent and stable table-column pair retains its
     /// own fragment count and cell retry identity. Parent provenance remains
