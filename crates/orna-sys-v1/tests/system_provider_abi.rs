@@ -2888,3 +2888,102 @@ fn generated_bindings_preserve_registry_provider_failure_edges() {
         generated_bindings + (shared_failure_pairs + undeclared_failure_pairs) * 2
     );
 }
+
+#[test]
+fn generated_idl_unknown_operation_diagnostics_match_round_tripped_registry() {
+    let baked = system_dispatch_table();
+    let round_tripped = round_trip_generated_provider_artifacts();
+    let registry = ProviderRoleRegistry::from_baked_abi(&round_tripped)
+        .expect("round-tripped typed registry resolves generated provider offers");
+    let idl_operation_ids = system_binding_stubs()
+        .lines()
+        .filter_map(|line| line.strip_prefix("// sys-op: "))
+        .collect::<Vec<_>>();
+    let typed_operation_ids = baked
+        .operations()
+        .map(|contract| contract.id.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(idl_operation_ids, typed_operation_ids);
+
+    let fallback_role = baked
+        .roles()
+        .next()
+        .expect("generated typed registry has a provider role");
+    let fallback_offer = ProviderOffer {
+        provider: ProviderId::new("fixture.unknown_operation").unwrap(),
+        role: fallback_role.id.clone(),
+        version: fallback_role.version,
+        effects: fallback_role.effects.clone(),
+    };
+    let mut generated_bindings = 0;
+    let mut unknown_selector_pairs = 0;
+
+    for contract in baked.operations() {
+        let operation_name = contract.id.as_str();
+        let generated = system_function_descriptor(operation_name)
+            .unwrap_or_else(|| panic!("missing generated binding for {operation_name}"));
+        assert_eq!(generated.name, operation_name);
+        assert_eq!(generated.signature, contract.signature.source);
+        assert_eq!(contract.effects.iter().next(), Some(generated.effect));
+        generated_bindings += 1;
+
+        let separator = operation_name.find(['(', '<']);
+        let unregistered = match separator {
+            Some(index) if operation_name[index..].starts_with('(') => {
+                format!("{}(sys.conformance.RegistryMiss)", &operation_name[..index])
+            }
+            Some(index) => format!("{}<sys.conformance.RegistryMiss>", &operation_name[..index]),
+            None => format!("{operation_name}.registry_miss"),
+        };
+        let unknown_id = OperationId::new(unregistered.clone())
+            .expect("generated negative selector remains a valid operation ID");
+        assert!(baked.operation(&unregistered).is_none());
+        assert!(round_tripped.operation(&unregistered).is_none());
+
+        let provider_for = || InvokeValueProvider {
+            offer: fallback_offer.clone(),
+            operation: unknown_id.clone(),
+            argument_types: Vec::new(),
+            response: Ok(TypedValue::public(
+                TypeId::new("sys.conformance.UnexpectedDispatch"),
+                b"must-not-run".to_vec(),
+            )),
+            calls: AtomicUsize::new(0),
+        };
+        let direct_provider = provider_for();
+        let registry_provider = provider_for();
+        let mut direct_preconditions = 0;
+        let mut registry_preconditions = 0;
+        let direct = baked.dispatch_to_provider(&unregistered, &direct_provider, &[], |_| {
+            direct_preconditions += 1;
+            Ok(())
+        });
+        let mediated = registry.dispatch_to_provider(
+            &round_tripped,
+            &unregistered,
+            &registry_provider,
+            &[],
+            |_| {
+                registry_preconditions += 1;
+                Ok(())
+            },
+        );
+        let expected = Err(ProviderDiagnostic::UnknownOperation(unknown_id));
+        assert_eq!(direct, expected);
+        assert_eq!(mediated, expected);
+        assert_eq!(direct.unwrap_err().code(), "sys.abi.unknown_operation");
+        assert_eq!(mediated.unwrap_err().code(), "sys.abi.unknown_operation");
+        assert_eq!(direct_preconditions, 0);
+        assert_eq!(registry_preconditions, 0);
+        assert_eq!(direct_provider.calls.load(Ordering::SeqCst), 0);
+        assert_eq!(registry_provider.calls.load(Ordering::SeqCst), 0);
+        unknown_selector_pairs += 1;
+    }
+
+    assert_eq!(generated_bindings, idl_operation_ids.len());
+    assert_eq!(unknown_selector_pairs, generated_bindings);
+    println!(
+        "generated_idl_unknown_operation_diagnostic_parity bindings={generated_bindings} unknown_selectors={unknown_selector_pairs} direct_registry_pairs={unknown_selector_pairs} code=sys.abi.unknown_operation preconditions_checked=0 providers_called=0 total_cases={}",
+        generated_bindings + unknown_selector_pairs * 2
+    );
+}
