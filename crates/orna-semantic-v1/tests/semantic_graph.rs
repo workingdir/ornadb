@@ -18272,3 +18272,98 @@ fn single_pair_sparse_pin_fold_chain_keeps_learned_identity() {
         "the rejected split does not discard independent witness values"
     );
 }
+
+#[test]
+fn paired_sparse_restoration_fold_chain_replays_saved_identity() {
+    let source = include_str!("fixtures/historical-paired-sparse-restoration-fold-chain.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-paired-sparse-restoration-fold-chain.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(
+        result.is_ok(),
+        "sparse restoration chain: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+    let module = result
+        .modules
+        .values()
+        .find(|module| module.symbols.contains_key("paired_sparse_restoration_fold_chain"))
+        .expect("sparse restoration fixture module");
+    let Type::Function { result, .. } =
+        &module.symbols["paired_sparse_restoration_fold_chain"].ty
+    else {
+        panic!("sparse restoration proof must return computed values");
+    };
+    let Type::Record(stages) = result.as_ref() else {
+        panic!("sparse restoration proof must retain saved and replayed values: {result:?}");
+    };
+    let saved = stages.get("saved").expect("saved sparse chain");
+    let replayed = stages.get("replayed").expect("replayed sparse chain");
+    assert_eq!(
+        saved, replayed,
+        "restoring saved paired omission maps after a decoy sparse fold must be exact"
+    );
+    let tuple_maps = |value: &Type, name: &str| {
+        let Type::List(row) = value else {
+            panic!("{name} must remain a computed list: {value:?}");
+        };
+        let Type::Record(fields) = row.as_ref() else {
+            panic!("{name} rows must remain records: {row:?}");
+        };
+        let Type::Tuple(slots) = fields.get(name).expect("checkpoint pair") else {
+            panic!("{name} must remain a paired tuple");
+        };
+        slots
+            .iter()
+            .map(|slot| {
+                let mut contexts = BTreeSet::new();
+                collect_snapshot_contexts(slot, &mut contexts);
+                contexts
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        tuple_maps(saved, "left_checkpoint"),
+        [
+            BTreeSet::from(["selector:HEAD~6000".to_owned()]),
+            BTreeSet::new(),
+        ],
+        "the saved first lane keeps its concrete pin and its omitted sibling stays omitted"
+    );
+    assert_eq!(
+        tuple_maps(saved, "right_checkpoint"),
+        [BTreeSet::new(), BTreeSet::new()],
+        "the wholly omitted paired lane remains empty in the saved value"
+    );
+    assert_eq!(
+        tuple_maps(replayed, "left_checkpoint"),
+        tuple_maps(saved, "left_checkpoint"),
+        "both restorations return the saved partial identity, not either decoy map"
+    );
+    assert_eq!(
+        tuple_maps(replayed, "right_checkpoint"),
+        tuple_maps(saved, "right_checkpoint"),
+        "repeated restoration does not promote the omitted lane's decoy identity"
+    );
+    let mut witness_contexts = BTreeSet::new();
+    let Type::List(row) = replayed else { unreachable!() };
+    let Type::Record(fields) = row.as_ref() else { unreachable!() };
+    collect_snapshot_contexts(
+        fields.get("witness").expect("saved witness"),
+        &mut witness_contexts,
+    );
+    assert_eq!(
+        witness_contexts,
+        BTreeSet::from(["selector:HEAD~6001".to_owned()])
+    );
+}
