@@ -1,0 +1,45 @@
+pub fn factory_at(pin: sys.SnapshotRef) =
+    sys.database.as_of(pin).energy.factory;
+
+pub fn omitted_leaf_checkpoint_at(failure: Error, root_pin: sys.SnapshotRef) =
+    (middle_pin: sys.SnapshotRef) =>
+    (leaf_pin: sys.SnapshotRef) => {
+        root: factory_at(root_pin),
+        middle: factory_at(middle_pin),
+        leaf: fail(failure),
+    };
+
+pub fn complete_leaf_checkpoint_at(failure: Error, root_pin: sys.SnapshotRef) =
+    (middle_pin: sys.SnapshotRef) =>
+    (leaf_pin: sys.SnapshotRef) => {
+        root: factory_at(root_pin),
+        middle: factory_at(middle_pin),
+        leaf: factory_at(leaf_pin),
+    };
+
+pub fn shared_root_middle_checkpoint_at(failure: Error, root_pin: sys.SnapshotRef) =
+    (middle_pin: sys.SnapshotRef) =>
+    (leaf_pin: sys.SnapshotRef) => {
+        root: factory_at(root_pin),
+        middle: factory_at(root_pin),
+        leaf: factory_at(leaf_pin),
+    };
+
+pub fn nested_boundary_checkpoint_reset_values(failure: Error) {
+    let saved_omitted = omitted_leaf_checkpoint_at(failure, sys.snapshot("HEAD~520"));
+    let rolling = saved_omitted;
+    rolling = complete_leaf_checkpoint_at(failure, sys.snapshot("HEAD~510"));
+    let saved_complete = rolling;
+    rolling = complete_leaf_checkpoint_at(failure, sys.snapshot("HEAD~500"));
+    rolling = shared_root_middle_checkpoint_at(failure, sys.snapshot("HEAD~505"));
+    rolling = saved_omitted;
+    let reset_omitted = rolling;
+    rolling = saved_complete;
+    let reset_complete = rolling;
+
+    {
+        saved_omitted: saved_omitted(sys.snapshot("HEAD~490"))(sys.snapshot("HEAD~480")),
+        reset_omitted: reset_omitted(sys.snapshot("HEAD~470"))(sys.snapshot("HEAD~460")),
+        reset_complete: reset_complete(sys.snapshot("HEAD~450"))(sys.snapshot("HEAD~440")),
+    }
+}
