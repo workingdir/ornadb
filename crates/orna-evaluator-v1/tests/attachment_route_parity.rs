@@ -2849,6 +2849,50 @@ fn sparse_nested_storm_folds_preserve_terminal_route_identity() {
         leaf_final,
         "identity-edge validation preserves the exact final nested package value"
     );
+    let paired_terminal_pin_folds = [
+        forward_pair_round.as_slice(),
+        active_terminal_round.as_slice(),
+        forward_pair_round.as_slice(),
+    ];
+    let pin_fold_identity_checked = resolver
+        .extend_nested_terminal_pair_sparse_checkpoint_storm_pin_folds_validating_terminal_identity_transitions(
+            &first_stage,
+            &paired_terminal_pin_folds,
+            &expected_identity_transitions,
+        )
+        .unwrap();
+    assert_eq!(
+        pin_fold_identity_checked.terminal_route_identity(),
+        restored_chain_identity,
+        "each paired terminal pin fold follows its exact identity transition"
+    );
+    assert_eq!(
+        pin_fold_identity_checked.retained_depth_label(0, 1).unwrap(),
+        nested_label,
+        "nested depth identity stays attached through each terminal pin fold"
+    );
+    assert_eq!(
+        pin_fold_identity_checked
+            .final_session()
+            .database(aliases[4])
+            .unwrap()
+            .pin()
+            .commit()
+            .as_str(),
+        leaf_final,
+        "validated terminal pin folds resolve the actual restored package commit"
+    );
+    let mut stale_pin_fold_transitions = expected_identity_transitions.clone();
+    stale_pin_fold_transitions[1].1 = first_chain_identity.clone();
+    assert!(matches!(
+        resolver
+            .extend_nested_terminal_pair_sparse_checkpoint_storm_pin_folds_validating_terminal_identity_transitions(
+                &first_stage,
+                &paired_terminal_pin_folds,
+                &stale_pin_fold_transitions,
+            ),
+        Err(AttachmentError::RetainedSnapshotUnavailable)
+    ));
     let first_rebind_cascade = [
         first_sparse_chain.as_slice(),
         middle_rebind_chain.as_slice(),
