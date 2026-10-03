@@ -10793,6 +10793,99 @@ fn pinned_callable_map_width_growth_is_rejected_on_rebind() {
 }
 
 #[test]
+fn nested_snapshot_boundary_rebinds_preserve_values_and_reject_crossing() {
+    let source = include_str!("fixtures/historical-nested-snapshot-boundary-rebind-values.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-nested-snapshot-boundary-rebind-values.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert_eq!(
+        result
+            .diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.code() == DIAG_TYPE)
+            .count(),
+        1,
+        "crossing the outer and inner boundaries must fail while a stable rebind computes values: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+    let module = result
+        .modules
+        .values()
+        .find(|module| {
+            module
+                .symbols
+                .contains_key("nested_snapshot_boundary_values_survive_rebinding")
+        })
+        .expect("nested snapshot boundary fixture module");
+    let Type::Function { result, .. } = &module.symbols
+        ["nested_snapshot_boundary_values_survive_rebinding"]
+        .ty
+    else {
+        panic!("nested boundary proof must return computed values");
+    };
+    let Type::Record(stages) = result.as_ref() else {
+        panic!("nested boundary proof must retain both value stages: {result:?}");
+    };
+    for (stage, root_selector, leaf_selector) in [
+        ("retained", "selector:HEAD~72", "selector:HEAD~52"),
+        ("rebound", "selector:HEAD~62", "selector:HEAD~51"),
+    ] {
+        let Type::Record(values) = stages.get(stage).expect("computed stage") else {
+            panic!("{stage} must remain a record of real historical values");
+        };
+        for (field, selector) in [("root", root_selector), ("leaf", leaf_selector)] {
+            let value = values.get(field).expect("historical value field");
+            assert_canonical_snapshot_context_maps(value);
+            let mut contexts = BTreeSet::new();
+            collect_snapshot_contexts(value, &mut contexts);
+            assert_eq!(
+                contexts,
+                BTreeSet::from([selector.to_owned()]),
+                "{stage}.{field} must retain its computed nested snapshot value"
+            );
+        }
+    }
+}
+
+#[test]
+fn nested_snapshot_boundary_list_folds_reject_crossed_values() {
+    let source = include_str!("fixtures/historical-nested-snapshot-boundary-fold.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-nested-snapshot-boundary-fold.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert_eq!(
+        result
+            .diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.code() == DIAG_TYPE)
+            .count(),
+        1,
+        "a list fold must reject a closure whose nested result values cross their snapshot boundaries: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
 fn paired_checkpoint_snapshot_maps_survive_chained_depth_storms() {
     let source = include_str!(
         "fixtures/historical-paired-checkpoint-snapshot-retention-depth-storm.orna"
