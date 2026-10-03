@@ -8318,6 +8318,10 @@ impl Context<'_, '_> {
             ("__window_rate", [Value::List(points), Value::Int(size), Value::Int(step)]) => {
                 self.window_time_series_statistics(points, size, step, "rate")
             }
+            (
+                "__window_rate_integrate",
+                [Value::List(points), Value::Int(size), Value::Int(step)],
+            ) => self.window_time_series_statistics(points, size, step, "rate_integrate"),
             ("__window_derivative", [Value::List(points), Value::Int(size), Value::Int(step)]) => {
                 self.window_time_series_statistics(points, size, step, "derivative")
             }
@@ -8348,9 +8352,13 @@ impl Context<'_, '_> {
             | ("zip" | "zip_exact", [_, _])
             | ("window", [_, _] | [_, _, _]) => Err(error("ORNA-EVAL-TYPE")),
             ("__strictly_ordered_time_series", [_]) => Err(error("ORNA-EVAL-TYPE")),
-            ("__window_rate" | "__window_derivative" | "__window_integrate", [_, _, _]) => {
-                Err(error("ORNA-EVAL-TYPE"))
-            }
+            (
+                "__window_rate"
+                | "__window_rate_integrate"
+                | "__window_derivative"
+                | "__window_integrate",
+                [_, _, _],
+            ) => Err(error("ORNA-EVAL-TYPE")),
             ("__list_length" | "__numeric_sum", [_])
             | ("__list_concat", [_, _])
             | ("__stable_sort" | "__group_by" | "__rank", [_, _])
@@ -10152,12 +10160,22 @@ impl Context<'_, '_> {
             self.step()?;
             let window = points[start..end].to_vec();
             self.step()?;
-            let result = self.stats(statistic, vec![Value::List(window)])?;
-            results.push(if matches!(statistic, "rate" | "integrate") {
-                Value::Option(Some(Box::new(result)))
+            let result = if statistic == "rate_integrate" {
+                let rate = self.stats_rate(&window)?;
+                let integral = self.stats_integrate(&window)?;
+                Value::Tuple(vec![
+                    Value::Option(Some(Box::new(rate))),
+                    Value::Option(Some(Box::new(integral))),
+                ])
             } else {
-                result
-            });
+                let result = self.stats(statistic, vec![Value::List(window)])?;
+                if matches!(statistic, "rate" | "integrate") {
+                    Value::Option(Some(Box::new(result)))
+                } else {
+                    result
+                }
+            };
+            results.push(result);
             self.items(results.len())?;
 
             let Some(next) = start.checked_add(step) else {
@@ -11289,7 +11307,10 @@ fn named_arguments(
         "__asof_join" => &["left", "right", "time", "by"],
         "__bucket_by" => &["rows", "period", "zone"],
         "__strictly_ordered_time_series" => &["points"],
-        "__window_rate" | "__window_derivative" | "__window_integrate" => {
+        "__window_rate"
+        | "__window_rate_integrate"
+        | "__window_derivative"
+        | "__window_integrate" => {
             &["points", "size", "step"]
         }
         "filter" => &["rows", "predicate"],
@@ -11551,6 +11572,7 @@ const STANDARD_BINDING_MODULES: &[StandardBindingModule] = &[
             "__bucket_by",
             "__strictly_ordered_time_series",
             "__window_rate",
+            "__window_rate_integrate",
             "__window_derivative",
             "__window_integrate",
         ],
