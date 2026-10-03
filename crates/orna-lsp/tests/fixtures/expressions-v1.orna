@@ -1,0 +1,13 @@
+/// Add two integer values.
+pub fn add(left: Int, right: Int): Int = left + right;
+
+/// Calls the documented function.
+pub fn call_add(value: Int): Int = add(value, 2);
+
+pub enum Outcome {
+    success { value: Int },
+    failed { reason: Str },
+}
+
+pub fn absolute(value: Int): Int =
+    if value > 0 { value } else { -value };
