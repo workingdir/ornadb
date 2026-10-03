@@ -85,6 +85,31 @@ fn nested_aggregate_refresh_functions() -> Functions {
         .collect()
 }
 
+fn nested_aggregate_compaction_functions() -> Functions {
+    let parsed = parse_module(include_str!(
+        "fixtures/table_relation_nested_aggregate_compaction_3xa7q.orna"
+    ));
+    assert!(parsed.is_ok(), "{:?}", parsed.diagnostics);
+    parsed
+        .value
+        .items
+        .into_iter()
+        .map(|item| {
+            let orna_syntax_v1::Declaration::Function { signature, body } = item.declaration else {
+                panic!("fixture function expected")
+            };
+            (
+                signature.name,
+                PureFunction {
+                    parameters: signature.parameters,
+                    body,
+                    environment: Environment::new(),
+                },
+            )
+        })
+        .collect()
+}
+
 fn sparse_window_fold_functions() -> Functions {
     let parsed = parse_module(include_str!("fixtures/table_relation_sparse_window_fold_d4441.orna"));
     assert!(parsed.is_ok(), "{:?}", parsed.diagnostics);
@@ -111,6 +136,31 @@ fn sparse_window_fold_functions() -> Functions {
 fn paired_window_refresh_compaction_functions() -> Functions {
     let parsed = parse_module(include_str!(
         "fixtures/table_relation_paired_window_refresh_compaction_lzevs.orna"
+    ));
+    assert!(parsed.is_ok(), "{:?}", parsed.diagnostics);
+    parsed
+        .value
+        .items
+        .into_iter()
+        .map(|item| {
+            let orna_syntax_v1::Declaration::Function { signature, body } = item.declaration else {
+                panic!("fixture function expected")
+            };
+            (
+                signature.name,
+                PureFunction {
+                    parameters: signature.parameters,
+                    body,
+                    environment: Environment::new(),
+                },
+            )
+        })
+        .collect()
+}
+
+fn paired_checkpoint_rotation_functions() -> Functions {
+    let parsed = parse_module(include_str!(
+        "fixtures/table_relation_paired_window_checkpoint_rotation_n37re.orna"
     ));
     assert!(parsed.is_ok(), "{:?}", parsed.diagnostics);
     parsed
@@ -1915,6 +1965,16 @@ fn paired_window_refresh_compaction_body() -> Expr {
     }
 }
 
+fn paired_sparse_checkpoint_rotation_body() -> Expr {
+    Expr::Tuple {
+        elements: vec![
+            terminal(sparse_window_fold("View.Left", "is_odd"), "sum"),
+            terminal(sparse_window_fold("View.Right", "is_even"), "sum"),
+        ],
+        span: span(),
+    }
+}
+
 fn paired_limit_refresh_compaction_body() -> Expr {
     let limited_sum = |source: &str| {
         let first_limit = relation_stage(
@@ -2585,6 +2645,121 @@ fn paired_limit_compaction_refreshes_keep_scoped_prefix_values() {
 }
 
 #[test]
+fn paired_sparse_window_folds_keep_identity_across_checkpoint_rotation_chains() {
+    // The reference is silent on provider checkpoint rotation between refreshes;
+    // pin every `(source, scope)` to one forward-moving rotation chain.
+    let checkpoint_epochs = [0x41, 0x42, 0x43, 0x44];
+    let restore = |groups: &[&[i64]], tokens: &[Vec<u8>]| {
+        assert_eq!(groups.len(), tokens.len() + 1);
+        groups
+            .iter()
+            .enumerate()
+            .map(|(index, values)| {
+                let after = index.checked_sub(1).map(|previous| tokens[previous].clone());
+                let next = tokens.get(index).cloned();
+                (after, page(values, next))
+            })
+            .collect::<CursorRestore>()
+    };
+    let mut restores = Vec::new();
+    let mut lane_names = Vec::new();
+    let mut rotated_chains = Vec::new();
+    let mut add_restore = |source_name: &'static str, groups: &[&[i64]], rotation: usize| {
+        let tokens = (0..checkpoint_epochs.len())
+            .map(|step| vec![checkpoint_epochs[rotation], step as u8])
+            .collect::<Vec<_>>();
+        restores.push((source_name, restore(groups, &tokens)));
+        lane_names.push(source_name);
+        rotated_chains.push(tokens);
+    };
+    add_restore("View.Left", &[&[1, 2], &[3, 4], &[5, 6], &[7, 8], &[9, 10]], 0);
+    add_restore("View.Right", &[&[2, 1], &[4, 3], &[6, 5], &[8, 7], &[10, 9]], 1);
+    add_restore("View.Left", &[&[3, 2], &[5, 4], &[7, 6], &[9, 8], &[11, 10]], 2);
+    add_restore("View.Right", &[&[2, 1], &[6, 3], &[8, 5], &[10, 7], &[12, 9]], 3);
+    add_restore("View.Left", &[&[1, 2], &[5, 4], &[7, 6], &[11, 8], &[13, 10]], 1);
+    add_restore("View.Right", &[&[4, 3], &[8, 5], &[10, 7], &[12, 9], &[14, 11]], 0);
+    drop(add_restore);
+
+    let mut source = PairedCursorRestoreSource::new(restores);
+    let mut functions = paired_checkpoint_rotation_functions();
+    functions.insert(
+        "run".into(),
+        PureFunction {
+            parameters: Vec::new(),
+            body: paired_sparse_checkpoint_rotation_body(),
+            environment: Environment::new(),
+        },
+    );
+    let run_refresh = |source: &mut PairedCursorRestoreSource| {
+        invoke_named_with_effects(
+            "run",
+            &functions,
+            &Environment::new(),
+            Limits::default(),
+            source,
+        )
+        .unwrap()
+    };
+
+    let first = run_refresh(&mut source);
+    assert_eq!(first, integer_pair(60, 72), "the first sparse paired windows fold to their nested totals");
+    let second = run_refresh(&mut source);
+    assert_eq!(second, integer_pair(84, 94), "the rotated checkpoint pair computes its own sparse folds");
+    let third = run_refresh(&mut source);
+    assert_eq!(third, integer_pair(90, 118), "the next rotation retains independent left/right window folds");
+    assert_eq!(first, integer_pair(60, 72), "later rotations leave the first fold snapshot unchanged");
+    assert_eq!(second, integer_pair(84, 94), "later rotations leave the middle fold snapshot unchanged");
+
+    assert_eq!(source.lanes.len(), lane_names.len());
+    assert_eq!(
+        rotated_chains
+            .iter()
+            .map(|chain| chain[0][0])
+            .collect::<Vec<_>>(),
+        [0x41, 0x42, 0x43, 0x44, 0x42, 0x41],
+        "checkpoint epochs rotate across both source lanes and all refreshes"
+    );
+    for chain in &rotated_chains {
+        for adjacent in chain.windows(2) {
+            assert!(
+                adjacent[0] < adjacent[1],
+                "each rotated checkpoint chain still advances lexicographically"
+            );
+        }
+    }
+    let scopes = source
+        .lanes
+        .iter()
+        .zip(lane_names.iter().copied())
+        .map(|((source_name, scope, _), expected_name)| {
+            assert_eq!(source_name, expected_name, "each refresh folds left then right");
+            *scope
+        })
+        .collect::<Vec<_>>();
+    for (index, scope) in scopes.iter().enumerate() {
+        assert!(
+            !scopes[..index].contains(scope),
+            "sibling checkpoint rotations cannot alias an earlier source scope: {scope:?}"
+        );
+    }
+    let mut expected_cursors = Vec::new();
+    for (index, chain) in rotated_chains.iter().enumerate() {
+        let source_name = lane_names[index].to_owned();
+        expected_cursors.push((source_name.clone(), scopes[index], None));
+        expected_cursors.extend(chain.iter().cloned().map(|cursor| {
+            (source_name.clone(), scopes[index], Some(cursor))
+        }));
+    }
+    assert_eq!(
+        source.cursors,
+        expected_cursors,
+        "each sparse window fold restores all pages only through its scoped rotation chain"
+    );
+    assert!(source.pending["View.Left"].is_empty());
+    assert!(source.pending["View.Right"].is_empty());
+}
+
+#[test]
 fn paired_refresh_cursor_restores_preserve_source_scope_identity() {
     let continuations = [vec![0x62], vec![0x62, 0x00], vec![0x62, 0x00, 0x00]];
     assert!(continuations[0].as_slice() < continuations[1].as_slice());
@@ -2659,6 +2834,117 @@ fn paired_refresh_cursor_restores_preserve_source_scope_identity() {
         source.cursors,
         expected_cursors,
         "reused restoration cursors resolve only within their source and fresh read scope"
+    );
+    assert!(source.pending["View.Left"].is_empty());
+    assert!(source.pending["View.Right"].is_empty());
+}
+
+#[test]
+fn nested_aggregate_folds_keep_identity_across_paired_refresh_compaction_chains() {
+    // The reference does not specify whether opaque provider cursors survive
+    // refresh compaction. Keep the documented lexicographic progress within a
+    // chain, and treat each `(source, scope)` snapshot as its own chain even
+    // when both long and compact cursor tokens are reused by sibling snapshots.
+    let long_checkpoint_cursor = vec![0x5a, 0xff, 0x00];
+    let compacted_cursor = vec![0x5b];
+    let restore = |groups: &[&[i64]]| {
+        assert_eq!(groups.len(), 3, "each checkpoint chain has three pages");
+        BTreeMap::from([
+            (
+                None,
+                page(groups[0], Some(long_checkpoint_cursor.clone())),
+            ),
+            (
+                Some(long_checkpoint_cursor.clone()),
+                page(groups[1], Some(compacted_cursor.clone())),
+            ),
+            (
+                Some(compacted_cursor.clone()),
+                page(groups[2], None),
+            ),
+        ])
+    };
+    let mut source = PairedCursorRestoreSource::new([
+        ("View.Left", restore(&[&[1, 2], &[3], &[4]])),
+        ("View.Right", restore(&[&[10], &[20, 30], &[40]])),
+        ("View.Left", restore(&[&[4], &[5, 6], &[7]])),
+        ("View.Right", restore(&[&[2, 4], &[6], &[8]])),
+        ("View.Left", restore(&[&[-1, 3], &[5], &[7]])),
+        ("View.Right", restore(&[&[3], &[6, 9], &[12]])),
+    ]);
+    let mut functions = nested_aggregate_compaction_functions();
+    functions.insert(
+        "run".into(),
+        PureFunction {
+            parameters: Vec::new(),
+            body: paired_nested_aggregate_refresh_body(),
+            environment: Environment::new(),
+        },
+    );
+    let run_refresh = |source: &mut PairedCursorRestoreSource| {
+        invoke_named_with_effects(
+            "run",
+            &functions,
+            &Environment::new(),
+            Limits::default(),
+            source,
+        )
+        .unwrap()
+    };
+
+    let first = run_refresh(&mut source);
+    assert_eq!(first, integer_pair(20, 200), "nested folds compute the first paired snapshot");
+    let second = run_refresh(&mut source);
+    assert_eq!(second, integer_pair(44, 40), "the next compacted pair computes its own nested totals");
+    let third = run_refresh(&mut source);
+    assert_eq!(third, integer_pair(30, 60), "the final pair folds its own pages after compaction");
+    assert_eq!(first, integer_pair(20, 200), "later refreshes retain the first paired value snapshot");
+    assert_eq!(second, integer_pair(44, 40), "later refreshes retain the second paired value snapshot");
+
+    let lane_names = [
+        "View.Left",
+        "View.Right",
+        "View.Left",
+        "View.Right",
+        "View.Left",
+        "View.Right",
+    ];
+    assert_eq!(source.lanes.len(), lane_names.len());
+    let scopes = source
+        .lanes
+        .iter()
+        .zip(lane_names)
+        .map(|((source_name, scope, _), expected_name)| {
+            assert_eq!(source_name, expected_name, "each generation restores left then right");
+            *scope
+        })
+        .collect::<Vec<_>>();
+    for (index, scope) in scopes.iter().enumerate() {
+        assert!(
+            !scopes[..index].contains(scope),
+            "paired compaction chains retain independent snapshot scopes: {scope:?}"
+        );
+    }
+    let mut expected_cursors = Vec::new();
+    for (index, scope) in scopes.iter().copied().enumerate() {
+        expected_cursors.extend([
+            (lane_names[index].to_owned(), scope, None),
+            (
+                lane_names[index].to_owned(),
+                scope,
+                Some(long_checkpoint_cursor.clone()),
+            ),
+            (
+                lane_names[index].to_owned(),
+                scope,
+                Some(compacted_cursor.clone()),
+            ),
+        ]);
+    }
+    assert_eq!(
+        source.cursors,
+        expected_cursors,
+        "the shared compact token resumes only inside its paired refresh and source scope"
     );
     assert!(source.pending["View.Left"].is_empty());
     assert!(source.pending["View.Right"].is_empty());
