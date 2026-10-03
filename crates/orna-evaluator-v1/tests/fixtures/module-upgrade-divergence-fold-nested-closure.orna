@@ -1,0 +1,10 @@
+fn make_paired_fold_closure(seed: Int) = offset => value => [
+    math.marker(),
+    collection.marker(),
+    math.marker() + collection.marker(),
+    std.math.marker(),
+    std.collection.marker(),
+    std.math.marker() + std.collection.marker(),
+    math.shift(seed + offset + value),
+    std.math.shift(seed + offset + value + 1),
+];
