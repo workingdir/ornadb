@@ -8945,17 +8945,19 @@ fn infer_assignment(
                         "snapshot context maps must contain canonical selector sets",
                     ));
                 }
-                Some(expected)
-                    if pinned_snapshot_rebind_compatible(&expected, &value.ty) =>
-                {
-                    // A local pin aggregate or historical closure now refers
-                    // to the new selector identities; aliases inferred before
-                    // this assignment keep their old contexts.
-                    if let Some(symbol) = local.get_mut(name) {
-                        symbol.ty = value.ty.clone();
+                Some(expected) => {
+                    if let Some(reset_type) = pinned_snapshot_reset_type(&expected, &value.ty) {
+                        // A checkpoint reset replaces the local with the exact
+                        // selected value. Do not merge it with intermediate
+                        // rebinds: saved aliases keep their own identities, and
+                        // a later reset must recover the source map unchanged.
+                        if let Some(symbol) = local.get_mut(name) {
+                            symbol.ty = reset_type;
+                        }
+                    } else {
+                        require_same(&expected, &value.ty, diagnostics);
                     }
                 }
-                Some(expected) => require_same(&expected, &value.ty, diagnostics),
                 None => diagnostics.push(diag(
                     DIAG_UNRESOLVED,
                     "assignment target cannot be resolved",
@@ -18129,12 +18131,17 @@ fn callable_function_type(ty: &Type) -> Option<&Type> {
     }
 }
 
-fn pinned_snapshot_rebind_compatible(expected: &Type, actual: &Type) -> bool {
-    checkpoint_snapshot_maps_are_valid(expected)
-        && checkpoint_snapshot_maps_are_valid(actual)
+/// A compatible local checkpoint reset adopts the selected source value's
+/// exact identity map. The reference is silent on structured local reset
+/// chains; replacement preserves saved selector identities without unioning
+/// them with intermediate checkpoints.
+fn pinned_snapshot_reset_type(expected: &Type, selected: &Type) -> Option<Type> {
+    (checkpoint_snapshot_maps_are_valid(expected)
+        && checkpoint_snapshot_maps_are_valid(selected)
         && type_contains_pinned_snapshot_identity(expected)
-        && type_contains_pinned_snapshot_identity(actual)
-        && pinned_snapshot_shape_matches(expected, actual)
+        && type_contains_pinned_snapshot_identity(selected)
+        && pinned_snapshot_shape_matches(expected, selected))
+    .then(|| selected.clone())
 }
 
 fn type_contains_pinned_snapshot_identity(ty: &Type) -> bool {
@@ -22997,8 +23004,8 @@ mod tests {
             &first
         ));
         assert!(type_contains_pinned_snapshot_identity(&first));
-        assert!(pinned_snapshot_rebind_compatible(&first, &second));
-        assert!(!pinned_snapshot_rebind_compatible(&first, &wider));
+        assert!(pinned_snapshot_reset_type(&first, &second).is_some());
+        assert!(pinned_snapshot_reset_type(&first, &wider).is_none());
         let terminal_factory = Type::Function {
             parameters: vec![],
             parameter_names: Some(vec![]),
@@ -23016,20 +23023,18 @@ mod tests {
             &first_pinned_factory,
             &wider_pinned_factory
         ));
-        assert!(pinned_snapshot_rebind_compatible(
-            &first_pinned_factory,
-            &second_pinned_factory
-        ));
-        assert!(!pinned_snapshot_rebind_compatible(
-            &first_pinned_factory,
-            &wider_pinned_factory
-        ));
+        assert!(
+            pinned_snapshot_reset_type(&first_pinned_factory, &second_pinned_factory).is_some()
+        );
+        assert!(
+            pinned_snapshot_reset_type(&first_pinned_factory, &wider_pinned_factory).is_none()
+        );
         assert!(!is_snapshot_context_map_shape(&malformed));
         assert!(!types_match(&malformed, &malformed));
         assert!(!types_match(&malformed, &Type::Bottom));
         assert!(!pinned_snapshot_shape_matches(&malformed, &malformed));
         assert!(!type_contains_pinned_snapshot_identity(&malformed));
-        assert!(!pinned_snapshot_rebind_compatible(&malformed, &second));
+        assert!(pinned_snapshot_reset_type(&malformed, &second).is_none());
         assert!(!is_snapshot_context_map_shape(&singleton));
         assert!(!is_snapshot_context_map_shape(&unsorted));
         assert!(!is_snapshot_context_map_shape(&duplicate));
@@ -23047,10 +23052,7 @@ mod tests {
         assert!(!type_contains_pinned_snapshot_identity(&nested_malformed));
         assert!(merge_list_element_types(&nested_malformed, &nested_malformed).is_none());
         assert!(merge_checkpoint_field_map(&nested_malformed, &nested_malformed).is_none());
-        assert!(!pinned_snapshot_rebind_compatible(
-            &nested_malformed,
-            &nested_malformed
-        ));
+        assert!(pinned_snapshot_reset_type(&nested_malformed, &nested_malformed).is_none());
     }
 
     #[test]
