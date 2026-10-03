@@ -1036,6 +1036,46 @@ impl PackageResolver {
         Ok(route)
     }
 
+    /// Applies rounds of checkpoint storms selected by retained depth labels.
+    /// Each round may select a different depth in the same nested route; all
+    /// selected labels remain bound to their original route and snapshot
+    /// identities across later folds. The reference is silent on composing
+    /// depth-selected closure storms; v1 validates labels at every round
+    /// boundary and returns no partial route if a selected depth or closure
+    /// fails.
+    pub fn extend_nested_terminal_pair_checkpoint_storm_rounds_from_depth_labels(
+        &self,
+        previous: &ReboundPathResolution,
+        rounds: &[&[(&NestedPairDepthLabel, &[[PinnedDatabase; 2]])]],
+    ) -> Result<ReboundPathResolution, AttachmentError> {
+        let mut route = previous.clone();
+        let mut retained_labels = Vec::new();
+        for round in rounds {
+            let checkpoints = round
+                .iter()
+                .map(|(label, _)| {
+                    route.validate_depth_label(label)?;
+                    let checkpoint = route.handoff_checkpoint(label.wave, label.depth)?;
+                    if checkpoint.depth_label() != *label {
+                        return Err(AttachmentError::RetainedSnapshotUnavailable);
+                    }
+                    Ok(checkpoint)
+                })
+                .collect::<Result<Vec<_>, AttachmentError>>()?;
+            let storms = round
+                .iter()
+                .zip(&checkpoints)
+                .map(|((_, replacements), checkpoint)| (checkpoint, *replacements))
+                .collect::<Vec<_>>();
+            route = self.extend_nested_terminal_pair_checkpoint_storms(&route, &storms)?;
+            retained_labels.extend(round.iter().map(|(label, _)| (*label).clone()));
+            for label in &retained_labels {
+                route.validate_depth_label(label)?;
+            }
+        }
+        Ok(route)
+    }
+
     /// Folds checkpoint-rooted terminal-pair storms across independent parent
     /// routes. Each table row is `(route, storms)` and resolves only checkpoints
     /// captured from that row's route; row order and anchor identity are kept
