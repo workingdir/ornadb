@@ -25,3 +25,7 @@
 { id: "wal-merge/c/order-9", name: "log-left-c9", city: "log-right-c9", }
 
 { id: "wal-merge/c/order-9-segment", name: "segment-left-c9", city: "segment-right-c9", }
+
+{ id: "wal-merge/d/order-4", name: "log-left-d4", city: "log-right-d4", }
+
+{ id: "wal-merge/d/order-4-segment", name: "segment-left-d4", city: "segment-right-d4", }
