@@ -63,6 +63,7 @@ use orna_storage_v1::{
     fold_paired_checkpoint_redo_sparse_streams_preserving_undo_chain_identity,
     fold_paired_checkpoint_redo_sparse_streams_preserving_segment_rotation_identity,
     fold_paired_checkpoint_redo_sparse_stream_chains_preserving_segment_rotation_identity,
+    compress_paired_checkpoint_redo_sparse_stream_chains_preserving_segment_rotation_identity,
     fold_paired_checkpoint_redo_sparse_stream_chains_preserving_log_segment_identity,
     compress_paired_checkpoint_redo_sparse_chains_preserving_segment_rotation_identity,
     compress_paired_checkpoint_redo_sparse_chains_preserving_log_segment_identity,
@@ -23328,7 +23329,7 @@ fn paired_sparse_redo_fold_preserves_segment_rotation_identities() {
 }
 
 #[test]
-fn paired_redo_identity_survives_sparse_write_ahead_segment_chains() {
+fn paired_segment_rotation_identity_survives_sparse_checkpoint_fold_compaction_chains() {
     let first_segment_rows = PAIRED_SPARSE_SEGMENT_ROTATIONS
         .split("\n\n")
         .map(|record| parse_fixture(record, RowKeyKind::Explicit))
@@ -23474,10 +23475,80 @@ fn paired_redo_identity_survives_sparse_write_ahead_segment_chains() {
     );
     assert_eq!(slots(&beta)[1].right, Some(positionless.clone()));
     assert_eq!(slots(&beta)[6].left, Some(positionless.clone()));
-    assert_eq!(slots(&observed_late)[5].left, Some(positionless));
+    assert_eq!(slots(&observed_late)[5].left, Some(positionless.clone()));
     assert!(slots(&catalog_only)
         .iter()
         .all(|slot| slot.left.is_none() && slot.right.is_none()));
+
+    let compacted =
+        compress_paired_checkpoint_redo_sparse_stream_chains_preserving_segment_rotation_identity(
+            &streams,
+        );
+    assert_eq!(
+        compacted
+            .iter()
+            .map(|stream| stream.checkpoint_id.clone())
+            .collect::<Vec<_>>(),
+        vec![alpha.clone(), beta.clone(), catalog_only.clone(), observed_late.clone()],
+        "compaction retains the complete sparse checkpoint catalog",
+    );
+    let runs = |checkpoint_id: &[u8]| {
+        &compacted
+            .iter()
+            .find(|stream| stream.checkpoint_id == checkpoint_id)
+            .unwrap()
+            .runs
+    };
+    assert_eq!(
+        runs(&catalog_only)
+            .iter()
+            .map(|run| (run.fold_ordinal, run.first_order, run.last_order, run.left.clone(), run.right.clone()))
+            .collect::<Vec<_>>(),
+        vec![
+            (0, 40, 41, None, None),
+            (0, 43, 44, None, None),
+            (1, 43, 45, None, None),
+        ],
+        "equal state compacts through segment rotations but not across gaps or fold boundaries",
+    );
+    assert_eq!(runs(&catalog_only)[0].segment_identities, first_segments[0..2]);
+    assert_eq!(runs(&catalog_only)[1].segment_identities, first_segments[2..4]);
+    assert_eq!(runs(&catalog_only)[2].segment_identities, second_segments.clone());
+    assert_eq!(
+        runs(&beta)
+            .iter()
+            .map(|run| (run.fold_ordinal, run.first_order, run.last_order, run.left.clone(), run.right.clone()))
+            .collect::<Vec<_>>(),
+        vec![
+            (0, 40, 40, None, None),
+            (0, 41, 41, None, Some(positionless.clone())),
+            (0, 43, 44, None, None),
+            (1, 43, 44, None, None),
+            (1, 45, 45, Some(positionless.clone()), None),
+        ],
+        "positionless states remain distinct from omitted values and repeated orders stay fold-scoped",
+    );
+    assert_eq!(runs(&beta)[2].segment_identities, first_segments[2..4]);
+    assert_eq!(runs(&beta)[3].segment_identities, second_segments[0..2]);
+    assert_eq!(
+        runs(&observed_late)
+            .iter()
+            .map(|run| (run.fold_ordinal, run.first_order, run.last_order, run.left.clone(), run.right.clone()))
+            .collect::<Vec<_>>(),
+        vec![
+            (0, 40, 41, None, None),
+            (0, 43, 44, None, None),
+            (1, 43, 43, None, None),
+            (1, 44, 44, Some(positionless), None),
+            (1, 45, 45, None, None),
+        ],
+        "later observations retain earlier and surrounding omission runs",
+    );
+    assert_eq!(runs(&observed_late)[0].segment_identities, first_segments[0..2]);
+    assert_eq!(runs(&observed_late)[1].segment_identities, first_segments[2..4]);
+    assert_eq!(runs(&observed_late)[2].segment_identities, second_segments[0..1]);
+    assert_eq!(runs(&observed_late)[3].segment_identities, second_segments[1..2]);
+    assert_eq!(runs(&observed_late)[4].segment_identities, second_segments[2..3]);
 }
 
 #[test]

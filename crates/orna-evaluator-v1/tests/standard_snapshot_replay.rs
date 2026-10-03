@@ -2941,6 +2941,72 @@ fn captured_dependency_snapshots_survive_paired_pin_replay_folds() {
 }
 
 #[test]
+fn captured_same_named_exports_keep_paired_resolution_pin_identity() {
+    let (
+        _directory,
+        _project_v1,
+        _project_v2,
+        project_v3,
+        project_v4,
+        project_v5,
+        project_v6,
+        snapshots,
+    ) = module_upgrade_projects();
+    let projects = [&project_v3, &project_v4, &project_v5, &project_v6];
+    let pins = [&snapshots[2], &snapshots[3], &snapshots[4], &snapshots[5]];
+    let expected = [
+        [40, 3, 43, 40, 3, 43, 1_007, 1_008],
+        [40, 4, 44, 40, 4, 44, 1_007, 1_008],
+        [50, 5, 55, 50, 5, 55, 10_007, 10_008],
+        [60, 6, 66, 60, 6, 66, 100_007, 100_008],
+    ];
+    let use_pair = include_str!("fixtures/module-upgrade-paired-divergence-use.orna");
+    let capture = include_str!("fixtures/module-upgrade-paired-resolution-capture.orna");
+    let replay = include_str!("fixtures/module-upgrade-paired-resolution-replay.orna");
+
+    assert!(pins.windows(2).all(|pair| pair[0] != pair[1]));
+    let mut sessions = Vec::with_capacity(projects.len());
+    for (index, project) in projects.iter().enumerate() {
+        assert_eq!(
+            project.standard_profile().unwrap().snapshot(),
+            pins[index],
+            "project v{} must retain its paired module snapshot",
+            index + 3
+        );
+        let mut session = AdmittedReplSession::from_loaded_project(
+            project,
+            project.standard_sources().iter().cloned(),
+            Limits::default(),
+        )
+        .unwrap();
+        for import in use_pair.lines() {
+            assert_eq!(session.submit(import), Ok(None));
+        }
+        assert_eq!(session.submit(capture), Ok(None));
+        sessions.push(session);
+    }
+
+    for index in [3, 0, 2, 1, 3, 1, 0] {
+        assert_eq!(
+            sessions[index].submit(replay),
+            Ok(Some(ints(&expected[index]))),
+            "same-named math and collection exports must remain paired at pin {}",
+            pins[index]
+        );
+    }
+
+    let mut cloned_sessions = sessions.clone();
+    for index in [1, 3, 0, 2] {
+        assert_eq!(
+            cloned_sessions[index].submit(replay),
+            Ok(Some(ints(&expected[index]))),
+            "cloned resolution replay must preserve both module identities at pin {}",
+            pins[index]
+        );
+    }
+}
+
+#[test]
 fn replayed_closure_uses_its_captured_dependency_snapshot_after_snapshot_changes() {
     let (_directory, project_v1, project_v2, snapshot_v1, snapshot_v2, sources_v1, sources_v2) =
         snapshot_projects();
