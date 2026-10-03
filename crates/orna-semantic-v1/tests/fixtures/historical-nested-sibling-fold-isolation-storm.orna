@@ -1,0 +1,38 @@
+pub fn factory_at(pin: sys.SnapshotRef) =
+    sys.database.as_of(pin).energy.factory;
+
+// A crossed identity relation between two nested siblings must not discard a
+// third sibling's labels from earlier or later rows in the reconciliation.
+pub fn nested_sibling_storm_isolates_crossed_depth_labels(failure: Error) {
+    let parents = [
+        {
+            nested: {
+                left: { pins: (fail(failure), fail(failure)) },
+                right: { pins: (fail(failure), fail(failure)) },
+                steady: { pins: (fail(failure), fail(failure)) },
+            },
+        },
+        {
+            nested: {
+                left: { pins: (factory_at(sys.snapshot("HEAD~1210")), factory_at(sys.snapshot("HEAD~1211"))) },
+                right: { pins: (factory_at(sys.snapshot("HEAD~1220")), factory_at(sys.snapshot("HEAD~1221"))) },
+                steady: { pins: (factory_at(sys.snapshot("HEAD~1230")), factory_at(sys.snapshot("HEAD~1231"))) },
+            },
+        },
+        {
+            nested: {
+                left: { pins: (factory_at(sys.snapshot("HEAD~1240")), factory_at(sys.snapshot("HEAD~1241"))) },
+                right: { pins: (factory_at(sys.snapshot("HEAD~1240")), factory_at(sys.snapshot("HEAD~1241"))) },
+                steady: { pins: (factory_at(sys.snapshot("HEAD~1250")), factory_at(sys.snapshot("HEAD~1251"))) },
+            },
+        },
+        {
+            nested: {
+                left: { pins: (factory_at(sys.snapshot("HEAD~1260")), factory_at(sys.snapshot("HEAD~1261"))) },
+                right: { pins: (factory_at(sys.snapshot("HEAD~1270")), factory_at(sys.snapshot("HEAD~1271"))) },
+                steady: { pins: (factory_at(sys.snapshot("HEAD~1280")), factory_at(sys.snapshot("HEAD~1281"))) },
+            },
+        },
+    ];
+    { parent_fold: parents }
+}

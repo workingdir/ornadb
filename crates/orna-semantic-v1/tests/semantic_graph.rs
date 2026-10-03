@@ -7197,6 +7197,106 @@ fn nested_sibling_pin_reconciliation_storms_preserve_depth_identity() {
 }
 
 #[test]
+fn nested_sibling_reconciliation_storm_rolls_back_only_crossed_scopes() {
+    let source =
+        include_str!("fixtures/historical-nested-sibling-fold-isolation-storm.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-nested-sibling-fold-isolation-storm.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    let type_diagnostics = result
+        .diagnostics
+        .iter()
+        .filter(|diagnostic| diagnostic.code() == DIAG_TYPE)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        type_diagnostics.len(),
+        1,
+        "the crossed sibling row must be rejected once while the independent sibling fold survives: {:?}",
+        type_diagnostics
+            .iter()
+            .map(|diagnostic| diagnostic.message())
+            .collect::<Vec<_>>()
+    );
+    let module = result
+        .modules
+        .values()
+        .find(|module| {
+            module
+                .symbols
+                .contains_key("nested_sibling_storm_isolates_crossed_depth_labels")
+        })
+        .expect("nested sibling fold isolation fixture module");
+    let Type::Function { result, .. } = &module.symbols
+        ["nested_sibling_storm_isolates_crossed_depth_labels"]
+        .ty
+    else {
+        panic!("nested sibling storm must retain its computed result");
+    };
+    let Type::Record(fields) = result.as_ref() else {
+        panic!("nested sibling storm must return a record: {result:?}");
+    };
+    let Type::List(parent) = fields.get("parent_fold").expect("parent fold") else {
+        panic!("nested sibling storm must return its computed parent list");
+    };
+    let Type::Record(parent) = parent.as_ref() else {
+        panic!("folded parent must remain a record: {parent:?}");
+    };
+    let Type::Record(siblings) = parent.get("nested").expect("nested sibling record") else {
+        panic!("folded nested field must remain a record");
+    };
+
+    let pin_contexts = |sibling: &str| {
+        let Type::Record(depths) = &siblings[sibling] else {
+            panic!("{sibling} must retain its depth record");
+        };
+        let Type::Tuple(slots) = &depths["pins"] else {
+            panic!("{sibling} must retain both depth slots");
+        };
+        slots
+            .iter()
+            .map(|slot| {
+                let mut contexts = BTreeSet::new();
+                collect_snapshot_contexts(slot, &mut contexts);
+                contexts
+            })
+            .collect::<Vec<_>>()
+    };
+
+    assert_eq!(
+        pin_contexts("left"),
+        [BTreeSet::new(), BTreeSet::new()],
+        "the left path participating in a new cross-sibling identity must roll back to the omitted anchor"
+    );
+    assert_eq!(
+        pin_contexts("right"),
+        [BTreeSet::new(), BTreeSet::new()],
+        "the right path participating in a new cross-sibling identity must roll back to the omitted anchor"
+    );
+    assert_eq!(
+        pin_contexts("steady"),
+        [
+            BTreeSet::from([
+                "selector:HEAD~1230".into(),
+                "selector:HEAD~1250".into(),
+                "selector:HEAD~1280".into(),
+            ]),
+            BTreeSet::from([
+                "selector:HEAD~1231".into(),
+                "selector:HEAD~1251".into(),
+                "selector:HEAD~1281".into(),
+            ]),
+        ],
+        "a sibling outside the crossed identity must retain labels before and after the rejected row"
+    );
+}
+
+#[test]
 fn multi_parent_checkpoint_folds_preserve_labels_across_paired_omissions() {
     let source = include_str!(
         "fixtures/historical-paired-omission-multi-parent-reconciliation.orna"
