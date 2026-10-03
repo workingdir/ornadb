@@ -814,6 +814,53 @@ fn generated_schema_accepts_relationship_shapes_that_typed_dispatch_rejects() {
 }
 
 #[test]
+fn generated_schema_defers_semantic_dispatch_id_uniqueness_to_typed_registry() {
+    let schema_json = build_provider::generate_provider_registry_schema()
+        .expect("provider dispatch schema regenerates from its generator");
+    let registry: Value =
+        serde_json::from_str(system_provider_abi_json()).expect("embedded dispatch document");
+
+    let mut duplicate_operation = registry.clone();
+    let mut operation = duplicate_operation["operations"][0].clone();
+    operation["preconditions"]
+        .as_array_mut()
+        .expect("operation preconditions are an array")
+        .push(Value::String("sys.cont23.duplicate_probe".to_owned()));
+    duplicate_operation["operations"]
+        .as_array_mut()
+        .unwrap()
+        .push(operation);
+    let duplicate_operation_json = duplicate_operation.to_string();
+    build_host::validate_json_against_schema(&duplicate_operation_json, &schema_json)
+        .expect("different operation rows satisfy schema uniqueItems");
+    assert_eq!(
+        SystemProviderAbi::from_json(&duplicate_operation_json),
+        Err(orna_sys_v1::ProviderAbiError::DuplicateOperation),
+        "typed dispatch keys operations by semantic name"
+    );
+
+    let mut duplicate_role = registry;
+    let mut role = duplicate_role["roles"][0].clone();
+    let replaceable = role["replaceable"]
+        .as_bool()
+        .expect("role replaceable flag is boolean");
+    role["replaceable"] = Value::Bool(!replaceable);
+    duplicate_role["roles"].as_array_mut().unwrap().push(role);
+    let duplicate_role_json = duplicate_role.to_string();
+    build_host::validate_json_against_schema(&duplicate_role_json, &schema_json)
+        .expect("different role rows satisfy schema uniqueItems");
+    assert_eq!(
+        SystemProviderAbi::from_json(&duplicate_role_json),
+        Err(orna_sys_v1::ProviderAbiError::DuplicateRole),
+        "typed dispatch keys roles by semantic name"
+    );
+
+    println!(
+        "generated_schema_typed_dispatch_identity_parity schema_valid=2 typed_rejections=duplicate_operation_id,duplicate_role_id total_cases=2"
+    );
+}
+
+#[test]
 fn generated_artifact_drift_probe_rejects_tampered_outputs_and_stale_modules() {
     let regenerated = regenerate();
     let source_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
