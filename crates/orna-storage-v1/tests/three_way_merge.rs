@@ -5,7 +5,9 @@ use orna_evolution_v1::{
 };
 use orna_foundation_v1::OvbRaw;
 use orna_storage_v1::{
+    BranchMergePairedCheckpointRedoIdentityFrame,
     BranchMergePairedCheckpointRedoFrame,
+    BranchMergePairedWriteAheadIdentity,
     BranchMergeBudget, BranchMergeColumnDepthEvent, BranchMergeColumnDepthFragments,
     BranchMergeColumnDepthFragmentSnapshot, BranchMergeColumnDepthLadderEvent,
     BranchMergeColumnDepthLadderSnapshot, BranchMergeColumnDepthLadderWaveSnapshot,
@@ -45,6 +47,7 @@ use orna_storage_v1::{
     BranchMergeTombstoneHistoryError, KeyRange, MergeSide, MergedSegment, RowSegmentManifest,
     SequencedBranchMergePlan, TableManifest, ThreeWaySnapshot,
     compress_paired_checkpoint_redo_chain, merge_three_way_snapshots,
+    compress_paired_checkpoint_redo_chain_preserving_write_ahead_identity,
 };
 use orna_syntax_v1::{Expr, LiteralKind, parse_row};
 use std::{
@@ -66,6 +69,8 @@ const CHECKPOINT_TAIL_LEFT: &str = include_str!("fixtures/merge-checkpoint-tail-
 const CHECKPOINT_TAIL_RIGHT: &str = include_str!("fixtures/merge-checkpoint-tail-right.orna");
 const PAIRED_CHECKPOINT_REDO: &str =
     include_str!("fixtures/merge-paired-checkpoint-redo.orna");
+const PAIRED_WRITE_AHEAD_REDO_IDENTITIES: &str =
+    include_str!("fixtures/paired-write-ahead-redo-identities.orna");
 const TOMBSTONE_DEPTH_SHALLOW: &str = include_str!("fixtures/merge-tombstone-depth-shallow.orna");
 const TOMBSTONE_DEPTH_MIDDLE: &str = include_str!("fixtures/merge-tombstone-depth-middle.orna");
 const TOMBSTONE_DEPTH_DEEP: &str = include_str!("fixtures/merge-tombstone-depth-deep.orna");
@@ -22724,6 +22729,80 @@ fn paired_checkpoint_redo_compression_keeps_state_changes_and_order_gaps() {
         ],
         "an absent checkpoint differs from a present positionless checkpoint and order gaps stay explicit",
     );
+}
+
+#[test]
+fn paired_checkpoint_redo_compaction_preserves_write_ahead_identities() {
+    let identity_rows = PAIRED_WRITE_AHEAD_REDO_IDENTITIES
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    let checkpoint_states = PAIRED_CHECKPOINT_REDO
+        .split("\n\n")
+        .map(parse_checkpoint_fixture)
+        .collect::<Vec<_>>();
+    assert_eq!(identity_rows.len(), 6);
+    assert_eq!(checkpoint_states.len(), 5);
+    let left_base = checkpoint_states[0].clone();
+    let right_base = checkpoint_states[1].clone();
+    let left_redo = checkpoint_states[2].clone();
+    let right_redo = checkpoint_states[3].clone();
+    let checkpoint_id = b"consumer/paired-log".to_vec();
+    let orders = [10_u64, 11, 12, 13, 14, 16];
+    let identities = identity_rows
+        .iter()
+        .map(|row| BranchMergePairedWriteAheadIdentity {
+            left_log: row.fields[&id(2)].encode().unwrap(),
+            right_log: row.fields[&id(3)].encode().unwrap(),
+        })
+        .collect::<Vec<_>>();
+    let mut frames = BTreeMap::new();
+    for (index, (order, identity)) in orders.into_iter().zip(identities.iter()).enumerate() {
+        let (left, right) = match index {
+            0 | 1 => (&left_base, &right_base),
+            2 => (&left_redo, &right_base),
+            _ => (&left_redo, &right_redo),
+        };
+        frames.insert(
+            order,
+            BranchMergePairedCheckpointRedoIdentityFrame {
+                checkpoints: BranchMergePairedCheckpointRedoFrame {
+                    left: BTreeMap::from([(checkpoint_id.clone(), left.clone())]),
+                    right: BTreeMap::from([(checkpoint_id.clone(), right.clone())]),
+                },
+                write_ahead_identity: identity.clone(),
+            },
+        );
+    }
+
+    let chains = compress_paired_checkpoint_redo_chain_preserving_write_ahead_identity(&frames);
+    assert_eq!(chains.len(), 1);
+    assert_eq!(chains[0].checkpoint_id, checkpoint_id);
+    let runs = &chains[0].runs;
+    assert_eq!(runs.len(), 4);
+    assert_eq!(
+        runs.iter()
+            .map(|run| (run.first_order, run.last_order))
+            .collect::<Vec<_>>(),
+        vec![(10, 11), (12, 12), (13, 14), (16, 16)],
+    );
+    assert_eq!(runs[0].left, Some(left_base.clone()));
+    assert_eq!(runs[0].right, Some(right_base.clone()));
+    assert_eq!(runs[1].left, Some(left_redo.clone()));
+    assert_eq!(runs[1].right, Some(right_base));
+    assert_eq!(runs[2].left, Some(left_redo.clone()));
+    assert_eq!(runs[2].right, Some(right_redo.clone()));
+    assert_eq!(runs[3].left, Some(left_redo));
+    assert_eq!(runs[3].right, Some(right_redo));
+    assert_eq!(runs[0].write_ahead_identities, identities[..2]);
+    assert_eq!(runs[1].write_ahead_identities, identities[2..3]);
+    assert_eq!(runs[2].write_ahead_identities, identities[3..5]);
+    assert_eq!(
+        runs[2].write_ahead_identities[0],
+        runs[2].write_ahead_identities[1],
+        "repeated write-ahead identities remain present at both committed orders",
+    );
+    assert_eq!(runs[3].write_ahead_identities, identities[5..6]);
 }
 
 #[test]
