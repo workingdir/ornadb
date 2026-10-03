@@ -1,0 +1,9 @@
+pub table Reading(id: Int) {
+    key: ((Int, Str)?, (Int, Str)?),
+    assert all_unique(reading => reading.key);
+}
+
+fn parent() {
+    Reading.insert({ id: 1, key: (null, null) });
+    Reading.insert({ id: 2, key: (null, null) });
+}
