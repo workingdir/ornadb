@@ -2,13 +2,16 @@ use orna_evaluator_v1::{AdmittedReplSession, Limits};
 use orna_foundation_v1::CanonicalValue;
 use orna_value_v1::Raw;
 
+#[path = "support/pinned_time_text_std.rs"]
+mod pinned_time_text_std;
+
 fn canonical(raw: Raw) -> CanonicalValue {
     CanonicalValue::new(raw).unwrap()
 }
 
 #[test]
 fn pinned_timezone_and_calendar_sources_cover_zone_policy_and_civil_arithmetic() {
-    let mut session = AdmittedReplSession::with_reference_standard(Limits::default()).unwrap();
+    let mut session = pinned_time_text_std::time_session();
     let import_source = include_str!("fixtures/stdlib-timezone-calendar-use-b8tgd.orna");
     let import_parsed = orna_syntax_v1::parse_repl(import_source);
     assert!(
@@ -65,7 +68,7 @@ fn pinned_timezone_and_calendar_sources_cover_zone_policy_and_civil_arithmetic()
 
 #[test]
 fn timezone_overlap_and_gap_policies_fail_closed_and_core_dates_need_no_std() {
-    let mut with_std = AdmittedReplSession::with_reference_standard(Limits::default()).unwrap();
+    let mut with_std = pinned_time_text_std::time_session();
     let import_source = include_str!("fixtures/stdlib-timezone-calendar-use-b8tgd.orna");
     let import_parsed = orna_syntax_v1::parse_repl(import_source);
     assert!(

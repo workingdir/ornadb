@@ -928,6 +928,55 @@ impl PackageResolver {
         Ok(route)
     }
 
+    /// Applies checkpoint-anchored paired rebind chains while validating the
+    /// terminal identity on both sides of every anchor. Labels emitted by an
+    /// earlier anchor remain attached to their exact snapshots through later
+    /// chains. The reference does not specify identity edges between nested
+    /// anchor chains; v1 checks each edge in order and returns no partial route
+    /// or transition list when an anchor or identity is stale.
+    pub fn extend_nested_terminal_pair_checkpoint_cascades_validating_terminal_identity_transitions(
+        &self,
+        previous: &ReboundPathResolution,
+        cascades: &[(&ReboundPathCheckpoint, &[[PinnedDatabase; 2]])],
+        expected_transitions: &[(NestedPairTerminalRouteIdentity, NestedPairTerminalRouteIdentity)],
+    ) -> Result<(
+        ReboundPathResolution,
+        Vec<(NestedPairTerminalRouteIdentity, NestedPairTerminalRouteIdentity)>,
+    ), AttachmentError> {
+        if cascades.len() != expected_transitions.len() {
+            return Err(AttachmentError::RetainedSnapshotUnavailable);
+        }
+
+        let mut route = previous.clone();
+        let mut retained_checkpoint_labels = Vec::new();
+        let mut transitions = Vec::with_capacity(cascades.len());
+        for ((checkpoint, replacement_waves), (expected_before, expected_after)) in
+            cascades.iter().zip(expected_transitions)
+        {
+            let before = route.terminal_route_identity();
+            route.validate_terminal_route_identity(expected_before)?;
+            let (folded, checkpoint_label) = self
+                .extend_nested_terminal_pair_chain_from_checkpoint_with_labels(
+                    &route,
+                    checkpoint,
+                    replacement_waves,
+                    &retained_checkpoint_labels,
+                )?;
+            if let Some(label) = checkpoint_label {
+                retained_checkpoint_labels.push(label);
+            }
+            route = folded;
+            for label in &retained_checkpoint_labels {
+                route.validate_depth_label(label)?;
+            }
+            let after = route.terminal_route_identity();
+            route.validate_terminal_route_identity(expected_after)?;
+            transitions.push((before, after));
+        }
+
+        Ok((route, transitions))
+    }
+
     fn extend_nested_terminal_pair_chain_from_checkpoint_with_labels(
         &self,
         previous: &ReboundPathResolution,
