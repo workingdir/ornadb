@@ -1,0 +1,9 @@
+fn captured_suppressed_pair(seed: Int) = [
+    marker(),
+    math.marker(),
+    collection.marker(),
+    std.math.marker(),
+    std.collection.marker(),
+    shift(seed),
+    std.math.shift(seed + 1),
+];
