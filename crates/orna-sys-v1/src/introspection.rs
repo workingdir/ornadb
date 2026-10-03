@@ -2551,6 +2551,9 @@ fn explain_query_core_with_limit_pushdowns(
     let mut paired_aggregate_spill_restoration_fold: Option<
         QueryPairedAggregateSpillRestorationFold,
     > = None;
+    let mut paired_window_compaction_spill_fold: Option<
+        QueryPairedWindowCompactionSpillFold,
+    > = None;
     let mut paired_join_limit_anchor_cascade_fold: Option<QueryJoinLimitAnchorCascadeFold> = None;
     let mut paired_limit_window_cascade_fold: Option<QueryLimitWindowCascadeFold> = None;
     add_join_cost_fold_seed_details(
@@ -3198,6 +3201,30 @@ fn explain_query_core_with_limit_pushdowns(
                 ),
             );
         }
+        let paired_window_compaction_spill_pair_identity = join_pair_identity
+            .zip(paired_aggregate_pushdown_anchor_fold_id.as_deref())
+            .zip(right_window_identity.as_deref())
+            .map(|((pair, window_anchor_fold_identity), window_chain_identity)| {
+                query_paired_window_compaction_spill_pair_identity(
+                    pair,
+                    window_anchor_fold_identity,
+                    window_chain_identity,
+                    right_window_spill_chain_identity.as_deref(),
+                )
+            });
+        if let (Some(pair_identity), Some(window_fold)) = (
+            paired_window_compaction_spill_pair_identity.as_deref(),
+            paired_aggregate_anchor_cascade_fold.as_ref(),
+        ) {
+            paired_window_compaction_spill_fold = Some(
+                query_paired_window_compaction_spill_fold(
+                    paired_window_compaction_spill_fold.as_ref(),
+                    pair_identity,
+                    window_fold,
+                    paired_window_spill_cascade_fold.as_ref(),
+                ),
+            );
+        }
         let paired_aggregate_spill_restoration_pair_identity =
             query_paired_aggregate_spill_restoration_pair_identity(
                 paired_aggregate_pushdown_anchor_fold_id.as_deref(),
@@ -3268,6 +3295,26 @@ fn explain_query_core_with_limit_pushdowns(
             fold_nodes.extend(right_window_operator_start..operators.len());
             for index in fold_nodes {
                 add_paired_aggregate_spill_restoration_fold_details(
+                    &mut operators[index].details,
+                    fold,
+                );
+            }
+        }
+        if let Some(identity) = paired_window_compaction_spill_pair_identity.as_deref() {
+            let mut fold_nodes = BTreeSet::from([right_access, right]);
+            fold_nodes.extend(right_window_operator_start..operators.len());
+            for index in fold_nodes {
+                add_paired_window_compaction_spill_pair_details(
+                    &mut operators[index].details,
+                    identity,
+                );
+            }
+        }
+        if let Some(fold) = paired_window_compaction_spill_fold.as_ref() {
+            let mut fold_nodes = BTreeSet::from([right_access, right]);
+            fold_nodes.extend(right_window_operator_start..operators.len());
+            for index in fold_nodes {
+                add_paired_window_compaction_spill_fold_details(
                     &mut operators[index].details,
                     fold,
                 );
@@ -3478,6 +3525,9 @@ fn explain_query_core_with_limit_pushdowns(
             paired_aggregate_spill_restoration_fold
                 .as_ref()
                 .map(|fold| fold.identity.as_str()),
+            paired_window_compaction_spill_fold
+                .as_ref()
+                .map(|fold| fold.identity.as_str()),
             paired_limit_aggregate_restoration_fold
                 .as_ref()
                 .map(|fold| fold.identity.as_str()),
@@ -3624,6 +3674,12 @@ fn explain_query_core_with_limit_pushdowns(
         }
         if let Some(fold) = paired_aggregate_spill_restoration_fold.as_ref() {
             add_paired_aggregate_spill_restoration_fold_details(&mut details, fold);
+        }
+        if let Some(identity) = paired_window_compaction_spill_pair_identity.as_deref() {
+            add_paired_window_compaction_spill_pair_details(&mut details, identity);
+        }
+        if let Some(fold) = paired_window_compaction_spill_fold.as_ref() {
+            add_paired_window_compaction_spill_fold_details(&mut details, fold);
         }
         if let Some(identity) = paired_limit_aggregate_restoration_pair_identity.as_deref() {
             add_paired_limit_aggregate_restoration_pair_details(
@@ -5868,6 +5924,16 @@ struct QueryPairedAggregateSpillRestorationFold {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+struct QueryPairedWindowCompactionSpillFold {
+    identity: String,
+    window_pair_count: u64,
+    window_stage_count: u64,
+    spill_pair_count: u64,
+    spill_totals: Option<QueryAggregateSpillTotals>,
+    overflowed: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 struct QueryPairedLimitAggregateRestorationFold {
     identity: String,
     aggregate_pair_count: u64,
@@ -6022,6 +6088,165 @@ fn add_paired_window_spill_cascade_fold_details(
             "computed".to_owned()
         }),
     );
+}
+
+/// Folds each exact paired window chain together with the cumulative spill
+/// history observed at its compaction boundaries. Window chains without a
+/// spill still advance the pair identity, while sparse joins without a window
+/// chain carry the last combined identity and estimates unchanged.
+fn query_paired_window_compaction_spill_pair_identity(
+    pair: &QueryJoinPairIdentityDescription,
+    window_anchor_fold_identity: &str,
+    window_chain_identity: &str,
+    spill_chain_identity: Option<&str>,
+) -> String {
+    let mut hash = Sha256::new();
+    hash.update(b"orna.sys.query-paired-window-compaction-spill-pair.v1\0");
+    hash_part(&mut hash, window_anchor_fold_identity.as_bytes());
+    hash_part(&mut hash, pair.identity.as_str().as_bytes());
+    hash_part(&mut hash, pair.left_source.as_str().as_bytes());
+    hash_part(&mut hash, pair.right_source.as_str().as_bytes());
+    hash_optional_text(
+        &mut hash,
+        pair.predicate.as_ref().map(ExpressionRef::as_str),
+    );
+    hash_part(&mut hash, window_chain_identity.as_bytes());
+    hash_optional_text(&mut hash, spill_chain_identity);
+    format!(
+        "paired-window-compaction-spill-pair:{}",
+        hex(&hash.finalize())
+    )
+}
+
+fn query_paired_window_compaction_spill_fold(
+    previous: Option<&QueryPairedWindowCompactionSpillFold>,
+    pair_identity: &str,
+    window_fold: &QueryPairedAggregateAnchorCascadeFold,
+    spill_fold: Option<&QueryWindowSpillCascadeFold>,
+) -> QueryPairedWindowCompactionSpillFold {
+    let spill_totals = spill_fold.map(|fold| fold.totals);
+    let spill_pair_count = spill_fold.map_or(0, |fold| fold.spill_pair_count);
+    let overflowed = window_fold.overflowed
+        || spill_totals.is_some_and(|totals| totals.overflowed);
+
+    let mut hash = Sha256::new();
+    hash.update(b"orna.sys.query-paired-window-compaction-spill-fold.v1\0");
+    hash_optional_text(
+        &mut hash,
+        previous.map(|previous| previous.identity.as_str()),
+    );
+    hash_part(&mut hash, pair_identity.as_bytes());
+    hash_part(&mut hash, window_fold.identity.as_bytes());
+    hash_optional_text(&mut hash, spill_fold.map(|fold| fold.identity.as_str()));
+    hash.update(window_fold.pair_count.to_be_bytes());
+    hash.update(window_fold.aggregate_stage_count.to_be_bytes());
+    hash.update(spill_pair_count.to_be_bytes());
+    if let Some(totals) = spill_totals {
+        hash.update([1]);
+        hash_query_aggregate_spill_totals(&mut hash, totals);
+    } else {
+        hash.update([0]);
+    }
+    hash.update([u8::from(overflowed)]);
+
+    QueryPairedWindowCompactionSpillFold {
+        identity: format!(
+            "paired-window-compaction-spill-fold:{}",
+            hex(&hash.finalize())
+        ),
+        window_pair_count: window_fold.pair_count,
+        window_stage_count: window_fold.aggregate_stage_count,
+        spill_pair_count,
+        spill_totals,
+        overflowed,
+    }
+}
+
+fn add_paired_window_compaction_spill_pair_details(
+    details: &mut BTreeMap<String, PlanDetail>,
+    identity: &str,
+) {
+    details.insert(
+        "paired_window_compaction_spill_pair_identity".to_owned(),
+        PlanDetail::Text(identity.to_owned()),
+    );
+    details.insert(
+        "paired_window_compaction_spill_pairing".to_owned(),
+        PlanDetail::Text(
+            "exact_join_pair_window_chain_and_optional_compaction_spill_chain".to_owned(),
+        ),
+    );
+}
+
+fn add_paired_window_compaction_spill_fold_details(
+    details: &mut BTreeMap<String, PlanDetail>,
+    fold: &QueryPairedWindowCompactionSpillFold,
+) {
+    details.insert(
+        "paired_window_compaction_spill_fold_identity".to_owned(),
+        PlanDetail::Text(fold.identity.clone()),
+    );
+    details.insert(
+        "paired_window_compaction_spill_fold_pairing".to_owned(),
+        PlanDetail::Text(
+            "sparse_paired_window_chains_with_cumulative_compaction_spill_history".to_owned(),
+        ),
+    );
+    details.insert(
+        "paired_window_compaction_spill_window_pair_count".to_owned(),
+        PlanDetail::Integer(fold.window_pair_count),
+    );
+    details.insert(
+        "paired_window_compaction_spill_window_stage_count".to_owned(),
+        PlanDetail::Integer(fold.window_stage_count),
+    );
+    details.insert(
+        "paired_window_compaction_spill_pair_count".to_owned(),
+        PlanDetail::Integer(fold.spill_pair_count),
+    );
+    let totals = fold.spill_totals;
+    details.insert(
+        "paired_window_compaction_spill_stage_count".to_owned(),
+        PlanDetail::Integer(totals.map_or(0, |totals| totals.stage_count)),
+    );
+    details.insert(
+        "paired_window_compaction_spill_unknown_working_set_count".to_owned(),
+        PlanDetail::Integer(totals.map_or(0, |totals| totals.unknown_working_set_count)),
+    );
+    details.insert(
+        "paired_window_compaction_spill_overflowed".to_owned(),
+        PlanDetail::Boolean(fold.overflowed),
+    );
+    let status = match totals {
+        None => "no_spill_pairs",
+        Some(totals) if fold.overflowed || totals.overflowed => "overflow",
+        Some(totals) if totals.unknown_working_set_count > 0 => "unknown_working_set",
+        Some(_) => "computed",
+    };
+    details.insert(
+        "paired_window_compaction_spill_estimate_status".to_owned(),
+        PlanDetail::Text(status.to_owned()),
+    );
+    for (key, value) in [
+        (
+            "paired_window_compaction_spill_estimated_bytes",
+            totals.and_then(|totals| totals.estimated_bytes),
+        ),
+        (
+            "paired_window_compaction_spill_estimated_io_blocks",
+            totals.and_then(|totals| totals.estimated_io_blocks),
+        ),
+        (
+            "paired_window_compaction_spill_estimated_io_work",
+            totals.and_then(|totals| totals.estimated_io_work),
+        ),
+    ] {
+        if let Some(value) = value {
+            details.insert(key.to_owned(), PlanDetail::Integer(value));
+        } else {
+            details.remove(key);
+        }
+    }
 }
 
 /// Joins sparse aggregate restoration and spill histories into one identity.
@@ -7181,6 +7406,7 @@ fn query_join_cost_fold(
     paired_aggregate_anchor_cascade_fold_identity: Option<&str>,
     paired_window_spill_cascade_fold_identity: Option<&str>,
     paired_aggregate_spill_restoration_fold_identity: Option<&str>,
+    paired_window_compaction_spill_fold_identity: Option<&str>,
     paired_limit_aggregate_restoration_fold_identity: Option<&str>,
     paired_limit_window_cascade_fold_identity: Option<&str>,
     paired_join_limit_anchor_cascade_fold_identity: Option<&str>,
@@ -7227,6 +7453,7 @@ fn query_join_cost_fold(
         &mut hash,
         paired_aggregate_spill_restoration_fold_identity,
     );
+    hash_optional_text(&mut hash, paired_window_compaction_spill_fold_identity);
     hash_optional_text(
         &mut hash,
         paired_limit_aggregate_restoration_fold_identity,
