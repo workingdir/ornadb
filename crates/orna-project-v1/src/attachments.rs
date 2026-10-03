@@ -1216,6 +1216,63 @@ impl PackageResolver {
         Ok(folded)
     }
 
+    /// Applies rounds of label-selected checkpoint storms with one slot per
+    /// sibling route. `None` retains that row unchanged for the round; it is
+    /// not compacted away, so a later row plan cannot inherit its identity.
+    /// Present plans are validated against their original row and all earlier
+    /// labels are revalidated after each fold. The reference is silent on
+    /// paired closure omissions; v1 keeps row positions stable and returns no
+    /// partial result if any present plan fails.
+    pub fn extend_sibling_terminal_pair_checkpoint_storm_rounds_from_depth_labels_with_omissions(
+        &self,
+        previous: &SiblingRebindResolution,
+        rounds: &[&[Option<(&NestedPairDepthLabel, &[[PinnedDatabase; 2]])>]],
+    ) -> Result<SiblingRebindResolution, AttachmentError> {
+        let mut folded = previous.clone();
+        for round in rounds {
+            if round.len() != folded.routes.len() {
+                return Err(AttachmentError::RetainedSnapshotUnavailable);
+            }
+            let checkpoint_storms_by_row = round
+                .iter()
+                .enumerate()
+                .map(|(row, plan)| match plan {
+                    Some((label, replacements)) => {
+                        let route = folded
+                            .routes
+                            .get(row)
+                            .ok_or(AttachmentError::RetainedSnapshotUnavailable)?;
+                        route.validate_depth_label(label)?;
+                        let checkpoint = route.handoff_checkpoint(label.wave, label.depth)?;
+                        if checkpoint.depth_label() != *label {
+                            return Err(AttachmentError::RetainedSnapshotUnavailable);
+                        }
+                        Ok(vec![(checkpoint, *replacements)])
+                    }
+                    None => Ok(Vec::new()),
+                })
+                .collect::<Result<Vec<_>, AttachmentError>>()?;
+            let checkpoint_storm_rows = checkpoint_storms_by_row
+                .iter()
+                .map(|storms| {
+                    storms
+                        .iter()
+                        .map(|(checkpoint, replacements)| (checkpoint, *replacements))
+                        .collect::<Vec<_>>()
+                })
+                .collect::<Vec<_>>();
+            let checkpoint_storm_row_slices = checkpoint_storm_rows
+                .iter()
+                .map(Vec::as_slice)
+                .collect::<Vec<_>>();
+            folded = self.extend_sibling_terminal_pair_checkpoint_storms_from_siblings(
+                &folded,
+                &checkpoint_storm_row_slices,
+            )?;
+        }
+        Ok(folded)
+    }
+
     /// Applies ordered rounds of depth-selected sibling checkpoint storms.
     /// Each round contains one plan slice per sibling row, and its coordinates
     /// are resolved against the result of the preceding round. The reference
