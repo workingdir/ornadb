@@ -132,6 +132,7 @@ pub const REFERENCE_STANDARD_IO_READER_PATH_V1: &str = "std/io/reader.orna";
 pub const REFERENCE_STANDARD_IO_WRITER_PATH_V1: &str = "std/io/writer.orna";
 pub const REFERENCE_STANDARD_IO_BUFFER_PATH_V1: &str = "std/io/buffer.orna";
 pub const REFERENCE_STANDARD_CONCURRENT_PATH_V1: &str = "std/concurrent/main.orna";
+pub const REFERENCE_STANDARD_CONCURRENT_RESULT_PATH_V1: &str = "std/concurrent/result.orna";
 pub const REFERENCE_STANDARD_TEST_PATH_V1: &str = "std/test.orna";
 pub const REFERENCE_STANDARD_GENERICS_PATH_V1: &str = "std/generics.orna";
 pub const REFERENCE_STANDARD_TYPE_UTILS_PATH_V1: &str = "std/type_utils.orna";
@@ -222,6 +223,8 @@ const REFERENCE_STANDARD_IO_BUFFER_SOURCE_V1: &str =
     include_str!("../../../stdlib/std/io/buffer.orna");
 const REFERENCE_STANDARD_CONCURRENT_SOURCE_V1: &str =
     include_str!("../../../stdlib/std/concurrent/main.orna");
+const REFERENCE_STANDARD_CONCURRENT_RESULT_SOURCE_V1: &str =
+    include_str!("../../../stdlib/std/concurrent/result.orna");
 const REFERENCE_STANDARD_TEST_SOURCE_V1: &str = include_str!("../../../stdlib/std/test.orna");
 const REFERENCE_STANDARD_GENERICS_SOURCE_V1: &str =
     include_str!("../../../stdlib/std/generics.orna");
@@ -250,8 +253,8 @@ const REFERENCE_STANDARD_PRELUDE_SOURCE_V1: &str =
 /// This is the current source-backed standard boundary. The retained `orna.std/1`–
 /// `orna.std/11` APIs below model older, explicitly versioned snapshots.
 #[must_use]
-pub fn reference_standard_sources_v1() -> [(String, String); 56] {
-    let mut sources: [(String, String); 56] = [
+pub fn reference_standard_sources_v1() -> [(String, String); 57] {
+    let mut sources: [(String, String); 57] = [
         (
             REFERENCE_STANDARD_MATH_PATH_V1.into(),
             REFERENCE_STANDARD_MATH_SOURCE_V1.into(),
@@ -475,6 +478,10 @@ pub fn reference_standard_sources_v1() -> [(String, String); 56] {
         (
             REFERENCE_STANDARD_IO_BUFFER_PATH_V1.into(),
             REFERENCE_STANDARD_IO_BUFFER_SOURCE_V1.into(),
+        ),
+        (
+            REFERENCE_STANDARD_CONCURRENT_RESULT_PATH_V1.into(),
+            REFERENCE_STANDARD_CONCURRENT_RESULT_SOURCE_V1.into(),
         ),
     ];
     sources[2]
