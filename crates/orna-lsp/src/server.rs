@@ -7,6 +7,9 @@ use std::collections::HashMap;
 use std::io::{self, BufReader};
 use std::thread::{self, JoinHandle};
 
+use crate::analysis::{self, EditorParse as Parse};
+use crate::documents::{Document, PositionMapper};
+use crate::semantic;
 use lsp_server::{Connection, ErrorCode, Message, Notification, Request, Response, ResponseError};
 use lsp_types::{
     CompletionOptions, CompletionParams, CompletionResponse, DiagnosticOptions,
@@ -20,11 +23,6 @@ use lsp_types::{
     SignatureHelpOptions, TextDocumentSyncCapability, TextDocumentSyncKind,
     TextDocumentSyncOptions, TextDocumentSyncSaveOptions, TextEdit, Uri, WorkspaceEdit,
 };
-use orna_syntax::Parse;
-
-use crate::analysis::{self, StandardLibrary};
-use crate::documents::{Document, PositionMapper};
-use crate::semantic;
 
 /// Transport threads for the server's standard input and output streams.
 ///
@@ -100,21 +98,12 @@ fn stdio_connection() -> (Connection, StdioIoThreads) {
 /// Shared state across requests and notifications.
 struct ServerState {
     documents: HashMap<Uri, Document>,
-    standard: Option<StandardLibrary>,
 }
 
 impl ServerState {
     fn new() -> Self {
-        let standard = match StandardLibrary::load() {
-            Ok(standard) => Some(standard),
-            Err(error) => {
-                eprintln!("orna-lsp: standard library unavailable: {error}");
-                None
-            }
-        };
         Self {
             documents: HashMap::new(),
-            standard,
         }
     }
 
@@ -371,7 +360,7 @@ fn publish_diagnostics(state: &ServerState, connection: &Connection, uri: &Uri) 
         return;
     };
     let mapper = PositionMapper::new(&document.text);
-    let diagnostics = analysis::check_document(document, state.standard.as_ref(), &mapper);
+    let diagnostics = analysis::check_document(document, &mapper);
     let params = PublishDiagnosticsParams {
         uri: uri.clone(),
         diagnostics,
@@ -386,7 +375,7 @@ fn publish_diagnostics(state: &ServerState, connection: &Connection, uri: &Uri) 
 /// Parses one document with its current mapper.
 fn parse_document(document: &Document) -> (Parse, PositionMapper<'_>) {
     let mapper = PositionMapper::new(&document.text);
-    let parse = orna_syntax::parse(&document.text);
+    let parse = analysis::parse_document(document);
     (parse, mapper)
 }
 
@@ -397,12 +386,16 @@ fn request_hover(
     let (_, params) = request.extract::<HoverParams>("textDocument/hover")?;
     let uri = params.text_document_position_params.text_document.uri;
     let position = params.text_document_position_params.position;
-    let Some(document) = state.document(&uri) else {
+    let Some((document, _, selected_start)) = combined_workspace(&state.documents, &uri) else {
         return Ok(serde_json::Value::Null);
     };
-    let (parse, mapper) = parse_document(document);
-    let hover: Option<Hover> =
-        analysis::hover(document, &parse, state.standard.as_ref(), position, &mapper);
+    let (parse, mapper) = parse_document(&document);
+    let Some(position) =
+        workspace_position(&document, selected_start, position, &state.documents, &uri)
+    else {
+        return Ok(serde_json::Value::Null);
+    };
+    let hover: Option<Hover> = analysis::hover(&document, &parse, position, &mapper);
     Ok(serde_json::to_value(hover)?)
 }
 
@@ -414,12 +407,16 @@ fn request_signature_help(
         request.extract::<lsp_types::SignatureHelpParams>("textDocument/signatureHelp")?;
     let uri = params.text_document_position_params.text_document.uri;
     let position = params.text_document_position_params.position;
-    let Some(document) = state.document(&uri) else {
+    let Some((document, _, selected_start)) = combined_workspace(&state.documents, &uri) else {
         return Ok(serde_json::Value::Null);
     };
-    let (parse, mapper) = parse_document(document);
-    let help =
-        analysis::signature_help(document, &parse, state.standard.as_ref(), position, &mapper);
+    let (parse, mapper) = parse_document(&document);
+    let Some(position) =
+        workspace_position(&document, selected_start, position, &state.documents, &uri)
+    else {
+        return Ok(serde_json::Value::Null);
+    };
+    let help = analysis::signature_help(&document, &parse, position, &mapper);
     Ok(serde_json::to_value(help)?)
 }
 
@@ -430,11 +427,18 @@ fn request_definition(
     let (_, params) = request.extract::<GotoDefinitionParams>("textDocument/definition")?;
     let uri = params.text_document_position_params.text_document.uri;
     let position = params.text_document_position_params.position;
-    let Some(document) = state.document(&uri) else {
+    let Some((document, segments, selected_start)) = combined_workspace(&state.documents, &uri)
+    else {
         return Ok(serde_json::Value::Null);
     };
-    let (parse, mapper) = parse_document(document);
-    let location = analysis::definition(document, &parse, position, &mapper);
+    let (parse, mapper) = parse_document(&document);
+    let Some(position) =
+        workspace_position(&document, selected_start, position, &state.documents, &uri)
+    else {
+        return Ok(serde_json::Value::Null);
+    };
+    let location = analysis::definition(&document, &parse, position, &mapper)
+        .and_then(|location| project_location(location, &mapper, &segments));
     let response = location.map(GotoDefinitionResponse::Scalar);
     Ok(serde_json::to_value(response)?)
 }
@@ -446,17 +450,26 @@ fn request_references(
     let (_, params) = request.extract::<ReferenceParams>("textDocument/references")?;
     let uri = params.text_document_position.text_document.uri;
     let position = params.text_document_position.position;
-    let Some(document) = state.document(&uri) else {
+    let Some((document, segments, selected_start)) = combined_workspace(&state.documents, &uri)
+    else {
         return Ok(serde_json::Value::Null);
     };
-    let (parse, mapper) = parse_document(document);
+    let (parse, mapper) = parse_document(&document);
+    let Some(position) =
+        workspace_position(&document, selected_start, position, &state.documents, &uri)
+    else {
+        return Ok(serde_json::Value::Null);
+    };
     let locations = analysis::references(
-        document,
+        &document,
         &parse,
         position,
         &mapper,
         params.context.include_declaration,
-    );
+    )
+    .into_iter()
+    .filter_map(|location| project_location(location, &mapper, &segments))
+    .collect::<Vec<_>>();
     Ok(serde_json::to_value(locations)?)
 }
 
@@ -484,15 +497,12 @@ struct SourceSegment<'a> {
     end: usize,
 }
 
-fn semantic_rename(
-    documents: &HashMap<Uri, Document>,
+/// Builds a deterministic source view from open Orna documents so editor
+/// features can resolve declarations and references across file boundaries.
+fn combined_workspace<'a>(
+    documents: &'a HashMap<Uri, Document>,
     uri: &Uri,
-    position: Position,
-    new_name: &str,
-) -> Option<HashMap<Uri, Vec<TextEdit>>> {
-    // The analysis APIs accept one document at a time. A deterministic joined
-    // source view lets them resolve references between open files; offsets are
-    // projected back to the original source documents below.
+) -> Option<(Document, Vec<SourceSegment<'a>>, usize)> {
     let mut sources: Vec<_> = documents
         .values()
         .filter(|document| document.uri.as_str().ends_with(".orna"))
@@ -517,14 +527,64 @@ fn semantic_rename(
     let selected = segments
         .iter()
         .find(|segment| &segment.document.uri == uri)?;
-    let selected_mapper = PositionMapper::new(&selected.document.text);
-    let combined_mapper = PositionMapper::new(&combined_source);
-    let combined_byte = selected
-        .start
-        .checked_add(selected_mapper.byte_offset(position))?;
-    let combined_position = combined_mapper.position(combined_byte);
-    let workspace_document = Document::new(uri.clone(), combined_source, selected.document.version);
-    let workspace_parse = orna_syntax::parse(&workspace_document.text);
+    let selected_start = selected.start;
+    let version = selected.document.version;
+    Some((
+        Document::new(uri.clone(), combined_source, version),
+        segments,
+        selected_start,
+    ))
+}
+
+fn workspace_position(
+    workspace: &Document,
+    selected_start: usize,
+    position: Position,
+    documents: &HashMap<Uri, Document>,
+    uri: &Uri,
+) -> Option<Position> {
+    let selected = documents.get(uri)?;
+    let selected_mapper = PositionMapper::new(&selected.text);
+    let workspace_mapper = PositionMapper::new(&workspace.text);
+    let byte = selected_start.checked_add(selected_mapper.byte_offset(position))?;
+    Some(workspace_mapper.position(byte))
+}
+
+fn project_location(
+    location: lsp_types::Location,
+    workspace_mapper: &PositionMapper<'_>,
+    segments: &[SourceSegment<'_>],
+) -> Option<lsp_types::Location> {
+    let start = workspace_mapper.byte_offset(location.range.start);
+    let end = workspace_mapper.byte_offset(location.range.end);
+    let segment = segments
+        .iter()
+        .find(|segment| start >= segment.start && end <= segment.end && start < end)?;
+    let mapper = PositionMapper::new(&segment.document.text);
+    Some(lsp_types::Location {
+        uri: segment.document.uri.clone(),
+        range: mapper.range(&orna_syntax_v1::SyntaxSpan::new(
+            start - segment.start,
+            end - segment.start,
+        )),
+    })
+}
+
+fn semantic_rename(
+    documents: &HashMap<Uri, Document>,
+    uri: &Uri,
+    position: Position,
+    new_name: &str,
+) -> Option<HashMap<Uri, Vec<TextEdit>>> {
+    let (workspace_document, segments, selected_start) = combined_workspace(documents, uri)?;
+    let combined_position = workspace_position(
+        &workspace_document,
+        selected_start,
+        position,
+        documents,
+        uri,
+    )?;
+    let workspace_parse = analysis::parse_document(&workspace_document);
     let workspace_mapper = PositionMapper::new(&workspace_document.text);
     let edits = semantic_rename_in_source(
         &workspace_document,
@@ -542,10 +602,10 @@ fn semantic_rename(
             .iter()
             .find(|segment| start >= segment.start && end <= segment.end && start < end)?;
         let source_mapper = PositionMapper::new(&segment.document.text);
-        let range = source_mapper.range(&orna_syntax::SourceSpan {
-            start: start - segment.start,
-            end: end - segment.start,
-        });
+        let range = source_mapper.range(&orna_syntax_v1::SyntaxSpan::new(
+            start - segment.start,
+            end - segment.start,
+        ));
         changes
             .entry(segment.document.uri.clone())
             .or_default()
@@ -564,17 +624,17 @@ fn semantic_rename_in_source(
     mapper: &PositionMapper<'_>,
     new_name: &str,
 ) -> Option<Vec<TextEdit>> {
-    if !document.uri.as_str().ends_with(".orna") || !parse.diagnostics().is_empty() {
+    if !document.uri.as_str().ends_with(".orna") || !parse.diagnostics.is_empty() {
         return None;
     }
     let definition = analysis::definition(document, parse, position, mapper)?;
     if definition.uri != document.uri {
         return None;
     }
-    let declarations = persistent_declaration_ranges(parse, mapper);
+    let declarations = persistent_declaration_ranges(parse, &document.text, mapper);
     let target = declarations
         .iter()
-        .find(|(qualified_name, _)| qualified_name == &definition.range)?;
+        .find(|(_, name_range)| name_range == &definition.range)?;
     let target_name_range = target.1.clone();
 
     let references = analysis::references(document, parse, position, mapper, true);
@@ -623,35 +683,25 @@ fn semantic_rename_in_source(
 
 fn persistent_declaration_ranges(
     parse: &Parse,
+    text: &str,
     mapper: &PositionMapper<'_>,
 ) -> Vec<(Range, Range)> {
-    let mut ranges = Vec::new();
-    let mut push_name = |name: &orna_syntax::QualifiedName| {
-        if let Some(final_name) = name.parts.last() {
-            ranges.push((mapper.range(&name.span), mapper.range(&final_name.span)));
-        }
-    };
-    for declaration in parse.language_model().declarations() {
-        if declaration.is_renameable() {
-            push_name(declaration.name());
-        }
-    }
-    ranges
+    analysis::declaration_symbols(parse, text)
+        .into_iter()
+        .map(|symbol| (mapper.range(&symbol.full), mapper.range(&symbol.selection)))
+        .collect()
 }
 
 fn valid_rename_identifier(new_name: &str) -> bool {
-    const PREFIX: &str = "CREATE SCHEMA ";
-    let source = format!("{PREFIX}{new_name};");
-    let parse = orna_syntax::parse(&source);
-    if !parse.diagnostics().is_empty() || parse.schemas().len() != 1 {
-        return false;
-    }
-    let [part] = parse.schemas()[0].name.parts.as_slice() else {
-        return false;
-    };
-    part.span.start == PREFIX.len()
-        && part.span.end == PREFIX.len() + new_name.len()
-        && source[part.span.start..part.span.end] == *new_name
+    let source = format!("fn {new_name}() = 0;");
+    let parse = orna_syntax_v1::parse_module(&source);
+    parse.diagnostics.is_empty()
+        && analysis::declaration_symbols(&parse, &source)
+            .iter()
+            .any(|symbol| {
+                symbol.name == new_name
+                    && source[symbol.selection.start..symbol.selection.end] == *new_name
+            })
 }
 
 fn rename_preserves_unique_resolution(
@@ -694,8 +744,8 @@ fn rename_preserves_unique_resolution(
         updated_source.replace_range(start..end, new_name);
     }
     let updated_document = Document::new(document.uri.clone(), updated_source, document.version);
-    let updated_parse = orna_syntax::parse(&updated_document.text);
-    if !updated_parse.diagnostics().is_empty() {
+    let updated_parse = analysis::parse_document(&updated_document);
+    if !updated_parse.diagnostics.is_empty() {
         return false;
     }
     let updated_mapper = PositionMapper::new(&updated_document.text);
@@ -708,10 +758,11 @@ fn rename_preserves_unique_resolution(
     ) else {
         return false;
     };
-    let updated_declarations = persistent_declaration_ranges(&updated_parse, &updated_mapper);
+    let updated_declarations =
+        persistent_declaration_ranges(&updated_parse, &updated_document.text, &updated_mapper);
     let Some((_, updated_target_name_range)) = updated_declarations
         .iter()
-        .find(|(qualified_name, _)| qualified_name == &updated_definition.range)
+        .find(|(_, name_range)| name_range == &updated_definition.range)
     else {
         return false;
     };
@@ -749,7 +800,7 @@ fn request_document_symbols(
         return Ok(serde_json::Value::Null);
     };
     let (parse, mapper) = parse_document(document);
-    let symbols = analysis::document_symbols(&parse, &mapper);
+    let symbols = analysis::document_symbols(&parse, &document.text, &mapper);
     let response = DocumentSymbolResponse::Nested(symbols);
     Ok(serde_json::to_value(response)?)
 }
@@ -763,7 +814,7 @@ fn request_workspace_symbols(
     let mut symbols = Vec::new();
     for document in state.documents.values() {
         let (parse, mapper) = parse_document(document);
-        for symbol in analysis::document_symbols(&parse, &mapper) {
+        for symbol in analysis::document_symbols(&parse, &document.text, &mapper) {
             if symbol.name.to_ascii_lowercase().contains(&query) {
                 symbols.push(lsp_types::WorkspaceSymbol {
                     name: symbol.name,
@@ -795,7 +846,7 @@ fn request_semantic_tokens_full(
         return Ok(serde_json::Value::Null);
     };
     let (parse, mapper) = parse_document(document);
-    let data = semantic::semantic_tokens(&parse, &mapper, None);
+    let data = semantic::semantic_tokens(&parse, &document.text, &mapper, None);
     Ok(serde_json::to_value(SemanticTokens {
         result_id: None,
         data,
@@ -813,7 +864,7 @@ fn request_semantic_tokens_range(
         return Ok(serde_json::Value::Null);
     };
     let (parse, mapper) = parse_document(document);
-    let data = semantic::semantic_tokens(&parse, &mapper, Some(&params.range));
+    let data = semantic::semantic_tokens(&parse, &document.text, &mapper, Some(&params.range));
     Ok(serde_json::to_value(SemanticTokens {
         result_id: None,
         data,
@@ -826,18 +877,19 @@ fn request_completion(
 ) -> Result<serde_json::Value, Box<dyn std::error::Error + Send + Sync>> {
     let (_, params) = request.extract::<CompletionParams>("textDocument/completion")?;
     let uri = params.text_document_position.text_document.uri;
-    let Some(document) = state.document(&uri) else {
+    let Some((document, _, selected_start)) = combined_workspace(&state.documents, &uri) else {
         return Ok(serde_json::Value::Null);
     };
-    let (parse, mapper) = parse_document(document);
+    let (parse, mapper) = parse_document(&document);
     let position = params.text_document_position.position;
+    let Some(position) =
+        workspace_position(&document, selected_start, position, &state.documents, &uri)
+    else {
+        return Ok(serde_json::Value::Null);
+    };
     let byte = mapper.byte_offset(position);
-    let items = analysis::completion_at(
-        &parse,
-        state.standard.as_ref(),
-        Some(byte),
-        params.context.as_ref(),
-    );
+    let items =
+        analysis::completion_at(&parse, &document.text, Some(byte), params.context.as_ref());
     let response = CompletionResponse::Array(items);
     Ok(serde_json::to_value(response)?)
 }
@@ -853,7 +905,7 @@ fn request_document_diagnostic(
         return Ok(serde_json::to_value(report)?);
     };
     let mapper = PositionMapper::new(&document.text);
-    let diagnostics = analysis::check_document(document, state.standard.as_ref(), &mapper);
+    let diagnostics = analysis::check_document(document, &mapper);
     let report = DocumentDiagnosticReport::Full(RelatedFullDocumentDiagnosticReport {
         related_documents: None,
         full_document_diagnostic_report: FullDocumentDiagnosticReport {
