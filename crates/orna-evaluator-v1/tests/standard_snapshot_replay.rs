@@ -602,26 +602,57 @@ fn captured_codec_snapshots_fold_host_process_values_across_interleaved_pins() {
         SysHostBindingRegistry::new(EnvironmentProvider::default()).with_process_provider(process);
     let mut folded_outputs = Vec::new();
     for snapshot_index in [0, 1, 0] {
-        let output = match snapshot_index {
-            0 => historical.submit_with_sys_host_bindings(
-                include_str!("fixtures/snapshot-host-codec-process-padding-matrix.orna"),
-                &mut bindings,
-            ),
-            1 => upgraded.submit_with_sys_host_bindings(
-                include_str!("fixtures/snapshot-host-codec-process-padding-matrix.orna"),
-                &mut bindings,
-            ),
+        let (session, expected_marker) = match snapshot_index {
+            0 => (&mut historical, 1),
+            1 => (&mut upgraded, 2),
             _ => unreachable!("the process fold only selects captured snapshots"),
         };
-        let values = output
+        let tagged = session
+            .submit(include_str!("fixtures/snapshot-host-codec-tagged.orna"))
+            .unwrap_or_else(|error| panic!("snapshot marker failed: {}", error.code()))
+            .expect("the captured snapshot marker returns a value");
+        let expected_tagged = CanonicalValue::new(Raw::Array(vec![
+            Raw::Int(expected_marker.into()),
+            Raw::Text("AP8AQQ==".to_owned()),
+        ]))
+        .unwrap();
+        assert_eq!(tagged, expected_tagged);
+
+        let process_values = session
+            .submit_with_sys_host_bindings(
+                include_str!("fixtures/snapshot-host-codec-process-padding-matrix.orna"),
+                &mut bindings,
+            )
             .unwrap_or_else(|error| panic!("captured process fold failed: {}", error.code()))
             .expect("the process fold returns its six captured values");
-        folded_outputs.push(values);
+        assert_eq!(process_values, base64_process_matrix_value());
+        folded_outputs.push(
+            CanonicalValue::new(Raw::Array(vec![
+                tagged.raw().clone(),
+                process_values.raw().clone(),
+            ]))
+            .unwrap(),
+        );
     }
-    let expected = base64_process_matrix_value();
+    let process_values = base64_process_matrix_value();
+    let expected = [1, 2, 1]
+        .into_iter()
+        .map(|marker| {
+            let tagged = CanonicalValue::new(Raw::Array(vec![
+                Raw::Int(marker.into()),
+                Raw::Text("AP8AQQ==".to_owned()),
+            ]))
+            .unwrap();
+            CanonicalValue::new(Raw::Array(vec![
+                tagged.raw().clone(),
+                process_values.raw().clone(),
+            ]))
+            .unwrap()
+        })
+        .collect::<Vec<_>>();
     assert_eq!(
         folded_outputs,
-        vec![expected.clone(), expected.clone(), expected]
+        expected
     );
 }
 
