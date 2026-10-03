@@ -574,16 +574,20 @@ impl RelationWindowState {
             return None;
         }
 
-        let window = self.pending.iter().take(self.size).cloned().collect();
         if self.step < self.size {
+            let window = self.pending.iter().take(self.size).cloned().collect();
             for _ in 0..self.step {
                 self.pending.pop_front();
             }
+            Some(window)
         } else {
-            self.pending.clear();
             self.skipped = self.step - self.size;
+            // A non-overlapping frame owns every buffered value, so move the
+            // frame out intact instead of cloning nested row values. This
+            // keeps sparse, filtered frame boundaries on the same first-seen
+            // identities while avoiding a deep copy per complete window.
+            Some(std::mem::take(&mut self.pending).into_iter().collect())
         }
-        Some(window)
     }
 }
 /// Incremental state for a relation `last` observation.

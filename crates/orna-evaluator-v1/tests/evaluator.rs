@@ -9999,6 +9999,57 @@ fn window_relation_handles_gaps_without_partial_windows() {
 }
 
 #[test]
+fn windowed_distinct_preserves_frame_identities_across_sparse_union_cascade() {
+    let body = parsed_expression(include_str!(
+        "fixtures/query-window-distinct-sparse-frame-cascade-xlnp8.orna"
+    ));
+    let ints = |values: &[i64]| {
+        values
+            .iter()
+            .copied()
+            .map(|value| Value::int(value.into()))
+            .collect()
+    };
+    let mut effects = UnionRelationEffects {
+        rows: BTreeMap::from([
+            ("sys.Storage".into(), ints(&[1, 0, 2, 0, 1])),
+            ("sys.MaintenanceJob".into(), ints(&[2, 0, 1, 0, 2])),
+        ]),
+        cursors: Vec::new(),
+    };
+
+    let result = invoke_relation(body, &mut effects, Limits::default())
+        .unwrap_or_else(|error| panic!("sparse windowed distinct failed: {}", error.code()));
+
+    let first_frame = relation_window_row(&[1, 2]);
+    let first_two_distinct_frames = Value::new(Raw::Tag(
+        60015,
+        Box::new(Raw::Array(vec![
+            Raw::Array(vec![Raw::Int(1.into()), Raw::Int(2.into())]),
+            Raw::Array(vec![Raw::Int(2.into()), Raw::Int(1.into())]),
+        ])),
+    ))
+    .expect("paired frames are a canonical tuple");
+    let expected = Value::new(Raw::Array(vec![
+        Raw::Int(1.into()),
+        Value::option(Some(first_frame))
+            .expect("first frame is a canonical option")
+            .raw()
+            .clone(),
+        Value::option(Some(first_two_distinct_frames))
+            .expect("first pair of frames is a canonical option")
+            .raw()
+            .clone(),
+    ]))
+    .expect("proof result is canonical");
+    assert_eq!(
+        result,
+        expected,
+        "sparse filters retain all frame positions across the union boundary, then distinct keeps the first original frames"
+    );
+}
+
+#[test]
 fn window_relation_empty_and_single_inputs_emit_only_complete_windows() {
     for (rows, size, expected_count) in [
         (Vec::new(), 2, 0),
