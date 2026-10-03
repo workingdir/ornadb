@@ -28,6 +28,7 @@ use orna_storage_v1::{
     BranchMergeColumnRestorePairedPathExtensionStormSnapshot,
     BranchMergeColumnRestorePairedPathExtensionColumnFoldSnapshot,
     BranchMergeColumnRestorePairedPathExtensionFoldSnapshot,
+    BranchMergeSnapshotPathOccurrence,
     BranchMergeConflict, BranchMergeDepthFragmentRecovery,
     BranchMergeDepthWaveRecovery, BranchMergeError, BranchMergePlan,
     BranchMergeMultiParentColumnDepthLadderWaveEvent,
@@ -75,6 +76,8 @@ const TOMBSTONE_DEPTH_COMMIT_ORDER: &str =
 const COLUMN_RESTORE_LADDER: &str = include_str!("fixtures/merge-column-restore-ladder.orna");
 const COLUMN_RESTORE_EXTENSIONS: &str =
     include_str!("fixtures/merge-column-restore-extensions.orna");
+const PAIRED_SNAPSHOT_OMISSIONS: &str =
+    include_str!("fixtures/merge-paired-snapshot-omissions.orna");
 const MULTI_PARENT_COLUMN_DEPTH: &str =
     include_str!("fixtures/merge-multiparent-column-depth.orna");
 const TOMBSTONE_STORM_KEYS: &[&str] = &[
@@ -27459,6 +27462,146 @@ fn paired_path_extension_folds_keep_identity_over_depth_omissions() {
             ],
         }],
         "the exact slash-boundary extension keeps independent depths through absent paths and waves across paired columns",
+    );
+}
+
+#[test]
+fn paired_snapshot_path_occurrences_keep_identity_across_omitted_depths() {
+    let fixture_rows = PAIRED_SNAPSHOT_OMISSIONS
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    let row = |path: &str| {
+        fixture_rows
+            .iter()
+            .find(|row| row.key == string(path))
+            .unwrap_or_else(|| panic!("the in-crate omission fixture supplies {path}"))
+            .clone()
+    };
+    let root = row("restore/root");
+    let child = row("restore/root/child");
+    let other = row("restore/other");
+    assert_eq!(root.fields[&id(2)], string("Root identity"));
+    assert_eq!(child.fields[&id(3)], string("Bergen"));
+    assert_eq!(other.fields[&id(2)], string("Other path"));
+
+    let cells = |row: &KeyedRow, column| {
+        vec![(row.key.clone(), row.fields[&id(column)].clone())]
+    };
+    let depth = |fragments: Vec<Vec<(CanonicalValue, CanonicalValue)>>| {
+        BranchMergeColumnDepthFragments {
+            fragment_count: fragments.len(),
+            fragments: fragments.into_iter().enumerate().collect(),
+        }
+    };
+    let wave = |order| {
+        let columns = match order {
+            1 => BTreeMap::from([
+                (
+                    (id(1), id(2)),
+                    depth(vec![cells(&root, 2), cells(&child, 2)]),
+                ),
+                ((id(1), id(3)), depth(vec![cells(&root, 3)])),
+            ]),
+            2 => BTreeMap::from([((id(1), id(2)), depth(vec![cells(&root, 2)]))]),
+            4 => BTreeMap::from([
+                (
+                    (id(1), id(2)),
+                    depth(vec![Vec::new(), Vec::new(), cells(&child, 2)]),
+                ),
+                ((id(1), id(3)), depth(vec![cells(&child, 3)])),
+            ]),
+            5 => BTreeMap::from([((id(1), id(3)), depth(vec![cells(&root, 3)]))]),
+            other => panic!("unexpected paired omission restore order: {other}"),
+        };
+        BranchMergeTabularColumnDepthWave { order, columns }
+    };
+    let empty_plan = |order| SequencedBranchMergePlan {
+        order,
+        plan: BranchMergePlan {
+            schema: Schema {
+                version: EvolutionVersion::V1_0,
+                tables: Vec::new(),
+            },
+            tables: BTreeMap::new(),
+            checkpoints: BTreeMap::new(),
+            report: Default::default(),
+        },
+        ordered_row_tombstones: Vec::new(),
+    };
+
+    let mut history = BranchMergeTombstoneHistory::new(0);
+    assert!(history.submit(&empty_plan(0)).unwrap().is_empty());
+    assert!(history
+        .submit_tabular_column_depth_wave(&wave(2))
+        .unwrap()
+        .is_empty());
+    history.submit_tabular_column_depth_wave(&wave(1)).unwrap();
+    assert!(history.submit(&empty_plan(3)).unwrap().is_empty());
+    assert!(history
+        .submit_tabular_column_depth_wave(&wave(5))
+        .unwrap()
+        .is_empty());
+    history.submit_tabular_column_depth_wave(&wave(4)).unwrap();
+    assert!(history.submit(&empty_plan(6)).unwrap().is_empty());
+
+    let folds = history.column_restore_paired_snapshot_path_occurrence_folds();
+    let child_fold = folds
+        .iter()
+        .find(|fold| fold.table == id(1) && fold.snapshot_path == child.key)
+        .expect("the child path identity survives its omitted restore waves");
+    assert_eq!(
+        child_fold.columns.iter().map(|column| column.column).collect::<Vec<_>>(),
+        vec![id(2), id(3)],
+    );
+    let occurrence = |column, storm_index, order| {
+        child_fold
+            .columns
+            .iter()
+            .find(|fold| fold.column == id(column))
+            .unwrap()
+            .storms
+            .iter()
+            .find(|storm| storm.storm_index == storm_index)
+            .unwrap()
+            .waves
+            .iter()
+            .find(|wave| wave.order == order)
+            .unwrap()
+            .occurrence
+            .clone()
+    };
+    assert_eq!(
+        occurrence(2, 0, 1),
+        BranchMergeSnapshotPathOccurrence::DepthLabels(vec![1]),
+    );
+    assert_eq!(
+        occurrence(2, 0, 2),
+        BranchMergeSnapshotPathOccurrence::PathOmitted,
+    );
+    assert_eq!(
+        occurrence(3, 0, 1),
+        BranchMergeSnapshotPathOccurrence::PathOmitted,
+    );
+    assert_eq!(
+        occurrence(3, 0, 2),
+        BranchMergeSnapshotPathOccurrence::ColumnOmitted,
+    );
+    assert_eq!(
+        occurrence(2, 1, 4),
+        BranchMergeSnapshotPathOccurrence::DepthLabels(vec![2]),
+    );
+    assert_eq!(
+        occurrence(3, 1, 4),
+        BranchMergeSnapshotPathOccurrence::DepthLabels(vec![0]),
+    );
+    assert_eq!(
+        occurrence(2, 1, 5),
+        BranchMergeSnapshotPathOccurrence::ColumnOmitted,
+    );
+    assert_eq!(
+        occurrence(3, 1, 5),
+        BranchMergeSnapshotPathOccurrence::PathOmitted,
     );
 }
 
