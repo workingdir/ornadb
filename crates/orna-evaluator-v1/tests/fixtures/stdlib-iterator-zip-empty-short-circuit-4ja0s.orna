@@ -1,0 +1,9 @@
+if true {
+    let failing: std.iterator.Iterator<Int> = std.iterator.Iterator {
+        pull: () => fail(error(
+            code: "proof.unexpected_pull",
+            message: "zip pulled the right input after the left input was empty"
+        ))
+    };
+    std.iterator.first(std.iterator.zip(std.iterator.empty(), failing)) == null
+} else { false }
