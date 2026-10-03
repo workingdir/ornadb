@@ -110,6 +110,31 @@ fn nested_aggregate_compaction_functions() -> Functions {
         .collect()
 }
 
+fn paired_nested_spill_aggregate_functions() -> Functions {
+    let parsed = parse_module(include_str!(
+        "fixtures/table_relation_paired_nested_spill_aggregate_bviql.orna"
+    ));
+    assert!(parsed.is_ok(), "{:?}", parsed.diagnostics);
+    parsed
+        .value
+        .items
+        .into_iter()
+        .map(|item| {
+            let orna_syntax_v1::Declaration::Function { signature, body } = item.declaration else {
+                panic!("fixture function expected")
+            };
+            (
+                signature.name,
+                PureFunction {
+                    parameters: signature.parameters,
+                    body,
+                    environment: Environment::new(),
+                },
+            )
+        })
+        .collect()
+}
+
 fn sparse_window_fold_functions() -> Functions {
     let parsed = parse_module(include_str!("fixtures/table_relation_sparse_window_fold_d4441.orna"));
     assert!(parsed.is_ok(), "{:?}", parsed.diagnostics);
@@ -2038,6 +2063,38 @@ fn paired_nested_aggregate_refresh_body() -> Expr {
         elements: vec![
             terminal(nested_window_aggregate("View.Left"), "sum"),
             terminal(nested_window_aggregate("View.Right"), "sum"),
+        ],
+        span: span(),
+    }
+}
+
+fn nested_spill_aggregate(source: &str) -> Expr {
+    let first = relation_stage(
+        relation_source(source),
+        "window",
+        vec![integer_literal(2), integer_literal(1)],
+    );
+    let first_totals = relation_stage(first, "map", vec![named_function("sum_frame")]);
+    let second = relation_stage(
+        first_totals,
+        "window",
+        vec![integer_literal(2), integer_literal(1)],
+    );
+    let second_totals = relation_stage(second, "map", vec![named_function("sum_frame")]);
+    let third = relation_stage(
+        second_totals,
+        "window",
+        vec![integer_literal(2), integer_literal(1)],
+    );
+    let third_totals = relation_stage(third, "map", vec![named_function("sum_frame")]);
+    terminal(third_totals, "sum")
+}
+
+fn paired_nested_spill_aggregate_body() -> Expr {
+    Expr::Tuple {
+        elements: vec![
+            nested_spill_aggregate("View.Left"),
+            nested_spill_aggregate("View.Right"),
         ],
         span: span(),
     }
@@ -4466,6 +4523,100 @@ fn paired_snapshots_keep_values_across_sparse_escalation_fold_chains() {
         expected_cursors,
         "each fold depth consumes only the sparse cursors belonging to its captured source snapshot"
     );
+    assert!(source.pending["View.Left"].is_empty());
+    assert!(source.pending["View.Right"].is_empty());
+}
+
+#[test]
+fn paired_nested_aggregates_keep_values_across_compaction_spill_folds() {
+    // A long provider checkpoint compacts to a short opaque token. Repeated
+    // token bytes are scoped to each paired refresh snapshot.
+    let long_cursors = [
+        vec![0x5a; 255],
+        vec![0x5a; 256],
+        vec![0x5a; 511],
+        vec![0x5a; 512],
+    ];
+    let compacted_cursor = vec![0x5b];
+    assert_eq!(
+        long_cursors.iter().map(Vec::len).collect::<Vec<_>>(),
+        [255, 256, 511, 512]
+    );
+    for (index, cursor) in long_cursors.iter().enumerate() {
+        assert!(cursor.as_slice() < compacted_cursor.as_slice());
+        if let Some(next) = long_cursors.get(index + 1) {
+            assert!(cursor.as_slice() < next.as_slice());
+        }
+    }
+    let restore = |groups: &[&[i64]], long_cursor: &[u8]| {
+        assert_eq!(groups.len(), 3, "each spill chain has three ordered pages");
+        BTreeMap::from([
+            (
+                None,
+                page(groups[0], Some(long_cursor.to_vec())),
+            ),
+            (
+                Some(long_cursor.to_vec()),
+                page(groups[1], Some(compacted_cursor.clone())),
+            ),
+            (
+                Some(compacted_cursor.clone()),
+                page(groups[2], None),
+            ),
+        ])
+    };
+    let mut restores = Vec::new();
+    let mut lane_names = Vec::new();
+    let mut cursor_chains = Vec::new();
+    let mut add_restore = |source_name: &'static str, groups: &[&[i64]], cursor_index: usize| {
+        let long_cursor = long_cursors[cursor_index].clone();
+        restores.push((source_name, restore(groups, &long_cursor)));
+        lane_names.push(source_name);
+        cursor_chains.push(long_cursor);
+    };
+    add_restore("View.Left", &[&[1], &[2, 3, 4], &[5, 6]], 0);
+    add_restore("View.Right", &[&[10, 20], &[30], &[40, 50, 60]], 1);
+    add_restore("View.Left", &[&[7, 8, 9], &[10], &[11, 12]], 2);
+    add_restore("View.Right", &[&[2], &[4, 6, 8], &[10, 12]], 3);
+    add_restore("View.Left", &[&[-1, -2], &[-3], &[-4, -5, -6]], 1);
+    add_restore("View.Right", &[&[3, 6], &[9, 12], &[15, 18]], 0);
+    add_restore("View.Left", &[&[100], &[90, 80], &[70, 60, 50]], 3);
+    add_restore("View.Right", &[&[5, 10], &[15], &[20, 25, 30]], 2);
+    drop(add_restore);
+
+    let mut source = PairedCursorRestoreSource::new(restores);
+    let mut functions = paired_nested_spill_aggregate_functions();
+    functions.insert(
+        "run".into(),
+        PureFunction {
+            parameters: Vec::new(),
+            body: paired_nested_spill_aggregate_body(),
+            environment: Environment::new(),
+        },
+    );
+    let run_refresh = |source: &mut PairedCursorRestoreSource| {
+        invoke_named_with_effects(
+            "run",
+            &functions,
+            &Environment::new(),
+            Limits::default(),
+            source,
+        )
+        .unwrap()
+    };
+
+    let first = run_refresh(&mut source);
+    assert_eq!(first, integer_pair(84, 840), "the first triple fold computes (84, 840)");
+    let second = run_refresh(&mut source);
+    assert_eq!(second, integer_pair(228, 168), "the next spilled pair computes (228, 168)");
+    let third = run_refresh(&mut source);
+    assert_eq!(third, integer_pair(-84, 252), "the third nested pair computes (-84, 252)");
+    let fourth = run_refresh(&mut source);
+    assert_eq!(fourth, integer_pair(1800, 420), "the final nested pair computes (1800, 420)");
+    assert_eq!(first, integer_pair(84, 840), "later spills retain the first aggregate snapshot");
+    assert_eq!(second, integer_pair(228, 168), "later spills retain the second aggregate snapshot");
+    assert_eq!(third, integer_pair(-84, 252), "later spills retain the third aggregate snapshot");
+    assert_eq!(source.lanes.len(), lane_names.len());
     assert!(source.pending["View.Left"].is_empty());
     assert!(source.pending["View.Right"].is_empty());
 }
