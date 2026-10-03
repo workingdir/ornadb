@@ -109,3 +109,108 @@ fn deepest_nested_predicate_uses_the_current_family_continuation() {
         }
     }
 }
+
+#[test]
+fn named_predicate_continuations_keep_their_captured_fold_identity() {
+    let source = include_str!("fixtures/txn-relation-predicate-fold-values-m7ffi.orna");
+    let analysis = analyze_with_catalogue(
+        &[ModuleInput::new("relation-predicate-fold-values.orna", source)],
+        &Catalogue::authoritative_fixture(),
+    );
+    assert!(
+        analysis.is_ok(),
+        "named predicate continuation fixture must type-check: {:?}",
+        analysis
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+
+    let mut runtime = TransactionalEvaluator::new("parent", Limits::default());
+    let outcome = runtime.execute_source(&fixture_source(source));
+    assert!(
+        matches!(&outcome, StageOutcome::Passed),
+        "named continuation fold failed: {:?}",
+        match &outcome {
+            StageOutcome::Passed => None,
+            StageOutcome::Failed(diagnostic) | StageOutcome::Cancelled(diagnostic) => {
+                Some(diagnostic.code().to_owned())
+            }
+            StageOutcome::Skipped { reason } => Some(reason.clone()),
+        }
+    );
+    for (id, expected) in [(1, "amber"), (2, "blue")] {
+        let family = runtime
+            .committed_row("Family", &Value::int(id.into()))
+            .expect("family value was committed");
+        assert_eq!(row_field(&family, "expected"), &Raw::Text(expected.into()));
+    }
+    for (id, family_id) in [(10, 1), (11, 1), (20, 2)] {
+        let branch = runtime
+            .committed_row("Branch", &Value::int(id.into()))
+            .expect("branch value was committed");
+        assert_eq!(row_field(&branch, "family_id"), &Raw::Int(family_id.into()));
+    }
+    for (id, branch_id) in [(100, 10), (101, 10), (110, 11), (200, 20), (999, 99)] {
+        let leaf = runtime
+            .committed_row("Leaf", &Value::int(id.into()))
+            .expect("leaf value was committed");
+        assert_eq!(row_field(&leaf, "branch_id"), &Raw::Int(branch_id.into()));
+    }
+    for (id, family_id, branch_id, leaf_id, token) in [
+        (1000, 1, 10, 100, "amber"),
+        (1001, 1, 10, 101, "amber"),
+        (1010, 1, 11, 110, "amber"),
+        (2000, 2, 20, 200, "blue"),
+        (2099, 1, 20, 200, "amber"),
+        (1099, 2, 10, 100, "blue"),
+    ] {
+        let proof = runtime
+            .committed_row("Proof", &Value::int(id.into()))
+            .expect("proof value was committed");
+        assert_eq!(row_field(&proof, "family_id"), &Raw::Int(family_id.into()));
+        assert_eq!(row_field(&proof, "branch_id"), &Raw::Int(branch_id.into()));
+        assert_eq!(row_field(&proof, "leaf_id"), &Raw::Int(leaf_id.into()));
+        assert_eq!(row_field(&proof, "token"), &Raw::Text(token.into()));
+    }
+}
+
+#[test]
+fn reused_named_predicate_continuations_reject_a_stale_family_capture() {
+    let mut runtime = TransactionalEvaluator::new("parent", Limits::default());
+    let outcome = runtime.execute_source(&fixture_source(include_str!(
+        "fixtures/txn-relation-predicate-fold-mismatch-m7ffi.orna"
+    )));
+
+    assert!(
+        matches!(
+            &outcome,
+            StageOutcome::Failed(diagnostic)
+                if diagnostic.code() == "ORNA-EVAL-MODULE-ASSERT"
+        ),
+        "blue must reject the proof accepted by the amber continuation: {:?}",
+        match &outcome {
+            StageOutcome::Passed => None,
+            StageOutcome::Failed(diagnostic) | StageOutcome::Cancelled(diagnostic) => {
+                Some(diagnostic.code().to_owned())
+            }
+            StageOutcome::Skipped { reason } => Some(reason.clone()),
+        }
+    );
+    for (table, id) in [
+        ("Family", 1),
+        ("Family", 2),
+        ("Branch", 10),
+        ("Branch", 20),
+        ("Leaf", 100),
+        ("Leaf", 200),
+        ("Proof", 1000),
+    ] {
+        assert_eq!(
+            runtime.committed_row(table, &Value::int(id.into())),
+            None,
+            "failed captured continuation published {table} row {id}"
+        );
+    }
+}
