@@ -1,0 +1,1 @@
+std.iterator.nth(std.iterator.from_list([4, 6, 9]), -1)

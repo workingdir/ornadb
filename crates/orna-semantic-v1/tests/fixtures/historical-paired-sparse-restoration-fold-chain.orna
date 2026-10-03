@@ -1,0 +1,40 @@
+pub fn factory_at(pin: sys.SnapshotRef) =
+    sys.database.as_of(pin).energy.factory;
+
+pub fn paired_sparse_restoration_fold_chain(failure: Error) {
+    let saved = [
+        {
+            left_checkpoint: (factory_at(sys.snapshot("HEAD~6000")), fail(failure)),
+            right_checkpoint: (fail(failure), fail(failure)),
+            witness: factory_at(sys.snapshot("HEAD~6001")),
+        },
+    ];
+    let rolling = [
+        {
+            left_checkpoint: (factory_at(sys.snapshot("HEAD~7000")), factory_at(sys.snapshot("HEAD~7010"))),
+            right_checkpoint: (factory_at(sys.snapshot("HEAD~6900")), factory_at(sys.snapshot("HEAD~6900"))),
+            witness: factory_at(sys.snapshot("HEAD~7001")),
+        },
+        {
+            left_checkpoint: (factory_at(sys.snapshot("HEAD~7000")), factory_at(sys.snapshot("HEAD~7020"))),
+            right_checkpoint: (factory_at(sys.snapshot("HEAD~6900")), factory_at(sys.snapshot("HEAD~6900"))),
+            witness: factory_at(sys.snapshot("HEAD~7021")),
+        },
+    ];
+    rolling = saved;
+    let restored_once = rolling;
+    let rolling_again = [
+        {
+            left_checkpoint: (factory_at(sys.snapshot("HEAD~8000")), factory_at(sys.snapshot("HEAD~8010"))),
+            right_checkpoint: (factory_at(sys.snapshot("HEAD~7900")), factory_at(sys.snapshot("HEAD~7900"))),
+            witness: factory_at(sys.snapshot("HEAD~8001")),
+        },
+        {
+            left_checkpoint: (factory_at(sys.snapshot("HEAD~8000")), factory_at(sys.snapshot("HEAD~8020"))),
+            right_checkpoint: (factory_at(sys.snapshot("HEAD~7900")), factory_at(sys.snapshot("HEAD~7900"))),
+            witness: factory_at(sys.snapshot("HEAD~8021")),
+        },
+    ];
+    rolling_again = restored_once;
+    { saved: saved, replayed: rolling_again }
+}

@@ -1,0 +1,19 @@
+{ id: "segment-pin-restore/vw336/a10", name: "restore/a-left-10", city: "restore/a-right-10", }
+
+{ id: "segment-pin-restore/vw336/a11", name: "restore/a-left-11", city: "restore/a-right-11", }
+
+{ id: "segment-pin-restore/vw336/a-handoff", name: "restore/a-left-handoff", city: "restore/a-right-handoff", }
+
+{ id: "segment-pin-restore/vw336/beta", name: "restore/beta-left", city: "restore/beta-right", }
+
+{ id: "segment-pin-restore/vw336/b10", name: "restore/b-left-10", city: "restore/b-right-10", }
+
+{ id: "segment-pin-restore/vw336/b12", name: "restore/b-left-12", city: "restore/b-right-12", }
+
+{ id: "segment-pin-restore/vw336/c-handoff", name: "restore/c-left-handoff", city: "restore/c-right-handoff", }
+
+{ id: "segment-pin-restore/vw336/late", name: "restore/late-left", city: "restore/late-right", }
+
+{ id: "segment-pin-restore/vw336/c10", name: "restore/c-left-10", city: "restore/c-right-10", }
+
+{ id: "segment-pin-restore/vw336/d-handoff", name: "restore/d-left-handoff", city: "restore/d-right-handoff", }
