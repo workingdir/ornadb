@@ -271,6 +271,16 @@ fn ints(values: &[i64]) -> CanonicalValue {
     .unwrap()
 }
 
+fn bigints(values: &[&str]) -> CanonicalValue {
+    CanonicalValue::new(Raw::Array(
+        values
+            .iter()
+            .map(|value| Raw::Int(value.parse().unwrap()))
+            .collect(),
+    ))
+    .unwrap()
+}
+
 fn int(value: i64) -> CanonicalValue {
     CanonicalValue::new(Value::int(value.into()).raw().clone()).unwrap()
 }
@@ -5273,6 +5283,134 @@ fn captured_iteration_identity_survives_paired_pin_restoration_folds() {
             Ok(Some(ints(&expected[index]))),
             "cloned callback iteration must preserve restored pin {}",
             pins[index]
+        );
+    }
+}
+
+#[test]
+fn captured_overflow_identity_survives_paired_restoration_folds() {
+    let (directory, initial_projects, pins, initial_parents) =
+        paired_divergence_pin_restoration_projects();
+    let project_path = directory.path().join("project");
+    let repository = Repository::discover(&project_path).unwrap();
+    let loader = ProjectLoader::default();
+    let mut projects = initial_projects.into_iter().collect::<Vec<_>>();
+    let mut selected_pin_indices = vec![0, 1, 2, 3, 2, 0];
+    let mut project_parents = initial_parents.to_vec();
+    for (fold, pin_index) in [1, 3, 2, 0].into_iter().enumerate() {
+        let message = format!("append overflow restoration fold {fold} for pin {pin_index}");
+        let parent = capture_standard_gitlink(&project_path, &pins[pin_index], &message);
+        let ancestry = git_output_at(
+            &project_path,
+            &["rev-list", "--parents", "-n", "1", parent.as_str()],
+        );
+        let ancestry = ancestry.split_whitespace().collect::<Vec<_>>();
+        assert_eq!(ancestry.len(), 2, "each overflow fold must have one parent");
+        assert_eq!(
+            ancestry[1],
+            project_parents.last().unwrap(),
+            "overflow restoration fold {fold} must continue the paired chain"
+        );
+        let gitlink = git_output_at(&project_path, &["ls-tree", parent.as_str(), "stdlib/std"]);
+        assert_eq!(
+            gitlink.split_whitespace().nth(2),
+            Some(pins[pin_index].as_str()),
+            "overflow restoration fold {fold} must capture the selected pin"
+        );
+        let snapshot = repository.resolve_snapshot(&parent).unwrap();
+        projects.push(loader.load_committed_snapshot(&repository, &snapshot).unwrap());
+        project_parents.push(parent);
+        selected_pin_indices.push(pin_index);
+    }
+
+    assert!(
+        pins[..4]
+            .iter()
+            .enumerate()
+            .all(|(index, pin)| !pins[..index].contains(pin))
+    );
+    assert_eq!(pins[4], pins[2]);
+    assert_eq!(pins[5], pins[0]);
+    // The reference omits fixed-width overflow; this proof uses exact Int values above i64.
+    let expected = [
+        [
+            "18446744073709553669",
+            "18446744073709553671",
+            "18446744073709553673",
+        ],
+        [
+            "18446744073709571679",
+            "18446744073709571681",
+            "18446744073709571683",
+        ],
+        [
+            "18446744073709553670",
+            "18446744073709553672",
+            "18446744073709553674",
+        ],
+        [
+            "18446744073709571680",
+            "18446744073709571682",
+            "18446744073709571684",
+        ],
+    ];
+    let imports = include_str!("fixtures/module-upgrade-paired-divergence-use.orna");
+    let closure = include_str!("fixtures/module-upgrade-divergence-iteration-closure.orna");
+    let replay = include_str!(
+        "fixtures/module-upgrade-divergence-overflow-iteration-replay.orna"
+    );
+    let selected_pins = selected_pin_indices
+        .iter()
+        .map(|index| pins[*index].clone())
+        .collect::<Vec<_>>();
+
+    let mut sessions = Vec::with_capacity(projects.len());
+    for (fold, (project, pin_index)) in projects.iter().zip(&selected_pin_indices).enumerate() {
+        assert_eq!(
+            project.standard_profile().unwrap().snapshot(),
+            &selected_pins[fold],
+            "overflow restoration fold {fold} must load its exact pin"
+        );
+        let mut session = AdmittedReplSession::from_loaded_project(
+            project,
+            project.standard_sources().iter().cloned(),
+            Limits::default(),
+        )
+        .unwrap();
+        for import in imports.lines() {
+            assert_eq!(session.submit(import), Ok(None));
+        }
+        assert_eq!(session.submit(closure), Ok(None));
+        let output = session.submit(replay).unwrap_or_else(|error| {
+            panic!(
+                "overflow iteration replay failed at fold {fold}, pin {}: {}",
+                selected_pins[fold],
+                error.code()
+            )
+        });
+        assert_eq!(
+            output,
+            Some(bigints(&expected[*pin_index])),
+            "overflow iteration replay must compute exact values at fold {fold}"
+        );
+        sessions.push(session);
+    }
+
+    for index in [9, 0, 7, 1, 8, 3, 6, 2, 9, 5] {
+        assert_eq!(
+            sessions[index].submit(replay),
+            Ok(Some(bigints(&expected[selected_pin_indices[index]]))),
+            "interleaved overflow replay must preserve pin {}",
+            selected_pins[index]
+        );
+    }
+    let mut cloned_sessions = sessions.clone();
+    for index in [8, 9, 0, 6, 1, 7] {
+        assert_eq!(
+            cloned_sessions[index].submit(replay),
+            Ok(Some(bigints(&expected[selected_pin_indices[index]]))),
+            "cloned overflow replay must preserve pin {}",
+            selected_pins[index]
         );
     }
 }
