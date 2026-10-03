@@ -1153,12 +1153,41 @@ impl PackageResolver {
             .collect::<Result<Vec<_>, _>>()?;
         let checkpoint_storm_rows = checkpoint_storms_by_row
             .iter()
+            .map(|storms| {
+                storms
+                    .iter()
+                    .map(|(checkpoint, replacements)| (checkpoint, *replacements))
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        let checkpoint_storm_row_slices = checkpoint_storm_rows
+            .iter()
             .map(Vec::as_slice)
             .collect::<Vec<_>>();
         self.extend_sibling_terminal_pair_checkpoint_storms_from_siblings(
             previous,
-            &checkpoint_storm_rows,
+            &checkpoint_storm_row_slices,
         )
+    }
+
+    /// Applies ordered rounds from exact sibling depth labels captured before
+    /// the first round. A source label remains bound to its original row and
+    /// retained snapshot throughout the continuation, including when the
+    /// selected rows have equal pins. The reference does not define repeated
+    /// label-selected multi-parent folds; v1 validates every round against the
+    /// accumulated route and returns no partial result if one fails.
+    pub fn extend_sibling_terminal_pair_checkpoint_storm_rounds_from_depth_labels(
+        &self,
+        previous: &SiblingRebindResolution,
+        rounds: &[&[&[(&NestedPairDepthLabel, &[[PinnedDatabase; 2]])]]],
+    ) -> Result<SiblingRebindResolution, AttachmentError> {
+        let mut folded = previous.clone();
+        for round in rounds {
+            folded = self.extend_sibling_terminal_pair_checkpoint_storms_from_depth_labels(
+                &folded, round,
+            )?;
+        }
+        Ok(folded)
     }
 
     /// Applies ordered rounds of depth-selected sibling checkpoint storms.
