@@ -1,0 +1,41 @@
+pub fn factory_at(pin: sys.SnapshotRef) =
+    sys.database.as_of(pin).energy.factory;
+
+pub fn rejects_late_paired_boundary_depth_drift_after_omission_storm(failure: Error) {
+    let first = {
+        left: { pins: (factory_at(sys.snapshot("HEAD~901")), fail(failure)) },
+        right: { pins: (factory_at(sys.snapshot("HEAD~911")), fail(failure)) },
+    };
+    let middle = {
+        left: { pins: (factory_at(sys.snapshot("HEAD~902")), factory_at(sys.snapshot("HEAD~921"))) },
+        right: { pins: (factory_at(sys.snapshot("HEAD~912")), factory_at(sys.snapshot("HEAD~921"))) },
+    };
+    let last = {
+        left: { pins: (factory_at(sys.snapshot("HEAD~903")), factory_at(sys.snapshot("HEAD~931"))) },
+        right: { pins: (factory_at(sys.snapshot("HEAD~913")), factory_at(sys.snapshot("HEAD~932"))) },
+    };
+    {
+        first: first,
+        middle: middle,
+        last: last,
+        folded: [first, middle, last],
+    }
+}
+
+pub fn accepts_stable_paired_boundary_depths_after_omission_storm(failure: Error) {
+    let parents = [
+        {
+            left: { pins: (factory_at(sys.snapshot("HEAD~951")), fail(failure)) },
+            right: { pins: (factory_at(sys.snapshot("HEAD~961")), fail(failure)) },
+        },
+        {
+            left: { pins: (factory_at(sys.snapshot("HEAD~952")), factory_at(sys.snapshot("HEAD~971"))) },
+            right: { pins: (factory_at(sys.snapshot("HEAD~962")), factory_at(sys.snapshot("HEAD~972"))) },
+        },
+        {
+            left: { pins: (factory_at(sys.snapshot("HEAD~953")), factory_at(sys.snapshot("HEAD~973"))) },
+            right: { pins: (factory_at(sys.snapshot("HEAD~963")), factory_at(sys.snapshot("HEAD~974"))) },
+        },
+    ];
+    { folded: parents }
+}
