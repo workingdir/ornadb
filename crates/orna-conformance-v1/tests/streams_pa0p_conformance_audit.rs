@@ -80,6 +80,8 @@ const PREDICATE_NESTED_PAIRS_DUPLICATE: &str =
     include_str!("fixtures/streams-jyy6a-predicate-nested-pairs-duplicate.orna");
 const PREDICATE_NESTED_PAIRS_EVERY_MISMATCH: &str =
     include_str!("fixtures/streams-jyy6a-predicate-nested-pairs-every-mismatch.orna");
+const PREDICATE_NESTED_PAIRS_CHECKPOINT_FOLD: &str =
+    include_str!("fixtures/streams-yfxkj-predicate-nested-pairs-checkpoint-fold.orna");
 
 fn nested_pair_key(
     first_id: i64,
@@ -635,6 +637,73 @@ async fn every_rejects_a_nested_pair_mismatch_at_its_checkpoint() {
     assert_eq!(row_field(&row, "id"), &Raw::Int(1.into()));
     assert_eq!(row_field(&row, "key"), &matching);
     assert_eq!(row_field(&row, "expected"), &matching);
+}
+
+#[tokio::test]
+async fn predicate_continuations_find_nested_pairs_across_checkpoints() {
+    let analysis = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "streams-yfxkj-predicate-nested-pairs-checkpoint-fold.orna",
+            PREDICATE_NESTED_PAIRS_CHECKPOINT_FOLD,
+        )],
+        &Catalogue::authoritative_fixture(),
+    );
+    assert!(
+        analysis.is_ok(),
+        "checkpoint fold fixture failed semantic admission: {:?}",
+        analysis
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+    let (_directory, repository) = repository(PREDICATE_NESTED_PAIRS_CHECKPOINT_FOLD);
+    let identity = identity();
+    let state = RuntimeState::open(&repository, identity, [0x53; 32])
+        .await
+        .expect("open runtime state");
+    let fixture = source_unit_with(
+        PREDICATE_NESTED_PAIRS_CHECKPOINT_FOLD,
+        "streams-yfxkj-predicate-nested-pairs-checkpoint-fold",
+    );
+    let outcome = DurableTransactionalEvaluator::new("main", Limits::default())
+        .execute_list_stream_source(&repository, identity, [0x54; 16], [0x53; 32], &fixture)
+        .await
+        .expect("execute nested-pair checkpoint fold");
+    assert_eq!(outcome, StageOutcome::Passed);
+
+    let red = nested_pair_key(1, "east", 2, "oak", 3, "red");
+    let blue = nested_pair_key(1, "east", 2, "oak", 3, "blue");
+    let source_values = vec![
+        nested_pair_row(1, red.clone(), red.clone()),
+        nested_pair_row(2, blue.clone(), blue.clone()),
+    ];
+    let checkpoint = state
+        .stream_checkpoint(&list_checkpoint_key_for_values(
+            "main",
+            "fixture:streams-yfxkj-predicate-nested-pairs-checkpoint-fold",
+            &source_values,
+        ))
+        .await
+        .expect("checkpoint after both pair-fold deliveries");
+    assert_eq!(checkpoint.version, 2);
+    assert_eq!(checkpoint.committed.unwrap().token.as_str(), "2");
+
+    let rows = state
+        .committed_table_rows("Reading")
+        .await
+        .expect("read rows admitted by nested continuation folds");
+    assert_eq!(rows.len(), 2);
+    for (index, ((_, encoded), (expected_key, expected_value))) in rows
+        .iter()
+        .zip([(red.clone(), red), (blue.clone(), blue)])
+        .enumerate()
+    {
+        let row = Value::decode(encoded).expect("decode committed pair row");
+        assert_eq!(row_field(&row, "id"), &Raw::Int((index as i64 + 1).into()));
+        assert_eq!(row_field(&row, "key"), &expected_key);
+        assert_eq!(row_field(&row, "expected"), &expected_value);
+    }
 }
 
 #[test]
