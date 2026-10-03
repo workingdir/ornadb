@@ -1,0 +1,29 @@
+pub table Org(id: Int) { name: Str, }
+pub table Route(id: Int) { org_id: Int, }
+pub table Endpoint(id: Int) { route_id: Int, }
+pub table Audit(id: Int) { endpoint_id: Int, verdict: Str, }
+
+assert every(Org, org =>
+    exists(Route, route => route.org_id == org.id &&
+        if org.id == 1 {
+            every(Endpoint, endpoint => endpoint.route_id != route.id || if endpoint.route_id != route.id {
+                1 / 0 == 0
+            } else {
+                exists(Audit, audit => audit.endpoint_id == endpoint.id && audit.verdict == "ok")
+            })
+        } else {
+            exists(Endpoint, endpoint => endpoint.route_id == route.id &&
+                exists(Audit, audit => audit.endpoint_id == endpoint.id && audit.verdict == "ok"))
+        }));
+
+fn parent() {
+    Org.insert({ id: 1, name: "north" });
+    Org.insert({ id: 2, name: "south" });
+    Route.insert({ id: 10, org_id: 1 });
+    Route.insert({ id: 20, org_id: 2 });
+    Endpoint.insert({ id: 100, route_id: 10 });
+    Endpoint.insert({ id: 200, route_id: 20 });
+    Endpoint.insert({ id: 999, route_id: 99 });
+    Audit.insert({ id: 1000, endpoint_id: 100, verdict: "ok" });
+    Audit.insert({ id: 2000, endpoint_id: 200, verdict: "ok" });
+}
