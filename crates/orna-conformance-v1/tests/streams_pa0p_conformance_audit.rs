@@ -64,6 +64,7 @@ use orna_repository_v1::Repository;
 use orna_runtime_v1::{RuntimeIdentity, RuntimeState};
 use orna_semantic_v1::{Catalogue, ModuleInput, analyze_with_catalogue};
 use orna_stream_v1::{CheckpointKey, Component, ConsumerIdentity};
+use orna_value_v1::Raw;
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 
@@ -73,6 +74,96 @@ const CONFIG_VARIANT: &str = include_str!("fixtures/streams-pa0p-config-variant.
 const RENAMED_CONSUMER: &str = include_str!("fixtures/streams-pa0p-renamed-consumer.orna");
 const MULTIPLE_ROOTS: &str = include_str!("fixtures/streams-pa0p-multiple-roots.orna");
 const FUNCTION_CALLBACK: &str = include_str!("fixtures/streams-pa0p-function-callback.orna");
+const PREDICATE_NESTED_PAIRS: &str =
+    include_str!("fixtures/streams-jyy6a-predicate-nested-pairs.orna");
+const PREDICATE_NESTED_PAIRS_DUPLICATE: &str =
+    include_str!("fixtures/streams-jyy6a-predicate-nested-pairs-duplicate.orna");
+const PREDICATE_NESTED_PAIRS_EVERY_MISMATCH: &str =
+    include_str!("fixtures/streams-jyy6a-predicate-nested-pairs-every-mismatch.orna");
+
+fn nested_pair_key(
+    first_id: i64,
+    first_label: &str,
+    second_id: i64,
+    second_label: &str,
+    third_id: i64,
+    third_label: &str,
+) -> Raw {
+    Raw::Array(vec![
+        Raw::Array(vec![
+            Raw::Array(vec![Raw::Int(first_id.into()), Raw::Text(first_label.into())]),
+            Raw::Array(vec![Raw::Int(second_id.into()), Raw::Text(second_label.into())]),
+        ]),
+        Raw::Array(vec![Raw::Int(third_id.into()), Raw::Text(third_label.into())]),
+    ])
+}
+
+fn row_field<'a>(row: &'a Value, field: &str) -> &'a Raw {
+    let Raw::Map(fields) = row.raw() else {
+        panic!("expected a table row record, got {:?}", row.raw());
+    };
+    fields
+        .iter()
+        .find_map(|(key, value)| (key == &Raw::Text(field.into())).then_some(value))
+        .unwrap_or_else(|| panic!("table row omitted field {field}"))
+}
+
+fn nested_pair_row(id: i64, key: Raw, expected: Raw) -> Value {
+    let mut fields = vec![
+        (String::from("id"), Raw::Int(id.into())),
+        (String::from("key"), key),
+        (String::from("expected"), expected),
+    ];
+    fields.sort_by_cached_key(|(name, _)| {
+        Value::new(Raw::Text(name.clone()))
+            .expect("field name is a canonical value")
+            .encode()
+            .expect("field name encodes canonically")
+    });
+    Value::new(Raw::Map(
+        fields
+            .into_iter()
+            .map(|(name, value)| (Raw::Text(name), value))
+            .collect(),
+    ))
+    .expect("nested pair row is canonical")
+}
+
+fn list_checkpoint_key_for_values(
+    function: &str,
+    source_label: &str,
+    values: &[Value],
+) -> CheckpointKey {
+    let payloads = values
+        .iter()
+        .map(|value| value.encode().expect("encode canonical source item"))
+        .collect::<Vec<_>>();
+    let mut digest = Sha256::new();
+    digest.update(b"ORNA-LIST-STREAM-IDENTITY\0");
+    for payload in &payloads {
+        digest.update(u64::try_from(payload.len()).unwrap().to_be_bytes());
+        digest.update(payload);
+    }
+    let suffix = digest
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    let component = |value: &str| Component::new(value).expect("valid identity component");
+    CheckpointKey {
+        consumer: ConsumerIdentity {
+            principal: component("conformance"),
+            root: component("main.orna"),
+            function: component(function),
+            binding: component("from_list"),
+        },
+        source_format: component("orna-stream-v1"),
+        source: component(&format!("{source_label}:{suffix}")),
+        partition_format: component("literal-list"),
+        partition: None,
+        position_format: component("orna.list.v1"),
+    }
+}
 
 fn repository(source: &str) -> (TempDir, Repository) {
     let directory = tempfile::tempdir_in("/var/tmp").expect("temporary repository");
@@ -373,6 +464,177 @@ async fn finite_list_identity_changes_with_semantic_source_configuration() {
         first.key.source, second.key.source,
         "a changed canonical list is a changed source identity despite the same label"
     );
+}
+
+#[tokio::test]
+async fn section9_predicates_fold_complete_nested_pairs_at_each_checkpoint() {
+    // Section 9 compares the complete selected values. This proof interprets
+    // the stream checkpoint boundary as an activation: each item must preserve
+    // the full nested pair before the next checkpoint is committed.
+    let (_directory, repository) = repository(PREDICATE_NESTED_PAIRS);
+    let identity = identity();
+    let state = RuntimeState::open(&repository, identity, [0x53; 32])
+        .await
+        .expect("open runtime state");
+    let fixture = source_unit_with(
+        PREDICATE_NESTED_PAIRS,
+        "streams-jyy6a-predicate-nested-pairs",
+    );
+    let outcome = DurableTransactionalEvaluator::new("main", Limits::default())
+        .execute_list_stream_source(
+            &repository,
+            identity,
+            [0x54; 16],
+            [0x53; 32],
+            &fixture,
+        )
+        .await
+        .expect("execute nested-pair source");
+    assert_eq!(outcome, StageOutcome::Passed);
+
+    let keys = [
+        nested_pair_key(1, "east", 2, "oak", 3, "red"),
+        nested_pair_key(1, "east", 2, "oak", 3, "blue"),
+        nested_pair_key(1, "east", 2, "pine", 3, "red"),
+        nested_pair_key(1, "west", 2, "oak", 3, "red"),
+    ];
+    let source_values = keys
+        .iter()
+        .cloned()
+        .enumerate()
+        .map(|(index, key)| nested_pair_row(index as i64 + 1, key.clone(), key))
+        .collect::<Vec<_>>();
+    let key = list_checkpoint_key_for_values(
+        "main",
+        "fixture:streams-jyy6a-predicate-nested-pairs",
+        &source_values,
+    );
+    let checkpoint = state
+        .stream_checkpoint(&key)
+        .await
+        .expect("checkpoint after every nested pair");
+    assert_eq!(checkpoint.version, 4);
+    assert_eq!(checkpoint.committed.unwrap().token.as_str(), "4");
+
+    let rows = state
+        .committed_table_rows("Reading")
+        .await
+        .expect("read committed nested-pair rows");
+    assert_eq!(rows.len(), 4);
+    for (index, ((_, encoded), expected_key)) in rows.iter().zip(keys).enumerate() {
+        let row = Value::decode(encoded).expect("decode committed row");
+        assert_eq!(row_field(&row, "id"), &Raw::Int((index as i64 + 1).into()));
+        assert_eq!(row_field(&row, "key"), &expected_key);
+        assert_eq!(row_field(&row, "expected"), &expected_key);
+    }
+}
+
+#[tokio::test]
+async fn all_unique_rejects_a_nested_pair_duplicate_without_advancing_checkpoint() {
+    let (_directory, repository) = repository(PREDICATE_NESTED_PAIRS_DUPLICATE);
+    let identity = identity();
+    let state = RuntimeState::open(&repository, identity, [0x53; 32])
+        .await
+        .expect("open runtime state");
+    let fixture = source_unit_with(
+        PREDICATE_NESTED_PAIRS_DUPLICATE,
+        "streams-jyy6a-predicate-nested-pairs-duplicate",
+    );
+    assert!(matches!(
+        DurableTransactionalEvaluator::new("main", Limits::default())
+            .execute_list_stream_source(
+                &repository,
+                identity,
+                [0x54; 16],
+                [0x53; 32],
+                &fixture,
+            )
+            .await
+            .expect("execute duplicate nested-pair source"),
+        StageOutcome::Failed(_)
+    ));
+
+    let red = nested_pair_key(1, "east", 2, "oak", 3, "red");
+    let blue = nested_pair_key(1, "east", 2, "oak", 3, "blue");
+    let source_values = vec![
+        nested_pair_row(1, red.clone(), red.clone()),
+        nested_pair_row(2, blue.clone(), blue.clone()),
+        nested_pair_row(3, red.clone(), red.clone()),
+    ];
+    let key = list_checkpoint_key_for_values(
+        "main",
+        "fixture:streams-jyy6a-predicate-nested-pairs-duplicate",
+        &source_values,
+    );
+    let checkpoint = state
+        .stream_checkpoint(&key)
+        .await
+        .expect("checkpoint stops before duplicate nested pair");
+    assert_eq!(checkpoint.version, 2);
+    assert_eq!(checkpoint.committed.unwrap().token.as_str(), "2");
+    let rows = state
+        .committed_table_rows("Reading")
+        .await
+        .expect("read rows before duplicate");
+    assert_eq!(rows.len(), 2);
+    for (index, ((_, encoded), expected_key)) in rows.iter().zip([red, blue]).enumerate() {
+        let row = Value::decode(encoded).expect("decode committed row");
+        assert_eq!(row_field(&row, "id"), &Raw::Int((index as i64 + 1).into()));
+        assert_eq!(row_field(&row, "key"), &expected_key);
+    }
+}
+
+#[tokio::test]
+async fn every_rejects_a_nested_pair_mismatch_at_its_checkpoint() {
+    let (_directory, repository) = repository(PREDICATE_NESTED_PAIRS_EVERY_MISMATCH);
+    let identity = identity();
+    let state = RuntimeState::open(&repository, identity, [0x53; 32])
+        .await
+        .expect("open runtime state");
+    let fixture = source_unit_with(
+        PREDICATE_NESTED_PAIRS_EVERY_MISMATCH,
+        "streams-jyy6a-predicate-nested-pairs-every-mismatch",
+    );
+    assert!(matches!(
+        DurableTransactionalEvaluator::new("main", Limits::default())
+            .execute_list_stream_source(
+                &repository,
+                identity,
+                [0x54; 16],
+                [0x53; 32],
+                &fixture,
+            )
+            .await
+            .expect("execute nested-pair mismatch source"),
+        StageOutcome::Failed(_)
+    ));
+
+    let matching = nested_pair_key(1, "east", 2, "oak", 3, "red");
+    let mismatching = nested_pair_key(1, "east", 2, "oak", 3, "blue");
+    let source_values = vec![
+        nested_pair_row(1, matching.clone(), matching.clone()),
+        nested_pair_row(2, mismatching, matching.clone()),
+    ];
+    let key = list_checkpoint_key_for_values(
+        "main",
+        "fixture:streams-jyy6a-predicate-nested-pairs-every-mismatch",
+        &source_values,
+    );
+    let checkpoint = state
+        .stream_checkpoint(&key)
+        .await
+        .expect("checkpoint stops before every mismatch");
+    assert_eq!(checkpoint.version, 1);
+    assert_eq!(checkpoint.committed.unwrap().token.as_str(), "1");
+    let rows = state
+        .committed_table_rows("Reading")
+        .await
+        .expect("read row before mismatch");
+    assert_eq!(rows.len(), 1);
+    let row = Value::decode(&rows[0].1).expect("decode committed matching row");
+    assert_eq!(row_field(&row, "id"), &Raw::Int(1.into()));
+    assert_eq!(row_field(&row, "key"), &matching);
+    assert_eq!(row_field(&row, "expected"), &matching);
 }
 
 #[test]
