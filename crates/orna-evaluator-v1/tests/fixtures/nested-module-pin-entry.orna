@@ -1,0 +1,2 @@
+use std.chain.bridge.{transform};
+pub fn replay(value: Int): Int = transform(value + 1);
