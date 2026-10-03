@@ -8275,6 +8275,129 @@ fn nested_paired_omissions_keep_each_reconciled_fold_depth_identity() {
     );
 }
 
+#[test]
+fn paired_rollback_omissions_keep_extension_depth_identities() {
+    let source = include_str!(
+        "fixtures/historical-paired-rollback-extension-depths-27.orna"
+    );
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-paired-rollback-extension-depths-27.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    let type_diagnostics = result
+        .diagnostics
+        .iter()
+        .filter(|diagnostic| diagnostic.code() == DIAG_TYPE)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        type_diagnostics.len(),
+        1,
+        "the parent crossing the two paired rollback pins is rejected once: {:?}",
+        type_diagnostics
+            .iter()
+            .map(|diagnostic| diagnostic.message())
+            .collect::<Vec<_>>()
+    );
+    let module = result
+        .modules
+        .values()
+        .find(|module| module.symbols.contains_key("paired_rollback_extension_depths"))
+        .expect("paired rollback fixture module");
+    let Type::Function { result, .. } =
+        &module.symbols["paired_rollback_extension_depths"].ty
+    else {
+        panic!("paired rollback proof must retain its computed function result");
+    };
+    let Type::Record(fields) = result.as_ref() else {
+        panic!("paired rollback proof must return a record: {result:?}");
+    };
+    let Type::List(parent) = fields.get("parent_fold").expect("parent fold") else {
+        panic!("paired rollback proof must retain its parent list");
+    };
+    let Type::Record(parent) = parent.as_ref() else {
+        panic!("folded parent must retain its record: {parent:?}");
+    };
+    let Type::Record(siblings) = parent.get("nested").expect("nested siblings") else {
+        panic!("folded parent must retain nested sibling records");
+    };
+    let pin_contexts = |sibling: &str| {
+        let Type::Record(fields) = &siblings[sibling] else {
+            panic!("{sibling} must retain its record");
+        };
+        let Type::Tuple(depths) = &fields["pins"] else {
+            panic!("{sibling} must retain paired extension depths");
+        };
+        depths
+            .iter()
+            .map(|depth| {
+                let Type::Tuple(slots) = depth else {
+                    panic!("{sibling} depth must retain both pin slots: {depth:?}");
+                };
+                slots
+                    .iter()
+                    .map(|slot| {
+                        let mut contexts = BTreeSet::new();
+                        collect_snapshot_contexts(slot, &mut contexts);
+                        contexts
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>()
+    };
+
+    let left = pin_contexts("left");
+    let right = pin_contexts("right");
+    assert!(
+        left[0][0].is_empty(),
+        "the left omitted pin must not acquire the crossed right identity: {left:?}"
+    );
+    assert!(
+        right[0][0].is_empty(),
+        "the right omitted pin must not acquire the crossed left identity: {right:?}"
+    );
+    assert_eq!(
+        left[0][1],
+        BTreeSet::from(["selector:HEAD~11".into()]),
+        "the neighboring left pin retains its anchor identity"
+    );
+    assert_eq!(
+        right[0][1],
+        BTreeSet::from(["selector:HEAD~31".into()]),
+        "the neighboring right pin retains its anchor identity"
+    );
+    assert_eq!(
+        left[1],
+        [
+            BTreeSet::from(["selector:HEAD~20".into(), "selector:HEAD~120".into()]),
+            BTreeSet::from(["selector:HEAD~21".into(), "selector:HEAD~121".into()]),
+        ],
+        "the untouched left depth keeps its identities across the rejected pair"
+    );
+    assert_eq!(
+        right[1],
+        [
+            BTreeSet::from(["selector:HEAD~40".into(), "selector:HEAD~140".into()]),
+            BTreeSet::from(["selector:HEAD~41".into(), "selector:HEAD~141".into()]),
+        ],
+        "the untouched right depth keeps its identities across the rejected pair"
+    );
+    assert_eq!(
+        pin_contexts("steady")[1][1],
+        BTreeSet::from([
+            "selector:HEAD~811".into(),
+            "selector:HEAD~911".into(),
+            "selector:HEAD~1011".into(),
+            "selector:HEAD~1111".into(),
+        ]),
+        "an unrelated sibling keeps all depth labels across the paired rollback"
+    );
+}
+
 
 #[test]
 fn nested_omission_checkpoint_storms_preserve_depth_labels_transactionally() {
