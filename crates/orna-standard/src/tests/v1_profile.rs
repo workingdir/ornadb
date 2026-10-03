@@ -299,6 +299,83 @@ fn pinned_collection_overloads_preserve_relation_result_kinds() {
 }
 
 #[test]
+fn pinned_query_and_statistics_aggregates_accept_relation_inputs() {
+    let catalogue = reference_standard_catalogue_v1()
+        .expect("the pinned std profile checks");
+    let analysis = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "relation_statistics_consumer.orna",
+            include_str!("fixtures/v1_relation_statistics_overloads_6c10u.orna"),
+        )],
+        &catalogue,
+    );
+    assert!(
+        analysis.is_ok(),
+        "{}",
+        analysis
+            .diagnostics
+            .iter()
+            .map(|diagnostic| format!("{}: {}", diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+            .join("; ")
+    );
+    let module = analysis
+        .modules
+        .values()
+        .find(|module| module.namespace.display() == "relation_statistics_consumer")
+        .expect("fixture module");
+    let result_type = |name: &str| match &module.symbols[name].ty {
+        Type::Function { result, .. } => result.as_ref(),
+        other => panic!("{name} should be a function, got {other:?}"),
+    };
+    let optional_int = Type::Optional(Box::new(Type::Int));
+    assert_eq!(result_type("query_count"), &Type::Int);
+    assert_eq!(result_type("query_sum"), &Type::Int);
+    assert_eq!(result_type("query_min"), &optional_int);
+    assert_eq!(result_type("query_max"), &optional_int);
+    assert_eq!(result_type("average"), &optional_int);
+    assert_eq!(result_type("median"), &optional_int);
+    assert_eq!(result_type("percentile"), &optional_int);
+    assert_eq!(result_type("histogram"), &Type::List(Box::new(Type::Int)));
+    assert_eq!(
+        result_type("derivative"),
+        &Type::List(Box::new(Type::Tuple(vec![Type::Instant, Type::Int])))
+    );
+    assert_eq!(result_type("piped_average"), &optional_int);
+}
+#[test]
+fn pinned_query_plan_hint_exports_structured_plan() {
+    let catalogue = reference_standard_catalogue_v1()
+        .expect("the pinned std profile checks");
+    let analysis = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "query_plan_hint_consumer.orna",
+            include_str!("fixtures/v1_query_plan_hint_statistics_azb4m.orna"),
+        )],
+        &catalogue,
+    );
+    assert!(
+        analysis.is_ok(),
+        "{}",
+        analysis
+            .diagnostics
+            .iter()
+            .map(|diagnostic| format!("{}: {}", diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+            .join("; ")
+    );
+    let module = analysis
+        .modules
+        .values()
+        .find(|module| module.namespace.display() == "query_plan_hint_consumer")
+        .expect("fixture module");
+    let result_type = |name: &str| match &module.symbols[name].ty {
+        Type::Function { result, .. } => result.as_ref(),
+        other => panic!("{name} should be a function, got {other:?}"),
+    };
+    assert!(matches!(result_type("plan_hint"), Type::Named(name) if name == "sys.Plan"));
+}
+#[test]
 fn pinned_calendar_arithmetic_source_typechecks_against_core() {
     let source = reference_standard_sources_v1()
         .into_iter()

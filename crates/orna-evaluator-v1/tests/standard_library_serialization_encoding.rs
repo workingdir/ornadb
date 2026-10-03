@@ -140,6 +140,38 @@ fn pinned_encoding_modules_compute_canonical_values_and_reject_noncanonical_inpu
         eval_pinned(include_str!("fixtures/stdlib-codec-json-record-rl767.orna")),
         Ok(text_value("{\"answer\":42,\"label\":\"exact\"}"))
     );
+    assert_eq!(
+        eval_pinned(include_str!(
+            "fixtures/stdlib-codec-json-exact-decimal-pyyhx.orna"
+        )),
+        Ok(CanonicalValue::new(Raw::Tag(
+            60000,
+            Box::new(Raw::Array(vec![
+                Raw::Int(9_007_199_254_740_993_125_i128.into()),
+                Raw::Int((-3).into()),
+            ])),
+        ))
+        .unwrap())
+    );
+    assert_eq!(
+        eval_pinned(include_str!(
+            "fixtures/stdlib-codec-json-small-exact-decimal-pyyhx.orna"
+        )),
+        Ok(CanonicalValue::new(Raw::Tag(
+            60000,
+            Box::new(Raw::Array(vec![
+                Raw::Int(100_000_000_000_000_005_i128.into()),
+                Raw::Int((-18).into()),
+            ])),
+        ))
+        .unwrap())
+    );
+    assert_eq!(
+        eval_pinned(include_str!(
+            "fixtures/stdlib-codec-json-encode-exact-decimal-pyyhx.orna"
+        )),
+        Ok(text_value("0.100000000000000005"))
+    );
     for fixture in [
         include_str!("fixtures/stdlib-codec-json-stream-rl767.orna"),
         include_str!("fixtures/stdlib-codec-orna-stream-rl767.orna"),
@@ -202,6 +234,56 @@ fn pinned_encoding_modules_compute_canonical_values_and_reject_noncanonical_inpu
         "ORNA-S010-IMPORT"
     );
     assert_eq!(without_std.submit(core), Ok(Some(bool_value(true))));
+}
+
+#[test]
+fn standard_base64_roundtrips_each_padding_shape_and_rejects_noncanonical_tails() {
+    let encode = include_str!("fixtures/stdlib-base64-edge-encode-etsj1.orna");
+    let decode = include_str!("fixtures/stdlib-base64-edge-decode-etsj1.orna");
+    for (bytes, encoded) in [
+        (&[][..], ""),
+        (&[0][..], "AA=="),
+        (&[0, 1][..], "AAE="),
+        (&[0, 1, 2][..], "AAEC"),
+        (&[255][..], "/w=="),
+        (&[255, 238][..], "/+4="),
+    ] {
+        let environment = Environment::from([(
+            "payload".into(),
+            CanonicalValue::new(Raw::Bytes(bytes.to_vec())).unwrap(),
+        )]);
+        assert_eq!(
+            eval_pinned_with_environment(encode, environment),
+            Ok(text_value(encoded)),
+            "Base64 encoding of {bytes:?}"
+        );
+
+        let environment = Environment::from([("input".into(), text_value(encoded))]);
+        assert_eq!(
+            eval_pinned_with_environment(decode, environment),
+            Ok(CanonicalValue::new(Raw::Bytes(bytes.to_vec())).unwrap()),
+            "Base64 decoding of {encoded:?}"
+        );
+    }
+
+    for invalid in [
+        "A===",   // padding in a data position
+        "AAA",    // omitted required padding
+        "-w==",   // URL-safe alphabet is a separate profile
+        "AA==\n", // whitespace is not ignored
+        "AA=A",   // padding before the final position
+        "AB==",   // nonzero unused four trailing bits
+        "AAB=",   // nonzero unused two trailing bits
+    ] {
+        let environment = Environment::from([("input".into(), text_value(invalid))]);
+        assert_eq!(
+            eval_pinned_with_environment(decode, environment)
+                .unwrap_err()
+                .code(),
+            "ORNA-EVAL-VALUE",
+            "Base64 input {invalid:?} must be rejected"
+        );
+    }
 }
 
 #[test]
@@ -269,14 +351,11 @@ fn json_schema_decode_preserves_null_defaults_and_unknown_field_policy() {
         include_str!("fixtures/stdlib-codec-json-nominal-ignore-extra-rl767.orna"),
         include_str!("fixtures/stdlib-codec-json-nominal-default-rl767.orna"),
         include_str!("fixtures/stdlib-codec-json-nominal-explicit-null-rl767.orna"),
+        include_str!("fixtures/stdlib-codec-json-reserved-number-key-pyyhx.orna"),
     ] {
         let actual = eval_pinned_with_nominals(fixture, &definitions)
             .unwrap_or_else(|error| panic!("schema decode failed: {}", error.code()));
-        assert_eq!(
-            actual,
-            bool_value(true),
-            "{fixture}"
-        );
+        assert_eq!(actual, bool_value(true), "{fixture}");
     }
     for fixture in [
         include_str!("fixtures/stdlib-codec-json-nominal-unknown-rejected-rl767.orna"),

@@ -1,0 +1,15 @@
+[
+    std.stats.mean(rows),
+    std.stats.median(rows),
+    std.stats.percentile(rows, 0.5, interpolation: "lower"),
+    std.stats.sum(rows),
+    std.stats.min(rows),
+    std.stats.max(rows),
+    std.stats.range(rows),
+    std.stats.mode(rows),
+    std.stats.variance(rows),
+    std.stats.standard_deviation(rows),
+    std.stats.histogram(rows, [(0, 2)]),
+    std.query.count(rows),
+    std.query.sum(rows),
+]
