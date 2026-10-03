@@ -208,6 +208,31 @@ fn paired_sparse_window_checkpoint_functions() -> Functions {
         .collect()
 }
 
+fn paired_refresh_sparse_rotation_functions() -> Functions {
+    let parsed = parse_module(include_str!(
+        "fixtures/table_relation_paired_refresh_sparse_rotation_9wumm.orna"
+    ));
+    assert!(parsed.is_ok(), "{:?}", parsed.diagnostics);
+    parsed
+        .value
+        .items
+        .into_iter()
+        .map(|item| {
+            let orna_syntax_v1::Declaration::Function { signature, body } = item.declaration else {
+                panic!("fixture function expected")
+            };
+            (
+                signature.name,
+                PureFunction {
+                    parameters: signature.parameters,
+                    body,
+                    environment: Environment::new(),
+                },
+            )
+        })
+        .collect()
+}
+
 fn nested_pagination_compaction_functions() -> Functions {
     let parsed = parse_module(include_str!(
         "fixtures/table_relation_nested_pagination_compaction_gwlx9.orna"
@@ -2070,6 +2095,30 @@ fn paired_sparse_window_checkpoint_body() -> Expr {
         );
         let frame_totals = relation_stage(frames, "map", vec![named_function("sum_frame")]);
         terminal(frame_totals, "sum")
+    };
+    Expr::Tuple {
+        elements: vec![
+            fold("View.Left", "is_odd"),
+            fold("View.Right", "is_even"),
+        ],
+        span: span(),
+    }
+}
+
+fn paired_refresh_sparse_rotation_body() -> Expr {
+    let fold = |source: &str, predicate: &str| {
+        let filtered = relation_stage(
+            relation_source(source),
+            "filter",
+            vec![named_function(predicate)],
+        );
+        let frames = relation_stage(
+            filtered,
+            "window",
+            vec![integer_literal(3), integer_literal(2)],
+        );
+        let totals = relation_stage(frames, "map", vec![named_function("sum_frame")]);
+        terminal(totals, "sum")
     };
     Expr::Tuple {
         elements: vec![
@@ -4105,6 +4154,137 @@ fn nested_aggregates_keep_values_across_paired_pagination_compaction_chains() {
         source.cursors,
         expected_cursors,
         "reused compact pagination cursors restore only the corresponding nested source snapshot"
+    );
+    assert!(source.pending["View.Left"].is_empty());
+    assert!(source.pending["View.Right"].is_empty());
+}
+
+#[test]
+fn paired_refreshes_keep_values_across_sparse_checkpoint_rotation_chains() {
+    let checkpoint_epochs = [
+        [
+            vec![0x71, 0x02],
+            vec![0x71, 0x08],
+            vec![0x71, 0x20],
+            vec![0x71, 0x40],
+        ],
+        [
+            vec![0x72, 0x01],
+            vec![0x72, 0x09],
+            vec![0x72, 0x21],
+            vec![0x72, 0x41],
+        ],
+        [
+            vec![0x73, 0x03],
+            vec![0x73, 0x0a],
+            vec![0x73, 0x22],
+            vec![0x73, 0x42],
+        ],
+    ];
+    let restore = |groups: &[&[i64]], tokens: &[Vec<u8>]| {
+        assert_eq!(groups.len(), tokens.len() + 1);
+        groups
+            .iter()
+            .enumerate()
+            .map(|(index, values)| {
+                let after = index.checked_sub(1).map(|previous| tokens[previous].clone());
+                let next = tokens.get(index).cloned();
+                (after, page(values, next))
+            })
+            .collect::<CursorRestore>()
+    };
+    let mut restores = Vec::new();
+    let mut lane_names = Vec::new();
+    let mut rotated_chains = Vec::new();
+    let mut add_restore = |source_name: &'static str, groups: &[&[i64]], epoch: usize| {
+        let tokens = checkpoint_epochs[epoch][..groups.len() - 1].to_vec();
+        restores.push((source_name, restore(groups, &tokens)));
+        lane_names.push(source_name);
+        rotated_chains.push(tokens);
+    };
+    add_restore("View.Left", &[&[1, 2], &[4, 3, 6], &[5, 8], &[7, 9], &[10]], 0);
+    add_restore("View.Right", &[&[2, 1, 4], &[6, 3], &[8, 5, 10], &[7]], 1);
+    add_restore("View.Left", &[&[11, 12, 13], &[14, 15], &[16, 17, 18], &[19, 20]], 2);
+    add_restore("View.Right", &[&[21, 22, 23, 24], &[25, 26, 27, 28], &[29, 30]], 0);
+    add_restore("View.Left", &[&[-9, -8, -7], &[-6, -5], &[-4, -3, -2], &[-1, 0]], 1);
+    add_restore("View.Right", &[&[-10, -8], &[-9, -7, -6], &[-5, -4], &[-3, -2]], 2);
+    add_restore("View.Left", &[&[101, 102, 103], &[104, 105, 106, 107], &[108, 109, 110]], 0);
+    add_restore("View.Right", &[&[101, 102], &[103, 104, 105], &[106, 107, 108], &[109, 110]], 1);
+    drop(add_restore);
+
+    let mut source = PairedCursorRestoreSource::new(restores);
+    let mut functions = paired_refresh_sparse_rotation_functions();
+    functions.insert(
+        "run".into(),
+        PureFunction {
+            parameters: Vec::new(),
+            body: paired_refresh_sparse_rotation_body(),
+            environment: Environment::new(),
+        },
+    );
+    let run_refresh = |source: &mut PairedCursorRestoreSource| {
+        invoke_named_with_effects(
+            "run",
+            &functions,
+            &Environment::new(),
+            Limits::default(),
+            source,
+        )
+        .unwrap()
+    };
+
+    let first = run_refresh(&mut source);
+    assert_eq!(first, integer_pair(30, 36), "the first sparse pair computes (30, 36)");
+    let second = run_refresh(&mut source);
+    assert_eq!(second, integer_pair(90, 156), "the second rotated pair computes (90, 156)");
+    let third = run_refresh(&mut source);
+    assert_eq!(third, integer_pair(-30, -36), "the third rotated pair computes (-30, -36)");
+    let fourth = run_refresh(&mut source);
+    assert_eq!(fourth, integer_pair(630, 636), "the fourth rotated pair computes (630, 636)");
+    assert_eq!(first, integer_pair(30, 36), "later refreshes preserve the first result");
+    assert_eq!(second, integer_pair(90, 156), "later refreshes preserve the second result");
+    assert_eq!(third, integer_pair(-30, -36), "later refreshes preserve the third result");
+    assert_eq!(source.lanes.len(), lane_names.len());
+    let scopes = source
+        .lanes
+        .iter()
+        .zip(lane_names.iter().copied())
+        .map(|((source_name, scope, _), expected_name)| {
+            assert_eq!(source_name, expected_name, "each refresh reads left then right");
+            *scope
+        })
+        .collect::<Vec<_>>();
+    for (index, scope) in scopes.iter().enumerate() {
+        assert!(
+            !scopes[..index].contains(scope),
+            "reused checkpoint epochs bind to distinct paired refresh scopes: {scope:?}"
+        );
+    }
+    assert_eq!(
+        rotated_chains.iter().map(Vec::len).collect::<Vec<_>>(),
+        [4, 3, 3, 2, 3, 3, 2, 3],
+        "each sparse restore follows only the checkpoints present in its page chain"
+    );
+    assert_eq!(
+        rotated_chains
+            .iter()
+            .map(|chain| chain[0][0])
+            .collect::<Vec<_>>(),
+        [0x71, 0x72, 0x73, 0x71, 0x72, 0x73, 0x71, 0x72],
+        "checkpoint epochs rotate and are reused across left/right refresh scopes"
+    );
+    let mut expected_cursors = Vec::new();
+    for (index, chain) in rotated_chains.iter().enumerate() {
+        let source_name = lane_names[index].to_owned();
+        expected_cursors.push((source_name.clone(), scopes[index], None));
+        expected_cursors.extend(chain.iter().cloned().map(|cursor| {
+            (source_name.clone(), scopes[index], Some(cursor))
+        }));
+    }
+    assert_eq!(
+        source.cursors,
+        expected_cursors,
+        "rotated sparse checkpoints resume only their paired source scope"
     );
     assert!(source.pending["View.Left"].is_empty());
     assert!(source.pending["View.Right"].is_empty());
