@@ -1,0 +1,4 @@
+fn make_reordered_iteration(seed: Int) = delta => collection.map(
+    [3, 1, 2],
+    value => math.marker() + collection.marker() + math.shift(seed + delta + value)
+);

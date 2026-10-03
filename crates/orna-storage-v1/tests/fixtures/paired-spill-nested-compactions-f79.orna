@@ -1,0 +1,25 @@
+{ id: "f79/spill/reused", name: "f79/checkpoint/alpha", city: "f79/source/alpha-main", }
+
+{ id: "f79/spill/reused", name: "f79/checkpoint/alpha", city: "f79/source/alpha-peer", }
+
+{ id: "f79/spill/secondary", name: "f79/checkpoint/alpha", city: "f79/source/alpha-main", }
+
+{ id: "f79/spill/secondary", name: "f79/checkpoint/beta", city: "f79/source/beta", }
+
+{ id: "f79/spill/reused", name: "f79/checkpoint/alpha", city: "f79/source/alpha-main", }
+
+{ id: "f79/spill/late", name: "f79/checkpoint/late", city: "f79/source/late", }
+
+{ id: "f79/segment/0", name: "f79/left/alpha-base-4", city: "f79/right/alpha-base-4", }
+
+{ id: "f79/segment/1", name: "f79/left/alpha-base-5", city: "f79/right/alpha-base-5", }
+
+{ id: "f79/segment/2", name: "f79/left/alpha-redo-7", city: "f79/right/alpha-redo-7", }
+
+{ id: "f79/segment/3", name: "f79/left/alpha-peer-4", city: "f79/right/alpha-peer-4", }
+
+{ id: "f79/segment/4", name: "f79/left/beta-7", city: "f79/right/beta-7", }
+
+{ id: "f79/segment/5", name: "f79/left/alpha-restored-4", city: "f79/right/alpha-restored-4", }
+
+{ id: "f79/segment/6", name: "f79/left/late-unpinned-9", city: "f79/right/late-unpinned-9", }

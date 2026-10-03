@@ -1,4 +1,4 @@
-use std::{fs, path::Path, process::Command};
+use std::{cell::Cell, fs, path::Path, process::Command};
 
 use orna_evaluator_v1::{AdmittedReplSession, Limits};
 use orna_project_v1::{
@@ -1982,12 +1982,17 @@ fn paired_terminal_checkpoint_spill_compaction_folds_preserve_nested_rebind_iden
         [&first_checkpoint, &second_checkpoint],
         [&dropped_checkpoint, &first_checkpoint],
     ];
+    let consumed_spill_folds = Cell::new(0);
+    let spill_fold_stream = checkpoint_spill_folds
+        .into_iter()
+        .inspect(|_| consumed_spill_folds.set(consumed_spill_folds.get() + 1));
     let (spill_compacted, spill_transitions) = resolver
-        .compact_nested_terminal_pair_checkpoint_spill_folds_preserving_terminal_identity(
+        .compact_nested_terminal_pair_checkpoint_spill_stream_preserving_terminal_identity(
             &nested_rebinds,
-            &checkpoint_spill_folds,
+            spill_fold_stream,
         )
         .unwrap();
+    assert_eq!(consumed_spill_folds.get(), 2, "each yielded pair is consumed once");
     assert_eq!(spill_transitions.len(), 2);
     for (before, after) in &spill_transitions {
         assert_eq!(before, &terminal_identity);
@@ -2015,6 +2020,24 @@ fn paired_terminal_checkpoint_spill_compaction_folds_preserve_nested_rebind_iden
             "the folded route restores the spilled checkpoint pin for {alias}"
         );
     }
+    let spill_replay_route = resolver
+        .extend_nested_terminal_pair_storm_from_label(
+            &spill_compacted,
+            &first_label,
+            std::slice::from_ref(&first_pair),
+        )
+        .unwrap();
+    let mut spill_replay = AdmittedReplSession::from_attached_database_session(
+        &spill_replay_route.retained_wave(2).unwrap()[1],
+        Limits::default(),
+    )
+    .unwrap();
+    assert_eq!(spill_replay.submit(&format!("use {};", aliases[3])), Ok(None));
+    assert_eq!(
+        spill_replay.submit(&format!("{}.package_value()", aliases[3])),
+        Ok(Some(Value::int(84.into()))),
+        "stream compaction preserves a retained nested closure identity for replay"
+    );
     let restored_spill_checkpoint = resolver
         .extend_nested_terminal_pair_chain_from_checkpoint(
             &spill_compacted,
@@ -2026,6 +2049,33 @@ fn paired_terminal_checkpoint_spill_compaction_folds_preserve_nested_rebind_iden
         restored_spill_checkpoint.terminal_route_identity(),
         terminal_identity,
         "the restored spill checkpoint leaves the terminal route unchanged"
+    );
+
+    let invalid_stream_folds = [
+        [&first_checkpoint, &second_checkpoint],
+        [&dropped_checkpoint, &dropped_checkpoint],
+        [&first_checkpoint, &first_checkpoint],
+    ];
+    let consumed_before_error = Cell::new(0);
+    let invalid_stream = invalid_stream_folds
+        .into_iter()
+        .inspect(|_| consumed_before_error.set(consumed_before_error.get() + 1));
+    assert!(matches!(
+        resolver.compact_nested_terminal_pair_checkpoint_spill_stream_preserving_terminal_identity(
+            &nested_rebinds,
+            invalid_stream,
+        ),
+        Err(AttachmentError::RetainedSnapshotUnavailable)
+    ));
+    assert_eq!(
+        consumed_before_error.get(),
+        2,
+        "an invalid pair stops the stream before later folds are requested"
+    );
+    assert_eq!(
+        nested_rebinds.terminal_route_identity(),
+        terminal_identity,
+        "a rejected stream leaves its input route identity intact"
     );
 
     let rebound = resolver
