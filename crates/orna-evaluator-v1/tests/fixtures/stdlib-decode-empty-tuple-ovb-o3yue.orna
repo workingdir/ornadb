@@ -1,0 +1,1 @@
+std.encoding.ovb.decode(std.encoding.ovb.encode(()), as: ())

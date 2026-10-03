@@ -311,6 +311,38 @@ fn pinned_collection_overloads_preserve_relation_result_kinds() {
 }
 
 #[test]
+fn pinned_map_ovb_order_projection_is_snapshot_bound_and_typechecks() {
+    let sources = reference_standard_sources_v1();
+    let (path, source) = sources
+        .iter()
+        .find(|(path, _)| path == "std/map.orna")
+        .expect("the pinned standard snapshot contains std.map");
+    assert!(source.contains("pub fn entries_by_ovb_key"));
+    reference_standard_profile_v1()
+        .verify_source(path, source)
+        .expect("map ordering behavior is captured by the pinned std snapshot");
+
+    let catalogue = reference_standard_catalogue_v1().expect("the pinned std sources typecheck");
+    let analysis = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "map_ovb_order_consumer.orna",
+            include_str!("fixtures/v1_map_ovb_order_consumer_w02pm.orna"),
+        )],
+        &catalogue,
+    );
+    assert!(
+        analysis.is_ok(),
+        "{}",
+        analysis
+            .diagnostics
+            .iter()
+            .map(|diagnostic| format!("{}: {}", diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+            .join("; ")
+    );
+}
+
+#[test]
 fn pinned_query_and_statistics_aggregates_accept_relation_inputs() {
     let catalogue = reference_standard_catalogue_v1()
         .expect("the pinned std profile checks");

@@ -44,6 +44,39 @@ fn query_windows_compute_rate_and_trapezoidal_integral_per_overlapping_window() 
 }
 
 #[test]
+fn query_windows_preserve_elapsed_time_across_sparse_nonoverlapping_windows() {
+    let mut session = session();
+    let rate = session
+        .submit(include_str!("fixtures/stdlib-query-window-rate-sparse-pkbay.orna"))
+        .unwrap_or_else(|error| panic!("sparse window rate failed with {}", error.code()));
+    assert_eq!(rate, Some(optional_ints(&[2, 2])));
+
+    let integral = session
+        .submit(include_str!("fixtures/stdlib-query-window-integrate-sparse-pkbay.orna"))
+        .unwrap_or_else(|error| panic!("sparse window integration failed with {}", error.code()));
+    assert_eq!(integral, Some(optional_ints(&[2, 30])));
+}
+
+#[test]
+fn query_windows_keep_sparse_step_boundaries_and_omit_the_short_tail() {
+    let mut session = session();
+    let rate = session
+        .submit(include_str!("fixtures/stdlib-query-window-rate-deep-sparse-hb3lu.orna"))
+        .unwrap_or_else(|error| panic!("deep sparse window rate failed with {}", error.code()));
+    assert_eq!(rate, Some(optional_ints(&[2, 2])));
+
+    let derivative = session
+        .submit(include_str!("fixtures/stdlib-query-window-derivative-deep-sparse-hb3lu.orna"))
+        .unwrap_or_else(|error| panic!("deep sparse window derivative failed with {}", error.code()));
+    assert_eq!(derivative, Some(canonical(Raw::Bool(true))));
+
+    let integral = session
+        .submit(include_str!("fixtures/stdlib-query-window-integrate-deep-sparse-hb3lu.orna"))
+        .unwrap_or_else(|error| panic!("deep sparse window integration failed with {}", error.code()));
+    assert_eq!(integral, Some(optional_ints(&[1, 40])));
+}
+
+#[test]
 fn query_window_derivative_uses_each_pair_right_endpoint_and_exact_slope() {
     let actual = session()
         .submit(include_str!("fixtures/stdlib-query-window-derivative-pkbay.orna"))
@@ -61,5 +94,44 @@ fn time_series_windows_omit_short_tails_and_keep_strict_time_order() {
     let error = session()
         .submit(include_str!("fixtures/stdlib-query-window-time-duplicate-pkbay.orna"))
         .expect_err("equal timestamps in a complete window must fail");
-    assert_eq!(error.code(), "ORNA-EVAL-VALUE");
+    assert_eq!(error.code(), "ORNA-EVAL-ERROR");
+}
+
+#[test]
+fn time_series_rejects_reversal_between_disjoint_windows() {
+    let error = session()
+        .submit(include_str!(
+            "fixtures/stdlib-query-window-time-boundary-reversal-pkbay.orna"
+        ))
+        .expect_err("window boundaries must not hide a source timestamp reversal");
+    assert_eq!(error.code(), "ORNA-EVAL-ERROR");
+}
+
+#[test]
+fn time_series_window_rejects_a_singleton_source_even_without_complete_windows() {
+    let error = session()
+        .submit(include_str!(
+            "fixtures/stdlib-query-window-time-singleton-pkbay.orna"
+        ))
+        .expect_err("Section 9 time-series statistics require at least two source points");
+    assert_eq!(error.code(), "ORNA-EVAL-ERROR");
+}
+
+#[test]
+fn time_series_window_validates_bounds_before_sparse_source_cardinality() {
+    let mut session = session();
+    let invalid_size = session
+        .submit(include_str!("fixtures/stdlib-query-window-time-invalid-size-hb3lu.orna"))
+        .expect_err("nonpositive window size must fail before source-series validation");
+    assert_eq!(invalid_size.code(), "ORNA-EVAL-ERROR");
+
+    let invalid_step = session
+        .submit(include_str!("fixtures/stdlib-query-window-time-invalid-step-hb3lu.orna"))
+        .expect_err("nonpositive window step must fail before source-series validation");
+    assert_eq!(invalid_step.code(), "ORNA-EVAL-ERROR");
+
+    let singleton_window = session
+        .submit(include_str!("fixtures/stdlib-query-window-time-singleton-window-hb3lu.orna"))
+        .expect_err("each time-series statistic window must contain two points");
+    assert_eq!(singleton_window.code(), "ORNA-EVAL-ERROR");
 }
