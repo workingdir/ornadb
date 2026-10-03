@@ -1,0 +1,12 @@
+{
+  "name": "tree-sitter-orna",
+  "version": "1.0.0",
+  "description": "Generated Tree-sitter grammar for Orna",
+  "tree-sitter": {
+    "scopes": { "source.orna": "orna" },
+    "file-types": ["orna"],
+    "highlights": ["queries/highlights.scm"]
+  },
+  "scripts": { "test": "tree-sitter test" },
+  "devDependencies": { "tree-sitter-cli": "^0.26.5" }
+}
