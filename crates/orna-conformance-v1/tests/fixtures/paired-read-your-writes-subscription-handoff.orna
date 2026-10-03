@@ -1,5 +1,8 @@
 pub table Note(id: Int) { amount: Int, label: Str, }
 
+// ORNA-QUERY-005 requires same-activation read-your-writes but does not define
+// paired same-table continuation ownership; each relation arm has its own
+// scope, and every fresh fold reads the current activation overlay.
 fn seed() {
     Note.insert({ id: 1, amount: 10, label: "stable" });
     Note.insert({ id: 2, amount: 20, label: "seed" });
