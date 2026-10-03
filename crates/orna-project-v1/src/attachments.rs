@@ -1145,9 +1145,9 @@ impl PackageResolver {
         rounds: &[&[(&NestedPairDepthLabel, Option<&[[PinnedDatabase; 2]]>)]],
     ) -> Result<ReboundPathResolution, AttachmentError> {
         let mut route = previous.clone();
-        let mut retained_labels = Vec::new();
+        let mut retained_labels: Vec<NestedPairDepthLabel> = Vec::new();
         for round in rounds {
-            let mut seen_labels = Vec::with_capacity(round.len());
+            let mut seen_labels: Vec<NestedPairDepthLabel> = Vec::with_capacity(round.len());
             let checkpoints = round
                 .iter()
                 .map(|(label, replacements)| {
