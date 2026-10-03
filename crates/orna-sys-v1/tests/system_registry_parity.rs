@@ -815,6 +815,107 @@ fn generated_schema_accepts_relationship_shapes_that_typed_dispatch_rejects() {
 }
 
 #[test]
+fn generated_provider_default_values_match_schema_and_macro_bindings() {
+    let regenerated = regenerate();
+    let schema_json = build_provider::generate_provider_registry_schema()
+        .expect("provider default schema regenerates from its source generator");
+    assert_eq!(schema_json, system_provider_abi_schema_json());
+    assert_eq!(
+        regenerated.provider_abi_json,
+        system_provider_abi_json(),
+        "embedded provider metadata is the fresh typed-registry projection"
+    );
+    build_host::validate_json_against_schema(&regenerated.provider_abi_json, &schema_json)
+        .expect("generated provider defaults conform to the embedded schema");
+
+    let provider_registry: Value = serde_json::from_str(&regenerated.provider_abi_json)
+        .expect("generated provider registry is valid JSON");
+    let api: Value =
+        serde_json::from_str(&system_api_json()).expect("macro-generated sys API is valid JSON");
+    let api_functions = api["functions"]
+        .as_array()
+        .expect("macro-generated API publishes its function descriptors");
+    let table = SystemProviderAbi::from_json(&regenerated.provider_abi_json)
+        .expect("generated provider registry parses into the typed table");
+    assert_eq!(&table, system_dispatch_table());
+
+    let raw_operations = provider_registry["operations"]
+        .as_array()
+        .expect("generated provider registry has operation rows");
+    let mut defaulted_provider_operations = 0;
+    let mut defaulted_provider_parameters = 0;
+    let mut null_defaults = 0;
+    let mut qualified_defaults = 0;
+
+    for operation in table.operations() {
+        if operation.role.is_none() {
+            continue;
+        }
+        let defaults = operation
+            .signature
+            .parameters
+            .iter()
+            .filter_map(|parameter| parameter.default.as_deref())
+            .collect::<Vec<_>>();
+        if defaults.is_empty() {
+            continue;
+        }
+
+        let generated = system_function_descriptor(operation.id.as_str()).unwrap_or_else(|| {
+            panic!(
+                "missing macro-generated binding for {}",
+                operation.id.as_str()
+            )
+        });
+        assert_eq!(generated.signature, operation.signature.source);
+        let api_row = api_functions
+            .iter()
+            .find(|function| function["name"] == operation.id.as_str())
+            .expect("macro-generated API descriptor covers provider operation");
+        assert_eq!(
+            api_row["signature"].as_str(),
+            Some(operation.signature.source.as_str()),
+            "API descriptor preserves defaults for {}",
+            operation.id.as_str()
+        );
+        let raw_row = raw_operations
+            .iter()
+            .find(|row| row["name"] == operation.id.as_str())
+            .expect("generated provider registry covers typed operation");
+        assert_eq!(
+            raw_row["signature"].as_str(),
+            Some(operation.signature.source.as_str()),
+            "schema-validated provider row preserves defaults for {}",
+            operation.id.as_str()
+        );
+
+        for default in defaults {
+            defaulted_provider_parameters += 1;
+            if default == "null" {
+                null_defaults += 1;
+            } else if default.contains('.') {
+                qualified_defaults += 1;
+            } else {
+                panic!(
+                    "unclassified generated provider default {default:?} on {}",
+                    operation.id.as_str()
+                );
+            }
+        }
+        defaulted_provider_operations += 1;
+    }
+
+    assert!(defaulted_provider_operations > 0);
+    assert!(defaulted_provider_parameters >= defaulted_provider_operations);
+    assert!(null_defaults > 0);
+    assert!(qualified_defaults > 0);
+    println!(
+        "generated_provider_default_schema_parity operations={defaulted_provider_operations} defaults={defaulted_provider_parameters} null={null_defaults} qualified={qualified_defaults} total_cases={}",
+        defaulted_provider_operations + defaulted_provider_parameters
+    );
+}
+
+#[test]
 fn generated_bindings_match_schema_valid_provider_edge_mutations() {
     fn effect_name(effect: SystemEffect) -> &'static str {
         match effect {

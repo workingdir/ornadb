@@ -8,13 +8,14 @@ fixture-audit:
     test ! -e reference || (echo "fixture-audit: remove the top-level reference tree" >&2; exit 1)
     cargo test --locked -p orna-syntax --test reference_path_boundary
 
-# Regenerate checked-in TextMate, semantic-token, and VS Code metadata.
+# Regenerate checked-in syntax, semantic-token, and editor packaging artifacts.
 editor-artifacts:
     cargo run --locked -p orna-syntax --example generate_editor_artifacts
 
-# Reject editor artifacts that drift from the orna-syntax grammar metadata.
+# Reject editor artifacts that drift from orna-syntax metadata and templates.
 editor-artifacts-check:
     cargo run --locked -p orna-syntax --example generate_editor_artifacts -- --check
+    node --check editors/tree-sitter-orna/grammar.js
 
 
 # Verify formatting without changing source files.
@@ -135,7 +136,7 @@ lint:
 test:
     cargo test --locked --workspace --all-targets
 
-# Keep LSP fixtures and keyword completion aligned with the ORNA-LEX-007 parser.
+# Keep LSP parsing, fixtures, and completion vocabulary aligned with ORNA-LEX-007.
 lsp-syntax-v1-parity:
     cargo test --locked -p orna-lsp keyword_completion_vocabulary_matches_lex_007_exactly
     cargo test --locked -p orna-lsp in_crate_fixtures_parse_with_the_frozen_1_0_frontend
@@ -153,7 +154,5 @@ sys-binding-conformance-ci:
 sys-dispatch-coverage-ci:
     cargo test --locked -p orna-evaluator-v1 --features orna-sys-v1/dev-sys-export --lib every_generated_host_operation_reaches_its_native_dispatch_arm
 
-# Validate the tree-sitter grammar and editor metadata without installing editor runtimes.
-# This static gate requires its CLI prerequisites: Python 3.11+, tree-sitter CLI, node, and cargo.
-editor-tooling-check:
-    python3 scripts/check-editor-tooling.py
+# Compatibility name for the static generated-editor drift check.
+editor-tooling-check: editor-artifacts-check
