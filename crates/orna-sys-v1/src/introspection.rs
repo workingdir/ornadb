@@ -2477,6 +2477,7 @@ fn explain_query_core_with_limit_pushdowns(
         query.source_statistics.as_ref(),
         window_aggregates,
     );
+    let mut paired_index_anchor_chain_identity: Option<String> = None;
     let mut paired_window_spill_cascade_fold: Option<QueryWindowSpillCascadeFold> = None;
     add_join_cost_fold_seed_details(
         &mut operators[current].details,
@@ -2655,6 +2656,51 @@ fn explain_query_core_with_limit_pushdowns(
                     work_overflow,
                 )
             });
+        let paired_index_anchor_chain_advance = join_pair_identity
+            .zip(selected_partial_index)
+            .zip(paired_index_refold_id.as_deref())
+            .zip(paired_index_selection_id.as_deref())
+            .map(|(((pair, _index), refold_identity), selection_identity)| {
+                let parent_chain_identity = paired_index_anchor_chain_identity
+                    .clone()
+                    .unwrap_or_else(|| {
+                        query_paired_index_anchor_chain_seed_identity(&left_fold_identity)
+                    });
+                let identity = query_paired_index_anchor_chain_identity(
+                    &parent_chain_identity,
+                    &left_fold_identity,
+                    pair,
+                    selection_identity,
+                    refold_identity,
+                );
+                (
+                    parent_chain_identity,
+                    identity,
+                    refold_identity.to_owned(),
+                    selection_identity.to_owned(),
+                )
+            });
+        let next_paired_index_anchor_chain_identity = paired_index_anchor_chain_advance
+            .as_ref()
+            .map(|(_, identity, _, _)| identity.clone())
+            .or_else(|| paired_index_anchor_chain_identity.clone());
+        let paired_index_anchor_chain_parent_identity = paired_index_anchor_chain_advance
+            .as_ref()
+            .map(|(parent_identity, _, _, _)| parent_identity.as_str())
+            .or(paired_index_anchor_chain_identity.as_deref());
+        let paired_index_anchor_chain_transition = if paired_index_anchor_chain_advance.is_some() {
+            Some("append_exact_index_refold")
+        } else if next_paired_index_anchor_chain_identity.is_some() {
+            Some("carry_through_sparse_cost_fold")
+        } else {
+            None
+        };
+        let paired_index_anchor_chain_step_refold_identity = paired_index_anchor_chain_advance
+            .as_ref()
+            .map(|(_, _, identity, _)| identity.as_str());
+        let paired_index_anchor_chain_step_selection_identity = paired_index_anchor_chain_advance
+            .as_ref()
+            .map(|(_, _, _, identity)| identity.as_str());
         let decorrelated_anchor_fold_id = decorrelated_subquery.map(|subquery| {
             query_decorrelated_anchor_fold_identity(
                 &left_fold_identity,
@@ -2885,6 +2931,25 @@ fn explain_query_core_with_limit_pushdowns(
                 );
             }
         }
+        if let (Some(identity), Some(parent_identity), Some(transition)) = (
+            next_paired_index_anchor_chain_identity.as_deref(),
+            paired_index_anchor_chain_parent_identity,
+            paired_index_anchor_chain_transition,
+        ) {
+            let pair_identity = join_pair_identity.map(|pair| pair.identity.as_str());
+            for index in BTreeSet::from([right_access, right]) {
+                add_paired_index_anchor_chain_details(
+                    &mut operators[index].details,
+                    identity,
+                    parent_identity,
+                    &left_fold_identity,
+                    transition,
+                    pair_identity,
+                    paired_index_anchor_chain_step_refold_identity,
+                    paired_index_anchor_chain_step_selection_identity,
+                );
+            }
+        }
         let next_join_cost_fold_identity = query_join_cost_fold(
             &left_fold_identity,
             &right_fold_identity,
@@ -3038,6 +3103,23 @@ fn explain_query_core_with_limit_pushdowns(
                 selection_identity,
             );
         }
+        if let (Some(identity), Some(parent_identity), Some(transition)) = (
+            next_paired_index_anchor_chain_identity.as_deref(),
+            paired_index_anchor_chain_parent_identity,
+            paired_index_anchor_chain_transition,
+        ) {
+            let pair_identity = join_pair_identity.map(|pair| pair.identity.as_str());
+            add_paired_index_anchor_chain_details(
+                &mut details,
+                identity,
+                parent_identity,
+                &left_fold_identity,
+                transition,
+                pair_identity,
+                paired_index_anchor_chain_step_refold_identity,
+                paired_index_anchor_chain_step_selection_identity,
+            );
+        }
         if let Some(window_identity) = right_window_identity.as_deref() {
             add_window_pushdown_chain_details(&mut details, window_identity);
         }
@@ -3067,6 +3149,7 @@ fn explain_query_core_with_limit_pushdowns(
         ));
         current_cardinality = cardinality;
         join_cost_fold_identity = next_join_cost_fold_identity;
+        paired_index_anchor_chain_identity = next_paired_index_anchor_chain_identity;
     }
     for limit in nested_input_limits {
         let cardinality = limit_cardinality(current_cardinality, *limit);
@@ -4354,6 +4437,52 @@ fn add_paired_index_refold_details(
     );
 }
 
+fn add_paired_index_anchor_chain_details(
+    details: &mut BTreeMap<String, PlanDetail>,
+    identity: &str,
+    parent_identity: &str,
+    parent_cost_identity: &str,
+    transition: &str,
+    pair_identity: Option<&str>,
+    step_refold_identity: Option<&str>,
+    step_selection_identity: Option<&str>,
+) {
+    details.insert(
+        "paired_index_anchor_chain_identity".to_owned(),
+        PlanDetail::Text(identity.to_owned()),
+    );
+    details.insert(
+        "paired_index_anchor_chain_parent_identity".to_owned(),
+        PlanDetail::Text(parent_identity.to_owned()),
+    );
+    details.insert(
+        "paired_index_anchor_chain_parent_cost_identity".to_owned(),
+        PlanDetail::Text(parent_cost_identity.to_owned()),
+    );
+    details.insert(
+        "paired_index_anchor_chain_transition".to_owned(),
+        PlanDetail::Text(transition.to_owned()),
+    );
+    if let Some(pair_identity) = pair_identity {
+        details.insert(
+            "paired_index_anchor_chain_pair_identity".to_owned(),
+            PlanDetail::Text(pair_identity.to_owned()),
+        );
+    }
+    if let Some(refold_identity) = step_refold_identity {
+        details.insert(
+            "paired_index_anchor_chain_step_refold_identity".to_owned(),
+            PlanDetail::Text(refold_identity.to_owned()),
+        );
+    }
+    if let Some(selection_identity) = step_selection_identity {
+        details.insert(
+            "paired_index_anchor_chain_step_selection_identity".to_owned(),
+            PlanDetail::Text(selection_identity.to_owned()),
+        );
+    }
+}
+
 fn add_paired_predicate_pushdown_details(
     details: &mut BTreeMap<String, PlanDetail>,
     identity: &str,
@@ -5210,6 +5339,41 @@ fn query_join_cost_input_identity(
         hash_part(&mut hash, identity.as_bytes());
     }
     format!("join-input:{}", hex(&hash.finalize()))
+}
+
+/// Starts the paired-index anchor chain at its current sparse cost ancestry.
+fn query_paired_index_anchor_chain_seed_identity(parent_cost_identity: &str) -> String {
+    let mut hash = Sha256::new();
+    hash.update(b"orna.sys.query-paired-index-anchor-chain-seed.v1\0");
+    hash_part(&mut hash, parent_cost_identity.as_bytes());
+    format!("paired-index-anchor-chain:{}", hex(&hash.finalize()))
+}
+
+/// Accumulates exact paired-index refolds on the current sparse cost ancestry.
+/// The reference leaves this explain-only identity open; keep each selected
+/// route attached to its prior paired anchor while allowing scan-only joins to
+/// pass the chain through unchanged.
+fn query_paired_index_anchor_chain_identity(
+    parent_chain_identity: &str,
+    parent_cost_identity: &str,
+    pair: &QueryJoinPairIdentityDescription,
+    selection_identity: &str,
+    refold_identity: &str,
+) -> String {
+    let mut hash = Sha256::new();
+    hash.update(b"orna.sys.query-paired-index-anchor-chain.v1\0");
+    hash_part(&mut hash, parent_chain_identity.as_bytes());
+    hash_part(&mut hash, parent_cost_identity.as_bytes());
+    hash_part(&mut hash, pair.identity.as_str().as_bytes());
+    hash_part(&mut hash, pair.left_source.as_str().as_bytes());
+    hash_part(&mut hash, pair.right_source.as_str().as_bytes());
+    hash_optional_text(
+        &mut hash,
+        pair.predicate.as_ref().map(ExpressionRef::as_str),
+    );
+    hash_part(&mut hash, selection_identity.as_bytes());
+    hash_part(&mut hash, refold_identity.as_bytes());
+    format!("paired-index-anchor-chain:{}", hex(&hash.finalize()))
 }
 
 /// Refolds a paired exact-index outcome against the current sparse cost
