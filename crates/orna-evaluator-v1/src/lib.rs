@@ -8515,8 +8515,10 @@ impl Context<'_, '_> {
     }
 
     /// Computes a finite breadth-first recursive query, using one canonical
-    /// identity set for the anchor and every recursive round. The output owns
-    /// the first value for each identity and preserves anchor/round/term order.
+    /// identity set for the anchor and every recursive round. The invocation
+    /// owns that fold; input anchor order (including any prior lateral
+    /// flat-map order) determines first values and the breadth-first output
+    /// order.
     fn recursive_cte(
         &mut self,
         anchor: &[Value],
