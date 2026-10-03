@@ -12262,13 +12262,30 @@ fn ui_property_type_matches(type_name: &str, value: &Value) -> bool {
         type_name
             .strip_prefix("std.option<")
             .and_then(|inner| inner.strip_suffix('>'))
-            .is_some_and(|inner| !inner.is_empty())
+            .is_some_and(ui_type_name_is_well_formed)
     };
     match value {
         Value::Null => type_name == "std.null" || is_typed_option(),
         Value::Option(None) => is_typed_option(),
         _ => type_name == ui_value_type_name(value),
     }
+}
+
+fn ui_type_name_is_well_formed(type_name: &str) -> bool {
+    if let Some(inner) = type_name
+        .strip_prefix("std.option<")
+        .and_then(|inner| inner.strip_suffix('>'))
+    {
+        return ui_type_name_is_well_formed(inner);
+    }
+    !type_name.is_empty()
+        && type_name.split('.').all(|part| {
+            let mut chars = part.chars();
+            chars
+                .next()
+                .is_some_and(|first| first == '_' || first.is_alphabetic())
+                && chars.all(|char| char == '_' || char.is_alphanumeric())
+        })
 }
 
 fn is_ui_presentation_node(
@@ -14934,6 +14951,26 @@ mod tests {
 
         let parent = node(vec![invalid_child]);
         assert!(!is_ui_presentation_node(&parent, 0, 2).expect("invalid child is not too deep"));
+    }
+
+    #[test]
+    fn presentation_optional_types_preserve_nested_type_paths() {
+        assert!(ui_property_type_matches(
+            "std.option<std.option<app.Token>>",
+            &Value::Option(None)
+        ));
+        assert!(!ui_property_type_matches(
+            "std.option<>",
+            &Value::Option(None)
+        ));
+        assert!(!ui_property_type_matches(
+            "std.option<std.option<>>",
+            &Value::Null
+        ));
+        assert!(!ui_property_type_matches(
+            "std.option<std..text>",
+            &Value::Null
+        ));
     }
 
     #[test]
