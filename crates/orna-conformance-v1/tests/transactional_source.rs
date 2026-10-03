@@ -836,6 +836,30 @@ fn relation_every_rejects_a_paired_value_mismatch_after_an_omission() {
 }
 
 #[test]
+fn all_unique_rejects_a_second_fully_omitted_pair_key() {
+    let mut runtime = TransactionalEvaluator::new("parent", Limits::default());
+    let outcome = runtime.execute_source(&fixture_source(include_str!(
+        "fixtures/txn-relation-paired-omissions-duplicate-my3f3.orna"
+    )));
+
+    assert!(
+        matches!(
+            &outcome,
+            StageOutcome::Failed(diagnostic)
+                if diagnostic.code() == "ORNA-EVAL-TABLE-ASSERT"
+        ),
+        "null equals null in both selected pair positions: {outcome:?}"
+    );
+    for id in [1, 2] {
+        assert_eq!(
+            runtime.committed_row("Reading", &Value::int(id.into())),
+            None,
+            "duplicate fully omitted pair key published row {id}"
+        );
+    }
+}
+
+#[test]
 fn all_unique_factory_rejects_equal_nested_record_keys_and_rolls_back_rows() {
     let mut runtime = TransactionalEvaluator::new("parent", Limits::default());
     let outcome = runtime.execute_source(&fixture_source(include_str!(
