@@ -506,6 +506,7 @@ pub struct BranchMergePairedCheckpointRedoFoldSparseCompactionRestoreHandoffStre
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum BranchMergePairedCheckpointRedoFoldSparseCompactionRestoreHandoffError {
     InvalidOrderRange {
+        checkpoint_id: CheckpointId,
         restore_ordinal: usize,
         stream_ordinal: usize,
         compaction_ordinal: usize,
@@ -2474,10 +2475,12 @@ pub fn restore_paired_checkpoint_redo_sparse_compaction_handoff_chains_preservin
 /// run also retains its original handoff and fold labels. Restored occurrences
 /// therefore remain distinct even when checkpoint, handoff, fold, and order
 /// labels overlap. The known and observed checkpoint IDs are unioned in sorted
-/// order. Descending ranges are rejected with their full source path; sparse
-/// gaps, absent streams, and omitted checkpoint sides remain absent. The
-/// reference is silent on duplicate-stream/run ordering, so input order is
-/// the stable local policy.
+/// order. Descending ranges are rejected with their full source path, including
+/// checkpoint identity, so callers need not reconstruct the failed stream from
+/// repeated ordinals. Sparse gaps, absent streams, and omitted checkpoint sides
+/// remain absent. The reference is silent on duplicate-stream/run ordering and
+/// error-path detail, so input order is the stable local policy and malformed
+/// paths include the checkpoint ID.
 pub fn restore_paired_checkpoint_redo_sparse_compaction_handoff_chains_preserving_source_identity(
     known_checkpoint_ids: &[CheckpointId],
     restore_handoffs: &[Vec<BranchMergePairedCheckpointRedoFoldSparseCompactionHandoffSnapshot>],
@@ -2505,6 +2508,7 @@ pub fn restore_paired_checkpoint_redo_sparse_compaction_handoff_chains_preservin
                     if run.last_order < run.first_order {
                         return Err(
                             BranchMergePairedCheckpointRedoFoldSparseCompactionRestoreHandoffError::InvalidOrderRange {
+                                checkpoint_id: checkpoint_id.clone(),
                                 restore_ordinal,
                                 stream_ordinal,
                                 compaction_ordinal,
