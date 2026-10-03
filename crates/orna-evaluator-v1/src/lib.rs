@@ -222,8 +222,8 @@ pub struct RelationPage {
 /// identity. The identity follows its source through folds and pagination
 /// handoffs; cursor bytes are checkpoints, not identities, and may be reused
 /// by sibling subscriptions or later refreshes. Effect handlers should bind
-/// continuation state by both source name and this identity so paired same-name
-/// reads cannot resume one another's cursors.
+/// each read batch's continuation state by both source name and this identity
+/// so paired same-name reads cannot resume one another's cursors.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct RelationReadScope(u64);
 
