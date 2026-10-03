@@ -5205,6 +5205,79 @@ fn captured_snapshot_identity_survives_paired_divergence_pin_restoration_folds()
 }
 
 #[test]
+fn captured_iteration_identity_survives_paired_pin_restoration_folds() {
+    let (_directory, projects, pins, project_parents) =
+        paired_divergence_pin_restoration_projects();
+    let expected = [
+        [2_061, 2_063, 2_065],
+        [20_071, 20_073, 20_075],
+        [2_062, 2_064, 2_066],
+        [20_072, 20_074, 20_076],
+        [2_062, 2_064, 2_066],
+        [2_061, 2_063, 2_065],
+    ];
+    let imports = include_str!("fixtures/module-upgrade-paired-divergence-use.orna");
+    let closure = include_str!("fixtures/module-upgrade-divergence-iteration-closure.orna");
+    let replay = include_str!("fixtures/module-upgrade-divergence-iteration-replay.orna");
+
+    assert_eq!(pins[4], pins[2], "the first fold restores the captured collection-only pin");
+    assert_eq!(pins[5], pins[0], "the second fold restores the captured baseline pin");
+    assert_ne!(project_parents[4], project_parents[2]);
+    assert_ne!(project_parents[5], project_parents[0]);
+
+    let mut sessions = Vec::with_capacity(projects.len());
+    for (index, project) in projects.iter().enumerate() {
+        assert_eq!(
+            project.standard_profile().unwrap().snapshot(),
+            &pins[index],
+            "iteration fold {index} must load its exact standard pin"
+        );
+        let mut session = AdmittedReplSession::from_loaded_project(
+            project,
+            project.standard_sources().iter().cloned(),
+            Limits::default(),
+        )
+        .unwrap();
+        for import in imports.lines() {
+            assert_eq!(session.submit(import), Ok(None));
+        }
+        assert_eq!(session.submit(closure), Ok(None));
+        let replayed = session.submit(replay).unwrap_or_else(|error| {
+            panic!(
+                "collection iteration callback must compute with restored pin {}: {}",
+                pins[index],
+                error.code()
+            )
+        });
+        assert_eq!(
+            replayed,
+            Some(ints(&expected[index])),
+            "collection iteration callback must compute with restored pin {}",
+            pins[index]
+        );
+        sessions.push(session);
+    }
+
+    for index in [5, 0, 4, 3, 2, 1, 5, 2, 0, 4] {
+        assert_eq!(
+            sessions[index].submit(replay),
+            Ok(Some(ints(&expected[index]))),
+            "interleaved callback iteration must preserve restored pin {}",
+            pins[index]
+        );
+    }
+    let mut cloned_sessions = sessions.clone();
+    for index in [4, 5, 1, 3, 0, 2] {
+        assert_eq!(
+            cloned_sessions[index].submit(replay),
+            Ok(Some(ints(&expected[index]))),
+            "cloned callback iteration must preserve restored pin {}",
+            pins[index]
+        );
+    }
+}
+
+#[test]
 fn captured_snapshot_identity_survives_paired_divergence_compaction_folds() {
     let (directory, projects, pins) = paired_divergence_compaction_projects();
     let expected = [
