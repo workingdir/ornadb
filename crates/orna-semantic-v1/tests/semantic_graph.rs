@@ -7498,6 +7498,107 @@ fn sparse_paired_rebind_chains_preserve_identity_across_omitted_rows() {
 }
 
 #[test]
+fn paired_sparse_omission_replay_recovers_learned_lane_identities() {
+    let source = include_str!(
+        "fixtures/historical-paired-sparse-omission-replay-recovery.orna"
+    );
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-paired-sparse-omission-replay-recovery.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    let type_diagnostics = result
+        .diagnostics
+        .iter()
+        .filter(|diagnostic| diagnostic.code() == DIAG_TYPE)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        type_diagnostics.len(),
+        1,
+        "only the final lane split after the sparse replay chain should be rejected: {:?}",
+        type_diagnostics
+            .iter()
+            .map(|diagnostic| diagnostic.message())
+            .collect::<Vec<_>>()
+    );
+    let module = result
+        .modules
+        .values()
+        .find(|module| {
+            module
+                .symbols
+                .contains_key("paired_sparse_omission_replay_recovery")
+        })
+        .expect("paired sparse replay fixture module");
+    let Type::Function { result, .. } =
+        &module.symbols["paired_sparse_omission_replay_recovery"].ty
+    else {
+        panic!("paired sparse replay recovery must return computed stages");
+    };
+    let Type::Record(stages) = result.as_ref() else {
+        panic!("paired sparse replay recovery must return both saved and replayed lists");
+    };
+    let saved = stages.get("saved").expect("saved sparse list");
+    let replayed = stages.get("replayed").expect("replayed sparse list");
+    assert_eq!(
+        saved, replayed,
+        "resetting after a decoy sparse chain must recover every saved pin map"
+    );
+    let Type::List(row) = saved else {
+        panic!("saved sparse checkpoints must remain a real list: {saved:?}");
+    };
+    let Type::Record(fields) = row.as_ref() else {
+        panic!("saved sparse list must keep its computed row shape: {row:?}");
+    };
+    for (lane, first_slot, second_slot) in [
+        (
+            "left",
+            &["HEAD~1000", "HEAD~1020", "HEAD~1040"][..],
+            &["HEAD~1020", "HEAD~1040"][..],
+        ),
+        (
+            "right",
+            &["HEAD~1020", "HEAD~1040"][..],
+            &["HEAD~1001", "HEAD~1021", "HEAD~1041"][..],
+        ),
+    ] {
+        let Type::Tuple(slots) = fields.get(lane).expect("paired lane") else {
+            panic!("{lane} must retain both paired slots");
+        };
+        for (slot, expected) in slots.iter().zip([first_slot, second_slot]) {
+            let mut contexts = BTreeSet::new();
+            collect_snapshot_contexts(slot, &mut contexts);
+            assert_eq!(
+                contexts,
+                expected
+                    .iter()
+                    .map(|selector| format!("selector:{selector}"))
+                    .into_iter()
+                    .collect(),
+                "{lane} must recover its concrete selector history through sparse rows"
+            );
+        }
+    }
+    let mut witness_contexts = BTreeSet::new();
+    collect_snapshot_contexts(
+        fields.get("witness").expect("independent witness lane"),
+        &mut witness_contexts,
+    );
+    assert_eq!(
+        witness_contexts,
+        ["HEAD~1010", "HEAD~1022", "HEAD~1030", "HEAD~1042", "HEAD~1052"]
+            .map(|selector| format!("selector:{selector}"))
+            .into_iter()
+            .collect(),
+        "rejecting a lane split must retain independent witness identities"
+    );
+}
+
+#[test]
 fn paired_tuple_rebind_cascades_preserve_both_depths_of_identity() {
     let source = include_str!("fixtures/historical-cascaded-sparse-paired-three-way-rebinds.orna");
     let parsed = orna_syntax_v1::parse_module(source);
@@ -12835,6 +12936,99 @@ fn paired_checkpoint_map_shape_rebind_preserves_each_real_selector_set() {
             collect_snapshot_contexts(value, &mut contexts);
             assert_eq!(contexts, BTreeSet::from([selector.to_owned()]), "{name}.{field}");
         }
+    }
+}
+
+#[test]
+fn sparse_checkpoint_rebind_chains_keep_paired_three_way_identity() {
+    let source = include_str!("fixtures/historical-sparse-checkpoint-three-way-rebind-chains.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-sparse-checkpoint-three-way-rebind-chains.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    let type_errors = result
+        .diagnostics
+        .iter()
+        .filter(|diagnostic| diagnostic.code() == DIAG_TYPE)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        type_errors.len(),
+        1,
+        "only the checkpoint chain that splits its paired identity should fail: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+    let module = result
+        .modules
+        .values()
+        .find(|module| module.symbols.contains_key("accepts_sparse_checkpoint_rebind_chains"))
+        .expect("sparse checkpoint rebind fixture module");
+    let Type::Function { result, .. } = &module.symbols["accepts_sparse_checkpoint_rebind_chains"].ty else {
+        panic!("checkpoint chain must return its computed type");
+    };
+    let Type::Record(stages) = result.as_ref() else {
+        panic!("checkpoint chain must return computed stage values: {result:?}");
+    };
+    let tuple_maps = |stage: &str, lane: &str| {
+        let Type::List(row) = stages.get(stage).expect("checkpoint stage") else {
+            panic!("{stage} must retain its checkpoint rows");
+        };
+        let Type::Record(fields) = row.as_ref() else {
+            panic!("{stage} must retain its row record");
+        };
+        let Type::Tuple(slots) = fields.get(lane).expect("checkpoint lane") else {
+            panic!("{stage}.{lane} must remain a paired checkpoint tuple");
+        };
+        assert_eq!(slots.len(), 2, "{stage}.{lane} preserves both tuple slots");
+        slots
+            .iter()
+            .map(|slot| {
+                let mut selectors = BTreeSet::new();
+                collect_snapshot_contexts(slot, &mut selectors);
+                assert!(!selectors.is_empty(), "{stage}.{lane} contains real checkpoint values");
+                selectors
+            })
+            .collect::<Vec<_>>()
+    };
+    let selectors = |values: &[&str]| {
+        values
+            .iter()
+            .map(|value| format!("selector:HEAD~{value}"))
+            .collect::<BTreeSet<_>>()
+    };
+    for (stage, left, right) in [
+        (
+            "saved",
+            [selectors(&["8200", "8220", "8260"]), selectors(&["8220", "8260"])],
+            [selectors(&["8120", "8160"]), selectors(&["8100", "8120", "8160"])],
+        ),
+        (
+            "after_first_rebind",
+            [selectors(&["8320", "8360"]), selectors(&["8320", "8360"])],
+            [selectors(&["8310", "8350"]), selectors(&["8310", "8350"])],
+        ),
+        (
+            "after_second_rebind",
+            [selectors(&["8460", "8480"]), selectors(&["8460", "8480"])],
+            [selectors(&["8450", "8490"]), selectors(&["8450", "8490"])],
+        ),
+        (
+            "restored",
+            [selectors(&["8200", "8220", "8260"]), selectors(&["8220", "8260"])],
+            [selectors(&["8120", "8160"]), selectors(&["8100", "8120", "8160"])],
+        ),
+    ] {
+        assert_eq!(tuple_maps(stage, "left_checkpoint"), left, "{stage} left identity");
+        assert_eq!(tuple_maps(stage, "right_checkpoint"), right, "{stage} right identity");
+        assert_ne!(left, right, "{stage} keeps each checkpoint lane distinct");
     }
 }
 
