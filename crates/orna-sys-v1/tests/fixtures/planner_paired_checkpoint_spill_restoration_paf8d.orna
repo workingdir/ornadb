@@ -1,0 +1,7 @@
+use sys.query as query_ops;
+
+pub fn explain_checkpoint_spill_costs(query: Query<Int>): sys.Plan =
+    query_ops.plan_hint(query);
+
+pub fn checkpoint_spill_coordinates(): Text =
+    "restore, spill, stream, compaction, handoff, fold, order, checkpoint generations and redo fold";

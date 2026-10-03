@@ -1692,6 +1692,388 @@ fn dispatch_signature_depth_matrix_matches_every_typed_parameter_and_result() {
 }
 
 #[test]
+fn provider_default_edges_require_materialized_dispatch_arguments() {
+    let table = system_dispatch_table();
+    let registry = ProviderRoleRegistry::from_baked_abi(table)
+        .expect("generated built-in provider offers resolve");
+    let mut defaulted_operations = 0;
+    let mut defaulted_parameters = 0;
+    let mut omitted_direct_rejections = 0;
+    let mut omitted_registry_rejections = 0;
+    let mut materialized_direct_routes = 0;
+    let mut materialized_registry_routes = 0;
+
+    for contract in table.operations() {
+        if contract.role.is_none() {
+            continue;
+        }
+        let Some(first_default) = contract
+            .signature
+            .parameters
+            .iter()
+            .position(|parameter| parameter.default.is_some())
+        else {
+            continue;
+        };
+        assert!(
+            contract.signature.parameters[first_default..]
+                .iter()
+                .all(|parameter| parameter.default.is_some()),
+            "provider defaults remain a trailing suffix for {}",
+            contract.id.as_str()
+        );
+        let generated = system_function_descriptor(contract.id.as_str())
+            .expect("defaulted provider operation has a generated binding");
+        assert_eq!(generated.signature, contract.signature.source);
+
+        let role = contract
+            .role
+            .as_ref()
+            .expect("provider operation has a role");
+        let offer = registry
+            .resolve(role.as_str())
+            .expect("defaulted provider role has a selected built-in offer")
+            .clone();
+        let argument_types = contract
+            .signature
+            .parameters
+            .iter()
+            .map(|parameter| parameter.ty.canonical())
+            .collect::<Vec<_>>();
+        let omitted_arguments = contract.signature.parameters[..first_default]
+            .iter()
+            .map(|parameter| {
+                TypedValue::public(
+                    TypeId::new(parameter.ty.canonical()),
+                    parameter.name.as_bytes().to_vec(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let supplied = TypedValue::public(
+            TypeId::new(contract.signature.result.canonical()),
+            b"materialized-provider-defaults".to_vec(),
+        );
+        let provider = InvokeValueProvider {
+            offer,
+            operation: contract.id.clone(),
+            argument_types,
+            response: Ok(supplied.clone()),
+            calls: AtomicUsize::new(0),
+        };
+        let omitted = ProviderDiagnostic::ArgumentCountMismatch {
+            operation: contract.id.clone(),
+            expected: contract.signature.parameters.len(),
+            actual: first_default,
+        };
+
+        assert_eq!(
+            table.dispatch_to_provider(generated.name, &provider, &omitted_arguments, |_| Ok(())),
+            Err(omitted.clone()),
+            "direct provider route rejects omitted defaults for {}",
+            contract.id.as_str()
+        );
+        omitted_direct_rejections += 1;
+        assert_eq!(
+            registry.dispatch_to_provider(
+                table,
+                generated.name,
+                &provider,
+                &omitted_arguments,
+                |_| Ok(())
+            ),
+            Err(omitted),
+            "registry provider route rejects omitted defaults for {}",
+            contract.id.as_str()
+        );
+        omitted_registry_rejections += 1;
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
+
+        let materialized_arguments = contract
+            .signature
+            .parameters
+            .iter()
+            .map(|parameter| {
+                let value = parameter.default.as_deref().unwrap_or(&parameter.name);
+                TypedValue::public(
+                    TypeId::new(parameter.ty.canonical()),
+                    value.as_bytes().to_vec(),
+                )
+            })
+            .collect::<Vec<_>>();
+        defaulted_parameters += contract.signature.parameters.len() - first_default;
+        assert_eq!(
+            table.dispatch_to_provider(generated.name, &provider, &materialized_arguments, |_| Ok(
+                ()
+            )),
+            Ok(orna_sys_v1::SystemDispatchResult::Returned(
+                supplied.clone()
+            )),
+            "direct provider route accepts materialized defaults for {}",
+            contract.id.as_str()
+        );
+        materialized_direct_routes += 1;
+        assert_eq!(
+            registry.dispatch_to_provider(
+                table,
+                generated.name,
+                &provider,
+                &materialized_arguments,
+                |_| Ok(())
+            ),
+            Ok(orna_sys_v1::SystemDispatchResult::Returned(supplied)),
+            "registry provider route accepts materialized defaults for {}",
+            contract.id.as_str()
+        );
+        materialized_registry_routes += 1;
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 2);
+        defaulted_operations += 1;
+    }
+
+    assert_eq!(defaulted_operations, 6);
+    assert_eq!(defaulted_parameters, 14);
+    assert_eq!(omitted_direct_rejections, defaulted_operations);
+    assert_eq!(omitted_registry_rejections, defaulted_operations);
+    assert_eq!(materialized_direct_routes, defaulted_operations);
+    assert_eq!(materialized_registry_routes, defaulted_operations);
+    println!(
+        "provider_default_dispatch_parity operations={defaulted_operations} defaults={defaulted_parameters} omitted_direct={omitted_direct_rejections} omitted_registry={omitted_registry_rejections} materialized_direct={materialized_direct_routes} materialized_registry={materialized_registry_routes} total_cases={}",
+        defaulted_parameters
+            + omitted_direct_rejections
+            + omitted_registry_rejections
+            + materialized_direct_routes
+            + materialized_registry_routes
+    );
+}
+
+#[test]
+fn provider_optional_argument_edges_match_schema_and_dispatch_diagnostics() {
+    let schema_json = build_provider::generate_provider_registry_schema()
+        .expect("provider optional-argument schema regenerates");
+    assert_eq!(schema_json, system_provider_abi_schema_json());
+    build_host::validate_json_against_schema(system_provider_abi_json(), &schema_json)
+        .expect("embedded optional provider arguments conform to the generated schema");
+
+    let table = system_dispatch_table();
+    let registry = ProviderRoleRegistry::from_baked_abi(table)
+        .expect("generated built-in provider offers resolve");
+    let mut optional_operations = 0;
+    let mut optional_parameters = 0;
+    let mut generated_binding_cases = 0;
+    let mut null_direct_routes = 0;
+    let mut null_registry_routes = 0;
+    let mut present_direct_routes = 0;
+    let mut present_registry_routes = 0;
+    let mut bare_inner_rejections = 0;
+    let mut wrong_optional_rejections = 0;
+
+    for contract in table.operations() {
+        if contract.role.is_none() {
+            continue;
+        }
+        let optional_indexes = contract
+            .signature
+            .parameters
+            .iter()
+            .enumerate()
+            .filter_map(|(index, parameter)| {
+                matches!(&parameter.ty, AbiType::Optional(_)).then_some(index)
+            })
+            .collect::<Vec<_>>();
+        if optional_indexes.is_empty() {
+            continue;
+        }
+
+        let generated = system_function_descriptor(contract.id.as_str())
+            .expect("optional provider operation has a generated binding");
+        assert_eq!(generated.signature, contract.signature.source);
+        assert_eq!(
+            contract.effects.iter().next(),
+            Some(generated.effect),
+            "generated binding effect matches {}",
+            contract.id.as_str()
+        );
+        generated_binding_cases += 1;
+
+        let role = contract
+            .role
+            .as_ref()
+            .expect("provider operation has a role");
+        let offer = registry
+            .resolve(role.as_str())
+            .expect("optional provider role has a selected offer")
+            .clone();
+        let argument_types = contract
+            .signature
+            .parameters
+            .iter()
+            .map(|parameter| parameter.ty.canonical())
+            .collect::<Vec<_>>();
+        let provider = InvokeValueProvider {
+            offer,
+            operation: contract.id.clone(),
+            argument_types,
+            response: Ok(TypedValue::public(
+                TypeId::new(contract.signature.result.canonical()),
+                b"optional-provider-result".to_vec(),
+            )),
+            calls: AtomicUsize::new(0),
+        };
+        let null_arguments = contract
+            .signature
+            .parameters
+            .iter()
+            .map(|parameter| {
+                let value = parameter.default.as_deref().unwrap_or(&parameter.name);
+                TypedValue::public(
+                    TypeId::new(parameter.ty.canonical()),
+                    value.as_bytes().to_vec(),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            optional_indexes.iter().all(|index| {
+                contract.signature.parameters[*index].default.as_deref() == Some("null")
+            }),
+            "optional provider parameters use explicit null defaults for {}",
+            contract.id.as_str()
+        );
+        let expected_result = provider.response.as_ref().unwrap().clone();
+        assert_eq!(
+            table.dispatch_to_provider(generated.name, &provider, &null_arguments, |_| Ok(())),
+            Ok(orna_sys_v1::SystemDispatchResult::Returned(
+                expected_result.clone()
+            )),
+            "direct route accepts explicit null optional arguments for {}",
+            contract.id.as_str()
+        );
+        null_direct_routes += 1;
+        assert_eq!(
+            registry.dispatch_to_provider(
+                table,
+                generated.name,
+                &provider,
+                &null_arguments,
+                |_| Ok(())
+            ),
+            Ok(orna_sys_v1::SystemDispatchResult::Returned(
+                expected_result.clone()
+            )),
+            "registry route accepts explicit null optional arguments for {}",
+            contract.id.as_str()
+        );
+        null_registry_routes += 1;
+
+        let mut present_arguments = null_arguments.clone();
+        for index in &optional_indexes {
+            let parameter = &contract.signature.parameters[*index];
+            present_arguments[*index] = TypedValue::public(
+                TypeId::new(parameter.ty.canonical()),
+                b"present-optional-value".to_vec(),
+            );
+        }
+        assert_eq!(
+            table.dispatch_to_provider(generated.name, &provider, &present_arguments, |_| Ok(())),
+            Ok(orna_sys_v1::SystemDispatchResult::Returned(
+                expected_result.clone()
+            )),
+            "direct route accepts present optional arguments for {}",
+            contract.id.as_str()
+        );
+        present_direct_routes += 1;
+        assert_eq!(
+            registry.dispatch_to_provider(
+                table,
+                generated.name,
+                &provider,
+                &present_arguments,
+                |_| Ok(())
+            ),
+            Ok(orna_sys_v1::SystemDispatchResult::Returned(expected_result)),
+            "registry route accepts present optional arguments for {}",
+            contract.id.as_str()
+        );
+        present_registry_routes += 1;
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 4);
+
+        for index in &optional_indexes {
+            let parameter = &contract.signature.parameters[*index];
+            let AbiType::Optional(inner) = &parameter.ty else {
+                unreachable!("selected optional index has an optional type")
+            };
+            let inner_type = inner.canonical();
+            for (invalid_type, counter) in [
+                (inner_type.clone(), &mut bare_inner_rejections),
+                (
+                    "sys.cont38.Wrong?".to_owned(),
+                    &mut wrong_optional_rejections,
+                ),
+            ] {
+                let mut invalid_arguments = null_arguments.clone();
+                invalid_arguments[*index] = TypedValue::public(
+                    TypeId::new(invalid_type.clone()),
+                    b"invalid-optional-type".to_vec(),
+                );
+                let expected = ProviderDiagnostic::ArgumentTypeMismatch {
+                    operation: contract.id.clone(),
+                    parameter: parameter.name.clone(),
+                    expected: parameter.ty.canonical(),
+                    actual: invalid_type,
+                };
+                assert_eq!(
+                    table.dispatch_to_provider(
+                        generated.name,
+                        &provider,
+                        &invalid_arguments,
+                        |_| Ok(())
+                    ),
+                    Err(expected.clone()),
+                    "direct route rejects invalid optional type for {}.{}",
+                    contract.id.as_str(),
+                    parameter.name
+                );
+                assert_eq!(
+                    registry.dispatch_to_provider(
+                        table,
+                        generated.name,
+                        &provider,
+                        &invalid_arguments,
+                        |_| Ok(())
+                    ),
+                    Err(expected),
+                    "registry route rejects invalid optional type for {}.{}",
+                    contract.id.as_str(),
+                    parameter.name
+                );
+                *counter += 1;
+                assert_eq!(provider.calls.load(Ordering::SeqCst), 4);
+            }
+            optional_parameters += 1;
+        }
+        optional_operations += 1;
+    }
+
+    assert_eq!(optional_operations, 6);
+    assert_eq!(optional_parameters, 10);
+    assert_eq!(generated_binding_cases, optional_operations);
+    assert_eq!(null_direct_routes, optional_operations);
+    assert_eq!(null_registry_routes, optional_operations);
+    assert_eq!(present_direct_routes, optional_operations);
+    assert_eq!(present_registry_routes, optional_operations);
+    assert_eq!(bare_inner_rejections, optional_parameters);
+    assert_eq!(wrong_optional_rejections, optional_parameters);
+    println!(
+        "provider_optional_dispatch_parity operations={optional_operations} optional_arguments={optional_parameters} null_direct={null_direct_routes} null_registry={null_registry_routes} present_direct={present_direct_routes} present_registry={present_registry_routes} bare_inner_rejected={bare_inner_rejections} wrong_optional_rejected={wrong_optional_rejections} total_cases={}",
+        generated_binding_cases
+            + null_direct_routes
+            + null_registry_routes
+            + present_direct_routes
+            + present_registry_routes
+            + bare_inner_rejections
+            + wrong_optional_rejections
+    );
+}
+
+#[test]
 fn dispatch_to_provider_routes_typed_value_and_declared_failure() {
     let table = system_dispatch_table();
     let operation_name = "sys.invoke(Value)";
