@@ -1,0 +1,3 @@
+use std.math.{shift};
+use std.collection.{marker};
+pub fn finish(value: Int): Int = shift(value + marker() + 3);
