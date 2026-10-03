@@ -4,9 +4,9 @@ pub fn factory_at(pin: sys.SnapshotRef) =
 pub fn accepts_sparse_rebinds_after_omitted_pair_rows(failure: Error) {
     let parents = [
         { witness: factory_at(sys.snapshot("HEAD~2991")) },
-        { pins: (factory_at(sys.snapshot("HEAD~3000")), factory_at(sys.snapshot("HEAD~3000"))), witness: factory_at(sys.snapshot("HEAD~3001")) },
+        { pins: (factory_at(sys.snapshot("HEAD~3000")), fail(failure)), witness: factory_at(sys.snapshot("HEAD~3001")) },
         { witness: factory_at(sys.snapshot("HEAD~3011")) },
-        { pins: (factory_at(sys.snapshot("HEAD~3020")), fail(failure)), witness: factory_at(sys.snapshot("HEAD~3021")) },
+        { pins: (factory_at(sys.snapshot("HEAD~3020")), factory_at(sys.snapshot("HEAD~3020"))), witness: factory_at(sys.snapshot("HEAD~3021")) },
         { witness: factory_at(sys.snapshot("HEAD~3031")) },
         { pins: (factory_at(sys.snapshot("HEAD~3040")), factory_at(sys.snapshot("HEAD~3040"))), witness: factory_at(sys.snapshot("HEAD~3041")) },
         { witness: factory_at(sys.snapshot("HEAD~3051")) },
@@ -24,6 +24,18 @@ pub fn rejects_sparse_rebind_split_after_omitted_pair_rows(failure: Error) {
         { witness: factory_at(sys.snapshot("HEAD~4031")) },
         { pins: (factory_at(sys.snapshot("HEAD~4040")), factory_at(sys.snapshot("HEAD~4041"))), witness: factory_at(sys.snapshot("HEAD~4042")) },
         { pins: (factory_at(sys.snapshot("HEAD~4050")), factory_at(sys.snapshot("HEAD~4050"))), witness: factory_at(sys.snapshot("HEAD~4051")) },
+    ];
+    { parent_fold: parents }
+}
+
+pub fn accepts_nested_sparse_rebinds_after_omitted_pair_rows() {
+    let parents = [
+        { details: { witness: factory_at(sys.snapshot("HEAD~4991")) }, witness: factory_at(sys.snapshot("HEAD~4992")) },
+        { details: { pins: (factory_at(sys.snapshot("HEAD~5000")), factory_at(sys.snapshot("HEAD~5000"))), witness: factory_at(sys.snapshot("HEAD~5001")) }, witness: factory_at(sys.snapshot("HEAD~5002")) },
+        { details: { witness: factory_at(sys.snapshot("HEAD~5011")) }, witness: factory_at(sys.snapshot("HEAD~5012")) },
+        { details: { pins: (factory_at(sys.snapshot("HEAD~5020")), factory_at(sys.snapshot("HEAD~5020"))), witness: factory_at(sys.snapshot("HEAD~5021")) }, witness: factory_at(sys.snapshot("HEAD~5022")) },
+        { details: { witness: factory_at(sys.snapshot("HEAD~5031")) }, witness: factory_at(sys.snapshot("HEAD~5032")) },
+        { details: { pins: (factory_at(sys.snapshot("HEAD~5040")), factory_at(sys.snapshot("HEAD~5040"))), witness: factory_at(sys.snapshot("HEAD~5041")) }, witness: factory_at(sys.snapshot("HEAD~5042")) },
     ];
     { parent_fold: parents }
 }

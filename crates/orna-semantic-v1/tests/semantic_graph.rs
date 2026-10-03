@@ -7401,6 +7401,36 @@ fn sparse_paired_rebind_chains_preserve_identity_across_omitted_rows() {
         );
         contexts
     };
+    let nested_pin_slots = |function: &str| {
+        let Type::Record(details) = row_fields(function)
+            .get("details")
+            .expect("nested details sibling")
+        else {
+            panic!("{function}.details must retain its computed record");
+        };
+        let Type::Tuple(slots) = details.get("pins").expect("nested paired pins") else {
+            panic!("{function}.details.pins must retain its paired tuple");
+        };
+        slots
+            .iter()
+            .map(|slot| {
+                let mut contexts = BTreeSet::new();
+                collect_snapshot_contexts(slot, &mut contexts);
+                contexts
+            })
+            .collect::<Vec<_>>()
+    };
+    let nested_witness_contexts = |function: &str| {
+        let Type::Record(details) = row_fields(function)
+            .get("details")
+            .expect("nested details sibling")
+        else {
+            panic!("{function}.details must retain its computed record");
+        };
+        let mut contexts = BTreeSet::new();
+        collect_snapshot_contexts(details.get("witness").expect("nested witness"), &mut contexts);
+        contexts
+    };
 
     assert_eq!(
         pin_slots("accepts_sparse_rebinds_after_omitted_pair_rows"),
@@ -7412,12 +7442,12 @@ fn sparse_paired_rebind_chains_preserve_identity_across_omitted_rows() {
                 "selector:HEAD~3060".into(),
             ]),
             BTreeSet::from([
-                "selector:HEAD~3000".into(),
+                "selector:HEAD~3020".into(),
                 "selector:HEAD~3040".into(),
                 "selector:HEAD~3060".into(),
             ]),
         ],
-        "omitted rows do not erase sparse slot history or change later paired rebind identity"
+        "omitted rows do not erase sparse slot history or fabricate the failed slot's value"
     );
     assert_eq!(
         pin_slots("rejects_sparse_rebind_split_after_omitted_pair_rows"),
@@ -7436,6 +7466,34 @@ fn sparse_paired_rebind_chains_preserve_identity_across_omitted_rows() {
             "selector:HEAD~4051".into(),
         ]),
         "rejecting the sparse tuple split leaves each sibling witness value intact"
+    );
+    assert_eq!(
+        nested_pin_slots("accepts_nested_sparse_rebinds_after_omitted_pair_rows"),
+        [
+            BTreeSet::from([
+                "selector:HEAD~5000".into(),
+                "selector:HEAD~5020".into(),
+                "selector:HEAD~5040".into(),
+            ]),
+            BTreeSet::from([
+                "selector:HEAD~5000".into(),
+                "selector:HEAD~5020".into(),
+                "selector:HEAD~5040".into(),
+            ]),
+        ],
+        "nested omitted sibling rows preserve both tuple slot identities through three-way rebinds"
+    );
+    assert_eq!(
+        nested_witness_contexts("accepts_nested_sparse_rebinds_after_omitted_pair_rows"),
+        BTreeSet::from([
+            "selector:HEAD~4991".into(),
+            "selector:HEAD~5001".into(),
+            "selector:HEAD~5011".into(),
+            "selector:HEAD~5021".into(),
+            "selector:HEAD~5031".into(),
+            "selector:HEAD~5041".into(),
+        ]),
+        "nested non-tuple siblings retain their real computed values"
     );
 }
 
