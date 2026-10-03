@@ -1,0 +1,6 @@
+std.iterator.collect(
+    std.iterator.adapters.flat_map(
+        std.iterator.from_list([2, 1, 3]),
+        value => std.iterator.from_list([value, value * 10])
+    )
+)
