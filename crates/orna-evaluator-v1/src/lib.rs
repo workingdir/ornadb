@@ -12162,11 +12162,50 @@ fn is_ui_presentation_node(value: &Value) -> bool {
     let Value::Record(fields) = value else {
         return false;
     };
-    matches!(fields.get("kind"), Some(Value::String(kind)) if kind == "node")
-        && matches!(fields.get("contract"), Some(Value::Record(_)))
-        && matches!(fields.get("properties"), Some(Value::Record(_)))
-        && matches!(fields.get("slots"), Some(Value::Record(_)))
-        && matches!(fields.get("actions"), Some(Value::Record(_)))
+    if !matches!(fields.get("kind"), Some(Value::String(kind)) if kind == "node") {
+        return false;
+    }
+    let Some(Value::Record(contract)) = fields.get("contract") else {
+        return false;
+    };
+    if !["id", "name", "version"].into_iter().all(|name| {
+        matches!(contract.get(name), Some(Value::String(value)) if !value.is_empty())
+    }) {
+        return false;
+    }
+    let Some(Value::Record(properties)) = fields.get("properties") else {
+        return false;
+    };
+    if !properties.iter().all(|(name, property)| {
+        let Value::Record(typed) = property else {
+            return false;
+        };
+        let (Some(Value::String(type_name)), Some(value)) =
+            (typed.get("type"), typed.get("value"))
+        else {
+            return false;
+        };
+        !name.is_empty()
+            && type_name == &ui_value_type_name(value)
+            && value.clone().canonical().is_ok()
+    }) {
+        return false;
+    }
+    let Some(Value::Record(slots)) = fields.get("slots") else {
+        return false;
+    };
+    if !slots.values().all(|slot| {
+        let Value::List(children) = slot else {
+            return false;
+        };
+        children.iter().all(is_ui_presentation_node)
+    }) {
+        return false;
+    }
+    let Some(Value::Record(actions)) = fields.get("actions") else {
+        return false;
+    };
+    actions.values().all(is_ui_action_descriptor)
 }
 
 fn is_ui_action_descriptor(value: &Value) -> bool {
@@ -14650,6 +14689,44 @@ mod tests {
         assert_eq!(field("action_id"), &Raw::Text("save".into()));
         assert_eq!(field("input_type"), &Raw::Text("std.text".into()));
         assert_eq!(field("debug_kind"), &Raw::Text("button".into()));
+    }
+
+    #[test]
+    fn presentation_container_validation_rejects_incomplete_nested_contracts() {
+        fn node(children: Vec<Value>) -> Value {
+            Value::Record(BTreeMap::from([
+                ("kind".into(), Value::String("node".into())),
+                (
+                    "contract".into(),
+                    Value::Record(BTreeMap::from([
+                        ("id".into(), Value::String("std.ui.text@1".into())),
+                        ("name".into(), Value::String("std.ui.text".into())),
+                        ("version".into(), Value::String("1.0".into())),
+                    ])),
+                ),
+                ("properties".into(), Value::Record(BTreeMap::new())),
+                (
+                    "slots".into(),
+                    Value::Record(BTreeMap::from([(
+                        "content".into(),
+                        Value::List(children),
+                    )])),
+                ),
+                ("actions".into(), Value::Record(BTreeMap::new())),
+            ]))
+        }
+
+        let valid = node(Vec::new());
+        assert!(is_ui_presentation_node(&valid));
+
+        let mut invalid_child = node(Vec::new());
+        let Value::Record(fields) = &mut invalid_child else {
+            unreachable!();
+        };
+        fields.insert("contract".into(), Value::Record(BTreeMap::new()));
+
+        let parent = node(vec![invalid_child]);
+        assert!(!is_ui_presentation_node(&parent));
     }
 
     #[test]
