@@ -1,4 +1,6 @@
-use orna_semantic_v1::{ModuleInput, Type, analyze_with_catalogue};
+use orna_semantic_v1::{
+    Catalogue, ModuleInput, StandardDependencyProfile, Type, analyze_with_catalogue,
+};
 
 use crate::{
     REFERENCE_STANDARD_COLLECTION_PATH_V1, REFERENCE_STANDARD_MATH_PATH_V1,
@@ -99,6 +101,30 @@ fn pinned_std_entrypoint_imports_optional_content_modules() {
     assert!(entrypoint.lines().any(|line| line.trim() == "use reflection;"));
     assert!(entrypoint.lines().any(|line| line.trim() == "use format;"));
     assert!(entrypoint.lines().any(|line| line.trim() == "use parse;"));
+}
+
+#[test]
+fn pinned_test_should_contracts_typecheck_from_the_captured_module() {
+    let test_source = reference_standard_sources_v1()
+        .into_iter()
+        .find(|(path, _)| path == REFERENCE_STANDARD_TEST_PATH_V1)
+        .expect("the pinned source bundle includes std.test");
+    reference_standard_profile_v1()
+        .verify_source(&test_source.0, &test_source.1)
+        .expect("the test contracts use bytes from the captured std snapshot");
+    let sources = vec![test_source];
+    let profile = StandardDependencyProfile::from_sources(
+        "orna.std/test-assert-contracts",
+        sources.clone(),
+    )
+    .expect("the selected pinned test source forms a captured module snapshot");
+    let catalogue = Catalogue::authoritative_core()
+        .with_standard_sources(&profile, sources)
+        .expect("the pinned test module resolves without host test-runner imports");
+    let consumer = include_str!("fixtures/v1_test_consumer.orna");
+    let analysis =
+        analyze_with_catalogue(&[ModuleInput::new("test_consumer.orna", consumer)], &catalogue);
+    assert!(analysis.is_ok(), "{:#?}", analysis.diagnostics);
 }
 
 #[test]
@@ -963,6 +989,14 @@ fn reference_standard_uses_pinned_orna_1_source_and_resolves_its_imports() {
         "pub fn expect_not_equal<T>(actual: T, unexpected: T)",
         "pub fn expect_some<T>(value: T?)",
         "pub fn expect_none<T>(value: T?)",
+        "pub fn should(condition: Bool)",
+        "pub fn should_be_true(value: Bool)",
+        "pub fn should_be_false(value: Bool)",
+        "pub fn should_equal<T>(actual: T, expected: T)",
+        "pub fn should_not_equal<T>(actual: T, unexpected: T)",
+        "pub fn should_be_some<T>(value: T?)",
+        "pub fn should_be_none<T>(value: T?)",
+        "pub fn should_satisfy<T>(value: T, predicate: fn(T): Bool)",
         "pub fn expect_failure<T>(action: fn(): T, code: Str?)",
         "pub fn for_all<T>(",
         "pub fn integer_range(",
@@ -975,6 +1009,7 @@ fn reference_standard_uses_pinned_orna_1_source_and_resolves_its_imports() {
     }
     for contract in [
         "Core `assert` remains",
+        "Should-style forms use the same pure Boolean contract",
         "zero-based case index",
         "pair always produces the same value",
         "worktree-local CWD",
