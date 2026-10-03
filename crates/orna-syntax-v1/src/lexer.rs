@@ -39,46 +39,82 @@ pub enum Keyword {
 }
 
 impl Keyword {
-    /// The exact version 1.0.0 reserved-word inventory from ORNA-LEX-007.
-    /// Editor tooling and lexer recognition share this table.
-    pub const ALL: &'static [(&'static str, Self)] = &[
-        ("as", Self::As),
-        ("assert", Self::Assert),
-        ("base", Self::Base),
-        ("break", Self::Break),
-        ("case", Self::Case),
-        ("continue", Self::Continue),
-        ("dim", Self::Dim),
-        ("else", Self::Else),
-        ("enum", Self::Enum),
-        ("false", Self::False),
-        ("fn", Self::Fn),
-        ("for", Self::For),
-        ("if", Self::If),
-        ("impl", Self::Impl),
-        ("in", Self::In),
-        ("let", Self::Let),
-        ("loop", Self::Loop),
-        ("null", Self::Null),
-        ("offset", Self::Offset),
-        ("affine", Self::Affine),
-        ("protocol", Self::Protocol),
-        ("pub", Self::Pub),
-        ("return", Self::Return),
-        ("self", Self::SelfValue),
-        ("static", Self::Static),
-        ("table", Self::Table),
-        ("true", Self::True),
-        ("type", Self::Type),
-        ("unit", Self::Unit),
-        ("use", Self::Use),
-        ("while", Self::While),
+    /// The complete ORNA-LEX-007 keyword vocabulary.
+    pub const ALL: [Self; 31] = [
+        Self::As,
+        Self::Assert,
+        Self::Base,
+        Self::Break,
+        Self::Case,
+        Self::Continue,
+        Self::Dim,
+        Self::Else,
+        Self::Enum,
+        Self::False,
+        Self::Fn,
+        Self::For,
+        Self::If,
+        Self::Impl,
+        Self::In,
+        Self::Let,
+        Self::Loop,
+        Self::Null,
+        Self::Offset,
+        Self::Affine,
+        Self::Protocol,
+        Self::Pub,
+        Self::Return,
+        Self::SelfValue,
+        Self::Static,
+        Self::Table,
+        Self::True,
+        Self::Type,
+        Self::Unit,
+        Self::Use,
+        Self::While,
     ];
+
+    /// Returns the canonical source spelling.
+    pub const fn spelling(self) -> &'static str {
+        match self {
+            Self::As => "as",
+            Self::Assert => "assert",
+            Self::Base => "base",
+            Self::Break => "break",
+            Self::Case => "case",
+            Self::Continue => "continue",
+            Self::Dim => "dim",
+            Self::Else => "else",
+            Self::Enum => "enum",
+            Self::False => "false",
+            Self::Fn => "fn",
+            Self::For => "for",
+            Self::If => "if",
+            Self::Impl => "impl",
+            Self::In => "in",
+            Self::Let => "let",
+            Self::Loop => "loop",
+            Self::Null => "null",
+            Self::Offset => "offset",
+            Self::Affine => "affine",
+            Self::Protocol => "protocol",
+            Self::Pub => "pub",
+            Self::Return => "return",
+            Self::SelfValue => "self",
+            Self::Static => "static",
+            Self::Table => "table",
+            Self::True => "true",
+            Self::Type => "type",
+            Self::Unit => "unit",
+            Self::Use => "use",
+            Self::While => "while",
+        }
+    }
 
     pub fn from_text(s: &str) -> Option<Self> {
         Self::ALL
-            .iter()
-            .find_map(|(spelling, keyword)| (*spelling == s).then_some(*keyword))
+            .into_iter()
+            .find(|keyword| keyword.spelling() == s)
     }
 }
 

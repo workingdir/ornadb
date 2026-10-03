@@ -14,8 +14,6 @@ use crate::{
     },
 };
 
-/// Shared editor pattern for the literal candidates emitted by the v1
-/// numeric lexer. The Rust lexer remains authoritative for validation.
 pub const BRACKET_PAIRS: &[(&str, &str)] = &[("(", ")"), ("[", "]"), ("{", "}")];
 pub const LANGUAGE_ID: &str = "orna";
 pub const SOURCE_EXTENSION: &str = "orna";
@@ -381,7 +379,7 @@ fn artifact(path: &'static str, contents: String) -> GeneratedArtifact {
 }
 
 fn keywords() -> Vec<&'static str> {
-    Keyword::ALL.iter().map(|(word, _)| *word).collect()
+    Keyword::ALL.iter().map(|keyword| keyword.spelling()).collect()
 }
 
 fn json_string(value: &str) -> String {

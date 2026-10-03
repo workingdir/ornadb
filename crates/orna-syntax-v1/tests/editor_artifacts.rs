@@ -22,7 +22,7 @@ const ORNA_LEX_007: &[&str] = &[
 fn lexer_keyword_table_and_reference_fixture_match_orna_lex_007_exactly() {
     let lexer_inventory = Keyword::ALL
         .iter()
-        .map(|(word, _)| *word)
+        .map(|keyword| keyword.spelling())
         .collect::<Vec<_>>();
     assert_eq!(lexer_inventory, ORNA_LEX_007);
 

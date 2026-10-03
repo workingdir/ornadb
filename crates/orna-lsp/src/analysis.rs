@@ -562,11 +562,11 @@ pub fn completion_at(
 ) -> Vec<CompletionItem> {
     let mut completions = Keyword::ALL
         .iter()
-        .map(|(spelling, _)| CompletionItem {
-            label: (*spelling).to_owned(),
+        .map(|keyword| CompletionItem {
+            label: keyword.spelling().to_owned(),
             kind: Some(CompletionItemKind::KEYWORD),
             detail: Some("Orna 1.0 keyword".to_owned()),
-            sort_text: Some(format!("0-{spelling}")),
+            sort_text: Some(format!("0-{}", keyword.spelling())),
             ..CompletionItem::default()
         })
         .collect::<Vec<_>>();
