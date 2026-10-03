@@ -2586,6 +2586,106 @@ fn nested_paired_resolution_keeps_import_and_qualified_paths_on_each_pin() {
 }
 
 #[test]
+fn divergent_paired_pins_keep_same_named_exports_with_their_module_identity() {
+    let (
+        _directory,
+        _project_v1,
+        _project_v2,
+        _project_v3,
+        project_v4,
+        project_v5,
+        project_v6,
+        snapshots,
+    ) = module_upgrade_projects();
+    let projects = [&project_v4, &project_v5, &project_v6];
+    let pins = [&snapshots[3], &snapshots[4], &snapshots[5]];
+    let expected = [[40, 4, 1_007], [50, 5, 10_007], [60, 6, 100_007]];
+    let expected_math = [
+        include_str!("fixtures/module-upgrade-std-v3.orna"),
+        include_str!("fixtures/module-upgrade-std-v4.orna"),
+        include_str!("fixtures/module-upgrade-std-v5.orna"),
+    ];
+    let expected_collection = [
+        include_str!("fixtures/module-upgrade-std-collection-v4.orna"),
+        include_str!("fixtures/module-upgrade-std-collection-v5.orna"),
+        include_str!("fixtures/module-upgrade-std-collection-v6.orna"),
+    ];
+    let use_pair = include_str!("fixtures/module-upgrade-paired-divergence-use.orna");
+    let fold_pair = include_str!("fixtures/module-upgrade-paired-divergence-fold.orna");
+
+    assert!(pins.windows(2).all(|pair| pair[0] != pair[1]));
+    let mut sessions = Vec::with_capacity(projects.len());
+    for (index, project) in projects.iter().enumerate() {
+        assert_eq!(project.standard_profile().unwrap().snapshot(), pins[index]);
+        assert_eq!(standard_source(project, "std/math.orna"), expected_math[index]);
+        assert_eq!(
+            standard_source(project, "std/collection.orna"),
+            expected_collection[index]
+        );
+        let mut session = AdmittedReplSession::from_loaded_project(
+            project,
+            project.standard_sources().iter().cloned(),
+            Limits::default(),
+        )
+        .unwrap();
+        for import in use_pair.lines() {
+            assert_eq!(session.submit(import), Ok(None));
+        }
+        assert_eq!(
+            session.submit(fold_pair),
+            Ok(Some(ints(&expected[index]))),
+            "snapshot {} must keep each marker bound to its module and pin",
+            pins[index]
+        );
+        sessions.push(session);
+    }
+
+    for index in [2, 0, 1, 2, 1, 0] {
+        assert_eq!(
+            sessions[index].submit(fold_pair),
+            Ok(Some(ints(&expected[index]))),
+            "divergent paired fold must retain snapshot {}'s module identities",
+            pins[index]
+        );
+    }
+
+    let mut cloned_sessions = sessions.clone();
+    for index in (0..cloned_sessions.len()).rev() {
+        assert_eq!(
+            cloned_sessions[index].submit(fold_pair),
+            Ok(Some(ints(&expected[index]))),
+            "cloned fold must retain snapshot {}'s module identities",
+            pins[index]
+        );
+    }
+
+    for index in 0..projects.len() - 1 {
+        let mut crossed_sources = projects[index].standard_sources().to_vec();
+        for path in ["std/math.orna", "std/collection.orna"] {
+            let next_source = standard_source(projects[index + 1], path).to_owned();
+            crossed_sources
+                .iter_mut()
+                .find(|(candidate, _)| candidate == path)
+                .unwrap()
+                .1 = next_source;
+        }
+        assert_eq!(
+            AdmittedReplSession::from_loaded_project(
+                projects[index],
+                crossed_sources,
+                Limits::default(),
+            )
+            .unwrap_err()
+            .code(),
+            "ORNA-REPL-STANDARD",
+            "snapshot {} must reject the paired sources from snapshot {}",
+            pins[index],
+            pins[index + 1]
+        );
+    }
+}
+
+#[test]
 fn replayed_closure_uses_its_captured_dependency_snapshot_after_snapshot_changes() {
     let (_directory, project_v1, project_v2, snapshot_v1, snapshot_v2, sources_v1, sources_v2) =
         snapshot_projects();
