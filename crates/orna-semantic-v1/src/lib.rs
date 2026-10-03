@@ -7185,20 +7185,51 @@ fn infer(
             infer_nominal(path, fields, scope, local, diagnostics)
         }
         Expr::List { elements, .. } => {
-            let mut ty = None;
+            let mut element_types = Vec::with_capacity(elements.len());
             let mut effects = EffectSummary::default();
             for element in elements {
                 let value = infer(element, scope, local, diagnostics);
                 effects.join(&value.effects);
+                element_types.push(value.ty);
+            }
+
+            let first_parent = element_types.first().cloned();
+            let transactional_checkpoint_fold = element_types.len() > 2
+                && first_parent.as_ref().is_some_and(|first| {
+                    matches!(first, Type::Tuple(_))
+                        && type_contains_pinned_snapshot_identity(first)
+                });
+            let mut rejected_checkpoint_parent = false;
+            let mut ty = None;
+            for value in element_types {
                 if let Some(prior) = &ty {
-                    if let Some(merged) = merge_list_element_types(prior, &value.ty) {
+                    let merged = if transactional_checkpoint_fold {
+                        merge_multi_parent_checkpoint_tuple(
+                            prior,
+                            &value,
+                            first_parent.as_ref().expect("transactional fold has a parent"),
+                        )
+                    } else {
+                        merge_list_element_types(prior, &value)
+                    };
+                    if let Some(merged) = merged {
                         ty = Some(merged);
                     } else {
-                        require_same(prior, &value.ty, diagnostics);
+                        require_same(prior, &value, diagnostics);
+                        rejected_checkpoint_parent |= transactional_checkpoint_fold;
                     }
                 } else {
-                    ty = Some(value.ty);
+                    ty = Some(value);
                 }
+            }
+
+            // The reference does not define recovery when one parent in a
+            // multi-parent checkpoint fold cannot reconcile. Keep the first
+            // parent's concrete labels as the recovery anchor; otherwise a
+            // later parent could be partially promoted after an earlier
+            // rejection, making the recovered pin map depend on parent order.
+            if rejected_checkpoint_parent {
+                ty = first_parent;
             }
             if ty.is_none() {
                 diagnostics.push(diag(
@@ -18189,6 +18220,35 @@ fn tuple_checkpoint_promotion_matches(left: &[Type], right: &[Type]) -> bool {
         && tuple_checkpoint_compaction_fold_preserves_pin_identity(left, right)
 }
 
+/// Reconcile another parent into a multi-parent tuple checkpoint fold. Each
+/// source parent must have the first parent's map width, while the accumulated
+/// result may grow as it collects more parent labels. The fold guard still
+/// rejects any new cross-slot identity introduced by the accumulated union.
+fn merge_multi_parent_checkpoint_tuple(
+    accumulated: &Type,
+    parent: &Type,
+    first_parent: &Type,
+) -> Option<Type> {
+    let (Type::Tuple(accumulated), Type::Tuple(parent), Type::Tuple(first_parent)) =
+        (accumulated, parent, first_parent)
+    else {
+        return None;
+    };
+    if accumulated.len() != first_parent.len() || parent.len() != first_parent.len() {
+        return None;
+    }
+    if !first_parent
+        .iter()
+        .zip(parent)
+        .all(|(first, parent)| checkpoint_pin_map_widths_match(first, parent))
+        || !tuple_checkpoint_compaction_fold_preserves_pin_identity(accumulated, parent)
+    {
+        return None;
+    }
+
+    merge_checkpoint_field_map(&Type::Tuple(accumulated.clone()), &Type::Tuple(parent.clone()))
+}
+
 /// A folded tuple map must not invent cross-slot identity by unioning maps
 /// from opposite rows. The reference does not define that compaction case;
 /// only promote when every identity shared after the fold was shared within
@@ -18294,13 +18354,15 @@ fn checkpoint_pin_map_widths_match(left: &Type, right: &Type) -> bool {
     }
 }
 
-/// A tuple rebind may rename snapshot selectors, but it must keep the
-/// cross-slot identity relationships intact. Compare selector overlap for
-/// corresponding pin maps after traversing the tuple's structural shape. The
-/// reference defines historical pinning but is silent on local tuple rebinds
-/// across checkpoint compaction; preserving overlap prevents compaction from
-/// splitting one pin identity or folding distinct tuple pins together.
+/// A tuple rebind may rename snapshot selectors, but each selector label must
+/// keep the same tuple-map membership. Pairwise overlap counts lose higher
+/// order label relationships after compaction folds, so compare the full
+/// membership signatures. The reference defines historical pinning but is
+/// silent on local tuple rebind labels across checkpoint compaction.
 fn tuple_pin_identity_topology_matches(expected: &[Type], actual: &[Type]) -> bool {
+    if expected.len() != actual.len() {
+        return false;
+    }
     let mut pin_maps = Vec::new();
     for (expected, actual) in expected.iter().zip(actual) {
         if !collect_corresponding_snapshot_context_maps(expected, actual, &mut pin_maps) {
@@ -18336,15 +18398,29 @@ fn record_pin_identity_topology_matches(
 fn snapshot_context_topology_matches(
     pin_maps: &[(BTreeSet<String>, BTreeSet<String>)],
 ) -> bool {
-    pin_maps.iter().enumerate().all(|(index, (expected, actual))| {
-        expected.len() == actual.len()
-            && pin_maps[index + 1..]
-                .iter()
-                .all(|(other_expected, other_actual)| {
-                    expected.intersection(other_expected).count()
-                        == actual.intersection(other_actual).count()
-                })
-    })
+    fn membership_signatures(
+        pin_maps: &[(BTreeSet<String>, BTreeSet<String>)],
+        expected: bool,
+    ) -> BTreeMap<Vec<usize>, usize> {
+        let mut labels = BTreeMap::<String, Vec<usize>>::new();
+        for (map_index, (expected_map, actual_map)) in pin_maps.iter().enumerate() {
+            let selectors = if expected { expected_map } else { actual_map };
+            for selector in selectors {
+                labels.entry(selector.clone()).or_default().push(map_index);
+            }
+        }
+
+        let mut signatures = BTreeMap::new();
+        for membership in labels.into_values() {
+            *signatures.entry(membership).or_insert(0) += 1;
+        }
+        signatures
+    }
+
+    pin_maps
+        .iter()
+        .all(|(expected, actual)| expected.len() == actual.len())
+        && membership_signatures(pin_maps, true) == membership_signatures(pin_maps, false)
 }
 
 fn collect_corresponding_snapshot_context_maps(
@@ -20939,6 +21015,71 @@ mod tests {
         assert!(!pinned_snapshot_rebind_compatible(
             &nested_malformed,
             &nested_malformed
+        ));
+    }
+
+    #[test]
+    fn tuple_checkpoint_rebind_preserves_full_selector_membership_signatures() {
+        let context_map = |selectors: &[&str]| Type::Applied {
+            base: "semantic.SnapshotContextMap".into(),
+            arguments: selectors
+                .iter()
+                .map(|selector| Type::Named((*selector).into()))
+                .collect(),
+        };
+        let saved = vec![
+            context_map(&["selector:pin:a", "selector:pin:b"]),
+            context_map(&["selector:pin:a", "selector:pin:c"]),
+            context_map(&["selector:pin:b", "selector:pin:c"]),
+        ];
+        let relabeled = vec![
+            context_map(&["selector:pin:d", "selector:pin:e"]),
+            context_map(&["selector:pin:d", "selector:pin:f"]),
+            context_map(&["selector:pin:d", "selector:pin:g"]),
+        ];
+        let same_topology = vec![
+            context_map(&["selector:pin:u", "selector:pin:v"]),
+            context_map(&["selector:pin:u", "selector:pin:w"]),
+            context_map(&["selector:pin:v", "selector:pin:w"]),
+        ];
+        let pairwise_overlaps = |maps: &[Type]| {
+            let selector_sets = maps
+                .iter()
+                .map(|map| {
+                    let Type::Applied { arguments, .. } = map else {
+                        panic!("checkpoint selector map must be applied");
+                    };
+                    arguments
+                        .iter()
+                        .filter_map(|argument| match argument {
+                            Type::Named(selector) => Some(selector.clone()),
+                            _ => None,
+                        })
+                        .collect::<BTreeSet<_>>()
+                })
+                .collect::<Vec<_>>();
+            let mut overlaps = Vec::new();
+            for index in 0..selector_sets.len() {
+                for other in index + 1..selector_sets.len() {
+                    overlaps.push(
+                        selector_sets[index]
+                            .intersection(&selector_sets[other])
+                            .count(),
+                    );
+                }
+            }
+            overlaps
+        };
+
+        assert!(saved.iter().all(is_snapshot_context_map_shape));
+        assert!(relabeled.iter().all(is_snapshot_context_map_shape));
+        assert_eq!(pairwise_overlaps(&saved), vec![1, 1, 1]);
+        assert_eq!(pairwise_overlaps(&relabeled), vec![1, 1, 1]);
+        assert!(tuple_pin_identity_topology_matches(&saved, &same_topology));
+        assert!(!tuple_pin_identity_topology_matches(&saved, &relabeled));
+        assert!(!pinned_snapshot_shape_matches(
+            &Type::Tuple(saved),
+            &Type::Tuple(relabeled)
         ));
     }
 
