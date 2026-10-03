@@ -524,6 +524,8 @@ pub enum BranchMergePairedCheckpointRedoFoldSegmentRotationSparseRestoreChainErr
 pub struct BranchMergePairedCheckpointRedoFoldSparseCompactionHandoffRunSnapshot {
     /// Zero-based position of the source compacted chain supplied to handoff.
     pub handoff_ordinal: usize,
+    /// Original merge position retained by the compacted run.
+    pub merge_ordinal: usize,
     pub fold_ordinal: usize,
     pub first_order: u64,
     pub last_order: u64,
@@ -582,6 +584,8 @@ pub struct BranchMergePairedCheckpointRedoFoldSparseCompactionRestoreHandoffSlot
     pub compaction_ordinal: usize,
     /// Source compacted chain position retained by the handoff run.
     pub handoff_ordinal: usize,
+    /// Original merge position retained by the compacted run.
+    pub merge_ordinal: usize,
     pub fold_ordinal: usize,
     pub order: u64,
     pub left: Option<CheckpointGeneration>,
@@ -605,6 +609,7 @@ pub enum BranchMergePairedCheckpointRedoFoldSparseCompactionRestoreHandoffError 
         stream_ordinal: usize,
         compaction_ordinal: usize,
         handoff_ordinal: usize,
+        merge_ordinal: usize,
         fold_ordinal: usize,
         first_order: u64,
         last_order: u64,
@@ -3043,8 +3048,11 @@ pub fn restore_paired_checkpoint_redo_sparse_merge_chains_preserving_fold_and_se
 ///
 /// Each compacted source chain is kept as an independent coordinate space.
 /// Runs are copied verbatim and tagged with the source handoff ordinal, so
-/// overlapping fold/order ranges cannot erase one another. Known and observed
-/// checkpoint IDs are unioned; no runs or checkpoint values are synthesized.
+/// overlapping fold/order ranges cannot erase one another. Since these legacy
+/// compacted runs do not carry a merge coordinate, the source handoff ordinal
+/// also supplies the merge ordinal here; richer handoff snapshots may retain
+/// distinct values through restoration. Known and observed checkpoint IDs are
+/// unioned; no runs or checkpoint values are synthesized.
 pub fn merge_paired_checkpoint_redo_sparse_compaction_handoff_chains_preserving_fold_identity(
     known_checkpoint_ids: &[CheckpointId],
     handoff_chains: &[Vec<BranchMergePairedCheckpointRedoFoldSparseStreamChainCompactionSnapshot>],
@@ -3071,6 +3079,7 @@ pub fn merge_paired_checkpoint_redo_sparse_compaction_handoff_chains_preserving_
                             stream.runs.iter().map(move |run| {
                                 BranchMergePairedCheckpointRedoFoldSparseCompactionHandoffRunSnapshot {
                                     handoff_ordinal,
+                                    merge_ordinal: handoff_ordinal,
                                     fold_ordinal: run.fold_ordinal,
                                     first_order: run.first_order,
                                     last_order: run.last_order,
@@ -3083,7 +3092,12 @@ pub fn merge_paired_checkpoint_redo_sparse_compaction_handoff_chains_preserving_
                 })
                 .collect::<Vec<_>>();
             runs.sort_by_key(|run| {
-                (run.handoff_ordinal, run.fold_ordinal, run.first_order)
+                (
+                    run.handoff_ordinal,
+                    run.merge_ordinal,
+                    run.fold_ordinal,
+                    run.first_order,
+                )
             });
             BranchMergePairedCheckpointRedoFoldSparseCompactionHandoffSnapshot {
                 checkpoint_id,
@@ -3229,15 +3243,15 @@ pub fn restore_paired_checkpoint_redo_sparse_compaction_handoff_chains_preservin
 ///
 /// Each outer input is one independent restore batch. Within a batch, each
 /// checkpoint stream and each compacted run retain their input ordinals; each
-/// run also retains its original handoff and fold labels. Restored occurrences
-/// therefore remain distinct even when checkpoint, handoff, fold, and order
-/// labels overlap. The known and observed checkpoint IDs are unioned in sorted
-/// order. Descending ranges are rejected with their full source path, including
-/// checkpoint identity, so callers need not reconstruct the failed stream from
-/// repeated ordinals. Sparse gaps, absent streams, and omitted checkpoint sides
-/// remain absent. The reference is silent on duplicate-stream/run ordering and
-/// error-path detail, so input order is the stable local policy and malformed
-/// paths include the checkpoint ID.
+/// run also retains its original handoff, merge, and fold labels. Restored
+/// occurrences therefore remain distinct even when checkpoint, handoff, merge,
+/// fold, and order labels overlap. The known and observed checkpoint IDs are
+/// unioned in sorted order. Descending ranges are rejected with their full
+/// source path, including checkpoint identity, so callers need not reconstruct
+/// the failed stream from repeated ordinals. Sparse gaps, absent streams, and
+/// omitted checkpoint sides remain absent. The reference is silent on
+/// duplicate-stream/run ordering and error-path detail, so input order is the
+/// stable local policy and malformed paths include the checkpoint ID.
 pub fn restore_paired_checkpoint_redo_sparse_compaction_handoff_chains_preserving_source_identity(
     known_checkpoint_ids: &[CheckpointId],
     restore_handoffs: &[Vec<BranchMergePairedCheckpointRedoFoldSparseCompactionHandoffSnapshot>],
@@ -3270,6 +3284,7 @@ pub fn restore_paired_checkpoint_redo_sparse_compaction_handoff_chains_preservin
                                 stream_ordinal,
                                 compaction_ordinal,
                                 handoff_ordinal: run.handoff_ordinal,
+                                merge_ordinal: run.merge_ordinal,
                                 fold_ordinal: run.fold_ordinal,
                                 first_order: run.first_order,
                                 last_order: run.last_order,
@@ -3282,6 +3297,7 @@ pub fn restore_paired_checkpoint_redo_sparse_compaction_handoff_chains_preservin
                             stream_ordinal,
                             compaction_ordinal,
                             handoff_ordinal: run.handoff_ordinal,
+                            merge_ordinal: run.merge_ordinal,
                             fold_ordinal: run.fold_ordinal,
                             order,
                             left: run.left.clone(),
@@ -3298,6 +3314,7 @@ pub fn restore_paired_checkpoint_redo_sparse_compaction_handoff_chains_preservin
                 slot.stream_ordinal,
                 slot.compaction_ordinal,
                 slot.handoff_ordinal,
+                slot.merge_ordinal,
                 slot.fold_ordinal,
                 slot.order,
             )
