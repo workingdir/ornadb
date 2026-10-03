@@ -1049,7 +1049,6 @@ fn paired_limit_identity_tracks_sparse_aggregate_spill_restoration() {
         text(limit_only_compact, key)
     );
 }
-
 #[test]
 fn scoped_limit_identity_tracks_paired_window_restoration_folds() {
     let parsed = orna_syntax_v1::parse_module(SCOPED_LIMIT_WINDOW_FIXTURE);
