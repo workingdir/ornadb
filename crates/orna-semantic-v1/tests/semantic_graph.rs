@@ -6762,6 +6762,220 @@ fn sequential_sparse_tuple_rebinds_keep_sibling_values_deterministic() {
 }
 
 #[test]
+fn paired_rebind_storms_preserve_tuple_fold_determinism() {
+    let source = include_str!("fixtures/historical-paired-rebind-storm-determinism.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-paired-rebind-storm-determinism.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    let type_diagnostics = result
+        .diagnostics
+        .iter()
+        .filter(|diagnostic| diagnostic.code() == DIAG_TYPE)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        type_diagnostics.len(),
+        2,
+        "only the final splits after repeated pair rebinds should fail: {:?}",
+        type_diagnostics
+            .iter()
+            .map(|diagnostic| diagnostic.message())
+            .collect::<Vec<_>>()
+    );
+    let module = result
+        .modules
+        .values()
+        .find(|module| module.symbols.contains_key("accepts_paired_rebind_storm"))
+        .expect("paired rebind storm fixture module");
+    let pins = |function: &str, sibling: &str| {
+        let Type::Function { result, .. } = &module.symbols[function].ty else {
+            panic!("{function} must retain its computed function type");
+        };
+        let Type::Record(fields) = result.as_ref() else {
+            panic!("{function} must return its parent fold: {result:?}");
+        };
+        let Type::List(element) = fields.get("parent_fold").expect("parent fold") else {
+            panic!("{function} must retain its parent list");
+        };
+        let Type::Record(row) = element.as_ref() else {
+            panic!("{function} must retain its row: {element:?}");
+        };
+        let Type::Record(fields) = &row[sibling] else {
+            panic!("{function}.{sibling} must retain its record");
+        };
+        let Type::Tuple(slots) = &fields["pins"] else {
+            panic!("{function}.{sibling}.pins must retain its tuple");
+        };
+        assert_eq!(slots.len(), 2, "{function}.{sibling} must keep both slots");
+        slots
+            .iter()
+            .map(|slot| {
+                let mut contexts = BTreeSet::new();
+                collect_snapshot_contexts(slot, &mut contexts);
+                contexts
+            })
+            .collect::<Vec<_>>()
+    };
+
+    assert_eq!(
+        pins("accepts_paired_rebind_storm", "left"),
+        [
+            BTreeSet::from([
+                "selector:HEAD~100".into(),
+                "selector:HEAD~110".into(),
+                "selector:HEAD~120".into(),
+                "selector:HEAD~130".into(),
+                "selector:HEAD~140".into(),
+                "selector:HEAD~150".into(),
+                "selector:HEAD~160".into(),
+            ]),
+            BTreeSet::from([
+                "selector:HEAD~100".into(),
+                "selector:HEAD~120".into(),
+                "selector:HEAD~140".into(),
+                "selector:HEAD~160".into(),
+            ]),
+        ],
+        "repeated sparse rebinds must preserve every paired tuple pin"
+    );
+    assert_eq!(
+        pins("accepts_paired_rebind_storm", "right"),
+        [
+            BTreeSet::from([
+                "selector:HEAD~101".into(),
+                "selector:HEAD~111".into(),
+                "selector:HEAD~121".into(),
+                "selector:HEAD~131".into(),
+                "selector:HEAD~141".into(),
+                "selector:HEAD~151".into(),
+                "selector:HEAD~161".into(),
+            ]),
+            BTreeSet::from([
+                "selector:HEAD~102".into(),
+                "selector:HEAD~112".into(),
+                "selector:HEAD~122".into(),
+                "selector:HEAD~132".into(),
+                "selector:HEAD~142".into(),
+                "selector:HEAD~152".into(),
+                "selector:HEAD~162".into(),
+            ]),
+        ],
+        "the independent sibling fold must accumulate every real pin"
+    );
+    assert_eq!(
+        pins(
+            "rejects_paired_rebind_storm_split_without_losing_sibling_values",
+            "left",
+        ),
+        [
+            BTreeSet::from(["selector:HEAD~200".into()]),
+            BTreeSet::from(["selector:HEAD~200".into()]),
+        ],
+        "a late split after the storm restores the original pair atomically"
+    );
+    assert_eq!(
+        pins(
+            "rejects_paired_rebind_storm_split_without_losing_sibling_values",
+            "right",
+        ),
+        [
+            BTreeSet::from([
+                "selector:HEAD~201".into(),
+                "selector:HEAD~211".into(),
+                "selector:HEAD~221".into(),
+                "selector:HEAD~231".into(),
+                "selector:HEAD~251".into(),
+            ]),
+            BTreeSet::from([
+                "selector:HEAD~202".into(),
+                "selector:HEAD~212".into(),
+                "selector:HEAD~222".into(),
+                "selector:HEAD~232".into(),
+                "selector:HEAD~252".into(),
+            ]),
+        ],
+        "a rejected pair must not erase sibling values accumulated during the storm"
+    );
+    assert_eq!(
+        pins("accepts_dense_paired_rebind_storm", "left"),
+        [
+            BTreeSet::from([
+                "selector:HEAD~300".into(),
+                "selector:HEAD~310".into(),
+                "selector:HEAD~320".into(),
+                "selector:HEAD~330".into(),
+                "selector:HEAD~340".into(),
+            ]),
+            BTreeSet::from([
+                "selector:HEAD~300".into(),
+                "selector:HEAD~310".into(),
+                "selector:HEAD~320".into(),
+                "selector:HEAD~330".into(),
+                "selector:HEAD~340".into(),
+            ]),
+        ],
+        "dense paired rebind storms preserve every aligned tuple identity"
+    );
+    assert_eq!(
+        pins("accepts_dense_paired_rebind_storm", "right"),
+        [
+            BTreeSet::from([
+                "selector:HEAD~301".into(),
+                "selector:HEAD~311".into(),
+                "selector:HEAD~321".into(),
+                "selector:HEAD~331".into(),
+                "selector:HEAD~341".into(),
+            ]),
+            BTreeSet::from([
+                "selector:HEAD~302".into(),
+                "selector:HEAD~312".into(),
+                "selector:HEAD~322".into(),
+                "selector:HEAD~332".into(),
+                "selector:HEAD~342".into(),
+            ]),
+        ],
+        "independent dense tuple siblings accumulate every pin in the storm"
+    );
+    assert_eq!(
+        pins(
+            "rejects_dense_paired_rebind_storm_split_without_losing_sibling_values",
+            "left",
+        ),
+        [
+            BTreeSet::from(["selector:HEAD~400".into()]),
+            BTreeSet::from(["selector:HEAD~400".into()]),
+        ],
+        "a dense tuple split rolls its pair back to the initial anchor"
+    );
+    assert_eq!(
+        pins(
+            "rejects_dense_paired_rebind_storm_split_without_losing_sibling_values",
+            "right",
+        ),
+        [
+            BTreeSet::from([
+                "selector:HEAD~401".into(),
+                "selector:HEAD~411".into(),
+                "selector:HEAD~421".into(),
+                "selector:HEAD~441".into(),
+            ]),
+            BTreeSet::from([
+                "selector:HEAD~402".into(),
+                "selector:HEAD~412".into(),
+                "selector:HEAD~422".into(),
+                "selector:HEAD~442".into(),
+            ]),
+        ],
+        "a dense pair rollback retains the unrelated sibling's whole storm"
+    );
+}
+
+#[test]
 fn multi_parent_selector_topology_storm_preserves_label_depth_identity() {
     let source = include_str!("fixtures/historical-multi-parent-selector-topology-storm.orna");
     let parsed = orna_syntax_v1::parse_module(source);
