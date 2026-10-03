@@ -1895,6 +1895,34 @@ fn paired_aggregate_restores_keep_refresh_scope_identity_and_values() {
     assert_eq!(first, integer_pair(4, 6), "later refreshes retain the first aggregate pair");
     assert_eq!(second, integer_pair(12, 14), "later refreshes retain the second aggregate pair");
 
+    assert_eq!(source.lanes.len(), 6, "three refreshes bind independent left and right scopes");
+    for generation in 0..3 {
+        let start = generation * 2;
+        assert_eq!(source.lanes[start].0, "View.Left");
+        assert_eq!(source.lanes[start + 1].0, "View.Right");
+    }
+    let scopes = source.lanes.iter().map(|(_, scope, _)| *scope).collect::<Vec<_>>();
+    for (index, scope) in scopes.iter().enumerate() {
+        assert!(
+            !scopes[..index].contains(scope),
+            "paired aggregate restore chains keep fresh scope identities: {scope:?}"
+        );
+    }
+    let mut expected_cursors = Vec::new();
+    for (name, scope, _) in &source.lanes {
+        expected_cursors.extend([
+            (name.clone(), *scope, None),
+            (name.clone(), *scope, Some(cursor_one.clone())),
+            (name.clone(), *scope, Some(cursor_two.clone())),
+        ]);
+    }
+    assert_eq!(
+        source.cursors,
+        expected_cursors,
+        "reused compact cursor bytes resume only within each refresh's source scope"
+    );
+    assert!(source.pending["View.Left"].is_empty());
+    assert!(source.pending["View.Right"].is_empty());
 }
 
 #[test]
