@@ -1,0 +1,33 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "Orna",
+  "scopeName": "source.orna",
+  "fileTypes": ["orna"],
+  "patterns": [
+    { "include": "#comments" },
+    { "include": "#strings" },
+    { "include": "#quoted-identifiers" },
+    { "include": "#scalar-types" },
+    { "include": "#keywords" },
+    { "include": "#numbers" },
+    { "include": "#operators" },
+    { "include": "#punctuation" },
+    { "include": "#identifiers" }
+  ],
+  "repository": {
+    "comments": {
+      "patterns": [
+        { "match": "--[^\\n]*", "name": "comment.orna" },
+        { "begin": "/\\*", "end": "\\*/", "name": "comment.orna" }
+      ]
+    },
+    "strings": { "match": "'(?:''|[^'])*'", "name": "string.quoted.single.orna" },
+    "quoted-identifiers": { "match": "\"(?:\"\"|[^\"])*\"", "name": "entity.name.quoted.orna" },
+    "scalar-types": { "match": "(?i:\\b(?:CHARACTER\\s+LARGE\\s+OBJECT|BINARY\\s+LARGE\\s+OBJECT|TIMESTAMP|DURATION|BOOLEAN|DECIMAL|INTEGER|BIGINT|BYTES|FLOAT|BOOL|DATE|TEXT|TIME|UUID|VOID|INT)\\b)", "name": "storage.type.orna" },
+    "keywords": { "match": "(?i:\\b(?:DOCUMENTATION|PERSISTABLE|TRANSACTION|CAPABILITY|VOLATILITY|IMMUTABLE|PRIMITIVE|RETURNING|TRANSIENT|CONTRACT|DISABLED|DISTINCT|EXTERNAL|FUNCTION|REQUIRES|RESTRICT|SECURITY|VOLATILE|BETWEEN|CASCADE|DEFAULT|DEFINER|EXECUTE|INSPECT|INVOKER|PRELUDE|RETURNS|RUNTIME|SESSION|ATOMIC|CLIENT|CREATE|DELETE|EXISTS|EXPORT|HAVING|INSERT|KERNEL|MANUAL|OBJECT|OFFSET|OPAQUE|OPTION|RENAME|RETURN|REVOKE|SCHEMA|SEALED|SELECT|SERVER|STABLE|STREAM|UNIQUE|UPDATE|VALUES|ALTER|AWAIT|BEGIN|CHECK|CONST|CROSS|ELSIF|FALSE|FIELD|FINAL|FIRST|GRANT|GROUP|ILIKE|INNER|LIMIT|LOCAL|NULLS|ORDER|OUTER|RIGHT|SCOPE|STATE|TABLE|UNION|VALUE|WHERE|WHILE|CALL|CASE|DESC|DROP|ELSE|ENUM|FROM|FULL|INTO|JOIN|LAST|LEFT|LIKE|LIST|LOOP|NULL|ONLY|READ|ROLE|ROWS|THEN|TRUE|TYPE|USER|WHEN|ADD|ALL|AND|ASC|END|FOR|LET|MAP|NOT|REF|SET|AS|BY|IF|IN|IS|ON|OR|TO)\\b)", "name": "keyword.control.orna" },
+    "numbers": { "match": "\\b[0-9]+\\b", "name": "constant.numeric.orna" },
+    "operators": { "match": "(?:\\|\\||!=|->|:=|<=|<>|=>|>=|\\*|\\+|\\?|%|-|/|:|<|=|>)", "name": "keyword.operator.orna" },
+    "punctuation": { "match": "(?:\\(|\\)|\\.|\\[|\\]|\\{|\\}|,|;)", "name": "punctuation.orna" },
+    "identifiers": { "match": "[\\p{L}_][\\p{L}\\p{N}_]*", "name": "variable.other.orna" }
+  }
+}
