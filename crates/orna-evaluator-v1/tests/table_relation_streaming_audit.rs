@@ -5155,6 +5155,10 @@ fn paired_pagination_compaction_keeps_identity_through_escalating_folds() {
     let long_b = long_b_lengths.map(|length| vec![0x5b; length]);
     let compact_b = vec![0x5c];
     let after_compaction = vec![0x5d];
+    assert!(long_a.iter().all(|cursor| cursor < &compact_a));
+    assert!(long_b.iter().all(|cursor| &compact_a < cursor));
+    assert!(long_b.iter().all(|cursor| cursor < &compact_b));
+    assert!(compact_b < after_compaction);
 
     let restore = |values: &[i64], a: &[u8], b: &[u8]| {
         assert_eq!(values.len(), 10);
@@ -5194,6 +5198,7 @@ fn paired_pagination_compaction_keeps_identity_through_escalating_folds() {
     ];
     let mut restores = Vec::new();
     let mut expected_lanes = Vec::new();
+    let mut cursor_tokens = Vec::new();
     for (refresh, (left, right)) in snapshots.iter().enumerate() {
         for (lane, source_name, values) in [
             (refresh * 2, "View.Left", left.as_slice()),
@@ -5208,6 +5213,10 @@ fn paired_pagination_compaction_keeps_identity_through_escalating_folds() {
                 ),
             ));
             expected_lanes.push(source_name);
+            cursor_tokens.push((
+                long_a[lane % long_a.len()].clone(),
+                long_b[lane % long_b.len()].clone(),
+            ));
         }
     }
 
@@ -5261,4 +5270,46 @@ fn paired_pagination_compaction_keeps_identity_through_escalating_folds() {
             "every escalation refresh uses isolated source scope {scope:?}"
         );
     }
+    assert_eq!(
+        cursor_tokens
+            .iter()
+            .map(|(a, b)| (a.len(), b.len()))
+            .collect::<Vec<_>>(),
+        [
+            (255, 512),
+            (256, 511),
+            (511, 256),
+            (512, 255),
+            (255, 512),
+            (256, 511),
+            (511, 256),
+            (512, 255),
+        ],
+        "long cursors in both positions straddle the 255/256 and 511/512 byte edges"
+    );
+    let mut expected_cursors = Vec::new();
+    for (index, (a, b)) in cursor_tokens.iter().enumerate() {
+        let (source_name, scope, _) = &source.lanes[index];
+        expected_cursors.extend([
+            (source_name.clone(), *scope, None),
+            (source_name.clone(), *scope, Some(a.clone())),
+            (source_name.clone(), *scope, Some(compact_a.clone())),
+            (source_name.clone(), *scope, Some(b.clone())),
+            (source_name.clone(), *scope, Some(compact_b.clone())),
+        ]);
+    }
+    assert_eq!(
+        source.cursors,
+        expected_cursors,
+        "escalation reuses each paired snapshot scope through both compactions"
+    );
+    assert!(
+        source
+            .cursors
+            .iter()
+            .all(|(_, _, cursor)| cursor.as_ref() != Some(&after_compaction)),
+        "take(10) stops before the sentinel page as fold depth increases"
+    );
+    assert!(source.pending["View.Left"].is_empty());
+    assert!(source.pending["View.Right"].is_empty());
 }
