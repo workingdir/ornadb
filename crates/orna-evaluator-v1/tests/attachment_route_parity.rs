@@ -1738,6 +1738,20 @@ fn sibling_checkpoint_folds_keep_tabular_anchor_identities() {
     let depth_label_a = nested_folded.retained_depth_label(0, 6, 1).unwrap();
     let depth_label_b = nested_folded.retained_depth_label(1, 6, 0).unwrap();
     let depth_label_independent_a = nested_folded.retained_depth_label(2, 6, 1).unwrap();
+    let evaluate_terminal_pin = |session: &AttachedDatabaseSession, alias: &str| {
+        let mut evaluation_session =
+            AttachedDatabaseSession::new(parent_a.primary().clone()).unwrap();
+        evaluation_session
+            .attach_database(session.database(alias).unwrap().clone())
+            .unwrap();
+        let mut evaluator = AdmittedReplSession::from_attached_database_session(
+            &evaluation_session,
+            Limits::default(),
+        )
+        .unwrap();
+        assert_eq!(evaluator.submit(&format!("use {alias};")), Ok(None));
+        evaluator.submit(&format!("{alias}.package_value()"))
+    };
     assert_eq!(depth_label_a.depth(), 1);
     assert_eq!(depth_label_b.depth(), 0);
     assert_ne!(
@@ -1752,6 +1766,66 @@ fn sibling_checkpoint_folds_keep_tabular_anchor_identities() {
         depth_storms_b.as_slice(),
         depth_storms_independent_a.as_slice(),
     ];
+    let label_storms_a = [(&depth_label_a, middle_waves_a.as_slice())];
+    let label_storms_b = [(&depth_label_b, root_waves_b.as_slice())];
+    let label_storms_independent_a =
+        [(&depth_label_independent_a, middle_waves_a.as_slice())];
+    let label_plans = [
+        label_storms_a.as_slice(),
+        label_storms_b.as_slice(),
+        label_storms_independent_a.as_slice(),
+    ];
+    let equal_pin_crossed_labels = [
+        [(&depth_label_independent_a, middle_waves_a.as_slice())],
+        label_storms_b,
+        [(&depth_label_a, middle_waves_a.as_slice())],
+    ];
+    assert!(matches!(
+        resolver.extend_sibling_terminal_pair_checkpoint_storms_from_depth_labels(
+            &nested_folded,
+            &equal_pin_crossed_labels.each_ref().map(|row| row.as_slice()),
+        ),
+        Err(AttachmentError::RetainedSnapshotUnavailable)
+    ));
+    let label_continued = resolver
+        .extend_sibling_terminal_pair_checkpoint_storms_from_depth_labels(
+            &nested_folded,
+            &label_plans,
+        )
+        .unwrap_or_else(|error| panic!("label-selected sibling continuation failed: {error:?}"));
+    for (row, source_depth, source_label, expected_value) in [
+        (0, 1, &depth_label_a, 91),
+        (1, 0, &depth_label_b, 92),
+        (2, 1, &depth_label_independent_a, 91),
+    ] {
+        assert_eq!(
+            label_continued
+                .retained_depth_label(row, 6, source_depth)
+                .unwrap(),
+            *source_label,
+            "label-selected folds retain the exact paired parent anchor"
+        );
+        let final_session = label_continued.routes()[row].final_session();
+        assert_eq!(
+            final_session
+                .database(aliases[4])
+                .unwrap()
+                .pin()
+                .commit()
+                .as_str(),
+            if expected_value == 91 {
+                leaf_a.as_str()
+            } else {
+                leaf_b.as_str()
+            },
+            "each exact depth label resolves its row's terminal package"
+        );
+        assert_eq!(
+            evaluate_terminal_pin(final_session, aliases[4]),
+            Ok(Some(Value::int(expected_value.into()))),
+            "label-selected row {row} evaluates the selected terminal primary"
+        );
+    }
     assert!(matches!(
         resolver.extend_sibling_terminal_pair_checkpoint_storms_from_depths(
             &nested_folded,
@@ -1804,6 +1878,32 @@ fn sibling_checkpoint_folds_keep_tabular_anchor_identities() {
         second_depth_storms_independent_a.as_slice(),
     ];
     let storm_rounds = [depth_plans.as_slice(), second_depth_plans.as_slice()];
+    let label_storm_rounds = [label_plans.as_slice(), label_plans.as_slice()];
+    let twice_label_continued = resolver
+        .extend_sibling_terminal_pair_checkpoint_storm_rounds_from_depth_labels(
+            &nested_folded,
+            &label_storm_rounds,
+        )
+        .unwrap_or_else(|error| panic!("multi-round label storm failed: {error:?}"));
+    for (row, source_depth, source_label, expected_value) in [
+        (0, 1, &depth_label_a, 91),
+        (1, 0, &depth_label_b, 92),
+        (2, 1, &depth_label_independent_a, 91),
+    ] {
+        assert_eq!(
+            twice_label_continued
+                .retained_depth_label(row, 6, source_depth)
+                .unwrap(),
+            *source_label,
+            "repeated folds keep resolving their captured row anchor identity"
+        );
+        let final_session = twice_label_continued.routes()[row].final_session();
+        assert_eq!(
+            evaluate_terminal_pin(final_session, aliases[4]),
+            Ok(Some(Value::int(expected_value.into()))),
+            "repeated folds return the value computed by each paired parent route"
+        );
+    }
     let twice_continued = resolver
         .extend_sibling_terminal_pair_checkpoint_storm_rounds_from_depths(
             &nested_folded,
