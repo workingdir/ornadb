@@ -4617,6 +4617,41 @@ fn paired_nested_aggregates_keep_values_across_compaction_spill_folds() {
     assert_eq!(second, integer_pair(228, 168), "later spills retain the second aggregate snapshot");
     assert_eq!(third, integer_pair(-84, 252), "later spills retain the third aggregate snapshot");
     assert_eq!(source.lanes.len(), lane_names.len());
+    let scopes = source
+        .lanes
+        .iter()
+        .zip(lane_names.iter().copied())
+        .map(|((source_name, scope, _), expected_name)| {
+            assert_eq!(source_name, expected_name, "each paired fold reads left then right");
+            *scope
+        })
+        .collect::<Vec<_>>();
+    for (index, scope) in scopes.iter().enumerate() {
+        assert!(
+            !scopes[..index].contains(scope),
+            "compacted nested aggregates retain distinct snapshot scopes: {scope:?}"
+        );
+    }
+    assert_eq!(
+        cursor_chains.iter().map(Vec::len).collect::<Vec<_>>(),
+        [255, 256, 511, 512, 256, 255, 512, 511],
+        "paired snapshots exercise cursor payloads around both storage chunk boundaries"
+    );
+    let mut expected_cursors = Vec::new();
+    for (index, long_cursor) in cursor_chains.iter().enumerate() {
+        let source_name = lane_names[index].to_owned();
+        let scope = scopes[index];
+        expected_cursors.extend([
+            (source_name.clone(), scope, None),
+            (source_name.clone(), scope, Some(long_cursor.clone())),
+            (source_name, scope, Some(compacted_cursor.clone())),
+        ]);
+    }
+    assert_eq!(
+        source.cursors,
+        expected_cursors,
+        "long checkpoints compact and resume only inside their source snapshot scope"
+    );
     assert!(source.pending["View.Left"].is_empty());
     assert!(source.pending["View.Right"].is_empty());
 }
