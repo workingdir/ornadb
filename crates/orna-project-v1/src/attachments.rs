@@ -523,6 +523,7 @@ impl PackageResolver {
             retained_sessions: retained,
             retained_wave_lengths: vec![1],
             route_identity: Arc::new(()),
+            retained_snapshot_identities: vec![Arc::new(())],
         })
     }
 
@@ -538,12 +539,12 @@ impl PackageResolver {
     ) -> Result<ReboundPathResolution, AttachmentError> {
         let mut current = parent.clone();
         let mut retained_sessions = Vec::with_capacity(replacements.len());
+        let mut retained_snapshot_identities = Vec::with_capacity(replacements.len());
         for replacement in replacements {
-            let (next, mut retained) = self
-                .resolve_nested_rebind(&current, replacement.clone())?
-                .into_parts();
-            retained_sessions.append(&mut retained);
-            current = next;
+            let mut extension = self.resolve_nested_rebind(&current, replacement.clone())?;
+            retained_sessions.append(&mut extension.retained_sessions);
+            retained_snapshot_identities.append(&mut extension.retained_snapshot_identities);
+            current = extension.final_session;
         }
         let retained_wave_lengths = if retained_sessions.is_empty() {
             Vec::new()
@@ -555,6 +556,7 @@ impl PackageResolver {
             retained_sessions,
             retained_wave_lengths,
             route_identity: Arc::new(()),
+            retained_snapshot_identities,
         })
     }
 
@@ -635,17 +637,21 @@ impl PackageResolver {
             final_session,
             mut retained_sessions,
             retained_wave_lengths: extension_wave_lengths,
+            mut retained_snapshot_identities,
             ..
         } = extension;
         let mut all_retained = previous.retained_sessions.clone();
         all_retained.append(&mut retained_sessions);
         let mut retained_wave_lengths = previous.retained_wave_lengths.clone();
         retained_wave_lengths.extend(extension_wave_lengths);
+        let mut all_snapshot_identities = previous.retained_snapshot_identities.clone();
+        all_snapshot_identities.append(&mut retained_snapshot_identities);
         ReboundPathResolution {
             final_session,
             retained_sessions: all_retained,
             retained_wave_lengths,
             route_identity: previous.route_identity.clone(),
+            retained_snapshot_identities: all_snapshot_identities,
         }
     }
 
@@ -657,6 +663,7 @@ impl PackageResolver {
             final_session,
             mut retained_sessions,
             retained_wave_lengths: extension_wave_lengths,
+            mut retained_snapshot_identities,
             ..
         } = extension;
         let mut all_retained = previous.retained_sessions.clone();
@@ -665,11 +672,15 @@ impl PackageResolver {
         let mut retained_wave_lengths = previous.retained_wave_lengths.clone();
         retained_wave_lengths.push(1);
         retained_wave_lengths.extend(extension_wave_lengths);
+        let mut all_snapshot_identities = previous.retained_snapshot_identities.clone();
+        all_snapshot_identities.push(Arc::new(()));
+        all_snapshot_identities.append(&mut retained_snapshot_identities);
         ReboundPathResolution {
             final_session,
             retained_sessions: all_retained,
             retained_wave_lengths,
             route_identity: previous.route_identity.clone(),
+            retained_snapshot_identities: all_snapshot_identities,
         }
     }
 
@@ -922,6 +933,7 @@ impl PackageResolver {
             checkpoint_wave,
             0,
             &route.route_identity,
+            route.retained_snapshot_identity_at_depth(checkpoint_wave, 0)?,
             retained_checkpoint,
         );
         route.validate_depth_label(&folded_label)?;
@@ -1261,12 +1273,15 @@ impl PackageResolver {
 /// `retained_sessions` is ordered from the original parent through each
 /// intermediate closure, with one snapshot recorded before each replacement.
 /// The final session is the closure reached after the last replacement.
+/// Cloned routes preserve lineage and retained-depth identities; separately
+/// resolved folds receive fresh identities for their new retained snapshots.
 #[derive(Clone, Debug)]
 pub struct ReboundPathResolution {
     final_session: AttachedDatabaseSession,
     retained_sessions: Vec<AttachedDatabaseSession>,
     retained_wave_lengths: Vec<usize>,
     route_identity: Arc<()>,
+    retained_snapshot_identities: Vec<Arc<()>>,
 }
 
 impl ReboundPathResolution {
@@ -1303,6 +1318,7 @@ impl ReboundPathResolution {
             wave,
             depth,
             &self.route_identity,
+            self.retained_snapshot_identity_at_depth(wave, depth)?,
             session,
         ))
     }
@@ -1312,6 +1328,28 @@ impl ReboundPathResolution {
         wave: usize,
         depth: usize,
     ) -> Result<&AttachedDatabaseSession, AttachmentError> {
+        let index = self.retained_snapshot_index(wave, depth)?;
+        self.retained_sessions
+            .get(index)
+            .ok_or(AttachmentError::RetainedSnapshotUnavailable)
+    }
+
+    fn retained_snapshot_identity_at_depth(
+        &self,
+        wave: usize,
+        depth: usize,
+    ) -> Result<&Arc<()>, AttachmentError> {
+        let index = self.retained_snapshot_index(wave, depth)?;
+        self.retained_snapshot_identities
+            .get(index)
+            .ok_or(AttachmentError::RetainedSnapshotUnavailable)
+    }
+
+    fn retained_snapshot_index(
+        &self,
+        wave: usize,
+        depth: usize,
+    ) -> Result<usize, AttachmentError> {
         let length = *self
             .retained_wave_lengths
             .get(wave)
@@ -1326,9 +1364,7 @@ impl ReboundPathResolution {
         let index = start
             .checked_add(depth)
             .ok_or(AttachmentError::RetainedSnapshotUnavailable)?;
-        self.retained_sessions
-            .get(index)
-            .ok_or(AttachmentError::RetainedSnapshotUnavailable)
+        Ok(index)
     }
 
     fn validate_depth_label(
@@ -1336,7 +1372,9 @@ impl ReboundPathResolution {
         label: &NestedPairDepthLabel,
     ) -> Result<(), AttachmentError> {
         let session = self.retained_snapshot_at_depth(label.wave, label.depth)?;
+        let snapshot_identity = self.retained_snapshot_identity_at_depth(label.wave, label.depth)?;
         if Arc::ptr_eq(&self.route_identity, &label.route_identity)
+            && Arc::ptr_eq(snapshot_identity, &label.snapshot_identity)
             && label.matches_session(session)
         {
             Ok(())
@@ -1358,6 +1396,7 @@ impl ReboundPathResolution {
             wave,
             snapshot,
             &self.route_identity,
+            self.retained_snapshot_identity_at_depth(wave, snapshot)?,
             &handoff,
         );
         Ok(ReboundPathCheckpoint {
@@ -1372,12 +1411,14 @@ impl ReboundPathResolution {
     }
 }
 
-/// A retained wave/depth coordinate bound to the exact pins and route lineage.
+/// A retained wave/depth coordinate bound to exact pins, route lineage, and
+/// the particular retained snapshot created at that coordinate.
 #[derive(Clone, Debug)]
 pub struct NestedPairDepthLabel {
     wave: usize,
     depth: usize,
     route_identity: Arc<()>,
+    snapshot_identity: Arc<()>,
     primary: PackagePin,
     attached: Vec<(String, PackagePin)>,
 }
@@ -1387,12 +1428,14 @@ impl NestedPairDepthLabel {
         wave: usize,
         depth: usize,
         route_identity: &Arc<()>,
+        snapshot_identity: &Arc<()>,
         session: &AttachedDatabaseSession,
     ) -> Self {
         Self {
             wave,
             depth,
             route_identity: route_identity.clone(),
+            snapshot_identity: snapshot_identity.clone(),
             primary: session.primary().pin().clone(),
             attached: session
                 .attached()
@@ -1426,6 +1469,7 @@ impl NestedPairDepthLabel {
 impl PartialEq for NestedPairDepthLabel {
     fn eq(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.route_identity, &other.route_identity)
+            && Arc::ptr_eq(&self.snapshot_identity, &other.snapshot_identity)
             && self.wave == other.wave
             && self.depth == other.depth
             && self.primary == other.primary
