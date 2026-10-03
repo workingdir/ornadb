@@ -1069,6 +1069,52 @@ impl PackageResolver {
         Ok(folded)
     }
 
+    /// Continues sibling checkpoint storms from explicit retained
+    /// `(wave, depth)` coordinates. Each coordinate is resolved within its
+    /// own sibling row before any route is folded, so equal pins at another
+    /// row or depth cannot substitute for the selected handoff. The reference
+    /// is silent on multi-parent depth selection; v1 binds every selection to
+    /// its original row identity and returns no partial result on failure.
+    pub fn extend_sibling_terminal_pair_checkpoint_storms_from_depths(
+        &self,
+        previous: &SiblingRebindResolution,
+        storms_by_row: &[&[(usize, usize, &[[PinnedDatabase; 2]])]],
+    ) -> Result<SiblingRebindResolution, AttachmentError> {
+        if storms_by_row.len() != previous.routes.len() {
+            return Err(AttachmentError::RetainedSnapshotUnavailable);
+        }
+
+        let checkpoints_by_row = storms_by_row
+            .iter()
+            .enumerate()
+            .map(|(row, storms)| {
+                storms
+                    .iter()
+                    .map(|(wave, depth, _)| previous.handoff_checkpoint(row, *wave, *depth))
+                    .collect::<Result<Vec<_>, _>>()
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let checkpoint_storms_by_row = storms_by_row
+            .iter()
+            .zip(&checkpoints_by_row)
+            .map(|(storms, checkpoints)| {
+                storms
+                    .iter()
+                    .zip(checkpoints)
+                    .map(|((_, _, replacements), checkpoint)| (checkpoint, *replacements))
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        let checkpoint_storm_rows = checkpoint_storms_by_row
+            .iter()
+            .map(Vec::as_slice)
+            .collect::<Vec<_>>();
+        self.extend_sibling_terminal_pair_checkpoint_storms_from_siblings(
+            previous,
+            &checkpoint_storm_rows,
+        )
+    }
+
     /// Rebinds each terminal pair in a storm from one saved checkpoint.
     /// Every fold starts from the same exact nested pins and appends that
     /// checkpoint route to retained history. Each emitted route receives its
