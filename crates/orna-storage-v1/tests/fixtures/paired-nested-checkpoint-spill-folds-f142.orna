@@ -1,0 +1,21 @@
+{ id: "f142/spill/reused", name: "f142/checkpoint/alpha", city: "f142/source/main", }
+
+{ id: "f142/spill/reused", name: "f142/checkpoint/alpha", city: "f142/source/peer", }
+
+{ id: "f142/spill/beta", name: "f142/checkpoint/beta", city: "f142/source/beta", }
+
+{ id: "f142/source-pair/main", name: "f142/source-checkpoint/main-left", city: "f142/source-checkpoint/main-right", }
+
+{ id: "f142/source-pair/rebound", name: "f142/source-checkpoint/rebound-left", city: "f142/source-checkpoint/rebound-right", }
+
+{ id: "f142/segment/10", name: "f142/left/main-10", city: "f142/right/main-10", }
+
+{ id: "f142/segment/11", name: "f142/left/main-11", city: "f142/right/main-11", }
+
+{ id: "f142/segment/10-peer", name: "f142/left/peer-10", city: "f142/right/peer-10", }
+
+{ id: "f142/segment/10-rebound", name: "f142/left/rebound-10", city: "f142/right/rebound-10", }
+
+{ id: "f142/segment/12-right-only", name: "f142/left/late-12", city: "f142/right/late-12", }
+
+{ id: "f142/segment/beta-6", name: "f142/left/beta-6", city: "f142/right/beta-6", }
