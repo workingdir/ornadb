@@ -1734,4 +1734,61 @@ fn sibling_checkpoint_folds_keep_tabular_anchor_identities() {
             Ok(Some(Value::int(expected_value.into())))
         );
     }
+
+    let depth_label_a = nested_folded.retained_depth_label(0, 6, 1).unwrap();
+    let depth_label_b = nested_folded.retained_depth_label(1, 6, 0).unwrap();
+    let depth_label_independent_a = nested_folded.retained_depth_label(2, 6, 1).unwrap();
+    assert_eq!(depth_label_a.depth(), 1);
+    assert_eq!(depth_label_b.depth(), 0);
+    assert_ne!(
+        depth_label_a, depth_label_independent_a,
+        "equal pins at equal coordinates remain distinct across sibling rows"
+    );
+    let depth_storms_a = [(6, 1, middle_waves_a.as_slice())];
+    let depth_storms_b = [(6, 0, root_waves_b.as_slice())];
+    let depth_storms_independent_a = [(6, 1, middle_waves_a.as_slice())];
+    let depth_plans = [
+        depth_storms_a.as_slice(),
+        depth_storms_b.as_slice(),
+        depth_storms_independent_a.as_slice(),
+    ];
+    assert!(matches!(
+        resolver.extend_sibling_terminal_pair_checkpoint_storms_from_depths(
+            &nested_folded,
+            &depth_plans[..2],
+        ),
+        Err(AttachmentError::RetainedSnapshotUnavailable)
+    ));
+    let depth_continued = resolver
+        .extend_sibling_terminal_pair_checkpoint_storms_from_depths(
+            &nested_folded,
+            &depth_plans,
+        )
+        .unwrap_or_else(|error| panic!("depth-selected sibling continuation failed: {error:?}"));
+    for (row, depth, original_label, expected_value) in [
+        (0, 1, &depth_label_a, 91),
+        (1, 0, &depth_label_b, 92),
+        (2, 1, &depth_label_independent_a, 91),
+    ] {
+        assert_eq!(
+            depth_continued.retained_depth_label(row, 6, depth).unwrap(),
+            *original_label,
+            "the selected nonuniform depth identity survives another multi-parent fold"
+        );
+        let final_session = depth_continued.routes()[row].final_session();
+        assert_eq!(
+            final_session
+                .database(aliases[4])
+                .unwrap()
+                .pin()
+                .commit()
+                .as_str(),
+            if expected_value == 91 {
+                leaf_a.as_str()
+            } else {
+                leaf_b.as_str()
+            },
+            "continuation follows the pin selected by this row's exact depth"
+        );
+    }
 }
