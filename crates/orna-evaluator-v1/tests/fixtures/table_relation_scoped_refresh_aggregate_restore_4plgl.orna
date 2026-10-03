@@ -1,0 +1,2 @@
+fn is_odd(value: Int) = value % 2 == 1;
+fn is_even(value: Int) = value % 2 == 0;
