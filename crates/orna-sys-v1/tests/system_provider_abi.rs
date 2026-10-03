@@ -2888,3 +2888,268 @@ fn generated_bindings_preserve_registry_provider_failure_edges() {
         generated_bindings + (shared_failure_pairs + undeclared_failure_pairs) * 2
     );
 }
+
+#[test]
+fn generated_idl_unknown_operation_diagnostics_match_round_tripped_registry() {
+    let baked = system_dispatch_table();
+    let round_tripped = round_trip_generated_provider_artifacts();
+    let registry = ProviderRoleRegistry::from_baked_abi(&round_tripped)
+        .expect("round-tripped typed registry resolves generated provider offers");
+    let idl_operation_ids = system_binding_stubs()
+        .lines()
+        .filter_map(|line| line.strip_prefix("// sys-op: "))
+        .collect::<Vec<_>>();
+    let typed_operation_ids = baked
+        .operations()
+        .map(|contract| contract.id.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(idl_operation_ids, typed_operation_ids);
+
+    let fallback_role = baked
+        .roles()
+        .next()
+        .expect("generated typed registry has a provider role");
+    let fallback_offer = ProviderOffer {
+        provider: ProviderId::new("fixture.unknown_operation").unwrap(),
+        role: fallback_role.id.clone(),
+        version: fallback_role.version,
+        effects: fallback_role.effects.clone(),
+    };
+    let mut generated_bindings = 0;
+    let mut unknown_selector_pairs = 0;
+
+    for contract in baked.operations() {
+        let operation_name = contract.id.as_str();
+        let generated = system_function_descriptor(operation_name)
+            .unwrap_or_else(|| panic!("missing generated binding for {operation_name}"));
+        assert_eq!(generated.name, operation_name);
+        assert_eq!(generated.signature, contract.signature.source);
+        assert_eq!(contract.effects.iter().next(), Some(generated.effect));
+        generated_bindings += 1;
+
+        let separator = operation_name.find(['(', '<']);
+        let unregistered = match separator {
+            Some(index) if operation_name[index..].starts_with('(') => {
+                format!("{}(sys.conformance.RegistryMiss)", &operation_name[..index])
+            }
+            Some(index) => format!("{}<sys.conformance.RegistryMiss>", &operation_name[..index]),
+            None => format!("{operation_name}.registry_miss"),
+        };
+        let unknown_id = OperationId::new(unregistered.clone())
+            .expect("generated negative selector remains a valid operation ID");
+        assert!(baked.operation(&unregistered).is_none());
+        assert!(round_tripped.operation(&unregistered).is_none());
+
+        let provider_for = || InvokeValueProvider {
+            offer: fallback_offer.clone(),
+            operation: unknown_id.clone(),
+            argument_types: Vec::new(),
+            response: Ok(TypedValue::public(
+                TypeId::new("sys.conformance.UnexpectedDispatch"),
+                b"must-not-run".to_vec(),
+            )),
+            calls: AtomicUsize::new(0),
+        };
+        let direct_provider = provider_for();
+        let registry_provider = provider_for();
+        let mut direct_preconditions = 0;
+        let mut registry_preconditions = 0;
+        let direct = baked.dispatch_to_provider(&unregistered, &direct_provider, &[], |_| {
+            direct_preconditions += 1;
+            Ok(())
+        });
+        let mediated = registry.dispatch_to_provider(
+            &round_tripped,
+            &unregistered,
+            &registry_provider,
+            &[],
+            |_| {
+                registry_preconditions += 1;
+                Ok(())
+            },
+        );
+        let expected = Err(ProviderDiagnostic::UnknownOperation(unknown_id));
+        assert_eq!(direct, expected);
+        assert_eq!(mediated, expected);
+        assert_eq!(direct.unwrap_err().code(), "sys.abi.unknown_operation");
+        assert_eq!(mediated.unwrap_err().code(), "sys.abi.unknown_operation");
+        assert_eq!(direct_preconditions, 0);
+        assert_eq!(registry_preconditions, 0);
+        assert_eq!(direct_provider.calls.load(Ordering::SeqCst), 0);
+        assert_eq!(registry_provider.calls.load(Ordering::SeqCst), 0);
+        unknown_selector_pairs += 1;
+    }
+
+    assert_eq!(generated_bindings, idl_operation_ids.len());
+    assert_eq!(unknown_selector_pairs, generated_bindings);
+    println!(
+        "generated_idl_unknown_operation_diagnostic_parity bindings={generated_bindings} unknown_selectors={unknown_selector_pairs} direct_registry_pairs={unknown_selector_pairs} code=sys.abi.unknown_operation preconditions_checked=0 providers_called=0 total_cases={}",
+        generated_bindings + unknown_selector_pairs * 2
+    );
+}
+
+#[test]
+fn round_tripped_dispatch_metadata_matches_selected_provider_routes() {
+    fn effect_name(effect: SystemEffect) -> &'static str {
+        match effect {
+            SystemEffect::Read => "read",
+            SystemEffect::Invoke => "invoke",
+            SystemEffect::Admin => "admin",
+        }
+    }
+
+    let table = round_trip_generated_provider_artifacts();
+    let metadata: Value =
+        serde_json::from_str(system_provider_abi_json()).expect("embedded dispatch metadata");
+    let registry = ProviderRoleRegistry::from_baked_abi(&table)
+        .expect("round-tripped metadata resolves the selected provider registry");
+    let operation_rows = metadata["operations"]
+        .as_array()
+        .expect("generated dispatch metadata lists operations");
+    let role_rows = metadata["roles"]
+        .as_array()
+        .expect("generated dispatch metadata lists provider roles");
+    let mut operation_cases = 0;
+    let mut role_cases = 0;
+    let mut provider_route_pairs = 0;
+
+    for contract in table.operations() {
+        let operation_name = contract.id.as_str();
+        let generated = system_function_descriptor(operation_name)
+            .unwrap_or_else(|| panic!("missing generated binding for {operation_name}"));
+        let operation_row = operation_rows
+            .iter()
+            .find(|row| row["name"] == operation_name)
+            .unwrap_or_else(|| panic!("generated metadata omits {operation_name}"));
+        assert_eq!(generated.name, operation_name);
+        assert_eq!(generated.signature, contract.signature.source);
+        assert_eq!(generated.effect, contract.effects.iter().next().unwrap());
+        assert_eq!(
+            operation_row["signature"].as_str(),
+            Some(generated.signature)
+        );
+        assert_eq!(
+            operation_row["version"]["major"].as_u64(),
+            Some(contract.version.major.into())
+        );
+        assert_eq!(
+            operation_row["version"]["minor"].as_u64(),
+            Some(contract.version.minor.into())
+        );
+        assert_eq!(
+            operation_row["effect"].as_str(),
+            Some(effect_name(generated.effect))
+        );
+        let expected_role = match (&contract.role, contract.role_version) {
+            (Some(role), Some(version)) => Some(format!(
+                "{}@{}.{}",
+                role.as_str(),
+                version.major,
+                version.minor
+            )),
+            (None, None) => None,
+            _ => panic!("operation role name and version must be paired for {operation_name}"),
+        };
+        assert_eq!(operation_row["role"].as_str(), expected_role.as_deref());
+        operation_cases += 1;
+
+        let Some(role_id) = &contract.role else {
+            continue;
+        };
+        let role = table
+            .role(role_id.as_str())
+            .unwrap_or_else(|| panic!("missing typed role {}", role_id.as_str()));
+        let role_row = role_rows
+            .iter()
+            .find(|row| row["name"] == role.id.as_str())
+            .unwrap_or_else(|| panic!("generated metadata omits role {}", role.id.as_str()));
+        assert_eq!(
+            role_row["version"]["major"].as_u64(),
+            Some(role.version.major.into())
+        );
+        assert_eq!(
+            role_row["version"]["minor"].as_u64(),
+            Some(role.version.minor.into())
+        );
+        assert_eq!(
+            role_row["builtin_provider"].as_str(),
+            role.builtin_provider
+                .as_ref()
+                .map(|provider| provider.as_str())
+        );
+        assert!(
+            role_row["operations"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|operation| operation.as_str() == Some(operation_name)),
+            "metadata role {} links back to {operation_name}",
+            role.id.as_str()
+        );
+        let offer = registry
+            .resolve(role_id.as_str())
+            .unwrap_or_else(|_| panic!("missing selected offer for {}", role_id.as_str()))
+            .clone();
+        assert_eq!(offer.role, role.id);
+        assert_eq!(offer.version, role.version);
+        assert_eq!(offer.effects, role.effects);
+        assert_eq!(offer.provider, role.builtin_provider.clone().unwrap());
+        role_cases += 1;
+
+        let arguments = contract
+            .signature
+            .parameters
+            .iter()
+            .map(|parameter| {
+                TypedValue::public(
+                    TypeId::new(parameter.ty.canonical()),
+                    parameter.name.as_bytes().to_vec(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let argument_types = contract
+            .signature
+            .parameters
+            .iter()
+            .map(|parameter| parameter.ty.canonical())
+            .collect::<Vec<_>>();
+        let result = TypedValue::public(
+            TypeId::new(contract.signature.result.canonical()),
+            b"round-tripped-provider-metadata".to_vec(),
+        );
+        let provider_for = || InvokeValueProvider {
+            offer: offer.clone(),
+            operation: contract.id.clone(),
+            argument_types: argument_types.clone(),
+            response: Ok(result.clone()),
+            calls: AtomicUsize::new(0),
+        };
+        let direct_provider = provider_for();
+        let direct = table
+            .dispatch_to_provider(operation_name, &direct_provider, &arguments, |_| Ok(()))
+            .expect("direct dispatch accepts the generated provider contract");
+        let mediated_provider = provider_for();
+        let mediated = registry
+            .dispatch_to_provider(
+                &table,
+                generated.name,
+                &mediated_provider,
+                &arguments,
+                |_| Ok(()),
+            )
+            .expect("round-tripped selected provider dispatch accepts the contract");
+        assert_eq!(direct, orna_sys_v1::SystemDispatchResult::Returned(result));
+        assert_eq!(mediated, direct);
+        assert_eq!(direct_provider.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(mediated_provider.calls.load(Ordering::SeqCst), 1);
+        provider_route_pairs += 1;
+    }
+
+    assert_eq!(operation_cases, table.operations().count());
+    assert!(role_cases > 0);
+    assert_eq!(provider_route_pairs, role_cases);
+    println!(
+        "round_tripped_dispatch_metadata_provider_parity operations={operation_cases} role_links={role_cases} provider_routes={provider_route_pairs} direct_registry_pairs={provider_route_pairs} total_cases={}",
+        operation_cases + role_cases + provider_route_pairs * 2
+    );
+}

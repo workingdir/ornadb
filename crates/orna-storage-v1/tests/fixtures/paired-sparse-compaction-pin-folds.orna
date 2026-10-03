@@ -1,0 +1,5 @@
+{ id: "compaction-pin/fold-a", name: "compaction-pin/left-a", city: "compaction-pin/right-a", }
+
+{ id: "compaction-pin/fold-b", name: "compaction-pin/left-b", city: "compaction-pin/right-b", }
+
+{ id: "compaction-pin/fold-c", name: "compaction-pin/left-a", city: "compaction-pin/right-a", }
