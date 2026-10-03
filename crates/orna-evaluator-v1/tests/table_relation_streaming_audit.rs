@@ -135,6 +135,31 @@ fn paired_nested_spill_aggregate_functions() -> Functions {
         .collect()
 }
 
+fn paired_pagination_nested_escalation_functions() -> Functions {
+    let parsed = parse_module(include_str!(
+        "fixtures/table_relation_paired_pagination_nested_escalation_spill_p8hxa.orna"
+    ));
+    assert!(parsed.is_ok(), "{:?}", parsed.diagnostics);
+    parsed
+        .value
+        .items
+        .into_iter()
+        .map(|item| {
+            let orna_syntax_v1::Declaration::Function { signature, body } = item.declaration else {
+                panic!("fixture function expected")
+            };
+            (
+                signature.name,
+                PureFunction {
+                    parameters: signature.parameters,
+                    body,
+                    environment: Environment::new(),
+                },
+            )
+        })
+        .collect()
+}
+
 fn sparse_window_fold_functions() -> Functions {
     let parsed = parse_module(include_str!("fixtures/table_relation_sparse_window_fold_d4441.orna"));
     assert!(parsed.is_ok(), "{:?}", parsed.diagnostics);
@@ -2095,6 +2120,33 @@ fn paired_nested_spill_aggregate_body() -> Expr {
         elements: vec![
             nested_spill_aggregate("View.Left"),
             nested_spill_aggregate("View.Right"),
+        ],
+        span: span(),
+    }
+}
+
+fn nested_paginated_escalation(source: &str, depth: usize) -> Expr {
+    let prefix = relation_stage(
+        relation_source(source),
+        "take",
+        vec![integer_literal(6)],
+    );
+    let folded = (0..depth).fold(prefix, |input, _| {
+        let frames = relation_stage(
+            input,
+            "window",
+            vec![integer_literal(2), integer_literal(1)],
+        );
+        relation_stage(frames, "map", vec![named_function("sum_frame")])
+    });
+    terminal(folded, "sum")
+}
+
+fn paired_pagination_nested_escalation_body(depth: usize) -> Expr {
+    Expr::Tuple {
+        elements: vec![
+            nested_paginated_escalation("View.Left", depth),
+            nested_paginated_escalation("View.Right", depth),
         ],
         span: span(),
     }
@@ -4651,6 +4703,140 @@ fn paired_nested_aggregates_keep_values_across_compaction_spill_folds() {
         source.cursors,
         expected_cursors,
         "long checkpoints compact and resume only inside their source snapshot scope"
+    );
+    assert!(source.pending["View.Left"].is_empty());
+    assert!(source.pending["View.Right"].is_empty());
+}
+
+#[test]
+fn paired_pagination_keeps_identity_across_nested_escalation_spill_folds() {
+    // Pin escalation to one additional window-and-sum fold per refresh. Each
+    // take(6) stops before the sentinel page after the compacted spill cursor.
+    let long_cursors = [
+        vec![0x5a; 255],
+        vec![0x5a; 256],
+        vec![0x5a; 511],
+        vec![0x5a; 512],
+    ];
+    let compacted_cursor = vec![0x5b];
+    let after_compaction_cursor = vec![0x5c];
+    assert!(compacted_cursor.as_slice() < after_compaction_cursor.as_slice());
+    assert!(
+        long_cursors
+            .iter()
+            .all(|cursor| cursor.as_slice() < compacted_cursor.as_slice()),
+        "each long checkpoint advances to the compact token"
+    );
+    let restore = |groups: &[&[i64]], long_cursor: &[u8]| {
+        assert_eq!(groups.len(), 4, "each spill chain includes one out-of-prefix page");
+        BTreeMap::from([
+            (
+                None,
+                page(groups[0], Some(long_cursor.to_vec())),
+            ),
+            (
+                Some(long_cursor.to_vec()),
+                page(groups[1], Some(compacted_cursor.clone())),
+            ),
+            (
+                Some(compacted_cursor.clone()),
+                page(groups[2], Some(after_compaction_cursor.clone())),
+            ),
+            (
+                Some(after_compaction_cursor.clone()),
+                page(groups[3], None),
+            ),
+        ])
+    };
+    let mut restores = Vec::new();
+    let mut lane_names = Vec::new();
+    let mut cursor_chains = Vec::new();
+    let mut add_restore = |source_name: &'static str, groups: &[&[i64]], cursor_index: usize| {
+        let long_cursor = long_cursors[cursor_index].clone();
+        restores.push((source_name, restore(groups, &long_cursor)));
+        lane_names.push(source_name);
+        cursor_chains.push(long_cursor);
+    };
+    add_restore("View.Left", &[&[1], &[2, 3], &[4, 5, 6], &[1000, 1001]], 0);
+    add_restore("View.Right", &[&[10, 20], &[30], &[40, 50, 60], &[2000, 2001]], 1);
+    add_restore("View.Left", &[&[7, 8, 9], &[10], &[11, 12], &[1100, 1101]], 2);
+    add_restore("View.Right", &[&[2], &[4, 6, 8], &[10, 12], &[2200, 2201]], 3);
+    add_restore("View.Left", &[&[-1, -2], &[-3, -4], &[-5, -6], &[-3000, -3001]], 1);
+    add_restore("View.Right", &[&[3, 6], &[9], &[12, 15, 18], &[3000, 3001]], 0);
+    add_restore("View.Left", &[&[100], &[90, 80], &[70, 60, 50], &[4000, 4001]], 3);
+    add_restore("View.Right", &[&[5, 10], &[15], &[20, 25, 30], &[5000, 5001]], 2);
+    drop(add_restore);
+
+    let mut source = PairedCursorRestoreSource::new(restores);
+    let mut functions = paired_pagination_nested_escalation_functions();
+    let mut snapshots = Vec::new();
+    for (depth, left, right) in [(1, 35, 350), (2, 152, 112), (3, -84, 252), (4, 2400, 560)] {
+        functions.insert(
+            "run".into(),
+            PureFunction {
+                parameters: Vec::new(),
+                body: paired_pagination_nested_escalation_body(depth),
+                environment: Environment::new(),
+            },
+        );
+        snapshots.push(
+            invoke_named_with_effects(
+                "run",
+                &functions,
+                &Environment::new(),
+                Limits::default(),
+                &mut source,
+            )
+            .unwrap(),
+        );
+        assert_eq!(snapshots.last(), Some(&integer_pair(left, right)));
+    }
+    assert_eq!(snapshots[0], integer_pair(35, 350), "one nested stage computes (35, 350)");
+    assert_eq!(snapshots[1], integer_pair(152, 112), "two nested stages compute (152, 112)");
+    assert_eq!(snapshots[2], integer_pair(-84, 252), "three nested stages compute (-84, 252)");
+    assert_eq!(snapshots[3], integer_pair(2400, 560), "four nested stages compute (2400, 560)");
+    assert_eq!(source.lanes.len(), lane_names.len());
+    let scopes = source
+        .lanes
+        .iter()
+        .zip(lane_names.iter().copied())
+        .map(|((source_name, scope, _), expected_name)| {
+            assert_eq!(source_name, expected_name, "each paginated pair reads left then right");
+            *scope
+        })
+        .collect::<Vec<_>>();
+    for (index, scope) in scopes.iter().enumerate() {
+        assert!(
+            !scopes[..index].contains(scope),
+            "nested pagination keeps each spill snapshot on a fresh source scope: {scope:?}"
+        );
+    }
+    assert_eq!(
+        cursor_chains.iter().map(Vec::len).collect::<Vec<_>>(),
+        [255, 256, 511, 512, 256, 255, 512, 511],
+        "paired pagination restores long spill cursors around both chunk boundaries"
+    );
+    let mut expected_cursors = Vec::new();
+    for (index, long_cursor) in cursor_chains.iter().enumerate() {
+        let source_name = lane_names[index].to_owned();
+        let scope = scopes[index];
+        expected_cursors.extend([
+            (source_name.clone(), scope, None),
+            (source_name.clone(), scope, Some(long_cursor.clone())),
+            (source_name, scope, Some(compacted_cursor.clone())),
+        ]);
+    }
+    assert_eq!(
+        source.cursors,
+        expected_cursors,
+        "each nested fold requests only its own prefix through the compacted cursor"
+    );
+    assert!(
+        source
+            .cursors
+            .iter()
+            .all(|(_, _, cursor)| cursor.as_ref() != Some(&after_compaction_cursor)),
+        "take(6) stops before requesting the sentinel page"
     );
     assert!(source.pending["View.Left"].is_empty());
     assert!(source.pending["View.Right"].is_empty());
