@@ -14,8 +14,8 @@ use orna_foundation_v1::{
 };
 use orna_project_v1::{AttachedDatabaseSession, LoadedProject};
 use orna_semantic_v1::{
-    Analysis, Catalogue, EffectSummary, ModuleInput, ReplAdmission, ReplContext, SymbolKind, Type,
-    StandardDependencyProfile, analyze_with_catalogue,
+    Analysis, Catalogue, EffectSummary, ModuleInput, ReplAdmission, ReplContext,
+    StandardDependencyProfile, SymbolKind, Type, analyze_with_catalogue,
 };
 use orna_syntax_v1::{Declaration, ImportSegment, ReplInput, UseTail, Visibility, parse_module};
 
@@ -772,9 +772,7 @@ fn semantic_error(diagnostics: Vec<orna_foundation_v1::Diagnostic>) -> ReplError
 #[cfg(test)]
 mod tests {
     use super::*;
-    use orna_project_v1::{
-        AttachedDatabaseSession, PinnedDatabase, ProjectLoader,
-    };
+    use orna_project_v1::{AttachedDatabaseSession, PinnedDatabase, ProjectLoader};
     use orna_repository_v1::Repository;
     use orna_semantic_v1::StandardDependencyProfile;
     use orna_value_v1::{Raw, Value};
@@ -1108,17 +1106,23 @@ mod tests {
             ))
         );
         assert_eq!(
-            session.submit(include_str!("fixtures/repl-inline-std-query-filter-2165.orna")),
+            session.submit(include_str!(
+                "fixtures/repl-inline-std-query-filter-2165.orna"
+            )),
             Ok(Some(
                 Value::new(Raw::Array(vec![Raw::Int(2.into()), Raw::Int(3.into())])).unwrap(),
             ))
         );
         assert_eq!(
-            session.submit(include_str!("fixtures/repl-inline-std-collection-one-2165.orna")),
+            session.submit(include_str!(
+                "fixtures/repl-inline-std-collection-one-2165.orna"
+            )),
             Ok(Some(Value::int(4.into())))
         );
         assert_eq!(
-            session.submit(include_str!("fixtures/repl-inline-std-query-every-2165.orna")),
+            session.submit(include_str!(
+                "fixtures/repl-inline-std-query-every-2165.orna"
+            )),
             Ok(Some(Value::new(Raw::Bool(true)).unwrap()))
         );
         assert_eq!(
@@ -1603,20 +1607,13 @@ mod tests {
             (directory, repository, commit)
         }
 
-        let (_primary_dir, primary_repository, primary_commit) = pinned_repo(include_str!(
-            "fixtures/attached-primary-main.orna"
-        ));
-        let (_package_dir, package_repository, package_commit) = pinned_repo(include_str!(
-            "fixtures/attached-package-main.orna"
-        ));
+        let (_primary_dir, primary_repository, primary_commit) =
+            pinned_repo(include_str!("fixtures/attached-primary-main.orna"));
+        let (_package_dir, package_repository, package_commit) =
+            pinned_repo(include_str!("fixtures/attached-package-main.orna"));
         let loader = ProjectLoader::default();
-        let primary = PinnedDatabase::resolve(
-            "app",
-            primary_repository,
-            &primary_commit,
-            loader,
-        )
-        .unwrap();
+        let primary =
+            PinnedDatabase::resolve("app", primary_repository, &primary_commit, loader).unwrap();
         let package = PinnedDatabase::resolve(
             "widgets",
             package_repository.clone(),
@@ -1627,15 +1624,10 @@ mod tests {
         let mut databases = AttachedDatabaseSession::new(primary.clone()).unwrap();
         databases.attach_database(package).unwrap();
 
-        let mut session = AdmittedReplSession::from_attached_database_session(
-            &databases,
-            Limits::default(),
-        )
-        .unwrap();
-        assert_eq!(
-            session.submit("use widgets;"),
-            Ok(None)
-        );
+        let mut session =
+            AdmittedReplSession::from_attached_database_session(&databases, Limits::default())
+                .unwrap();
+        assert_eq!(session.submit("use widgets;"), Ok(None));
         assert_eq!(
             session.submit("widgets.answer()"),
             Ok(Some(Value::int(42.into())))
@@ -1652,20 +1644,13 @@ mod tests {
             package_commit
         );
 
-        let std_package = PinnedDatabase::resolve(
-            "std",
-            package_repository,
-            &package_commit,
-            loader,
-        )
-        .unwrap();
+        let std_package =
+            PinnedDatabase::resolve("std", package_repository, &package_commit, loader).unwrap();
         let mut std_databases = AttachedDatabaseSession::new(primary).unwrap();
         std_databases.attach_database(std_package).unwrap();
-        let mut std_session = AdmittedReplSession::from_attached_database_session(
-            &std_databases,
-            Limits::default(),
-        )
-        .unwrap();
+        let mut std_session =
+            AdmittedReplSession::from_attached_database_session(&std_databases, Limits::default())
+                .unwrap();
         assert_eq!(std_session.submit("use std;"), Ok(None));
         assert_eq!(
             std_session.submit("std.answer()"),
