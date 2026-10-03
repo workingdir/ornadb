@@ -7278,7 +7278,10 @@ fn infer(
                 || (omitted_pinned_tuple_path
                     && first_parent
                         .as_ref()
-                        .is_some_and(type_contains_pinned_checkpoint_tuple));
+                        .is_some_and(type_contains_pinned_checkpoint_tuple)
+                    && !first_parent
+                        .as_ref()
+                        .is_some_and(type_contains_omitted_checkpoint_tuple));
             let mut checkpoint_recovery_parent = first_parent.clone();
             // Any omitted row can expose a cross-sibling selector collision.
             // Sparse pinned tuples anywhere in the fold need a local scope so
