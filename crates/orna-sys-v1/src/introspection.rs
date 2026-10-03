@@ -1286,6 +1286,33 @@ pub fn explain_query_with_partial_indexes(
     )
 }
 
+/// Explains exact partial-index selection together with resolver-supplied
+/// logical join-pair identities. The pair and its selected predicate/index
+/// identity move together through physical cost ordering and the fold chain.
+pub fn explain_query_with_partial_indexes_and_join_pair_identities(
+    query: &QueryPlanDescription,
+    indexes: &[QueryPartialIndexDescription],
+    pairs: &[QueryJoinPairIdentityDescription],
+) -> Result<ExplainedPlan, ExplainError> {
+    explain_query_core_with_subqueries(
+        query,
+        1,
+        None,
+        None,
+        &[],
+        &[],
+        &[],
+        None,
+        &[],
+        &[],
+        &[],
+        indexes,
+        &[],
+        &[],
+        pairs,
+    )
+}
+
 /// Explains exact partial-index pushdowns and resolver-approved correlated
 /// subqueries in one sparse cost cascade. Predicate and subquery identities
 /// remain paired to their exact right input as physical ordering moves known
@@ -2286,7 +2313,17 @@ fn explain_query_core_with_subqueries(
         }
         let join_pair_identity = join_pair_identity_for_join(join, join_pair_identities);
         if let Some(pair_identity) = join_pair_identity {
-            add_join_pair_identity_details(&mut operators[right].details, pair_identity);
+            for index in BTreeSet::from([right_access, right]) {
+                add_join_pair_identity_details(&mut operators[index].details, pair_identity);
+            }
+        }
+        let paired_predicate_pushdown_identity = join_pair_identity
+            .zip(selected_partial_index)
+            .map(|(pair, index)| paired_predicate_pushdown_identity(pair, index));
+        if let Some(identity) = paired_predicate_pushdown_identity.as_deref() {
+            for index in BTreeSet::from([right_access, right]) {
+                add_paired_predicate_pushdown_details(&mut operators[index].details, identity);
+            }
         }
         let right_cardinality = source_cardinality(join.statistics.as_ref());
         let cardinality = join_cardinality(
@@ -2328,6 +2365,7 @@ fn explain_query_core_with_subqueries(
             &left_fold_identity,
             &right_fold_identity,
             join_pair_identity,
+            paired_predicate_pushdown_identity.as_deref(),
             cardinality,
             work,
             work_overflow,
@@ -2380,6 +2418,9 @@ fn explain_query_core_with_subqueries(
         }
         if let Some(pair_identity) = join_pair_identity {
             add_join_pair_identity_details(&mut details, pair_identity);
+        }
+        if let Some(identity) = paired_predicate_pushdown_identity.as_deref() {
+            add_paired_predicate_pushdown_details(&mut details, identity);
         }
         if let Some(window_identity) = right_window_identity.as_deref() {
             add_window_pushdown_chain_details(&mut details, window_identity);
@@ -3486,6 +3527,43 @@ fn partial_index_pair_identity(candidate: &QueryPartialIndexDescription) -> Stri
     format!("index-pair:{}", hex(&hash.finalize()))
 }
 
+/// Binds a logical join pair to the exact partial index selected for its
+/// right source and predicate. ORNA leaves this combined planner identity
+/// encoding open, so use a domain-separated deterministic digest.
+fn paired_predicate_pushdown_identity(
+    pair: &QueryJoinPairIdentityDescription,
+    candidate: &QueryPartialIndexDescription,
+) -> String {
+    let mut hash = Sha256::new();
+    hash.update(b"orna.sys.join-predicate-pushdown-pair.v1\0");
+    hash_part(&mut hash, pair.identity.as_str().as_bytes());
+    hash_part(&mut hash, pair.left_source.as_str().as_bytes());
+    hash_part(&mut hash, pair.right_source.as_str().as_bytes());
+    hash_optional_text(
+        &mut hash,
+        pair.predicate.as_ref().map(ExpressionRef::as_str),
+    );
+    hash_part(
+        &mut hash,
+        partial_index_pair_identity(candidate).as_bytes(),
+    );
+    format!("join-predicate-pair:{}", hex(&hash.finalize()))
+}
+
+fn add_paired_predicate_pushdown_details(
+    details: &mut BTreeMap<String, PlanDetail>,
+    identity: &str,
+) {
+    details.insert(
+        "paired_predicate_pushdown_identity".to_owned(),
+        PlanDetail::Text(identity.to_owned()),
+    );
+    details.insert(
+        "paired_predicate_pushdown_policy".to_owned(),
+        PlanDetail::Text("logical_join_and_exact_table_index_predicate".to_owned()),
+    );
+}
+
 /// Combines the resolver-approved subquery/correlation tuple with the exact
 /// selected partial-index tuple. The reference leaves this combined identity
 /// encoding open, so use a domain-separated deterministic digest.
@@ -3598,6 +3676,7 @@ fn query_join_cost_fold(
     left_identity: &str,
     right_identity: &str,
     pair: Option<&QueryJoinPairIdentityDescription>,
+    paired_predicate_pushdown_identity: Option<&str>,
     cardinality: Cardinality,
     work: Option<u64>,
     work_overflow: bool,
@@ -3618,6 +3697,7 @@ fn query_join_cost_fold(
     } else {
         hash.update([0]);
     }
+    hash_optional_text(&mut hash, paired_predicate_pushdown_identity);
     hash_optional_u64(&mut hash, cardinality.rows);
     hash_optional_u64(&mut hash, cardinality.bytes);
     hash_optional_u64(&mut hash, work);
