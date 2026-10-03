@@ -2686,6 +2686,102 @@ fn divergent_paired_pins_keep_same_named_exports_with_their_module_identity() {
 }
 
 #[test]
+fn paired_dependency_upgrade_replay_keeps_each_original_snapshot_pin() {
+    let (
+        _directory,
+        project_v1,
+        project_v2,
+        project_v3,
+        project_v4,
+        project_v5,
+        project_v6,
+        snapshots,
+    ) = module_upgrade_projects();
+    let projects = [
+        &project_v1,
+        &project_v2,
+        &project_v3,
+        &project_v4,
+        &project_v5,
+        &project_v6,
+    ];
+    let expected = [
+        [8, 3, 11],
+        [107, 3, 110],
+        [1_007, 3, 1_010],
+        [1_007, 4, 1_011],
+        [10_007, 5, 10_012],
+        [100_007, 6, 100_013],
+    ];
+    let use_pair = include_str!("fixtures/module-upgrade-paired-use.orna");
+    let replay = include_str!("fixtures/module-upgrade-snapshot-paired-identity-fold.orna");
+
+    assert!(snapshots.windows(2).all(|pair| pair[0] != pair[1]));
+    assert_eq!(
+        standard_source(&project_v3, "std/math.orna"),
+        standard_source(&project_v4, "std/math.orna"),
+        "v3 to v4 changes collection while math remains the same"
+    );
+    assert_ne!(
+        standard_source(&project_v3, "std/collection.orna"),
+        standard_source(&project_v4, "std/collection.orna")
+    );
+    assert_ne!(
+        standard_source(&project_v4, "std/math.orna"),
+        standard_source(&project_v5, "std/math.orna")
+    );
+    assert_ne!(
+        standard_source(&project_v4, "std/collection.orna"),
+        standard_source(&project_v5, "std/collection.orna")
+    );
+
+    let mut sessions = Vec::with_capacity(projects.len());
+    for (index, project) in projects.iter().enumerate() {
+        assert_eq!(
+            project.standard_profile().unwrap().snapshot(),
+            &snapshots[index],
+            "project v{} must retain its captured std pin",
+            index + 1
+        );
+        let mut session = AdmittedReplSession::from_loaded_project(
+            project,
+            project.standard_sources().iter().cloned(),
+            Limits::default(),
+        )
+        .unwrap();
+        for import in use_pair.lines() {
+            assert_eq!(session.submit(import), Ok(None));
+        }
+        assert_eq!(
+            session.submit(replay),
+            Ok(Some(ints(&expected[index]))),
+            "snapshot {} must compute its own math, collection, and paired values",
+            snapshots[index]
+        );
+        sessions.push(session);
+    }
+
+    for index in [5, 0, 3, 1, 4, 2, 5, 0] {
+        assert_eq!(
+            sessions[index].submit(replay),
+            Ok(Some(ints(&expected[index]))),
+            "replay after later dependency upgrades must preserve snapshot {}",
+            snapshots[index]
+        );
+    }
+
+    let mut cloned_sessions = sessions.clone();
+    for index in [2, 4, 1, 5, 0, 3] {
+        assert_eq!(
+            cloned_sessions[index].submit(replay),
+            Ok(Some(ints(&expected[index]))),
+            "cloned replay must preserve snapshot {} after the full upgrade chain",
+            snapshots[index]
+        );
+    }
+}
+
+#[test]
 fn replayed_closure_uses_its_captured_dependency_snapshot_after_snapshot_changes() {
     let (_directory, project_v1, project_v2, snapshot_v1, snapshot_v2, sources_v1, sources_v2) =
         snapshot_projects();
