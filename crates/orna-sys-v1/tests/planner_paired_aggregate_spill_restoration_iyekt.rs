@@ -571,6 +571,7 @@ fn aggregate_fold_components_survive_sparse_spill_restoration() {
     let small = joins["table:Small"];
     let middle = joins["table:Middle"];
     let large = joins["table:Large"];
+    let unknown = joins["table:Unknown"];
 
     assert_eq!(
         text(small, "paired_aggregate_spill_restoration_aggregate_fold_identity"),
@@ -586,6 +587,23 @@ fn aggregate_fold_components_survive_sparse_spill_restoration() {
         text(middle, "paired_aggregate_spill_restoration_fold_identity"),
         text(small, "paired_aggregate_spill_restoration_fold_identity"),
         "a sparse join carries the complete paired restore fold"
+    );
+    assert!(
+        middle
+            .details()
+            .get("paired_aggregate_spill_restoration_previous_fold_identity")
+            .is_none(),
+        "a sparse join carries the existing fold without inventing a new transition"
+    );
+    assert_eq!(
+        text(large, "paired_aggregate_spill_restoration_previous_fold_identity"),
+        text(small, "paired_aggregate_spill_restoration_fold_identity"),
+        "the next aggregate event points to the last restoration fold across the gap"
+    );
+    assert_eq!(
+        text(unknown, "paired_aggregate_spill_restoration_previous_fold_identity"),
+        text(large, "paired_aggregate_spill_restoration_fold_identity"),
+        "the later spill restoration points to the preceding aggregate fold"
     );
     assert_eq!(
         text(middle, "paired_aggregate_spill_restoration_aggregate_fold_identity"),
