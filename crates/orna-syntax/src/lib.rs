@@ -7,17 +7,10 @@ use std::{fmt, ops::Range};
 
 pub mod grammar;
 mod highlight;
-mod language_model;
 mod lexer;
 mod parser;
 
 pub use highlight::{HighlightKind, HighlightToken, KEYWORDS, SCALAR_TYPES, highlight};
-pub use language_model::{
-    IdentifierKey, LanguageDeclaration, LanguageDeclarationKind, LanguageModel, identifier_key,
-    identifier_spelling_matches, qualified_name_matches_keys, qualified_names_match,
-    source_name_parts,
-};
-
 /// A byte range in the input source.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SourceSpan {

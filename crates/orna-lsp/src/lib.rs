@@ -8,7 +8,6 @@
 mod analysis;
 mod documents;
 mod hover;
-mod reference;
 mod semantic;
 mod server;
 
