@@ -1930,6 +1930,39 @@ fn paired_sparse_window_folds_keep_identity_across_compacted_cursor_chains() {
     assert_eq!(first, integer(28), "later cursor restores preserve the first paired fold");
     assert_eq!(second, integer(42), "later cursor restores preserve the second paired fold");
 
+    assert_eq!(source.lanes.len(), 6, "three restores bind two independent source scopes each");
+    let scopes = source
+        .lanes
+        .iter()
+        .map(|(name, scope, _)| {
+            assert_eq!(name, "View.Paired");
+            *scope
+        })
+        .collect::<Vec<_>>();
+    for (index, scope) in scopes.iter().enumerate() {
+        assert!(
+            !scopes[..index].contains(scope),
+            "identical compact cursor tokens remain scoped to their paired lane: {scope:?}"
+        );
+    }
+    let expected_cursors = scopes
+        .iter()
+        .copied()
+        .flat_map(|scope| {
+            std::iter::once(("View.Paired".to_owned(), scope, None)).chain(
+                cursors
+                    .iter()
+                    .cloned()
+                    .map(move |cursor| ("View.Paired".to_owned(), scope, Some(cursor))),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        source.cursors,
+        expected_cursors,
+        "each sparse window fold follows the same compacted page sequence in its own scope"
+    );
+    assert!(source.pending["View.Paired"].is_empty(), "all six sparse page chains are consumed");
 }
 
 #[test]
