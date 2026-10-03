@@ -6424,6 +6424,139 @@ fn multi_parent_checkpoint_reconciliation_keeps_depth_labels_transactional() {
 }
 
 #[test]
+fn nested_sibling_pin_reconciliation_storms_preserve_depth_identity() {
+    let source = include_str!("fixtures/historical-nested-sibling-pin-reconciliation-storm.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-nested-sibling-pin-reconciliation-storm.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert_eq!(
+        result
+            .diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.code() == DIAG_TYPE)
+            .count(),
+        2,
+        "crossed nested sibling folds must fail while their valid storm computes: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+    let module = result
+        .modules
+        .values()
+        .find(|module| {
+            module
+                .symbols
+                .contains_key("nested_storm_rejects_sibling_depth_crossing")
+        })
+        .expect("nested sibling reconciliation fixture module");
+
+    let nested_pin_maps = |function: &str| {
+        let Type::Function { result, .. } = &module.symbols[function].ty else {
+            panic!("{function} must retain its computed result type");
+        };
+        let Type::Record(fields) = result.as_ref() else {
+            panic!("{function} must return the computed parent fold: {result:?}");
+        };
+        let Type::List(element) = fields.get("parent_fold").expect("computed parent fold")
+        else {
+            panic!("{function} must retain its reconciled parent list");
+        };
+        let Type::Record(siblings) = element.as_ref() else {
+            panic!("{function} must preserve its nested sibling record: {element:?}");
+        };
+        ["left", "right"].map(|sibling| {
+            let Type::Record(depths) = &siblings[sibling] else {
+                panic!("{function}.{sibling} must preserve its nested depth record");
+            };
+            let Type::Tuple(slots) = &depths["pins"] else {
+                panic!("{function}.{sibling} must preserve both pin depths");
+            };
+            assert_eq!(slots.len(), 2);
+            slots
+                .iter()
+                .map(|slot| {
+                    let mut contexts = BTreeSet::new();
+                    collect_snapshot_contexts(slot, &mut contexts);
+                    assert!(
+                        !contexts.is_empty(),
+                        "{function}.{sibling} pins must be concrete"
+                    );
+                    contexts
+                })
+                .collect::<Vec<_>>()
+        })
+    };
+
+    assert_eq!(
+        nested_pin_maps("nested_storm_rejects_sibling_depth_crossing"),
+        [
+            vec![
+                BTreeSet::from(["selector:HEAD~10".into()]),
+                BTreeSet::from(["selector:HEAD~11".into()])
+            ],
+            vec![
+                BTreeSet::from(["selector:HEAD~20".into()]),
+                BTreeSet::from(["selector:HEAD~21".into()])
+            ],
+        ],
+        "a rejected middle parent must not partially promote any nested sibling labels"
+    );
+    assert_eq!(
+        nested_pin_maps("nested_storm_keeps_every_sibling_depth_label"),
+        [
+            vec![
+                BTreeSet::from([
+                    "selector:HEAD~50".into(),
+                    "selector:HEAD~52".into(),
+                    "selector:HEAD~54".into()
+                ]),
+                BTreeSet::from([
+                    "selector:HEAD~51".into(),
+                    "selector:HEAD~53".into(),
+                    "selector:HEAD~55".into()
+                ]),
+            ],
+            vec![
+                BTreeSet::from([
+                    "selector:HEAD~60".into(),
+                    "selector:HEAD~62".into(),
+                    "selector:HEAD~64".into()
+                ]),
+                BTreeSet::from([
+                    "selector:HEAD~61".into(),
+                    "selector:HEAD~63".into(),
+                    "selector:HEAD~65".into()
+                ]),
+            ],
+        ],
+        "valid nested reconciliation storms must return all computed labels at each sibling depth"
+    );
+    assert_eq!(
+        nested_pin_maps("nested_pair_rejects_sibling_depth_crossing"),
+        [
+            vec![
+                BTreeSet::from(["selector:HEAD~70".into()]),
+                BTreeSet::from(["selector:HEAD~71".into()])
+            ],
+            vec![
+                BTreeSet::from(["selector:HEAD~80".into()]),
+                BTreeSet::from(["selector:HEAD~81".into()])
+            ],
+        ],
+        "two-parent nested promotion must reject sibling identity crossing and retain both first-row values"
+    );
+}
+
+#[test]
 fn stacked_record_checkpoint_folds_preserve_selector_depth_labels() {
     let source = include_str!("fixtures/historical-stacked-selector-depth-fold.orna");
     let parsed = orna_syntax_v1::parse_module(source);
@@ -6519,6 +6652,7 @@ fn stacked_record_checkpoint_folds_preserve_selector_depth_labels() {
     };
     assert_selectors(&leaf_row["leaf"], &["HEAD~603", "HEAD~606"]);
 }
+
 
 
 #[test]

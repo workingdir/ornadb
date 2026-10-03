@@ -7196,15 +7196,14 @@ fn infer(
             let first_parent = element_types.first().cloned();
             let transactional_checkpoint_fold = element_types.len() > 2
                 && first_parent.as_ref().is_some_and(|first| {
-                    matches!(first, Type::Tuple(_))
-                        && type_contains_pinned_snapshot_identity(first)
+                    type_contains_pinned_checkpoint_tuple(first)
                 });
             let mut rejected_checkpoint_parent = false;
             let mut ty = None;
             for value in element_types {
                 if let Some(prior) = &ty {
                     let merged = if transactional_checkpoint_fold {
-                        merge_multi_parent_checkpoint_tuple(
+                        merge_multi_parent_checkpoint_value(
                             prior,
                             &value,
                             first_parent.as_ref().expect("transactional fold has a parent"),
@@ -9527,6 +9526,13 @@ fn merge_list_element_types(left: &Type, right: &Type) -> Option<Type> {
         // cannot silently combine terminal values from separate lanes.
         return None;
     }
+    if (type_contains_pinned_checkpoint_tuple(left)
+        || type_contains_pinned_checkpoint_tuple(right))
+        && (!checkpoint_pin_map_widths_match(left, right)
+            || !nested_checkpoint_compaction_fold_preserves_pin_identity(left, right))
+    {
+        return None;
+    }
     if let (Type::Tuple(left), Type::Tuple(right)) = (left, right)
         && !tuple_checkpoint_promotion_matches(left, right)
     {
@@ -9645,6 +9651,13 @@ fn merge_checkpoint_field_map(left: &Type, right: &Type) -> Option<Type> {
             })
         }
         (Type::List(left), Type::List(right)) => {
+            if (type_contains_pinned_checkpoint_tuple(left)
+                || type_contains_pinned_checkpoint_tuple(right))
+                && (!checkpoint_pin_map_widths_match(left, right)
+                    || !nested_checkpoint_compaction_fold_preserves_pin_identity(left, right))
+            {
+                return None;
+            }
             // Tuple shape is a list-element promotion contract: otherwise a
             // later row with narrower checkpoint maps can widen the already
             // inferred tuple slots. Keep this check at collection promotion
@@ -18259,6 +18272,68 @@ fn merge_multi_parent_checkpoint_tuple(
     merge_checkpoint_field_map(&Type::Tuple(accumulated.clone()), &Type::Tuple(parent.clone()))
 }
 
+/// Find a pinned tuple at any structural depth so parent-list inference can
+/// make its reconciliation transactional even when records wrap the tuple.
+fn type_contains_pinned_checkpoint_tuple(ty: &Type) -> bool {
+    match ty {
+        Type::Tuple(_) => type_contains_pinned_snapshot_identity(ty),
+        Type::List(element)
+        | Type::Range(element)
+        | Type::Relation(element)
+        | Type::Stream(element)
+        | Type::Optional(element) => type_contains_pinned_checkpoint_tuple(element),
+        Type::Record(fields) => fields.values().any(type_contains_pinned_checkpoint_tuple),
+        Type::Applied { arguments, .. } => arguments
+            .iter()
+            .any(type_contains_pinned_checkpoint_tuple),
+        Type::Function {
+            parameters, result, ..
+        } => {
+            parameters
+                .iter()
+                .any(type_contains_pinned_checkpoint_tuple)
+                || type_contains_pinned_checkpoint_tuple(result)
+        }
+        Type::MoneyPerUnit { currency, unit } => {
+            type_contains_pinned_checkpoint_tuple(currency)
+                || type_contains_pinned_checkpoint_tuple(unit)
+        }
+        _ => false,
+    }
+}
+
+/// Reconcile a parent row transactionally while preserving the first parent's
+/// selector widths and each nested tuple's boundary-path identity.
+fn merge_multi_parent_checkpoint_value(
+    accumulated: &Type,
+    parent: &Type,
+    first_parent: &Type,
+) -> Option<Type> {
+    if matches!(first_parent, Type::Tuple(_)) {
+        return merge_multi_parent_checkpoint_tuple(accumulated, parent, first_parent);
+    }
+    if !checkpoint_pin_map_widths_match(first_parent, parent)
+        || !nested_checkpoint_compaction_fold_preserves_pin_identity(accumulated, parent)
+    {
+        return None;
+    }
+
+    merge_checkpoint_field_map(accumulated, parent)
+}
+
+fn nested_checkpoint_compaction_fold_preserves_pin_identity(left: &Type, right: &Type) -> bool {
+    let mut pin_maps = Vec::new();
+    if !collect_corresponding_snapshot_context_maps_at_path(
+        left,
+        right,
+        &mut pin_maps,
+        &mut Vec::new(),
+    ) {
+        return false;
+    }
+    checkpoint_snapshot_fold_preserves_pin_identity(&pin_maps)
+}
+
 /// A folded tuple map must not invent cross-slot identity by unioning maps
 /// from opposite rows. The reference does not define that compaction case;
 /// only promote when every identity shared after the fold was shared within
@@ -18625,9 +18700,6 @@ fn collect_corresponding_snapshot_context_maps_at_path(
         };
         let expected = selectors(expected);
         let actual = selectors(actual);
-        if expected.len() != actual.len() {
-            return false;
-        }
         into.push(SnapshotContextMapPair {
             boundary_path: path.clone(),
             expected,
