@@ -13,7 +13,7 @@ num-bigint = "0.4.6"
 num-integer = "0.1.47"
 num-traits = "0.2.19"
 serde = "1.0"
-serde_json = { version = "1.0.151", features = ["arbitrary_precision"] }
+serde_json = { version = "1.0.151", features = ["arbitrary_precision", "raw_value"] }
 orna-foundation-v1 = { path = "../orna-foundation-v1" }
 orna-project-v1 = { path = "../orna-project-v1" }
 orna-standard = { path = "../orna-standard" }
@@ -23,6 +23,7 @@ orna-syntax-v1 = { path = "../orna-syntax-v1" }
 orna-value-v1 = { path = "../orna-value-v1" }
 sha2 = "0.10.9"
 unicode-normalization = "=0.1.24"
+unicode-case-mapping = "=1.0.0"
 
 [dev-dependencies]
 orna-repository-v1 = { path = "../orna-repository-v1" }

@@ -278,6 +278,76 @@ pub struct BranchMergeDepthFragmentRecovery {
     pub tombstones: Vec<(ObjectId, CanonicalValue)>,
 }
 
+/// A table's complete depth layout within one paired tombstone wave.
+///
+/// Peer tables may have different depth counts. Each table supplies every
+/// fragment index in `0..fragment_count`; an empty fragment is still an
+/// identity-bearing depth position.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BranchMergeTableDepthFragments {
+    pub fragment_count: usize,
+    pub fragments: BTreeMap<usize, Vec<CanonicalValue>>,
+}
+
+/// One complete paired tombstone wave whose peer tables have independent
+/// depth-fragment labels.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BranchMergeTabularDepthWave {
+    pub order: u64,
+    pub tables: BTreeMap<ObjectId, BranchMergeTableDepthFragments>,
+}
+
+/// One stable table column's complete depth layout in a restore wave.
+///
+/// Each fragment carries canonical `(row_key, value)` cells. Columns keep
+/// independent depth counts, and an empty fragment remains an identity-bearing
+/// position in that column's restore ladder.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BranchMergeColumnDepthFragments {
+    pub fragment_count: usize,
+    pub fragments: BTreeMap<usize, Vec<(CanonicalValue, CanonicalValue)>>,
+}
+
+/// One paired restore wave with independent depth ladders for each stable
+/// `(table, column)` identity.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BranchMergeTabularColumnDepthWave {
+    pub order: u64,
+    pub columns: BTreeMap<(ObjectId, ObjectId), BranchMergeColumnDepthFragments>,
+}
+
+/// One paired restore wave contributed by multiple stable parent branches.
+/// Every parent carries its own table-column depth ladders.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BranchMergeMultiParentTabularColumnDepthWave {
+    pub order: u64,
+    pub parents:
+        BTreeMap<ObjectId, BTreeMap<(ObjectId, ObjectId), BranchMergeColumnDepthFragments>>,
+}
+
+/// A canonical column cell released from a complete restore ladder.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BranchMergeColumnDepthEvent {
+    pub order: u64,
+    pub table: ObjectId,
+    pub column: ObjectId,
+    pub fragment: usize,
+    pub key: CanonicalValue,
+    pub value: CanonicalValue,
+}
+
+/// A canonical column cell released with its source parent identity intact.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BranchMergeParentColumnDepthEvent {
+    pub order: u64,
+    pub parent: ObjectId,
+    pub table: ObjectId,
+    pub column: ObjectId,
+    pub fragment: usize,
+    pub key: CanonicalValue,
+    pub value: CanonicalValue,
+}
+
 /// One exact-key tombstone event retained in committed paired history.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BranchMergeTombstoneEvent {
@@ -313,6 +383,68 @@ pub enum BranchMergeTombstoneHistoryError {
     EmptyDepthFragmentRecoveryBatch,
     /// A fragment-recovery request names one position and index more than once.
     DuplicateDepthFragmentRecovery { order: u64, fragment: usize },
+    /// A tabular depth wave does not name any peer tables.
+    EmptyTabularDepthWave { order: u64 },
+    /// A tabular column depth wave does not name any stable table columns.
+    EmptyTabularColumnDepthWave { order: u64 },
+    /// A multi-parent restore wave must carry at least two distinct parents.
+    InsufficientTabularDepthParents { order: u64, actual: usize },
+    /// One parent in a multi-parent wave has no table-column branches.
+    EmptyParentColumnDepthWave { order: u64, parent: ObjectId },
+    /// A tabular depth wave omits or repeats a table-local fragment index.
+    IncompleteTabularDepthFragments { order: u64, table: ObjectId },
+    /// A column branch omits or repeats one of its local depth positions.
+    IncompleteTabularColumnDepthFragments {
+        order: u64,
+        table: ObjectId,
+        column: ObjectId,
+    },
+    /// A parent column branch omits or repeats one local depth position.
+    IncompleteParentColumnDepthFragments {
+        order: u64,
+        parent: ObjectId,
+        table: ObjectId,
+        column: ObjectId,
+    },
+    /// A committed peer table was restored with a different depth count.
+    TabularFragmentCountMismatch {
+        order: u64,
+        table: ObjectId,
+        expected: usize,
+        actual: usize,
+    },
+    /// A committed column branch was restored with a different depth count.
+    TabularColumnFragmentCountMismatch {
+        order: u64,
+        table: ObjectId,
+        column: ObjectId,
+        expected: usize,
+        actual: usize,
+    },
+    /// A committed parent column was restored with a different depth count.
+    ParentColumnFragmentCountMismatch {
+        order: u64,
+        parent: ObjectId,
+        table: ObjectId,
+        column: ObjectId,
+        expected: usize,
+        actual: usize,
+    },
+    /// One column fragment contains more than one value for a logical row.
+    DuplicateColumnDepthRow {
+        order: u64,
+        table: ObjectId,
+        column: ObjectId,
+        fragment: usize,
+    },
+    /// A parent column fragment repeats one logical row key.
+    DuplicateParentColumnDepthRow {
+        order: u64,
+        parent: ObjectId,
+        table: ObjectId,
+        column: ObjectId,
+        fragment: usize,
+    },
     /// Overlapping fragments attempted to record one table/key twice in a wave.
     DuplicateTombstone { order: u64 },
     /// Two concurrently buffered lineage positions record one table/key.
@@ -332,13 +464,27 @@ enum BufferedBranchMergeTombstoneDelta {
         fragment_count: usize,
         fragments: BTreeMap<usize, Vec<(ObjectId, CanonicalValue)>>,
     },
+    TabularDepthWave(BranchMergeTabularDepthWave),
+    TabularColumnDepthWave(BranchMergeTabularColumnDepthWave),
+    MultiParentTabularColumnDepthWave(BranchMergeMultiParentTabularColumnDepthWave),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum BranchMergeTombstoneSubmissionMode {
     WholePlan,
     DepthFragments,
+    TabularDepthWave,
+    TabularColumnDepthWave,
+    MultiParentTabularColumnDepthWave,
 }
+
+type TabularFragmentRetryIdentity = BTreeMap<ObjectId, (usize, BTreeMap<usize, [u8; 32]>)>;
+type TabularColumnFragmentRetryIdentity =
+    BTreeMap<(ObjectId, ObjectId), (usize, BTreeMap<usize, [u8; 32]>)>;
+type MultiParentColumnFragmentRetryIdentity = BTreeMap<
+    ObjectId,
+    BTreeMap<(ObjectId, ObjectId), (usize, BTreeMap<usize, [u8; 32]>)>,
+>;
 
 type PairedRetryPlanSignature = (u64, [u8; 32], [u8; 32]);
 type DepthFragmentRetrySignature = (u64, usize, usize, [u8; 32]);
@@ -475,6 +621,13 @@ pub struct BranchMergeTombstoneHistory {
     committed_modes: BTreeMap<u64, BranchMergeTombstoneSubmissionMode>,
     committed_fragment_counts: BTreeMap<u64, usize>,
     committed_fragment_retry_identities: BTreeMap<u64, BTreeMap<usize, [u8; 32]>>,
+    committed_tabular_fragment_retry_identities: BTreeMap<u64, TabularFragmentRetryIdentity>,
+    committed_tabular_column_fragment_retry_identities:
+        BTreeMap<u64, TabularColumnFragmentRetryIdentity>,
+    column_events: Vec<BranchMergeColumnDepthEvent>,
+    committed_multi_parent_column_retry_identities:
+        BTreeMap<u64, MultiParentColumnFragmentRetryIdentity>,
+    parent_column_events: Vec<BranchMergeParentColumnDepthEvent>,
     committed_plan_identities: BTreeMap<u64, [u8; 32]>,
     duplicate_retry_modes: BTreeMap<u64, BranchMergeTombstoneSubmissionMode>,
     applied_fragment_retry_transactions: Vec<AppliedDepthFragmentRetryTransaction>,
@@ -491,6 +644,11 @@ impl BranchMergeTombstoneHistory {
             committed_modes: BTreeMap::new(),
             committed_fragment_counts: BTreeMap::new(),
             committed_fragment_retry_identities: BTreeMap::new(),
+            committed_tabular_fragment_retry_identities: BTreeMap::new(),
+            committed_tabular_column_fragment_retry_identities: BTreeMap::new(),
+            column_events: Vec::new(),
+            committed_multi_parent_column_retry_identities: BTreeMap::new(),
+            parent_column_events: Vec::new(),
             committed_plan_identities: BTreeMap::new(),
             duplicate_retry_modes: BTreeMap::new(),
             applied_fragment_retry_transactions: Vec::new(),
@@ -627,6 +785,15 @@ impl BranchMergeTombstoneHistory {
             Some(BufferedBranchMergeTombstoneDelta::WholePlan(_)) => unreachable!(
                 "whole-plan mode conflicts are classified before fragment validation"
             ),
+            Some(BufferedBranchMergeTombstoneDelta::TabularDepthWave(_)) => unreachable!(
+                "tabular-wave mode conflicts are classified before fragment validation"
+            ),
+            Some(BufferedBranchMergeTombstoneDelta::TabularColumnDepthWave(_)) => unreachable!(
+                "column-wave mode conflicts are classified before fragment validation"
+            ),
+            Some(BufferedBranchMergeTombstoneDelta::MultiParentTabularColumnDepthWave(_)) => {
+                unreachable!("multi-parent mode conflicts are classified before fragment validation")
+            }
             Some(BufferedBranchMergeTombstoneDelta::DepthFragments {
                 fragment_count: expected_count,
                 fragments,
@@ -690,6 +857,254 @@ impl BranchMergeTombstoneHistory {
         };
         fragments.insert(fragment, tombstones.to_vec());
         Ok(self.release_contiguous())
+    }
+
+    /// Submits a complete paired wave with a table-local depth layout.
+    ///
+    /// A peer table may have a different fragment count from the other tables
+    /// in the same paired restore. Every table must provide all indices in
+    /// its declared count; empty fragments retain their depth identity. The
+    /// wave is queued atomically behind earlier lineage positions and commits
+    /// tombstones in table/key order. After release, a retry must preserve the
+    /// peer table set, each table's fragment count, and each fragment's
+    /// tombstone identity. MERGE-1 is silent on peer-table depth labels; this
+    /// v1 policy preserves them independently across restore folds.
+    pub fn submit_tabular_depth_wave(
+        &mut self,
+        wave: &BranchMergeTabularDepthWave,
+    ) -> Result<Vec<BranchMergeTombstoneEvent>, BranchMergeTombstoneHistoryError> {
+        let order = wave.order;
+        self.classify_submission_mode_conflict(
+            order,
+            BranchMergeTombstoneSubmissionMode::TabularDepthWave,
+        )?;
+
+        if let Some(expected) = self.committed_tabular_fragment_retry_identities.get(&order) {
+            if wave.tables.len() != expected.len() || wave.tables.keys().ne(expected.keys()) {
+                return Err(BranchMergeTombstoneHistoryError::ConflictingSubmission { order });
+            }
+            for (table, fragments) in &wave.tables {
+                let (expected_count, _) = expected
+                    .get(table)
+                    .expect("the peer table set was checked above");
+                if *expected_count != fragments.fragment_count {
+                    return Err(
+                        BranchMergeTombstoneHistoryError::TabularFragmentCountMismatch {
+                            order,
+                            table: *table,
+                            expected: *expected_count,
+                            actual: fragments.fragment_count,
+                        },
+                    );
+                }
+            }
+        }
+
+        let tombstones = tabular_depth_wave_tombstones(wave)?;
+        if has_duplicate_tombstones_in_wave(&tombstones) {
+            return Err(BranchMergeTombstoneHistoryError::DuplicateTombstone { order });
+        }
+        if let Some(expected) = self.committed_tabular_fragment_retry_identities.get(&order)
+            && *expected != tabular_depth_wave_retry_identity(wave)
+        {
+            return Err(BranchMergeTombstoneHistoryError::ConflictingSubmission { order });
+        }
+
+        self.classify_submission_position(
+            order,
+            BranchMergeTombstoneSubmissionMode::TabularDepthWave,
+        )?;
+        if let Some(other_order) = self.pending_duplicate_order(order, &tombstones) {
+            self.reserve_duplicate_retry_mode(
+                order,
+                BranchMergeTombstoneSubmissionMode::TabularDepthWave,
+            );
+            return Err(concurrent_duplicate_error(order, other_order));
+        }
+
+        self.duplicate_retry_modes.remove(&order);
+        self.pending_deltas.insert(
+            order,
+            BufferedBranchMergeTombstoneDelta::TabularDepthWave(wave.clone()),
+        );
+        Ok(self.release_contiguous())
+    }
+
+    /// Submits a paired restore wave whose depth labels belong to stable
+    /// table-column branches. Each `(table, column)` supplies every local
+    /// fragment index, while sibling columns may use different fragment
+    /// counts. Complete future waves wait behind the missing paired prefix;
+    /// release records their cells in table, column, depth, and primary-key
+    /// order. Committed retries retain each column's count and per-fragment
+    /// cell identity, so one branch cannot borrow another branch's labels.
+    ///
+    /// MERGE-1 specifies stable column identities and three-way row merge
+    /// behavior, but is silent on restore-ladder labels across uneven column
+    /// branches. This v1 policy gives each stable `(table, column)` pair its
+    /// own complete depth range and keeps empty depths identity-bearing.
+    pub fn submit_tabular_column_depth_wave(
+        &mut self,
+        wave: &BranchMergeTabularColumnDepthWave,
+    ) -> Result<Vec<BranchMergeColumnDepthEvent>, BranchMergeTombstoneHistoryError> {
+        let order = wave.order;
+        self.classify_submission_mode_conflict(
+            order,
+            BranchMergeTombstoneSubmissionMode::TabularColumnDepthWave,
+        )?;
+
+        if let Some(expected) = self
+            .committed_tabular_column_fragment_retry_identities
+            .get(&order)
+        {
+            if wave.columns.len() != expected.len() || wave.columns.keys().ne(expected.keys()) {
+                return Err(BranchMergeTombstoneHistoryError::ConflictingSubmission { order });
+            }
+            for ((table, column), fragments) in &wave.columns {
+                let (expected_count, _) = expected
+                    .get(&(*table, *column))
+                    .expect("the stable table-column set was checked above");
+                if *expected_count != fragments.fragment_count {
+                    return Err(
+                        BranchMergeTombstoneHistoryError::TabularColumnFragmentCountMismatch {
+                            order,
+                            table: *table,
+                            column: *column,
+                            expected: *expected_count,
+                            actual: fragments.fragment_count,
+                        },
+                    );
+                }
+            }
+        }
+
+        tabular_column_depth_wave_events(wave)?;
+        let incoming_identity = tabular_column_depth_wave_retry_identity(wave);
+        if let Some(expected) = self
+            .committed_tabular_column_fragment_retry_identities
+            .get(&order)
+            && *expected != incoming_identity
+        {
+            return Err(BranchMergeTombstoneHistoryError::ConflictingSubmission { order });
+        }
+        if let Some(BufferedBranchMergeTombstoneDelta::TabularColumnDepthWave(existing)) =
+            self.pending_deltas.get(&order)
+        {
+            if tabular_column_depth_wave_retry_identity(existing) != incoming_identity {
+                return Err(BranchMergeTombstoneHistoryError::ConflictingSubmission { order });
+            }
+            return Err(BranchMergeTombstoneHistoryError::DuplicateOrStale { order });
+        }
+
+        self.classify_submission_position(
+            order,
+            BranchMergeTombstoneSubmissionMode::TabularColumnDepthWave,
+        )?;
+        let first_new_event = self.column_events.len();
+        self.pending_deltas.insert(
+            order,
+            BufferedBranchMergeTombstoneDelta::TabularColumnDepthWave(wave.clone()),
+        );
+        self.release_contiguous();
+        Ok(self.column_events[first_new_event..].to_vec())
+    }
+
+    /// Returns the ordered column cells released by complete restore ladders.
+    pub fn column_events(&self) -> &[BranchMergeColumnDepthEvent] {
+        &self.column_events
+    }
+
+    /// Submits a complete paired restore wave from at least two distinct
+    /// parent branches. Each parent and stable table-column pair retains its
+    /// own fragment count and cell retry identity. Parent provenance remains
+    /// attached to released cells, even when parents restore the same row and
+    /// column with equal or different values. Complete future waves wait for
+    /// their lineage prefix, then release in parent, table, column, depth, and
+    /// primary-key order.
+    ///
+    /// The reference defines stable column identities and three-way merge
+    /// behavior, but is silent about depth labels across multi-parent restore
+    /// ladders. This v1 policy treats each parent as an independent source and
+    /// never aligns its fragment indexes with a sibling parent.
+    pub fn submit_multi_parent_tabular_column_depth_wave(
+        &mut self,
+        wave: &BranchMergeMultiParentTabularColumnDepthWave,
+    ) -> Result<Vec<BranchMergeParentColumnDepthEvent>, BranchMergeTombstoneHistoryError> {
+        let order = wave.order;
+        self.classify_submission_mode_conflict(
+            order,
+            BranchMergeTombstoneSubmissionMode::MultiParentTabularColumnDepthWave,
+        )?;
+
+        if let Some(expected) = self
+            .committed_multi_parent_column_retry_identities
+            .get(&order)
+        {
+            if wave.parents.len() != expected.len() || wave.parents.keys().ne(expected.keys()) {
+                return Err(BranchMergeTombstoneHistoryError::ConflictingSubmission { order });
+            }
+            for (parent, columns) in &wave.parents {
+                let expected_columns = expected
+                    .get(parent)
+                    .expect("the parent identity set was checked above");
+                if columns.len() != expected_columns.len()
+                    || columns.keys().ne(expected_columns.keys())
+                {
+                    return Err(BranchMergeTombstoneHistoryError::ConflictingSubmission { order });
+                }
+                for ((table, column), depth) in columns {
+                    let (expected_count, _) = expected_columns
+                        .get(&(*table, *column))
+                        .expect("the parent-local column set was checked above");
+                    if *expected_count != depth.fragment_count {
+                        return Err(
+                            BranchMergeTombstoneHistoryError::ParentColumnFragmentCountMismatch {
+                                order,
+                                parent: *parent,
+                                table: *table,
+                                column: *column,
+                                expected: *expected_count,
+                                actual: depth.fragment_count,
+                            },
+                        );
+                    }
+                }
+            }
+        }
+
+        parent_column_depth_wave_events(wave)?;
+        let incoming_identity = parent_column_depth_wave_retry_identity(wave);
+        if let Some(expected) = self
+            .committed_multi_parent_column_retry_identities
+            .get(&order)
+            && *expected != incoming_identity
+        {
+            return Err(BranchMergeTombstoneHistoryError::ConflictingSubmission { order });
+        }
+        if let Some(BufferedBranchMergeTombstoneDelta::MultiParentTabularColumnDepthWave(existing)) =
+            self.pending_deltas.get(&order)
+        {
+            if parent_column_depth_wave_retry_identity(existing) != incoming_identity {
+                return Err(BranchMergeTombstoneHistoryError::ConflictingSubmission { order });
+            }
+            return Err(BranchMergeTombstoneHistoryError::DuplicateOrStale { order });
+        }
+
+        self.classify_submission_position(
+            order,
+            BranchMergeTombstoneSubmissionMode::MultiParentTabularColumnDepthWave,
+        )?;
+        let first_new_event = self.parent_column_events.len();
+        self.pending_deltas.insert(
+            order,
+            BufferedBranchMergeTombstoneDelta::MultiParentTabularColumnDepthWave(wave.clone()),
+        );
+        self.release_contiguous();
+        Ok(self.parent_column_events[first_new_event..].to_vec())
+    }
+
+    /// Returns ordered cells released with their source parent identities.
+    pub fn parent_column_events(&self) -> &[BranchMergeParentColumnDepthEvent] {
+        &self.parent_column_events
     }
 
     /// Associates a complete paired result with an already-complete depth
@@ -1292,6 +1707,15 @@ impl BranchMergeTombstoneHistory {
             Some(BufferedBranchMergeTombstoneDelta::WholePlan(_)) => unreachable!(
                 "whole-plan mode conflicts are classified before fragment recovery"
             ),
+            Some(BufferedBranchMergeTombstoneDelta::TabularDepthWave(_)) => unreachable!(
+                "tabular-wave mode conflicts are classified before fragment recovery"
+            ),
+            Some(BufferedBranchMergeTombstoneDelta::TabularColumnDepthWave(_)) => unreachable!(
+                "column-wave mode conflicts are classified before fragment recovery"
+            ),
+            Some(BufferedBranchMergeTombstoneDelta::MultiParentTabularColumnDepthWave(_)) => {
+                unreachable!("multi-parent mode conflicts are classified before fragment recovery")
+            }
             None => {
                 if recovery.fragment >= recovery.fragment_count {
                     return Err(BranchMergeTombstoneHistoryError::InvalidFragment {
@@ -1360,6 +1784,9 @@ impl BranchMergeTombstoneHistory {
                     ..
                 }) => Some(*fragment_count),
                 Some(BufferedBranchMergeTombstoneDelta::WholePlan(_)) => None,
+                Some(BufferedBranchMergeTombstoneDelta::TabularDepthWave(_)) => None,
+                Some(BufferedBranchMergeTombstoneDelta::TabularColumnDepthWave(_)) => None,
+                Some(BufferedBranchMergeTombstoneDelta::MultiParentTabularColumnDepthWave(_)) => None,
                 None => self.committed_fragment_counts.get(&recovery.order).copied(),
             };
             let Some(expected_count) = expected_count else {
@@ -1422,6 +1849,9 @@ impl BranchMergeTombstoneHistory {
                     fragment_count,
                     fragments,
                 }) => fragments.len() == *fragment_count,
+                Some(BufferedBranchMergeTombstoneDelta::TabularDepthWave(_)) => true,
+                Some(BufferedBranchMergeTombstoneDelta::TabularColumnDepthWave(_)) => true,
+                Some(BufferedBranchMergeTombstoneDelta::MultiParentTabularColumnDepthWave(_)) => true,
                 None => false,
             };
             if !ready {
@@ -1448,16 +1878,44 @@ impl BranchMergeTombstoneHistory {
                         .collect(),
                 );
             }
+            if let BufferedBranchMergeTombstoneDelta::TabularDepthWave(wave) = &delta {
+                self.committed_tabular_fragment_retry_identities
+                    .insert(order, tabular_depth_wave_retry_identity(wave));
+            }
+            if let BufferedBranchMergeTombstoneDelta::TabularColumnDepthWave(wave) = &delta {
+                self.committed_tabular_column_fragment_retry_identities
+                    .insert(order, tabular_column_depth_wave_retry_identity(wave));
+            }
+            if let BufferedBranchMergeTombstoneDelta::MultiParentTabularColumnDepthWave(wave) = &delta {
+                self.committed_multi_parent_column_retry_identities
+                    .insert(order, parent_column_depth_wave_retry_identity(wave));
+            }
             self.duplicate_retry_modes.remove(&order);
             if let Some(identity) = self.pending_plan_identities.remove(&order) {
                 self.committed_plan_identities.insert(order, identity);
             } else if mode == BranchMergeTombstoneSubmissionMode::WholePlan {
                 unreachable!("whole-plan identity is buffered with its tombstone delta");
             }
+            let mut column_events = Vec::new();
+            let mut parent_column_events = Vec::new();
             let mut tombstones = match delta {
                 BufferedBranchMergeTombstoneDelta::WholePlan(tombstones) => tombstones,
                 BufferedBranchMergeTombstoneDelta::DepthFragments { fragments, .. } => {
                     fragments.into_values().flatten().collect()
+                }
+                BufferedBranchMergeTombstoneDelta::TabularDepthWave(wave) => {
+                    tabular_depth_wave_tombstones(&wave)
+                        .expect("buffered tabular depth waves were validated before insertion")
+                }
+                BufferedBranchMergeTombstoneDelta::TabularColumnDepthWave(wave) => {
+                    column_events = tabular_column_depth_wave_events(&wave)
+                        .expect("buffered column waves were validated before insertion");
+                    Vec::new()
+                }
+                BufferedBranchMergeTombstoneDelta::MultiParentTabularColumnDepthWave(wave) => {
+                    parent_column_events = parent_column_depth_wave_events(&wave)
+                        .expect("buffered multi-parent waves were validated before insertion");
+                    Vec::new()
                 }
             };
             self.committed_modes.insert(order, mode);
@@ -1469,6 +1927,8 @@ impl BranchMergeTombstoneHistory {
             self.events.extend(tombstones.into_iter().map(|(table, key)| {
                 BranchMergeTombstoneEvent { order, table, key }
             }));
+            self.column_events.extend(column_events);
+            self.parent_column_events.extend(parent_column_events);
             self.next_order = order.checked_add(1);
         }
 
@@ -1500,6 +1960,18 @@ impl BranchMergeTombstoneHistory {
             (
                 Some(BufferedBranchMergeTombstoneDelta::DepthFragments { .. }),
                 BranchMergeTombstoneSubmissionMode::DepthFragments,
+            )
+            | (
+                Some(BufferedBranchMergeTombstoneDelta::TabularDepthWave(_)),
+                BranchMergeTombstoneSubmissionMode::TabularDepthWave,
+            )
+            | (
+                Some(BufferedBranchMergeTombstoneDelta::TabularColumnDepthWave(_)),
+                BranchMergeTombstoneSubmissionMode::TabularColumnDepthWave,
+            )
+            | (
+                Some(BufferedBranchMergeTombstoneDelta::MultiParentTabularColumnDepthWave(_)),
+                BranchMergeTombstoneSubmissionMode::MultiParentTabularColumnDepthWave,
             )
             | (None, _) => Ok(()),
             (Some(_), _) => unreachable!(
@@ -1587,6 +2059,13 @@ impl BufferedBranchMergeTombstoneDelta {
         match self {
             Self::WholePlan(_) => BranchMergeTombstoneSubmissionMode::WholePlan,
             Self::DepthFragments { .. } => BranchMergeTombstoneSubmissionMode::DepthFragments,
+            Self::TabularDepthWave(_) => BranchMergeTombstoneSubmissionMode::TabularDepthWave,
+            Self::TabularColumnDepthWave(_) => {
+                BranchMergeTombstoneSubmissionMode::TabularColumnDepthWave
+            }
+            Self::MultiParentTabularColumnDepthWave(_) => {
+                BranchMergeTombstoneSubmissionMode::MultiParentTabularColumnDepthWave
+            }
         }
     }
 
@@ -1604,6 +2083,15 @@ impl BufferedBranchMergeTombstoneDelta {
                 .values()
                 .flatten()
                 .any(|(candidate_table, candidate_key)| contains(candidate_table, candidate_key)),
+            Self::TabularDepthWave(wave) => wave.tables.iter().any(|(table_id, table)| {
+                table
+                    .fragments
+                    .values()
+                    .flatten()
+                    .any(|candidate_key| contains(table_id, candidate_key))
+            }),
+            Self::TabularColumnDepthWave(_) => false,
+            Self::MultiParentTabularColumnDepthWave(_) => false,
         }
     }
 }
@@ -1749,6 +2237,279 @@ fn tombstone_delta_retry_identity(tombstones: &[(ObjectId, CanonicalValue)]) -> 
         hash.update(key);
     }
     hash.finalize().into()
+}
+
+fn tabular_depth_wave_tombstones(
+    wave: &BranchMergeTabularDepthWave,
+) -> Result<Vec<(ObjectId, CanonicalValue)>, BranchMergeTombstoneHistoryError> {
+    if wave.tables.is_empty() {
+        return Err(BranchMergeTombstoneHistoryError::EmptyTabularDepthWave {
+            order: wave.order,
+        });
+    }
+
+    let mut tombstones = Vec::new();
+    for (table, depth) in &wave.tables {
+        if depth.fragment_count == 0 {
+            return Err(BranchMergeTombstoneHistoryError::InvalidFragment {
+                fragment: 0,
+                fragment_count: 0,
+            });
+        }
+        if depth.fragments.len() != depth.fragment_count
+            || depth
+                .fragments
+                .keys()
+                .enumerate()
+                .any(|(expected, actual)| *actual != expected)
+        {
+            return Err(
+                BranchMergeTombstoneHistoryError::IncompleteTabularDepthFragments {
+                    order: wave.order,
+                    table: *table,
+                },
+            );
+        }
+        for keys in depth.fragments.values() {
+            tombstones.extend(keys.iter().cloned().map(|key| (*table, key)));
+        }
+    }
+    Ok(tombstones)
+}
+
+fn tabular_depth_wave_retry_identity(
+    wave: &BranchMergeTabularDepthWave,
+) -> TabularFragmentRetryIdentity {
+    wave.tables
+        .iter()
+        .map(|(table, depth)| {
+            let fragments = depth
+                .fragments
+                .iter()
+                .map(|(fragment, keys)| {
+                    let tombstones = keys
+                        .iter()
+                        .cloned()
+                        .map(|key| (*table, key))
+                        .collect::<Vec<_>>();
+                    (*fragment, tombstone_delta_retry_identity(&tombstones))
+                })
+                .collect();
+            (*table, (depth.fragment_count, fragments))
+        })
+        .collect()
+}
+
+fn tabular_column_depth_wave_events(
+    wave: &BranchMergeTabularColumnDepthWave,
+) -> Result<Vec<BranchMergeColumnDepthEvent>, BranchMergeTombstoneHistoryError> {
+    if wave.columns.is_empty() {
+        return Err(BranchMergeTombstoneHistoryError::EmptyTabularColumnDepthWave {
+            order: wave.order,
+        });
+    }
+
+    let mut events = Vec::new();
+    for ((table, column), depth) in &wave.columns {
+        if depth.fragment_count == 0
+            || depth.fragments.len() != depth.fragment_count
+            || depth
+                .fragments
+                .keys()
+                .enumerate()
+                .any(|(expected, actual)| *actual != expected)
+        {
+            return Err(
+                BranchMergeTombstoneHistoryError::IncompleteTabularColumnDepthFragments {
+                    order: wave.order,
+                    table: *table,
+                    column: *column,
+                },
+            );
+        }
+
+        for (fragment, cells) in &depth.fragments {
+            for (index, (key, value)) in cells.iter().enumerate() {
+                if cells[..index]
+                    .iter()
+                    .any(|(prior, _)| same_primary_key(prior, key))
+                {
+                    return Err(BranchMergeTombstoneHistoryError::DuplicateColumnDepthRow {
+                        order: wave.order,
+                        table: *table,
+                        column: *column,
+                        fragment: *fragment,
+                    });
+                }
+                events.push(BranchMergeColumnDepthEvent {
+                    order: wave.order,
+                    table: *table,
+                    column: *column,
+                    fragment: *fragment,
+                    key: key.clone(),
+                    value: value.clone(),
+                });
+            }
+        }
+    }
+    events.sort_by(|left, right| {
+        left.table
+            .cmp(&right.table)
+            .then_with(|| left.column.cmp(&right.column))
+            .then_with(|| left.fragment.cmp(&right.fragment))
+            .then_with(|| {
+                compare_primary_keys_with_encoding_tiebreak(&left.key, &right.key)
+            })
+    });
+    Ok(events)
+}
+
+fn tabular_column_depth_wave_retry_identity(
+    wave: &BranchMergeTabularColumnDepthWave,
+) -> TabularColumnFragmentRetryIdentity {
+    wave.columns
+        .iter()
+        .map(|(identity, depth)| {
+            let fragments = depth
+                .fragments
+                .iter()
+                .map(|(fragment, cells)| (*fragment, column_depth_fragment_retry_identity(cells)))
+                .collect();
+            (*identity, (depth.fragment_count, fragments))
+        })
+        .collect()
+}
+
+fn column_depth_fragment_retry_identity(
+    cells: &[(CanonicalValue, CanonicalValue)],
+) -> [u8; 32] {
+    let mut encoded = cells
+        .iter()
+        .map(|(key, value)| {
+            (
+                key.encode()
+                    .expect("validated canonical primary keys remain encodable"),
+                value
+                    .encode()
+                    .expect("canonical column values remain encodable"),
+            )
+        })
+        .collect::<Vec<_>>();
+    encoded.sort_unstable();
+
+    let mut hash = Sha256::new();
+    hash.update(b"orna-storage-column-depth-fragment-retry-v1");
+    update_retry_identity_count(&mut hash, encoded.len());
+    for (key, value) in encoded {
+        update_retry_identity_count(&mut hash, key.len());
+        hash.update(key);
+        update_retry_identity_count(&mut hash, value.len());
+        hash.update(value);
+    }
+    hash.finalize().into()
+}
+
+fn parent_column_depth_wave_events(
+    wave: &BranchMergeMultiParentTabularColumnDepthWave,
+) -> Result<Vec<BranchMergeParentColumnDepthEvent>, BranchMergeTombstoneHistoryError> {
+    if wave.parents.len() < 2 {
+        return Err(
+            BranchMergeTombstoneHistoryError::InsufficientTabularDepthParents {
+                order: wave.order,
+                actual: wave.parents.len(),
+            },
+        );
+    }
+
+    let mut events = Vec::new();
+    for (parent, columns) in &wave.parents {
+        if columns.is_empty() {
+            return Err(BranchMergeTombstoneHistoryError::EmptyParentColumnDepthWave {
+                order: wave.order,
+                parent: *parent,
+            });
+        }
+        for ((table, column), depth) in columns {
+            if depth.fragment_count == 0
+                || depth.fragments.len() != depth.fragment_count
+                || depth
+                    .fragments
+                    .keys()
+                    .enumerate()
+                    .any(|(expected, actual)| *actual != expected)
+            {
+                return Err(
+                    BranchMergeTombstoneHistoryError::IncompleteParentColumnDepthFragments {
+                        order: wave.order,
+                        parent: *parent,
+                        table: *table,
+                        column: *column,
+                    },
+                );
+            }
+
+            for (fragment, cells) in &depth.fragments {
+                for (index, (key, value)) in cells.iter().enumerate() {
+                    if cells[..index]
+                        .iter()
+                        .any(|(prior, _)| same_primary_key(prior, key))
+                    {
+                        return Err(
+                            BranchMergeTombstoneHistoryError::DuplicateParentColumnDepthRow {
+                                order: wave.order,
+                                parent: *parent,
+                                table: *table,
+                                column: *column,
+                                fragment: *fragment,
+                            },
+                        );
+                    }
+                    events.push(BranchMergeParentColumnDepthEvent {
+                        order: wave.order,
+                        parent: *parent,
+                        table: *table,
+                        column: *column,
+                        fragment: *fragment,
+                        key: key.clone(),
+                        value: value.clone(),
+                    });
+                }
+            }
+        }
+    }
+    events.sort_by(|left, right| {
+        left.parent
+            .cmp(&right.parent)
+            .then_with(|| left.table.cmp(&right.table))
+            .then_with(|| left.column.cmp(&right.column))
+            .then_with(|| left.fragment.cmp(&right.fragment))
+            .then_with(|| compare_primary_keys_with_encoding_tiebreak(&left.key, &right.key))
+    });
+    Ok(events)
+}
+
+fn parent_column_depth_wave_retry_identity(
+    wave: &BranchMergeMultiParentTabularColumnDepthWave,
+) -> MultiParentColumnFragmentRetryIdentity {
+    wave.parents
+        .iter()
+        .map(|(parent, columns)| {
+            let identities = columns
+                .iter()
+                .map(|(identity, depth)| {
+                    let fragments = depth
+                        .fragments
+                        .iter()
+                        .map(|(fragment, cells)| {
+                            (*fragment, column_depth_fragment_retry_identity(cells))
+                        })
+                        .collect();
+                    (*identity, (depth.fragment_count, fragments))
+                })
+                .collect();
+            (*parent, identities)
+        })
+        .collect()
 }
 
 fn update_retry_identity_value(hash: &mut Sha256, value: &CanonicalValue) {

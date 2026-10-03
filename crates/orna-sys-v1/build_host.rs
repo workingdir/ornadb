@@ -266,11 +266,23 @@ fn validate_schema_value(
                     "{path}: string is shorter than {minimum} characters"
                 ));
             }
-            if schema.get("pattern").and_then(Value::as_str)
-                == Some("^sys\\.[a-z0-9_]+(\\.[a-z0-9_]+)*$")
-                && !valid_sys_failure_code(string)
-            {
-                return Err(format!("{path}: invalid sys failure code `{string}`"));
+            if let Some(pattern) = schema.get("pattern").and_then(Value::as_str) {
+                let matches = match pattern {
+                    "^sys\\.[a-z0-9_]+(\\.[a-z0-9_]+)*$" => {
+                        Some(valid_sys_failure_code(string))
+                    }
+                    QUALIFIED_ID_PATTERN => Some(valid_qualified_id(string)),
+                    ROLE_ANNOTATION_PATTERN => Some(valid_role_annotation_id(string)),
+                    _ => None,
+                };
+                if matches == Some(false) {
+                    let description = if pattern == "^sys\\.[a-z0-9_]+(\\.[a-z0-9_]+)*$" {
+                        format!("invalid sys failure code `{string}`")
+                    } else {
+                        format!("value `{string}` does not match its identifier pattern")
+                    };
+                    return Err(format!("{path}: {description}"));
+                }
             }
         }
         Some("integer") => {
@@ -326,6 +338,35 @@ fn valid_sys_failure_code(code: &str) -> bool {
                     .bytes()
                     .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
         })
+}
+
+const QUALIFIED_ID_PATTERN: &str = r"^[A-Za-z0-9_-]+(\.[A-Za-z0-9_-]+)*$";
+const ROLE_ANNOTATION_PATTERN: &str =
+    r"^[A-Za-z0-9_-]+(\.[A-Za-z0-9_-]+)*@[0-9]+\.[0-9]+$";
+
+fn valid_qualified_id(value: &str) -> bool {
+    !value.is_empty()
+        && value.split('.').all(|part| {
+            !part.is_empty()
+                && part
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || b"_-".contains(&byte))
+        })
+}
+
+fn valid_role_annotation_id(value: &str) -> bool {
+    let Some((role, version)) = value.rsplit_once('@') else {
+        return false;
+    };
+    let Some((major, minor)) = version.split_once('.') else {
+        return false;
+    };
+    valid_qualified_id(role)
+        && !major.is_empty()
+        && !minor.is_empty()
+        && !minor.contains('.')
+        && major.bytes().all(|byte| byte.is_ascii_digit())
+        && minor.bytes().all(|byte| byte.is_ascii_digit())
 }
 
 impl<'ast> Visit<'ast> for Collector {
