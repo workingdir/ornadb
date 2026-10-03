@@ -18312,9 +18312,12 @@ fn type_contains_pinned_checkpoint_tuple(ty: &Type) -> bool {
 /// partially promoted map behind.
 fn type_contains_omitted_checkpoint_tuple(ty: &Type) -> bool {
     match ty {
-        Type::Tuple(elements) => elements.iter().any(|element| {
-            matches!(element, Type::Bottom) || type_contains_omitted_checkpoint_tuple(element)
-        }),
+        Type::Tuple(elements) => {
+            checkpoint_value_is_omitted(ty)
+                || elements
+                    .iter()
+                    .any(type_contains_omitted_checkpoint_tuple)
+        }
         Type::List(element)
         | Type::Range(element)
         | Type::Relation(element)
@@ -18335,6 +18338,22 @@ fn type_contains_omitted_checkpoint_tuple(ty: &Type) -> bool {
         Type::MoneyPerUnit { currency, unit } => {
             type_contains_omitted_checkpoint_tuple(currency)
                 || type_contains_omitted_checkpoint_tuple(unit)
+        }
+        _ => false,
+    }
+}
+
+/// A partial tuple still has concrete checkpoint depth labels to fold. Only a
+/// tuple whose every slot is omitted anchors the transactional recovery point;
+/// nested records and tuples can carry that all-omitted shape at any depth.
+fn checkpoint_value_is_omitted(ty: &Type) -> bool {
+    match ty {
+        Type::Bottom => true,
+        Type::Tuple(elements) => {
+            !elements.is_empty() && elements.iter().all(checkpoint_value_is_omitted)
+        }
+        Type::Record(fields) => {
+            !fields.is_empty() && fields.values().all(checkpoint_value_is_omitted)
         }
         _ => false,
     }
