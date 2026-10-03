@@ -62,7 +62,11 @@ pub fn generate_provider_registry_schema() -> Result<String, String> {
                             "pattern": "^sys\\.[a-z0-9_]+(\\.[a-z0-9_]+)*$"
                         }
                     },
-                    "role": {"type": ["string", "null"], "minLength": 1}
+                    "role": {
+                        "type": ["string", "null"],
+                        "minLength": 1,
+                        "pattern": "^[A-Za-z0-9_-]+(\\.[A-Za-z0-9_-]+)*@[0-9]+\\.[0-9]+$"
+                    }
                 }
             },
             "role": {
@@ -70,7 +74,11 @@ pub fn generate_provider_registry_schema() -> Result<String, String> {
                 "additionalProperties": false,
                 "required": ["name", "version", "effects", "operations", "required", "replaceable", "builtin_provider"],
                 "properties": {
-                    "name": {"type": "string", "minLength": 1},
+                    "name": {
+                        "type": "string",
+                        "minLength": 1,
+                        "pattern": "^[A-Za-z0-9_-]+(\\.[A-Za-z0-9_-]+)*$"
+                    },
                     "version": {"$ref": "#/$defs/version"},
                     "effects": {
                         "type": "array",
@@ -86,7 +94,11 @@ pub fn generate_provider_registry_schema() -> Result<String, String> {
                     },
                     "required": {"type": "boolean"},
                     "replaceable": {"type": "boolean"},
-                    "builtin_provider": {"type": ["string", "null"], "minLength": 1}
+                    "builtin_provider": {
+                        "type": ["string", "null"],
+                        "minLength": 1,
+                        "pattern": "^[A-Za-z0-9_-]+(\\.[A-Za-z0-9_-]+)*$"
+                    }
                 }
             }
         }
