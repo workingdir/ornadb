@@ -1988,22 +1988,27 @@ impl Value {
                 )
             }
             Self::Record(values) => {
-                // OVB map keys are ordered by their canonical text encoding:
-                // text length first, then bytewise lexical order.
-                let mut fields = values.into_iter().collect::<Vec<_>>();
-                if fields
-                    .iter()
-                    .any(|(key, _)| !key.nfc().eq(key.chars()))
-                {
-                    return Err(error("ORNA-EVAL-VALUE"));
-                }
-                fields.sort_by(|(left, _), (right, _)| {
-                    left.len().cmp(&right.len()).then_with(|| left.cmp(right))
-                });
+                // OVB orders map keys by complete deterministic encodings.
+                // Keep the comparator tied to that rule, including CBOR head
+                // length transitions and multi-byte Unicode field names.
+                let mut fields = values
+                    .into_iter()
+                    .map(|(key, value)| {
+                        if !key.nfc().eq(key.chars()) {
+                            return Err(error("ORNA-EVAL-VALUE"));
+                        }
+                        let encoded_key = CanonicalValue::new(Raw::Text(key.clone()))
+                            .map_err(|_| error("ORNA-EVAL-VALUE"))?
+                            .encode()
+                            .map_err(|_| error("ORNA-EVAL-VALUE"))?;
+                        Ok((encoded_key, key, value))
+                    })
+                    .collect::<Result<Vec<_>, EvaluationError>>()?;
+                fields.sort_by(|(left, _, _), (right, _, _)| left.cmp(right));
                 Raw::Map(
                     fields
                         .into_iter()
-                        .map(|(key, value)| value.raw().map(|value| (Raw::Text(key), value)))
+                        .map(|(_, key, value)| value.raw().map(|value| (Raw::Text(key), value)))
                         .collect::<Result<_, _>>()?,
                 )
             }
@@ -12492,6 +12497,7 @@ fn lawful_sort_key(value: &Value) -> Result<(), EvaluationError> {
         | Value::Int(_)
         | Value::Decimal(_)
         | Value::Float(_)
+        | Value::Blob(_)
         | Value::String(_)
         | Value::Date(_)
         | Value::Instant { .. }
@@ -12504,6 +12510,10 @@ fn lawful_sort_key(value: &Value) -> Result<(), EvaluationError> {
 fn compare_sort_keys(left: &Value, right: &Value) -> Result<std::cmp::Ordering, EvaluationError> {
     match (left, right) {
         (Value::Bool(left), Value::Bool(right)) => Ok(left.cmp(right)),
+        // Byte strings have a deterministic unsigned lexicographic order.
+        // This lets source code sort by a complete OVB key encoding without
+        // converting those bytes into a lossy textual representation.
+        (Value::Blob(left), Value::Blob(right)) => Ok(left.cmp(right)),
         (Value::String(left), Value::String(right)) => Ok(left.cmp(right)),
         (Value::Date(left), Value::Date(right)) => Ok(left.cmp(right)),
         (
