@@ -7,6 +7,8 @@
 //! together. Ordinary pure submission has no external effects; the explicit
 //! host-binding path admits only capabilities installed by the caller.
 
+use std::collections::{BTreeMap, BTreeSet};
+
 use orna_foundation_v1::{
     CanonicalValue, Diagnostic as FoundationDiagnostic, DiagnosticSeverity, SafeText,
 };
@@ -15,11 +17,12 @@ use orna_semantic_v1::{
     Analysis, Catalogue, EffectSummary, ModuleInput, ReplAdmission, ReplContext, SymbolKind, Type,
     StandardDependencyProfile, analyze_with_catalogue,
 };
-use orna_syntax_v1::{Declaration, ReplInput, parse_module};
+use orna_syntax_v1::{Declaration, ImportSegment, ReplInput, UseTail, Visibility, parse_module};
 
 use crate::{
     CancellationToken, Environment, EvaluationError, Functions, Limits, PureFunction, ReplSession,
-    parse_admitted_repl, reference_standard_profile, reference_standard_sources,
+    module_function_alias_key, parse_admitted_repl, reference_standard_profile,
+    reference_standard_sources,
 };
 
 /// Redacted failure from the admitted REPL boundary.
@@ -509,14 +512,51 @@ fn admitted_runtime_sources(
     );
     modules.sort_by(|left, right| left.0.cmp(&right.0));
 
-    let mut functions = Functions::new();
+    let mut parsed_modules = Vec::with_capacity(modules.len());
     for (namespace, source) in modules {
         limits.check_source(&source).map_err(ReplError::runtime)?;
         let parsed = parse_module(&source);
         if !parsed.is_ok() {
             return Err(ReplError::fixed("ORNA-EVAL-PARSE"));
         }
-        for item in parsed.value.items {
+        parsed_modules.push((namespace, parsed.value));
+    }
+
+    let mut function_names = BTreeSet::new();
+    for (namespace, module) in &parsed_modules {
+        let Some(namespace) = namespace else {
+            continue;
+        };
+        for item in &module.items {
+            if let Declaration::Function { signature, .. } = &item.declaration
+                && matches!(item.visibility, Visibility::Public { .. })
+            {
+                function_names.insert(format!("{namespace}.{}", signature.name));
+            }
+        }
+    }
+
+    let mut module_aliases = BTreeMap::new();
+    for (namespace, module) in &parsed_modules {
+        let Some(namespace) = namespace else {
+            continue;
+        };
+        for item in &module.items {
+            if let Declaration::Use { path, tail } = &item.declaration {
+                add_module_import_aliases(
+                    &mut module_aliases,
+                    namespace,
+                    path,
+                    tail,
+                    &function_names,
+                )?;
+            }
+        }
+    }
+
+    let mut functions = Functions::new();
+    for (namespace, module) in parsed_modules {
+        for item in module.items {
             match item.declaration {
                 Declaration::Function { signature, body } => {
                     let name = namespace
@@ -551,8 +591,143 @@ fn admitted_runtime_sources(
         }
     }
     ReplSession::with_bindings(limits, Environment::new(), functions)
+        .map_err(ReplError::runtime)?
+        .with_module_aliases(module_aliases)
         .map(|session| session.with_table_names(table_names))
         .map_err(ReplError::runtime)
+}
+
+fn add_module_import_aliases(
+    aliases: &mut BTreeMap<String, String>,
+    namespace: &str,
+    path: &[ImportSegment],
+    tail: &UseTail,
+    function_names: &BTreeSet<String>,
+) -> Result<(), ReplError> {
+    let imported_path = path
+        .iter()
+        .map(|segment| segment.name.as_str())
+        .collect::<Vec<_>>()
+        .join(".");
+    match tail {
+        UseTail::Names(names) => {
+            for name in names {
+                register_module_import_alias(
+                    aliases,
+                    namespace,
+                    &name.name,
+                    &format!("{imported_path}.{}", name.name),
+                )?;
+            }
+        }
+        UseTail::Glob { .. } => {
+            add_imported_module_functions(
+                aliases,
+                namespace,
+                &imported_path,
+                "",
+                true,
+                function_names,
+            )?;
+        }
+        UseTail::Alias { name, .. } if name == "_" => {
+            add_imported_module_functions(
+                aliases,
+                namespace,
+                &imported_path,
+                "",
+                true,
+                function_names,
+            )?;
+        }
+        UseTail::Alias { name, .. } => {
+            add_import_or_namespace_alias(
+                aliases,
+                namespace,
+                &imported_path,
+                name,
+                function_names,
+            )?;
+        }
+        UseTail::None => {
+            let name = path
+                .last()
+                .map(|segment| segment.name.as_str())
+                .unwrap_or_default();
+            add_import_or_namespace_alias(
+                aliases,
+                namespace,
+                &imported_path,
+                name,
+                function_names,
+            )?;
+        }
+    }
+    Ok(())
+}
+
+fn add_import_or_namespace_alias(
+    aliases: &mut BTreeMap<String, String>,
+    namespace: &str,
+    imported_path: &str,
+    local_name: &str,
+    function_names: &BTreeSet<String>,
+) -> Result<(), ReplError> {
+    if function_names.contains(imported_path) {
+        register_module_import_alias(aliases, namespace, local_name, imported_path)
+    } else {
+        add_imported_module_functions(
+            aliases,
+            namespace,
+            imported_path,
+            local_name,
+            false,
+            function_names,
+        )
+    }
+}
+
+fn add_imported_module_functions(
+    aliases: &mut BTreeMap<String, String>,
+    namespace: &str,
+    imported_path: &str,
+    local_prefix: &str,
+    direct_children_only: bool,
+    function_names: &BTreeSet<String>,
+) -> Result<(), ReplError> {
+    let prefix = format!("{imported_path}.");
+    for target in function_names {
+        let Some(suffix) = target.strip_prefix(&prefix) else {
+            continue;
+        };
+        if suffix.is_empty() || (direct_children_only && suffix.contains('.')) {
+            continue;
+        }
+        let local_name = if local_prefix.is_empty() {
+            suffix.to_owned()
+        } else {
+            format!("{local_prefix}.{suffix}")
+        };
+        register_module_import_alias(aliases, namespace, &local_name, target)?;
+    }
+    Ok(())
+}
+
+fn register_module_import_alias(
+    aliases: &mut BTreeMap<String, String>,
+    namespace: &str,
+    local_name: &str,
+    target: &str,
+) -> Result<(), ReplError> {
+    let key = module_function_alias_key(namespace, local_name);
+    if let Some(existing) = aliases.get(&key) {
+        if existing != target {
+            return Err(ReplError::fixed("ORNA-REPL-STANDARD"));
+        }
+    } else {
+        aliases.insert(key, target.to_owned());
+    }
+    Ok(())
 }
 
 fn admitted_table_names(analysis: &Analysis) -> Vec<String> {
