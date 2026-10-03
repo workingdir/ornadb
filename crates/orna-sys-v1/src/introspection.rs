@@ -2512,6 +2512,7 @@ fn explain_query_core_with_limit_pushdowns(
     let mut decorrelated_pin_chain_identity: Option<String> = None;
     let mut paired_index_anchor_chain_identity: Option<String> = None;
     let mut paired_window_spill_cascade_fold: Option<QueryWindowSpillCascadeFold> = None;
+    let mut paired_join_limit_anchor_cascade_fold: Option<QueryJoinLimitAnchorCascadeFold> = None;
     let mut paired_limit_window_cascade_fold: Option<QueryLimitWindowCascadeFold> = None;
     add_join_cost_fold_seed_details(
         &mut operators[current].details,
@@ -2844,6 +2845,47 @@ fn explain_query_core_with_limit_pushdowns(
                     chain_identity,
                 )
             });
+        let paired_join_limit_anchor_fold_id = join_pair_identity
+            .zip(join_pair_anchor_fold_id.as_deref())
+            .zip(paired_limit_pushdown_anchor_fold_id.as_deref())
+            .map(|((pair, join_anchor_identity), limit_anchor_identity)| {
+                query_paired_join_limit_anchor_fold_identity(
+                    pair,
+                    join_anchor_identity,
+                    limit_anchor_identity,
+                )
+            });
+        if let Some(identity) = paired_join_limit_anchor_fold_id.as_deref() {
+            let mut fold_nodes = BTreeSet::from([right_access, right]);
+            fold_nodes.extend(right_limit_operator_start..right_limit_operator_end);
+            fold_nodes.extend(right_window_operator_start..operators.len());
+            for index in fold_nodes {
+                add_paired_join_limit_anchor_fold_details(
+                    &mut operators[index].details,
+                    identity,
+                );
+            }
+            let limit_stage_count =
+                u64::try_from(right_limit_operator_end - right_limit_operator_start)
+                    .unwrap_or(u64::MAX);
+            paired_join_limit_anchor_cascade_fold =
+                Some(query_paired_join_limit_anchor_cascade_fold(
+                    paired_join_limit_anchor_cascade_fold.as_ref(),
+                    identity,
+                    limit_stage_count,
+                ));
+        }
+        if let Some(cascade_fold) = paired_join_limit_anchor_cascade_fold.as_ref() {
+            let mut fold_nodes = BTreeSet::from([right_access, right]);
+            fold_nodes.extend(right_limit_operator_start..right_limit_operator_end);
+            fold_nodes.extend(right_window_operator_start..operators.len());
+            for index in fold_nodes {
+                add_paired_join_limit_anchor_cascade_fold_details(
+                    &mut operators[index].details,
+                    cascade_fold,
+                );
+            }
+        }
         let paired_limit_window_anchor_fold_id = join_pair_identity
             .zip(paired_limit_pushdown_anchor_fold_id.as_deref())
             .zip(right_window_identity.as_deref())
@@ -3129,6 +3171,9 @@ fn explain_query_core_with_limit_pushdowns(
             paired_limit_window_cascade_fold
                 .as_ref()
                 .map(|fold| fold.identity.as_str()),
+            paired_join_limit_anchor_cascade_fold
+                .as_ref()
+                .map(|fold| fold.identity.as_str()),
             cardinality,
             work,
             work_overflow,
@@ -3253,6 +3298,12 @@ fn explain_query_core_with_limit_pushdowns(
         }
         if let Some(identity) = paired_limit_pushdown_anchor_fold_id.as_deref() {
             add_paired_limit_pushdown_anchor_fold_details(&mut details, identity);
+        }
+        if let Some(identity) = paired_join_limit_anchor_fold_id.as_deref() {
+            add_paired_join_limit_anchor_fold_details(&mut details, identity);
+        }
+        if let Some(cascade_fold) = paired_join_limit_anchor_cascade_fold.as_ref() {
+            add_paired_join_limit_anchor_cascade_fold_details(&mut details, cascade_fold);
         }
         if let Some(identity) = paired_limit_window_anchor_fold_id.as_deref() {
             add_paired_limit_window_anchor_fold_details(&mut details, identity);
@@ -5510,6 +5561,119 @@ fn add_paired_limit_pushdown_anchor_fold_details(
     );
 }
 
+/// Binds a logical join fold to the exact pair's ordered input-limit fold.
+/// ORNA leaves this explain-only identity encoding open; hashing both parent
+/// digests keeps a limit chain from being reassociated with another join.
+fn query_paired_join_limit_anchor_fold_identity(
+    pair: &QueryJoinPairIdentityDescription,
+    join_anchor_fold_identity: &str,
+    limit_anchor_fold_identity: &str,
+) -> String {
+    let mut hash = Sha256::new();
+    hash.update(b"orna.sys.query-paired-join-limit-anchor-fold.v1\0");
+    hash_part(&mut hash, pair.identity.as_str().as_bytes());
+    hash_part(&mut hash, pair.left_source.as_str().as_bytes());
+    hash_part(&mut hash, pair.right_source.as_str().as_bytes());
+    hash_optional_text(&mut hash, pair.predicate.as_ref().map(ExpressionRef::as_str));
+    hash_part(&mut hash, join_anchor_fold_identity.as_bytes());
+    hash_part(&mut hash, limit_anchor_fold_identity.as_bytes());
+    format!(
+        "paired-join-limit-anchor-fold:{}",
+        hex(&hash.finalize())
+    )
+}
+
+fn add_paired_join_limit_anchor_fold_details(
+    details: &mut BTreeMap<String, PlanDetail>,
+    identity: &str,
+) {
+    details.insert(
+        "paired_join_limit_anchor_fold_identity".to_owned(),
+        PlanDetail::Text(identity.to_owned()),
+    );
+    details.insert(
+        "paired_join_limit_anchor_fold_pairing".to_owned(),
+        PlanDetail::Text("sparse_join_pair_anchor_and_exact_limit_anchor_chain".to_owned()),
+    );
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct QueryJoinLimitAnchorCascadeFold {
+    identity: String,
+    pair_count: u64,
+    stage_count: u64,
+    overflowed: bool,
+}
+
+fn query_paired_join_limit_anchor_cascade_fold(
+    previous: Option<&QueryJoinLimitAnchorCascadeFold>,
+    pair_anchor_fold_identity: &str,
+    limit_stage_count: u64,
+) -> QueryJoinLimitAnchorCascadeFold {
+    let mut overflowed = previous.is_some_and(|previous| previous.overflowed);
+    let (pair_count, stage_count) = if let Some(previous) = previous {
+        let pair_count = previous.pair_count.checked_add(1).unwrap_or_else(|| {
+            overflowed = true;
+            u64::MAX
+        });
+        let stage_count = previous
+            .stage_count
+            .checked_add(limit_stage_count)
+            .unwrap_or_else(|| {
+                overflowed = true;
+                u64::MAX
+            });
+        (pair_count, stage_count)
+    } else {
+        (1, limit_stage_count)
+    };
+    let mut hash = Sha256::new();
+    hash.update(b"orna.sys.query-paired-join-limit-anchor-cascade-fold.v1\0");
+    hash_optional_text(
+        &mut hash,
+        previous.map(|previous| previous.identity.as_str()),
+    );
+    hash_part(&mut hash, pair_anchor_fold_identity.as_bytes());
+    hash.update(pair_count.to_be_bytes());
+    hash.update(stage_count.to_be_bytes());
+    hash.update([u8::from(overflowed)]);
+    QueryJoinLimitAnchorCascadeFold {
+        identity: format!(
+            "paired-join-limit-anchor-cascade-fold:{}",
+            hex(&hash.finalize())
+        ),
+        pair_count,
+        stage_count,
+        overflowed,
+    }
+}
+
+fn add_paired_join_limit_anchor_cascade_fold_details(
+    details: &mut BTreeMap<String, PlanDetail>,
+    fold: &QueryJoinLimitAnchorCascadeFold,
+) {
+    details.insert(
+        "paired_join_limit_anchor_cascade_fold_identity".to_owned(),
+        PlanDetail::Text(fold.identity.clone()),
+    );
+    details.insert(
+        "paired_join_limit_anchor_cascade_pairing".to_owned(),
+        PlanDetail::Text("planned_pair_order_sparse_limit_anchor_chains".to_owned()),
+    );
+    details.insert(
+        "paired_join_limit_anchor_cascade_pair_count".to_owned(),
+        PlanDetail::Integer(fold.pair_count),
+    );
+    details.insert(
+        "paired_join_limit_anchor_cascade_stage_count".to_owned(),
+        PlanDetail::Integer(fold.stage_count),
+    );
+    details.insert(
+        "paired_join_limit_anchor_cascade_overflowed".to_owned(),
+        PlanDetail::Boolean(fold.overflowed),
+    );
+}
+
 /// Combines the exact pair's anchored ordered limit chain with the window
 /// chain attached to that same right input. ORNA leaves this explain-only
 /// digest open; the input identities prevent either chain from sliding across
@@ -5937,6 +6101,7 @@ fn query_join_cost_fold(
     paired_aggregate_spill_anchor_fold_identity: Option<&str>,
     paired_window_spill_cascade_fold_identity: Option<&str>,
     paired_limit_window_cascade_fold_identity: Option<&str>,
+    paired_join_limit_anchor_cascade_fold_identity: Option<&str>,
     cardinality: Cardinality,
     work: Option<u64>,
     work_overflow: bool,
@@ -5976,6 +6141,7 @@ fn query_join_cost_fold(
     hash_optional_text(&mut hash, paired_aggregate_spill_anchor_fold_identity);
     hash_optional_text(&mut hash, paired_window_spill_cascade_fold_identity);
     hash_optional_text(&mut hash, paired_limit_window_cascade_fold_identity);
+    hash_optional_text(&mut hash, paired_join_limit_anchor_cascade_fold_identity);
     hash_optional_u64(&mut hash, cardinality.rows);
     hash_optional_u64(&mut hash, cardinality.bytes);
     hash_optional_u64(&mut hash, work);
