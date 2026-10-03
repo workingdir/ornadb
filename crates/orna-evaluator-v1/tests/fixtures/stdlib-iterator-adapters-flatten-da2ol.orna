@@ -1,0 +1,8 @@
+std.iterator.collect(
+    std.iterator.adapters.flatten(
+        std.iterator.from_list([
+            std.iterator.from_list([1, 2]),
+            std.iterator.from_list([3])
+        ])
+    )
+)

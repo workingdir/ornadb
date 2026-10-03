@@ -1,5 +1,6 @@
 use orna_evaluator_v1::{AdmittedReplSession, Environment, Limits, evaluate_expression};
 use orna_foundation_v1::CanonicalValue;
+use orna_semantic_v1::{Catalogue, StandardDependencyProfile};
 use orna_value_v1::Raw;
 
 fn bool_value(value: bool) -> CanonicalValue {
@@ -17,9 +18,24 @@ fn payload_environment() -> Environment {
     )])
 }
 
+fn random_hash_snapshot_session() -> AdmittedReplSession {
+    let sources = orna_standard::reference_standard_sources_v1()
+        .into_iter()
+        .filter(|(path, _)| matches!(path.as_str(), "std/random.orna" | "std/hash.orna"))
+        .collect::<Vec<_>>();
+    let profile =
+        StandardDependencyProfile::from_sources("orna.std/random-hash-focused", sources.clone())
+            .expect("the selected random and hash modules form a pinned profile");
+    let catalogue = Catalogue::authoritative_core()
+        .with_standard_sources(&profile, sources.clone())
+        .expect("the selected modules resolve against core");
+    AdmittedReplSession::from_catalogue(&[], catalogue, sources, Limits::default())
+        .expect("the selected module snapshot loads")
+}
+
 #[test]
 fn pinned_random_hash_modules_are_optional_and_do_not_replace_core() {
-    let mut with_std = AdmittedReplSession::with_reference_standard(Limits::default()).unwrap();
+    let mut with_std = random_hash_snapshot_session();
     assert_eq!(
         with_std.submit(include_str!("fixtures/stdlib-use-random-dmkss.orna")),
         Ok(None)
@@ -33,7 +49,7 @@ fn pinned_random_hash_modules_are_optional_and_do_not_replace_core() {
             .submit(include_str!("fixtures/stdlib-call-random-dmkss.orna"))
             .unwrap_err()
             .code(),
-        "ORNA-EVAL-ERROR"
+        "ORNA-EVAL-UNSUPPORTED"
     );
     assert_eq!(
         with_std.submit(include_str!("fixtures/stdlib-call-hash-dmkss.orna")),
