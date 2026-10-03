@@ -791,10 +791,12 @@ pub struct BranchMergePairedCheckpointRedoFoldSegmentRotationRestoreHandoffStrea
         Vec<BranchMergePairedCheckpointRedoFoldSegmentRotationRestoreHandoffSlotSnapshot>,
 }
 
-/// A malformed rotation handoff run cannot be restored without losing lineage.
+/// A malformed rotation run cannot be restored without losing lineage.
+/// Errors include the checkpoint ID because source ordinals are local to a stream.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum BranchMergePairedCheckpointRedoFoldSegmentRotationRestoreHandoffError {
     InvalidOrderRange {
+        checkpoint_id: CheckpointId,
         restore_ordinal: usize,
         handoff_ordinal: usize,
         stream_ordinal: usize,
@@ -804,6 +806,7 @@ pub enum BranchMergePairedCheckpointRedoFoldSegmentRotationRestoreHandoffError {
         last_order: u64,
     },
     SegmentIdentityCountMismatch {
+        checkpoint_id: CheckpointId,
         restore_ordinal: usize,
         handoff_ordinal: usize,
         stream_ordinal: usize,
@@ -866,9 +869,11 @@ pub struct BranchMergePairedCheckpointRedoFoldSegmentRotationCompactionRestorePi
 }
 
 /// A malformed compacted rotation run cannot be expanded losslessly.
+/// Errors include the checkpoint ID because source ordinals are local to a stream.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum BranchMergePairedCheckpointRedoFoldSegmentRotationCompactionRestoreHandoffError {
     InvalidOrderRange {
+        checkpoint_id: CheckpointId,
         restore_ordinal: usize,
         handoff_ordinal: usize,
         stream_ordinal: usize,
@@ -878,6 +883,7 @@ pub enum BranchMergePairedCheckpointRedoFoldSegmentRotationCompactionRestoreHand
         last_order: u64,
     },
     SegmentIdentityCountMismatch {
+        checkpoint_id: CheckpointId,
         restore_ordinal: usize,
         handoff_ordinal: usize,
         stream_ordinal: usize,
@@ -3205,6 +3211,8 @@ pub fn restore_paired_checkpoint_redo_sparse_wal_merge_handoff_chains_preserving
 /// catalog is unioned, but gaps, omitted streams, and missing sides are not
 /// filled in. The reference is silent on this chained restore projection, so
 /// caller source order is the stable handoff, stream, and compaction rule.
+/// Errors include checkpoint identity because those source ordinals can repeat
+/// across checkpoint streams.
 pub fn restore_paired_checkpoint_redo_sparse_segment_rotation_handoff_chains_preserving_fold_identity(
     known_checkpoint_ids: &[CheckpointId],
     restore_handoffs: &[Vec<Vec<BranchMergePairedCheckpointRedoFoldSegmentRotationCompactionSnapshot>>],
@@ -3236,6 +3244,7 @@ pub fn restore_paired_checkpoint_redo_sparse_segment_rotation_handoff_chains_pre
                         if run.last_order < run.first_order {
                             return Err(
                                 BranchMergePairedCheckpointRedoFoldSegmentRotationRestoreHandoffError::InvalidOrderRange {
+                                    checkpoint_id: checkpoint_id.clone(),
                                     restore_ordinal,
                                     handoff_ordinal,
                                     stream_ordinal,
@@ -3251,6 +3260,7 @@ pub fn restore_paired_checkpoint_redo_sparse_segment_rotation_handoff_chains_pre
                         if expected != run.segment_identities.len() as u128 {
                             return Err(
                                 BranchMergePairedCheckpointRedoFoldSegmentRotationRestoreHandoffError::SegmentIdentityCountMismatch {
+                                    checkpoint_id: checkpoint_id.clone(),
                                     restore_ordinal,
                                     handoff_ordinal,
                                     stream_ordinal,
@@ -3311,7 +3321,8 @@ pub fn restore_paired_checkpoint_redo_sparse_segment_rotation_handoff_chains_pre
 /// order coordinates even when sparse labels overlap. Every represented order
 /// consumes its exact directional segment pair. The reference does not define
 /// this nested compaction projection, so source positions are stable ordinals;
-/// checkpoint gaps, absent streams, and missing sides remain absent.
+/// checkpoint gaps, absent streams, and missing sides remain absent. Errors
+/// include checkpoint identity when repeated source ordinals are malformed.
 pub fn restore_paired_checkpoint_redo_sparse_segment_rotation_compaction_handoffs_preserving_identity(
     known_checkpoint_ids: &[CheckpointId],
     restore_handoffs: &[Vec<Vec<BranchMergePairedCheckpointRedoFoldSegmentRotationCompactionSnapshot>>],
@@ -3342,6 +3353,7 @@ pub fn restore_paired_checkpoint_redo_sparse_segment_rotation_compaction_handoff
                         if run.last_order < run.first_order {
                             return Err(
                                 BranchMergePairedCheckpointRedoFoldSegmentRotationCompactionRestoreHandoffError::InvalidOrderRange {
+                                    checkpoint_id: checkpoint_id.clone(),
                                     restore_ordinal,
                                     handoff_ordinal,
                                     stream_ordinal,
@@ -3357,6 +3369,7 @@ pub fn restore_paired_checkpoint_redo_sparse_segment_rotation_compaction_handoff
                         if expected != run.segment_identities.len() as u128 {
                             return Err(
                                 BranchMergePairedCheckpointRedoFoldSegmentRotationCompactionRestoreHandoffError::SegmentIdentityCountMismatch {
+                                    checkpoint_id: checkpoint_id.clone(),
                                     restore_ordinal,
                                     handoff_ordinal,
                                     stream_ordinal,

@@ -35132,6 +35132,7 @@ fn paired_redo_fold_identity_survives_sparse_checkpoint_rotation_handoffs() {
             &[vec![vec![], vec![malformed_stream(9, 8, vec![])]]],
         ),
         Err(orna_storage_v1::BranchMergePairedCheckpointRedoFoldSegmentRotationRestoreHandoffError::InvalidOrderRange {
+            checkpoint_id: alpha.clone(),
             restore_ordinal: 0,
             handoff_ordinal: 1,
             stream_ordinal: 0,
@@ -35147,6 +35148,7 @@ fn paired_redo_fold_identity_survives_sparse_checkpoint_rotation_handoffs() {
             &[vec![vec![malformed_stream(20, 21, vec![rotations[0].clone()])]]],
         ),
         Err(orna_storage_v1::BranchMergePairedCheckpointRedoFoldSegmentRotationRestoreHandoffError::SegmentIdentityCountMismatch {
+            checkpoint_id: alpha.clone(),
             restore_ordinal: 0,
             handoff_ordinal: 0,
             stream_ordinal: 0,
@@ -35531,6 +35533,7 @@ fn paired_redo_fold_rotation_restore_retains_duplicate_stream_ordinals() {
             &[vec![vec![stream(0, 0), malformed]]],
         ),
         Err(orna_storage_v1::BranchMergePairedCheckpointRedoFoldSegmentRotationRestoreHandoffError::InvalidOrderRange {
+            checkpoint_id: checkpoint_id.clone(),
             restore_ordinal: 0,
             handoff_ordinal: 0,
             stream_ordinal: 1,
@@ -35639,6 +35642,7 @@ fn paired_redo_fold_rotation_restore_retains_duplicate_compaction_ordinals() {
             &[vec![vec![malformed]]],
         ),
         Err(orna_storage_v1::BranchMergePairedCheckpointRedoFoldSegmentRotationRestoreHandoffError::InvalidOrderRange {
+            checkpoint_id: checkpoint_id.clone(),
             restore_ordinal: 0,
             handoff_ordinal: 0,
             stream_ordinal: 0,
@@ -36162,6 +36166,7 @@ fn paired_redo_fold_identity_survives_sparse_compaction_rotation_restore_chains(
             ])]]],
         ),
         Err(orna_storage_v1::BranchMergePairedCheckpointRedoFoldSegmentRotationCompactionRestoreHandoffError::InvalidOrderRange {
+            checkpoint_id: alpha.clone(),
             restore_ordinal: 0,
             handoff_ordinal: 1,
             stream_ordinal: 0,
@@ -36180,6 +36185,7 @@ fn paired_redo_fold_identity_survives_sparse_compaction_rotation_restore_chains(
             ]]],
         ),
         Err(orna_storage_v1::BranchMergePairedCheckpointRedoFoldSegmentRotationCompactionRestoreHandoffError::SegmentIdentityCountMismatch {
+            checkpoint_id: alpha.clone(),
             restore_ordinal: 0,
             handoff_ordinal: 0,
             stream_ordinal: 1,
@@ -36568,6 +36574,7 @@ fn paired_checkpoint_segment_pins_survive_three_sparse_compaction_restore_batche
             &[vec![vec![malformed_stream(vec![malformed_run(8, 31, 30, &[])])]]],
         ),
         Err(orna_storage_v1::BranchMergePairedCheckpointRedoFoldSegmentRotationCompactionRestoreHandoffError::InvalidOrderRange {
+            checkpoint_id: alpha.clone(),
             restore_ordinal: 0,
             handoff_ordinal: 0,
             stream_ordinal: 0,
@@ -36583,6 +36590,7 @@ fn paired_checkpoint_segment_pins_survive_three_sparse_compaction_restore_batche
             &[vec![vec![malformed_stream(vec![malformed_run(4, 40, 41, &[0])])]]],
         ),
         Err(orna_storage_v1::BranchMergePairedCheckpointRedoFoldSegmentRotationCompactionRestoreHandoffError::SegmentIdentityCountMismatch {
+            checkpoint_id: alpha.clone(),
             restore_ordinal: 0,
             handoff_ordinal: 0,
             stream_ordinal: 0,
