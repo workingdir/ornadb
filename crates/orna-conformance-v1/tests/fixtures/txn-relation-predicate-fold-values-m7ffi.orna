@@ -1,0 +1,47 @@
+pub table Family(id: Int) { expected: Str, }
+pub table Branch(id: Int) { family_id: Int, }
+pub table Leaf(id: Int) { branch_id: Int, }
+pub table Proof(id: Int) { family_id: Int, branch_id: Int, leaf_id: Int, token: Str, }
+
+// Section 9 specifies callback inputs and fold results, but not named
+// continuations across nested boundaries. These captured predicates retain
+// each family and branch identity while inner folds run.
+assert every(Family, family => {
+    let family_id = family.id;
+    let family_token = family.expected;
+    let matches_family: fn({ id: Int, family_id: Int, branch_id: Int, leaf_id: Int, token: Str }): Bool = proof =>
+        proof.family_id == family_id && proof.token == family_token;
+    let branch_continuation: fn({ id: Int, family_id: Int }): Bool = branch => {
+        let branch_id = branch.id;
+        let leaf_continuation: fn({ id: Int, branch_id: Int }): Bool = leaf =>
+            leaf.branch_id != branch_id ||
+                exists(Proof, proof =>
+                    matches_family(proof) &&
+                        proof.branch_id == branch_id &&
+                        proof.leaf_id == leaf.id
+                );
+        every(Leaf, leaf_continuation)
+    };
+    every(Branch, branch =>
+        branch.family_id != family_id || branch_continuation(branch)
+    )
+});
+
+fn parent() {
+    Family.insert({ id: 1, expected: "amber" });
+    Family.insert({ id: 2, expected: "blue" });
+    Branch.insert({ id: 10, family_id: 1 });
+    Branch.insert({ id: 11, family_id: 1 });
+    Branch.insert({ id: 20, family_id: 2 });
+    Leaf.insert({ id: 100, branch_id: 10 });
+    Leaf.insert({ id: 101, branch_id: 10 });
+    Leaf.insert({ id: 110, branch_id: 11 });
+    Leaf.insert({ id: 200, branch_id: 20 });
+    Leaf.insert({ id: 999, branch_id: 99 });
+    Proof.insert({ id: 1000, family_id: 1, branch_id: 10, leaf_id: 100, token: "amber" });
+    Proof.insert({ id: 1001, family_id: 1, branch_id: 10, leaf_id: 101, token: "amber" });
+    Proof.insert({ id: 1010, family_id: 1, branch_id: 11, leaf_id: 110, token: "amber" });
+    Proof.insert({ id: 2000, family_id: 2, branch_id: 20, leaf_id: 200, token: "blue" });
+    Proof.insert({ id: 2099, family_id: 1, branch_id: 20, leaf_id: 200, token: "amber" });
+    Proof.insert({ id: 1099, family_id: 2, branch_id: 10, leaf_id: 100, token: "blue" });
+}
