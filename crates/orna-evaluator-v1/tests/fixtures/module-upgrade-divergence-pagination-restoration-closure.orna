@@ -1,0 +1,4 @@
+fn make_snapshot_page(seed: Int) = page => rows => collection.map(
+    collection.take(collection.drop(rows, page * 2), 2),
+    value => math.shift(seed + value) + collection.marker()
+);
