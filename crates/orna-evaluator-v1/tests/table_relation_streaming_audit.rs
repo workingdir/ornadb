@@ -1780,6 +1780,39 @@ fn nested_window_aggregates_recompute_real_values_for_paired_restore_chains() {
     assert_eq!(first, integer(88), "later restored snapshots do not mutate the first aggregate");
     assert_eq!(second, integer(36), "later restored snapshots do not mutate the second aggregate");
 
+    assert_eq!(source.lanes.len(), 6, "three restore generations each bind a paired source");
+    let scopes = source
+        .lanes
+        .iter()
+        .map(|(name, scope, _)| {
+            assert_eq!(name, "View.Paired");
+            *scope
+        })
+        .collect::<Vec<_>>();
+    for (index, scope) in scopes.iter().enumerate() {
+        assert!(
+            !scopes[..index].contains(scope),
+            "compacted cursor bytes remain isolated by restored source scope: {scope:?}"
+        );
+    }
+    let expected_cursors = scopes
+        .iter()
+        .copied()
+        .flat_map(|scope| {
+            [
+                ("View.Paired".to_owned(), scope, None),
+                ("View.Paired".to_owned(), scope, Some(cursor_one.clone())),
+                ("View.Paired".to_owned(), scope, Some(cursor_two.clone())),
+            ]
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        source.cursors,
+        expected_cursors,
+        "each nested window chain restores all cursor pages within only its own paired scope"
+    );
+    assert!(source.pending["View.Paired"].is_empty(), "all six restored snapshots are consumed");
+
 }
 
 #[test]
