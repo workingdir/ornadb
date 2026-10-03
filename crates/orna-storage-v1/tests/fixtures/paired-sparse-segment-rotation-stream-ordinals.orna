@@ -1,0 +1,7 @@
+{ id: "redo-fold/restore-stream-a", name: "redo-fold/restore-left-a", city: "redo-fold/restore-right-a", }
+
+{ id: "redo-fold/restore-stream-b", name: "redo-fold/restore-left-b", city: "redo-fold/restore-right-b", }
+
+{ id: "segment/restore-stream-a", name: "segment/restore-left-a", city: "segment/restore-right-a", }
+
+{ id: "segment/restore-stream-b", name: "segment/restore-left-b", city: "segment/restore-right-b", }

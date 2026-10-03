@@ -1694,7 +1694,7 @@ fn fresh_nested_route_pair_chains_evaluate_rebound_closure_values() {
 }
 
 #[test]
-fn paired_terminal_compaction_folds_preserve_nested_rebind_identity() {
+fn paired_terminal_compaction_fold_pages_preserve_nested_rebind_identity() {
     let package_source = include_str!("fixtures/attachment-route-package.orna");
     let primary_source = include_str!("fixtures/attachment-route-primary.orna");
     let (package_dir, package_repository, _) = repository(package_source);
@@ -1840,9 +1840,47 @@ fn paired_terminal_compaction_folds_preserve_nested_rebind_identity() {
         Err(AttachmentError::RetainedSnapshotUnavailable)
     ));
 
+    let empty_page = &folds[0..0];
+    let pages = [&folds[..1], empty_page, &folds[1..]];
+    let (paged_compacted, page_transitions) = resolver
+        .compact_nested_terminal_pair_history_pages_preserving_terminal_identity(
+            &nested_rebinds,
+            &pages,
+        )
+        .unwrap();
+    assert_eq!(page_transitions.len(), 3, "empty pages retain their boundary");
+    assert_eq!(
+        page_transitions.iter().map(Vec::len).collect::<Vec<_>>(),
+        [1, 0, 1],
+        "each page reports only its ordered compaction folds"
+    );
+    for (before, after) in page_transitions.iter().flatten() {
+        assert_eq!(before, &terminal_identity);
+        assert_eq!(after, &terminal_identity);
+    }
+    assert_eq!(paged_compacted.terminal_route_identity(), terminal_identity);
+    assert_eq!(paged_compacted.retained_sessions().len(), 2);
+    assert_eq!(
+        paged_compacted.retained_depth_label(0, 0).unwrap(),
+        second_label,
+        "labels remain bound to pins when the next page swaps their coordinates"
+    );
+    assert_eq!(
+        paged_compacted.retained_depth_label(0, 1).unwrap(),
+        first_label
+    );
+    assert!(matches!(
+        resolver.extend_nested_terminal_pair_storm_from_label(
+            &paged_compacted,
+            &dropped_label,
+            &[]
+        ),
+        Err(AttachmentError::RetainedSnapshotUnavailable)
+    ));
+
     let rebound = resolver
         .extend_nested_terminal_pair_storm_from_label(
-            &compacted,
+            &paged_compacted,
             &first_label,
             std::slice::from_ref(&first_pair),
         )
