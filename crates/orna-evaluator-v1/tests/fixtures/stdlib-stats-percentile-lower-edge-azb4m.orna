@@ -1,0 +1,1 @@
+stats.percentile([2, 4, 8], 0.0, interpolation: "nearest")
