@@ -128,6 +128,137 @@ fn snapshot_projects() -> (
     )
 }
 
+fn host_codec_standard_sources(base64_source: &str) -> Vec<(String, String)> {
+    [
+        (
+            "std/encoding.orna",
+            include_str!("fixtures/snapshot-host-codec-encoding-main.orna"),
+        ),
+        ("std/encoding/base64.orna", base64_source),
+        (
+            "std/io.orna",
+            include_str!("fixtures/snapshot-host-codec-io-main.orna"),
+        ),
+        (
+            "std/io/process.orna",
+            include_str!("fixtures/snapshot-host-codec-process.orna"),
+        ),
+    ]
+    .into_iter()
+    .map(|(path, source)| (path.to_owned(), source.to_owned()))
+    .collect()
+}
+
+fn host_codec_snapshot_projects() -> (TempDir, LoadedProject, LoadedProject, [String; 2]) {
+    let directory = tempfile::tempdir().unwrap();
+    let project_path = directory.path().join("project");
+    fs::create_dir_all(&project_path).unwrap();
+    fs::write(
+        project_path.join("main.orna"),
+        include_str!("fixtures/snapshot-host-codec-project.orna"),
+    )
+    .unwrap();
+    git_output_at(&project_path, &["init", "--quiet"]);
+    for (key, value) in [
+        ("user.email", "kieran@drewett.dev"),
+        ("user.name", "kierandrewett"),
+        ("commit.gpgsign", "false"),
+    ] {
+        git_output_at(&project_path, &["config", key, value]);
+    }
+    fs::write(
+        project_path.join(".gitmodules"),
+        "[submodule \"std\"]\n\tpath = stdlib/std\n\turl = https://example.invalid/ornadb-std.git\n",
+    )
+    .unwrap();
+
+    let standard_path = project_path.join("stdlib/std");
+    fs::create_dir_all(standard_path.join("encoding")).unwrap();
+    fs::create_dir_all(standard_path.join("io")).unwrap();
+    initialize_repository(&standard_path).unwrap();
+    fs::write(
+        standard_path.join("encoding.orna"),
+        include_str!("fixtures/snapshot-host-codec-encoding-main.orna"),
+    )
+    .unwrap();
+    fs::write(
+        standard_path.join("io.orna"),
+        include_str!("fixtures/snapshot-host-codec-io-main.orna"),
+    )
+    .unwrap();
+    fs::write(
+        standard_path.join("io/process.orna"),
+        include_str!("fixtures/snapshot-host-codec-process.orna"),
+    )
+    .unwrap();
+    fs::write(
+        standard_path.join("encoding/base64.orna"),
+        include_str!("fixtures/snapshot-host-codec-base64-v1.orna"),
+    )
+    .unwrap();
+    commit_directory(&standard_path, "captured host codec snapshot v1");
+    let snapshot_v1 = git_output_at(&standard_path, &["rev-parse", "HEAD"]);
+    let parent_v1 = capture_standard_gitlink(&project_path, &snapshot_v1, "capture codec v1");
+
+    fs::write(
+        standard_path.join("encoding/base64.orna"),
+        include_str!("fixtures/snapshot-host-codec-base64-v2.orna"),
+    )
+    .unwrap();
+    commit_directory(&standard_path, "captured host codec snapshot v2");
+    let snapshot_v2 = git_output_at(&standard_path, &["rev-parse", "HEAD"]);
+    let parent_v2 = capture_standard_gitlink(&project_path, &snapshot_v2, "capture codec v2");
+
+    let repository = Repository::discover(&project_path).unwrap();
+    let loader = ProjectLoader::default();
+    let project_v1_snapshot = repository.resolve_snapshot(&parent_v1).unwrap();
+    let project_v2_snapshot = repository.resolve_snapshot(&parent_v2).unwrap();
+    assert_eq!(
+        repository
+            .committed_submodule_commit(&project_v1_snapshot, "stdlib/std")
+            .unwrap()
+            .as_str(),
+        snapshot_v1
+    );
+    assert_eq!(
+        repository
+            .committed_submodule_commit(&project_v2_snapshot, "stdlib/std")
+            .unwrap()
+            .as_str(),
+        snapshot_v2
+    );
+    let profile_v1 = StandardDependencyProfile::from_sources(
+        snapshot_v1.clone(),
+        host_codec_standard_sources(include_str!("fixtures/snapshot-host-codec-base64-v1.orna")),
+    )
+    .unwrap();
+    let profile_v2 = StandardDependencyProfile::from_sources(
+        snapshot_v2.clone(),
+        host_codec_standard_sources(include_str!("fixtures/snapshot-host-codec-base64-v2.orna")),
+    )
+    .unwrap();
+    let project_v1 = loader
+        .load_committed_snapshot_with_standard_profile(
+            &repository,
+            &project_v1_snapshot,
+            Some(profile_v1),
+        )
+        .unwrap();
+    let project_v2 = loader
+        .load_committed_snapshot_with_standard_profile(
+            &repository,
+            &project_v2_snapshot,
+            Some(profile_v2),
+        )
+        .unwrap();
+    (
+        directory,
+        project_v1,
+        project_v2,
+        [snapshot_v1, snapshot_v2],
+    )
+}
+
 fn ints(values: &[i64]) -> CanonicalValue {
     CanonicalValue::new(Raw::Array(
         values
@@ -140,6 +271,84 @@ fn ints(values: &[i64]) -> CanonicalValue {
 
 fn int(value: i64) -> CanonicalValue {
     CanonicalValue::new(Value::int(value.into()).raw().clone()).unwrap()
+}
+
+#[test]
+fn captured_codec_snapshots_replay_real_base64_values_without_retargeting() {
+    let (_directory, project_v1, project_v2, snapshots) = host_codec_snapshot_projects();
+    assert_ne!(snapshots[0], snapshots[1]);
+    assert_eq!(
+        project_v1
+            .standard_profile()
+            .expect("captured v1 std profile")
+            .snapshot(),
+        &snapshots[0]
+    );
+    assert_eq!(
+        project_v2
+            .standard_profile()
+            .expect("captured v2 std profile")
+            .snapshot(),
+        &snapshots[1]
+    );
+    let sources_v1 =
+        host_codec_standard_sources(include_str!("fixtures/snapshot-host-codec-base64-v1.orna"));
+    let sources_v2 =
+        host_codec_standard_sources(include_str!("fixtures/snapshot-host-codec-base64-v2.orna"));
+    assert_eq!(
+        sources_v1
+            .iter()
+            .find(|(path, _)| path == "std/encoding/base64.orna")
+            .unwrap()
+            .1,
+        include_str!("fixtures/snapshot-host-codec-base64-v1.orna")
+    );
+    assert_eq!(
+        sources_v2
+            .iter()
+            .find(|(path, _)| path == "std/encoding/base64.orna")
+            .unwrap()
+            .1,
+        include_str!("fixtures/snapshot-host-codec-base64-v2.orna")
+    );
+
+    // The version marker is proof-only because section 9 specifies Base64
+    // values but no source-level snapshot marker API. The codec bodies remain
+    // identical and real so the result identifies the captured dependency.
+    let mut historical =
+        AdmittedReplSession::from_loaded_project(&project_v1, sources_v1, Limits::default())
+            .unwrap();
+    let mut upgraded =
+        AdmittedReplSession::from_loaded_project(&project_v2, sources_v2, Limits::default())
+            .unwrap();
+    let bytes = CanonicalValue::new(Raw::Bytes(vec![0, 255, 0, b'A'])).unwrap();
+
+    for (session, expected_marker) in [(&mut historical, 1), (&mut upgraded, 2)] {
+        assert_eq!(
+            session.submit(include_str!("fixtures/snapshot-host-codec-decode.orna")),
+            Ok(Some(bytes.clone()))
+        );
+        assert_eq!(
+            session.submit(include_str!("fixtures/snapshot-host-codec-tagged.orna")),
+            Ok(Some(
+                CanonicalValue::new(Raw::Array(vec![
+                    Raw::Int(expected_marker.into()),
+                    Raw::Text("AP8AQQ==".to_owned()),
+                ]))
+                .unwrap()
+            ))
+        );
+    }
+    assert_eq!(
+        historical.submit(include_str!("fixtures/snapshot-host-codec-tagged.orna")),
+        Ok(Some(
+            CanonicalValue::new(Raw::Array(vec![
+                Raw::Int(1.into()),
+                Raw::Text("AP8AQQ==".to_owned()),
+            ]))
+            .unwrap()
+        ))
+    );
 }
 
 fn capture_standard_gitlink(project_path: &Path, standard_snapshot: &str, message: &str) -> String {
@@ -894,14 +1103,23 @@ fn project_module_executes_a_real_function_from_its_gitlink_pinned_std_snapshot(
     )
     .expect("the current project's exact std gitlink snapshot admits");
 
-    assert_eq!(project_v1.standard_profile().unwrap().snapshot(), snapshots[0]);
-    assert_eq!(project_v6.standard_profile().unwrap().snapshot(), snapshots[5]);
+    assert_eq!(
+        project_v1.standard_profile().unwrap().snapshot(),
+        snapshots[0]
+    );
+    assert_eq!(
+        project_v6.standard_profile().unwrap().snapshot(),
+        snapshots[5]
+    );
     assert_eq!(historical.submit("use snapshot_app;"), Ok(None));
     assert_eq!(current.submit("use snapshot_app;"), Ok(None));
     assert_eq!(
         historical
             .submit("snapshot_app.value()")
-            .unwrap_or_else(|error| panic!("historical snapshot_app.value failed: {}", error.code())),
+            .unwrap_or_else(|error| panic!(
+                "historical snapshot_app.value failed: {}",
+                error.code()
+            )),
         Some(int(8))
     );
     assert_eq!(
