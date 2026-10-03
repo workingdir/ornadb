@@ -1,0 +1,7 @@
+{ id: "redo-fold/checkpoint-rotation-a", name: "redo-fold/checkpoint-left-a", city: "redo-fold/checkpoint-right-a", }
+
+{ id: "redo-fold/checkpoint-rotation-b", name: "redo-fold/checkpoint-left-b", city: "redo-fold/checkpoint-right-b", }
+
+{ id: "segment/checkpoint-rotation-a", name: "segment/checkpoint-left-a", city: "segment/checkpoint-right-a", }
+
+{ id: "segment/checkpoint-rotation-b", name: "segment/checkpoint-left-b", city: "segment/checkpoint-right-b", }
