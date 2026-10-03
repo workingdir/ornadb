@@ -313,14 +313,17 @@ fn base64_snapshot_marker_value(marker: i64) -> CanonicalValue {
 }
 
 fn process_output_value(stdout: &[u8]) -> Raw {
-    Raw::Array(vec![
-        Raw::Tag(
-            60013,
-            Box::new(Raw::Array(vec![Raw::Int(1.into()), Raw::Int(0.into())])),
-        ),
-        Raw::Bytes(stdout.to_vec()),
-        Raw::Bytes(Vec::new()),
-    ])
+    Raw::Tag(
+        60015,
+        Box::new(Raw::Array(vec![
+            Raw::Tag(
+                60013,
+                Box::new(Raw::Array(vec![Raw::Int(1.into()), Raw::Int(0.into())])),
+            ),
+            Raw::Bytes(stdout.to_vec()),
+            Raw::Bytes(Vec::new()),
+        ])),
+    )
 }
 
 fn base64_process_matrix_value() -> CanonicalValue {
@@ -355,31 +358,6 @@ fn base64_codec_depth_process_matrix_value() -> CanonicalValue {
         ]
         .into_iter()
         .map(process_output_value)
-        .collect(),
-    ))
-    .unwrap()
-}
-
-fn base64_process_reprocess_matrix_value() -> CanonicalValue {
-    CanonicalValue::new(Raw::Array(
-        [
-            &[][..],
-            &[0][..],
-            &[0, 1][..],
-            &[0, 1, 2][..],
-            &[255][..],
-            &[255, 238][..],
-            &[0, 1, 2, 3][..],
-            &[0, 1, 2, 3, 4][..],
-            &[0, 1, 2, 3, 4, 5][..],
-        ]
-        .into_iter()
-        .map(|bytes| {
-            Raw::Array(vec![
-                process_output_value(bytes),
-                process_output_value(bytes),
-            ])
-        })
         .collect(),
     ))
     .unwrap()
@@ -481,15 +459,7 @@ fn captured_codec_snapshots_feed_real_process_stdin_after_interleaved_upgrade() 
     let mut bindings =
         SysHostBindingRegistry::new(EnvironmentProvider::default()).with_process_provider(process);
     let bytes = vec![0, 255, 0, b'A'];
-    let expected = CanonicalValue::new(Raw::Array(vec![
-        Raw::Tag(
-            60013,
-            Box::new(Raw::Array(vec![Raw::Int(1.into()), Raw::Int(0.into())])),
-        ),
-        Raw::Bytes(bytes),
-        Raw::Bytes(Vec::new()),
-    ]))
-    .unwrap();
+    let expected = CanonicalValue::new(process_output_value(&bytes)).unwrap();
 
     let mut assert_process_value = |session: &mut AdmittedReplSession| {
         let output = session.submit_with_sys_host_bindings(
@@ -744,6 +714,8 @@ fn captured_codec_snapshots_preserve_nested_codec_bytes_through_host_process() {
 fn captured_codec_snapshots_reprocess_host_output_through_nested_codecs() {
     let fixture =
         include_str!("fixtures/snapshot-host-codec-process-reprocess-matrix.orna");
+    let parsed = orna_syntax_v1::parse_repl(fixture);
+    assert!(parsed.diagnostics.is_empty(), "{:#?}", parsed.diagnostics);
     let (_directory, project_v1, project_v2, snapshots) = host_codec_snapshot_projects();
     let sources_v1 =
         host_codec_standard_sources(include_str!("fixtures/snapshot-host-codec-base64-v1.orna"));
@@ -764,7 +736,21 @@ fn captured_codec_snapshots_reprocess_host_output_through_nested_codecs() {
         .unwrap();
     let mut bindings =
         SysHostBindingRegistry::new(EnvironmentProvider::default()).with_process_provider(process);
-    let expected = base64_process_reprocess_matrix_value();
+    let inputs = [
+        ("", &[][..]),
+        ("AA==", &[0][..]),
+        ("AAE=", &[0, 1][..]),
+        ("AAEC", &[0, 1, 2][..]),
+        ("/w==", &[255][..]),
+        ("AAECAwQF", &[0, 1, 2, 3, 4, 5][..]),
+    ];
+    let expected = CanonicalValue::new(Raw::Array(
+        inputs
+            .iter()
+            .map(|(_, bytes)| process_output_value(bytes))
+            .collect(),
+    ))
+    .unwrap();
     let mut folded_outputs = Vec::new();
     for snapshot_index in [0, 1, 0] {
         let (session, expected_marker) = match snapshot_index {
@@ -776,14 +762,22 @@ fn captured_codec_snapshots_reprocess_host_output_through_nested_codecs() {
             session.submit(include_str!("fixtures/snapshot-host-codec-tagged.orna")),
             Ok(Some(base64_snapshot_marker_value(expected_marker)))
         );
-        let output = session
-            .submit_with_sys_host_bindings(fixture, &mut bindings)
-            .unwrap_or_else(|error| {
-                panic!("nested process output replay failed: {}", error.code())
-            })
-            .expect("each captured snapshot returns both process results for every input");
-        assert_eq!(output, expected);
-        folded_outputs.push(output);
+        let mut replay_rows = Vec::new();
+        for (encoded, bytes) in &inputs {
+            let source = fixture.replace("__BASE64_INPUT__", encoded);
+            let output = session
+                .submit_with_sys_host_bindings(&source, &mut bindings)
+                .unwrap_or_else(|error| {
+                    panic!("nested process output replay failed: {}", error.code())
+                })
+                .expect("nested codecs feed captured stdout into a second host process");
+            let expected_row = CanonicalValue::new(process_output_value(bytes)).unwrap();
+            assert_eq!(output, expected_row);
+            replay_rows.push(output.raw().clone());
+        }
+        let replay_matrix = CanonicalValue::new(Raw::Array(replay_rows)).unwrap();
+        assert_eq!(replay_matrix, expected);
+        folded_outputs.push(replay_matrix);
     }
 
     assert_eq!(folded_outputs, vec![expected.clone(), expected.clone(), expected]);
