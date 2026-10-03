@@ -4967,6 +4967,7 @@ fn paired_pagination_nested_compaction_keeps_snapshot_values() {
     ];
     let mut restores = Vec::new();
     let mut expected_lanes = Vec::new();
+    let mut cursor_tokens = Vec::new();
     for (refresh, (left, right)) in snapshots.iter().enumerate() {
         for (lane, source_name, values) in [
             (refresh * 2, "View.Left", left.as_slice()),
@@ -4976,6 +4977,7 @@ fn paired_pagination_nested_compaction_keeps_snapshot_values() {
             let b = long_b[lane % long_b.len()].clone();
             restores.push((source_name, restore(values, &a, &b)));
             expected_lanes.push(source_name);
+            cursor_tokens.push((a, b));
         }
     }
 
@@ -5028,4 +5030,46 @@ fn paired_pagination_nested_compaction_keeps_snapshot_values() {
             "each paired snapshot has a distinct scope: {scope:?}"
         );
     }
+    assert_eq!(
+        cursor_tokens
+            .iter()
+            .map(|(a, b)| (a.len(), b.len()))
+            .collect::<Vec<_>>(),
+        [
+            (255, 512),
+            (256, 511),
+            (511, 256),
+            (512, 255),
+            (255, 512),
+            (256, 511),
+            (511, 256),
+            (512, 255),
+        ],
+        "both long cursor positions cover the 255/256 and 511/512 byte edges"
+    );
+    let mut expected_cursors = Vec::new();
+    for (index, (a, b)) in cursor_tokens.iter().enumerate() {
+        let (source_name, scope, _) = &source.lanes[index];
+        expected_cursors.extend([
+            (source_name.clone(), *scope, None),
+            (source_name.clone(), *scope, Some(a.clone())),
+            (source_name.clone(), *scope, Some(compact_a.clone())),
+            (source_name.clone(), *scope, Some(b.clone())),
+            (source_name.clone(), *scope, Some(compact_b.clone())),
+        ]);
+    }
+    assert_eq!(
+        source.cursors,
+        expected_cursors,
+        "each snapshot resumes through both compacted cursor transitions"
+    );
+    assert!(
+        source
+            .cursors
+            .iter()
+            .all(|(_, _, cursor)| cursor.as_ref() != Some(&after_compaction)),
+        "take(10) does not request the sixth sentinel page"
+    );
+    assert!(source.pending["View.Left"].is_empty());
+    assert!(source.pending["View.Right"].is_empty());
 }
