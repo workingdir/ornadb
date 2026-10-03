@@ -1214,4 +1214,41 @@ fn paired_subscription_read_batches_preserve_four_page_cursor_fold_chains() {
             "generation {generation} keeps its left and right read scopes independent"
         );
     }
+    let scopes = source.lanes.iter().map(|(scope, _)| *scope).collect::<Vec<_>>();
+    for (index, scope) in scopes.iter().enumerate() {
+        assert!(
+            !scopes[..index].contains(scope),
+            "each refreshed four-page pair receives new read-batch identities"
+        );
+    }
+    assert_eq!(
+        source.cursors,
+        vec![
+            (scopes[0], None),
+            (scopes[0], Some(vec![11])),
+            (scopes[0], Some(vec![22])),
+            (scopes[0], Some(vec![33])),
+            (scopes[1], None),
+            (scopes[1], Some(vec![11])),
+            (scopes[1], Some(vec![24])),
+            (scopes[1], Some(vec![34])),
+            (scopes[2], None),
+            (scopes[2], Some(vec![11])),
+            (scopes[2], Some(vec![52])),
+            (scopes[2], Some(vec![53])),
+            (scopes[3], None),
+            (scopes[3], Some(vec![11])),
+            (scopes[3], Some(vec![64])),
+            (scopes[3], Some(vec![65])),
+            (scopes[4], None),
+            (scopes[4], Some(vec![11])),
+            (scopes[4], Some(vec![22])),
+            (scopes[4], Some(vec![33])),
+            (scopes[5], None),
+            (scopes[5], Some(vec![11])),
+            (scopes[5], Some(vec![24])),
+            (scopes[5], Some(vec![34])),
+        ],
+        "each exact cursor chain stays local to its paired read scope during handoff"
+    );
 }
