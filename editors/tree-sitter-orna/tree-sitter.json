@@ -1,14 +1,12 @@
 {
-  "grammars": [
-    {
-      "name": "orna",
-      "camelcase": "Orna",
-      "scope": "source.orna",
-      "path": ".",
-      "file-types": ["orna"],
-      "highlights": "queries/highlights.scm"
-    }
-  ],
+  "grammars": [{
+    "name": "orna",
+    "camelcase": "Orna",
+    "scope": "source.orna",
+    "path": ".",
+    "file-types": ["orna"],
+    "highlights": "queries/highlights.scm"
+  }],
   "metadata": {
     "version": "1.0.0",
     "license": "MIT",

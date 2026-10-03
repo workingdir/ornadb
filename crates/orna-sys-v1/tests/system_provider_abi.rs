@@ -2269,6 +2269,567 @@ fn provider_argument_map_variadic_cardinalities_match_both_dispatch_routes() {
 }
 
 #[test]
+fn provider_alias_variadic_argument_map_edges_match_schema_and_both_dispatch_routes() {
+    const PROVIDER_ALIASES: [&str; 4] = ["-", "_", "9", "_9.edge-name"];
+    const VARIADIC_OPERATIONS: [&str; 4] = [
+        "sys.invoke(Value)",
+        "sys.invoke<T>",
+        "sys.start(Value)",
+        "sys.start<T>",
+    ];
+    const EDGE_CARDINALITIES: [usize; 3] = [0, 1, 4];
+
+    let generated_schema = build_provider::generate_provider_registry_schema()
+        .expect("provider alias schema regenerates from its source generator");
+    assert_eq!(generated_schema, system_provider_abi_schema_json());
+    let baseline: Value =
+        serde_json::from_str(system_provider_abi_json()).expect("embedded provider registry");
+    let base_table = SystemProviderAbi::from_json(system_provider_abi_json())
+        .expect("embedded registry parses into its typed provider table");
+    let raw_roles = baseline["roles"]
+        .as_array()
+        .expect("embedded provider registry has role rows");
+    let mut operation_roles = Vec::<(String, usize)>::new();
+    for operation_name in VARIADIC_OPERATIONS {
+        let role_name = base_table
+            .operation(operation_name)
+            .and_then(|operation| operation.role.as_ref())
+            .expect("invoke/start overload has a provider role")
+            .as_str()
+            .to_owned();
+        if operation_roles
+            .iter()
+            .any(|(registered_role, _)| registered_role == &role_name)
+        {
+            continue;
+        }
+        let role_index = raw_roles
+            .iter()
+            .position(|role| role["name"] == role_name)
+            .expect("invoke/start provider role has a generated JSON row");
+        operation_roles.push((role_name, role_index));
+    }
+
+    let mut schema_acceptances = 0;
+    let mut typed_alias_parses = 0;
+    let mut generated_binding_cases = 0;
+    let mut map_slots = 0;
+    let mut map_cases = 0;
+    let mut direct_routes = 0;
+    let mut registry_routes = 0;
+    for provider_alias in PROVIDER_ALIASES {
+        let mut alias_registry = baseline.clone();
+        for (_, role_index) in &operation_roles {
+            alias_registry["roles"][*role_index]["builtin_provider"] =
+                Value::String(provider_alias.to_owned());
+        }
+        let alias_json = alias_registry.to_string();
+        build_host::validate_json_against_schema(&alias_json, &generated_schema).unwrap_or_else(
+            |error| panic!("schema rejects provider alias {provider_alias:?}: {error}"),
+        );
+        schema_acceptances += 1;
+
+        let table = SystemProviderAbi::from_json(&alias_json)
+            .expect("schema-valid provider alias parses into the typed registry");
+        let provider_registry = ProviderRoleRegistry::from_baked_abi(&table)
+            .expect("aliased invoke/start provider roles resolve");
+        for (role_name, _) in &operation_roles {
+            assert_eq!(
+                table
+                    .role(role_name)
+                    .and_then(|role| role.builtin_provider.as_ref())
+                    .map(|provider| provider.as_str()),
+                Some(provider_alias)
+            );
+        }
+        typed_alias_parses += 1;
+
+        for operation_name in VARIADIC_OPERATIONS {
+            let contract = table
+                .operation(operation_name)
+                .expect("invoke/start operation remains in aliased typed table");
+            let generated = system_function_descriptor(operation_name)
+                .expect("invoke/start operation has a macro-generated binding");
+            assert_eq!(generated.signature, contract.signature.source);
+            assert_eq!(
+                contract.effects.iter().next(),
+                Some(generated.effect),
+                "provider-alias binding effect matches {operation_name}"
+            );
+            generated_binding_cases += 1;
+
+            let map_indexes = contract
+                .signature
+                .parameters
+                .iter()
+                .enumerate()
+                .filter_map(|(index, parameter)| (parameter.name == "arguments").then_some(index))
+                .collect::<Vec<_>>();
+            assert_eq!(map_indexes, [1], "one map slot in {operation_name}");
+            assert_eq!(
+                contract.signature.parameters[map_indexes[0]].ty,
+                AbiType::Named("sys.ArgumentMap".to_owned())
+            );
+            map_slots += 1;
+
+            let role = contract
+                .role
+                .as_ref()
+                .expect("invoke/start operation retains its provider role");
+            let offer = provider_registry
+                .resolve(role.as_str())
+                .expect("aliased provider offer resolves for operation role")
+                .clone();
+            assert_eq!(offer.provider.as_str(), provider_alias);
+            let expected_argument_types = contract
+                .signature
+                .parameters
+                .iter()
+                .map(|parameter| parameter.ty.canonical())
+                .collect::<Vec<_>>();
+
+            for cardinality in EDGE_CARDINALITIES {
+                let argument_map = ArgumentMap::new((0..cardinality).map(|index| Argument {
+                    name: format!("arg_{index:02}"),
+                    value: TypedValue::public(
+                        TypeId::new("Str"),
+                        format!("value-{index}").into_bytes(),
+                    ),
+                }))
+                .expect("distinct argument names form an argument map");
+                assert_eq!(argument_map.entries().count(), cardinality);
+                let encoded_entries = argument_map
+                    .entries()
+                    .map(|(name, value)| {
+                        (
+                            name,
+                            value.static_type().as_str(),
+                            value.canonical().expect("map test values are public"),
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                let map_payload = serde_json::to_vec(&encoded_entries)
+                    .expect("argument-map test payload serializes deterministically");
+                let arguments = contract
+                    .signature
+                    .parameters
+                    .iter()
+                    .enumerate()
+                    .map(|(index, parameter)| {
+                        let canonical = if index == map_indexes[0] {
+                            map_payload.clone()
+                        } else {
+                            format!("{}-{operation_name}-{cardinality}", parameter.name)
+                                .into_bytes()
+                        };
+                        TypedValue::public(TypeId::new(parameter.ty.canonical()), canonical)
+                    })
+                    .collect::<Vec<_>>();
+                let result = TypedValue::public(
+                    TypeId::new(contract.signature.result.canonical()),
+                    format!("result-{provider_alias}-{operation_name}-{cardinality}").into_bytes(),
+                );
+                let provider_for = || ArgumentMapEdgeProvider {
+                    offer: offer.clone(),
+                    operation: contract.id.clone(),
+                    expected_argument_types: expected_argument_types.clone(),
+                    expected_map_payload: map_payload.clone(),
+                    result: result.clone(),
+                    calls: AtomicUsize::new(0),
+                };
+
+                let direct_provider = provider_for();
+                assert_eq!(
+                    table
+                        .dispatch_to_provider(generated.name, &direct_provider, &arguments, |_| Ok(
+                            ()
+                        ),)
+                        .expect("direct route accepts alias and map cardinality"),
+                    orna_sys_v1::SystemDispatchResult::Returned(result.clone()),
+                    "direct route preserves {provider_alias:?}/{operation_name}/{cardinality}"
+                );
+                assert_eq!(direct_provider.calls.load(Ordering::SeqCst), 1);
+                direct_routes += 1;
+
+                let registry_provider = provider_for();
+                assert_eq!(
+                    provider_registry
+                        .dispatch_to_provider(
+                            &table,
+                            generated.name,
+                            &registry_provider,
+                            &arguments,
+                            |_| Ok(()),
+                        )
+                        .expect("selected-provider route accepts alias and map cardinality"),
+                    orna_sys_v1::SystemDispatchResult::Returned(result),
+                    "registry route preserves {provider_alias:?}/{operation_name}/{cardinality}"
+                );
+                assert_eq!(registry_provider.calls.load(Ordering::SeqCst), 1);
+                registry_routes += 1;
+                map_cases += 1;
+            }
+        }
+    }
+
+    let expected_map_cases =
+        PROVIDER_ALIASES.len() * VARIADIC_OPERATIONS.len() * EDGE_CARDINALITIES.len();
+    assert_eq!(schema_acceptances, PROVIDER_ALIASES.len());
+    assert_eq!(typed_alias_parses, PROVIDER_ALIASES.len());
+    assert_eq!(
+        generated_binding_cases,
+        PROVIDER_ALIASES.len() * VARIADIC_OPERATIONS.len()
+    );
+    assert_eq!(map_slots, generated_binding_cases);
+    assert_eq!(map_cases, expected_map_cases);
+    assert_eq!(direct_routes, map_cases);
+    assert_eq!(registry_routes, map_cases);
+    println!(
+        "provider_alias_argument_map_variadic_parity aliases={} operations={} cardinalities=0,1,4 schema_acceptances={schema_acceptances} typed_parses={typed_alias_parses} generated_bindings={generated_binding_cases} map_slots={map_slots} map_cases={map_cases} direct_routes={direct_routes} registry_routes={registry_routes} total_cases={}",
+        PROVIDER_ALIASES.len(),
+        VARIADIC_OPERATIONS.len(),
+        schema_acceptances
+            + typed_alias_parses
+            + generated_binding_cases
+            + map_slots
+            + map_cases
+            + direct_routes
+            + registry_routes
+    );
+}
+
+#[test]
+fn provider_alias_optional_argument_map_edges_match_schema_and_dispatch_routes() {
+    const PROVIDER_ALIASES: [&str; 4] = ["-", "_", "9", "_9.edge-name"];
+    const VARIADIC_OPERATIONS: [&str; 4] = [
+        "sys.invoke(Value)",
+        "sys.invoke<T>",
+        "sys.start(Value)",
+        "sys.start<T>",
+    ];
+    const EDGE_CARDINALITIES: [usize; 3] = [0, 1, 4];
+
+    let generated_schema = build_provider::generate_provider_registry_schema()
+        .expect("provider alias schema regenerates from its source generator");
+    assert_eq!(generated_schema, system_provider_abi_schema_json());
+    let baseline: Value =
+        serde_json::from_str(system_provider_abi_json()).expect("embedded provider registry");
+    let base_table = SystemProviderAbi::from_json(system_provider_abi_json())
+        .expect("embedded registry parses into its typed provider table");
+    let raw_roles = baseline["roles"]
+        .as_array()
+        .expect("embedded provider registry has role rows");
+    let mut operation_roles = Vec::<(String, usize)>::new();
+    for operation_name in VARIADIC_OPERATIONS {
+        let role_name = base_table
+            .operation(operation_name)
+            .and_then(|operation| operation.role.as_ref())
+            .expect("invoke/start overload has a provider role")
+            .as_str()
+            .to_owned();
+        if operation_roles
+            .iter()
+            .any(|(registered_role, _)| registered_role == &role_name)
+        {
+            continue;
+        }
+        let role_index = raw_roles
+            .iter()
+            .position(|role| role["name"] == role_name)
+            .expect("invoke/start provider role has a generated JSON row");
+        operation_roles.push((role_name, role_index));
+    }
+
+    let mut schema_acceptances = 0;
+    let mut typed_alias_parses = 0;
+    let mut generated_bindings = 0;
+    let mut optional_parameters = 0;
+    let mut omitted_direct_rejections = 0;
+    let mut omitted_registry_rejections = 0;
+    let mut matrix_cases = 0;
+    let mut direct_routes = 0;
+    let mut registry_routes = 0;
+    for provider_alias in PROVIDER_ALIASES {
+        let mut alias_registry = baseline.clone();
+        for (_, role_index) in &operation_roles {
+            alias_registry["roles"][*role_index]["builtin_provider"] =
+                Value::String(provider_alias.to_owned());
+        }
+        let alias_json = alias_registry.to_string();
+        build_host::validate_json_against_schema(&alias_json, &generated_schema).unwrap_or_else(
+            |error| panic!("schema rejects provider alias {provider_alias:?}: {error}"),
+        );
+        schema_acceptances += 1;
+
+        let table = SystemProviderAbi::from_json(&alias_json)
+            .expect("schema-valid provider alias parses into the typed registry");
+        let provider_registry = ProviderRoleRegistry::from_baked_abi(&table)
+            .expect("aliased invoke/start provider roles resolve");
+        for (role_name, _) in &operation_roles {
+            assert_eq!(
+                table
+                    .role(role_name)
+                    .and_then(|role| role.builtin_provider.as_ref())
+                    .map(|provider| provider.as_str()),
+                Some(provider_alias)
+            );
+        }
+        typed_alias_parses += 1;
+
+        for operation_name in VARIADIC_OPERATIONS {
+            let contract = table
+                .operation(operation_name)
+                .expect("invoke/start operation remains in aliased typed table");
+            let generated = system_function_descriptor(operation_name)
+                .expect("invoke/start operation has a macro-generated binding");
+            assert_eq!(generated.signature, contract.signature.source);
+            generated_bindings += 1;
+
+            let map_indexes = contract
+                .signature
+                .parameters
+                .iter()
+                .enumerate()
+                .filter_map(|(index, parameter)| (parameter.name == "arguments").then_some(index))
+                .collect::<Vec<_>>();
+            assert_eq!(map_indexes, [1], "one typed map slot in {operation_name}");
+            assert_eq!(
+                contract.signature.parameters[map_indexes[0]].ty,
+                AbiType::Named("sys.ArgumentMap".to_owned())
+            );
+            let optional_indexes = contract
+                .signature
+                .parameters
+                .iter()
+                .enumerate()
+                .filter_map(|(index, parameter)| {
+                    matches!(&parameter.ty, AbiType::Optional(_)).then_some(index)
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                optional_indexes.len(),
+                2,
+                "optional edge slots in {operation_name}"
+            );
+            assert!(optional_indexes.iter().all(|index| {
+                contract.signature.parameters[*index].default.as_deref() == Some("null")
+            }));
+            optional_parameters += optional_indexes.len();
+
+            let first_default = contract
+                .signature
+                .parameters
+                .iter()
+                .position(|parameter| parameter.default.is_some())
+                .expect("invoke/start provider signature has trailing defaults");
+            assert!(
+                contract.signature.parameters[first_default..]
+                    .iter()
+                    .all(|parameter| parameter.default.is_some())
+            );
+            let role = contract
+                .role
+                .as_ref()
+                .expect("invoke/start operation retains its provider role");
+            let offer = provider_registry
+                .resolve(role.as_str())
+                .expect("aliased provider offer resolves for operation role")
+                .clone();
+            assert_eq!(offer.provider.as_str(), provider_alias);
+            let expected_argument_types = contract
+                .signature
+                .parameters
+                .iter()
+                .map(|parameter| parameter.ty.canonical())
+                .collect::<Vec<_>>();
+
+            let empty_map_payload = serde_json::to_vec(&Vec::<(&str, &str, Vec<u8>)>::new())
+                .expect("empty argument map payload serializes deterministically");
+            let omitted_arguments = contract.signature.parameters[..first_default]
+                .iter()
+                .enumerate()
+                .map(|(index, parameter)| {
+                    TypedValue::public(
+                        TypeId::new(parameter.ty.canonical()),
+                        if index == map_indexes[0] {
+                            empty_map_payload.clone()
+                        } else {
+                            parameter.name.as_bytes().to_vec()
+                        },
+                    )
+                })
+                .collect::<Vec<_>>();
+            let diagnostic = ProviderDiagnostic::ArgumentCountMismatch {
+                operation: contract.id.clone(),
+                expected: contract.signature.parameters.len(),
+                actual: first_default,
+            };
+            let omitted_provider = ArgumentMapEdgeProvider {
+                offer: offer.clone(),
+                operation: contract.id.clone(),
+                expected_argument_types: expected_argument_types.clone(),
+                expected_map_payload: empty_map_payload,
+                result: TypedValue::public(
+                    TypeId::new(contract.signature.result.canonical()),
+                    b"omitted-default-must-not-call-provider".to_vec(),
+                ),
+                calls: AtomicUsize::new(0),
+            };
+            assert_eq!(
+                table.dispatch_to_provider(
+                    generated.name,
+                    &omitted_provider,
+                    &omitted_arguments,
+                    |_| Ok(()),
+                ),
+                Err(diagnostic.clone()),
+                "direct route rejects omitted optional/default suffix for {operation_name}"
+            );
+            omitted_direct_rejections += 1;
+            assert_eq!(
+                provider_registry.dispatch_to_provider(
+                    &table,
+                    generated.name,
+                    &omitted_provider,
+                    &omitted_arguments,
+                    |_| Ok(()),
+                ),
+                Err(diagnostic),
+                "selected-provider route rejects omitted suffix for {operation_name}"
+            );
+            omitted_registry_rejections += 1;
+            assert_eq!(omitted_provider.calls.load(Ordering::SeqCst), 0);
+
+            let optional_masks = 1usize << optional_indexes.len();
+            for cardinality in EDGE_CARDINALITIES {
+                let argument_map = ArgumentMap::new((0..cardinality).map(|index| Argument {
+                    name: format!("arg_{index:02}"),
+                    value: TypedValue::public(
+                        TypeId::new("Str"),
+                        format!("value-{index}").into_bytes(),
+                    ),
+                }))
+                .expect("distinct argument names form an argument map");
+                let encoded_entries = argument_map
+                    .entries()
+                    .map(|(name, value)| {
+                        (
+                            name,
+                            value.static_type().as_str(),
+                            value.canonical().expect("map test values are public"),
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                let map_payload = serde_json::to_vec(&encoded_entries)
+                    .expect("argument-map test payload serializes deterministically");
+                for optional_mask in 0..optional_masks {
+                    let arguments = contract
+                        .signature
+                        .parameters
+                        .iter()
+                        .enumerate()
+                        .map(|(index, parameter)| {
+                            let payload = if index == map_indexes[0] {
+                                map_payload.clone()
+                            } else if let Some(optional_position) = optional_indexes
+                                .iter()
+                                .position(|optional| *optional == index)
+                            {
+                                if optional_mask & (1 << optional_position) == 0 {
+                                    b"null".to_vec()
+                                } else {
+                                    format!("present-{operation_name}-{optional_position}")
+                                        .into_bytes()
+                                }
+                            } else if let Some(default) = parameter.default.as_deref() {
+                                default.as_bytes().to_vec()
+                            } else {
+                                format!("{}-{cardinality}", parameter.name).into_bytes()
+                            };
+                            TypedValue::public(TypeId::new(parameter.ty.canonical()), payload)
+                        })
+                        .collect::<Vec<_>>();
+                    let result = TypedValue::public(
+                        TypeId::new(contract.signature.result.canonical()),
+                        format!(
+                            "result-{provider_alias}-{operation_name}-{cardinality}-{optional_mask}"
+                        )
+                        .into_bytes(),
+                    );
+                    let provider_for = || ArgumentMapEdgeProvider {
+                        offer: offer.clone(),
+                        operation: contract.id.clone(),
+                        expected_argument_types: expected_argument_types.clone(),
+                        expected_map_payload: map_payload.clone(),
+                        result: result.clone(),
+                        calls: AtomicUsize::new(0),
+                    };
+
+                    let direct_provider = provider_for();
+                    assert_eq!(
+                        table.dispatch_to_provider(
+                            generated.name,
+                            &direct_provider,
+                            &arguments,
+                            |_| Ok(()),
+                        ),
+                        Ok(orna_sys_v1::SystemDispatchResult::Returned(result.clone())),
+                        "direct route preserves optional mask {optional_mask}, {provider_alias:?}/{operation_name}/{cardinality}"
+                    );
+                    assert_eq!(direct_provider.calls.load(Ordering::SeqCst), 1);
+                    direct_routes += 1;
+
+                    let registry_provider = provider_for();
+                    assert_eq!(
+                        provider_registry.dispatch_to_provider(
+                            &table,
+                            generated.name,
+                            &registry_provider,
+                            &arguments,
+                            |_| Ok(()),
+                        ),
+                        Ok(orna_sys_v1::SystemDispatchResult::Returned(result)),
+                        "selected-provider route preserves optional mask {optional_mask}, {provider_alias:?}/{operation_name}/{cardinality}"
+                    );
+                    assert_eq!(registry_provider.calls.load(Ordering::SeqCst), 1);
+                    registry_routes += 1;
+                    matrix_cases += 1;
+                }
+            }
+        }
+    }
+
+    let expected_matrix_cases =
+        PROVIDER_ALIASES.len() * VARIADIC_OPERATIONS.len() * EDGE_CARDINALITIES.len() * 4;
+    assert_eq!(schema_acceptances, PROVIDER_ALIASES.len());
+    assert_eq!(typed_alias_parses, PROVIDER_ALIASES.len());
+    assert_eq!(
+        generated_bindings,
+        PROVIDER_ALIASES.len() * VARIADIC_OPERATIONS.len()
+    );
+    assert_eq!(optional_parameters, generated_bindings * 2);
+    assert_eq!(omitted_direct_rejections, generated_bindings);
+    assert_eq!(omitted_registry_rejections, generated_bindings);
+    assert_eq!(matrix_cases, expected_matrix_cases);
+    assert_eq!(direct_routes, matrix_cases);
+    assert_eq!(registry_routes, matrix_cases);
+    println!(
+        "provider_alias_optional_argument_map_parity aliases={} operations={} optional_parameters={optional_parameters} optional_masks=4 cardinalities=0,1,4 schema_acceptances={schema_acceptances} typed_parses={typed_alias_parses} generated_bindings={generated_bindings} omitted_direct={omitted_direct_rejections} omitted_registry={omitted_registry_rejections} matrix_cases={matrix_cases} direct_routes={direct_routes} registry_routes={registry_routes} total_cases={}",
+        PROVIDER_ALIASES.len(),
+        VARIADIC_OPERATIONS.len(),
+        schema_acceptances
+            + typed_alias_parses
+            + generated_bindings
+            + optional_parameters
+            + omitted_direct_rejections
+            + omitted_registry_rejections
+            + matrix_cases
+            + direct_routes
+            + registry_routes
+    );
+}
+
+#[test]
 fn dispatch_to_provider_routes_typed_value_and_declared_failure() {
     let table = system_dispatch_table();
     let operation_name = "sys.invoke(Value)";
@@ -3033,6 +3594,207 @@ fn generated_bindings_round_trip_typed_results_through_both_dispatch_paths() {
     println!(
         "generated_binding_typed_result_round_trip bindings={generated_binding_cases} provider_routes={provider_route_cases} direct_registry_pairs={provider_route_cases} total_cases={}",
         generated_binding_cases + provider_route_cases * 2
+    );
+}
+
+#[test]
+fn provider_generic_object_returns_preserve_witness_types_on_both_routes() {
+    const OBJECT_RETURN_OPERATIONS: [&str; 2] = ["sys.invoke<T>", "sys.start<T>"];
+    const OBJECT_RESULT_TYPES: [&str; 4] = [
+        "sys.ObjectRef",
+        "sys.FunctionRef",
+        "sys.RowRef<sys.Object>",
+        "sys.ObjectDescription",
+    ];
+
+    let generated_schema = build_provider::generate_provider_registry_schema()
+        .expect("provider object-return schema regenerates from its source generator");
+    assert_eq!(generated_schema, system_provider_abi_schema_json());
+    build_host::validate_json_against_schema(system_provider_abi_json(), &generated_schema)
+        .expect("embedded provider registry conforms to the regenerated schema");
+    let table = SystemProviderAbi::from_json(system_provider_abi_json())
+        .expect("schema-validated registry parses into typed provider contracts");
+    let registry = ProviderRoleRegistry::from_baked_abi(&table)
+        .expect("generic invoke/start provider offers resolve");
+
+    let mut generated_bindings = 0;
+    let mut object_type_bindings = 0;
+    let mut direct_routes = 0;
+    let mut registry_routes = 0;
+    let mut direct_result_mismatches = 0;
+    let mut registry_result_mismatches = 0;
+    for operation_name in OBJECT_RETURN_OPERATIONS {
+        let contract = table
+            .operation(operation_name)
+            .expect("generic object-return operation exists in the typed registry");
+        let generated = system_function_descriptor(operation_name)
+            .expect("generic object-return operation has a macro-generated descriptor");
+        assert_eq!(generated.signature, contract.signature.source);
+        assert_eq!(contract.effects.iter().next(), Some(generated.effect));
+        generated_bindings += 1;
+
+        let role_id = contract
+            .role
+            .as_ref()
+            .expect("generic invoke/start operation has a typed provider role");
+        let offer = registry
+            .resolve(role_id.as_str())
+            .expect("generic operation role has a selected provider offer")
+            .clone();
+
+        for object_type in OBJECT_RESULT_TYPES {
+            let expected_argument_types = contract
+                .signature
+                .parameters
+                .iter()
+                .map(|parameter| {
+                    if parameter.ty == AbiType::Named("T".to_owned()) {
+                        object_type.to_owned()
+                    } else {
+                        parameter.ty.canonical()
+                    }
+                })
+                .collect::<Vec<_>>();
+            let arguments = contract
+                .signature
+                .parameters
+                .iter()
+                .map(|parameter| {
+                    let (argument_type, payload) = if parameter.ty == AbiType::Named("T".to_owned())
+                    {
+                        (
+                            object_type.to_owned(),
+                            format!("witness-{object_type}").into_bytes(),
+                        )
+                    } else if parameter.name == "arguments" {
+                        (parameter.ty.canonical(), b"[]".to_vec())
+                    } else {
+                        (
+                            parameter.ty.canonical(),
+                            parameter
+                                .default
+                                .as_deref()
+                                .unwrap_or(&parameter.name)
+                                .as_bytes()
+                                .to_vec(),
+                        )
+                    };
+                    TypedValue::public(TypeId::new(argument_type), payload)
+                })
+                .collect::<Vec<_>>();
+            let expected_result_type = if operation_name == "sys.invoke<T>" {
+                object_type.to_owned()
+            } else {
+                format!("sys.InvocationHandle<{object_type}>")
+            };
+            let object_payload =
+                format!("object-return-{operation_name}-{object_type}").into_bytes();
+            let expected_result =
+                TypedValue::public(TypeId::new(expected_result_type.clone()), object_payload);
+            let provider_for = |response: TypedValue| InvokeValueProvider {
+                offer: offer.clone(),
+                operation: contract.id.clone(),
+                argument_types: expected_argument_types.clone(),
+                response: Ok(response),
+                calls: AtomicUsize::new(0),
+            };
+
+            let direct_provider = provider_for(expected_result.clone());
+            assert_eq!(
+                table.dispatch_to_provider(
+                    generated.name,
+                    &direct_provider,
+                    &arguments,
+                    |_| Ok(()),
+                ),
+                Ok(orna_sys_v1::SystemDispatchResult::Returned(
+                    expected_result.clone()
+                )),
+                "direct route preserves {operation_name} object result {object_type}"
+            );
+            assert_eq!(direct_provider.calls.load(Ordering::SeqCst), 1);
+            direct_routes += 1;
+
+            let registry_provider = provider_for(expected_result.clone());
+            assert_eq!(
+                registry.dispatch_to_provider(
+                    &table,
+                    generated.name,
+                    &registry_provider,
+                    &arguments,
+                    |_| Ok(()),
+                ),
+                Ok(orna_sys_v1::SystemDispatchResult::Returned(
+                    expected_result.clone()
+                )),
+                "selected-provider route preserves {operation_name} object result {object_type}"
+            );
+            assert_eq!(registry_provider.calls.load(Ordering::SeqCst), 1);
+            registry_routes += 1;
+
+            let wrong_object_type = if object_type == "sys.ObjectRef" {
+                "sys.FunctionRef"
+            } else {
+                "sys.ObjectRef"
+            };
+            let wrong_result_type = if operation_name == "sys.invoke<T>" {
+                wrong_object_type.to_owned()
+            } else {
+                format!("sys.InvocationHandle<{wrong_object_type}>")
+            };
+            let expected_diagnostic = ProviderDiagnostic::ResultTypeMismatch {
+                operation: contract.id.clone(),
+                expected: contract.signature.result.canonical(),
+                actual: wrong_result_type.clone(),
+            };
+            let wrong_result = TypedValue::public(
+                TypeId::new(wrong_result_type),
+                b"wrong-object-return-type".to_vec(),
+            );
+            let wrong_direct_provider = provider_for(wrong_result.clone());
+            let wrong_registry_provider = provider_for(wrong_result);
+            let direct_diagnostic = table
+                .dispatch_to_provider(generated.name, &wrong_direct_provider, &arguments, |_| {
+                    Ok(())
+                })
+                .expect_err("direct route rejects object return type outside its witness");
+            let registry_diagnostic = registry
+                .dispatch_to_provider(
+                    &table,
+                    generated.name,
+                    &wrong_registry_provider,
+                    &arguments,
+                    |_| Ok(()),
+                )
+                .expect_err("selected-provider route rejects object return type outside witness");
+            assert_eq!(direct_diagnostic, expected_diagnostic);
+            assert_eq!(registry_diagnostic, expected_diagnostic);
+            assert_eq!(direct_diagnostic.code(), "sys.abi.result_type_mismatch");
+            assert_eq!(registry_diagnostic.code(), "sys.abi.result_type_mismatch");
+            assert_eq!(wrong_direct_provider.calls.load(Ordering::SeqCst), 1);
+            assert_eq!(wrong_registry_provider.calls.load(Ordering::SeqCst), 1);
+            direct_result_mismatches += 1;
+            registry_result_mismatches += 1;
+            object_type_bindings += 1;
+        }
+    }
+
+    let expected_object_type_bindings = OBJECT_RETURN_OPERATIONS.len() * OBJECT_RESULT_TYPES.len();
+    assert_eq!(generated_bindings, OBJECT_RETURN_OPERATIONS.len());
+    assert_eq!(object_type_bindings, expected_object_type_bindings);
+    assert_eq!(direct_routes, expected_object_type_bindings);
+    assert_eq!(registry_routes, expected_object_type_bindings);
+    assert_eq!(direct_result_mismatches, expected_object_type_bindings);
+    assert_eq!(registry_result_mismatches, expected_object_type_bindings);
+    println!(
+        "provider_generic_object_return_parity operations={generated_bindings} object_types={} type_bindings={object_type_bindings} schema_validated=1 typed_registry=1 direct_routes={direct_routes} registry_routes={registry_routes} direct_result_mismatches={direct_result_mismatches} registry_result_mismatches={registry_result_mismatches} total_cases={}",
+        OBJECT_RESULT_TYPES.len(),
+        2 + generated_bindings
+            + object_type_bindings
+            + direct_routes
+            + registry_routes
+            + direct_result_mismatches
+            + registry_result_mismatches
     );
 }
 

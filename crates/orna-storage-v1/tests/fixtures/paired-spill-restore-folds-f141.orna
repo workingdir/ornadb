@@ -1,0 +1,17 @@
+{ id: "f141/spill/shared", name: "f141/checkpoint/alpha", city: "f141/source/alpha-main", }
+
+{ id: "f141/spill/shared", name: "f141/checkpoint/alpha", city: "f141/source/alpha-peer", }
+
+{ id: "f141/spill/beta", name: "f141/checkpoint/beta", city: "f141/source/beta", }
+
+{ id: "f141/segment/alpha-base-4", name: "f141/left/alpha-base-4", city: "f141/right/alpha-base-4", }
+
+{ id: "f141/segment/alpha-base-5", name: "f141/left/alpha-base-5", city: "f141/right/alpha-base-5", }
+
+{ id: "f141/segment/alpha-fold-4", name: "f141/left/alpha-fold-4", city: "f141/right/alpha-fold-4", }
+
+{ id: "f141/segment/alpha-late-6", name: "f141/left/alpha-late-6", city: "f141/right/alpha-late-6", }
+
+{ id: "f141/segment/alpha-peer-4", name: "f141/left/alpha-peer-4", city: "f141/right/alpha-peer-4", }
+
+{ id: "f141/segment/beta-8", name: "f141/left/beta-8", city: "f141/right/beta-8", }
