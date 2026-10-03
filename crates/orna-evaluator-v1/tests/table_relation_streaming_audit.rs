@@ -4424,7 +4424,48 @@ fn paired_snapshots_keep_values_across_sparse_escalation_fold_chains() {
     assert_eq!(snapshots[1], integer_pair(180, 192), "two fold stages compute (180, 192)");
     assert_eq!(snapshots[2], integer_pair(-80, -64), "three fold stages compute (-80, -64)");
     assert_eq!(snapshots[3], integer_pair(1680, 1696), "four fold stages compute (1680, 1696)");
-    assert_eq!(source.lanes.len(), 8, "four paired snapshots read eight source scopes");
+    assert_eq!(source.lanes.len(), lane_names.len());
+    let scopes = source
+        .lanes
+        .iter()
+        .zip(lane_names.iter().copied())
+        .map(|((source_name, scope, _), expected_name)| {
+            assert_eq!(source_name, expected_name, "each escalation reads left then right");
+            *scope
+        })
+        .collect::<Vec<_>>();
+    for (index, scope) in scopes.iter().enumerate() {
+        assert!(
+            !scopes[..index].contains(scope),
+            "paired fold escalation binds each captured snapshot to a fresh source scope: {scope:?}"
+        );
+    }
+    assert_eq!(
+        rotated_chains.iter().map(Vec::len).collect::<Vec<_>>(),
+        [3, 4, 2, 3, 4, 2, 3, 4],
+        "each sparse snapshot restores exactly its own number of checkpoint transitions"
+    );
+    assert_eq!(
+        rotated_chains
+            .iter()
+            .map(|chain| chain[0][0])
+            .collect::<Vec<_>>(),
+        [0x81, 0x82, 0x83, 0x81, 0x82, 0x83, 0x81, 0x82],
+        "checkpoint epochs rotate and recur across the paired escalation snapshots"
+    );
+    let mut expected_cursors = Vec::new();
+    for (index, chain) in rotated_chains.iter().enumerate() {
+        let source_name = lane_names[index].to_owned();
+        expected_cursors.push((source_name.clone(), scopes[index], None));
+        expected_cursors.extend(chain.iter().cloned().map(|cursor| {
+            (source_name.clone(), scopes[index], Some(cursor))
+        }));
+    }
+    assert_eq!(
+        source.cursors,
+        expected_cursors,
+        "each fold depth consumes only the sparse cursors belonging to its captured source snapshot"
+    );
     assert!(source.pending["View.Left"].is_empty());
     assert!(source.pending["View.Right"].is_empty());
 }
