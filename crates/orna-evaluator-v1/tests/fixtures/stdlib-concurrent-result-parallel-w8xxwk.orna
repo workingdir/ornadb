@@ -1,0 +1,7 @@
+std.concurrent.result.parallel_partition([
+    () => outcomes[2],
+    () => outcomes[4],
+    () => outcomes[1],
+    () => outcomes[3],
+    () => outcomes[0],
+]) == ([null, 9, 4], ["first", "second"])

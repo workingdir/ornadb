@@ -1237,6 +1237,98 @@ fn generated_object_return_bindings_match_schema_registry_and_idl() {
 }
 
 #[test]
+fn generated_provider_callback_binding_matches_schema_and_idl() {
+    const OPERATION_NAME: &str = "sys.invoke(Value)";
+
+    let generated_schema = build_provider::generate_provider_registry_schema()
+        .expect("provider callback schema regenerates from its typed source");
+    assert_eq!(generated_schema, system_provider_abi_schema_json());
+    build_host::validate_json_against_schema(system_provider_abi_json(), &generated_schema)
+        .expect("embedded callback operation conforms to its regenerated schema");
+    let registry_json: Value =
+        serde_json::from_str(system_provider_abi_json()).expect("embedded provider registry");
+    let raw_operations = registry_json["operations"]
+        .as_array()
+        .expect("embedded provider registry has operation rows");
+    let registry = orna_sys_v1::SystemProviderAbi::from_json(system_provider_abi_json())
+        .expect("embedded provider registry parses into typed contracts");
+    let contract = registry
+        .operation(OPERATION_NAME)
+        .expect("invoke callback operation exists in typed registry");
+    assert!(contract.role.is_some());
+    let row = raw_operations
+        .iter()
+        .find(|row| row["name"] == OPERATION_NAME)
+        .expect("schema registry contains the invoke operation row");
+    assert_eq!(
+        row["signature"].as_str(),
+        Some(contract.signature.source.as_str())
+    );
+    let generated = system_function_descriptor(OPERATION_NAME)
+        .expect("invoke operation has a macro-generated binding");
+    assert_eq!(generated.signature, contract.signature.source);
+    assert_eq!(contract.effects.iter().next(), Some(generated.effect));
+
+    let source = system_binding_stubs();
+    let parsed = parse_module(source);
+    assert!(
+        parsed.is_ok(),
+        "generated invoke binding bundle parses: {:?}",
+        parsed.diagnostics
+    );
+    let markers = source
+        .lines()
+        .filter_map(|line| line.strip_prefix("// sys-op: "))
+        .collect::<Vec<_>>();
+    let item_index = markers
+        .iter()
+        .position(|marker| *marker == OPERATION_NAME)
+        .expect("generated IDL has the invoke operation marker");
+    let Declaration::Function { signature, .. } = &parsed.value.items[item_index].declaration
+    else {
+        panic!("generated callback binding is not a function")
+    };
+    assert_eq!(
+        signature.parameters.len(),
+        contract.signature.parameters.len()
+    );
+    for (idl_parameter, registry_parameter) in signature
+        .parameters
+        .iter()
+        .zip(&contract.signature.parameters)
+    {
+        let parsed_type = resolve_type(
+            idl_parameter
+                .annotation
+                .as_ref()
+                .expect("generated invoke IDL parameter has a type"),
+        )
+        .expect("generated invoke IDL parameter type resolves");
+        assert_eq!(parsed_type, registry_parameter.ty);
+        let parsed_default = idl_parameter
+            .default
+            .as_ref()
+            .map(|default| &source[default.span().start..default.span().end]);
+        assert_eq!(parsed_default, registry_parameter.default.as_deref());
+    }
+    assert_eq!(
+        resolve_type(
+            signature
+                .result
+                .as_ref()
+                .expect("generated invoke IDL declares its result")
+        )
+        .expect("generated invoke IDL result resolves"),
+        contract.signature.result
+    );
+    println!(
+        "generated_provider_callback_binding_parity schema_validated=1 typed_contracts=1 macro_bindings=1 idl_parameters={} idl_results=1 provider_role=1 total_cases={}",
+        signature.parameters.len(),
+        5 + signature.parameters.len()
+    );
+}
+
+#[test]
 fn generated_idl_modules_parse_and_validate_registry_contracts_independently() {
     let abi = system_provider_abi();
     let modules: BTreeMap<String, String> = serde_json::from_str(system_binding_modules_json())
