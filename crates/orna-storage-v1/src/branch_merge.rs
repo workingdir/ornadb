@@ -1309,8 +1309,8 @@ impl BranchMergeTombstoneHistory {
     pub fn column_restore_storms(&self) -> Vec<BranchMergeColumnRestoreStormSnapshot> {
         let timelines = self.column_restore_ladder_timelines();
         let mut ranges = Vec::new();
-        let mut first_order = None;
-        let mut last_order = None;
+        let mut first_order: Option<u64> = None;
+        let mut last_order: Option<u64> = None;
 
         for (order, mode) in &self.committed_modes {
             if *mode == BranchMergeTombstoneSubmissionMode::TabularColumnDepthWave {
