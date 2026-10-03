@@ -5416,6 +5416,115 @@ fn captured_overflow_identity_survives_paired_restoration_folds() {
 }
 
 #[test]
+fn captured_reorder_identity_survives_paired_restoration_folds() {
+    let (directory, initial_projects, pins, initial_parents) =
+        paired_divergence_pin_restoration_projects();
+    let project_path = directory.path().join("project");
+    let repository = Repository::discover(&project_path).unwrap();
+    let loader = ProjectLoader::default();
+    let mut projects = initial_projects.into_iter().collect::<Vec<_>>();
+    let mut selected_pin_indices = vec![0, 1, 2, 3, 2, 0];
+    let mut project_parents = initial_parents.to_vec();
+    for (fold, pin_index) in [3, 1, 2, 0].into_iter().enumerate() {
+        let message = format!("append reorder restoration fold {fold} for pin {pin_index}");
+        let parent = capture_standard_gitlink(&project_path, &pins[pin_index], &message);
+        let ancestry = git_output_at(
+            &project_path,
+            &["rev-list", "--parents", "-n", "1", parent.as_str()],
+        );
+        let ancestry = ancestry.split_whitespace().collect::<Vec<_>>();
+        assert_eq!(ancestry.len(), 2, "each reorder fold must have one parent");
+        assert_eq!(
+            ancestry[1],
+            project_parents.last().unwrap(),
+            "reorder restoration fold {fold} must continue the paired chain"
+        );
+        let gitlink = git_output_at(&project_path, &["ls-tree", parent.as_str(), "stdlib/std"]);
+        assert_eq!(
+            gitlink.split_whitespace().nth(2),
+            Some(pins[pin_index].as_str()),
+            "reorder restoration fold {fold} must capture the selected pin"
+        );
+        let snapshot = repository.resolve_snapshot(&parent).unwrap();
+        projects.push(loader.load_committed_snapshot(&repository, &snapshot).unwrap());
+        project_parents.push(parent);
+        selected_pin_indices.push(pin_index);
+    }
+
+    assert!(
+        pins[..4]
+            .iter()
+            .enumerate()
+            .all(|(index, pin)| !pins[..index].contains(pin))
+    );
+    assert_eq!(pins[4], pins[2]);
+    assert_eq!(pins[5], pins[0]);
+    let expected = [
+        [1_054, 1_052, 1_053],
+        [10_064, 10_062, 10_063],
+        [1_055, 1_053, 1_054],
+        [10_065, 10_063, 10_064],
+    ];
+    let imports = include_str!("fixtures/module-upgrade-paired-divergence-use.orna");
+    let closure = include_str!("fixtures/module-upgrade-divergence-reorder-iteration-closure.orna");
+    let replay = include_str!("fixtures/module-upgrade-divergence-reorder-iteration-replay.orna");
+    let selected_pins = selected_pin_indices
+        .iter()
+        .map(|index| pins[*index].clone())
+        .collect::<Vec<_>>();
+
+    let mut sessions = Vec::with_capacity(projects.len());
+    for (fold, (project, pin_index)) in projects.iter().zip(&selected_pin_indices).enumerate() {
+        assert_eq!(
+            project.standard_profile().unwrap().snapshot(),
+            &selected_pins[fold],
+            "reorder restoration fold {fold} must load its exact pin"
+        );
+        let mut session = AdmittedReplSession::from_loaded_project(
+            project,
+            project.standard_sources().iter().cloned(),
+            Limits::default(),
+        )
+        .unwrap();
+        for import in imports.lines() {
+            assert_eq!(session.submit(import), Ok(None));
+        }
+        assert_eq!(session.submit(closure), Ok(None));
+        let output = session.submit(replay).unwrap_or_else(|error| {
+            panic!(
+                "reordered iteration replay failed at fold {fold}, pin {}: {}",
+                selected_pins[fold],
+                error.code()
+            )
+        });
+        assert_eq!(
+            output,
+            Some(ints(&expected[*pin_index])),
+            "map must preserve reordered input values at restoration fold {fold}"
+        );
+        sessions.push(session);
+    }
+
+    for index in [9, 0, 7, 1, 8, 3, 6, 2, 9, 5] {
+        assert_eq!(
+            sessions[index].submit(replay),
+            Ok(Some(ints(&expected[selected_pin_indices[index]]))),
+            "interleaved reordered replay must preserve pin {}",
+            selected_pins[index]
+        );
+    }
+    let mut cloned_sessions = sessions.clone();
+    for index in [8, 9, 0, 6, 1, 7] {
+        assert_eq!(
+            cloned_sessions[index].submit(replay),
+            Ok(Some(ints(&expected[selected_pin_indices[index]]))),
+            "cloned reordered replay must preserve pin {}",
+            selected_pins[index]
+        );
+    }
+}
+
+#[test]
 fn captured_snapshot_identity_survives_paired_divergence_compaction_folds() {
     let (directory, projects, pins) = paired_divergence_compaction_projects();
     let expected = [
