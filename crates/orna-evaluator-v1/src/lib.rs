@@ -11606,6 +11606,107 @@ mod tests {
     }
 
     #[test]
+    fn relation_query_aggregations_and_statistics_return_computed_values() {
+        let ints = |values: &[i64]| {
+            values
+                .iter()
+                .map(|value| Value::Int(BigInt::from(*value)))
+                .collect::<Vec<_>>()
+        };
+        let result = evaluate_relation_collection_fixture(
+            include_str!("../tests/fixtures/relation-query-statistics-6c10u.orna"),
+            &[("rows", ints(&[0, 2]))],
+        )
+        .expect("query and statistics operators compute relation values");
+        assert_eq!(
+            result,
+            Value::List(vec![
+                Value::Int(BigInt::from(2)),
+                Value::Int(BigInt::from(2)),
+                Value::Option(Some(Box::new(Value::Int(BigInt::from(0))))),
+                Value::Option(Some(Box::new(Value::Int(BigInt::from(2))))),
+                Value::Int(BigInt::from(1)),
+                Value::Int(BigInt::from(1)),
+                Value::Decimal(DecimalValue::new(5.into(), (-1).into()).unwrap()),
+                Value::Int(BigInt::from(2)),
+                Value::Option(Some(Box::new(Value::Int(BigInt::from(0))))),
+                Value::Option(Some(Box::new(Value::Int(BigInt::from(2))))),
+                Value::Int(BigInt::from(2)),
+                Value::List(ints(&[0, 2])),
+                Value::Int(BigInt::from(1)),
+                Value::Int(BigInt::from(1)),
+                Value::List(ints(&[1, 1])),
+            ])
+        );
+
+        let empty = evaluate_relation_collection_fixture(
+            include_str!("../tests/fixtures/relation-statistics-empty-6c10u.orna"),
+            &[("rows", Vec::new())],
+        )
+        .expect("empty aggregates use their documented identities");
+        assert_eq!(
+            empty,
+            Value::List(vec![
+                Value::Null,
+                Value::Null,
+                Value::Null,
+                Value::Int(BigInt::from(0)),
+                Value::Null,
+                Value::Null,
+                Value::Null,
+                Value::List(Vec::new()),
+                Value::Null,
+                Value::Null,
+                Value::List(ints(&[0])),
+                Value::Int(BigInt::from(0)),
+                Value::Int(BigInt::from(0)),
+            ])
+        );
+    }
+
+    #[test]
+    fn relation_time_statistics_compute_rate_derivative_and_area() {
+        fn instant(source: &str) -> Value {
+            let parsed = parse_expression(source);
+            assert!(parsed.is_ok(), "{source}: {:?}", parsed.diagnostics);
+            let functions = Functions::new();
+            let mut context = test_context(&functions);
+            let mut scope = Scope(
+                BTreeMap::new(),
+                BTreeSet::new(),
+                BTreeSet::new(),
+                NominalDefinitions::new(),
+                BTreeSet::new(),
+            );
+            context
+                .evaluate(&parsed.value, &mut scope, 0)
+                .unwrap_or_else(|error| panic!("{source}: {}", error.code()))
+        }
+        let first_time = instant("2024-01-01T00:00:00Z");
+        let last_time = instant("2024-01-01T00:00:02Z");
+        let points = vec![
+            Value::Tuple(vec![first_time, Value::Int(BigInt::from(1))]),
+            Value::Tuple(vec![last_time.clone(), Value::Int(BigInt::from(3))]),
+        ];
+        let result = evaluate_relation_collection_fixture(
+            include_str!("../tests/fixtures/relation-statistics-time-series-6c10u.orna"),
+            &[("points", points)],
+        )
+        .expect("time-series statistics consume ordered relation points");
+        assert_eq!(
+            result,
+            Value::List(vec![
+                Value::Int(BigInt::from(1)),
+                Value::List(vec![Value::Tuple(vec![
+                    last_time,
+                    Value::Int(BigInt::from(1)),
+                ])]),
+                Value::Int(BigInt::from(4)),
+            ])
+        );
+    }
+
+    #[test]
     fn function_defaults_bind_in_declaration_order_and_only_when_omitted() {
         let parsed = orna_syntax_v1::parse_module(
             "fn run(seed: Int = 3, doubled: Int = seed * 2) = doubled;",
