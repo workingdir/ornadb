@@ -2488,7 +2488,9 @@ fn captured_pair_resolution_folds_keep_each_pinned_snapshot_identity() {
             Limits::default(),
         )
         .unwrap();
-        assert_eq!(session.submit(use_pair), Ok(None));
+        for import in use_pair.lines() {
+            assert_eq!(session.submit(import), Ok(None));
+        }
         assert_eq!(session.submit(bind_pair), Ok(None));
         assert_eq!(
             session.submit(fold_pair),
