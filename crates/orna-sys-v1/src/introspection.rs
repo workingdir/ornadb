@@ -693,10 +693,13 @@ pub struct QueryJoinPairIdentityDescription {
 /// A correlated subquery that the resolver has already approved for
 /// decorrelation into a predicate join. The planner keeps the subquery and
 /// correlation identities on both the join and its input while cost ordering
-/// moves known inputs across sparse unknown-cost entries. ORNA does not define
-/// decorrelation eligibility or a subquery-specific cost model; this
-/// explain-only adapter uses the supplied pinned input statistics and the
-/// ordinary predicate-join estimate.
+/// moves known inputs across sparse unknown-cost entries. Its decorrelated
+/// anchor-fold identity additionally binds that input to the accumulated
+/// anchor side of the join, so separate sparse lateral anchors cannot share a
+/// fold identity. ORNA does not define decorrelation eligibility, a
+/// subquery-specific cost model, or this explain-only identity encoding; the
+/// adapter uses supplied pinned statistics and the ordinary predicate-join
+/// estimate.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct QueryDecorrelatedSubqueryDescription {
     pub identity: ObjectRef,
@@ -2353,6 +2356,14 @@ fn explain_query_core_with_subqueries(
         let decorrelated_predicate_identity = decorrelated_subquery
             .zip(selected_partial_index)
             .map(|(subquery, index)| decorrelated_predicate_pushdown_identity(subquery, index));
+        let decorrelated_anchor_fold_id = decorrelated_subquery.map(|subquery| {
+            query_decorrelated_anchor_fold_identity(
+                &left_fold_identity,
+                &right_fold_identity,
+                subquery,
+                decorrelated_predicate_identity.as_deref(),
+            )
+        });
         if let Some(identity) = decorrelated_predicate_identity.as_deref() {
             for index in BTreeSet::from([right_access, right]) {
                 add_decorrelated_predicate_pushdown_details(
@@ -2361,12 +2372,18 @@ fn explain_query_core_with_subqueries(
                 );
             }
         }
+        if let Some(identity) = decorrelated_anchor_fold_id.as_deref() {
+            for index in BTreeSet::from([right_access, right]) {
+                add_decorrelated_anchor_fold_details(&mut operators[index].details, identity);
+            }
+        }
         let next_join_cost_fold_identity = query_join_cost_fold(
             &left_fold_identity,
             &right_fold_identity,
             join_pair_identity,
             paired_predicate_pushdown_identity.as_deref(),
             decorrelated_predicate_identity.as_deref(),
+            decorrelated_anchor_fold_id.as_deref(),
             cardinality,
             work,
             work_overflow,
@@ -2416,6 +2433,9 @@ fn explain_query_core_with_subqueries(
         }
         if let Some(identity) = decorrelated_predicate_identity.as_deref() {
             add_decorrelated_predicate_pushdown_details(&mut details, identity);
+        }
+        if let Some(identity) = decorrelated_anchor_fold_id.as_deref() {
+            add_decorrelated_anchor_fold_details(&mut details, identity);
         }
         if let Some(pair_identity) = join_pair_identity {
             add_join_pair_identity_details(&mut details, pair_identity);
@@ -3587,6 +3607,44 @@ fn decorrelated_predicate_pushdown_identity(
     format!("decorrelated-pushdown:{}", hex(&hash.finalize()))
 }
 
+/// Binds a resolver-approved decorrelation to the sparse fold accumulated on
+/// its lateral anchor. The reference leaves explain identity encoding open;
+/// this domain-separated digest prevents equal child subqueries under distinct
+/// anchors from being reported as the same paired fold.
+fn query_decorrelated_anchor_fold_identity(
+    anchor_fold_identity: &str,
+    input_identity: &str,
+    subquery: &QueryDecorrelatedSubqueryDescription,
+    predicate_pushdown_identity: Option<&str>,
+) -> String {
+    let mut hash = Sha256::new();
+    hash.update(b"orna.sys.decorrelated-anchor-fold.v1\0");
+    hash_part(&mut hash, anchor_fold_identity.as_bytes());
+    hash_part(&mut hash, input_identity.as_bytes());
+    hash_part(&mut hash, subquery.identity.as_str().as_bytes());
+    hash_part(&mut hash, subquery.source.as_str().as_bytes());
+    hash_part(
+        &mut hash,
+        subquery.correlation_predicate.as_str().as_bytes(),
+    );
+    hash_optional_text(&mut hash, predicate_pushdown_identity);
+    format!("decorrelated-anchor-fold:{}", hex(&hash.finalize()))
+}
+
+fn add_decorrelated_anchor_fold_details(
+    details: &mut BTreeMap<String, PlanDetail>,
+    identity: &str,
+) {
+    details.insert(
+        "decorrelated_anchor_fold_identity".to_owned(),
+        PlanDetail::Text(identity.to_owned()),
+    );
+    details.insert(
+        "decorrelated_anchor_fold_pairing".to_owned(),
+        PlanDetail::Text("sparse_anchor_fold_and_resolved_subquery_input".to_owned()),
+    );
+}
+
 fn add_decorrelated_predicate_pushdown_details(
     details: &mut BTreeMap<String, PlanDetail>,
     identity: &str,
@@ -3679,6 +3737,7 @@ fn query_join_cost_fold(
     pair: Option<&QueryJoinPairIdentityDescription>,
     paired_predicate_pushdown_identity: Option<&str>,
     decorrelated_predicate_pushdown_identity: Option<&str>,
+    decorrelated_anchor_fold_identity: Option<&str>,
     cardinality: Cardinality,
     work: Option<u64>,
     work_overflow: bool,
@@ -3701,6 +3760,7 @@ fn query_join_cost_fold(
     }
     hash_optional_text(&mut hash, paired_predicate_pushdown_identity);
     hash_optional_text(&mut hash, decorrelated_predicate_pushdown_identity);
+    hash_optional_text(&mut hash, decorrelated_anchor_fold_identity);
     hash_optional_u64(&mut hash, cardinality.rows);
     hash_optional_u64(&mut hash, cardinality.bytes);
     hash_optional_u64(&mut hash, work);
