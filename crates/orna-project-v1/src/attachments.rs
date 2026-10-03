@@ -1137,8 +1137,11 @@ impl PackageResolver {
     /// widths may vary because an omitted entry is not assigned a new slot;
     /// every label previously selected or explicitly omitted remains tracked
     /// and is revalidated after each fold. The reference is silent on sparse
-    /// nested storm batches, so v1 treats labels as stable keys and rejects a
-    /// duplicate key within one round. Failure returns no partial route.
+    /// nested storm batches, so v1 treats labels as stable keys, orders each
+    /// round by `(wave, depth)`, and rejects a duplicate key within one round.
+    /// This makes a sparse round deterministic regardless of entry order while
+    /// keeping each replacement wave's internal order intact. Failure returns
+    /// no partial route.
     pub fn extend_nested_terminal_pair_sparse_checkpoint_storm_rounds_from_depth_labels(
         &self,
         previous: &ReboundPathResolution,
@@ -1148,7 +1151,7 @@ impl PackageResolver {
         let mut retained_labels: Vec<NestedPairDepthLabel> = Vec::new();
         for round in rounds {
             let mut seen_labels: Vec<NestedPairDepthLabel> = Vec::with_capacity(round.len());
-            let checkpoints = round
+            let mut checkpoints = round
                 .iter()
                 .map(|(label, replacements)| {
                     route.validate_depth_label(label)?;
@@ -1159,19 +1162,23 @@ impl PackageResolver {
                     if !retained_labels.contains(label) {
                         retained_labels.push((*label).clone());
                     }
-                    let Some(replacement_waves) = replacements else {
-                        return Ok(None);
+                    let checkpoint = match replacements {
+                        Some(replacement_waves) => {
+                            let checkpoint = route.handoff_checkpoint(label.wave, label.depth)?;
+                            if checkpoint.depth_label() != *label {
+                                return Err(AttachmentError::RetainedSnapshotUnavailable);
+                            }
+                            Some((checkpoint, *replacement_waves))
+                        }
+                        None => None,
                     };
-                    let checkpoint = route.handoff_checkpoint(label.wave, label.depth)?;
-                    if checkpoint.depth_label() != *label {
-                        return Err(AttachmentError::RetainedSnapshotUnavailable);
-                    }
-                    Ok(Some((checkpoint, *replacement_waves)))
+                    Ok((label.wave, label.depth, checkpoint))
                 })
                 .collect::<Result<Vec<_>, AttachmentError>>()?;
+            checkpoints.sort_by_key(|(wave, depth, _)| (*wave, *depth));
             let storms = checkpoints
                 .iter()
-                .filter_map(|checkpoint| {
+                .filter_map(|(_, _, checkpoint)| {
                     checkpoint
                         .as_ref()
                         .map(|(checkpoint, replacement_waves)| (checkpoint, *replacement_waves))
