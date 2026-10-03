@@ -1138,7 +1138,8 @@ fn divergent_paired_module_projects() -> (TempDir, [LoadedProject; 4], [String; 
     )
 }
 
-fn paired_divergence_restoration_projects() -> (TempDir, [LoadedProject; 6], [String; 6]) {
+fn paired_divergence_restoration_projects()
+-> (TempDir, [LoadedProject; 6], [String; 6], [String; 6]) {
     let (directory, projects, pins) = divergent_paired_module_projects();
     let [
         base_project,
@@ -1203,6 +1204,27 @@ fn paired_divergence_restoration_projects() -> (TempDir, [LoadedProject; 6], [St
     };
     let math_restored_project = load(&math_restored_parent);
     let restored_project = load(&restored_parent);
+    let project_parents = pins
+        .iter()
+        .map(|pin| {
+            git_output_at(&project_path, &["rev-list", "--all", "--reverse"])
+                .lines()
+                .find(|commit| {
+                    git_output_at(&project_path, &["ls-tree", commit, "stdlib/std"])
+                        .split_whitespace()
+                        .nth(2)
+                        == Some(pin.as_str())
+                })
+                .expect("every captured pin must have a project snapshot")
+                .to_owned()
+        })
+        .collect::<Vec<_>>();
+    let project_parents: [String; 6] = project_parents
+        .into_iter()
+        .chain([math_restored_parent, restored_parent])
+        .collect::<Vec<_>>()
+        .try_into()
+        .unwrap();
     (
         directory,
         [
@@ -1221,6 +1243,7 @@ fn paired_divergence_restoration_projects() -> (TempDir, [LoadedProject; 6], [St
             math_restored_pin,
             restored_pin,
         ],
+        project_parents,
     )
 }
 
@@ -4526,7 +4549,7 @@ fn captured_nested_closures_keep_paired_pin_identity_across_divergence_folds() {
 
 #[test]
 fn captured_snapshot_identity_survives_paired_divergence_restoration_folds() {
-    let (directory, projects, pins) = paired_divergence_restoration_projects();
+    let (directory, projects, pins, project_parents) = paired_divergence_restoration_projects();
     let expected = [
         [40, 4, 44, 40, 4, 44, 1_014, 1_015],
         [50, 4, 54, 50, 4, 54, 10_014, 10_015],
@@ -4606,6 +4629,35 @@ fn captured_snapshot_identity_survives_paired_divergence_restoration_folds() {
         pins[5], pins[0],
         "restored source equality must retain the new restoration commit identity"
     );
+    for (index, (parent, pin)) in project_parents.iter().zip(&pins).enumerate() {
+        let gitlink = git_output_at(
+            &directory.path().join("project"),
+            &["ls-tree", parent.as_str(), "stdlib/std"],
+        );
+        assert_eq!(
+            gitlink.split_whitespace().nth(2),
+            Some(pin.as_str()),
+            "project snapshot {index} must record its captured standard pin"
+        );
+    }
+    for (restoration_index, previous_index) in [(4, 3), (5, 4)] {
+        let ancestry = git_output_at(
+            &directory.path().join("project"),
+            &[
+                "rev-list",
+                "--parents",
+                "-n",
+                "1",
+                project_parents[restoration_index].as_str(),
+            ],
+        );
+        let ancestry = ancestry.split_whitespace().collect::<Vec<_>>();
+        assert_eq!(ancestry.len(), 2, "each restoration snapshot has one parent");
+        assert_eq!(
+            ancestry[1], project_parents[previous_index],
+            "project restoration snapshots preserve the paired fold chain"
+        );
+    }
 
     let mut sessions = Vec::with_capacity(projects.len());
     for (index, project) in projects.iter().enumerate() {
