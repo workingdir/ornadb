@@ -650,9 +650,14 @@ fn emacs_keywords(root: &Path, expected: &BTreeSet<String>) -> (&'static str, BT
     );
     assert!(source.contains("font-lock-keyword-face"));
     assert!(
+        !source.contains("(setq-local case-fold-search t)"),
+        "Orna v1 font-lock must not fold keyword case"
+    );
+    assert!(
         source.contains("(orna-font-lock-keywords nil nil)"),
         "Orna v1 keywords are case-sensitive"
     );
+    assert!(source.contains("auto-mode-alist") && source.contains(".orna"));
     assert_surface_has_no_legacy(&words, expected, "Emacs font-lock");
     ("Emacs", words)
 }
