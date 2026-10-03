@@ -1,0 +1,1 @@
+io.buffer.read_line_batches("ROOT_PATH", "input.txt", "io-buffer-proof", 2)
