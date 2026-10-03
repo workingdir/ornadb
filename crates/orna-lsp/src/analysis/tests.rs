@@ -9,6 +9,7 @@ use crate::documents::{Document, PositionMapper};
 
 const LEXICAL_SOURCE: &str = include_str!("../../tests/fixtures/lexical-v1.orna");
 const EXPRESSIONS_SOURCE: &str = include_str!("../../tests/fixtures/expressions-v1.orna");
+const CALL_SOURCE: &str = include_str!("../../tests/fixtures/call-v1.orna");
 
 fn document(text: &str) -> Document {
     Document::new(
@@ -20,7 +21,7 @@ fn document(text: &str) -> Document {
 
 #[test]
 fn in_crate_fixtures_parse_with_the_frozen_1_0_frontend() {
-    for source in [LEXICAL_SOURCE, EXPRESSIONS_SOURCE] {
+    for source in [LEXICAL_SOURCE, EXPRESSIONS_SOURCE, CALL_SOURCE] {
         let parsed = orna_syntax_v1::parse_module(source);
         assert!(parsed.diagnostics.is_empty(), "{:#?}", parsed.diagnostics);
     }
@@ -91,13 +92,8 @@ fn model_drives_function_completions_hover_signature_navigation_and_rename_range
     assert!(hover_text.contains("fn add(left: Int, right: Int): Int"));
 
     let parameter_position = mapper.position(document.text.find("left: Int").unwrap() + 1);
-    let parameter_hover = hover(
-        &document,
-        &parse,
-        parameter_position,
-        &mapper,
-    )
-    .expect("parameter hover");
+    let parameter_hover =
+        hover(&document, &parse, parameter_position, &mapper).expect("parameter hover");
     let parameter_hover = match parameter_hover.contents {
         lsp_types::HoverContents::Markup(content) => content.value,
         _ => panic!("expected markdown parameter hover"),

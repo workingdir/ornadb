@@ -386,11 +386,16 @@ fn request_hover(
     let (_, params) = request.extract::<HoverParams>("textDocument/hover")?;
     let uri = params.text_document_position_params.text_document.uri;
     let position = params.text_document_position_params.position;
-    let Some(document) = state.document(&uri) else {
+    let Some((document, _, selected_start)) = combined_workspace(&state.documents, &uri) else {
         return Ok(serde_json::Value::Null);
     };
-    let (parse, mapper) = parse_document(document);
-    let hover: Option<Hover> = analysis::hover(document, &parse, position, &mapper);
+    let (parse, mapper) = parse_document(&document);
+    let Some(position) =
+        workspace_position(&document, selected_start, position, &state.documents, &uri)
+    else {
+        return Ok(serde_json::Value::Null);
+    };
+    let hover: Option<Hover> = analysis::hover(&document, &parse, position, &mapper);
     Ok(serde_json::to_value(hover)?)
 }
 
@@ -402,11 +407,16 @@ fn request_signature_help(
         request.extract::<lsp_types::SignatureHelpParams>("textDocument/signatureHelp")?;
     let uri = params.text_document_position_params.text_document.uri;
     let position = params.text_document_position_params.position;
-    let Some(document) = state.document(&uri) else {
+    let Some((document, _, selected_start)) = combined_workspace(&state.documents, &uri) else {
         return Ok(serde_json::Value::Null);
     };
-    let (parse, mapper) = parse_document(document);
-    let help = analysis::signature_help(document, &parse, position, &mapper);
+    let (parse, mapper) = parse_document(&document);
+    let Some(position) =
+        workspace_position(&document, selected_start, position, &state.documents, &uri)
+    else {
+        return Ok(serde_json::Value::Null);
+    };
+    let help = analysis::signature_help(&document, &parse, position, &mapper);
     Ok(serde_json::to_value(help)?)
 }
 
@@ -417,11 +427,18 @@ fn request_definition(
     let (_, params) = request.extract::<GotoDefinitionParams>("textDocument/definition")?;
     let uri = params.text_document_position_params.text_document.uri;
     let position = params.text_document_position_params.position;
-    let Some(document) = state.document(&uri) else {
+    let Some((document, segments, selected_start)) = combined_workspace(&state.documents, &uri)
+    else {
         return Ok(serde_json::Value::Null);
     };
-    let (parse, mapper) = parse_document(document);
-    let location = analysis::definition(document, &parse, position, &mapper);
+    let (parse, mapper) = parse_document(&document);
+    let Some(position) =
+        workspace_position(&document, selected_start, position, &state.documents, &uri)
+    else {
+        return Ok(serde_json::Value::Null);
+    };
+    let location = analysis::definition(&document, &parse, position, &mapper)
+        .and_then(|location| project_location(location, &mapper, &segments));
     let response = location.map(GotoDefinitionResponse::Scalar);
     Ok(serde_json::to_value(response)?)
 }
@@ -433,17 +450,26 @@ fn request_references(
     let (_, params) = request.extract::<ReferenceParams>("textDocument/references")?;
     let uri = params.text_document_position.text_document.uri;
     let position = params.text_document_position.position;
-    let Some(document) = state.document(&uri) else {
+    let Some((document, segments, selected_start)) = combined_workspace(&state.documents, &uri)
+    else {
         return Ok(serde_json::Value::Null);
     };
-    let (parse, mapper) = parse_document(document);
+    let (parse, mapper) = parse_document(&document);
+    let Some(position) =
+        workspace_position(&document, selected_start, position, &state.documents, &uri)
+    else {
+        return Ok(serde_json::Value::Null);
+    };
     let locations = analysis::references(
-        document,
+        &document,
         &parse,
         position,
         &mapper,
         params.context.include_declaration,
-    );
+    )
+    .into_iter()
+    .filter_map(|location| project_location(location, &mapper, &segments))
+    .collect::<Vec<_>>();
     Ok(serde_json::to_value(locations)?)
 }
 
@@ -471,15 +497,12 @@ struct SourceSegment<'a> {
     end: usize,
 }
 
-fn semantic_rename(
-    documents: &HashMap<Uri, Document>,
+/// Builds a deterministic source view from open Orna documents so editor
+/// features can resolve declarations and references across file boundaries.
+fn combined_workspace<'a>(
+    documents: &'a HashMap<Uri, Document>,
     uri: &Uri,
-    position: Position,
-    new_name: &str,
-) -> Option<HashMap<Uri, Vec<TextEdit>>> {
-    // The analysis APIs accept one document at a time. A deterministic joined
-    // source view lets them resolve references between open files; offsets are
-    // projected back to the original source documents below.
+) -> Option<(Document, Vec<SourceSegment<'a>>, usize)> {
     let mut sources: Vec<_> = documents
         .values()
         .filter(|document| document.uri.as_str().ends_with(".orna"))
@@ -504,13 +527,63 @@ fn semantic_rename(
     let selected = segments
         .iter()
         .find(|segment| &segment.document.uri == uri)?;
-    let selected_mapper = PositionMapper::new(&selected.document.text);
-    let combined_mapper = PositionMapper::new(&combined_source);
-    let combined_byte = selected
-        .start
-        .checked_add(selected_mapper.byte_offset(position))?;
-    let combined_position = combined_mapper.position(combined_byte);
-    let workspace_document = Document::new(uri.clone(), combined_source, selected.document.version);
+    let selected_start = selected.start;
+    let version = selected.document.version;
+    Some((
+        Document::new(uri.clone(), combined_source, version),
+        segments,
+        selected_start,
+    ))
+}
+
+fn workspace_position(
+    workspace: &Document,
+    selected_start: usize,
+    position: Position,
+    documents: &HashMap<Uri, Document>,
+    uri: &Uri,
+) -> Option<Position> {
+    let selected = documents.get(uri)?;
+    let selected_mapper = PositionMapper::new(&selected.text);
+    let workspace_mapper = PositionMapper::new(&workspace.text);
+    let byte = selected_start.checked_add(selected_mapper.byte_offset(position))?;
+    Some(workspace_mapper.position(byte))
+}
+
+fn project_location(
+    location: lsp_types::Location,
+    workspace_mapper: &PositionMapper<'_>,
+    segments: &[SourceSegment<'_>],
+) -> Option<lsp_types::Location> {
+    let start = workspace_mapper.byte_offset(location.range.start);
+    let end = workspace_mapper.byte_offset(location.range.end);
+    let segment = segments
+        .iter()
+        .find(|segment| start >= segment.start && end <= segment.end && start < end)?;
+    let mapper = PositionMapper::new(&segment.document.text);
+    Some(lsp_types::Location {
+        uri: segment.document.uri.clone(),
+        range: mapper.range(&orna_syntax_v1::SyntaxSpan::new(
+            start - segment.start,
+            end - segment.start,
+        )),
+    })
+}
+
+fn semantic_rename(
+    documents: &HashMap<Uri, Document>,
+    uri: &Uri,
+    position: Position,
+    new_name: &str,
+) -> Option<HashMap<Uri, Vec<TextEdit>>> {
+    let (workspace_document, segments, selected_start) = combined_workspace(documents, uri)?;
+    let combined_position = workspace_position(
+        &workspace_document,
+        selected_start,
+        position,
+        documents,
+        uri,
+    )?;
     let workspace_parse = analysis::parse_document(&workspace_document);
     let workspace_mapper = PositionMapper::new(&workspace_document.text);
     let edits = semantic_rename_in_source(
@@ -804,11 +877,16 @@ fn request_completion(
 ) -> Result<serde_json::Value, Box<dyn std::error::Error + Send + Sync>> {
     let (_, params) = request.extract::<CompletionParams>("textDocument/completion")?;
     let uri = params.text_document_position.text_document.uri;
-    let Some(document) = state.document(&uri) else {
+    let Some((document, _, selected_start)) = combined_workspace(&state.documents, &uri) else {
         return Ok(serde_json::Value::Null);
     };
-    let (parse, mapper) = parse_document(document);
+    let (parse, mapper) = parse_document(&document);
     let position = params.text_document_position.position;
+    let Some(position) =
+        workspace_position(&document, selected_start, position, &state.documents, &uri)
+    else {
+        return Ok(serde_json::Value::Null);
+    };
     let byte = mapper.byte_offset(position);
     let items =
         analysis::completion_at(&parse, &document.text, Some(byte), params.context.as_ref());

@@ -8,6 +8,7 @@ use std::{
 use serde_json::{Value, json};
 
 const SOURCE: &str = include_str!("fixtures/expressions-v1.orna");
+const CALL_SOURCE: &str = include_str!("fixtures/call-v1.orna");
 
 struct Client {
     child: Child,
@@ -113,8 +114,9 @@ fn open(client: &mut Client, uri: &str, source: &str) -> Value {
 }
 
 #[test]
-fn v1_language_model_powers_hover_completion_signature_navigation_and_rename() {
+fn v1_workspace_model_powers_editor_features_across_open_files() {
     let uri = "file:///workspace/expressions-v1.orna";
+    let caller_uri = "file:///workspace/call-v1.orna";
     let mut client = Client::spawn();
     initialize(&mut client);
     let diagnostics = open(&mut client, uri, SOURCE);
@@ -122,12 +124,20 @@ fn v1_language_model_powers_hover_completion_signature_navigation_and_rename() {
         diagnostics["diagnostics"].as_array().unwrap().is_empty(),
         "{diagnostics}"
     );
+    let caller_diagnostics = open(&mut client, caller_uri, CALL_SOURCE);
+    assert!(
+        caller_diagnostics["diagnostics"]
+            .as_array()
+            .unwrap()
+            .is_empty(),
+        "{caller_diagnostics}"
+    );
 
-    let call_offset = SOURCE.find("add(value, 2)").unwrap();
-    let call_position = position_at(SOURCE, call_offset + 1);
+    let call_offset = CALL_SOURCE.find("add(value, 2)").unwrap();
+    let call_position = position_at(CALL_SOURCE, call_offset + 1);
     let hover = client.request(
         "textDocument/hover",
-        json!({"textDocument":{"uri":uri},"position":call_position}),
+        json!({"textDocument":{"uri":caller_uri},"position":call_position}),
     );
     assert!(
         hover["contents"]["value"]
@@ -144,7 +154,7 @@ fn v1_language_model_powers_hover_completion_signature_navigation_and_rename() {
 
     let definition = client.request(
         "textDocument/definition",
-        json!({"textDocument":{"uri":uri},"position":call_position}),
+        json!({"textDocument":{"uri":caller_uri},"position":call_position}),
     );
     assert_eq!(definition["uri"], uri);
     assert_eq!(
@@ -152,21 +162,38 @@ fn v1_language_model_powers_hover_completion_signature_navigation_and_rename() {
         position_of(SOURCE, "pub fn add", "pub fn ".len())
     );
 
-    let references = client.request("textDocument/references", json!({"textDocument":{"uri":uri},"position":call_position,"context":{"includeDeclaration":true}}));
-    assert_eq!(references.as_array().unwrap().len(), 2);
+    let references = client.request("textDocument/references", json!({"textDocument":{"uri":caller_uri},"position":call_position,"context":{"includeDeclaration":true}}));
+    assert_eq!(references.as_array().unwrap().len(), 3);
+    assert!(
+        references
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|location| location["uri"] == uri)
+    );
+    assert!(
+        references
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|location| location["uri"] == caller_uri)
+    );
 
     let renamed = client.request(
         "textDocument/rename",
-        json!({"textDocument":{"uri":uri},"position":call_position,"newName":"sum"}),
+        json!({"textDocument":{"uri":caller_uri},"position":call_position,"newName":"sum"}),
     );
     let edits = renamed["changes"][uri].as_array().unwrap();
     assert_eq!(edits.len(), 2);
     assert!(edits.iter().all(|edit| edit["newText"] == "sum"));
+    let caller_edits = renamed["changes"][caller_uri].as_array().unwrap();
+    assert_eq!(caller_edits.len(), 1);
+    assert_eq!(caller_edits[0]["newText"], "sum");
 
-    let cursor = SOURCE.find("add(value, 2)").unwrap() + "add(value, ".len();
+    let cursor = CALL_SOURCE.find("add(value, 2)").unwrap() + "add(value, ".len();
     let signature = client.request(
         "textDocument/signatureHelp",
-        json!({"textDocument":{"uri":uri},"position":position_at(SOURCE,cursor)}),
+        json!({"textDocument":{"uri":caller_uri},"position":position_at(CALL_SOURCE,cursor)}),
     );
     assert_eq!(signature["activeParameter"], 1);
     assert!(
@@ -178,7 +205,7 @@ fn v1_language_model_powers_hover_completion_signature_navigation_and_rename() {
 
     let completion = client.request(
         "textDocument/completion",
-        json!({"textDocument":{"uri":uri},"position":position_at(SOURCE,call_offset)}),
+        json!({"textDocument":{"uri":caller_uri},"position":position_at(CALL_SOURCE,call_offset)}),
     );
     let completion_items = completion
         .as_array()
