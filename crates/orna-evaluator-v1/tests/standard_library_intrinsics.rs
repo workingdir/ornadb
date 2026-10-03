@@ -2,13 +2,16 @@ use orna_evaluator_v1::{AdmittedReplSession, Limits};
 use orna_foundation_v1::CanonicalValue;
 use orna_value_v1::Raw;
 
+#[path = "support/pinned_time_text_std.rs"]
+mod pinned_time_text_std;
+
 fn canonical(raw: Raw) -> CanonicalValue {
     CanonicalValue::new(raw).unwrap()
 }
 
 #[test]
 fn pinned_math_and_text_exports_bind_to_their_runtime_intrinsics() {
-    let mut session = AdmittedReplSession::with_reference_standard(Limits::default()).unwrap();
+    let mut session = pinned_time_text_std::text_math_session();
     assert_eq!(session.submit(include_str!("fixtures/stdlib-use-math-2189.orna")), Ok(None));
     assert_eq!(session.submit(include_str!("fixtures/stdlib-use-text-2189.orna")), Ok(None));
     assert_eq!(
