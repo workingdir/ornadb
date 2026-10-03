@@ -1225,8 +1225,6 @@ fn paired_divergence_compaction_projects() -> (TempDir, [LoadedProject; 5], [Str
         "capture compacted paired module divergence fold",
     );
 
-    git_output_at(&standard_path, &["gc", "--prune=now"]);
-    git_output_at(&project_path, &["gc", "--prune=now"]);
     let repository = Repository::discover(&project_path).unwrap();
     let parent = repository.resolve_snapshot(&compacted_parent).unwrap();
     let compacted_project = ProjectLoader::default()
@@ -4096,13 +4094,25 @@ fn captured_snapshot_identity_survives_paired_divergence_compaction_folds() {
             assert_eq!(session.submit(import), Ok(None));
         }
         assert_eq!(session.submit(capture), Ok(None));
+        sessions.push(session);
+    }
+
+    git_output_at(&standard_path, &["gc", "--prune=now"]);
+    git_output_at(&directory.path().join("project"), &["gc", "--prune=now"]);
+    for pin in &pins {
+        assert_eq!(
+            git_output_at(&standard_path, &["rev-parse", pin.as_str()]),
+            *pin,
+            "object compaction must retain captured pin {pin}"
+        );
+    }
+    for (index, session) in sessions.iter_mut().enumerate() {
         assert_eq!(
             session.submit(replay),
             Ok(Some(ints(&expected[index]))),
-            "captured replay must compute from compacted history pin {}",
+            "capture made before compaction must replay from pin {}",
             pins[index]
         );
-        sessions.push(session);
     }
 
     for index in [4, 0, 3, 2, 1, 4, 3, 0, 2, 1] {
