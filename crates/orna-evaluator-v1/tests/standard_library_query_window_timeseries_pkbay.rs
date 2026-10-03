@@ -44,6 +44,20 @@ fn query_windows_compute_rate_and_trapezoidal_integral_per_overlapping_window() 
 }
 
 #[test]
+fn query_windows_preserve_elapsed_time_across_sparse_nonoverlapping_windows() {
+    let mut session = session();
+    let rate = session
+        .submit(include_str!("fixtures/stdlib-query-window-rate-sparse-pkbay.orna"))
+        .unwrap_or_else(|error| panic!("sparse window rate failed with {}", error.code()));
+    assert_eq!(rate, Some(optional_ints(&[2, 2])));
+
+    let integral = session
+        .submit(include_str!("fixtures/stdlib-query-window-integrate-sparse-pkbay.orna"))
+        .unwrap_or_else(|error| panic!("sparse window integration failed with {}", error.code()));
+    assert_eq!(integral, Some(optional_ints(&[2, 30])));
+}
+
+#[test]
 fn query_window_derivative_uses_each_pair_right_endpoint_and_exact_slope() {
     let actual = session()
         .submit(include_str!("fixtures/stdlib-query-window-derivative-pkbay.orna"))
@@ -61,5 +75,15 @@ fn time_series_windows_omit_short_tails_and_keep_strict_time_order() {
     let error = session()
         .submit(include_str!("fixtures/stdlib-query-window-time-duplicate-pkbay.orna"))
         .expect_err("equal timestamps in a complete window must fail");
-    assert_eq!(error.code(), "ORNA-EVAL-VALUE");
+    assert_eq!(error.code(), "ORNA-EVAL-ERROR");
+}
+
+#[test]
+fn time_series_rejects_reversal_between_disjoint_windows() {
+    let error = session()
+        .submit(include_str!(
+            "fixtures/stdlib-query-window-time-boundary-reversal-pkbay.orna"
+        ))
+        .expect_err("window boundaries must not hide a source timestamp reversal");
+    assert_eq!(error.code(), "ORNA-EVAL-ERROR");
 }
