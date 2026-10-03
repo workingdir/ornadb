@@ -51,13 +51,14 @@ closed boundaries; later ADRs supersede only the named deferred portion.
 | 0099 | OrnaDB 1.0 CLIENT capability-grant configuration boundary | Local CLIENT grant loading and its configuration contract are not defined; the built-in grants database remains explicitly outside the 1.0 profile. |
 | 0100 | Studio source tooling boundary | Orna 1.0 accepts semantic CLI diff and read-only retained source/revision APIs; Studio source editing/apply, revision browsing UI, and public revision activation remain deferred. |
 | 0101 | Deferred: CLIENT STATE dogfood is not defined by frozen Orna 1.0.0 | ORNA-PAGE-001/002 define pages and widgets as ordinary values, not CLIENT state declarations, scope/default semantics, or StateClientPlan metadata. |
-| 0102 | Qualified type editor highlighting deferral | Lowercase qualified-name capture semantics are unspecified, and the current main branch contains no editor/tree-sitter implementation to update. |
+| 0102 | Qualified type editor highlighting deferral | The exact lowercase qualified-type capture request remains deferred; generated lexical fallback and semantic-token metadata are restored by 0115. |
 | 0103 | Studio runtime and Inspector reference boundary | Generic Orna inspection, presentation, redaction, and snapshot rules remain required; Studio-specific runtime and explorer contracts are deferred. |
 | 0105 | Deferred: Studio security/DBA page reference and authority boundary | A production page, CLIENT-to-administration authority path, and its interaction contract are not defined by the frozen reference; existing security implementation and CLI are unchanged. |
 | 0109 | Deferred: `orna-artifact` owns no PUB-1 immutable publication-object consumer | Keep executable plan codecs separate from compact segments, manifests, Git objects, and durability barriers; continue at the accepted runtime/storage/repository publication boundary. |
 | 0110 | Source-document and object-description contracts as specified by Orna 1.0.0 | A separate bounded function-declaration metadata value and `sys.source.function` API remain gated on a canonical contract; this ADR does not add identities or runtime behavior. |
 | 0111 | Design for `sys` as a baked typed module ABI with one provider protocol for built-ins and extensions. | Typed provider dispatch, semantic-role linkage, capability negotiation, Wasm loading, and adapters are phased follow-on slices; 1.0.0 `sys` semantics and `api/sys.json` remain frozen. |
 | 0112 | Phase 1 typed `sys` provider protocol implementation and 1.0 compatibility choices. | Build-time typed registry and role linkage are consumed by semantic/runtime crates; Wasm/WIT loading remains deferred. |
+| 0115 | Generate TextMate, VS Code language metadata, and the semantic-token mapping from `orna-syntax` presentation metadata. | TextMate remains a lexical fallback; parser-contextual token roles require semantic-token support. Exact editor scopes and package conventions are pragmatic because the frozen reference does not define them. |
 | 0101 | OrnaDB 1.0 CLIENT VM trust boundary | Host-side remote source evaluation remains normative; production CLIENT bytecode VM, artifact trust, and CLIENT sandbox contracts are deferred. |
 
 ## Current work ADRs
@@ -267,6 +268,8 @@ closed boundaries; later ADRs supersede only the named deferred portion.
   [Source Introspection Reference Gate](0110-source-introspection-reference-gate.md)
 * **work ADR 0111:**
   [`sys` Baked Module ABI and Extensible Provider Protocol](0111-sys-baked-module-abi.md)
+* **work ADR 0115:**
+  [Single-source editor syntax artifacts](0115-single-source-editor-syntax-artifacts.md)
 
 ## External reference records
 
