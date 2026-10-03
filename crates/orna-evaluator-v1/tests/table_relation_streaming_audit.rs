@@ -1518,6 +1518,24 @@ fn paired_view_refresh_spill_folds_keep_cursor_identity() {
         );
     }
 
+    let depths = generations
+        .iter()
+        .flat_map(|(_, _, lane_depths)| lane_depths)
+        .copied()
+        .collect::<Vec<_>>();
+    let mut expected_cursors = Vec::new();
+    for (lane, depth) in depths.into_iter().enumerate() {
+        let (source_name, scope, _) = &source.lanes[lane];
+        expected_cursors.push((source_name.clone(), *scope, None));
+        for token in continuations.iter().take(depth - 1) {
+            expected_cursors.push((source_name.clone(), *scope, Some(token.clone())));
+        }
+    }
+    assert_eq!(
+        source.cursors,
+        expected_cursors,
+        "255/256/511/512-byte cursor tokens retain every byte and paired scope across refresh folds"
+    );
 }
 
 fn paired_subscription_cascade_body() -> Expr {
