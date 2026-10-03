@@ -1,7 +1,7 @@
 default: check
 
 # Run the default local fmt/build/lint/non-ignored test/rustdoc gate.
-check: fixture-audit editor-artifacts-check fmt build lint test sys-artifact-ci rustdoc-check
+check: fixture-audit editor-artifacts-check fmt build lint test lsp-syntax-v1-parity sys-artifact-ci rustdoc-check
 
 # Reject external reference paths and a checkout-local reference tree.
 fixture-audit:
@@ -135,6 +135,11 @@ lint:
 # Run workspace tests excluding #[ignore] tests.
 test:
     cargo test --locked --workspace --all-targets
+
+# Keep LSP parsing, fixtures, and completion vocabulary aligned with ORNA-LEX-007.
+lsp-syntax-v1-parity:
+    cargo test --locked -p orna-lsp keyword_completion_vocabulary_matches_lex_007_exactly
+    cargo test --locked -p orna-lsp in_crate_fixtures_parse_with_the_frozen_1_0_frontend
 
 # Verify provider dispatch metadata export/schema conformance and generated-artifact drift.
 sys-artifact-ci: sys-binding-conformance-ci sys-dispatch-coverage-ci

@@ -1,3609 +1,274 @@
-//! Compiler-backed analysis for one open Orna document.
-#![allow(deprecated)] // lsp-types 0.97 keeps the mandatory `deprecated` field.
-//!
-//! The analysis stages reuse Orna's offline parser and semantic catalogue, so
-//! they need no running database and never write to disk. The standard
-//! catalogue is verified once and cached for the lifetime of the server.
+//! Editor analysis built exclusively on the frozen Orna 1.0 syntax tree.
+#![allow(deprecated)] // lsp-types 0.97 still requires DocumentSymbol::deprecated.
 
 use lsp_types::{
-    CompletionContext, CompletionItem, CompletionItemKind, CompletionTriggerKind, Diagnostic,
-    DiagnosticRelatedInformation, DiagnosticSeverity, DiagnosticTag, DocumentSymbol, Hover,
-    Location, NumberOrString, Position, SymbolKind,
+    CompletionContext, CompletionItem, CompletionItemKind, Diagnostic,
+    DiagnosticRelatedInformation, DiagnosticSeverity, DocumentSymbol, Hover, Location,
+    NumberOrString, ParameterInformation, ParameterLabel, Position, SignatureHelp,
+    SignatureInformation, SymbolKind,
 };
-use orna_compiler::{
-    CompilerDiagnostic, DiagnosticCode, DiagnosticSeverity as CompilerDiagnosticSeverity,
-    SourceLocation,
-};
-use orna_core::source::{SourceBundle, SourceUnit};
-use orna_semantic_v1::{
-    Catalogue as StandardCatalogueV1, ModuleInput as ModuleInputV1, Namespace as NamespaceV1,
-    SymbolKind as SymbolKindV1, Type as TypeV1, analyze_with_catalogue,
-};
-use orna_standard::reference_standard_catalogue_v1;
-use orna_syntax::FunctionReturnType;
-use orna_syntax::{
-    ClientExpression, ClientFunctionDeclaration, EnumTypeDeclaration, HighlightKind,
-    ObjectTypeDeclaration, OpaqueValueTypeDeclaration, Parse, PrimitiveValueTypeDeclaration,
-    QualifiedName, RecordValueTypeDeclaration, SchemaDeclaration, ServerFunctionDeclaration,
-    ServerFunctionParameter, SourceSlice, SourceSpan, StandardLargeObjectKind, TypeSpecification,
+use orna_syntax_v1::{
+    Argument, Declaration, Expr, Item, Keyword, Parse, Pattern, Statement,
+    SyntaxSpan as SourceSpan, SyntaxTree, Token, TokenKind, TypeExpr, lex, parse_module_with_file,
 };
 
 use crate::documents::{Document, PositionMapper};
 
-/// The verified 1.0.0 source-backed standard catalogue shared by documents.
-pub struct StandardLibrary {
-    catalogue: StandardCatalogueV1,
-    modules: std::collections::BTreeMap<NamespaceV1, orna_semantic_v1::ModuleHeader>,
-    documentation: std::collections::BTreeMap<String, String>,
-}
+pub type EditorParse = Parse<SyntaxTree>;
 
-impl StandardLibrary {
-    /// Loads the pinned Orna 1.0.0 standard source catalogue.
-    ///
-    /// This runs once per server process. The catalogue is immutable
-    /// and safe to reuse for every document.
-    pub fn load() -> Result<Self, String> {
-        let catalogue = reference_standard_catalogue_v1()
-            .map_err(|error| format!("invalid pinned 1.0.0 standard catalogue: {error:?}"))?;
-        let documentation =
-            standard_function_documentation(orna_standard::reference_standard_sources_v1());
-        let analysis = analyze_with_catalogue(&[], &catalogue);
-        if !analysis.is_ok() {
-            return Err("pinned 1.0.0 standard catalogue did not analyze cleanly".to_owned());
-        }
-        Ok(Self {
-            catalogue,
-            modules: analysis.modules,
-            documentation,
-        })
-    }
-}
-
-/// Returns the syntax diagnostics of one document.
-///
-/// This path needs no standard library and is used when the pinned standard
-/// catalogue cannot be loaded.
-pub fn syntax_diagnostics(document: &Document, mapper: &PositionMapper<'_>) -> Vec<Diagnostic> {
-    let logical_path = document.logical_path();
-    if let Ok(bundle) =
-        SourceBundle::new([SourceUnit::new(logical_path.clone(), document.text.clone())])
-    {
-        let report = orna_compiler::parse_bundle(&bundle);
-        return report
-            .diagnostics()
-            .iter()
-            .filter(|diagnostic| diagnostic.location().logical_path() == logical_path)
-            .map(|diagnostic| compiler_diagnostic(diagnostic, mapper, &document.uri, &logical_path))
-            .collect();
-    }
-
-    // Keep the parser-only fallback deliberately minimal. A source bundle
-    // normally succeeds for an open document, but if its logical path is
-    // rejected there is no compiler metadata to project or invent.
-    orna_syntax::parse(&document.text)
-        .diagnostics()
+/// Syntax diagnostics emitted by the 1.0 parser with their original byte spans.
+pub fn check_document(document: &Document, mapper: &PositionMapper<'_>) -> Vec<Diagnostic> {
+    let parse = parse_document(document);
+    parse
+        .diagnostics
         .iter()
-        .map(|diagnostic| Diagnostic {
-            range: mapper.range(&diagnostic.span),
-            severity: Some(DiagnosticSeverity::ERROR),
-            code: Some(NumberOrString::String(diagnostic.code.to_owned())),
-            code_description: None,
-            source: Some("orna".to_owned()),
-            message: diagnostic.message.clone(),
-            related_information: None,
-            tags: None,
-            data: None,
-        })
-        .collect()
-}
-
-pub fn check_document(
-    document: &Document,
-    standard: Option<&StandardLibrary>,
-    mapper: &PositionMapper<'_>,
-) -> Vec<Diagnostic> {
-    let syntax = orna_syntax::parse(&document.text);
-    if uses_compiler_declaration_grammar(&syntax, &document.text) {
-        return compiler_check_diagnostics(document, mapper);
-    }
-    let Some(standard) = standard else {
-        return syntax_diagnostics(document, mapper);
-    };
-    // Semantic-v1 accepts repository-relative module paths. LSP analysis is
-    // intentionally per-document today, so use a stable virtual module path
-    // instead of treating the editor URI as a source-module name.
-    let logical_path = "lsp-document.orna";
-    let parsed = orna_syntax_v1::parse_module_with_file(&document.text, logical_path);
-    if !parsed.is_ok() {
-        return parsed
-            .diagnostics
-            .iter()
-            .map(|diagnostic| Diagnostic {
-                range: mapper.range(&SourceSpan {
-                    start: diagnostic.span.start,
-                    end: diagnostic.span.end,
-                }),
+        .map(|diagnostic| {
+            let related = diagnostic
+                .labels
+                .iter()
+                .filter(|label| !label.primary)
+                .map(|label| DiagnosticRelatedInformation {
+                    location: Location {
+                        uri: document.uri.clone(),
+                        range: mapper.range(&label.span),
+                    },
+                    message: label.message.clone().unwrap_or_default(),
+                })
+                .collect::<Vec<_>>();
+            Diagnostic {
+                range: mapper.range(&diagnostic.span),
                 severity: Some(DiagnosticSeverity::ERROR),
                 code: Some(NumberOrString::String(diagnostic.code.to_owned())),
                 code_description: None,
-                source: Some("orna".to_owned()),
+                source: Some("orna-syntax-v1".to_owned()),
                 message: diagnostic.message.clone(),
-                related_information: None,
+                related_information: (!related.is_empty()).then_some(related),
                 tags: None,
                 data: Some(serde_json::json!({
                     "title": diagnostic.title,
                     "help": diagnostic.help,
                     "notes": diagnostic.notes,
                 })),
-            })
-            .collect();
-    }
-    let report = analyze_with_catalogue(
-        &[ModuleInputV1::new(logical_path, document.text.clone())],
-        &standard.catalogue,
-    );
-    report
-        .diagnostics
-        .iter()
-        .map(|diagnostic| Diagnostic {
-            range: mapper.range(&SourceSpan {
-                start: 0,
-                end: document.text.len(),
-            }),
-            severity: Some(DiagnosticSeverity::ERROR),
-            code: Some(NumberOrString::String(diagnostic.code().to_owned())),
-            code_description: None,
-            source: Some("orna".to_owned()),
-            message: diagnostic.message().to_owned(),
-            related_information: None,
-            tags: None,
-            data: Some(serde_json::json!({
-                "standardProfile": standard.catalogue.standard_dependency_profile().map(|profile| profile.snapshot()),
-            })),
+            }
         })
         .collect()
 }
 
-fn uses_compiler_declaration_grammar(parse: &Parse, text: &str) -> bool {
-    // DDL documents use the compiler's accepted declaration grammar; module
-    // documents continue through syntax-v1 analysis so editor errors match the
-    // same source each respective frontend uses.
-    parse
-        .highlight()
-        .into_iter()
-        .find(|token| token.kind != HighlightKind::Comment)
-        .and_then(|token| text.get(token.range))
-        .is_some_and(|first| {
-            ["CREATE", "ALTER", "EXPORT"]
-                .iter()
-                .any(|keyword| first.eq_ignore_ascii_case(keyword))
-        })
+pub fn parse_document(document: &Document) -> EditorParse {
+    parse_module_with_file(&document.text, document.logical_path())
 }
 
-fn compiler_check_diagnostics(document: &Document, mapper: &PositionMapper<'_>) -> Vec<Diagnostic> {
-    let logical_path = document.logical_path();
-    let Ok(bundle) =
-        SourceBundle::new([SourceUnit::new(logical_path.clone(), document.text.clone())])
-    else {
-        return syntax_diagnostics(document, mapper);
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum EditorSymbolKind {
+    Function,
+    Type,
+    Enum,
+    Table,
+    Protocol,
+    Other,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct EditorSymbol {
+    pub name: String,
+    pub kind: EditorSymbolKind,
+    pub selection: SourceSpan,
+    pub full: SourceSpan,
+    pub detail: Option<String>,
+    pub documentation: Option<String>,
+    pub parameters: Vec<String>,
+}
+
+pub(crate) fn declaration_symbols(parse: &EditorParse, text: &str) -> Vec<EditorSymbol> {
+    let Ok(tokens) = lex(text) else {
+        return Vec::new();
     };
-    let Ok(base) = orna_core::catalogue::CatalogueSnapshot::new(
-        orna_compiler::EMPTY_APPLICATION_CATALOGUE_REVISION_ID,
-        Vec::new(),
-        Vec::new(),
-    ) else {
-        return syntax_diagnostics(document, mapper);
-    };
-    orna_compiler::check(&bundle, &base)
-        .diagnostics()
+    let mut symbols = parse
+        .value
+        .items
         .iter()
-        .filter(|diagnostic| diagnostic.location().logical_path() == logical_path)
-        .map(|diagnostic| compiler_diagnostic(diagnostic, mapper, &document.uri, &logical_path))
-        .collect()
-}
-
-fn compiler_diagnostic(
-    diagnostic: &CompilerDiagnostic,
-    mapper: &PositionMapper<'_>,
-    uri: &lsp_types::Uri,
-    logical_path: &str,
-) -> Diagnostic {
-    let span = compiler_span(diagnostic.location());
-    let related_information = diagnostic
-        .related()
-        .iter()
-        // PositionMapper is tied to this open document. Do not project a
-        // foreign source location using the current document's text.
-        .filter(|related| related.location().logical_path() == logical_path)
-        .map(|related| DiagnosticRelatedInformation {
-            location: Location {
-                uri: uri.clone(),
-                range: mapper.range(&compiler_span(related.location())),
-            },
-            message: related.message().to_owned(),
-        })
+        .filter_map(|item| symbol_for_item(item, text, &tokens))
         .collect::<Vec<_>>();
-    let related_data = diagnostic
-        .related()
-        .iter()
-        .map(|related| {
-            serde_json::json!({
-                "path": related.location().logical_path(),
-                "start": related.location().span().start(),
-                "end": related.location().span().end(),
-                "label": related.message(),
-            })
-        })
-        .collect::<Vec<_>>();
-
-    Diagnostic {
-        range: mapper.range(&span),
-        severity: Some(match diagnostic.severity() {
-            CompilerDiagnosticSeverity::Error => DiagnosticSeverity::ERROR,
-            CompilerDiagnosticSeverity::Warning => DiagnosticSeverity::WARNING,
-        }),
-        code: Some(NumberOrString::String(
-            diagnostic.code().as_str().to_owned(),
-        )),
-        code_description: None,
-        source: Some("orna".to_owned()),
-        // Keep the protocol message byte-for-byte equivalent to the
-        // compiler's raw message. Rich labels and notes live in data.
-        message: diagnostic.message().to_owned(),
-        related_information: (!related_information.is_empty()).then_some(related_information),
-        tags: (diagnostic.code() == DiagnosticCode::UnreachableCode)
-            .then_some(vec![DiagnosticTag::UNNECESSARY]),
-        data: Some(serde_json::json!({
-            "severity": diagnostic.severity().as_str(),
-            "title": diagnostic.code().title(),
-            "summary": diagnostic.code().summary(),
-            "primaryLabel": diagnostic.primary_label(),
-            "help": diagnostic.help(),
-            "notes": diagnostic.notes(),
-            "related": related_data,
-        })),
-    }
-}
-
-fn compiler_span(location: &SourceLocation) -> SourceSpan {
-    SourceSpan {
-        start: location.span().start(),
-        end: location.span().end(),
-    }
-}
-
-/// Returns the outline symbols of one parsed document.
-pub fn document_symbols(parse: &Parse, mapper: &PositionMapper<'_>) -> Vec<DocumentSymbol> {
-    let mut symbols = Vec::new();
-    for schema in parse.schemas() {
-        symbols.push(DocumentSymbol {
-            name: last_name(&schema.name),
-            detail: Some("schema".to_owned()),
-            kind: SymbolKind::NAMESPACE,
-            tags: None,
-            deprecated: None,
-            range: mapper.range(&schema.span),
-            selection_range: mapper.range(&schema.name.span),
-            children: None,
-        });
-    }
-    for declaration in parse.object_types() {
-        let children = declaration
-            .fields
-            .iter()
-            .map(|field| DocumentSymbol {
-                name: field.name.text.clone(),
-                detail: Some("field".to_owned()),
-                kind: SymbolKind::FIELD,
-                tags: None,
-                deprecated: None,
-                range: mapper.range(&field.span),
-                selection_range: mapper.range(&field.name.span),
-                children: None,
-            })
-            .collect();
-        symbols.push(DocumentSymbol {
-            name: last_name(&declaration.name),
-            detail: Some("object type".to_owned()),
-            kind: SymbolKind::INTERFACE,
-            tags: None,
-            deprecated: None,
-            range: mapper.range(&declaration.span),
-            selection_range: mapper.range(&declaration.name.span),
-            children: Some(children),
-        });
-    }
-    for declaration in parse.enum_types() {
-        symbols.push(DocumentSymbol {
-            name: last_name(&declaration.name),
-            detail: Some("enum type".to_owned()),
-            kind: SymbolKind::ENUM,
-            tags: None,
-            deprecated: None,
-            range: mapper.range(&declaration.span),
-            selection_range: mapper.range(&declaration.name.span),
-            children: None,
-        });
-    }
-    for declaration in parse.record_value_types() {
-        let children = declaration
-            .fields
-            .iter()
-            .map(|field| DocumentSymbol {
-                name: field.name.text.clone(),
-                detail: Some("field".to_owned()),
-                kind: SymbolKind::FIELD,
-                tags: None,
-                deprecated: None,
-                range: mapper.range(&field.span),
-                selection_range: mapper.range(&field.name.span),
-                children: None,
-            })
-            .collect();
-        symbols.push(DocumentSymbol {
-            name: last_name(&declaration.name),
-            detail: Some("record value type".to_owned()),
-            kind: SymbolKind::STRUCT,
-            tags: None,
-            deprecated: None,
-            range: mapper.range(&declaration.span),
-            selection_range: mapper.range(&declaration.name.span),
-            children: Some(children),
-        });
-    }
-    for declaration in parse.primitive_value_types() {
-        symbols.push(DocumentSymbol {
-            name: last_name(&declaration.name),
-            detail: Some("primitive value type".to_owned()),
-            kind: SymbolKind::STRUCT,
-            tags: None,
-            deprecated: None,
-            range: mapper.range(&declaration.span),
-            selection_range: mapper.range(&declaration.name.span),
-            children: None,
-        });
-    }
-    for declaration in parse.opaque_value_types() {
-        symbols.push(DocumentSymbol {
-            name: last_name(&declaration.name),
-            detail: Some("opaque value type".to_owned()),
-            kind: SymbolKind::STRUCT,
-            tags: None,
-            deprecated: None,
-            range: mapper.range(&declaration.span),
-            selection_range: mapper.range(&declaration.name.span),
-            children: None,
-        });
-    }
-    for declaration in parse.server_functions() {
-        symbols.push(function_symbol(declaration, "server function", mapper));
-    }
-    for declaration in parse.client_functions() {
-        symbols.push(function_symbol(declaration, "client function", mapper));
-    }
+    symbols.sort_by_key(|symbol| symbol.selection.start);
     symbols
 }
 
-fn function_symbol<F>(
-    declaration: &F,
-    detail: &'static str,
-    mapper: &PositionMapper<'_>,
-) -> DocumentSymbol
-where
-    F: FunctionDeclarationView,
-{
-    let children = declaration
-        .parameters()
-        .iter()
-        .map(|parameter| DocumentSymbol {
-            name: parameter.name.text.clone(),
-            detail: Some("parameter".to_owned()),
-            kind: SymbolKind::VARIABLE,
-            tags: None,
-            deprecated: None,
-            range: mapper.range(&parameter.name.span),
-            selection_range: mapper.range(&parameter.name.span),
-            children: None,
-        })
-        .collect();
-    DocumentSymbol {
-        name: last_name(declaration.name()),
-        detail: Some(detail.to_owned()),
-        kind: SymbolKind::FUNCTION,
-        tags: None,
-        deprecated: None,
-        range: mapper.range(declaration.span()),
-        selection_range: mapper.range(&declaration.name().span),
-        children: Some(children),
-    }
-}
-
-/// A common view over SERVER and CLIENT function declarations.
-pub trait FunctionDeclarationView {
-    fn name(&self) -> &QualifiedName;
-    fn span(&self) -> &SourceSpan;
-    fn parameters(&self) -> &[ServerFunctionParameter];
-}
-
-impl FunctionDeclarationView for ServerFunctionDeclaration {
-    fn name(&self) -> &QualifiedName {
-        &self.name
-    }
-
-    fn span(&self) -> &SourceSpan {
-        &self.span
-    }
-
-    fn parameters(&self) -> &[ServerFunctionParameter] {
-        &self.parameters
-    }
-}
-
-impl FunctionDeclarationView for ClientFunctionDeclaration {
-    fn name(&self) -> &QualifiedName {
-        &self.name
-    }
-
-    fn span(&self) -> &SourceSpan {
-        &self.span
-    }
-
-    fn parameters(&self) -> &[ServerFunctionParameter] {
-        &self.parameters
-    }
-}
-
-/// Returns the source text of one qualified name's final component.
-fn last_name(name: &QualifiedName) -> String {
-    name.parts
-        .last()
-        .map(|part| part.text.clone())
-        .unwrap_or_default()
-}
-
-fn qualified_name_text(name: &QualifiedName) -> String {
-    name.parts
-        .iter()
-        .map(|part| part.text.as_str())
-        .collect::<Vec<_>>()
-        .join(".")
-}
-
-/// One declaration found by a name lookup.
-#[derive(Clone, Copy)]
-pub enum DeclarationRef<'a> {
-    /// A parsed `CREATE SCHEMA` declaration.
-    Schema(&'a SchemaDeclaration),
-    /// A parsed object type declaration.
-    ObjectType(&'a ObjectTypeDeclaration),
-    /// A parsed enum type declaration.
-    EnumType(&'a EnumTypeDeclaration),
-    /// A parsed record value type declaration.
-    RecordValueType(&'a RecordValueTypeDeclaration),
-    /// A parsed primitive value type declaration.
-    PrimitiveValueType(&'a PrimitiveValueTypeDeclaration),
-    /// A parsed opaque value type declaration.
-    OpaqueValueType(&'a OpaqueValueTypeDeclaration),
-    /// A parsed SERVER function declaration.
-    ServerFunction(&'a ServerFunctionDeclaration),
-    /// A parsed CLIENT function declaration.
-    ClientFunction(&'a ClientFunctionDeclaration),
-}
-
-impl DeclarationRef<'_> {
-    /// Returns the declared qualified name.
-    pub fn name(&self) -> &QualifiedName {
-        match self {
-            Self::Schema(declaration) => &declaration.name,
-            Self::ObjectType(declaration) => &declaration.name,
-            Self::EnumType(declaration) => &declaration.name,
-            Self::RecordValueType(declaration) => &declaration.name,
-            Self::PrimitiveValueType(declaration) => &declaration.name,
-            Self::OpaqueValueType(declaration) => &declaration.name,
-            Self::ServerFunction(declaration) => &declaration.name,
-            Self::ClientFunction(declaration) => &declaration.name,
-        }
-    }
-
-    /// Returns the span of the declared name.
-    pub fn name_span(&self) -> &SourceSpan {
-        &self.name().span
-    }
-}
-
-/// Returns the token at one byte offset, including keywords.
-fn token_at(
-    text: &str,
-    highlighted: &[orna_syntax::HighlightToken],
-    byte: usize,
-) -> Option<(String, HighlightKind, SourceSpan)> {
-    highlighted
-        .iter()
-        .find(|token| token.range.contains(&byte))
-        .filter(|token| {
-            matches!(
-                token.kind,
-                HighlightKind::VariableName
-                    | HighlightKind::FunctionName
-                    | HighlightKind::TypeName
-                    | HighlightKind::NamespaceName
-                    | HighlightKind::PropertyName
-                    | HighlightKind::QuotedIdentifier
-                    | HighlightKind::Keyword
-            )
-        })
-        .map(|token| {
-            (
-                text[token.range.clone()].to_owned(),
-                token.kind,
-                SourceSpan {
-                    start: token.range.start,
-                    end: token.range.end,
-                },
-            )
-        })
-}
-#[derive(Clone, PartialEq, Eq)]
-enum IdentifierKey {
-    Quoted(String),
-    Unquoted(String),
-}
-
-/// Canonicalizes one source identifier using Orna's quoted-name rules.
-///
-/// Unquoted identifiers are case-insensitive. Quoted identifiers preserve
-/// exact spelling and do not match an unquoted identifier.
-fn identifier_key(spelling: &str) -> IdentifierKey {
-    if spelling.starts_with('"') && spelling.ends_with('"') {
-        IdentifierKey::Quoted(spelling.to_owned())
-    } else {
-        IdentifierKey::Unquoted(spelling.chars().flat_map(char::to_lowercase).collect())
-    }
-}
-
-fn identifier_spelling_matches(candidate: &str, query: &str) -> bool {
-    identifier_key(candidate) == identifier_key(query)
-}
-
-fn source_name_parts(name: &str) -> Vec<&str> {
-    let bytes = name.as_bytes();
-    let mut parts = Vec::new();
-    let mut start = 0;
-    let mut quoted = false;
-    let mut index = 0;
-    while index < bytes.len() {
-        match bytes[index] {
-            b'"' => {
-                if quoted && bytes.get(index + 1) == Some(&b'"') {
-                    index += 1;
-                } else {
-                    quoted = !quoted;
-                }
-            }
-            b'.' if !quoted => {
-                parts.push(&name[start..index]);
-                start = index + 1;
-            }
-            _ => {}
-        }
-        index += 1;
-    }
-    parts.push(&name[start..]);
-    parts
-}
-
-fn qualified_name_matches_keys(name: &QualifiedName, keys: &[IdentifierKey]) -> bool {
-    name.parts.len() == keys.len()
-        && name
-            .parts
-            .iter()
-            .zip(keys)
-            .all(|(part, key)| &identifier_key(&part.text) == key)
-}
-
-fn dotted_name_separator(text: &str, start: usize, end: usize) -> bool {
-    let bytes = text.as_bytes();
-    let mut index = start;
-    let mut dot = false;
-    while index < end {
-        if bytes[index].is_ascii_whitespace() {
-            index += 1;
-        } else if bytes.get(index..index + 2) == Some(b"/*") {
-            index += 2;
-            while index + 1 < end && bytes.get(index..index + 2) != Some(b"*/") {
-                index += 1;
-            }
-            if index + 1 >= end {
-                return false;
-            }
-            index += 2;
-        } else if bytes.get(index..index + 2) == Some(b"//")
-            || bytes.get(index..index + 2) == Some(b"--")
-        {
-            index += 2;
-            while index < end && bytes[index] != b'\n' {
-                index += 1;
-            }
-        } else if bytes[index] == b'.' && !dot {
-            dot = true;
-            index += 1;
-        } else {
-            return false;
-        }
-    }
-    dot
-}
-
-/// Reconstructs the source-qualified path containing one highlighted token.
-///
-/// The SQL highlighter keeps quoted components as `QuotedIdentifier` rather
-/// than reclassifying them as namespaces, so accept either kind while walking
-/// in the direction of the containing path. Context-specific field resolution
-/// runs before this top-level fallback and keeps member paths out of the lookup.
-fn qualified_name_keys_at(
-    text: &str,
-    highlighted: &[orna_syntax::HighlightToken],
-    selected_span: &SourceSpan,
-) -> Option<Vec<IdentifierKey>> {
-    let selected_index = highlighted.iter().position(|token| {
-        token.range.start == selected_span.start && token.range.end == selected_span.end
-    })?;
-    let mut first_index = selected_index;
-    let mut right_start = selected_span.start;
-    while first_index > 0 {
-        let Some(previous_index) = highlighted[..first_index].iter().rposition(|token| {
-            matches!(
-                token.kind,
-                HighlightKind::NamespaceName | HighlightKind::QuotedIdentifier
-            )
-        }) else {
-            break;
-        };
-        let previous = &highlighted[previous_index];
-        if !dotted_name_separator(text, previous.range.end, right_start) {
-            break;
-        }
-        first_index = previous_index;
-        right_start = previous.range.start;
-    }
-    Some(
-        highlighted[first_index..=selected_index]
-            .iter()
-            .filter(|token| {
-                matches!(
-                    token.kind,
-                    HighlightKind::NamespaceName | HighlightKind::QuotedIdentifier
-                ) || (token.range.start == selected_span.start
-                    && token.range.end == selected_span.end)
-            })
-            .map(|token| identifier_key(&text[token.range.clone()]))
-            .collect(),
-    )
-}
-
-/// Returns a case-aware declaration lookup for one simple name.
-pub fn declaration_at<'a>(parse: &'a Parse, name: &str) -> Option<DeclarationRef<'a>> {
-    let query_parts = source_name_parts(name);
-    let query_keys: Vec<_> = query_parts
-        .iter()
-        .map(|part| identifier_key(part))
-        .collect();
-    let matches = |candidate: &QualifiedName| {
-        if query_keys.len() == 1 {
-            candidate
-                .parts
-                .last()
-                .is_some_and(|part| identifier_spelling_matches(&part.text, name))
-        } else {
-            qualified_name_matches_keys(candidate, &query_keys)
-        }
+fn symbol_for_item(item: &Item, text: &str, tokens: &[Token]) -> Option<EditorSymbol> {
+    let (name, kind, selection_scope, detail, parameters) = match &item.declaration {
+        Declaration::Function { signature, .. } => (
+            signature.name.as_str(),
+            EditorSymbolKind::Function,
+            &signature.span,
+            Some(source_slice(text, &signature.span).to_owned()),
+            signature
+                .parameters
+                .iter()
+                .map(|parameter| source_slice(text, &parameter.span).to_owned())
+                .collect(),
+        ),
+        Declaration::Table { name, .. } => (
+            name.as_str(),
+            EditorSymbolKind::Table,
+            &item.span,
+            None,
+            Vec::new(),
+        ),
+        Declaration::Protocol { name, .. } => (
+            name.as_str(),
+            EditorSymbolKind::Protocol,
+            &item.span,
+            None,
+            Vec::new(),
+        ),
+        Declaration::Enum { name, .. } => (
+            name.as_str(),
+            EditorSymbolKind::Enum,
+            &item.span,
+            None,
+            Vec::new(),
+        ),
+        Declaration::Type { name, .. } => (
+            name.as_str(),
+            EditorSymbolKind::Type,
+            &item.span,
+            None,
+            Vec::new(),
+        ),
+        Declaration::Dimension { name, .. } | Declaration::Unit { name, .. } => (
+            name.as_str(),
+            EditorSymbolKind::Other,
+            &item.span,
+            None,
+            Vec::new(),
+        ),
+        _ => return None,
     };
-
-    if let Some(declaration) = parse
-        .schemas()
+    let selection = tokens
         .iter()
-        .find(|declaration| matches(&declaration.name))
-    {
-        return Some(DeclarationRef::Schema(declaration));
-    }
-    if let Some(declaration) = parse
-        .object_types()
-        .iter()
-        .find(|declaration| matches(&declaration.name))
-    {
-        return Some(DeclarationRef::ObjectType(declaration));
-    }
-    if let Some(declaration) = parse
-        .enum_types()
-        .iter()
-        .find(|declaration| matches(&declaration.name))
-    {
-        return Some(DeclarationRef::EnumType(declaration));
-    }
-    if let Some(declaration) = parse
-        .record_value_types()
-        .iter()
-        .find(|declaration| matches(&declaration.name))
-    {
-        return Some(DeclarationRef::RecordValueType(declaration));
-    }
-    if let Some(declaration) = parse
-        .primitive_value_types()
-        .iter()
-        .find(|declaration| matches(&declaration.name))
-    {
-        return Some(DeclarationRef::PrimitiveValueType(declaration));
-    }
-    if let Some(declaration) = parse
-        .opaque_value_types()
-        .iter()
-        .find(|declaration| matches(&declaration.name))
-    {
-        return Some(DeclarationRef::OpaqueValueType(declaration));
-    }
-    if let Some(declaration) = parse
-        .server_functions()
-        .iter()
-        .find(|declaration| matches(&declaration.name))
-    {
-        return Some(DeclarationRef::ServerFunction(declaration));
-    }
-    if let Some(declaration) = parse
-        .client_functions()
-        .iter()
-        .find(|declaration| matches(&declaration.name))
-    {
-        return Some(DeclarationRef::ClientFunction(declaration));
-    }
-    None
-}
-
-fn declaration_for_keys<'a>(
-    parse: &'a Parse,
-    keys: &[IdentifierKey],
-    kind: HighlightKind,
-) -> Option<DeclarationRef<'a>> {
-    let matches = |name: &QualifiedName| qualified_name_matches_keys(name, keys);
-    match kind {
-        HighlightKind::NamespaceName => parse
-            .schemas()
-            .iter()
-            .find(|declaration| matches(&declaration.name))
-            .map(DeclarationRef::Schema),
-        HighlightKind::TypeName => parse
-            .object_types()
-            .iter()
-            .find(|declaration| matches(&declaration.name))
-            .map(DeclarationRef::ObjectType)
-            .or_else(|| {
-                parse
-                    .enum_types()
-                    .iter()
-                    .find(|declaration| matches(&declaration.name))
-                    .map(DeclarationRef::EnumType)
-            })
-            .or_else(|| {
-                parse
-                    .record_value_types()
-                    .iter()
-                    .find(|declaration| matches(&declaration.name))
-                    .map(DeclarationRef::RecordValueType)
-            })
-            .or_else(|| {
-                parse
-                    .primitive_value_types()
-                    .iter()
-                    .find(|declaration| matches(&declaration.name))
-                    .map(DeclarationRef::PrimitiveValueType)
-            })
-            .or_else(|| {
-                parse
-                    .opaque_value_types()
-                    .iter()
-                    .find(|declaration| matches(&declaration.name))
-                    .map(DeclarationRef::OpaqueValueType)
-            }),
-        HighlightKind::FunctionName => parse
-            .server_functions()
-            .iter()
-            .find(|declaration| matches(&declaration.name))
-            .map(DeclarationRef::ServerFunction)
-            .or_else(|| {
-                parse
-                    .client_functions()
-                    .iter()
-                    .find(|declaration| matches(&declaration.name))
-                    .map(DeclarationRef::ClientFunction)
-            }),
-        _ => parse
-            .schemas()
-            .iter()
-            .find(|declaration| matches(&declaration.name))
-            .map(DeclarationRef::Schema)
-            .or_else(|| {
-                parse
-                    .object_types()
-                    .iter()
-                    .find(|declaration| matches(&declaration.name))
-                    .map(DeclarationRef::ObjectType)
-            })
-            .or_else(|| {
-                parse
-                    .enum_types()
-                    .iter()
-                    .find(|declaration| matches(&declaration.name))
-                    .map(DeclarationRef::EnumType)
-            })
-            .or_else(|| {
-                parse
-                    .record_value_types()
-                    .iter()
-                    .find(|declaration| matches(&declaration.name))
-                    .map(DeclarationRef::RecordValueType)
-            })
-            .or_else(|| {
-                parse
-                    .primitive_value_types()
-                    .iter()
-                    .find(|declaration| matches(&declaration.name))
-                    .map(DeclarationRef::PrimitiveValueType)
-            })
-            .or_else(|| {
-                parse
-                    .opaque_value_types()
-                    .iter()
-                    .find(|declaration| matches(&declaration.name))
-                    .map(DeclarationRef::OpaqueValueType)
-            })
-            .or_else(|| {
-                parse
-                    .server_functions()
-                    .iter()
-                    .find(|declaration| matches(&declaration.name))
-                    .map(DeclarationRef::ServerFunction)
-            })
-            .or_else(|| {
-                parse
-                    .client_functions()
-                    .iter()
-                    .find(|declaration| matches(&declaration.name))
-                    .map(DeclarationRef::ClientFunction)
-            }),
-    }
-}
-
-fn top_level_declaration_at_span<'a>(
-    parse: &'a Parse,
-    selected_span: &SourceSpan,
-) -> Option<DeclarationRef<'a>> {
-    parse
-        .schemas()
-        .iter()
-        .find(|declaration| qualified_name_matches_span(&declaration.name, selected_span))
-        .map(DeclarationRef::Schema)
-        .or_else(|| {
-            parse
-                .object_types()
-                .iter()
-                .find(|declaration| qualified_name_matches_span(&declaration.name, selected_span))
-                .map(DeclarationRef::ObjectType)
-        })
-        .or_else(|| {
-            parse
-                .enum_types()
-                .iter()
-                .find(|declaration| qualified_name_matches_span(&declaration.name, selected_span))
-                .map(DeclarationRef::EnumType)
-        })
-        .or_else(|| {
-            parse
-                .record_value_types()
-                .iter()
-                .find(|declaration| qualified_name_matches_span(&declaration.name, selected_span))
-                .map(DeclarationRef::RecordValueType)
-        })
-        .or_else(|| {
-            parse
-                .primitive_value_types()
-                .iter()
-                .find(|declaration| qualified_name_matches_span(&declaration.name, selected_span))
-                .map(DeclarationRef::PrimitiveValueType)
-        })
-        .or_else(|| {
-            parse
-                .opaque_value_types()
-                .iter()
-                .find(|declaration| qualified_name_matches_span(&declaration.name, selected_span))
-                .map(DeclarationRef::OpaqueValueType)
-        })
-        .or_else(|| {
-            parse
-                .server_functions()
-                .iter()
-                .find(|declaration| qualified_name_matches_span(&declaration.name, selected_span))
-                .map(DeclarationRef::ServerFunction)
-        })
-        .or_else(|| {
-            parse
-                .client_functions()
-                .iter()
-                .find(|declaration| qualified_name_matches_span(&declaration.name, selected_span))
-                .map(DeclarationRef::ClientFunction)
-        })
-}
-
-fn declaration_at_span<'a>(
-    parse: &'a Parse,
-    text: &str,
-    highlighted: &[orna_syntax::HighlightToken],
-    name: &str,
-    kind: HighlightKind,
-    selected_span: &SourceSpan,
-) -> Option<DeclarationRef<'a>> {
-    if kind == HighlightKind::QuotedIdentifier
-        && let Some(declaration) = top_level_declaration_at_span(parse, selected_span)
-    {
-        return Some(declaration);
-    }
-    if let Some(keys) = qualified_name_keys_at(text, highlighted, selected_span) {
-        if let Some(declaration) = declaration_for_keys(parse, &keys, kind) {
-            return Some(declaration);
-        }
-        if keys.len() > 1 {
-            return None;
-        }
-    }
-    declaration_at(parse, name)
-}
-
-fn source_span_matches(left: &SourceSpan, right: &SourceSpan) -> bool {
-    left.start == right.start && left.end == right.end
-}
-
-fn name_part_matches_span(part: &orna_syntax::NamePart, span: &SourceSpan) -> bool {
-    source_span_matches(&part.span, span)
-}
-
-fn qualified_name_matches_span(name: &QualifiedName, span: &SourceSpan) -> bool {
-    name.parts
-        .last()
-        .is_some_and(|part| name_part_matches_span(part, span))
-}
-
-fn return_type_contains_declaration(return_type: &FunctionReturnType, span: &SourceSpan) -> bool {
-    match return_type {
-        FunctionReturnType::Rows { columns, .. } => columns
-            .iter()
-            .any(|column| name_part_matches_span(&column.name, span)),
-        FunctionReturnType::Single(_) | FunctionReturnType::Stream { .. } => false,
-    }
-}
-
-fn client_body_contains_declaration(
-    declaration: &ClientFunctionDeclaration,
-    span: &SourceSpan,
-) -> bool {
-    declaration.body.as_state_block().is_some_and(|block| {
-        block
-            .states
-            .iter()
-            .any(|state| name_part_matches_span(&state.name, span))
-            || all_client_local_declarations(block)
-                .iter()
-                .any(|local| name_part_matches_span(local.name(), span))
+        .find(|token| {
+            token.span.start >= selection_scope.start
+                && token.span.end <= selection_scope.end
+                && token.text == name
+                && matches!(token.kind, TokenKind::Identifier { .. })
+        })?
+        .span
+        .clone();
+    Some(EditorSymbol {
+        name: name.to_owned(),
+        kind,
+        selection,
+        full: item.span.clone(),
+        detail,
+        documentation: leading_doc_comment(text, item.span.start),
+        parameters,
     })
 }
 
-fn is_declaration_span(parse: &Parse, span: &SourceSpan) -> bool {
-    parse
-        .schemas()
-        .iter()
-        .any(|declaration| qualified_name_matches_span(&declaration.name, span))
-        || parse.object_types().iter().any(|declaration| {
-            qualified_name_matches_span(&declaration.name, span)
-                || declaration
-                    .fields
-                    .iter()
-                    .any(|field| name_part_matches_span(&field.name, span))
-        })
-        || parse
-            .enum_types()
-            .iter()
-            .any(|declaration| qualified_name_matches_span(&declaration.name, span))
-        || parse.record_value_types().iter().any(|declaration| {
-            qualified_name_matches_span(&declaration.name, span)
-                || declaration
-                    .fields
-                    .iter()
-                    .any(|field| name_part_matches_span(&field.name, span))
-        })
-        || parse
-            .primitive_value_types()
-            .iter()
-            .any(|declaration| qualified_name_matches_span(&declaration.name, span))
-        || parse
-            .opaque_value_types()
-            .iter()
-            .any(|declaration| qualified_name_matches_span(&declaration.name, span))
-        || parse.server_functions().iter().any(|declaration| {
-            qualified_name_matches_span(&declaration.name, span)
-                || declaration
-                    .parameters
-                    .iter()
-                    .any(|parameter| name_part_matches_span(&parameter.name, span))
-                || return_type_contains_declaration(&declaration.return_type, span)
-        })
-        || parse.client_functions().iter().any(|declaration| {
-            qualified_name_matches_span(&declaration.name, span)
-                || declaration
-                    .parameters
-                    .iter()
-                    .any(|parameter| name_part_matches_span(&parameter.name, span))
-                || client_body_contains_declaration(declaration, span)
-                || return_type_contains_declaration(&declaration.return_type, span)
-        })
-}
-
-fn name_part_matches_text(part: &orna_syntax::NamePart, name: &str) -> bool {
-    identifier_spelling_matches(&part.text, name)
-}
-
-fn span_contains_span(container: &SourceSpan, contained: &SourceSpan) -> bool {
-    contained.start >= container.start && contained.end <= container.end
-}
-
-fn containing_server_function<'a>(
-    parse: &'a Parse,
-    selected_span: &SourceSpan,
-) -> Option<&'a ServerFunctionDeclaration> {
-    parse
-        .server_functions()
-        .iter()
-        .find(|declaration| span_contains_span(&declaration.span, selected_span))
-}
-
-fn containing_client_function<'a>(
-    parse: &'a Parse,
-    selected_span: &SourceSpan,
-) -> Option<&'a ClientFunctionDeclaration> {
-    parse
-        .client_functions()
-        .iter()
-        .find(|declaration| span_contains_span(&declaration.span, selected_span))
-}
-
-fn containing_function_span(parse: &Parse, selected_span: &SourceSpan) -> Option<SourceSpan> {
-    containing_server_function(parse, selected_span)
-        .map(|declaration| declaration.span.clone())
-        .or_else(|| {
-            containing_client_function(parse, selected_span)
-                .map(|declaration| declaration.span.clone())
-        })
-}
-
-fn rows_column_declaration_span(
-    return_type: &FunctionReturnType,
-    selected_span: &SourceSpan,
-) -> Option<SourceSpan> {
-    match return_type {
-        FunctionReturnType::Rows { columns, .. } => columns
-            .iter()
-            .find(|column| name_part_matches_span(&column.name, selected_span))
-            .map(|column| column.name.span.clone()),
-        FunctionReturnType::Single(_) | FunctionReturnType::Stream { .. } => None,
-    }
-}
-
-fn return_column_scope(
-    parse: &Parse,
-    selected_span: &SourceSpan,
-) -> Option<(SourceSpan, SourceSpan)> {
-    containing_server_function(parse, selected_span)
-        .and_then(|declaration| {
-            rows_column_declaration_span(&declaration.return_type, selected_span)
-                .map(|column_span| (declaration.span.clone(), column_span))
-        })
-        .or_else(|| {
-            containing_client_function(parse, selected_span).and_then(|declaration| {
-                rows_column_declaration_span(&declaration.return_type, selected_span)
-                    .map(|column_span| (declaration.span.clone(), column_span))
-            })
-        })
-}
-
-fn field_declaration_span(parse: &Parse, selected_span: &SourceSpan) -> Option<SourceSpan> {
-    parse
-        .object_types()
-        .iter()
-        .flat_map(|declaration| &declaration.fields)
-        .find(|field| name_part_matches_span(&field.name, selected_span))
-        .map(|field| field.name.span.clone())
-        .or_else(|| {
-            parse
-                .record_value_types()
-                .iter()
-                .flat_map(|declaration| &declaration.fields)
-                .find(|field| name_part_matches_span(&field.name, selected_span))
-                .map(|field| field.name.span.clone())
-        })
-}
-
-/// Resolves only the final name token in an accepted object-field rename.
-///
-/// The ALTER statement is transition evidence, not a declaration. Its new
-/// name still denotes the final object field, while the old name remains
-/// intentionally unresolved.
-fn renamed_object_field_at<'a>(
-    parse: &'a Parse,
-    selected_span: &SourceSpan,
-) -> Option<FieldInfo<'a>> {
-    parse.field_renames().iter().find_map(|rename| {
-        if !name_part_matches_span(&rename.new_field_name, selected_span) {
-            return None;
-        }
-        let declaration = parse
-            .object_types()
-            .iter()
-            .find(|declaration| qualified_names_match(&declaration.name, &rename.type_name))?;
-        let field = declaration.fields.iter().find(|field| {
-            identifier_spelling_matches(&field.name.text, &rename.new_field_name.text)
-        })?;
-        Some(object_field_info(field))
-    })
-}
-
-fn renamed_object_field_declaration_span(
-    parse: &Parse,
-    selected_span: &SourceSpan,
-) -> Option<SourceSpan> {
-    renamed_object_field_at(parse, selected_span).map(|field| field.name.span.clone())
-}
-
-fn renamed_object_field_at_byte<'a>(parse: &'a Parse, byte: usize) -> Option<FieldInfo<'a>> {
-    parse.field_renames().iter().find_map(|rename| {
-        (byte >= rename.new_field_name.span.start && byte < rename.new_field_name.span.end)
-            .then(|| renamed_object_field_at(parse, &rename.new_field_name.span))
-            .flatten()
-    })
-}
-
-#[derive(Clone, Copy)]
-enum ClientExpressionPart<'a> {
-    ParameterRoot(&'a orna_syntax::NamePart),
-    LocalRoot(&'a orna_syntax::NamePart),
-    FieldRoot(&'a orna_syntax::NamePart),
-    FieldMember {
-        root: &'a orna_syntax::NamePart,
-        members: &'a [orna_syntax::NamePart],
-        index: usize,
-    },
-    TargetFunction {
-        root: &'a orna_syntax::NamePart,
-        members: &'a [orna_syntax::NamePart],
-        constructor: ClientTargetConstructor,
-    },
-    CallArgumentLabel,
-}
-
-#[derive(Clone, Copy, Eq, PartialEq)]
-enum ClientTargetConstructor {
-    Resource,
-    StreamResource,
-    Action,
-}
-
-#[derive(Clone, Copy)]
-struct ClientTargetFunctionPath<'a> {
-    root: &'a orna_syntax::NamePart,
-    members: &'a [orna_syntax::NamePart],
-    constructor: ClientTargetConstructor,
-}
-#[derive(Clone, Copy)]
-enum ClientLocalDeclaration<'a> {
-    PreBegin(&'a orna_syntax::ClientLocalBinding),
-    Procedural(&'a orna_syntax::ClientLetStatement),
-}
-
-impl<'a> ClientLocalDeclaration<'a> {
-    fn name(self) -> &'a orna_syntax::NamePart {
-        match self {
-            Self::PreBegin(local) => &local.name,
-            Self::Procedural(local) => &local.name,
-        }
-    }
-
-    fn type_source(self) -> Option<&'a SourceSlice> {
-        match self {
-            Self::PreBegin(local) => Some(&local.type_source),
-            Self::Procedural(local) => local.type_source.as_ref(),
-        }
-    }
-}
-
-fn client_statement_span(statement: &orna_syntax::ClientProceduralStatement) -> &SourceSpan {
-    match statement {
-        orna_syntax::ClientProceduralStatement::Let(statement) => &statement.span,
-        orna_syntax::ClientProceduralStatement::Assignment(statement) => &statement.span,
-        orna_syntax::ClientProceduralStatement::Return(statement) => &statement.span,
-        orna_syntax::ClientProceduralStatement::If(statement) => &statement.span,
-        orna_syntax::ClientProceduralStatement::While(statement) => &statement.span,
-    }
-}
-
-fn statement_contains_span(
-    statements: &[orna_syntax::ClientProceduralStatement],
-    selected_span: &SourceSpan,
-) -> bool {
-    statements
-        .iter()
-        .any(|statement| span_contains_span(client_statement_span(statement), selected_span))
-}
-
-fn client_locals_visible_in_statements<'a>(
-    statements: &'a [orna_syntax::ClientProceduralStatement],
-    selected_span: &SourceSpan,
-    mut visible: Vec<ClientLocalDeclaration<'a>>,
-) -> Vec<ClientLocalDeclaration<'a>> {
-    for statement in statements {
-        let statement_span = client_statement_span(statement);
-        if statement_span.end <= selected_span.start {
-            if let orna_syntax::ClientProceduralStatement::Let(local) = statement {
-                visible.push(ClientLocalDeclaration::Procedural(local));
-            }
+fn leading_doc_comment(text: &str, before: usize) -> Option<String> {
+    let prefix = text.get(..before)?;
+    let mut lines = Vec::new();
+    for line in prefix.lines().rev() {
+        let trimmed = line.trim_start();
+        if let Some(documentation) = trimmed.strip_prefix("///") {
+            lines.push(documentation.strip_prefix(' ').unwrap_or(documentation));
+        } else if trimmed.is_empty() && lines.is_empty() {
             continue;
-        }
-        if statement_span.start > selected_span.start {
+        } else {
             break;
         }
-
-        match statement {
-            orna_syntax::ClientProceduralStatement::If(statement) => {
-                if span_contains_span(statement.condition.span(), selected_span) {
-                    return visible;
-                }
-                if statement_contains_span(&statement.then_statements, selected_span) {
-                    return client_locals_visible_in_statements(
-                        &statement.then_statements,
-                        selected_span,
-                        visible,
-                    );
-                }
-                for branch in &statement.elsif_branches {
-                    if span_contains_span(branch.condition.span(), selected_span) {
-                        return visible;
-                    }
-                    if statement_contains_span(&branch.statements, selected_span) {
-                        return client_locals_visible_in_statements(
-                            &branch.statements,
-                            selected_span,
-                            visible,
-                        );
-                    }
-                }
-                if let Some(else_statements) = &statement.else_statements
-                    && statement_contains_span(else_statements, selected_span)
-                {
-                    return client_locals_visible_in_statements(
-                        else_statements,
-                        selected_span,
-                        visible,
-                    );
-                }
-            }
-            orna_syntax::ClientProceduralStatement::While(statement) => {
-                if span_contains_span(statement.condition.span(), selected_span) {
-                    return visible;
-                }
-                if statement_contains_span(&statement.body, selected_span) {
-                    return client_locals_visible_in_statements(
-                        &statement.body,
-                        selected_span,
-                        visible,
-                    );
-                }
-            }
-            orna_syntax::ClientProceduralStatement::Let(_)
-            | orna_syntax::ClientProceduralStatement::Assignment(_)
-            | orna_syntax::ClientProceduralStatement::Return(_) => {}
-        }
-        return visible;
     }
-    visible
-}
-
-fn client_local_declarations_visible<'a>(
-    block: &'a orna_syntax::ClientStateBlockBody,
-    selected_span: &SourceSpan,
-) -> Vec<ClientLocalDeclaration<'a>> {
-    let visible = block
-        .locals
-        .iter()
-        .take_while(|local| local.span.end <= selected_span.start)
-        .map(ClientLocalDeclaration::PreBegin)
-        .collect();
-    client_locals_visible_in_statements(&block.statements, selected_span, visible)
-}
-
-fn collect_client_local_declarations<'a>(
-    statements: &'a [orna_syntax::ClientProceduralStatement],
-    locals: &mut Vec<ClientLocalDeclaration<'a>>,
-) {
-    for statement in statements {
-        match statement {
-            orna_syntax::ClientProceduralStatement::Let(local) => {
-                locals.push(ClientLocalDeclaration::Procedural(local));
-            }
-            orna_syntax::ClientProceduralStatement::If(statement) => {
-                collect_client_local_declarations(&statement.then_statements, locals);
-                for branch in &statement.elsif_branches {
-                    collect_client_local_declarations(&branch.statements, locals);
-                }
-                if let Some(else_statements) = &statement.else_statements {
-                    collect_client_local_declarations(else_statements, locals);
-                }
-            }
-            orna_syntax::ClientProceduralStatement::While(statement) => {
-                collect_client_local_declarations(&statement.body, locals);
-            }
-            orna_syntax::ClientProceduralStatement::Assignment(_)
-            | orna_syntax::ClientProceduralStatement::Return(_) => {}
-        }
-    }
-}
-fn all_client_local_declarations<'a>(
-    block: &'a orna_syntax::ClientStateBlockBody,
-) -> Vec<ClientLocalDeclaration<'a>> {
-    let mut locals = block
-        .locals
-        .iter()
-        .map(ClientLocalDeclaration::PreBegin)
-        .collect::<Vec<_>>();
-    collect_client_local_declarations(&block.statements, &mut locals);
-    locals
-}
-fn client_statement_part_at<'a>(
-    statement: &'a orna_syntax::ClientProceduralStatement,
-    selected_span: &SourceSpan,
-) -> Option<ClientExpressionPart<'a>> {
-    match statement {
-        orna_syntax::ClientProceduralStatement::Let(statement) => {
-            client_expression_part_at(&statement.expression, selected_span)
-        }
-        orna_syntax::ClientProceduralStatement::Assignment(statement) => {
-            client_expression_part_at(&statement.expression, selected_span)
-        }
-        orna_syntax::ClientProceduralStatement::Return(statement) => statement
-            .expression
-            .as_ref()
-            .and_then(|expression| client_expression_part_at(expression, selected_span)),
-        orna_syntax::ClientProceduralStatement::If(statement) => {
-            client_expression_part_at(&statement.condition, selected_span)
-                .or_else(|| {
-                    statement
-                        .then_statements
-                        .iter()
-                        .find_map(|statement| client_statement_part_at(statement, selected_span))
-                })
-                .or_else(|| {
-                    statement.elsif_branches.iter().find_map(|branch| {
-                        client_expression_part_at(&branch.condition, selected_span).or_else(|| {
-                            branch.statements.iter().find_map(|statement| {
-                                client_statement_part_at(statement, selected_span)
-                            })
-                        })
-                    })
-                })
-                .or_else(|| {
-                    statement.else_statements.as_ref().and_then(|statements| {
-                        statements.iter().find_map(|statement| {
-                            client_statement_part_at(statement, selected_span)
-                        })
-                    })
-                })
-        }
-        orna_syntax::ClientProceduralStatement::While(statement) => {
-            client_expression_part_at(&statement.condition, selected_span).or_else(|| {
-                statement
-                    .body
-                    .iter()
-                    .find_map(|statement| client_statement_part_at(statement, selected_span))
-            })
-        }
-    }
-}
-
-fn qualified_name_matches_parts(name: &QualifiedName, parts: &[&str]) -> bool {
-    name.parts.len() == parts.len()
-        && name
-            .parts
-            .iter()
-            .zip(parts)
-            .all(|(part, expected)| identifier_spelling_matches(&part.text, expected))
-}
-
-fn accepted_target_constructor(callee: &QualifiedName) -> Option<ClientTargetConstructor> {
-    if qualified_name_matches_parts(callee, &["std", "data", "resource"]) {
-        Some(ClientTargetConstructor::Resource)
-    } else if qualified_name_matches_parts(callee, &["std", "data", "stream_resource"]) {
-        Some(ClientTargetConstructor::StreamResource)
-    } else if qualified_name_matches_parts(callee, &["std", "action", "call"]) {
-        Some(ClientTargetConstructor::Action)
-    } else {
+    if lines.is_empty() {
         None
+    } else {
+        lines.reverse();
+        Some(lines.join("\n"))
     }
 }
 
-fn is_target_argument(name: &orna_syntax::NamePart) -> bool {
-    identifier_spelling_matches(&name.text, "target")
+fn source_slice<'a>(text: &'a str, span: &SourceSpan) -> &'a str {
+    text.get(span.start..span.end).unwrap_or("")
 }
 
-fn target_path_matches_name(path: ClientTargetFunctionPath<'_>, name: &QualifiedName) -> bool {
-    name.parts.len() == path.members.len() + 1
-        && name
-            .parts
-            .iter()
-            .zip(std::iter::once(path.root).chain(path.members.iter()))
-            .all(|(candidate, source)| identifier_spelling_matches(&candidate.text, &source.text))
-}
-
-fn target_path_key(path: ClientTargetFunctionPath<'_>) -> Vec<IdentifierKey> {
-    std::iter::once(path.root)
-        .chain(path.members.iter())
-        .map(|part| identifier_key(&part.text))
-        .collect()
-}
-
-fn target_name_key(name: &QualifiedName) -> Vec<IdentifierKey> {
-    name.parts
-        .iter()
-        .map(|part| identifier_key(&part.text))
-        .collect()
-}
-
-fn client_target_function_path_at<'a>(
-    parse: &'a Parse,
-    selected_span: &SourceSpan,
-) -> Option<ClientTargetFunctionPath<'a>> {
-    let (declaration, part) = client_expression_part_in_parse(parse, selected_span)?;
-    let ClientExpressionPart::TargetFunction {
-        root,
-        members,
-        constructor,
-    } = part
-    else {
-        return None;
-    };
-    let path = ClientTargetFunctionPath {
-        root,
-        members,
-        constructor,
-    };
-    let target_is_declared = parse
-        .server_functions()
-        .iter()
-        .any(|candidate| target_path_matches_name(path, &candidate.name))
-        || parse
-            .client_functions()
-            .iter()
-            .any(|candidate| target_path_matches_name(path, &candidate.name));
-    // A target root bound to a parameter or local is an ordinary field path,
-    // even when its spelling is `std`; only an unbound `std` root denotes
-    // the standard-library constructor namespace.
-    if client_root_binding(declaration, root, ClientExpressionPart::FieldRoot(root)).is_some()
-        && !target_is_declared
-    {
-        return None;
-    }
-    Some(path)
-}
-
-fn client_target_declaration<'a>(
-    parse: &'a Parse,
-    selected_span: &SourceSpan,
-) -> Option<DeclarationRef<'a>> {
-    let path = client_target_function_path_at(parse, selected_span)?;
-    let mut declaration = None;
-    for candidate in parse.server_functions() {
-        if target_path_matches_name(path, &candidate.name) {
-            if declaration.is_some() {
-                return None;
-            }
-            declaration = Some(DeclarationRef::ServerFunction(candidate));
-        }
-    }
-    for candidate in parse.client_functions() {
-        if target_path_matches_name(path, &candidate.name) {
-            if declaration.is_some() {
-                return None;
-            }
-            declaration = Some(DeclarationRef::ClientFunction(candidate));
-        }
-    }
-    declaration
-}
-
-fn client_target_declaration_span(parse: &Parse, selected_span: &SourceSpan) -> Option<SourceSpan> {
-    client_target_declaration(parse, selected_span)
-        .map(|declaration| declaration.name_span().clone())
-}
-
-/// Returns true only for the final function component of an accepted target.
-pub(crate) fn is_client_target_function_span(parse: &Parse, selected_span: &SourceSpan) -> bool {
-    client_target_function_path_at(parse, selected_span).is_some()
-}
-
-fn client_expression_part_at<'a>(
-    expression: &'a ClientExpression,
-    selected_span: &SourceSpan,
-) -> Option<ClientExpressionPart<'a>> {
-    match expression {
-        ClientExpression::Call {
-            callee, arguments, ..
-        } => {
-            if let Some(constructor) = accepted_target_constructor(callee)
-                && let Some(argument) = arguments
-                    .iter()
-                    .find(|argument| argument.name.as_ref().is_some_and(is_target_argument))
-                && let ClientExpression::FieldPath { root, members, .. } = &argument.value
-                && members
-                    .last()
-                    .is_some_and(|member| name_part_matches_span(member, selected_span))
-            {
-                return Some(ClientExpressionPart::TargetFunction {
-                    root,
-                    members,
-                    constructor,
-                });
-            }
-            arguments.iter().find_map(|argument| {
-                if argument
-                    .name
-                    .as_ref()
-                    .is_some_and(|name| name_part_matches_span(name, selected_span))
-                {
-                    return Some(ClientExpressionPart::CallArgumentLabel);
-                }
-                client_expression_part_at(&argument.value, selected_span)
+fn normalized_identifier(text: &str) -> String {
+    lex(text)
+        .ok()
+        .and_then(|tokens| {
+            tokens.into_iter().find_map(|token| match token.kind {
+                TokenKind::Identifier { normalized } => Some(normalized),
+                _ => None,
             })
-        }
-        ClientExpression::ParameterRead { parameter } => {
-            name_part_matches_span(parameter, selected_span)
-                .then_some(ClientExpressionPart::ParameterRoot(parameter))
-        }
-        ClientExpression::LocalRead { local } => name_part_matches_span(local, selected_span)
-            .then_some(ClientExpressionPart::LocalRoot(local)),
-        ClientExpression::FieldPath { root, members, .. } => {
-            if name_part_matches_span(root, selected_span) {
-                return Some(ClientExpressionPart::FieldRoot(root));
-            }
-            members.iter().enumerate().find_map(|(index, member)| {
-                name_part_matches_span(member, selected_span).then_some(
-                    ClientExpressionPart::FieldMember {
-                        root,
-                        members,
-                        index,
-                    },
-                )
-            })
-        }
-        ClientExpression::Await { expression, .. } => {
-            client_expression_part_at(expression, selected_span)
-        }
-        ClientExpression::Concat { left, right, .. } => {
-            client_expression_part_at(left, selected_span)
-                .or_else(|| client_expression_part_at(right, selected_span))
-        }
-        ClientExpression::Unary(unary) => {
-            client_expression_part_at(&unary.expression, selected_span)
-        }
-        ClientExpression::Binary(binary) => client_expression_part_at(&binary.left, selected_span)
-            .or_else(|| client_expression_part_at(&binary.right, selected_span)),
-        ClientExpression::Parenthesized { expression, .. } => {
-            client_expression_part_at(expression, selected_span)
-        }
-        ClientExpression::StringLiteral { .. }
-        | ClientExpression::IntegerLiteral { .. }
-        | ClientExpression::BooleanLiteral { .. } => None,
-    }
+        })
+        .unwrap_or_else(|| text.to_owned())
 }
 
-fn client_body_part_at<'a>(
-    declaration: &'a ClientFunctionDeclaration,
-    selected_span: &SourceSpan,
-) -> Option<ClientExpressionPart<'a>> {
-    let block_part = |block: &'a orna_syntax::ClientStateBlockBody| {
-        block
-            .states
-            .iter()
-            .find_map(|state| match &state.default {
-                orna_syntax::StateDefault::Expression(expression) => {
-                    client_expression_part_at(expression, selected_span)
-                }
-                orna_syntax::StateDefault::Unset | orna_syntax::StateDefault::Null => None,
-            })
-            .or_else(|| {
-                block
-                    .locals
-                    .iter()
-                    .find_map(|local| client_expression_part_at(&local.expression, selected_span))
-            })
-            .or_else(|| {
-                block
-                    .statements
-                    .iter()
-                    .find_map(|statement| client_statement_part_at(statement, selected_span))
-            })
-            .or_else(|| {
-                block
-                    .return_expression
-                    .as_ref()
-                    .and_then(|expression| client_expression_part_at(expression, selected_span))
-            })
-    };
-    match &declaration.body {
-        orna_syntax::ClientFunctionBody::Expression { expression }
-        | orna_syntax::ClientFunctionBody::ReturnExpression { expression } => {
-            client_expression_part_at(expression, selected_span)
-        }
-        orna_syntax::ClientFunctionBody::StateBlock(block) => block_part(block),
-        orna_syntax::ClientFunctionBody::BooleanLiteral { .. }
-        | orna_syntax::ClientFunctionBody::ExternalContract { .. } => None,
-        _ => None,
-    }
-}
-
-fn client_expression_part_in_parse<'a>(
-    parse: &'a Parse,
-    selected_span: &SourceSpan,
-) -> Option<(&'a ClientFunctionDeclaration, ClientExpressionPart<'a>)> {
-    parse.client_functions().iter().find_map(|declaration| {
-        if !span_contains_span(&declaration.span, selected_span) {
-            return None;
-        }
-        client_body_part_at(declaration, selected_span).map(|part| (declaration, part))
+fn token_at(text: &str, byte: usize) -> Option<Token> {
+    lex(text).ok()?.into_iter().find(|token| {
+        matches!(token.kind, TokenKind::Identifier { .. })
+            && token.span.start <= byte
+            && byte < token.span.end
     })
 }
 
-fn client_call_callee_at<'a>(
-    parse: &'a Parse,
-    selected_span: &SourceSpan,
-) -> Option<&'a orna_syntax::QualifiedName> {
-    fn find_callee<'a>(
-        node: &'a ClientExpression,
-        selected_span: &SourceSpan,
-    ) -> Option<&'a orna_syntax::QualifiedName> {
-        match node {
-            ClientExpression::Call {
-                callee, arguments, ..
-            } => {
-                if callee
-                    .parts
-                    .iter()
-                    .any(|part| name_part_matches_span(part, selected_span))
-                {
-                    return Some(callee);
-                }
-                arguments
-                    .iter()
-                    .find_map(|argument| find_callee(&argument.value, selected_span))
-            }
-            ClientExpression::Await { expression, .. }
-            | ClientExpression::Parenthesized { expression, .. } => {
-                find_callee(expression, selected_span)
-            }
-            ClientExpression::Concat { left, right, .. }
-            | ClientExpression::Binary(orna_syntax::ClientBinaryExpression {
-                left, right, ..
-            }) => find_callee(left, selected_span).or_else(|| find_callee(right, selected_span)),
-            ClientExpression::Unary(unary) => find_callee(&unary.expression, selected_span),
-            _ => None,
-        }
-    }
-
-    parse.client_functions().iter().find_map(|declaration| {
-        if !span_contains_span(&declaration.span, selected_span) {
-            return None;
-        }
-        match &declaration.body {
-            orna_syntax::ClientFunctionBody::Expression { expression: body }
-            | orna_syntax::ClientFunctionBody::ReturnExpression { expression: body } => {
-                find_callee(body, selected_span)
-            }
-            _ => None,
-        }
-    })
-}
-
-fn qualified_names_match(left: &QualifiedName, right: &QualifiedName) -> bool {
-    left.parts.len() == right.parts.len()
-        && left
-            .parts
-            .iter()
-            .zip(&right.parts)
-            .all(|(left, right)| identifier_spelling_matches(&left.text, &right.text))
-}
-fn type_owner_name(specification: &TypeSpecification) -> Option<QualifiedName> {
-    match specification {
-        TypeSpecification::Named(name) => Some(name.clone()),
-        TypeSpecification::Reference { target, .. }
-        | TypeSpecification::List {
-            element: target, ..
-        }
-        | TypeSpecification::Set {
-            element: target, ..
-        }
-        | TypeSpecification::Stream {
-            element: target, ..
-        }
-        | TypeSpecification::Option { value: target, .. } => type_owner_name(target),
-        TypeSpecification::Map { key, value, .. } => {
-            type_owner_name(key).or_else(|| type_owner_name(value))
-        }
-        TypeSpecification::StandardLargeObject { .. } => None,
-    }
-}
-
-fn source_contains_unquoted_comment(source: &str) -> bool {
-    let bytes = source.as_bytes();
-    let mut index = 0;
-    let mut quoted = false;
-    while index < bytes.len() {
-        if quoted {
-            if bytes[index] == b'"' {
-                if bytes.get(index + 1) == Some(&b'"') {
-                    index += 2;
-                    continue;
-                }
-                quoted = false;
-            }
-            index += 1;
-            continue;
-        }
-        if bytes[index] == b'"' {
-            quoted = true;
-            index += 1;
-            continue;
-        }
-        if index + 2 <= bytes.len()
-            && (&bytes[index..index + 2] == b"/*" || &bytes[index..index + 2] == b"--")
-        {
-            return true;
-        }
-        index += 1;
-    }
-    false
-}
-
-const TYPE_SOURCE_PREFIX: &str = "CREATE SERVER FUNCTION __orna_lsp_type_owner(p BOOLEAN) RETURNS ";
-
-fn type_specification_from_source(source: &str) -> Option<TypeSpecification> {
-    if source_contains_unquoted_comment(source) {
-        return None;
-    }
-    let wrapped = format!("{TYPE_SOURCE_PREFIX}{source} AS SELECT p;");
-    let parsed = orna_syntax::parse(&wrapped);
-    parsed
-        .server_functions()
-        .first()
-        .and_then(|declaration| match &declaration.return_type {
-            FunctionReturnType::Single(specification) => Some(specification.clone()),
-            FunctionReturnType::Rows { .. } | FunctionReturnType::Stream { .. } => None,
-        })
-}
-
-fn rebase_span(span: &mut SourceSpan, source_start: usize) {
-    let width = span.end - span.start;
-    span.start = span.start - TYPE_SOURCE_PREFIX.len() + source_start;
-    span.end = span.start + width;
-}
-
-fn rebase_qualified_name(name: &mut QualifiedName, source_start: usize) {
-    rebase_span(&mut name.span, source_start);
-    for part in &mut name.parts {
-        rebase_span(&mut part.span, source_start);
-    }
-}
-
-fn rebase_type_specification(specification: &mut TypeSpecification, source_start: usize) {
-    match specification {
-        TypeSpecification::Named(name) => rebase_qualified_name(name, source_start),
-        TypeSpecification::StandardLargeObject { source, .. } => {
-            rebase_span(&mut source.span, source_start)
-        }
-        TypeSpecification::Reference { target, span, .. }
-        | TypeSpecification::List {
-            element: target,
-            span,
-        }
-        | TypeSpecification::Set {
-            element: target,
-            span,
-        }
-        | TypeSpecification::Option {
-            value: target,
-            span,
-            ..
-        }
-        | TypeSpecification::Stream {
-            element: target,
-            span,
-        } => {
-            rebase_span(span, source_start);
-            rebase_type_specification(target, source_start);
-        }
-        TypeSpecification::Map {
-            key, value, span, ..
-        } => {
-            rebase_span(span, source_start);
-            rebase_type_specification(key, source_start);
-            rebase_type_specification(value, source_start);
-        }
-    }
-}
-
-fn type_specification_from_slice(source: &SourceSlice) -> Option<TypeSpecification> {
-    let mut specification = type_specification_from_source(&source.text)?;
-    rebase_type_specification(&mut specification, source.span.start);
-    Some(specification)
-}
-
-fn type_owner_name_from_source(source: &str) -> Option<QualifiedName> {
-    // The compiler's CLIENT local type resolver only strips whitespace.
-    if source_contains_unquoted_comment(source) {
-        return None;
-    }
-    type_specification_from_source(source).and_then(|specification| type_owner_name(&specification))
-}
-
-struct ClientRootBinding {
-    declaration_span: SourceSpan,
-    owner: Option<QualifiedName>,
-}
-
-fn client_root_binding(
-    declaration: &ClientFunctionDeclaration,
-    root: &orna_syntax::NamePart,
-    kind: ClientExpressionPart<'_>,
-) -> Option<ClientRootBinding> {
-    let find_local = || {
-        let block = declaration.body.as_state_block()?;
-        // A binding becomes visible only after its declaration. Invalid or
-        // ambiguous source must fail closed rather than guessing a target.
-        let matches: Vec<_> = client_local_declarations_visible(block, &root.span)
-            .into_iter()
-            .filter(|local| name_part_matches_text(local.name(), &root.text))
-            .collect();
-        if matches.len() != 1 {
-            return None;
-        }
-        let local = matches[0];
-        Some(ClientRootBinding {
-            declaration_span: local.name().span.clone(),
-            owner: local
-                .type_source()
-                .and_then(|source| type_owner_name_from_source(&source.text)),
-        })
-    };
-    let find_state = || {
-        let block = declaration.body.as_state_block()?;
-        let mut matches = block.states.iter().filter(|state| {
-            name_part_matches_text(&state.name, &root.text) && state.span.end <= root.span.start
-        });
-        let state = matches.next()?;
-        if matches.next().is_some() {
-            return None;
-        }
-        Some(ClientRootBinding {
-            declaration_span: state.name.span.clone(),
-            owner: type_owner_name(&state.type_specification),
-        })
-    };
-    match kind {
-        ClientExpressionPart::LocalRoot(_) => find_local(),
-        ClientExpressionPart::ParameterRoot(_) => find_local()
-            .or_else(|| {
-                declaration
-                    .parameters
-                    .iter()
-                    .find(|parameter| name_part_matches_text(&parameter.name, &root.text))
-                    .map(|parameter| ClientRootBinding {
-                        declaration_span: parameter.name.span.clone(),
-                        owner: type_owner_name(&parameter.type_specification),
-                    })
-            })
-            .or_else(find_state),
-        // The compiler's FieldPath grammar starts from a parameter. Keep
-        // that precedence when a local happens to share its name.
-        ClientExpressionPart::FieldRoot(_) => declaration
-            .parameters
-            .iter()
-            .find(|parameter| name_part_matches_text(&parameter.name, &root.text))
-            .map(|parameter| ClientRootBinding {
-                declaration_span: parameter.name.span.clone(),
-                owner: type_owner_name(&parameter.type_specification),
-            })
-            .or_else(find_local),
-        ClientExpressionPart::FieldMember { .. }
-        | ClientExpressionPart::TargetFunction { .. }
-        | ClientExpressionPart::CallArgumentLabel => None,
-    }
-}
-
-fn field_on_object_or_record<'a>(
-    parse: &'a Parse,
-    owner: &QualifiedName,
-    field_name: &str,
-) -> Option<FieldInfo<'a>> {
-    if let Some(declaration) = parse
-        .object_types()
+fn symbol_for_name<'a>(symbols: &'a [EditorSymbol], name: &str) -> Option<&'a EditorSymbol> {
+    let key = normalized_identifier(name);
+    let mut matches = symbols
         .iter()
-        .find(|declaration| qualified_names_match(&declaration.name, owner))
-    {
-        let field = declaration
-            .fields
-            .iter()
-            .find(|field| identifier_spelling_matches(&field.name.text, field_name))?;
-        return Some(object_field_info(field));
-    }
-    let declaration = parse
-        .record_value_types()
-        .iter()
-        .find(|declaration| qualified_names_match(&declaration.name, owner))?;
-    let field = declaration
-        .fields
-        .iter()
-        .find(|field| identifier_spelling_matches(&field.name.text, field_name))?;
-    Some(record_field_info(field))
+        .filter(|symbol| normalized_identifier(&symbol.name) == key);
+    let found = matches.next()?;
+    matches.next().is_none().then_some(found)
 }
 
-fn client_parameter_info<'a>(
-    declaration: &'a ClientFunctionDeclaration,
-    root: &orna_syntax::NamePart,
-    kind: ClientExpressionPart<'_>,
-) -> Option<ParameterInfo<'a>> {
-    let find_parameter = || {
-        declaration
-            .parameters
-            .iter()
-            .find(|parameter| name_part_matches_text(&parameter.name, &root.text))
-            .map(|parameter| ParameterInfo {
-                name: &parameter.name,
-                type_specification: &parameter.type_specification,
-                default_text: parameter
-                    .default_expression
-                    .as_ref()
-                    .map(|default| default.text.as_str()),
-                documentation: parameter.documentation.as_ref().map(strip_quotes),
-            })
-    };
-    let find_state = || {
-        declaration
-            .body
-            .as_state_block()
-            .and_then(|block| {
-                block.states.iter().find(|state| {
-                    name_part_matches_text(&state.name, &root.text)
-                        && state.span.end <= root.span.start
-                })
-            })
-            .map(|state| ParameterInfo {
-                name: &state.name,
-                type_specification: &state.type_specification,
-                default_text: None,
-                documentation: None,
-            })
-    };
-    let visible_local = || {
-        declaration.body.as_state_block().is_some_and(|block| {
-            client_local_declarations_visible(block, &root.span)
-                .iter()
-                .any(|local| name_part_matches_text(local.name(), &root.text))
-        })
-    };
-    match kind {
-        ClientExpressionPart::ParameterRoot(_) => {
-            if visible_local() {
-                None
-            } else {
-                find_parameter().or_else(find_state)
-            }
-        }
-        ClientExpressionPart::LocalRoot(_) => None,
-        ClientExpressionPart::FieldRoot(_) => find_parameter().or_else(find_state),
-        ClientExpressionPart::FieldMember { .. }
-        | ClientExpressionPart::TargetFunction { .. }
-        | ClientExpressionPart::CallArgumentLabel => None,
-    }
+fn selected_symbol_owned(parse: &EditorParse, text: &str, byte: usize) -> Option<EditorSymbol> {
+    let token = token_at(text, byte)?;
+    let symbols = declaration_symbols(parse, text);
+    symbol_for_name(&symbols, &token.text).cloned()
 }
 
-fn client_local_hover(
-    parse: &Parse,
-    declaration: &ClientFunctionDeclaration,
-    root: &orna_syntax::NamePart,
-    text: &str,
-    doc_link: Option<&str>,
-) -> Option<Hover> {
-    let block = declaration.body.as_state_block()?;
-    let matches: Vec<_> = client_local_declarations_visible(block, &root.span)
-        .into_iter()
-        .filter(|local| name_part_matches_text(local.name(), &root.text))
-        .collect();
-    if matches.len() != 1 {
-        return None;
-    }
-    let local = matches[0];
-    let name = local.name();
-    let type_source = local.type_source()?;
-    let specification = type_specification_from_slice(type_source)?;
-    let parameter = ParameterInfo {
-        name,
-        type_specification: &specification,
-        default_text: None,
-        documentation: None,
-    };
-    Some(crate::hover::parameter_hover(
-        parse, &parameter, text, doc_link,
-    ))
-}
-
-fn client_field_info_at<'a>(parse: &'a Parse, selected_span: &SourceSpan) -> Option<FieldInfo<'a>> {
-    let (declaration, part) = client_expression_part_in_parse(parse, selected_span)?;
-    let ClientExpressionPart::FieldMember {
-        root,
-        members,
-        index,
-    } = part
-    else {
-        return None;
-    };
-    let mut owner =
-        client_root_binding(declaration, root, ClientExpressionPart::FieldRoot(root))?.owner?;
-    for (member_index, member) in members.iter().take(index + 1).enumerate() {
-        let field = field_on_object_or_record(parse, &owner, &member.text)?;
-        if member_index == index {
-            return Some(field);
-        }
-        owner = type_owner_name(field.type_specification)?;
-    }
-    None
-}
-
-fn client_field_declaration_span(parse: &Parse, selected_span: &SourceSpan) -> Option<SourceSpan> {
-    let (declaration, part) = client_expression_part_in_parse(parse, selected_span)?;
-    let ClientExpressionPart::FieldMember {
-        root,
-        members,
-        index,
-    } = part
-    else {
-        return None;
-    };
-    let mut owner =
-        client_root_binding(declaration, root, ClientExpressionPart::FieldRoot(root))?.owner?;
-    let mut field_span = None;
-    for (member_index, member) in members.iter().take(index + 1).enumerate() {
-        let field = field_on_object_or_record(parse, &owner, &member.text)?;
-        field_span = Some(field.name.span.clone());
-        if member_index < index {
-            owner = type_owner_name(field.type_specification)?;
-        }
-    }
-    field_span
-}
-
-fn query_expression_field_path_at<'a>(
-    expression: &'a orna_syntax::QueryExpression,
-    selected_span: &SourceSpan,
-) -> Option<(&'a orna_syntax::NamePart, &'a [orna_syntax::NamePart])> {
-    match expression {
-        orna_syntax::QueryExpression::FieldPath { root, members, .. }
-            if members
-                .iter()
-                .any(|member| name_part_matches_span(member, selected_span)) =>
-        {
-            Some((root, members))
-        }
-        orna_syntax::QueryExpression::Equality { left, right, .. } => {
-            query_expression_field_path_at(left, selected_span)
-                .or_else(|| query_expression_field_path_at(right, selected_span))
-        }
-        orna_syntax::QueryExpression::ObjectReference { .. }
-        | orna_syntax::QueryExpression::FieldPath { .. }
-        | orna_syntax::QueryExpression::BooleanLiteral { .. }
-        | orna_syntax::QueryExpression::ParameterRead { .. } => None,
-    }
-}
-
-fn query_field_path_at<'a>(
-    query: &'a orna_syntax::SelectQuery,
-    selected_span: &SourceSpan,
-) -> Option<(&'a orna_syntax::NamePart, &'a [orna_syntax::NamePart])> {
-    let root_matches = |root: &orna_syntax::NamePart| {
-        identifier_spelling_matches(&query.source_object.alias.text, &root.text)
-    };
-    query
-        .projections
-        .iter()
-        .find_map(|expression| {
-            query_expression_field_path_at(expression, selected_span)
-                .filter(|(root, _)| root_matches(root))
-        })
-        .or_else(|| {
-            query
-                .predicate
-                .as_ref()
-                .and_then(|expression| query_expression_field_path_at(expression, selected_span))
-                .filter(|(root, _)| root_matches(root))
-        })
-        .or_else(|| {
-            query.ordering.iter().find_map(|ordering| {
-                query_expression_field_path_at(&ordering.expression, selected_span)
-                    .filter(|(root, _)| root_matches(root))
-            })
-        })
-}
-
-/// Returns the object or record field whose name covers one byte offset inside SQL.
-fn sql_column_at<'a>(
-    parse: &'a Parse,
-    byte: usize,
-    text: &str,
-    highlighted: &[orna_syntax::HighlightToken],
-) -> Option<FieldInfo<'a>> {
-    let (_, kind, selected_span) = token_at(text, highlighted, byte)?;
-    if !matches!(
-        kind,
-        HighlightKind::PropertyName | HighlightKind::QuotedIdentifier
-    ) {
-        return None;
-    }
-    for declaration in parse.server_functions() {
-        let resolved = match &declaration.body {
-            orna_syntax::ServerFunctionBody::SqlQuery(body) => {
-                query_field_path_at(&body.query, &selected_span).and_then(|(_, members)| {
-                    let mut owner = body.query.source_object.object_type.clone();
-                    for (index, member) in members.iter().enumerate() {
-                        let field = field_on_object_or_record(parse, &owner, &member.text)?;
-                        if name_part_matches_span(member, &selected_span) {
-                            return Some(field);
-                        }
-                        if index + 1 < members.len() {
-                            owner = type_owner_name(field.type_specification)?;
-                        }
-                    }
-                    None
-                })
-            }
-            orna_syntax::ServerFunctionBody::SqlInsert(body) => body
-                .insert
-                .target_fields
-                .iter()
-                .find(|field| name_part_matches_span(field, &selected_span))
-                .and_then(|field| {
-                    field_on_object_or_record(parse, &body.insert.target_object, &field.text)
-                }),
-            orna_syntax::ServerFunctionBody::SqlUpdate(body) => body
-                .update
-                .assignments
-                .iter()
-                .find(|assignment| name_part_matches_span(&assignment.target_field, &selected_span))
-                .and_then(|assignment| {
-                    field_on_object_or_record(
-                        parse,
-                        &body.update.target_object,
-                        &assignment.target_field.text,
-                    )
-                }),
-            _ => None,
-        };
-        if resolved.is_some() {
-            return resolved;
-        }
-    }
-    None
-}
-
-fn query_field_path_any_at<'a>(
-    query: &'a orna_syntax::SelectQuery,
-    selected_span: &SourceSpan,
-) -> Option<(&'a orna_syntax::NamePart, &'a [orna_syntax::NamePart])> {
-    query
-        .projections
-        .iter()
-        .find_map(|expression| query_expression_field_path_at(expression, selected_span))
-        .or_else(|| {
-            query
-                .predicate
-                .as_ref()
-                .and_then(|expression| query_expression_field_path_at(expression, selected_span))
-        })
-        .or_else(|| {
-            query.ordering.iter().find_map(|ordering| {
-                query_expression_field_path_at(&ordering.expression, selected_span)
-            })
-        })
-}
-
-fn sql_source_object_type_contains_span(
-    parse: &Parse,
-    path: &[IdentifierKey],
-    selected_span: &SourceSpan,
-) -> bool {
-    let matches = |object_type: &QualifiedName| {
-        qualified_name_matches_keys(object_type, path)
-            && object_type
-                .parts
-                .iter()
-                .any(|part| name_part_matches_span(part, selected_span))
-    };
-    parse
-        .server_functions()
-        .iter()
-        .any(|declaration| match &declaration.body {
-            orna_syntax::ServerFunctionBody::SqlQuery(body) => {
-                matches(&body.query.source_object.object_type)
-            }
-            orna_syntax::ServerFunctionBody::SqlInsert(body) => matches(&body.insert.target_object),
-            orna_syntax::ServerFunctionBody::SqlUpdate(body) => matches(&body.update.target_object),
-            orna_syntax::ServerFunctionBody::SqlDelete(body) => matches(&body.delete.target_object),
-            _ => false,
-        })
-}
-fn sql_source_object_type_prefix_contains_span(
-    parse: &Parse,
-    path: &[IdentifierKey],
-    selected_span: &SourceSpan,
-) -> bool {
-    let matches = |object_type: &QualifiedName| {
-        object_type.parts.len() >= path.len()
-            && object_type
-                .parts
-                .iter()
-                .zip(path)
-                .all(|(part, key)| identifier_key(&part.text) == *key)
-            && object_type
-                .parts
-                .iter()
-                .take(path.len())
-                .any(|part| name_part_matches_span(part, selected_span))
-    };
-    parse
-        .server_functions()
-        .iter()
-        .any(|declaration| match &declaration.body {
-            orna_syntax::ServerFunctionBody::SqlQuery(body) => {
-                matches(&body.query.source_object.object_type)
-            }
-            orna_syntax::ServerFunctionBody::SqlInsert(body) => matches(&body.insert.target_object),
-            orna_syntax::ServerFunctionBody::SqlUpdate(body) => matches(&body.update.target_object),
-            orna_syntax::ServerFunctionBody::SqlDelete(body) => matches(&body.delete.target_object),
-            _ => false,
-        })
-}
-
-fn sql_object_type_declaration_at<'a>(
-    parse: &'a Parse,
-    text: &str,
-    highlighted: &[orna_syntax::HighlightToken],
-    selected_span: &SourceSpan,
-) -> Option<DeclarationRef<'a>> {
-    let path = qualified_name_keys_at(text, highlighted, selected_span).unwrap_or_else(|| {
-        vec![identifier_key(
-            &text[selected_span.start..selected_span.end],
-        )]
-    });
-    sql_source_object_type_contains_span(parse, &path, selected_span)
-        .then(|| declaration_for_keys(parse, &path, HighlightKind::TypeName))
-        .flatten()
-}
-
-fn query_expression_alias_or_parameter_contains_span(
-    expression: &orna_syntax::QueryExpression,
-    selected_span: &SourceSpan,
-) -> bool {
-    match expression {
-        orna_syntax::QueryExpression::ObjectReference { alias, .. }
-        | orna_syntax::QueryExpression::FieldPath { root: alias, .. } => {
-            name_part_matches_span(alias, selected_span)
-        }
-        orna_syntax::QueryExpression::ParameterRead { parameter } => {
-            name_part_matches_span(parameter, selected_span)
-        }
-        orna_syntax::QueryExpression::Equality { left, right, .. } => {
-            query_expression_alias_or_parameter_contains_span(left, selected_span)
-                || query_expression_alias_or_parameter_contains_span(right, selected_span)
-        }
-        orna_syntax::QueryExpression::BooleanLiteral { .. } => false,
-    }
-}
-
-fn sql_query_alias_or_parameter_contains_span(
-    query: &orna_syntax::SelectQuery,
-    selected_span: &SourceSpan,
-) -> bool {
-    query.projections.iter().any(|expression| {
-        query_expression_alias_or_parameter_contains_span(expression, selected_span)
-    }) || query.predicate.as_ref().is_some_and(|expression| {
-        query_expression_alias_or_parameter_contains_span(expression, selected_span)
-    }) || query.ordering.iter().any(|ordering| {
-        query_expression_alias_or_parameter_contains_span(&ordering.expression, selected_span)
-    })
-}
-
-fn sql_query_contains_span(parse: &Parse, selected_span: &SourceSpan) -> bool {
-    parse
-        .server_functions()
-        .iter()
-        .any(|declaration| match &declaration.body {
-            orna_syntax::ServerFunctionBody::SqlQuery(body) => {
-                span_contains_span(&body.source.span, selected_span)
-            }
-            _ => false,
-        })
-}
-
-fn sql_unresolved_field_or_alias(parse: &Parse, selected_span: &SourceSpan) -> bool {
-    parse
-        .server_functions()
-        .iter()
-        .any(|declaration| match &declaration.body {
-            orna_syntax::ServerFunctionBody::SqlQuery(body) => {
-                if name_part_matches_span(&body.query.source_object.alias, selected_span) {
-                    return true;
-                }
-                if sql_query_alias_or_parameter_contains_span(&body.query, selected_span) {
-                    return true;
-                }
-                let Some((root, members)) = query_field_path_any_at(&body.query, selected_span)
-                else {
-                    return false;
-                };
-                let root_matches =
-                    identifier_spelling_matches(&body.query.source_object.alias.text, &root.text);
-                if !root_matches || name_part_matches_span(root, selected_span) {
-                    return true;
-                }
-                let mut owner = body.query.source_object.object_type.clone();
-                for (index, member) in members.iter().enumerate() {
-                    let Some(field) = field_on_object_or_record(parse, &owner, &member.text) else {
-                        return true;
-                    };
-                    if name_part_matches_span(member, selected_span) {
-                        return false;
-                    }
-                    if index + 1 < members.len() {
-                        let Some(next_owner) = type_owner_name(field.type_specification) else {
-                            return true;
-                        };
-                        owner = next_owner;
-                    }
-                }
-                false
-            }
-            orna_syntax::ServerFunctionBody::SqlInsert(body) => {
-                name_part_matches_span(&body.insert.target_alias, selected_span)
-                    || name_part_matches_span(&body.insert.returning_alias, selected_span)
-                    || body.insert.target_fields.iter().any(|field| {
-                        name_part_matches_span(field, selected_span)
-                            && field_on_object_or_record(
-                                parse,
-                                &body.insert.target_object,
-                                &field.text,
-                            )
-                            .is_none()
-                    })
-            }
-            orna_syntax::ServerFunctionBody::SqlUpdate(body) => {
-                name_part_matches_span(&body.update.target_alias, selected_span)
-                    || name_part_matches_span(&body.update.selector_alias, selected_span)
-                    || name_part_matches_span(&body.update.returning_alias, selected_span)
-                    || body.update.assignments.iter().any(|assignment| {
-                        name_part_matches_span(&assignment.target_field, selected_span)
-                            && field_on_object_or_record(
-                                parse,
-                                &body.update.target_object,
-                                &assignment.target_field.text,
-                            )
-                            .is_none()
-                    })
-            }
-            orna_syntax::ServerFunctionBody::SqlDelete(body) => {
-                name_part_matches_span(&body.delete.target_alias, selected_span)
-                    || name_part_matches_span(&body.delete.selector_alias, selected_span)
-            }
-            _ => false,
-        })
-}
-
-fn field_reference_declaration_span(
-    parse: &Parse,
-    text: &str,
-    highlighted: &[orna_syntax::HighlightToken],
-    selected_span: &SourceSpan,
-) -> Option<SourceSpan> {
-    client_field_declaration_span(parse, selected_span)
-        .or_else(|| renamed_object_field_declaration_span(parse, selected_span))
-        .or_else(|| {
-            sql_column_at(parse, selected_span.start, text, highlighted)
-                .map(|field| field.name.span.clone())
-        })
-}
-
-fn property_declaration_span(
-    parse: &Parse,
-    text: &str,
-    highlighted: &[orna_syntax::HighlightToken],
-    selected_span: &SourceSpan,
-) -> Option<SourceSpan> {
-    if let Some((_, column_span)) = return_column_scope(parse, selected_span) {
-        return Some(column_span);
-    }
-    if let Some(span) = client_field_declaration_span(parse, selected_span) {
-        return Some(span);
-    }
-    if is_declaration_span(parse, selected_span)
-        && let Some(span) = field_declaration_span(parse, selected_span)
-    {
-        return Some(span);
-    }
-    field_reference_declaration_span(parse, text, highlighted, selected_span)
-}
-
-fn variable_declaration_span(
-    parse: &Parse,
-    name: &str,
-    selected_span: &SourceSpan,
-) -> Option<SourceSpan> {
-    if let Some(declaration) = containing_server_function(parse, selected_span) {
-        let matches: Vec<_> = declaration
-            .parameters
-            .iter()
-            .filter(|parameter| name_part_matches_text(&parameter.name, name))
-            .collect();
-        return (matches.len() == 1).then(|| matches[0].name.span.clone());
-    }
-
-    let declaration = containing_client_function(parse, selected_span)?;
-    let mut exact = Vec::new();
-    let mut visible = Vec::new();
-    if let Some(block) = declaration.body.as_state_block() {
-        for state in &block.states {
-            if !name_part_matches_text(&state.name, name) {
-                continue;
-            }
-            if name_part_matches_span(&state.name, selected_span) {
-                exact.push(state.name.span.clone());
-            } else if state.span.end <= selected_span.start {
-                visible.push(state.name.span.clone());
-            }
-        }
-        for local in all_client_local_declarations(block) {
-            if name_part_matches_text(local.name(), name)
-                && name_part_matches_span(local.name(), selected_span)
-            {
-                exact.push(local.name().span.clone());
-            }
-        }
-        for local in client_local_declarations_visible(block, selected_span) {
-            if name_part_matches_text(local.name(), name) {
-                visible.push(local.name().span.clone());
-            }
-        }
-    }
-    if exact.len() > 1 || visible.len() > 1 {
-        return None;
-    }
-    if let Some(span) = exact.into_iter().next() {
-        return Some(span);
-    }
-    if let Some(span) = visible.into_iter().next() {
-        return Some(span);
-    }
-    let parameters: Vec<_> = declaration
-        .parameters
-        .iter()
-        .filter(|parameter| name_part_matches_text(&parameter.name, name))
-        .collect();
-    (parameters.len() == 1).then(|| parameters[0].name.span.clone())
-}
-
-fn is_client_call_argument_label(parse: &Parse, selected_span: &SourceSpan) -> bool {
-    client_expression_part_in_parse(parse, selected_span)
-        .is_some_and(|(_, part)| matches!(part, ClientExpressionPart::CallArgumentLabel))
-}
-
-fn declaration_span_for_kind(
-    parse: &Parse,
-    text: &str,
-    highlighted: &[orna_syntax::HighlightToken],
-    name: &str,
-    kind: HighlightKind,
-    selected_span: &SourceSpan,
-) -> Option<SourceSpan> {
-    if is_client_call_argument_label(parse, selected_span) {
-        return None;
-    }
-    if let Some(span) = client_target_declaration_span(parse, selected_span) {
-        return Some(span);
-    }
-    if kind == HighlightKind::QuotedIdentifier
-        && sql_unresolved_field_or_alias(parse, selected_span)
-    {
-        return None;
-    }
-    if kind == HighlightKind::QuotedIdentifier
-        && let Some(declaration) =
-            sql_object_type_declaration_at(parse, text, highlighted, selected_span)
-    {
-        return Some(declaration.name_span().clone());
-    }
-    if let Some((declaration, part)) = client_expression_part_in_parse(parse, selected_span) {
-        match part {
-            ClientExpressionPart::ParameterRoot(root)
-            | ClientExpressionPart::LocalRoot(root)
-            | ClientExpressionPart::FieldRoot(root) => {
-                return client_root_binding(declaration, root, part)
-                    .map(|binding| binding.declaration_span);
-            }
-            ClientExpressionPart::FieldMember { .. } => {
-                return client_field_declaration_span(parse, selected_span);
-            }
-            ClientExpressionPart::TargetFunction { .. }
-            | ClientExpressionPart::CallArgumentLabel => return None,
-        }
-    }
-    match kind {
-        HighlightKind::PropertyName => {
-            property_declaration_span(parse, text, highlighted, selected_span)
-        }
-        HighlightKind::VariableName => variable_declaration_span(parse, name, selected_span),
-        HighlightKind::QuotedIdentifier => {
-            property_declaration_span(parse, text, highlighted, selected_span)
-                .or_else(|| variable_declaration_span(parse, name, selected_span))
-                .or_else(|| {
-                    declaration_at_span(parse, text, highlighted, name, kind, selected_span)
-                        .map(|declaration| declaration.name_span().clone())
-                })
-        }
-        _ => declaration_at_span(parse, text, highlighted, name, kind, selected_span)
-            .map(|declaration| declaration.name_span().clone()),
-    }
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum TopLevelDeclarationKind {
-    Schema,
-    Type,
-    Function,
-}
-
-fn top_level_declaration_kind(declaration: DeclarationRef<'_>) -> TopLevelDeclarationKind {
-    match declaration {
-        DeclarationRef::Schema(_) => TopLevelDeclarationKind::Schema,
-        DeclarationRef::ObjectType(_)
-        | DeclarationRef::EnumType(_)
-        | DeclarationRef::RecordValueType(_)
-        | DeclarationRef::PrimitiveValueType(_)
-        | DeclarationRef::OpaqueValueType(_) => TopLevelDeclarationKind::Type,
-        DeclarationRef::ServerFunction(_) | DeclarationRef::ClientFunction(_) => {
-            TopLevelDeclarationKind::Function
-        }
-    }
-}
-
-#[derive(Clone)]
-enum ReferenceScope {
-    /// A resolved top-level name and its full source-qualified path.
-    TopLevel {
-        /// The declaration category used to validate quoted SQL tokens.
-        declaration_kind: TopLevelDeclarationKind,
-        /// The selected token's highlighter kind for ordinary tokens.
-        selected_kind: HighlightKind,
-        path: Vec<IdentifierKey>,
-    },
-    /// A parameter, state, or local inside one function.
-    Variable {
-        function_span: SourceSpan,
-        declaration_span: SourceSpan,
-    },
-    /// A ROWS return column inside one function.
-    ReturnColumn {
-        function_span: SourceSpan,
-        column_span: SourceSpan,
-    },
-    /// An object or record field declaration and its resolved uses.
-    Field(SourceSpan),
-    /// A target function path in an accepted resource or action constructor.
-    TargetFunction(Vec<IdentifierKey>),
-    /// The selected token has no resolved declaration and must not leak.
-    None,
-}
-
-/// Resolves references requested from a function declaration that is used as
-/// an accepted CLIENT target. Target paths are highlighted as properties
-/// because they are not calls, so a declaration-side `TopLevel(FunctionName)`
-/// scope cannot see them. Keep this path separate from ordinary function
-/// lookup: only the three accepted target constructors may contribute uses.
-fn target_declaration_scope(
-    parse: &Parse,
-    highlighted: &[orna_syntax::HighlightToken],
-    selected_span: &SourceSpan,
-) -> Option<ReferenceScope> {
-    let target = parse
-        .server_functions()
-        .iter()
-        .find(|declaration| qualified_name_matches_span(&declaration.name, selected_span))
-        .map(|declaration| target_name_key(&declaration.name))
-        .or_else(|| {
-            parse
-                .client_functions()
-                .iter()
-                .find(|declaration| qualified_name_matches_span(&declaration.name, selected_span))
-                .map(|declaration| target_name_key(&declaration.name))
-        })?;
-
-    let mut found_target = false;
-    for token in highlighted {
-        let token_span = SourceSpan {
-            start: token.range.start,
-            end: token.range.end,
-        };
-        let Some(path) = client_target_function_path_at(parse, &token_span) else {
-            continue;
-        };
-        if target_path_key(path) != target {
-            continue;
-        }
-        found_target = true;
-        if client_target_declaration(parse, &token_span).is_none() {
-            // An unresolved or duplicate SERVER/CLIENT target is ambiguous;
-            // do not let the declaration side make it appear resolved.
-            return Some(ReferenceScope::None);
-        }
-    }
-
-    found_target.then_some(ReferenceScope::TargetFunction(target))
-}
-
-fn reference_scope(
-    parse: &Parse,
-    text: &str,
-    highlighted: &[orna_syntax::HighlightToken],
-    name: &str,
-    kind: HighlightKind,
-    selected_span: &SourceSpan,
-) -> ReferenceScope {
-    if is_client_call_argument_label(parse, selected_span) {
-        return ReferenceScope::None;
-    }
-    if let Some(scope) = target_declaration_scope(parse, highlighted, selected_span) {
-        return scope;
-    }
-    if let Some(path) = client_target_function_path_at(parse, selected_span) {
-        if client_target_declaration(parse, selected_span).is_none() {
-            // An unresolved or duplicate SERVER/CLIENT target is ambiguous.
-            return ReferenceScope::None;
-        }
-        return ReferenceScope::TargetFunction(target_path_key(path));
-    }
-    if kind == HighlightKind::PropertyName {
-        if let Some((function_span, column_span)) = return_column_scope(parse, selected_span) {
-            return ReferenceScope::ReturnColumn {
-                function_span,
-                column_span,
-            };
-        }
-        if is_declaration_span(parse, selected_span)
-            && field_declaration_span(parse, selected_span).is_some()
-        {
-            return ReferenceScope::Field(
-                field_declaration_span(parse, selected_span)
-                    .expect("field declaration checked above"),
-            );
-        }
-        if let Some(field_span) =
-            field_reference_declaration_span(parse, text, highlighted, selected_span)
-        {
-            return ReferenceScope::Field(field_span);
-        }
-        return ReferenceScope::None;
-    }
-    if kind == HighlightKind::QuotedIdentifier {
-        if let Some((function_span, column_span)) = return_column_scope(parse, selected_span) {
-            return ReferenceScope::ReturnColumn {
-                function_span,
-                column_span,
-            };
-        }
-        if is_declaration_span(parse, selected_span)
-            && field_declaration_span(parse, selected_span).is_some()
-        {
-            return ReferenceScope::Field(
-                field_declaration_span(parse, selected_span)
-                    .expect("field declaration checked above"),
-            );
-        }
-        if let Some(field_span) =
-            field_reference_declaration_span(parse, text, highlighted, selected_span)
-        {
-            return ReferenceScope::Field(field_span);
-        }
-        if sql_unresolved_field_or_alias(parse, selected_span) {
-            return ReferenceScope::None;
-        }
-    }
-    if let Some((declaration, part)) = client_expression_part_in_parse(parse, selected_span) {
-        match part {
-            ClientExpressionPart::ParameterRoot(root)
-            | ClientExpressionPart::LocalRoot(root)
-            | ClientExpressionPart::FieldRoot(root) => {
-                if let Some(binding) = client_root_binding(declaration, root, part) {
-                    return ReferenceScope::Variable {
-                        function_span: declaration.span.clone(),
-                        declaration_span: binding.declaration_span,
-                    };
-                }
-                return ReferenceScope::None;
-            }
-            ClientExpressionPart::FieldMember { .. } => {
-                return client_field_declaration_span(parse, selected_span)
-                    .map_or(ReferenceScope::None, ReferenceScope::Field);
-            }
-            ClientExpressionPart::TargetFunction { .. }
-            | ClientExpressionPart::CallArgumentLabel => return ReferenceScope::None,
-        }
-    }
-    let qualified_path = qualified_name_keys_at(text, highlighted, selected_span)
-        .or_else(|| Some(vec![identifier_key(name)]));
-    if kind == HighlightKind::QuotedIdentifier
-        && let Some(declaration) =
-            sql_object_type_declaration_at(parse, text, highlighted, selected_span)
-    {
-        let path = qualified_path
-            .as_ref()
-            .expect("SQL object declaration requires a qualified path");
-        return ReferenceScope::TopLevel {
-            declaration_kind: top_level_declaration_kind(declaration),
-            selected_kind: kind,
-            path: path.clone(),
-        };
-    }
-    let has_qualified_path = qualified_path.as_ref().is_some_and(|path| path.len() > 1);
-    if matches!(
-        kind,
-        HighlightKind::VariableName | HighlightKind::QuotedIdentifier
-    ) && !has_qualified_path
-        && containing_function_span(parse, selected_span).is_some()
-    {
-        if let Some(declaration_span) = variable_declaration_span(parse, name, selected_span) {
-            return ReferenceScope::Variable {
-                function_span: containing_function_span(parse, selected_span)
-                    .expect("containing function checked above"),
-                declaration_span,
-            };
-        }
-        if kind == HighlightKind::VariableName {
-            return ReferenceScope::None;
-        }
-    }
-    if let Some(declaration) =
-        declaration_at_span(parse, text, highlighted, name, kind, selected_span)
-    {
-        let path = qualified_path.unwrap_or_else(|| vec![identifier_key(name)]);
-        return ReferenceScope::TopLevel {
-            declaration_kind: top_level_declaration_kind(declaration),
-            selected_kind: kind,
-            path,
-        };
-    }
-    ReferenceScope::None
-}
-
-fn variable_reference_declaration_span(
-    parse: &Parse,
-    text: &str,
-    token: &orna_syntax::HighlightToken,
-) -> Option<SourceSpan> {
-    let token_span = SourceSpan {
-        start: token.range.start,
-        end: token.range.end,
-    };
-    if is_client_call_argument_label(parse, &token_span) {
-        return None;
-    }
-    if let Some((declaration, part)) = client_expression_part_in_parse(parse, &token_span) {
-        return match part {
-            ClientExpressionPart::ParameterRoot(root)
-            | ClientExpressionPart::LocalRoot(root)
-            | ClientExpressionPart::FieldRoot(root) => {
-                client_root_binding(declaration, root, part).map(|binding| binding.declaration_span)
-            }
-            ClientExpressionPart::FieldMember { .. }
-            | ClientExpressionPart::TargetFunction { .. }
-            | ClientExpressionPart::CallArgumentLabel => None,
-        };
-    }
-    if matches!(
-        token.kind,
-        HighlightKind::VariableName | HighlightKind::QuotedIdentifier
-    ) {
-        let name = text[token.range.clone()].to_owned();
-        return variable_declaration_span(parse, &name, &token_span);
-    }
-    None
-}
-
-/// Resolves a quoted token's top-level role before including it in references.
-///
-/// Unlike declaration tokens, SQL quoted identifiers have no semantic role in
-/// the highlighter. Reject known field, alias, local, and target paths first,
-/// then resolve the full path in the selected top-level category.
-fn quoted_top_level_token_matches_category(
-    parse: &Parse,
-    text: &str,
-    highlighted: &[orna_syntax::HighlightToken],
-    token: &orna_syntax::HighlightToken,
-    declaration_kind: TopLevelDeclarationKind,
-) -> bool {
-    let token_span = SourceSpan {
-        start: token.range.start,
-        end: token.range.end,
-    };
-    let name = text[token.range.clone()].to_owned();
-    let candidate_path = qualified_name_keys_at(text, highlighted, &token_span)
-        .or_else(|| Some(vec![identifier_key(&name)]));
-    let has_qualified_path = candidate_path.as_ref().is_some_and(|path| path.len() > 1);
-    let is_declaration = is_declaration_span(parse, &token_span);
-    if matches!(
-        declaration_kind,
-        TopLevelDeclarationKind::Schema | TopLevelDeclarationKind::Function
-    ) && candidate_path
-        .as_ref()
-        .is_some_and(|path| sql_source_object_type_prefix_contains_span(parse, path, &token_span))
-    {
-        return false;
-    }
-    if (is_declaration
-        && (field_declaration_span(parse, &token_span).is_some()
-            || return_column_scope(parse, &token_span).is_some()))
-        || field_reference_declaration_span(parse, text, highlighted, &token_span).is_some()
-        || sql_unresolved_field_or_alias(parse, &token_span)
-        || client_expression_part_in_parse(parse, &token_span).is_some()
-        || (!has_qualified_path
-            && (variable_reference_declaration_span(parse, text, token).is_some()
-                || variable_declaration_span(parse, &name, &token_span).is_some()))
-    {
-        return false;
-    }
-    let kind = match declaration_kind {
-        TopLevelDeclarationKind::Schema => HighlightKind::NamespaceName,
-        TopLevelDeclarationKind::Type => HighlightKind::TypeName,
-        TopLevelDeclarationKind::Function => HighlightKind::FunctionName,
-    };
-    candidate_path
-        .and_then(|keys| declaration_for_keys(parse, &keys, kind))
-        .is_some()
-}
-
-fn reference_token_in_scope(
-    parse: &Parse,
-    text: &str,
-    highlighted: &[orna_syntax::HighlightToken],
-    token: &orna_syntax::HighlightToken,
-    scope: &ReferenceScope,
-) -> bool {
-    let token_span = SourceSpan {
-        start: token.range.start,
-        end: token.range.end,
-    };
-    if is_client_call_argument_label(parse, &token_span) {
-        return false;
-    }
-    match scope {
-        ReferenceScope::TopLevel {
-            declaration_kind,
-            selected_kind,
-            path,
-        } => {
-            let candidate_path = qualified_name_keys_at(text, highlighted, &token_span)
-                .unwrap_or_else(|| vec![identifier_key(&text[token.range.clone()])]);
-            if candidate_path.as_slice() != path.as_slice() {
-                return false;
-            }
-            if is_declaration_span(parse, &token_span) {
-                let candidate_name = text[token.range.clone()].to_owned();
-                if field_declaration_span(parse, &token_span).is_some()
-                    || return_column_scope(parse, &token_span).is_some()
-                    || (token.kind == HighlightKind::VariableName
-                        && variable_declaration_span(parse, &candidate_name, &token_span).is_some())
-                {
-                    return false;
-                }
-            }
-            if token.kind == HighlightKind::QuotedIdentifier {
-                return quoted_top_level_token_matches_category(
-                    parse,
-                    text,
-                    highlighted,
-                    token,
-                    *declaration_kind,
-                );
-            }
-            if *selected_kind == HighlightKind::QuotedIdentifier {
-                let declaration_token_kind = match declaration_kind {
-                    TopLevelDeclarationKind::Schema => HighlightKind::NamespaceName,
-                    TopLevelDeclarationKind::Type => HighlightKind::TypeName,
-                    TopLevelDeclarationKind::Function => HighlightKind::FunctionName,
-                };
-                return token.kind == declaration_token_kind
-                    && quoted_top_level_token_matches_category(
-                        parse,
-                        text,
-                        highlighted,
-                        token,
-                        *declaration_kind,
-                    );
-            }
-            token.kind == *selected_kind
-        }
-        ReferenceScope::None => false,
-        ReferenceScope::Variable {
-            function_span,
-            declaration_span,
-        } => {
-            span_contains_span(function_span, &token_span)
-                && variable_reference_declaration_span(parse, text, token)
-                    .is_some_and(|candidate| source_span_matches(&candidate, declaration_span))
-        }
-        ReferenceScope::ReturnColumn {
-            function_span,
-            column_span,
-        } => {
-            if !span_contains_span(function_span, &token_span)
-                || !matches!(
-                    token.kind,
-                    HighlightKind::PropertyName | HighlightKind::QuotedIdentifier
-                )
-            {
-                return false;
-            }
-            source_span_matches(column_span, &token_span)
-                || (sql_query_contains_span(parse, &token_span)
-                    && !sql_unresolved_field_or_alias(parse, &token_span)
-                    && sql_column_at(parse, token.range.start, text, highlighted).is_none()
-                    && identifier_spelling_matches(
-                        &text[token.range.clone()],
-                        &text[column_span.start..column_span.end],
-                    ))
-        }
-        ReferenceScope::Field(field_span) => {
-            source_span_matches(field_span, &token_span)
-                || field_reference_declaration_span(parse, text, highlighted, &token_span)
-                    .is_some_and(|candidate| source_span_matches(&candidate, field_span))
-        }
-        ReferenceScope::TargetFunction(target) => {
-            if let Some(path) = client_target_function_path_at(parse, &token_span) {
-                return target_path_key(path).as_slice() == target.as_slice();
-            }
-            parse.server_functions().iter().any(|declaration| {
-                target_name_key(&declaration.name).as_slice() == target.as_slice()
-                    && declaration
-                        .name
-                        .parts
-                        .last()
-                        .is_some_and(|part| source_span_matches(&part.span, &token_span))
-            }) || parse.client_functions().iter().any(|declaration| {
-                target_name_key(&declaration.name).as_slice() == target.as_slice()
-                    && declaration
-                        .name
-                        .parts
-                        .last()
-                        .is_some_and(|part| source_span_matches(&part.span, &token_span))
-            })
-        }
-    }
-}
-
-/// The data behind a field hover.
-pub struct FieldInfo<'a> {
-    /// The field name as written in source.
-    pub name: &'a orna_syntax::NamePart,
-    /// The declared field type.
-    pub type_specification: &'a orna_syntax::TypeSpecification,
-    /// Whether the field is nullable; absent for record value fields.
-    pub nullable: Option<bool>,
-    /// Whether the field has a uniqueness constraint.
-    pub unique: bool,
-    /// The rendered on-delete policy, when declared.
-    pub on_delete: Option<&'static str>,
-    /// The documentation text, with quotes stripped.
-    pub documentation: Option<&'a str>,
-    /// The default expression source, when declared.
-    pub default_text: Option<&'a str>,
-}
-
-/// The data behind a parameter hover.
-pub struct ParameterInfo<'a> {
-    /// The parameter name as written in source.
-    pub name: &'a orna_syntax::NamePart,
-    /// The declared parameter type.
-    pub type_specification: &'a orna_syntax::TypeSpecification,
-    /// The default expression source, when declared.
-    pub default_text: Option<&'a str>,
-    /// The documentation text, with quotes stripped.
-    pub documentation: Option<&'a str>,
-}
-
-/// Returns the object or record field whose name covers one byte offset.
-pub fn field_at(parse: &Parse, byte: usize) -> Option<FieldInfo<'_>> {
-    if let Some(field) = renamed_object_field_at_byte(parse, byte) {
-        return Some(field);
-    }
-    for declaration in parse.object_types() {
-        for field in &declaration.fields {
-            if byte >= field.name.span.start && byte < field.name.span.end {
-                return Some(object_field_info(field));
-            }
-        }
-    }
-    for declaration in parse.record_value_types() {
-        for field in &declaration.fields {
-            if byte >= field.name.span.start && byte < field.name.span.end {
-                return Some(record_field_info(field));
-            }
-        }
-    }
-    None
-}
-
-/// Returns the function parameter whose name covers one byte offset.
-pub fn parameter_at<'a>(parse: &'a Parse, byte: usize) -> Option<ParameterInfo<'a>> {
-    let find =
-        |parameters: &'a [orna_syntax::ServerFunctionParameter]| -> Option<ParameterInfo<'a>> {
-            parameters
-                .iter()
-                .find(|parameter| {
-                    byte >= parameter.name.span.start && byte < parameter.name.span.end
-                })
-                .map(|parameter| ParameterInfo {
-                    name: &parameter.name,
-                    type_specification: &parameter.type_specification,
-                    documentation: parameter.documentation.as_ref().map(strip_quotes),
-                    default_text: parameter
-                        .default_expression
-                        .as_ref()
-                        .map(|default| default.text.as_str()),
-                })
-        };
-    parse
-        .server_functions()
-        .iter()
-        .find_map(|declaration| find(&declaration.parameters))
-        .or_else(|| {
-            parse
-                .client_functions()
-                .iter()
-                .find_map(|declaration| find(&declaration.parameters))
-        })
-}
-
-/// Builds the hover data for one object field.
-fn object_field_info(field: &orna_syntax::ObjectFieldDeclaration) -> FieldInfo<'_> {
-    FieldInfo {
-        name: &field.name,
-        type_specification: &field.type_specification,
-        nullable: Some(field.nullable),
-        unique: field.unique,
-        on_delete: field.on_delete.map(on_delete_text),
-        documentation: field.documentation.as_ref().map(strip_quotes),
-        default_text: field
-            .default_expression
-            .as_ref()
-            .map(|default| default.text.as_str()),
-    }
-}
-
-fn record_field_info(field: &orna_syntax::ValueFieldDeclaration) -> FieldInfo<'_> {
-    FieldInfo {
-        name: &field.name,
-        type_specification: &field.type_specification,
-        nullable: None,
-        unique: false,
-        on_delete: None,
-        documentation: field.documentation.as_ref().map(strip_quotes),
-        default_text: None,
-    }
-}
-
-/// Strips the surrounding apostrophes from a captured string literal.
-fn strip_quotes(slice: &orna_syntax::SourceSlice) -> &str {
-    slice
-        .text
-        .strip_prefix('\'')
-        .and_then(|inner| inner.strip_suffix('\''))
-        .unwrap_or(&slice.text)
-}
-
-/// Renders an on-delete policy as source text.
-fn on_delete_text(policy: orna_syntax::OnDeletePolicy) -> &'static str {
-    match policy {
-        orna_syntax::OnDeletePolicy::Restrict => "RESTRICT",
-        orna_syntax::OnDeletePolicy::SetNull => "SET NULL",
-        orna_syntax::OnDeletePolicy::Cascade => "CASCADE",
-    }
-}
-
-/// Finds a canonical multi-word scalar type containing one source byte.
-///
-/// `Parse::highlight` deliberately emits one type-name token per word in a
-/// `CHARACTER LARGE OBJECT` or `BINARY LARGE OBJECT` phrase.  Hovering one of
-/// those tokens must nevertheless resolve the AST's complete type span, while
-/// ordinary words with the same spelling remain ordinary words outside a type
-/// specification.
-fn standard_large_object_at(
-    parse: &Parse,
-    byte: usize,
-) -> Option<(&SourceSpan, StandardLargeObjectKind)> {
-    fn in_source(
-        source: &orna_syntax::SourceSlice,
-        byte: usize,
-    ) -> Option<(&SourceSpan, StandardLargeObjectKind)> {
-        if source.span.start > byte || byte >= source.span.end {
-            return None;
-        }
-        let mut words = Vec::new();
-        let mut offset = 0;
-        while offset < source.text.len() {
-            let rest = &source.text[offset..];
-            if rest.starts_with("--") || rest.starts_with("/*") {
-                return None;
-            }
-            let character = rest.chars().next()?;
-            if character.is_ascii_whitespace() {
-                offset += character.len_utf8();
-                continue;
-            }
-            if character.is_ascii_alphabetic() {
-                let start = offset;
-                offset += character.len_utf8();
-                while offset < source.text.len() {
-                    let next = source.text[offset..].chars().next()?;
-                    if next.is_ascii_alphanumeric() {
-                        offset += next.len_utf8();
-                    } else {
-                        break;
-                    }
-                }
-                words.push(source.text[start..offset].to_ascii_uppercase());
-                continue;
-            }
-            return None;
-        }
-        let kind = match words.as_slice() {
-            [character, large, object]
-                if character == "CHARACTER" && large == "LARGE" && object == "OBJECT" =>
-            {
-                StandardLargeObjectKind::Character
-            }
-            [binary, large, object]
-                if binary == "BINARY" && large == "LARGE" && object == "OBJECT" =>
-            {
-                StandardLargeObjectKind::Binary
-            }
-            _ => return None,
-        };
-        Some((&source.span, kind))
-    }
-
-    fn in_spec(
-        specification: &TypeSpecification,
-        byte: usize,
-    ) -> Option<(&SourceSpan, StandardLargeObjectKind)> {
-        match specification {
-            TypeSpecification::StandardLargeObject { kind, source }
-                if source.span.start <= byte && byte < source.span.end =>
-            {
-                Some((&source.span, *kind))
-            }
-            TypeSpecification::Reference { target, .. }
-            | TypeSpecification::List {
-                element: target, ..
-            }
-            | TypeSpecification::Set {
-                element: target, ..
-            }
-            | TypeSpecification::Option { value: target, .. }
-            | TypeSpecification::Stream {
-                element: target, ..
-            } => in_spec(target, byte),
-            TypeSpecification::Map { key, value, .. } => {
-                in_spec(key, byte).or_else(|| in_spec(value, byte))
-            }
-            TypeSpecification::Named(_) | TypeSpecification::StandardLargeObject { .. } => None,
-        }
-    }
-
-    fn in_return_type(
-        return_type: &FunctionReturnType,
-        byte: usize,
-    ) -> Option<(&SourceSpan, StandardLargeObjectKind)> {
-        match return_type {
-            FunctionReturnType::Single(specification) => in_spec(specification, byte),
-            FunctionReturnType::Stream { element, .. } => in_spec(element, byte),
-            FunctionReturnType::Rows { columns, .. } => columns
-                .iter()
-                .find_map(|column| in_spec(&column.type_specification, byte)),
-        }
-    }
-    fn in_statement(
-        statement: &orna_syntax::ClientProceduralStatement,
-        byte: usize,
-    ) -> Option<(&SourceSpan, StandardLargeObjectKind)> {
-        match statement {
-            orna_syntax::ClientProceduralStatement::Let(statement) => statement
-                .type_source
-                .as_ref()
-                .and_then(|source| in_source(source, byte)),
-            orna_syntax::ClientProceduralStatement::If(statement) => {
-                in_statements(&statement.then_statements, byte)
-                    .or_else(|| {
-                        statement
-                            .elsif_branches
-                            .iter()
-                            .find_map(|branch| in_statements(&branch.statements, byte))
-                    })
-                    .or_else(|| {
-                        statement
-                            .else_statements
-                            .as_deref()
-                            .and_then(|statements| in_statements(statements, byte))
-                    })
-            }
-            orna_syntax::ClientProceduralStatement::While(statement) => {
-                in_statements(&statement.body, byte)
-            }
-            orna_syntax::ClientProceduralStatement::Assignment(_)
-            | orna_syntax::ClientProceduralStatement::Return(_) => None,
-        }
-    }
-
-    fn in_statements(
-        statements: &[orna_syntax::ClientProceduralStatement],
-        byte: usize,
-    ) -> Option<(&SourceSpan, StandardLargeObjectKind)> {
-        statements
-            .iter()
-            .find_map(|statement| in_statement(statement, byte))
-    }
-
-    for object_type in parse.object_types() {
-        if let Some(found) = object_type
-            .fields
-            .iter()
-            .find_map(|field| in_spec(&field.type_specification, byte))
-        {
-            return Some(found);
-        }
-    }
-    for value_type in parse.record_value_types() {
-        if let Some(found) = value_type
-            .fields
-            .iter()
-            .find_map(|field| in_spec(&field.type_specification, byte))
-        {
-            return Some(found);
-        }
-    }
-    for function in parse.server_functions() {
-        if let Some(found) = function
-            .parameters
-            .iter()
-            .find_map(|parameter| in_spec(&parameter.type_specification, byte))
-            .or_else(|| in_return_type(&function.return_type, byte))
-        {
-            return Some(found);
-        }
-    }
-    for function in parse.client_functions() {
-        if let Some(found) = function
-            .parameters
-            .iter()
-            .find_map(|parameter| in_spec(&parameter.type_specification, byte))
-            .or_else(|| in_return_type(&function.return_type, byte))
-        {
-            return Some(found);
-        }
-        if let orna_syntax::ClientFunctionBody::StateBlock(body) = &function.body {
-            if let Some(found) = body
-                .states
-                .iter()
-                .find_map(|state| in_spec(&state.type_specification, byte))
-            {
-                return Some(found);
-            }
-            if let Some(found) = body
-                .locals
-                .iter()
-                .find_map(|local| in_source(&local.type_source, byte))
-            {
-                return Some(found);
-            }
-            if let Some(found) = in_statements(&body.statements, byte) {
-                return Some(found);
-            }
-        }
-    }
-    None
-}
-
-fn standard_large_object_reference(
-    kind: StandardLargeObjectKind,
-) -> Option<&'static crate::reference::ScalarReference> {
-    let canonical_name = match kind {
-        StandardLargeObjectKind::Character => "CHARACTER_LARGE_OBJECT",
-        StandardLargeObjectKind::Binary => "BINARY_LARGE_OBJECT",
-    };
-    crate::reference::scalar_reference(canonical_name)
-}
-
-/// Returns the hover content for the token at one position.
 pub fn hover(
     document: &Document,
-    parse: &Parse,
-    standard: Option<&StandardLibrary>,
+    parse: &EditorParse,
     position: Position,
     mapper: &PositionMapper<'_>,
 ) -> Option<Hover> {
     let byte = mapper.byte_offset(position);
-    let highlighted = parse.highlight();
-    let doc_link = crate::hover::spec_doc_link(&document.uri);
-    let (name, kind, span) = token_at(&document.text, &highlighted, byte)?;
-    let target_function =
-        client_expression_part_in_parse(parse, &span).and_then(|(_declaration, part)| match part {
-            ClientExpressionPart::TargetFunction { root, members, .. } => Some(
-                std::iter::once(root.text.as_str())
-                    .chain(members.iter().map(|member| member.text.as_str()))
-                    .collect::<Vec<_>>()
-                    .join("."),
-            ),
-            _ => None,
-        });
-    if let Some(target_name) = target_function {
-        if let Some(declaration) = client_target_declaration(parse, &span) {
-            let mut hover = crate::hover::declaration_hover(
-                parse,
-                declaration,
-                &document.text,
-                doc_link.as_deref(),
-            );
-            hover.range = Some(mapper.range(&span));
-            return Some(hover);
-        }
-        if let Some(hover) =
-            system_function_hover(&target_name, doc_link.as_deref()).or_else(|| {
-                standard.and_then(|library| {
-                    standard_function_hover(library, &target_name, doc_link.as_deref())
-                })
-            })
-        {
-            let mut hover = hover;
-            hover.range = Some(mapper.range(&span));
-            return Some(hover);
-        }
-    }
-    if let Some(callee) = client_call_callee_at(parse, &span) {
-        let target_name = callee
-            .parts
-            .iter()
-            .map(|part| part.text.as_str())
-            .collect::<Vec<_>>()
-            .join(".");
-        if let Some(hover) =
-            system_function_hover(&target_name, doc_link.as_deref()).or_else(|| {
-                standard.and_then(|library| {
-                    standard_function_hover(library, &target_name, doc_link.as_deref())
-                })
-            })
-        {
-            let mut hover = hover;
-            hover.range = Some(mapper.range(&span));
-            return Some(hover);
-        }
-    }
-    if client_target_function_path_at(parse, &span).is_some() {
-        return None;
-    }
-    if let Some((type_span, large_object_kind)) = standard_large_object_at(parse, byte) {
-        let reference = standard_large_object_reference(large_object_kind)?;
-        let mut hover = crate::hover::scalar_hover(reference, doc_link.as_deref());
-        hover.range = Some(mapper.range(type_span));
-        return Some(hover);
-    }
-    let mut hover = match kind {
-        HighlightKind::Keyword => {
-            let reference = crate::reference::keyword_reference(&name)?;
-            let mut hover = crate::hover::keyword_hover(reference, doc_link.as_deref());
-            if name.eq_ignore_ascii_case("IS") {
-                let is_procedural = parse.client_functions().iter().any(|function| {
-                    function
-                        .body
-                        .as_state_block()
-                        .is_some_and(|block| block.span.start == span.start)
-                });
-                if !is_procedural
-                    && let lsp_types::HoverContents::Markup(markup) = &mut hover.contents
-                {
-                    markup.value = markup.value.replace(
-                        "IS declarations BEGIN statements END; after RETURNS. expression IS [NOT] NULL. Null and identity comparison.",
-                        "expression IS [NOT] NULL. Null and identity comparison.",
-                    );
-                }
-            }
-            Some(hover)
-        }
-        _ => {
-            if let Some(field) = field_at(parse, byte) {
-                // A field name shadows scalar and declaration names at the
-                // same spelling, for example a field named `text`.
-                Some(crate::hover::field_hover(
-                    parse,
-                    &field,
-                    &document.text,
-                    doc_link.as_deref(),
-                ))
-            } else if let Some(parameter) = parameter_at(parse, byte) {
-                Some(crate::hover::parameter_hover(
-                    parse,
-                    &parameter,
-                    &document.text,
-                    doc_link.as_deref(),
-                ))
-            } else if let Some((declaration, part)) = client_expression_part_in_parse(parse, &span)
-            {
-                match part {
-                    ClientExpressionPart::FieldMember { .. } => client_field_info_at(parse, &span)
-                        .map(|field| {
-                            crate::hover::field_hover(
-                                parse,
-                                &field,
-                                &document.text,
-                                doc_link.as_deref(),
-                            )
-                        }),
-                    ClientExpressionPart::ParameterRoot(root) => {
-                        client_parameter_info(declaration, root, part).map(|parameter| {
-                            crate::hover::parameter_hover(
-                                parse,
-                                &parameter,
-                                &document.text,
-                                doc_link.as_deref(),
-                            )
-                        })
-                    }
-                    ClientExpressionPart::LocalRoot(root) => {
-                        client_parameter_info(declaration, root, part)
-                            .map(|parameter| {
-                                crate::hover::parameter_hover(
-                                    parse,
-                                    &parameter,
-                                    &document.text,
-                                    doc_link.as_deref(),
-                                )
-                            })
-                            .or_else(|| {
-                                client_local_hover(
-                                    parse,
-                                    declaration,
-                                    root,
-                                    &document.text,
-                                    doc_link.as_deref(),
-                                )
-                            })
-                    }
-                    ClientExpressionPart::FieldRoot(root) => {
-                        client_parameter_info(declaration, root, part)
-                            .map(|parameter| {
-                                crate::hover::parameter_hover(
-                                    parse,
-                                    &parameter,
-                                    &document.text,
-                                    doc_link.as_deref(),
-                                )
-                            })
-                            .or_else(|| {
-                                client_local_hover(
-                                    parse,
-                                    declaration,
-                                    root,
-                                    &document.text,
-                                    doc_link.as_deref(),
-                                )
-                            })
-                    }
-                    ClientExpressionPart::TargetFunction { .. }
-                    | ClientExpressionPart::CallArgumentLabel => None,
-                }
-            } else if let Some(field) = sql_column_at(parse, byte, &document.text, &highlighted) {
-                Some(crate::hover::field_hover(
-                    parse,
-                    &field,
-                    &document.text,
-                    doc_link.as_deref(),
-                ))
-            } else if kind == HighlightKind::QuotedIdentifier
-                && let Some(declaration) =
-                    sql_object_type_declaration_at(parse, &document.text, &highlighted, &span)
-            {
-                Some(crate::hover::declaration_hover(
-                    parse,
-                    declaration,
-                    &document.text,
-                    doc_link.as_deref(),
-                ))
-            } else if let Some(declaration) =
-                declaration_at_span(parse, &document.text, &highlighted, &name, kind, &span)
-            {
-                Some(crate::hover::declaration_hover(
-                    parse,
-                    declaration,
-                    &document.text,
-                    doc_link.as_deref(),
-                ))
-            } else {
-                crate::reference::scalar_reference(&name)
-                    .map(|reference| crate::hover::scalar_hover(reference, doc_link.as_deref()))
-                    .or_else(|| {
-                        standard.and_then(|standard| {
-                            standard_function_hover(standard, &name, doc_link.as_deref()).or_else(
-                                || standard_value_hover(standard, &name, doc_link.as_deref()),
-                            )
-                        })
-                    })
-            }
-        }
+    let token = token_at(&document.text, byte)?;
+    let Some(symbol) = selected_symbol_owned(parse, &document.text, byte) else {
+        return parameter_hover(parse, &document.text, byte);
     };
-    if let Some(hover) = &mut hover {
-        hover.range = Some(mapper.range(&span));
-    }
-    hover
+    let kind = match symbol.kind {
+        EditorSymbolKind::Function => "function",
+        EditorSymbolKind::Type => "type",
+        EditorSymbolKind::Enum => "enum",
+        EditorSymbolKind::Table => "table",
+        EditorSymbolKind::Protocol => "protocol",
+        EditorSymbolKind::Other => "declaration",
+    };
+    let _ = token;
+    Some(crate::hover::declaration(
+        kind,
+        &symbol.name,
+        symbol.detail.as_deref(),
+        &symbol.parameters,
+        symbol.documentation.as_deref(),
+    ))
 }
 
-/// Builds the hover for one standard-library type or schema name.
-fn standard_value_hover(
-    standard: &StandardLibrary,
-    name: &str,
-    doc_link: Option<&str>,
-) -> Option<lsp_types::Hover> {
-    let target = source_name_parts(name)
-        .into_iter()
-        .map(str::to_ascii_lowercase)
-        .collect::<Vec<_>>();
-    if let Some((namespace, _)) = standard.modules.iter().find(|(namespace, _)| {
-        namespace.0.len() == target.len()
-            && namespace
-                .0
-                .iter()
-                .map(|part| part.to_ascii_lowercase())
-                .eq(target.iter().cloned())
-    }) {
-        return Some(crate::hover::standard_module_hover(
-            &namespace.display(),
-            doc_link,
-        ));
-    }
-    for module in standard.modules.values() {
-        for (symbol_name, symbol) in &module.exports {
-            if identifier_spelling_matches(symbol_name, name)
-                && matches!(
-                    symbol.kind,
-                    SymbolKindV1::Type | SymbolKindV1::Enum | SymbolKindV1::Protocol
-                )
-            {
-                return Some(crate::hover::standard_type_hover(
-                    symbol_name,
-                    "source-backed",
-                    "Pinned by the Orna 1.0.0 standard source profile.",
-                    doc_link,
+fn parameter_hover(parse: &EditorParse, text: &str, byte: usize) -> Option<Hover> {
+    for item in &parse.value.items {
+        let Declaration::Function { signature, .. } = &item.declaration else {
+            continue;
+        };
+        for parameter in &signature.parameters {
+            let Pattern::Name(name, span) = &parameter.pattern else {
+                continue;
+            };
+            if span.start <= byte && byte < span.end {
+                return Some(crate::hover::declaration(
+                    "parameter",
+                    name,
+                    Some(source_slice(text, &parameter.span)),
+                    &[],
+                    leading_doc_comment(text, parameter.span.start).as_deref(),
                 ));
             }
         }
@@ -3611,1088 +276,559 @@ fn standard_value_hover(
     None
 }
 
-fn standard_symbol_matches_source(
-    standard: &StandardLibrary,
-    name: &QualifiedName,
-    kinds: &[SymbolKindV1],
-) -> bool {
-    let parts = name
-        .parts
+pub fn signature_help(
+    document: &Document,
+    parse: &EditorParse,
+    position: Position,
+    mapper: &PositionMapper<'_>,
+) -> Option<SignatureHelp> {
+    let byte = mapper.byte_offset(position);
+    let mut calls = Vec::new();
+    for item in &parse.value.items {
+        if let Declaration::Function { body, .. } = &item.declaration {
+            collect_calls(body, &mut calls);
+        }
+    }
+    let call = calls
+        .into_iter()
+        .filter(|call| call.span.start <= byte && byte <= call.span.end)
+        .min_by_key(|call| call.span.end.saturating_sub(call.span.start))?;
+    let symbols = declaration_symbols(parse, &document.text);
+    let function = symbol_for_name(&symbols, call.name.rsplit('.').next().unwrap_or(&call.name))?;
+    if function.kind != EditorSymbolKind::Function {
+        return None;
+    }
+    let active_parameter = call
+        .arguments
         .iter()
-        .map(|part| identifier_key(&part.text))
-        .collect::<Vec<_>>();
-    let Some((symbol_name, namespace_parts)) = parts.split_last() else {
-        return false;
-    };
-    standard.modules.iter().any(|(namespace, module)| {
-        namespace.0.len() == namespace_parts.len()
-            && namespace
-                .0
-                .iter()
-                .zip(namespace_parts)
-                .all(|(candidate, query)| identifier_key(candidate) == *query)
-            && module.exports.iter().any(|(candidate, symbol)| {
-                identifier_key(candidate) == *symbol_name && kinds.contains(&symbol.kind)
-            })
+        .take_while(|argument| argument.span.start < byte)
+        .count()
+        .min(function.parameters.len().saturating_sub(1)) as u32;
+    let signature = function
+        .detail
+        .clone()
+        .unwrap_or_else(|| function.name.clone());
+    let parameters = function
+        .parameters
+        .iter()
+        .cloned()
+        .map(|label| ParameterInformation {
+            label: ParameterLabel::Simple(label),
+            documentation: None,
+        })
+        .collect();
+    Some(SignatureHelp {
+        signatures: vec![SignatureInformation {
+            label: signature,
+            documentation: function.documentation.clone().map(|text| {
+                lsp_types::Documentation::MarkupContent(lsp_types::MarkupContent {
+                    kind: lsp_types::MarkupKind::Markdown,
+                    value: text,
+                })
+            }),
+            parameters: Some(parameters),
+            active_parameter: Some(active_parameter),
+        }],
+        active_signature: Some(0),
+        active_parameter: Some(active_parameter),
     })
 }
 
-/// Returns the declaration location for the identifier at one position.
+#[derive(Debug)]
+struct CallSite {
+    name: String,
+    span: SourceSpan,
+    arguments: Vec<Argument>,
+}
+
+fn collect_calls(expression: &Expr, output: &mut Vec<CallSite>) {
+    match expression {
+        Expr::Call {
+            callee,
+            arguments,
+            span,
+        } => {
+            if let Some(name) = expression_name(callee) {
+                output.push(CallSite {
+                    name,
+                    span: span.clone(),
+                    arguments: arguments.clone(),
+                });
+            }
+            collect_calls(callee, output);
+            for argument in arguments {
+                collect_calls(&argument.value, output);
+            }
+        }
+        Expr::GenericCall {
+            callee,
+            arguments,
+            span,
+            ..
+        } => {
+            if let Some(name) = expression_name(callee) {
+                output.push(CallSite {
+                    name,
+                    span: span.clone(),
+                    arguments: arguments.clone(),
+                });
+            }
+            collect_calls(callee, output);
+            for argument in arguments {
+                collect_calls(&argument.value, output);
+            }
+        }
+        Expr::Unary { rhs, .. } => collect_calls(rhs, output),
+        Expr::Binary { lhs, rhs, .. } => {
+            collect_calls(lhs, output);
+            collect_calls(rhs, output);
+        }
+        Expr::Range { lower, upper, .. } => {
+            if let Some(value) = lower {
+                collect_calls(value, output);
+            }
+            if let Some(value) = upper {
+                collect_calls(value, output);
+            }
+        }
+        Expr::Index { base, index, .. } => {
+            collect_calls(base, output);
+            collect_calls(index, output);
+        }
+        Expr::Field { base, .. } | Expr::Group { inner: base, .. } => collect_calls(base, output),
+        Expr::Tuple { elements, .. } | Expr::List { elements, .. } => {
+            for value in elements {
+                collect_calls(value, output);
+            }
+        }
+        Expr::Record { fields, .. } => {
+            for field in fields {
+                collect_calls(&field.value, output);
+            }
+        }
+        Expr::Nominal { fields, .. } => {
+            for field in fields {
+                collect_calls(&field.value, output);
+            }
+        }
+        Expr::Lambda { body, .. } => collect_calls(body, output),
+        Expr::Block {
+            statements, tail, ..
+        } => {
+            for statement in statements {
+                collect_statement_calls(statement, output);
+            }
+            if let Some(tail) = tail {
+                collect_calls(tail, output);
+            }
+        }
+        Expr::Control {
+            condition,
+            body,
+            arms,
+            alternate,
+            ..
+        } => {
+            if let Some(condition) = condition {
+                collect_calls(condition, output);
+            }
+            if let Some(body) = body {
+                collect_calls(body, output);
+            }
+            for arm in arms {
+                if let Some(guard) = &arm.guard {
+                    collect_calls(guard, output);
+                }
+                collect_calls(&arm.body, output);
+            }
+            if let Some(alternate) = alternate {
+                collect_calls(alternate, output);
+            }
+        }
+        Expr::Name { .. }
+        | Expr::Literal { .. }
+        | Expr::InterpolatedString { .. }
+        | Expr::ReplBinding { .. } => {}
+    }
+}
+
+fn collect_statement_calls(statement: &Statement, output: &mut Vec<CallSite>) {
+    match statement {
+        Statement::Let { value, .. }
+        | Statement::Assert { value, .. }
+        | Statement::Expression { value, .. }
+        | Statement::Control { value, .. } => collect_calls(value, output),
+        Statement::Return { value, .. } | Statement::Break { value, .. } => {
+            if let Some(value) = value {
+                collect_calls(value, output);
+            }
+        }
+        Statement::Assignment { value, .. } => collect_calls(value, output),
+        Statement::Continue { .. } => {}
+    }
+}
+
+fn expression_name(expression: &Expr) -> Option<String> {
+    match expression {
+        Expr::Name { text, .. } => Some(text.clone()),
+        Expr::Field { base, name, .. } => Some(format!("{}.{}", expression_name(base)?, name)),
+        _ => None,
+    }
+}
+
 pub fn definition(
     document: &Document,
-    parse: &Parse,
+    parse: &EditorParse,
     position: Position,
     mapper: &PositionMapper<'_>,
 ) -> Option<Location> {
     let byte = mapper.byte_offset(position);
-    let highlighted = parse.highlight();
-    let (name, kind, selected_span) = token_at(&document.text, &highlighted, byte)?;
-    if kind == HighlightKind::Keyword {
-        return None;
-    }
-    if let Some(span) = client_target_declaration_span(parse, &selected_span) {
-        return Some(Location {
-            uri: document.uri.clone(),
-            range: mapper.range(&span),
-        });
-    }
-    declaration_span_for_kind(
-        parse,
-        &document.text,
-        &highlighted,
-        &name,
-        kind,
-        &selected_span,
-    )
-    .map(|span| Location {
+    let token = token_at(&document.text, byte)?;
+    let symbols = declaration_symbols(parse, &document.text);
+    let symbol = symbol_for_name(&symbols, &token.text)?;
+    Some(Location {
         uri: document.uri.clone(),
-        range: mapper.range(&span),
+        range: mapper.range(&symbol.selection),
     })
 }
 
-/// Returns every occurrence of the identifier at one position.
-///
-/// When `include_declaration` is false, the matching declaration is omitted.
 pub fn references(
     document: &Document,
-    parse: &Parse,
+    parse: &EditorParse,
     position: Position,
     mapper: &PositionMapper<'_>,
     include_declaration: bool,
 ) -> Vec<Location> {
     let byte = mapper.byte_offset(position);
-    let highlighted = parse.highlight();
-    let Some((name, kind, selected_span)) = token_at(&document.text, &highlighted, byte) else {
+    let Some(token) = token_at(&document.text, byte) else {
         return Vec::new();
     };
-    if kind == HighlightKind::Keyword {
+    let symbols = declaration_symbols(parse, &document.text);
+    let Some(symbol) = symbol_for_name(&symbols, &token.text) else {
         return Vec::new();
+    };
+    let name = normalized_identifier(&symbol.name);
+    let mut spans = reference_occurrences(&parse.value, &document.text)
+        .into_iter()
+        .filter(|(occurrence, _)| normalized_identifier(occurrence) == name)
+        .map(|(_, span)| span)
+        .collect::<Vec<_>>();
+    if include_declaration {
+        spans.push(symbol.selection.clone());
     }
-    let scope = reference_scope(
-        parse,
-        &document.text,
-        &highlighted,
-        &name,
-        kind,
-        &selected_span,
-    );
-    let declaration_span = if include_declaration {
-        None
-    } else if is_declaration_span(parse, &selected_span) {
-        Some(selected_span)
-    } else {
-        declaration_span_for_kind(
-            parse,
-            &document.text,
-            &highlighted,
-            &name,
-            kind,
-            &selected_span,
-        )
-    };
-    highlighted
-        .iter()
-        .filter(|token| {
-            matches!(
-                token.kind,
-                HighlightKind::VariableName
-                    | HighlightKind::FunctionName
-                    | HighlightKind::TypeName
-                    | HighlightKind::NamespaceName
-                    | HighlightKind::PropertyName
-                    | HighlightKind::QuotedIdentifier
-            )
-        })
-        .filter(|token| {
-            reference_token_in_scope(parse, &document.text, &highlighted, token, &scope)
-        })
-        .filter(|token| identifier_spelling_matches(&document.text[token.range.clone()], &name))
-        .filter(|token| {
-            declaration_span
-                .as_ref()
-                .is_none_or(|span| span.start != token.range.start || span.end != token.range.end)
-        })
-        .map(|token| Location {
+    spans.sort_by_key(|span| (span.start, span.end));
+    spans.dedup_by_key(|span| (span.start, span.end));
+    spans
+        .into_iter()
+        .map(|span| Location {
             uri: document.uri.clone(),
-            range: mapper.range(&SourceSpan {
-                start: token.range.start,
-                end: token.range.end,
-            }),
+            range: mapper.range(&span),
         })
         .collect()
 }
 
-/// Returns signature help for the callable declaration at a source position.
-pub fn signature_help(
-    document: &Document,
-    parse: &Parse,
-    standard: Option<&StandardLibrary>,
-    position: Position,
+pub fn document_symbols(
+    parse: &EditorParse,
+    text: &str,
     mapper: &PositionMapper<'_>,
-) -> Option<lsp_types::SignatureHelp> {
-    let byte = mapper.byte_offset(position);
-    let mut open = None;
-    let mut depth = 0usize;
-    for (index, character) in document.text[..byte].char_indices().rev() {
-        match character {
-            ')' => depth += 1,
-            '(' if depth == 0 => {
-                open = Some(index);
-                break;
-            }
-            '(' => depth -= 1,
-            _ => {}
-        }
-    }
-    let open = open?;
-    let function_start = callable_name_start(&document.text, open);
-    let name = document.text[function_start..open].trim().to_owned();
-    let active_parameter = document.text[open + 1..byte]
-        .chars()
-        .fold(
-            (0usize, 0usize),
-            |(depth, commas), character| match character {
-                '(' => (depth + 1, commas),
-                ')' if depth > 0 => (depth - 1, commas),
-                ',' if depth == 0 => (depth, commas + 1),
-                _ => (depth, commas),
+) -> Vec<DocumentSymbol> {
+    declaration_symbols(parse, text)
+        .into_iter()
+        .map(|symbol| DocumentSymbol {
+            name: symbol.name,
+            detail: symbol.detail,
+            kind: match symbol.kind {
+                EditorSymbolKind::Function => SymbolKind::FUNCTION,
+                EditorSymbolKind::Type => SymbolKind::STRUCT,
+                EditorSymbolKind::Enum => SymbolKind::ENUM,
+                EditorSymbolKind::Table => SymbolKind::CLASS,
+                EditorSymbolKind::Protocol => SymbolKind::INTERFACE,
+                EditorSymbolKind::Other => SymbolKind::NAMESPACE,
             },
-        )
-        .1;
-    if let Some(declaration) = declaration_at(parse, &name) {
-        match declaration {
-            DeclarationRef::ServerFunction(function) => {
-                return Some(signature_information(
-                    format!("SERVER FUNCTION {}", qualified_name_text(&function.name)),
-                    function.parameters.iter().map(|parameter| {
-                        (
-                            parameter.name.text.clone(),
-                            parameter.documentation.as_ref().and_then(|documentation| {
-                                documentation_text(Some(documentation)).map(str::to_owned)
-                            }),
-                        )
-                    }),
-                    return_text(&function.return_type, &document.text),
-                    active_parameter,
-                ));
+            tags: None,
+            deprecated: None,
+            range: mapper.range(&symbol.full),
+            selection_range: mapper.range(&symbol.selection),
+            children: None,
+        })
+        .collect()
+}
+
+pub fn completion_at(
+    parse: &EditorParse,
+    text: &str,
+    _byte: Option<usize>,
+    _context: Option<&CompletionContext>,
+) -> Vec<CompletionItem> {
+    let mut completions = Keyword::ALL
+        .iter()
+        .map(|keyword| CompletionItem {
+            label: keyword.spelling().to_owned(),
+            kind: Some(CompletionItemKind::KEYWORD),
+            detail: Some("Orna 1.0 keyword".to_owned()),
+            sort_text: Some(format!("0-{}", keyword.spelling())),
+            ..CompletionItem::default()
+        })
+        .collect::<Vec<_>>();
+    for symbol in declaration_symbols(parse, text) {
+        let kind = match symbol.kind {
+            EditorSymbolKind::Function => CompletionItemKind::FUNCTION,
+            EditorSymbolKind::Type => CompletionItemKind::STRUCT,
+            EditorSymbolKind::Enum => CompletionItemKind::ENUM,
+            EditorSymbolKind::Table => CompletionItemKind::CLASS,
+            EditorSymbolKind::Protocol => CompletionItemKind::INTERFACE,
+            EditorSymbolKind::Other => CompletionItemKind::REFERENCE,
+        };
+        let insert_text = if symbol.kind == EditorSymbolKind::Function {
+            let placeholders = symbol
+                .parameters
+                .iter()
+                .enumerate()
+                .map(|(index, parameter)| {
+                    format!(
+                        "${{{}:{}}}",
+                        index + 1,
+                        parameter_name(parameter).unwrap_or("arg")
+                    )
+                })
+                .collect::<Vec<_>>();
+            format!("{}({})", symbol.name, placeholders.join(", "))
+        } else {
+            symbol.name.clone()
+        };
+        let sort_text = format!("1-{}", symbol.name);
+        completions.push(CompletionItem {
+            label: symbol.name,
+            kind: Some(kind),
+            detail: symbol.detail,
+            documentation: symbol.documentation.map(lsp_types::Documentation::String),
+            insert_text: Some(insert_text),
+            insert_text_format: Some(lsp_types::InsertTextFormat::SNIPPET),
+            sort_text: Some(sort_text),
+            ..CompletionItem::default()
+        });
+    }
+    completions
+}
+
+fn parameter_name(source: &str) -> Option<&str> {
+    let name = source.split(':').next()?.split('=').next()?.trim();
+    (!name.is_empty()).then_some(name)
+}
+
+pub(crate) fn reference_occurrences(tree: &SyntaxTree, text: &str) -> Vec<(String, SourceSpan)> {
+    let mut output = Vec::new();
+    for item in &tree.items {
+        match &item.declaration {
+            Declaration::Function { signature, body } => {
+                for parameter in &signature.parameters {
+                    if let Some(ty) = &parameter.annotation {
+                        collect_type_refs(ty, text, &mut output);
+                    }
+                }
+                if let Some(result) = &signature.result {
+                    collect_type_refs(result, text, &mut output);
+                }
+                collect_expr_refs(body, text, &mut output);
             }
-            DeclarationRef::ClientFunction(function) => {
-                return Some(signature_information(
-                    format!("CLIENT FUNCTION {}", qualified_name_text(&function.name)),
-                    function.parameters.iter().map(|parameter| {
-                        (
-                            parameter.name.text.clone(),
-                            parameter.documentation.as_ref().and_then(|documentation| {
-                                documentation_text(Some(documentation)).map(str::to_owned)
-                            }),
-                        )
-                    }),
-                    return_text(&function.return_type, &document.text),
-                    active_parameter,
-                ));
+            Declaration::Let {
+                annotation, value, ..
+            } => {
+                if let Some(ty) = annotation {
+                    collect_type_refs(ty, text, &mut output);
+                }
+                collect_expr_refs(value, text, &mut output);
+            }
+            Declaration::Assertion { value } => collect_expr_refs(value, text, &mut output),
+            Declaration::Table { members, .. } => {
+                for member in members {
+                    if let orna_syntax_v1::TableMember::Field {
+                        ty, initializer, ..
+                    } = member
+                    {
+                        collect_type_refs(ty, text, &mut output);
+                        if let Some(
+                            orna_syntax_v1::FieldInitializer::Default(value)
+                            | orna_syntax_v1::FieldInitializer::Computed(value),
+                        ) = initializer
+                        {
+                            collect_expr_refs(value, text, &mut output);
+                        }
+                    } else if let orna_syntax_v1::TableMember::Assertion { value, .. } = member {
+                        collect_expr_refs(value, text, &mut output);
+                    }
+                }
             }
             _ => {}
         }
     }
-    let standard = standard?;
-    let function = standard_function(standard, &name)?;
-    Some(signature_information(
-        format!("{} FUNCTION {}", function.domain, function.name),
-        function
-            .parameters
-            .iter()
-            .map(|(name, _)| (name.clone(), None)),
-        function.return_type,
-        active_parameter,
-    ))
+    output
 }
 
-/// Finds the start of the qualified callable name immediately before `open`.
-///
-/// The compiler accepts Unicode and quoted identifier components. A plain
-/// ASCII backward scan loses both forms before declaration lookup can use the
-/// parsed name, so keep the scan lexical and preserve the original spelling.
-fn callable_name_start(text: &str, open: usize) -> usize {
-    let mut cursor = open;
-    loop {
-        while cursor > 0 {
-            let character = text[..cursor]
-                .chars()
-                .next_back()
-                .expect("cursor is on a character boundary");
-            if !character.is_whitespace() {
-                break;
+fn collect_type_refs(ty: &TypeExpr, text: &str, output: &mut Vec<(String, SourceSpan)>) {
+    match ty {
+        TypeExpr::Name {
+            path,
+            span,
+            arguments,
+        } => {
+            let tokens = lex(text).unwrap_or_default();
+            for token in tokens.into_iter().filter(|token| {
+                token.span.start >= span.start
+                    && token.span.end <= span.end
+                    && matches!(token.kind, TokenKind::Identifier { .. })
+            }) {
+                output.push((token.text, token.span));
             }
-            cursor -= character.len_utf8();
-        }
-        if cursor == 0 {
-            return cursor;
-        }
-
-        if text[..cursor].ends_with('"') {
-            let mut characters = text[..cursor - '"'.len_utf8()].char_indices().rev();
-            let mut start = None;
-            while let Some((index, character)) = characters.next() {
-                if character != '"' {
-                    continue;
-                }
-                if text[..index].ends_with('"') {
-                    let _ = characters.next();
-                    continue;
-                }
-                start = Some(index);
-                break;
+            for argument in arguments {
+                collect_type_refs(argument, text, output);
             }
-            let Some(start) = start else {
-                return cursor;
-            };
-            cursor = start;
-        } else {
-            let mut characters = text[..cursor].char_indices().rev();
-            let mut start = None;
-            while let Some((index, character)) = characters.next() {
-                if character == '_' || character.is_alphanumeric() {
-                    start = Some(index);
-                } else {
-                    break;
-                }
-            }
-            let Some(start) = start else {
-                return cursor;
-            };
-            cursor = start;
+            let _ = path;
         }
-
-        if cursor > 0 && text.as_bytes()[cursor - 1] == b'.' {
-            cursor -= 1;
-        } else {
-            return cursor;
+        TypeExpr::Optional { inner, .. } | TypeExpr::List { inner, .. } => {
+            collect_type_refs(inner, text, output)
+        }
+        TypeExpr::Product { lhs, rhs, .. } => {
+            collect_type_refs(lhs, text, output);
+            collect_type_refs(rhs, text, output);
+        }
+        TypeExpr::Record { fields, .. } => {
+            for (_, ty, _) in fields {
+                collect_type_refs(ty, text, output);
+            }
+        }
+        TypeExpr::Tuple { elements, .. } => {
+            for ty in elements {
+                collect_type_refs(ty, text, output);
+            }
+        }
+        TypeExpr::Function {
+            parameters, result, ..
+        } => {
+            for ty in parameters {
+                collect_type_refs(ty, text, output);
+            }
+            collect_type_refs(result, text, output);
         }
     }
 }
 
-fn resolved_type_name(return_type: &TypeV1) -> String {
-    match return_type {
-        TypeV1::Int => "Int".into(),
-        TypeV1::Decimal => "Decimal".into(),
-        TypeV1::Float => "Float".into(),
-        TypeV1::Date => "Date".into(),
-        TypeV1::Instant => "Instant".into(),
-        TypeV1::Text => "Text".into(),
-        TypeV1::Bool => "Bool".into(),
-        TypeV1::Null => "Null".into(),
-        TypeV1::Named(name) => name.clone(),
-        TypeV1::Optional(inner) => format!("{}?", resolved_type_name(inner)),
-        _ => format!("{return_type:?}"),
-    }
-}
-
-struct StandardFunctionSignature {
-    name: String,
-    domain: &'static str,
-    parameters: Vec<(String, Option<String>)>,
-    return_type: String,
-    documentation: Option<String>,
-}
-fn standard_function(standard: &StandardLibrary, name: &str) -> Option<StandardFunctionSignature> {
-    let target = source_name_parts(name)
-        .into_iter()
-        .map(str::to_ascii_lowercase)
-        .collect::<Vec<_>>();
-    let (function_name, namespace_parts) = target.split_last()?;
-    let (namespace, module) = standard.modules.iter().find(|(namespace, module)| {
-        namespace.0.len() == namespace_parts.len()
-            && namespace
-                .0
-                .iter()
-                .map(|part| part.to_ascii_lowercase())
-                .eq(namespace_parts.iter().cloned())
-            && module.exports.iter().any(|(candidate, symbol)| {
-                candidate.eq_ignore_ascii_case(function_name)
-                    && symbol.kind == SymbolKindV1::Function
-            })
-    })?;
-    let (function_name, definition) = module.exports.iter().find(|(candidate, symbol)| {
-        candidate.eq_ignore_ascii_case(function_name) && symbol.kind == SymbolKindV1::Function
-    })?;
-    let TypeV1::Function {
-        parameters: parameter_types,
-        parameter_names,
-        result,
-        ..
-    } = &definition.ty
-    else {
-        return None;
-    };
-    let parameters = parameter_names
-        .as_ref()
-        .map(|names| names.iter().map(|name| (name.clone(), None)).collect())
-        .unwrap_or_else(|| {
-            parameter_types
-                .iter()
-                .enumerate()
-                .map(|(index, _)| (format!("arg{}", index + 1), None))
-                .collect()
-        });
-    let return_type = resolved_type_name(result);
-    let qualified_name = format!("{}.{}", namespace.display(), function_name);
-    Some(StandardFunctionSignature {
-        documentation: standard.documentation.get(&qualified_name).cloned(),
-        name: qualified_name,
-        domain: "1.0",
-        parameters,
-        return_type,
-    })
-}
-
-/// Builds hover content for one checked standard-library function.
-fn standard_function_hover(
-    standard: &StandardLibrary,
-    name: &str,
-    doc_link: Option<&str>,
-) -> Option<lsp_types::Hover> {
-    let function = standard_function(standard, name)?;
-    Some(crate::hover::standard_function_hover(
-        function.domain,
-        &function.name,
-        &function
-            .parameters
-            .iter()
-            .map(|(name, _)| name.as_str())
-            .collect::<Vec<_>>()
-            .join(", "),
-        &function.return_type,
-        function.documentation.as_deref(),
-        doc_link,
-    ))
-}
-
-fn system_function_hover(name: &str, doc_link: Option<&str>) -> Option<lsp_types::Hover> {
-    let descriptors = orna_sys_v1::SYSTEM_FUNCTION_DESCRIPTORS
-        .iter()
-        .filter(|descriptor| {
-            descriptor
-                .name
-                .split(['(', '<'])
-                .next()
-                .is_some_and(|callable| callable.eq_ignore_ascii_case(name))
-        })
-        .collect::<Vec<_>>();
-    (!descriptors.is_empty()).then(|| crate::hover::system_function_hover(&descriptors, doc_link))
-}
-
-fn standard_function_documentation(
-    sources: impl IntoIterator<Item = (String, String)>,
-) -> std::collections::BTreeMap<String, String> {
-    let mut documentation = std::collections::BTreeMap::new();
-    for (path, source) in sources {
-        let Some(relative_path) = path
-            .strip_prefix("std/")
-            .and_then(|path| path.strip_suffix(".orna"))
-        else {
-            continue;
-        };
-        let mut module_parts = relative_path.split('/').collect::<Vec<_>>();
-        if module_parts.last() == Some(&"main") {
-            module_parts.pop();
+fn collect_expr_refs(expression: &Expr, text: &str, output: &mut Vec<(String, SourceSpan)>) {
+    match expression {
+        Expr::Name { text: name, span } => output.push((name.clone(), span.clone())),
+        Expr::Field { base, name, span } => {
+            output.push((
+                name.clone(),
+                SourceSpan::new(span.end.saturating_sub(name.len()), span.end),
+            ));
+            collect_expr_refs(base, text, output);
         }
-        let module = if module_parts.is_empty() {
-            "std".to_owned()
-        } else {
-            format!("std.{}", module_parts.join("."))
-        };
-        let mut pending = Vec::<String>::new();
-        for line in source.lines() {
-            let trimmed = line.trim_start();
-            if let Some(comment) = trimmed.strip_prefix("///") {
-                pending.push(comment.strip_prefix(' ').unwrap_or(comment).to_owned());
-                continue;
+        Expr::Call {
+            callee, arguments, ..
+        } => {
+            collect_expr_refs(callee, text, output);
+            for arg in arguments {
+                collect_expr_refs(&arg.value, text, output);
             }
-            if trimmed.is_empty() && !pending.is_empty() {
-                pending.push(String::new());
-                continue;
+        }
+        Expr::GenericCall {
+            callee,
+            type_arguments,
+            arguments,
+            ..
+        } => {
+            collect_expr_refs(callee, text, output);
+            for ty in type_arguments {
+                collect_type_refs(ty, text, output);
             }
-            if let Some(declaration) = trimmed.strip_prefix("pub fn ") {
-                let function = declaration
-                    .split(['(', '<', ':', ' '])
-                    .next()
-                    .unwrap_or_default();
-                let value = pending.join("\n").trim().to_owned();
-                if !function.is_empty() && !value.is_empty() {
-                    documentation.insert(format!("{module}.{function}"), value);
+            for arg in arguments {
+                collect_expr_refs(&arg.value, text, output);
+            }
+        }
+        Expr::Unary { rhs, .. } => collect_expr_refs(rhs, text, output),
+        Expr::Binary { lhs, rhs, .. } => {
+            collect_expr_refs(lhs, text, output);
+            collect_expr_refs(rhs, text, output);
+        }
+        Expr::Range { lower, upper, .. } => {
+            if let Some(expr) = lower {
+                collect_expr_refs(expr, text, output);
+            }
+            if let Some(expr) = upper {
+                collect_expr_refs(expr, text, output);
+            }
+        }
+        Expr::Index { base, index, .. } => {
+            collect_expr_refs(base, text, output);
+            collect_expr_refs(index, text, output);
+        }
+        Expr::Group { inner, .. } => collect_expr_refs(inner, text, output),
+        Expr::Tuple { elements, .. } | Expr::List { elements, .. } => {
+            for expr in elements {
+                collect_expr_refs(expr, text, output);
+            }
+        }
+        Expr::Record { fields, .. } | Expr::Nominal { fields, .. } => {
+            for field in fields {
+                collect_expr_refs(&field.value, text, output);
+            }
+        }
+        Expr::Lambda { body, .. } => collect_expr_refs(body, text, output),
+        Expr::Block {
+            statements, tail, ..
+        } => {
+            for statement in statements {
+                match statement {
+                    Statement::Let {
+                        annotation, value, ..
+                    } => {
+                        if let Some(ty) = annotation {
+                            collect_type_refs(ty, text, output);
+                        }
+                        collect_expr_refs(value, text, output);
+                    }
+                    Statement::Assert { value, .. }
+                    | Statement::Expression { value, .. }
+                    | Statement::Control { value, .. } => collect_expr_refs(value, text, output),
+                    Statement::Return { value, .. } | Statement::Break { value, .. } => {
+                        if let Some(value) = value {
+                            collect_expr_refs(value, text, output);
+                        }
+                    }
+                    Statement::Assignment { value, .. } => collect_expr_refs(value, text, output),
+                    Statement::Continue { .. } => {}
                 }
             }
-            pending.clear();
+            if let Some(tail) = tail {
+                collect_expr_refs(tail, text, output);
+            }
         }
-    }
-    documentation
-}
-
-fn signature_information(
-    label: String,
-    parameters: impl IntoIterator<Item = (String, Option<String>)>,
-    return_type: String,
-    active_parameter: usize,
-) -> lsp_types::SignatureHelp {
-    let parameters = parameters
-        .into_iter()
-        .map(|(name, documentation)| lsp_types::ParameterInformation {
-            label: lsp_types::ParameterLabel::Simple(name),
-            documentation: documentation.map(lsp_types::Documentation::String),
-        })
-        .collect::<Vec<_>>();
-    lsp_types::SignatureHelp {
-        signatures: vec![lsp_types::SignatureInformation {
-            label: format!(
-                "{label}({}) RETURNS {return_type}",
-                parameters
-                    .iter()
-                    .map(|parameter| match &parameter.label {
-                        lsp_types::ParameterLabel::Simple(label) => label.clone(),
-                        lsp_types::ParameterLabel::LabelOffsets { .. } => String::new(),
-                    })
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ),
-            documentation: None,
-            parameters: Some(parameters),
-            active_parameter: Some(active_parameter as u32),
-        }],
-        active_signature: Some(0),
-        active_parameter: Some(active_parameter as u32),
-    }
-}
-fn return_text(return_type: &FunctionReturnType, text: &str) -> String {
-    let span_text = |type_specification: &TypeSpecification| {
-        text.get(type_specification.span().start..type_specification.span().end)
-            .unwrap_or("value")
-            .to_owned()
-    };
-    match return_type {
-        FunctionReturnType::Single(type_specification) => span_text(type_specification),
-        FunctionReturnType::Stream { element, .. } => format!("STREAM <{}>", span_text(element)),
-        FunctionReturnType::Rows { columns, .. } => format!(
-            "ROWS ({})",
-            columns
-                .iter()
-                .map(|column| column.name.text.clone())
-                .collect::<Vec<_>>()
-                .join(", ")
-        ),
-    }
-}
-
-fn documentation_text(slice: Option<&SourceSlice>) -> Option<&str> {
-    slice.map(|slice| slice.text.as_str())
-}
-
-/// Returns global completion items plus fields for an accepted CLIENT path at
-/// the requested source byte.
-///
-/// The parser retains complete dotted paths, so completion after a dot can
-/// inspect the member already present in the accepted source without adding
-/// proposal-only syntax to the language grammar. A dotted path in the
-/// `target` argument of one of the accepted resource or action constructors
-/// is recognized separately: same-document SERVER and CLIENT declarations
-/// retain `FUNCTION` kind and receive target-specific details, while ordinary
-/// field paths only contribute their object/record fields.
-pub fn completion_at(
-    parse: &Parse,
-    standard: Option<&StandardLibrary>,
-    byte: Option<usize>,
-    context: Option<&CompletionContext>,
-) -> Vec<CompletionItem> {
-    let target_completion = byte
-        .filter(|_| member_completion_context_allows(context))
-        .and_then(|byte| client_target_completion_at_byte(parse, byte));
-    let mut items = Vec::new();
-    if let Some(standard) = standard {
-        for module in standard.modules.values() {
-            for (last, symbol) in &module.exports {
-                if !matches!(
-                    symbol.kind,
-                    SymbolKindV1::Type | SymbolKindV1::Enum | SymbolKindV1::Protocol
-                ) {
-                    continue;
+        Expr::Control {
+            condition,
+            body,
+            arms,
+            alternate,
+            ..
+        } => {
+            if let Some(expr) = condition {
+                collect_expr_refs(expr, text, output);
+            }
+            if let Some(expr) = body {
+                collect_expr_refs(expr, text, output);
+            }
+            for arm in arms {
+                if let Some(guard) = &arm.guard {
+                    collect_expr_refs(guard, text, output);
                 }
-                let name = format!("{}.{}", module.namespace.display(), last);
-                items.push(CompletionItem {
-                    label: last.clone(),
-                    kind: Some(CompletionItemKind::STRUCT),
-                    detail: Some(format!("1.0 standard type {name}")),
-                    documentation: Some(lsp_types::Documentation::String(format!(
-                        "Standard-library value type `{name}`."
-                    ))),
-                    sort_text: Some(format!("0-{last}")),
-                    ..CompletionItem::default()
-                });
+                collect_expr_refs(&arm.body, text, output);
+            }
+            if let Some(expr) = alternate {
+                collect_expr_refs(expr, text, output);
             }
         }
-    }
-    if let Some(standard) = standard {
-        for module in standard.modules.values() {
-            for (last, symbol) in &module.exports {
-                if symbol.kind != SymbolKindV1::Function {
-                    continue;
-                }
-                let name = format!("{}.{}", module.namespace.display(), last);
-                items.push(CompletionItem {
-                    label: last.clone(),
-                    kind: Some(CompletionItemKind::FUNCTION),
-                    detail: Some("1.0 standard function".to_owned()),
-                    documentation: Some(lsp_types::Documentation::String(format!(
-                        "Standard-library function `{name}`."
-                    ))),
-                    sort_text: Some(format!("0-{last}")),
-                    ..CompletionItem::default()
-                });
-            }
-        }
-    }
-    for keyword in orna_syntax::KEYWORDS {
-        items.push(CompletionItem {
-            label: (*keyword).to_owned(),
-            kind: Some(CompletionItemKind::KEYWORD),
-            detail: Some("language keyword".to_owned()),
-            documentation: crate::reference::keyword_reference(keyword)
-                .map(|reference| lsp_types::Documentation::String(reference.summary.to_owned())),
-            sort_text: Some(format!("2-{keyword}")),
-            ..CompletionItem::default()
-        });
-    }
-    for scalar in orna_syntax::SCALAR_TYPES {
-        items.push(CompletionItem {
-            label: (*scalar).to_owned(),
-            kind: Some(CompletionItemKind::TYPE_PARAMETER),
-            detail: Some("standard scalar type".to_owned()),
-            documentation: crate::reference::scalar_reference(scalar)
-                .map(|reference| lsp_types::Documentation::String(reference.summary.to_owned())),
-            sort_text: Some(format!("1-{scalar}")),
-            ..CompletionItem::default()
-        });
-    }
-    let mut add_named =
-        |label: String, kind: CompletionItemKind, detail: String, documentation: Option<String>| {
-            items.push(CompletionItem {
-                label,
-                kind: Some(kind),
-                detail: Some(detail),
-                documentation: documentation.map(lsp_types::Documentation::String),
-                ..CompletionItem::default()
-            });
-        };
-    for schema in parse.schemas() {
-        add_named(
-            last_name(&schema.name),
-            CompletionItemKind::MODULE,
-            "schema".to_owned(),
-            schema
-                .name
-                .parts
-                .last()
-                .and_then(|name| parse.documentation_comment(name))
-                .map(str::to_owned),
-        );
-    }
-    for declaration in parse.object_types() {
-        add_named(
-            last_name(&declaration.name),
-            CompletionItemKind::INTERFACE,
-            "object type".to_owned(),
-            declaration
-                .name
-                .parts
-                .last()
-                .and_then(|name| parse.documentation_comment(name))
-                .map(str::to_owned),
-        );
-    }
-    for declaration in parse.enum_types() {
-        add_named(
-            last_name(&declaration.name),
-            CompletionItemKind::ENUM,
-            "enum type".to_owned(),
-            declaration
-                .name
-                .parts
-                .last()
-                .and_then(|name| parse.documentation_comment(name))
-                .map(str::to_owned),
-        );
-    }
-    for declaration in parse.record_value_types() {
-        add_named(
-            last_name(&declaration.name),
-            CompletionItemKind::STRUCT,
-            "record value type".to_owned(),
-            declaration
-                .name
-                .parts
-                .last()
-                .and_then(|name| parse.documentation_comment(name))
-                .map(str::to_owned),
-        );
-    }
-    for declaration in parse.primitive_value_types() {
-        add_named(
-            last_name(&declaration.name),
-            CompletionItemKind::STRUCT,
-            "primitive value type".to_owned(),
-            declaration
-                .name
-                .parts
-                .last()
-                .and_then(|name| parse.documentation_comment(name))
-                .map(str::to_owned),
-        );
-    }
-    for declaration in parse.opaque_value_types() {
-        add_named(
-            last_name(&declaration.name),
-            CompletionItemKind::STRUCT,
-            "opaque value type".to_owned(),
-            declaration
-                .name
-                .parts
-                .last()
-                .and_then(|name| parse.documentation_comment(name))
-                .map(str::to_owned),
-        );
-    }
-    for declaration in parse.server_functions() {
-        let detail = if target_completion.is_some_and(|constructor| {
-            server_target_is_eligible(parse, declaration, constructor, standard)
-        }) {
-            "server function target"
-        } else {
-            "server function"
-        }
-        .to_owned();
-        add_named(
-            last_name(&declaration.name),
-            CompletionItemKind::FUNCTION,
-            detail,
-            declaration
-                .name
-                .parts
-                .last()
-                .and_then(|name| parse.documentation_comment(name))
-                .map(str::to_owned),
-        );
-    }
-    for declaration in parse.client_functions() {
-        let detail = if target_completion.is_some_and(|constructor| {
-            client_target_is_eligible(declaration, constructor, standard)
-        }) {
-            "client function target"
-        } else {
-            "client function"
-        }
-        .to_owned();
-        add_named(
-            last_name(&declaration.name),
-            CompletionItemKind::FUNCTION,
-            detail,
-            declaration
-                .name
-                .parts
-                .last()
-                .and_then(|name| parse.documentation_comment(name))
-                .map(str::to_owned),
-        );
-    }
-    if let Some(byte) = byte
-        && member_completion_context_allows(context)
-    {
-        add_client_member_completions(parse, byte, &mut items);
-    }
-    items
-}
-
-fn client_target_completion_at_byte(parse: &Parse, byte: usize) -> Option<ClientTargetConstructor> {
-    parse.client_functions().iter().find_map(|declaration| {
-        client_field_path_at_byte(declaration, byte).and_then(|(_, members, index)| {
-            client_target_function_path_at(parse, &members[index].span).map(|path| path.constructor)
-        })
-    })
-}
-
-fn server_target_is_eligible(
-    parse: &Parse,
-    declaration: &ServerFunctionDeclaration,
-    constructor: ClientTargetConstructor,
-    standard: Option<&StandardLibrary>,
-) -> bool {
-    match constructor {
-        ClientTargetConstructor::Resource => {
-            matches!(&declaration.return_type, FunctionReturnType::Single(_))
-        }
-        ClientTargetConstructor::Action => {
-            action_target_return_type_is_durable(&declaration.return_type, standard)
-        }
-        ClientTargetConstructor::StreamResource => {
-            matches!(
-                &declaration.return_type,
-                FunctionReturnType::Stream { element, .. }
-                    if stream_target_element_is_supported(parse, element, standard)
-            )
-        }
-    }
-}
-
-fn stream_target_element_is_supported(
-    parse: &Parse,
-    element: &TypeSpecification,
-    standard: Option<&StandardLibrary>,
-) -> bool {
-    match element {
-        TypeSpecification::Named(name) => {
-            let closed_scalar = name.parts.len() == 1
-                && !name.parts[0].text.starts_with('"')
-                && [
-                    "BOOLEAN", "BOOL", "INTEGER", "INT", "BIGINT", "FLOAT", "TEXT", "BYTES",
-                ]
-                .iter()
-                .any(|scalar| identifier_spelling_matches(&name.parts[0].text, scalar));
-            let qualified_scalar = name.parts.len() == 2
-                && identifier_spelling_matches(&name.parts[0].text, "std")
-                && [
-                    "BOOLEAN",
-                    "INTEGER",
-                    "BIGINT",
-                    "FLOAT",
-                    "CHARACTER_LARGE_OBJECT",
-                    "BINARY_LARGE_OBJECT",
-                ]
-                .iter()
-                .any(|scalar| identifier_spelling_matches(&name.parts[1].text, scalar));
-            let local_named = parse
-                .enum_types()
-                .iter()
-                .any(|candidate| qualified_names_match(&candidate.name, name))
-                || parse
-                    .record_value_types()
-                    .iter()
-                    .any(|candidate| qualified_names_match(&candidate.name, name));
-            let standard_named = standard.is_some_and(|standard| {
-                standard_symbol_matches_source(
-                    standard,
-                    name,
-                    &[
-                        SymbolKindV1::Type,
-                        SymbolKindV1::Enum,
-                        SymbolKindV1::Protocol,
-                    ],
-                )
-            });
-            closed_scalar || qualified_scalar || local_named || standard_named
-        }
-        TypeSpecification::StandardLargeObject { .. } => true,
-        TypeSpecification::Reference { target, .. } => {
-            let TypeSpecification::Named(name) = target.as_ref() else {
-                return false;
-            };
-            let local_object = parse
-                .object_types()
-                .iter()
-                .any(|candidate| qualified_names_match(&candidate.name, name));
-            let standard_object = standard.is_some_and(|standard| {
-                standard_symbol_matches_source(
-                    standard,
-                    name,
-                    &[SymbolKindV1::Type, SymbolKindV1::Table],
-                )
-            });
-            local_object || standard_object
-        }
-        TypeSpecification::List { .. }
-        | TypeSpecification::Set { .. }
-        | TypeSpecification::Map { .. }
-        | TypeSpecification::Option { .. }
-        | TypeSpecification::Stream { .. } => false,
-    }
-}
-
-fn client_target_is_eligible(
-    declaration: &ClientFunctionDeclaration,
-    constructor: ClientTargetConstructor,
-    standard: Option<&StandardLibrary>,
-) -> bool {
-    matches!(constructor, ClientTargetConstructor::Action)
-        && action_target_return_type_is_durable(&declaration.return_type, standard)
-}
-
-fn action_target_return_type_is_durable(
-    return_type: &FunctionReturnType,
-    standard: Option<&StandardLibrary>,
-) -> bool {
-    let FunctionReturnType::Single(type_specification) = return_type else {
-        return false;
-    };
-    action_target_type_is_durable(type_specification, standard)
-}
-
-fn action_target_type_is_durable(
-    type_specification: &TypeSpecification,
-    _standard: Option<&StandardLibrary>,
-) -> bool {
-    match type_specification {
-        TypeSpecification::Reference { .. } => true,
-        TypeSpecification::StandardLargeObject { kind, .. } => matches!(
-            kind,
-            StandardLargeObjectKind::Character | StandardLargeObjectKind::Binary
-        ),
-        TypeSpecification::Named(name) => {
-            let prelude_scalar = name.parts.len() == 1
-                && ["BOOL", "BOOLEAN", "INT", "INTEGER", "BIGINT", "FLOAT"]
-                    .iter()
-                    .any(|scalar| identifier_spelling_matches(&name.parts[0].text, scalar));
-            let standard_scalar_alias = name.parts.len() == 2
-                && identifier_spelling_matches(&name.parts[0].text, "std")
-                && [
-                    "BOOLEAN",
-                    "INTEGER",
-                    "BIGINT",
-                    "FLOAT",
-                    "CHARACTER_LARGE_OBJECT",
-                    "BINARY_LARGE_OBJECT",
-                ]
-                .iter()
-                .any(|scalar| identifier_spelling_matches(&name.parts[1].text, scalar));
-            let standard_action_alias = (name.parts.len() == 2
-                && identifier_spelling_matches(&name.parts[0].text, "std")
-                && identifier_spelling_matches(&name.parts[1].text, "Action"))
-                || (name.parts.len() == 3
-                    && identifier_spelling_matches(&name.parts[0].text, "std")
-                    && identifier_spelling_matches(&name.parts[1].text, "action")
-                    && identifier_spelling_matches(&name.parts[2].text, "Action"));
-            prelude_scalar || standard_scalar_alias || standard_action_alias
-        }
-        TypeSpecification::List { .. }
-        | TypeSpecification::Set { .. }
-        | TypeSpecification::Map { .. }
-        | TypeSpecification::Option { .. }
-        | TypeSpecification::Stream { .. } => false,
-    }
-}
-
-fn member_completion_context_allows(context: Option<&CompletionContext>) -> bool {
-    let Some(context) = context else {
-        return true;
-    };
-    if context.trigger_kind == CompletionTriggerKind::INVOKED
-        || context.trigger_kind == CompletionTriggerKind::TRIGGER_FOR_INCOMPLETE_COMPLETIONS
-    {
-        return true;
-    }
-    context.trigger_kind == CompletionTriggerKind::TRIGGER_CHARACTER
-        && context.trigger_character.as_deref() == Some(".")
-}
-
-fn add_client_member_completions(parse: &Parse, byte: usize, items: &mut Vec<CompletionItem>) {
-    let Some((declaration, root, members, index)) =
-        parse.client_functions().iter().find_map(|declaration| {
-            client_field_path_at_byte(declaration, byte)
-                .map(|(root, members, index)| (declaration, root, members, index))
-        })
-    else {
-        return;
-    };
-    let Some(mut owner) =
-        client_root_binding(declaration, root, ClientExpressionPart::FieldRoot(root))
-            .and_then(|binding| binding.owner)
-    else {
-        return;
-    };
-    for member in members.iter().take(index) {
-        let Some(field) = field_on_object_or_record(parse, &owner, &member.text) else {
-            return;
-        };
-        let Some(next_owner) = type_owner_name(field.type_specification) else {
-            return;
-        };
-        owner = next_owner;
-    }
-    let fields = parse
-        .object_types()
-        .iter()
-        .find(|declaration| qualified_names_match(&declaration.name, &owner))
-        .map(|declaration| {
-            declaration
-                .fields
-                .iter()
-                .map(|field| (&field.name, "object"))
-        })
-        .into_iter()
-        .flatten()
-        .chain(
-            parse
-                .record_value_types()
-                .iter()
-                .find(|declaration| qualified_names_match(&declaration.name, &owner))
-                .map(|declaration| {
-                    declaration
-                        .fields
-                        .iter()
-                        .map(|field| (&field.name, "record"))
-                })
-                .into_iter()
-                .flatten(),
-        );
-    for (field, kind) in fields {
-        items.push(CompletionItem {
-            label: field.text.clone(),
-            kind: Some(CompletionItemKind::FIELD),
-            detail: Some(format!("{kind} field of {}", qualified_name_text(&owner))),
-            documentation: parse
-                .documentation_comment(field)
-                .map(|documentation| lsp_types::Documentation::String(documentation.to_owned())),
-            ..CompletionItem::default()
-        });
-    }
-}
-
-fn client_field_path_at_byte(
-    declaration: &ClientFunctionDeclaration,
-    byte: usize,
-) -> Option<(&orna_syntax::NamePart, &[orna_syntax::NamePart], usize)> {
-    fn expression_at_byte(
-        expression: &ClientExpression,
-        byte: usize,
-    ) -> Option<(&orna_syntax::NamePart, &[orna_syntax::NamePart], usize)> {
-        match expression {
-            ClientExpression::FieldPath { root, members, .. } => members
-                .iter()
-                .enumerate()
-                .find(|(index, member)| {
-                    let previous_end = if *index == 0 {
-                        root.span.end
-                    } else {
-                        members[index - 1].span.end
-                    };
-                    byte >= previous_end && byte <= member.span.end
-                })
-                .map(|(index, _)| (root, members.as_slice(), index)),
-            ClientExpression::Call { arguments, .. } => arguments
-                .iter()
-                .find_map(|argument| expression_at_byte(&argument.value, byte)),
-            ClientExpression::Await { expression, .. } => expression_at_byte(expression, byte),
-            ClientExpression::Concat { left, right, .. } => {
-                expression_at_byte(left, byte).or_else(|| expression_at_byte(right, byte))
-            }
-            ClientExpression::Unary(unary) => expression_at_byte(&unary.expression, byte),
-            ClientExpression::Binary(binary) => expression_at_byte(&binary.left, byte)
-                .or_else(|| expression_at_byte(&binary.right, byte)),
-            ClientExpression::Parenthesized { expression, .. } => {
-                expression_at_byte(expression, byte)
-            }
-            ClientExpression::ParameterRead { .. }
-            | ClientExpression::LocalRead { .. }
-            | ClientExpression::StringLiteral { .. }
-            | ClientExpression::IntegerLiteral { .. }
-            | ClientExpression::BooleanLiteral { .. } => None,
-        }
-    }
-    fn statements_at_byte(
-        statements: &[orna_syntax::ClientProceduralStatement],
-        byte: usize,
-    ) -> Option<(&orna_syntax::NamePart, &[orna_syntax::NamePart], usize)> {
-        statements
-            .iter()
-            .find_map(|statement| statement_at_byte(statement, byte))
-    }
-
-    fn statement_at_byte(
-        statement: &orna_syntax::ClientProceduralStatement,
-        byte: usize,
-    ) -> Option<(&orna_syntax::NamePart, &[orna_syntax::NamePart], usize)> {
-        match statement {
-            orna_syntax::ClientProceduralStatement::Let(statement) => {
-                expression_at_byte(&statement.expression, byte)
-            }
-            orna_syntax::ClientProceduralStatement::Assignment(statement) => {
-                expression_at_byte(&statement.expression, byte)
-            }
-            orna_syntax::ClientProceduralStatement::Return(statement) => statement
-                .expression
-                .as_ref()
-                .and_then(|expression| expression_at_byte(expression, byte)),
-            orna_syntax::ClientProceduralStatement::If(statement) => {
-                expression_at_byte(&statement.condition, byte)
-                    .or_else(|| statements_at_byte(&statement.then_statements, byte))
-                    .or_else(|| {
-                        statement.elsif_branches.iter().find_map(|branch| {
-                            expression_at_byte(&branch.condition, byte)
-                                .or_else(|| statements_at_byte(&branch.statements, byte))
-                        })
-                    })
-                    .or_else(|| {
-                        statement
-                            .else_statements
-                            .as_deref()
-                            .and_then(|statements| statements_at_byte(statements, byte))
-                    })
-            }
-            orna_syntax::ClientProceduralStatement::While(statement) => {
-                expression_at_byte(&statement.condition, byte)
-                    .or_else(|| statements_at_byte(&statement.body, byte))
-            }
-        }
-    }
-
-    match &declaration.body {
-        orna_syntax::ClientFunctionBody::Expression { expression }
-        | orna_syntax::ClientFunctionBody::ReturnExpression { expression } => {
-            expression_at_byte(expression, byte)
-        }
-        orna_syntax::ClientFunctionBody::StateBlock(block) => block
-            .states
-            .iter()
-            .find_map(|state| match &state.default {
-                orna_syntax::StateDefault::Expression(expression) => {
-                    expression_at_byte(expression, byte)
-                }
-                orna_syntax::StateDefault::Unset | orna_syntax::StateDefault::Null => None,
-            })
-            .or_else(|| {
-                block
-                    .locals
-                    .iter()
-                    .find_map(|local| expression_at_byte(&local.expression, byte))
-            })
-            .or_else(|| statements_at_byte(&block.statements, byte))
-            .or_else(|| {
-                block
-                    .return_expression
-                    .as_ref()
-                    .and_then(|expression| expression_at_byte(expression, byte))
-            }),
-        orna_syntax::ClientFunctionBody::BooleanLiteral { .. }
-        | orna_syntax::ClientFunctionBody::ExternalContract { .. } => None,
-        _ => None,
+        Expr::Literal { .. } | Expr::InterpolatedString { .. } | Expr::ReplBinding { .. } => {}
     }
 }
 
 #[cfg(test)]
-#[path = "analysis/tests.rs"]
 mod tests;

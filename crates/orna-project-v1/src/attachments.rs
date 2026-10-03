@@ -923,8 +923,33 @@ impl PackageResolver {
         ),
         AttachmentError,
     > {
+        self.compact_nested_terminal_pair_checkpoint_spill_stream_preserving_terminal_identity(
+            previous,
+            checkpoint_folds.iter().copied(),
+        )
+    }
+
+    /// Consumes ordered checkpoint pairs once and compacts each pair before
+    /// requesting the next one. A same-route checkpoint may restore its exact
+    /// snapshot into a temporary retained wave after an earlier fold removed
+    /// it; every fold retains the selected snapshots and their original
+    /// identities. The reference does not define streaming checkpoint folds
+    /// for attach routes, so v1 treats each yielded pair as one ordered fold
+    /// and returns no route unless the complete stream validates. Foreign,
+    /// malformed, or duplicate identities stop consumption with an error.
+    pub fn compact_nested_terminal_pair_checkpoint_spill_stream_preserving_terminal_identity<'a>(
+        &self,
+        previous: &ReboundPathResolution,
+        checkpoint_folds: impl IntoIterator<Item = [&'a ReboundPathCheckpoint; 2]>,
+    ) -> Result<
+        (
+            ReboundPathResolution,
+            Vec<(NestedPairTerminalRouteIdentity, NestedPairTerminalRouteIdentity)>,
+        ),
+        AttachmentError,
+    > {
         let mut route = previous.clone();
-        let mut transitions = Vec::with_capacity(checkpoint_folds.len());
+        let mut transitions = Vec::new();
         for checkpoints in checkpoint_folds {
             for checkpoint in checkpoints {
                 checkpoint.validate_depth_identity()?;

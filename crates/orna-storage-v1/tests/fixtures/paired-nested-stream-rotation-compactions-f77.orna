@@ -1,0 +1,15 @@
+{ id: "f77/rotation/a", name: "f77/left/a", city: "f77/right/a", }
+
+{ id: "f77/rotation/b", name: "f77/left/b", city: "f77/right/b", }
+
+{ id: "f77/rotation/c", name: "f77/left/c", city: "f77/right/c", }
+
+{ id: "f77/rotation/d", name: "f77/left/d", city: "f77/right/d", }
+
+{ id: "f77/rotation/e", name: "f77/left/e", city: "f77/right/e", }
+
+{ id: "f77/rotation/f", name: "f77/left/f", city: "f77/right/f", }
+
+{ id: "f77/rotation/g", name: "f77/left/g", city: "f77/right/g", }
+
+{ id: "f77/rotation/h", name: "f77/left/h", city: "f77/right/h", }
