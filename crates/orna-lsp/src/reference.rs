@@ -904,27 +904,7 @@ const SCALAR_REFERENCES: &[ScalarReference] = &[
 
 #[cfg(test)]
 mod tests {
-    use super::{KEYWORD_REFERENCES, keyword_reference, scalar_reference};
-
-    const ACCEPTED_STANDARD_SCALAR_SPELLINGS: [&str; 17] = [
-        "BIGINT",
-        "BINARY LARGE OBJECT",
-        "BOOL",
-        "BOOLEAN",
-        "BYTES",
-        "CHARACTER LARGE OBJECT",
-        "DATE",
-        "DECIMAL",
-        "DURATION",
-        "FLOAT",
-        "INT",
-        "INTEGER",
-        "TEXT",
-        "TIME",
-        "TIMESTAMP",
-        "UUID",
-        "VOID",
-    ];
+    use super::{KEYWORD_REFERENCES, SCALAR_REFERENCES, keyword_reference, scalar_reference};
 
     #[test]
     fn keyword_reference_keys_are_unique() {
@@ -953,10 +933,19 @@ mod tests {
     }
 
     #[test]
-    fn reference_covers_every_classifier_keyword_including_rejected_sql() {
+    fn language_model_keyword_reference_keys_match_classifier_keywords() {
         // KEYWORDS is the classifier authority. It includes SQL words that the
         // accepted parser deliberately rejects or reserves; those words still
         // need hover references that explain the current grammar boundary.
+        let actual = KEYWORD_REFERENCES
+            .iter()
+            .map(|entry| entry.keyword)
+            .collect::<std::collections::BTreeSet<_>>();
+        let expected = orna_syntax::KEYWORDS
+            .iter()
+            .copied()
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(actual, expected, "keyword reference drift");
         for keyword in orna_syntax::KEYWORDS {
             let entry = keyword_reference(keyword)
                 .unwrap_or_else(|| panic!("missing keyword reference for {keyword}"));
@@ -968,13 +957,22 @@ mod tests {
     }
 
     #[test]
-    fn reference_covers_every_canonical_scalar_spelling() {
-        assert_eq!(
-            orna_syntax::SCALAR_TYPES,
-            ACCEPTED_STANDARD_SCALAR_SPELLINGS.as_slice()
-        );
-        for spelling in ACCEPTED_STANDARD_SCALAR_SPELLINGS {
-            let reference_name = match spelling {
+    fn language_model_scalar_reference_keys_match_canonical_spellings() {
+        let actual = SCALAR_REFERENCES
+            .iter()
+            .map(|entry| entry.name)
+            .collect::<std::collections::BTreeSet<_>>();
+        let expected = orna_syntax::SCALAR_TYPES
+            .iter()
+            .map(|spelling| match *spelling {
+                "CHARACTER LARGE OBJECT" => "CHARACTER_LARGE_OBJECT",
+                "BINARY LARGE OBJECT" => "BINARY_LARGE_OBJECT",
+                spelling => spelling,
+            })
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(actual, expected, "scalar reference drift");
+        for spelling in orna_syntax::SCALAR_TYPES {
+            let reference_name = match *spelling {
                 "CHARACTER LARGE OBJECT" => "CHARACTER_LARGE_OBJECT",
                 "BINARY LARGE OBJECT" => "BINARY_LARGE_OBJECT",
                 spelling => spelling,
