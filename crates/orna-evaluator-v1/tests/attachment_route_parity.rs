@@ -2504,6 +2504,52 @@ fn sparse_nested_storm_folds_preserve_terminal_route_identity() {
         "the paired active depth remains attached to its original checkpoint"
     );
 
+    let first_sparse_chain = [forward_pair_round.as_slice()];
+    let second_sparse_chain = [forward_omission_pair.as_slice()];
+    let sparse_chains = [
+        first_sparse_chain.as_slice(),
+        second_sparse_chain.as_slice(),
+    ];
+    let chained_sparse_fold = resolver
+        .extend_nested_terminal_pair_sparse_checkpoint_storm_chains_from_depth_labels(
+            &first_stage,
+            &sparse_chains,
+        )
+        .unwrap();
+    assert_eq!(
+        chained_sparse_fold.terminal_route_identity(),
+        folded.terminal_route_identity(),
+        "separate sparse fold chains retain the exact paired terminal identity"
+    );
+    assert_eq!(
+        chained_sparse_fold.retained_depth_label(0, 0).unwrap(),
+        outer_label,
+        "the outer checkpoint identity survives a later sparse chain"
+    );
+    assert_eq!(
+        chained_sparse_fold.retained_depth_label(0, 1).unwrap(),
+        nested_label,
+        "the nested checkpoint identity survives a later sparse chain"
+    );
+    let chained_terminal_identity = chained_sparse_fold.terminal_route_identity();
+    let paired_omission_tail = [(&outer_label, None), (&nested_label, None)];
+    let omission_tail_chain = [paired_omission_tail.as_slice()];
+    let omission_tail_chains = [omission_tail_chain.as_slice()];
+    let chained_after_omissions = resolver
+        .extend_nested_terminal_pair_sparse_checkpoint_storm_chains_from_depth_labels(
+            &chained_sparse_fold,
+            &omission_tail_chains,
+        )
+        .unwrap();
+    chained_after_omissions
+        .validate_terminal_route_identity(&chained_terminal_identity)
+        .unwrap();
+    assert_eq!(
+        chained_after_omissions.terminal_route_identity(),
+        chained_terminal_identity,
+        "paired omissions across a later chain preserve the computed terminal identity"
+    );
+
     let duplicate_sparse_round = [(&outer_label, None), (&outer_label, None)];
     assert!(matches!(
         resolver.extend_nested_terminal_pair_sparse_checkpoint_storm_rounds_from_depth_labels(
@@ -2554,7 +2600,7 @@ fn sparse_nested_storm_folds_preserve_terminal_route_identity() {
     let mut evaluation_session = AttachedDatabaseSession::new(parent.primary().clone()).unwrap();
     evaluation_session
         .attach_database(
-            after_omissions
+            chained_after_omissions
                 .final_session()
                 .database(aliases[4])
                 .unwrap()
