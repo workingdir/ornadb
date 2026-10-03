@@ -2520,6 +2520,52 @@ fn captured_pair_resolution_folds_keep_each_pinned_snapshot_identity() {
 }
 
 #[test]
+fn nested_paired_resolution_keeps_import_and_qualified_paths_on_each_pin() {
+    let (
+        _directory,
+        _project_v1,
+        _project_v2,
+        _project_v3,
+        project_v4,
+        project_v5,
+        project_v6,
+        snapshots,
+    ) = module_upgrade_projects();
+    let projects = [&project_v4, &project_v5, &project_v6];
+    let pins = [&snapshots[3], &snapshots[4], &snapshots[5]];
+    let expected = [[1_011, 1_012], [10_012, 10_013], [100_013, 100_014]];
+    let use_pair = include_str!("fixtures/module-upgrade-paired-use.orna");
+    let replay = include_str!("fixtures/module-upgrade-paired-resolution-depth.orna");
+
+    for (index, project) in projects.iter().enumerate() {
+        assert_eq!(project.standard_profile().unwrap().snapshot(), pins[index]);
+        let mut session = AdmittedReplSession::from_loaded_project(
+            project,
+            project.standard_sources().iter().cloned(),
+            Limits::default(),
+        )
+        .unwrap();
+        for import in use_pair.lines() {
+            assert_eq!(session.submit(import), Ok(None));
+        }
+        let output = session.submit(replay).unwrap_or_else(|error| {
+            panic!(
+                "nested imported and qualified calls failed on snapshot {}: {}",
+                pins[index],
+                error.code()
+            )
+        });
+        assert_eq!(
+            output,
+            Some(ints(&expected[index])),
+            "nested imported and qualified calls must resolve from snapshot {}",
+            pins[index]
+        );
+    }
+
+}
+
+#[test]
 fn replayed_closure_uses_its_captured_dependency_snapshot_after_snapshot_changes() {
     let (_directory, project_v1, project_v2, snapshot_v1, snapshot_v2, sources_v1, sources_v2) =
         snapshot_projects();
