@@ -377,6 +377,21 @@ pub struct BranchMergeTabularColumnRestoreWaveSnapshot {
     pub columns: Vec<BranchMergeColumnDepthLadderSnapshot>,
 }
 
+/// One stable column's independent depth labels at one released wave order.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BranchMergeColumnDepthLadderWaveSnapshot {
+    pub order: u64,
+    pub fragments: Vec<BranchMergeColumnDepthFragmentSnapshot>,
+}
+
+/// A stable table-column identity folded across its released restore waves.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BranchMergeColumnRestoreLadderFoldSnapshot {
+    pub table: ObjectId,
+    pub column: ObjectId,
+    pub waves: Vec<BranchMergeColumnDepthLadderWaveSnapshot>,
+}
+
 /// A canonical column cell released with its source parent identity intact.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BranchMergeParentColumnDepthEvent {
@@ -1182,6 +1197,37 @@ impl BranchMergeTombstoneHistory {
             .map(|(order, columns)| BranchMergeTabularColumnRestoreWaveSnapshot {
                 order,
                 columns,
+            })
+            .collect()
+    }
+
+    /// Returns each stable table-column ladder folded across released waves.
+    ///
+    /// A fold keeps each wave's order and local labels intact: labels restart
+    /// at zero for every wave and are never combined with labels from another
+    /// order or sibling column. The reference is silent about this cross-wave
+    /// view, so v1 folds by stable `(table, column)` identity only.
+    pub fn column_restore_ladder_folds(
+        &self,
+    ) -> Vec<BranchMergeColumnRestoreLadderFoldSnapshot> {
+        let mut folds = BTreeMap::new();
+        for wave in self.column_restore_waves() {
+            for column in wave.columns {
+                folds
+                    .entry((column.table, column.column))
+                    .or_insert_with(Vec::new)
+                    .push(BranchMergeColumnDepthLadderWaveSnapshot {
+                        order: wave.order,
+                        fragments: column.fragments,
+                    });
+            }
+        }
+        folds
+            .into_iter()
+            .map(|((table, column), waves)| BranchMergeColumnRestoreLadderFoldSnapshot {
+                table,
+                column,
+                waves,
             })
             .collect()
     }
