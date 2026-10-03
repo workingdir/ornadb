@@ -5,7 +5,7 @@
 //! capability.
 
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, HashSet},
     fmt,
     fmt::Write as _,
     sync::Arc,
@@ -217,7 +217,10 @@ pub struct RelationPage {
 ///
 /// Cloned plans retain this identity across their page reads; independently
 /// created sources receive distinct identities, even when their source names
-/// are equal. Effect handlers can use it to scope read-batch cursors.
+/// are equal. A newly built plan for a later view refresh receives a fresh
+/// identity. Effect handlers should bind continuation state by both source
+/// name and this identity so paired same-name reads cannot resume one another's
+/// cursors.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct RelationReadScope(u64);
 
@@ -816,8 +819,11 @@ pub trait EffectHandler {
     }
 
     /// Supplies a bounded page together with the identity of its relation
-    /// source. The default delegates to [`EffectHandler::scan_relation_page`]
-    /// to preserve existing handlers while allowing stateful readers to keep
+    /// source. Implementations that retain page continuations should key them
+    /// by both `source` and `scope`: same-name planned reads are independent,
+    /// and a fresh scope starts a fresh observation during a later refresh.
+    /// The default delegates to [`EffectHandler::scan_relation_page`] to
+    /// preserve existing handlers while allowing stateful readers to keep
     /// continuation cursors separate across equal-named view sources.
     fn scan_relation_page_scoped(
         &mut self,
@@ -1417,6 +1423,20 @@ fn error(code: &'static str) -> EvaluationError {
     // No parser diagnostic, source text, span, input value, or filesystem data
     // crosses this boundary.
     EvaluationError::redacted(SafeText::new(code).expect("static safe code"))
+}
+
+/// Encodes the lawful equality identity used by collection and relation
+/// distinct folds. The set stores this identity while the stream retains its
+/// first original value and therefore its stable order.
+fn distinct_identity(value: &Value) -> Result<Vec<u8>, EvaluationError> {
+    if value.contains_float() {
+        return Err(error("ORNA-EVAL-UNSUPPORTED"));
+    }
+    value
+        .clone()
+        .canonical()?
+        .encode()
+        .map_err(|_| error("ORNA-EVAL-VALUE"))
 }
 
 fn aggregate_task_failures(failures: &[EvaluationError]) -> EvaluationError {
@@ -4458,7 +4478,7 @@ impl Context<'_, '_> {
             else {
                 unreachable!("sort_by returns a list");
             };
-            let mut distinct_seen = vec![Vec::new(); plan.stages.len()];
+            let mut distinct_seen = vec![HashSet::new(); plan.stages.len()];
             let mut pair_previous = vec![None; plan.stages.len()];
             let mut window_states = (0..plan.stages.len())
                 .map(|_| None)
@@ -4475,7 +4495,7 @@ impl Context<'_, '_> {
             );
         }
         let mut counters = vec![0usize; plan.stages.len()];
-        let mut distinct_seen = vec![Vec::new(); plan.stages.len()];
+        let mut distinct_seen = vec![HashSet::new(); plan.stages.len()];
         let mut pair_previous = vec![None; plan.stages.len()];
         let mut window_states = (0..plan.stages.len())
             .map(|_| None)
@@ -4836,7 +4856,7 @@ impl Context<'_, '_> {
             return Ok(());
         }
         let mut counters = vec![0usize; plan.stages.len()];
-        let mut distinct_seen = vec![Vec::new(); plan.stages.len()];
+        let mut distinct_seen = vec![HashSet::new(); plan.stages.len()];
         let mut pair_previous = vec![None; plan.stages.len()];
         let mut window_states = (0..plan.stages.len())
             .map(|_| None)
@@ -4958,7 +4978,7 @@ impl Context<'_, '_> {
         mut value: Value,
         stages: &[RelationStage],
         counters: &mut [usize],
-        distinct_seen: &mut [Vec<orna_foundation_v1::CanonicalValue>],
+        distinct_seen: &mut [HashSet<Vec<u8>>],
         pair_previous: &mut [Option<Value>],
         window_states: &mut [Option<RelationWindowState>],
         stage_offset: usize,
@@ -5040,15 +5060,10 @@ impl Context<'_, '_> {
                 }
                 RelationStage::BucketBy(_) => return Err(error("ORNA-EVAL-UNSUPPORTED")),
                 RelationStage::Distinct => {
-                    if value.contains_float() {
-                        return Err(error("ORNA-EVAL-UNSUPPORTED"));
-                    }
-                    let key = value.clone().canonical()?;
                     let seen = &mut distinct_seen[index];
-                    if seen.iter().any(|existing| existing == &key) {
+                    if !seen.insert(distinct_identity(&value)?) {
                         return Ok(vec![RelationRow::Skip]);
                     }
-                    seen.push(key);
                     self.items(seen.len())?;
                 }
                 RelationStage::Pairs => {
@@ -5137,7 +5152,7 @@ impl Context<'_, '_> {
             unreachable!("sort_by returns a list")
         };
         let suffix = &plan.stages[sort_index + 1..];
-        let mut distinct_seen = vec![Vec::new(); plan.stages.len()];
+        let mut distinct_seen = vec![HashSet::new(); plan.stages.len()];
         let mut pair_previous = vec![None; plan.stages.len()];
         let mut window_states = (0..plan.stages.len())
             .map(|_| None)
@@ -5160,7 +5175,7 @@ impl Context<'_, '_> {
         stages: &[RelationStage],
         stage_offset: usize,
         depth: usize,
-        distinct_seen: &mut [Vec<orna_foundation_v1::CanonicalValue>],
+        distinct_seen: &mut [HashSet<Vec<u8>>],
         pair_previous: &mut [Option<Value>],
         window_states: &mut [Option<RelationWindowState>],
         visit: impl FnMut(&mut Self, Value) -> Result<bool, EvaluationError>,
@@ -5221,7 +5236,7 @@ impl Context<'_, '_> {
         stages: &[RelationStage],
         stage_offset: usize,
         depth: usize,
-        distinct_seen: &mut [Vec<orna_foundation_v1::CanonicalValue>],
+        distinct_seen: &mut [HashSet<Vec<u8>>],
         pair_previous: &mut [Option<Value>],
         window_states: &mut [Option<RelationWindowState>],
         mut visit: impl FnMut(&mut Self, Value) -> Result<bool, EvaluationError>,
@@ -8541,23 +8556,13 @@ impl Context<'_, '_> {
     }
     fn distinct(&mut self, values: &[Value]) -> Result<Value, EvaluationError> {
         self.items(values.len())?;
-        let mut keys = Vec::new();
+        let mut keys = HashSet::new();
         let mut unique = Vec::new();
         for value in values {
             self.step()?;
-            // Equality for this fallback is equality of the canonical value,
-            // not incidental host representation. Values that cannot cross the
-            // canonical boundary (including callables) have no lawful key.
-            // Float has no default lawful hash/equality implementation here,
-            // so distinctness fails closed rather than inventing semantics.
-            if value.contains_float() {
-                return Err(error("ORNA-EVAL-UNSUPPORTED"));
-            }
-            let key = value.clone().canonical()?;
-            if keys.iter().any(|existing| existing == &key) {
+            if !keys.insert(distinct_identity(value)?) {
                 continue;
             }
-            keys.push(key);
             self.step()?;
             unique.push(value.clone());
             self.items(unique.len())?;
