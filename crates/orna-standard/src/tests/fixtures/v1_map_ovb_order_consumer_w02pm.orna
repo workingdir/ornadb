@@ -2,3 +2,6 @@ use std.map as map;
 
 pub fn canonical_entry_view(entries: [(Str, Int)]): [(Str, Int)] =
     map.entries_by_ovb_key(entries);
+
+pub fn encoded_entry_projection_size(entries: [(Int, Str)]): Int =
+    std.collection.count(map.encoded_entries_by_ovb_key(entries));
