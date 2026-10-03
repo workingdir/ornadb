@@ -5051,11 +5051,11 @@ impl Context<'_, '_> {
                     value = Value::Tuple(vec![previous, value]);
                 }
                 RelationStage::Window(size, step) => {
-                    self.items(*size)?;
                     let state = window_states[index].get_or_insert_with(|| {
                         RelationWindowState::try_new(*size, *step)
                             .expect("window stage parameters are validated")
                     });
+                    self.items(state.next_item_bound())?;
                     let Some(window) = state.push(value) else {
                         return Ok(rejected_relation_rows(stages, counters, stage_offset));
                     };

@@ -559,6 +559,21 @@ impl RelationWindowState {
         })
     }
 
+    /// Returns the largest collection the next input could retain or emit.
+    /// An incomplete trailing frame only retains values observed so far; the
+    /// requested window size is not allocated eagerly.
+    pub(super) fn next_item_bound(&self) -> usize {
+        if self.skipped > 0 {
+            return self.pending.len();
+        }
+        let next_len = self.pending.len().saturating_add(1);
+        if next_len >= self.size {
+            self.size
+        } else {
+            next_len
+        }
+    }
+
     /// Feeds one ordered value and returns a complete window when available.
     ///
     /// The returned list owns its values, allowing the caller to pass it down
