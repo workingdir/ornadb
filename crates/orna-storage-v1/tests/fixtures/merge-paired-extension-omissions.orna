@@ -1,0 +1,17 @@
+{
+  id: "snapshot",
+  name: "Prefix snapshot",
+  city: "Oslo",
+}
+
+{
+  id: "snapshot/child",
+  name: "Extension snapshot",
+  city: "Bergen",
+}
+
+{
+  id: "snapshotting",
+  name: "Boundary lookalike",
+  city: "Paris",
+}

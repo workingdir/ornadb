@@ -7259,15 +7259,15 @@ fn infer(
                 .find(|parent| type_contains_pinned_checkpoint_tuple(parent))
                 .cloned()
                 .or_else(|| first_parent.clone());
-            // An all-omitted first row anchors rollback to the smallest
-            // structural checkpoint scope that later fails. Keep unaffected
-            // sibling scopes folding so valid depth labels are not discarded.
-            let scoped_checkpoint_rollback = first_parent
-                .as_ref()
-                .is_some_and(|first| {
-                    type_contains_omitted_checkpoint_tuple(first)
-                        || type_contains_paired_checkpoint_omissions(first)
-                });
+            // Any all-omitted row can expose a cross-sibling selector collision.
+            // Paired partial omissions in the first row also establish a local
+            // recovery scope; keep unaffected siblings folding in both cases.
+            let scoped_checkpoint_rollback = element_types
+                .iter()
+                .any(type_contains_omitted_checkpoint_tuple)
+                || first_parent
+                    .as_ref()
+                    .is_some_and(type_contains_paired_checkpoint_omissions);
             let mut rolled_back_checkpoint_paths = BTreeSet::new();
             let mut rejected_checkpoint_parent = false;
             let mut ty = None;
@@ -19324,8 +19324,9 @@ fn merge_multi_parent_checkpoint_value_scoped(
         || !topology_matches
         || !compaction_preserves_identity
     {
-        if widths_match
-            && rollback_conflicting_checkpoint_paths(
+        // A late omission can change widths along with identity topology.
+        // Let concrete mismatch paths roll back first, then revalidate widths.
+        if rollback_conflicting_checkpoint_paths(
                 &mut merged,
                 &mut effective_parent,
                 rollback_anchor,
