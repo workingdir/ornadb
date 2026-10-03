@@ -18430,12 +18430,14 @@ struct ScopedCheckpointFold {
 
 /// Reconcile one parent while allowing all-omitted-first-row folds to recover
 /// locally. A rejected nested scope is restored to the first row and frozen
-/// for later parents across record, tuple, and collection-element boundaries;
-/// unaffected sibling paths keep folding. The reference is silent on rollback
-/// through nested containers, so these existing structural boundaries use
-/// the same smallest-failing-scope rule. Rebuild the effective parent with
-/// restored paths before rechecking cross-path pin identity, so local recovery
-/// cannot manufacture sharing.
+/// for later parents across record, tuple, collection-element, generic applied
+/// argument, and money-dimension boundaries; unaffected sibling paths keep
+/// folding. The reference is silent on rollback through these local structures,
+/// so use the same smallest-failing-scope rule. Snapshot context maps,
+/// historical callable/namespace pairs, and function contracts remain atomic
+/// because their identities or binder rules are coupled. Rebuild the effective
+/// parent with restored paths before rechecking cross-path pin identity, so
+/// local recovery cannot manufacture sharing.
 fn merge_multi_parent_checkpoint_value_scoped(
     accumulated: &Type,
     parent: &Type,
@@ -18663,6 +18665,128 @@ fn merge_multi_parent_checkpoint_value_scoped(
                 Type::Optional(Box::new(child.effective_parent)),
             )
         }
+        (
+            Type::Applied {
+                base: accumulated_base,
+                arguments: accumulated_arguments,
+            },
+            Type::Applied {
+                base: parent_base,
+                arguments: parent_arguments,
+            },
+            Type::Applied {
+                base: rollback_base,
+                arguments: rollback_arguments,
+            },
+            Type::Applied {
+                base: topology_base,
+                arguments: topology_arguments,
+            },
+        ) if accumulated_base == parent_base
+            && accumulated_base == rollback_base
+            && accumulated_base == topology_base
+            && accumulated_arguments.len() == parent_arguments.len()
+            && accumulated_arguments.len() == rollback_arguments.len()
+            && accumulated_arguments.len() == topology_arguments.len()
+            && accumulated_base != "sys.HistoricalCallable"
+            && accumulated_base != "sys.HistoricalNamespace"
+            && !is_snapshot_context_type(accumulated) =>
+        {
+            let mut merged_arguments = Vec::with_capacity(accumulated_arguments.len());
+            let mut effective_arguments = Vec::with_capacity(accumulated_arguments.len());
+            for (index, arguments) in accumulated_arguments
+                .iter()
+                .zip(parent_arguments)
+                .zip(rollback_arguments)
+                .zip(topology_arguments)
+                .enumerate()
+            {
+                let (((accumulated_argument, parent_argument), rollback_argument), topology_argument) =
+                    arguments;
+                let child = merge_scoped_checkpoint_child(
+                    accumulated_argument,
+                    parent_argument,
+                    rollback_argument,
+                    topology_argument,
+                    SnapshotTopologyBoundary::AppliedArgument {
+                        base: accumulated_base.clone(),
+                        index,
+                    },
+                    path,
+                    rolled_back_paths,
+                );
+                let Some(child) = child else {
+                    return scoped_checkpoint_rollback(rollback_anchor, path, rolled_back_paths);
+                };
+                rejected_scope |= child.rejected_scope;
+                merged_arguments.push(child.merged);
+                effective_arguments.push(child.effective_parent);
+            }
+            (
+                Type::Applied {
+                    base: accumulated_base.clone(),
+                    arguments: merged_arguments,
+                },
+                Type::Applied {
+                    base: accumulated_base.clone(),
+                    arguments: effective_arguments,
+                },
+            )
+        }
+        (
+            Type::MoneyPerUnit {
+                currency: accumulated_currency,
+                unit: accumulated_unit,
+            },
+            Type::MoneyPerUnit {
+                currency: parent_currency,
+                unit: parent_unit,
+            },
+            Type::MoneyPerUnit {
+                currency: rollback_currency,
+                unit: rollback_unit,
+            },
+            Type::MoneyPerUnit {
+                currency: topology_currency,
+                unit: topology_unit,
+            },
+        ) => {
+            let currency = merge_scoped_checkpoint_child(
+                accumulated_currency,
+                parent_currency,
+                rollback_currency,
+                topology_currency,
+                SnapshotTopologyBoundary::MoneyCurrency,
+                path,
+                rolled_back_paths,
+            );
+            let Some(currency) = currency else {
+                return scoped_checkpoint_rollback(rollback_anchor, path, rolled_back_paths);
+            };
+            let unit = merge_scoped_checkpoint_child(
+                accumulated_unit,
+                parent_unit,
+                rollback_unit,
+                topology_unit,
+                SnapshotTopologyBoundary::MoneyUnit,
+                path,
+                rolled_back_paths,
+            );
+            let Some(unit) = unit else {
+                return scoped_checkpoint_rollback(rollback_anchor, path, rolled_back_paths);
+            };
+            rejected_scope |= currency.rejected_scope || unit.rejected_scope;
+            (
+                Type::MoneyPerUnit {
+                    currency: Box::new(currency.merged),
+                    unit: Box::new(unit.merged),
+                },
+                Type::MoneyPerUnit {
+                    currency: Box::new(currency.effective_parent),
+                    unit: Box::new(unit.effective_parent),
+                },
+            )
+        }
         _ => return scoped_checkpoint_rollback(rollback_anchor, path, rolled_back_paths),
     };
 
@@ -18715,10 +18839,13 @@ fn scoped_checkpoint_rollback(
     })
 }
 
-/// Compare selector topology only for paired record boundaries whose values
-/// contain pinned tuples without crossing collection or closure boundaries.
-/// This lets a partially omitted first row acquire its depth relation, then
-/// prevents later rows in the same storm from splitting that learned pair.
+/// Compare selector topology for paired record boundaries whose values contain
+/// pinned tuples, including boundaries nested inside another record. Do not
+/// cross collection or closure boundaries: their folds have independent
+/// rollback scopes. The reference is silent on nested record pairing, so use
+/// the direct-record rule recursively. This lets a partially omitted first
+/// row acquire its depth relation, then prevents later rows in the same storm
+/// from splitting that learned pair.
 fn checkpoint_paired_boundary_fold_topology_matches(
     accumulated: &Type,
     parent: &Type,
@@ -18730,6 +18857,18 @@ fn checkpoint_paired_boundary_fold_topology_matches(
         return true;
     };
 
+    checkpoint_paired_boundary_record_maps_match(
+        accumulated_fields,
+        parent_fields,
+        anchor_fields,
+    )
+}
+
+fn checkpoint_paired_boundary_record_maps_match(
+    accumulated_fields: &BTreeMap<String, Type>,
+    parent_fields: &BTreeMap<String, Type>,
+    anchor_fields: &BTreeMap<String, Type>,
+) -> bool {
     let paired_field_names = anchor_fields
         .iter()
         .filter_map(|(name, anchor)| {
@@ -18743,12 +18882,10 @@ fn checkpoint_paired_boundary_fold_topology_matches(
             .then_some(name)
         })
         .collect::<Vec<_>>();
-    if paired_field_names.len() < 2 {
-        return true;
-    }
+    let has_paired_fields = paired_field_names.len() >= 2;
 
     let mut learned = Vec::new();
-    for name in paired_field_names {
+    for name in paired_field_names.iter().copied() {
         let (Some(anchor), Some(accumulated), Some(parent)) = (
             anchor_fields.get(name),
             accumulated_fields.get(name),
@@ -18797,52 +18934,71 @@ fn checkpoint_paired_boundary_fold_topology_matches(
         }));
     }
 
-    let paired_maps = learned
-        .iter()
-        .filter(|candidate| {
-            learned.iter().any(|other| {
-                other.boundary_path != candidate.boundary_path
-                    && checkpoint_paths_are_paired_boundaries(
-                        &candidate.boundary_path,
-                        &other.boundary_path,
-                    )
+    if has_paired_fields {
+        let paired_maps = learned
+            .iter()
+            .filter(|candidate| {
+                learned.iter().any(|other| {
+                    other.boundary_path != candidate.boundary_path
+                        && checkpoint_paths_are_paired_boundaries(
+                            &candidate.boundary_path,
+                            &other.boundary_path,
+                        )
+                })
             })
-        })
-        .cloned()
-        .collect::<Vec<_>>();
-    if paired_maps.len() < 2 {
-        return true;
-    }
-
-    let membership_shapes = |expected: bool| {
-        let mut labels = BTreeMap::<String, BTreeSet<Vec<SnapshotTopologyBoundary>>>::new();
-        for pair in &paired_maps {
-            let selectors = if expected {
-                &pair.expected
-            } else {
-                &pair.actual
-            };
-            for selector in selectors {
+            .cloned()
+            .collect::<Vec<_>>();
+        if paired_maps.len() >= 2 {
+            let membership_shapes = |expected: bool| {
+                let mut labels =
+                    BTreeMap::<String, BTreeSet<Vec<SnapshotTopologyBoundary>>>::new();
+                for pair in &paired_maps {
+                    let selectors = if expected {
+                        &pair.expected
+                    } else {
+                        &pair.actual
+                    };
+                    for selector in selectors {
+                        labels
+                            .entry(selector.clone())
+                            .or_default()
+                            .insert(pair.boundary_path.clone());
+                    }
+                }
                 labels
-                    .entry(selector.clone())
-                    .or_default()
-                    .insert(pair.boundary_path.clone());
+                    .into_values()
+                    .map(|membership| membership.into_iter().collect::<Vec<_>>())
+                    .collect::<BTreeSet<_>>()
+            };
+
+            if membership_shapes(true) != membership_shapes(false) {
+                return false;
             }
         }
-        labels
-            .into_values()
-            .map(|membership| membership.into_iter().collect::<Vec<_>>())
-            .collect::<BTreeSet<_>>()
-    };
+    }
 
-    membership_shapes(true) == membership_shapes(false)
+    anchor_fields.iter().all(|(name, anchor)| {
+        let (Some(accumulated), Some(parent)) =
+            (accumulated_fields.get(name), parent_fields.get(name))
+        else {
+            return true;
+        };
+        let (Type::Record(anchor), Type::Record(accumulated), Type::Record(parent)) =
+            (anchor, accumulated, parent)
+        else {
+            return true;
+        };
+        if anchor.keys().ne(accumulated.keys()) || anchor.keys().ne(parent.keys()) {
+            return true;
+        }
+        checkpoint_paired_boundary_record_maps_match(accumulated, parent, anchor)
+    })
 }
 
 fn type_contains_pinned_tuple_through_records(ty: &Type) -> bool {
     match ty {
-        Type::Record(fields) => fields.values().any(|field| {
-            matches!(field, Type::Tuple(_)) && type_contains_pinned_snapshot_identity(field)
-        }),
+        Type::Record(fields) => fields.values().any(type_contains_pinned_tuple_through_records),
+        Type::Tuple(_) => type_contains_pinned_snapshot_identity(ty),
         _ => false,
     }
 }
@@ -22168,6 +22324,161 @@ mod tests {
             }
             _ => {}
         }
+    }
+
+    #[test]
+    fn omitted_generic_argument_rollback_keeps_sibling_depth_identities() {
+        let wrapped = |arguments| Type::Applied {
+            base: "domain.CheckpointBundle".into(),
+            arguments,
+        };
+        let omitted_pair = || Type::Tuple(vec![Type::Bottom, Type::Bottom]);
+        let pin_pair = |left: &str, right: &str| {
+            Type::Tuple(vec![
+                contextual_snapshot_ref(left),
+                contextual_snapshot_ref(right),
+            ])
+        };
+        let anchor = wrapped(vec![omitted_pair(), omitted_pair()]);
+        let accumulated = wrapped(vec![
+            pin_pair("selector:HEAD~101", "selector:HEAD~102"),
+            pin_pair("selector:HEAD~201", "selector:HEAD~202"),
+        ]);
+        let parent = wrapped(vec![
+            pin_pair("selector:HEAD~102", "selector:HEAD~101"),
+            pin_pair("selector:HEAD~301", "selector:HEAD~302"),
+        ]);
+        let mut rolled_back_paths = BTreeSet::new();
+        let folded = merge_multi_parent_checkpoint_value_scoped(
+            &accumulated,
+            &parent,
+            &anchor,
+            &anchor,
+            &mut Vec::new(),
+            &mut rolled_back_paths,
+        )
+        .expect("same applied wrapper and tuple widths should fold transactionally");
+        let Type::Applied { arguments, .. } = folded.merged else {
+            panic!("the successful sibling argument must remain computed");
+        };
+        assert_eq!(
+            arguments[0],
+            omitted_pair(),
+            "the crossed argument rolls back"
+        );
+        assert_eq!(
+            arguments[1],
+            Type::Tuple(vec![
+                Type::Applied {
+                    base: "semantic.SnapshotContextMap".into(),
+                    arguments: vec![
+                        Type::Named("selector:HEAD~201".into()),
+                        Type::Named("selector:HEAD~301".into()),
+                    ],
+                },
+                Type::Applied {
+                    base: "semantic.SnapshotContextMap".into(),
+                    arguments: vec![
+                        Type::Named("selector:HEAD~202".into()),
+                        Type::Named("selector:HEAD~302".into()),
+                    ],
+                },
+            ]),
+            "the unaffected applied argument retains real folded depth identities"
+        );
+        assert_eq!(
+            folded.effective_parent,
+            wrapped(vec![
+                omitted_pair(),
+                pin_pair("selector:HEAD~301", "selector:HEAD~302"),
+            ]),
+            "the rejected argument is removed from the effective parent before later folds"
+        );
+        assert!(
+            folded.rejected_scope,
+            "a rejected argument must be reported"
+        );
+        assert_eq!(
+            rolled_back_paths,
+            BTreeSet::from([vec![SnapshotTopologyBoundary::AppliedArgument {
+                base: "domain.CheckpointBundle".into(),
+                index: 0,
+            }]]),
+            "rollback is frozen at the smallest failing applied-argument boundary"
+        );
+    }
+
+    #[test]
+    fn omitted_money_dimension_rollback_keeps_sibling_depth_identities() {
+        let omitted_pair = || Type::Tuple(vec![Type::Bottom, Type::Bottom]);
+        let pin_pair = |left: &str, right: &str| {
+            Type::Tuple(vec![
+                contextual_snapshot_ref(left),
+                contextual_snapshot_ref(right),
+            ])
+        };
+        let money = |currency, unit| Type::MoneyPerUnit {
+            currency: Box::new(currency),
+            unit: Box::new(unit),
+        };
+        let anchor = money(omitted_pair(), omitted_pair());
+        let accumulated = money(
+            pin_pair("selector:HEAD~401", "selector:HEAD~402"),
+            pin_pair("selector:HEAD~501", "selector:HEAD~502"),
+        );
+        let parent = money(
+            pin_pair("selector:HEAD~402", "selector:HEAD~401"),
+            pin_pair("selector:HEAD~601", "selector:HEAD~602"),
+        );
+        let mut rolled_back_paths = BTreeSet::new();
+        let folded = merge_multi_parent_checkpoint_value_scoped(
+            &accumulated,
+            &parent,
+            &anchor,
+            &anchor,
+            &mut Vec::new(),
+            &mut rolled_back_paths,
+        )
+        .expect("money dimensions should recover independently");
+
+        let Type::MoneyPerUnit { currency, unit } = folded.merged else {
+            panic!("the money result must retain its computed type");
+        };
+        assert_eq!(*currency, omitted_pair(), "the crossed currency rolls back");
+        assert_eq!(
+            *unit,
+            Type::Tuple(vec![
+                Type::Applied {
+                    base: "semantic.SnapshotContextMap".into(),
+                    arguments: vec![
+                        Type::Named("selector:HEAD~501".into()),
+                        Type::Named("selector:HEAD~601".into()),
+                    ],
+                },
+                Type::Applied {
+                    base: "semantic.SnapshotContextMap".into(),
+                    arguments: vec![
+                        Type::Named("selector:HEAD~502".into()),
+                        Type::Named("selector:HEAD~602".into()),
+                    ],
+                },
+            ]),
+            "the unaffected unit keeps both computed depth identities"
+        );
+        assert_eq!(
+            folded.effective_parent,
+            money(
+                omitted_pair(),
+                pin_pair("selector:HEAD~601", "selector:HEAD~602")
+            ),
+            "the rejected currency is removed from the effective parent before later folds"
+        );
+        assert!(folded.rejected_scope);
+        assert_eq!(
+            rolled_back_paths,
+            BTreeSet::from([vec![SnapshotTopologyBoundary::MoneyCurrency]]),
+            "rollback is frozen at the smallest failing money dimension"
+        );
     }
 
     #[test]
