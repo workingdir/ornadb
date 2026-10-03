@@ -100,6 +100,8 @@ fn pinned_iterator_and_lazy_modules_are_snapshot_bound_and_catalogued() {
         "pub type Iterator<T>",
         "pub fn chain<T>(left: Iterator<T>, right: Iterator<T>): Iterator<T>",
         "pub fn enumerate<T>(source: Iterator<T>): Iterator<(Int, T)>",
+        "pub fn zip_with<T, U, V>(",
+        "pub fn zip<T, U>(left: Iterator<T>, right: Iterator<U>): Iterator<(T, U)>",
         "pub fn fold<T, U>(source: Iterator<T>, initial: U, combine: fn(U, T): U): U",
         "pub fn take_while<T>(source: Iterator<T>, predicate: fn(T): Bool): Iterator<T>",
         "pub fn scan<T, U>(source: Iterator<T>, initial: U, combine: fn(U, T): U): Iterator<U>",
@@ -116,6 +118,8 @@ fn pinned_iterator_and_lazy_modules_are_snapshot_bound_and_catalogued() {
         "Folds a finite iterator from left to right",
         "Stops at the first rejected value",
         "Emits one left-to-right accumulated value for each source item",
+        "Pulls one value from each cursor in left-to-right order",
+        "persistent like its inputs",
         "Returns the last item of a finite iterator, or null when it is empty",
     ] {
         assert!(
@@ -320,4 +324,28 @@ fn iterator_nth_negative_index_fails_with_its_pinned_error_identity() {
             .code(),
         "std.iterator.negative_index"
     );
+}
+
+#[test]
+fn iterator_zip_uses_shortest_input_order_and_persistent_cursor_ownership() {
+    let functions = pinned_functions();
+    let nominals = pinned_iterator_nominals();
+    for source in [
+        include_str!("fixtures/stdlib-iterator-zip-shortest-4ja0s.orna"),
+        include_str!("fixtures/stdlib-iterator-zip-with-shortest-4ja0s.orna"),
+        include_str!("fixtures/stdlib-iterator-cursor-replay-4ja0s.orna"),
+        include_str!("fixtures/stdlib-iterator-zip-empty-short-circuit-4ja0s.orna"),
+    ] {
+        let parsed = orna_syntax_v1::parse_expression(source);
+        assert!(parsed.is_ok(), "{}: {:#?}", source, parsed.diagnostics);
+        let actual = evaluate_with_functions_and_nominals(
+            &parsed.value,
+            &Environment::new(),
+            &functions,
+            &nominals,
+            Limits::default(),
+        )
+        .unwrap_or_else(|error| panic!("evaluation of {source} failed: {}", error.code()));
+        assert_eq!(actual, canonical(Raw::Bool(true)), "{source}");
+    }
 }
