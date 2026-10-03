@@ -12,6 +12,8 @@ const FIXTURE: &str =
     include_str!("fixtures/planner_paired_limit_window_compaction_fold_5al0l.orna");
 const SCOPED_LIMIT_FIXTURE: &str =
     include_str!("fixtures/planner_paired_scoped_window_limit_restoration_7lx92.orna");
+const LIMIT_SPILL_FIXTURE: &str =
+    include_str!("fixtures/planner_paired_limit_aggregate_spill_restoration_wemku.orna");
 
 fn object(reference: &str) -> ObjectRef {
     ObjectRef::descriptive(reference)
@@ -829,5 +831,219 @@ fn scoped_window_identity_tracks_paired_limit_restoration_folds() {
             "join_cost_fold_identity"
         ),
         "the changed scoped-window restoration fold propagates into later join costs"
+    );
+}
+
+#[test]
+fn paired_limit_identity_tracks_sparse_aggregate_spill_restoration() {
+    let parsed = orna_syntax_v1::parse_module(LIMIT_SPILL_FIXTURE);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+    assert_eq!(parsed.value.items.len(), 2);
+
+    let declared = [
+        "table:First",
+        "table:Gap",
+        "table:Compact",
+        "table:Restore",
+        "table:Unknown",
+    ];
+    let base_pairs = pairs("table:Anchor", &declared);
+    let limit_descriptors = limits();
+    let aggregate_descriptors = aggregates();
+    let spill_descriptors = spills();
+    let original = plan(
+        "table:Anchor",
+        &declared,
+        &base_pairs,
+        &limit_descriptors,
+        &aggregate_descriptors,
+        &spill_descriptors,
+    );
+    let joins = joins_by_source(&original);
+    let first = joins["table:First"];
+    let gap = joins["table:Gap"];
+    let compact = joins["table:Compact"];
+    let restore = joins["table:Restore"];
+    let unknown = joins["table:Unknown"];
+    let key = "paired_limit_aggregate_spill_restoration_fold_identity";
+    let limit_component = "paired_limit_aggregate_spill_restoration_limit_fold_identity";
+    let aggregate_component =
+        "paired_limit_aggregate_spill_restoration_aggregate_fold_identity";
+
+    assert_eq!(
+        text(first, "paired_limit_aggregate_spill_restoration_transition"),
+        "advanced_limit_and_aggregate_restoration"
+    );
+    assert_eq!(
+        text(first, limit_component),
+        text(first, "paired_join_limit_anchor_cascade_fold_identity")
+    );
+    assert_eq!(
+        text(first, aggregate_component),
+        text(first, "paired_aggregate_spill_restoration_fold_identity")
+    );
+    assert_eq!(
+        integer(first, "paired_limit_aggregate_spill_restoration_limit_pair_count"),
+        1
+    );
+    assert_eq!(
+        integer(first, "paired_limit_aggregate_spill_restoration_limit_stage_count"),
+        2
+    );
+    assert_eq!(
+        integer(first, "paired_limit_aggregate_spill_restoration_aggregate_pair_count"),
+        1
+    );
+    assert_eq!(
+        integer(first, "paired_limit_aggregate_spill_restoration_spill_pair_count"),
+        1
+    );
+
+    assert_eq!(text(gap, key), text(first, key));
+    assert_eq!(
+        text(gap, "paired_limit_aggregate_spill_restoration_transition"),
+        "carried_across_sparse_input"
+    );
+    assert_eq!(
+        text(compact, "paired_limit_aggregate_spill_restoration_transition"),
+        "advanced_aggregate_restoration"
+    );
+    assert_eq!(text(compact, limit_component), text(gap, limit_component));
+    assert_ne!(text(compact, aggregate_component), text(gap, aggregate_component));
+    assert_ne!(text(compact, key), text(gap, key));
+    assert_eq!(
+        integer(compact, "paired_limit_aggregate_spill_restoration_aggregate_pair_count"),
+        2
+    );
+    assert_eq!(
+        integer(compact, "paired_limit_aggregate_spill_restoration_spill_pair_count"),
+        2
+    );
+
+    assert_eq!(
+        text(restore, "paired_limit_aggregate_spill_restoration_transition"),
+        "advanced_limit_and_aggregate_restoration"
+    );
+    assert_ne!(text(restore, key), text(compact, key));
+    assert_eq!(
+        integer(restore, "paired_limit_aggregate_spill_restoration_limit_pair_count"),
+        2
+    );
+    assert_eq!(
+        integer(restore, "paired_limit_aggregate_spill_restoration_aggregate_pair_count"),
+        3
+    );
+    assert_eq!(
+        text(unknown, "paired_limit_aggregate_spill_restoration_transition"),
+        "advanced_limit_and_aggregate_restoration"
+    );
+    assert_eq!(
+        integer(unknown, "paired_limit_aggregate_spill_restoration_limit_pair_count"),
+        3
+    );
+    assert_eq!(
+        integer(unknown, "paired_limit_aggregate_spill_restoration_aggregate_pair_count"),
+        4
+    );
+    assert_eq!(text(original.root(), key), text(unknown, key));
+    assert_eq!(
+        text(original.root(), "join_cost_fold_identity"),
+        text(unknown, "join_cost_fold_identity")
+    );
+
+    let mut changed_limits = limit_descriptors.clone();
+    changed_limits[0].limit += 1;
+    let changed_limit = plan(
+        "table:Anchor",
+        &declared,
+        &base_pairs,
+        &changed_limits,
+        &aggregate_descriptors,
+        &spill_descriptors,
+    );
+    let changed_first = joins_by_source(&changed_limit)["table:First"];
+    assert_ne!(text(first, key), text(changed_first, key));
+    assert_ne!(
+        text(original.root(), "join_cost_fold_identity"),
+        text(changed_limit.root(), "join_cost_fold_identity")
+    );
+    assert_eq!(
+        text(changed_first, limit_component),
+        text(changed_first, "paired_join_limit_anchor_cascade_fold_identity")
+    );
+    assert_eq!(
+        text(changed_first, aggregate_component),
+        text(changed_first, "paired_aggregate_spill_restoration_fold_identity")
+    );
+
+    let mut changed_spills = spill_descriptors.clone();
+    changed_spills[0].memory_budget_bytes += 1;
+    let changed_spill = plan(
+        "table:Anchor",
+        &declared,
+        &base_pairs,
+        &limit_descriptors,
+        &aggregate_descriptors,
+        &changed_spills,
+    );
+    let changed_spill_first = joins_by_source(&changed_spill)["table:First"];
+    assert_eq!(
+        text(changed_spill_first, limit_component),
+        text(
+            changed_spill_first,
+            "paired_join_limit_anchor_cascade_fold_identity"
+        ),
+        "the composite reflects the limit cascade selected after replanning"
+    );
+    assert_ne!(
+        text(first, aggregate_component),
+        text(changed_spill_first, aggregate_component),
+        "a changed spill updates the aggregate restoration component"
+    );
+    assert_ne!(text(first, key), text(changed_spill_first, key));
+    assert_ne!(
+        text(original.root(), "join_cost_fold_identity"),
+        text(changed_spill.root(), "join_cost_fold_identity")
+    );
+
+    let without_restore_aggregates = aggregate_descriptors
+        .iter()
+        .filter(|aggregate| aggregate.source.as_str() != "table:Restore")
+        .cloned()
+        .collect::<Vec<_>>();
+    let without_restore_spills = spill_descriptors
+        .iter()
+        .filter(|spill| spill.source.as_str() != "table:Restore")
+        .cloned()
+        .collect::<Vec<_>>();
+    let limit_only = plan(
+        "table:Anchor",
+        &declared,
+        &base_pairs,
+        &limit_descriptors,
+        &without_restore_aggregates,
+        &without_restore_spills,
+    );
+    let limit_only_joins = joins_by_source(&limit_only);
+    let limit_only_compact = limit_only_joins["table:Compact"];
+    let limit_only_restore = limit_only_joins["table:Restore"];
+    assert_eq!(
+        text(
+            limit_only_restore,
+            "paired_limit_aggregate_spill_restoration_transition"
+        ),
+        "advanced_limit_identity"
+    );
+    assert_eq!(
+        text(limit_only_restore, aggregate_component),
+        text(limit_only_compact, aggregate_component)
+    );
+    assert_ne!(
+        text(limit_only_restore, limit_component),
+        text(limit_only_compact, limit_component)
+    );
+    assert_ne!(
+        text(limit_only_restore, key),
+        text(limit_only_compact, key)
     );
 }
