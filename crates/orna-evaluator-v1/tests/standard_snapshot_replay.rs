@@ -1249,6 +1249,104 @@ fn paired_divergence_compaction_projects() -> (TempDir, [LoadedProject; 5], [Str
     )
 }
 
+fn paired_divergence_refold_projects() -> (TempDir, [LoadedProject; 9], [String; 9]) {
+    let (directory, projects, pins) = divergent_paired_module_projects();
+    let [
+        base_project,
+        math_project,
+        collection_project,
+        math_first_project,
+    ] = projects;
+    let project_path = directory.path().join("project");
+    let standard_path = project_path.join("stdlib/std");
+    git_output_at(&standard_path, &["checkout", "--detach", pins[2].as_str()]);
+
+    let mut refolded_pins = Vec::with_capacity(5);
+    let mut refolded_parents = Vec::with_capacity(5);
+    for (fold_index, (module, source, message)) in [
+        (
+            "math.orna",
+            include_str!("fixtures/module-upgrade-std-v4.orna"),
+            "fold math after collection on opposite paired branch",
+        ),
+        (
+            "collection.orna",
+            include_str!("fixtures/module-upgrade-std-collection-v6.orna"),
+            "refold collection forward on paired branch",
+        ),
+        (
+            "math.orna",
+            include_str!("fixtures/module-upgrade-std-v5.orna"),
+            "refold math forward on paired branch",
+        ),
+        (
+            "math.orna",
+            include_str!("fixtures/module-upgrade-std-v4.orna"),
+            "refold math back on paired branch",
+        ),
+        (
+            "collection.orna",
+            include_str!("fixtures/module-upgrade-std-collection-v5.orna"),
+            "refold collection back to paired source bodies",
+        ),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        fs::write(standard_path.join(module), source).unwrap();
+        commit_directory(&standard_path, message);
+        let pin = git_output_at(&standard_path, &["rev-parse", "HEAD"]);
+        let branch = format!("refold-pin-{fold_index}");
+        git_output_at(&standard_path, &["branch", branch.as_str(), pin.as_str()]);
+        let parent = capture_standard_gitlink(&project_path, &pin, message);
+        refolded_pins.push(pin);
+        refolded_parents.push(parent);
+    }
+
+    let repository = Repository::discover(&project_path).unwrap();
+    let refolded_projects = refolded_parents
+        .iter()
+        .map(|parent| {
+            let snapshot = repository.resolve_snapshot(parent).unwrap();
+            ProjectLoader::default()
+                .load_committed_snapshot(&repository, &snapshot)
+                .unwrap()
+        })
+        .collect::<Vec<_>>();
+    let [
+        opposite_pair_project,
+        collection_upgrade_project,
+        math_upgrade_project,
+        math_refold_project,
+        paired_refold_project,
+    ] = refolded_projects.try_into().unwrap();
+    (
+        directory,
+        [
+            base_project,
+            math_project,
+            collection_project,
+            math_first_project,
+            opposite_pair_project,
+            collection_upgrade_project,
+            math_upgrade_project,
+            math_refold_project,
+            paired_refold_project,
+        ],
+        [
+            pins[0].clone(),
+            pins[1].clone(),
+            pins[2].clone(),
+            pins[3].clone(),
+            refolded_pins[0].clone(),
+            refolded_pins[1].clone(),
+            refolded_pins[2].clone(),
+            refolded_pins[3].clone(),
+            refolded_pins[4].clone(),
+        ],
+    )
+}
+
 fn paired_divergence_reanchoring_projects()
 -> (TempDir, [LoadedProject; 6], [String; 6], [String; 3]) {
     let (directory, projects, pins) = divergent_paired_module_projects();
@@ -2400,13 +2498,23 @@ fn admitted_snapshot_app_session(project: &LoadedProject) -> AdmittedReplSession
 }
 
 fn standard_source<'a>(project: &'a LoadedProject, path: &str) -> &'a str {
-    project
+    let Some((_, source)) = project
         .standard_sources()
         .iter()
         .find(|(logical_path, _)| logical_path == path)
-        .unwrap()
-        .1
-        .as_str()
+    else {
+        let available = project
+            .standard_sources()
+            .iter()
+            .map(|(logical_path, _)| logical_path.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        panic!(
+            "standard source {path:?} missing at captured pin {:?}; available sources: {available}",
+            project.standard_profile().map(|profile| profile.snapshot())
+        );
+    };
+    source.as_str()
 }
 
 #[test]
@@ -4129,6 +4237,142 @@ fn captured_snapshot_identity_survives_paired_divergence_compaction_folds() {
             cloned_sessions[index].submit(replay),
             Ok(Some(ints(&expected[index]))),
             "cloned replay must preserve compacted history pin {}",
+            pins[index]
+        );
+    }
+}
+
+#[test]
+fn captured_snapshot_identity_survives_paired_divergence_refold_chains() {
+    let (directory, projects, pins) = paired_divergence_refold_projects();
+    let expected = [
+        [40, 4, 44, 40, 4, 44, 1_007, 1_008],
+        [50, 4, 54, 50, 4, 54, 10_007, 10_008],
+        [40, 5, 45, 40, 5, 45, 1_007, 1_008],
+        [50, 5, 55, 50, 5, 55, 10_007, 10_008],
+        [50, 5, 55, 50, 5, 55, 10_007, 10_008],
+        [50, 6, 56, 50, 6, 56, 10_007, 10_008],
+        [60, 6, 66, 60, 6, 66, 100_007, 100_008],
+        [50, 6, 56, 50, 6, 56, 10_007, 10_008],
+        [50, 5, 55, 50, 5, 55, 10_007, 10_008],
+    ];
+    let expected_math = [
+        include_str!("fixtures/module-upgrade-std-v3.orna"),
+        include_str!("fixtures/module-upgrade-std-v4.orna"),
+        include_str!("fixtures/module-upgrade-std-v3.orna"),
+        include_str!("fixtures/module-upgrade-std-v4.orna"),
+        include_str!("fixtures/module-upgrade-std-v4.orna"),
+        include_str!("fixtures/module-upgrade-std-v4.orna"),
+        include_str!("fixtures/module-upgrade-std-v5.orna"),
+        include_str!("fixtures/module-upgrade-std-v4.orna"),
+        include_str!("fixtures/module-upgrade-std-v4.orna"),
+    ];
+    let expected_collection = [
+        include_str!("fixtures/module-upgrade-std-collection-v4.orna"),
+        include_str!("fixtures/module-upgrade-std-collection-v4.orna"),
+        include_str!("fixtures/module-upgrade-std-collection-v5.orna"),
+        include_str!("fixtures/module-upgrade-std-collection-v5.orna"),
+        include_str!("fixtures/module-upgrade-std-collection-v5.orna"),
+        include_str!("fixtures/module-upgrade-std-collection-v6.orna"),
+        include_str!("fixtures/module-upgrade-std-collection-v6.orna"),
+        include_str!("fixtures/module-upgrade-std-collection-v6.orna"),
+        include_str!("fixtures/module-upgrade-std-collection-v5.orna"),
+    ];
+    let imports = include_str!("fixtures/module-upgrade-paired-divergence-use.orna");
+    let capture = include_str!("fixtures/module-upgrade-divergence-refold-capture.orna");
+    let replay = include_str!("fixtures/module-upgrade-divergence-refold-replay.orna");
+    let standard_path = directory.path().join("project/stdlib/std");
+
+    for (index, pin) in pins.iter().enumerate() {
+        assert!(
+            !pins[..index].contains(pin),
+            "refold history must assign unique pin identity {pin}"
+        );
+    }
+    for (pin, parent) in [
+        (pins[1].as_str(), pins[0].as_str()),
+        (pins[2].as_str(), pins[0].as_str()),
+        (pins[3].as_str(), pins[1].as_str()),
+        (pins[4].as_str(), pins[2].as_str()),
+        (pins[5].as_str(), pins[4].as_str()),
+        (pins[6].as_str(), pins[5].as_str()),
+        (pins[7].as_str(), pins[6].as_str()),
+        (pins[8].as_str(), pins[7].as_str()),
+    ] {
+        let ancestry = git_output_at(&standard_path, &["rev-list", "--parents", "-n", "1", pin]);
+        let ancestry = ancestry.split_whitespace().collect::<Vec<_>>();
+        assert_eq!(
+            ancestry.len(),
+            2,
+            "each refold must extend one captured pin"
+        );
+        assert_eq!(ancestry[1], parent);
+    }
+    for (index, project) in projects.iter().enumerate() {
+        assert!(
+            project.standard_profile().is_some(),
+            "refold project {index} at pin {} must load its standard profile",
+            pins[index]
+        );
+    }
+    for index in [3, 4, 8] {
+        for path in ["std/math.orna", "std/collection.orna"] {
+            assert_eq!(
+                standard_source(&projects[3], path),
+                standard_source(&projects[index], path),
+                "refold {index} restores the paired source for {path}"
+            );
+        }
+    }
+
+    let mut sessions = Vec::with_capacity(projects.len());
+    for (index, project) in projects.iter().enumerate() {
+        assert_eq!(
+            project.standard_profile().unwrap().snapshot(),
+            &pins[index],
+            "refold history {index} must retain its own standard pin"
+        );
+        assert_eq!(
+            standard_source(project, "std/math.orna"),
+            expected_math[index]
+        );
+        assert_eq!(
+            standard_source(project, "std/collection.orna"),
+            expected_collection[index]
+        );
+        let mut session = AdmittedReplSession::from_loaded_project(
+            project,
+            project.standard_sources().iter().cloned(),
+            Limits::default(),
+        )
+        .unwrap();
+        for import in imports.lines() {
+            assert_eq!(session.submit(import), Ok(None));
+        }
+        assert_eq!(session.submit(capture), Ok(None));
+        assert_eq!(
+            session.submit(replay),
+            Ok(Some(ints(&expected[index]))),
+            "captured replay must compute from refold pin {}",
+            pins[index]
+        );
+        sessions.push(session);
+    }
+
+    for index in [8, 0, 7, 3, 6, 2, 5, 1, 4, 8, 6, 3, 0] {
+        assert_eq!(
+            sessions[index].submit(replay),
+            Ok(Some(ints(&expected[index]))),
+            "interleaved replay must preserve refold pin {}",
+            pins[index]
+        );
+    }
+    let mut cloned_sessions = sessions.clone();
+    for index in [8, 4, 2, 6, 0, 7, 3, 5, 1] {
+        assert_eq!(
+            cloned_sessions[index].submit(replay),
+            Ok(Some(ints(&expected[index]))),
+            "cloned replay must preserve refold pin {}",
             pins[index]
         );
     }
