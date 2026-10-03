@@ -2461,6 +2461,46 @@ fn paired_module_pin_upgrades_replay_computed_values_deterministically() {
 }
 
 #[test]
+fn captured_pair_resolution_folds_keep_each_pinned_snapshot_identity() {
+    let (
+        _directory,
+        _project_v1,
+        _project_v2,
+        _project_v3,
+        project_v4,
+        project_v5,
+        project_v6,
+        snapshots,
+    ) = module_upgrade_projects();
+    let projects = [&project_v4, &project_v5, &project_v6];
+    let pins = [&snapshots[3], &snapshots[4], &snapshots[5]];
+    let expected_values = [1_011, 10_012, 100_013];
+    let use_pair = include_str!("fixtures/module-upgrade-paired-use.orna");
+    let bind_pair = include_str!("fixtures/module-upgrade-paired-bind.orna");
+    let fold_pair = include_str!("fixtures/module-upgrade-paired-fold.orna");
+
+    let mut sessions = Vec::with_capacity(projects.len());
+    for (index, project) in projects.iter().enumerate() {
+        assert_eq!(project.standard_profile().unwrap().snapshot(), pins[index]);
+        let mut session = AdmittedReplSession::from_loaded_project(
+            project,
+            project.standard_sources().iter().cloned(),
+            Limits::default(),
+        )
+        .unwrap();
+        assert_eq!(session.submit(use_pair), Ok(None));
+        assert_eq!(session.submit(bind_pair), Ok(None));
+        assert_eq!(
+            session.submit(fold_pair),
+            Ok(Some(int(expected_values[index]))),
+            "snapshot {} must resolve the paired imports from its captured sources",
+            pins[index]
+        );
+        sessions.push(session);
+    }
+}
+
+#[test]
 fn replayed_closure_uses_its_captured_dependency_snapshot_after_snapshot_changes() {
     let (_directory, project_v1, project_v2, snapshot_v1, snapshot_v2, sources_v1, sources_v2) =
         snapshot_projects();
