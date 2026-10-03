@@ -237,7 +237,7 @@ fn server_capabilities() -> ServerCapabilities {
         semantic_tokens_provider: Some(SemanticTokensServerCapabilities::SemanticTokensOptions(
             SemanticTokensOptions {
                 legend: SemanticTokensLegend {
-                    token_types: semantic::LEGEND.to_vec(),
+                    token_types: semantic::legend(),
                     token_modifiers: Vec::new(),
                 },
                 range: Some(true),
