@@ -268,9 +268,7 @@ fn validate_schema_value(
             }
             if let Some(pattern) = schema.get("pattern").and_then(Value::as_str) {
                 let matches = match pattern {
-                    "^sys\\.[a-z0-9_]+(\\.[a-z0-9_]+)*$" => {
-                        Some(valid_sys_failure_code(string))
-                    }
+                    "^sys\\.[a-z0-9_]+(\\.[a-z0-9_]+)*$" => Some(valid_sys_failure_code(string)),
                     QUALIFIED_ID_PATTERN => Some(valid_qualified_id(string)),
                     ROLE_ANNOTATION_PATTERN => Some(valid_role_annotation_id(string)),
                     _ => None,
@@ -341,8 +339,7 @@ fn valid_sys_failure_code(code: &str) -> bool {
 }
 
 const QUALIFIED_ID_PATTERN: &str = r"^[A-Za-z0-9_-]+(\.[A-Za-z0-9_-]+)*$";
-const ROLE_ANNOTATION_PATTERN: &str =
-    r"^[A-Za-z0-9_-]+(\.[A-Za-z0-9_-]+)*@[0-9]+\.[0-9]+$";
+const ROLE_ANNOTATION_PATTERN: &str = r"^[A-Za-z0-9_-]+(\.[A-Za-z0-9_-]+)*@[0-9]+\.[0-9]+$";
 
 fn valid_qualified_id(value: &str) -> bool {
     !value.is_empty()

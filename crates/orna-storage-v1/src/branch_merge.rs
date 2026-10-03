@@ -419,6 +419,42 @@ pub struct BranchMergeColumnRestoreStormSnapshot {
     pub ladders: Vec<BranchMergeColumnRestoreLadderTimelineSnapshot>,
 }
 
+/// One stable column's dense depth-label timeline inside a restore storm.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BranchMergeColumnRestoreStormLadderSnapshot {
+    pub first_order: u64,
+    pub last_order: u64,
+    pub waves: Vec<BranchMergeColumnRestoreLadderWaveSlotSnapshot>,
+}
+
+/// A stable table-column identity folded across all committed restore storms.
+///
+/// Every storm remains a separate group. A column absent for an entire storm
+/// still receives a storm entry with `None` wave slots, so later depth labels
+/// cannot be mistaken for a continuation of an earlier group.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BranchMergeColumnRestoreStormFoldSnapshot {
+    pub table: ObjectId,
+    pub column: ObjectId,
+    pub storms: Vec<BranchMergeColumnRestoreStormLadderSnapshot>,
+}
+
+/// One stable column's depth labels at a specific wave in a restore storm.
+///
+/// `storm_index` is zero-based in committed lineage order. The stable
+/// `(table, column)` identity, storm range, and wave order travel with the
+/// labels so sibling ladders can be paired without interpreting cell values.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BranchMergeColumnRestoreStormDepthLabelWaveSnapshot {
+    pub storm_index: usize,
+    pub first_order: u64,
+    pub last_order: u64,
+    pub order: u64,
+    pub table: ObjectId,
+    pub column: ObjectId,
+    pub depth_labels: Vec<usize>,
+}
+
 /// A canonical column cell released with its source parent identity intact.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BranchMergeParentColumnDepthEvent {
@@ -1367,6 +1403,99 @@ impl BranchMergeTombstoneHistory {
                 }
             })
             .collect()
+    }
+
+    /// Folds each stable table-column pair across committed restore storms.
+    ///
+    /// Unlike `column_restore_ladder_timelines`, this view retains storm
+    /// boundaries as explicit groups. Each storm has dense wave slots, and a
+    /// column absent for the whole group is represented by `None` in every
+    /// slot. MERGE-1 is silent about cross-storm label continuity; v1 keeps
+    /// every storm's labels local and never carries a depth index across a
+    /// non-column submission boundary.
+    pub fn column_restore_storm_folds(
+        &self,
+    ) -> Vec<BranchMergeColumnRestoreStormFoldSnapshot> {
+        let storms = self.column_restore_storms();
+        let mut identities = BTreeMap::new();
+        for storm in &storms {
+            for ladder in &storm.ladders {
+                identities.insert((ladder.table, ladder.column), ());
+            }
+        }
+
+        identities
+            .into_keys()
+            .map(|(table, column)| {
+                let storm_folds = storms
+                    .iter()
+                    .map(|storm| {
+                        let waves = storm
+                            .ladders
+                            .iter()
+                            .find(|ladder| ladder.table == table && ladder.column == column)
+                            .map(|ladder| ladder.waves.clone())
+                            .unwrap_or_else(|| {
+                                storm
+                                    .ladders
+                                    .first()
+                                    .expect("a committed restore storm contains a column")
+                                    .waves
+                                    .iter()
+                                    .map(|wave| BranchMergeColumnRestoreLadderWaveSlotSnapshot {
+                                        order: wave.order,
+                                        fragments: None,
+                                    })
+                                    .collect()
+                            });
+                        BranchMergeColumnRestoreStormLadderSnapshot {
+                            first_order: storm.first_order,
+                            last_order: storm.last_order,
+                            waves,
+                        }
+                    })
+                    .collect();
+                BranchMergeColumnRestoreStormFoldSnapshot {
+                    table,
+                    column,
+                    storms: storm_folds,
+                }
+            })
+            .collect()
+    }
+
+    /// Returns the explicit paired depth-label roster for every present
+    /// column ladder in every committed restore storm.
+    ///
+    /// Each result binds local labels to its stable `(table, column)` pair,
+    /// storm index and order range, and restore-wave order. Empty fragments
+    /// contribute their labels; omitted columns contribute no label record.
+    /// This v1 projection does not renumber or align labels across waves.
+    pub fn column_restore_storm_depth_labels(
+        &self,
+    ) -> Vec<BranchMergeColumnRestoreStormDepthLabelWaveSnapshot> {
+        let mut labels = Vec::new();
+        for (storm_index, storm) in self.column_restore_storms().into_iter().enumerate() {
+            for ladder in storm.ladders {
+                for wave in ladder.waves {
+                    if let Some(fragments) = wave.fragments {
+                        labels.push(BranchMergeColumnRestoreStormDepthLabelWaveSnapshot {
+                            storm_index,
+                            first_order: storm.first_order,
+                            last_order: storm.last_order,
+                            order: wave.order,
+                            table: ladder.table,
+                            column: ladder.column,
+                            depth_labels: fragments
+                                .into_iter()
+                                .map(|fragment| fragment.label)
+                                .collect(),
+                        });
+                    }
+                }
+            }
+        }
+        labels
     }
 
     /// Submits a complete paired restore wave from at least two distinct
