@@ -1,6 +1,7 @@
 use orna_conformance_v1::{SourceUnit, StageOutcome, TransactionalEvaluator};
 use orna_evaluator_v1::Limits;
 use orna_foundation_v1::Value;
+use orna_semantic_v1::{Catalogue, ModuleInput, analyze_with_catalogue};
 
 fn source(parent_body: &str) -> SourceUnit {
     SourceUnit {
@@ -961,6 +962,95 @@ fn module_every_exists_assertion_permits_atomic_cross_table_publication() {
             .committed_row("Loan", &Value::int(1.into()))
             .is_some()
     );
+}
+
+#[test]
+fn nested_relation_predicate_folds_publish_the_matching_candidate_values() {
+    let source = include_str!("fixtures/txn-relation-predicate-fold-depth-dch7y.orna");
+    let analysis = analyze_with_catalogue(
+        &[ModuleInput::new("relation-fold-depth.orna", source)],
+        &Catalogue::authoritative_fixture(),
+    );
+    assert!(
+        analysis.is_ok(),
+        "nested section 9 fixture must type-check: {:?}",
+        analysis
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+    let mut runtime = TransactionalEvaluator::new("parent", Limits::default());
+    let outcome = runtime.execute_source(&fixture_source(source));
+
+    assert!(matches!(outcome, StageOutcome::Passed), "{outcome:?}");
+    for (table, id) in [
+        ("Org", 1),
+        ("Org", 2),
+        ("Route", 10),
+        ("Route", 20),
+        ("Endpoint", 100),
+        ("Endpoint", 200),
+        ("Endpoint", 999),
+        ("Audit", 1000),
+        ("Audit", 2000),
+    ] {
+        assert!(
+            runtime
+                .committed_row(table, &Value::int(id.into()))
+                .is_some(),
+            "successful four-level predicate continuation omitted {table} row {id}"
+        );
+    }
+}
+
+#[test]
+fn deepest_relation_predicate_mismatch_aborts_every_candidate_table() {
+    let mut runtime = TransactionalEvaluator::new("parent", Limits::default());
+    let outcome = runtime.execute_source(&fixture_source(include_str!(
+        "fixtures/txn-relation-predicate-fold-depth-reject-dch7y.orna"
+    )));
+
+    assert!(matches!(
+        outcome,
+        StageOutcome::Failed(ref diagnostic)
+            if diagnostic.code() == "ORNA-EVAL-MODULE-ASSERT"
+    ));
+    for (table, id) in [
+        ("Org", 1),
+        ("Org", 2),
+        ("Route", 10),
+        ("Route", 20),
+        ("Endpoint", 100),
+        ("Endpoint", 200),
+        ("Audit", 1000),
+        ("Audit", 2000),
+    ] {
+        assert_eq!(
+            runtime.committed_row(table, &Value::int(id.into())),
+            None,
+            "failed deepest predicate leaked {table} row {id}"
+        );
+    }
+}
+
+#[test]
+fn nested_relation_predicate_depth_fails_with_the_evaluator_limit() {
+    let limits = Limits {
+        max_depth: 3,
+        ..Limits::default()
+    };
+    let mut runtime = TransactionalEvaluator::new("parent", limits);
+    let outcome = runtime.execute_source(&fixture_source(include_str!(
+        "fixtures/txn-relation-predicate-fold-depth-dch7y.orna"
+    )));
+
+    assert!(matches!(
+        outcome,
+        StageOutcome::Failed(ref diagnostic) if diagnostic.code() == "ORNA-EVAL-LIMIT"
+    ));
+    assert_eq!(runtime.committed_row("Org", &Value::int(1.into())), None);
+    assert_eq!(runtime.committed_row("Audit", &Value::int(1000.into())), None);
 }
 
 #[test]
