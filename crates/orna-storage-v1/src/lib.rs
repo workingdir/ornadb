@@ -17,6 +17,10 @@ pub use branch_merge::{
     BranchMergePairedCheckpointRedoFrame,
     BranchMergePairedCheckpointRedoRunSnapshot,
     BranchMergePairedCheckpointRedoChainSnapshot,
+    BranchMergePairedWriteAheadIdentity,
+    BranchMergePairedCheckpointRedoIdentityFrame,
+    BranchMergePairedCheckpointRedoIdentityRunSnapshot,
+    BranchMergePairedCheckpointRedoIdentityChainSnapshot,
     BranchMergeBudget, BranchMergeColumnDepthEvent, BranchMergeColumnDepthFragmentSnapshot,
     BranchMergeColumnDepthFragments, BranchMergeColumnDepthLadderEvent,
     BranchMergeColumnDepthLadderSnapshot, BranchMergeColumnDepthLadderWaveSnapshot,
@@ -64,7 +68,9 @@ pub use branch_merge::{
     BranchMergePlanSequenceError, BranchMergePlanSequencer, BranchMergeReport,
     BranchMergeTableDepthLadderEvent, SequencedBranchMergePlan,
     BranchRowSource, CheckpointId, KeyRange, MergeSide, MergedSegment, MergedTable,
-    RowSegmentManifest, TableManifest, ThreeWaySnapshot, compress_paired_checkpoint_redo_chain,
+    RowSegmentManifest, TableManifest, ThreeWaySnapshot,
+    compress_paired_checkpoint_redo_chain,
+    compress_paired_checkpoint_redo_chain_preserving_write_ahead_identity,
     merge_three_way_snapshots,
 };
 
