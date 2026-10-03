@@ -455,6 +455,22 @@ pub struct BranchMergeColumnRestoreStormDepthLabelWaveSnapshot {
     pub depth_labels: Vec<usize>,
 }
 
+/// Snapshot paths bound to one depth label in a paired column restore storm.
+///
+/// `snapshot_paths` contains the canonical row keys from that labeled
+/// fragment. An empty fragment remains represented with an empty path list.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BranchMergeColumnRestoreStormDepthPathSnapshot {
+    pub storm_index: usize,
+    pub first_order: u64,
+    pub last_order: u64,
+    pub order: u64,
+    pub table: ObjectId,
+    pub column: ObjectId,
+    pub label: usize,
+    pub snapshot_paths: Vec<CanonicalValue>,
+}
+
 /// A canonical column cell released with its source parent identity intact.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BranchMergeParentColumnDepthEvent {
@@ -1496,6 +1512,44 @@ impl BranchMergeTombstoneHistory {
             }
         }
         labels
+    }
+
+    /// Returns each stable column's canonical snapshot paths under its local
+    /// depth label, keeping storm and restore-wave identity attached.
+    ///
+    /// Every present labeled fragment yields one record, including an empty
+    /// path list for an empty fragment. Omitted columns yield no records. This
+    /// v1 view treats the canonical row key as snapshot-path identity and
+    /// never carries that identity across labels, waves, columns, or storms.
+    pub fn column_restore_storm_depth_paths(
+        &self,
+    ) -> Vec<BranchMergeColumnRestoreStormDepthPathSnapshot> {
+        let mut paths = Vec::new();
+        for (storm_index, storm) in self.column_restore_storms().into_iter().enumerate() {
+            for ladder in storm.ladders {
+                for wave in ladder.waves {
+                    if let Some(fragments) = wave.fragments {
+                        for fragment in fragments {
+                            paths.push(BranchMergeColumnRestoreStormDepthPathSnapshot {
+                                storm_index,
+                                first_order: storm.first_order,
+                                last_order: storm.last_order,
+                                order: wave.order,
+                                table: ladder.table,
+                                column: ladder.column,
+                                label: fragment.label,
+                                snapshot_paths: fragment
+                                    .cells
+                                    .into_iter()
+                                    .map(|(path, _value)| path)
+                                    .collect(),
+                            });
+                        }
+                    }
+                }
+            }
+        }
+        paths
     }
 
     /// Submits a complete paired restore wave from at least two distinct
