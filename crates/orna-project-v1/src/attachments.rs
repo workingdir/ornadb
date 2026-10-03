@@ -1115,6 +1115,52 @@ impl PackageResolver {
         )
     }
 
+    /// Continues sibling checkpoint storms from exact retained depth labels.
+    /// Each label is checked against its indexed sibling row before any fold
+    /// starts, so equal pins and coordinates from another parent cannot be
+    /// substituted. The reference is silent on label-selected multi-parent
+    /// folds; v1 preserves each selected row identity and returns no partial
+    /// result if any label or replacement fails.
+    pub fn extend_sibling_terminal_pair_checkpoint_storms_from_depth_labels(
+        &self,
+        previous: &SiblingRebindResolution,
+        storms_by_row: &[&[(&NestedPairDepthLabel, &[[PinnedDatabase; 2]])]],
+    ) -> Result<SiblingRebindResolution, AttachmentError> {
+        if storms_by_row.len() != previous.routes.len() {
+            return Err(AttachmentError::RetainedSnapshotUnavailable);
+        }
+
+        let checkpoint_storms_by_row = storms_by_row
+            .iter()
+            .enumerate()
+            .map(|(row, storms)| {
+                let route = previous
+                    .routes
+                    .get(row)
+                    .ok_or(AttachmentError::RetainedSnapshotUnavailable)?;
+                storms
+                    .iter()
+                    .map(|(label, replacements)| {
+                        route.validate_depth_label(label)?;
+                        let checkpoint = route.handoff_checkpoint(label.wave, label.depth)?;
+                        if checkpoint.depth_label() != *label {
+                            return Err(AttachmentError::RetainedSnapshotUnavailable);
+                        }
+                        Ok((checkpoint, *replacements))
+                    })
+                    .collect::<Result<Vec<_>, AttachmentError>>()
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let checkpoint_storm_rows = checkpoint_storms_by_row
+            .iter()
+            .map(Vec::as_slice)
+            .collect::<Vec<_>>();
+        self.extend_sibling_terminal_pair_checkpoint_storms_from_siblings(
+            previous,
+            &checkpoint_storm_rows,
+        )
+    }
+
     /// Applies ordered rounds of depth-selected sibling checkpoint storms.
     /// Each round contains one plan slice per sibling row, and its coordinates
     /// are resolved against the result of the preceding round. The reference
