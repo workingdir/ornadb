@@ -3317,6 +3317,7 @@ fn explain_query_core_with_limit_pushdowns(
                 add_paired_window_compaction_spill_fold_details(
                     &mut operators[index].details,
                     fold,
+                    paired_window_compaction_spill_pair_identity.is_some(),
                 );
             }
         }
@@ -3679,7 +3680,11 @@ fn explain_query_core_with_limit_pushdowns(
             add_paired_window_compaction_spill_pair_details(&mut details, identity);
         }
         if let Some(fold) = paired_window_compaction_spill_fold.as_ref() {
-            add_paired_window_compaction_spill_fold_details(&mut details, fold);
+            add_paired_window_compaction_spill_fold_details(
+                &mut details,
+                fold,
+                paired_window_compaction_spill_pair_identity.is_some(),
+            );
         }
         if let Some(identity) = paired_limit_aggregate_restoration_pair_identity.as_deref() {
             add_paired_limit_aggregate_restoration_pair_details(
@@ -6181,6 +6186,7 @@ fn add_paired_window_compaction_spill_pair_details(
 fn add_paired_window_compaction_spill_fold_details(
     details: &mut BTreeMap<String, PlanDetail>,
     fold: &QueryPairedWindowCompactionSpillFold,
+    advanced_on_window_pair: bool,
 ) {
     details.insert(
         "paired_window_compaction_spill_fold_identity".to_owned(),
@@ -6191,6 +6197,14 @@ fn add_paired_window_compaction_spill_fold_details(
         PlanDetail::Text(
             "sparse_paired_window_chains_with_cumulative_compaction_spill_history".to_owned(),
         ),
+    );
+    details.insert(
+        "paired_window_compaction_spill_fold_transition".to_owned(),
+        PlanDetail::Text(if advanced_on_window_pair {
+            "advanced_window_pair".to_owned()
+        } else {
+            "carried_across_sparse_input".to_owned()
+        }),
     );
     details.insert(
         "paired_window_compaction_spill_window_pair_count".to_owned(),
