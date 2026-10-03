@@ -1,0 +1,14 @@
+use std.stats as stats;
+
+pub fn query_count(rows: Relation<Int>): Int = std.query.count(rows);
+pub fn query_sum(rows: Relation<Int>): Int = std.query.sum(rows);
+pub fn query_min(rows: Relation<Int>): Int? = std.query.min(rows);
+pub fn query_max(rows: Relation<Int>): Int? = std.query.max(rows);
+pub fn average(rows: Relation<Int>): Int? = stats.mean(rows);
+pub fn median(rows: Relation<Int>): Int? = stats.median(rows);
+pub fn percentile(rows: Relation<Int>): Int? =
+    stats.percentile(rows, 0.5, interpolation: "linear");
+pub fn histogram(rows: Relation<Int>): [Int] = stats.histogram(rows, [(0, 2)]);
+pub fn derivative(points: Relation<(Instant, Int)>): [(Instant, Int)] =
+    stats.derivative(points);
+pub fn piped_average(rows: Relation<Int>): Int? = rows | stats.mean();
