@@ -1148,6 +1148,36 @@ fn fresh_nested_route_pair_chains_evaluate_rebound_closure_values() {
         Ok(Some(Value::int(96.into())))
     );
 
+    let anchor_a_waves = [first_pair.clone()];
+    let anchor_b_waves = [second_pair.clone()];
+    let anchor_a_return_waves = [first_pair.clone()];
+    let cyclic_anchor_plans = [
+        (&saved_handoff, anchor_a_waves.as_slice()),
+        (&saved_middle_handoff, anchor_b_waves.as_slice()),
+        (&saved_handoff, anchor_a_return_waves.as_slice()),
+    ];
+    let cyclic_anchor_storm = resolver
+        .extend_nested_terminal_pair_checkpoint_storms(&later_cascade, &cyclic_anchor_plans)
+        .unwrap_or_else(|error| panic!("cyclic anchor storm failed: {error:?}"));
+    assert_eq!(
+        cyclic_anchor_storm.retained_depth_label(0, 0).unwrap(),
+        saved_handoff.depth_label().clone()
+    );
+    assert_eq!(
+        cyclic_anchor_storm.retained_depth_label(0, 1).unwrap(),
+        saved_middle_handoff.depth_label().clone()
+    );
+    for (wave, checkpoint) in [
+        (4, &saved_handoff),
+        (6, &saved_middle_handoff),
+        (8, &saved_handoff),
+    ] {
+        let root = &cyclic_anchor_storm.retained_wave(wave).unwrap()[0];
+        assert_eq!(pin_route(root), pin_route(checkpoint.handoff()));
+        let label = cyclic_anchor_storm.retained_depth_label(wave, 0).unwrap();
+        assert_eq!(label.wave(), wave);
+        assert_eq!(label.depth(), 0);
+    }
     let checkpoint_replay = resolver
         .extend_nested_terminal_pair_chain_from_checkpoint(
             &later_cascade,
