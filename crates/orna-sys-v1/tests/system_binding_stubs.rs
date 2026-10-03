@@ -1,7 +1,9 @@
-use orna_syntax_v1::{parse_module, Declaration, TypeExpr};
+use orna_syntax_v1::{Declaration, TypeExpr, parse_module};
 use orna_sys_v1::{
-    system_binding_stubs, system_provider_abi, AbiType, EffectSet, OperationContract, SystemEffect,
+    AbiType, EffectSet, OperationContract, SystemEffect, system_binding_stubs, system_provider_abi,
+    system_provider_abi_json,
 };
+use serde_json::Value;
 
 const GENERIC_KEYWORD_STUB_FIXTURE: &str = include_str!("fixtures/sys-invoke-generic-keyword.orna");
 const GENERIC_START_KEYWORD_STUB_FIXTURE: &str =
@@ -94,6 +96,14 @@ fn generated_sys_stubs_parse_resolve_to_registry_types_and_dispatch_one_to_one()
     );
 
     let abi = system_provider_abi();
+    let dispatch_metadata: Value =
+        serde_json::from_str(system_provider_abi_json()).expect("generated dispatch metadata");
+    let dispatch_rows = dispatch_metadata["operations"]
+        .as_array()
+        .expect("dispatch operation inventory")
+        .iter()
+        .map(|row| (row["name"].as_str().expect("dispatch operation name"), row))
+        .collect::<std::collections::BTreeMap<_, _>>();
     let operations = abi.operations().collect::<Vec<_>>();
     let expected_operation_ids = operations
         .iter()
@@ -157,6 +167,40 @@ fn generated_sys_stubs_parse_resolve_to_registry_types_and_dispatch_one_to_one()
             marker,
             operation.id.as_str(),
             "dispatch marker must name its registry op"
+        );
+        let dispatch_row = dispatch_rows
+            .get(marker.as_str())
+            .unwrap_or_else(|| panic!("generated dispatch metadata omits {marker}"));
+        assert_eq!(dispatch_row["name"].as_str(), Some(operation.id.as_str()));
+        assert_eq!(
+            dispatch_row["signature"].as_str(),
+            Some(operation.signature.source.as_str()),
+            "stub marker {marker} resolves to the same typed signature as dispatch metadata"
+        );
+        assert_eq!(
+            dispatch_row["version"]["major"].as_u64(),
+            Some(operation.version.major.into()),
+            "stub marker {marker} resolves to the dispatch ABI version"
+        );
+        assert_eq!(
+            dispatch_row["version"]["minor"].as_u64(),
+            Some(operation.version.minor.into()),
+            "stub marker {marker} resolves to the dispatch ABI version"
+        );
+        let expected_role = match (&operation.role, operation.role_version) {
+            (Some(role), Some(version)) => Some(format!(
+                "{}@{}.{}",
+                role.as_str(),
+                version.major,
+                version.minor
+            )),
+            (None, None) => None,
+            _ => panic!("role name/version must be present together for {marker}"),
+        };
+        assert_eq!(
+            dispatch_row["role"].as_str(),
+            expected_role.as_deref(),
+            "stub marker {marker} resolves to the dispatch semantic role"
         );
         let Declaration::Function { signature, .. } = &item.declaration else {
             panic!("each generated stub must be a function declaration")
