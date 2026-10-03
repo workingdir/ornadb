@@ -1,0 +1,9 @@
+{ generation: 1, position: "left-base", }
+
+{ generation: 1, position: "right-base", }
+
+{ generation: 2, position: "left-redo", }
+
+{ generation: 2, position: "right-redo", }
+
+{ generation: 7, }
