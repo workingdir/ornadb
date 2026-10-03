@@ -28,6 +28,7 @@ use orna_storage_v1::{
     BranchMergeColumnRestorePairedPathExtensionStormSnapshot,
     BranchMergeColumnRestorePairedPathExtensionColumnFoldSnapshot,
     BranchMergeColumnRestorePairedPathExtensionFoldSnapshot,
+    BranchMergeSnapshotPathOccurrence,
     BranchMergeConflict, BranchMergeDepthFragmentRecovery,
     BranchMergeDepthWaveRecovery, BranchMergeError, BranchMergePlan,
     BranchMergeMultiParentColumnDepthLadderWaveEvent,
@@ -75,6 +76,10 @@ const TOMBSTONE_DEPTH_COMMIT_ORDER: &str =
 const COLUMN_RESTORE_LADDER: &str = include_str!("fixtures/merge-column-restore-ladder.orna");
 const COLUMN_RESTORE_EXTENSIONS: &str =
     include_str!("fixtures/merge-column-restore-extensions.orna");
+const PAIRED_SNAPSHOT_OMISSIONS: &str =
+    include_str!("fixtures/merge-paired-snapshot-omissions.orna");
+const PAIRED_EXTENSION_OMISSIONS: &str =
+    include_str!("fixtures/merge-paired-extension-omissions.orna");
 const MULTI_PARENT_COLUMN_DEPTH: &str =
     include_str!("fixtures/merge-multiparent-column-depth.orna");
 const TOMBSTONE_STORM_KEYS: &[&str] = &[
@@ -27459,6 +27464,299 @@ fn paired_path_extension_folds_keep_identity_over_depth_omissions() {
             ],
         }],
         "the exact slash-boundary extension keeps independent depths through absent paths and waves across paired columns",
+    );
+}
+
+#[test]
+fn paired_snapshot_path_occurrences_keep_identity_across_omitted_depths() {
+    let fixture_rows = PAIRED_SNAPSHOT_OMISSIONS
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    let row = |path: &str| {
+        fixture_rows
+            .iter()
+            .find(|row| row.key == string(path))
+            .unwrap_or_else(|| panic!("the in-crate omission fixture supplies {path}"))
+            .clone()
+    };
+    let root = row("restore/root");
+    let child = row("restore/root/child");
+    let other = row("restore/other");
+    assert_eq!(root.fields[&id(2)], string("Root identity"));
+    assert_eq!(child.fields[&id(3)], string("Bergen"));
+    assert_eq!(other.fields[&id(2)], string("Other path"));
+
+    let cells = |row: &KeyedRow, column| {
+        vec![(row.key.clone(), row.fields[&id(column)].clone())]
+    };
+    let depth = |fragments: Vec<Vec<(CanonicalValue, CanonicalValue)>>| {
+        BranchMergeColumnDepthFragments {
+            fragment_count: fragments.len(),
+            fragments: fragments.into_iter().enumerate().collect(),
+        }
+    };
+    let wave = |order| {
+        let columns = match order {
+            1 => BTreeMap::from([
+                (
+                    (id(1), id(2)),
+                    depth(vec![cells(&root, 2), cells(&child, 2)]),
+                ),
+                ((id(1), id(3)), depth(vec![cells(&root, 3)])),
+            ]),
+            2 => BTreeMap::from([((id(1), id(2)), depth(vec![cells(&root, 2)]))]),
+            4 => BTreeMap::from([
+                (
+                    (id(1), id(2)),
+                    depth(vec![Vec::new(), Vec::new(), cells(&child, 2)]),
+                ),
+                ((id(1), id(3)), depth(vec![cells(&child, 3)])),
+            ]),
+            5 => BTreeMap::from([((id(1), id(3)), depth(vec![cells(&root, 3)]))]),
+            other => panic!("unexpected paired omission restore order: {other}"),
+        };
+        BranchMergeTabularColumnDepthWave { order, columns }
+    };
+    let empty_plan = |order| SequencedBranchMergePlan {
+        order,
+        plan: BranchMergePlan {
+            schema: Schema {
+                version: EvolutionVersion::V1_0,
+                tables: Vec::new(),
+            },
+            tables: BTreeMap::new(),
+            checkpoints: BTreeMap::new(),
+            report: Default::default(),
+        },
+        ordered_row_tombstones: Vec::new(),
+    };
+
+    let mut history = BranchMergeTombstoneHistory::new(0);
+    assert!(history.submit(&empty_plan(0)).unwrap().is_empty());
+    assert!(history
+        .submit_tabular_column_depth_wave(&wave(2))
+        .unwrap()
+        .is_empty());
+    history.submit_tabular_column_depth_wave(&wave(1)).unwrap();
+    assert!(history.submit(&empty_plan(3)).unwrap().is_empty());
+    assert!(history
+        .submit_tabular_column_depth_wave(&wave(5))
+        .unwrap()
+        .is_empty());
+    history.submit_tabular_column_depth_wave(&wave(4)).unwrap();
+    assert!(history.submit(&empty_plan(6)).unwrap().is_empty());
+
+    let folds = history.column_restore_paired_snapshot_path_occurrence_folds();
+    let child_fold = folds
+        .iter()
+        .find(|fold| fold.table == id(1) && fold.snapshot_path == child.key)
+        .expect("the child path identity survives its omitted restore waves");
+    assert_eq!(
+        child_fold.columns.iter().map(|column| column.column).collect::<Vec<_>>(),
+        vec![id(2), id(3)],
+    );
+    let occurrence = |column, storm_index, order| {
+        child_fold
+            .columns
+            .iter()
+            .find(|fold| fold.column == id(column))
+            .unwrap()
+            .storms
+            .iter()
+            .find(|storm| storm.storm_index == storm_index)
+            .unwrap()
+            .waves
+            .iter()
+            .find(|wave| wave.order == order)
+            .unwrap()
+            .occurrence
+            .clone()
+    };
+    assert_eq!(
+        occurrence(2, 0, 1),
+        BranchMergeSnapshotPathOccurrence::DepthLabels(vec![1]),
+    );
+    assert_eq!(
+        occurrence(2, 0, 2),
+        BranchMergeSnapshotPathOccurrence::PathOmitted,
+    );
+    assert_eq!(
+        occurrence(3, 0, 1),
+        BranchMergeSnapshotPathOccurrence::PathOmitted,
+    );
+    assert_eq!(
+        occurrence(3, 0, 2),
+        BranchMergeSnapshotPathOccurrence::ColumnOmitted,
+    );
+    assert_eq!(
+        occurrence(2, 1, 4),
+        BranchMergeSnapshotPathOccurrence::DepthLabels(vec![2]),
+    );
+    assert_eq!(
+        occurrence(3, 1, 4),
+        BranchMergeSnapshotPathOccurrence::DepthLabels(vec![0]),
+    );
+    assert_eq!(
+        occurrence(2, 1, 5),
+        BranchMergeSnapshotPathOccurrence::ColumnOmitted,
+    );
+    assert_eq!(
+        occurrence(3, 1, 5),
+        BranchMergeSnapshotPathOccurrence::PathOmitted,
+    );
+}
+
+#[test]
+fn paired_extension_occurrences_keep_independent_depth_identities() {
+    let fixture_rows = PAIRED_EXTENSION_OMISSIONS
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    let row = |path: &str| {
+        fixture_rows
+            .iter()
+            .find(|row| row.key == string(path))
+            .unwrap_or_else(|| panic!("the in-crate extension fixture supplies {path}"))
+            .clone()
+    };
+    let prefix = row("snapshot");
+    let extension = row("snapshot/child");
+    let lookalike = row("snapshotting");
+    assert_eq!(prefix.fields[&id(2)], string("Prefix snapshot"));
+    assert_eq!(extension.fields[&id(3)], string("Bergen"));
+    assert_eq!(lookalike.fields[&id(2)], string("Boundary lookalike"));
+
+    let cells = |row: &KeyedRow, column| {
+        vec![(row.key.clone(), row.fields[&id(column)].clone())]
+    };
+    let depth = |fragments: Vec<Vec<(CanonicalValue, CanonicalValue)>>| {
+        BranchMergeColumnDepthFragments {
+            fragment_count: fragments.len(),
+            fragments: fragments.into_iter().enumerate().collect(),
+        }
+    };
+    let wave = |order| {
+        let columns = match order {
+            1 => BTreeMap::from([
+                (
+                    (id(1), id(2)),
+                    depth(vec![cells(&prefix, 2), cells(&extension, 2), cells(&lookalike, 2)]),
+                ),
+                ((id(1), id(3)), depth(vec![cells(&prefix, 3)])),
+            ]),
+            2 => BTreeMap::from([((id(1), id(2)), depth(vec![cells(&prefix, 2)]))]),
+            4 => BTreeMap::from([
+                (
+                    (id(1), id(2)),
+                    depth(vec![Vec::new(), Vec::new(), cells(&extension, 2)]),
+                ),
+                ((id(1), id(3)), depth(vec![cells(&extension, 3)])),
+            ]),
+            5 => BTreeMap::from([((id(1), id(3)), depth(vec![cells(&prefix, 3)]))]),
+            other => panic!("unexpected extension omission restore order: {other}"),
+        };
+        BranchMergeTabularColumnDepthWave { order, columns }
+    };
+    let empty_plan = |order| SequencedBranchMergePlan {
+        order,
+        plan: BranchMergePlan {
+            schema: Schema {
+                version: EvolutionVersion::V1_0,
+                tables: Vec::new(),
+            },
+            tables: BTreeMap::new(),
+            checkpoints: BTreeMap::new(),
+            report: Default::default(),
+        },
+        ordered_row_tombstones: Vec::new(),
+    };
+
+    let mut history = BranchMergeTombstoneHistory::new(0);
+    assert!(history.submit(&empty_plan(0)).unwrap().is_empty());
+    assert!(history
+        .submit_tabular_column_depth_wave(&wave(2))
+        .unwrap()
+        .is_empty());
+    history.submit_tabular_column_depth_wave(&wave(1)).unwrap();
+    assert!(history.submit(&empty_plan(3)).unwrap().is_empty());
+    assert!(history
+        .submit_tabular_column_depth_wave(&wave(5))
+        .unwrap()
+        .is_empty());
+    history.submit_tabular_column_depth_wave(&wave(4)).unwrap();
+    assert!(history.submit(&empty_plan(6)).unwrap().is_empty());
+
+    let folds = history.column_restore_paired_path_extension_occurrence_folds();
+    assert_eq!(folds.len(), 1, "slash boundary excludes snapshotting");
+    let fold = &folds[0];
+    assert_eq!(fold.table, id(1));
+    assert_eq!(fold.prefix_path, prefix.key);
+    assert_eq!(fold.extension_path, extension.key);
+    let states = |column, storm_index, order| {
+        let wave = fold
+            .columns
+            .iter()
+            .find(|fold| fold.column == id(column))
+            .unwrap()
+            .storms
+            .iter()
+            .find(|storm| storm.storm_index == storm_index)
+            .unwrap()
+            .waves
+            .iter()
+            .find(|wave| wave.order == order)
+            .unwrap();
+        (wave.prefix_occurrence.clone(), wave.extension_occurrence.clone())
+    };
+    assert_eq!(
+        states(2, 0, 1),
+        (
+            BranchMergeSnapshotPathOccurrence::DepthLabels(vec![0]),
+            BranchMergeSnapshotPathOccurrence::DepthLabels(vec![1]),
+        ),
+    );
+    assert_eq!(
+        states(2, 0, 2),
+        (
+            BranchMergeSnapshotPathOccurrence::DepthLabels(vec![0]),
+            BranchMergeSnapshotPathOccurrence::PathOmitted,
+        ),
+    );
+    assert_eq!(
+        states(3, 0, 2),
+        (
+            BranchMergeSnapshotPathOccurrence::ColumnOmitted,
+            BranchMergeSnapshotPathOccurrence::ColumnOmitted,
+        ),
+    );
+    assert_eq!(
+        states(2, 1, 4),
+        (
+            BranchMergeSnapshotPathOccurrence::PathOmitted,
+            BranchMergeSnapshotPathOccurrence::DepthLabels(vec![2]),
+        ),
+    );
+    assert_eq!(
+        states(3, 1, 4),
+        (
+            BranchMergeSnapshotPathOccurrence::PathOmitted,
+            BranchMergeSnapshotPathOccurrence::DepthLabels(vec![0]),
+        ),
+    );
+    assert_eq!(
+        states(2, 1, 5),
+        (
+            BranchMergeSnapshotPathOccurrence::ColumnOmitted,
+            BranchMergeSnapshotPathOccurrence::ColumnOmitted,
+        ),
+    );
+    assert_eq!(
+        states(3, 1, 5),
+        (
+            BranchMergeSnapshotPathOccurrence::DepthLabels(vec![0]),
+            BranchMergeSnapshotPathOccurrence::PathOmitted,
+        ),
     );
 }
 
