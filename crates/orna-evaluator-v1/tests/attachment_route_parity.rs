@@ -1134,6 +1134,83 @@ fn fresh_nested_route_pair_chains_evaluate_rebound_closure_values() {
         ),
         Err(AttachmentError::RetainedSnapshotUnavailable)
     ));
+
+    let depth_slot_round_zero = [Some((&initial_depth_label, depth_zero_waves.as_slice())), None];
+    let depth_slot_round_one = [
+        None,
+        Some((saved_middle_handoff.depth_label(), depth_one_waves.as_slice())),
+    ];
+    let nested_omission_rounds = [
+        depth_slot_round_zero.as_slice(),
+        depth_slot_round_one.as_slice(),
+    ];
+    let nested_omissions = resolver
+        .extend_nested_terminal_pair_checkpoint_storm_rounds_from_depth_labels_with_omissions(
+            &first_stage,
+            &nested_omission_rounds,
+        )
+        .unwrap_or_else(|error| panic!("nested paired omissions failed: {error:?}"));
+    assert_eq!(
+        nested_omissions.retained_depth_label(0, 0).unwrap(),
+        initial_depth_label,
+        "omitting slot zero later retains its original outer route identity"
+    );
+    assert_eq!(
+        nested_omissions.retained_depth_label(0, 1).unwrap(),
+        *saved_middle_handoff.depth_label(),
+        "the delayed slot-one rebind keeps its captured nested route identity"
+    );
+    assert_eq!(
+        nested_omissions
+            .final_session()
+            .database(aliases[4])
+            .unwrap()
+            .pin()
+            .commit()
+            .as_str(),
+        leaf_final,
+        "paired omission slots still produce the final nested terminal pin"
+    );
+    let mut omission_evaluation_session =
+        AttachedDatabaseSession::new(parent.primary().clone()).unwrap();
+    omission_evaluation_session
+        .attach_database(
+            nested_omissions
+                .final_session()
+                .database(aliases[4])
+                .unwrap()
+                .clone(),
+        )
+        .unwrap();
+    let mut omission_evaluator = AdmittedReplSession::from_attached_database_session(
+        &omission_evaluation_session,
+        Limits::default(),
+    )
+    .unwrap();
+    assert_eq!(
+        omission_evaluator.submit(&format!("use {};", aliases[4])),
+        Ok(None)
+    );
+    assert_eq!(
+        omission_evaluator.submit(&format!("{}.package_value()", aliases[4])),
+        Ok(Some(Value::int(96.into())))
+    );
+    let crossed_omission_slot = [
+        Some((saved_middle_handoff.depth_label(), depth_one_waves.as_slice())),
+        None,
+    ];
+    let crossed_omission_rounds = [
+        depth_slot_round_zero.as_slice(),
+        crossed_omission_slot.as_slice(),
+    ];
+    assert!(matches!(
+        resolver.extend_nested_terminal_pair_checkpoint_storm_rounds_from_depth_labels_with_omissions(
+            &first_stage,
+            &crossed_omission_rounds,
+        ),
+        Err(AttachmentError::RetainedSnapshotUnavailable)
+    ));
+
     assert_eq!(
         nested_depth_folds
             .final_session()
