@@ -11936,6 +11936,92 @@ fn nested_snapshot_boundary_resets_fill_and_restore_omitted_checkpoint_slots() {
 }
 
 #[test]
+fn nested_snapshot_boundary_reset_depth_keeps_each_selected_identity() {
+    let source = include_str!("fixtures/historical-nested-snapshot-boundary-reset-depth.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-nested-snapshot-boundary-reset-depth.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(result.is_ok(), "{:?}", result.diagnostics);
+    let module = result
+        .modules
+        .values()
+        .find(|module| {
+            module
+                .symbols
+                .contains_key("nested_snapshot_boundary_reset_depth_values")
+        })
+        .expect("deep nested checkpoint reset module");
+    let Type::Function { result, .. } =
+        &module.symbols["nested_snapshot_boundary_reset_depth_values"].ty
+    else {
+        panic!("deep nested reset must return computed values");
+    };
+    let Type::Record(stages) = result.as_ref() else {
+        panic!("deep nested reset must expose each checkpoint stage");
+    };
+    for (stage, selectors, tail) in [
+        (
+            "saved_omitted",
+            [
+                ("root", "selector:HEAD~620"),
+                ("branch", "selector:HEAD~590"),
+                ("leaf", "selector:HEAD~580"),
+            ],
+            None,
+        ),
+        (
+            "reset_omitted",
+            [
+                ("root", "selector:HEAD~620"),
+                ("branch", "selector:HEAD~560"),
+                ("leaf", "selector:HEAD~550"),
+            ],
+            None,
+        ),
+        (
+            "reset_complete",
+            [
+                ("root", "selector:HEAD~610"),
+                ("branch", "selector:HEAD~530"),
+                ("leaf", "selector:HEAD~520"),
+            ],
+            Some("selector:HEAD~510"),
+        ),
+    ] {
+        let Type::Record(values) = stages.get(stage).expect("reset stage") else {
+            panic!("{stage} must contain nested checkpoint values");
+        };
+        for (field, expected) in selectors {
+            let value = values.get(field).expect("nested checkpoint field");
+            assert_canonical_snapshot_context_maps(value);
+            let mut contexts = BTreeSet::new();
+            collect_snapshot_contexts(value, &mut contexts);
+            assert_eq!(
+                contexts,
+                BTreeSet::from([expected.to_owned()]),
+                "{stage}.{field} must retain the selected boundary identity"
+            );
+        }
+        match tail {
+            Some(expected) => {
+                let value = values.get("tail").expect("deepest checkpoint field");
+                assert_canonical_snapshot_context_maps(value);
+                let mut contexts = BTreeSet::new();
+                collect_snapshot_contexts(value, &mut contexts);
+                assert_eq!(contexts, BTreeSet::from([expected.to_owned()]));
+            }
+            None => assert_eq!(values.get("tail"), Some(&Type::Bottom)),
+        }
+    }
+}
+
+#[test]
 fn paired_checkpoint_snapshot_maps_survive_chained_depth_storms() {
     let source = include_str!(
         "fixtures/historical-paired-checkpoint-snapshot-retention-depth-storm.orna"
