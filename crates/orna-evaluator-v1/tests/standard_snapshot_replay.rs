@@ -1055,6 +1055,76 @@ fn module_upgrade_projects() -> (
     )
 }
 
+fn divergent_paired_module_projects() -> (TempDir, [LoadedProject; 4], [String; 4]) {
+    let (directory, _, _, _, base_project, _, _, snapshots) = module_upgrade_projects();
+    let project_path = directory.path().join("project");
+    let standard_path = project_path.join("stdlib/std");
+    let base_pin = snapshots[3].clone();
+
+    git_output_at(&standard_path, &["checkout", "--detach", base_pin.as_str()]);
+    fs::write(
+        standard_path.join("math.orna"),
+        include_str!("fixtures/module-upgrade-std-v4.orna"),
+    )
+    .unwrap();
+    commit_directory(&standard_path, "diverge math from paired module pin");
+    let math_pin = git_output_at(&standard_path, &["rev-parse", "HEAD"]);
+    git_output_at(&standard_path, &["branch", "math-only-pin", math_pin.as_str()]);
+    let math_parent = capture_standard_gitlink(
+        &project_path,
+        &math_pin,
+        "capture math-only branch from paired module pin",
+    );
+
+    git_output_at(&standard_path, &["checkout", "--detach", base_pin.as_str()]);
+    fs::write(
+        standard_path.join("collection.orna"),
+        include_str!("fixtures/module-upgrade-std-collection-v5.orna"),
+    )
+    .unwrap();
+    commit_directory(&standard_path, "diverge collection from paired module pin");
+    let collection_pin = git_output_at(&standard_path, &["rev-parse", "HEAD"]);
+    git_output_at(
+        &standard_path,
+        &["branch", "collection-only-pin", collection_pin.as_str()],
+    );
+    let collection_parent = capture_standard_gitlink(
+        &project_path,
+        &collection_pin,
+        "capture collection-only branch from paired module pin",
+    );
+
+    git_output_at(&standard_path, &["checkout", "--detach", math_pin.as_str()]);
+    fs::write(
+        standard_path.join("collection.orna"),
+        include_str!("fixtures/module-upgrade-std-collection-v5.orna"),
+    )
+    .unwrap();
+    commit_directory(&standard_path, "fold divergent paired module upgrades");
+    let paired_pin = git_output_at(&standard_path, &["rev-parse", "HEAD"]);
+    git_output_at(&standard_path, &["branch", "paired-pin", paired_pin.as_str()]);
+    let paired_parent = capture_standard_gitlink(
+        &project_path,
+        &paired_pin,
+        "capture combined math and collection divergence fold",
+    );
+
+    let repository = Repository::discover(&project_path).unwrap();
+    let loader = ProjectLoader::default();
+    let load = |parent: &str| {
+        let parent = repository.resolve_snapshot(parent).unwrap();
+        loader.load_committed_snapshot(&repository, &parent).unwrap()
+    };
+    let math_project = load(&math_parent);
+    let collection_project = load(&collection_parent);
+    let paired_project = load(&paired_parent);
+    (
+        directory,
+        [base_project, math_project, collection_project, paired_project],
+        [base_pin, math_pin, collection_pin, paired_pin],
+    )
+}
+
 fn snapshot_matrix_projects() -> (TempDir, Vec<LoadedProject>, Vec<String>) {
     let directory = tempfile::tempdir().unwrap();
     let project_path = directory.path().join("project");
@@ -2936,6 +3006,183 @@ fn captured_dependency_snapshots_survive_paired_pin_replay_folds() {
             Ok(Some(ints(&expected[index]))),
             "cloned captured closure must retain paired pin {}",
             snapshots[index]
+        );
+    }
+}
+
+#[test]
+fn captured_same_named_exports_keep_paired_resolution_pin_identity() {
+    let (
+        _directory,
+        _project_v1,
+        _project_v2,
+        project_v3,
+        project_v4,
+        project_v5,
+        project_v6,
+        snapshots,
+    ) = module_upgrade_projects();
+    let projects = [&project_v3, &project_v4, &project_v5, &project_v6];
+    let pins = [&snapshots[2], &snapshots[3], &snapshots[4], &snapshots[5]];
+    let expected = [
+        [40, 3, 43, 40, 3, 43, 1_007, 1_008],
+        [40, 4, 44, 40, 4, 44, 1_007, 1_008],
+        [50, 5, 55, 50, 5, 55, 10_007, 10_008],
+        [60, 6, 66, 60, 6, 66, 100_007, 100_008],
+    ];
+    let use_pair = include_str!("fixtures/module-upgrade-paired-divergence-use.orna");
+    let capture = include_str!("fixtures/module-upgrade-paired-resolution-capture.orna");
+    let replay = include_str!("fixtures/module-upgrade-paired-resolution-replay.orna");
+
+    assert!(pins.windows(2).all(|pair| pair[0] != pair[1]));
+    let mut sessions = Vec::with_capacity(projects.len());
+    for (index, project) in projects.iter().enumerate() {
+        assert_eq!(
+            project.standard_profile().unwrap().snapshot(),
+            pins[index],
+            "project v{} must retain its paired module snapshot",
+            index + 3
+        );
+        let mut session = AdmittedReplSession::from_loaded_project(
+            project,
+            project.standard_sources().iter().cloned(),
+            Limits::default(),
+        )
+        .unwrap();
+        for import in use_pair.lines() {
+            assert_eq!(session.submit(import), Ok(None));
+        }
+        assert_eq!(session.submit(capture), Ok(None));
+        sessions.push(session);
+    }
+
+    for index in [3, 0, 2, 1, 3, 1, 0] {
+        assert_eq!(
+            sessions[index].submit(replay),
+            Ok(Some(ints(&expected[index]))),
+            "same-named math and collection exports must remain paired at pin {}",
+            pins[index]
+        );
+    }
+
+    let mut cloned_sessions = sessions.clone();
+    for index in [1, 3, 0, 2] {
+        assert_eq!(
+            cloned_sessions[index].submit(replay),
+            Ok(Some(ints(&expected[index]))),
+            "cloned resolution replay must preserve both module identities at pin {}",
+            pins[index]
+        );
+    }
+}
+
+#[test]
+fn captured_replays_preserve_divergent_paired_dependency_pins() {
+    let (_directory, projects, pins) = divergent_paired_module_projects();
+    let expected = [
+        [40, 4, 44, 40, 4, 44, 1_007, 1_008],
+        [50, 4, 54, 50, 4, 54, 10_007, 10_008],
+        [40, 5, 45, 40, 5, 45, 1_007, 1_008],
+        [50, 5, 55, 50, 5, 55, 10_007, 10_008],
+    ];
+    let expected_math = [
+        include_str!("fixtures/module-upgrade-std-v3.orna"),
+        include_str!("fixtures/module-upgrade-std-v4.orna"),
+        include_str!("fixtures/module-upgrade-std-v3.orna"),
+        include_str!("fixtures/module-upgrade-std-v4.orna"),
+    ];
+    let expected_collection = [
+        include_str!("fixtures/module-upgrade-std-collection-v4.orna"),
+        include_str!("fixtures/module-upgrade-std-collection-v4.orna"),
+        include_str!("fixtures/module-upgrade-std-collection-v5.orna"),
+        include_str!("fixtures/module-upgrade-std-collection-v5.orna"),
+    ];
+    let use_pair = include_str!("fixtures/module-upgrade-paired-divergence-use.orna");
+    let capture = include_str!("fixtures/module-upgrade-divergent-pair-capture.orna");
+    let replay = include_str!("fixtures/module-upgrade-divergent-pair-replay.orna");
+
+    assert!(pins.windows(2).all(|pair| pair[0] != pair[1]));
+    for (index, project) in projects.iter().enumerate() {
+        let profile = project.standard_profile().unwrap_or_else(|| {
+            panic!(
+                "divergent project {index} has no captured standard profile; modules: {:?}",
+                project.standard_modules()
+            )
+        });
+        assert_eq!(profile.snapshot(), &pins[index]);
+        assert_eq!(standard_source(project, "std/math.orna"), expected_math[index]);
+        assert_eq!(
+            standard_source(project, "std/collection.orna"),
+            expected_collection[index]
+        );
+    }
+    assert_eq!(
+        standard_source(&projects[0], "std/collection.orna"),
+        standard_source(&projects[1], "std/collection.orna"),
+        "the math-only fork retains the base collection module"
+    );
+    assert_eq!(
+        standard_source(&projects[0], "std/math.orna"),
+        standard_source(&projects[2], "std/math.orna"),
+        "the collection-only fork retains the base math module"
+    );
+
+    for (pinned_index, replacement_index, path) in
+        [(1, 2, "std/collection.orna"), (2, 1, "std/math.orna")]
+    {
+        let mut crossed_sources = projects[pinned_index].standard_sources().to_vec();
+        let replacement = standard_source(&projects[replacement_index], path).to_owned();
+        crossed_sources
+            .iter_mut()
+            .find(|(candidate, _)| candidate == path)
+            .unwrap()
+            .1 = replacement;
+        assert_eq!(
+            AdmittedReplSession::from_loaded_project(
+                &projects[pinned_index],
+                crossed_sources,
+                Limits::default(),
+            )
+            .unwrap_err()
+            .code(),
+            "ORNA-REPL-STANDARD",
+            "snapshot {} must reject the crossed {path} from snapshot {}",
+            pins[pinned_index],
+            pins[replacement_index]
+        );
+    }
+
+    let mut sessions = Vec::with_capacity(projects.len());
+    for project in &projects {
+        let mut session = AdmittedReplSession::from_loaded_project(
+            project,
+            project.standard_sources().iter().cloned(),
+            Limits::default(),
+        )
+        .unwrap();
+        for import in use_pair.lines() {
+            assert_eq!(session.submit(import), Ok(None));
+        }
+        assert_eq!(session.submit(capture), Ok(None));
+        sessions.push(session);
+    }
+
+    for index in [3, 0, 2, 1, 3, 1, 0, 2] {
+        assert_eq!(
+            sessions[index].submit(replay),
+            Ok(Some(ints(&expected[index]))),
+            "captured fold must keep both divergent module identities at pin {}",
+            pins[index]
+        );
+    }
+
+    let mut cloned_sessions = sessions.clone();
+    for index in [2, 3, 0, 1] {
+        assert_eq!(
+            cloned_sessions[index].submit(replay),
+            Ok(Some(ints(&expected[index]))),
+            "cloned captured fold must preserve divergent pin {}",
+            pins[index]
         );
     }
 }

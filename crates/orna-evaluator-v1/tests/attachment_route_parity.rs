@@ -2628,6 +2628,144 @@ fn sparse_nested_storm_folds_preserve_terminal_route_identity() {
         )
         .unwrap();
     let active_terminal_identity = active_terminal_route.terminal_route_identity();
+    let middle_rebind_chain = [active_terminal_round.as_slice()];
+    let paired_rebind_chains = [
+        first_sparse_chain.as_slice(),
+        middle_rebind_chain.as_slice(),
+        first_sparse_chain.as_slice(),
+    ];
+    let after_first_rebind_chain = resolver
+        .extend_nested_terminal_pair_sparse_checkpoint_storm_chains_from_depth_labels(
+            &first_stage,
+            &[first_sparse_chain.as_slice()],
+        )
+        .unwrap();
+    let after_middle_rebind_chain = resolver
+        .extend_nested_terminal_pair_sparse_checkpoint_storm_chains_from_depth_labels(
+            &after_first_rebind_chain,
+            &[middle_rebind_chain.as_slice()],
+        )
+        .unwrap();
+    let after_restoring_rebind_chain = resolver
+        .extend_nested_terminal_pair_sparse_checkpoint_storm_chains_from_depth_labels(
+            &after_middle_rebind_chain,
+            &[first_sparse_chain.as_slice()],
+        )
+        .unwrap();
+    let first_chain_identity = after_first_rebind_chain.terminal_route_identity();
+    let middle_chain_identity = after_middle_rebind_chain.terminal_route_identity();
+    let restored_chain_identity = after_restoring_rebind_chain.terminal_route_identity();
+    assert_ne!(
+        first_chain_identity,
+        middle_chain_identity,
+        "the nested rebind changes the terminal identity at its chain boundary"
+    );
+    assert_eq!(
+        first_chain_identity,
+        restored_chain_identity,
+        "rebinding back to the same pins on the same route restores its terminal identity"
+    );
+    assert_eq!(
+        after_middle_rebind_chain
+            .final_session()
+            .database(aliases[4])
+            .unwrap()
+            .pin()
+            .commit()
+            .as_str(),
+        leaf_middle,
+        "the intermediate paired chain selects the computed middle package snapshot"
+    );
+    let expected_chain_identities = [
+        first_chain_identity.clone(),
+        middle_chain_identity.clone(),
+        restored_chain_identity.clone(),
+    ];
+    let identity_checked_rebind_chains = resolver
+        .extend_nested_terminal_pair_sparse_checkpoint_storm_chains_validating_terminal_identities(
+            &first_stage,
+            &paired_rebind_chains,
+            &expected_chain_identities,
+        )
+        .unwrap();
+    identity_checked_rebind_chains
+        .validate_terminal_route_identity(&restored_chain_identity)
+        .unwrap();
+    assert_eq!(
+        identity_checked_rebind_chains.terminal_route_identity(),
+        restored_chain_identity,
+        "the paired fold returns the verified identity for its final sparse chain"
+    );
+    assert_eq!(
+        identity_checked_rebind_chains
+            .final_session()
+            .database(aliases[4])
+            .unwrap()
+            .pin()
+            .commit()
+            .as_str(),
+        leaf_final,
+        "the final sparse chain restores the actual terminal package snapshot"
+    );
+    let segmented_rebind_chains = [
+        first_sparse_chain.as_slice(),
+        middle_rebind_chain.as_slice(),
+    ];
+    let segmented_omission_chains = [
+        omission_tail_chain.as_slice(),
+        omission_tail_chain.as_slice(),
+    ];
+    let (segmented_route, segment_identities) = resolver
+        .extend_nested_terminal_pair_sparse_checkpoint_storm_rebind_omission_segments_preserving_terminal_identities(
+            &first_stage,
+            &segmented_rebind_chains,
+            &segmented_omission_chains,
+        )
+        .unwrap();
+    assert_eq!(
+        segment_identities,
+        [first_chain_identity.clone(), middle_chain_identity.clone()],
+        "each paired omission segment retains the exact identity produced by its rebind"
+    );
+    assert_eq!(
+        segmented_route.terminal_route_identity(),
+        middle_chain_identity,
+        "the final sparse route fold retains the last segment's terminal identity"
+    );
+    assert_eq!(
+        segmented_route
+            .final_session()
+            .database(aliases[4])
+            .unwrap()
+            .pin()
+            .commit()
+            .as_str(),
+        leaf_middle,
+        "the final route still resolves to the computed terminal package snapshot"
+    );
+    assert!(matches!(
+        resolver
+            .extend_nested_terminal_pair_sparse_checkpoint_storm_rebind_omission_segments_preserving_terminal_identities(
+                &first_stage,
+                &segmented_rebind_chains,
+                &[omission_tail_chain.as_slice()],
+            ),
+        Err(AttachmentError::RetainedSnapshotUnavailable)
+    ));
+    let stale_intermediate_identities = [
+        first_chain_identity.clone(),
+        first_chain_identity,
+        restored_chain_identity.clone(),
+    ];
+    assert!(matches!(
+        resolver
+            .extend_nested_terminal_pair_sparse_checkpoint_storm_chains_validating_terminal_identities(
+                &first_stage,
+                &paired_rebind_chains,
+                &stale_intermediate_identities,
+            ),
+        Err(AttachmentError::RetainedSnapshotUnavailable)
+    ));
     let following_paired_omission = [(&outer_label, None), (&nested_label, None)];
     let active_then_omission_chain = [
         active_terminal_round.as_slice(),

@@ -57,3 +57,34 @@ fn paired_recursive_cte_folds_keep_independent_first_seen_identities() {
         "each recursive fold keeps its own first anchor and recursive value for overlapping identities"
     );
 }
+
+#[test]
+fn paired_lateral_anchors_keep_distinct_identity_across_recursive_folds() {
+    let mut session = AdmittedReplSession::with_reference_standard(Limits::default())
+        .expect("reference standard profile is admitted");
+    assert_eq!(
+        session.submit(include_str!("fixtures/stdlib-use-query-2213.orna")),
+        Ok(None)
+    );
+    assert_eq!(
+        session.submit(include_str!("fixtures/stdlib-use-collection-4tksn.orna")),
+        Ok(None)
+    );
+    let actual = session
+        .submit(include_str!("fixtures/stdlib-query-paired-lateral-recursive-cte-4tksn.orna"))
+        .unwrap_or_else(|error| panic!("lateral recursive CTE evaluation failed with {}", error.code()));
+
+    let expected = CanonicalValue::new(Raw::Tag(
+        60015,
+        Box::new(Raw::Array(vec![
+            raw_integers(&[101, 201]),
+            raw_integers(&[301, 201]),
+        ])),
+    ))
+    .expect("paired lateral recursive results are canonical");
+    assert_eq!(
+        actual,
+        Some(expected),
+        "each sparse lateral anchor preserves flattened first-seen values in its own recursive fold"
+    );
+}

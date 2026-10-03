@@ -1255,6 +1255,64 @@ impl PackageResolver {
         Ok(route)
     }
 
+    /// Applies sparse nested terminal-pair chains while checking the exact
+    /// terminal route identity after each chain. The expected identities must
+    /// have one entry per chain and bind that chain's computed lineage and
+    /// pins. The reference is silent on intermediate chain-boundary checks;
+    /// v1 rejects drift immediately, even when a later chain would restore the
+    /// final pins.
+    pub fn extend_nested_terminal_pair_sparse_checkpoint_storm_chains_validating_terminal_identities(
+        &self,
+        previous: &ReboundPathResolution,
+        chains: &[&[&[(&NestedPairDepthLabel, Option<&[[PinnedDatabase; 2]]>)]]],
+        expected_terminal_identities: &[NestedPairTerminalRouteIdentity],
+    ) -> Result<ReboundPathResolution, AttachmentError> {
+        if chains.len() != expected_terminal_identities.len() {
+            return Err(AttachmentError::RetainedSnapshotUnavailable);
+        }
+
+        let mut route = previous.clone();
+        for (chain, expected_identity) in chains.iter().zip(expected_terminal_identities) {
+            route = self
+                .extend_nested_terminal_pair_sparse_checkpoint_storm_chains_from_depth_labels(
+                    &route,
+                    &[*chain],
+                )?;
+            route.validate_terminal_route_identity(expected_identity)?;
+        }
+        Ok(route)
+    }
+
+    /// Applies paired rebinding and omission chains as consecutive terminal
+    /// route segments. Each omission chain must preserve the terminal identity
+    /// computed by its preceding rebind chain. Returns the final route and the
+    /// verified terminal identity for every segment. The reference is silent
+    /// on interleaved sparse route segments; v1 requires one omission chain
+    /// per rebind chain and returns no partial result on drift.
+    pub fn extend_nested_terminal_pair_sparse_checkpoint_storm_rebind_omission_segments_preserving_terminal_identities(
+        &self,
+        previous: &ReboundPathResolution,
+        rebind_chains: &[&[&[(&NestedPairDepthLabel, Option<&[[PinnedDatabase; 2]]>)]]],
+        omission_chains: &[&[&[(&NestedPairDepthLabel, Option<&[[PinnedDatabase; 2]]>)]]],
+    ) -> Result<(ReboundPathResolution, Vec<NestedPairTerminalRouteIdentity>), AttachmentError> {
+        if rebind_chains.len() != omission_chains.len() {
+            return Err(AttachmentError::RetainedSnapshotUnavailable);
+        }
+
+        let mut route = previous.clone();
+        let mut terminal_identities = Vec::with_capacity(rebind_chains.len());
+        for (rebind_chain, omission_chain) in rebind_chains.iter().zip(omission_chains) {
+            route = self
+                .extend_nested_terminal_pair_sparse_checkpoint_storm_rebind_then_omission_chains_preserving_terminal_identity(
+                    &route,
+                    &[*rebind_chain],
+                    &[*omission_chain],
+                )?;
+            terminal_identities.push(route.terminal_route_identity());
+        }
+        Ok((route, terminal_identities))
+    }
+
     /// Applies paired sparse rebinding chains, captures the resulting terminal
     /// route identity, and carries that exact identity through later omission
     /// chains. Non-empty replacement waves are rejected in the omission phase.
