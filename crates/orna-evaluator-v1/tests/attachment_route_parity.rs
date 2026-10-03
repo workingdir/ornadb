@@ -1791,4 +1791,86 @@ fn sibling_checkpoint_folds_keep_tabular_anchor_identities() {
             "continuation follows the pin selected by this row's exact depth"
         );
     }
+
+    let continued_label_a = depth_continued.retained_depth_label(0, 10, 1).unwrap();
+    let continued_label_b = depth_continued.retained_depth_label(1, 10, 0).unwrap();
+    let continued_label_independent_a = depth_continued.retained_depth_label(2, 10, 1).unwrap();
+    let second_depth_storms_a = [(10, 1, no_pair_waves.as_slice())];
+    let second_depth_storms_b = [(10, 0, no_pair_waves.as_slice())];
+    let second_depth_storms_independent_a = [(10, 1, no_pair_waves.as_slice())];
+    let second_depth_plans = [
+        second_depth_storms_a.as_slice(),
+        second_depth_storms_b.as_slice(),
+        second_depth_storms_independent_a.as_slice(),
+    ];
+    let storm_rounds = [depth_plans.as_slice(), second_depth_plans.as_slice()];
+    let twice_continued = resolver
+        .extend_sibling_terminal_pair_checkpoint_storm_rounds_from_depths(
+            &nested_folded,
+            &storm_rounds,
+        )
+        .unwrap_or_else(|error| panic!("multi-round sibling depth storm failed: {error:?}"));
+    let twice_continued_by_steps = resolver
+        .extend_sibling_terminal_pair_checkpoint_storms_from_depths(
+            &depth_continued,
+            &second_depth_plans,
+        )
+        .unwrap_or_else(|error| panic!("continued sibling depth replay failed: {error:?}"));
+    for (row, source_depth, source_label, next_depth, next_label, expected_value) in [
+        (0, 1, &depth_label_a, 1, &continued_label_a, 91),
+        (1, 0, &depth_label_b, 0, &continued_label_b, 92),
+        (
+            2,
+            1,
+            &depth_label_independent_a,
+            1,
+            &continued_label_independent_a,
+            91,
+        ),
+    ] {
+        assert_eq!(
+            twice_continued_by_steps
+                .retained_depth_label(row, 6, source_depth)
+                .unwrap(),
+            *source_label,
+            "the first-round source anchor remains bound to its original depth"
+        );
+        assert_eq!(
+            twice_continued_by_steps
+                .retained_depth_label(row, 10, next_depth)
+                .unwrap(),
+            *next_label,
+            "the next round retains the checkpoint identity selected from its predecessor"
+        );
+        assert_eq!(
+            twice_continued_by_steps.routes()[row]
+                .final_session()
+                .database(aliases[4])
+                .unwrap()
+                .pin()
+                .commit()
+                .as_str(),
+            if expected_value == 91 {
+                leaf_a.as_str()
+            } else {
+                leaf_b.as_str()
+            }
+        );
+        let batch_label = twice_continued.retained_depth_label(row, 10, next_depth).unwrap();
+        assert_eq!(batch_label.wave(), 10);
+        assert_eq!(batch_label.depth(), next_depth);
+        assert_eq!(
+            twice_continued.routes()[row]
+                .final_session()
+                .database(aliases[4])
+                .unwrap()
+                .pin(),
+            twice_continued_by_steps.routes()[row]
+                .final_session()
+                .database(aliases[4])
+                .unwrap()
+                .pin(),
+            "atomic round composition matches the explicitly stepped continuation"
+        );
+    }
 }

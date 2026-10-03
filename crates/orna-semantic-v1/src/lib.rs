@@ -18469,7 +18469,8 @@ fn merge_multi_parent_checkpoint_value_scoped(
     }
 
     let mut rejected_scope = false;
-    let (merged, effective_parent) = match (accumulated, parent, rollback_anchor, topology_anchor) {
+    let (mut merged, mut effective_parent) =
+        match (accumulated, parent, rollback_anchor, topology_anchor) {
         (
             Type::Record(accumulated_fields),
             Type::Record(parent_fields),
@@ -18790,14 +18791,49 @@ fn merge_multi_parent_checkpoint_value_scoped(
         _ => return scoped_checkpoint_rollback(rollback_anchor, path, rolled_back_paths),
     };
 
-    if !checkpoint_paired_boundary_fold_topology_matches(
+    let paired_boundaries_match = checkpoint_paired_boundary_fold_topology_matches(
         accumulated,
         &effective_parent,
         topology_anchor,
-    ) || !checkpoint_pin_map_widths_match(topology_anchor, &effective_parent)
-        || !checkpoint_value_pin_identity_topology_matches(topology_anchor, &effective_parent)
-        || !nested_checkpoint_compaction_fold_preserves_pin_identity(accumulated, &effective_parent)
+    );
+    let widths_match = checkpoint_pin_map_widths_match(topology_anchor, &effective_parent);
+    let topology_matches =
+        checkpoint_value_pin_identity_topology_matches(topology_anchor, &effective_parent);
+    let compaction_preserves_identity =
+        nested_checkpoint_compaction_fold_preserves_pin_identity(accumulated, &effective_parent);
+    if !paired_boundaries_match
+        || !widths_match
+        || !topology_matches
+        || !compaction_preserves_identity
     {
+        if widths_match
+            && rollback_conflicting_checkpoint_siblings(
+                &mut merged,
+                &mut effective_parent,
+                rollback_anchor,
+                accumulated,
+                topology_anchor,
+                path,
+                rolled_back_paths,
+            )
+            && checkpoint_paired_boundary_fold_topology_matches(
+                accumulated,
+                &effective_parent,
+                topology_anchor,
+            )
+            && checkpoint_pin_map_widths_match(topology_anchor, &effective_parent)
+            && checkpoint_value_pin_identity_topology_matches(topology_anchor, &effective_parent)
+            && nested_checkpoint_compaction_fold_preserves_pin_identity(
+                accumulated,
+                &effective_parent,
+            )
+        {
+            return Some(ScopedCheckpointFold {
+                merged,
+                effective_parent,
+                rejected_scope: true,
+            });
+        }
         return scoped_checkpoint_rollback(rollback_anchor, path, rolled_back_paths);
     }
 
@@ -18841,6 +18877,166 @@ fn scoped_checkpoint_rollback(
         effective_parent: rollback_anchor.clone(),
         rejected_scope: true,
     })
+}
+
+/// A fold can pass every child independently yet create an identity relation
+/// between two sibling paths when their maps are considered together. The
+/// reference is silent on this nested rollback boundary, so restore only the
+/// direct siblings named by that new relation; unrelated nested paths can
+/// continue accumulating labels in later rows.
+fn rollback_conflicting_checkpoint_siblings(
+    merged: &mut Type,
+    effective_parent: &mut Type,
+    rollback_anchor: &Type,
+    accumulated: &Type,
+    topology_anchor: &Type,
+    path: &[SnapshotTopologyBoundary],
+    rolled_back_paths: &mut BTreeSet<Vec<SnapshotTopologyBoundary>>,
+) -> bool {
+    let mut implicated_paths = BTreeSet::new();
+    if !checkpoint_value_pin_identity_topology_matches(topology_anchor, effective_parent) {
+        implicated_paths.extend(checkpoint_topology_mismatch_paths(
+            topology_anchor,
+            effective_parent,
+        ));
+    }
+    if !nested_checkpoint_compaction_fold_preserves_pin_identity(accumulated, effective_parent) {
+        implicated_paths.extend(checkpoint_compaction_mismatch_paths(
+            accumulated,
+            effective_parent,
+        ));
+    }
+
+    let implicated_children = implicated_paths
+        .iter()
+        .filter_map(|scope| scope.first().cloned())
+        .collect::<BTreeSet<_>>();
+    if implicated_children.is_empty() {
+        return false;
+    }
+
+    let mut rolled_back_any = false;
+    match (merged, effective_parent, rollback_anchor) {
+        (Type::Record(merged), Type::Record(effective), Type::Record(anchor)) => {
+            for child in implicated_children {
+                let SnapshotTopologyBoundary::RecordField(name) = child else {
+                    continue;
+                };
+                let Some(anchor_child) = anchor.get(&name) else {
+                    continue;
+                };
+                if !merged.contains_key(&name) || !effective.contains_key(&name) {
+                    continue;
+                }
+                let mut child_path = path.to_vec();
+                child_path.push(SnapshotTopologyBoundary::RecordField(name.clone()));
+                if rolled_back_paths.contains(&child_path) {
+                    continue;
+                }
+                rolled_back_paths.insert(child_path);
+                merged.insert(name.clone(), anchor_child.clone());
+                effective.insert(name, anchor_child.clone());
+                rolled_back_any = true;
+            }
+        }
+        _ => {}
+    }
+    rolled_back_any
+}
+
+fn checkpoint_topology_mismatch_paths(
+    expected: &Type,
+    actual: &Type,
+) -> BTreeSet<Vec<SnapshotTopologyBoundary>> {
+    let mut pin_maps = Vec::new();
+    if !collect_corresponding_snapshot_context_maps_at_path(
+        expected,
+        actual,
+        &mut pin_maps,
+        &mut Vec::new(),
+    ) {
+        return BTreeSet::new();
+    }
+
+    let signatures = |expected_side: bool| {
+        let mut labels = BTreeMap::<String, BTreeSet<Vec<SnapshotTopologyBoundary>>>::new();
+        for pair in pin_maps
+            .iter()
+            .filter(|pair| !pair.expected.is_empty() && !pair.actual.is_empty())
+        {
+            let selectors = if expected_side {
+                &pair.expected
+            } else {
+                &pair.actual
+            };
+            for selector in selectors {
+                labels
+                    .entry(selector.clone())
+                    .or_default()
+                    .insert(pair.boundary_path.clone());
+            }
+        }
+        let mut signatures = BTreeMap::<Vec<Vec<SnapshotTopologyBoundary>>, usize>::new();
+        for membership in labels.into_values() {
+            *signatures
+                .entry(membership.into_iter().collect())
+                .or_default() += 1;
+        }
+        signatures
+    };
+
+    let expected = signatures(true);
+    let actual = signatures(false);
+    expected
+        .iter()
+        .chain(actual.iter())
+        .filter(|(membership, _)| expected.get(*membership) != actual.get(*membership))
+        .flat_map(|(membership, _)| membership.iter().cloned())
+        .collect()
+}
+
+fn checkpoint_compaction_mismatch_paths(
+    accumulated: &Type,
+    parent: &Type,
+) -> BTreeSet<Vec<SnapshotTopologyBoundary>> {
+    let mut pin_maps = Vec::new();
+    if !collect_corresponding_snapshot_context_maps_at_path(
+        accumulated,
+        parent,
+        &mut pin_maps,
+        &mut Vec::new(),
+    ) {
+        return BTreeSet::new();
+    }
+
+    let mut mismatched = BTreeSet::new();
+    for (index, pair) in pin_maps.iter().enumerate() {
+        let folded = pair
+            .expected
+            .union(&pair.actual)
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        for other in &pin_maps[index + 1..] {
+            let other_folded = other
+                .expected
+                .union(&other.actual)
+                .cloned()
+                .collect::<BTreeSet<_>>();
+            let shared_before = pair
+                .expected
+                .intersection(&other.expected)
+                .chain(pair.actual.intersection(&other.actual))
+                .cloned()
+                .collect::<BTreeSet<_>>();
+            if folded.intersection(&other_folded).cloned().collect::<BTreeSet<_>>()
+                != shared_before
+            {
+                mismatched.insert(pair.boundary_path.clone());
+                mismatched.insert(other.boundary_path.clone());
+            }
+        }
+    }
+    mismatched
 }
 
 /// Compare selector topology for paired record boundaries whose values contain
