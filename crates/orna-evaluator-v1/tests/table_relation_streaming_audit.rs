@@ -666,6 +666,80 @@ fn paired_view_cursor_scopes_rebind_across_three_page_refresh_handoffs() {
     );
 }
 
+#[test]
+fn paired_view_handoffs_rebind_old_cursor_tokens_to_fresh_scopes() {
+    // Cursor bytes are opaque; the reference is silent on token reuse after
+    // multiple paired view refreshes. Each `(source, scope)` owns its stream,
+    // so returning to an older token starts from that refresh's first page.
+    let mut source = PairedViewRefreshSource::new([
+        (
+            "View.Left",
+            vec![
+                page(&[1], Some(vec![11])),
+                page(&[3], Some(vec![33])),
+                page(&[5], None),
+            ],
+        ),
+        (
+            "View.Right",
+            vec![
+                page(&[2], Some(vec![11])),
+                page(&[4], Some(vec![44])),
+                page(&[6], None),
+            ],
+        ),
+        (
+            "View.Left",
+            vec![
+                page(&[-3], Some(vec![11])),
+                page(&[5], Some(vec![55])),
+                page(&[7], None),
+            ],
+        ),
+        (
+            "View.Right",
+            vec![
+                page(&[2], Some(vec![11])),
+                page(&[9], Some(vec![66])),
+                page(&[8], None),
+            ],
+        ),
+        (
+            "View.Left",
+            vec![
+                page(&[-1], Some(vec![11])),
+                page(&[3], Some(vec![33])),
+                page(&[7], None),
+            ],
+        ),
+        (
+            "View.Right",
+            vec![
+                page(&[2], Some(vec![11])),
+                page(&[4], Some(vec![44])),
+                page(&[10], None),
+            ],
+        ),
+    ]);
+
+    for (fold, expected) in [21, 3, 12].into_iter().enumerate() {
+        assert_eq!(
+            run_with_fixture_functions(incremental_scoped_view_body(), &mut source).unwrap(),
+            integer(expected),
+            "paired view refresh fold {fold} computes only that generation's filtered rows"
+        );
+    }
+
+    assert_eq!(source.lanes.len(), 6);
+    for generation in 0..3 {
+        let left = &source.lanes[generation * 2];
+        let right = &source.lanes[generation * 2 + 1];
+        assert_eq!(left.0, "View.Left");
+        assert_eq!(right.0, "View.Right");
+        assert_ne!(left.1, right.1, "generation {generation} keeps sibling view scopes distinct");
+    }
+}
+
 fn paired_subscription_cascade_body() -> Expr {
     let left = relation_stage(
         relation_stage(
