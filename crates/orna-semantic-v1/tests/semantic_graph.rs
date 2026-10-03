@@ -18461,3 +18461,93 @@ fn paired_sparse_compaction_fold_chain_keeps_learned_omission_identity() {
         "rejecting the paired row is atomic, then the right map continues through the later row"
     );
 }
+
+#[test]
+fn paired_rollback_identity_survives_repeated_sparse_compaction_rejections() {
+    let source = include_str!("fixtures/historical-paired-rollback-sparse-compaction-chain.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-paired-rollback-sparse-compaction-chain.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    let type_errors = result
+        .diagnostics
+        .iter()
+        .filter(|diagnostic| diagnostic.code() == DIAG_TYPE)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        type_errors.len(),
+        2,
+        "each crossed pair is rejected once while sparse rows remain harmless: {:?}",
+        type_errors
+            .iter()
+            .map(|diagnostic| diagnostic.message())
+            .collect::<Vec<_>>()
+    );
+    let module = result
+        .modules
+        .values()
+        .find(|module| {
+            module
+                .symbols
+                .contains_key("paired_rollback_sparse_compaction_chain")
+        })
+        .expect("paired rollback compaction fixture module");
+    let Type::Function { result, .. } =
+        &module.symbols["paired_rollback_sparse_compaction_chain"].ty
+    else {
+        panic!("paired rollback proof must return its computed rows");
+    };
+    let Type::List(row) = result.as_ref() else {
+        panic!("paired rollback proof must retain compacted rows: {result:?}");
+    };
+    let Type::Record(fields) = row.as_ref() else {
+        panic!("compacted rows must remain records: {row:?}");
+    };
+    let Type::Record(checkpoints) = fields.get("checkpoints").expect("nested checkpoints") else {
+        panic!("checkpoint map must remain a nested record");
+    };
+    let tuple_maps = |name: &str| {
+        let Type::Tuple(slots) = checkpoints.get(name).expect("paired checkpoint lane") else {
+            panic!("{name} must retain its checkpoint tuple");
+        };
+        slots
+            .iter()
+            .map(|slot| {
+                let mut selectors = BTreeSet::new();
+                collect_snapshot_contexts(slot, &mut selectors);
+                selectors
+            })
+            .collect::<Vec<_>>()
+    };
+    let selectors = |values: &[&str]| {
+        values
+            .iter()
+            .map(|value| format!("selector:HEAD~{value}"))
+            .collect::<BTreeSet<_>>()
+    };
+    assert_eq!(
+        tuple_maps("left_checkpoint"),
+        [selectors(&["620", "650"]), selectors(&["610", "620", "650"])],
+        "later left pins grow only from rows accepted after both rollbacks"
+    );
+    assert_eq!(
+        tuple_maps("right_checkpoint"),
+        [selectors(&["510", "520", "550"]), selectors(&["520", "550"])],
+        "neither rejected right split leaks into the recovered paired identity"
+    );
+    let mut witness = BTreeSet::new();
+    collect_snapshot_contexts(
+        checkpoints.get("witness").expect("nested witness sibling"),
+        &mut witness,
+    );
+    assert_eq!(
+        witness,
+        selectors(&["600", "611", "621", "632", "633", "641", "642", "651"]),
+        "nested witness pins from rejected pairs and sparse rows survive tuple rollback"
+    );
+}
