@@ -788,6 +788,37 @@ impl PackageResolver {
         Ok((route, transitions))
     }
 
+    /// Applies paired history-compaction folds grouped into caller-visible
+    /// pages. Folds run in order across page boundaries, so stable snapshot
+    /// labels from an earlier page still select the same pins after later
+    /// compaction moves their coordinates. The reference is silent on
+    /// paginating in-memory attach history; v1 preserves one transition list
+    /// per input page (including empty pages) and returns no partial result if
+    /// any fold is invalid.
+    pub fn compact_nested_terminal_pair_history_pages_preserving_terminal_identity(
+        &self,
+        previous: &ReboundPathResolution,
+        pages: &[&[[NestedPairDepthLabel; 2]]],
+    ) -> Result<
+        (
+            ReboundPathResolution,
+            Vec<Vec<(NestedPairTerminalRouteIdentity, NestedPairTerminalRouteIdentity)>>,
+        ),
+        AttachmentError,
+    > {
+        let mut route = previous.clone();
+        let mut page_transitions = Vec::with_capacity(pages.len());
+        for page in pages {
+            let (compacted, transitions) = self
+                .compact_nested_terminal_pair_history_folds_preserving_terminal_identity(
+                    &route, page,
+                )?;
+            route = compacted;
+            page_transitions.push(transitions);
+        }
+        Ok((route, page_transitions))
+    }
+
     /// Continues a terminal-pair chain from an exact retained session. The
     /// first pair uses that session as its handoff root; later pairs continue
     /// from the preceding pair's newest handoff. The reference does not define
