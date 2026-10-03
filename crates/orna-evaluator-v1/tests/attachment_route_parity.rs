@@ -1694,6 +1694,173 @@ fn fresh_nested_route_pair_chains_evaluate_rebound_closure_values() {
 }
 
 #[test]
+fn paired_terminal_compaction_folds_preserve_nested_rebind_identity() {
+    let package_source = include_str!("fixtures/attachment-route-package.orna");
+    let primary_source = include_str!("fixtures/attachment-route-primary.orna");
+    let (package_dir, package_repository, _) = repository(package_source);
+    let aliases = [
+        "archive",
+        "archive_copy",
+        "archive_copy_archive",
+        "archive_copy_archive_archive",
+        "archive_copy_archive_archive_archive",
+    ];
+    let snapshot = |value: &str, manifest: Option<&str>, message: &str| {
+        commit_snapshot(
+            package_dir.path(),
+            &package_source.replace("42", value),
+            manifest,
+            message,
+        )
+    };
+
+    let leaf_initial = snapshot("93", None, "compaction initial leaf");
+    let leaf_first = snapshot("94", None, "compaction first leaf");
+    let leaf_second = snapshot("96", None, "compaction second leaf");
+    let route_three_initial = snapshot(
+        "83",
+        Some(&format!("{} {}\n", aliases[4], leaf_initial)),
+        "compaction initial third depth",
+    );
+    let route_three_first = snapshot(
+        "84",
+        Some(&format!("{} {}\n", aliases[4], leaf_first)),
+        "compaction first third depth",
+    );
+    let route_three_second = snapshot(
+        "85",
+        Some(&format!("{} {}\n", aliases[4], leaf_second)),
+        "compaction second third depth",
+    );
+    let terminal_initial = snapshot(
+        "80",
+        Some(&format!("{} {}\n", aliases[3], route_three_initial)),
+        "compaction initial second depth",
+    );
+    let terminal_first = snapshot(
+        "81",
+        Some(&format!("{} {}\n", aliases[3], route_three_first)),
+        "compaction first second depth",
+    );
+    let deep_initial = snapshot(
+        "70",
+        Some(&format!("{} {}\n", aliases[2], terminal_initial)),
+        "compaction initial deep route",
+    );
+    let middle = snapshot(
+        "60",
+        Some(&format!("{} {}\n", aliases[1], deep_initial)),
+        "compaction middle route",
+    );
+
+    let (primary_dir, primary_repository, _) = repository(primary_source);
+    let parent_commit = commit_snapshot(
+        primary_dir.path(),
+        primary_source,
+        Some(&format!("{} {}\n", aliases[0], middle)),
+        "compaction primary route",
+    );
+    let loader = ProjectLoader::default();
+    let resolver = PackageResolver::new(
+        aliases
+            .iter()
+            .map(|alias| ((*alias).to_owned(), package_repository.clone())),
+        loader,
+    )
+    .unwrap();
+    let parent = resolver
+        .resolve_for_parent(
+            PinnedDatabase::resolve("app", primary_repository, &parent_commit, loader).unwrap(),
+        )
+        .unwrap();
+    let nested_parent = resolver
+        .resolve_nested_path(&parent, &[aliases[0], aliases[1]])
+        .unwrap();
+    let fresh_route = resolver
+        .resolve_nested_rebind_path(&nested_parent, &[])
+        .unwrap();
+    let first_pair = [
+        PinnedDatabase::resolve(
+            aliases[2],
+            package_repository.clone(),
+            &terminal_first,
+            loader,
+        )
+        .unwrap(),
+        PinnedDatabase::resolve(
+            aliases[3],
+            package_repository.clone(),
+            &route_three_first,
+            loader,
+        )
+        .unwrap(),
+    ];
+    let second_pair = [
+        PinnedDatabase::resolve(
+            aliases[3],
+            package_repository.clone(),
+            &route_three_second,
+            loader,
+        )
+        .unwrap(),
+        PinnedDatabase::resolve(aliases[4], package_repository, &leaf_second, loader).unwrap(),
+    ];
+    let first_stage = resolver
+        .extend_nested_terminal_pair_chain(&fresh_route, &[first_pair.clone()])
+        .unwrap();
+    let nested_rebinds = resolver
+        .extend_nested_terminal_pair_chain(&first_stage, &[second_pair])
+        .unwrap();
+    let first_label = first_stage.retained_depth_label(0, 0).unwrap();
+    let second_label = nested_rebinds.retained_depth_label(2, 1).unwrap();
+    let dropped_label = nested_rebinds.retained_depth_label(1, 0).unwrap();
+    let terminal_identity = nested_rebinds.terminal_route_identity();
+    let folds = [
+        [first_label.clone(), second_label.clone()],
+        [second_label.clone(), first_label.clone()],
+    ];
+
+    let (compacted, identity_edges) = resolver
+        .compact_nested_terminal_pair_history_folds_preserving_terminal_identity(
+            &nested_rebinds,
+            &folds,
+        )
+        .unwrap();
+    assert_eq!(identity_edges.len(), 2);
+    for (before, after) in identity_edges {
+        assert_eq!(before, terminal_identity);
+        assert_eq!(after, terminal_identity);
+    }
+    assert_eq!(compacted.retained_sessions().len(), 2);
+    assert_eq!(compacted.terminal_route_identity(), terminal_identity);
+    assert_eq!(compacted.retained_depth_label(0, 0).unwrap(), second_label);
+    assert_eq!(compacted.retained_depth_label(0, 1).unwrap(), first_label);
+    assert!(matches!(
+        resolver.extend_nested_terminal_pair_storm_from_label(&compacted, &dropped_label, &[]),
+        Err(AttachmentError::RetainedSnapshotUnavailable)
+    ));
+
+    let rebound = resolver
+        .extend_nested_terminal_pair_storm_from_label(
+            &compacted,
+            &first_label,
+            std::slice::from_ref(&first_pair),
+        )
+        .unwrap();
+    let mut evaluator = AdmittedReplSession::from_attached_database_session(
+        &rebound.retained_wave(2).unwrap()[1],
+        Limits::default(),
+    )
+    .unwrap();
+    assert_eq!(evaluator.submit(&format!("use {};", aliases[3])), Ok(None));
+    assert_eq!(
+        evaluator.submit(&format!("{}.package_value()", aliases[3])),
+        Ok(Some(Value::int(84.into()))),
+        "the original nested pin label still resolves its real closure after paired compaction folds"
+    );
+}
+
+#[test]
 fn sibling_checkpoint_folds_keep_tabular_anchor_identities() {
     let package_source = include_str!("fixtures/attachment-route-package.orna");
     let primary_source = include_str!("fixtures/attachment-route-primary.orna");
