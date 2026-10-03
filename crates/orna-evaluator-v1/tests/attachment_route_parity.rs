@@ -1637,6 +1637,11 @@ fn sibling_checkpoint_folds_keep_tabular_anchor_identities() {
         anchor_independent_a.depth_label(),
         "row-indexed checkpoints preserve distinct anchor identities"
     );
+    assert!(folded.validate_handoff_checkpoint(0, &anchor_a).is_ok());
+    assert!(matches!(
+        folded.validate_handoff_checkpoint(2, &anchor_a),
+        Err(AttachmentError::RetainedSnapshotUnavailable)
+    ));
     assert!(matches!(
         resolver.extend_nested_terminal_pair_checkpoint_storms(
             &folded.routes()[2],
@@ -1645,10 +1650,15 @@ fn sibling_checkpoint_folds_keep_tabular_anchor_identities() {
         Err(AttachmentError::RetainedSnapshotUnavailable)
     ));
 
-    let anchor_b = folded.handoff_checkpoint(1, 4, 0).unwrap();
-    let continuation_a = [(&anchor_a, middle_waves_a.as_slice())];
-    let continuation_b = [(&anchor_b, middle_waves_b.as_slice())];
-    let continuation_independent_a = [(&anchor_independent_a, middle_waves_a.as_slice())];
+    let continuation_root_a = folded.handoff_checkpoint(0, 6, 0).unwrap();
+    let continuation_root_b = folded.handoff_checkpoint(1, 6, 0).unwrap();
+    let continuation_root_independent_a = folded.handoff_checkpoint(2, 6, 0).unwrap();
+    let continuation_a = [(&continuation_root_a, root_waves_a.as_slice())];
+    let continuation_b = [(&continuation_root_b, root_waves_b.as_slice())];
+    let continuation_independent_a = [(
+        &continuation_root_independent_a,
+        root_return_waves_a.as_slice(),
+    )];
     let continuation_plans = [
         continuation_a.as_slice(),
         continuation_b.as_slice(),
@@ -1698,8 +1708,23 @@ fn sibling_checkpoint_folds_keep_tabular_anchor_identities() {
         Err(AttachmentError::RetainedSnapshotUnavailable)
     ));
     for (row, expected_value) in [(0, 91), (1, 92), (2, 91)] {
+        let final_session = nested_folded.routes()[row].final_session();
+        assert_eq!(
+            final_session
+                .database(aliases[4])
+                .unwrap()
+                .pin()
+                .commit()
+                .as_str(),
+            if expected_value == 91 {
+                leaf_a.as_str()
+            } else {
+                leaf_b.as_str()
+            },
+            "the nested row keeps the expected terminal pin"
+        );
         let mut evaluator = AdmittedReplSession::from_attached_database_session(
-            &nested_folded.routes()[row].final_session(),
+            final_session,
             Limits::default(),
         )
         .unwrap();

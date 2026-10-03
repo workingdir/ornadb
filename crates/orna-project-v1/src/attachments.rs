@@ -1046,6 +1046,11 @@ impl PackageResolver {
         if storms_by_row.len() != previous.routes.len() {
             return Err(AttachmentError::RetainedSnapshotUnavailable);
         }
+        for (route, storms) in storms_by_row.iter().enumerate() {
+            for (checkpoint, _) in *storms {
+                previous.validate_handoff_checkpoint(route, checkpoint)?;
+            }
+        }
         let paths = previous
             .routes
             .iter()
@@ -1583,6 +1588,22 @@ impl SiblingRebindResolution {
             .get(route)
             .ok_or(AttachmentError::RetainedSnapshotUnavailable)?
             .handoff_checkpoint(wave, depth)
+    }
+
+    /// Verifies that a checkpoint belongs to one retained sibling row.
+    /// Equal pins and wave/depth coordinates in another row do not transfer
+    /// identity. The reference does not define cross-row checkpoint reuse;
+    /// v1 accepts only the selected row's original route and snapshot token.
+    pub fn validate_handoff_checkpoint(
+        &self,
+        route: usize,
+        checkpoint: &ReboundPathCheckpoint,
+    ) -> Result<(), AttachmentError> {
+        checkpoint.validate_depth_identity()?;
+        self.routes
+            .get(route)
+            .ok_or(AttachmentError::RetainedSnapshotUnavailable)?
+            .validate_depth_label(&checkpoint.depth_label)
     }
 
     /// Takes ownership of the sibling results in input order.
