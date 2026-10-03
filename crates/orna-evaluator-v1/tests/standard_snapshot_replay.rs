@@ -2901,8 +2901,36 @@ fn diamond_dependency_snapshots_replay_deterministically_when_interleaved() {
 }
 
 #[test]
-fn dependency_graph_replays_reject_divergent_edge_sources() {
+fn dependency_graph_replays_reject_divergence_without_retargeting_values() {
     let (_directory, projects, snapshots, source_bundles) = dependency_graph_projects();
+    let expected_results = [1112, 2122, 2322, 2324, 23024];
+    let use_graph = include_str!("fixtures/snapshot-dependency-graph-use.orna");
+    let replay = include_str!("fixtures/snapshot-dependency-graph-call.orna");
+    let mut sessions = Vec::with_capacity(projects.len());
+
+    for (index, project) in projects.iter().enumerate() {
+        let mut session = AdmittedReplSession::from_loaded_project(
+            project,
+            source_bundles[index].clone(),
+            Limits::default(),
+        )
+        .unwrap_or_else(|error| {
+            panic!(
+                "pinned program {} could not be replayed: {}",
+                snapshots[index],
+                error.code()
+            )
+        });
+        assert_eq!(session.submit(use_graph), Ok(None));
+        assert_eq!(
+            session.submit(replay),
+            Ok(Some(int(expected_results[index]))),
+            "program {} must compute with its own captured dependency graph",
+            snapshots[index]
+        );
+        sessions.push(session);
+    }
+
     let mut divergent_edges = 0;
 
     for index in 0..projects.len() - 1 {
@@ -2912,10 +2940,7 @@ fn dependency_graph_replays_reject_divergent_edge_sources() {
             snapshots[index]
         );
         assert_eq!(
-            projects[index + 1]
-                .standard_profile()
-                .unwrap()
-                .snapshot(),
+            projects[index + 1].standard_profile().unwrap().snapshot(),
             snapshots[index + 1]
         );
 
@@ -2969,5 +2994,17 @@ fn dependency_graph_replays_reject_divergent_edge_sources() {
         }
     }
 
-    assert_eq!(divergent_edges, 4, "each graph layer changes in one upgrade");
+    assert_eq!(
+        divergent_edges, 4,
+        "each graph layer changes in one upgrade"
+    );
+
+    for index in [4, 2, 0, 3, 1, 4, 0, 1, 3, 2] {
+        assert_eq!(
+            sessions[index].submit(replay),
+            Ok(Some(int(expected_results[index]))),
+            "rejected source drift must not retarget replayed program {}",
+            snapshots[index]
+        );
+    }
 }
