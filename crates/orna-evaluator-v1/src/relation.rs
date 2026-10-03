@@ -783,7 +783,7 @@ impl RelationPlan {
 
 #[cfg(test)]
 mod tests {
-    use super::{FilterBatch, RelationPlan, RelationStage};
+    use super::{FilterBatch, RelationPlan, RelationReadScope, RelationStage};
     use crate::Value;
     use std::sync::Arc;
 
