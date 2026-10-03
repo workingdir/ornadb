@@ -6532,6 +6532,8 @@ struct QueryWindowSpillCascadeFold {
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct QueryPairedAggregateSpillRestorationFold {
     identity: String,
+    aggregate_fold_identity: String,
+    spill_fold_identity: Option<String>,
     aggregate_pair_count: u64,
     aggregate_stage_count: u64,
     spill_pair_count: u64,
@@ -6901,6 +6903,8 @@ fn query_paired_aggregate_spill_restoration_fold(
 ) -> QueryPairedAggregateSpillRestorationFold {
     let spill_totals = spill_fold.map(|fold| fold.totals);
     let spill_pair_count = spill_fold.map_or(0, |fold| fold.spill_pair_count);
+    let aggregate_fold_identity = aggregate_fold.identity.clone();
+    let spill_fold_identity = spill_fold.map(|fold| fold.identity.clone());
     let overflowed = aggregate_fold.overflowed
         || spill_totals.is_some_and(|totals| totals.overflowed);
 
@@ -6911,8 +6915,8 @@ fn query_paired_aggregate_spill_restoration_fold(
         previous.map(|previous| previous.identity.as_str()),
     );
     hash_part(&mut hash, pair_identity.as_bytes());
-    hash_part(&mut hash, aggregate_fold.identity.as_bytes());
-    hash_optional_text(&mut hash, spill_fold.map(|fold| fold.identity.as_str()));
+    hash_part(&mut hash, aggregate_fold_identity.as_bytes());
+    hash_optional_text(&mut hash, spill_fold_identity.as_deref());
     hash.update(aggregate_fold.pair_count.to_be_bytes());
     hash.update(aggregate_fold.aggregate_stage_count.to_be_bytes());
     hash.update(spill_pair_count.to_be_bytes());
@@ -6929,6 +6933,8 @@ fn query_paired_aggregate_spill_restoration_fold(
             "paired-aggregate-spill-restoration-fold:{}",
             hex(&hash.finalize())
         ),
+        aggregate_fold_identity,
+        spill_fold_identity,
         aggregate_pair_count: aggregate_fold.pair_count,
         aggregate_stage_count: aggregate_fold.aggregate_stage_count,
         spill_pair_count,
@@ -6945,6 +6951,18 @@ fn add_paired_aggregate_spill_restoration_fold_details(
         "paired_aggregate_spill_restoration_fold_identity".to_owned(),
         PlanDetail::Text(fold.identity.clone()),
     );
+    details.insert(
+        "paired_aggregate_spill_restoration_aggregate_fold_identity".to_owned(),
+        PlanDetail::Text(fold.aggregate_fold_identity.clone()),
+    );
+    if let Some(identity) = fold.spill_fold_identity.as_deref() {
+        details.insert(
+            "paired_aggregate_spill_restoration_spill_fold_identity".to_owned(),
+            PlanDetail::Text(identity.to_owned()),
+        );
+    } else {
+        details.remove("paired_aggregate_spill_restoration_spill_fold_identity");
+    }
     details.insert(
         "paired_aggregate_spill_restoration_fold_pairing".to_owned(),
         PlanDetail::Text(
