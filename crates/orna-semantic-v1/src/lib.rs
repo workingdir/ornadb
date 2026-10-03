@@ -7259,12 +7259,12 @@ fn infer(
                 .find(|parent| type_contains_pinned_checkpoint_tuple(parent))
                 .cloned()
                 .or_else(|| first_parent.clone());
-            // An all-omitted first row anchors rollback to the smallest
-            // structural checkpoint scope that later fails. Keep unaffected
-            // sibling scopes folding so valid depth labels are not discarded.
-            let scoped_checkpoint_rollback = first_parent
-                .as_ref()
-                .is_some_and(type_contains_omitted_checkpoint_tuple);
+            // The first row anchors rollback. An all-omitted tuple in any row
+            // can expose a cross-sibling selector collision, so enable scoped
+            // recovery for the whole fold and keep unaffected siblings folding.
+            let scoped_checkpoint_rollback = element_types
+                .iter()
+                .any(type_contains_omitted_checkpoint_tuple);
             let mut rolled_back_checkpoint_paths = BTreeSet::new();
             let mut rejected_checkpoint_parent = false;
             let mut ty = None;
@@ -18158,10 +18158,19 @@ fn pinned_snapshot_reset_shape_matches(expected: &Type, selected: &Type) -> bool
     let mut path = Vec::new();
     collect_reset_snapshot_context_maps(expected, selected, &mut maps, &mut path)
         && snapshot_context_topology_matches(&maps)
-        && pinned_snapshot_reset_shape_matches_at_path(expected, selected)
+        && pinned_snapshot_reset_shape_matches_at_path(expected, selected, false)
 }
 
-fn pinned_snapshot_reset_shape_matches_at_path(expected: &Type, selected: &Type) -> bool {
+fn pinned_snapshot_reset_shape_matches_at_path(
+    expected: &Type,
+    selected: &Type,
+    input_position: bool,
+) -> bool {
+    if input_position && matches!(selected, Type::Bottom) && !matches!(expected, Type::Bottom) {
+        // A reset cannot narrow an established callable input to Bottom: a
+        // previously valid nested snapshot argument would stop being accepted.
+        return false;
+    }
     if matches!(expected, Type::Bottom) || matches!(selected, Type::Bottom) {
         return true;
     }
@@ -18174,17 +18183,17 @@ fn pinned_snapshot_reset_shape_matches_at_path(expected: &Type, selected: &Type)
         | (Type::Relation(expected), Type::Relation(selected))
         | (Type::Stream(expected), Type::Stream(selected))
         | (Type::Optional(expected), Type::Optional(selected)) => {
-            pinned_snapshot_reset_shape_matches_at_path(expected, selected)
+            pinned_snapshot_reset_shape_matches_at_path(expected, selected, input_position)
         }
         (Type::Tuple(expected), Type::Tuple(selected)) if expected.len() == selected.len() => {
             expected.iter().zip(selected).all(|(expected, selected)| {
-                pinned_snapshot_reset_shape_matches_at_path(expected, selected)
+                pinned_snapshot_reset_shape_matches_at_path(expected, selected, input_position)
             })
         }
         (Type::Record(expected), Type::Record(selected)) if expected.len() == selected.len() => {
             expected.iter().all(|(name, expected)| {
                 selected.get(name).is_some_and(|selected| {
-                    pinned_snapshot_reset_shape_matches_at_path(expected, selected)
+                    pinned_snapshot_reset_shape_matches_at_path(expected, selected, input_position)
                 })
             })
         }
@@ -18209,9 +18218,17 @@ fn pinned_snapshot_reset_shape_matches_at_path(expected: &Type, selected: &Type)
                     .iter()
                     .zip(selected_parameters)
                     .all(|(expected, selected)| {
-                        pinned_snapshot_reset_shape_matches_at_path(expected, selected)
+                        pinned_snapshot_reset_shape_matches_at_path(
+                            expected,
+                            selected,
+                            !input_position,
+                        )
                     })
-                && pinned_snapshot_reset_shape_matches_at_path(expected_result, selected_result)
+                && pinned_snapshot_reset_shape_matches_at_path(
+                    expected_result,
+                    selected_result,
+                    input_position,
+                )
         }
         (
             Type::Applied {
@@ -18227,7 +18244,7 @@ fn pinned_snapshot_reset_shape_matches_at_path(expected: &Type, selected: &Type)
                 .iter()
                 .zip(selected_arguments)
                 .all(|(expected, selected)| {
-                    pinned_snapshot_reset_shape_matches_at_path(expected, selected)
+                    pinned_snapshot_reset_shape_matches_at_path(expected, selected, input_position)
                 })
         }
         (
@@ -18240,8 +18257,15 @@ fn pinned_snapshot_reset_shape_matches_at_path(expected: &Type, selected: &Type)
                 unit: selected_unit,
             },
         ) => {
-            pinned_snapshot_reset_shape_matches_at_path(expected_currency, selected_currency)
-                && pinned_snapshot_reset_shape_matches_at_path(expected_unit, selected_unit)
+            pinned_snapshot_reset_shape_matches_at_path(
+                expected_currency,
+                selected_currency,
+                input_position,
+            ) && pinned_snapshot_reset_shape_matches_at_path(
+                expected_unit,
+                selected_unit,
+                input_position,
+            )
         }
         _ => expected == selected,
     }
@@ -19217,8 +19241,9 @@ fn merge_multi_parent_checkpoint_value_scoped(
         || !topology_matches
         || !compaction_preserves_identity
     {
-        if widths_match
-            && rollback_conflicting_checkpoint_paths(
+        // A late omission can change widths along with identity topology.
+        // Let concrete mismatch paths roll back first, then revalidate widths.
+        if rollback_conflicting_checkpoint_paths(
                 &mut merged,
                 &mut effective_parent,
                 rollback_anchor,
@@ -23349,6 +23374,27 @@ mod tests {
         assert!(merge_list_element_types(&nested_malformed, &nested_malformed).is_none());
         assert!(merge_checkpoint_field_map(&nested_malformed, &nested_malformed).is_none());
         assert!(pinned_snapshot_reset_type(&nested_malformed, &nested_malformed).is_none());
+    }
+
+    #[test]
+    fn checkpoint_resets_preserve_nested_callable_input_contracts() {
+        let callable = |parameter: Type, result_selector: &str| Type::Function {
+            parameters: vec![parameter],
+            parameter_names: Some(vec!["nested_pin".into()]),
+            default_parameters: BTreeSet::new(),
+            result: Box::new(contextual_snapshot_ref(result_selector)),
+        };
+        let concrete_input = callable(
+            contextual_snapshot_ref("selector:input:checkpoint"),
+            "selector:result:checkpoint",
+        );
+        let omitted_input = callable(Type::Bottom, "selector:result:omitted-input");
+
+        assert!(pinned_snapshot_reset_type(&omitted_input, &concrete_input).is_some());
+        assert!(
+            pinned_snapshot_reset_type(&concrete_input, &omitted_input).is_none(),
+            "restoring a nested checkpoint must not remove an input boundary that the local accepted"
+        );
     }
 
     #[test]
