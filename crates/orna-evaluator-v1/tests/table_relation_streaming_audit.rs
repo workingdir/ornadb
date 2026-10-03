@@ -208,6 +208,31 @@ fn paired_sparse_window_checkpoint_functions() -> Functions {
         .collect()
 }
 
+fn nested_pagination_compaction_functions() -> Functions {
+    let parsed = parse_module(include_str!(
+        "fixtures/table_relation_nested_pagination_compaction_gwlx9.orna"
+    ));
+    assert!(parsed.is_ok(), "{:?}", parsed.diagnostics);
+    parsed
+        .value
+        .items
+        .into_iter()
+        .map(|item| {
+            let orna_syntax_v1::Declaration::Function { signature, body } = item.declaration else {
+                panic!("fixture function expected")
+            };
+            (
+                signature.name,
+                PureFunction {
+                    parameters: signature.parameters,
+                    body,
+                    environment: Environment::new(),
+                },
+            )
+        })
+        .collect()
+}
+
 fn paired_checkpoint_rotation_functions() -> Functions {
     let parsed = parse_module(include_str!(
         "fixtures/table_relation_paired_window_checkpoint_rotation_n37re.orna"
@@ -3984,6 +4009,65 @@ fn paired_window_folds_keep_values_across_sparse_checkpoint_restore_chains() {
         expected_cursors,
         "the same sparse checkpoint sequence advances independently in each source scope"
     );
+    assert!(source.pending["View.Left"].is_empty());
+    assert!(source.pending["View.Right"].is_empty());
+}
+
+#[test]
+fn nested_aggregates_keep_values_across_paired_pagination_compaction_chains() {
+    // Cross-refresh cursor reuse is unspecified by the reference. Each source
+    // snapshot owns its page chain; the short checkpoint remains greater than
+    // its long predecessor and is reused only inside that scope.
+    let cursors = [vec![0x51, 0xff], vec![0x52], vec![0x52, 0x01]];
+    let restore = |groups: &[&[i64]]| {
+        assert_eq!(groups.len(), cursors.len() + 1);
+        groups
+            .iter()
+            .enumerate()
+            .map(|(index, values)| {
+                let after = index.checked_sub(1).map(|previous| cursors[previous].clone());
+                let next = cursors.get(index).cloned();
+                (after, page(values, next))
+            })
+            .collect::<CursorRestore>()
+    };
+    let mut source = PairedCursorRestoreSource::new([
+        ("View.Left", restore(&[&[1, 2], &[3], &[4, 5], &[6]])),
+        ("View.Right", restore(&[&[10], &[20, 30], &[40], &[50, 60]])),
+        ("View.Left", restore(&[&[4], &[5, 6], &[7], &[8, 9]])),
+        ("View.Right", restore(&[&[2], &[4, 6], &[8], &[10, 12]])),
+        ("View.Left", restore(&[&[-1], &[3, 5], &[7], &[9, 11]])),
+        ("View.Right", restore(&[&[3], &[6, 9], &[12], &[15, 18]])),
+    ]);
+    let mut functions = nested_pagination_compaction_functions();
+    functions.insert(
+        "run".into(),
+        PureFunction {
+            parameters: Vec::new(),
+            body: paired_nested_aggregate_refresh_body(),
+            environment: Environment::new(),
+        },
+    );
+    let run_refresh = |source: &mut PairedCursorRestoreSource| {
+        invoke_named_with_effects(
+            "run",
+            &functions,
+            &Environment::new(),
+            Limits::default(),
+            source,
+        )
+        .unwrap()
+    };
+
+    let first = run_refresh(&mut source);
+    assert_eq!(first, integer_pair(56, 560), "the first nested page folds compute (56, 560)");
+    let second = run_refresh(&mut source);
+    assert_eq!(second, integer_pair(104, 112), "the compacted second pair computes (104, 112)");
+    let third = run_refresh(&mut source);
+    assert_eq!(third, integer_pair(94, 168), "the final page pair computes (94, 168)");
+    assert_eq!(first, integer_pair(56, 560), "later refreshes preserve the first nested aggregate pair");
+    assert_eq!(second, integer_pair(104, 112), "later refreshes preserve the second nested aggregate pair");
+    assert_eq!(source.lanes.len(), 6, "three refreshes restore paired source chains");
     assert!(source.pending["View.Left"].is_empty());
     assert!(source.pending["View.Right"].is_empty());
 }
