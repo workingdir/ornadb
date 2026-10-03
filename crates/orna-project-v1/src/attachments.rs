@@ -937,10 +937,10 @@ impl PackageResolver {
     /// for attach routes, so v1 treats each yielded pair as one ordered fold
     /// and returns no route unless the complete stream validates. Foreign,
     /// malformed, or duplicate identities stop consumption with an error.
-    pub fn compact_nested_terminal_pair_checkpoint_spill_stream_preserving_terminal_identity(
+    pub fn compact_nested_terminal_pair_checkpoint_spill_stream_preserving_terminal_identity<'a>(
         &self,
         previous: &ReboundPathResolution,
-        checkpoint_folds: impl IntoIterator<Item = [&ReboundPathCheckpoint; 2]>,
+        checkpoint_folds: impl IntoIterator<Item = [&'a ReboundPathCheckpoint; 2]>,
     ) -> Result<
         (
             ReboundPathResolution,
