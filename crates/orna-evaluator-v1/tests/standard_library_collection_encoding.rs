@@ -51,6 +51,10 @@ fn integer(value: i64) -> Raw {
     Raw::Int(value.into())
 }
 
+fn big_integer(value: &str) -> Raw {
+    Raw::Int(value.parse().expect("test integer literal is valid"))
+}
+
 fn tuple(parts: Vec<Raw>) -> Raw {
     Raw::Tag(60015, Box::new(Raw::Array(parts)))
 }
@@ -63,6 +67,10 @@ fn encoded(raw: Raw) -> CanonicalValue {
     value(Raw::Bytes(
         value(raw).encode().expect("expected OVB encoding"),
     ))
+}
+
+fn encoded_bytes(raw: Raw) -> Raw {
+    Raw::Bytes(value(raw).encode().expect("expected OVB encoding"))
 }
 
 #[test]
@@ -227,7 +235,9 @@ fn map_projection_uses_complete_ovb_key_bytes_at_text_length_boundaries() {
 #[test]
 fn map_projection_sorts_nested_tuple_key_encodings() {
     assert_eq!(
-        evaluate(include_str!("fixtures/stdlib-map-nested-ovb-key-order-w02pm.orna")),
+        evaluate(include_str!(
+            "fixtures/stdlib-map-nested-ovb-key-order-w02pm.orna"
+        )),
         Ok(value(Raw::Array(vec![
             tuple(vec![
                 tuple(vec![Raw::Text("z".into()), integer(0)]),
@@ -244,7 +254,9 @@ fn map_projection_sorts_nested_tuple_key_encodings() {
 #[test]
 fn map_projection_orders_a_four_entry_map_by_canonical_key() {
     assert_eq!(
-        evaluate(include_str!("fixtures/stdlib-map-four-entry-ovb-order-w02pm.orna")),
+        evaluate(include_str!(
+            "fixtures/stdlib-map-four-entry-ovb-order-w02pm.orna"
+        )),
         Ok(value(Raw::Array(vec![
             tuple(vec![Raw::Text("a".into()), integer(1)]),
             tuple(vec![Raw::Text("b".into()), integer(2)]),
@@ -255,18 +267,76 @@ fn map_projection_orders_a_four_entry_map_by_canonical_key() {
 }
 
 #[test]
+fn encoded_map_projection_orders_integer_head_boundaries_and_normalizes_duplicates() {
+    let ordered = vec![
+        (integer(0), integer(0)),
+        (integer(23), integer(23)),
+        (integer(24), integer(240)),
+        (integer(255), integer(255)),
+        (integer(256), integer(256)),
+        (integer(-1), integer(-1)),
+        (integer(-24), integer(-24)),
+        (integer(-25), integer(-25)),
+        (
+            big_integer("18446744073709551616"),
+            big_integer("18446744073709551616"),
+        ),
+        (
+            big_integer("-18446744073709551617"),
+            big_integer("-18446744073709551617"),
+        ),
+    ];
+    let expected = value(Raw::Array(
+        ordered
+            .into_iter()
+            .map(|(key, item)| tuple(vec![encoded_bytes(key), encoded_bytes(item)]))
+            .collect(),
+    ));
+    assert_eq!(
+        evaluate(include_str!(
+            "fixtures/stdlib-map-ovb-integer-heads-ugnd3.orna"
+        )),
+        Ok(expected)
+    );
+}
+
+#[test]
+fn encoded_map_projection_orders_deep_tuple_keys_by_complete_ovb_bytes() {
+    let aa_key = tuple(vec![
+        tuple(vec![
+            tuple(vec![Raw::Text("aa".into()), integer(0)]),
+            tuple(vec![integer(1), integer(2)]),
+        ]),
+        integer(0),
+    ]);
+    let z_key = tuple(vec![
+        tuple(vec![
+            tuple(vec![Raw::Text("z".into()), integer(0)]),
+            tuple(vec![integer(1), integer(3)]),
+        ]),
+        integer(1),
+    ]);
+    assert_eq!(
+        evaluate(include_str!("fixtures/stdlib-map-ovb-nested-ugnd3.orna")),
+        Ok(value(Raw::Array(vec![
+            tuple(vec![encoded_bytes(z_key), encoded_bytes(integer(13))]),
+            tuple(vec![encoded_bytes(aa_key), encoded_bytes(integer(12))]),
+        ])))
+    );
+}
+
+#[test]
 fn structural_record_ovb_order_uses_encoded_nfc_field_keys() {
     let expected = encoded(Raw::Map(vec![
         (Raw::Text("aa".into()), integer(1)),
         (Raw::Text("é".into()), integer(2)),
         (Raw::Text("aaaaaaaaaaaaaaaaaaaaaaa".into()), integer(23)),
-        (
-            Raw::Text("bbbbbbbbbbbbbbbbbbbbbbbb".into()),
-            integer(24),
-        ),
+        (Raw::Text("bbbbbbbbbbbbbbbbbbbbbbbb".into()), integer(24)),
     ]));
     assert_eq!(
-        evaluate(include_str!("fixtures/stdlib-record-key-boundaries-w02pm.orna")),
+        evaluate(include_str!(
+            "fixtures/stdlib-record-key-boundaries-w02pm.orna"
+        )),
         Ok(expected)
     );
 }
@@ -369,6 +439,11 @@ fn map_and_set_bodies_are_bound_to_the_published_std_snapshot() {
         changed.push_str("\n// changed outside the pinned snapshot\n");
         assert!(profile.verify_source(path, &changed).is_err());
     }
+    let (_, map_source) = sources
+        .iter()
+        .find(|(path, _)| path == "std/map.orna")
+        .expect("the pinned standard snapshot contains std.map");
+    assert!(map_source.contains("pub fn encoded_entries_by_ovb_key"));
 }
 
 #[test]
