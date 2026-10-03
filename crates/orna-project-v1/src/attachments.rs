@@ -1133,6 +1133,58 @@ impl PackageResolver {
         Ok(route)
     }
 
+    /// Applies sparse storm rounds keyed by exact nested depth labels. Round
+    /// widths may vary because an omitted entry is not assigned a new slot;
+    /// every label previously selected or explicitly omitted remains tracked
+    /// and is revalidated after each fold. The reference is silent on sparse
+    /// nested storm batches, so v1 treats labels as stable keys and rejects a
+    /// duplicate key within one round. Failure returns no partial route.
+    pub fn extend_nested_terminal_pair_sparse_checkpoint_storm_rounds_from_depth_labels(
+        &self,
+        previous: &ReboundPathResolution,
+        rounds: &[&[(&NestedPairDepthLabel, Option<&[[PinnedDatabase; 2]]>)]],
+    ) -> Result<ReboundPathResolution, AttachmentError> {
+        let mut route = previous.clone();
+        let mut retained_labels = Vec::new();
+        for round in rounds {
+            let mut seen_labels = Vec::with_capacity(round.len());
+            let checkpoints = round
+                .iter()
+                .map(|(label, replacements)| {
+                    route.validate_depth_label(label)?;
+                    if seen_labels.contains(label) {
+                        return Err(AttachmentError::RetainedSnapshotUnavailable);
+                    }
+                    seen_labels.push((*label).clone());
+                    if !retained_labels.contains(label) {
+                        retained_labels.push((*label).clone());
+                    }
+                    let Some(replacement_waves) = replacements else {
+                        return Ok(None);
+                    };
+                    let checkpoint = route.handoff_checkpoint(label.wave, label.depth)?;
+                    if checkpoint.depth_label() != *label {
+                        return Err(AttachmentError::RetainedSnapshotUnavailable);
+                    }
+                    Ok(Some((checkpoint, *replacement_waves)))
+                })
+                .collect::<Result<Vec<_>, AttachmentError>>()?;
+            let storms = checkpoints
+                .iter()
+                .filter_map(|checkpoint| {
+                    checkpoint
+                        .as_ref()
+                        .map(|(checkpoint, replacement_waves)| (checkpoint, *replacement_waves))
+                })
+                .collect::<Vec<_>>();
+            route = self.extend_nested_terminal_pair_checkpoint_storms(&route, &storms)?;
+            for label in &retained_labels {
+                route.validate_depth_label(label)?;
+            }
+        }
+        Ok(route)
+    }
+
     /// Folds checkpoint-rooted terminal-pair storms across independent parent
     /// routes. Each table row is `(route, storms)` and resolves only checkpoints
     /// captured from that row's route; row order and anchor identity are kept
