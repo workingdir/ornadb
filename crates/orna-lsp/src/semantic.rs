@@ -1,45 +1,32 @@
-//! Semantic token projection from the frozen 1.0.0 lexer.
+//! Semantic token projection from the frozen 1.0.0 editor lexer.
 
 use lsp_types::{Range, SemanticToken, SemanticTokenType};
-use orna_syntax_v1::{Parse, SyntaxTree, TokenKind, lex};
+use orna_syntax_v1::{SyntaxSpan, editor};
 
 use crate::documents::PositionMapper;
 
 /// LSP token legend supported by this server.
 pub fn legend() -> Vec<SemanticTokenType> {
-    [
-        SemanticTokenType::KEYWORD,
-        SemanticTokenType::FUNCTION,
-        SemanticTokenType::TYPE,
-        SemanticTokenType::ENUM,
-        SemanticTokenType::VARIABLE,
-        SemanticTokenType::STRING,
-        SemanticTokenType::NUMBER,
-        SemanticTokenType::OPERATOR,
-    ]
-    .into_iter()
-    .collect()
+    editor::semantic_token_types()
+        .map(SemanticTokenType::new)
+        .collect()
 }
 
-/// Returns delta-encoded tokens from `orna-syntax-v1` lexer spans.
+/// Returns delta-encoded tokens projected from the v1 editor token classes.
 pub fn semantic_tokens(
-    parse: &Parse<SyntaxTree>,
     text: &str,
     mapper: &PositionMapper<'_>,
     range: Option<&Range>,
 ) -> Vec<SemanticToken> {
-    let Ok(tokens) = lex(text) else {
-        return Vec::new();
-    };
-    let symbols = crate::analysis::declaration_symbols(parse, text);
     let mut data = Vec::new();
     let mut previous_line = 0u32;
     let mut previous_start = 0u32;
-    for token in tokens {
-        let Some(token_type) = token_type(&token.kind, &token.text, &token.span, &symbols) else {
+    for token in editor::highlight(text) {
+        let Some(token_type) = editor::semantic_token_index(token.class) else {
             continue;
         };
-        for (position, length) in mapper.segments(&token.span) {
+        let span = SyntaxSpan::new(token.range.start, token.range.end);
+        for (position, length) in mapper.segments(&span) {
             if length == 0 {
                 continue;
             }
@@ -65,7 +52,7 @@ pub fn semantic_tokens(
                 delta_line,
                 delta_start,
                 length,
-                token_type,
+                token_type: token_type as u32,
                 token_modifiers_bitset: 0,
             });
             previous_line = line;
@@ -75,68 +62,34 @@ pub fn semantic_tokens(
     data
 }
 
-fn token_type(
-    kind: &TokenKind,
-    text: &str,
-    span: &orna_syntax_v1::SyntaxSpan,
-    symbols: &[crate::analysis::EditorSymbol],
-) -> Option<u32> {
-    let index = match kind {
-        TokenKind::Keyword(_) => 0,
-        TokenKind::Identifier { .. } => symbols
-            .iter()
-            .find(|symbol| symbol.selection == *span)
-            .map(|symbol| match symbol.kind {
-                crate::analysis::EditorSymbolKind::Function => 1,
-                crate::analysis::EditorSymbolKind::Type => 2,
-                crate::analysis::EditorSymbolKind::Enum => 3,
-                crate::analysis::EditorSymbolKind::Table
-                | crate::analysis::EditorSymbolKind::Protocol
-                | crate::analysis::EditorSymbolKind::Other => 4,
-            })
-            .or(Some(4))?,
-        TokenKind::String
-        | TokenKind::StringStart
-        | TokenKind::StringText
-        | TokenKind::StringEnd => 5,
-        TokenKind::Integer
-        | TokenKind::Decimal
-        | TokenKind::Float
-        | TokenKind::Date
-        | TokenKind::Instant => 6,
-        TokenKind::Punct(value) if is_operator(value) => 7,
-        TokenKind::Punct(_)
-        | TokenKind::InterpolationStart
-        | TokenKind::InterpolationEnd
-        | TokenKind::Eof
-        | TokenKind::ReplBinding => return None,
-    };
-    let _ = text;
-    Some(index)
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-fn is_operator(value: &str) -> bool {
-    matches!(
-        value,
-        "!" | "?"
-            | "??"
-            | "|?"
-            | "|"
-            | "||"
-            | "&&"
-            | "=="
-            | "!="
-            | "<"
-            | "<="
-            | ">"
-            | ">="
-            | "+"
-            | "-"
-            | "*"
-            | "/"
-            | "%"
-            | "=>"
-            | ".."
-            | "..="
-    )
+    const SOURCE: &str = include_str!("../tests/fixtures/editor-semantic-tokens.orna");
+
+    #[test]
+    fn legend_and_emitted_tokens_follow_v1_editor_classes() {
+        assert_eq!(
+            legend(),
+            [
+                "keyword", "variable", "number", "string", "comment", "operator"
+            ]
+            .into_iter()
+            .map(SemanticTokenType::new)
+            .collect::<Vec<_>>()
+        );
+
+        let expected = editor::highlight(SOURCE)
+            .into_iter()
+            .filter_map(|token| editor::semantic_token_index(token.class))
+            .map(|index| index as u32)
+            .collect::<Vec<_>>();
+        let mapper = PositionMapper::new(SOURCE);
+        let actual = semantic_tokens(SOURCE, &mapper, None)
+            .into_iter()
+            .map(|token| token.token_type)
+            .collect::<Vec<_>>();
+        assert_eq!(actual, expected);
+    }
 }
