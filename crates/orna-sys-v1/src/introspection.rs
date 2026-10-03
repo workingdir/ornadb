@@ -2660,6 +2660,21 @@ fn explain_query_core_with_limit_pushdowns(
                 decorrelated_index_fold_id.as_deref(),
             )
         });
+        let decorrelated_omission_refold_id = decorrelated_subquery
+            .zip(decorrelated_index_omission_identity.as_deref())
+            .zip(decorrelated_index_fold_id.as_deref())
+            .map(|((subquery, omission_identity), selection_identity)| {
+                query_decorrelated_omission_refold_identity(
+                    &left_fold_identity,
+                    &right_fold_identity,
+                    subquery,
+                    omission_identity,
+                    selection_identity,
+                    cardinality,
+                    work,
+                    work_overflow,
+                )
+            });
         let window_anchor_fold_id = right_window_identity.as_deref().map(|chain_identity| {
             query_window_anchor_fold_identity(
                 &left_fold_identity,
@@ -2773,6 +2788,29 @@ fn explain_query_core_with_limit_pushdowns(
                 );
             }
         }
+        if let (
+            Some(identity),
+            Some(subquery),
+            Some(omission_identity),
+            Some(selection_identity),
+        ) = (
+            decorrelated_omission_refold_id.as_deref(),
+            decorrelated_subquery,
+            decorrelated_index_omission_identity.as_deref(),
+            decorrelated_index_fold_id.as_deref(),
+        ) {
+            for index in BTreeSet::from([right_access, right]) {
+                add_decorrelated_omission_refold_details(
+                    &mut operators[index].details,
+                    identity,
+                    &left_fold_identity,
+                    &right_fold_identity,
+                    subquery,
+                    omission_identity,
+                    selection_identity,
+                );
+            }
+        }
         if let (Some(identity), Some(pair), Some(selection_identity)) = (
             paired_index_refold_id.as_deref(),
             join_pair_identity,
@@ -2799,6 +2837,7 @@ fn explain_query_core_with_limit_pushdowns(
             paired_index_refold_id.as_deref(),
             decorrelated_predicate_identity.as_deref(),
             decorrelated_anchor_fold_id.as_deref(),
+            decorrelated_omission_refold_id.as_deref(),
             window_anchor_fold_id.as_deref(),
             join_pair_anchor_fold_id.as_deref(),
             paired_limit_pushdown_anchor_fold_id.as_deref(),
@@ -2867,6 +2906,27 @@ fn explain_query_core_with_limit_pushdowns(
                 &left_fold_identity,
                 &right_fold_identity,
                 index_selection_identity,
+            );
+        }
+        if let (
+            Some(identity),
+            Some(subquery),
+            Some(omission_identity),
+            Some(selection_identity),
+        ) = (
+            decorrelated_omission_refold_id.as_deref(),
+            decorrelated_subquery,
+            decorrelated_index_omission_identity.as_deref(),
+            decorrelated_index_fold_id.as_deref(),
+        ) {
+            add_decorrelated_omission_refold_details(
+                &mut details,
+                identity,
+                &left_fold_identity,
+                &right_fold_identity,
+                subquery,
+                omission_identity,
+                selection_identity,
             );
         }
         if let Some(identity) = window_anchor_fold_id.as_deref() {
@@ -4322,6 +4382,39 @@ fn decorrelated_index_selection_fold_identity(
     format!("decorrelated-index-fold:{}", hex(&hash.finalize()))
 }
 
+/// Refolds an omitted decorrelated index outcome against its sparse cost
+/// ancestry. ORNA leaves this explain-only identity encoding open; retaining
+/// the omission tuple here prevents later decorrelated folds from shifting
+/// across an unindexed input.
+fn query_decorrelated_omission_refold_identity(
+    parent_identity: &str,
+    input_identity: &str,
+    subquery: &QueryDecorrelatedSubqueryDescription,
+    omission_identity: &str,
+    selection_identity: &str,
+    cardinality: Cardinality,
+    work: Option<u64>,
+    work_overflow: bool,
+) -> String {
+    let mut hash = Sha256::new();
+    hash.update(b"orna.sys.query-decorrelated-omission-refold.v1\0");
+    hash_part(&mut hash, parent_identity.as_bytes());
+    hash_part(&mut hash, input_identity.as_bytes());
+    hash_part(&mut hash, subquery.identity.as_str().as_bytes());
+    hash_part(&mut hash, subquery.source.as_str().as_bytes());
+    hash_part(
+        &mut hash,
+        subquery.correlation_predicate.as_str().as_bytes(),
+    );
+    hash_part(&mut hash, omission_identity.as_bytes());
+    hash_part(&mut hash, selection_identity.as_bytes());
+    hash_optional_u64(&mut hash, cardinality.rows);
+    hash_optional_u64(&mut hash, cardinality.bytes);
+    hash_optional_u64(&mut hash, work);
+    hash.update([u8::from(work_overflow)]);
+    format!("decorrelated-omission-refold:{}", hex(&hash.finalize()))
+}
+
 /// Binds a resolver-approved decorrelation to the sparse fold accumulated on
 /// its lateral anchor. The reference leaves explain identity encoding open;
 /// this domain-separated digest prevents equal child subqueries under distinct
@@ -4374,6 +4467,45 @@ fn add_decorrelated_anchor_fold_details(
     details.insert(
         "decorrelated_anchor_fold_pairing".to_owned(),
         PlanDetail::Text("sparse_anchor_fold_and_resolved_subquery_input".to_owned()),
+    );
+}
+
+fn add_decorrelated_omission_refold_details(
+    details: &mut BTreeMap<String, PlanDetail>,
+    identity: &str,
+    parent_identity: &str,
+    input_identity: &str,
+    subquery: &QueryDecorrelatedSubqueryDescription,
+    omission_identity: &str,
+    selection_identity: &str,
+) {
+    details.insert(
+        "decorrelated_omission_refold_identity".to_owned(),
+        PlanDetail::Text(identity.to_owned()),
+    );
+    details.insert(
+        "decorrelated_omission_refold_parent_identity".to_owned(),
+        PlanDetail::Text(parent_identity.to_owned()),
+    );
+    details.insert(
+        "decorrelated_omission_refold_input_identity".to_owned(),
+        PlanDetail::Text(input_identity.to_owned()),
+    );
+    details.insert(
+        "decorrelated_omission_refold_subquery_identity".to_owned(),
+        PlanDetail::Text(subquery.identity.as_str().to_owned()),
+    );
+    details.insert(
+        "decorrelated_omission_refold_omission_identity".to_owned(),
+        PlanDetail::Text(omission_identity.to_owned()),
+    );
+    details.insert(
+        "decorrelated_omission_refold_selection_identity".to_owned(),
+        PlanDetail::Text(selection_identity.to_owned()),
+    );
+    details.insert(
+        "decorrelated_omission_refold_pairing".to_owned(),
+        PlanDetail::Text("sparse_parent_fold_and_unindexed_subquery_input".to_owned()),
     );
 }
 
@@ -4735,6 +4867,7 @@ fn query_join_cost_fold(
     paired_index_refold_identity: Option<&str>,
     decorrelated_predicate_pushdown_identity: Option<&str>,
     decorrelated_anchor_fold_identity: Option<&str>,
+    decorrelated_omission_refold_identity: Option<&str>,
     window_anchor_fold_identity: Option<&str>,
     join_pair_anchor_fold_identity: Option<&str>,
     paired_limit_pushdown_anchor_fold_identity: Option<&str>,
@@ -4764,6 +4897,7 @@ fn query_join_cost_fold(
     hash_optional_text(&mut hash, paired_index_refold_identity);
     hash_optional_text(&mut hash, decorrelated_predicate_pushdown_identity);
     hash_optional_text(&mut hash, decorrelated_anchor_fold_identity);
+    hash_optional_text(&mut hash, decorrelated_omission_refold_identity);
     hash_optional_text(&mut hash, window_anchor_fold_identity);
     hash_optional_text(&mut hash, join_pair_anchor_fold_identity);
     if let Some(identity) = paired_limit_pushdown_anchor_fold_identity {
