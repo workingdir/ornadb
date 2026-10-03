@@ -35071,18 +35071,20 @@ fn paired_redo_fold_identity_survives_sparse_checkpoint_rotation_handoffs() {
             .map(|slot| (
                 slot.restore_ordinal,
                 slot.handoff_ordinal,
+                slot.stream_ordinal,
+                slot.compaction_ordinal,
                 slot.fold_ordinal,
                 slot.order,
             ))
             .collect::<Vec<_>>(),
         vec![
-            (0, 0, 0, 10),
-            (0, 0, 0, 11),
-            (0, 1, 1, 10),
-            (1, 0, 2, 10),
-            (1, 0, 2, 12),
+            (0, 0, 0, 0, 0, 10),
+            (0, 0, 0, 0, 0, 11),
+            (0, 1, 0, 0, 1, 10),
+            (1, 0, 0, 0, 2, 10),
+            (1, 0, 0, 1, 2, 12),
         ],
-        "restore, handoff, fold, and order coordinates remain distinct",
+        "restore, handoff, stream, compaction, fold, and order coordinates remain distinct",
     );
     assert_eq!(slots(&alpha)[0].left, Some(left_base.clone()));
     assert_eq!(slots(&alpha)[1].right, Some(right_base.clone()));
@@ -35486,11 +35488,12 @@ fn paired_redo_fold_rotation_restore_retains_duplicate_stream_ordinals() {
                 slot.restore_ordinal,
                 slot.handoff_ordinal,
                 slot.stream_ordinal,
+                slot.compaction_ordinal,
                 slot.fold_ordinal,
                 slot.order,
             ))
             .collect::<Vec<_>>(),
-        vec![(0, 0, 0, 0, 8), (0, 0, 1, 0, 8)],
+        vec![(0, 0, 0, 0, 0, 8), (0, 0, 1, 0, 0, 8)],
         "same checkpoint, fold, and order retain distinct source stream coordinates",
     );
     assert_eq!(slots[0].redo_fold_identity, folds[0]);
