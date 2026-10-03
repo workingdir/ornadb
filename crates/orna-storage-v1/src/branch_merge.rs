@@ -258,6 +258,25 @@ pub struct BranchMergePairedCheckpointRedoLogSegmentFrame {
     pub log_segment_identity: BranchMergePairedLogSegmentIdentity,
 }
 
+/// One checkpoint slot retaining its atomic log/segment lineage across folds.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BranchMergePairedCheckpointRedoLogSegmentSparseChainSlotSnapshot {
+    /// Zero-based position of the sparse fold in the caller's chain.
+    pub fold_ordinal: usize,
+    /// Committed redo order inside the identified fold.
+    pub order: u64,
+    pub left: Option<CheckpointGeneration>,
+    pub right: Option<CheckpointGeneration>,
+    pub log_segment_identity: BranchMergePairedLogSegmentIdentity,
+}
+
+/// A checkpoint stream's complete paired lineage across sparse fold chains.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BranchMergePairedCheckpointRedoLogSegmentSparseStreamChainSnapshot {
+    pub checkpoint_id: CheckpointId,
+    pub slots: Vec<BranchMergePairedCheckpointRedoLogSegmentSparseChainSlotSnapshot>,
+}
+
 /// A paired checkpoint redo frame carrying the active write-ahead segments.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BranchMergePairedCheckpointRedoSegmentFrame {
@@ -768,6 +787,60 @@ pub fn fold_paired_checkpoint_redo_sparse_stream_chains_preserving_segment_rotat
 /// checkpoint. Segment rotation does not block state compaction because every
 /// segment pair is copied into the run in input order. An order gap or a
 /// checkpoint state change starts a new run, so no redo state is omitted.
+/// Chains sparse checkpoint folds with each frame's atomic log/segment pair.
+///
+/// The output checkpoint catalog unions caller-known IDs with IDs observed in
+/// every fold. Each supplied frame contributes one slot per stream, retaining
+/// its exact paired checkpoint values and bound write-ahead/segment identity.
+/// Fold ordinal plus in-fold order distinguishes overlapping orders across
+/// folds. Missing streams, gaps, and repeated identity pairs are preserved as
+/// supplied; no checkpoint value or lineage is inferred or deduplicated.
+pub fn fold_paired_checkpoint_redo_sparse_stream_chains_preserving_log_segment_identity(
+    known_checkpoint_ids: &[CheckpointId],
+    fold_frames: &[BTreeMap<u64, BranchMergePairedCheckpointRedoLogSegmentFrame>],
+) -> Vec<BranchMergePairedCheckpointRedoLogSegmentSparseStreamChainSnapshot> {
+    let checkpoint_ids = known_checkpoint_ids
+        .iter()
+        .cloned()
+        .chain(fold_frames.iter().flat_map(|frames| {
+            frames.values().flat_map(|frame| {
+                frame
+                    .checkpoints
+                    .left
+                    .keys()
+                    .chain(frame.checkpoints.right.keys())
+                    .cloned()
+            })
+        }))
+        .collect::<BTreeSet<_>>();
+
+    checkpoint_ids
+        .into_iter()
+        .map(|checkpoint_id| {
+            let stream_checkpoint_id = &checkpoint_id;
+            let slots = fold_frames
+                .iter()
+                .enumerate()
+                .flat_map(|(fold_ordinal, frames)| {
+                    frames.iter().map(move |(&order, frame)| {
+                        BranchMergePairedCheckpointRedoLogSegmentSparseChainSlotSnapshot {
+                            fold_ordinal,
+                            order,
+                            left: frame.checkpoints.left.get(stream_checkpoint_id).cloned(),
+                            right: frame.checkpoints.right.get(stream_checkpoint_id).cloned(),
+                            log_segment_identity: frame.log_segment_identity.clone(),
+                        }
+                    })
+                })
+                .collect();
+            BranchMergePairedCheckpointRedoLogSegmentSparseStreamChainSnapshot {
+                checkpoint_id,
+                slots,
+            }
+        })
+        .collect()
+}
+
 pub fn compress_paired_checkpoint_redo_sparse_chains_preserving_segment_rotation_identity(
     known_checkpoint_ids: &[CheckpointId],
     frames: &BTreeMap<u64, BranchMergePairedCheckpointRedoSegmentFrame>,
