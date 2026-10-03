@@ -7498,6 +7498,115 @@ fn sparse_paired_rebind_chains_preserve_identity_across_omitted_rows() {
 }
 
 #[test]
+fn paired_tuple_rebind_cascades_preserve_both_depths_of_identity() {
+    let source = include_str!("fixtures/historical-cascaded-sparse-paired-three-way-rebinds.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-cascaded-sparse-paired-three-way-rebinds.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(
+        result.diagnostics.is_empty(),
+        "cascaded three-way folds must retain compatible tuple identities: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+    let module = result
+        .modules
+        .values()
+        .find(|module| module.symbols.contains_key("accepts_cascaded_sparse_rebinds"))
+        .expect("cascaded sparse rebind fixture module");
+    let Type::Function { result, .. } = &module.symbols["accepts_cascaded_sparse_rebinds"].ty
+    else {
+        panic!("cascaded sparse rebind must retain its computed function type");
+    };
+    let Type::Record(fields) = result.as_ref() else {
+        panic!("cascaded sparse rebind must return its computed record: {result:?}");
+    };
+    let Type::List(cascade_row) = fields.get("cascades").expect("cascade rows") else {
+        panic!("cascade rows must retain their computed list type");
+    };
+    let Type::Record(cascade_fields) = cascade_row.as_ref() else {
+        panic!("cascade rows must retain their record fields: {cascade_row:?}");
+    };
+    let Type::List(inner_row) = cascade_fields.get("previous").expect("previous folds") else {
+        panic!("previous folds must retain their computed list type");
+    };
+    let Type::Record(inner_fields) = inner_row.as_ref() else {
+        panic!("previous folds must retain their record rows: {inner_row:?}");
+    };
+    let Type::Tuple(slots) = inner_fields.get("pins").expect("paired pins") else {
+        panic!("previous rows must retain their paired tuple pins");
+    };
+    assert_eq!(slots.len(), 2, "both tuple slots remain present");
+    let pin_contexts = slots
+        .iter()
+        .map(|slot| {
+            let mut contexts = BTreeSet::new();
+            collect_snapshot_contexts(slot, &mut contexts);
+            contexts
+        })
+        .collect::<Vec<_>>();
+    let all_rebinds = BTreeSet::from([
+        "selector:HEAD~6000".into(),
+        "selector:HEAD~6020".into(),
+        "selector:HEAD~6110".into(),
+        "selector:HEAD~6130".into(),
+        "selector:HEAD~6200".into(),
+        "selector:HEAD~6220".into(),
+    ]);
+    assert_eq!(
+        pin_contexts,
+        [all_rebinds.clone(), all_rebinds],
+        "each paired slot keeps every concrete rebind across the nested omission cascade"
+    );
+
+    let mut nested_witnesses = BTreeSet::new();
+    collect_snapshot_contexts(
+        inner_fields.get("witness").expect("inner witness sibling"),
+        &mut nested_witnesses,
+    );
+    assert_eq!(
+        nested_witnesses,
+        BTreeSet::from([
+            "selector:HEAD~6001".into(),
+            "selector:HEAD~6011".into(),
+            "selector:HEAD~6021".into(),
+            "selector:HEAD~6101".into(),
+            "selector:HEAD~6111".into(),
+            "selector:HEAD~6131".into(),
+            "selector:HEAD~6201".into(),
+            "selector:HEAD~6211".into(),
+            "selector:HEAD~6221".into(),
+        ]),
+        "each inner fold retains real sibling values through its own omission rows"
+    );
+    let mut outer_witnesses = BTreeSet::new();
+    collect_snapshot_contexts(
+        cascade_fields.get("witness").expect("outer witness sibling"),
+        &mut outer_witnesses,
+    );
+    assert_eq!(
+        outer_witnesses,
+        BTreeSet::from([
+            "selector:HEAD~6301".into(),
+            "selector:HEAD~6311".into(),
+            "selector:HEAD~6321".into(),
+            "selector:HEAD~6331".into(),
+            "selector:HEAD~6341".into(),
+        ]),
+        "the outer fold keeps computed witnesses from rows with and without inner folds"
+    );
+}
+
+#[test]
 fn multi_parent_selector_topology_storm_preserves_label_depth_identity() {
     let source = include_str!("fixtures/historical-multi-parent-selector-topology-storm.orna");
     let parsed = orna_syntax_v1::parse_module(source);
