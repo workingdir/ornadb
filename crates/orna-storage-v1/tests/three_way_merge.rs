@@ -22,6 +22,8 @@ use orna_storage_v1::{
     BranchMergeColumnRestoreStormSnapshotPathWaveSlotSnapshot,
     BranchMergeColumnRestoreSnapshotPathChainFoldSnapshot,
     BranchMergeColumnRestoreSnapshotPathStormSnapshot,
+    BranchMergeColumnRestorePairedSnapshotPathColumnFoldSnapshot,
+    BranchMergeColumnRestorePairedSnapshotPathChainFoldSnapshot,
     BranchMergeConflict, BranchMergeDepthFragmentRecovery,
     BranchMergeDepthWaveRecovery, BranchMergeError, BranchMergePlan,
     BranchMergeMultiParentColumnDepthLadderWaveEvent,
