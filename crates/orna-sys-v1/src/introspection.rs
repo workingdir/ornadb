@@ -722,8 +722,10 @@ pub struct QueryPartialIndexDescription {
 
 /// A resolved window aggregate eligible at its exact source boundary.
 /// Aggregate and frame identities remain attached across sparse input
-/// reordering. ORNA-PLAN does not prescribe a window-pushdown cost, so this
-/// adapter charges one work unit per known input row and preserves cardinality.
+/// reordering. The planner also binds each right-side frame chain to its
+/// accumulated sparse anchor fold. ORNA-PLAN does not prescribe a
+/// window-pushdown cost or this explain identity encoding, so this adapter
+/// charges one work unit per known input row and preserves cardinality.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct QueryWindowAggregatePushdownDescription {
     pub identity: ObjectRef,
@@ -2295,6 +2297,7 @@ fn explain_query_core_with_subqueries(
         } else {
             push_scan(&mut operators, join.source.clone(), join.statistics.as_ref())
         };
+        let right_window_operator_start = operators.len();
         let right = push_window_aggregates(
             &mut operators,
             right_access,
@@ -2364,6 +2367,20 @@ fn explain_query_core_with_subqueries(
                 decorrelated_predicate_identity.as_deref(),
             )
         });
+        let window_anchor_fold_id = right_window_identity.as_deref().map(|chain_identity| {
+            query_window_anchor_fold_identity(
+                &left_fold_identity,
+                &right_fold_identity,
+                chain_identity,
+            )
+        });
+        if let Some(identity) = window_anchor_fold_id.as_deref() {
+            let mut chain_nodes = BTreeSet::from([right_access, right]);
+            chain_nodes.extend(right_window_operator_start..operators.len());
+            for index in chain_nodes {
+                add_window_anchor_fold_details(&mut operators[index].details, identity);
+            }
+        }
         if let Some(identity) = decorrelated_predicate_identity.as_deref() {
             for index in BTreeSet::from([right_access, right]) {
                 add_decorrelated_predicate_pushdown_details(
@@ -2384,6 +2401,7 @@ fn explain_query_core_with_subqueries(
             paired_predicate_pushdown_identity.as_deref(),
             decorrelated_predicate_identity.as_deref(),
             decorrelated_anchor_fold_id.as_deref(),
+            window_anchor_fold_id.as_deref(),
             cardinality,
             work,
             work_overflow,
@@ -2436,6 +2454,9 @@ fn explain_query_core_with_subqueries(
         }
         if let Some(identity) = decorrelated_anchor_fold_id.as_deref() {
             add_decorrelated_anchor_fold_details(&mut details, identity);
+        }
+        if let Some(identity) = window_anchor_fold_id.as_deref() {
+            add_window_anchor_fold_details(&mut details, identity);
         }
         if let Some(pair_identity) = join_pair_identity {
             add_join_pair_identity_details(&mut details, pair_identity);
@@ -3645,6 +3666,34 @@ fn add_decorrelated_anchor_fold_details(
     );
 }
 
+/// Binds a source's complete resolver-ordered window chain to the accumulated
+/// sparse anchor fold and exact right input. The reference leaves this
+/// explain-only identity encoding open; domain separation makes the pairing
+/// explicit in plans and cost-fold digests.
+fn query_window_anchor_fold_identity(
+    anchor_fold_identity: &str,
+    input_identity: &str,
+    window_chain_identity: &str,
+) -> String {
+    let mut hash = Sha256::new();
+    hash.update(b"orna.sys.query-window-anchor-fold.v1\0");
+    hash_part(&mut hash, anchor_fold_identity.as_bytes());
+    hash_part(&mut hash, input_identity.as_bytes());
+    hash_part(&mut hash, window_chain_identity.as_bytes());
+    format!("window-anchor-fold:{}", hex(&hash.finalize()))
+}
+
+fn add_window_anchor_fold_details(details: &mut BTreeMap<String, PlanDetail>, identity: &str) {
+    details.insert(
+        "window_anchor_fold_identity".to_owned(),
+        PlanDetail::Text(identity.to_owned()),
+    );
+    details.insert(
+        "window_anchor_fold_pairing".to_owned(),
+        PlanDetail::Text("sparse_anchor_fold_and_exact_source_frame_chain".to_owned()),
+    );
+}
+
 fn add_decorrelated_predicate_pushdown_details(
     details: &mut BTreeMap<String, PlanDetail>,
     identity: &str,
@@ -3738,6 +3787,7 @@ fn query_join_cost_fold(
     paired_predicate_pushdown_identity: Option<&str>,
     decorrelated_predicate_pushdown_identity: Option<&str>,
     decorrelated_anchor_fold_identity: Option<&str>,
+    window_anchor_fold_identity: Option<&str>,
     cardinality: Cardinality,
     work: Option<u64>,
     work_overflow: bool,
@@ -3761,6 +3811,7 @@ fn query_join_cost_fold(
     hash_optional_text(&mut hash, paired_predicate_pushdown_identity);
     hash_optional_text(&mut hash, decorrelated_predicate_pushdown_identity);
     hash_optional_text(&mut hash, decorrelated_anchor_fold_identity);
+    hash_optional_text(&mut hash, window_anchor_fold_identity);
     hash_optional_u64(&mut hash, cardinality.rows);
     hash_optional_u64(&mut hash, cardinality.bytes);
     hash_optional_u64(&mut hash, work);
