@@ -2407,6 +2407,13 @@ fn explain_query_core_with_limit_pushdowns(
         let decorrelated_index_omission_identity = decorrelated_subquery
             .filter(|_| selected_partial_index.is_none())
             .map(decorrelated_index_selection_omission_identity);
+        let decorrelated_index_fold_id = decorrelated_subquery.map(|subquery| {
+            decorrelated_index_selection_fold_identity(
+                subquery,
+                selected_partial_index,
+                decorrelated_index_omission_identity.as_deref(),
+            )
+        });
         let right_access = if let Some(candidate) = selected_partial_index {
             push_index_lookup(&mut operators, candidate, join.statistics.as_ref())
         } else {
@@ -2511,6 +2518,7 @@ fn explain_query_core_with_limit_pushdowns(
                 &right_fold_identity,
                 subquery,
                 decorrelated_predicate_identity.as_deref(),
+                decorrelated_index_fold_id.as_deref(),
             )
         });
         let window_anchor_fold_id = right_window_identity.as_deref().map(|chain_identity| {
@@ -2590,13 +2598,17 @@ fn explain_query_core_with_limit_pushdowns(
                 );
             }
         }
-        if let Some(identity) = decorrelated_anchor_fold_id.as_deref() {
+        if let (Some(identity), Some(index_selection_identity)) = (
+            decorrelated_anchor_fold_id.as_deref(),
+            decorrelated_index_fold_id.as_deref(),
+        ) {
             for index in BTreeSet::from([right_access, right]) {
                 add_decorrelated_anchor_fold_details(
                     &mut operators[index].details,
                     identity,
                     &left_fold_identity,
                     &right_fold_identity,
+                    index_selection_identity,
                 );
             }
         }
@@ -2664,12 +2676,16 @@ fn explain_query_core_with_limit_pushdowns(
         if let Some(identity) = decorrelated_index_omission_identity.as_deref() {
             add_decorrelated_index_selection_omission_details(&mut details, identity);
         }
-        if let Some(identity) = decorrelated_anchor_fold_id.as_deref() {
+        if let (Some(identity), Some(index_selection_identity)) = (
+            decorrelated_anchor_fold_id.as_deref(),
+            decorrelated_index_fold_id.as_deref(),
+        ) {
             add_decorrelated_anchor_fold_details(
                 &mut details,
                 identity,
                 &left_fold_identity,
                 &right_fold_identity,
+                index_selection_identity,
             );
         }
         if let Some(identity) = window_anchor_fold_id.as_deref() {
@@ -3984,6 +4000,48 @@ fn decorrelated_index_selection_omission_identity(
     format!("decorrelated-index-omission:{}", hex(&hash.finalize()))
 }
 
+/// Binds each decorrelated fold to its exact sparse index outcome. The
+/// reference does not define this planner-local identity; keep indexed and
+/// omitted inputs distinct while retaining the subquery tuple in either case.
+fn decorrelated_index_selection_fold_identity(
+    subquery: &QueryDecorrelatedSubqueryDescription,
+    selected_index: Option<&QueryPartialIndexDescription>,
+    omission_identity: Option<&str>,
+) -> String {
+    let mut hash = Sha256::new();
+    hash.update(b"orna.sys.decorrelated-index-selection-fold.v1\0");
+    hash_part(&mut hash, subquery.identity.as_str().as_bytes());
+    hash_part(&mut hash, subquery.source.as_str().as_bytes());
+    hash_part(
+        &mut hash,
+        subquery.correlation_predicate.as_str().as_bytes(),
+    );
+    match (selected_index, omission_identity) {
+        (Some(index), None) => {
+            hash.update([1]);
+            hash_part(&mut hash, partial_index_pair_identity(index).as_bytes());
+        }
+        (None, Some(identity)) => {
+            hash.update([0]);
+            hash_part(&mut hash, identity.as_bytes());
+        }
+        (Some(index), Some(identity)) => {
+            // Retain both inputs if a future planner path reports an omission
+            // alongside a selected index instead of silently collapsing them.
+            hash.update([2]);
+            hash_part(&mut hash, partial_index_pair_identity(index).as_bytes());
+            hash_part(&mut hash, identity.as_bytes());
+        }
+        (None, None) => {
+            // This is unreachable for current decorrelated inputs, which
+            // always carry either an exact selected index or an omission.
+            hash.update([0]);
+            hash.update([0]);
+        }
+    }
+    format!("decorrelated-index-fold:{}", hex(&hash.finalize()))
+}
+
 /// Binds a resolver-approved decorrelation to the sparse fold accumulated on
 /// its lateral anchor. The reference leaves explain identity encoding open;
 /// this domain-separated digest prevents equal child subqueries under distinct
@@ -3993,6 +4051,7 @@ fn query_decorrelated_anchor_fold_identity(
     input_identity: &str,
     subquery: &QueryDecorrelatedSubqueryDescription,
     predicate_pushdown_identity: Option<&str>,
+    index_selection_fold_identity: Option<&str>,
 ) -> String {
     let mut hash = Sha256::new();
     hash.update(b"orna.sys.decorrelated-anchor-fold.v1\0");
@@ -4005,6 +4064,7 @@ fn query_decorrelated_anchor_fold_identity(
         subquery.correlation_predicate.as_str().as_bytes(),
     );
     hash_optional_text(&mut hash, predicate_pushdown_identity);
+    hash_optional_text(&mut hash, index_selection_fold_identity);
     format!("decorrelated-anchor-fold:{}", hex(&hash.finalize()))
 }
 
@@ -4013,6 +4073,7 @@ fn add_decorrelated_anchor_fold_details(
     identity: &str,
     parent_identity: &str,
     input_identity: &str,
+    index_selection_identity: &str,
 ) {
     details.insert(
         "decorrelated_anchor_fold_identity".to_owned(),
@@ -4025,6 +4086,10 @@ fn add_decorrelated_anchor_fold_details(
     details.insert(
         "decorrelated_anchor_fold_input_identity".to_owned(),
         PlanDetail::Text(input_identity.to_owned()),
+    );
+    details.insert(
+        "decorrelated_anchor_fold_index_selection_identity".to_owned(),
+        PlanDetail::Text(index_selection_identity.to_owned()),
     );
     details.insert(
         "decorrelated_anchor_fold_pairing".to_owned(),
