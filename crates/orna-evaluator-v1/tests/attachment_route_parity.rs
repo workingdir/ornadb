@@ -1578,13 +1578,22 @@ fn fresh_nested_route_pair_chains_evaluate_rebound_closure_values() {
         single_restoration_transitions.clone(),
         single_restoration_transitions,
     ];
+    let consumed_restoration_folds = Cell::new(0);
+    let restoration_fold_stream = repeated_restoration_folds
+        .into_iter()
+        .zip(expected_restoration_transitions.clone())
+        .inspect(|_| consumed_restoration_folds.set(consumed_restoration_folds.get() + 1));
     let (restored_anchor_route, observed_restoration_transitions) = resolver
-        .extend_nested_terminal_pair_checkpoint_restoration_folds_validating_terminal_identity_transitions(
+        .extend_nested_terminal_pair_checkpoint_restoration_stream_validating_terminal_identity_transitions(
             &first_stage,
-            &repeated_restoration_folds,
-            &expected_restoration_transitions,
+            restoration_fold_stream,
         )
         .unwrap();
+    assert_eq!(
+        consumed_restoration_folds.get(),
+        2,
+        "each checkpoint restoration fold is consumed once"
+    );
     assert_eq!(
         observed_restoration_transitions,
         expected_restoration_transitions,
@@ -1616,12 +1625,32 @@ fn fresh_nested_route_pair_chains_evaluate_rebound_closure_values() {
         leaf_middle,
         "the restored nested route retains its actual starting package commit"
     );
+    let mut restored_pin_context = AttachedDatabaseSession::new(parent.primary().clone()).unwrap();
+    restored_pin_context
+        .attach_database(
+            restored_anchor_route
+                .final_session()
+                .database(aliases[4])
+                .unwrap()
+                .clone(),
+        )
+        .unwrap();
+    let mut restored_value = AdmittedReplSession::from_attached_database_session(
+        &restored_pin_context,
+        Limits::default(),
+    )
+    .unwrap();
+    assert_eq!(restored_value.submit(&format!("use {};", aliases[4])), Ok(None));
+    assert_eq!(
+        restored_value.submit(&format!("{}.package_value()", aliases[4])),
+        Ok(Some(Value::int(94.into()))),
+        "paired checkpoint restoration computes the nested pin's restored fixture value"
+    );
 
     let non_restoring_pair = [
         terminal_excursion_plan[0],
         terminal_excursion_plan[0],
     ];
-    let non_restoring_fold = [non_restoring_pair];
     let non_restoring_transitions = [[
         (
             starting_terminal_identity.clone(),
@@ -1632,15 +1661,39 @@ fn fresh_nested_route_pair_chains_evaluate_rebound_closure_values() {
             excursion_terminal_identity.clone(),
         ),
     ]];
+    let invalid_restoration_folds = [
+        (
+            restoration_anchor_pair,
+            expected_restoration_transitions[0].clone(),
+        ),
+        (non_restoring_pair, non_restoring_transitions[0].clone()),
+        (
+            restoration_anchor_pair,
+            expected_restoration_transitions[0].clone(),
+        ),
+    ];
+    let consumed_restoration_prefix = Cell::new(0);
+    let invalid_restoration_stream = invalid_restoration_folds.into_iter().inspect(|_| {
+        consumed_restoration_prefix.set(consumed_restoration_prefix.get() + 1);
+    });
     assert!(matches!(
         resolver
-            .extend_nested_terminal_pair_checkpoint_restoration_folds_validating_terminal_identity_transitions(
+            .extend_nested_terminal_pair_checkpoint_restoration_stream_validating_terminal_identity_transitions(
                 &first_stage,
-                &non_restoring_fold,
-                &non_restoring_transitions,
+                invalid_restoration_stream,
             ),
         Err(AttachmentError::RetainedSnapshotUnavailable)
     ));
+    assert_eq!(
+        consumed_restoration_prefix.get(),
+        2,
+        "a non-restoring fold prevents later checkpoint restores from being requested"
+    );
+    assert_eq!(
+        first_stage.terminal_route_identity(),
+        starting_terminal_identity,
+        "a rejected restore stream leaves its source route unchanged"
+    );
 
     let replay_handoff = checkpoint_replay.retained_wave(4).unwrap()[0].clone();
     let replay_depth_label = checkpoint_replay.retained_depth_label(4, 0).unwrap();
