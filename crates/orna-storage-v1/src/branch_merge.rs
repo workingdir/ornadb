@@ -477,6 +477,25 @@ pub struct BranchMergePairedCheckpointRedoFoldSparseRestoreHandoffStreamSnapshot
     pub slots: Vec<BranchMergePairedCheckpointRedoFoldSparseRestoreHandoffSlotSnapshot>,
 }
 
+/// One restored occurrence with each present side bound to its checkpoint pin.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BranchMergePairedCheckpointRedoFoldSparseRestorePinHandoffSlotSnapshot {
+    pub restore_ordinal: usize,
+    pub handoff_ordinal: usize,
+    pub fold_ordinal: usize,
+    pub order: u64,
+    pub left_pin: Option<BranchMergePairedCheckpointPinIdentity>,
+    pub right_pin: Option<BranchMergePairedCheckpointPinIdentity>,
+    pub redo_fold_identity: BranchMergePairedRedoFoldIdentity,
+}
+
+/// A restored checkpoint stream with paired, checkpoint-bound side pins.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BranchMergePairedCheckpointRedoFoldSparseRestorePinHandoffStreamSnapshot {
+    pub checkpoint_id: CheckpointId,
+    pub slots: Vec<BranchMergePairedCheckpointRedoFoldSparseRestorePinHandoffSlotSnapshot>,
+}
+
 /// A malformed run rejected while restoring one compacted handoff batch.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum BranchMergePairedCheckpointRedoFoldSparseRestoreHandoffError {
@@ -2243,6 +2262,61 @@ pub fn restore_paired_checkpoint_redo_sparse_compaction_handoff_chains_preservin
             }
         })
         .collect())
+}
+
+/// Restores sparse compaction handoffs with paired checkpoint-pin identity.
+///
+/// Each present side keeps its exact generation and binds it to the enclosing
+/// checkpoint stream. Restore, handoff, fold, and order coordinates and the
+/// paired redo-fold identity remain independent. The reference is silent on
+/// this checkpoint-pin projection, so omitted generations remain unpinned and
+/// no pin or checkpoint state is synthesized.
+pub fn restore_paired_checkpoint_redo_sparse_compaction_handoff_chains_preserving_checkpoint_pin_identity(
+    known_checkpoint_ids: &[CheckpointId],
+    restore_handoffs: &[Vec<BranchMergePairedCheckpointRedoFoldSparseCompactionHandoffSnapshot>],
+) -> Result<
+    Vec<BranchMergePairedCheckpointRedoFoldSparseRestorePinHandoffStreamSnapshot>,
+    BranchMergePairedCheckpointRedoFoldSparseRestoreHandoffError,
+> {
+    restore_paired_checkpoint_redo_sparse_compaction_handoff_chains_preserving_restore_identity(
+        known_checkpoint_ids,
+        restore_handoffs,
+    )
+    .map(|streams| {
+        streams
+            .into_iter()
+            .map(|stream| {
+                let checkpoint_id = stream.checkpoint_id;
+                let slots = stream
+                    .slots
+                    .into_iter()
+                    .map(|slot| {
+                        let pin = |generation: Option<CheckpointGeneration>| {
+                            generation.map(|generation| {
+                                BranchMergePairedCheckpointPinIdentity {
+                                    checkpoint_id: checkpoint_id.clone(),
+                                    generation,
+                                }
+                            })
+                        };
+                        BranchMergePairedCheckpointRedoFoldSparseRestorePinHandoffSlotSnapshot {
+                            restore_ordinal: slot.restore_ordinal,
+                            handoff_ordinal: slot.handoff_ordinal,
+                            fold_ordinal: slot.fold_ordinal,
+                            order: slot.order,
+                            left_pin: pin(slot.left),
+                            right_pin: pin(slot.right),
+                            redo_fold_identity: slot.redo_fold_identity,
+                        }
+                    })
+                    .collect();
+                BranchMergePairedCheckpointRedoFoldSparseRestorePinHandoffStreamSnapshot {
+                    checkpoint_id,
+                    slots,
+                }
+            })
+            .collect()
+    })
 }
 
 /// Restores sparse redo-fold WAL handoffs without collapsing source identity.
