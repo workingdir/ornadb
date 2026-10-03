@@ -644,6 +644,21 @@ pub struct QueryJoinDescription {
     pub predicate: Option<ExpressionRef>,
 }
 
+/// A correlated subquery that the resolver has already approved for
+/// decorrelation into a predicate join. The planner keeps the subquery and
+/// correlation identities on both the join and its input while cost ordering
+/// moves known inputs across sparse unknown-cost entries. ORNA does not define
+/// decorrelation eligibility or a subquery-specific cost model; this
+/// explain-only adapter uses the supplied pinned input statistics and the
+/// ordinary predicate-join estimate.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct QueryDecorrelatedSubqueryDescription {
+    pub identity: ObjectRef,
+    pub source: ObjectRef,
+    pub correlation_predicate: ExpressionRef,
+    pub statistics: Option<QuerySourceStatistics>,
+}
+
 /// A partial index that may accelerate a join predicate when both the input
 /// table and the predicate reference match exactly. Sparse predicate cascades
 /// therefore cannot shift an index candidate onto a neighboring join.
@@ -1066,6 +1081,32 @@ impl std::error::Error for ExplainError {}
 /// actual fields remain absent because explain does not execute the query.
 pub fn explain_query(query: &QueryPlanDescription) -> Result<ExplainedPlan, ExplainError> {
     explain_query_with_limit_chain(query, &[])
+}
+
+/// Explains a query while folding resolver-approved correlated subqueries into
+/// predicate joins. Subquery identity remains attached to its source input and
+/// resulting join if cost ordering moves it across known or unknown-cost
+/// boundaries. Unknown-cost inputs remain after fully estimated inputs in
+/// declaration order.
+pub fn explain_query_with_decorrelated_subqueries(
+    query: &QueryPlanDescription,
+    subqueries: &[QueryDecorrelatedSubqueryDescription],
+) -> Result<ExplainedPlan, ExplainError> {
+    explain_query_core_with_subqueries(
+        query,
+        1,
+        None,
+        None,
+        &[],
+        &[],
+        &[],
+        None,
+        &[],
+        &[],
+        &[],
+        &[],
+        subqueries,
+    )
 }
 
 /// Explains a query while choosing exact-identity partial indexes for join
@@ -1731,6 +1772,67 @@ fn explain_query_with_predicate_pressure_and_branch_limits_and_storms_with_parti
     disjunct_storm_cascades: &[DisjunctStormCascadeDescription],
     partial_indexes: &[QueryPartialIndexDescription],
 ) -> Result<ExplainedPlan, ExplainError> {
+    explain_query_core_with_subqueries(
+        query,
+        disjunct_count,
+        conjunct_count,
+        conjunct_count_per_disjunct,
+        nested_input_limits,
+        nested_branch_limits,
+        limits_between_disjunct_and_conjunct,
+        post_expansion_conjunct,
+        additional_limits,
+        disjunct_storms,
+        disjunct_storm_cascades,
+        partial_indexes,
+        &[],
+    )
+}
+
+fn explain_query_core_with_subqueries(
+    query: &QueryPlanDescription,
+    disjunct_count: u64,
+    conjunct_count: Option<u64>,
+    conjunct_count_per_disjunct: Option<u64>,
+    nested_input_limits: &[u64],
+    nested_branch_limits: &[u64],
+    limits_between_disjunct_and_conjunct: &[u64],
+    post_expansion_conjunct: Option<&ExpressionRef>,
+    additional_limits: &[u64],
+    disjunct_storms: &[DisjunctStormDescription],
+    disjunct_storm_cascades: &[DisjunctStormCascadeDescription],
+    partial_indexes: &[QueryPartialIndexDescription],
+    decorrelated_subqueries: &[QueryDecorrelatedSubqueryDescription],
+) -> Result<ExplainedPlan, ExplainError> {
+    if query
+        .joins
+        .len()
+        .saturating_add(decorrelated_subqueries.len())
+        > MAX_PLAN_NODES
+    {
+        return Err(ExplainError::TooManyNodes);
+    }
+    if decorrelated_subqueries
+        .iter()
+        .any(|subquery| invalid_reference(subquery.identity.as_str()))
+    {
+        return Err(ExplainError::InvalidObject);
+    }
+    let declared_join_count = query.joins.len();
+    let mut expanded_query = query.clone();
+    expanded_query
+        .joins
+        .extend(
+            decorrelated_subqueries
+                .iter()
+                .map(|subquery| QueryJoinDescription {
+                    source: subquery.source.clone(),
+                    statistics: subquery.statistics.clone(),
+                    predicate: Some(subquery.correlation_predicate.clone()),
+                }),
+        );
+    let query = &expanded_query;
+
     let (storm_cascade_operators, storm_cascade_expressions, storm_cascade_predicates) =
         disjunct_storm_cascade_shape_counts(disjunct_storm_cascades)?;
     if disjunct_count == 0
@@ -1862,11 +1964,17 @@ fn explain_query_with_predicate_pressure_and_branch_limits_and_storms_with_parti
     for (planned_position, (declared_position, join)) in
         planned_query_join_order(&query.joins).into_iter().enumerate()
     {
+        let decorrelated_subquery = declared_position
+            .checked_sub(declared_join_count)
+            .and_then(|offset| decorrelated_subqueries.get(offset));
         let right = if let Some(candidate) = partial_index_for_join(join, partial_indexes) {
             push_index_lookup(&mut operators, candidate, join.statistics.as_ref())
         } else {
             push_scan(&mut operators, join.source.clone(), join.statistics.as_ref())
         };
+        if let Some(subquery) = decorrelated_subquery {
+            add_decorrelated_subquery_details(&mut operators[right].details, subquery);
+        }
         let right_cardinality = source_cardinality(join.statistics.as_ref());
         let cardinality = join_cardinality(
             current_cardinality,
@@ -1917,6 +2025,9 @@ fn explain_query_with_predicate_pressure_and_branch_limits_and_storms_with_parti
                 "join_type".to_owned(),
                 PlanDetail::Text("cross".to_owned()),
             );
+        }
+        if let Some(subquery) = decorrelated_subquery {
+            add_decorrelated_subquery_details(&mut details, subquery);
         }
         let prior = current;
         current = operators.len();
@@ -2784,6 +2895,24 @@ fn planned_query_join_order(joins: &[QueryJoinDescription]) -> Vec<(usize, &Quer
         (work.is_none(), work.unwrap_or_default(), *declared_position)
     });
     ordered
+}
+
+fn add_decorrelated_subquery_details(
+    details: &mut BTreeMap<String, PlanDetail>,
+    subquery: &QueryDecorrelatedSubqueryDescription,
+) {
+    details.insert(
+        "subquery_identity".to_owned(),
+        PlanDetail::Text(subquery.identity.as_str().to_owned()),
+    );
+    details.insert(
+        "correlation_predicate_identity".to_owned(),
+        PlanDetail::Text(subquery.correlation_predicate.as_str().to_owned()),
+    );
+    details.insert(
+        "subquery_decorrelation".to_owned(),
+        PlanDetail::Text("resolver_approved_predicate_join".to_owned()),
+    );
 }
 
 fn partial_index_for_join<'a>(
