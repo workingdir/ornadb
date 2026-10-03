@@ -634,7 +634,7 @@ fn is_scalar_type(word: &str) -> bool {
 }
 
 fn is_operator(text: &str) -> bool {
-    crate::grammar::OPERATORS.contains(&text)
+    crate::legacy_lexical::OPERATORS.contains(&text)
 }
 
 /// Orna and SQL keywords recognised by the classifier, sorted for binary search.
