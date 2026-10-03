@@ -575,6 +575,22 @@ fn provider_diagnostic_codes_stay_outside_the_public_failure_catalog() {
             provided: AbiVersion { major: 2, minor: 0 },
         },
         ProviderDiagnostic::EffectIncompatible(role),
+        ProviderDiagnostic::ArgumentCountMismatch {
+            operation: operation.clone(),
+            expected: 1,
+            actual: 0,
+        },
+        ProviderDiagnostic::ArgumentTypeMismatch {
+            operation: operation.clone(),
+            parameter: "value".into(),
+            expected: "sys.Value".into(),
+            actual: "sys.String".into(),
+        },
+        ProviderDiagnostic::ResultTypeMismatch {
+            operation: operation.clone(),
+            expected: "sys.Value".into(),
+            actual: "sys.String".into(),
+        },
         ProviderDiagnostic::UndeclaredFailure {
             operation,
             code: FailureCode::new("sys.storage.corrupt").unwrap(),
@@ -605,6 +621,8 @@ fn provider_diagnostic_codes_stay_outside_the_public_failure_catalog() {
     assert_eq!(
         diagnostic_codes,
         BTreeSet::from([
+            "sys.abi.argument_count_mismatch",
+            "sys.abi.argument_type_mismatch",
             "sys.abi.duplicate_role_contract",
             "sys.abi.duplicate_role_provider",
             "sys.abi.effect_incompatible",
@@ -613,6 +631,7 @@ fn provider_diagnostic_codes_stay_outside_the_public_failure_catalog() {
             "sys.abi.provider_not_selected",
             "sys.abi.role_unavailable",
             "sys.abi.role_version_mismatch",
+            "sys.abi.result_type_mismatch",
             "sys.abi.undeclared_failure",
             "sys.abi.unknown_operation",
             "sys.abi.unknown_role",
@@ -1142,6 +1161,195 @@ fn dispatch_to_provider_routes_typed_value_and_declared_failure() {
     println!(
         "dispatch_to_provider operation={operation_name} typed_arguments={} outcomes=returned_typed_value,declared_failure total_cases=2",
         arguments.len()
+    );
+}
+
+#[test]
+fn generated_dispatch_diagnostics_match_registry_and_direct_paths() {
+    fn expect_diagnostic<T>(result: Result<T, ProviderDiagnostic>) -> ProviderDiagnostic {
+        match result {
+            Err(diagnostic) => diagnostic,
+            Ok(_) => panic!("invalid provider dispatch unexpectedly succeeded"),
+        }
+    }
+
+    let table = system_dispatch_table();
+    let operation_name = "sys.invoke(Value)";
+    let contract = table
+        .operation(operation_name)
+        .expect("generated typed registry contains sys.invoke(Value)");
+    let generated = system_function_descriptor(operation_name)
+        .expect("macro-generated binding contains sys.invoke(Value)");
+    assert_eq!(generated.name, contract.id.as_str());
+    assert_eq!(generated.signature, contract.signature.source);
+    assert_eq!(
+        contract.effects.iter().next(),
+        Some(generated.effect),
+        "generated binding and typed dispatch effects match"
+    );
+    let role_id = contract
+        .role
+        .as_ref()
+        .expect("generated invoke binding selects a provider role");
+    let registry = ProviderRoleRegistry::from_baked_abi(table).unwrap();
+    let offer = registry
+        .resolve(role_id.as_str())
+        .expect("generated invoke role resolves a baked provider")
+        .clone();
+    let arguments = contract
+        .signature
+        .parameters
+        .iter()
+        .map(|parameter| {
+            TypedValue::public(
+                TypeId::new(parameter.ty.canonical()),
+                parameter.name.as_bytes().to_vec(),
+            )
+        })
+        .collect::<Vec<_>>();
+    let argument_types = contract
+        .signature
+        .parameters
+        .iter()
+        .map(|parameter| parameter.ty.canonical())
+        .collect::<Vec<_>>();
+    let expected_result = contract.signature.result.canonical();
+    let provider_for = |response| InvokeValueProvider {
+        offer: offer.clone(),
+        operation: contract.id.clone(),
+        argument_types: argument_types.clone(),
+        response,
+        calls: AtomicUsize::new(0),
+    };
+    let mut diagnostic_cases = 0;
+
+    let mut wrong_arity = arguments.clone();
+    if wrong_arity.is_empty() {
+        wrong_arity.push(TypedValue::public(
+            TypeId::new("sys.conformance.Unexpected"),
+            b"extra".to_vec(),
+        ));
+    } else {
+        wrong_arity.pop();
+    }
+    let expected_count = ProviderDiagnostic::ArgumentCountMismatch {
+        operation: contract.id.clone(),
+        expected: contract.signature.parameters.len(),
+        actual: wrong_arity.len(),
+    };
+    let count_registry_provider = provider_for(Ok(TypedValue::public(
+        TypeId::new(expected_result.clone()),
+        b"unused".to_vec(),
+    )));
+    let count_direct_provider = provider_for(Ok(TypedValue::public(
+        TypeId::new(expected_result.clone()),
+        b"unused".to_vec(),
+    )));
+    let registry_count = expect_diagnostic(registry.dispatch_to_provider(
+        table,
+        operation_name,
+        &count_registry_provider,
+        &wrong_arity,
+        |_| Ok(()),
+    ));
+    let direct_count = expect_diagnostic(table.dispatch_to_provider(
+        operation_name,
+        &count_direct_provider,
+        &wrong_arity,
+        |_| Ok(()),
+    ));
+    assert_eq!(registry_count, expected_count);
+    assert_eq!(direct_count, expected_count);
+    assert_eq!(registry_count, direct_count);
+    assert_eq!(registry_count.code(), "sys.abi.argument_count_mismatch");
+    assert_eq!(count_registry_provider.calls.load(Ordering::SeqCst), 0);
+    assert_eq!(count_direct_provider.calls.load(Ordering::SeqCst), 0);
+    diagnostic_cases += 1;
+
+    assert!(
+        !arguments.is_empty(),
+        "sys.invoke(Value) has a typed argument"
+    );
+    let mismatched_type = "sys.conformance.DispatchMismatch";
+    let expected_argument = contract.signature.parameters[0].ty.canonical();
+    assert_ne!(expected_argument, mismatched_type);
+    let mut wrong_type_arguments = arguments.clone();
+    wrong_type_arguments[0] =
+        TypedValue::public(TypeId::new(mismatched_type), b"wrong-type".to_vec());
+    let expected_argument_diagnostic = ProviderDiagnostic::ArgumentTypeMismatch {
+        operation: contract.id.clone(),
+        parameter: contract.signature.parameters[0].name.clone(),
+        expected: expected_argument,
+        actual: mismatched_type.to_owned(),
+    };
+    let argument_registry_provider = provider_for(Ok(TypedValue::public(
+        TypeId::new(expected_result.clone()),
+        b"unused".to_vec(),
+    )));
+    let argument_direct_provider = provider_for(Ok(TypedValue::public(
+        TypeId::new(expected_result.clone()),
+        b"unused".to_vec(),
+    )));
+    let registry_argument = expect_diagnostic(registry.dispatch_to_provider(
+        table,
+        operation_name,
+        &argument_registry_provider,
+        &wrong_type_arguments,
+        |_| Ok(()),
+    ));
+    let direct_argument = expect_diagnostic(table.dispatch_to_provider(
+        operation_name,
+        &argument_direct_provider,
+        &wrong_type_arguments,
+        |_| Ok(()),
+    ));
+    assert_eq!(registry_argument, expected_argument_diagnostic);
+    assert_eq!(direct_argument, expected_argument_diagnostic);
+    assert_eq!(registry_argument, direct_argument);
+    assert_eq!(registry_argument.code(), "sys.abi.argument_type_mismatch");
+    assert_eq!(argument_registry_provider.calls.load(Ordering::SeqCst), 0);
+    assert_eq!(argument_direct_provider.calls.load(Ordering::SeqCst), 0);
+    diagnostic_cases += 1;
+
+    let mismatched_result = "sys.conformance.DispatchMismatch";
+    assert_ne!(expected_result, mismatched_result);
+    let expected_result_diagnostic = ProviderDiagnostic::ResultTypeMismatch {
+        operation: contract.id.clone(),
+        expected: expected_result,
+        actual: mismatched_result.to_owned(),
+    };
+    let result_registry_provider = provider_for(Ok(TypedValue::public(
+        TypeId::new(mismatched_result),
+        b"wrong-result".to_vec(),
+    )));
+    let result_direct_provider = provider_for(Ok(TypedValue::public(
+        TypeId::new(mismatched_result),
+        b"wrong-result".to_vec(),
+    )));
+    let registry_result = expect_diagnostic(registry.dispatch_to_provider(
+        table,
+        operation_name,
+        &result_registry_provider,
+        &arguments,
+        |_| Ok(()),
+    ));
+    let direct_result = expect_diagnostic(table.dispatch_to_provider(
+        operation_name,
+        &result_direct_provider,
+        &arguments,
+        |_| Ok(()),
+    ));
+    assert_eq!(registry_result, expected_result_diagnostic);
+    assert_eq!(direct_result, expected_result_diagnostic);
+    assert_eq!(registry_result, direct_result);
+    assert_eq!(registry_result.code(), "sys.abi.result_type_mismatch");
+    assert_eq!(result_registry_provider.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(result_direct_provider.calls.load(Ordering::SeqCst), 1);
+    diagnostic_cases += 1;
+
+    println!(
+        "generated_dispatch_diagnostic_parity operation={operation_name} diagnostics=argument_count,argument_type,result_type direct_registry_pairs={diagnostic_cases} provider_not_called_on_invalid_arguments=true total_cases={}",
+        diagnostic_cases * 2
     );
 }
 
