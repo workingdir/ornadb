@@ -5446,4 +5446,71 @@ fn paired_compaction_cursor_collisions_keep_escalation_scope_identity() {
             "each compaction chain and escalation snapshot has a distinct scope: {scope:?}"
         );
     }
+    assert_eq!(
+        cursor_chains
+            .iter()
+            .map(|(long_a, _, _, _, _)| long_a.len())
+            .collect::<Vec<_>>(),
+        [255, 256, 1, 1, 1, 1, 1, 1],
+        "fresh-snapshot cursors reuse the previous same-source compact token"
+    );
+    assert_eq!(
+        cursor_chains
+            .iter()
+            .map(|(_, _, long_b, _, _)| long_b.len())
+            .collect::<Vec<_>>(),
+        [511, 512, 255, 256, 511, 512, 255, 256],
+        "the second long-cursor position covers all chunk boundaries"
+    );
+    for previous_refresh in 0..3 {
+        let previous_left = &cursor_chains[previous_refresh * 2];
+        let fresh_left = &cursor_chains[(previous_refresh + 1) * 2];
+        let previous_right = &cursor_chains[previous_refresh * 2 + 1];
+        let fresh_right = &cursor_chains[(previous_refresh + 1) * 2 + 1];
+        assert_eq!(
+            previous_left.1, fresh_left.0,
+            "left refresh {previous_refresh} reuses the exact compact token under a new scope"
+        );
+        assert_eq!(
+            previous_right.1, fresh_right.0,
+            "right refresh {previous_refresh} reuses the exact compact token under a new scope"
+        );
+    }
+    for (long_a, compact_a, long_b, compact_b, after_compaction) in &cursor_chains {
+        assert!(long_a.as_slice() < compact_a.as_slice());
+        assert!(compact_a.as_slice() < long_b.as_slice());
+        assert!(long_b.as_slice() < compact_b.as_slice());
+        assert!(compact_b.as_slice() < after_compaction.as_slice());
+    }
+    let mut expected_cursors = Vec::new();
+    for (index, (long_a, compact_a, long_b, compact_b, _)) in
+        cursor_chains.iter().enumerate()
+    {
+        let (source_name, scope, _) = &source.lanes[index];
+        expected_cursors.extend([
+            (source_name.clone(), *scope, None),
+            (source_name.clone(), *scope, Some(long_a.clone())),
+            (source_name.clone(), *scope, Some(compact_a.clone())),
+            (source_name.clone(), *scope, Some(long_b.clone())),
+            (source_name.clone(), *scope, Some(compact_b.clone())),
+        ]);
+    }
+    assert_eq!(
+        source.cursors,
+        expected_cursors,
+        "each escalation refresh follows its own collision-safe cursor chain"
+    );
+    for (index, chain) in cursor_chains.iter().enumerate() {
+        let scope = source.lanes[index].1;
+        assert!(
+            source
+                .cursors
+                .iter()
+                .all(|(_, read_scope, cursor)| *read_scope != scope
+                    || cursor.as_ref() != Some(&chain.4)),
+            "the sentinel page is not requested within scope {scope:?}"
+        );
+    }
+    assert!(source.pending["View.Left"].is_empty());
+    assert!(source.pending["View.Right"].is_empty());
 }
