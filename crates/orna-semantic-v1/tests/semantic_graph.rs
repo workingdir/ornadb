@@ -7498,6 +7498,107 @@ fn sparse_paired_rebind_chains_preserve_identity_across_omitted_rows() {
 }
 
 #[test]
+fn paired_sparse_omission_replay_recovers_learned_lane_identities() {
+    let source = include_str!(
+        "fixtures/historical-paired-sparse-omission-replay-recovery.orna"
+    );
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-paired-sparse-omission-replay-recovery.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    let type_diagnostics = result
+        .diagnostics
+        .iter()
+        .filter(|diagnostic| diagnostic.code() == DIAG_TYPE)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        type_diagnostics.len(),
+        1,
+        "only the final lane split after the sparse replay chain should be rejected: {:?}",
+        type_diagnostics
+            .iter()
+            .map(|diagnostic| diagnostic.message())
+            .collect::<Vec<_>>()
+    );
+    let module = result
+        .modules
+        .values()
+        .find(|module| {
+            module
+                .symbols
+                .contains_key("paired_sparse_omission_replay_recovery")
+        })
+        .expect("paired sparse replay fixture module");
+    let Type::Function { result, .. } =
+        &module.symbols["paired_sparse_omission_replay_recovery"].ty
+    else {
+        panic!("paired sparse replay recovery must return computed stages");
+    };
+    let Type::Record(stages) = result.as_ref() else {
+        panic!("paired sparse replay recovery must return both saved and replayed lists");
+    };
+    let saved = stages.get("saved").expect("saved sparse list");
+    let replayed = stages.get("replayed").expect("replayed sparse list");
+    assert_eq!(
+        saved, replayed,
+        "resetting after a decoy sparse chain must recover every saved pin map"
+    );
+    let Type::List(row) = saved else {
+        panic!("saved sparse checkpoints must remain a real list: {saved:?}");
+    };
+    let Type::Record(fields) = row.as_ref() else {
+        panic!("saved sparse list must keep its computed row shape: {row:?}");
+    };
+    for (lane, first_slot, second_slot) in [
+        (
+            "left",
+            &["HEAD~1000", "HEAD~1020", "HEAD~1040"][..],
+            &["HEAD~1020", "HEAD~1040"][..],
+        ),
+        (
+            "right",
+            &["HEAD~1020", "HEAD~1040"][..],
+            &["HEAD~1001", "HEAD~1021", "HEAD~1041"][..],
+        ),
+    ] {
+        let Type::Tuple(slots) = fields.get(lane).expect("paired lane") else {
+            panic!("{lane} must retain both paired slots");
+        };
+        for (slot, expected) in slots.iter().zip([first_slot, second_slot]) {
+            let mut contexts = BTreeSet::new();
+            collect_snapshot_contexts(slot, &mut contexts);
+            assert_eq!(
+                contexts,
+                expected
+                    .iter()
+                    .map(|selector| format!("selector:{selector}"))
+                    .into_iter()
+                    .collect(),
+                "{lane} must recover its concrete selector history through sparse rows"
+            );
+        }
+    }
+    let mut witness_contexts = BTreeSet::new();
+    collect_snapshot_contexts(
+        fields.get("witness").expect("independent witness lane"),
+        &mut witness_contexts,
+    );
+    assert_eq!(
+        witness_contexts,
+        ["HEAD~1010", "HEAD~1022", "HEAD~1030", "HEAD~1042", "HEAD~1052"]
+            .map(|selector| format!("selector:{selector}"))
+            .into_iter()
+            .collect(),
+        "rejecting a lane split must retain independent witness identities"
+    );
+}
+
+#[test]
 fn paired_tuple_rebind_cascades_preserve_both_depths_of_identity() {
     let source = include_str!("fixtures/historical-cascaded-sparse-paired-three-way-rebinds.orna");
     let parsed = orna_syntax_v1::parse_module(source);
