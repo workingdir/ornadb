@@ -23,6 +23,7 @@ pub use branch_merge::{
     BranchMergeColumnRestoreStormFoldSnapshot,
     BranchMergeColumnRestoreStormLadderSnapshot,
     BranchMergeColumnRestoreStormSnapshot,
+    BranchMergeColumnRestoreStormDepthLabelWaveSnapshot,
     BranchMergeConflict, BranchMergeDepthFragmentRecovery,
     BranchMergeDepthWaveRecovery, BranchMergeError, BranchMergePlan,
     BranchMergeMultiParentColumnDepthLadderWaveEvent,
