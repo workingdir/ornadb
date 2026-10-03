@@ -1,0 +1,22 @@
+{
+  "name": "orna-playground-web-ui",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "test": "vitest run",
+    "wasm:build": "wasm-pack build ../orna-wasm --target web --out-dir pkg --out-name orna_wasm"
+  },
+  "dependencies": {
+    "monaco-editor": "0.57.0"
+  },
+  "devDependencies": {
+    "@types/node": "24.10.0",
+    "typescript": "5.9.3",
+    "vite": "8.3.2",
+    "vitest": "4.0.14"
+  }
+}
