@@ -2512,6 +2512,8 @@ fn explain_query_core_with_limit_pushdowns(
     let mut decorrelated_pin_chain_identity: Option<String> = None;
     let mut paired_index_anchor_chain_identity: Option<String> = None;
     let mut paired_window_spill_cascade_fold: Option<QueryWindowSpillCascadeFold> = None;
+    let mut paired_aggregate_anchor_cascade_fold: Option<QueryPairedAggregateAnchorCascadeFold> =
+        None;
     let mut paired_join_limit_anchor_cascade_fold: Option<QueryJoinLimitAnchorCascadeFold> = None;
     let mut paired_limit_window_cascade_fold: Option<QueryLimitWindowCascadeFold> = None;
     add_join_cost_fold_seed_details(
@@ -2948,6 +2950,31 @@ fn explain_query_core_with_limit_pushdowns(
                     chain_identity,
                 )
             });
+        if let Some(identity) = paired_aggregate_pushdown_anchor_fold_id.as_deref() {
+            let mut aggregate_nodes = BTreeSet::from([right_access, right]);
+            aggregate_nodes.extend(right_window_operator_start..operators.len());
+            for index in aggregate_nodes {
+                add_paired_aggregate_cascade_pair_details(&mut operators[index].details, identity);
+            }
+            let aggregate_stage_count =
+                u64::try_from(operators.len() - right_window_operator_start).unwrap_or(u64::MAX);
+            paired_aggregate_anchor_cascade_fold =
+                Some(query_paired_aggregate_anchor_cascade_fold(
+                    paired_aggregate_anchor_cascade_fold.as_ref(),
+                    identity,
+                    aggregate_stage_count,
+                ));
+        }
+        if let Some(cascade_fold) = paired_aggregate_anchor_cascade_fold.as_ref() {
+            let mut aggregate_nodes = BTreeSet::from([right_access, right]);
+            aggregate_nodes.extend(right_window_operator_start..operators.len());
+            for index in aggregate_nodes {
+                add_paired_aggregate_cascade_fold_details(
+                    &mut operators[index].details,
+                    cascade_fold,
+                );
+            }
+        }
         let paired_window_spill_anchor_fold_id = join_pair_identity
             .zip(right_window_identity.as_deref())
             .zip(right_window_spill_chain_identity.as_deref())
@@ -3165,6 +3192,9 @@ fn explain_query_core_with_limit_pushdowns(
             paired_aggregate_spill_fold
                 .as_ref()
                 .map(|(identity, _)| identity.as_str()),
+            paired_aggregate_anchor_cascade_fold
+                .as_ref()
+                .map(|fold| fold.identity.as_str()),
             paired_window_spill_cascade_fold
                 .as_ref()
                 .map(|fold| fold.identity.as_str()),
@@ -3286,6 +3316,9 @@ fn explain_query_core_with_limit_pushdowns(
         }
         if let Some(identity) = paired_aggregate_pushdown_anchor_fold_id.as_deref() {
             add_paired_aggregate_pushdown_anchor_fold_details(&mut details, identity);
+        }
+        if let Some(cascade_fold) = paired_aggregate_anchor_cascade_fold.as_ref() {
+            add_paired_aggregate_cascade_fold_details(&mut details, cascade_fold);
         }
         if let Some(identity) = paired_window_spill_anchor_fold_id.as_deref() {
             add_paired_window_spill_anchor_fold_details(&mut details, identity);
@@ -5162,6 +5195,100 @@ fn add_paired_aggregate_pushdown_anchor_fold_details(
     );
 }
 
+fn add_paired_aggregate_cascade_pair_details(
+    details: &mut BTreeMap<String, PlanDetail>,
+    identity: &str,
+) {
+    details.insert(
+        "paired_aggregate_cascade_pair_identity".to_owned(),
+        PlanDetail::Text(identity.to_owned()),
+    );
+    details.insert(
+        "paired_aggregate_cascade_pairing".to_owned(),
+        PlanDetail::Text("exact_join_pair_and_ordered_window_aggregate_chain".to_owned()),
+    );
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct QueryPairedAggregateAnchorCascadeFold {
+    identity: String,
+    pair_count: u64,
+    aggregate_stage_count: u64,
+    overflowed: bool,
+}
+
+/// Appends an exact paired aggregate chain to the sparse planned sequence.
+/// Inputs without a window chain carry the previous identity through; the
+/// next aggregate chain restores it by folding the new exact pair.
+fn query_paired_aggregate_anchor_cascade_fold(
+    previous: Option<&QueryPairedAggregateAnchorCascadeFold>,
+    pair_aggregate_anchor_fold_identity: &str,
+    aggregate_stage_count: u64,
+) -> QueryPairedAggregateAnchorCascadeFold {
+    let mut overflowed = previous.is_some_and(|previous| previous.overflowed);
+    let (pair_count, aggregate_stage_count) = if let Some(previous) = previous {
+        let pair_count = previous.pair_count.checked_add(1).unwrap_or_else(|| {
+            overflowed = true;
+            u64::MAX
+        });
+        let aggregate_stage_count = previous
+            .aggregate_stage_count
+            .checked_add(aggregate_stage_count)
+            .unwrap_or_else(|| {
+                overflowed = true;
+                u64::MAX
+            });
+        (pair_count, aggregate_stage_count)
+    } else {
+        (1, aggregate_stage_count)
+    };
+    let mut hash = Sha256::new();
+    hash.update(b"orna.sys.query-paired-aggregate-anchor-cascade-fold.v1\0");
+    hash_optional_text(
+        &mut hash,
+        previous.map(|previous| previous.identity.as_str()),
+    );
+    hash_part(&mut hash, pair_aggregate_anchor_fold_identity.as_bytes());
+    hash.update(pair_count.to_be_bytes());
+    hash.update(aggregate_stage_count.to_be_bytes());
+    hash.update([u8::from(overflowed)]);
+    QueryPairedAggregateAnchorCascadeFold {
+        identity: format!(
+            "paired-aggregate-anchor-cascade-fold:{}",
+            hex(&hash.finalize())
+        ),
+        pair_count,
+        aggregate_stage_count,
+        overflowed,
+    }
+}
+
+fn add_paired_aggregate_cascade_fold_details(
+    details: &mut BTreeMap<String, PlanDetail>,
+    fold: &QueryPairedAggregateAnchorCascadeFold,
+) {
+    details.insert(
+        "paired_aggregate_anchor_cascade_fold_identity".to_owned(),
+        PlanDetail::Text(fold.identity.clone()),
+    );
+    details.insert(
+        "paired_aggregate_anchor_cascade_pairing".to_owned(),
+        PlanDetail::Text("planned_pair_order_sparse_window_restoration_chains".to_owned()),
+    );
+    details.insert(
+        "paired_aggregate_anchor_cascade_pair_count".to_owned(),
+        PlanDetail::Integer(fold.pair_count),
+    );
+    details.insert(
+        "paired_aggregate_anchor_cascade_stage_count".to_owned(),
+        PlanDetail::Integer(fold.aggregate_stage_count),
+    );
+    details.insert(
+        "paired_aggregate_anchor_cascade_overflowed".to_owned(),
+        PlanDetail::Boolean(fold.overflowed),
+    );
+}
+
 fn query_paired_window_spill_anchor_fold_identity(
     anchor_fold_identity: &str,
     input_identity: &str,
@@ -6099,6 +6226,7 @@ fn query_join_cost_fold(
     paired_aggregate_pushdown_anchor_fold_identity: Option<&str>,
     paired_window_spill_anchor_fold_identity: Option<&str>,
     paired_aggregate_spill_anchor_fold_identity: Option<&str>,
+    paired_aggregate_anchor_cascade_fold_identity: Option<&str>,
     paired_window_spill_cascade_fold_identity: Option<&str>,
     paired_limit_window_cascade_fold_identity: Option<&str>,
     paired_join_limit_anchor_cascade_fold_identity: Option<&str>,
@@ -6139,6 +6267,7 @@ fn query_join_cost_fold(
         hash_part(&mut hash, identity.as_bytes());
     }
     hash_optional_text(&mut hash, paired_aggregate_spill_anchor_fold_identity);
+    hash_optional_text(&mut hash, paired_aggregate_anchor_cascade_fold_identity);
     hash_optional_text(&mut hash, paired_window_spill_cascade_fold_identity);
     hash_optional_text(&mut hash, paired_limit_window_cascade_fold_identity);
     hash_optional_text(&mut hash, paired_join_limit_anchor_cascade_fold_identity);
