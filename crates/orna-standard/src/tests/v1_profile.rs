@@ -33,6 +33,7 @@ use crate::{
     REFERENCE_STANDARD_INTROSPECTION_PATH_V1, REFERENCE_STANDARD_REFLECTION_PATH_V1,
     REFERENCE_STANDARD_ALGORITHM_PATH_V1, REFERENCE_STANDARD_UI_PATH_V1,
     REFERENCE_STANDARD_FORMAT_PATH_V1, REFERENCE_STANDARD_PARSE_PATH_V1,
+    REFERENCE_STANDARD_PRELUDE_PATH_V1, REFERENCE_STANDARD_PRELUDE_EXPORTS_V1,
     reference_standard_catalogue_v1,
     reference_standard_profile_v1, reference_standard_sources_v1,
 };
@@ -40,7 +41,7 @@ use crate::{
 #[test]
 fn pinned_ui_presentation_helpers_are_included_as_source() {
     let sources = reference_standard_sources_v1();
-    assert_eq!(sources.len(), 54);
+    assert_eq!(sources.len(), 55);
     assert_eq!(sources[49].0, REFERENCE_STANDARD_UI_PATH_V1);
     let parsed = orna_syntax_v1::parse_module_with_file(
         &sources[49].1,
@@ -101,6 +102,50 @@ fn pinned_std_entrypoint_imports_optional_content_modules() {
     assert!(entrypoint.lines().any(|line| line.trim() == "use reflection;"));
     assert!(entrypoint.lines().any(|line| line.trim() == "use format;"));
     assert!(entrypoint.lines().any(|line| line.trim() == "use parse;"));
+    assert!(entrypoint.lines().any(|line| line.trim() == "use prelude;"));
+}
+
+#[test]
+fn pinned_std_prelude_publishes_its_versioned_curated_export_set() {
+    let sources = reference_standard_sources_v1();
+    let (index, (path, source)) = sources
+        .iter()
+        .enumerate()
+        .find(|(_, (path, _))| path == REFERENCE_STANDARD_PRELUDE_PATH_V1)
+        .expect("the pinned source bundle includes std.prelude");
+    assert_eq!(index, 54, "the facade appends without renumbering old source entries");
+    for declaration in [
+        "pub fn api_version(): Str",
+        "pub fn version(): Str",
+        "pub fn count<T>(values: [T]): Int",
+        "pub fn first<T>(values: [T]): T?",
+        "pub fn unique<T>(values: [T]): [T]",
+        "pub fn trim(value: Str): Str",
+        "pub fn split(value: Str, separator: Str): [Str]",
+        "pub fn is_some<T>(value: T?): Bool",
+        "pub fn is_none<T>(value: T?): Bool",
+    ] {
+        assert!(source.contains(declaration), "missing {declaration}");
+    }
+    let parsed = orna_syntax_v1::parse_module_with_file(source, path);
+    assert!(parsed.is_ok(), "{path}: {:#?}", parsed.diagnostics);
+
+    let profile = reference_standard_profile_v1();
+    profile
+        .verify_source(path, source)
+        .expect("facade bytes are bound to the captured std snapshot");
+    assert_eq!(
+        profile
+            .module_prelude_exports()
+            .get(REFERENCE_STANDARD_PRELUDE_PATH_V1)
+            .expect("the prelude export set is recorded by the snapshot")
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        REFERENCE_STANDARD_PRELUDE_EXPORTS_V1
+    );
+    reference_standard_catalogue_v1()
+        .expect("curated names resolve through the pinned std catalogue");
 }
 
 #[test]
@@ -1020,7 +1065,7 @@ fn reference_standard_uses_pinned_orna_1_source_and_resolves_its_imports() {
     ] {
         assert!(sources[33].1.contains(contract), "missing std.test contract `{contract}`");
     }
-    assert_eq!(sources.len(), 54);
+    assert_eq!(sources.len(), 55);
     assert_eq!(sources[49].0, REFERENCE_STANDARD_UI_PATH_V1);
     for declaration in [
         "pub fn Field<T>(label: Str, value: T): UI",
@@ -1482,7 +1527,7 @@ fn pinned_filesystem_effect_is_visible_to_consumers_and_forbidden_in_assertions(
 #[test]
 fn pinned_filesystem_path_and_metadata_modules_are_captured_and_typecheck() {
     let sources = reference_standard_sources_v1();
-    assert_eq!(sources.len(), 54);
+    assert_eq!(sources.len(), 55);
     for (index, path) in [
         (42, REFERENCE_STANDARD_IO_PATH_MODULE_PATH_V1),
         (43, REFERENCE_STANDARD_IO_METADATA_PATH_V1),
@@ -1546,7 +1591,7 @@ fn pinned_filesystem_path_and_metadata_modules_are_captured_and_typecheck() {
 #[test]
 fn pinned_process_and_environment_modules_are_captured_and_typecheck() {
     let sources = reference_standard_sources_v1();
-    assert_eq!(sources.len(), 54);
+    assert_eq!(sources.len(), 55);
     for (index, path) in [
         (44, REFERENCE_STANDARD_IO_PROCESS_PATH_V1),
         (45, REFERENCE_STANDARD_IO_ENVIRONMENT_PATH_V1),
