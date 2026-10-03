@@ -4246,6 +4246,7 @@ fn captured_snapshot_identity_survives_paired_divergence_project_pin_folds() {
     let imports = include_str!("fixtures/module-upgrade-paired-divergence-use.orna");
     let capture = include_str!("fixtures/module-upgrade-divergence-pin-fold-capture.orna");
     let replay = include_str!("fixtures/module-upgrade-divergence-pin-fold-replay.orna");
+    let expected_app_values = [1_007, 10_007, 1_007, 10_007];
     let project_path = directory.path().join("project");
     let standard_path = project_path.join("stdlib/std");
 
@@ -4341,6 +4342,14 @@ fn captured_snapshot_identity_survives_paired_divergence_project_pin_folds() {
             pins[index]
         );
         sessions.push(session);
+
+        let mut app_session = admitted_snapshot_app_session(project);
+        assert_eq!(
+            app_session.submit(include_str!("fixtures/module-upgrade-call-app.orna")),
+            Ok(Some(int(expected_app_values[index]))),
+            "project app must execute against paired project pin {}",
+            pins[index]
+        );
     }
 
     for index in [3, 0, 2, 1, 3, 1, 0, 2] {
