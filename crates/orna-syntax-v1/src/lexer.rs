@@ -39,6 +39,78 @@ pub enum Keyword {
 }
 
 impl Keyword {
+    /// The complete ORNA-LEX-007 keyword vocabulary.
+    pub const ALL: [Self; 31] = [
+        Self::As,
+        Self::Assert,
+        Self::Base,
+        Self::Break,
+        Self::Case,
+        Self::Continue,
+        Self::Dim,
+        Self::Else,
+        Self::Enum,
+        Self::False,
+        Self::Fn,
+        Self::For,
+        Self::If,
+        Self::Impl,
+        Self::In,
+        Self::Let,
+        Self::Loop,
+        Self::Null,
+        Self::Offset,
+        Self::Affine,
+        Self::Protocol,
+        Self::Pub,
+        Self::Return,
+        Self::SelfValue,
+        Self::Static,
+        Self::Table,
+        Self::True,
+        Self::Type,
+        Self::Unit,
+        Self::Use,
+        Self::While,
+    ];
+
+    /// Returns the canonical source spelling.
+    pub const fn spelling(self) -> &'static str {
+        match self {
+            Self::As => "as",
+            Self::Assert => "assert",
+            Self::Base => "base",
+            Self::Break => "break",
+            Self::Case => "case",
+            Self::Continue => "continue",
+            Self::Dim => "dim",
+            Self::Else => "else",
+            Self::Enum => "enum",
+            Self::False => "false",
+            Self::Fn => "fn",
+            Self::For => "for",
+            Self::If => "if",
+            Self::Impl => "impl",
+            Self::In => "in",
+            Self::Let => "let",
+            Self::Loop => "loop",
+            Self::Null => "null",
+            Self::Offset => "offset",
+            Self::Affine => "affine",
+            Self::Protocol => "protocol",
+            Self::Pub => "pub",
+            Self::Return => "return",
+            Self::SelfValue => "self",
+            Self::Static => "static",
+            Self::Table => "table",
+            Self::True => "true",
+            Self::Type => "type",
+            Self::Unit => "unit",
+            Self::Use => "use",
+            Self::While => "while",
+        }
+    }
+
     pub fn from_text(s: &str) -> Option<Self> {
         Some(match s {
             "as" => Self::As,
