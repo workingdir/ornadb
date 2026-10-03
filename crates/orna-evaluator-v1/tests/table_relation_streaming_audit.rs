@@ -4796,6 +4796,48 @@ fn paired_pagination_keeps_identity_across_nested_escalation_spill_folds() {
     assert_eq!(snapshots[2], integer_pair(-84, 252), "three nested stages compute (-84, 252)");
     assert_eq!(snapshots[3], integer_pair(2400, 560), "four nested stages compute (2400, 560)");
     assert_eq!(source.lanes.len(), lane_names.len());
+    let scopes = source
+        .lanes
+        .iter()
+        .zip(lane_names.iter().copied())
+        .map(|((source_name, scope, _), expected_name)| {
+            assert_eq!(source_name, expected_name, "each paginated pair reads left then right");
+            *scope
+        })
+        .collect::<Vec<_>>();
+    for (index, scope) in scopes.iter().enumerate() {
+        assert!(
+            !scopes[..index].contains(scope),
+            "nested pagination keeps each spill snapshot on a fresh source scope: {scope:?}"
+        );
+    }
+    assert_eq!(
+        cursor_chains.iter().map(Vec::len).collect::<Vec<_>>(),
+        [255, 256, 511, 512, 256, 255, 512, 511],
+        "paired pagination restores long spill cursors around both chunk boundaries"
+    );
+    let mut expected_cursors = Vec::new();
+    for (index, long_cursor) in cursor_chains.iter().enumerate() {
+        let source_name = lane_names[index].to_owned();
+        let scope = scopes[index];
+        expected_cursors.extend([
+            (source_name.clone(), scope, None),
+            (source_name.clone(), scope, Some(long_cursor.clone())),
+            (source_name, scope, Some(compacted_cursor.clone())),
+        ]);
+    }
+    assert_eq!(
+        source.cursors,
+        expected_cursors,
+        "each nested fold requests only its own prefix through the compacted cursor"
+    );
+    assert!(
+        source
+            .cursors
+            .iter()
+            .all(|(_, _, cursor)| cursor.as_ref() != Some(&after_compaction_cursor)),
+        "take(6) stops before requesting the sentinel page"
+    );
     assert!(source.pending["View.Left"].is_empty());
     assert!(source.pending["View.Right"].is_empty());
 }
