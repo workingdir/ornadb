@@ -271,6 +271,13 @@ fn generated_artifact_determinism_matrix_matches_embedded_and_build_outputs() {
         serde_json::from_str(&regenerated.schema_json).expect("generated system API schema");
     let provider_schema: Value =
         serde_json::from_str(&provider_schema_json).expect("generated typed provider JSON Schema");
+    let provider_registry: Value = serde_json::from_str(&regenerated.provider_abi_json)
+        .expect("generated typed provider registry JSON");
+    assert_eq!(
+        build_support::canonical_pretty_json(&provider_registry).unwrap() + "\n",
+        regenerated.provider_abi_json,
+        "embedded dispatch metadata uses deterministic canonical serialization"
+    );
     assert_eq!(
         build_support::canonical_pretty_json(&provider_schema).unwrap() + "\n",
         provider_schema_json,
@@ -361,6 +368,79 @@ fn dispatch_metadata_schema_covers_nullable_roles_and_rejects_unknown_or_invalid
             .unwrap_err()
             .contains("invalid sys failure code"),
         "dispatch schema restricts operation failures to the sys vocabulary"
+    );
+}
+
+#[test]
+fn dispatch_identifier_schema_and_typed_parser_reject_the_same_malformed_ids() {
+    let dispatch_json = system_provider_abi_json();
+    let schema_json = system_provider_abi_schema_json();
+    let registry: Value = serde_json::from_str(dispatch_json).expect("embedded dispatch JSON");
+    let schema: Value = serde_json::from_str(schema_json).expect("embedded dispatch schema");
+
+    assert_eq!(
+        schema["$defs"]["operation"]["properties"]["role"]["pattern"],
+        r"^[A-Za-z0-9_-]+(\.[A-Za-z0-9_-]+)*@[0-9]+\.[0-9]+$"
+    );
+    assert_eq!(
+        schema["$defs"]["role"]["properties"]["name"]["pattern"],
+        r"^[A-Za-z0-9_-]+(\.[A-Za-z0-9_-]+)*$"
+    );
+    build_host::validate_json_against_schema(dispatch_json, schema_json)
+        .expect("valid provider identifiers conform to the generated schema");
+
+    let mut invalid_annotation = registry.clone();
+    let operation = invalid_annotation["operations"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|operation| operation["role"].is_string())
+        .expect("at least one operation declares a semantic role");
+    operation["role"] = Value::String("bad role@1.0".to_owned());
+    assert!(
+        build_host::validate_json_against_schema(&invalid_annotation.to_string(), schema_json)
+            .unwrap_err()
+            .contains("identifier pattern"),
+        "the published schema rejects malformed role annotations"
+    );
+    assert_eq!(
+        SystemProviderAbi::from_json(&invalid_annotation.to_string()),
+        Err(orna_sys_v1::ProviderAbiError::InvalidRoleId),
+        "the typed parser rejects the same malformed role annotation"
+    );
+
+    let mut invalid_role_name = registry.clone();
+    invalid_role_name["roles"][0]["name"] = Value::String("bad role".to_owned());
+    assert!(
+        build_host::validate_json_against_schema(&invalid_role_name.to_string(), schema_json)
+            .unwrap_err()
+            .contains("identifier pattern"),
+        "the published schema rejects malformed role identifiers"
+    );
+    assert_eq!(
+        SystemProviderAbi::from_json(&invalid_role_name.to_string()),
+        Err(orna_sys_v1::ProviderAbiError::InvalidRoleId),
+        "the typed parser rejects the same malformed role identifier"
+    );
+
+    let mut invalid_provider = registry;
+    let role = invalid_provider["roles"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|role| role["builtin_provider"].is_string())
+        .expect("a required built-in role declares its provider ID");
+    role["builtin_provider"] = Value::String("bad provider".to_owned());
+    assert!(
+        build_host::validate_json_against_schema(&invalid_provider.to_string(), schema_json)
+            .unwrap_err()
+            .contains("identifier pattern"),
+        "the published schema rejects malformed provider identifiers"
+    );
+    assert_eq!(
+        SystemProviderAbi::from_json(&invalid_provider.to_string()),
+        Err(orna_sys_v1::ProviderAbiError::InvalidProviderId),
+        "the typed parser rejects the same malformed provider identifier"
     );
 }
 
