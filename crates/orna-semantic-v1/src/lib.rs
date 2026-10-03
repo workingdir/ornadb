@@ -5822,6 +5822,15 @@ fn type_mentions_generic(ty: &Type, generic_names: &BTreeSet<String>) -> bool {
     }
 }
 
+fn function_parameters_are_concrete(ty: &Type, generic_names: &BTreeSet<String>) -> bool {
+    let Type::Function { parameters, .. } = ty else {
+        return false;
+    };
+    parameters
+        .iter()
+        .all(|parameter| !type_mentions_generic(parameter, generic_names))
+}
+
 fn substitute_generic_type(ty: &Type, substitutions: &BTreeMap<String, Type>) -> Type {
     match ty {
         Type::Named(name) => substitutions
@@ -6167,53 +6176,96 @@ fn infer_local_generic_call(
     }
     let mut effects = intrinsic_call_effects(callee);
     effects.join(&symbol.effects);
-    let values = arguments
-        .iter()
-        .enumerate()
-        .map(|(index, argument)| {
-            let expected = expected_call_parameter(
-                raw_parameters,
-                parameter_names.as_deref(),
-                arguments,
-                index,
-            );
-            let explicit_context = explicit_type_arguments
-                .is_some()
-                .then(|| expected.map(|expected| substitute_generic_type(expected, &substitutions)))
-                .flatten();
-            let local_constructor_scope = expected.is_some_and(|expected| {
-                matches!(expected, Type::Named(name) if bounded_generic_names.contains(name))
+    let mut values = vec![Type::Error; arguments.len()];
+    let mut argument_diagnostics = vec![Vec::new(); arguments.len()];
+    // Generic value arguments establish callback input types. Infer them
+    // before lambdas so named argument order cannot leave a predicate's
+    // parameter unbound when its source value appears later in the call.
+    let inference_order = (0..arguments.len())
+        .filter(|index| !matches!(arguments[*index].value, Expr::Lambda { .. }))
+        .chain((0..arguments.len()).filter(|index| {
+            matches!(arguments[*index].value, Expr::Lambda { .. })
+        }));
+    for index in inference_order {
+        let argument = &arguments[index];
+        let expected = expected_call_parameter(
+            raw_parameters,
+            parameter_names.as_deref(),
+            arguments,
+            index,
+        );
+        let contextual_expected =
+            expected.map(|expected| substitute_generic_type(expected, &substitutions));
+        let explicit_context = explicit_type_arguments
+            .is_some()
+            .then(|| contextual_expected.clone())
+            .flatten();
+        let local_constructor_scope = expected.is_some_and(|expected| {
+            matches!(expected, Type::Named(name) if bounded_generic_names.contains(name))
+        });
+        let contextual_callback = matches!(argument.value, Expr::Lambda { .. })
+            && contextual_expected.as_ref().is_some_and(|expected| {
+                function_parameters_are_concrete(expected, &generic_names)
             });
-            let inferred = if let Some(expected) = explicit_context.as_ref() {
-                infer_contextual(&argument.value, expected, scope, local, diagnostics)
-            } else if let Some(expected) = expected {
-                if type_mentions_generic(expected, &generic_names) {
-                    if local_constructor_scope {
-                        let mut argument_scope = scope.clone();
-                        argument_scope.allow_local_private_nominal_construction = true;
-                        infer(&argument.value, &argument_scope, local, diagnostics)
-                    } else {
-                        infer(&argument.value, scope, local, diagnostics)
-                    }
+        let diagnostics_for_argument = &mut argument_diagnostics[index];
+        let inferred = if let Some(expected) = explicit_context.as_ref() {
+            infer_contextual(&argument.value, expected, scope, local, diagnostics_for_argument)
+        } else if let (true, Some(contextual_expected)) =
+            (expected.is_some(), contextual_expected.as_ref())
+        {
+            if type_mentions_generic(contextual_expected, &generic_names) {
+                if local_constructor_scope {
+                    let mut argument_scope = scope.clone();
+                    argument_scope.allow_local_private_nominal_construction = true;
+                    infer(&argument.value, &argument_scope, local, diagnostics_for_argument)
+                } else if contextual_callback {
+                    // The callback's input can be concrete while its result
+                    // still determines another generic. Leave only those
+                    // result variables open for inference after contextualizing.
+                    let unresolved = generic_names
+                        .iter()
+                        .filter(|name| !substitutions.contains_key(*name))
+                        .map(|name| (name.clone(), Type::Error))
+                        .collect::<BTreeMap<_, _>>();
+                    let callback_context =
+                        substitute_generic_type(contextual_expected, &unresolved);
+                    infer_contextual(
+                        &argument.value,
+                        &callback_context,
+                        scope,
+                        local,
+                        diagnostics_for_argument,
+                    )
                 } else {
-                    infer_contextual(&argument.value, expected, scope, local, diagnostics)
+                    infer(&argument.value, scope, local, diagnostics_for_argument)
                 }
             } else {
-                infer(&argument.value, scope, local, diagnostics)
-            };
-            effects.join(&inferred.effects);
-            if let Some(expected) = expected {
-                constrain_generic_type(
-                    expected,
-                    &inferred.ty,
-                    &generic_names,
-                    &mut substitutions,
-                    diagnostics,
-                );
+                infer_contextual(
+                    &argument.value,
+                    contextual_expected,
+                    scope,
+                    local,
+                    diagnostics_for_argument,
+                )
             }
-            inferred.ty
-        })
-        .collect::<Vec<_>>();
+        } else {
+            infer(&argument.value, scope, local, diagnostics_for_argument)
+        };
+        effects.join(&inferred.effects);
+        if let Some(expected) = expected {
+            constrain_generic_type(
+                expected,
+                &inferred.ty,
+                &generic_names,
+                &mut substitutions,
+                diagnostics_for_argument,
+            );
+        }
+        values[index] = inferred.ty;
+    }
+    for diagnostics_for_argument in argument_diagnostics {
+        diagnostics.extend(diagnostics_for_argument);
+    }
     for generic in &generic_parameters {
         let Some(actual) = substitutions.get(&generic.name) else {
             diagnostics.push(diag(DIAG_TYPE, "generic type argument cannot be inferred"));
