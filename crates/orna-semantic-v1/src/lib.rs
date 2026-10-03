@@ -75,6 +75,7 @@ pub struct StandardDependencyProfile {
     snapshot: String,
     module_digests: BTreeMap<String, [u8; 32]>,
     prelude_exports: BTreeSet<String>,
+    module_prelude_exports: BTreeMap<String, BTreeSet<String>>,
 }
 
 impl StandardDependencyProfile {
@@ -88,6 +89,7 @@ impl StandardDependencyProfile {
             snapshot,
             module_digests: BTreeMap::new(),
             prelude_exports: BTreeSet::new(),
+            module_prelude_exports: BTreeMap::new(),
         })
     }
 
@@ -124,7 +126,8 @@ impl StandardDependencyProfile {
     /// Returns the canonical source-bundle revision for this profile.
     ///
     /// The revision binds the captured snapshot label, every module path and
-    /// source digest, and the root prelude export set. It is deliberately
+    /// source digest, the root prelude export set, and any module-specific
+    /// prelude export sets. It is deliberately
     /// derived from this descriptor rather than from caller iteration order,
     /// so a catalogue consumer can retain one stable provenance coordinate
     /// without retaining source bytes. This is a source identity, not a
@@ -134,6 +137,7 @@ impl StandardDependencyProfile {
             &self.snapshot,
             &self.module_digests,
             &self.prelude_exports,
+            &self.module_prelude_exports,
         )
     }
 
@@ -150,6 +154,28 @@ impl StandardDependencyProfile {
 
     pub fn prelude_exports(&self) -> &BTreeSet<String> {
         &self.prelude_exports
+    }
+
+    /// Records the exact `as _` exports for one pinned standard source module.
+    /// The path and names are checked against captured module bytes when the
+    /// profile is admitted into a catalogue.
+    pub fn with_module_prelude_exports(
+        mut self,
+        logical_path: impl Into<String>,
+        names: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Self {
+        let logical_path = logical_path.into();
+        let exports = names.into_iter().map(Into::into).collect::<BTreeSet<_>>();
+        if exports.is_empty() {
+            self.module_prelude_exports.remove(&logical_path);
+        } else {
+            self.module_prelude_exports.insert(logical_path, exports);
+        }
+        self
+    }
+
+    pub fn module_prelude_exports(&self) -> &BTreeMap<String, BTreeSet<String>> {
+        &self.module_prelude_exports
     }
 
     /// Verifies one source unit against the exact pinned module digest.
@@ -203,17 +229,25 @@ fn digest_source(source: &str) -> [u8; 32] {
     Sha256::digest(source.as_bytes()).into()
 }
 
-const STANDARD_DEPENDENCY_REVISION_DOMAIN: &[u8] = b"orna.std.dependency.v1";
+const STANDARD_DEPENDENCY_REVISION_DOMAIN_V1: &[u8] = b"orna.std.dependency.v1";
+const STANDARD_DEPENDENCY_REVISION_DOMAIN_V2: &[u8] = b"orna.std.dependency.v2";
 
 fn standard_dependency_revision_digest(
     snapshot: &str,
     module_digests: &BTreeMap<String, [u8; 32]>,
     prelude_exports: &BTreeSet<String>,
+    module_prelude_exports: &BTreeMap<String, BTreeSet<String>>,
 ) -> [u8; 32] {
     let mut hasher = Sha256::new();
-    hasher.update(STANDARD_DEPENDENCY_REVISION_DOMAIN);
+    let revision_domain: &[u8] = if module_prelude_exports.is_empty() {
+        STANDARD_DEPENDENCY_REVISION_DOMAIN_V1
+    } else {
+        STANDARD_DEPENDENCY_REVISION_DOMAIN_V2
+    };
+    let revision_version = if module_prelude_exports.is_empty() { 1u32 } else { 2u32 };
+    hasher.update(revision_domain);
     hasher.update([0]);
-    hasher.update(1u32.to_be_bytes());
+    hasher.update(revision_version.to_be_bytes());
     update_canonical_text(&mut hasher, snapshot);
     hasher.update((module_digests.len() as u64).to_be_bytes());
     for (logical_path, digest) in module_digests {
@@ -223,6 +257,16 @@ fn standard_dependency_revision_digest(
     hasher.update((prelude_exports.len() as u64).to_be_bytes());
     for export in prelude_exports {
         update_canonical_text(&mut hasher, export);
+    }
+    if !module_prelude_exports.is_empty() {
+        hasher.update((module_prelude_exports.len() as u64).to_be_bytes());
+        for (logical_path, exports) in module_prelude_exports {
+            update_canonical_text(&mut hasher, logical_path);
+            hasher.update((exports.len() as u64).to_be_bytes());
+            for export in exports {
+                update_canonical_text(&mut hasher, export);
+            }
+        }
     }
     hasher.finalize().into()
 }
@@ -499,6 +543,13 @@ impl Catalogue {
         profile: &StandardDependencyProfile,
         sources: impl IntoIterator<Item = (String, String)>,
     ) -> Result<Self, StandardCatalogueError> {
+        if profile.module_prelude_exports.keys().any(|path| {
+            !is_standard_module_path(path) || !profile.module_digests.contains_key(path)
+        }) {
+            return Err(StandardCatalogueError::Profile(
+                StandardProfileError::InvalidPreludeExport,
+            ));
+        }
         let mut catalogue = Self::empty();
         catalogue.standard_dependency_profile = Some(profile.clone());
         let mut seen = BTreeSet::new();
@@ -518,10 +569,14 @@ impl Catalogue {
                 return Err(StandardCatalogueError::InvalidSource);
             }
             let mut diagnostics = Vec::new();
+            let empty_prelude_exports = BTreeSet::new();
             let prelude_exports = if namespace == Namespace(vec!["std".into()]) {
                 &profile.prelude_exports
             } else {
-                &BTreeSet::new()
+                profile
+                    .module_prelude_exports
+                    .get(&logical_path)
+                    .unwrap_or(&empty_prelude_exports)
             };
             let header =
                 collect_header(&namespace, &parsed.value, prelude_exports, &mut diagnostics);
@@ -531,11 +586,9 @@ impl Catalogue {
             {
                 return Err(StandardCatalogueError::DuplicateDeclaration);
             }
-            if namespace == Namespace(vec!["std".into()])
-                && !profile
-                    .prelude_exports
-                    .iter()
-                    .all(|name| header.exports.contains_key(name))
+            if !prelude_exports
+                .iter()
+                .all(|name| header.exports.contains_key(name))
             {
                 return Err(StandardCatalogueError::Profile(
                     StandardProfileError::InvalidPreludeExport,
@@ -25166,6 +25219,48 @@ mod tests {
         .with_prelude_exports(["missing"]);
         assert_eq!(
             Catalogue::from_standard_sources(&invalid, [("std/main.orna".into(), source.into())]),
+            Err(StandardCatalogueError::Profile(
+                StandardProfileError::InvalidPreludeExport,
+            ))
+        );
+    }
+
+    #[test]
+    fn pinned_standard_module_prelude_uses_only_its_recorded_exports() {
+        let root = "pub fn root_only(): Int = 7;";
+        let prelude = "pub fn curated(): Int = 42; pub fn module_only(): Int = 9;";
+        let sources = [
+            ("std/main.orna".to_owned(), root.to_owned()),
+            ("std/prelude.orna".to_owned(), prelude.to_owned()),
+        ];
+        let profile = StandardDependencyProfile::from_sources("std-snapshot-2", sources.clone())
+            .unwrap()
+            .with_module_prelude_exports("std/prelude.orna", ["curated"]);
+        let catalogue = Catalogue::from_standard_sources(&profile, sources.clone()).unwrap();
+
+        let curated = analyze_with_catalogue(
+            &[ModuleInput::new(
+                "client.orna",
+                "use std.prelude as _; pub fn run(): Int = curated();",
+            )],
+            &catalogue,
+        );
+        assert!(curated.is_ok(), "{:#?}", curated.diagnostics);
+
+        let not_curated = analyze_with_catalogue(
+            &[ModuleInput::new(
+                "client.orna",
+                "use std.prelude as _; pub fn run(): Int = module_only();",
+            )],
+            &catalogue,
+        );
+        assert!(has(&not_curated, DIAG_UNRESOLVED), "{:#?}", not_curated.diagnostics);
+
+        let invalid = StandardDependencyProfile::from_sources("std-snapshot-2", sources.clone())
+            .unwrap()
+            .with_module_prelude_exports("std/prelude.orna", ["missing"]);
+        assert_eq!(
+            Catalogue::from_standard_sources(&invalid, sources),
             Err(StandardCatalogueError::Profile(
                 StandardProfileError::InvalidPreludeExport,
             ))
