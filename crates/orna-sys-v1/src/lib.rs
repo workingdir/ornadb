@@ -630,6 +630,18 @@ pub struct SystemFunctionDescriptor {
     pub effect: SystemEffect,
     pub signature: &'static str,
     pub purpose: &'static str,
+    /// Extended source documentation for editor hover and reference views.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub documentation: Option<&'static str>,
+    /// Optional registry details useful when presenting the callable contract.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub contract: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub preconditions: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ownership: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub snapshot_rule: Option<&'static str>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Serialize)]
