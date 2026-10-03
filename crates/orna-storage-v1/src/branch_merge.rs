@@ -302,6 +302,23 @@ pub struct BranchMergePairedCheckpointRedoFoldSegmentRotationCompactionSnapshot 
     pub runs: Vec<BranchMergePairedCheckpointRedoFoldSegmentRotationCompactionRunSnapshot>,
 }
 
+/// A malformed compacted fold/segment run cannot be restored losslessly.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum BranchMergePairedCheckpointRedoFoldSegmentRotationRestoreError {
+    InvalidOrderRange {
+        fold_ordinal: usize,
+        first_order: u64,
+        last_order: u64,
+    },
+    SegmentIdentityCountMismatch {
+        fold_ordinal: usize,
+        first_order: u64,
+        last_order: u64,
+        expected: u128,
+        actual: usize,
+    },
+}
+
 /// A sparse redo fold carrying fold provenance and each frame's atomic
 /// write-ahead log/segment identity.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -2038,6 +2055,67 @@ pub fn compress_paired_checkpoint_redo_sparse_stream_chains_preserving_fold_and_
                 checkpoint_id: stream.checkpoint_id.clone(),
                 runs,
             }
+        })
+        .collect()
+}
+
+/// Restores sparse checkpoint slots from compacted fold/segment runs.
+///
+/// Every represented order expands with its exact checkpoint state, enclosing
+/// redo-fold identity, and directional segment pair. Sparse gaps and fold
+/// boundaries remain distinct. Runs with an invalid range or anything other
+/// than one saved segment pair per represented order are rejected rather than
+/// synthesizing or losing rotation history.
+pub fn restore_paired_checkpoint_redo_sparse_stream_chains_preserving_fold_and_segment_rotation_identity(
+    compacted: &[BranchMergePairedCheckpointRedoFoldSegmentRotationCompactionSnapshot],
+) -> Result<
+    Vec<BranchMergePairedCheckpointRedoFoldSegmentRotationSparseStreamChainSnapshot>,
+    BranchMergePairedCheckpointRedoFoldSegmentRotationRestoreError,
+> {
+    compacted
+        .iter()
+        .map(|stream| {
+            let mut slots = Vec::new();
+            for run in &stream.runs {
+                if run.last_order < run.first_order {
+                    return Err(
+                        BranchMergePairedCheckpointRedoFoldSegmentRotationRestoreError::InvalidOrderRange {
+                            fold_ordinal: run.fold_ordinal,
+                            first_order: run.first_order,
+                            last_order: run.last_order,
+                        },
+                    );
+                }
+                let expected = u128::from(run.last_order) - u128::from(run.first_order) + 1;
+                if expected != run.segment_identities.len() as u128 {
+                    return Err(
+                        BranchMergePairedCheckpointRedoFoldSegmentRotationRestoreError::SegmentIdentityCountMismatch {
+                            fold_ordinal: run.fold_ordinal,
+                            first_order: run.first_order,
+                            last_order: run.last_order,
+                            expected,
+                            actual: run.segment_identities.len(),
+                        },
+                    );
+                }
+                slots.extend(run.segment_identities.iter().enumerate().map(
+                    |(offset, segment_identity)| {
+                        BranchMergePairedCheckpointRedoFoldSegmentRotationSparseChainSlotSnapshot {
+                            fold_ordinal: run.fold_ordinal,
+                            order: run.first_order + offset as u64,
+                            left: run.left.clone(),
+                            right: run.right.clone(),
+                            redo_fold_identity: run.redo_fold_identity.clone(),
+                            segment_identity: segment_identity.clone(),
+                        }
+                    },
+                ));
+            }
+            slots.sort_by_key(|slot| (slot.fold_ordinal, slot.order));
+            Ok(BranchMergePairedCheckpointRedoFoldSegmentRotationSparseStreamChainSnapshot {
+                checkpoint_id: stream.checkpoint_id.clone(),
+                slots,
+            })
         })
         .collect()
 }
