@@ -18916,9 +18916,25 @@ fn rollback_conflicting_checkpoint_paths(
         .filter_map(|scope| {
             let mut full_scope = path.to_vec();
             full_scope.extend(scope);
-            let rollback_scope = checkpoint_rollback_scope(&full_scope)?;
-            (rollback_scope.starts_with(path) && rollback_scope.len() >= path.len())
-                .then(|| (rollback_scope.clone(), rollback_scope[path.len()..].to_vec()))
+            let mut rollback_scope = checkpoint_rollback_scope(&full_scope)?;
+            if !rollback_scope.starts_with(path) || rollback_scope.len() < path.len() {
+                return None;
+            }
+            let mut relative_scope = rollback_scope[path.len()..].to_vec();
+            // An earlier parent can omit the whole callback slot, so a deep
+            // result boundary may not exist in the rollback anchor. Fall back
+            // only as far as the nearest boundary present on all three sides.
+            while checkpoint_value_at_scope(rollback_anchor, &relative_scope).is_none()
+                || checkpoint_value_at_scope(merged, &relative_scope).is_none()
+                || checkpoint_value_at_scope(effective_parent, &relative_scope).is_none()
+            {
+                if rollback_scope.len() <= path.len() {
+                    return None;
+                }
+                rollback_scope.pop();
+                relative_scope.pop();
+            }
+            Some((rollback_scope, relative_scope))
         })
         .collect::<BTreeMap<_, _>>();
 
