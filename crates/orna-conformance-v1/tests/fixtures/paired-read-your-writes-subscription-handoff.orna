@@ -1,0 +1,25 @@
+pub table Note(id: Int) { amount: Int, label: Str, }
+
+fn seed() {
+    Note.insert({ id: 1, amount: 10, label: "stable" });
+    Note.insert({ id: 2, amount: 20, label: "seed" });
+    Note.insert({ id: 3, amount: 30, label: "stable" });
+}
+
+fn paired_total(): Int = Note
+    | filter(note => note.id % 2 == 1)
+    | union(Note | filter(note => note.id % 2 == 0))
+    | map(note => note.amount)
+    | sum;
+
+fn paired_identity_total(): Int = Note
+    | filter(note => note.label == "seed")
+    | union(Note | filter(note => note.label == "stable"))
+    | map(note => note.id * note.amount)
+    | sum;
+
+fn parent() {
+    seed();
+    assert paired_total() == 60;
+    assert paired_identity_total() == 140;
+}

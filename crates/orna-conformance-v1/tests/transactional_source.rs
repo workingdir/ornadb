@@ -425,6 +425,28 @@ fn parsed_paired_folds_observe_nested_activation_writes_and_keep_row_identity() 
 }
 
 #[test]
+fn parsed_paired_subscription_folds_compute_candidate_values() {
+    let mut runtime = TransactionalEvaluator::new("parent", Limits::default());
+    let outcome = runtime.execute_source(&fixture_source(include_str!(
+        "fixtures/paired-read-your-writes-subscription-handoff.orna"
+    )));
+
+    assert!(matches!(outcome, StageOutcome::Passed), "{outcome:?}");
+    let one = runtime
+        .committed_row("Note", &Value::int(1.into()))
+        .expect("seeded first paired row commits");
+    assert_eq!(row_field(one, "amount"), &Raw::Int(10.into()));
+    let two = runtime
+        .committed_row("Note", &Value::int(2.into()))
+        .expect("seeded second paired row commits");
+    assert_eq!(row_field(two, "amount"), &Raw::Int(20.into()));
+    let three = runtime
+        .committed_row("Note", &Value::int(3.into()))
+        .expect("seeded third paired row commits");
+    assert_eq!(row_field(three, "amount"), &Raw::Int(30.into()));
+}
+
+#[test]
 fn parsed_filter_count_failure_rolls_back_candidate_rows() {
     let mut runtime = TransactionalEvaluator::new("parent", Limits::default());
     let outcome = runtime.execute_source(&fixture_source(include_str!(
