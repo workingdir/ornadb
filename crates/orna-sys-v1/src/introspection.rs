@@ -2441,7 +2441,12 @@ fn explain_query_core_with_subqueries(
         }
         if let Some(identity) = decorrelated_anchor_fold_id.as_deref() {
             for index in BTreeSet::from([right_access, right]) {
-                add_decorrelated_anchor_fold_details(&mut operators[index].details, identity);
+                add_decorrelated_anchor_fold_details(
+                    &mut operators[index].details,
+                    identity,
+                    &left_fold_identity,
+                    &right_fold_identity,
+                );
             }
         }
         let next_join_cost_fold_identity = query_join_cost_fold(
@@ -2508,7 +2513,12 @@ fn explain_query_core_with_subqueries(
             add_decorrelated_index_selection_omission_details(&mut details, identity);
         }
         if let Some(identity) = decorrelated_anchor_fold_id.as_deref() {
-            add_decorrelated_anchor_fold_details(&mut details, identity);
+            add_decorrelated_anchor_fold_details(
+                &mut details,
+                identity,
+                &left_fold_identity,
+                &right_fold_identity,
+            );
         }
         if let Some(identity) = window_anchor_fold_id.as_deref() {
             add_window_anchor_fold_details(&mut details, identity);
@@ -3741,10 +3751,20 @@ fn query_decorrelated_anchor_fold_identity(
 fn add_decorrelated_anchor_fold_details(
     details: &mut BTreeMap<String, PlanDetail>,
     identity: &str,
+    parent_identity: &str,
+    input_identity: &str,
 ) {
     details.insert(
         "decorrelated_anchor_fold_identity".to_owned(),
         PlanDetail::Text(identity.to_owned()),
+    );
+    details.insert(
+        "decorrelated_anchor_fold_parent_identity".to_owned(),
+        PlanDetail::Text(parent_identity.to_owned()),
+    );
+    details.insert(
+        "decorrelated_anchor_fold_input_identity".to_owned(),
+        PlanDetail::Text(input_identity.to_owned()),
     );
     details.insert(
         "decorrelated_anchor_fold_pairing".to_owned(),
