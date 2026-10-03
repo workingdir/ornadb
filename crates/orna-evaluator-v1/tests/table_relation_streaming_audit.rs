@@ -1431,6 +1431,21 @@ fn paired_view_prefix_spill_cursors_keep_scope_across_handoffs() {
         );
     }
     assert_eq!(source.cursors.len(), 28, "all prefix-spill page chains are consumed");
+    let continuations = [cursor_prefix, cursor_one, cursor_two];
+    let depths = [2, 1, 3, 2, 1, 4, 2, 2, 2, 2, 4, 3];
+    let mut expected_cursors = Vec::new();
+    for (lane, depth) in depths.into_iter().enumerate() {
+        let (source_name, scope, _) = &source.lanes[lane];
+        expected_cursors.push((source_name.clone(), *scope, None));
+        for token in continuations.iter().take(depth - 1) {
+            expected_cursors.push((source_name.clone(), *scope, Some(token.clone())));
+        }
+    }
+    assert_eq!(
+        source.cursors,
+        expected_cursors,
+        "prefix-related cursor byte strings stay exact and scope-local through paired handoffs"
+    );
 }
 
 fn paired_subscription_cascade_body() -> Expr {
