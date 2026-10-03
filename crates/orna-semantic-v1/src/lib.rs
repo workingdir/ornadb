@@ -9786,8 +9786,9 @@ fn merge_checkpoint_field_map_multi_parent(left: &Type, right: &Type) -> Option<
 }
 
 /// A rejected paired-pin scope must not discard unrelated checkpoint values
-/// from the same sparse row. Keep pinned tuple fields at their recovery anchor,
-/// while allowing independent record siblings to continue contributing pins.
+/// from the same sparse row. Descend through containing records so only the
+/// pinned tuple fields return to their recovery anchor while independent
+/// nested siblings continue contributing pins.
 fn merge_unpaired_checkpoint_record_siblings(
     accumulated: &Type,
     parent: &Type,
@@ -9801,13 +9802,19 @@ fn merge_unpaired_checkpoint_record_siblings(
             merged.insert(name.clone(), accumulated_value.clone());
             continue;
         };
-        let value = if type_contains_pinned_checkpoint_tuple(accumulated_value)
-            || type_contains_pinned_checkpoint_tuple(parent_value)
-        {
-            accumulated_value.clone()
-        } else {
-            merge_checkpoint_field_map_multi_parent(accumulated_value, parent_value)
-                .unwrap_or_else(|| accumulated_value.clone())
+        let contains_pinned_tuple = type_contains_pinned_checkpoint_tuple(accumulated_value)
+            || type_contains_pinned_checkpoint_tuple(parent_value);
+        let value = match (accumulated_value, parent_value) {
+            // Roll back the actual paired tuple fields, not a containing
+            // record. Unrelated nested siblings from the rejected row still
+            // contribute their independently valid checkpoint identities.
+            (Type::Record(_), Type::Record(_)) if contains_pinned_tuple => {
+                merge_unpaired_checkpoint_record_siblings(accumulated_value, parent_value)
+                    .unwrap_or_else(|| accumulated_value.clone())
+            }
+            _ if contains_pinned_tuple => accumulated_value.clone(),
+            _ => merge_checkpoint_field_map_multi_parent(accumulated_value, parent_value)
+                .unwrap_or_else(|| accumulated_value.clone()),
         };
         merged.insert(name.clone(), value);
     }
