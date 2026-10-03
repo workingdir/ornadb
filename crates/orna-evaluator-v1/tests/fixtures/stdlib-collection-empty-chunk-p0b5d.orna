@@ -1,0 +1,1 @@
+collection_ops.chunk(collection_ops.take([1], 0), 2)
