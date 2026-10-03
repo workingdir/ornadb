@@ -1,0 +1,15 @@
+std.ui.Details([
+    std.ui.Rows([
+        std.ui.Stack([
+            std.ui.Details([
+                std.ui.Rows([
+                    std.ui.Stack([
+                        std.ui.Code("", null),
+                        std.ui.Text(" deep é\n🙂\t "),
+                        std.ui.Field("zero", 0),
+                    ]),
+                ]),
+            ]),
+        ]),
+    ]),
+])
