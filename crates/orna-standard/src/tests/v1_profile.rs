@@ -306,6 +306,7 @@ fn pinned_map_ovb_order_projection_is_snapshot_bound_and_typechecks() {
         .find(|(path, _)| path == "std/map.orna")
         .expect("the pinned standard snapshot contains std.map");
     assert!(source.contains("pub fn entries_by_ovb_key"));
+    assert!(source.contains("pub fn encoded_entries_by_ovb_key"));
     reference_standard_profile_v1()
         .verify_source(path, source)
         .expect("map ordering behavior is captured by the pinned std snapshot");
