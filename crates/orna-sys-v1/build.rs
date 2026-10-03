@@ -100,6 +100,11 @@ fn main() {
         provider_schema,
     )
     .expect("write generated typed system provider ABI schema");
+    fs::write(
+        out_dir.join("system_binding_modules.json"),
+        artifacts.binding_modules_json,
+    )
+    .expect("write generated sys binding-module manifest");
     let binding_root = out_dir.join("system_bindings");
     if binding_root.exists() {
         fs::remove_dir_all(&binding_root).expect("remove stale generated sys binding stubs");
