@@ -37,6 +37,10 @@ impl<'source> Parser<'source> {
             self.builder.finish_node();
             return;
         };
+        self.capture_documentation_comment(
+            statement_start,
+            name.parts.last().expect("qualified name").span.start,
+        );
         self.skip_trivia();
         let Some(parameter_list_start) = self.expect_kind(
             TokenKind::LeftParenthesis,
