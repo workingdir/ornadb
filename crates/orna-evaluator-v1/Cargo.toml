@@ -23,6 +23,7 @@ orna-syntax-v1 = { path = "../orna-syntax-v1" }
 orna-value-v1 = { path = "../orna-value-v1" }
 sha2 = "0.10.9"
 unicode-normalization = "=0.1.24"
+unicode-case-mapping = "=1.0.0"
 
 [dev-dependencies]
 orna-repository-v1 = { path = "../orna-repository-v1" }

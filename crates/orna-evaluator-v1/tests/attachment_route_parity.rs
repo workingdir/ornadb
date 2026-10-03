@@ -1091,6 +1091,93 @@ fn fresh_nested_route_pair_chains_evaluate_rebound_closure_values() {
             Ok(Some(Value::int(84.into())))
         );
     }
+
+    assert!(matches!(
+        resolver.extend_nested_terminal_pair_storm_from_checkpoint(
+            &fresh_route,
+            &saved_middle_handoff,
+            &[],
+        ),
+        Err(AttachmentError::RetainedSnapshotUnavailable)
+    ));
+    let nested_checkpoint_storm = resolver
+        .extend_nested_terminal_pair_storm_from_checkpoint(
+            &later_cascade,
+            &saved_middle_handoff,
+            &[
+                second_pair.clone(),
+                second_pair.clone(),
+                second_pair.clone(),
+            ],
+        )
+        .unwrap_or_else(|error| panic!("depth-one checkpoint storm failed: {error:?}"));
+    assert_eq!(
+        nested_checkpoint_storm.retained_depth_label(0, 1).unwrap(),
+        saved_middle_handoff.depth_label().clone(),
+        "the source depth-one handoff remains bound to its original pins"
+    );
+    for wave in [4, 6, 8] {
+        let retained = nested_checkpoint_storm.retained_wave(wave).unwrap();
+        assert_eq!(pin_route(&retained[0]), pin_route(saved_middle_handoff.handoff()));
+        let label = nested_checkpoint_storm.retained_depth_label(wave, 0).unwrap();
+        assert_eq!(label.wave(), wave);
+        assert_eq!(label.depth(), 0);
+    }
+    let nested_root = &nested_checkpoint_storm.retained_wave(8).unwrap()[0];
+    let mut nested_root_value =
+        AdmittedReplSession::from_attached_database_session(nested_root, Limits::default())
+            .unwrap();
+    assert_eq!(
+        nested_root_value.submit(&format!("use {};", aliases[3])),
+        Ok(None)
+    );
+    assert_eq!(
+        nested_root_value.submit(&format!("{}.package_value()", aliases[3])),
+        Ok(Some(Value::int(84.into())))
+    );
+    let nested_rebound = &nested_checkpoint_storm.retained_wave(8).unwrap()[1];
+    let mut nested_rebound_value =
+        AdmittedReplSession::from_attached_database_session(nested_rebound, Limits::default())
+            .unwrap();
+    assert_eq!(
+        nested_rebound_value.submit(&format!("use {};", aliases[4])),
+        Ok(None)
+    );
+    assert_eq!(
+        nested_rebound_value.submit(&format!("{}.package_value()", aliases[4])),
+        Ok(Some(Value::int(96.into())))
+    );
+
+    let anchor_a_waves = [first_pair.clone()];
+    let anchor_b_waves = [second_pair.clone()];
+    let anchor_a_return_waves = [first_pair.clone()];
+    let cyclic_anchor_plans = [
+        (&saved_handoff, anchor_a_waves.as_slice()),
+        (&saved_middle_handoff, anchor_b_waves.as_slice()),
+        (&saved_handoff, anchor_a_return_waves.as_slice()),
+    ];
+    let cyclic_anchor_storm = resolver
+        .extend_nested_terminal_pair_checkpoint_storms(&later_cascade, &cyclic_anchor_plans)
+        .unwrap_or_else(|error| panic!("cyclic anchor storm failed: {error:?}"));
+    assert_eq!(
+        cyclic_anchor_storm.retained_depth_label(0, 0).unwrap(),
+        saved_handoff.depth_label().clone()
+    );
+    assert_eq!(
+        cyclic_anchor_storm.retained_depth_label(0, 1).unwrap(),
+        saved_middle_handoff.depth_label().clone()
+    );
+    for (wave, checkpoint) in [
+        (4, &saved_handoff),
+        (6, &saved_middle_handoff),
+        (8, &saved_handoff),
+    ] {
+        let root = &cyclic_anchor_storm.retained_wave(wave).unwrap()[0];
+        assert_eq!(pin_route(root), pin_route(checkpoint.handoff()));
+        let label = cyclic_anchor_storm.retained_depth_label(wave, 0).unwrap();
+        assert_eq!(label.wave(), wave);
+        assert_eq!(label.depth(), 0);
+    }
     let checkpoint_replay = resolver
         .extend_nested_terminal_pair_chain_from_checkpoint(
             &later_cascade,
