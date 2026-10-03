@@ -380,6 +380,59 @@ fn generated_binding_version_edge_diagnostics_match_direct_and_registry_routes()
 }
 
 #[test]
+fn generated_binding_effect_edge_diagnostics_match_direct_and_registry_routes() {
+    let table = system_dispatch_table();
+    let registry = ProviderRoleRegistry::from_baked_abi(table)
+        .expect("generated provider offers resolve from the typed registry");
+    let mut provider_bound_cases = 0;
+
+    for contract in table.operations() {
+        let Some(role_id) = &contract.role else {
+            continue;
+        };
+        let selected = registry
+            .resolve(role_id.as_str())
+            .expect("generated binding role has a selected provider");
+        let extra_effect = [
+            SystemEffect::Read,
+            SystemEffect::Invoke,
+            SystemEffect::Admin,
+        ]
+        .into_iter()
+        .find(|effect| {
+            !selected
+                .effects
+                .iter()
+                .any(|registered| registered == *effect)
+        })
+        .expect("typed provider roles leave at least one effect outside their ceiling");
+        let widened_effects = EffectSet::new(selected.effects.iter().chain([extra_effect]));
+        let invalid_offer = ProviderOffer {
+            provider: selected.provider.clone(),
+            role: selected.role.clone(),
+            version: selected.version,
+            effects: widened_effects,
+        };
+        assert_generated_edge_diagnostic_parity(
+            table,
+            &registry,
+            contract,
+            invalid_offer,
+            ProviderDiagnostic::EffectIncompatible(role_id.clone()),
+            "sys.abi.effect_incompatible",
+        );
+        provider_bound_cases += 1;
+    }
+
+    assert!(provider_bound_cases > 0);
+    println!(
+        "generated_binding_provider_effect_edge_parity operations={} provider_bound_cases={provider_bound_cases} direct_registry_pairs={provider_bound_cases} code=sys.abi.effect_incompatible providers_called=0 total_cases={}",
+        table.operations().count(),
+        provider_bound_cases * 2
+    );
+}
+
+#[test]
 fn provider_abi_rejects_nonconformant_role_edges_and_effects() {
     let baseline: Value = serde_json::from_str(system_provider_abi_json()).unwrap();
     let first_role = baseline["roles"]
