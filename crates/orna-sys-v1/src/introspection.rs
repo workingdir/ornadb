@@ -6328,6 +6328,8 @@ struct QueryPairedLimitAggregateRestorationFold {
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct QueryPairedLimitWindowCompactionFold {
     identity: String,
+    limit_aggregate_identity: Option<String>,
+    window_compaction_identity: Option<String>,
     limit_pair_count: u64,
     limit_stage_count: u64,
     aggregate_pair_count: u64,
@@ -6939,6 +6941,8 @@ fn query_paired_limit_window_compaction_fold(
             "paired-limit-window-compaction-fold:{}",
             hex(&hash.finalize())
         ),
+        limit_aggregate_identity: limit_aggregate_fold.map(|fold| fold.identity.clone()),
+        window_compaction_identity: window_compaction_fold.map(|fold| fold.identity.clone()),
         limit_pair_count,
         limit_stage_count,
         aggregate_pair_count,
@@ -6983,6 +6987,22 @@ fn add_paired_limit_window_compaction_fold_details(
                 .to_owned(),
         ),
     );
+    for (key, value) in [
+        (
+            "paired_limit_window_compaction_limit_aggregate_fold_identity",
+            fold.limit_aggregate_identity.as_deref(),
+        ),
+        (
+            "paired_limit_window_compaction_window_spill_fold_identity",
+            fold.window_compaction_identity.as_deref(),
+        ),
+    ] {
+        if let Some(value) = value {
+            details.insert(key.to_owned(), PlanDetail::Text(value.to_owned()));
+        } else {
+            details.remove(key);
+        }
+    }
     details.insert(
         "paired_limit_window_compaction_fold_transition".to_owned(),
         PlanDetail::Text(if advanced_on_pair {
