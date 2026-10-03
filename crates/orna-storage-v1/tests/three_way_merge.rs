@@ -87,6 +87,7 @@ use orna_storage_v1::{
     compress_paired_checkpoint_redo_sparse_stream_chains_preserving_fold_identity,
     restore_paired_checkpoint_redo_sparse_stream_chains_preserving_fold_identity,
     restore_paired_checkpoint_redo_sparse_compaction_handoff_chains_preserving_restore_identity,
+    restore_paired_checkpoint_redo_sparse_compaction_handoff_chains_preserving_source_identity,
     restore_paired_checkpoint_redo_sparse_wal_handoff_chains_preserving_identity,
     restore_paired_checkpoint_redo_sparse_wal_merge_handoff_chains_preserving_identity,
     restore_paired_checkpoint_redo_sparse_segment_rotation_handoff_chains_preserving_fold_identity,
@@ -167,6 +168,8 @@ const PAIRED_SPARSE_SEGMENT_PIN_CHAINS: &str =
     include_str!("fixtures/paired-sparse-segment-pin-chains.orna");
 const PAIRED_SPARSE_CHECKPOINT_RESTORE_CHAINS: &str =
     include_str!("fixtures/paired-sparse-checkpoint-restore-chains.orna");
+const PAIRED_SPARSE_CHECKPOINT_COMPACTION_HANDOFFS: &str =
+    include_str!("fixtures/paired-sparse-checkpoint-compaction-handoffs.orna");
 const PAIRED_SPARSE_SEGMENT_PIN_RESTORES: &str =
     include_str!("fixtures/paired-sparse-segment-pin-restores.orna");
 const PAIRED_SPARSE_CHECKPOINT_PIN_CHAINS: &str =
@@ -35959,6 +35962,234 @@ fn paired_redo_fold_identity_survives_sparse_compaction_rotation_restore_chains(
             last_order: 21,
             expected: 2,
             actual: 1,
+        }),
+    );
+}
+
+#[test]
+fn paired_redo_fold_identity_survives_sparse_checkpoint_compaction_handoff_chains() {
+    let source_rows = PAIRED_SPARSE_CHECKPOINT_COMPACTION_HANDOFFS
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    let fold_rows = PAIRED_REDO_FOLD_IDENTITIES
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    let states = PAIRED_CHECKPOINT_REDO
+        .split("\n\n")
+        .map(parse_checkpoint_fixture)
+        .collect::<Vec<_>>();
+    assert_eq!(source_rows.len(), 5);
+    assert_eq!(fold_rows.len(), 3);
+    assert_eq!(states.len(), 5);
+
+    let checkpoint_ids = source_rows
+        .iter()
+        .map(|row| row.fields[&id(2)].encode().unwrap())
+        .collect::<Vec<_>>();
+    let alpha = checkpoint_ids[0].clone();
+    let duplicate_alpha = checkpoint_ids[1].clone();
+    let beta = checkpoint_ids[2].clone();
+    let catalog_only = checkpoint_ids[3].clone();
+    let observed_late = checkpoint_ids[4].clone();
+    assert_eq!(alpha, duplicate_alpha);
+    assert_ne!(
+        source_rows[0].fields[&id(3)],
+        source_rows[1].fields[&id(3)],
+        "the fixture gives duplicate checkpoint streams distinct source labels",
+    );
+
+    let folds = fold_rows
+        .iter()
+        .map(|row| BranchMergePairedRedoFoldIdentity {
+            left_fold: row.fields[&id(2)].encode().unwrap(),
+            right_fold: row.fields[&id(3)].encode().unwrap(),
+        })
+        .collect::<Vec<_>>();
+    let left_base = states[0].clone();
+    let right_base = states[1].clone();
+    let left_redo = states[2].clone();
+    let right_redo = states[3].clone();
+    let positionless = states[4].clone();
+    assert_eq!(positionless.position, None);
+
+    let run = |handoff_ordinal: usize,
+               fold_ordinal: usize,
+               first_order: u64,
+               last_order: u64,
+               left: Option<CheckpointGeneration>,
+               right: Option<CheckpointGeneration>,
+               redo_fold_identity: &BranchMergePairedRedoFoldIdentity| {
+        BranchMergePairedCheckpointRedoFoldSparseCompactionHandoffRunSnapshot {
+            handoff_ordinal,
+            fold_ordinal,
+            first_order,
+            last_order,
+            left,
+            right,
+            redo_fold_identity: redo_fold_identity.clone(),
+        }
+    };
+    let stream = |checkpoint_id, runs| {
+        BranchMergePairedCheckpointRedoFoldSparseCompactionHandoffSnapshot {
+            checkpoint_id,
+            runs,
+        }
+    };
+
+    let first_batch = vec![
+        stream(
+            alpha.clone(),
+            vec![
+                run(
+                    0,
+                    2,
+                    4,
+                    5,
+                    Some(left_base.clone()),
+                    Some(right_base.clone()),
+                    &folds[0],
+                ),
+                run(
+                    0,
+                    2,
+                    4,
+                    4,
+                    Some(left_redo.clone()),
+                    Some(right_base.clone()),
+                    &folds[1],
+                ),
+            ],
+        ),
+        stream(
+            duplicate_alpha,
+            vec![run(
+                0,
+                2,
+                4,
+                4,
+                Some(positionless.clone()),
+                None,
+                &folds[2],
+            )],
+        ),
+        stream(
+            beta.clone(),
+            vec![run(
+                2,
+                1,
+                7,
+                7,
+                Some(positionless.clone()),
+                None,
+                &folds[0],
+            )],
+        ),
+    ];
+    let second_batch = vec![
+        stream(
+            alpha.clone(),
+            vec![run(
+                0,
+                2,
+                4,
+                4,
+                Some(positionless.clone()),
+                Some(right_redo.clone()),
+                &folds[2],
+            )],
+        ),
+        stream(
+            observed_late.clone(),
+            vec![run(1, 0, 10, 10, None, None, &folds[0])],
+        ),
+    ];
+
+    let restored =
+        restore_paired_checkpoint_redo_sparse_compaction_handoff_chains_preserving_source_identity(
+            &[alpha.clone(), beta.clone(), catalog_only.clone()],
+            &[first_batch, second_batch],
+        )
+        .unwrap();
+    let mut expected_checkpoint_ids =
+        vec![alpha.clone(), beta.clone(), catalog_only.clone(), observed_late.clone()];
+    expected_checkpoint_ids.sort();
+    assert_eq!(
+        restored
+            .iter()
+            .map(|stream| stream.checkpoint_id.clone())
+            .collect::<Vec<_>>(),
+        expected_checkpoint_ids
+    );
+    let slots = |checkpoint_id: &[u8]| {
+        &restored
+            .iter()
+            .find(|stream| stream.checkpoint_id == checkpoint_id)
+            .unwrap()
+            .slots
+    };
+    assert_eq!(
+        slots(&alpha)
+            .iter()
+            .map(|slot| (
+                slot.restore_ordinal,
+                slot.stream_ordinal,
+                slot.compaction_ordinal,
+                slot.handoff_ordinal,
+                slot.fold_ordinal,
+                slot.order,
+            ))
+            .collect::<Vec<_>>(),
+        vec![
+            (0, 0, 0, 0, 2, 4),
+            (0, 0, 0, 0, 2, 5),
+            (0, 0, 1, 0, 2, 4),
+            (0, 1, 0, 0, 2, 4),
+            (1, 0, 0, 0, 2, 4),
+        ],
+        "batch, duplicate stream, compacted run, handoff, fold, and order remain distinct",
+    );
+    assert_eq!(slots(&alpha)[0].left, Some(left_base.clone()));
+    assert_eq!(slots(&alpha)[1].right, Some(right_base.clone()));
+    assert_eq!(slots(&alpha)[2].left, Some(left_redo.clone()));
+    assert_eq!(slots(&alpha)[2].redo_fold_identity, folds[1]);
+    assert_eq!(slots(&alpha)[3].left, Some(positionless.clone()));
+    assert!(slots(&alpha)[3].right.is_none());
+    assert_eq!(slots(&alpha)[3].redo_fold_identity, folds[2]);
+    assert_eq!(slots(&alpha)[4].left, Some(positionless.clone()));
+    assert_eq!(slots(&alpha)[4].right, Some(right_redo.clone()));
+    assert!(slots(&beta)[0].right.is_none());
+    assert_eq!(slots(&beta)[0].left, Some(positionless.clone()));
+    assert!(slots(&catalog_only).is_empty());
+    assert_eq!(slots(&observed_late).len(), 1);
+    assert!(slots(&observed_late)[0].left.is_none());
+    assert!(slots(&observed_late)[0].right.is_none());
+
+    assert_eq!(
+        restore_paired_checkpoint_redo_sparse_compaction_handoff_chains_preserving_source_identity(
+            &[],
+            &[
+                vec![
+                    stream(beta.clone(), vec![]),
+                    stream(
+                        alpha.clone(),
+                        vec![
+                            run(0, 2, 1, 1, None, None, &folds[0]),
+                            run(4, 9, 8, 7, None, None, &folds[1]),
+                        ],
+                    ),
+                ],
+            ],
+        ),
+        Err(orna_storage_v1::BranchMergePairedCheckpointRedoFoldSparseCompactionRestoreHandoffError::InvalidOrderRange {
+            restore_ordinal: 0,
+            stream_ordinal: 1,
+            compaction_ordinal: 1,
+            handoff_ordinal: 4,
+            fold_ordinal: 9,
+            first_order: 8,
+            last_order: 7,
         }),
     );
 }
