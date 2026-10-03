@@ -60,6 +60,7 @@ use std::{
     cmp::Ordering,
     collections::{BTreeMap, BTreeSet},
     ops::Bound,
+    sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -8227,7 +8228,7 @@ fn validate_module_assertions(
         let value = evaluate_module_assertion(
             activation,
             &assertion.expression,
-            &Environment::new(),
+            &ModuleAssertionScope::default(),
             functions,
             limits,
             budget,
@@ -8260,17 +8261,17 @@ fn module_assertion_child_depth(
 fn evaluate_module_assertion(
     activation: &TransactionActivation<'_>,
     expression: &Expr,
-    environment: &Environment,
+    scope: &ModuleAssertionScope,
     functions: &Functions,
     limits: EvaluatorLimits,
     budget: &mut StepBudget,
     depth: usize,
 ) -> Result<Value, EvaluationError> {
-    let Some((kind, table, binding, body)) = module_assertion_quantifier(expression) else {
+    let Some((kind, table, predicate)) = module_assertion_quantifier(expression) else {
         return evaluate_module_assertion_continuation(
             activation,
             expression,
-            environment,
+            scope,
             functions,
             limits,
             budget,
@@ -8286,13 +8287,12 @@ fn evaluate_module_assertion(
             for (_, row) in relation {
                 debit_host_step(budget)?;
                 let child_depth = module_assertion_child_depth(depth, limits)?;
-                let mut local = environment.clone();
-                local.insert(binding.to_owned(), row);
                 if !matches!(
-                    evaluate_module_assertion(
+                    evaluate_module_predicate(
                         activation,
-                        body,
-                        &local,
+                        &predicate,
+                        row,
+                        scope,
                         functions,
                         limits,
                         budget,
@@ -8310,13 +8310,12 @@ fn evaluate_module_assertion(
             for (_, row) in relation {
                 debit_host_step(budget)?;
                 let child_depth = module_assertion_child_depth(depth, limits)?;
-                let mut local = environment.clone();
-                local.insert(binding.to_owned(), row);
                 if matches!(
-                    evaluate_module_assertion(
+                    evaluate_module_predicate(
                         activation,
-                        body,
-                        &local,
+                        &predicate,
+                        row,
+                        scope,
                         functions,
                         limits,
                         budget,
@@ -8333,10 +8332,56 @@ fn evaluate_module_assertion(
     }
 }
 
+fn evaluate_module_predicate(
+    activation: &TransactionActivation<'_>,
+    predicate: &ModuleAssertionPredicate<'_>,
+    row: Value,
+    scope: &ModuleAssertionScope,
+    functions: &Functions,
+    limits: EvaluatorLimits,
+    budget: &mut StepBudget,
+    depth: usize,
+) -> Result<Value, EvaluationError> {
+    match predicate {
+        ModuleAssertionPredicate::Inline { binding, body } => {
+            let mut local = scope.clone();
+            local.values.insert((*binding).to_owned(), row);
+            local.continuations.remove(*binding);
+            evaluate_module_assertion(
+                activation,
+                body,
+                &local,
+                functions,
+                limits,
+                budget,
+                depth,
+            )
+        }
+        ModuleAssertionPredicate::Named(name) => {
+            let closure = scope
+                .continuations
+                .get(*name)
+                .ok_or_else(|| transaction_error("ORNA-EVAL-NAME"))?;
+            let mut captured = closure.captured.clone();
+            captured.values.insert(closure.parameter.clone(), row);
+            captured.continuations.remove(&closure.parameter);
+            evaluate_module_assertion(
+                activation,
+                &closure.body,
+                &captured,
+                functions,
+                limits,
+                budget,
+                depth,
+            )
+        }
+    }
+}
+
 fn evaluate_module_assertion_continuation(
     activation: &TransactionActivation<'_>,
     expression: &Expr,
-    environment: &Environment,
+    scope: &ModuleAssertionScope,
     functions: &Functions,
     limits: EvaluatorLimits,
     budget: &mut StepBudget,
@@ -8346,30 +8391,110 @@ fn evaluate_module_assertion_continuation(
         Expr::Group { inner, .. } => evaluate_module_assertion(
             activation,
             inner,
-            environment,
+            scope,
             functions,
             limits,
             budget,
             module_assertion_child_depth(depth, limits)?,
         ),
         Expr::Block {
-            statements,
-            tail: Some(tail),
-            ..
-        } if statements.is_empty() => evaluate_module_assertion(
-            activation,
-            tail,
-            environment,
-            functions,
-            limits,
-            budget,
-            module_assertion_child_depth(depth, limits)?,
-        ),
+            statements, tail, ..
+        } => {
+            let mut local = scope.clone();
+            for statement in statements {
+                match statement {
+                    Statement::Let {
+                        pattern,
+                        value: Expr::Lambda {
+                            parameters, body, ..
+                        },
+                        ..
+                    } => {
+                        let [parameter] = parameters.as_slice() else {
+                            return Err(transaction_error("ORNA-EVAL-MODULE-ASSERT"));
+                        };
+                        let Pattern::Name(parameter, _) = &parameter.pattern else {
+                            return Err(transaction_error("ORNA-EVAL-MODULE-ASSERT"));
+                        };
+                        let Pattern::Name(name, _) = pattern else {
+                            return Err(transaction_error("ORNA-EVAL-MODULE-ASSERT"));
+                        };
+                        local.values.remove(name);
+                        local.continuations.insert(
+                            name.clone(),
+                            Arc::new(ModuleAssertionClosure {
+                                parameter: parameter.clone(),
+                                body: body.as_ref().clone(),
+                                captured: local.clone(),
+                            }),
+                        );
+                    }
+                    Statement::Let { pattern, value, .. } => {
+                        let value = evaluate_with_functions_and_budget(
+                            value,
+                            &local.values,
+                            functions,
+                            limits,
+                            budget,
+                        )?;
+                        let Pattern::Name(name, _) = pattern else {
+                            return Err(transaction_error("ORNA-EVAL-MODULE-ASSERT"));
+                        };
+                        local.continuations.remove(name);
+                        local.values.insert(name.clone(), value);
+                    }
+                    Statement::Assert { value, .. } => {
+                        let value = evaluate_module_assertion(
+                            activation,
+                            value,
+                            &local,
+                            functions,
+                            limits,
+                            budget,
+                            module_assertion_child_depth(depth, limits)?,
+                        )?;
+                        if !matches!(value.raw(), OvbRaw::Bool(true)) {
+                            return Err(transaction_error("ORNA-EVAL-MODULE-ASSERT"));
+                        }
+                    }
+                    Statement::Expression { value, .. } | Statement::Control { value, .. } => {
+                        let _ = evaluate_module_assertion(
+                            activation,
+                            value,
+                            &local,
+                            functions,
+                            limits,
+                            budget,
+                            module_assertion_child_depth(depth, limits)?,
+                        )?;
+                    }
+                    Statement::Return { .. }
+                    | Statement::Break { .. }
+                    | Statement::Continue { .. }
+                    | Statement::Assignment { .. } => {
+                        return Err(transaction_error("ORNA-EVAL-MODULE-ASSERT"));
+                    }
+                }
+            }
+            if let Some(tail) = tail {
+                evaluate_module_assertion(
+                    activation,
+                    tail,
+                    &local,
+                    functions,
+                    limits,
+                    budget,
+                    module_assertion_child_depth(depth, limits)?,
+                )
+            } else {
+                canonical_bool(true)
+            }
+        }
         Expr::Unary { op, rhs, .. } if op == "!" => {
             let value = evaluate_module_assertion(
                 activation,
                 rhs,
-                environment,
+                scope,
                 functions,
                 limits,
                 budget,
@@ -8384,7 +8509,7 @@ fn evaluate_module_assertion_continuation(
             let left = evaluate_module_assertion(
                 activation,
                 lhs,
-                environment,
+                scope,
                 functions,
                 limits,
                 budget,
@@ -8399,7 +8524,7 @@ fn evaluate_module_assertion_continuation(
             let right = evaluate_module_assertion(
                 activation,
                 rhs,
-                environment,
+                scope,
                 functions,
                 limits,
                 budget,
@@ -8423,7 +8548,7 @@ fn evaluate_module_assertion_continuation(
             let condition = evaluate_module_assertion(
                 activation,
                 condition,
-                environment,
+                scope,
                 functions,
                 limits,
                 budget,
@@ -8433,7 +8558,7 @@ fn evaluate_module_assertion_continuation(
                 OvbRaw::Bool(true) => evaluate_module_assertion(
                     activation,
                     body,
-                    environment,
+                    scope,
                     functions,
                     limits,
                     budget,
@@ -8442,7 +8567,7 @@ fn evaluate_module_assertion_continuation(
                 OvbRaw::Bool(false) => evaluate_module_assertion(
                     activation,
                     alternate,
-                    environment,
+                    scope,
                     functions,
                     limits,
                     budget,
@@ -8451,9 +8576,38 @@ fn evaluate_module_assertion_continuation(
                 _ => Err(transaction_error("ORNA-EVAL-MODULE-ASSERT")),
             }
         }
+        Expr::Call {
+            callee, arguments, ..
+        } if let Expr::Name { text, .. } = callee.as_ref()
+            && let Some(closure) = scope.continuations.get(text) =>
+        {
+            let [argument] = arguments.as_slice() else {
+                return Err(transaction_error("ORNA-EVAL-MODULE-ASSERT"));
+            };
+            let value = evaluate_with_functions_and_budget(
+                &argument.value,
+                &scope.values,
+                functions,
+                limits,
+                budget,
+            )?;
+            debit_host_step(budget)?;
+            let mut captured = closure.captured.clone();
+            captured.values.insert(closure.parameter.clone(), value);
+            captured.continuations.remove(&closure.parameter);
+            evaluate_module_assertion(
+                activation,
+                &closure.body,
+                &captured,
+                functions,
+                limits,
+                budget,
+                module_assertion_child_depth(depth, limits)?,
+            )
+        }
         _ => evaluate_with_functions_and_budget(
             expression,
-            environment,
+            &scope.values,
             functions,
             limits,
             budget,
@@ -8470,7 +8624,7 @@ fn evaluate_module_assertion_rows(
     budget: &mut StepBudget,
     depth: usize,
 ) -> Result<Value, EvaluationError> {
-    let Some((kind, table, binding, body)) = module_assertion_quantifier(expression) else {
+    let Some((kind, table, binding, body)) = module_assertion_inline_quantifier(expression) else {
         return evaluate_module_assertion_rows_continuation(
             rows,
             expression,
@@ -8748,9 +8902,27 @@ enum ModuleAssertionKind {
     Exists,
 }
 
+#[derive(Clone, Default)]
+struct ModuleAssertionScope {
+    values: Environment,
+    continuations: BTreeMap<String, Arc<ModuleAssertionClosure>>,
+}
+
+#[derive(Clone)]
+struct ModuleAssertionClosure {
+    parameter: String,
+    body: Expr,
+    captured: ModuleAssertionScope,
+}
+
+enum ModuleAssertionPredicate<'a> {
+    Inline { binding: &'a str, body: &'a Expr },
+    Named(&'a str),
+}
+
 fn module_assertion_quantifier(
     expression: &Expr,
-) -> Option<(ModuleAssertionKind, &str, &str, &Expr)> {
+) -> Option<(ModuleAssertionKind, &str, ModuleAssertionPredicate<'_>)> {
     let Expr::Call {
         callee, arguments, ..
     } = expression
@@ -8771,16 +8943,29 @@ fn module_assertion_quantifier(
     let Expr::Name { text: table, .. } = &table.value else {
         return None;
     };
-    let Expr::Lambda {
-        parameters, body, ..
-    } = &predicate.value
-    else {
-        return None;
+    let callback = match &predicate.value {
+        Expr::Lambda {
+            parameters, body, ..
+        } => {
+            let [parameter] = parameters.as_slice() else {
+                return None;
+            };
+            let Pattern::Name(binding, _) = &parameter.pattern else {
+                return None;
+            };
+            ModuleAssertionPredicate::Inline { binding, body }
+        }
+        Expr::Name { text, .. } => ModuleAssertionPredicate::Named(text),
+        _ => return None,
     };
-    let [parameter] = parameters.as_slice() else {
-        return None;
-    };
-    let Pattern::Name(binding, _) = &parameter.pattern else {
+    Some((kind, table, callback))
+}
+
+fn module_assertion_inline_quantifier(
+    expression: &Expr,
+) -> Option<(ModuleAssertionKind, &str, &str, &Expr)> {
+    let (kind, table, predicate) = module_assertion_quantifier(expression)?;
+    let ModuleAssertionPredicate::Inline { binding, body } = predicate else {
         return None;
     };
     Some((kind, table, binding, body))
