@@ -3468,6 +3468,24 @@ fn captured_paired_resolution_identity_survives_stepwise_repins() {
         );
         sessions.push(session);
     }
+
+    for index in [3, 0, 2, 1, 3, 1, 0, 2] {
+        assert_eq!(
+            sessions[index].submit(replay),
+            Ok(Some(ints(&expected[index]))),
+            "interleaved replay must retain the paired resolution at pin {}",
+            pins[index]
+        );
+    }
+    let mut cloned_sessions = sessions.clone();
+    for index in [2, 0, 3, 1] {
+        assert_eq!(
+            cloned_sessions[index].submit(replay),
+            Ok(Some(ints(&expected[index]))),
+            "cloned replay must retain the paired resolution at pin {}",
+            pins[index]
+        );
+    }
 }
 
 #[test]
