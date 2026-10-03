@@ -1448,6 +1448,78 @@ fn paired_view_prefix_spill_cursors_keep_scope_across_handoffs() {
     );
 }
 
+#[test]
+fn paired_view_refresh_spill_folds_keep_cursor_identity() {
+    let cursor_255 = vec![0x6d; 255];
+    let mut cursor_256 = cursor_255.clone();
+    cursor_256.push(0x00);
+    let mut cursor_511 = cursor_256.clone();
+    cursor_511.extend(vec![0x7e; 255]);
+    let mut cursor_512 = cursor_511.clone();
+    cursor_512.push(0xff);
+    assert_eq!(
+        [cursor_255.len(), cursor_256.len(), cursor_511.len(), cursor_512.len()],
+        [255, 256, 511, 512]
+    );
+    assert!(cursor_255.as_slice() < cursor_256.as_slice());
+    assert!(cursor_256.as_slice() < cursor_511.as_slice());
+    assert!(cursor_511.as_slice() < cursor_512.as_slice());
+    let continuations = [cursor_255, cursor_256, cursor_511, cursor_512];
+
+    let generations = [
+        ([1, 2, 3, 4], [5, 8, 5, 8], [5, 4, 3, 2]),
+        ([3, 4, 1, 6], [5, 8, 5, 8], [2, 5, 4, 3]),
+        ([1, 6, 3, 2], [5, 8, 5, 8], [3, 2, 5, 4]),
+    ];
+    let mut subscriptions = Vec::new();
+    for (values, filtered_values, lane_depths) in generations {
+        for lane in 0..4 {
+            let source = if lane < 2 { "View.Left" } else { "View.Right" };
+            let depth = lane_depths[lane];
+            let pages = (0..depth)
+                .map(|page_index| {
+                    let next = (page_index + 1 < depth)
+                        .then(|| continuations[page_index].clone());
+                    let value = if page_index == 0 {
+                        values[lane]
+                    } else {
+                        filtered_values[lane]
+                    };
+                    page(&[value], next)
+                })
+                .collect();
+            subscriptions.push((source, pages));
+        }
+    }
+    let mut source = PairedViewRefreshSource::new(subscriptions);
+
+    let first = run_with_fixture_functions(paired_scoped_view_refresh_body(), &mut source).unwrap();
+    assert_eq!(first, integer(14), "the initial scoped fold filters rows before mapping and summing");
+    let second = run_with_fixture_functions(paired_scoped_view_refresh_body(), &mut source).unwrap();
+    assert_eq!(second, integer(18), "the next refresh observes its own four source values");
+    let third = run_with_fixture_functions(paired_scoped_view_refresh_body(), &mut source).unwrap();
+    assert_eq!(third, integer(16), "the final refresh keeps its own scoped snapshot values");
+    assert_eq!(first, integer(14), "later spill folds do not rewrite the first result");
+    assert_eq!(second, integer(18), "later spill folds do not rewrite the middle result");
+
+    assert_eq!(source.lanes.len(), 12, "three refreshes bind four independent scopes each");
+    for generation in 0..3 {
+        let start = generation * 4;
+        assert_eq!(source.lanes[start].0, "View.Left");
+        assert_eq!(source.lanes[start + 1].0, "View.Left");
+        assert_eq!(source.lanes[start + 2].0, "View.Right");
+        assert_eq!(source.lanes[start + 3].0, "View.Right");
+    }
+    let scopes = source.lanes.iter().map(|(_, scope, _)| *scope).collect::<Vec<_>>();
+    for (index, scope) in scopes.iter().enumerate() {
+        assert!(
+            !scopes[..index].contains(scope),
+            "each spill fold retains a separate paired read scope: {scope:?}"
+        );
+    }
+
+}
+
 fn paired_subscription_cascade_body() -> Expr {
     let left = relation_stage(
         relation_stage(
