@@ -1,0 +1,8 @@
+CREATE SCHEMA api;
+CREATE SERVER FUNCTION api.fetch_user(
+    --| Stable user identifier.
+    user_id INT,
+    --| Include archived records.
+    include_archived BOOLEAN
+) RETURNS INT AS SELECT user_id;
+CREATE CLIENT FUNCTION api.invoke() RETURNS INT AS api.fetch_user(42, TRUE);
