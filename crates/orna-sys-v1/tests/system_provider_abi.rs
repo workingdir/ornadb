@@ -1692,6 +1692,160 @@ fn dispatch_signature_depth_matrix_matches_every_typed_parameter_and_result() {
 }
 
 #[test]
+fn provider_default_edges_require_materialized_dispatch_arguments() {
+    let table = system_dispatch_table();
+    let registry = ProviderRoleRegistry::from_baked_abi(table)
+        .expect("generated built-in provider offers resolve");
+    let mut defaulted_operations = 0;
+    let mut defaulted_parameters = 0;
+    let mut omitted_direct_rejections = 0;
+    let mut omitted_registry_rejections = 0;
+    let mut materialized_direct_routes = 0;
+    let mut materialized_registry_routes = 0;
+
+    for contract in table.operations() {
+        if contract.role.is_none() {
+            continue;
+        }
+        let Some(first_default) = contract
+            .signature
+            .parameters
+            .iter()
+            .position(|parameter| parameter.default.is_some())
+        else {
+            continue;
+        };
+        assert!(
+            contract.signature.parameters[first_default..]
+                .iter()
+                .all(|parameter| parameter.default.is_some()),
+            "provider defaults remain a trailing suffix for {}",
+            contract.id.as_str()
+        );
+        let generated = system_function_descriptor(contract.id.as_str())
+            .expect("defaulted provider operation has a generated binding");
+        assert_eq!(generated.signature, contract.signature.source);
+
+        let role = contract
+            .role
+            .as_ref()
+            .expect("provider operation has a role");
+        let offer = registry
+            .resolve(role.as_str())
+            .expect("defaulted provider role has a selected built-in offer")
+            .clone();
+        let argument_types = contract
+            .signature
+            .parameters
+            .iter()
+            .map(|parameter| parameter.ty.canonical())
+            .collect::<Vec<_>>();
+        let omitted_arguments = contract.signature.parameters[..first_default]
+            .iter()
+            .map(|parameter| {
+                TypedValue::public(
+                    TypeId::new(parameter.ty.canonical()),
+                    parameter.name.as_bytes().to_vec(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let supplied = TypedValue::public(
+            TypeId::new(contract.signature.result.canonical()),
+            b"materialized-provider-defaults".to_vec(),
+        );
+        let provider = InvokeValueProvider {
+            offer,
+            operation: contract.id.clone(),
+            argument_types,
+            response: Ok(supplied.clone()),
+            calls: AtomicUsize::new(0),
+        };
+        let omitted = ProviderDiagnostic::ArgumentCountMismatch {
+            operation: contract.id.clone(),
+            expected: contract.signature.parameters.len(),
+            actual: first_default,
+        };
+
+        assert_eq!(
+            table.dispatch_to_provider(generated.name, &provider, &omitted_arguments, |_| Ok(())),
+            Err(omitted.clone()),
+            "direct provider route rejects omitted defaults for {}",
+            contract.id.as_str()
+        );
+        omitted_direct_rejections += 1;
+        assert_eq!(
+            registry.dispatch_to_provider(
+                table,
+                generated.name,
+                &provider,
+                &omitted_arguments,
+                |_| Ok(())
+            ),
+            Err(omitted),
+            "registry provider route rejects omitted defaults for {}",
+            contract.id.as_str()
+        );
+        omitted_registry_rejections += 1;
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
+
+        let materialized_arguments = contract
+            .signature
+            .parameters
+            .iter()
+            .map(|parameter| {
+                let value = parameter.default.as_deref().unwrap_or(&parameter.name);
+                TypedValue::public(
+                    TypeId::new(parameter.ty.canonical()),
+                    value.as_bytes().to_vec(),
+                )
+            })
+            .collect::<Vec<_>>();
+        defaulted_parameters += contract.signature.parameters.len() - first_default;
+        assert_eq!(
+            table.dispatch_to_provider(generated.name, &provider, &materialized_arguments, |_| Ok(
+                ()
+            )),
+            Ok(orna_sys_v1::SystemDispatchResult::Returned(
+                supplied.clone()
+            )),
+            "direct provider route accepts materialized defaults for {}",
+            contract.id.as_str()
+        );
+        materialized_direct_routes += 1;
+        assert_eq!(
+            registry.dispatch_to_provider(
+                table,
+                generated.name,
+                &provider,
+                &materialized_arguments,
+                |_| Ok(())
+            ),
+            Ok(orna_sys_v1::SystemDispatchResult::Returned(supplied)),
+            "registry provider route accepts materialized defaults for {}",
+            contract.id.as_str()
+        );
+        materialized_registry_routes += 1;
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 2);
+        defaulted_operations += 1;
+    }
+
+    assert_eq!(defaulted_operations, 6);
+    assert_eq!(defaulted_parameters, 14);
+    assert_eq!(omitted_direct_rejections, defaulted_operations);
+    assert_eq!(omitted_registry_rejections, defaulted_operations);
+    assert_eq!(materialized_direct_routes, defaulted_operations);
+    assert_eq!(materialized_registry_routes, defaulted_operations);
+    println!(
+        "provider_default_dispatch_parity operations={defaulted_operations} defaults={defaulted_parameters} omitted_direct={omitted_direct_rejections} omitted_registry={omitted_registry_rejections} materialized_direct={materialized_direct_routes} materialized_registry={materialized_registry_routes} total_cases={}",
+        defaulted_parameters
+            + omitted_direct_rejections
+            + omitted_registry_rejections
+            + materialized_direct_routes
+            + materialized_registry_routes
+    );
+}
+
+#[test]
 fn dispatch_to_provider_routes_typed_value_and_declared_failure() {
     let table = system_dispatch_table();
     let operation_name = "sys.invoke(Value)";
