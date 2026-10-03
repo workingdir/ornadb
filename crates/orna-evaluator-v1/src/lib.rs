@@ -27,8 +27,9 @@ use orna_value_v1::{
 use sha2::{Digest as _, Sha256};
 use serde::{
     Deserialize,
-    de::{self, MapAccess, SeqAccess, Visitor},
+    de::{self, MapAccess, Visitor},
 };
+use serde_json::value::RawValue;
 use unicode_normalization::UnicodeNormalization;
 
 mod admitted_repl;
@@ -8879,98 +8880,79 @@ enum JsonNode {
     Object(Vec<(String, JsonNode)>),
 }
 
-impl<'de> Deserialize<'de> for JsonNode {
+struct RawJsonObject(Vec<(String, Box<RawValue>)>);
+
+impl<'de> Deserialize<'de> for RawJsonObject {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: serde::Deserializer<'de>,
     {
-        struct JsonNodeVisitor;
-        impl<'de> Visitor<'de> for JsonNodeVisitor {
-            type Value = JsonNode;
+        struct RawJsonObjectVisitor;
+        impl<'de> Visitor<'de> for RawJsonObjectVisitor {
+            type Value = RawJsonObject;
 
             fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-                formatter.write_str("a JSON value")
+                formatter.write_str("a JSON object")
             }
-            fn visit_unit<E>(self) -> Result<Self::Value, E> {
-                Ok(JsonNode::Null)
-            }
-            fn visit_none<E>(self) -> Result<Self::Value, E> {
-                Ok(JsonNode::Null)
-            }
-            fn visit_bool<E>(self, value: bool) -> Result<Self::Value, E> {
-                Ok(JsonNode::Bool(value))
-            }
-            fn visit_i64<E>(self, value: i64) -> Result<Self::Value, E> {
-                Ok(JsonNode::Number(value.to_string()))
-            }
-            fn visit_u64<E>(self, value: u64) -> Result<Self::Value, E> {
-                Ok(JsonNode::Number(value.to_string()))
-            }
-            fn visit_f64<E>(self, value: f64) -> Result<Self::Value, E>
-            where
-                E: de::Error,
-            {
-                if value.is_finite() {
-                    Ok(JsonNode::Number(value.to_string()))
-                } else {
-                    Err(E::custom("JSON numbers must be finite"))
-                }
-            }
-            fn visit_str<E>(self, value: &str) -> Result<Self::Value, E> {
-                Ok(JsonNode::String(value.to_owned()))
-            }
-            fn visit_string<E>(self, value: String) -> Result<Self::Value, E> {
-                Ok(JsonNode::String(value))
-            }
-            fn visit_seq<A>(self, mut sequence: A) -> Result<Self::Value, A::Error>
-            where
-                A: SeqAccess<'de>,
-            {
-                let mut values = Vec::new();
-                while let Some(value) = sequence.next_element::<JsonNode>()? {
-                    values.push(value);
-                }
-                Ok(JsonNode::Array(values))
-            }
+
             fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
             where
                 A: MapAccess<'de>,
             {
-                let Some(first_key) = map.next_key::<String>()? else {
-                    return Ok(JsonNode::Object(Vec::new()));
-                };
-                // serde_json's arbitrary-precision number representation is a
-                // one-entry private map. Preserve its token exactly instead
-                // of passing it through a binary Float.
-                if first_key == "$serde_json::private::Number" {
-                    let number = map.next_value::<String>()?;
-                    if map.next_key::<String>()?.is_some() {
-                        return Err(de::Error::custom("malformed exact JSON number"));
-                    }
-                    return Ok(JsonNode::Number(number));
-                }
                 let mut names = BTreeSet::new();
                 let mut values = Vec::new();
-                names.insert(first_key.clone());
-                values.push((first_key, map.next_value::<JsonNode>()?));
                 while let Some(key) = map.next_key::<String>()? {
                     if !names.insert(key.clone()) {
                         return Err(de::Error::custom("duplicate JSON object key"));
                     }
-                    values.push((key, map.next_value::<JsonNode>()?));
+                    values.push((key, map.next_value::<Box<RawValue>>()?));
                 }
-                Ok(JsonNode::Object(values))
+                Ok(RawJsonObject(values))
             }
         }
-        deserializer.deserialize_any(JsonNodeVisitor)
+        deserializer.deserialize_map(RawJsonObjectVisitor)
+    }
+}
+
+fn parse_json_raw(raw: &str) -> Result<JsonNode, EvaluationError> {
+    let raw = raw.trim();
+    match raw.as_bytes().first().copied() {
+        Some(b'{') => {
+            let RawJsonObject(fields) =
+                serde_json::from_str(raw).map_err(|_| error("ORNA-EVAL-VALUE"))?;
+            fields
+                .into_iter()
+                .map(|(key, value)| Ok((key, parse_json_raw(value.get())?)))
+                .collect::<Result<Vec<_>, EvaluationError>>()
+                .map(JsonNode::Object)
+        }
+        Some(b'[') => {
+            let values: Vec<Box<RawValue>> =
+                serde_json::from_str(raw).map_err(|_| error("ORNA-EVAL-VALUE"))?;
+            values
+                .into_iter()
+                .map(|value| parse_json_raw(value.get()))
+                .collect::<Result<Vec<_>, _>>()
+                .map(JsonNode::Array)
+        }
+        Some(b'"') => serde_json::from_str(raw)
+            .map(JsonNode::String)
+            .map_err(|_| error("ORNA-EVAL-VALUE")),
+        Some(b't' | b'f') => serde_json::from_str(raw)
+            .map(JsonNode::Bool)
+            .map_err(|_| error("ORNA-EVAL-VALUE")),
+        Some(b'n') => serde_json::from_str::<()>(raw)
+            .map(|()| JsonNode::Null)
+            .map_err(|_| error("ORNA-EVAL-VALUE")),
+        Some(_) => Ok(JsonNode::Number(raw.to_owned())),
+        None => Err(error("ORNA-EVAL-VALUE")),
     }
 }
 
 fn parse_json_node(input: &str) -> Result<JsonNode, EvaluationError> {
-    let mut deserializer = serde_json::Deserializer::from_str(input);
-    let node = JsonNode::deserialize(&mut deserializer).map_err(|_| error("ORNA-EVAL-VALUE"))?;
-    deserializer.end().map_err(|_| error("ORNA-EVAL-VALUE"))?;
-    Ok(node)
+    let raw: Box<RawValue> =
+        serde_json::from_str(input).map_err(|_| error("ORNA-EVAL-VALUE"))?;
+    parse_json_raw(raw.get())
 }
 
 fn json_node_to_value(
