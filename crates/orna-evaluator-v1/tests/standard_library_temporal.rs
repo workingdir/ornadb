@@ -2,13 +2,16 @@ use orna_evaluator_v1::{AdmittedReplSession, Limits};
 use orna_foundation_v1::CanonicalValue;
 use orna_value_v1::Raw;
 
+#[path = "support/pinned_time_text_std.rs"]
+mod pinned_time_text_std;
+
 fn canonical(raw: Raw) -> CanonicalValue {
     CanonicalValue::new(raw).unwrap()
 }
 
 #[test]
 fn pinned_time_exports_use_the_captured_timezone_edition() {
-    let mut session = AdmittedReplSession::with_reference_standard(Limits::default()).unwrap();
+    let mut session = pinned_time_text_std::time_session();
     assert_eq!(
         session.submit(include_str!("fixtures/stdlib-use-time-7q1e.orna")),
         Ok(None)
@@ -55,7 +58,7 @@ fn pinned_calendar_helpers_use_source_and_core_dates_work_without_std() {
     ));
     assert!(parsed.diagnostics.is_empty(), "{:#?}", parsed.diagnostics);
 
-    let mut session = AdmittedReplSession::with_reference_standard(Limits::default()).unwrap();
+    let mut session = pinned_time_text_std::time_session();
     assert_eq!(
         session.submit(include_str!("fixtures/stdlib-time-calendar-use-r0asr.orna")),
         Ok(None)
