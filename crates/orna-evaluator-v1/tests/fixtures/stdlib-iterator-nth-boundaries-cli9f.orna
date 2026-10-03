@@ -1,0 +1,10 @@
+case std.iterator.nth(std.iterator.from_list([4, 6, 9]), 0) {
+    Some(value): value == 4,
+    null: false,
+}
+&& case std.iterator.nth(std.iterator.from_list([4, 6, 9]), 2) {
+    Some(value): value == 9,
+    null: false,
+}
+&& std.iterator.nth(std.iterator.from_list([4, 6, 9]), 3) == null
+&& std.iterator.nth(std.iterator.empty(), 0) == null
