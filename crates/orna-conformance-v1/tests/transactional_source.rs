@@ -453,6 +453,30 @@ fn parsed_paired_subscription_folds_compute_candidate_values() {
 }
 
 #[test]
+fn parsed_paired_subscription_handoffs_retain_scopes_across_read_your_writes() {
+    let mut runtime = TransactionalEvaluator::new("parent", Limits::default());
+    let outcome = runtime.execute_source(&fixture_source(include_str!(
+        "fixtures/paired-read-your-writes-sequential-handoff.orna"
+    )));
+
+    assert!(matches!(outcome, StageOutcome::Passed), "{outcome:?}");
+    let expected = [
+        (1, 11, "rebound"),
+        (2, 25, "rebound"),
+        (3, 33, "stable"),
+        (4, 40, "stable"),
+        (5, 50, "new"),
+    ];
+    for (id, amount, label) in expected {
+        let row = runtime
+            .committed_row("Note", &Value::int(id.into()))
+            .unwrap_or_else(|| panic!("paired handoff should commit Note row {id}"));
+        assert_eq!(row_field(row, "amount"), &Raw::Int(amount.into()), "row {id}");
+        assert_eq!(row_field(row, "label"), &Raw::Text(label.into()), "row {id}");
+    }
+}
+
+#[test]
 fn parsed_filter_count_failure_rolls_back_candidate_rows() {
     let mut runtime = TransactionalEvaluator::new("parent", Limits::default());
     let outcome = runtime.execute_source(&fixture_source(include_str!(
