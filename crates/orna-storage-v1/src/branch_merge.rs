@@ -392,6 +392,25 @@ pub struct BranchMergeColumnRestoreLadderFoldSnapshot {
     pub waves: Vec<BranchMergeColumnDepthLadderWaveSnapshot>,
 }
 
+/// One released column-restore order in a dense ladder timeline.
+///
+/// `None` means the stable column was omitted from that restore wave. A
+/// present ladder contains all local labels, so an empty fragment remains a
+/// labeled entry with an empty `cells` vector.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BranchMergeColumnRestoreLadderWaveSlotSnapshot {
+    pub order: u64,
+    pub fragments: Option<Vec<BranchMergeColumnDepthFragmentSnapshot>>,
+}
+
+/// A stable table-column ladder with explicit presence across restore waves.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BranchMergeColumnRestoreLadderTimelineSnapshot {
+    pub table: ObjectId,
+    pub column: ObjectId,
+    pub waves: Vec<BranchMergeColumnRestoreLadderWaveSlotSnapshot>,
+}
+
 /// A canonical column cell released with its source parent identity intact.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BranchMergeParentColumnDepthEvent {
@@ -1228,6 +1247,48 @@ impl BranchMergeTombstoneHistory {
                 table,
                 column,
                 waves,
+            })
+            .collect()
+    }
+
+    /// Returns dense timelines for stable columns present in released restore
+    /// waves. Each timeline has one slot for every column-restore order; a
+    /// missing column is `None`, while an empty labeled depth is present with
+    /// no cells. The reference is silent about omitted-column slots, so v1
+    /// distinguishes absence from an empty restore fragment.
+    pub fn column_restore_ladder_timelines(
+        &self,
+    ) -> Vec<BranchMergeColumnRestoreLadderTimelineSnapshot> {
+        let restore_waves = self.column_restore_waves();
+        let orders = restore_waves
+            .iter()
+            .map(|wave| wave.order)
+            .collect::<Vec<_>>();
+        let mut present_ladders = BTreeMap::new();
+        for wave in restore_waves {
+            for column in wave.columns {
+                present_ladders
+                    .entry((column.table, column.column))
+                    .or_insert_with(BTreeMap::new)
+                    .insert(wave.order, column.fragments);
+            }
+        }
+
+        present_ladders
+            .into_iter()
+            .map(|((table, column), mut present)| {
+                let waves = orders
+                    .iter()
+                    .map(|order| BranchMergeColumnRestoreLadderWaveSlotSnapshot {
+                        order: *order,
+                        fragments: present.remove(order),
+                    })
+                    .collect();
+                BranchMergeColumnRestoreLadderTimelineSnapshot {
+                    table,
+                    column,
+                    waves,
+                }
             })
             .collect()
     }
