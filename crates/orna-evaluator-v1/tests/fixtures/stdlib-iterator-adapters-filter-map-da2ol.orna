@@ -1,0 +1,6 @@
+std.iterator.collect(
+    std.iterator.adapters.filter_map(
+        std.iterator.from_list([1, 2, 3, 4]),
+        value => if value % 2 == 0 { Some(value * 10) } else { null }
+    )
+)
