@@ -166,6 +166,25 @@ pub struct BranchMergePairedCheckpointRedoIdentityChainSnapshot {
     pub runs: Vec<BranchMergePairedCheckpointRedoIdentityRunSnapshot>,
 }
 
+/// One committed redo order projected onto a sparse checkpoint stream.
+///
+/// An absent side remains `None`, while the frame's write-ahead identity is
+/// retained even when both checkpoint sides omit this stream.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BranchMergePairedCheckpointRedoSparseSlotSnapshot {
+    pub order: u64,
+    pub left: Option<CheckpointGeneration>,
+    pub right: Option<CheckpointGeneration>,
+    pub write_ahead_identity: BranchMergePairedWriteAheadIdentity,
+}
+
+/// A checkpoint stream's sparse state across the supplied paired redo frames.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BranchMergePairedCheckpointRedoSparseStreamSnapshot {
+    pub checkpoint_id: CheckpointId,
+    pub slots: Vec<BranchMergePairedCheckpointRedoSparseSlotSnapshot>,
+}
+
 /// Compresses adjacent paired redo frames only when both sides retain exactly
 /// the same checkpoint state for an identity.
 ///
@@ -259,6 +278,54 @@ pub fn compress_paired_checkpoint_redo_chain_preserving_write_ahead_identity(
                 }
             }
             BranchMergePairedCheckpointRedoIdentityChainSnapshot { checkpoint_id, runs }
+        })
+        .collect()
+}
+
+/// Folds sparse paired redo frames into per-stream slots without losing stream
+/// identity at omission boundaries.
+///
+/// `known_checkpoint_ids` lets a caller carry checkpoint identities forward
+/// even when a stream is omitted from every frame in this fold. Identities
+/// observed in a frame are also included, so an incomplete catalog never
+/// drops checkpoint data. Output stream IDs and frame orders are sorted. Each
+/// supplied frame contributes exactly one slot per stream; a missing side is
+/// `None`, and no absent integer orders are invented. Paired write-ahead IDs
+/// stay attached to every slot, including slots where both sides omit a
+/// checkpoint. IDs, generations, positions, and log identities remain opaque.
+pub fn fold_paired_checkpoint_redo_sparse_streams(
+    known_checkpoint_ids: &[CheckpointId],
+    frames: &BTreeMap<u64, BranchMergePairedCheckpointRedoIdentityFrame>,
+) -> Vec<BranchMergePairedCheckpointRedoSparseStreamSnapshot> {
+    let checkpoint_ids = known_checkpoint_ids
+        .iter()
+        .cloned()
+        .chain(frames.values().flat_map(|frame| {
+            frame
+                .checkpoints
+                .left
+                .keys()
+                .chain(frame.checkpoints.right.keys())
+                .cloned()
+        }))
+        .collect::<BTreeSet<_>>();
+
+    checkpoint_ids
+        .into_iter()
+        .map(|checkpoint_id| {
+            let slots = frames
+                .iter()
+                .map(|(&order, frame)| BranchMergePairedCheckpointRedoSparseSlotSnapshot {
+                    order,
+                    left: frame.checkpoints.left.get(&checkpoint_id).cloned(),
+                    right: frame.checkpoints.right.get(&checkpoint_id).cloned(),
+                    write_ahead_identity: frame.write_ahead_identity.clone(),
+                })
+                .collect();
+            BranchMergePairedCheckpointRedoSparseStreamSnapshot {
+                checkpoint_id,
+                slots,
+            }
         })
         .collect()
 }
