@@ -213,8 +213,6 @@ const PAIRED_COMPACTION_SPILL_RESTORE_FOLDS_F143: &str =
     include_str!("fixtures/paired-compaction-spill-restore-folds-f143.orna");
 const PAIRED_CHECKPOINT_IDENTITIES_F144: &str =
     include_str!("fixtures/paired-checkpoint-identities-f144.orna");
-const PAIRED_SPILL_IDENTITIES_F85: &str =
-    include_str!("fixtures/paired-spill-identities-f85.orna");
 const PAIRED_MERGE_IDENTITIES_F82: &str =
     include_str!("fixtures/paired-merge-identities-f82.orna");
 const CHECKPOINT_RESTORE_FOLD_IDENTITIES_F83: &str =
@@ -41636,14 +41634,14 @@ fn paired_checkpoint_identity_survives_nested_restore_spill_folds_f144() {
         .collect::<Vec<_>>();
 
     let pair = |row: usize| orna_storage_v1::BranchMergePairedCheckpointIdentity {
-        left_checkpoint_id: pair_rows[row].fields[&id(2)].encode().unwrap(),
-        right_checkpoint_id: pair_rows[row].fields[&id(3)].encode().unwrap(),
+        left_checkpoint: pair_rows[row].fields[&id(2)].encode().unwrap(),
+        right_checkpoint: pair_rows[row].fields[&id(3)].encode().unwrap(),
     };
     let main_pair = pair(0);
     let retry_pair = pair(1);
     let repeated_main_pair = pair(2);
     assert_eq!(main_pair, repeated_main_pair);
-    assert_ne!(main_pair.left_checkpoint_id, main_pair.right_checkpoint_id);
+    assert_ne!(main_pair.left_checkpoint, main_pair.right_checkpoint);
     assert_ne!(main_pair, retry_pair);
 
     let checkpoint_id = |row: usize| metadata_rows[row].fields[&id(2)].encode().unwrap();
@@ -41771,7 +41769,7 @@ fn paired_checkpoint_identity_survives_nested_restore_spill_folds_f144() {
     assert_eq!(retry.slots[0].restored_slot.order, 12);
     assert_ne!(
         main.slots[0].restored_slot.left_pin.as_ref().unwrap().checkpoint_id,
-        main.slots[0].checkpoint_identity.left_checkpoint_id,
+        main.slots[0].checkpoint_identity.left_checkpoint,
         "fold checkpoint identity stays independent from the nested source pin",
     );
     assert!(main.slots[0].restored_slot.right_pin.is_some());

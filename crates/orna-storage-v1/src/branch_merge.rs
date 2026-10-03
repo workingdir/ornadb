@@ -221,10 +221,10 @@ pub struct BranchMergePairedMergeIdentity {
     pub right_merge: Vec<u8>,
 }
 
-/// Opaque directional checkpoint identities attached to one nested merge run.
+/// Opaque directional checkpoint identities for a paired storage lineage.
 ///
 /// These identify the left and right checkpoint incarnations independently
-/// of the output checkpoint key, pin generations, and numeric merge ordinal.
+/// of output checkpoint keys, pin generations, and numeric merge ordinals.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BranchMergePairedCheckpointIdentity {
     pub left_checkpoint: Vec<u8>,
@@ -1210,14 +1210,6 @@ pub struct BranchMergePairedCheckpointRedoFoldSpillNestedPairedCheckpointCompact
     pub restore_fold_identity: Vec<u8>,
     pub checkpoint_id: CheckpointId,
     pub slots: Vec<BranchMergePairedCheckpointRedoFoldSpillNestedPairedCheckpointCompactionRestoreFoldIdentityPinSlotSnapshot>,
-}
-
-/// The caller-owned left/right checkpoint pair that identifies one nested
-/// restore fold. The byte strings are opaque and their direction is retained.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct BranchMergePairedCheckpointIdentity {
-    pub left_checkpoint_id: CheckpointId,
-    pub right_checkpoint_id: CheckpointId,
 }
 
 /// A nested spill restore fold bound to its paired checkpoint identity.

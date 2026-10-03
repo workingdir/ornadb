@@ -114,7 +114,6 @@ pub use branch_merge::{
     BranchMergePairedCheckpointRedoFoldSpillNestedMergeIdentityRestorePinStreamSnapshot,
     BranchMergePairedCheckpointRedoFoldSpillNestedMergeCheckpointIdentityRestorePinSlotSnapshot,
     BranchMergePairedCheckpointRedoFoldSpillNestedMergeCheckpointIdentityRestorePinStreamSnapshot,
-    BranchMergePairedCheckpointIdentity,
     BranchMergePairedCheckpointRedoNestedRestoreFoldSnapshot,
     BranchMergePairedCheckpointRedoNestedRestoreFoldIdentitySlotSnapshot,
     BranchMergePairedCheckpointRedoNestedRestoreFoldIdentityStreamSnapshot,
