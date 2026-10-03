@@ -5193,7 +5193,6 @@ fn captured_snapshot_identity_survives_paired_divergence_pin_restoration_folds()
         for import in imports.lines() {
             assert_eq!(session.submit(import), Ok(None));
         }
-        assert_eq!(session.submit(closure), Ok(None));
         assert_eq!(
             session.submit(replay),
             Ok(Some(ints(&expected[index]))),
@@ -5835,7 +5834,13 @@ fn captured_pagination_identity_survives_paired_restoration_folds() {
         for import in imports.lines() {
             assert_eq!(session.submit(import), Ok(None));
         }
-        assert_eq!(session.submit(closure), Ok(None));
+        let definition = session.submit(closure);
+        assert!(
+            definition.is_ok(),
+            "pagination closure definition failed at fold {fold}, pin {} with {}",
+            selected_pins[fold],
+            definition.as_ref().unwrap_err().code()
+        );
         assert_eq!(
             session.submit(replay),
             Ok(Some(int_pages(&expected[*pin_index]))),
