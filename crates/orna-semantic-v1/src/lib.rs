@@ -9657,6 +9657,14 @@ fn merge_checkpoint_field_map(left: &Type, right: &Type) -> Option<Type> {
             if left_parameters.len() != right_parameters.len() {
                 return None;
             }
+            if !function_snapshot_pin_identity_topology_matches(
+                left_parameters,
+                left_result,
+                right_parameters,
+                right_result,
+            ) {
+                return None;
+            }
             // Distinct checkpoint closures can have the same callable shape
             // while their SnapshotRef parameters carry different lexical
             // binder IDs. Merge only those pinned parameter shapes, retaining
@@ -18198,6 +18206,12 @@ fn pinned_snapshot_shape_matches(expected: &Type, actual: &Type) -> bool {
             expected_names == actual_names
                 && expected_defaults == actual_defaults
                 && expected_parameters.len() == actual_parameters.len()
+                && function_snapshot_pin_identity_topology_matches(
+                    expected_parameters,
+                    expected_result,
+                    actual_parameters,
+                    actual_result,
+                )
                 && expected_parameters
                     .iter()
                     .zip(actual_parameters)
@@ -18259,6 +18273,48 @@ fn pinned_snapshot_shape_matches(expected: &Type, actual: &Type) -> bool {
         }
         _ => false,
     }
+}
+
+/// A function's pinned value boundaries include its inputs and every nested
+/// result. Compare them as one topology so rebinding cannot preserve each
+/// field's shape while swapping which parameter supplies a nested snapshot.
+/// The reference specifies explicit snapshot selection but does not define
+/// local function-value rebinds, so preserve the complete boundary relation.
+fn function_snapshot_pin_identity_topology_matches(
+    expected_parameters: &[Type],
+    expected_result: &Type,
+    actual_parameters: &[Type],
+    actual_result: &Type,
+) -> bool {
+    if expected_parameters.len() != actual_parameters.len() {
+        return false;
+    }
+    let mut pin_maps = Vec::new();
+    let mut path = Vec::new();
+    for (index, (expected, actual)) in expected_parameters
+        .iter()
+        .zip(actual_parameters)
+        .enumerate()
+    {
+        if !collect_corresponding_snapshot_context_maps_at_boundary(
+            expected,
+            actual,
+            &mut pin_maps,
+            &mut path,
+            SnapshotTopologyBoundary::FunctionParameter(index),
+        ) {
+            return false;
+        }
+    }
+    let boundaries_match = collect_corresponding_snapshot_context_maps_at_boundary(
+        expected_result,
+        actual_result,
+        &mut pin_maps,
+        &mut path,
+        SnapshotTopologyBoundary::FunctionResult,
+    );
+    let topology_matches = boundaries_match && snapshot_context_topology_matches(&pin_maps);
+    topology_matches
 }
 
 fn tuple_checkpoint_shape_matches(expected: &[Type], actual: &[Type]) -> bool {
