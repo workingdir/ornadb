@@ -6932,6 +6932,127 @@ fn tuple_wrapped_paired_boundary_depths_stay_stable_through_selector_storms() {
 }
 
 #[test]
+fn multi_level_paired_boundary_depths_stay_stable_through_selector_storms() {
+    let source = include_str!("fixtures/historical-multi-level-paired-boundary-depth-storm.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-multi-level-paired-boundary-depth-storm.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert_eq!(
+        result
+            .diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.code() == DIAG_TYPE)
+            .count(),
+        1,
+        "a split shared across multiple paired record boundaries must fail while stable labels fold: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+    let module = result
+        .modules
+        .values()
+        .find(|module| {
+            module.symbols.contains_key(
+                "rejects_multi_level_paired_depth_drift_after_selector_storm",
+            )
+        })
+        .expect("multi-level paired boundary selector storm fixture module");
+    let folded_element = |function: &str| {
+        let Type::Function { result, .. } = &module.symbols[function].ty else {
+            panic!("{function} must retain its computed result type");
+        };
+        let Type::Record(fields) = result.as_ref() else {
+            panic!("{function} must return a record: {result:?}");
+        };
+        let Type::List(element) = fields.get("folded").expect("folded parent list") else {
+            panic!("{function} must preserve its parent list");
+        };
+        element.as_ref()
+    };
+
+    let Type::Function { result, .. } = &module.symbols
+        ["rejects_multi_level_paired_depth_drift_after_selector_storm"]
+        .ty
+    else {
+        panic!("rejected storm must retain its computed result");
+    };
+    let Type::Record(rejected) = result.as_ref() else {
+        panic!("rejected storm must return its source rows: {result:?}");
+    };
+    assert_eq!(
+        folded_element("rejects_multi_level_paired_depth_drift_after_selector_storm"),
+        rejected.get("first").expect("first source row"),
+        "a multi-level paired-boundary conflict must roll back to the first row"
+    );
+
+    let Type::Record(folded) =
+        folded_element("accepts_multi_level_paired_depths_after_selector_storm")
+    else {
+        panic!("stable fold element must remain a record");
+    };
+    let Type::Record(cluster) = folded.get("cluster").expect("folded cluster") else {
+        panic!("stable cluster must remain a record");
+    };
+    for (branch, side, first_depth, shared_depth) in [
+        (
+            "west",
+            "left",
+            ["selector:HEAD~1451", "selector:HEAD~1452", "selector:HEAD~1453"],
+            ["selector:HEAD~1471", "selector:HEAD~1472"],
+        ),
+        (
+            "east",
+            "right",
+            ["selector:HEAD~1461", "selector:HEAD~1462", "selector:HEAD~1463"],
+            ["selector:HEAD~1471", "selector:HEAD~1472"],
+        ),
+    ] {
+        let Type::Record(branch_fields) = &cluster[branch] else {
+            panic!("stable {branch} boundary must remain a record");
+        };
+        let Type::Record(side_fields) = &branch_fields[side] else {
+            panic!("stable {side} boundary must remain a record");
+        };
+        let Type::Tuple(slots) = &side_fields["pins"] else {
+            panic!("stable {branch}.{side} depths must remain a tuple");
+        };
+        let contexts = slots
+            .iter()
+            .map(|slot| {
+                let mut contexts = BTreeSet::new();
+                collect_snapshot_contexts(slot, &mut contexts);
+                contexts
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            contexts[0],
+            first_depth
+                .into_iter()
+                .map(str::to_owned)
+                .collect::<BTreeSet<_>>(),
+            "stable {branch}.{side} must retain real identities at depth zero"
+        );
+        assert_eq!(
+            contexts[1],
+            shared_depth
+                .into_iter()
+                .map(str::to_owned)
+                .collect::<BTreeSet<_>>(),
+            "stable {branch}.{side} must retain the paired identity at depth one"
+        );
+    }
+}
+
+#[test]
 fn pairwise_selector_topology_folds_preserve_paired_boundary_depths() {
     let source = include_str!("fixtures/historical-paired-boundary-selector-depth-fold.orna");
     let parsed = orna_syntax_v1::parse_module(source);

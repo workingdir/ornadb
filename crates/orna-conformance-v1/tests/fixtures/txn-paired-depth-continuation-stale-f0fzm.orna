@@ -1,0 +1,55 @@
+pub table Pair(id: Int) { expected: Str, }
+pub table Left(id: Int) { pair_id: Int, expected: Str, }
+pub table Right(id: Int) { pair_id: Int, expected: Str, }
+pub table Evidence(id: Int) {
+    pair_id: Int,
+    left_id: Int,
+    right_id: Int,
+    pair_expected: Str,
+    left_expected: Str,
+    right_expected: Str,
+}
+
+// The second pair's evidence carries the first pair's capture. It must not
+// satisfy the nested continuation for pair 2.
+assert every(Pair, row => {
+    let pair_id = row.id;
+    let pair_expected = row.expected;
+    let pair_match: fn({
+        id: Int,
+        pair_id: Int,
+        left_id: Int,
+        right_id: Int,
+        pair_expected: Str,
+        left_expected: Str,
+        right_expected: Str,
+    }): Bool = evidence =>
+        evidence.pair_id == pair_id && evidence.pair_expected == pair_expected;
+
+    let left_match: fn({ id: Int, pair_id: Int, expected: Str }): Bool = row => {
+        let left_id = row.id;
+        let left_expected = row.expected;
+        let right_match: fn({ id: Int, pair_id: Int, expected: Str }): Bool = row =>
+            row.pair_id != pair_id || exists(Evidence, evidence =>
+                pair_match(evidence) &&
+                    evidence.left_id == left_id &&
+                    evidence.right_id == row.id &&
+                    evidence.left_expected == left_expected &&
+                    evidence.right_expected == row.expected
+            );
+        every(Right, right_match)
+    };
+
+    every(Left, row => row.pair_id != pair_id || left_match(row))
+});
+
+fn parent() {
+    Pair.insert({ id: 1, expected: "amber" });
+    Pair.insert({ id: 2, expected: "blue" });
+    Left.insert({ id: 10, pair_id: 1, expected: "west" });
+    Left.insert({ id: 20, pair_id: 2, expected: "north" });
+    Right.insert({ id: 100, pair_id: 1, expected: "gold" });
+    Right.insert({ id: 200, pair_id: 2, expected: "violet" });
+    Evidence.insert({ id: 1000, pair_id: 1, left_id: 10, right_id: 100, pair_expected: "amber", left_expected: "west", right_expected: "gold" });
+    Evidence.insert({ id: 2000, pair_id: 2, left_id: 20, right_id: 200, pair_expected: "amber", left_expected: "north", right_expected: "violet" });
+}
