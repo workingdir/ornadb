@@ -843,6 +843,52 @@ fn paired_view_subscriptions_keep_cursor_identity_across_refresh_handoffs() {
     }
 }
 
+#[test]
+fn paired_view_refresh_cursor_chains_keep_identity_across_handoffs() {
+    // Each refresh folds two paired views through three-page cursor chains.
+    // The first and last refresh deliberately reuse cursor bytes.
+    let subscriptions = [
+        ("View.Left", vec![page(&[1], Some(vec![11])), page(&[3], Some(vec![33])), page(&[5], None)]),
+        ("View.Left", vec![page(&[2], Some(vec![11])), page(&[4], Some(vec![44])), page(&[6], None)]),
+        ("View.Right", vec![page(&[-1], Some(vec![11])), page(&[1], Some(vec![55])), page(&[5], None)]),
+        ("View.Right", vec![page(&[2], Some(vec![11])), page(&[4], Some(vec![66])), page(&[8], None)]),
+        ("View.Left", vec![page(&[7], Some(vec![71])), page(&[9], Some(vec![73])), page(&[11], None)]),
+        ("View.Left", vec![page(&[8], Some(vec![81])), page(&[10], Some(vec![83])), page(&[12], None)]),
+        ("View.Right", vec![page(&[-3], Some(vec![91])), page(&[3], Some(vec![93])), page(&[7], None)]),
+        ("View.Right", vec![page(&[6], Some(vec![101])), page(&[8], Some(vec![103])), page(&[10], None)]),
+        ("View.Left", vec![page(&[-1], Some(vec![11])), page(&[3], Some(vec![33])), page(&[5], None)]),
+        ("View.Left", vec![page(&[2], Some(vec![11])), page(&[4], Some(vec![44])), page(&[8], None)]),
+        ("View.Right", vec![page(&[1], Some(vec![11])), page(&[3], Some(vec![55])), page(&[5], None)]),
+        ("View.Right", vec![page(&[2], Some(vec![11])), page(&[4], Some(vec![66])), page(&[8], None)]),
+    ];
+    let mut source = PairedViewRefreshSource::new(subscriptions);
+
+    let first = run_with_fixture_functions(paired_scoped_view_refresh_body(), &mut source).unwrap();
+    assert_eq!(first, integer(31));
+    let second = run_with_fixture_functions(paired_scoped_view_refresh_body(), &mut source).unwrap();
+    assert_eq!(second, integer(11));
+    let third = run_with_fixture_functions(paired_scoped_view_refresh_body(), &mut source).unwrap();
+    assert_eq!(third, integer(26));
+    assert_eq!(first, integer(31), "the first refresh result remains captured");
+    assert_eq!(second, integer(11), "the intermediate refresh result remains captured");
+
+    assert_eq!(source.lanes.len(), 12, "four scoped subscriptions bind on each refresh");
+    for generation in 0..3 {
+        let start = generation * 4;
+        assert_eq!(source.lanes[start].0, "View.Left");
+        assert_eq!(source.lanes[start + 1].0, "View.Left");
+        assert_eq!(source.lanes[start + 2].0, "View.Right");
+        assert_eq!(source.lanes[start + 3].0, "View.Right");
+    }
+    let scopes = source.lanes.iter().map(|(_, scope, _)| *scope).collect::<Vec<_>>();
+    for (index, scope) in scopes.iter().enumerate() {
+        assert!(
+            !scopes[..index].contains(scope),
+            "refresh and sibling subscriptions retain distinct scopes despite repeated cursor bytes: {scope:?}"
+        );
+    }
+}
+
 fn paired_subscription_cascade_body() -> Expr {
     let left = relation_stage(
         relation_stage(
