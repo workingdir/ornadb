@@ -1,0 +1,14 @@
+// ORNA-LEX-007 fixture: lowercase reserved vocabulary and Orna 1.0 forms.
+use vehicle.corsa;
+
+/// Return the square of a value.
+pub fn square(value: Int): Int = value * value;
+
+pub table Reading(id: Uuid) {
+    value: Decimal,
+    assert all_unique(reading => reading.id);
+}
+
+pub enum Status { ready, failed { reason: Str } }
+
+pub fn display(status: Status): Str = "status: {status}";

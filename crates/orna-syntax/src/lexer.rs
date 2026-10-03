@@ -1,13 +1,13 @@
 use std::ops::Range;
 
-use crate::{
-    Diagnostic, SourceSpan,
-    grammar::{
-        BLOCK_COMMENT_END, BLOCK_COMMENT_START, LINE_COMMENT_START, QUOTED_IDENTIFIER_DELIMITER,
-        STRING_DELIMITER,
-    },
-    parser::SyntaxKind,
-};
+use crate::{Diagnostic, SourceSpan, parser::SyntaxKind};
+
+// Private legacy scanner settings retained only for compiler compatibility.
+const LINE_COMMENT_START: &str = "--";
+const BLOCK_COMMENT_START: &str = "/*";
+const BLOCK_COMMENT_END: &str = "*/";
+const STRING_DELIMITER: char = '\'';
+const QUOTED_IDENTIFIER_DELIMITER: char = '"';
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum TokenKind {

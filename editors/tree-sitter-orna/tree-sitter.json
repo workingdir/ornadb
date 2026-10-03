@@ -1,19 +1,4 @@
 {
-  "grammars": [
-    {
-      "name": "orna",
-      "camelcase": "Orna",
-      "scope": "source.orna",
-      "path": ".",
-      "file-types": ["orna"],
-      "highlights": "queries/highlights.scm"
-    }
-  ],
-  "metadata": {
-    "version": "1.0.0",
-    "license": "MIT",
-    "description": "Generated Tree-sitter grammar for Orna",
-    "authors": [{ "name": "OrnaDB" }],
-    "links": { "repository": "https://github.com/workingdir/ornadb" }
-  }
+  "grammars": [{"name": "orna", "camelcase": "Orna", "scope": "source.orna", "path": ".", "file-types": ["orna"], "highlights": "queries/highlights.scm"}],
+  "metadata": {"version": "1.0.0", "license": "MIT", "description": "Orna 1.0 syntax-v1 grammar", "authors": [{"name": "OrnaDB"}], "links": {"repository": "https://github.com/workingdir/ornadb"}}
 }

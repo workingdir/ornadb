@@ -7,15 +7,8 @@
 use crate::{Keyword, lexer};
 
 /// Semantic token names shared by the LSP and generated legend.
-pub const EDITOR_TOKEN_TYPES: [&str; 8] = [
-    "keyword",
-    "function",
-    "type",
-    "enum",
-    "variable",
-    "string",
-    "number",
-    "operator",
+pub const EDITOR_TOKEN_TYPES: [&str; 9] = [
+    "keyword", "function", "type", "enum", "variable", "string", "number", "operator", "comment",
 ];
 
 /// Operators accepted by the syntax-v1 lexer, in longest-token-first order.
@@ -89,14 +82,8 @@ pub fn generated_editor_artifacts() -> Vec<GeneratedEditorArtifact> {
                 "%YAML 1.2\n---\nname: Orna 1.0\nfile_extensions: [orna]\nscope: source.orna\ncontexts:\n  main:\n    - match: '//.*$'\n      scope: comment.line.orna\n    - match: '/\\*'\n      push: block-comment\n    - match: '\"(?:\\\\.|[^\"\\\\])*\"'\n      scope: string.quoted.double.orna\n    - match: '\\b(?:{keywords_sublime})\\b'\n      scope: keyword.control.orna\n    - match: '\\b[0-9]+(?:\\.[0-9]+)?\\b'\n      scope: constant.numeric.orna\n    - match: '[[:alpha:]_][[:alnum:]_]*'\n      scope: variable.other.orna\n    - match: '[+*/%^=!<>|?&.-]+'\n      scope: keyword.operator.orna\n  block-comment:\n    - meta_scope: comment.block.orna\n    - match: '\\*/'\n      pop: true\n    - match: '/\\*'\n      push: block-comment\n"
             ),
         ),
-        artifact(
-            "editors/textmate/orna.tmLanguage.json",
-            textmate.clone(),
-        ),
-        artifact(
-            "editors/vscode/syntaxes/orna.tmLanguage.json",
-            textmate,
-        ),
+        artifact("editors/textmate/orna.tmLanguage.json", textmate.clone()),
+        artifact("editors/vscode/syntaxes/orna.tmLanguage.json", textmate),
         artifact(
             "editors/vscode/language-configuration.json",
             "{\n  \"comments\": {\"lineComment\": \"//\", \"blockComment\": [\"/*\", \"*/\"]},\n  \"brackets\": [[\"(\", \")\"], [\"[\", \"]\"], [\"{\", \"}\"]],\n  \"autoClosingPairs\": [{\"open\": \"(\", \"close\": \")\"}, {\"open\": \"[\", \"close\": \"]\"}, {\"open\": \"{\", \"close\": \"}\"}, {\"open\": \"\\\"\", \"close\": \"\\\"\", \"notIn\": [\"string\", \"comment\"]}],\n  \"surroundingPairs\": [[\"(\", \")\"], [\"[\", \"]\"], [\"{\", \"}\"], [\"\\\"\", \"\\\"\"]]\n}\n",
@@ -135,7 +122,10 @@ let b:current_syntax = "orna"
 
 fn render_textmate(keyword_pattern: &str) -> String {
     let keyword_pattern = json_string(&format!("\\b(?:{keyword_pattern})\\b"));
-    let line_comment = json_string(&format!("{}[^\\n\\r]*", regex_escape(lexer::LINE_COMMENT_START)));
+    let line_comment = json_string(&format!(
+        "{}[^\\n\\r]*",
+        regex_escape(lexer::LINE_COMMENT_START)
+    ));
     let block_start = json_string(lexer::BLOCK_COMMENT_START);
     let block_end = json_string(lexer::BLOCK_COMMENT_END);
     let string_pattern = json_string(r#""(?:\\.|[^"\\])*""#);
@@ -265,7 +255,10 @@ fn artifact(path: &'static str, contents: impl Into<String>) -> GeneratedEditorA
 fn regex_escape(value: &str) -> String {
     let mut escaped = String::new();
     for character in value.chars() {
-        if matches!(character, '.' | '+' | '*' | '?' | '^' | '$' | '(' | ')' | '[' | ']' | '{' | '}' | '|' | '\\') {
+        if matches!(
+            character,
+            '.' | '+' | '*' | '?' | '^' | '$' | '(' | ')' | '[' | ']' | '{' | '}' | '|' | '\\'
+        ) {
             escaped.push('\\');
         }
         escaped.push(character);
@@ -274,7 +267,13 @@ fn regex_escape(value: &str) -> String {
 }
 
 fn json_string(value: &str) -> String {
-    format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\n"))
+    format!(
+        "\"{}\"",
+        value
+            .replace('\\', "\\\\")
+            .replace('"', "\\\"")
+            .replace('\n', "\\n")
+    )
 }
 
 fn js_string(value: &str) -> String {

@@ -13,13 +13,13 @@ pub use admission::{
     ParseContext, SourceDocumentId, SyntaxAdmissionError, admit_diagnostic, admit_span,
 };
 pub use editor::{
-    GeneratedEditorArtifact, EDITOR_OPERATOR_SPELLINGS, EDITOR_TOKEN_TYPES,
+    EDITOR_OPERATOR_SPELLINGS, EDITOR_TOKEN_TYPES, GeneratedEditorArtifact,
     generated_editor_artifacts,
 };
 
 pub use lexer::{
-    BLOCK_COMMENT_END, BLOCK_COMMENT_START, LINE_COMMENT_START, OPERATOR_SPELLINGS,
-    STRING_DELIMITER, Keyword, LexError, Token, TokenKind, lex,
+    BLOCK_COMMENT_END, BLOCK_COMMENT_START, Keyword, LINE_COMMENT_START, LexError,
+    OPERATOR_SPELLINGS, STRING_DELIMITER, Token, TokenKind, lex,
 };
 pub use parser::{
     Argument, AssignmentOperator, AssignmentTarget, CaseArm, ControlKind, Declaration,

@@ -1,6 +1,6 @@
 //! The LSP server loop and request dispatch.
 //!
-//! The server is synchronous and single-threaded. Compiler checks for one
+//! The server is synchronous and single-threaded. Syntax-v1 checks for one
 //! document are fast, so no worker pool is needed for the first version.
 
 use std::collections::HashMap;

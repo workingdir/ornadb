@@ -1,25 +1,9 @@
 {
-  "name": "orna-syntax",
-  "displayName": "Orna Syntax",
-  "description": "Generated TextMate syntax support for Orna source files",
+  "name": "orna-language-v1",
+  "displayName": "Orna 1.0 Language",
+  "description": "Generated syntax-v1 highlighting for Orna source files",
   "version": "1.0.0",
-  "engines": { "vscode": "^1.80.0" },
+  "engines": {"vscode": "^1.80.0"},
   "categories": ["Programming Languages"],
-  "contributes": {
-    "languages": [
-      {
-        "id": "orna",
-        "aliases": ["Orna"],
-        "extensions": [".orna"],
-        "configuration": "./language-configuration.json"
-      }
-    ],
-    "grammars": [
-      {
-        "language": "orna",
-        "scopeName": "source.orna",
-        "path": "./syntaxes/orna.tmLanguage.json"
-      }
-    ]
-  }
+  "contributes": {"languages": [{"id": "orna", "aliases": ["Orna"], "extensions": [".orna"], "configuration": "./language-configuration.json"}], "grammars": [{"language": "orna", "scopeName": "source.orna", "path": "./syntaxes/orna.tmLanguage.json"}]}
 }

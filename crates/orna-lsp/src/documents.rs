@@ -24,7 +24,7 @@ impl Document {
         Self { uri, text, version }
     }
 
-    /// Returns the logical path used for compiler diagnostics.
+    /// Returns the logical path used for syntax-v1 diagnostics.
     ///
     /// The full URI string is unique and always nonempty, which satisfies
     /// the source bundle contract.

@@ -1,0 +1,2 @@
+CREATE SCHEMA app;
+CREATE TYPE app.record AS OBJECT (value TEXT);

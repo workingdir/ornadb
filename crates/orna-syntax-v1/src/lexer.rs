@@ -13,13 +13,13 @@ pub const BLOCK_COMMENT_END: &str = "*/";
 pub const STRING_DELIMITER: char = '"';
 /// Multi-character operator and numeric-prefix tokens, longest first.
 const MULTI_CHARACTER_TOKENS: &[&str] = &[
-    "..=", "=>", "==", "!=", "<=", ">=", "??", "|?", "&&", "||", "+=", "-=", "*=",
-    "/=", "..", "0x", "0b",
+    "..=", "=>", "==", "!=", "<=", ">=", "??", "|?", "&&", "||", "+=", "-=", "*=", "/=", "..",
+    "0x", "0b",
 ];
 /// Operator spellings recognized by the frozen lexer.
 pub const OPERATOR_SPELLINGS: &[&str] = &[
-    "..=", "=>", "==", "!=", "<=", ">=", "??", "|?", "&&", "||", "+=", "-=", "*=",
-    "/=", "..", "|", "!", "=", "<", ">", "+", "-", "*", "/", "%", "^", "?",
+    "..=", "=>", "==", "!=", "<=", ">=", "??", "|?", "&&", "||", "+=", "-=", "*=", "/=", "..", "|",
+    "!", "=", "<", ">", "+", "-", "*", "/", "%", "^", "?",
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

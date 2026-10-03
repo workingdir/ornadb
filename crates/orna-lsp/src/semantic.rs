@@ -2,7 +2,8 @@
 
 use lsp_types::{Range, SemanticToken, SemanticTokenType};
 use orna_syntax_v1::{
-    EDITOR_OPERATOR_SPELLINGS, EDITOR_TOKEN_TYPES, Parse, SyntaxTree, TokenKind, lex,
+    BLOCK_COMMENT_END, BLOCK_COMMENT_START, EDITOR_OPERATOR_SPELLINGS, EDITOR_TOKEN_TYPES,
+    LINE_COMMENT_START, Parse, SyntaxSpan, SyntaxTree, TokenKind, lex,
 };
 
 use crate::documents::PositionMapper;
@@ -26,14 +27,29 @@ pub fn semantic_tokens(
         return Vec::new();
     };
     let symbols = crate::analysis::declaration_symbols(parse, text);
+    let mut projected = tokens
+        .iter()
+        .filter_map(|token| {
+            token_type(&token.kind, &token.text, &token.span, &symbols)
+                .map(|token_type| (token.span.clone(), token_type))
+        })
+        .collect::<Vec<_>>();
+    if let Some(comment_type) = EDITOR_TOKEN_TYPES
+        .iter()
+        .position(|token_type| *token_type == "comment")
+    {
+        projected.extend(
+            comment_spans(text, &tokens)
+                .into_iter()
+                .map(|span| (span, comment_type as u32)),
+        );
+    }
+    projected.sort_by_key(|(span, _)| span.start);
     let mut data = Vec::new();
     let mut previous_line = 0u32;
     let mut previous_start = 0u32;
-    for token in tokens {
-        let Some(token_type) = token_type(&token.kind, &token.text, &token.span, &symbols) else {
-            continue;
-        };
-        for (position, length) in mapper.segments(&token.span) {
+    for (span, token_type) in projected {
+        for (position, length) in mapper.segments(&span) {
             if length == 0 {
                 continue;
             }
@@ -111,4 +127,53 @@ fn token_type(
 
 fn is_operator(value: &str) -> bool {
     EDITOR_OPERATOR_SPELLINGS.contains(&value)
+}
+
+fn comment_spans(text: &str, tokens: &[orna_syntax_v1::Token]) -> Vec<SyntaxSpan> {
+    let mut spans = Vec::new();
+    let mut cursor = 0;
+    for token in tokens {
+        let start = token.span.start.min(text.len());
+        if cursor < start {
+            scan_comments(text, cursor, start, &mut spans);
+        }
+        cursor = cursor.max(token.span.end.min(text.len()));
+    }
+    if cursor < text.len() {
+        scan_comments(text, cursor, text.len(), &mut spans);
+    }
+    spans
+}
+
+fn scan_comments(text: &str, mut at: usize, end: usize, spans: &mut Vec<SyntaxSpan>) {
+    while at < end {
+        let rest = &text[at..end];
+        if rest.starts_with(LINE_COMMENT_START) {
+            let comment_start = at;
+            at += LINE_COMMENT_START.len();
+            while at < end && !matches!(text.as_bytes()[at], b'\n' | b'\r') {
+                at += 1;
+            }
+            spans.push(SyntaxSpan::new(comment_start, at));
+        } else if rest.starts_with(BLOCK_COMMENT_START) {
+            let comment_start = at;
+            at += BLOCK_COMMENT_START.len();
+            let mut depth = 1usize;
+            while at < end && depth != 0 {
+                let remaining = &text[at..end];
+                if remaining.starts_with(BLOCK_COMMENT_START) {
+                    depth += 1;
+                    at += BLOCK_COMMENT_START.len();
+                } else if remaining.starts_with(BLOCK_COMMENT_END) {
+                    depth -= 1;
+                    at += BLOCK_COMMENT_END.len();
+                } else {
+                    at += remaining.chars().next().map_or(1, char::len_utf8);
+                }
+            }
+            spans.push(SyntaxSpan::new(comment_start, at));
+        } else {
+            at += rest.chars().next().map_or(1, char::len_utf8);
+        }
+    }
 }

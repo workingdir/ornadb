@@ -8,13 +8,14 @@ fixture-audit:
     test ! -e reference || (echo "fixture-audit: remove the top-level reference tree" >&2; exit 1)
     cargo test --locked -p orna-syntax --test reference_path_boundary
 
-# Regenerate checked-in syntax, semantic-token, and editor packaging artifacts.
+# Regenerate checked-in Orna 1.0 editor artifacts from orna-syntax-v1.
 editor-artifacts:
-    cargo run --locked -p orna-syntax --example generate_editor_artifacts
+    cargo run --locked -p orna-syntax-v1 --example generate_editor_artifacts
 
-# Reject editor artifacts that drift from orna-syntax metadata and templates.
+# Reject editor artifacts that drift from the syntax-v1 language model.
 editor-artifacts-check:
-    cargo run --locked -p orna-syntax --example generate_editor_artifacts -- --check
+    cargo run --locked -p orna-syntax-v1 --example generate_editor_artifacts -- --check
+    cargo test --locked -p orna-syntax-v1 --test editor_artifacts
     node --check editors/tree-sitter-orna/grammar.js
 
 

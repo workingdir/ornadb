@@ -5,6 +5,7 @@ use std::{
     process::{Child, ChildStdin, ChildStdout, Command, Stdio},
 };
 
+use orna_syntax_v1::EDITOR_TOKEN_TYPES;
 use serde_json::{Value, json};
 
 const SOURCE: &str = include_str!("fixtures/expressions-v1.orna");
@@ -102,6 +103,12 @@ fn initialize(client: &mut Client) {
     );
     assert_eq!(result["capabilities"]["positionEncoding"], "utf-16");
     assert_eq!(result["capabilities"]["hoverProvider"], true);
+    assert!(
+        result["capabilities"]["semanticTokensProvider"]["legend"]["tokenTypes"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("comment"))
+    );
     client.notify("initialized", json!({}));
 }
 
@@ -131,6 +138,20 @@ fn v1_workspace_model_powers_editor_features_across_open_files() {
             .unwrap()
             .is_empty(),
         "{caller_diagnostics}"
+    );
+
+    let semantic = client.request(
+        "textDocument/semanticTokens/full",
+        json!({"textDocument":{"uri":caller_uri}}),
+    );
+    let comment_type = EDITOR_TOKEN_TYPES
+        .iter()
+        .position(|token_type| *token_type == "comment")
+        .unwrap() as u64;
+    let data = semantic["data"].as_array().unwrap();
+    assert!(
+        data.chunks_exact(5).any(|token| token[3] == comment_type),
+        "comment token missing from LSP response: {semantic}"
     );
 
     let call_offset = CALL_SOURCE.find("add(value, 2)").unwrap();

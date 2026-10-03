@@ -1,32 +1,27 @@
 %YAML 1.2
 ---
-name: Orna
+name: Orna 1.0
 file_extensions: [orna]
 scope: source.orna
-
 contexts:
   main:
-    - include: comments
-    - match: "'(?:''|[^'])*'"
-      scope: string.quoted.single.orna
-    - match: "\"(?:\"\"|[^\"])*\""
-      scope: entity.name.quoted.orna
-    - match: "(?i:\\b(?:CHARACTER\\s+LARGE\\s+OBJECT|BINARY\\s+LARGE\\s+OBJECT|TIMESTAMP|DURATION|BOOLEAN|DECIMAL|INTEGER|BIGINT|BYTES|FLOAT|BOOL|DATE|TEXT|TIME|UUID|VOID|INT)\\b)"
-      scope: storage.type.orna
-    - match: "(?i:\\b(?:DOCUMENTATION|PERSISTABLE|TRANSACTION|CAPABILITY|VOLATILITY|IMMUTABLE|PRIMITIVE|RETURNING|TRANSIENT|CONTRACT|DISABLED|DISTINCT|EXTERNAL|FUNCTION|REQUIRES|RESTRICT|SECURITY|VOLATILE|BETWEEN|CASCADE|DEFAULT|DEFINER|EXECUTE|INSPECT|INVOKER|PRELUDE|RETURNS|RUNTIME|SESSION|ATOMIC|CLIENT|CREATE|DELETE|EXISTS|EXPORT|HAVING|INSERT|KERNEL|MANUAL|OBJECT|OFFSET|OPAQUE|OPTION|RENAME|RETURN|REVOKE|SCHEMA|SEALED|SELECT|SERVER|STABLE|STREAM|UNIQUE|UPDATE|VALUES|ALTER|AWAIT|BEGIN|CHECK|CONST|CROSS|ELSIF|FALSE|FIELD|FINAL|FIRST|GRANT|GROUP|ILIKE|INNER|LIMIT|LOCAL|NULLS|ORDER|OUTER|RIGHT|SCOPE|STATE|TABLE|UNION|VALUE|WHERE|WHILE|CALL|CASE|DESC|DROP|ELSE|ENUM|FROM|FULL|INTO|JOIN|LAST|LEFT|LIKE|LIST|LOOP|NULL|ONLY|READ|ROLE|ROWS|THEN|TRUE|TYPE|USER|WHEN|ADD|ALL|AND|ASC|END|FOR|LET|MAP|NOT|REF|SET|AS|BY|IF|IN|IS|ON|OR|TO)\\b)"
+    - match: '//.*$'
+      scope: comment.line.orna
+    - match: '/\*'
+      push: block-comment
+    - match: '"(?:\\.|[^"\\])*"'
+      scope: string.quoted.double.orna
+    - match: '\b(?:as|assert|base|break|case|continue|dim|else|enum|false|fn|for|if|impl|in|let|loop|null|offset|affine|protocol|pub|return|self|static|table|true|type|unit|use|while)\b'
       scope: keyword.control.orna
-    - match: "\\b[0-9]+\\b"
+    - match: '\b[0-9]+(?:\.[0-9]+)?\b'
       scope: constant.numeric.orna
-    - match: "(?:\\|\\||!=|->|:=|<=|<>|=>|>=|\\*|\\+|\\?|%|-|/|:|<|=|>)"
-      scope: keyword.operator.orna
-    - match: "(?:\\(|\\)|\\.|\\[|\\]|\\{|\\}|,|;)"
-      scope: punctuation.orna
-    - match: "[\\p{L}_][\\p{L}\\p{N}_]*"
+    - match: '[[:alpha:]_][[:alnum:]_]*'
       scope: variable.other.orna
-
-  comments:
-    - match: "--[^\\n]*"
-      scope: comment.orna
-    - begin: "/\\*"
-      end: "\\*/"
-      scope: comment.orna
+    - match: '[+*/%^=!<>|?&.-]+'
+      scope: keyword.operator.orna
+  block-comment:
+    - meta_scope: comment.block.orna
+    - match: '\*/'
+      pop: true
+    - match: '/\*'
+      push: block-comment
