@@ -861,6 +861,92 @@ fn generated_schema_defers_semantic_dispatch_id_uniqueness_to_typed_registry() {
 }
 
 #[test]
+fn generated_provider_schema_rejects_root_and_nested_registry_drift() {
+    let schema_json = build_provider::generate_provider_registry_schema()
+        .expect("provider dispatch schema regenerates from its generator");
+    assert_eq!(
+        schema_json,
+        system_provider_abi_schema_json(),
+        "the embedded provider schema matches fresh generated output"
+    );
+    let registry: Value =
+        serde_json::from_str(system_provider_abi_json()).expect("embedded dispatch document");
+    build_host::validate_json_against_schema(system_provider_abi_json(), &schema_json)
+        .expect("the embedded dispatch document passes its generated schema");
+
+    let mut unknown_root_field = registry.clone();
+    unknown_root_field["conformance_probe"] = Value::Bool(true);
+    let mut unknown_operation_field = registry.clone();
+    unknown_operation_field["operations"][0]["conformance_probe"] = Value::Bool(true);
+    let mut unknown_role_field = registry.clone();
+    unknown_role_field["roles"][0]["conformance_probe"] = Value::Bool(true);
+    let mut unknown_version_field = registry.clone();
+    unknown_version_field["abi_version"]["patch"] = Value::from(0);
+    let mut missing_operation_field = registry;
+    missing_operation_field["operations"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("failures");
+
+    let cases = [
+        ("root unknown field", unknown_root_field, true, true),
+        (
+            "operation unknown field",
+            unknown_operation_field,
+            true,
+            true,
+        ),
+        ("role unknown field", unknown_role_field, true, true),
+        ("version unknown field", unknown_version_field, true, true),
+        (
+            "missing operation field",
+            missing_operation_field,
+            false,
+            false,
+        ),
+    ];
+    let mut schema_rejections = 0;
+    let mut typed_unknown_field_acceptances = 0;
+    for (label, mutated, unknown_field, typed_accepts) in cases {
+        let json = mutated.to_string();
+        let error = build_host::validate_json_against_schema(&json, &schema_json)
+            .expect_err("provider schema drift must be rejected");
+        let expected_error = if unknown_field {
+            "unexpected field"
+        } else {
+            "missing required field"
+        };
+        assert!(
+            error.contains(expected_error),
+            "schema guard identifies {label}: {error}"
+        );
+        let typed_result = SystemProviderAbi::from_json(&json);
+        assert_eq!(
+            typed_result.is_ok(),
+            typed_accepts,
+            "typed deserializer behavior is explicit for {label}"
+        );
+        if typed_accepts {
+            typed_unknown_field_acceptances += 1;
+        } else {
+            assert_eq!(
+                typed_result,
+                Err(orna_sys_v1::ProviderAbiError::InvalidJson),
+                "missing raw fields remain invalid to typed deserialization"
+            );
+        }
+        schema_rejections += 1;
+    }
+
+    assert_eq!(schema_rejections, 5);
+    assert_eq!(typed_unknown_field_acceptances, 4);
+    println!(
+        "generated_provider_schema_drift_guard cases={schema_rejections} schema_rejections={schema_rejections} unknown_field_typed_acceptances={typed_unknown_field_acceptances} missing_required_typed_rejections=1 total_cases={}",
+        schema_rejections + typed_unknown_field_acceptances
+    );
+}
+
+#[test]
 fn generated_artifact_drift_probe_rejects_tampered_outputs_and_stale_modules() {
     let regenerated = regenerate();
     let source_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
