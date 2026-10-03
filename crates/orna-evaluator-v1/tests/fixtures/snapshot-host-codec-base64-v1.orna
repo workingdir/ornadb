@@ -1,0 +1,8 @@
+// The snapshot marker is test-only; section 9's codec bodies stay real.
+pub fn encode(input: Blob): Str = __encode(input);
+fn __encode(input: Blob): Str = encode(input);
+
+pub fn decode(input: Str): Blob = __decode(input);
+fn __decode(input: Str): Blob = decode(input);
+
+pub fn snapshot_encode(input: Blob): (Int, Str) = (1, __encode(input));

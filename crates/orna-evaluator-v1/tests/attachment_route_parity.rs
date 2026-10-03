@@ -2,8 +2,8 @@ use std::{fs, path::Path, process::Command};
 
 use orna_evaluator_v1::{AdmittedReplSession, Limits};
 use orna_project_v1::{
-    AttachmentError, AttachedDatabaseSession, PACKAGE_PIN_MANIFEST_PATH, PackageResolver,
-    PinnedDatabase, ProjectLoader,
+    AttachedDatabaseSession, AttachmentError, PackageResolver, PinnedDatabase, ProjectLoader,
+    ReboundPathCheckpoint, PACKAGE_PIN_MANIFEST_PATH,
 };
 use orna_repository_v1::Repository;
 use orna_value_v1::Value;
@@ -1422,6 +1422,7 @@ fn sibling_checkpoint_folds_keep_tabular_anchor_identities() {
     let root_b = stage_b.handoff_checkpoint(0, 0).unwrap();
     let middle_b_checkpoint = stage_b.handoff_checkpoint(0, 1).unwrap();
     let independent_root_a = independent_stage_a.handoff_checkpoint(0, 0).unwrap();
+    let independent_middle_a_checkpoint = independent_stage_a.handoff_checkpoint(0, 1).unwrap();
     assert_eq!(
         root_a.handoff().primary().pin().commit(),
         independent_root_a.handoff().primary().pin().commit(),
@@ -1465,9 +1466,15 @@ fn sibling_checkpoint_folds_keep_tabular_anchor_identities() {
         (&middle_b_checkpoint, middle_waves_b.as_slice()),
         (&root_b, root_return_waves_b.as_slice()),
     ];
+    let storms_independent_a = [
+        (&independent_root_a, root_waves_a.as_slice()),
+        (&independent_middle_a_checkpoint, middle_waves_a.as_slice()),
+        (&independent_root_a, root_return_waves_a.as_slice()),
+    ];
     let paths = [
         (&stage_a, storms_a.as_slice()),
         (&stage_b, storms_b.as_slice()),
+        (&independent_stage_a, storms_independent_a.as_slice()),
     ];
 
     assert!(matches!(
@@ -1478,13 +1485,83 @@ fn sibling_checkpoint_folds_keep_tabular_anchor_identities() {
         Err(AttachmentError::RetainedSnapshotUnavailable)
     ));
 
+    let one_root_storm = [(&root_a, root_waves_a.as_slice())];
+    let folded_branch_a = resolver
+        .extend_nested_terminal_pair_checkpoint_storms(&stage_a, &one_root_storm)
+        .unwrap();
+    let folded_branch_b = resolver
+        .extend_nested_terminal_pair_checkpoint_storms(&stage_a, &one_root_storm)
+        .unwrap();
+    let branch_a_anchor = folded_branch_a.retained_wave(2).unwrap().first().unwrap();
+    let branch_b_anchor = folded_branch_b.retained_wave(2).unwrap().first().unwrap();
+    assert_eq!(
+        branch_a_anchor.primary().pin().commit().as_str(),
+        branch_b_anchor.primary().pin().commit().as_str()
+    );
+    assert_eq!(
+        branch_a_anchor
+            .attached()
+            .map(|(name, database)| (name.to_owned(), database.pin().commit().as_str().to_owned()))
+            .collect::<Vec<_>>(),
+        branch_b_anchor
+            .attached()
+            .map(|(name, database)| (name.to_owned(), database.pin().commit().as_str().to_owned()))
+            .collect::<Vec<_>>()
+    );
+    let branch_a_label = folded_branch_a.retained_depth_label(2, 0).unwrap();
+    let branch_b_label = folded_branch_b.retained_depth_label(2, 0).unwrap();
+    assert_ne!(
+        branch_a_label, branch_b_label,
+        "separate folds assign distinct identities to matching route snapshots"
+    );
+    let branch_a_checkpoint = folded_branch_a.handoff_checkpoint(2, 0).unwrap();
+    let no_pair_waves: [[PinnedDatabase; 2]; 0] = [];
+    assert!(resolver
+        .extend_nested_terminal_pair_checkpoint_storms(
+            &folded_branch_a,
+            &[(
+                &branch_a_checkpoint,
+                no_pair_waves.as_slice(),
+            )],
+        )
+        .is_ok());
+    assert!(matches!(
+        resolver.extend_nested_terminal_pair_checkpoint_storms(
+            &folded_branch_b,
+            &[(
+                &branch_a_checkpoint,
+                no_pair_waves.as_slice(),
+            )],
+        ),
+        Err(AttachmentError::RetainedSnapshotUnavailable)
+    ));
+
     let folded = resolver
         .extend_sibling_terminal_pair_checkpoint_storms(&paths)
         .unwrap_or_else(|error| panic!("sibling checkpoint folds failed: {error:?}"));
-    assert_eq!(folded.routes().len(), 2);
-    for (route, expected_anchor, expected_leaf, expected_value) in [
-        (&folded.routes()[0], &middle_a_checkpoint, &leaf_a, 91),
-        (&folded.routes()[1], &middle_b_checkpoint, &leaf_b, 92),
+    assert_eq!(folded.routes().len(), 3);
+    for (route, expected_anchor, expected_leaf, expected_value, expected_root) in [
+        (
+            &folded.routes()[0],
+            &middle_a_checkpoint,
+            &leaf_a,
+            91,
+            &root_a,
+        ),
+        (
+            &folded.routes()[1],
+            &middle_b_checkpoint,
+            &leaf_b,
+            92,
+            &root_b,
+        ),
+        (
+            &folded.routes()[2],
+            &independent_middle_a_checkpoint,
+            &leaf_a,
+            91,
+            &independent_root_a,
+        ),
     ] {
         let retained_anchor = route.retained_wave(4).unwrap().first().unwrap();
         assert_eq!(
@@ -1495,21 +1572,13 @@ fn sibling_checkpoint_folds_keep_tabular_anchor_identities() {
         assert_eq!(route.retained_depth_label(4, 0).unwrap().wave(), 4);
         assert_eq!(
             route.retained_depth_label(0, 0).unwrap(),
-            if expected_value == 91 {
-                root_a.depth_label().clone()
-            } else {
-                root_b.depth_label().clone()
-            },
+            expected_root.depth_label().clone(),
             "the first anchor label survives the A-to-B-to-A cycle"
         );
         let returned_anchor = route.retained_wave(6).unwrap().first().unwrap();
         assert_eq!(
             returned_anchor.primary().pin().commit().as_str(),
-            if expected_value == 91 {
-                root_a.handoff().primary().pin().commit().as_str()
-            } else {
-                root_b.handoff().primary().pin().commit().as_str()
-            }
+            expected_root.handoff().primary().pin().commit().as_str()
         );
         assert_eq!(
             route
@@ -1532,4 +1601,47 @@ fn sibling_checkpoint_folds_keep_tabular_anchor_identities() {
             Ok(Some(Value::int(expected_value.into())))
         );
     }
+
+    let anchor_a = folded.handoff_checkpoint(0, 4, 0).unwrap();
+    let anchor_independent_a = folded.handoff_checkpoint(2, 4, 0).unwrap();
+    assert_eq!(
+        folded.retained_depth_label(0, 4, 0).unwrap(),
+        *anchor_a.depth_label(),
+        "row-indexed label selection preserves the checkpoint identity"
+    );
+    assert!(matches!(
+        folded.retained_depth_label(3, 4, 0),
+        Err(AttachmentError::RetainedSnapshotUnavailable)
+    ));
+    assert_eq!(
+        anchor_a.handoff().primary().pin(),
+        anchor_independent_a.handoff().primary().pin(),
+        "independent parent rows may retain exactly matching anchor pins"
+    );
+    let attached_pins = |checkpoint: &ReboundPathCheckpoint| {
+        checkpoint
+            .handoff()
+            .attached()
+            .map(|(name, database)| {
+                (name.to_owned(), database.pin().commit().as_str().to_owned())
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        attached_pins(&anchor_a),
+        attached_pins(&anchor_independent_a),
+        "independent parent rows may retain exactly matching attached pins"
+    );
+    assert_ne!(
+        anchor_a.depth_label(),
+        anchor_independent_a.depth_label(),
+        "row-indexed checkpoints preserve distinct anchor identities"
+    );
+    assert!(matches!(
+        resolver.extend_nested_terminal_pair_checkpoint_storms(
+            &folded.routes()[2],
+            &[(&anchor_a, no_pair_waves.as_slice())],
+        ),
+        Err(AttachmentError::RetainedSnapshotUnavailable)
+    ));
 }
