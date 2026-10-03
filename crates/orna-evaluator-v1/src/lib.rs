@@ -3779,6 +3779,8 @@ impl Context<'_, '_> {
         depth: usize,
     ) -> Option<Result<Value, EvaluationError>> {
         let resolved = self.resolve_function_name(callee, scope);
+        let statistics_operation =
+            portable_statistics_operation(callee, resolved.as_deref(), scope);
         let native_export = is_native_collection_binding(
             callee,
             resolved.as_deref(),
@@ -3788,12 +3790,18 @@ impl Context<'_, '_> {
         ) || resolved
             .as_deref()
             .is_some_and(|name| matches!(name, "std.collection.asof_join" | "std.query.asof_join"));
-        let name = root_collection_name(callee).or_else(|| {
-            native_export
-                .then(|| portable_collection_operation(callee, resolved.as_deref()))
-                .flatten()
-        })?;
-        if scope.0.contains_key(name) || (resolved.is_some() && !native_export) {
+        let intrinsic_name = root_collection_name(callee);
+        let name = intrinsic_name
+            .or_else(|| {
+                native_export
+                    .then(|| portable_collection_operation(callee, resolved.as_deref()))
+                    .flatten()
+            })
+            .or(statistics_operation)?;
+        if (statistics_operation.is_none()
+            && intrinsic_name.is_some_and(|name| scope.0.contains_key(name)))
+            || (resolved.is_some() && !native_export && statistics_operation.is_none())
+        {
             return None;
         }
         let pipeline_relation = matches!(input, Some(Value::Relation(_)));
@@ -3812,7 +3820,19 @@ impl Context<'_, '_> {
                 let value = self.evaluate(&argument.value, scope, depth + 1)?;
                 values.push(value);
             }
-            let ordered = relation_named_arguments(name, arguments, values, implicit)?;
+            let mut ordered = if statistics_operation.is_some() {
+                relation_statistics_arguments(name, arguments, values, implicit)?
+            } else {
+                relation_named_arguments(name, arguments, values, implicit)?
+            };
+            if statistics_operation.is_some() {
+                let Some(Value::Relation(plan)) = ordered.first() else {
+                    return Err(error("ORNA-EVAL-TYPE"));
+                };
+                let rows = self.collect_relation_values(plan, depth + 1)?;
+                ordered[0] = Value::List(rows);
+                return self.stats(name, ordered);
+            }
             if name == "union" {
                 let mut union_operands = ordered.into_iter();
                 let (Some(left), Some(right)) = (union_operands.next(), union_operands.next())
@@ -9936,6 +9956,46 @@ fn standard_collection_function_operation(name: &str) -> Option<&str> {
         .or_else(|| name.strip_prefix("std.query."))
 }
 
+fn portable_statistics_operation(
+    expression: &Expr,
+    resolved_function: Option<&str>,
+    scope: &Scope,
+) -> Option<&'static str> {
+    let operation = resolved_function
+        .and_then(statistics_function_operation)
+        .or_else(|| {
+            let root = function_root_name(expression)?;
+            if scope.0.contains_key(root) && !scope.2.contains(root) {
+                return None;
+            }
+            function_name(expression)
+                .as_deref()
+                .and_then(statistics_function_operation)
+        });
+    operation
+}
+
+fn statistics_function_operation(name: &str) -> Option<&'static str> {
+    let operation = name.strip_prefix("std.stats.")?;
+    Some(match operation {
+        "mean" | "__mean" => "mean",
+        "median" | "__median" => "median",
+        "percentile" | "__percentile" => "percentile",
+        "sum" | "__sum" => "sum",
+        "min" | "__min" => "min",
+        "max" | "__max" => "max",
+        "range" | "__range" => "range",
+        "mode" | "__mode" => "mode",
+        "variance" | "__variance" => "variance",
+        "standard_deviation" | "__standard_deviation" => "standard_deviation",
+        "histogram" | "__histogram" => "histogram",
+        "rate" | "__rate" => "rate",
+        "derivative" | "__derivative" => "derivative",
+        "integrate" | "__integrate" => "integrate",
+        _ => return None,
+    })
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum StandardBindingKind {
     Collection,
@@ -10648,6 +10708,77 @@ fn relation_named_arguments(
         .map(|value| value.ok_or_else(|| error("ORNA-EVAL-ARGUMENT")))
         .collect()
 }
+fn relation_statistics_arguments(
+    function: &str,
+    arguments: &[orna_syntax_v1::Argument],
+    values: Vec<Value>,
+    implicit: usize,
+) -> Result<Vec<Value>, EvaluationError> {
+    let expected: &[&str];
+    let defaults: Vec<Option<Value>>;
+    match function {
+        "mean" | "median" | "variance" | "standard_deviation" => {
+            expected = &["rows", "scale", "rounding"];
+            defaults = vec![None, Some(Value::Null), Some(Value::Null)];
+        }
+        "percentile" => {
+            expected = &["rows", "p", "interpolation", "scale", "rounding"];
+            defaults = vec![None, None, None, Some(Value::Null), Some(Value::Null)];
+        }
+        "sum" | "min" | "max" | "range" | "mode" => {
+            expected = &["rows"];
+            defaults = vec![None];
+        }
+        "histogram" => {
+            expected = &["rows", "bins", "include_final_upper"];
+            defaults = vec![None, None, Some(Value::Bool(false))];
+        }
+        "rate" | "derivative" | "integrate" => {
+            expected = &["points"];
+            defaults = vec![None];
+        }
+        _ => return Err(error("ORNA-EVAL-UNSUPPORTED")),
+    }
+    if values.len() > expected.len() || defaults.len() != expected.len() {
+        return Err(error("ORNA-EVAL-ARGUMENT"));
+    }
+    let mut ordered = vec![None; expected.len()];
+    let mut positional = 0usize;
+    let mut named_started = false;
+    for (index, value) in values.into_iter().enumerate() {
+        let name = index
+            .checked_sub(implicit)
+            .and_then(|index| arguments.get(index))
+            .and_then(|argument| argument.name.as_deref());
+        let position = if let Some(name) = name {
+            named_started = true;
+            expected.iter().position(|expected| *expected == name)
+        } else if named_started {
+            None
+        } else {
+            let position = Some(positional);
+            positional += 1;
+            position
+        }
+        .ok_or_else(|| error("ORNA-EVAL-ARGUMENT"))?;
+        if implicit > 0 && position == 0 && name.is_some() {
+            return Err(error("ORNA-EVAL-ARGUMENT"));
+        }
+        if ordered[position].replace(value).is_some() {
+            return Err(error("ORNA-EVAL-ARGUMENT"));
+        }
+    }
+    ordered
+        .into_iter()
+        .zip(defaults)
+        .map(|(value, default)| {
+            value
+                .or_else(|| default.clone())
+                .ok_or_else(|| error("ORNA-EVAL-ARGUMENT"))
+        })
+        .collect()
+}
+
 fn bucket_by_spec(period: &Value, zone: Option<&Value>) -> Result<BucketBySpec, EvaluationError> {
     let zone = match zone {
         Some(Value::String(value)) => Some(value.clone()),
@@ -11543,6 +11674,107 @@ mod tests {
                 Value::Int(BigInt::from(10)),
                 Value::Option(Some(Box::new(Value::Int(BigInt::from(9))))),
             ])])
+        );
+    }
+
+    #[test]
+    fn relation_query_aggregations_and_statistics_return_computed_values() {
+        let ints = |values: &[i64]| {
+            values
+                .iter()
+                .map(|value| Value::Int(BigInt::from(*value)))
+                .collect::<Vec<_>>()
+        };
+        let result = evaluate_relation_collection_fixture(
+            include_str!("../tests/fixtures/relation-query-statistics-6c10u.orna"),
+            &[("rows", ints(&[0, 2]))],
+        )
+        .expect("query and statistics operators compute relation values");
+        assert_eq!(
+            result,
+            Value::List(vec![
+                Value::Int(BigInt::from(2)),
+                Value::Int(BigInt::from(2)),
+                Value::Option(Some(Box::new(Value::Int(BigInt::from(0))))),
+                Value::Option(Some(Box::new(Value::Int(BigInt::from(2))))),
+                Value::Int(BigInt::from(1)),
+                Value::Int(BigInt::from(1)),
+                Value::Decimal(DecimalValue::new(5.into(), (-1).into()).unwrap()),
+                Value::Int(BigInt::from(2)),
+                Value::Option(Some(Box::new(Value::Int(BigInt::from(0))))),
+                Value::Option(Some(Box::new(Value::Int(BigInt::from(2))))),
+                Value::Int(BigInt::from(2)),
+                Value::List(ints(&[0, 2])),
+                Value::Int(BigInt::from(1)),
+                Value::Int(BigInt::from(1)),
+                Value::List(ints(&[1, 1])),
+            ])
+        );
+
+        let empty = evaluate_relation_collection_fixture(
+            include_str!("../tests/fixtures/relation-statistics-empty-6c10u.orna"),
+            &[("rows", Vec::new())],
+        )
+        .expect("empty aggregates use their documented identities");
+        assert_eq!(
+            empty,
+            Value::List(vec![
+                Value::Null,
+                Value::Null,
+                Value::Null,
+                Value::Int(BigInt::from(0)),
+                Value::Null,
+                Value::Null,
+                Value::Null,
+                Value::List(Vec::new()),
+                Value::Null,
+                Value::Null,
+                Value::List(ints(&[0])),
+                Value::Int(BigInt::from(0)),
+                Value::Int(BigInt::from(0)),
+            ])
+        );
+    }
+
+    #[test]
+    fn relation_time_statistics_compute_rate_derivative_and_area() {
+        fn instant(source: &str) -> Value {
+            let parsed = parse_expression(source);
+            assert!(parsed.is_ok(), "{source}: {:?}", parsed.diagnostics);
+            let functions = Functions::new();
+            let mut context = test_context(&functions);
+            let mut scope = Scope(
+                BTreeMap::new(),
+                BTreeSet::new(),
+                BTreeSet::new(),
+                NominalDefinitions::new(),
+                BTreeSet::new(),
+            );
+            context
+                .evaluate(&parsed.value, &mut scope, 0)
+                .unwrap_or_else(|error| panic!("{source}: {}", error.code()))
+        }
+        let first_time = instant("2024-01-01T00:00:00Z");
+        let last_time = instant("2024-01-01T00:00:02Z");
+        let points = vec![
+            Value::Tuple(vec![first_time, Value::Int(BigInt::from(1))]),
+            Value::Tuple(vec![last_time.clone(), Value::Int(BigInt::from(3))]),
+        ];
+        let result = evaluate_relation_collection_fixture(
+            include_str!("../tests/fixtures/relation-statistics-time-series-6c10u.orna"),
+            &[("points", points)],
+        )
+        .expect("time-series statistics consume ordered relation points");
+        assert_eq!(
+            result,
+            Value::List(vec![
+                Value::Int(BigInt::from(1)),
+                Value::List(vec![Value::Tuple(vec![
+                    last_time,
+                    Value::Int(BigInt::from(1)),
+                ])]),
+                Value::Int(BigInt::from(4)),
+            ])
         );
     }
 
