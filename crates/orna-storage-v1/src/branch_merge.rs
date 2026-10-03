@@ -678,6 +678,8 @@ pub struct BranchMergePairedCheckpointRedoFoldSegmentRotationRestoreHandoffSlotS
     pub handoff_ordinal: usize,
     /// Zero-based position of this checkpoint stream within its handoff.
     pub stream_ordinal: usize,
+    /// Zero-based compacted run position within the source stream.
+    pub compaction_ordinal: usize,
     pub fold_ordinal: usize,
     pub order: u64,
     pub left: Option<CheckpointGeneration>,
@@ -701,6 +703,7 @@ pub enum BranchMergePairedCheckpointRedoFoldSegmentRotationRestoreHandoffError {
         restore_ordinal: usize,
         handoff_ordinal: usize,
         stream_ordinal: usize,
+        compaction_ordinal: usize,
         fold_ordinal: usize,
         first_order: u64,
         last_order: u64,
@@ -709,6 +712,7 @@ pub enum BranchMergePairedCheckpointRedoFoldSegmentRotationRestoreHandoffError {
         restore_ordinal: usize,
         handoff_ordinal: usize,
         stream_ordinal: usize,
+        compaction_ordinal: usize,
         fold_ordinal: usize,
         first_order: u64,
         last_order: u64,
@@ -2881,11 +2885,13 @@ pub fn restore_paired_checkpoint_redo_sparse_wal_merge_handoff_chains_preserving
 /// batch, handoff, fold, and order coordinates remain independent even when
 /// labels overlap. Repeated checkpoint streams within a handoff also retain
 /// their original stream ordinal, even when their fold and order labels match.
-/// Every represented order consumes one exact directional segment pair;
-/// malformed ranges or pair counts are rejected. The known and observed
-/// checkpoint catalog is unioned, but gaps, omitted streams, and missing
-/// sides are not filled in. The reference is silent on this chained restore
-/// projection, so caller source order is the stable handoff and stream rule.
+/// Runs within each source stream retain their compaction ordinal as well, so
+/// repeated fold and order labels from distinct runs remain distinct. Every
+/// represented order consumes one exact directional segment pair; malformed
+/// ranges or pair counts are rejected. The known and observed checkpoint
+/// catalog is unioned, but gaps, omitted streams, and missing sides are not
+/// filled in. The reference is silent on this chained restore projection, so
+/// caller source order is the stable handoff, stream, and compaction rule.
 pub fn restore_paired_checkpoint_redo_sparse_segment_rotation_handoff_chains_preserving_fold_identity(
     known_checkpoint_ids: &[CheckpointId],
     restore_handoffs: &[Vec<Vec<BranchMergePairedCheckpointRedoFoldSegmentRotationCompactionSnapshot>>],
@@ -2913,13 +2919,14 @@ pub fn restore_paired_checkpoint_redo_sparse_segment_rotation_handoff_chains_pre
                     .enumerate()
                     .filter(|(_, stream)| stream.checkpoint_id == checkpoint_id)
                 {
-                    for run in &stream.runs {
+                    for (compaction_ordinal, run) in stream.runs.iter().enumerate() {
                         if run.last_order < run.first_order {
                             return Err(
                                 BranchMergePairedCheckpointRedoFoldSegmentRotationRestoreHandoffError::InvalidOrderRange {
                                     restore_ordinal,
                                     handoff_ordinal,
                                     stream_ordinal,
+                                    compaction_ordinal,
                                     fold_ordinal: run.fold_ordinal,
                                     first_order: run.first_order,
                                     last_order: run.last_order,
@@ -2934,6 +2941,7 @@ pub fn restore_paired_checkpoint_redo_sparse_segment_rotation_handoff_chains_pre
                                     restore_ordinal,
                                     handoff_ordinal,
                                     stream_ordinal,
+                                    compaction_ordinal,
                                     fold_ordinal: run.fold_ordinal,
                                     first_order: run.first_order,
                                     last_order: run.last_order,
@@ -2948,6 +2956,7 @@ pub fn restore_paired_checkpoint_redo_sparse_segment_rotation_handoff_chains_pre
                                     restore_ordinal,
                                     handoff_ordinal,
                                     stream_ordinal,
+                                    compaction_ordinal,
                                     fold_ordinal: run.fold_ordinal,
                                     order: run.first_order + offset as u64,
                                     left: run.left.clone(),
@@ -2966,6 +2975,7 @@ pub fn restore_paired_checkpoint_redo_sparse_segment_rotation_handoff_chains_pre
                 slot.restore_ordinal,
                 slot.handoff_ordinal,
                 slot.stream_ordinal,
+                slot.compaction_ordinal,
                 slot.fold_ordinal,
                 slot.order,
             )
