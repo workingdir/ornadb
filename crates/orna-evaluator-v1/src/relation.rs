@@ -8,13 +8,13 @@ use num_traits::ToPrimitive;
 
 use super::{
     timezone::{resolve_time_zone, Instant, LocalDateTime, LocalTimeResolution, TimeZone, TimeZoneError},
-    Value,
+    RelationReadScope, Value,
 };
 
 static NEXT_RELATION_SOURCE_ID: AtomicU64 = AtomicU64::new(1);
 
-fn next_relation_source_id() -> u64 {
-    NEXT_RELATION_SOURCE_ID.fetch_add(1, Ordering::Relaxed)
+fn next_relation_source_id() -> RelationReadScope {
+    RelationReadScope(NEXT_RELATION_SOURCE_ID.fetch_add(1, Ordering::Relaxed))
 }
 
 /// The two boundary models admitted by `bucket_by`.
@@ -278,7 +278,7 @@ fn days_in_month(year: i32, month: u8) -> u8 {
 #[derive(Clone, Debug)]
 pub(super) struct RelationPlan {
     pub(super) source: String,
-    pub(super) source_identity: u64,
+    pub(super) source_identity: RelationReadScope,
     pub(super) source_union: Option<(Box<RelationPlan>, Box<RelationPlan>)>,
     /// Bounded, already-materialized rows produced by finite collection
     /// operators over a relation. Keeping these rows behind an Arc lets the
@@ -298,7 +298,7 @@ impl PartialEq for RelationPlan {
 
 impl Eq for RelationPlan {}
 
-type FilterContinuationScope = Option<u64>;
+type FilterContinuationScope = Option<RelationReadScope>;
 
 /// Ordered filter chunks shared when a cascade fans out through a union.
 #[derive(Debug)]
@@ -339,7 +339,7 @@ impl FilterBatch {
             .continuations
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let scoped_key = (scope.clone(), key);
+        let scoped_key = (scope, key);
         if let Some(batch) = continuations.get(&scoped_key).and_then(Weak::upgrade) {
             return batch;
         }
@@ -364,7 +364,7 @@ impl FilterBatch {
     fn followed_by_shared_prefix(
         prefix: &Arc<Self>,
         next: &Arc<Self>,
-        source_identity: u64,
+        source_identity: RelationReadScope,
     ) -> Arc<Self> {
         let scope = Some(source_identity);
         let next_key = Arc::as_ptr(next) as usize;
@@ -372,7 +372,7 @@ impl FilterBatch {
             .continuations
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let scoped_key = (scope.clone(), next_key);
+        let scoped_key = (scope, next_key);
         if let Some(batch) = continuations.get(&scoped_key).and_then(Weak::upgrade) {
             // Cloned leaves already have an identity-keyed join; avoid taking
             // the suffix's cross-prefix cache lock for this common path. The
@@ -427,12 +427,16 @@ impl FilterBatch {
             }
         }
         prefixed_batches.retain(|(_, batch)| batch.strong_count() > 0);
-        let batch = Self::followed_by_in_scope(prefix, next, scope.clone());
+        let batch = Self::followed_by_in_scope(prefix, next, scope);
         prefixed_batches.push((scope, Arc::downgrade(&batch)));
         batch
     }
 
-    fn prefixed_by(values: Vec<Value>, next: &Arc<Self>, source_identity: u64) -> Arc<Self> {
+    fn prefixed_by(
+        values: Vec<Value>,
+        next: &Arc<Self>,
+        source_identity: RelationReadScope,
+    ) -> Arc<Self> {
         Self::followed_by_shared_prefix(&Self::from_values(values), next, source_identity)
     }
 
@@ -779,7 +783,7 @@ impl RelationPlan {
 
 #[cfg(test)]
 mod tests {
-    use super::{FilterBatch, RelationPlan, RelationStage};
+    use super::{FilterBatch, RelationPlan, RelationReadScope, RelationStage};
     use crate::Value;
     use std::sync::Arc;
 
@@ -808,14 +812,16 @@ mod tests {
     fn continuation_cache_does_not_cross_relation_sources() {
         let prefix = FilterBatch::from_values(vec![Value::Bool(true)]);
         let suffix = FilterBatch::from_values(vec![Value::Bool(false)]);
-        let left = FilterBatch::followed_by_shared_prefix(&prefix, &suffix, 1);
-        let cloned_left = FilterBatch::followed_by_shared_prefix(&prefix, &suffix, 1);
+        let left_scope = RelationReadScope(1);
+        let right_scope = RelationReadScope(2);
+        let left = FilterBatch::followed_by_shared_prefix(&prefix, &suffix, left_scope);
+        let cloned_left = FilterBatch::followed_by_shared_prefix(&prefix, &suffix, left_scope);
         let equal_left = FilterBatch::followed_by_shared_prefix(
             &FilterBatch::from_values(vec![Value::Bool(true)]),
             &suffix,
-            1,
+            left_scope,
         );
-        let right = FilterBatch::followed_by_shared_prefix(&prefix, &suffix, 2);
+        let right = FilterBatch::followed_by_shared_prefix(&prefix, &suffix, right_scope);
 
         assert!(Arc::ptr_eq(&left, &cloned_left));
         assert!(Arc::ptr_eq(&left, &equal_left));
