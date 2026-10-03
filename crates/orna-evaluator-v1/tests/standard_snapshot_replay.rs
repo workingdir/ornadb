@@ -2352,6 +2352,115 @@ fn replay_keeps_each_multi_module_upgrade_bound_to_its_snapshot_pin() {
 }
 
 #[test]
+fn paired_module_pin_upgrades_replay_computed_values_deterministically() {
+    let (
+        _directory,
+        _project_v1,
+        _project_v2,
+        _project_v3,
+        project_v4,
+        project_v5,
+        project_v6,
+        snapshots,
+    ) = module_upgrade_projects();
+    let projects = [&project_v4, &project_v5, &project_v6];
+    let pins = [&snapshots[3], &snapshots[4], &snapshots[5]];
+    // The reference specifies captured dependency behavior, not a snapshot-token function.
+    let expected_values = [1_011, 10_012, 100_013];
+    let expected_math = [
+        include_str!("fixtures/module-upgrade-std-v3.orna"),
+        include_str!("fixtures/module-upgrade-std-v4.orna"),
+        include_str!("fixtures/module-upgrade-std-v5.orna"),
+    ];
+    let expected_collection = [
+        include_str!("fixtures/module-upgrade-std-collection-v4.orna"),
+        include_str!("fixtures/module-upgrade-std-collection-v5.orna"),
+        include_str!("fixtures/module-upgrade-std-collection-v6.orna"),
+    ];
+    let replay = include_str!("fixtures/module-upgrade-paired-call.orna");
+
+    assert!(pins.windows(2).all(|pair| pair[0] != pair[1]));
+    for (index, project) in projects.iter().enumerate() {
+        assert_eq!(project.standard_profile().unwrap().snapshot(), pins[index]);
+        assert_eq!(standard_source(project, "std/math.orna"), expected_math[index]);
+        assert_eq!(
+            standard_source(project, "std/collection.orna"),
+            expected_collection[index]
+        );
+        if index > 0 {
+            assert_ne!(
+                standard_source(projects[index - 1], "std/math.orna"),
+                standard_source(project, "std/math.orna"),
+                "each paired upgrade changes std.math under its new pin"
+            );
+            assert_ne!(
+                standard_source(projects[index - 1], "std/collection.orna"),
+                standard_source(project, "std/collection.orna"),
+                "each paired upgrade changes std.collection under its new pin"
+            );
+        }
+    }
+
+    for index in 0..projects.len() - 1 {
+        for path in ["std/math.orna", "std/collection.orna"] {
+            let mut mixed_sources = projects[index].standard_sources().to_vec();
+            let upgraded_source = standard_source(projects[index + 1], path).to_owned();
+            mixed_sources
+                .iter_mut()
+                .find(|(candidate, _)| candidate == path)
+                .unwrap()
+                .1 = upgraded_source;
+            assert_eq!(
+                AdmittedReplSession::from_loaded_project(
+                    projects[index],
+                    mixed_sources,
+                    Limits::default(),
+                )
+                .unwrap_err()
+                .code(),
+                "ORNA-REPL-STANDARD",
+                "snapshot {} must reject upgraded source {path}",
+                pins[index]
+            );
+        }
+    }
+
+    let mut sessions = projects
+        .iter()
+        .map(|project| {
+            AdmittedReplSession::from_loaded_project(
+                project,
+                project.standard_sources().iter().cloned(),
+                Limits::default(),
+            )
+            .unwrap()
+        })
+        .collect::<Vec<_>>();
+    for (session, expected) in sessions.iter_mut().zip(expected_values) {
+        assert_eq!(session.submit(replay), Ok(Some(int(expected))));
+    }
+
+    for index in [2, 0, 1, 2, 1, 0] {
+        assert_eq!(
+            sessions[index].submit(replay),
+            Ok(Some(int(expected_values[index]))),
+            "replaying the paired modules must retain snapshot {}'s value",
+            pins[index]
+        );
+    }
+
+    let mut cloned_sessions = sessions.clone();
+    for index in (0..cloned_sessions.len()).rev() {
+        assert_eq!(
+            cloned_sessions[index].submit(replay),
+            Ok(Some(int(expected_values[index]))),
+            "cloned snapshot {} must replay the same paired-module value",
+            pins[index]
+        );
+    }
+}
+
+#[test]
 fn replayed_closure_uses_its_captured_dependency_snapshot_after_snapshot_changes() {
     let (_directory, project_v1, project_v2, snapshot_v1, snapshot_v2, sources_v1, sources_v2) =
         snapshot_projects();
