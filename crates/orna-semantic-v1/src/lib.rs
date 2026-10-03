@@ -9540,6 +9540,7 @@ fn merge_list_element_types(left: &Type, right: &Type) -> Option<Type> {
     if (type_contains_pinned_checkpoint_tuple(left)
         || type_contains_pinned_checkpoint_tuple(right))
         && (!checkpoint_pin_map_widths_match(left, right)
+            || !checkpoint_value_pin_identity_topology_matches(left, right)
             || !nested_checkpoint_compaction_fold_preserves_pin_identity(left, right))
     {
         return None;
@@ -9665,6 +9666,7 @@ fn merge_checkpoint_field_map(left: &Type, right: &Type) -> Option<Type> {
             if (type_contains_pinned_checkpoint_tuple(left)
                 || type_contains_pinned_checkpoint_tuple(right))
                 && (!checkpoint_pin_map_widths_match(left, right)
+                    || !checkpoint_value_pin_identity_topology_matches(left, right)
                     || !nested_checkpoint_compaction_fold_preserves_pin_identity(left, right))
             {
                 return None;
@@ -18251,6 +18253,7 @@ fn tuple_checkpoint_promotion_matches(left: &[Type], right: &[Type]) -> bool {
             .iter()
             .zip(right)
             .all(|(left, right)| checkpoint_pin_map_widths_match(left, right))
+        && checkpoint_tuple_pin_identity_topology_matches(left, right)
         && tuple_checkpoint_compaction_fold_preserves_pin_identity(left, right)
 }
 
@@ -18471,7 +18474,34 @@ fn record_checkpoint_promotion_matches(
                 checkpoint_pin_map_widths_match(left, right)
             })
         })
+        && checkpoint_record_pin_identity_topology_matches(left, right)
         && record_checkpoint_compaction_fold_preserves_pin_identity(left, right)
+}
+
+fn checkpoint_record_pin_identity_topology_matches(
+    expected: &BTreeMap<String, Type>,
+    actual: &BTreeMap<String, Type>,
+) -> bool {
+    if expected.len() != actual.len() {
+        return false;
+    }
+    let mut pin_maps = Vec::new();
+    let mut path = Vec::new();
+    for (name, expected) in expected {
+        let Some(actual) = actual.get(name) else {
+            return false;
+        };
+        if !collect_corresponding_snapshot_context_maps_at_boundary(
+            expected,
+            actual,
+            &mut pin_maps,
+            &mut path,
+            SnapshotTopologyBoundary::RecordField(name.clone()),
+        ) {
+            return false;
+        }
+    }
+    snapshot_context_topology_matches_over_present_maps(&pin_maps)
 }
 
 fn record_checkpoint_compaction_fold_preserves_pin_identity(
