@@ -654,14 +654,26 @@ impl SystemProviderAbi {
     }
 
     /// Resolve a provider-bound operation, check its preconditions and role
-    /// offer, then invoke the selected provider. Provider failures cross this
-    /// boundary only when the typed operation contract declares their code.
+    /// offer, then invoke the baked provider selected by this table. Callers
+    /// using a replaceable or dynamically bound provider must dispatch through
+    /// [`ProviderRoleRegistry::dispatch_to_provider`].
     pub fn dispatch_to_provider(
         &self,
         operation: &str,
         provider: &dyn SystemOperationProvider,
         arguments: &[TypedValue],
         check: impl FnMut(&Precondition) -> Result<(), FailureCode>,
+    ) -> Result<SystemDispatchResult<TypedValue>, ProviderDiagnostic> {
+        self.dispatch_to_provider_with_selected_offer(operation, provider, arguments, check, None)
+    }
+
+    fn dispatch_to_provider_with_selected_offer(
+        &self,
+        operation: &str,
+        provider: &dyn SystemOperationProvider,
+        arguments: &[TypedValue],
+        check: impl FnMut(&Precondition) -> Result<(), FailureCode>,
+        selected_offer: Option<&ProviderOffer>,
     ) -> Result<SystemDispatchResult<TypedValue>, ProviderDiagnostic> {
         let contract = match self.check_preconditions(operation, check) {
             Ok(contract) => contract,
@@ -680,20 +692,36 @@ impl SystemProviderAbi {
             .get(role_id)
             .expect("validated operation role is in the dispatch table");
         validate_provider_offer(role, provider.offer())?;
-        if !role.replaceable
-            && let Some(expected_provider) = &role.builtin_provider
-            && provider.offer().provider != *expected_provider
-        {
-            return Err(ProviderDiagnostic::ProviderNotSelected {
-                role: role.id.clone(),
-                expected: ProviderOffer {
+        match selected_offer {
+            Some(expected) if provider.offer() != expected => {
+                return Err(ProviderDiagnostic::ProviderNotSelected {
+                    role: role.id.clone(),
+                    expected: expected.clone(),
+                    provided: provider.offer().clone(),
+                });
+            }
+            Some(_) => {}
+            None => {
+                let Some(expected_provider) = &role.builtin_provider else {
+                    return Err(ProviderDiagnostic::RoleUnavailable {
+                        role: role.id.clone(),
+                        version: role.version,
+                    });
+                };
+                let expected = ProviderOffer {
                     provider: expected_provider.clone(),
                     role: role.id.clone(),
                     version: role.version,
                     effects: role.effects.clone(),
-                },
-                provided: provider.offer().clone(),
-            });
+                };
+                if provider.offer() != &expected {
+                    return Err(ProviderDiagnostic::ProviderNotSelected {
+                        role: role.id.clone(),
+                        expected,
+                        provided: provider.offer().clone(),
+                    });
+                }
+            }
         }
 
         if arguments.len() != contract.signature.parameters.len() {
@@ -936,14 +964,13 @@ impl ProviderRoleRegistry {
             return abi.dispatch_to_provider(operation, provider, arguments, check);
         };
         let expected = self.resolve(role_id.as_str())?;
-        if provider.offer() != expected {
-            return Err(ProviderDiagnostic::ProviderNotSelected {
-                role: role_id.clone(),
-                expected: expected.clone(),
-                provided: provider.offer().clone(),
-            });
-        }
-        abi.dispatch_to_provider(operation, provider, arguments, check)
+        abi.dispatch_to_provider_with_selected_offer(
+            operation,
+            provider,
+            arguments,
+            check,
+            Some(expected),
+        )
     }
 
     pub fn validate_required(&self) -> Result<(), ProviderDiagnostic> {
