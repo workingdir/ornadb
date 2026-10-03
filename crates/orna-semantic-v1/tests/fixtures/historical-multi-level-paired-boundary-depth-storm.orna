@@ -1,0 +1,48 @@
+pub fn factory_at(pin: sys.SnapshotRef) =
+    sys.database.as_of(pin).energy.factory;
+
+pub fn rejects_multi_level_paired_depth_drift_after_selector_storm(failure: Error) {
+    let first = {
+        cluster: {
+            west: { left: { pins: (factory_at(sys.snapshot("HEAD~1401")), fail(failure)) } },
+            east: { right: { pins: (factory_at(sys.snapshot("HEAD~1411")), fail(failure)) } },
+        },
+    };
+    let middle = {
+        cluster: {
+            west: { left: { pins: (factory_at(sys.snapshot("HEAD~1402")), factory_at(sys.snapshot("HEAD~1421"))) } },
+            east: { right: { pins: (factory_at(sys.snapshot("HEAD~1412")), factory_at(sys.snapshot("HEAD~1421"))) } },
+        },
+    };
+    let last = {
+        cluster: {
+            west: { left: { pins: (factory_at(sys.snapshot("HEAD~1403")), factory_at(sys.snapshot("HEAD~1431"))) } },
+            east: { right: { pins: (factory_at(sys.snapshot("HEAD~1413")), factory_at(sys.snapshot("HEAD~1432"))) } },
+        },
+    };
+    { first: first, middle: middle, last: last, folded: [first, middle, last] }
+}
+
+pub fn accepts_multi_level_paired_depths_after_selector_storm(failure: Error) {
+    let parents = [
+        {
+            cluster: {
+                west: { left: { pins: (factory_at(sys.snapshot("HEAD~1451")), fail(failure)) } },
+                east: { right: { pins: (factory_at(sys.snapshot("HEAD~1461")), fail(failure)) } },
+            },
+        },
+        {
+            cluster: {
+                west: { left: { pins: (factory_at(sys.snapshot("HEAD~1452")), factory_at(sys.snapshot("HEAD~1471"))) } },
+                east: { right: { pins: (factory_at(sys.snapshot("HEAD~1462")), factory_at(sys.snapshot("HEAD~1471"))) } },
+            },
+        },
+        {
+            cluster: {
+                west: { left: { pins: (factory_at(sys.snapshot("HEAD~1453")), factory_at(sys.snapshot("HEAD~1472"))) } },
+                east: { right: { pins: (factory_at(sys.snapshot("HEAD~1463")), factory_at(sys.snapshot("HEAD~1472"))) } },
+            },
+        },
+    ];
+    { folded: parents }
+}
