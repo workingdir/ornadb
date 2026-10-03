@@ -419,9 +419,9 @@ fn parsed_paired_folds_observe_nested_activation_writes_and_keep_row_identity() 
     assert!(matches!(outcome, StageOutcome::Passed), "{outcome:?}");
     let row = runtime
         .committed_row("Note", &Value::int(2.into()))
-        .expect("nested seed row is committed after both folds pass");
-    assert_eq!(row_field(row, "amount"), &Raw::Int(20.into()));
-    assert_eq!(row_field(row, "label"), &Raw::Text("seed".into()));
+        .expect("updated nested row is committed after both folds pass");
+    assert_eq!(row_field(row, "amount"), &Raw::Int(25.into()));
+    assert_eq!(row_field(row, "label"), &Raw::Text("rebound".into()));
 }
 
 #[test]
