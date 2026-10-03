@@ -1,7 +1,21 @@
 default: check
 
 # Run the default local fmt/build/lint/non-ignored test/rustdoc gate.
-check: fmt build lint test rustdoc-check
+check: fixture-audit editor-artifacts-check fmt build lint test lsp-syntax-v1-parity sys-artifact-ci rustdoc-check
+
+# Reject external reference paths and a checkout-local reference tree.
+fixture-audit:
+    test ! -e reference || (echo "fixture-audit: remove the top-level reference tree" >&2; exit 1)
+    cargo test --locked -p orna-syntax --test reference_path_boundary
+
+# Regenerate checked-in syntax, semantic-token, and editor packaging artifacts.
+editor-artifacts:
+    cargo run --locked -p orna-syntax --example generate_editor_artifacts
+
+# Reject editor artifacts that drift from orna-syntax metadata and templates.
+editor-artifacts-check:
+    cargo run --locked -p orna-syntax --example generate_editor_artifacts -- --check
+    node --check editors/tree-sitter-orna/grammar.js
 
 
 # Verify formatting without changing source files.
@@ -122,7 +136,23 @@ lint:
 test:
     cargo test --locked --workspace --all-targets
 
-# Validate the tree-sitter grammar and editor metadata without installing editor runtimes.
-# This static gate requires its CLI prerequisites: Python 3.11+, tree-sitter CLI, node, and cargo.
-editor-tooling-check:
-    python3 scripts/check-editor-tooling.py
+# Keep LSP parsing, fixtures, and completion vocabulary aligned with ORNA-LEX-007.
+lsp-syntax-v1-parity:
+    cargo test --locked -p orna-lsp keyword_completion_vocabulary_matches_lex_007_exactly
+    cargo test --locked -p orna-lsp in_crate_fixtures_parse_with_the_frozen_1_0_frontend
+
+# Verify provider dispatch metadata export/schema conformance and generated-artifact drift.
+sys-artifact-ci: sys-binding-conformance-ci sys-dispatch-coverage-ci
+    cargo test --locked -p orna-sys-v1 --features dev-sys-export --test sys_api_export --test system_registry_parity --test system_provider_abi
+    cargo test --locked -p orna-evaluator-v1 --features orna-sys-v1/dev-sys-export --test generated_sys_host_binding_coverage --test standard_library_process_environment --test standard_library_filesystem_network
+
+# Sweep generated declaration parsing, registry typing/dispatch, and embedded schema parity.
+sys-binding-conformance-ci:
+    cargo test --locked -p orna-sys-v1 --features dev-sys-export --test system_binding_stubs --test host_registry_parity --test sys_schema_regeneration --test sys_api_generation
+
+# Exercise every generated host operation through its registered evaluator dispatch arm.
+sys-dispatch-coverage-ci:
+    cargo test --locked -p orna-evaluator-v1 --features orna-sys-v1/dev-sys-export --lib every_generated_host_operation_reaches_its_native_dispatch_arm
+
+# Compatibility name for the static generated-editor drift check.
+editor-tooling-check: editor-artifacts-check

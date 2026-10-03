@@ -1,0 +1,40 @@
+pub table PlannerStormDeepUnknownRebindCaps(id: Int) {
+    first: Bool,
+    middle: Bool,
+    deep: Bool,
+    sibling: Bool,
+}
+pub fn deep_unknown_rebind_caps() = PlannerStormDeepUnknownRebindCaps
+    | union(
+        PlannerStormDeepUnknownRebindCaps
+            | take(32)
+            | union(
+                PlannerStormDeepUnknownRebindCaps
+                    | take(20)
+                    | union(
+                        PlannerStormDeepUnknownRebindCaps | take(80) | filter(row => row.deep),
+                        PlannerStormDeepUnknownRebindCaps | take(80) | filter(row => row.deep)
+                    )
+                    | take(8)
+                    | filter(row => row.middle),
+                PlannerStormDeepUnknownRebindCaps | take(6) | filter(row => row.sibling)
+            )
+            | take(18)
+            | filter(row => row.first),
+        PlannerStormDeepUnknownRebindCaps | take(10) | filter(row => row.sibling)
+    )
+    | union(
+        PlannerStormDeepUnknownRebindCaps
+            | take(12)
+            | union(
+                PlannerStormDeepUnknownRebindCaps | take(16) | filter(row => row.deep),
+                PlannerStormDeepUnknownRebindCaps | take(16) | filter(row => row.deep)
+            )
+            | take(6)
+            | filter(row => row.middle),
+        PlannerStormDeepUnknownRebindCaps | take(5) | filter(row => row.sibling)
+    )
+    | union(
+        PlannerStormDeepUnknownRebindCaps | take(3) | filter(row => row.first),
+        PlannerStormDeepUnknownRebindCaps | take(2) | filter(row => row.sibling)
+    );

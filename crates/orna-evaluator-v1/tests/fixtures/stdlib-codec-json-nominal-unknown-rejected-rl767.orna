@@ -1,0 +1,1 @@
+std.encoding.json.decode("\u{7b}\"answer\":42,\"label\":\"wire\",\"extra\":true\u{7d}", as: CodecRecord)

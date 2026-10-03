@@ -30,18 +30,75 @@ mod introspection;
 pub use introspection::{
     Dependency, DependencyConfidence, DependencyGraph, DependencyGraphError, DependencyInput,
     DependencyKind,
-    DefinitionRef, ExplainedPlan, ExplainError, ExpressionRef, FileRef, FunctionPlanDescription,
-    FunctionRef, MutableBranchSnapshot, QueryJoinDescription, QueryMutationDescription,
-    QueryMutationKind, QuerySourceStatistics,
+    DefinitionRef, DisjunctStormBranchDescription, DisjunctStormCascadeDescription,
+    DisjunctStormLimitRebindDescription,
+    DisjunctStormDescription, ExplainedPlan, ExplainError, ExpressionRef, FileRef,
+    FunctionPlanDescription, FunctionRef, MutableBranchSnapshot,
+    QueryDecorrelatedSubqueryDescription, QueryJoinDescription,
+    QueryLimitPushdownDescription, QueryMutationDescription, QueryMutationKind,
+    QueryPairedCheckpointSegmentCompactionChainDescription,
+    QueryPairedCheckpointSegmentCompactionStepDescription,
+    QueryPairedSegmentRotationChainDescription, QueryPairedSegmentRotationDescription,
+    QueryPairedStreamCompactionChainDescription,
+    QueryPairedStreamCompactionOccurrenceDescription,
+    QueryCheckpointGenerationDescription,
+    QueryPairedCheckpointSpillRestoreChainDescription,
+    QueryPairedCheckpointSpillRestoreOccurrenceDescription,
+    QueryPartialIndexDescription,
+    QuerySourceStatistics, QueryJoinPairIdentityDescription,
     MAX_DEPENDENCY_EDGES, MAX_DEPENDENCY_OBJECTS, MAX_PLAN_EXPRESSIONS,
-    MAX_PLAN_NODES, MAX_REFERENCE_BYTES, Plan, PlanDetail, PlanNode, PlanNodeKind, PlanNodeRef,
+    MAX_PLAN_NODES, MAX_REFERENCE_BYTES, Plan, PlanByteCapHandoffRoute, PlanByteCapScopeSegment,
+    PlanDetail, PlanNode, PlanNodeKind, PlanNodeRef,
     PlanNullOrder,
-    PlanOrdering, PlanSortDirection, QueryPlanDescription, SnapshotRef, SourceSpan, explain_function,
-    explain_query, explain_query_with_disjunct_limit_chain, explain_query_with_limit_chain,
+    PlanOrdering, PlanSortDirection, PlanWindowFrameBound, QueryPlanDescription, SnapshotRef,
+    SourceSpan, QueryWindowAggregatePushdownDescription, QueryWindowSpillDescription,
+    explain_function,
+    explain_query, explain_query_with_decorrelated_subqueries,
+    explain_query_with_join_pair_identities_and_limit_pushdowns,
+    explain_query_with_join_pair_identities_and_limit_window_aggregate_pushdowns,
+    explain_query_with_join_pair_identities_limit_window_aggregate_and_spill_pushdowns,
+    explain_query_with_partial_indexes,
+    explain_query_with_partial_indexes_and_decorrelated_subqueries,
+    explain_query_with_partial_indexes_and_decorrelated_subqueries_and_join_pair_identities,
+    explain_query_with_partial_indexes_and_join_pair_identities,
+    explain_query_with_partial_indexes_and_paired_checkpoint_segment_compaction_chains,
+    explain_query_with_partial_indexes_and_paired_checkpoint_compaction_and_segment_rotation_chains,
+    explain_query_with_partial_indexes_and_paired_checkpoint_rotation_and_stream_compaction_chains,
+    explain_query_with_partial_indexes_and_paired_checkpoint_rotation_stream_and_spill_restore_chains,
+    explain_query_with_window_aggregate_pushdowns,
+    explain_query_with_join_pair_identities,
+    explain_query_with_join_pair_identities_and_window_aggregate_pushdowns,
+    explain_query_with_join_pair_identities_window_aggregate_and_spill_pushdowns,
+    explain_query_with_conjunct_disjunct_limit_chain,
+    explain_query_with_disjunct_conjunct_limit_chain,
+    explain_query_with_disjunct_limit_conjunct_chain,
+    explain_query_with_disjunct_limit_chain, explain_query_with_input_limit_conjunct_disjunct_chain,
+    explain_query_with_input_limit_disjunct_chain,
+    explain_query_with_input_disjunct_limit_conjunct_chain,
+    explain_query_with_input_limit_conjunct_disjunct_limit_conjunct_chain,
+    explain_query_with_input_limit_disjunct_conjunct_chain, explain_query_with_limit_chain,
+    explain_query_with_disjunct_branch_limit_conjunct_cascade,
+    explain_query_with_disjunct_storm_chain,
+    explain_query_with_disjunct_storm_branch_limit_chains,
 };
 
 mod provider;
 pub use provider::*;
+
+mod host_environment;
+pub use host_environment::*;
+
+mod host_process;
+pub use host_process::*;
+
+mod host_clock;
+pub use host_clock::*;
+
+mod host_filesystem;
+pub use host_filesystem::*;
+
+mod host_network;
+pub use host_network::*;
 
 pub const CANONICAL_VALUE_CODEC_V1: &str = "OVB-1";
 
@@ -586,6 +643,18 @@ pub struct SystemFunctionDescriptor {
     pub effect: SystemEffect,
     pub signature: &'static str,
     pub purpose: &'static str,
+    /// Extended source documentation for editor hover and reference views.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub documentation: Option<&'static str>,
+    /// Optional registry details useful when presenting the callable contract.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub contract: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub preconditions: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ownership: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub snapshot_rule: Option<&'static str>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Serialize)]
@@ -5059,11 +5128,10 @@ mod tests {
 
     #[test]
     fn normative_sys_descriptor_metadata_is_present_and_runtime_neutral() {
-        // This is descriptor evidence only: the normative JSON is parsed and
-        // validated here, but no sys function is implemented or invoked.
-        let document: serde_json::Value =
-            serde_json::from_str(include_str!("../../../api/sys.json"))
-                .expect("api/sys.json must remain valid JSON");
+        // This is descriptor evidence only: the compile-time generated
+        // normative JSON is parsed here, but no sys function is invoked.
+        let document: serde_json::Value = serde_json::from_str(&system_api_json())
+            .expect("generated sys API must remain valid JSON");
 
         assert_eq!(document["status"], "specification");
         let functions = document["functions"]

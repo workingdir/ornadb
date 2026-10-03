@@ -1,0 +1,18 @@
+use std.test as testing;
+
+pub fn expectations(): Bool {
+    let missing: Int? = null;
+    assert testing.expect_true(true);
+    assert testing.expect_false(false);
+    assert testing.expect_equal(2 + 2, 4);
+    assert testing.expect_not_equal(2, 3);
+    assert testing.should(true);
+    assert testing.should_be_true(true);
+    assert testing.should_be_false(false);
+    assert testing.should_equal(2 + 2, 4);
+    assert testing.should_not_equal(2, 3);
+    assert testing.should_be_some<Int>(Some(7));
+    assert testing.should_be_none<Int>(missing);
+    assert testing.should_satisfy(5, value => value > 4);
+    true
+}

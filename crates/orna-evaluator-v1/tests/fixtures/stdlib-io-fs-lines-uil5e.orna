@@ -1,0 +1,4 @@
+(
+    std.io.fs.read_lines("ROOT_PATH", "empty.txt"),
+    std.io.fs.read_lines("ROOT_PATH", "terminal-breaks.txt"),
+)

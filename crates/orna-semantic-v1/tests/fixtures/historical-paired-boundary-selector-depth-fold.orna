@@ -1,0 +1,29 @@
+pub fn factory_at(pin: sys.SnapshotRef) =
+    sys.database.as_of(pin).energy.factory;
+
+pub fn rejects_pairwise_selector_topology_drift_across_boundaries() {
+    let first = {
+        left: { pins: (factory_at(sys.snapshot("HEAD~701")), factory_at(sys.snapshot("HEAD~701"))) },
+        right: { pins: (factory_at(sys.snapshot("HEAD~711")), factory_at(sys.snapshot("HEAD~712"))) },
+    };
+    let second = {
+        left: { pins: (factory_at(sys.snapshot("HEAD~704")), factory_at(sys.snapshot("HEAD~705"))) },
+        right: { pins: (factory_at(sys.snapshot("HEAD~714")), factory_at(sys.snapshot("HEAD~715"))) },
+    };
+    {
+        first: first,
+        second: second,
+        folded: [first, second],
+    }
+}
+
+pub fn accepts_pairwise_alpha_renamed_selector_topology_across_boundaries() = [
+    {
+        left: { pins: (factory_at(sys.snapshot("HEAD~801")), factory_at(sys.snapshot("HEAD~801"))) },
+        right: { pins: (factory_at(sys.snapshot("HEAD~811")), factory_at(sys.snapshot("HEAD~812"))) },
+    },
+    {
+        left: { pins: (factory_at(sys.snapshot("HEAD~804")), factory_at(sys.snapshot("HEAD~804"))) },
+        right: { pins: (factory_at(sys.snapshot("HEAD~814")), factory_at(sys.snapshot("HEAD~815"))) },
+    },
+];

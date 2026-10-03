@@ -1,7 +1,22 @@
-use orna_syntax_v1::{Declaration, TypeExpr, parse_module};
+use orna_syntax_v1::{Declaration, Expr, LiteralKind, TypeExpr, parse_module};
+use std::{collections::BTreeMap, fs, path::Path};
+
 use orna_sys_v1::{
-    AbiType, EffectSet, OperationContract, SystemEffect, system_binding_stubs, system_provider_abi,
+    AbiType, EffectSet, OperationContract, SystemEffect, system_binding_modules_json,
+    system_binding_stubs, system_function_descriptor, system_provider_abi,
+    system_provider_abi_json, system_provider_abi_schema_json,
 };
+use serde_json::Value;
+
+#[path = "../build_host.rs"]
+#[allow(dead_code)]
+mod build_host;
+#[path = "../build_provider.rs"]
+#[allow(dead_code)]
+mod build_provider;
+#[path = "../build_support.rs"]
+#[allow(dead_code)]
+mod build_support;
 
 const GENERIC_KEYWORD_STUB_FIXTURE: &str = include_str!("fixtures/sys-invoke-generic-keyword.orna");
 const GENERIC_START_KEYWORD_STUB_FIXTURE: &str =
@@ -48,6 +63,191 @@ fn local_function_name(contract: &OperationContract) -> &str {
         .expect("registered sys callable has a leaf name")
 }
 
+fn validate_stub_dispatch_inventory(
+    source: &str,
+    expected_operations: &[&str],
+) -> Result<(), String> {
+    let parsed = parse_module(source);
+    if !parsed.is_ok() {
+        return Err(format!(
+            "generated declarations do not parse: {:?}",
+            parsed.diagnostics
+        ));
+    }
+    let markers = source
+        .lines()
+        .filter_map(|line| line.strip_prefix("// sys-op: "))
+        .collect::<Vec<_>>();
+    if markers.len() != parsed.value.items.len() {
+        return Err(format!(
+            "{} dispatch markers cover {} parsed declarations",
+            markers.len(),
+            parsed.value.items.len()
+        ));
+    }
+    let unique_markers = markers
+        .iter()
+        .copied()
+        .collect::<std::collections::BTreeSet<_>>();
+    if unique_markers.len() != markers.len() {
+        return Err("duplicate generated dispatch marker".to_owned());
+    }
+    if markers != expected_operations {
+        return Err("generated dispatch markers differ from registry order".to_owned());
+    }
+    Ok(())
+}
+
+fn validate_stub_body(body: &Expr) -> Result<(), String> {
+    let Expr::Call {
+        callee, arguments, ..
+    } = body
+    else {
+        return Err("stub body is not the generated declaration error".to_owned());
+    };
+    if !matches!(callee.as_ref(), Expr::Name { text, .. } if text == "error") {
+        return Err("stub body does not call error".to_owned());
+    }
+    let is_string_argument = |index: usize, name: &str, value: &str| {
+        arguments.get(index).is_some_and(|argument| {
+            argument.name.as_deref() == Some(name)
+                && matches!(
+                    &argument.value,
+                    Expr::Literal { text, kind: LiteralKind::String, .. }
+                        if text == &format!("\"{value}\"")
+                )
+        })
+    };
+    if arguments.len() != 2
+        || !is_string_argument(0, "code", "sys.binding.stub")
+        || !is_string_argument(1, "message", "generated declaration stub")
+    {
+        return Err("stub body differs from the canonical generated declaration error".to_owned());
+    }
+    Ok(())
+}
+
+fn validate_stub_contract(source: &str, operation: &OperationContract) -> Result<(), String> {
+    let parsed = parse_module(source);
+    if !parsed.is_ok() {
+        return Err(format!("stub does not parse: {:?}", parsed.diagnostics));
+    }
+    validate_stub_dispatch_inventory(source, &[operation.id.as_str()])?;
+
+    let expected_module = operation
+        .signature
+        .callable
+        .rsplit_once('.')
+        .map(|(module, _)| module)
+        .ok_or_else(|| "registered callable has no module path".to_owned())?;
+    let module = source
+        .lines()
+        .find_map(|line| line.strip_prefix("// sys-module: "))
+        .ok_or_else(|| "stub has no module marker".to_owned())?;
+    if module != expected_module {
+        return Err(format!(
+            "stub module `{module}` differs from `{expected_module}`"
+        ));
+    }
+
+    let mut aliases = std::collections::BTreeMap::new();
+    for line in source.lines() {
+        if let Some(alias) = line.strip_prefix("// sys-parameter-alias: ") {
+            let (original, emitted) = alias
+                .split_once('=')
+                .ok_or_else(|| "stub parameter alias is malformed".to_owned())?;
+            aliases.insert(original, emitted);
+        }
+    }
+
+    let Declaration::Function { signature, body } = &parsed.value.items[0].declaration else {
+        return Err("stub declaration is not a function".to_owned());
+    };
+    validate_stub_body(body)?;
+    let expected_name = local_function_name(operation);
+    if signature.name != expected_name {
+        return Err(format!(
+            "stub function `{}` differs from `{expected_name}`",
+            signature.name
+        ));
+    }
+
+    let generics = signature
+        .generics
+        .iter()
+        .map(|generic| generic.name.as_str())
+        .collect::<Vec<_>>();
+    let expected_generics = operation
+        .signature
+        .type_parameters
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    if generics != expected_generics {
+        return Err(format!(
+            "stub generics {generics:?} differ from {expected_generics:?}"
+        ));
+    }
+    if signature.parameters.len() != operation.signature.parameters.len() {
+        return Err(format!(
+            "stub has {} parameters; registry has {}",
+            signature.parameters.len(),
+            operation.signature.parameters.len()
+        ));
+    }
+
+    for (parsed_parameter, registered_parameter) in signature
+        .parameters
+        .iter()
+        .zip(&operation.signature.parameters)
+    {
+        let source_parameter = &source[parsed_parameter.span.start..parsed_parameter.span.end];
+        let (name, _) = source_parameter
+            .split_once(": ")
+            .ok_or_else(|| "stub parameter has no explicit type".to_owned())?;
+        let expected_name = aliases
+            .get(registered_parameter.name.as_str())
+            .copied()
+            .unwrap_or(registered_parameter.name.as_str());
+        if name != expected_name {
+            return Err(format!(
+                "stub parameter `{name}` differs from `{expected_name}`"
+            ));
+        }
+        let parsed_type = resolve_type(
+            parsed_parameter
+                .annotation
+                .as_ref()
+                .ok_or_else(|| format!("stub parameter `{name}` has no type"))?,
+        )?;
+        if parsed_type != registered_parameter.ty {
+            return Err(format!(
+                "stub parameter `{name}` has a registry-incompatible type"
+            ));
+        }
+        let default = parsed_parameter
+            .default
+            .as_ref()
+            .map(|default| &source[default.span().start..default.span().end]);
+        if default != registered_parameter.default.as_deref() {
+            return Err(format!(
+                "stub parameter `{name}` has a registry-incompatible default"
+            ));
+        }
+    }
+
+    let result = resolve_type(
+        signature
+            .result
+            .as_ref()
+            .ok_or_else(|| "stub has no result type".to_owned())?,
+    )?;
+    if result != operation.signature.result {
+        return Err("stub result type differs from the typed registry".to_owned());
+    }
+    Ok(())
+}
+
 #[test]
 fn generated_sys_stubs_parse_resolve_to_registry_types_and_dispatch_one_to_one() {
     let source = system_binding_stubs();
@@ -59,7 +259,22 @@ fn generated_sys_stubs_parse_resolve_to_registry_types_and_dispatch_one_to_one()
     );
 
     let abi = system_provider_abi();
+    let dispatch_metadata: Value =
+        serde_json::from_str(system_provider_abi_json()).expect("generated dispatch metadata");
+    let dispatch_rows = dispatch_metadata["operations"]
+        .as_array()
+        .expect("dispatch operation inventory")
+        .iter()
+        .map(|row| (row["name"].as_str().expect("dispatch operation name"), row))
+        .collect::<std::collections::BTreeMap<_, _>>();
     let operations = abi.operations().collect::<Vec<_>>();
+    let operation_count = operations.len();
+    let expected_operation_ids = operations
+        .iter()
+        .map(|operation| operation.id.as_str())
+        .collect::<Vec<_>>();
+    validate_stub_dispatch_inventory(source, &expected_operation_ids)
+        .expect("generated stub markers are a bijection with registry operations");
     let mut current_module = None;
     let mut operation_markers =
         Vec::<(String, String, std::collections::BTreeMap<String, String>)>::new();
@@ -94,7 +309,8 @@ fn generated_sys_stubs_parse_resolve_to_registry_types_and_dispatch_one_to_one()
         "an operation may own only one emitted stub"
     );
 
-    assert_eq!(parsed.value.items.len(), operations.len());
+    assert_eq!(parsed.value.items.len(), operation_count);
+    let mut validated_stub_bodies = 0;
     for ((item, operation), (module_marker, marker, aliases)) in parsed
         .value
         .items
@@ -117,9 +333,50 @@ fn generated_sys_stubs_parse_resolve_to_registry_types_and_dispatch_one_to_one()
             operation.id.as_str(),
             "dispatch marker must name its registry op"
         );
-        let Declaration::Function { signature, .. } = &item.declaration else {
+        let dispatch_row = dispatch_rows
+            .get(marker.as_str())
+            .unwrap_or_else(|| panic!("generated dispatch metadata omits {marker}"));
+        assert_eq!(dispatch_row["name"].as_str(), Some(operation.id.as_str()));
+        assert_eq!(
+            dispatch_row["signature"].as_str(),
+            Some(operation.signature.source.as_str()),
+            "stub marker {marker} resolves to the same typed signature as dispatch metadata"
+        );
+        assert_eq!(
+            dispatch_row["version"]["major"].as_u64(),
+            Some(operation.version.major.into()),
+            "stub marker {marker} resolves to the dispatch ABI version"
+        );
+        assert_eq!(
+            dispatch_row["version"]["minor"].as_u64(),
+            Some(operation.version.minor.into()),
+            "stub marker {marker} resolves to the dispatch ABI version"
+        );
+        let expected_role = match (&operation.role, operation.role_version) {
+            (Some(role), Some(version)) => Some(format!(
+                "{}@{}.{}",
+                role.as_str(),
+                version.major,
+                version.minor
+            )),
+            (None, None) => None,
+            _ => panic!("role name/version must be present together for {marker}"),
+        };
+        assert_eq!(
+            dispatch_row["role"].as_str(),
+            expected_role.as_deref(),
+            "stub marker {marker} resolves to the dispatch semantic role"
+        );
+        let Declaration::Function { signature, body } = &item.declaration else {
             panic!("each generated stub must be a function declaration")
         };
+        validate_stub_body(body).unwrap_or_else(|error| {
+            panic!(
+                "generated stub body for {} is invalid: {error}",
+                operation.id.as_str()
+            )
+        });
+        validated_stub_bodies += 1;
         assert_eq!(signature.name, local_function_name(operation));
         assert_eq!(
             signature
@@ -188,6 +445,659 @@ fn generated_sys_stubs_parse_resolve_to_registry_types_and_dispatch_one_to_one()
             operation.id.as_str()
         );
     }
+    assert_eq!(validated_stub_bodies, operation_count);
+    println!(
+        "generated_stub_validation operations={operation_count} canonical_placeholder_bodies={validated_stub_bodies}"
+    );
+}
+
+#[test]
+fn generated_provider_default_values_match_schema_and_idl_stubs() {
+    let registry_json = system_provider_abi_json();
+    let schema_json = system_provider_abi_schema_json();
+    build_host::validate_json_against_schema(registry_json, schema_json)
+        .expect("embedded provider defaults conform to the generated schema");
+
+    let registry: Value =
+        serde_json::from_str(registry_json).expect("embedded provider registry is valid JSON");
+    let raw_operations = registry["operations"]
+        .as_array()
+        .expect("embedded provider registry has operation rows");
+    let abi = system_provider_abi();
+    let source = system_binding_stubs();
+    let parsed = parse_module(source);
+    assert!(
+        parsed.is_ok(),
+        "generated declaration bundle parses: {:?}",
+        parsed.diagnostics
+    );
+    let operations = abi.operations().collect::<Vec<_>>();
+    let expected_operations = operations
+        .iter()
+        .map(|operation| operation.id.as_str())
+        .collect::<Vec<_>>();
+    validate_stub_dispatch_inventory(source, &expected_operations)
+        .expect("generated stub markers cover the provider registry in order");
+
+    let mut defaulted_operations = 0;
+    let mut defaulted_parameters = 0;
+    let mut null_defaults = 0;
+    let mut qualified_defaults = 0;
+    for ((item, operation), marker) in parsed
+        .value
+        .items
+        .iter()
+        .zip(operations)
+        .zip(expected_operations)
+    {
+        if operation.role.is_none() {
+            continue;
+        }
+        let has_default = operation
+            .signature
+            .parameters
+            .iter()
+            .any(|parameter| parameter.default.is_some());
+        if !has_default {
+            continue;
+        }
+        assert_eq!(marker, operation.id.as_str());
+
+        let row = raw_operations
+            .iter()
+            .find(|row| row["name"] == operation.id.as_str())
+            .expect("schema-validated registry row covers the defaulted operation");
+        assert_eq!(
+            row["signature"].as_str(),
+            Some(operation.signature.source.as_str()),
+            "schema row keeps the typed signature for {}",
+            operation.id.as_str()
+        );
+        let Declaration::Function { signature, .. } = &item.declaration else {
+            panic!(
+                "generated operation {} is not a function stub",
+                operation.id.as_str()
+            )
+        };
+        assert_eq!(
+            signature.parameters.len(),
+            operation.signature.parameters.len(),
+            "stub parameter count for {}",
+            operation.id.as_str()
+        );
+        for (parsed_parameter, registered_parameter) in signature
+            .parameters
+            .iter()
+            .zip(&operation.signature.parameters)
+        {
+            let parsed_default = parsed_parameter
+                .default
+                .as_ref()
+                .map(|default| &source[default.span().start..default.span().end]);
+            assert_eq!(
+                parsed_default,
+                registered_parameter.default.as_deref(),
+                "stub default matches typed registry for {}.{}",
+                operation.id.as_str(),
+                registered_parameter.name
+            );
+            let Some(default) = registered_parameter.default.as_deref() else {
+                continue;
+            };
+            defaulted_parameters += 1;
+            if default == "null" {
+                null_defaults += 1;
+            } else if default.contains('.') {
+                qualified_defaults += 1;
+            } else {
+                panic!(
+                    "unclassified provider default {default:?} on {}.{}",
+                    operation.id.as_str(),
+                    registered_parameter.name
+                );
+            }
+        }
+        defaulted_operations += 1;
+    }
+
+    assert!(defaulted_operations > 0);
+    assert_eq!(defaulted_parameters, 14);
+    assert!(null_defaults > 0);
+    assert!(qualified_defaults > 0);
+    println!(
+        "generated_provider_default_idl_parity operations={defaulted_operations} defaults={defaulted_parameters} null={null_defaults} qualified={qualified_defaults} total_cases={}",
+        defaulted_operations + defaulted_parameters
+    );
+}
+
+#[test]
+fn generated_provider_optional_arguments_match_schema_and_idl_stubs() {
+    let registry_json = system_provider_abi_json();
+    let schema_json = system_provider_abi_schema_json();
+    build_host::validate_json_against_schema(registry_json, schema_json)
+        .expect("embedded optional provider arguments conform to the generated schema");
+    let registry: Value =
+        serde_json::from_str(registry_json).expect("embedded provider registry is valid JSON");
+    let raw_operations = registry["operations"]
+        .as_array()
+        .expect("embedded provider registry has operation rows");
+    let abi = system_provider_abi();
+    let source = system_binding_stubs();
+    let parsed = parse_module(source);
+    assert!(
+        parsed.is_ok(),
+        "generated optional argument declarations parse: {:?}",
+        parsed.diagnostics
+    );
+    let operations = abi.operations().collect::<Vec<_>>();
+    let expected_operations = operations
+        .iter()
+        .map(|operation| operation.id.as_str())
+        .collect::<Vec<_>>();
+    validate_stub_dispatch_inventory(source, &expected_operations)
+        .expect("generated stub inventory matches the typed provider registry");
+
+    let mut optional_operations = 0;
+    let mut optional_parameters = 0;
+    let mut null_default_parameters = 0;
+    for ((item, operation), marker) in parsed
+        .value
+        .items
+        .iter()
+        .zip(operations)
+        .zip(expected_operations)
+    {
+        if operation.role.is_none() {
+            continue;
+        }
+        let optional_indexes = operation
+            .signature
+            .parameters
+            .iter()
+            .enumerate()
+            .filter_map(|(index, parameter)| {
+                matches!(&parameter.ty, AbiType::Optional(_)).then_some(index)
+            })
+            .collect::<Vec<_>>();
+        if optional_indexes.is_empty() {
+            continue;
+        }
+        assert_eq!(marker, operation.id.as_str());
+        let generated = system_function_descriptor(operation.id.as_str())
+            .expect("optional provider operation has a macro-generated binding");
+        assert_eq!(generated.signature, operation.signature.source);
+        assert_eq!(
+            operation.effects.iter().next(),
+            Some(generated.effect),
+            "generated binding effect matches optional provider operation"
+        );
+        let row = raw_operations
+            .iter()
+            .find(|row| row["name"] == operation.id.as_str())
+            .expect("schema-validated registry row covers optional provider operation");
+        assert_eq!(
+            row["signature"].as_str(),
+            Some(operation.signature.source.as_str()),
+            "schema row preserves optional provider signature {}",
+            operation.id.as_str()
+        );
+
+        let Declaration::Function { signature, .. } = &item.declaration else {
+            panic!(
+                "generated operation {} is not a function stub",
+                operation.id.as_str()
+            )
+        };
+        for index in optional_indexes {
+            let registered_parameter = &operation.signature.parameters[index];
+            let parsed_parameter = &signature.parameters[index];
+            assert_eq!(
+                resolve_type(
+                    parsed_parameter
+                        .annotation
+                        .as_ref()
+                        .expect("optional binding parameter has a type")
+                )
+                .expect("generated optional type resolves"),
+                registered_parameter.ty,
+                "generated IDL optional type matches {}.{}",
+                operation.id.as_str(),
+                registered_parameter.name
+            );
+            let parsed_default = parsed_parameter
+                .default
+                .as_ref()
+                .map(|default| &source[default.span().start..default.span().end]);
+            assert_eq!(
+                parsed_default,
+                registered_parameter.default.as_deref(),
+                "generated IDL optional default matches {}.{}",
+                operation.id.as_str(),
+                registered_parameter.name
+            );
+            assert_eq!(
+                registered_parameter.default.as_deref(),
+                Some("null"),
+                "optional provider argument {}.{} uses the null default",
+                operation.id.as_str(),
+                registered_parameter.name
+            );
+            optional_parameters += 1;
+            null_default_parameters += 1;
+        }
+        optional_operations += 1;
+    }
+
+    assert!(optional_operations > 0);
+    assert_eq!(null_default_parameters, optional_parameters);
+    println!(
+        "generated_provider_optional_idl_parity operations={optional_operations} optional_arguments={optional_parameters} null_defaults={null_default_parameters} schema_validated=1 total_cases={}",
+        optional_operations + optional_parameters + 1
+    );
+}
+
+#[test]
+fn generated_provider_argument_map_variadics_keep_one_schema_and_idl_slot() {
+    const VARIADIC_OPERATIONS: [&str; 4] = [
+        "sys.invoke(Value)",
+        "sys.invoke<T>",
+        "sys.start(Value)",
+        "sys.start<T>",
+    ];
+
+    let registry_json = system_provider_abi_json();
+    let schema_json = build_provider::generate_provider_registry_schema()
+        .expect("provider schema regenerates for argument-map parity");
+    assert_eq!(schema_json, system_provider_abi_schema_json());
+    build_host::validate_json_against_schema(registry_json, &schema_json)
+        .expect("embedded provider registry conforms to the regenerated schema");
+    let registry: Value =
+        serde_json::from_str(registry_json).expect("embedded provider registry is valid JSON");
+    let rows = registry["operations"]
+        .as_array()
+        .expect("embedded registry has operation rows");
+
+    let abi = system_provider_abi();
+    let source = system_binding_stubs();
+    let parsed = parse_module(source);
+    assert!(
+        parsed.is_ok(),
+        "generated argument-map declarations parse: {:?}",
+        parsed.diagnostics
+    );
+    let markers = source
+        .lines()
+        .filter_map(|line| line.strip_prefix("// sys-op: "))
+        .collect::<Vec<_>>();
+    let operations = abi.operations().collect::<Vec<_>>();
+    let expected_operations = operations
+        .iter()
+        .map(|operation| operation.id.as_str())
+        .collect::<Vec<_>>();
+    validate_stub_dispatch_inventory(source, &expected_operations)
+        .expect("generated declaration markers match the typed registry");
+
+    let mut map_slots = 0;
+    for operation_name in VARIADIC_OPERATIONS {
+        let contract = abi
+            .operation(operation_name)
+            .expect("argument-map operation exists in the typed registry");
+        let registry_row = rows
+            .iter()
+            .find(|row| row["name"] == operation_name)
+            .expect("schema-validated operation row exists");
+        assert_eq!(
+            registry_row["signature"].as_str(),
+            Some(contract.signature.source.as_str()),
+            "schema row preserves the typed signature for {operation_name}"
+        );
+        let generated = system_function_descriptor(operation_name)
+            .expect("argument-map operation has a macro-generated binding");
+        assert_eq!(generated.signature, contract.signature.source);
+        assert_eq!(
+            contract.effects.iter().next(),
+            Some(generated.effect),
+            "macro-generated effect matches {operation_name}"
+        );
+
+        let registry_map_slots = contract
+            .signature
+            .parameters
+            .iter()
+            .enumerate()
+            .filter(|(_, parameter)| parameter.name == "arguments")
+            .collect::<Vec<_>>();
+        assert_eq!(
+            registry_map_slots.len(),
+            1,
+            "one typed map slot in {operation_name}"
+        );
+        let (map_index, registry_map_parameter) = registry_map_slots[0];
+        assert_eq!(
+            registry_map_parameter.ty,
+            AbiType::Named("sys.ArgumentMap".to_owned()),
+            "map remains one fixed ABI type in {operation_name}"
+        );
+
+        let item_index = markers
+            .iter()
+            .position(|marker| *marker == operation_name)
+            .expect("argument-map operation has a generated IDL marker");
+        let Declaration::Function { signature, .. } = &parsed.value.items[item_index].declaration
+        else {
+            panic!("generated binding {operation_name} is not a function")
+        };
+        assert_eq!(
+            signature.parameters.len(),
+            contract.signature.parameters.len(),
+            "IDL outer arity stays fixed for {operation_name}"
+        );
+        let parsed_map_parameter = &signature.parameters[map_index];
+        let parsed_map_name = &source
+            [parsed_map_parameter.span.start..parsed_map_parameter.span.end]
+            .split_once(": ")
+            .expect("generated argument-map parameter has an explicit type")
+            .0;
+        assert_eq!(*parsed_map_name, "arguments");
+        assert_eq!(
+            resolve_type(
+                parsed_map_parameter
+                    .annotation
+                    .as_ref()
+                    .expect("generated argument-map parameter has a type")
+            )
+            .expect("generated argument-map type resolves"),
+            registry_map_parameter.ty,
+            "IDL carries one sys.ArgumentMap slot for {operation_name}"
+        );
+        map_slots += 1;
+    }
+
+    assert_eq!(map_slots, VARIADIC_OPERATIONS.len());
+    println!(
+        "generated_provider_argument_map_idl_parity operations={} map_slots={map_slots} one_map_slot_per_operation=1 macro_parity=1 schema_validated=1 total_cases={}",
+        VARIADIC_OPERATIONS.len(),
+        VARIADIC_OPERATIONS.len() * 3 + 1
+    );
+}
+
+#[test]
+fn generated_idl_modules_parse_and_validate_registry_contracts_independently() {
+    let abi = system_provider_abi();
+    let modules: BTreeMap<String, String> = serde_json::from_str(system_binding_modules_json())
+        .expect("generated binding-module manifest maps paths to source");
+    let module_root = Path::new(env!("OUT_DIR")).join("system_bindings");
+    assert!(!modules.is_empty(), "generated IDL has module files");
+    let mut validated_modules = 0;
+    let mut validated_operations = 0;
+
+    for (relative_path, manifest_source) in &modules {
+        let module = relative_path
+            .strip_suffix(".orna")
+            .expect("generated module paths use the Orna extension")
+            .replace('/', ".");
+        let file_source = fs::read_to_string(module_root.join(relative_path))
+            .unwrap_or_else(|error| panic!("read generated IDL module {relative_path}: {error}"));
+        assert_eq!(
+            &file_source, manifest_source,
+            "generated module {relative_path} matches its embedded manifest source"
+        );
+        let parsed = parse_module(&file_source);
+        assert!(
+            parsed.is_ok(),
+            "generated IDL module {relative_path} parses independently: {:?}",
+            parsed.diagnostics
+        );
+
+        let expected_operations = abi
+            .operations()
+            .filter(|operation| {
+                operation
+                    .signature
+                    .callable
+                    .rsplit_once('.')
+                    .is_some_and(|(parent, _)| parent == module)
+            })
+            .collect::<Vec<_>>();
+        let markers = file_source
+            .lines()
+            .filter_map(|line| line.strip_prefix("// sys-op: "))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            markers,
+            expected_operations
+                .iter()
+                .map(|operation| operation.id.as_str())
+                .collect::<Vec<_>>(),
+            "module {relative_path} owns exactly its registry operations in order"
+        );
+        assert_eq!(parsed.value.items.len(), expected_operations.len());
+
+        for (block, operation) in file_source
+            .split("\n\n")
+            .filter(|block| block.lines().any(|line| line.starts_with("// sys-op: ")))
+            .zip(expected_operations)
+        {
+            let contract_source = format!("// sys-module: {module}\n{block}\n");
+            validate_stub_contract(&contract_source, operation).unwrap_or_else(|error| {
+                panic!(
+                    "generated IDL stub for {} in {relative_path} violates its registry contract: {error}",
+                    operation.id.as_str()
+                )
+            });
+            validated_operations += 1;
+        }
+        validated_modules += 1;
+    }
+
+    assert_eq!(
+        validated_operations,
+        abi.operations().count(),
+        "standalone module validation covers every typed registry operation"
+    );
+    println!(
+        "generated_idl_module_validation modules={validated_modules} operations={validated_operations} standalone_parse=true manifest_bytes_match=true typed_contracts=true"
+    );
+}
+
+#[test]
+fn generated_stub_parity_guard_rejects_missing_duplicate_and_unknown_dispatch_rows() {
+    let source = system_binding_stubs();
+    let expected = system_provider_abi()
+        .operations()
+        .map(|operation| operation.id.as_str())
+        .collect::<Vec<_>>();
+    validate_stub_dispatch_inventory(source, &expected).unwrap();
+
+    let first_marker = source
+        .lines()
+        .find(|line| line.starts_with("// sys-op: "))
+        .expect("generated stubs have dispatch markers");
+    let mut rejected_drift_cases = 0;
+    let missing = source.replacen(&format!("{first_marker}\n"), "", 1);
+    assert!(
+        validate_stub_dispatch_inventory(&missing, &expected).is_err(),
+        "omitting a generated dispatch row fails the parity guard"
+    );
+    rejected_drift_cases += 1;
+
+    let duplicate = format!("{source}\n{first_marker}\n");
+    assert!(
+        validate_stub_dispatch_inventory(&duplicate, &expected).is_err(),
+        "duplicating a generated dispatch row fails the parity guard"
+    );
+    rejected_drift_cases += 1;
+
+    let unknown = source.replacen(first_marker, "// sys-op: sys.vendor.unknown", 1);
+    assert!(
+        validate_stub_dispatch_inventory(&unknown, &expected).is_err(),
+        "redirecting a generated stub to an unknown registry operation fails the parity guard"
+    );
+    rejected_drift_cases += 1;
+    assert_eq!(rejected_drift_cases, 3);
+    println!(
+        "generated_stub_dispatch_parity operations={} rejected_drift_cases={} categories=missing,duplicate,unknown total_cases={}",
+        expected.len(),
+        rejected_drift_cases,
+        expected.len() + rejected_drift_cases
+    );
+}
+
+#[test]
+fn generated_stub_contract_validation_rejects_parseable_and_syntactic_drift() {
+    let fixture = GENERIC_INVOKE_KEYWORD_OVERLOAD_FIXTURE.trim_end();
+    let stub = fixture
+        .split("\n\n")
+        .find(|block| block.lines().any(|line| line == "// sys-op: sys.invoke<T>"))
+        .expect("in-crate fixture includes the generic invoke stub");
+    let operation = system_provider_abi()
+        .operation("sys.invoke<T>")
+        .expect("generic invoke dispatch contract");
+    assert_eq!(
+        validate_stub_contract(stub, operation),
+        Ok(()),
+        "fixture stub conforms to the generated registry contract"
+    );
+
+    fn replace_once(source: &str, from: &str, to: &str) -> String {
+        let replaced = source.replacen(from, to, 1);
+        assert_ne!(
+            replaced, source,
+            "mutation target `{from}` exists in fixture"
+        );
+        replaced
+    }
+
+    let parseable_mutations = [
+        (
+            "module",
+            replace_once(stub, "// sys-module: sys", "// sys-module: std"),
+        ),
+        (
+            "dispatch marker",
+            replace_once(
+                stub,
+                "// sys-op: sys.invoke<T>",
+                "// sys-op: sys.invoke(Value)",
+            ),
+        ),
+        (
+            "function name",
+            replace_once(stub, "pub fn invoke<T>", "pub fn call<T>"),
+        ),
+        (
+            "generic parameter",
+            replace_once(stub, "pub fn invoke<T>", "pub fn invoke<U>"),
+        ),
+        (
+            "keyword parameter alias",
+            replace_once(stub, "as_: T", "target: T"),
+        ),
+        (
+            "parameter type",
+            replace_once(stub, "as_: T", "as_: sys.Ghost"),
+        ),
+        (
+            "default value",
+            replace_once(
+                stub,
+                "transaction: sys.InvokeTransaction = sys.InvokeTransaction.inherit",
+                "transaction: sys.InvokeTransaction = sys.InvokeTransaction.separate",
+            ),
+        ),
+        (
+            "result type",
+            replace_once(stub, "): T =", "): sys.Value ="),
+        ),
+        (
+            "stub body",
+            replace_once(
+                stub,
+                "error(code: \"sys.binding.stub\", message: \"generated declaration stub\")",
+                "error(code: \"sys.abi.unavailable\", message: \"generated declaration stub\")",
+            ),
+        ),
+        (
+            "parameter inventory",
+            replace_once(stub, ", idempotency_key: Str? = null", ""),
+        ),
+    ];
+    for (field, mutated) in parseable_mutations {
+        let parsed = parse_module(&mutated);
+        assert!(
+            parsed.is_ok(),
+            "{field} drift remains syntactically valid and must reach contract validation: {:?}",
+            parsed.diagnostics
+        );
+        assert!(
+            validate_stub_contract(&mutated, operation).is_err(),
+            "registry contract validation rejects {field} drift"
+        );
+    }
+
+    let malformed = replace_once(stub, "as_: T", "as_: sys.Value<");
+    assert!(
+        !parse_module(&malformed).is_ok(),
+        "the Orna parser rejects malformed generated type syntax"
+    );
+    assert!(
+        validate_stub_contract(&malformed, operation).is_err(),
+        "stub contract validation rejects syntactic drift before dispatch parity"
+    );
+}
+
+#[test]
+fn generated_idl_placeholder_error_drift_is_rejected_for_every_operation() {
+    const CANONICAL_BODY: &str =
+        "error(code: \"sys.binding.stub\", message: \"generated declaration stub\")";
+    const DRIFTED_BODY: &str =
+        "error(code: \"sys.abi.unavailable\", message: \"generated declaration stub\")";
+
+    let abi = system_provider_abi();
+    let source = system_binding_stubs();
+    let mut validated_stubs = 0;
+    let mut rejected_body_drift = 0;
+
+    for stub in source
+        .split("\n\n")
+        .filter(|block| block.lines().any(|line| line.starts_with("// sys-op: ")))
+    {
+        let operation_id = stub
+            .lines()
+            .find_map(|line| line.strip_prefix("// sys-op: "))
+            .expect("each generated IDL stub has an operation marker");
+        let operation = abi
+            .operation(operation_id)
+            .unwrap_or_else(|| panic!("generated IDL stub names unknown operation {operation_id}"));
+        validate_stub_contract(stub, operation).unwrap_or_else(|error| {
+            panic!("canonical IDL stub {operation_id} violates its contract: {error}")
+        });
+        validated_stubs += 1;
+
+        let drifted = stub.replacen(CANONICAL_BODY, DRIFTED_BODY, 1);
+        assert_ne!(
+            drifted, stub,
+            "{operation_id} has the canonical placeholder body"
+        );
+        assert!(
+            parse_module(&drifted).is_ok(),
+            "placeholder error drift remains parseable for {operation_id}"
+        );
+        let error = validate_stub_contract(&drifted, operation)
+            .expect_err("generated IDL contract rejects placeholder diagnostic drift");
+        assert_eq!(
+            error, "stub body differs from the canonical generated declaration error",
+            "contract identifies the placeholder error drift for {operation_id}"
+        );
+        rejected_body_drift += 1;
+    }
+
+    assert_eq!(validated_stubs, abi.operations().count());
+    assert_eq!(rejected_body_drift, validated_stubs);
+    println!(
+        "generated_idl_placeholder_error_parity operations={validated_stubs} canonical_contracts={validated_stubs} rejected_body_drift={rejected_body_drift} diagnostic=sys.binding.stub total_cases={}",
+        validated_stubs + rejected_body_drift
+    );
 }
 
 #[test]

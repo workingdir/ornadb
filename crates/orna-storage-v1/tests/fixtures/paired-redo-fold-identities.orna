@@ -1,0 +1,5 @@
+{ id: "redo-fold/first", name: "redo-fold/left-a", city: "redo-fold/right-a", }
+
+{ id: "redo-fold/rotated", name: "redo-fold/left-b", city: "redo-fold/right-b", }
+
+{ id: "redo-fold/reused", name: "redo-fold/left-a", city: "redo-fold/right-a", }

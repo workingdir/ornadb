@@ -1,0 +1,2 @@
+pub fn marker(): Int = 40;
+pub fn shift(value: Int): Int = value + 1000;

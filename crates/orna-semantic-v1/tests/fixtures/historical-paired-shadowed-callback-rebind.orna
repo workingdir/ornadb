@@ -1,0 +1,26 @@
+pub fn factory_at(pin: sys.SnapshotRef) =
+    sys.database.as_of(pin).energy.factory;
+
+// Inner `pin` intentionally shadows the maker's parameter. Each invocation
+// should select its own historical callable, even after the maker is paired.
+pub fn callback_at(pin: sys.SnapshotRef) =
+    (pin: sys.SnapshotRef) => factory_at(pin);
+
+pub fn paired_shadowed_callback_rebinds_preserve_inner_pins() {
+    let pair = (
+        callback_at(sys.snapshot("HEAD~80")),
+        callback_at(sys.snapshot("HEAD~70")),
+    );
+    let (left, right) = pair;
+    let left_first = left(sys.snapshot("HEAD~60"));
+    let right_first = right(sys.snapshot("HEAD~50"));
+    let left_second = left(sys.snapshot("HEAD~40"));
+    let right_second = right(sys.snapshot("HEAD~30"));
+
+    {
+        left_first: std.concurrent.parallel([() => left_first, () => left_first]),
+        right_first: std.concurrent.parallel([() => right_first, () => right_first]),
+        left_second: std.concurrent.parallel([() => left_second, () => left_second]),
+        right_second: std.concurrent.parallel([() => right_second, () => right_second]),
+    }
+}

@@ -11,6 +11,7 @@ use std::{
     error::Error,
     fmt,
     path::Path,
+    sync::Arc,
 };
 
 use orna_repository_v1::{
@@ -237,9 +238,193 @@ impl PackageResolver {
     /// lookup for every selected parent's historical manifest.
     /// After a caller rebinds an alias, selecting that replacement here loads
     /// its own committed manifest. Sibling aliases remain pinned in the source
-    /// session and do not retarget the replacement's closure.
-    /// The reference requires each historical parent's exact pins but does not
+    /// session and do not retarget the replacement's closure. Each replacement
+    /// starts a new resolution branch: aliases from the prior parent's
+    /// manifest are not inherited or used as fallback at the next depth.
+    /// If an alias is rebound through several candidates before nested
+    /// expansion, the currently attached pin supplies that session's next
+    /// manifest; earlier candidates are not accumulated. A caller can retain a
+    /// candidate pin before rebinding again. It remains immutable, and
+    /// explicitly resolving it later reads its own manifest after the source
+    /// session has moved on. Since the reference is silent on storm history,
+    /// v1 treats the explicitly passed pin as the caller's closure choice.
+    /// Repeating detach/attach runs on one session replaces only the selected
+    /// exact alias in sequence. At the end of each run, that session's current
+    /// pin alone supplies the next manifest; previous run candidates remain
+    /// selectable only when the caller kept their pins separately. The
+    /// reference does not define how repeated runs compose, so v1 uses the
+    /// last attached pin for the session's current exact alias.
+    ///
+    /// Rebinding prefix-related aliases in one session keeps them as
+    /// independent exact-key entries. The session retains every unmodified
+    /// key, including longer prefix-related siblings. Expanding one replacement
+    /// uses only its manifest to create a fresh next-depth session, even when
+    /// that manifest names an alias matching a retained sibling. The reference
+    /// is silent on precedence across rebound alias chains; v1 makes the
+    /// selected parent's committed manifest authoritative at that depth. The
+    /// reference requires exact pins for each historical parent but does not
     /// require flattening a recursive closure into one session.
+    /// Apply the same precedence independently at every edge of a longer
+    /// chain: rebinding a descendant affects only that descendant session, and
+    /// the next closure uses its final selected pin's manifest. Since the
+    /// reference is silent on repeated storms across nested chains, v1 does
+    /// not overlay manifests from earlier candidates or ancestor sessions.
+    /// A pin retained from an earlier outer storm can still be expanded after
+    /// later storms; its own manifest starts that closure branch. Rebinding a
+    /// descendant in one expanded branch cannot retarget another retained
+    /// branch, and expanding a selected descendant uses only that pin's
+    /// manifest rather than carrying forward the ancestor's prefix siblings.
+    /// This keeps precedence stable across repeated storms at multiple closure
+    /// depths, including when those storms finish in different candidates.
+    /// If the caller returns to an ancestor session after rebinding descendants,
+    /// a later expansion follows the ancestor pin selected at that time. A
+    /// closure already expanded from a retained pin remains its own branch;
+    /// descendant storms do not become fallback pins for a newly selected
+    /// ancestor candidate. Where the reference is silent, v1 gives precedence
+    /// to the exact pin passed to each closure expansion.
+    /// A storm cascade is resolved edge by edge from that pin: selecting a new
+    /// ancestor starts a fresh descendant chain, and the terminal route follows
+    /// the final pin chosen at every edge. Pins retained from an earlier
+    /// cascade continue to resolve their own terminal routes.
+    /// After expanding the terminal parent, rebinding its exact terminal alias
+    /// changes only that closure's route to the latest attached terminal pin.
+    /// Earlier terminal candidates and the manifest-selected snapshot remain
+    /// independently resolvable; v1 applies the same last-pin rule at this
+    /// final edge when the reference does not specify terminal rebind storms.
+    /// Apply that rule separately to every retained closure branch: a terminal
+    /// alias storm follows the exact terminal pin selected through that
+    /// branch's ancestor manifests, and cannot retarget a same-named terminal
+    /// route in another branch. Reopening a retained ancestor starts its own
+    /// terminal route chain from that pin's manifest.
+    /// Expanding one retained parent pin more than once also creates sibling
+    /// closure branches: storms at paired nested depths remain local to each
+    /// session, and each terminal route follows only its branch's selected
+    /// pins.
+    /// A sibling expanded later from the retained ancestor still starts at
+    /// that ancestor's manifest-selected child; an earlier sibling's terminal
+    /// rebind does not supply a fallback for the late branch.
+    /// This remains true through additional nested edges: a late branch reads
+    /// each selected middle and deep manifest in turn, then applies terminal
+    /// alias storms only to the route reached through those exact pins.
+    /// A middle pin retained before a sibling rebind is also an independent
+    /// late-branch root: reopening it follows its own deep manifest and
+    /// terminal route rather than inheriting the sibling's later selections.
+    /// Sibling manifests may converge on the same exact deep and terminal
+    /// pins; rebinding that terminal alias in one closure changes only that
+    /// closure's route, while another retained branch can still resolve the
+    /// shared manifest-selected terminal pin.
+    /// Distinct sibling closures expanded before any terminal rebind also
+    /// keep independent route state when their terminal storms are interleaved.
+    /// Each session follows only its own last attached terminal pin, and a
+    /// fresh expansion from their shared deep pin still starts at the terminal
+    /// pin recorded in that deep manifest. The reference is silent on shared
+    /// terminal route storms, so v1 applies the exact-alias last-pin rule per
+    /// session.
+    /// Paired sibling branches may also storm their middle and deep aliases
+    /// independently before reaching a shared terminal pin. Each terminal
+    /// closure still begins at the exact pin in its selected deep manifest;
+    /// interleaving later terminal storms cannot change the other branch or a
+    /// fresh expansion from either retained deep pin.
+    /// Sibling middle pins that converge on one exact deep pin can then take
+    /// independent deep-rebind storms whose candidates select the same
+    /// terminal pin. Terminal closures opened from those selected deep pins
+    /// still begin on that shared route; later terminal rebinds remain local
+    /// to each sibling closure.
+    /// This holds across a wider sibling set as well: when several middle
+    /// routes converge on one deep pin, each branch can take its own paired
+    /// depth and terminal storms while retaining the exact shared route from
+    /// each selected pin's manifest.
+    /// Since the reference does not define an event order across sibling
+    /// sessions, v1 makes independent storms order-stable: interleaving or
+    /// reversing operations across branches leaves each branch at its own
+    /// last selected pin on every edge.
+    /// When distinct sibling middle pins converge on one deep pin, their
+    /// terminal closures may also converge after independent rebind storms.
+    /// Each closure still resolves its terminal edge from the exact selected
+    /// deep pin, and a terminal session retained before rebinding keeps the
+    /// manifest-selected route. Since the reference is silent on this
+    /// reconvergent storm case, v1 keeps convergence based on exact pin
+    /// identity while preserving each session's prior route snapshot.
+    /// Reopening the retained sibling middle pins after those storms starts
+    /// each closure again from its committed manifest. A later rebind wave on
+    /// the new closures remains local and may converge on the same exact
+    /// terminal pin; previously retained storm sessions keep their selections.
+    /// The reference does not define this post-storm reopen sequence, so v1
+    /// treats each newly expanded parent pin as a fresh route root.
+    /// A terminal rebind in one sibling may interleave with a later paired
+    /// middle/deep rebind in another. The new terminal closure follows only
+    /// its selected deep pin's manifest, while the first sibling keeps its
+    /// own last terminal pin. Since the reference is silent on cross-depth
+    /// event order, v1 preserves each closure's exact-pin route independently.
+    /// If another paired middle/deep rebind wave follows that reopen, each
+    /// new terminal closure still starts from its selected deep pin's
+    /// manifest, regardless of terminal pins retained from earlier waves.
+    /// Siblings whose selected deep manifests name the same terminal pin can
+    /// then converge again through local terminal rebinds. The reference is
+    /// silent on repeated post-storm depth waves; v1 keeps each wave rooted
+    /// in the exact pins selected along its own path.
+    /// After an earlier terminal storm across several siblings, a later
+    /// paired middle/deep closure wave also starts from each sibling's newly
+    /// selected middle pin, then follows that middle pin's exact deep pin.
+    /// Rebinding those reopened terminal closures can converge on one exact
+    /// terminal pin without merging their state: prior storm sessions and
+    /// pre-rebind snapshots retain their original routes. Since the reference
+    /// is silent on this wider post-storm sequence, v1 treats every reopened
+    /// closure as a fresh route root and keeps rebinds local to that session.
+    /// If a later paired middle/deep rebind selects different child pins for
+    /// sibling roots, each new deep closure follows the exact middle
+    /// manifest it was opened from. Rebinding its deep alias affects only
+    /// that closure; retained pre-storm and manifest-selected snapshots keep
+    /// their own pins. The reference is silent on diverging post-storm child
+    /// routes, so v1 resolves each edge from its selected immutable pin and
+    /// does not inherit a sibling's prior route.
+    /// Route consistency also applies to retained sessions: each attached
+    /// module resolves through the same package snapshot as that session's
+    /// pin. A paired depth rebind can make a fresh descendant closure follow
+    /// another manifest route, while the old closure keeps its matching pin
+    /// and module route. Since the reference does not define cross-session
+    /// route refresh, v1 keeps pin and module routing in the same session
+    /// snapshot.
+    /// Applying the same paired depth rebinds to sibling sessions in another
+    /// interleaving produces the same per-sibling pin and module-route pairs.
+    /// v1 makes independent sibling route updates order-stable, while keeping
+    /// each earlier closure snapshot tied to its original selected pins.
+    /// Across repeated paired depth storms, distinct sibling middle and deep
+    /// pins may reconverge on a shared terminal pin. The reference is silent
+    /// on this sequence, so v1 derives each route from its exact selected pin.
+    /// Each session's modules follow the pins in that snapshot; later sibling
+    /// rebinds do not refresh or retarget earlier sessions.
+    /// After those paired depth waves, a terminal rebind storm updates only
+    /// that sibling session's terminal pin and module route. Siblings can
+    /// diverge and reconverge on the same terminal pin, while retained
+    /// manifest and pre-rebind snapshots keep their prior routes.
+    /// A later paired depth storm also leaves those rebound terminal
+    /// snapshots intact. Newly opened terminal closures start from their
+    /// latest exact deep pins and follow those pins' manifest routes.
+    /// The reference is silent on terminal rebinds in those reopened
+    /// sessions, so v1 updates only each selected sibling's route and keeps
+    /// every retained manifest snapshot on its original pin-to-module route.
+    /// Reordering terminal rebind events between siblings while preserving
+    /// each sibling's own event order leaves both final routes unchanged.
+    /// v1 treats the sibling sessions as independent; retained snapshots
+    /// continue to use their manifest-selected terminal pins.
+    /// Repeating the same post-storm terminal rebind wave stabilizes each
+    /// sibling on its own final pin while snapshots from earlier waves retain
+    /// the route they captured. The reference is silent on repeated waves, so
+    /// v1 applies the exact-pin rule independently on every rebind.
+    /// Repeating paired middle and deep rebinds after those terminal storms
+    /// opens each new terminal route from the exact selected deep pin; the
+    /// earlier terminal sessions keep their captured routes. The reference
+    /// does not define this post-storm sequence, so v1 resolves each edge from
+    /// the pin selected in that wave.
+    /// Reopening a retained pre-rebind middle snapshot after later paired
+    /// depth waves still follows the deep and terminal pins in that snapshot's
+    /// manifest, even if a sibling's newer rebound route now differs.
+    /// Terminal sessions retained before those waves keep both their
+    /// manifest-selected terminal pin and the ancestor module route captured
+    /// from the selected deep pin. Later sibling depth rebinds do not refresh
+    /// either part of that session snapshot. The reference is silent on
+    /// cross-wave refresh, so v1 keeps both routes bound to the captured pins.
     pub fn resolve_for_parent(
         &self,
         primary: PinnedDatabase,
@@ -301,6 +486,2532 @@ impl PackageResolver {
         }
         Ok(session)
     }
+
+    /// Resolves the next closure from an exact alias selected in `parent`.
+    /// This uses that session's current pin, so a retained sibling session
+    /// continues from its own route after another session is rebound.
+    pub fn resolve_nested_for_alias(
+        &self,
+        parent: &AttachedDatabaseSession,
+        alias: &str,
+    ) -> Result<AttachedDatabaseSession, AttachmentError> {
+        let alias = checked_name(alias.to_owned())?;
+        let selected = parent
+            .database(&alias)
+            .cloned()
+            .ok_or(AttachmentError::DatabaseUnavailable)?;
+        self.resolve_for_parent(selected)
+    }
+
+    /// Rebinds one exact alias on a private copy of `parent`, then resolves
+    /// the replacement's next closure. The returned snapshot preserves the
+    /// prior route, and a failed expansion leaves the caller's session intact.
+    /// Where the reference does not define rebind ordering, v1 uses the new
+    /// pin's committed manifest for this edge.
+    pub fn resolve_nested_rebind(
+        &self,
+        parent: &AttachedDatabaseSession,
+        replacement: PinnedDatabase,
+    ) -> Result<ReboundPathResolution, AttachmentError> {
+        let alias = replacement.pin.name.clone();
+        let retained = vec![parent.clone()];
+        let mut rebound_parent = parent.clone();
+        rebound_parent.rebind_database(replacement)?;
+        let final_session = self.resolve_nested_for_alias(&rebound_parent, &alias)?;
+        Ok(ReboundPathResolution {
+            final_session,
+            retained_sessions: retained,
+            retained_wave_lengths: vec![1],
+            route_identity: Arc::new(()),
+            retained_snapshot_identities: vec![Arc::new(())],
+        })
+    }
+
+    /// Applies replacements one closure depth at a time and resolves the
+    /// resulting terminal route. One pre-rebind snapshot is retained per
+    /// depth. The whole path is atomic from the caller's view: if any later
+    /// replacement or closure fails, no partial result is returned and
+    /// `parent` remains unchanged. An empty path returns a clone of `parent`.
+    pub fn resolve_nested_rebind_path(
+        &self,
+        parent: &AttachedDatabaseSession,
+        replacements: &[PinnedDatabase],
+    ) -> Result<ReboundPathResolution, AttachmentError> {
+        let mut current = parent.clone();
+        let mut retained_sessions = Vec::with_capacity(replacements.len());
+        let mut retained_snapshot_identities = Vec::with_capacity(replacements.len());
+        for replacement in replacements {
+            let mut extension = self.resolve_nested_rebind(&current, replacement.clone())?;
+            retained_sessions.append(&mut extension.retained_sessions);
+            retained_snapshot_identities.append(&mut extension.retained_snapshot_identities);
+            current = extension.final_session;
+        }
+        let retained_wave_lengths = if retained_sessions.is_empty() {
+            Vec::new()
+        } else {
+            vec![retained_sessions.len()]
+        };
+        Ok(ReboundPathResolution {
+            final_session: current,
+            retained_sessions,
+            retained_wave_lengths,
+            route_identity: Arc::new(()),
+            retained_snapshot_identities,
+        })
+    }
+
+    /// Resolves two ordered terminal-depth replacements as one atomic wave.
+    /// The two prior sessions remain together in `retained_wave(0)`, so the
+    /// pre-pair and between-depth routes can both be reopened independently.
+    pub fn resolve_nested_terminal_pair(
+        &self,
+        parent: &AttachedDatabaseSession,
+        replacements: [PinnedDatabase; 2],
+    ) -> Result<ReboundPathResolution, AttachmentError> {
+        self.resolve_nested_rebind_path(parent, &replacements)
+    }
+
+    /// Continues a resolved rebind path with another wave of replacements.
+    /// Snapshots from the earlier wave stay in order, followed by the prior
+    /// terminal session and any new intermediate routes. A failed extension
+    /// leaves `previous` available with its original final route.
+    pub fn extend_nested_rebind_path(
+        &self,
+        previous: &ReboundPathResolution,
+        replacements: &[PinnedDatabase],
+    ) -> Result<ReboundPathResolution, AttachmentError> {
+        let extension =
+            self.resolve_nested_rebind_path(previous.final_session(), replacements)?;
+        Ok(Self::append_rebound_extension(previous, extension))
+    }
+
+    /// Continues a route from one of its retained snapshots rather than its
+    /// deepest resolved closure. `retained_session` indexes the flattened
+    /// history returned by `retained_sessions()`. This keeps post-storm
+    /// closure work rooted in the exact intermediate pins captured earlier.
+    /// The reference is silent on reopening these historical routes; v1 uses
+    /// the flattened index to select the exact snapshot and retains the
+    /// superseded final route as its own wave. Any snapshots produced by the
+    /// new call form another retained wave. A missing index or failed closure
+    /// returns no new route.
+    pub fn extend_nested_rebind_path_from_retained(
+        &self,
+        previous: &ReboundPathResolution,
+        retained_session: usize,
+        replacements: &[PinnedDatabase],
+    ) -> Result<ReboundPathResolution, AttachmentError> {
+        let parent = previous
+            .retained_sessions()
+            .get(retained_session)
+            .ok_or(AttachmentError::RetainedSnapshotUnavailable)?;
+        let extension = self.resolve_nested_rebind_path(parent, replacements)?;
+        Ok(Self::append_retained_rebound_extension(previous, extension))
+    }
+
+    /// Continues a route from a snapshot selected by retained wave and
+    /// position within that wave. The reference does not define reopening
+    /// between waves; v1 resolves from the exact selected pins and appends the
+    /// superseded final route as its own wave before appending the new
+    /// snapshots as another wave. Invalid wave or snapshot positions and
+    /// failed closures return no new route.
+    pub fn extend_nested_rebind_path_from_wave(
+        &self,
+        previous: &ReboundPathResolution,
+        wave: usize,
+        snapshot: usize,
+        replacements: &[PinnedDatabase],
+    ) -> Result<ReboundPathResolution, AttachmentError> {
+        let parent = previous
+            .retained_wave(wave)
+            .and_then(|sessions| sessions.get(snapshot))
+            .ok_or(AttachmentError::RetainedSnapshotUnavailable)?;
+        let extension = self.resolve_nested_rebind_path(parent, replacements)?;
+        Ok(Self::append_retained_rebound_extension(previous, extension))
+    }
+
+    fn append_rebound_extension(
+        previous: &ReboundPathResolution,
+        extension: ReboundPathResolution,
+    ) -> ReboundPathResolution {
+        let ReboundPathResolution {
+            final_session,
+            mut retained_sessions,
+            retained_wave_lengths: extension_wave_lengths,
+            mut retained_snapshot_identities,
+            ..
+        } = extension;
+        let mut all_retained = previous.retained_sessions.clone();
+        all_retained.append(&mut retained_sessions);
+        let mut retained_wave_lengths = previous.retained_wave_lengths.clone();
+        retained_wave_lengths.extend(extension_wave_lengths);
+        let mut all_snapshot_identities = previous.retained_snapshot_identities.clone();
+        all_snapshot_identities.append(&mut retained_snapshot_identities);
+        ReboundPathResolution {
+            final_session,
+            retained_sessions: all_retained,
+            retained_wave_lengths,
+            route_identity: previous.route_identity.clone(),
+            retained_snapshot_identities: all_snapshot_identities,
+        }
+    }
+
+    fn append_retained_rebound_extension(
+        previous: &ReboundPathResolution,
+        extension: ReboundPathResolution,
+    ) -> ReboundPathResolution {
+        let ReboundPathResolution {
+            final_session,
+            mut retained_sessions,
+            retained_wave_lengths: extension_wave_lengths,
+            mut retained_snapshot_identities,
+            ..
+        } = extension;
+        let mut all_retained = previous.retained_sessions.clone();
+        all_retained.push(previous.final_session.clone());
+        all_retained.append(&mut retained_sessions);
+        let mut retained_wave_lengths = previous.retained_wave_lengths.clone();
+        retained_wave_lengths.push(1);
+        retained_wave_lengths.extend(extension_wave_lengths);
+        let mut all_snapshot_identities = previous.retained_snapshot_identities.clone();
+        all_snapshot_identities.push(Arc::new(()));
+        all_snapshot_identities.append(&mut retained_snapshot_identities);
+        ReboundPathResolution {
+            final_session,
+            retained_sessions: all_retained,
+            retained_wave_lengths,
+            route_identity: previous.route_identity.clone(),
+            retained_snapshot_identities: all_snapshot_identities,
+        }
+    }
+
+    /// Extends a post-storm route with two ordered terminal-depth rebinds.
+    /// The prior history stays intact and the new pair is exposed together in
+    /// the last retained wave. A failure leaves `previous` unchanged.
+    pub fn extend_nested_terminal_pair(
+        &self,
+        previous: &ReboundPathResolution,
+        replacements: [PinnedDatabase; 2],
+    ) -> Result<ReboundPathResolution, AttachmentError> {
+        self.extend_nested_rebind_path(previous, &replacements)
+    }
+
+    /// Extends a route with a terminal-depth pair from one of its retained
+    /// snapshots. This is useful after a rebind storm has resolved a deeper
+    /// closure and callers need to continue from an earlier exact route.
+    /// Prior snapshots stay in order; the previous final route is then
+    /// retained as its own wave, followed by the selected root and
+    /// intermediate route captured by the new pair. The input route remains
+    /// unchanged if either replacement or closure fails.
+    pub fn extend_nested_terminal_pair_from_retained(
+        &self,
+        previous: &ReboundPathResolution,
+        retained_session: usize,
+        replacements: [PinnedDatabase; 2],
+    ) -> Result<ReboundPathResolution, AttachmentError> {
+        self.extend_nested_rebind_path_from_retained(previous, retained_session, &replacements)
+    }
+
+    /// Extends a terminal-depth pair from one snapshot in a retained wave.
+    /// This keeps repeated post-storm continuations attached to their explicit
+    /// wave and snapshot positions while preserving every prior route.
+    pub fn extend_nested_terminal_pair_from_wave(
+        &self,
+        previous: &ReboundPathResolution,
+        wave: usize,
+        snapshot: usize,
+        replacements: [PinnedDatabase; 2],
+    ) -> Result<ReboundPathResolution, AttachmentError> {
+        self.extend_nested_rebind_path_from_wave(previous, wave, snapshot, &replacements)
+    }
+
+    /// Applies an ordered chain of terminal-depth pairs to one nested route.
+    /// Each pair starts from the last snapshot in the latest retained wave,
+    /// carrying the preceding rebind forward by one closure depth. With no
+    /// retained history, the first pair starts from the current final route.
+    /// The reference is silent on this continuation rule; v1 uses that
+    /// fallback and returns no partial chain if a pair fails.
+    pub fn extend_nested_terminal_pair_chain(
+        &self,
+        previous: &ReboundPathResolution,
+        replacement_waves: &[[PinnedDatabase; 2]],
+    ) -> Result<ReboundPathResolution, AttachmentError> {
+        let mut route = previous.clone();
+        for replacements in replacement_waves {
+            if let Some(latest_wave) = route.retained_wave_lengths.len().checked_sub(1) {
+                let latest_snapshot = route.retained_wave_lengths[latest_wave]
+                    .checked_sub(1)
+                    .ok_or(AttachmentError::RetainedSnapshotUnavailable)?;
+                route = self.extend_nested_terminal_pair_from_wave(
+                    &route,
+                    latest_wave,
+                    latest_snapshot,
+                    replacements.clone(),
+                )?;
+            } else {
+                route = self.extend_nested_terminal_pair(&route, replacements.clone())?;
+            }
+        }
+        Ok(route)
+    }
+
+    /// Compacts retained history through paired snapshot folds while keeping
+    /// the current terminal route and the identities of the selected
+    /// snapshots. Each fold keeps exactly two labeled snapshots in the given
+    /// order and discards the other retained history. Labels are resolved by
+    /// their unique snapshot identity, so labels and checkpoints captured
+    /// before a compaction remain usable after their wave/depth coordinates
+    /// move. The reference defines storage compaction as preserving semantic
+    /// rows and checkpoints, but does not define in-memory attach-route
+    /// compaction; v1 applies that preservation rule to the two selected
+    /// closure snapshots and rejects stale, duplicate, or cross-route labels
+    /// atomically.
+    pub fn compact_nested_terminal_pair_history_folds_preserving_terminal_identity(
+        &self,
+        previous: &ReboundPathResolution,
+        folds: &[[NestedPairDepthLabel; 2]],
+    ) -> Result<
+        (
+            ReboundPathResolution,
+            Vec<(NestedPairTerminalRouteIdentity, NestedPairTerminalRouteIdentity)>,
+        ),
+        AttachmentError,
+    > {
+        let mut route = previous.clone();
+        let mut transitions = Vec::with_capacity(folds.len());
+        for fold in folds {
+            let before = route.terminal_route_identity();
+            route = route.compact_retained_depth_pair(fold)?;
+            let after = route.terminal_route_identity();
+            route.validate_terminal_route_identity(&before)?;
+            transitions.push((before, after));
+        }
+        Ok((route, transitions))
+    }
+
+    /// Applies paired history-compaction folds grouped into caller-visible
+    /// pages. Folds run in order across page boundaries, so stable snapshot
+    /// labels from an earlier page still select the same pins after later
+    /// compaction moves their coordinates. The reference is silent on
+    /// paginating in-memory attach history; v1 preserves one transition list
+    /// per input page (including empty pages) and returns no partial result if
+    /// any fold is invalid.
+    pub fn compact_nested_terminal_pair_history_pages_preserving_terminal_identity(
+        &self,
+        previous: &ReboundPathResolution,
+        pages: &[&[[NestedPairDepthLabel; 2]]],
+    ) -> Result<
+        (
+            ReboundPathResolution,
+            Vec<Vec<(NestedPairTerminalRouteIdentity, NestedPairTerminalRouteIdentity)>>,
+        ),
+        AttachmentError,
+    > {
+        let mut route = previous.clone();
+        let mut page_transitions = Vec::with_capacity(pages.len());
+        for page in pages {
+            let (compacted, transitions) = self
+                .compact_nested_terminal_pair_history_folds_preserving_terminal_identity(
+                    &route, page,
+                )?;
+            route = compacted;
+            page_transitions.push(transitions);
+        }
+        Ok((route, page_transitions))
+    }
+
+    /// Repeatedly compacts one labelled terminal pair, rotating its order
+    /// after each fold. `folds_per_page` controls how many rotations occur in
+    /// each page; the orientation carries across page boundaries and a zero
+    /// count preserves an empty page without changing it. The reference does
+    /// not define rotation for attach-history folds; v1 rotates the two exact
+    /// snapshot identities and validates the terminal route after every fold.
+    /// If a label is stale, no partial route is returned.
+    pub fn compact_nested_terminal_pair_history_rotation_pages_preserving_terminal_identity(
+        &self,
+        previous: &ReboundPathResolution,
+        labels: &[NestedPairDepthLabel; 2],
+        folds_per_page: &[usize],
+    ) -> Result<
+        (
+            ReboundPathResolution,
+            Vec<Vec<(NestedPairTerminalRouteIdentity, NestedPairTerminalRouteIdentity)>>,
+        ),
+        AttachmentError,
+    > {
+        let mut route = previous.clone();
+        let mut ordered_labels = [labels[0].clone(), labels[1].clone()];
+        let mut page_transitions = Vec::with_capacity(folds_per_page.len());
+        for fold_count in folds_per_page {
+            let mut transitions = Vec::with_capacity(*fold_count);
+            for _ in 0..*fold_count {
+                let (compacted, fold_transitions) = self
+                    .compact_nested_terminal_pair_history_folds_preserving_terminal_identity(
+                        &route,
+                        std::slice::from_ref(&ordered_labels),
+                    )?;
+                route = compacted;
+                transitions.extend(fold_transitions);
+                ordered_labels.rotate_left(1);
+            }
+            page_transitions.push(transitions);
+        }
+        Ok((route, page_transitions))
+    }
+
+    /// Compacts retained history through paired handoff checkpoints. Each
+    /// fold keeps the two exact checkpoint snapshots in caller order, so a
+    /// checkpoint captured before compaction remains replayable while its
+    /// snapshot is retained. The reference does not define checkpoint-backed
+    /// attach-history compaction; v1 requires both checkpoints to belong to
+    /// this route and validates their identities after every fold.
+    pub fn compact_nested_terminal_pair_checkpoint_folds_preserving_terminal_identity(
+        &self,
+        previous: &ReboundPathResolution,
+        checkpoint_folds: &[[&ReboundPathCheckpoint; 2]],
+    ) -> Result<
+        (
+            ReboundPathResolution,
+            Vec<(NestedPairTerminalRouteIdentity, NestedPairTerminalRouteIdentity)>,
+        ),
+        AttachmentError,
+    > {
+        let mut route = previous.clone();
+        let mut transitions = Vec::with_capacity(checkpoint_folds.len());
+        for checkpoints in checkpoint_folds {
+            for checkpoint in checkpoints {
+                checkpoint.validate_depth_identity()?;
+                route.validate_depth_label(checkpoint.depth_label())?;
+            }
+            let labels = [
+                checkpoints[0].depth_label().clone(),
+                checkpoints[1].depth_label().clone(),
+            ];
+            let (compacted, fold_transitions) = self
+                .compact_nested_terminal_pair_history_folds_preserving_terminal_identity(
+                    &route,
+                    std::slice::from_ref(&labels),
+                )?;
+            route = compacted;
+            for checkpoint in checkpoints {
+                route.validate_depth_label(checkpoint.depth_label())?;
+            }
+            transitions.push(
+                fold_transitions
+                    .into_iter()
+                    .next()
+                    .ok_or(AttachmentError::RetainedSnapshotUnavailable)?,
+            );
+        }
+        Ok((route, transitions))
+    }
+
+    /// Compacts paired checkpoints across retained history and checkpoint
+    /// spills. A same-route checkpoint may restore its exact snapshot into a
+    /// temporary retained wave after an earlier fold removed that snapshot;
+    /// the fold then keeps the selected pair and their original identities.
+    /// The reference does not define spilled in-memory attach checkpoints, so
+    /// v1 treats the checkpoint's owned handoff as the spill record. Foreign,
+    /// malformed, or duplicate checkpoint identities fail atomically.
+    pub fn compact_nested_terminal_pair_checkpoint_spill_folds_preserving_terminal_identity(
+        &self,
+        previous: &ReboundPathResolution,
+        checkpoint_folds: &[[&ReboundPathCheckpoint; 2]],
+    ) -> Result<
+        (
+            ReboundPathResolution,
+            Vec<(NestedPairTerminalRouteIdentity, NestedPairTerminalRouteIdentity)>,
+        ),
+        AttachmentError,
+    > {
+        self.compact_nested_terminal_pair_checkpoint_spill_stream_preserving_terminal_identity(
+            previous,
+            checkpoint_folds.iter().copied(),
+        )
+    }
+
+    /// Consumes ordered checkpoint pairs once and compacts each pair before
+    /// requesting the next one. A same-route checkpoint may restore its exact
+    /// snapshot into a temporary retained wave after an earlier fold removed
+    /// it; every fold retains the selected snapshots and their original
+    /// identities. The reference does not define streaming checkpoint folds
+    /// for attach routes, so v1 treats each yielded pair as one ordered fold
+    /// and returns no route unless the complete stream validates. Foreign,
+    /// malformed, or duplicate identities stop consumption with an error.
+    pub fn compact_nested_terminal_pair_checkpoint_spill_stream_preserving_terminal_identity<'a>(
+        &self,
+        previous: &ReboundPathResolution,
+        checkpoint_folds: impl IntoIterator<Item = [&'a ReboundPathCheckpoint; 2]>,
+    ) -> Result<
+        (
+            ReboundPathResolution,
+            Vec<(NestedPairTerminalRouteIdentity, NestedPairTerminalRouteIdentity)>,
+        ),
+        AttachmentError,
+    > {
+        let mut route = previous.clone();
+        let mut transitions = Vec::new();
+        for checkpoints in checkpoint_folds {
+            for checkpoint in checkpoints {
+                checkpoint.validate_depth_identity()?;
+                if !Arc::ptr_eq(
+                    &route.route_identity,
+                    &checkpoint.depth_label.route_identity,
+                ) {
+                    return Err(AttachmentError::RetainedSnapshotUnavailable);
+                }
+            }
+            if Arc::ptr_eq(
+                &checkpoints[0].depth_label.snapshot_identity,
+                &checkpoints[1].depth_label.snapshot_identity,
+            ) {
+                return Err(AttachmentError::RetainedSnapshotUnavailable);
+            }
+
+            let mut spilled_sessions = Vec::new();
+            let mut spilled_identities = Vec::new();
+            for checkpoint in checkpoints {
+                let label = checkpoint.depth_label();
+                if route
+                    .retained_snapshot_identities
+                    .iter()
+                    .any(|identity| Arc::ptr_eq(identity, &label.snapshot_identity))
+                {
+                    route.validate_depth_label(label)?;
+                } else {
+                    spilled_sessions.push(checkpoint.handoff().clone());
+                    spilled_identities.push(label.snapshot_identity.clone());
+                }
+            }
+            if !spilled_sessions.is_empty() {
+                route
+                    .retained_sessions
+                    .extend(spilled_sessions.iter().cloned());
+                route
+                    .retained_snapshot_identities
+                    .extend(spilled_identities);
+                route.retained_wave_lengths.push(spilled_sessions.len());
+            }
+
+            let labels = [
+                checkpoints[0].depth_label().clone(),
+                checkpoints[1].depth_label().clone(),
+            ];
+            let before = route.terminal_route_identity();
+            route = route.compact_retained_depth_pair(&labels)?;
+            let after = route.terminal_route_identity();
+            route.validate_terminal_route_identity(&before)?;
+            for checkpoint in checkpoints {
+                route.validate_depth_label(checkpoint.depth_label())?;
+            }
+            transitions.push((before, after));
+        }
+        Ok((route, transitions))
+    }
+
+    /// Continues a terminal-pair chain from an exact retained session. The
+    /// first pair uses that session as its handoff root; later pairs continue
+    /// from the preceding pair's newest handoff. The reference does not define
+    /// selecting an older handoff for a chained pair; v1 keeps that explicit
+    /// depth and preserves the displaced terminal route with the new history.
+    /// An empty chain leaves the previous route unchanged.
+    pub fn extend_nested_terminal_pair_chain_from_retained(
+        &self,
+        previous: &ReboundPathResolution,
+        retained_session: usize,
+        replacement_waves: &[[PinnedDatabase; 2]],
+    ) -> Result<ReboundPathResolution, AttachmentError> {
+        let Some((first, remaining)) = replacement_waves.split_first() else {
+            return Ok(previous.clone());
+        };
+        let route = self.extend_nested_terminal_pair_from_retained(
+            previous,
+            retained_session,
+            first.clone(),
+        )?;
+        self.extend_nested_terminal_pair_chain(&route, remaining)
+    }
+
+    /// Continues a terminal-pair chain from an exact snapshot in a retained
+    /// wave. The selected route determines the first pair's closure depth;
+    /// subsequent pairs preserve the normal one-depth handoff between waves.
+    /// Invalid wave or snapshot positions return no new route. The reference
+    /// is silent on this selection rule; v1 resolves from the exact snapshot.
+    pub fn extend_nested_terminal_pair_chain_from_wave(
+        &self,
+        previous: &ReboundPathResolution,
+        wave: usize,
+        snapshot: usize,
+        replacement_waves: &[[PinnedDatabase; 2]],
+    ) -> Result<ReboundPathResolution, AttachmentError> {
+        let selected_wave = previous
+            .retained_wave(wave)
+            .ok_or(AttachmentError::RetainedSnapshotUnavailable)?;
+        if snapshot >= selected_wave.len() {
+            return Err(AttachmentError::RetainedSnapshotUnavailable);
+        }
+        let retained_session = previous.retained_wave_lengths[..wave]
+            .iter()
+            .sum::<usize>()
+            + snapshot;
+        self.extend_nested_terminal_pair_chain_from_retained(
+            previous,
+            retained_session,
+            replacement_waves,
+        )
+    }
+
+    /// Rebinds each terminal pair in a storm from the same retained route.
+    /// Unlike a pair chain, one pair's handoff is not used as the next pair's
+    /// root, so repeated rebinds do not widen the closure depth. The selected
+    /// wave and snapshot remain stable because extensions append history.
+    /// The reference is silent on storm root selection; v1 uses the exact
+    /// caller-selected snapshot and returns no partial extension on failure.
+    pub fn extend_nested_terminal_pair_storm_from_wave(
+        &self,
+        previous: &ReboundPathResolution,
+        wave: usize,
+        snapshot: usize,
+        replacement_waves: &[[PinnedDatabase; 2]],
+    ) -> Result<ReboundPathResolution, AttachmentError> {
+        let label = previous.retained_depth_label(wave, snapshot)?;
+        self.extend_nested_terminal_pair_storm_from_label(previous, &label, replacement_waves)
+    }
+
+    /// Rebinds each terminal pair from one labelled retained depth.
+    ///
+    /// The reference does not assign labels to snapshots in folded storms.
+    /// In v1, a label records its wave, its pre-rebind depth within that wave,
+    /// and the exact primary and attached pins at that position. Each fold
+    /// verifies the label still selects those pins, so a regrouped history
+    /// cannot silently redirect a later pair. Even an empty fold validates
+    /// the label before returning the unchanged route.
+    pub fn extend_nested_terminal_pair_storm_from_label(
+        &self,
+        previous: &ReboundPathResolution,
+        label: &NestedPairDepthLabel,
+        replacement_waves: &[[PinnedDatabase; 2]],
+    ) -> Result<ReboundPathResolution, AttachmentError> {
+        previous.validate_depth_label(label)?;
+        let mut route = previous.clone();
+        for replacements in replacement_waves {
+            let (wave, depth) = route.retained_position_for_depth_label(label)?;
+            route = self.extend_nested_terminal_pair_from_wave(
+                &route,
+                wave,
+                depth,
+                replacements.clone(),
+            )?;
+        }
+        route.validate_depth_label(label)?;
+        Ok(route)
+    }
+
+    /// Applies successive checkpoint-storm batches from one exact retained
+    /// depth label. The selected label remains bound to its original route
+    /// identity and pins across every batch, even as newer closures are
+    /// appended. The reference is silent on chaining labelled storms; v1
+    /// validates the label at each batch boundary and returns no partial route
+    /// if any batch fails.
+    pub fn extend_nested_terminal_pair_storm_rounds_from_label(
+        &self,
+        previous: &ReboundPathResolution,
+        label: &NestedPairDepthLabel,
+        rounds: &[&[[PinnedDatabase; 2]]],
+    ) -> Result<ReboundPathResolution, AttachmentError> {
+        previous.validate_depth_label(label)?;
+        let mut route = previous.clone();
+        for replacement_waves in rounds {
+            route.validate_depth_label(label)?;
+            route = self.extend_nested_terminal_pair_storm_from_label(
+                &route,
+                label,
+                replacement_waves,
+            )?;
+            route.validate_depth_label(label)?;
+        }
+        Ok(route)
+    }
+
+    /// Continues a nested terminal-pair chain from a saved handoff checkpoint.
+    /// The first pair uses the checkpoint's exact attached pins even when
+    /// `previous` has since gone through another rebind cascade; later pairs
+    /// continue from their latest handoff. The reference is silent on replaying
+    /// retained routes across cascades, so v1 records the checkpoint route in
+    /// the new history and keeps the input route unchanged on failure.
+    pub fn extend_nested_terminal_pair_chain_from_checkpoint(
+        &self,
+        previous: &ReboundPathResolution,
+        checkpoint: &ReboundPathCheckpoint,
+        replacement_waves: &[[PinnedDatabase; 2]],
+    ) -> Result<ReboundPathResolution, AttachmentError> {
+        self.extend_nested_terminal_pair_chain_from_checkpoint_with_labels(
+            previous,
+            checkpoint,
+            replacement_waves,
+            &[],
+        )
+        .map(|(route, _)| route)
+    }
+
+    /// Applies ordered checkpoint-rooted pair chains as one atomic cascade.
+    /// Every checkpoint route is appended to retained history, then its exact
+    /// depth label is checked after each later pair fold, including folds from
+    /// subsequent checkpoints. The reference does not define this composition;
+    /// v1 keeps each selected checkpoint independent and preserves all earlier
+    /// checkpoint labels. Failure returns no partial cascade.
+    pub fn extend_nested_terminal_pair_checkpoint_cascades(
+        &self,
+        previous: &ReboundPathResolution,
+        cascades: &[(&ReboundPathCheckpoint, &[[PinnedDatabase; 2]])],
+    ) -> Result<ReboundPathResolution, AttachmentError> {
+        let mut route = previous.clone();
+        let mut retained_checkpoint_labels = Vec::new();
+        for (checkpoint, replacement_waves) in cascades {
+            let (folded, checkpoint_label) = self
+                .extend_nested_terminal_pair_chain_from_checkpoint_with_labels(
+                    &route,
+                    checkpoint,
+                    replacement_waves,
+                    &retained_checkpoint_labels,
+                )?;
+            if let Some(label) = checkpoint_label {
+                retained_checkpoint_labels.push(label);
+            }
+            route = folded;
+        }
+        Ok(route)
+    }
+
+    /// Applies checkpoint-anchored paired rebind chains while validating the
+    /// terminal identity on both sides of every anchor. Labels emitted by an
+    /// earlier anchor remain attached to their exact snapshots through later
+    /// chains. The reference does not specify identity edges between nested
+    /// anchor chains; v1 checks each edge in order and returns no partial route
+    /// or transition list when an anchor or identity is stale.
+    pub fn extend_nested_terminal_pair_checkpoint_cascades_validating_terminal_identity_transitions(
+        &self,
+        previous: &ReboundPathResolution,
+        cascades: &[(&ReboundPathCheckpoint, &[[PinnedDatabase; 2]])],
+        expected_transitions: &[(NestedPairTerminalRouteIdentity, NestedPairTerminalRouteIdentity)],
+    ) -> Result<(
+        ReboundPathResolution,
+        Vec<(NestedPairTerminalRouteIdentity, NestedPairTerminalRouteIdentity)>,
+    ), AttachmentError> {
+        if cascades.len() != expected_transitions.len() {
+            return Err(AttachmentError::RetainedSnapshotUnavailable);
+        }
+
+        let mut route = previous.clone();
+        let mut retained_checkpoint_labels = Vec::new();
+        let mut transitions = Vec::with_capacity(cascades.len());
+        for ((checkpoint, replacement_waves), (expected_before, expected_after)) in
+            cascades.iter().zip(expected_transitions)
+        {
+            let before = route.terminal_route_identity();
+            route.validate_terminal_route_identity(expected_before)?;
+            let (folded, checkpoint_label) = self
+                .extend_nested_terminal_pair_chain_from_checkpoint_with_labels(
+                    &route,
+                    checkpoint,
+                    replacement_waves,
+                    &retained_checkpoint_labels,
+                )?;
+            if let Some(label) = checkpoint_label {
+                retained_checkpoint_labels.push(label);
+            }
+            route = folded;
+            for label in &retained_checkpoint_labels {
+                route.validate_depth_label(label)?;
+            }
+            let after = route.terminal_route_identity();
+            route.validate_terminal_route_identity(expected_after)?;
+            transitions.push((before, after));
+        }
+
+        Ok((route, transitions))
+    }
+
+    /// Applies repeated paired checkpoint excursions and restorations. Each
+    /// fold contains exactly two anchored rebind chains; both identity edges
+    /// are checked, and the second chain must restore the fold's starting
+    /// terminal identity. Labels emitted by every anchor remain bound through
+    /// later folds. The reference does not specify this restoration pairing;
+    /// v1 requires exact lineage and pin equality at every boundary.
+    pub fn extend_nested_terminal_pair_checkpoint_restoration_folds_validating_terminal_identity_transitions(
+        &self,
+        previous: &ReboundPathResolution,
+        restoration_folds: &[[(&ReboundPathCheckpoint, &[[PinnedDatabase; 2]]); 2]],
+        expected_fold_transitions: &[
+            [(NestedPairTerminalRouteIdentity, NestedPairTerminalRouteIdentity); 2]
+        ],
+    ) -> Result<
+        (
+            ReboundPathResolution,
+            Vec<[(NestedPairTerminalRouteIdentity, NestedPairTerminalRouteIdentity); 2]>,
+        ),
+        AttachmentError,
+    > {
+        if restoration_folds.len() != expected_fold_transitions.len() {
+            return Err(AttachmentError::RetainedSnapshotUnavailable);
+        }
+
+        self.extend_nested_terminal_pair_checkpoint_restoration_stream_validating_terminal_identity_transitions(
+            previous,
+            restoration_folds
+                .iter()
+                .copied()
+                .zip(expected_fold_transitions.iter().cloned()),
+        )
+    }
+
+    /// Consumes paired checkpoint restoration folds once, in order. Each
+    /// yielded fold contains two checkpoint-rooted chains and their expected
+    /// identity edges. A fold must return to the terminal identity it started
+    /// from, and labels emitted earlier in the stream remain bound through
+    /// every later fold. The reference does not specify streamed restore-fold
+    /// semantics; v1 validates each yielded fold before requesting the next
+    /// and returns no partial route if any edge or restoration is invalid.
+    pub fn extend_nested_terminal_pair_checkpoint_restoration_stream_validating_terminal_identity_transitions<'a>(
+        &self,
+        previous: &ReboundPathResolution,
+        restoration_folds: impl IntoIterator<
+            Item = (
+                [(&'a ReboundPathCheckpoint, &'a [[PinnedDatabase; 2]]); 2],
+                [(NestedPairTerminalRouteIdentity, NestedPairTerminalRouteIdentity); 2],
+            ),
+        >,
+    ) -> Result<
+        (
+            ReboundPathResolution,
+            Vec<[(NestedPairTerminalRouteIdentity, NestedPairTerminalRouteIdentity); 2]>,
+        ),
+        AttachmentError,
+    > {
+        let mut route = previous.clone();
+        let mut retained_checkpoint_labels = Vec::new();
+        let mut all_transitions = Vec::new();
+        for (fold, expected_transitions) in restoration_folds {
+            let starting_identity = route.terminal_route_identity();
+            let mut transitions = Vec::with_capacity(2);
+            for ((checkpoint, replacement_waves), (expected_before, expected_after)) in
+                fold.iter().zip(&expected_transitions)
+            {
+                let before = route.terminal_route_identity();
+                route.validate_terminal_route_identity(expected_before)?;
+                let (folded, checkpoint_label) = self
+                    .extend_nested_terminal_pair_chain_from_checkpoint_with_labels(
+                        &route,
+                        checkpoint,
+                        replacement_waves,
+                        &retained_checkpoint_labels,
+                    )?;
+                if let Some(label) = checkpoint_label {
+                    retained_checkpoint_labels.push(label);
+                }
+                route = folded;
+                for label in &retained_checkpoint_labels {
+                    route.validate_depth_label(label)?;
+                }
+                let after = route.terminal_route_identity();
+                route.validate_terminal_route_identity(expected_after)?;
+                transitions.push((before, after));
+            }
+
+            route.validate_terminal_route_identity(&starting_identity)?;
+            let transitions: [
+                (NestedPairTerminalRouteIdentity, NestedPairTerminalRouteIdentity);
+                2
+            ] = transitions
+                .try_into()
+                .map_err(|_| AttachmentError::RetainedSnapshotUnavailable)?;
+            all_transitions.push(transitions);
+        }
+
+        Ok((route, all_transitions))
+    }
+
+    fn extend_nested_terminal_pair_chain_from_checkpoint_with_labels(
+        &self,
+        previous: &ReboundPathResolution,
+        checkpoint: &ReboundPathCheckpoint,
+        replacement_waves: &[[PinnedDatabase; 2]],
+        retained_checkpoint_labels: &[NestedPairDepthLabel],
+    ) -> Result<(ReboundPathResolution, Option<NestedPairDepthLabel>), AttachmentError> {
+        checkpoint.validate_depth_identity()?;
+        previous.validate_depth_label(&checkpoint.depth_label)?;
+        let Some((first, remaining)) = replacement_waves.split_first() else {
+            for label in retained_checkpoint_labels {
+                previous.validate_depth_label(label)?;
+            }
+            return Ok((previous.clone(), None));
+        };
+        let checkpoint_wave = previous
+            .retained_wave_lengths
+            .len()
+            .checked_add(1)
+            .ok_or(AttachmentError::RetainedSnapshotUnavailable)?;
+        let extension =
+            self.resolve_nested_rebind_path(&checkpoint.handoff, first.as_slice())?;
+        let mut route = Self::append_retained_rebound_extension(previous, extension);
+        let retained_checkpoint = route.retained_snapshot_at_depth(checkpoint_wave, 0)?;
+        if !checkpoint.depth_label.matches_session(retained_checkpoint) {
+            return Err(AttachmentError::RetainedSnapshotUnavailable);
+        }
+        let folded_label = NestedPairDepthLabel::from_session(
+            checkpoint_wave,
+            0,
+            &route.route_identity,
+            route.retained_snapshot_identity_at_depth(checkpoint_wave, 0)?,
+            retained_checkpoint,
+        );
+        route.validate_depth_label(&folded_label)?;
+        for label in retained_checkpoint_labels {
+            route.validate_depth_label(label)?;
+        }
+
+        for replacements in remaining {
+            let latest_wave = route
+                .retained_wave_lengths
+                .len()
+                .checked_sub(1)
+                .ok_or(AttachmentError::RetainedSnapshotUnavailable)?;
+            let latest_snapshot = route.retained_wave_lengths[latest_wave]
+                .checked_sub(1)
+                .ok_or(AttachmentError::RetainedSnapshotUnavailable)?;
+            route = self.extend_nested_terminal_pair_from_wave(
+                &route,
+                latest_wave,
+                latest_snapshot,
+                replacements.clone(),
+            )?;
+            route.validate_depth_label(&folded_label)?;
+            for label in retained_checkpoint_labels {
+                route.validate_depth_label(label)?;
+            }
+        }
+        Ok((route, Some(folded_label)))
+    }
+
+    /// Applies checkpoint-rooted storms in plan order, allowing a later storm
+    /// to return to an earlier nested anchor. Each pair starts from that
+    /// checkpoint's exact pins. The source wave/depth label and every emitted
+    /// checkpoint-root label are revalidated after subsequent folds, so a
+    /// cycle cannot silently redirect a handoff. The reference is silent on
+    /// cyclic checkpoint storms; v1 preserves order and exact routes, and
+    /// returns no partial result if a label or replacement fails. Empty plans
+    /// still validate their source handoff.
+    pub fn extend_nested_terminal_pair_checkpoint_storms(
+        &self,
+        previous: &ReboundPathResolution,
+        storms: &[(&ReboundPathCheckpoint, &[[PinnedDatabase; 2]])],
+    ) -> Result<ReboundPathResolution, AttachmentError> {
+        let mut route = previous.clone();
+        let mut retained_checkpoint_labels = Vec::new();
+        for (checkpoint, replacement_waves) in storms {
+            checkpoint.validate_depth_identity()?;
+            route.validate_depth_label(&checkpoint.depth_label)?;
+            if replacement_waves.is_empty() {
+                let (folded, _) = self
+                    .extend_nested_terminal_pair_chain_from_checkpoint_with_labels(
+                        &route,
+                        checkpoint,
+                        &[],
+                        &retained_checkpoint_labels,
+                    )?;
+                route = folded;
+                continue;
+            }
+            for replacements in *replacement_waves {
+                let (folded, checkpoint_label) = self
+                    .extend_nested_terminal_pair_chain_from_checkpoint_with_labels(
+                        &route,
+                        checkpoint,
+                        std::slice::from_ref(replacements),
+                        &retained_checkpoint_labels,
+                    )?;
+                let label = checkpoint_label
+                    .ok_or(AttachmentError::RetainedSnapshotUnavailable)?;
+                retained_checkpoint_labels.push(label);
+                route = folded;
+            }
+        }
+        Ok(route)
+    }
+
+    /// Applies rounds of checkpoint storms selected by retained depth labels.
+    /// Each round may select a different depth in the same nested route; all
+    /// selected labels remain bound to their original route and snapshot
+    /// identities across later folds. The reference is silent on composing
+    /// depth-selected closure storms; v1 validates labels at every round
+    /// boundary and returns no partial route if a selected depth or closure
+    /// fails.
+    pub fn extend_nested_terminal_pair_checkpoint_storm_rounds_from_depth_labels(
+        &self,
+        previous: &ReboundPathResolution,
+        rounds: &[&[(&NestedPairDepthLabel, &[[PinnedDatabase; 2]])]],
+    ) -> Result<ReboundPathResolution, AttachmentError> {
+        let mut route = previous.clone();
+        let mut retained_labels = Vec::new();
+        for round in rounds {
+            let checkpoints = round
+                .iter()
+                .map(|(label, _)| route.handoff_checkpoint_for_depth_label(label))
+                .collect::<Result<Vec<_>, AttachmentError>>()?;
+            let storms = round
+                .iter()
+                .zip(&checkpoints)
+                .map(|((_, replacements), checkpoint)| (checkpoint, *replacements))
+                .collect::<Vec<_>>();
+            route = self.extend_nested_terminal_pair_checkpoint_storms(&route, &storms)?;
+            retained_labels.extend(round.iter().map(|(label, _)| (*label).clone()));
+            for label in &retained_labels {
+                route.validate_depth_label(label)?;
+            }
+        }
+        Ok(route)
+    }
+
+    /// Applies depth-labelled checkpoint storm rounds with stable omission
+    /// slots. A slot keeps the route identity of its first selected label;
+    /// `None` leaves that slot unchanged, and a later label cannot take its
+    /// place. The reference is silent on nested paired omissions, so v1 fixes
+    /// the slot count from the first round and revalidates every selected
+    /// identity after each fold. Failure returns no partial route.
+    pub fn extend_nested_terminal_pair_checkpoint_storm_rounds_from_depth_labels_with_omissions(
+        &self,
+        previous: &ReboundPathResolution,
+        rounds: &[&[Option<(&NestedPairDepthLabel, &[[PinnedDatabase; 2]])>]],
+    ) -> Result<ReboundPathResolution, AttachmentError> {
+        let mut route = previous.clone();
+        let mut retained_labels: Option<Vec<Option<NestedPairDepthLabel>>> = None;
+        for round in rounds {
+            let labels = retained_labels.get_or_insert_with(|| vec![None; round.len()]);
+            if labels.len() != round.len() {
+                return Err(AttachmentError::RetainedSnapshotUnavailable);
+            }
+
+            let checkpoints = round
+                .iter()
+                .enumerate()
+                .map(|(slot, plan)| match plan {
+                    Some((label, replacements)) => {
+                        if let Some(retained) = &labels[slot] {
+                            if retained != *label {
+                                return Err(AttachmentError::RetainedSnapshotUnavailable);
+                            }
+                        } else {
+                            labels[slot] = Some((*label).clone());
+                        }
+                        let checkpoint = route.handoff_checkpoint_for_depth_label(label)?;
+                        Ok(Some((checkpoint, *replacements)))
+                    }
+                    None => Ok(None),
+                })
+                .collect::<Result<Vec<_>, AttachmentError>>()?;
+            let storms = checkpoints
+                .iter()
+                .filter_map(|checkpoint| {
+                    checkpoint
+                        .as_ref()
+                        .map(|(checkpoint, replacements)| (checkpoint, *replacements))
+                })
+                .collect::<Vec<_>>();
+            route = self.extend_nested_terminal_pair_checkpoint_storms(&route, &storms)?;
+            for label in labels.iter().flatten() {
+                route.validate_depth_label(label)?;
+            }
+        }
+        Ok(route)
+    }
+
+    /// Applies sparse storm rounds keyed by exact nested depth labels. Round
+    /// widths may vary because an omitted entry is not assigned a new slot;
+    /// every label previously selected or explicitly omitted remains tracked
+    /// and is revalidated after each fold. The reference is silent on sparse
+    /// nested storm batches, so v1 treats labels as stable keys, orders each
+    /// round by `(wave, depth)`, and rejects a duplicate key within one round.
+    /// This makes a sparse round deterministic regardless of entry order while
+    /// keeping each replacement wave's internal order intact. Failure returns
+    /// no partial route.
+    pub fn extend_nested_terminal_pair_sparse_checkpoint_storm_rounds_from_depth_labels(
+        &self,
+        previous: &ReboundPathResolution,
+        rounds: &[&[(&NestedPairDepthLabel, Option<&[[PinnedDatabase; 2]]>)]],
+    ) -> Result<ReboundPathResolution, AttachmentError> {
+        let mut route = previous.clone();
+        let mut retained_labels: Vec<NestedPairDepthLabel> = Vec::new();
+        for round in rounds {
+            let mut seen_labels: Vec<NestedPairDepthLabel> = Vec::with_capacity(round.len());
+            let mut checkpoints = round
+                .iter()
+                .map(|(label, replacements)| {
+                    let (wave, depth) = route.retained_position_for_depth_label(label)?;
+                    if seen_labels.contains(label) {
+                        return Err(AttachmentError::RetainedSnapshotUnavailable);
+                    }
+                    seen_labels.push((*label).clone());
+                    if !retained_labels.contains(label) {
+                        retained_labels.push((*label).clone());
+                    }
+                    let checkpoint = match replacements {
+                        Some(replacement_waves) => {
+                            let checkpoint = route.handoff_checkpoint(wave, depth)?;
+                            Some((checkpoint, *replacement_waves))
+                        }
+                        None => None,
+                    };
+                    Ok((wave, depth, checkpoint))
+                })
+                .collect::<Result<Vec<_>, AttachmentError>>()?;
+            checkpoints.sort_by_key(|(wave, depth, _)| (*wave, *depth));
+            let storms = checkpoints
+                .iter()
+                .filter_map(|(_, _, checkpoint)| {
+                    checkpoint
+                        .as_ref()
+                        .map(|(checkpoint, replacement_waves)| (checkpoint, *replacement_waves))
+                })
+                .collect::<Vec<_>>();
+            route = self.extend_nested_terminal_pair_checkpoint_storms(&route, &storms)?;
+            for label in &retained_labels {
+                route.validate_depth_label(label)?;
+            }
+        }
+        Ok(route)
+    }
+
+    /// Applies several sparse-round chains as one nested terminal-pair fold.
+    /// Labels seen in an earlier chain remain bound to their original retained
+    /// snapshots and are revalidated after every later round, including rounds
+    /// that omit them. Every omission-only round also preserves the exact
+    /// terminal route identity, even after an active round in the same chain.
+    /// The reference is silent on cross-chain sparse folds; v1 carries depth
+    /// identities across segment boundaries and returns no partial route if any
+    /// round invalidates one.
+    pub fn extend_nested_terminal_pair_sparse_checkpoint_storm_chains_from_depth_labels(
+        &self,
+        previous: &ReboundPathResolution,
+        chains: &[&[&[(&NestedPairDepthLabel, Option<&[[PinnedDatabase; 2]]>)]]],
+    ) -> Result<ReboundPathResolution, AttachmentError> {
+        let mut route = previous.clone();
+        let mut retained_labels: Vec<NestedPairDepthLabel> = Vec::new();
+        for chain in chains {
+            for round in *chain {
+                let omission_only = round.iter().all(|(_, replacements)| match replacements {
+                    Some(waves) => waves.is_empty(),
+                    None => true,
+                });
+                let terminal_identity = omission_only.then(|| route.terminal_route_identity());
+                route = self
+                    .extend_nested_terminal_pair_sparse_checkpoint_storm_rounds_from_depth_labels(
+                        &route,
+                        std::slice::from_ref(round),
+                    )?;
+                for (label, _) in *round {
+                    if !retained_labels.contains(label) {
+                        retained_labels.push((*label).clone());
+                    }
+                }
+                for label in &retained_labels {
+                    route.validate_depth_label(label)?;
+                }
+                if let Some(identity) = &terminal_identity {
+                    route.validate_terminal_route_identity(identity)?;
+                }
+            }
+        }
+        Ok(route)
+    }
+
+    /// Applies sparse nested terminal-pair chains only when they preserve a
+    /// caller-captured terminal route identity. The identity is checked before
+    /// and after the complete fold, so a foreign route or unexpected terminal
+    /// change returns no result. The reference is silent on identity-guarded
+    /// omission chains; v1 uses exact lineage and pin equality.
+    pub fn extend_nested_terminal_pair_sparse_checkpoint_storm_chains_preserving_terminal_identity(
+        &self,
+        previous: &ReboundPathResolution,
+        expected_terminal_identity: &NestedPairTerminalRouteIdentity,
+        chains: &[&[&[(&NestedPairDepthLabel, Option<&[[PinnedDatabase; 2]]>)]]],
+    ) -> Result<ReboundPathResolution, AttachmentError> {
+        previous.validate_terminal_route_identity(expected_terminal_identity)?;
+        let route = self
+            .extend_nested_terminal_pair_sparse_checkpoint_storm_chains_from_depth_labels(
+                previous, chains,
+            )?;
+        route.validate_terminal_route_identity(expected_terminal_identity)?;
+        Ok(route)
+    }
+
+    /// Applies sparse nested terminal-pair chains while checking the exact
+    /// terminal route identity after each chain. The expected identities must
+    /// have one entry per chain and bind that chain's computed lineage and
+    /// pins. The reference is silent on intermediate chain-boundary checks;
+    /// v1 rejects drift immediately, even when a later chain would restore the
+    /// final pins.
+    pub fn extend_nested_terminal_pair_sparse_checkpoint_storm_chains_validating_terminal_identities(
+        &self,
+        previous: &ReboundPathResolution,
+        chains: &[&[&[(&NestedPairDepthLabel, Option<&[[PinnedDatabase; 2]]>)]]],
+        expected_terminal_identities: &[NestedPairTerminalRouteIdentity],
+    ) -> Result<ReboundPathResolution, AttachmentError> {
+        if chains.len() != expected_terminal_identities.len() {
+            return Err(AttachmentError::RetainedSnapshotUnavailable);
+        }
+
+        let mut route = previous.clone();
+        for (chain, expected_identity) in chains.iter().zip(expected_terminal_identities) {
+            route = self
+                .extend_nested_terminal_pair_sparse_checkpoint_storm_chains_from_depth_labels(
+                    &route,
+                    &[*chain],
+                )?;
+            route.validate_terminal_route_identity(expected_identity)?;
+        }
+        Ok(route)
+    }
+
+    /// Applies sparse nested terminal-pair rebind chains and captures the
+    /// computed terminal identity at each chain boundary. The reference is
+    /// silent on returning a route-identity history; v1 reports the exact
+    /// lineage and ordered terminal pins after every chain and returns no
+    /// partial history if a later chain fails.
+    pub fn extend_nested_terminal_pair_sparse_checkpoint_storm_chains_capturing_terminal_identities(
+        &self,
+        previous: &ReboundPathResolution,
+        chains: &[&[&[(&NestedPairDepthLabel, Option<&[[PinnedDatabase; 2]]>)]]],
+    ) -> Result<(ReboundPathResolution, Vec<NestedPairTerminalRouteIdentity>), AttachmentError> {
+        let mut route = previous.clone();
+        let mut terminal_identities = Vec::with_capacity(chains.len());
+        for chain in chains {
+            route = self
+                .extend_nested_terminal_pair_sparse_checkpoint_storm_chains_from_depth_labels(
+                    &route,
+                    &[*chain],
+                )?;
+            terminal_identities.push(route.terminal_route_identity());
+        }
+        Ok((route, terminal_identities))
+    }
+
+    /// Applies sparse nested terminal-pair rebind chains and records the
+    /// terminal identity on both sides of every chain. The reference is silent
+    /// on identity transitions across fold boundaries; v1 reports adjacent
+    /// before/after identities, including equal identities for no-op chains,
+    /// and returns no partial transition list if a chain fails.
+    pub fn extend_nested_terminal_pair_sparse_checkpoint_storm_chains_capturing_terminal_identity_transitions(
+        &self,
+        previous: &ReboundPathResolution,
+        chains: &[&[&[(&NestedPairDepthLabel, Option<&[[PinnedDatabase; 2]]>)]]],
+    ) -> Result<(
+        ReboundPathResolution,
+        Vec<(NestedPairTerminalRouteIdentity, NestedPairTerminalRouteIdentity)>,
+    ), AttachmentError> {
+        let mut route = previous.clone();
+        let mut transitions = Vec::with_capacity(chains.len());
+        for chain in chains {
+            let before = route.terminal_route_identity();
+            route = self
+                .extend_nested_terminal_pair_sparse_checkpoint_storm_chains_from_depth_labels(
+                    &route,
+                    &[*chain],
+                )?;
+            let after = route.terminal_route_identity();
+            transitions.push((before, after));
+        }
+        Ok((route, transitions))
+    }
+
+    /// Applies sparse nested terminal-pair rebind chains only when every
+    /// before/after terminal identity matches the supplied transition. The
+    /// reference is silent on validating paired identity edges across fold
+    /// chains; v1 checks both ends at each boundary and rejects drift before
+    /// any later chain can mask it by restoring the same terminal pins.
+    pub fn extend_nested_terminal_pair_sparse_checkpoint_storm_chains_validating_terminal_identity_transitions(
+        &self,
+        previous: &ReboundPathResolution,
+        chains: &[&[&[(&NestedPairDepthLabel, Option<&[[PinnedDatabase; 2]]>)]]],
+        expected_transitions: &[(NestedPairTerminalRouteIdentity, NestedPairTerminalRouteIdentity)],
+    ) -> Result<ReboundPathResolution, AttachmentError> {
+        if chains.len() != expected_transitions.len() {
+            return Err(AttachmentError::RetainedSnapshotUnavailable);
+        }
+
+        let mut route = previous.clone();
+        for (chain, (expected_before, expected_after)) in
+            chains.iter().zip(expected_transitions)
+        {
+            route.validate_terminal_route_identity(expected_before)?;
+            route = self
+                .extend_nested_terminal_pair_sparse_checkpoint_storm_chains_from_depth_labels(
+                    &route,
+                    &[*chain],
+                )?;
+            route.validate_terminal_route_identity(expected_after)?;
+        }
+        Ok(route)
+    }
+
+    /// Applies nested terminal-pair rebind cascades, where each cascade may
+    /// contain several sparse rebind chains, and validates the exact identity
+    /// before and after every cascade. The reference is silent on grouped
+    /// cascade boundaries; v1 rejects a stale edge before a later cascade can
+    /// restore its terminal pins and returns no partial transition history.
+    pub fn extend_nested_terminal_pair_sparse_checkpoint_storm_rebind_cascades_validating_terminal_identity_transitions(
+        &self,
+        previous: &ReboundPathResolution,
+        rebind_cascades: &[&[&[&[(&NestedPairDepthLabel, Option<&[[PinnedDatabase; 2]]>)]]]],
+        expected_transitions: &[(NestedPairTerminalRouteIdentity, NestedPairTerminalRouteIdentity)],
+    ) -> Result<(
+        ReboundPathResolution,
+        Vec<(NestedPairTerminalRouteIdentity, NestedPairTerminalRouteIdentity)>,
+    ), AttachmentError> {
+        if rebind_cascades.len() != expected_transitions.len() {
+            return Err(AttachmentError::RetainedSnapshotUnavailable);
+        }
+
+        let mut route = previous.clone();
+        let mut transitions = Vec::with_capacity(rebind_cascades.len());
+        for (cascade, (expected_before, expected_after)) in
+            rebind_cascades.iter().zip(expected_transitions)
+        {
+            let before = route.terminal_route_identity();
+            route.validate_terminal_route_identity(expected_before)?;
+            route = self
+                .extend_nested_terminal_pair_sparse_checkpoint_storm_chains_from_depth_labels(
+                    &route,
+                    *cascade,
+                )?;
+            route.validate_terminal_route_identity(expected_after)?;
+            let after = route.terminal_route_identity();
+            transitions.push((before, after));
+        }
+
+        Ok((route, transitions))
+    }
+
+    /// Applies sparse paired terminal pin folds one round at a time, checking
+    /// the expected terminal identity before and after every fold. Depth labels
+    /// selected by earlier folds remain bound and are revalidated after each
+    /// later fold. The reference is silent on per-fold identity edges; v1
+    /// rejects drift at the first changed edge and returns no partial route.
+    pub fn extend_nested_terminal_pair_sparse_checkpoint_storm_pin_folds_validating_terminal_identity_transitions(
+        &self,
+        previous: &ReboundPathResolution,
+        pin_folds: &[&[(&NestedPairDepthLabel, Option<&[[PinnedDatabase; 2]]>)]],
+        expected_transitions: &[(NestedPairTerminalRouteIdentity, NestedPairTerminalRouteIdentity)],
+    ) -> Result<ReboundPathResolution, AttachmentError> {
+        if pin_folds.len() != expected_transitions.len() {
+            return Err(AttachmentError::RetainedSnapshotUnavailable);
+        }
+
+        let mut route = previous.clone();
+        let mut retained_labels: Vec<NestedPairDepthLabel> = Vec::new();
+        for (fold, (expected_before, expected_after)) in
+            pin_folds.iter().zip(expected_transitions)
+        {
+            route.validate_terminal_route_identity(expected_before)?;
+            for (label, _) in *fold {
+                route.validate_depth_label(label)?;
+                if !retained_labels.contains(label) {
+                    retained_labels.push((*label).clone());
+                }
+            }
+            route = self
+                .extend_nested_terminal_pair_sparse_checkpoint_storm_rounds_from_depth_labels(
+                    &route,
+                    &[*fold],
+                )?;
+            for label in &retained_labels {
+                route.validate_depth_label(label)?;
+            }
+            route.validate_terminal_route_identity(expected_after)?;
+        }
+
+        Ok(route)
+    }
+
+    /// Applies paired rebinding and omission chains as consecutive terminal
+    /// route segments. Each omission chain must preserve the terminal identity
+    /// computed by its preceding rebind chain. Returns the final route and the
+    /// verified terminal identity for every segment. The reference is silent
+    /// on interleaved sparse route segments; v1 requires one omission chain
+    /// per rebind chain and returns no partial result on drift.
+    pub fn extend_nested_terminal_pair_sparse_checkpoint_storm_rebind_omission_segments_preserving_terminal_identities(
+        &self,
+        previous: &ReboundPathResolution,
+        rebind_chains: &[&[&[(&NestedPairDepthLabel, Option<&[[PinnedDatabase; 2]]>)]]],
+        omission_chains: &[&[&[(&NestedPairDepthLabel, Option<&[[PinnedDatabase; 2]]>)]]],
+    ) -> Result<(ReboundPathResolution, Vec<NestedPairTerminalRouteIdentity>), AttachmentError> {
+        if rebind_chains.len() != omission_chains.len() {
+            return Err(AttachmentError::RetainedSnapshotUnavailable);
+        }
+
+        let mut route = previous.clone();
+        let mut terminal_identities = Vec::with_capacity(rebind_chains.len());
+        for (rebind_chain, omission_chain) in rebind_chains.iter().zip(omission_chains) {
+            route = self
+                .extend_nested_terminal_pair_sparse_checkpoint_storm_rebind_then_omission_chains_preserving_terminal_identity(
+                    &route,
+                    &[*rebind_chain],
+                    &[*omission_chain],
+                )?;
+            terminal_identities.push(route.terminal_route_identity());
+        }
+        Ok((route, terminal_identities))
+    }
+
+    /// Applies paired sparse rebinding chains, captures the resulting terminal
+    /// route identity, and carries that exact identity through later omission
+    /// chains. Non-empty replacement waves are rejected in the omission phase.
+    /// The reference is silent on this composed fold; v1 captures exact
+    /// lineage and pin equality at the rebind/omission boundary.
+    pub fn extend_nested_terminal_pair_sparse_checkpoint_storm_rebind_then_omission_chains_preserving_terminal_identity(
+        &self,
+        previous: &ReboundPathResolution,
+        rebind_chains: &[&[&[(&NestedPairDepthLabel, Option<&[[PinnedDatabase; 2]]>)]]],
+        omission_chains: &[&[&[(&NestedPairDepthLabel, Option<&[[PinnedDatabase; 2]]>)]]],
+    ) -> Result<ReboundPathResolution, AttachmentError> {
+        for chain in omission_chains {
+            for round in *chain {
+                for entry in round.iter() {
+                    if matches!(entry.1, Some(replacements) if !replacements.is_empty()) {
+                        return Err(AttachmentError::RetainedSnapshotUnavailable);
+                    }
+                }
+            }
+        }
+
+        let rebound_route = self
+            .extend_nested_terminal_pair_sparse_checkpoint_storm_chains_from_depth_labels(
+                previous,
+                rebind_chains,
+            )?;
+        let rebound_identity = rebound_route.terminal_route_identity();
+        self.extend_nested_terminal_pair_sparse_checkpoint_storm_chains_preserving_terminal_identity(
+            &rebound_route,
+            &rebound_identity,
+            omission_chains,
+        )
+    }
+
+    /// Applies a sparse paired rebind fold only when it reaches the caller's
+    /// expected terminal identity, then carries that exact identity through
+    /// nested omission chains. The reference is silent on guarding this
+    /// boundary across omission folds; v1 rejects a stale rebind identity or
+    /// any omission drift and returns no partial route.
+    pub fn extend_nested_terminal_pair_sparse_checkpoint_storm_rebind_then_omission_chains_validating_rebound_terminal_identity(
+        &self,
+        previous: &ReboundPathResolution,
+        rebind_chains: &[&[&[(&NestedPairDepthLabel, Option<&[[PinnedDatabase; 2]]>)]]],
+        expected_rebound_terminal_identity: &NestedPairTerminalRouteIdentity,
+        omission_chains: &[&[&[(&NestedPairDepthLabel, Option<&[[PinnedDatabase; 2]]>)]]],
+    ) -> Result<ReboundPathResolution, AttachmentError> {
+        let rebound_route = self
+            .extend_nested_terminal_pair_sparse_checkpoint_storm_chains_from_depth_labels(
+                previous,
+                rebind_chains,
+            )?;
+        rebound_route.validate_terminal_route_identity(expected_rebound_terminal_identity)?;
+        self.extend_nested_terminal_pair_sparse_checkpoint_storm_chains_preserving_terminal_identity(
+            &rebound_route,
+            expected_rebound_terminal_identity,
+            omission_chains,
+        )
+    }
+
+    /// Applies a sparse rebind fold after verifying its terminal identity, then
+    /// records the exact before/after identity for each paired omission chain.
+    /// Omission chains reject active replacement waves, and any drift aborts
+    /// the whole operation without returning a partial transition list. The
+    /// reference is silent on this composition; v1 treats each omission-chain
+    /// boundary as an auditable identity-preservation edge.
+    pub fn extend_nested_terminal_pair_sparse_checkpoint_storm_rebind_then_omission_chains_capturing_terminal_identity_transitions(
+        &self,
+        previous: &ReboundPathResolution,
+        rebind_chains: &[&[&[(&NestedPairDepthLabel, Option<&[[PinnedDatabase; 2]]>)]]],
+        expected_rebound_terminal_identity: &NestedPairTerminalRouteIdentity,
+        omission_chains: &[&[&[(&NestedPairDepthLabel, Option<&[[PinnedDatabase; 2]]>)]]],
+    ) -> Result<(
+        ReboundPathResolution,
+        Vec<(NestedPairTerminalRouteIdentity, NestedPairTerminalRouteIdentity)>,
+    ), AttachmentError> {
+        for chain in omission_chains {
+            for round in *chain {
+                if round.iter().any(|(_, replacements)| {
+                    matches!(replacements, Some(waves) if !waves.is_empty())
+                }) {
+                    return Err(AttachmentError::RetainedSnapshotUnavailable);
+                }
+            }
+        }
+
+        let rebound_route = self
+            .extend_nested_terminal_pair_sparse_checkpoint_storm_chains_from_depth_labels(
+                previous,
+                rebind_chains,
+            )?;
+        rebound_route.validate_terminal_route_identity(expected_rebound_terminal_identity)?;
+
+        let mut route = rebound_route;
+        let mut transitions = Vec::with_capacity(omission_chains.len());
+        for omission_chain in omission_chains {
+            let before = route.terminal_route_identity();
+            route = self
+                .extend_nested_terminal_pair_sparse_checkpoint_storm_chains_from_depth_labels(
+                    &route,
+                    &[*omission_chain],
+                )?;
+            route.validate_terminal_route_identity(expected_rebound_terminal_identity)?;
+            let after = route.terminal_route_identity();
+            transitions.push((before, after));
+        }
+
+        Ok((route, transitions))
+    }
+
+    /// Applies paired rebind/omission segments and captures the terminal
+    /// identity before rebind, after rebind, and after its paired omission
+    /// fold. Omission segments reject active replacement waves and must retain
+    /// the identity produced by their rebind. The reference is silent on this
+    /// three-boundary audit; v1 returns no partial transition history on error.
+    pub fn extend_nested_terminal_pair_sparse_checkpoint_storm_rebind_omission_segments_capturing_terminal_identity_transitions(
+        &self,
+        previous: &ReboundPathResolution,
+        rebind_chains: &[&[&[(&NestedPairDepthLabel, Option<&[[PinnedDatabase; 2]]>)]]],
+        omission_chains: &[&[&[(&NestedPairDepthLabel, Option<&[[PinnedDatabase; 2]]>)]]],
+    ) -> Result<(
+        ReboundPathResolution,
+        Vec<(
+            NestedPairTerminalRouteIdentity,
+            NestedPairTerminalRouteIdentity,
+            NestedPairTerminalRouteIdentity,
+        )>,
+    ), AttachmentError> {
+        if rebind_chains.len() != omission_chains.len() {
+            return Err(AttachmentError::RetainedSnapshotUnavailable);
+        }
+        for chain in omission_chains {
+            for round in *chain {
+                if round.iter().any(|(_, replacements)| {
+                    matches!(replacements, Some(waves) if !waves.is_empty())
+                }) {
+                    return Err(AttachmentError::RetainedSnapshotUnavailable);
+                }
+            }
+        }
+
+        let mut route = previous.clone();
+        let mut transitions = Vec::with_capacity(rebind_chains.len());
+        for (rebind_chain, omission_chain) in rebind_chains.iter().zip(omission_chains) {
+            let before_rebind = route.terminal_route_identity();
+            route = self
+                .extend_nested_terminal_pair_sparse_checkpoint_storm_chains_from_depth_labels(
+                    &route,
+                    &[*rebind_chain],
+                )?;
+            let after_rebind = route.terminal_route_identity();
+            route = self
+                .extend_nested_terminal_pair_sparse_checkpoint_storm_chains_preserving_terminal_identity(
+                    &route,
+                    &after_rebind,
+                    &[*omission_chain],
+                )?;
+            let after_omission = route.terminal_route_identity();
+            transitions.push((before_rebind, after_rebind, after_omission));
+        }
+
+        Ok((route, transitions))
+    }
+
+    /// Applies paired rebind/omission segments only when each segment matches
+    /// its expected identity before rebind, after rebind, and after omission.
+    /// Omission segments reject active replacement waves. The reference is
+    /// silent on validating this three-edge fold; v1 checks every boundary and
+    /// returns no partial route when an identity or segment count drifts.
+    pub fn extend_nested_terminal_pair_sparse_checkpoint_storm_rebind_omission_segments_validating_terminal_identity_transitions(
+        &self,
+        previous: &ReboundPathResolution,
+        rebind_chains: &[&[&[(&NestedPairDepthLabel, Option<&[[PinnedDatabase; 2]]>)]]],
+        omission_chains: &[&[&[(&NestedPairDepthLabel, Option<&[[PinnedDatabase; 2]]>)]]],
+        expected_transitions: &[(
+            NestedPairTerminalRouteIdentity,
+            NestedPairTerminalRouteIdentity,
+            NestedPairTerminalRouteIdentity,
+        )],
+    ) -> Result<ReboundPathResolution, AttachmentError> {
+        if rebind_chains.len() != omission_chains.len()
+            || rebind_chains.len() != expected_transitions.len()
+        {
+            return Err(AttachmentError::RetainedSnapshotUnavailable);
+        }
+        for chain in omission_chains {
+            for round in *chain {
+                if round.iter().any(|(_, replacements)| {
+                    matches!(replacements, Some(waves) if !waves.is_empty())
+                }) {
+                    return Err(AttachmentError::RetainedSnapshotUnavailable);
+                }
+            }
+        }
+
+        let mut route = previous.clone();
+        for ((rebind_chain, omission_chain), (expected_before, expected_rebound, expected_omitted)) in
+            rebind_chains
+                .iter()
+                .zip(omission_chains)
+                .zip(expected_transitions)
+        {
+            route.validate_terminal_route_identity(expected_before)?;
+            route = self
+                .extend_nested_terminal_pair_sparse_checkpoint_storm_chains_from_depth_labels(
+                    &route,
+                    &[*rebind_chain],
+                )?;
+            route.validate_terminal_route_identity(expected_rebound)?;
+            route = self
+                .extend_nested_terminal_pair_sparse_checkpoint_storm_chains_preserving_terminal_identity(
+                    &route,
+                    expected_rebound,
+                    &[*omission_chain],
+                )?;
+            route.validate_terminal_route_identity(expected_omitted)?;
+        }
+
+        Ok(route)
+    }
+
+    /// Folds checkpoint-rooted terminal-pair storms across independent parent
+    /// routes. Each table row is `(route, storms)` and resolves only checkpoints
+    /// captured from that row's route; row order and anchor identity are kept
+    /// independently. The reference is silent on tabular multi-parent folds,
+    /// so v1 validates every row through the single-route checkpoint rules and
+    /// returns no partial batch if any row or fold fails.
+    pub fn extend_sibling_terminal_pair_checkpoint_storms(
+        &self,
+        paths: &[(
+            &ReboundPathResolution,
+            &[(&ReboundPathCheckpoint, &[[PinnedDatabase; 2]])],
+        )],
+    ) -> Result<SiblingRebindResolution, AttachmentError> {
+        let routes = paths
+            .iter()
+            .map(|(previous, storms)| {
+                self.extend_nested_terminal_pair_checkpoint_storms(previous, storms)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(SiblingRebindResolution { routes })
+    }
+
+    /// Continues a sibling checkpoint-storm result with one plan per parent
+    /// row. Plans are paired with routes by input index, and each checkpoint
+    /// is validated only against the route at that index. The reference is
+    /// silent on nested multi-parent folds; v1 requires matching row counts
+    /// and revalidates every pre-existing depth identity after the folds.
+    /// No partial result is returned if any row fails.
+    pub fn extend_sibling_terminal_pair_checkpoint_storms_from_siblings(
+        &self,
+        previous: &SiblingRebindResolution,
+        storms_by_row: &[&[(&ReboundPathCheckpoint, &[[PinnedDatabase; 2]])]],
+    ) -> Result<SiblingRebindResolution, AttachmentError> {
+        if storms_by_row.len() != previous.routes.len() {
+            return Err(AttachmentError::RetainedSnapshotUnavailable);
+        }
+        for (route, storms) in storms_by_row.iter().enumerate() {
+            for (checkpoint, _) in *storms {
+                previous.validate_handoff_checkpoint(route, checkpoint)?;
+            }
+        }
+        let paths = previous
+            .routes
+            .iter()
+            .zip(storms_by_row)
+            .map(|(route, storms)| (route, *storms))
+            .collect::<Vec<_>>();
+        let folded = self.extend_sibling_terminal_pair_checkpoint_storms(&paths)?;
+        for (previous_route, folded_route) in previous.routes.iter().zip(&folded.routes) {
+            for (wave, length) in previous_route.retained_wave_lengths.iter().enumerate() {
+                for depth in 0..*length {
+                    let label = previous_route.retained_depth_label(wave, depth)?;
+                    folded_route.validate_depth_label(&label)?;
+                }
+            }
+        }
+        Ok(folded)
+    }
+
+    /// Continues sibling checkpoint storms from explicit retained
+    /// `(wave, depth)` coordinates. Each coordinate is resolved within its
+    /// own sibling row before any route is folded, so equal pins at another
+    /// row or depth cannot substitute for the selected handoff. The reference
+    /// is silent on multi-parent depth selection; v1 binds every selection to
+    /// its original row identity and returns no partial result on failure.
+    pub fn extend_sibling_terminal_pair_checkpoint_storms_from_depths(
+        &self,
+        previous: &SiblingRebindResolution,
+        storms_by_row: &[&[(usize, usize, &[[PinnedDatabase; 2]])]],
+    ) -> Result<SiblingRebindResolution, AttachmentError> {
+        if storms_by_row.len() != previous.routes.len() {
+            return Err(AttachmentError::RetainedSnapshotUnavailable);
+        }
+
+        let checkpoints_by_row = storms_by_row
+            .iter()
+            .enumerate()
+            .map(|(row, storms)| {
+                storms
+                    .iter()
+                    .map(|(wave, depth, _)| previous.handoff_checkpoint(row, *wave, *depth))
+                    .collect::<Result<Vec<_>, _>>()
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let checkpoint_storms_by_row = storms_by_row
+            .iter()
+            .zip(&checkpoints_by_row)
+            .map(|(storms, checkpoints)| {
+                storms
+                    .iter()
+                    .zip(checkpoints)
+                    .map(|((_, _, replacements), checkpoint)| (checkpoint, *replacements))
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        let checkpoint_storm_rows = checkpoint_storms_by_row
+            .iter()
+            .map(Vec::as_slice)
+            .collect::<Vec<_>>();
+        self.extend_sibling_terminal_pair_checkpoint_storms_from_siblings(
+            previous,
+            &checkpoint_storm_rows,
+        )
+    }
+
+    /// Continues sibling checkpoint storms from exact retained depth labels.
+    /// Each label is checked against its indexed sibling row before any fold
+    /// starts, so equal pins and coordinates from another parent cannot be
+    /// substituted. The reference is silent on label-selected multi-parent
+    /// folds; v1 preserves each selected row identity and returns no partial
+    /// result if any label or replacement fails.
+    pub fn extend_sibling_terminal_pair_checkpoint_storms_from_depth_labels(
+        &self,
+        previous: &SiblingRebindResolution,
+        storms_by_row: &[&[(&NestedPairDepthLabel, &[[PinnedDatabase; 2]])]],
+    ) -> Result<SiblingRebindResolution, AttachmentError> {
+        if storms_by_row.len() != previous.routes.len() {
+            return Err(AttachmentError::RetainedSnapshotUnavailable);
+        }
+
+        let checkpoint_storms_by_row = storms_by_row
+            .iter()
+            .enumerate()
+            .map(|(row, storms)| {
+                let route = previous
+                    .routes
+                    .get(row)
+                    .ok_or(AttachmentError::RetainedSnapshotUnavailable)?;
+                storms
+                    .iter()
+                    .map(|(label, replacements)| {
+                        let checkpoint = route.handoff_checkpoint_for_depth_label(label)?;
+                        Ok((checkpoint, *replacements))
+                    })
+                    .collect::<Result<Vec<_>, AttachmentError>>()
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let checkpoint_storm_rows = checkpoint_storms_by_row
+            .iter()
+            .map(|storms| {
+                storms
+                    .iter()
+                    .map(|(checkpoint, replacements)| (checkpoint, *replacements))
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        let checkpoint_storm_row_slices = checkpoint_storm_rows
+            .iter()
+            .map(Vec::as_slice)
+            .collect::<Vec<_>>();
+        self.extend_sibling_terminal_pair_checkpoint_storms_from_siblings(
+            previous,
+            &checkpoint_storm_row_slices,
+        )
+    }
+
+    /// Applies ordered rounds from exact sibling depth labels captured before
+    /// the first round. A source label remains bound to its original row and
+    /// retained snapshot throughout the continuation, including when the
+    /// selected rows have equal pins. The reference does not define repeated
+    /// label-selected multi-parent folds; v1 validates every round against the
+    /// accumulated route and returns no partial result if one fails.
+    pub fn extend_sibling_terminal_pair_checkpoint_storm_rounds_from_depth_labels(
+        &self,
+        previous: &SiblingRebindResolution,
+        rounds: &[&[&[(&NestedPairDepthLabel, &[[PinnedDatabase; 2]])]]],
+    ) -> Result<SiblingRebindResolution, AttachmentError> {
+        let mut folded = previous.clone();
+        for round in rounds {
+            folded = self.extend_sibling_terminal_pair_checkpoint_storms_from_depth_labels(
+                &folded, round,
+            )?;
+        }
+        Ok(folded)
+    }
+
+    /// Applies rounds of label-selected checkpoint storms with one slot per
+    /// sibling route. `None` retains that row unchanged for the round; it is
+    /// not compacted away, so a later row plan cannot inherit its identity.
+    /// Present plans are validated against their original row and all earlier
+    /// labels are revalidated after each fold. The reference is silent on
+    /// paired closure omissions; v1 keeps row positions stable and returns no
+    /// partial result if any present plan fails.
+    pub fn extend_sibling_terminal_pair_checkpoint_storm_rounds_from_depth_labels_with_omissions(
+        &self,
+        previous: &SiblingRebindResolution,
+        rounds: &[&[Option<(&NestedPairDepthLabel, &[[PinnedDatabase; 2]])>]],
+    ) -> Result<SiblingRebindResolution, AttachmentError> {
+        let mut folded = previous.clone();
+        for round in rounds {
+            if round.len() != folded.routes.len() {
+                return Err(AttachmentError::RetainedSnapshotUnavailable);
+            }
+            let checkpoint_storms_by_row = round
+                .iter()
+                .enumerate()
+                .map(|(row, plan)| match plan {
+                    Some((label, replacements)) => {
+                        let route = folded
+                            .routes
+                            .get(row)
+                            .ok_or(AttachmentError::RetainedSnapshotUnavailable)?;
+                        let checkpoint = route.handoff_checkpoint_for_depth_label(label)?;
+                        Ok(vec![(checkpoint, *replacements)])
+                    }
+                    None => Ok(Vec::new()),
+                })
+                .collect::<Result<Vec<_>, AttachmentError>>()?;
+            let checkpoint_storm_rows = checkpoint_storms_by_row
+                .iter()
+                .map(|storms| {
+                    storms
+                        .iter()
+                        .map(|(checkpoint, replacements)| (checkpoint, *replacements))
+                        .collect::<Vec<_>>()
+                })
+                .collect::<Vec<_>>();
+            let checkpoint_storm_row_slices = checkpoint_storm_rows
+                .iter()
+                .map(Vec::as_slice)
+                .collect::<Vec<_>>();
+            folded = self.extend_sibling_terminal_pair_checkpoint_storms_from_siblings(
+                &folded,
+                &checkpoint_storm_row_slices,
+            )?;
+        }
+        Ok(folded)
+    }
+
+    /// Applies ordered rounds of depth-selected sibling checkpoint storms.
+    /// Each round contains one plan slice per sibling row, and its coordinates
+    /// are resolved against the result of the preceding round. The reference
+    /// is silent on composing multi-parent continuation rounds; v1 preserves
+    /// all earlier row-scoped labels and returns no partial result if any
+    /// round selects a missing depth or fails to fold.
+    pub fn extend_sibling_terminal_pair_checkpoint_storm_rounds_from_depths(
+        &self,
+        previous: &SiblingRebindResolution,
+        rounds: &[&[&[(usize, usize, &[[PinnedDatabase; 2]])]]],
+    ) -> Result<SiblingRebindResolution, AttachmentError> {
+        let mut folded = previous.clone();
+        for round in rounds {
+            folded = self.extend_sibling_terminal_pair_checkpoint_storms_from_depths(
+                &folded, round,
+            )?;
+        }
+        Ok(folded)
+    }
+
+    /// Rebinds each terminal pair in a storm from one saved checkpoint.
+    /// Every fold starts from the same exact nested pins and appends that
+    /// checkpoint route to retained history. Each emitted route receives its
+    /// own wave/depth label, and every earlier emitted label is checked after
+    /// each later fold. The source checkpoint must still match its original
+    /// wave/depth in `previous`; empty storms validate that identity too.
+    /// The reference is silent on checkpoint-rooted storm folds; v1 preserves
+    /// exact pins and ordering and returns no partial route if a replacement
+    /// fails.
+    pub fn extend_nested_terminal_pair_storm_from_checkpoint(
+        &self,
+        previous: &ReboundPathResolution,
+        checkpoint: &ReboundPathCheckpoint,
+        replacement_waves: &[[PinnedDatabase; 2]],
+    ) -> Result<ReboundPathResolution, AttachmentError> {
+        self.extend_nested_terminal_pair_checkpoint_storms(
+            previous,
+            &[(checkpoint, replacement_waves)],
+        )
+    }
+
+    /// Resolves independently rebound paths for sibling parent snapshots.
+    /// Each input plan is `(parent, replacements)`; results keep input order
+    /// and each route retains its own pre-rebind sessions. No partial batch is
+    /// returned if any sibling path fails. Where sibling event ordering is
+    /// unspecified, v1 resolves every path from its own exact pins.
+    pub fn resolve_sibling_rebind_paths(
+        &self,
+        paths: &[(&AttachedDatabaseSession, &[PinnedDatabase])],
+    ) -> Result<SiblingRebindResolution, AttachmentError> {
+        let routes = paths
+            .iter()
+            .map(|(parent, replacements)| {
+                self.resolve_nested_rebind_path(parent, replacements)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(SiblingRebindResolution { routes })
+    }
+
+    /// Applies one identical replacement path to every sibling parent while
+    /// retaining each parent's route snapshots independently. Results keep
+    /// parent order and are returned only when every sibling resolves.
+    pub fn resolve_sibling_rebind_wave(
+        &self,
+        parents: &[AttachedDatabaseSession],
+        replacements: &[PinnedDatabase],
+    ) -> Result<SiblingRebindResolution, AttachmentError> {
+        let paths = parents
+            .iter()
+            .map(|parent| (parent, replacements))
+            .collect::<Vec<_>>();
+        self.resolve_sibling_rebind_paths(&paths)
+    }
+
+    /// Extends independently selected sibling routes with another wave.
+    /// Every earlier snapshot remains in its route's history, and input order
+    /// is retained. A failed sibling extension returns no partial batch and
+    /// leaves all supplied results unchanged.
+    pub fn extend_sibling_rebind_paths(
+        &self,
+        paths: &[(&ReboundPathResolution, &[PinnedDatabase])],
+    ) -> Result<SiblingRebindResolution, AttachmentError> {
+        let routes = paths
+            .iter()
+            .map(|(previous, replacements)| {
+                self.extend_nested_rebind_path(previous, replacements)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(SiblingRebindResolution { routes })
+    }
+
+    /// Applies one ordered terminal-depth pair to each sibling route. Every
+    /// branch retains its own two pre-rebind snapshots, input order is stable,
+    /// and no partial sibling batch is returned on failure.
+    pub fn extend_sibling_terminal_pair_paths(
+        &self,
+        paths: &[(&ReboundPathResolution, &[PinnedDatabase; 2])],
+    ) -> Result<SiblingRebindResolution, AttachmentError> {
+        let routes = paths
+            .iter()
+            .map(|(previous, replacements)| {
+                self.extend_nested_terminal_pair(previous, (**replacements).clone())
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(SiblingRebindResolution { routes })
+    }
+
+    /// Continues sibling routes from their own retained snapshots with one
+    /// terminal-depth pair per route. `retained_session` is each route's
+    /// flattened history index; results preserve input order and prior waves.
+    /// The batch is returned only if every selected snapshot and closure is
+    /// available.
+    pub fn extend_sibling_terminal_pair_paths_from_retained(
+        &self,
+        paths: &[(&ReboundPathResolution, usize, &[PinnedDatabase; 2])],
+    ) -> Result<SiblingRebindResolution, AttachmentError> {
+        let routes = paths
+            .iter()
+            .map(|(previous, retained_session, replacements)| {
+                self.extend_nested_terminal_pair_from_retained(
+                    previous,
+                    *retained_session,
+                    (**replacements).clone(),
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(SiblingRebindResolution { routes })
+    }
+
+    /// Continues sibling routes from explicit retained-wave snapshots with
+    /// one terminal-depth pair per route. Results preserve sibling order and
+    /// each route's prior waves; the batch is atomic when any wave, snapshot,
+    /// replacement or closure is unavailable.
+    pub fn extend_sibling_terminal_pair_paths_from_waves(
+        &self,
+        paths: &[(&ReboundPathResolution, usize, usize, &[PinnedDatabase; 2])],
+    ) -> Result<SiblingRebindResolution, AttachmentError> {
+        let routes = paths
+            .iter()
+            .map(|(previous, wave, snapshot, replacements)| {
+                self.extend_nested_terminal_pair_from_wave(
+                    previous,
+                    *wave,
+                    *snapshot,
+                    (**replacements).clone(),
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(SiblingRebindResolution { routes })
+    }
+
+    /// Applies one identical terminal-depth pair to sibling routes selected
+    /// from retained waves. Each route resolves from its own exact snapshot,
+    /// keeps its displaced final endpoint and earlier waves, and preserves
+    /// input order. No partial sibling batch is returned on failure.
+    pub fn extend_sibling_terminal_pair_wave_from_waves(
+        &self,
+        paths: &[(&ReboundPathResolution, usize, usize)],
+        replacements: [PinnedDatabase; 2],
+    ) -> Result<SiblingRebindResolution, AttachmentError> {
+        let routes = paths
+            .iter()
+            .map(|(previous, wave, snapshot)| {
+                self.extend_nested_terminal_pair_from_wave(
+                    previous,
+                    *wave,
+                    *snapshot,
+                    replacements.clone(),
+                )
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+        Ok(SiblingRebindResolution { routes })
+    }
+
+    /// Applies one identical terminal-depth pair to the latest retained-wave
+    /// root of every sibling route. The reference is silent on continuing a
+    /// convergent post-storm pair; v1 uses the first snapshot in each latest
+    /// wave as that route's root, retains the displaced final session as its
+    /// own wave, and returns no partial batch if any branch fails.
+    pub fn extend_sibling_terminal_pair_wave(
+        &self,
+        previous: &SiblingRebindResolution,
+        replacements: [PinnedDatabase; 2],
+    ) -> Result<SiblingRebindResolution, AttachmentError> {
+        let routes = previous
+            .routes
+            .iter()
+            .map(|route| {
+                let latest_wave = route
+                    .retained_wave_lengths
+                    .len()
+                    .checked_sub(1)
+                    .ok_or(AttachmentError::RetainedSnapshotUnavailable)?;
+                self.extend_nested_terminal_pair_from_wave(
+                    route,
+                    latest_wave,
+                    0,
+                    replacements.clone(),
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(SiblingRebindResolution { routes })
+    }
+
+    /// Applies an ordered chain of shared terminal-depth pairs across sibling
+    /// routes. Each pair continues from the last snapshot in the latest wave,
+    /// allowing the next pair to follow the newly rebound closure one depth
+    /// farther. The reference does not define chained post-storm selection;
+    /// v1 uses this retained-wave tail and returns no partial chain if any
+    /// sibling or pair fails.
+    pub fn extend_sibling_terminal_pair_chain(
+        &self,
+        previous: &SiblingRebindResolution,
+        replacement_waves: &[[PinnedDatabase; 2]],
+    ) -> Result<SiblingRebindResolution, AttachmentError> {
+        let routes = previous
+            .routes
+            .iter()
+            .map(|route| self.extend_nested_terminal_pair_chain(route, replacement_waves))
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(SiblingRebindResolution { routes })
+    }
+
+    /// Repeats one identical rebind path across a completed sibling batch.
+    /// Each branch extends from its own terminal session and keeps its earlier
+    /// route snapshots; the returned batch preserves sibling order.
+    pub fn extend_sibling_rebind_wave(
+        &self,
+        previous: &SiblingRebindResolution,
+        replacements: &[PinnedDatabase],
+    ) -> Result<SiblingRebindResolution, AttachmentError> {
+        let paths = previous
+            .routes
+            .iter()
+            .map(|route| (route, replacements))
+            .collect::<Vec<_>>();
+        self.extend_sibling_rebind_paths(&paths)
+    }
+
+    /// Resolves a chain of exact aliases from a retained session snapshot.
+    /// Each edge is selected from the session opened at the preceding edge;
+    /// a failure leaves the caller's snapshot untouched.
+    pub fn resolve_nested_path(
+        &self,
+        parent: &AttachedDatabaseSession,
+        aliases: &[&str],
+    ) -> Result<AttachedDatabaseSession, AttachmentError> {
+        let mut current = parent.clone();
+        for alias in aliases {
+            current = self.resolve_nested_for_alias(&current, alias)?;
+        }
+        Ok(current)
+    }
+}
+
+/// The terminal session and route snapshots retained while resolving a
+/// sequence of nested alias rebinds.
+///
+/// `retained_sessions` is ordered from the original parent through each
+/// intermediate closure, with one snapshot recorded before each replacement.
+/// The final session is the closure reached after the last replacement.
+/// Cloned routes preserve lineage and retained-depth identities; separately
+/// resolved folds receive fresh identities for their new retained snapshots.
+#[derive(Clone, Debug)]
+pub struct ReboundPathResolution {
+    final_session: AttachedDatabaseSession,
+    retained_sessions: Vec<AttachedDatabaseSession>,
+    retained_wave_lengths: Vec<usize>,
+    route_identity: Arc<()>,
+    retained_snapshot_identities: Vec<Arc<()>>,
+}
+
+impl ReboundPathResolution {
+    /// The closure reached after all requested replacements.
+    pub fn final_session(&self) -> &AttachedDatabaseSession {
+        &self.final_session
+    }
+
+    /// Captures the route lineage and exact pins of the current terminal
+    /// closure. The reference leaves terminal identity across omitted nested
+    /// rebinds unspecified; v1 binds it to the originating route and terminal
+    /// pin set so an unchanged terminal remains verifiable across omissions.
+    pub fn terminal_route_identity(&self) -> NestedPairTerminalRouteIdentity {
+        NestedPairTerminalRouteIdentity::from_session(&self.route_identity, &self.final_session)
+    }
+
+    /// Verifies that this resolution still ends at the exact terminal route
+    /// captured earlier, including its lineage and ordered attached pins.
+    pub fn validate_terminal_route_identity(
+        &self,
+        identity: &NestedPairTerminalRouteIdentity,
+    ) -> Result<(), AttachmentError> {
+        if Arc::ptr_eq(&self.route_identity, &identity.route_identity)
+            && identity.matches_session(&self.final_session)
+        {
+            Ok(())
+        } else {
+            Err(AttachmentError::RetainedSnapshotUnavailable)
+        }
+    }
+
+    /// Snapshots retained before each replacement, in path order.
+    pub fn retained_sessions(&self) -> &[AttachedDatabaseSession] {
+        &self.retained_sessions
+    }
+
+    /// Snapshots retained by one resolution wave, in the order they were
+    /// captured. The reference fixes exact historical pins but does not define
+    /// how paired rebind snapshots are grouped; v1 keeps each call's boundary.
+    pub fn retained_wave(&self, wave: usize) -> Option<&[AttachedDatabaseSession]> {
+        let length = *self.retained_wave_lengths.get(wave)?;
+        let start = self.retained_wave_lengths[..wave].iter().sum::<usize>();
+        self.retained_sessions.get(start..start + length)
+    }
+
+    /// Labels one pre-rebind depth in a retained wave by its position, exact
+    /// pin route, and originating route lineage. The reference leaves labels
+    /// across folded storms unspecified; v1 rejects reuse from an independently
+    /// resolved route even when its pins and coordinates happen to be equal.
+    pub fn retained_depth_label(
+        &self,
+        wave: usize,
+        depth: usize,
+    ) -> Result<NestedPairDepthLabel, AttachmentError> {
+        let session = self.retained_snapshot_at_depth(wave, depth)?;
+        Ok(NestedPairDepthLabel::from_session(
+            wave,
+            depth,
+            &self.route_identity,
+            self.retained_snapshot_identity_at_depth(wave, depth)?,
+            session,
+        ))
+    }
+
+    fn retained_snapshot_at_depth(
+        &self,
+        wave: usize,
+        depth: usize,
+    ) -> Result<&AttachedDatabaseSession, AttachmentError> {
+        let index = self.retained_snapshot_index(wave, depth)?;
+        self.retained_sessions
+            .get(index)
+            .ok_or(AttachmentError::RetainedSnapshotUnavailable)
+    }
+
+    fn retained_snapshot_identity_at_depth(
+        &self,
+        wave: usize,
+        depth: usize,
+    ) -> Result<&Arc<()>, AttachmentError> {
+        let index = self.retained_snapshot_index(wave, depth)?;
+        self.retained_snapshot_identities
+            .get(index)
+            .ok_or(AttachmentError::RetainedSnapshotUnavailable)
+    }
+
+    fn retained_snapshot_index(
+        &self,
+        wave: usize,
+        depth: usize,
+    ) -> Result<usize, AttachmentError> {
+        let length = *self
+            .retained_wave_lengths
+            .get(wave)
+            .ok_or(AttachmentError::RetainedSnapshotUnavailable)?;
+        if depth >= length {
+            return Err(AttachmentError::RetainedSnapshotUnavailable);
+        }
+        let start = self.retained_wave_lengths[..wave]
+            .iter()
+            .try_fold(0usize, |total, length| total.checked_add(*length))
+            .ok_or(AttachmentError::RetainedSnapshotUnavailable)?;
+        let index = start
+            .checked_add(depth)
+            .ok_or(AttachmentError::RetainedSnapshotUnavailable)?;
+        Ok(index)
+    }
+
+    fn validate_depth_label(
+        &self,
+        label: &NestedPairDepthLabel,
+    ) -> Result<(), AttachmentError> {
+        self.retained_position_for_depth_label(label).map(|_| ())
+    }
+
+    fn retained_position_for_depth_label(
+        &self,
+        label: &NestedPairDepthLabel,
+    ) -> Result<(usize, usize), AttachmentError> {
+        if !Arc::ptr_eq(&self.route_identity, &label.route_identity) {
+            return Err(AttachmentError::RetainedSnapshotUnavailable);
+        }
+        let index = self
+            .retained_snapshot_identities
+            .iter()
+            .position(|identity| Arc::ptr_eq(identity, &label.snapshot_identity))
+            .ok_or(AttachmentError::RetainedSnapshotUnavailable)?;
+        let session = self
+            .retained_sessions
+            .get(index)
+            .ok_or(AttachmentError::RetainedSnapshotUnavailable)?;
+        if !label.matches_session(session) {
+            return Err(AttachmentError::RetainedSnapshotUnavailable);
+        }
+
+        let mut start = 0usize;
+        for (wave, length) in self.retained_wave_lengths.iter().copied().enumerate() {
+            let end = start
+                .checked_add(length)
+                .ok_or(AttachmentError::RetainedSnapshotUnavailable)?;
+            if index < end {
+                return Ok((wave, index - start));
+            }
+            start = end;
+        }
+        Err(AttachmentError::RetainedSnapshotUnavailable)
+    }
+
+    fn handoff_checkpoint_for_depth_label(
+        &self,
+        label: &NestedPairDepthLabel,
+    ) -> Result<ReboundPathCheckpoint, AttachmentError> {
+        let (wave, depth) = self.retained_position_for_depth_label(label)?;
+        self.handoff_checkpoint(wave, depth)
+    }
+
+    fn compact_retained_depth_pair(
+        &self,
+        labels: &[NestedPairDepthLabel; 2],
+    ) -> Result<Self, AttachmentError> {
+        let positions = labels
+            .iter()
+            .map(|label| self.retained_position_for_depth_label(label))
+            .collect::<Result<Vec<_>, _>>()?;
+        let indices = positions
+            .iter()
+            .map(|(wave, depth)| self.retained_snapshot_index(*wave, *depth))
+            .collect::<Result<Vec<_>, _>>()?;
+        if indices[0] == indices[1] {
+            return Err(AttachmentError::RetainedSnapshotUnavailable);
+        }
+
+        let retained_sessions = indices
+            .iter()
+            .map(|index| {
+                self.retained_sessions
+                    .get(*index)
+                    .cloned()
+                    .ok_or(AttachmentError::RetainedSnapshotUnavailable)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let retained_snapshot_identities = indices
+            .iter()
+            .map(|index| {
+                self.retained_snapshot_identities
+                    .get(*index)
+                    .cloned()
+                    .ok_or(AttachmentError::RetainedSnapshotUnavailable)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(Self {
+            final_session: self.final_session.clone(),
+            retained_sessions,
+            retained_wave_lengths: vec![2],
+            route_identity: self.route_identity.clone(),
+            retained_snapshot_identities,
+        })
+    }
+
+    /// Saves one exact handoff route for replay after later rebinding
+    /// cascades. The checkpoint owns the selected session, so extending or
+    /// restoring another route cannot change its primary or attached pins.
+    pub fn handoff_checkpoint(
+        &self,
+        wave: usize,
+        snapshot: usize,
+    ) -> Result<ReboundPathCheckpoint, AttachmentError> {
+        let handoff = self.retained_snapshot_at_depth(wave, snapshot)?.clone();
+        let depth_label = NestedPairDepthLabel::from_session(
+            wave,
+            snapshot,
+            &self.route_identity,
+            self.retained_snapshot_identity_at_depth(wave, snapshot)?,
+            &handoff,
+        );
+        Ok(ReboundPathCheckpoint {
+            handoff,
+            depth_label,
+        })
+    }
+
+    /// Takes ownership of the final closure and every retained route snapshot.
+    pub fn into_parts(self) -> (AttachedDatabaseSession, Vec<AttachedDatabaseSession>) {
+        (self.final_session, self.retained_sessions)
+    }
+}
+
+/// A retained wave/depth coordinate and stable identity for one exact pinned
+/// snapshot in a route lineage. Compaction can move the snapshot's current
+/// coordinate while labels captured before the move continue to identify it.
+#[derive(Clone, Debug)]
+pub struct NestedPairDepthLabel {
+    wave: usize,
+    depth: usize,
+    route_identity: Arc<()>,
+    snapshot_identity: Arc<()>,
+    primary: PackagePin,
+    attached: Vec<(String, PackagePin)>,
+}
+
+impl NestedPairDepthLabel {
+    fn from_session(
+        wave: usize,
+        depth: usize,
+        route_identity: &Arc<()>,
+        snapshot_identity: &Arc<()>,
+        session: &AttachedDatabaseSession,
+    ) -> Self {
+        Self {
+            wave,
+            depth,
+            route_identity: route_identity.clone(),
+            snapshot_identity: snapshot_identity.clone(),
+            primary: session.primary().pin().clone(),
+            attached: session
+                .attached()
+                .map(|(name, database)| (name.to_owned(), database.pin().clone()))
+                .collect(),
+        }
+    }
+
+    fn matches_session(&self, session: &AttachedDatabaseSession) -> bool {
+        self.primary.eq(session.primary().pin())
+            && self
+                .attached
+                .iter()
+                .map(|(name, pin)| (name.as_str(), pin))
+                .eq(session
+                    .attached()
+                    .map(|(name, database)| (name, database.pin())))
+    }
+
+    /// Index of the retained wave containing this depth.
+    pub fn wave(&self) -> usize {
+        self.wave
+    }
+
+    /// Pre-rebind snapshot index within the retained wave.
+    pub fn depth(&self) -> usize {
+        self.depth
+    }
+}
+
+impl PartialEq for NestedPairDepthLabel {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.route_identity, &other.route_identity)
+            && Arc::ptr_eq(&self.snapshot_identity, &other.snapshot_identity)
+            && self.primary == other.primary
+            && self.attached == other.attached
+    }
+}
+
+impl Eq for NestedPairDepthLabel {}
+
+/// An opaque identity for one resolution's terminal closure. Equality binds
+/// the complete pin route to its originating nested route lineage.
+#[derive(Clone, Debug)]
+pub struct NestedPairTerminalRouteIdentity {
+    route_identity: Arc<()>,
+    primary: PackagePin,
+    attached: Vec<(String, PackagePin)>,
+}
+
+impl NestedPairTerminalRouteIdentity {
+    fn from_session(route_identity: &Arc<()>, session: &AttachedDatabaseSession) -> Self {
+        Self {
+            route_identity: route_identity.clone(),
+            primary: session.primary().pin().clone(),
+            attached: session
+                .attached()
+                .map(|(alias, database)| (alias.to_owned(), database.pin().clone()))
+                .collect(),
+        }
+    }
+
+    fn matches_session(&self, session: &AttachedDatabaseSession) -> bool {
+        self.primary.eq(session.primary().pin())
+            && self
+                .attached
+                .iter()
+                .map(|(alias, pin)| (alias.as_str(), pin))
+                .eq(session
+                    .attached()
+                    .map(|(alias, database)| (alias, database.pin())))
+    }
+}
+
+impl PartialEq for NestedPairTerminalRouteIdentity {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.route_identity, &other.route_identity)
+            && self.primary == other.primary
+            && self.attached == other.attached
+    }
+}
+
+impl Eq for NestedPairTerminalRouteIdentity {}
+
+/// An immutable copy of a retained nested route, suitable for replay after a
+/// later route has been extended or rebound.
+#[derive(Clone, Debug)]
+pub struct ReboundPathCheckpoint {
+    handoff: AttachedDatabaseSession,
+    depth_label: NestedPairDepthLabel,
+}
+
+impl ReboundPathCheckpoint {
+    /// The exact primary and attached pins saved at this handoff.
+    pub fn handoff(&self) -> &AttachedDatabaseSession {
+        &self.handoff
+    }
+
+    /// The original retained wave/depth coordinate and exact nested pins.
+    pub fn depth_label(&self) -> &NestedPairDepthLabel {
+        &self.depth_label
+    }
+
+    fn validate_depth_identity(&self) -> Result<(), AttachmentError> {
+        if self.depth_label.matches_session(&self.handoff) {
+            Ok(())
+        } else {
+            Err(AttachmentError::RetainedSnapshotUnavailable)
+        }
+    }
+}
+
+/// Independently resolved sibling paths, kept in input order.
+#[derive(Clone, Debug, Default)]
+pub struct SiblingRebindResolution {
+    routes: Vec<ReboundPathResolution>,
+}
+
+impl SiblingRebindResolution {
+    /// The sibling results in the same order as their input plans.
+    pub fn routes(&self) -> &[ReboundPathResolution] {
+        &self.routes
+    }
+
+    /// Labels one retained depth from a sibling row without dropping that
+    /// row's route and snapshot identities. `route` is the row's index in the
+    /// input plan. The reference does not define multi-parent label selection;
+    /// v1 keeps each label bound to its source row even when another row has
+    /// matching pins and coordinates.
+    pub fn retained_depth_label(
+        &self,
+        route: usize,
+        wave: usize,
+        depth: usize,
+    ) -> Result<NestedPairDepthLabel, AttachmentError> {
+        self.routes
+            .get(route)
+            .ok_or(AttachmentError::RetainedSnapshotUnavailable)?
+            .retained_depth_label(wave, depth)
+    }
+
+    /// Saves one retained route from a sibling row without dropping that
+    /// row's route and snapshot identities. `route` is the row's index in the
+    /// input plan. The reference does not define multi-parent checkpoint
+    /// selection; v1 keeps each checkpoint bound to its source row even when
+    /// another row has matching pins and coordinates.
+    pub fn handoff_checkpoint(
+        &self,
+        route: usize,
+        wave: usize,
+        depth: usize,
+    ) -> Result<ReboundPathCheckpoint, AttachmentError> {
+        self.routes
+            .get(route)
+            .ok_or(AttachmentError::RetainedSnapshotUnavailable)?
+            .handoff_checkpoint(wave, depth)
+    }
+
+    /// Verifies that a checkpoint belongs to one retained sibling row.
+    /// Equal pins and wave/depth coordinates in another row do not transfer
+    /// identity. The reference does not define cross-row checkpoint reuse;
+    /// v1 accepts only the selected row's original route and snapshot token.
+    pub fn validate_handoff_checkpoint(
+        &self,
+        route: usize,
+        checkpoint: &ReboundPathCheckpoint,
+    ) -> Result<(), AttachmentError> {
+        checkpoint.validate_depth_identity()?;
+        self.routes
+            .get(route)
+            .ok_or(AttachmentError::RetainedSnapshotUnavailable)?
+            .validate_depth_label(&checkpoint.depth_label)
+    }
+
+    /// Takes ownership of the sibling results in input order.
+    pub fn into_routes(self) -> Vec<ReboundPathResolution> {
+        self.routes
+    }
 }
 
 /// A primary database and zero or more read-only, commit-pinned attachments.
@@ -344,6 +3055,28 @@ impl AttachedDatabaseSession {
         }
         self.attached.insert(name, database);
         Ok(())
+    }
+
+    /// Atomically replaces one attached alias with a new immutable pin and
+    /// returns the previous pin for later use as a retained closure root.
+    /// Matching is by the new pin's exact alias; sibling aliases are unchanged.
+    /// The alias must already be attached, and failures leave the session as-is.
+    pub fn rebind_database(
+        &mut self,
+        database: PinnedDatabase,
+    ) -> Result<PinnedDatabase, AttachmentError> {
+        let name = checked_name(database.pin.name.clone())?;
+        if name == "sys" {
+            return Err(AttachmentError::SystemDatabaseCannotAttach);
+        }
+        if name == self.primary.pin.name {
+            return Err(AttachmentError::DuplicateAttachment);
+        }
+        let current = self
+            .attached
+            .get_mut(&name)
+            .ok_or(AttachmentError::AttachmentNotFound)?;
+        Ok(std::mem::replace(current, database))
     }
 
     /// Detaches an optional database alias from subsequent session lookups.
@@ -640,6 +3373,7 @@ pub enum AttachmentError {
     PrimaryDatabaseCannotDetach,
     SystemDatabaseCannotDetach,
     AttachmentNotFound,
+    RetainedSnapshotUnavailable,
     Repository(RepositoryError),
     Project(ProjectLoadError),
 }
@@ -663,6 +3397,7 @@ impl fmt::Display for AttachmentError {
             Self::PrimaryDatabaseCannotDetach => "the primary database cannot be detached",
             Self::SystemDatabaseCannotDetach => "the system database cannot be detached",
             Self::AttachmentNotFound => "database attachment does not exist",
+            Self::RetainedSnapshotUnavailable => "retained route snapshot does not exist",
             Self::Repository(_) => "repository snapshot could not be read",
             Self::Project(_) => "pinned database source could not be loaded",
         })

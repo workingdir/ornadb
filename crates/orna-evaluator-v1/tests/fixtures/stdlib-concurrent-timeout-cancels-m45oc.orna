@@ -1,0 +1,4 @@
+concurrent.timeout(
+    () => { for item in 1..100000 { item }; 37 },
+    0.s
+)

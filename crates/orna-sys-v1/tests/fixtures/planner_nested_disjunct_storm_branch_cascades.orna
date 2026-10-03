@@ -1,0 +1,34 @@
+pub table PlannerNestedDisjunctStormBranchCascades(id: Int) {
+    first: Bool,
+    second: Bool,
+    third: Bool,
+    fourth: Bool,
+    fifth: Bool,
+    sixth: Bool,
+}
+pub fn first_storm() = PlannerNestedDisjunctStormBranchCascades
+    | take(80)
+    | take(40)
+    | filter(row => row.first && row.second)
+    | union(
+        PlannerNestedDisjunctStormBranchCascades
+            | take(80)
+            | take(40)
+            | filter(row => row.third && row.fourth)
+    );
+pub fn second_storm() = PlannerNestedDisjunctStormBranchCascades
+    | take(12)
+    | take(6)
+    | filter(row => row.first)
+    | union(
+        PlannerNestedDisjunctStormBranchCascades
+            | take(12)
+            | take(6)
+            | filter(row => row.third)
+            | union(
+                PlannerNestedDisjunctStormBranchCascades
+                    | take(12)
+                    | take(6)
+                    | filter(row => row.fifth)
+            )
+    );

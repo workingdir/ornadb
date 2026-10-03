@@ -1,0 +1,5 @@
+pub fn pin() {
+    let selector = "HEAD~10";
+    let historical = sys.database.as_of(sys.snapshot(selector));
+    historical.energy.daily
+}

@@ -1,0 +1,16 @@
+pub fn deep(flag: Bool): String {
+    "prefix {case flag {
+        true: {
+            case flag {
+                true 0
+                [[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[false]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]] if flag: {
+                    case flag {
+                        true: "deep match"
+                        false: "deep fallback"
+                    }
+                }
+            }
+        },
+        false: "outer fallback"
+    }} suffix"
+}

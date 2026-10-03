@@ -1,0 +1,176 @@
+{
+  "$id": "https://github.com/workingdir/ornadb/blob/main/api/sys.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Orna portable sys API artifact",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "title",
+    "language_version",
+    "sys_version",
+    "status",
+    "removed_names",
+    "singletons",
+    "opaque_identifiers",
+    "reference_aliases",
+    "value_types",
+    "enums",
+    "relations",
+    "functions",
+    "failure_codes",
+    "counts",
+    "source_of_truth"
+  ],
+  "properties": {
+    "title": { "const": "Orna portable sys API" },
+    "language_version": { "type": "string", "minLength": 1 },
+    "sys_version": { "type": "string", "minLength": 1 },
+    "status": { "const": "specification" },
+    "removed_names": {
+      "type": "object",
+      "propertyNames": { "pattern": "^sys\\." },
+      "additionalProperties": { "$ref": "#/$defs/removedName" }
+    },
+    "singletons": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/singleton" }
+    },
+    "opaque_identifiers": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/nonBlankString" }
+    },
+    "reference_aliases": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/referenceAlias" }
+    },
+    "value_types": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/valueType" }
+    },
+    "enums": {
+      "type": "object",
+      "propertyNames": { "pattern": "^sys\\." },
+      "additionalProperties": {
+        "type": "array",
+        "items": { "$ref": "#/$defs/nonBlankString" }
+      }
+    },
+    "relations": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/relation" }
+    },
+    "functions": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/function" }
+    },
+    "failure_codes": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/nonBlankString" }
+    },
+    "counts": { "$ref": "#/$defs/counts" },
+    "source_of_truth": { "$ref": "#/$defs/nonBlankString" }
+  },
+  "$defs": {
+    "nonBlankString": { "type": "string", "minLength": 1 },
+    "field": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "type"],
+      "properties": {
+        "name": { "$ref": "#/$defs/nonBlankString" },
+        "type": { "$ref": "#/$defs/nonBlankString" }
+      }
+    },
+    "singleton": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "type", "availability"],
+      "properties": {
+        "name": { "$ref": "#/$defs/nonBlankString" },
+        "type": { "$ref": "#/$defs/nonBlankString" },
+        "availability": { "$ref": "#/$defs/nonBlankString" }
+      }
+    },
+    "removedName": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["replacement", "diagnostic"],
+      "properties": {
+        "replacement": { "$ref": "#/$defs/nonBlankString" },
+        "diagnostic": { "$ref": "#/$defs/nonBlankString" }
+      }
+    },
+    "referenceAlias": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "target", "definition"],
+      "properties": {
+        "name": { "$ref": "#/$defs/nonBlankString" },
+        "target": { "$ref": "#/$defs/nonBlankString" },
+        "definition": { "$ref": "#/$defs/nonBlankString" }
+      }
+    },
+    "valueType": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "kind", "purpose", "type_parameters", "fields", "invariants"],
+      "properties": {
+        "name": { "$ref": "#/$defs/nonBlankString" },
+        "kind": { "$ref": "#/$defs/nonBlankString" },
+        "purpose": { "$ref": "#/$defs/nonBlankString" },
+        "type_parameters": { "type": "array", "items": { "$ref": "#/$defs/nonBlankString" } },
+        "fields": { "type": "array", "items": { "$ref": "#/$defs/field" } },
+        "invariants": { "type": "array", "items": { "$ref": "#/$defs/nonBlankString" } }
+      }
+    },
+    "relation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "kind", "grouped_handle", "reference_type", "availability", "purpose", "fields", "key", "key_fields", "writable"],
+      "properties": {
+        "name": { "$ref": "#/$defs/nonBlankString" },
+        "kind": { "const": "relation" },
+        "grouped_handle": { "$ref": "#/$defs/nonBlankString" },
+        "reference_type": { "$ref": "#/$defs/nonBlankString" },
+        "availability": { "$ref": "#/$defs/nonBlankString" },
+        "purpose": { "$ref": "#/$defs/nonBlankString" },
+        "fields": { "type": "array", "items": { "$ref": "#/$defs/field" } },
+        "key": { "$ref": "#/$defs/nonBlankString" },
+        "key_fields": { "type": "array", "items": { "$ref": "#/$defs/nonBlankString" } },
+        "writable": { "type": "boolean" },
+        "invariants": { "type": "array", "items": { "$ref": "#/$defs/nonBlankString" } }
+      }
+    },
+    "function": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "effect", "signature", "purpose"],
+      "properties": {
+        "name": { "$ref": "#/$defs/nonBlankString" },
+        "effect": { "enum": ["read", "invoke", "admin"] },
+        "signature": { "$ref": "#/$defs/nonBlankString" },
+        "purpose": { "$ref": "#/$defs/nonBlankString" },
+        "documentation": { "$ref": "#/$defs/nonBlankString" },
+        "contract": { "$ref": "#/$defs/nonBlankString" },
+        "preconditions": { "$ref": "#/$defs/nonBlankString" },
+        "ownership": { "$ref": "#/$defs/nonBlankString" },
+        "snapshot_rule": { "$ref": "#/$defs/nonBlankString" }
+      }
+    },
+    "counts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["singletons", "opaque_identifiers", "reference_aliases", "value_types", "enums", "relations", "functions", "failure_codes"],
+      "properties": {
+        "singletons": { "type": "integer", "minimum": 0 },
+        "opaque_identifiers": { "type": "integer", "minimum": 0 },
+        "reference_aliases": { "type": "integer", "minimum": 0 },
+        "value_types": { "type": "integer", "minimum": 0 },
+        "enums": { "type": "integer", "minimum": 0 },
+        "relations": { "type": "integer", "minimum": 0 },
+        "functions": { "type": "integer", "minimum": 0 },
+        "failure_codes": { "type": "integer", "minimum": 0 }
+      }
+    }
+  }
+}

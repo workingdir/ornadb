@@ -1,0 +1,25 @@
+pub table PlannerStormUnknownRebindLimitChainAncestry(id: Int) {
+    outer: Bool,
+    nested: Bool,
+    leaf: Bool,
+}
+
+pub fn unknown_rebind_limit_chain_ancestry() = PlannerStormUnknownRebindLimitChainAncestry
+    | take(96)
+    | union(
+        PlannerStormUnknownRebindLimitChainAncestry
+            | take(64)
+            | union(
+                PlannerStormUnknownRebindLimitChainAncestry | take(48) | filter(row => row.leaf),
+                PlannerStormUnknownRebindLimitChainAncestry | take(32) | filter(row => row.nested)
+            )
+            | take(48)
+            | filter(row => row.outer),
+        PlannerStormUnknownRebindLimitChainAncestry | take(24) | filter(row => row.nested)
+    )
+    | union(
+        PlannerStormUnknownRebindLimitChainAncestry
+            | take(24)
+            | filter(row => row.nested),
+        PlannerStormUnknownRebindLimitChainAncestry | take(12) | filter(row => row.outer)
+    );

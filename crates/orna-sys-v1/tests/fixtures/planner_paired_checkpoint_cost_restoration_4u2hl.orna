@@ -1,0 +1,7 @@
+use sys.query as query_ops;
+
+pub fn explain_checkpoint_compaction_costs(query: Query<Int>): sys.Plan =
+    query_ops.plan_hint(query);
+
+pub fn checkpoint_segment_pairing_policy(): Text =
+    "ordered paired checkpoint and segment identities feed branch-local cost restoration";

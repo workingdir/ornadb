@@ -1,0 +1,10 @@
+std.encoding.json.decode_with_options(
+    "\u{7b}\"answer\":42,\"label\":\"wire\",\"extra\":\u{7b}\"discard\":[1,2,3]\u{7d}\u{7d}",
+    as: CodecRecord,
+    ignore_unknown_fields: true
+).answer == 42
+&& std.encoding.json.decode_with_options(
+    "\u{7b}\"answer\":42,\"label\":\"wire\",\"extra\":\u{7b}\"discard\":[1,2,3]\u{7d}\u{7d}",
+    as: CodecRecord,
+    ignore_unknown_fields: true
+).label == "wire"

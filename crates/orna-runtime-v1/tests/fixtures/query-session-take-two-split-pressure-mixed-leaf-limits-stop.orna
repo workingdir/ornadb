@@ -1,0 +1,14 @@
+sys.Storage
+    | filter(storage => storage.id < 9)
+    | take(2)
+    | union(
+        sys.Storage
+            | filter(storage => storage.id >= 9)
+            | take(4)
+    )
+    | filter(storage => storage.id != 8)
+    | filter(storage => storage.id != 10)
+    | filter(storage => sys.Storage.lookup(storage.target).title == "later")
+    | take(2)
+    | count()
+    |? (failure => failure.code)

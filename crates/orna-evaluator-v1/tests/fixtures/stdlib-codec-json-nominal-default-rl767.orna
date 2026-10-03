@@ -1,0 +1,1 @@
+std.encoding.json.decode("\u{7b}\"answer\":42\u{7d}", as: CodecRecord).label == "fallback"

@@ -1,0 +1,69 @@
+pub fn factory_at(pin: sys.SnapshotRef) =
+    sys.database.as_of(pin).energy.factory;
+
+pub fn forwarded_factory(pin: sys.SnapshotRef) = factory_at(pin);
+pub fn chained_factory(pin: sys.SnapshotRef) = forwarded_factory(pin);
+
+pub fn terminal_at(root_pin: sys.SnapshotRef) =
+    (bridge_pin: sys.SnapshotRef) =>
+        (leaf_pin: sys.SnapshotRef) =>
+            (terminal_pin: sys.SnapshotRef) => {
+                root: chained_factory(root_pin),
+                bridge: chained_factory(bridge_pin)().read,
+                leaf: chained_factory(leaf_pin)().read,
+                terminal: chained_factory(terminal_pin)().read(),
+            };
+
+pub fn continuation_at(root_pin: sys.SnapshotRef) =
+    (bridge_pin: sys.SnapshotRef) =>
+        (leaf_pin: sys.SnapshotRef) =>
+            (terminal_pin: sys.SnapshotRef) => {
+                root: chained_factory(root_pin),
+                bridge: chained_factory(bridge_pin)().read,
+                leaf: chained_factory(leaf_pin)().read,
+                terminal: chained_factory(terminal_pin)().read(),
+                continuation: terminal_at(terminal_pin),
+            };
+
+// Restoring after paired storms must not make terminal identities interchangeable.
+pub fn paired_continuation_chain_storms_reject_mixed_lanes() {
+    let left_origin = continuation_at(sys.snapshot("HEAD~760"))(sys.snapshot("HEAD~720"))(sys.snapshot("HEAD~680"))(sys.snapshot("HEAD~640"));
+    let right_origin = continuation_at(sys.snapshot("HEAD~750"))(sys.snapshot("HEAD~710"))(sys.snapshot("HEAD~670"))(sys.snapshot("HEAD~630"));
+
+    let continuation_roots_saved = (left_origin.continuation, right_origin.continuation);
+    let continuation_roots_rolling = continuation_roots_saved;
+    continuation_roots_rolling = (terminal_at(sys.snapshot("HEAD~559")), terminal_at(sys.snapshot("HEAD~549")));
+    continuation_roots_rolling = (terminal_at(sys.snapshot("HEAD~558")), terminal_at(sys.snapshot("HEAD~548")));
+    continuation_roots_rolling = continuation_roots_saved;
+    let (left_continuation_root, right_continuation_root) = continuation_roots_rolling;
+
+    let continuation_bridges_saved = (
+        left_continuation_root(sys.snapshot("HEAD~600")),
+        right_continuation_root(sys.snapshot("HEAD~590")),
+    );
+    let continuation_bridges_rolling = continuation_bridges_saved;
+    continuation_bridges_rolling = (
+        left_continuation_root(sys.snapshot("HEAD~598")),
+        right_continuation_root(sys.snapshot("HEAD~588")),
+    );
+    continuation_bridges_rolling = continuation_bridges_saved;
+    let (left_continuation_bridge, right_continuation_bridge) = continuation_bridges_rolling;
+
+    let continuation_leaves_saved = (
+        left_continuation_bridge(sys.snapshot("HEAD~580")),
+        right_continuation_bridge(sys.snapshot("HEAD~570")),
+    );
+    let continuation_leaves_rolling = continuation_leaves_saved;
+    continuation_leaves_rolling = (
+        left_continuation_bridge(sys.snapshot("HEAD~578")),
+        right_continuation_bridge(sys.snapshot("HEAD~568")),
+    );
+    continuation_leaves_rolling = continuation_leaves_saved;
+    let (left_continuation_leaf, right_continuation_leaf) = continuation_leaves_rolling;
+    let left_after_storm = left_continuation_leaf(sys.snapshot("HEAD~560"));
+    let right_after_storm = right_continuation_leaf(sys.snapshot("HEAD~550"));
+
+    {
+        cross_pair: [left_after_storm.terminal, right_after_storm.terminal],
+    }
+}

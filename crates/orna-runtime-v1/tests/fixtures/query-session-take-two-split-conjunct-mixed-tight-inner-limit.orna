@@ -1,0 +1,7 @@
+sys.Storage
+    | filter(storage => storage.id != 8)
+    | take(2)
+    | filter(storage => sys.Storage.lookup(storage.target).title == "later")
+    | take(3)
+    | count()
+    |? (failure => failure.code)

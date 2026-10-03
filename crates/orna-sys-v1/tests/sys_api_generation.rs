@@ -1,14 +1,15 @@
 use orna_sys_v1::{
-    SystemEffect, SYSTEM_FUNCTION_DESCRIPTORS, system_api_json, system_function_descriptor,
+    SystemEffect, SYSTEM_FUNCTION_DESCRIPTORS, system_api_json, system_api_schema_json,
+    system_function_descriptor,
 };
+use sha2::{Digest, Sha256};
 use serde_json::Value;
 
 #[path = "../build_support.rs"]
 #[allow(dead_code)]
 mod build_support;
 
-const PUBLISHED_SYS_API: &str = include_str!("../../../api/sys.json");
-const PUBLISHED_SYS_SCHEMA: &str = include_str!("../../../api/sys.schema.json");
+const SYS_API_V1_SHA256: &str = "ce59a945835ec9a5b7af56d9760b1cea810a480e642fee53ceabdd618ba08747";
 const SYSTEM_API_FIXTURE: &str = include_str!("fixtures/system-api-annotation.orna");
 const GENERIC_TYPE_GRAPH_FIXTURE: &str = include_str!("fixtures/sys-generic-type-graph.orna");
 
@@ -35,16 +36,18 @@ fn assert_canonical_object_key_order(value: &Value) {
 
 #[test]
 fn published_artifact_is_the_deterministic_registry_projection() {
+    let generated = system_api_json();
+    let digest = format!("{:x}", Sha256::digest(generated.as_bytes()));
     assert_eq!(
-        system_api_json(),
-        PUBLISHED_SYS_API,
-        "regenerate api/sys.json with `cargo run -p orna-sys-v1 --example write_sys_api > api/sys.json`"
+        digest, SYS_API_V1_SHA256,
+        "the on-demand api/sys.json export matches the reviewed docs-enriched 1.0 artifact"
     );
 }
 
 #[test]
 fn published_json_schema_covers_the_generated_artifact_and_closed_type_graph() {
-    let schema: Value = serde_json::from_str(PUBLISHED_SYS_SCHEMA).expect("published JSON Schema");
+    let schema: Value =
+        serde_json::from_str(system_api_schema_json()).expect("embedded generated JSON Schema");
     let api: Value = serde_json::from_str(&system_api_json()).expect("generated system API JSON");
     let properties = schema["properties"].as_object().expect("schema root properties");
     let mut property_names = properties.keys().cloned().collect::<Vec<_>>();
@@ -75,7 +78,7 @@ fn published_json_schema_covers_the_generated_artifact_and_closed_type_graph() {
 
 #[test]
 fn every_portable_function_has_the_collected_runtime_descriptor() {
-    let api: Value = serde_json::from_str(PUBLISHED_SYS_API).expect("published sys API JSON");
+    let api: Value = serde_json::from_str(&system_api_json()).expect("generated sys API JSON");
     let functions = api["functions"].as_array().expect("function declarations");
 
     assert_eq!(functions.len(), SYSTEM_FUNCTION_DESCRIPTORS.len());
@@ -91,6 +94,23 @@ fn every_portable_function_has_the_collected_runtime_descriptor() {
         assert_eq!(descriptor.effect, effect, "effect for {name}");
         assert_eq!(descriptor.signature, function["signature"], "signature for {name}");
         assert_eq!(descriptor.purpose, function["purpose"], "purpose for {name}");
+        assert_eq!(
+            descriptor.documentation,
+            function["documentation"].as_str(),
+            "documentation for {name}"
+        );
+        assert_eq!(descriptor.contract, function["contract"].as_str(), "contract for {name}");
+        assert_eq!(
+            descriptor.preconditions,
+            function["preconditions"].as_str(),
+            "preconditions for {name}"
+        );
+        assert_eq!(descriptor.ownership, function["ownership"].as_str(), "ownership for {name}");
+        assert_eq!(
+            descriptor.snapshot_rule,
+            function["snapshot_rule"].as_str(),
+            "snapshot rule for {name}"
+        );
     }
 }
 
@@ -875,7 +895,7 @@ fn in_crate_orna_fixture_uses_a_published_collected_api_signature() {
         orna_syntax_v1::parse_module(SYSTEM_API_FIXTURE).is_ok(),
         "system API consumer fixture must parse"
     );
-    let api: Value = serde_json::from_str(PUBLISHED_SYS_API).expect("published system API JSON");
+    let api: Value = serde_json::from_str(&system_api_json()).expect("generated system API JSON");
     let metadata = api["functions"]
         .as_array()
         .unwrap()
@@ -957,7 +977,7 @@ fn generic_type_graph_fixture_resolves_through_the_published_inventory() {
         ]
     );
 
-    let mut api: Value = serde_json::from_str(PUBLISHED_SYS_API).expect("published system API JSON");
+    let mut api: Value = serde_json::from_str(&system_api_json()).expect("generated system API JSON");
     build_support::validate_api_document(&api).expect("published graph is closed before extension");
     let fixtures = [
         (
@@ -1018,7 +1038,7 @@ fn generic_type_graph_fixture_resolves_through_the_published_inventory() {
 
 #[test]
 fn generic_type_graph_rejects_misapplied_and_unbound_arguments() {
-    let generated: Value = serde_json::from_str(PUBLISHED_SYS_API).unwrap();
+    let generated: Value = serde_json::from_str(&system_api_json()).unwrap();
 
     let mut wrong_arity = generated.clone();
     let meta = wrong_arity["functions"]

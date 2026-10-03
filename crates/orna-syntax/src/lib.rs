@@ -5,11 +5,18 @@
 
 use std::{fmt, ops::Range};
 
+pub mod grammar;
 mod highlight;
+mod language_model;
 mod lexer;
 mod parser;
 
 pub use highlight::{HighlightKind, HighlightToken, KEYWORDS, SCALAR_TYPES, highlight};
+pub use language_model::{
+    IdentifierKey, LanguageDeclaration, LanguageDeclarationKind, LanguageModel, identifier_key,
+    identifier_spelling_matches, qualified_name_matches_keys, qualified_names_match,
+    source_name_parts,
+};
 
 /// A byte range in the input source.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1567,6 +1574,7 @@ impl fmt::Debug for SyntaxTree {
 pub struct Parse {
     syntax: SyntaxTree,
     diagnostics: Vec<Diagnostic>,
+    documentation_comments: Vec<(usize, SourceSlice)>,
     schemas: Vec<SchemaDeclaration>,
     object_types: Vec<ObjectTypeDeclaration>,
     enum_types: Vec<EnumTypeDeclaration>,
@@ -1588,6 +1596,18 @@ impl Parse {
     /// Return all lexical and syntactic diagnostics in source order.
     pub fn diagnostics(&self) -> &[Diagnostic] {
         &self.diagnostics
+    }
+
+    /// Returns the contiguous `--|` documentation comment attached to a name.
+    ///
+    /// Documentation comments are source trivia captured by this parse, so
+    /// editor features do not need a second comment scanner or source-text
+    /// heuristics. A blank line or ordinary comment breaks the attachment.
+    pub fn documentation_comment(&self, name: &NamePart) -> Option<&str> {
+        self.documentation_comments
+            .iter()
+            .find(|(start, _)| *start == name.span.start)
+            .map(|(_, documentation)| documentation.text.as_str())
     }
 
     /// Return successfully parsed schema declarations in source order.

@@ -1,0 +1,15 @@
+use std.math as math;
+use std.collection as collection;
+
+fn make_captured_closure(seed: Int) = delta => value => [
+    math.marker(),
+    collection.marker(),
+    math.marker() + collection.marker(),
+    std.math.marker(),
+    std.collection.marker(),
+    std.math.marker() + std.collection.marker(),
+    math.shift(seed + delta + value),
+    std.math.shift(seed + delta + value + 1),
+];
+
+pub fn value(): [Int] = make_captured_closure(3)(4)(107);

@@ -1,0 +1,1 @@
+collection_ops.window([1, 2], 3)
