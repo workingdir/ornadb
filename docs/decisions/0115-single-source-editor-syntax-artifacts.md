@@ -10,16 +10,21 @@ punctuation, language metadata, semantic-token order, and the mapping from each
 `HighlightKind` to its TextMate scope and optional semantic-token type. The
 parser-backed classifier remains authoritative for contextual token roles.
 
-Generate the TextMate grammar, VS Code language metadata, and semantic-token
-mapping from this metadata. Check in the generated files and require the
+Generate the TextMate grammar, VS Code language metadata, Tree-sitter keyword
+rules and captures, and Vim, Emacs, and Sublime lexical packages from this
+metadata. The structural Tree-sitter productions live in a template under
+`orna-syntax`; its keyword inventory is injected from the same shared source
+as the fallback grammars. Check in every generated file and require the
 generator's check mode to match them byte-for-byte. `orna-lsp` must use the
 shared table for its legend and token indices rather than maintain a duplicate
 mapping.
 
-Static TextMate highlighting is a lexical fallback. Since TextMate cannot use
-the parser's CST context, ordinary identifiers receive a generic scope there;
-clients that support LSP semantic tokens receive the classifier's contextual
-type, function, property, namespace, and variable roles.
+Static editor highlighting is a lexical fallback. Since these packages cannot
+use the Rust parser's CST context, ordinary identifiers receive generic scopes
+where their formats do not support Tree-sitter captures; clients that support
+LSP semantic tokens receive the classifier's contextual type, function,
+property, namespace, and variable roles. The Tree-sitter query adds contextual
+captures over its own syntax tree.
 
 ## Context and pragmatic choices
 
@@ -40,7 +45,9 @@ just editor-artifacts-check
 ```
 
 Focused fixture tests live inside `orna-syntax` and load `.orna` inputs with
-`include_str!`. No editor test reads from the reference checkout.
+`include_str!`. No editor test reads from the reference checkout. The drift
+check compares all package files and verifies Tree-sitter grammar JavaScript
+syntax with Node; it does not launch editor hosts.
 
 ## Consequences
 
