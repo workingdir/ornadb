@@ -761,3 +761,128 @@ fn dispatch_checks_each_precondition_and_stops_at_the_failing_position() {
         }
     }
 }
+
+#[test]
+fn dispatch_selector_conformance_matrix_covers_registry_routes_and_misses() {
+    let api: Value = serde_json::from_str(&system_api_json()).expect("generated sys API JSON");
+    let api_functions = api["functions"]
+        .as_array()
+        .expect("generated API function inventory");
+    let table = system_dispatch_table();
+    let typed_operation_ids = table
+        .operations()
+        .map(|contract| contract.id.as_str())
+        .collect::<BTreeSet<_>>();
+    let api_operation_ids = api_functions
+        .iter()
+        .map(|function| function["name"].as_str().expect("generated function name"))
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        typed_operation_ids, api_operation_ids,
+        "dispatch selectors and macro-generated public operations have identical coverage"
+    );
+
+    let mut exact_route_cases = 0;
+    for function in api_functions {
+        let operation_id = function["name"].as_str().expect("generated function name");
+        let contract = table.operation(operation_id).unwrap_or_else(|| {
+            panic!("missing typed route for generated operation {operation_id}")
+        });
+        let mut checked_preconditions = 0;
+        let mut invoked = false;
+        let result = table.dispatch(
+            operation_id,
+            |_| {
+                checked_preconditions += 1;
+                Ok(())
+            },
+            |selected| {
+                invoked = true;
+                assert!(
+                    std::ptr::eq(selected, contract),
+                    "selector `{operation_id}` resolves to its exact typed contract"
+                );
+                assert_eq!(selected.signature.source, function["signature"]);
+                if let Some(role_id) = &selected.role {
+                    let role = table
+                        .role(role_id.as_str())
+                        .unwrap_or_else(|| panic!("missing linked role for {operation_id}"));
+                    assert_eq!(selected.role_version, Some(role.version));
+                    assert!(
+                        role.operations.contains(&selected.id),
+                        "selected operation `{operation_id}` belongs to its selected role"
+                    );
+                }
+                Ok(selected.id.as_str().to_owned())
+            },
+        );
+        assert_eq!(
+            result,
+            Ok(orna_sys_v1::SystemDispatchResult::Returned(
+                operation_id.to_owned()
+            )),
+            "exact registry selector `{operation_id}` dispatches"
+        );
+        assert_eq!(checked_preconditions, contract.preconditions.len());
+        assert!(
+            invoked,
+            "exact registry selector `{operation_id}` invokes once"
+        );
+        exact_route_cases += 1;
+    }
+
+    let mut unregistered_selectors = BTreeSet::new();
+    for contract in table.operations() {
+        let operation_id = contract.id.as_str();
+        let separator = operation_id.find(['(', '<']);
+        let unregistered = match separator {
+            Some(index) if operation_id[index..].starts_with('(') => {
+                format!("{}(sys.conformance.Unregistered)", &operation_id[..index])
+            }
+            Some(index) => format!("{}<sys.conformance.Unregistered>", &operation_id[..index]),
+            None => format!("{operation_id}.conformance_missing"),
+        };
+        assert_ne!(unregistered, operation_id);
+        assert!(
+            orna_sys_v1::OperationId::new(unregistered.clone()).is_ok(),
+            "negative selector `{unregistered}` is syntactically valid"
+        );
+        assert!(
+            table.operation(&unregistered).is_none(),
+            "negative selector `{unregistered}` is absent from the typed registry"
+        );
+        unregistered_selectors.insert(unregistered);
+    }
+
+    let mut rejected_selector_cases = 0;
+    for operation_id in &unregistered_selectors {
+        let id = orna_sys_v1::OperationId::new(operation_id.clone()).unwrap();
+        let mut checked_preconditions = false;
+        let mut invoked = false;
+        assert_eq!(
+            table.dispatch(
+                operation_id,
+                |_| {
+                    checked_preconditions = true;
+                    Ok(())
+                },
+                |_| {
+                    invoked = true;
+                    Ok::<(), FailureCode>(())
+                },
+            ),
+            Err(ProviderDiagnostic::UnknownOperation(id)),
+            "unregistered selector `{operation_id}` is rejected without fallback"
+        );
+        assert!(!checked_preconditions);
+        assert!(!invoked);
+        rejected_selector_cases += 1;
+    }
+
+    assert_eq!(exact_route_cases, typed_operation_ids.len());
+    assert!(!unregistered_selectors.is_empty());
+    println!(
+        "dispatch_selector_conformance_matrix exact_routes={exact_route_cases} rejected_unregistered_selectors={rejected_selector_cases} total_cases={}",
+        exact_route_cases + rejected_selector_cases
+    );
+}

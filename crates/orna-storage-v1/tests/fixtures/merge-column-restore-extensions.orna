@@ -1,0 +1,17 @@
+{
+  id: "a",
+  name: "Prefix row",
+  city: "Oslo",
+}
+
+{
+  id: "a/child",
+  name: "Extension row",
+  city: "Bergen",
+}
+
+{
+  id: "ab",
+  name: "Boundary lookalike",
+  city: "Paris",
+}
