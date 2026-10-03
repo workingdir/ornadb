@@ -333,6 +333,23 @@ fn provider_buffer_bounds_polls_and_commits_real_source_values() {
 }
 
 #[test]
+fn provider_rejects_empty_nonterminal_page_without_watermark_progress() {
+    let mut provider = ProviderHarness::new([
+        ProviderHarness::page(vec![delivery("events", 1, 1, "A")], 1, &[]),
+        ProviderHarness::page(Vec::new(), 1, &[]),
+    ]);
+
+    let result = evaluate(
+        include_str!("fixtures/provider-stream-for-each.orna"),
+        &mut provider,
+    );
+    assert_eq!(result.unwrap_err().code(), "ORNA-EVAL-VALUE");
+    assert_eq!(provider.observed_values, ["A"]);
+    assert_eq!(provider.committed_checkpoints["events"], [1]);
+    assert_eq!(provider.requests.len(), 2);
+}
+
+#[test]
 fn provider_batch_commits_a_short_final_group_with_its_last_checkpoint() {
     let mut provider = ProviderHarness::new([
         ProviderHarness::page(
