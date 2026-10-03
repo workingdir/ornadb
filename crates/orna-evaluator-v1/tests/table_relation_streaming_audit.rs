@@ -1822,7 +1822,24 @@ fn paired_pagination_restores_keep_forked_cursor_chains_scoped() {
             "paired restore forks retain distinct fresh scopes: {scope:?}"
         );
     }
-    assert_eq!(source.cursors.len(), 42, "all one-to-five-page restore chains are traversed");
+    let depths = generations
+        .iter()
+        .flat_map(|(_, _, lane_depths)| lane_depths)
+        .copied()
+        .collect::<Vec<_>>();
+    let mut expected_cursors = Vec::new();
+    for (lane, depth) in depths.into_iter().enumerate() {
+        let (source_name, scope, _) = &source.lanes[lane];
+        expected_cursors.push((source_name.clone(), *scope, None));
+        for cursor in forked_chains[lane % 4].iter().take(depth - 1) {
+            expected_cursors.push((source_name.clone(), *scope, Some(cursor.clone())));
+        }
+    }
+    assert_eq!(
+        source.cursors,
+        expected_cursors,
+        "paired restore requests preserve the shared checkpoint and each scope-specific cursor tail"
+    );
     assert!(source.pending["View.Left"].is_empty());
     assert!(source.pending["View.Right"].is_empty());
 }
