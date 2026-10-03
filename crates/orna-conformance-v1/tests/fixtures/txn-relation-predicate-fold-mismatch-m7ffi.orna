@@ -1,0 +1,36 @@
+pub table Family(id: Int) { expected: Str, }
+pub table Branch(id: Int) { family_id: Int, }
+pub table Leaf(id: Int) { branch_id: Int, }
+pub table Proof(id: Int) { family_id: Int, branch_id: Int, leaf_id: Int, token: Str, }
+
+// A stale amber-family continuation must not admit the blue family's wrong token.
+assert every(Family, family => {
+    let family_id = family.id;
+    let family_token = family.expected;
+    let matches_family: fn({ id: Int, family_id: Int, branch_id: Int, leaf_id: Int, token: Str }): Bool = proof =>
+        proof.family_id == family_id && proof.token == family_token;
+    let branch_continuation: fn({ id: Int, family_id: Int }): Bool = branch => {
+        let branch_id = branch.id;
+        let leaf_continuation: fn({ id: Int, branch_id: Int }): Bool = leaf =>
+            leaf.branch_id != branch_id ||
+                exists(Proof, proof =>
+                    matches_family(proof) &&
+                        proof.branch_id == branch_id &&
+                        proof.leaf_id == leaf.id
+                );
+        every(Leaf, leaf_continuation)
+    };
+    every(Branch, branch =>
+        branch.family_id != family_id || branch_continuation(branch)
+    )
+});
+
+fn parent() {
+    Family.insert({ id: 1, expected: "amber" });
+    Family.insert({ id: 2, expected: "blue" });
+    Branch.insert({ id: 10, family_id: 1 });
+    Branch.insert({ id: 20, family_id: 2 });
+    Leaf.insert({ id: 100, branch_id: 10 });
+    Leaf.insert({ id: 200, branch_id: 20 });
+    Proof.insert({ id: 1000, family_id: 2, branch_id: 20, leaf_id: 200, token: "amber" });
+}
