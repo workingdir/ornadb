@@ -645,6 +645,8 @@ pub struct BranchMergePairedCheckpointRedoFoldSegmentRotationRestoreHandoffSlotS
     pub restore_ordinal: usize,
     /// Zero-based position of the compacted checkpoint chain in the batch.
     pub handoff_ordinal: usize,
+    /// Zero-based position of this checkpoint stream within its handoff.
+    pub stream_ordinal: usize,
     pub fold_ordinal: usize,
     pub order: u64,
     pub left: Option<CheckpointGeneration>,
@@ -2697,11 +2699,13 @@ pub fn restore_paired_checkpoint_redo_sparse_wal_merge_handoff_chains_preserving
 /// Each outer input is an independent restore batch, and each inner input is
 /// one compacted rotation handoff containing its checkpoint streams. The
 /// batch, handoff, fold, and order coordinates remain independent even when
-/// labels overlap. Every represented order consumes one exact directional
-/// segment pair; malformed ranges or pair counts are rejected. The known and
-/// observed checkpoint catalog is unioned, but gaps, omitted streams, and
-/// missing sides are not filled in. The reference is silent on this chained
-/// restore projection, so caller source order is the stable handoff rule.
+/// labels overlap. Repeated checkpoint streams within a handoff also retain
+/// their original stream ordinal, even when their fold and order labels match.
+/// Every represented order consumes one exact directional segment pair;
+/// malformed ranges or pair counts are rejected. The known and observed
+/// checkpoint catalog is unioned, but gaps, omitted streams, and missing
+/// sides are not filled in. The reference is silent on this chained restore
+/// projection, so caller source order is the stable handoff and stream rule.
 pub fn restore_paired_checkpoint_redo_sparse_segment_rotation_handoff_chains_preserving_fold_identity(
     known_checkpoint_ids: &[CheckpointId],
     restore_handoffs: &[Vec<Vec<BranchMergePairedCheckpointRedoFoldSegmentRotationCompactionSnapshot>>],
@@ -2724,9 +2728,10 @@ pub fn restore_paired_checkpoint_redo_sparse_segment_rotation_handoff_chains_pre
         let mut slots = Vec::new();
         for (restore_ordinal, batch) in restore_handoffs.iter().enumerate() {
             for (handoff_ordinal, handoff) in batch.iter().enumerate() {
-                for stream in handoff
+                for (stream_ordinal, stream) in handoff
                     .iter()
-                    .filter(|stream| stream.checkpoint_id == checkpoint_id)
+                    .enumerate()
+                    .filter(|(_, stream)| stream.checkpoint_id == checkpoint_id)
                 {
                     for run in &stream.runs {
                         if run.last_order < run.first_order {
@@ -2760,6 +2765,7 @@ pub fn restore_paired_checkpoint_redo_sparse_segment_rotation_handoff_chains_pre
                                 BranchMergePairedCheckpointRedoFoldSegmentRotationRestoreHandoffSlotSnapshot {
                                     restore_ordinal,
                                     handoff_ordinal,
+                                    stream_ordinal,
                                     fold_ordinal: run.fold_ordinal,
                                     order: run.first_order + offset as u64,
                                     left: run.left.clone(),
@@ -2777,6 +2783,7 @@ pub fn restore_paired_checkpoint_redo_sparse_segment_rotation_handoff_chains_pre
             (
                 slot.restore_ordinal,
                 slot.handoff_ordinal,
+                slot.stream_ordinal,
                 slot.fold_ordinal,
                 slot.order,
             )
