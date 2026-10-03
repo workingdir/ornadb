@@ -27,6 +27,28 @@ fn optional_text_value(value: Option<&str>) -> CanonicalValue {
     CanonicalValue::new(OvbRaw::Tag(60013, Box::new(OvbRaw::Array(fields)))).unwrap()
 }
 
+fn process_value(status: Option<i64>, stdout: Vec<u8>, stderr: Vec<u8>) -> CanonicalValue {
+    let status = match status {
+        Some(status) => OvbRaw::Tag(
+            60013,
+            Box::new(OvbRaw::Array(vec![
+                OvbRaw::Int(1.into()),
+                OvbRaw::Int(status.into()),
+            ])),
+        ),
+        None => OvbRaw::Tag(60013, Box::new(OvbRaw::Array(vec![OvbRaw::Int(0.into())]))),
+    };
+    CanonicalValue::new(OvbRaw::Tag(
+        60015,
+        Box::new(OvbRaw::Array(vec![
+            status,
+            OvbRaw::Bytes(stdout),
+            OvbRaw::Bytes(stderr),
+        ])),
+    ))
+    .unwrap()
+}
+
 #[test]
 fn process_and_environment_host_effects_require_a_host_effect_handler() {
     let mut session = AdmittedReplSession::with_reference_standard(Limits::default())
@@ -163,20 +185,11 @@ fn typed_sys_process_and_clock_bindings_execute_allowlisted_native_providers() {
     );
     assert_eq!(
         process_result,
-        Ok(Some(
-            CanonicalValue::new(orna_foundation_v1::OvbRaw::Array(vec![
-                orna_foundation_v1::OvbRaw::Tag(
-                    60013,
-                    Box::new(orna_foundation_v1::OvbRaw::Array(vec![
-                        orna_foundation_v1::OvbRaw::Int(1.into()),
-                        orna_foundation_v1::OvbRaw::Int(0.into()),
-                    ])),
-                ),
-                orna_foundation_v1::OvbRaw::Bytes(b"host-bound".to_vec()),
-                orna_foundation_v1::OvbRaw::Bytes(Vec::new()),
-            ]))
-            .expect("process tuple is canonical")
-        ))
+        Ok(Some(process_value(
+            Some(0),
+            b"host-bound".to_vec(),
+            Vec::new(),
+        )))
     );
     assert_eq!(
         session
@@ -260,20 +273,11 @@ fn base64_binary_input_survives_real_process_stdin_and_stdout() {
             include_str!("fixtures/stdlib-io-process-base64-stdin-i50o4.orna"),
             &mut bindings,
         ),
-        Ok(Some(
-            CanonicalValue::new(OvbRaw::Array(vec![
-                OvbRaw::Tag(
-                    60013,
-                    Box::new(OvbRaw::Array(vec![
-                        OvbRaw::Int(1.into()),
-                        OvbRaw::Int(0.into()),
-                    ])),
-                ),
-                OvbRaw::Bytes(vec![0, 1, 2, 3, 255]),
-                OvbRaw::Bytes(Vec::new()),
-            ]))
-            .unwrap()
-        ))
+        Ok(Some(process_value(
+            Some(0),
+            vec![0, 1, 2, 3, 255],
+            Vec::new(),
+        )))
     );
 }
 
@@ -302,20 +306,11 @@ fn base64_binary_input_is_preserved_on_both_process_output_pipes() {
             include_str!("fixtures/stdlib-io-process-codec-both-pipes-bwdq0.orna"),
             &mut bindings,
         ),
-        Ok(Some(
-            CanonicalValue::new(OvbRaw::Array(vec![
-                OvbRaw::Tag(
-                    60013,
-                    Box::new(OvbRaw::Array(vec![
-                        OvbRaw::Int(1.into()),
-                        OvbRaw::Int(0.into()),
-                    ])),
-                ),
-                OvbRaw::Bytes(bytes.clone()),
-                OvbRaw::Bytes(bytes),
-            ]))
-            .unwrap()
-        ))
+        Ok(Some(process_value(
+            Some(0),
+            bytes.clone(),
+            bytes,
+        )))
     );
 }
 
@@ -340,20 +335,11 @@ fn process_arguments_keep_shell_metacharacters_as_literal_text() {
             include_str!("fixtures/stdlib-io-process-literal-arguments-i50o4.orna"),
             &mut bindings,
         ),
-        Ok(Some(
-            CanonicalValue::new(OvbRaw::Array(vec![
-                OvbRaw::Tag(
-                    60013,
-                    Box::new(OvbRaw::Array(vec![
-                        OvbRaw::Int(1.into()),
-                        OvbRaw::Int(0.into()),
-                    ])),
-                ),
-                OvbRaw::Bytes(b"$HOME;$(must-not-run)".to_vec()),
-                OvbRaw::Bytes(Vec::new()),
-            ]))
-            .unwrap()
-        ))
+        Ok(Some(process_value(
+            Some(0),
+            b"$HOME;$(must-not-run)".to_vec(),
+            Vec::new(),
+        )))
     );
 }
 
@@ -381,45 +367,29 @@ fn process_child_environment_and_nonzero_status_are_exact_values() {
     let mut bindings = SysHostBindingRegistry::new(EnvironmentProvider::default())
         .with_process_provider(process);
 
+    let environment_result = session.submit_with_sys_host_bindings(
+        include_str!("fixtures/stdlib-io-process-explicit-environment-bwdq0.orna"),
+        &mut bindings,
+    );
+    assert!(
+        environment_result.is_ok(),
+        "explicit process environment failed: {}",
+        environment_result.as_ref().unwrap_err().code()
+    );
     assert_eq!(
-        session.submit_with_sys_host_bindings(
-            include_str!("fixtures/stdlib-io-process-explicit-environment-bwdq0.orna"),
-            &mut bindings,
-        ),
-        Ok(Some(
-            CanonicalValue::new(OvbRaw::Array(vec![
-                OvbRaw::Tag(
-                    60013,
-                    Box::new(OvbRaw::Array(vec![
-                        OvbRaw::Int(1.into()),
-                        OvbRaw::Int(0.into()),
-                    ])),
-                ),
-                OvbRaw::Bytes(b"ORNA_PROOF=isolated-child\n".to_vec()),
-                OvbRaw::Bytes(Vec::new()),
-            ]))
-            .unwrap()
-        ))
+        environment_result,
+        Ok(Some(process_value(
+            Some(0),
+            b"ORNA_PROOF=isolated-child\n".to_vec(),
+            Vec::new(),
+        )))
     );
     assert_eq!(
         session.submit_with_sys_host_bindings(
             include_str!("fixtures/stdlib-io-process-nonzero-status-bwdq0.orna"),
             &mut bindings,
         ),
-        Ok(Some(
-            CanonicalValue::new(OvbRaw::Array(vec![
-                OvbRaw::Tag(
-                    60013,
-                    Box::new(OvbRaw::Array(vec![
-                        OvbRaw::Int(1.into()),
-                        OvbRaw::Int(1.into()),
-                    ])),
-                ),
-                OvbRaw::Bytes(Vec::new()),
-                OvbRaw::Bytes(Vec::new()),
-            ]))
-            .unwrap()
-        ))
+        Ok(Some(process_value(Some(1), Vec::new(), Vec::new())))
     );
 }
 
