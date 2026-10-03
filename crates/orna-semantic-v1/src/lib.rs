@@ -19039,7 +19039,7 @@ fn checkpoint_paths_are_paired_boundaries(
     if left.len() != right.len() {
         return false;
     }
-    let mut sibling_record_field = None;
+    let mut has_sibling_record_path = false;
     let mut shared_tuple_depth = None;
     for (index, (left, right)) in left.iter().zip(right).enumerate() {
         if left == right {
@@ -19055,20 +19055,19 @@ fn checkpoint_paths_are_paired_boundaries(
                 SnapshotTopologyBoundary::RecordField(_)
             )
         ) {
-            if sibling_record_field.replace(index).is_some() {
+            if shared_tuple_depth.is_some() {
                 return false;
             }
+            has_sibling_record_path = true;
         } else {
             return false;
         }
     }
-    let (Some(sibling_record_field_index), Some(shared_tuple_depth_index)) =
-        (sibling_record_field, shared_tuple_depth)
-    else {
+    let Some(shared_tuple_depth_index) = shared_tuple_depth else {
         return false;
     };
-    sibling_record_field_index < shared_tuple_depth_index
-        && left[sibling_record_field_index + 1..shared_tuple_depth_index]
+    has_sibling_record_path
+        && left[..shared_tuple_depth_index]
             .iter()
             .all(|boundary| {
                 matches!(
