@@ -1,0 +1,6 @@
+fmt.boolean(true) == "true"
+&& fmt.boolean(false) == "false"
+&& parse.boolean("true") == Some(true)
+&& parse.boolean("false") == Some(false)
+&& parse.boolean("True") == null
+&& parse.boolean(" true") == null
