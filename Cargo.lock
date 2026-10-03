@@ -1430,13 +1430,7 @@ version = "1.0.0"
 dependencies = [
  "lsp-server",
  "lsp-types",
- "orna-compiler",
- "orna-core",
- "orna-semantic-v1",
- "orna-standard",
- "orna-syntax",
  "orna-syntax-v1",
- "orna-sys-v1",
  "serde_json",
 ]
 
