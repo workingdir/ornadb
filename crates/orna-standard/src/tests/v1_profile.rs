@@ -343,7 +343,6 @@ fn pinned_query_and_statistics_aggregates_accept_relation_inputs() {
     );
     assert_eq!(result_type("piped_average"), &optional_int);
 }
-
 #[test]
 fn pinned_query_plan_hint_exports_structured_plan() {
     let catalogue = reference_standard_catalogue_v1()
@@ -376,7 +375,6 @@ fn pinned_query_plan_hint_exports_structured_plan() {
     };
     assert!(matches!(result_type("plan_hint"), Type::Named(name) if name == "sys.Plan"));
 }
-
 #[test]
 fn pinned_calendar_arithmetic_source_typechecks_against_core() {
     let source = reference_standard_sources_v1()
