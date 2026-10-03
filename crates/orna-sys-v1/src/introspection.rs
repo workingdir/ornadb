@@ -284,7 +284,10 @@ impl DependencyGraph {
         if objects.len() > MAX_DEPENDENCY_OBJECTS {
             return Err(DependencyGraphError::TooManyObjects);
         }
-        if objects.iter().any(|object| invalid_reference(object.as_str())) {
+        if objects
+            .iter()
+            .any(|object| invalid_reference(object.as_str()))
+        {
             return Err(DependencyGraphError::InvalidObject);
         }
 
@@ -296,19 +299,15 @@ impl DependencyGraph {
             if !objects.contains(&edge.from) || !objects.contains(&edge.to) {
                 return Err(DependencyGraphError::UnknownEndpoint);
             }
-            if edge
-                .span
-                .as_ref()
-                .is_some_and(|span| {
-                    invalid_reference(span.file.as_str())
-                        || span.start_byte > span.end_byte
-                        || span.start_line == 0
-                        || span.start_column == 0
-                        || span.end_line == 0
-                        || span.end_column == 0
-                        || (span.start_line, span.start_column) > (span.end_line, span.end_column)
-                })
-            {
+            if edge.span.as_ref().is_some_and(|span| {
+                invalid_reference(span.file.as_str())
+                    || span.start_byte > span.end_byte
+                    || span.start_line == 0
+                    || span.start_column == 0
+                    || span.end_line == 0
+                    || span.end_column == 0
+                    || (span.start_line, span.start_column) > (span.end_line, span.end_column)
+            }) {
                 return Err(DependencyGraphError::InvalidSpan);
             }
             if edge
@@ -693,10 +692,13 @@ pub struct QueryJoinPairIdentityDescription {
 /// A correlated subquery that the resolver has already approved for
 /// decorrelation into a predicate join. The planner keeps the subquery and
 /// correlation identities on both the join and its input while cost ordering
-/// moves known inputs across sparse unknown-cost entries. ORNA does not define
-/// decorrelation eligibility or a subquery-specific cost model; this
-/// explain-only adapter uses the supplied pinned input statistics and the
-/// ordinary predicate-join estimate.
+/// moves known inputs across sparse unknown-cost entries. Its decorrelated
+/// anchor-fold identity additionally binds that input to the accumulated
+/// anchor side of the join, so separate sparse lateral anchors cannot share a
+/// fold identity. ORNA does not define decorrelation eligibility, a
+/// subquery-specific cost model, or this explain-only identity encoding; the
+/// adapter uses supplied pinned statistics and the ordinary predicate-join
+/// estimate.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct QueryDecorrelatedSubqueryDescription {
     pub identity: ObjectRef,
@@ -1471,9 +1473,7 @@ pub fn explain_query_with_disjunct_branch_limit_conjunct_cascade(
     {
         return Err(ExplainError::InvalidExpression);
     }
-    if disjunct_count.saturating_mul(conjunct_count_per_disjunct)
-        > MAX_PLAN_EXPRESSIONS as u64
-    {
+    if disjunct_count.saturating_mul(conjunct_count_per_disjunct) > MAX_PLAN_EXPRESSIONS as u64 {
         return Err(ExplainError::TooManyExpressions);
     }
     explain_query_with_predicate_pressure_and_branch_limits(
@@ -1636,9 +1636,7 @@ pub fn explain_query_with_input_limit_conjunct_disjunct_chain(
     if disjunct_count == 0 || conjunct_count_per_disjunct == 0 || query.predicate.is_none() {
         return Err(ExplainError::InvalidExpression);
     }
-    if disjunct_count.saturating_mul(conjunct_count_per_disjunct)
-        > MAX_PLAN_EXPRESSIONS as u64
-    {
+    if disjunct_count.saturating_mul(conjunct_count_per_disjunct) > MAX_PLAN_EXPRESSIONS as u64 {
         return Err(ExplainError::TooManyExpressions);
     }
     explain_query_with_predicate_pressure(
@@ -1770,9 +1768,7 @@ pub fn explain_query_with_input_limit_conjunct_disjunct_limit_conjunct_chain(
     {
         return Err(ExplainError::InvalidExpression);
     }
-    if disjunct_count.saturating_mul(conjunct_count_per_disjunct)
-        > MAX_PLAN_EXPRESSIONS as u64
-    {
+    if disjunct_count.saturating_mul(conjunct_count_per_disjunct) > MAX_PLAN_EXPRESSIONS as u64 {
         return Err(ExplainError::TooManyExpressions);
     }
     explain_query_with_predicate_pressure(
@@ -1878,7 +1874,10 @@ fn explain_query_with_predicate_pressure_and_branch_limits(
 fn disjunct_storm_cascade_shape_counts<'a>(
     storms: &'a [DisjunctStormCascadeDescription],
 ) -> Result<(usize, usize, Vec<&'a ExpressionRef>), ExplainError> {
-    let mut pending = storms.iter().map(|storm| (storm, 1usize)).collect::<Vec<_>>();
+    let mut pending = storms
+        .iter()
+        .map(|storm| (storm, 1usize))
+        .collect::<Vec<_>>();
     let mut operators = 0usize;
     let mut expressions = 0usize;
     let mut predicates = Vec::new();
@@ -1898,9 +1897,8 @@ fn disjunct_storm_cascade_shape_counts<'a>(
             operators = operators
                 .saturating_add(branch.nested_limits.len())
                 .saturating_add(branch.limit_rebinds.len());
-            expressions = expressions.saturating_add(
-                usize::try_from(branch.conjunct_count).unwrap_or(usize::MAX),
-            );
+            expressions = expressions
+                .saturating_add(usize::try_from(branch.conjunct_count).unwrap_or(usize::MAX));
             let mut previous_rebind_position = 0;
             for rebind in &branch.limit_rebinds {
                 if rebind.after_limit == 0
@@ -2063,7 +2061,11 @@ fn explain_query_core_with_subqueries(
             return Err(ExplainError::InvalidObject);
         }
         let matching_sources = usize::from(query.source == aggregate.source)
-            + query.joins.iter().filter(|join| join.source == aggregate.source).count();
+            + query
+                .joins
+                .iter()
+                .filter(|join| join.source == aggregate.source)
+                .count();
         if matching_sources != 1 {
             return Err(ExplainError::InvalidObject);
         }
@@ -2099,9 +2101,7 @@ fn explain_query_core_with_subqueries(
         let matching_joins = query
             .joins
             .iter()
-            .filter(|join| {
-                join.source == pair.right_source && join.predicate == pair.predicate
-            })
+            .filter(|join| join.source == pair.right_source && join.predicate == pair.predicate)
             .count();
         if left_source_count != 1 || matching_joins != 1 {
             return Err(ExplainError::InvalidObject);
@@ -2128,8 +2128,7 @@ fn explain_query_core_with_subqueries(
             || conjunct_count_per_disjunct.is_some())
             && query.predicate.is_none())
         || (!disjunct_storm_cascades.is_empty() && query.predicate.is_some())
-        || (!limits_between_disjunct_and_conjunct.is_empty()
-            && post_expansion_conjunct.is_none())
+        || (!limits_between_disjunct_and_conjunct.is_empty() && post_expansion_conjunct.is_none())
         || (post_expansion_conjunct.is_some() && conjunct_count.is_none())
         || (post_expansion_conjunct.is_none()
             && conjunct_count.is_some()
@@ -2158,7 +2157,12 @@ fn explain_query_core_with_subqueries(
         || query
             .source_statistics
             .iter()
-            .chain(query.joins.iter().filter_map(|join| join.statistics.as_ref()))
+            .chain(
+                query
+                    .joins
+                    .iter()
+                    .filter_map(|join| join.statistics.as_ref()),
+            )
             .filter_map(|statistics| statistics.mutable_branch.as_ref())
             .any(|branch| invalid_reference(&branch.name))
     {
@@ -2167,13 +2171,9 @@ fn explain_query_core_with_subqueries(
     if partial_indexes.len() > MAX_PLAN_NODES {
         return Err(ExplainError::TooManyNodes);
     }
-    if partial_indexes
-        .iter()
-        .any(|candidate| {
-            invalid_reference(candidate.table.as_str())
-                || invalid_reference(candidate.index.as_str())
-        })
-    {
+    if partial_indexes.iter().any(|candidate| {
+        invalid_reference(candidate.table.as_str()) || invalid_reference(candidate.index.as_str())
+    }) {
         return Err(ExplainError::InvalidObject);
     }
     let operator_bound = 1usize
@@ -2204,7 +2204,12 @@ fn explain_query_core_with_subqueries(
         .iter()
         .chain(query.projections.iter())
         .chain(query.ordering.iter().map(|ordering| &ordering.expression))
-        .chain(query.joins.iter().filter_map(|join| join.predicate.as_ref()))
+        .chain(
+            query
+                .joins
+                .iter()
+                .filter_map(|join| join.predicate.as_ref()),
+        )
         .chain(
             partial_indexes
                 .iter()
@@ -2213,10 +2218,16 @@ fn explain_query_core_with_subqueries(
         .chain(post_expansion_conjunct.iter().copied())
         .chain(disjunct_storms.iter().map(|storm| &storm.predicate))
         .chain(storm_cascade_predicates.iter().copied())
-        .chain(window_aggregates.iter().flat_map(|aggregate| {
-            [&aggregate.aggregate, &aggregate.frame_identity]
-        }))
-        .chain(join_pair_identities.iter().filter_map(|pair| pair.predicate.as_ref()))
+        .chain(
+            window_aggregates
+                .iter()
+                .flat_map(|aggregate| [&aggregate.aggregate, &aggregate.frame_identity]),
+        )
+        .chain(
+            join_pair_identities
+                .iter()
+                .filter_map(|pair| pair.predicate.as_ref()),
+        )
         .any(|expression| invalid_reference(expression.as_str()))
     {
         return Err(ExplainError::InvalidExpression);
@@ -2234,7 +2245,13 @@ fn explain_query_core_with_subqueries(
         )
         .saturating_add(usize::from(query.predicate.is_some()))
         .saturating_add(usize::from(post_expansion_conjunct.is_some()))
-        .saturating_add(query.joins.iter().filter(|join| join.predicate.is_some()).count())
+        .saturating_add(
+            query
+                .joins
+                .iter()
+                .filter(|join| join.predicate.is_some())
+                .count(),
+        )
         .saturating_add(disjunct_storms.iter().fold(0usize, |total, storm| {
             let stage = usize::try_from(
                 storm
@@ -2270,18 +2287,15 @@ fn explain_query_core_with_subqueries(
         query.source_statistics.as_ref(),
         window_aggregates,
     );
-    add_join_cost_fold_seed_details(
-        &mut operators[current].details,
-        &join_cost_fold_identity,
-    );
-    if let Some(window_identity) = query_window_pushdown_chain_identity(
-        &query.source,
-        window_aggregates,
-    ) {
+    add_join_cost_fold_seed_details(&mut operators[current].details, &join_cost_fold_identity);
+    if let Some(window_identity) =
+        query_window_pushdown_chain_identity(&query.source, window_aggregates)
+    {
         add_window_pushdown_chain_details(&mut operators[current].details, &window_identity);
     }
-    for (planned_position, (declared_position, join)) in
-        planned_query_join_order(&query.joins).into_iter().enumerate()
+    for (planned_position, (declared_position, join)) in planned_query_join_order(&query.joins)
+        .into_iter()
+        .enumerate()
     {
         let decorrelated_subquery = declared_position
             .checked_sub(declared_join_count)
@@ -2290,7 +2304,11 @@ fn explain_query_core_with_subqueries(
         let right_access = if let Some(candidate) = selected_partial_index {
             push_index_lookup(&mut operators, candidate, join.statistics.as_ref())
         } else {
-            push_scan(&mut operators, join.source.clone(), join.statistics.as_ref())
+            push_scan(
+                &mut operators,
+                join.source.clone(),
+                join.statistics.as_ref(),
+            )
         };
         let right = push_window_aggregates(
             &mut operators,
@@ -2354,6 +2372,14 @@ fn explain_query_core_with_subqueries(
             decorrelated_subquery,
             decorrelated_predicate_identity.as_deref(),
         );
+        let decorrelated_anchor_fold_id = decorrelated_subquery.map(|subquery| {
+            query_decorrelated_anchor_fold_identity(
+                &left_fold_identity,
+                &right_fold_identity,
+                subquery,
+                decorrelated_predicate_identity.as_deref(),
+            )
+        });
         if let Some(identity) = decorrelated_predicate_identity.as_deref() {
             for index in BTreeSet::from([right_access, right]) {
                 add_decorrelated_predicate_pushdown_details(
@@ -2362,12 +2388,18 @@ fn explain_query_core_with_subqueries(
                 );
             }
         }
+        if let Some(identity) = decorrelated_anchor_fold_id.as_deref() {
+            for index in BTreeSet::from([right_access, right]) {
+                add_decorrelated_anchor_fold_details(&mut operators[index].details, identity);
+            }
+        }
         let next_join_cost_fold_identity = query_join_cost_fold(
             &left_fold_identity,
             &right_fold_identity,
             join_pair_identity,
             paired_predicate_pushdown_identity.as_deref(),
             decorrelated_predicate_identity.as_deref(),
+            decorrelated_anchor_fold_id.as_deref(),
             cardinality,
             work,
             work_overflow,
@@ -2378,10 +2410,8 @@ fn explain_query_core_with_subqueries(
                 PlanDetail::Text(next_join_cost_fold_identity.clone()),
             );
         }
-        let mut details = BTreeMap::from([(
-            "strategy".to_owned(),
-            PlanDetail::Text("hash".to_owned()),
-        )]);
+        let mut details =
+            BTreeMap::from([("strategy".to_owned(), PlanDetail::Text("hash".to_owned()))]);
         details.insert(
             "declared_input_position".to_owned(),
             PlanDetail::Integer(
@@ -2407,16 +2437,16 @@ fn explain_query_core_with_subqueries(
                 PlanDetail::Text("0.1_no_histogram".to_owned()),
             );
         } else {
-            details.insert(
-                "join_type".to_owned(),
-                PlanDetail::Text("cross".to_owned()),
-            );
+            details.insert("join_type".to_owned(), PlanDetail::Text("cross".to_owned()));
         }
         if let Some(subquery) = decorrelated_subquery {
             add_decorrelated_subquery_details(&mut details, subquery);
         }
         if let Some(identity) = decorrelated_predicate_identity.as_deref() {
             add_decorrelated_predicate_pushdown_details(&mut details, identity);
+        }
+        if let Some(identity) = decorrelated_anchor_fold_id.as_deref() {
+            add_decorrelated_anchor_fold_details(&mut details, identity);
         }
         if let Some(pair_identity) = join_pair_identity {
             add_join_pair_identity_details(&mut details, pair_identity);
@@ -2724,9 +2754,7 @@ fn explain_query_core_with_subqueries(
         let mut details = BTreeMap::from([
             (
                 "selectivity_assumption".to_owned(),
-                PlanDetail::Text(
-                    "0.5_per_branch_conjunct_then_independent_disjuncts".to_owned(),
-                ),
+                PlanDetail::Text("0.5_per_branch_conjunct_then_independent_disjuncts".to_owned()),
             ),
             (
                 "disjunct_count".to_owned(),
@@ -2878,9 +2906,7 @@ fn explain_query_core_with_subqueries(
                 .collect::<Vec<_>>()
                 .join(",");
         let limit_chain_rebind_byte_cap_handoff_estimates_by_depth_text =
-            rebind_byte_cap_handoff_estimates_by_depth_text(
-                &byte_cap_handoff_estimates_by_depth,
-            );
+            rebind_byte_cap_handoff_estimates_by_depth_text(&byte_cap_handoff_estimates_by_depth);
         let limit_chain_rebind_byte_cap_handoff_route_records =
             rebind_byte_cap_handoff_route_records(&byte_cap_handoff_estimates_by_depth);
         // Derive both scoped handoff summaries from the serialized typed routes
@@ -3095,7 +3121,9 @@ fn explain_query_core_with_subqueries(
         // The reference names no standalone DISTINCT plan kind. Aggregate is
         // the existing 1.0 logical operator for duplicate elimination.
         let cardinality = scale_cardinality(current_cardinality, 1, 2);
-        let work = current_cardinality.rows.and_then(|rows| rows.checked_mul(2));
+        let work = current_cardinality
+            .rows
+            .and_then(|rows| rows.checked_mul(2));
         let mut details = BTreeMap::from([
             (
                 "operation".to_owned(),
@@ -3157,12 +3185,17 @@ fn explain_query_core_with_subqueries(
     let mut table_rows = BTreeMap::<ObjectRef, Option<u64>>::new();
     table_rows.insert(
         query.source.clone(),
-        query.source_statistics.as_ref().and_then(|stats| stats.estimated_rows),
+        query
+            .source_statistics
+            .as_ref()
+            .and_then(|stats| stats.estimated_rows),
     );
     for join in &query.joins {
         table_rows.insert(
             join.source.clone(),
-            join.statistics.as_ref().and_then(|stats| stats.estimated_rows),
+            join.statistics
+                .as_ref()
+                .and_then(|stats| stats.estimated_rows),
         );
     }
     for mutation in &query.mutations {
@@ -3181,16 +3214,10 @@ fn explain_query_core_with_subqueries(
             ),
         ]);
         if let Some(before) = before {
-            details.insert(
-                "table_rows_before".to_owned(),
-                PlanDetail::Integer(before),
-            );
+            details.insert("table_rows_before".to_owned(), PlanDetail::Integer(before));
         }
         if let Some(after) = after {
-            details.insert(
-                "table_rows_after".to_owned(),
-                PlanDetail::Integer(after),
-            );
+            details.insert("table_rows_after".to_owned(), PlanDetail::Integer(after));
         }
         if let Some(affected) = mutation.estimated_affected_rows {
             details.insert("affected_rows".to_owned(), PlanDetail::Integer(affected));
@@ -3276,8 +3303,7 @@ struct RebindByteCapHandoffEstimate {
     output_bytes: Option<u64>,
 }
 
-type RebindByteCapHandoffEstimatesByDepth =
-    BTreeMap<usize, Vec<RebindByteCapHandoffEstimate>>;
+type RebindByteCapHandoffEstimatesByDepth = BTreeMap<usize, Vec<RebindByteCapHandoffEstimate>>;
 
 fn source_cardinality(statistics: Option<&QuerySourceStatistics>) -> Cardinality {
     statistics.map_or_else(Cardinality::default, |statistics| Cardinality {
@@ -3327,9 +3353,9 @@ fn join_pair_identity_for_join<'a>(
     join: &QueryJoinDescription,
     pairs: &'a [QueryJoinPairIdentityDescription],
 ) -> Option<&'a QueryJoinPairIdentityDescription> {
-    pairs.iter().find(|pair| {
-        pair.right_source == join.source && pair.predicate == join.predicate
-    })
+    pairs
+        .iter()
+        .find(|pair| pair.right_source == join.source && pair.predicate == join.predicate)
 }
 
 fn add_join_pair_identity_details(
@@ -3545,10 +3571,7 @@ fn paired_predicate_pushdown_identity(
         &mut hash,
         pair.predicate.as_ref().map(ExpressionRef::as_str),
     );
-    hash_part(
-        &mut hash,
-        partial_index_pair_identity(candidate).as_bytes(),
-    );
+    hash_part(&mut hash, partial_index_pair_identity(candidate).as_bytes());
     format!("join-predicate-pair:{}", hex(&hash.finalize()))
 }
 
@@ -3581,11 +3604,46 @@ fn decorrelated_predicate_pushdown_identity(
         &mut hash,
         subquery.correlation_predicate.as_str().as_bytes(),
     );
+    hash_part(&mut hash, partial_index_pair_identity(candidate).as_bytes());
+    format!("decorrelated-pushdown:{}", hex(&hash.finalize()))
+}
+
+/// Binds a resolver-approved decorrelation to the sparse fold accumulated on
+/// its lateral anchor. The reference leaves explain identity encoding open;
+/// this domain-separated digest prevents equal child subqueries under distinct
+/// anchors from being reported as the same paired fold.
+fn query_decorrelated_anchor_fold_identity(
+    anchor_fold_identity: &str,
+    input_identity: &str,
+    subquery: &QueryDecorrelatedSubqueryDescription,
+    predicate_pushdown_identity: Option<&str>,
+) -> String {
+    let mut hash = Sha256::new();
+    hash.update(b"orna.sys.decorrelated-anchor-fold.v1\0");
+    hash_part(&mut hash, anchor_fold_identity.as_bytes());
+    hash_part(&mut hash, input_identity.as_bytes());
+    hash_part(&mut hash, subquery.identity.as_str().as_bytes());
+    hash_part(&mut hash, subquery.source.as_str().as_bytes());
     hash_part(
         &mut hash,
-        partial_index_pair_identity(candidate).as_bytes(),
+        subquery.correlation_predicate.as_str().as_bytes(),
     );
-    format!("decorrelated-pushdown:{}", hex(&hash.finalize()))
+    hash_optional_text(&mut hash, predicate_pushdown_identity);
+    format!("decorrelated-anchor-fold:{}", hex(&hash.finalize()))
+}
+
+fn add_decorrelated_anchor_fold_details(
+    details: &mut BTreeMap<String, PlanDetail>,
+    identity: &str,
+) {
+    details.insert(
+        "decorrelated_anchor_fold_identity".to_owned(),
+        PlanDetail::Text(identity.to_owned()),
+    );
+    details.insert(
+        "decorrelated_anchor_fold_pairing".to_owned(),
+        PlanDetail::Text("sparse_anchor_fold_and_resolved_subquery_input".to_owned()),
+    );
 }
 
 fn add_decorrelated_predicate_pushdown_details(
@@ -3668,10 +3726,7 @@ fn query_join_cost_input_identity(
         }
         if let Some(index) = selected_index {
             hash.update([1]);
-            hash_part(
-                &mut hash,
-                partial_index_pair_identity(index).as_bytes(),
-            );
+            hash_part(&mut hash, partial_index_pair_identity(index).as_bytes());
         } else {
             hash.update([0]);
         }
@@ -3686,6 +3741,7 @@ fn query_join_cost_fold(
     pair: Option<&QueryJoinPairIdentityDescription>,
     paired_predicate_pushdown_identity: Option<&str>,
     decorrelated_predicate_pushdown_identity: Option<&str>,
+    decorrelated_anchor_fold_identity: Option<&str>,
     cardinality: Cardinality,
     work: Option<u64>,
     work_overflow: bool,
@@ -3708,6 +3764,7 @@ fn query_join_cost_fold(
     }
     hash_optional_text(&mut hash, paired_predicate_pushdown_identity);
     hash_optional_text(&mut hash, decorrelated_predicate_pushdown_identity);
+    hash_optional_text(&mut hash, decorrelated_anchor_fold_identity);
     hash_optional_u64(&mut hash, cardinality.rows);
     hash_optional_u64(&mut hash, cardinality.bytes);
     hash_optional_u64(&mut hash, work);
@@ -3773,10 +3830,7 @@ fn query_window_pushdown_chain_identity(
     Some(format!("window-chain:{}", hex(&hash.finalize())))
 }
 
-fn add_window_pushdown_chain_details(
-    details: &mut BTreeMap<String, PlanDetail>,
-    identity: &str,
-) {
+fn add_window_pushdown_chain_details(details: &mut BTreeMap<String, PlanDetail>, identity: &str) {
     details.insert(
         "window_pushdown_chain_identity".to_owned(),
         PlanDetail::Text(identity.to_owned()),
@@ -4184,9 +4238,7 @@ fn rebind_byte_cap_handoff_estimates_by_depth_text(
         .join(";")
 }
 
-fn rebind_byte_cap_handoff_scopes_by_depth_text(
-    routes: &[PlanByteCapHandoffRoute],
-) -> String {
+fn rebind_byte_cap_handoff_scopes_by_depth_text(routes: &[PlanByteCapHandoffRoute]) -> String {
     let mut by_depth = BTreeMap::<usize, Vec<String>>::new();
     for route in routes {
         let input_bytes = route
@@ -4196,10 +4248,10 @@ fn rebind_byte_cap_handoff_scopes_by_depth_text(
             .output_bytes
             .map_or_else(|| "?".to_owned(), |bytes| bytes.to_string());
         let (_, output_scope) = route.scope_labels();
-        by_depth.entry(route.depth).or_default().push(format!(
-            "{}={input_bytes}>{output_bytes}",
-            output_scope
-        ));
+        by_depth
+            .entry(route.depth)
+            .or_default()
+            .push(format!("{}={input_bytes}>{output_bytes}", output_scope));
     }
     by_depth
         .into_iter()
@@ -4208,9 +4260,7 @@ fn rebind_byte_cap_handoff_scopes_by_depth_text(
         .join(";")
 }
 
-fn rebind_byte_cap_handoff_routes_by_depth_text(
-    routes: &[PlanByteCapHandoffRoute],
-) -> String {
+fn rebind_byte_cap_handoff_routes_by_depth_text(routes: &[PlanByteCapHandoffRoute]) -> String {
     let mut by_depth = BTreeMap::<usize, Vec<String>>::new();
     for route in routes {
         let input_bytes = route
@@ -4259,9 +4309,7 @@ fn byte_cap_scope_path_label(path: &[PlanByteCapScopeSegment]) -> String {
     scope
 }
 
-fn stabilize_rebind_byte_cap_handoff_routes(
-    estimates: &mut RebindByteCapHandoffEstimatesByDepth,
-) {
+fn stabilize_rebind_byte_cap_handoff_routes(estimates: &mut RebindByteCapHandoffEstimatesByDepth) {
     for handoffs in estimates.values_mut() {
         handoffs.sort_by(|left, right| {
             left.input_path
@@ -4377,13 +4425,15 @@ fn disjunct_storm_branch_cascade_cardinality_and_work(
                         });
                     overflowed |= rebound_overflowed;
                     match (work, rebound_work) {
-                        (Some(total), Some(rebound_work)) => match total.checked_add(rebound_work) {
-                            Some(total) => work = Some(total),
-                            None => {
-                                work = None;
-                                overflowed = true;
+                        (Some(total), Some(rebound_work)) => {
+                            match total.checked_add(rebound_work) {
+                                Some(total) => work = Some(total),
+                                None => {
+                                    work = None;
+                                    overflowed = true;
+                                }
                             }
-                        },
+                        }
                         (Some(_), None) => work = None,
                         (None, _) => {}
                     }
@@ -4391,18 +4441,19 @@ fn disjunct_storm_branch_cascade_cardinality_and_work(
                     branch_byte_scope_path = handoff_scope_path;
                     // Keep produced outputs distinct from cascade targets so later handoffs
                     // retain provenance even when their estimates are unknown.
-                    branch_byte_scope_path.push(
-                        PlanByteCapScopeSegment::RebindCascadeOutput {
-                            position: rebind_index + 1,
-                            index: cascade_index + 1,
-                        },
-                    );
+                    branch_byte_scope_path.push(PlanByteCapScopeSegment::RebindCascadeOutput {
+                        position: rebind_index + 1,
+                        index: cascade_index + 1,
+                    });
                 }
             }
         }
 
-        let (mut branch_output, branch_work) =
-            conjunctive_disjunction_cardinality_and_work(branch_cardinality, 1, branch.conjunct_count);
+        let (mut branch_output, branch_work) = conjunctive_disjunction_cardinality_and_work(
+            branch_cardinality,
+            1,
+            branch.conjunct_count,
+        );
         if branch_cardinality.rows.is_some() && branch_work.is_none() {
             overflowed = true;
         }
@@ -4510,9 +4561,7 @@ fn conjunctive_disjunction_rows(
 fn limit_cardinality(cardinality: Cardinality, limit: u64) -> Cardinality {
     let rows = cardinality.rows.map(|rows| rows.min(limit));
     let bytes = match (cardinality.rows, cardinality.bytes, rows) {
-        (Some(before), Some(bytes), Some(after)) if before > 0 => {
-            scale_count(bytes, after, before)
-        }
+        (Some(before), Some(bytes), Some(after)) if before > 0 => scale_count(bytes, after, before),
         (Some(0), Some(_), Some(_)) => Some(0),
         (_, bytes, _) => bytes,
     };
@@ -4558,11 +4607,8 @@ fn mutation_work(affected_rows: Option<u64>, write_bytes: Option<u64>) -> Option
 
 fn partial_scan_or_mutation_work_lower_bound(operator: &Operator) -> Option<u64> {
     let has_row_byte_work_model = operator.kind == PlanNodeKind::Scan
-        || (operator.kind == PlanNodeKind::Invoke
-            && operator.details.contains_key("mutation"));
-    if !has_row_byte_work_model
-        || operator.details.contains_key("estimated_work_overflow")
-    {
+        || (operator.kind == PlanNodeKind::Invoke && operator.details.contains_key("mutation"));
+    if !has_row_byte_work_model || operator.details.contains_key("estimated_work_overflow") {
         return None;
     }
 
@@ -4600,9 +4646,7 @@ fn mutated_table_rows(
 /// Statically known calls and reads are visible; non-executable type/import
 /// edges remain available from the dependency relation instead of being
 /// misrepresented as runtime work.
-pub fn explain_function(
-    function: &FunctionPlanDescription,
-) -> Result<ExplainedPlan, ExplainError> {
+pub fn explain_function(function: &FunctionPlanDescription) -> Result<ExplainedPlan, ExplainError> {
     if invalid_reference(function.snapshot.as_str()) {
         return Err(ExplainError::InvalidSnapshot);
     }
@@ -5036,7 +5080,10 @@ mod byte_cap_handoff_route_scope_tests {
                 },
                 "rebind_output9_10",
             ),
-            (PlanByteCapScopeSegment::NestedStorm { index: 11 }, "nested11"),
+            (
+                PlanByteCapScopeSegment::NestedStorm { index: 11 },
+                "nested11",
+            ),
             (
                 PlanByteCapScopeSegment::NestedStormOutput { index: 12 },
                 "nested_output12",
@@ -5062,13 +5109,8 @@ mod byte_cap_handoff_route_scope_tests {
             PlanByteCapScopeSegment::Rebind { position: 1 },
             PlanByteCapScopeSegment::Cascade { index: 1 },
         ]);
-        let mut stale_route = PlanByteCapHandoffRoute::from_typed_paths(
-            2,
-            input_path,
-            output_path,
-            None,
-            None,
-        );
+        let mut stale_route =
+            PlanByteCapHandoffRoute::from_typed_paths(2, input_path, output_path, None, None);
         stale_route.input_scope = "stale input scope".to_owned();
         stale_route.output_scope = "stale output scope".to_owned();
 
