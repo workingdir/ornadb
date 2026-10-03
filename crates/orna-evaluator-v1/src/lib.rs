@@ -3797,10 +3797,11 @@ impl Context<'_, '_> {
             return None;
         }
         let pipeline_relation = matches!(input, Some(Value::Relation(_)));
-        if input.is_some() && !pipeline_relation {
+        let relation_argument = relation_call_candidate(name, arguments, scope);
+        if input.is_some() && !pipeline_relation && !relation_argument {
             return None;
         }
-        if input.is_none() && !relation_call_candidate(name, arguments, scope) {
+        if input.is_none() && !relation_argument {
             return None;
         }
 
@@ -3814,12 +3815,28 @@ impl Context<'_, '_> {
             let ordered = relation_named_arguments(name, arguments, values, implicit)?;
             if name == "union" {
                 let mut union_operands = ordered.into_iter();
-                let (Some(Value::Relation(left)), Some(Value::Relation(right))) =
-                    (union_operands.next(), union_operands.next())
+                let (Some(left), Some(right)) = (union_operands.next(), union_operands.next())
                 else {
+                    return Err(error("ORNA-EVAL-ARGUMENT"));
+                };
+                let (Value::Relation(left), Value::Relation(right)) = (left, right) else {
                     return Err(error("ORNA-EVAL-TYPE"));
                 };
                 return Ok(Value::Relation(RelationPlan::union(left, right)));
+            }
+            if matches!(
+                name,
+                "chunk"
+                    | "flatten"
+                    | "partition"
+                    | "zip"
+                    | "zip_exact"
+                    | "group_by"
+                    | "split_when"
+                    | "rank"
+                    | "asof_join"
+            ) {
+                return self.collection_relation_operation(name, ordered, depth);
             }
             if name == "filter" {
                 let mut filter_arguments = ordered.into_iter();
@@ -3872,6 +3889,10 @@ impl Context<'_, '_> {
                     plan = plan.with_stage(RelationStage::Distinct);
                     Ok(Value::Relation(plan))
                 }
+                "unique" => {
+                    plan = plan.with_stage(RelationStage::Distinct);
+                    Ok(Value::Relation(plan))
+                }
                 "pairs" => {
                     plan = plan.with_stage(RelationStage::Pairs);
                     Ok(Value::Relation(plan))
@@ -3902,6 +3923,67 @@ impl Context<'_, '_> {
         })())
     }
 
+    fn collection_relation_operation(
+        &mut self,
+        name: &str,
+        mut values: Vec<Value>,
+        depth: usize,
+    ) -> Result<Value, EvaluationError> {
+        let collection_count = match name {
+            "zip" | "zip_exact" | "asof_join" => 2,
+            _ => 1,
+        };
+        if values.len() < collection_count {
+            return Err(error("ORNA-EVAL-ARGUMENT"));
+        }
+
+        let mut relation_kinds = Vec::with_capacity(collection_count);
+        for value in values.iter_mut().take(collection_count) {
+            match value {
+                Value::List(_) => relation_kinds.push(false),
+                Value::Relation(plan) => {
+                    relation_kinds.push(true);
+                    *value = Value::List(self.collect_relation_values(plan, depth + 1)?);
+                }
+                _ => return Err(error("ORNA-EVAL-TYPE")),
+            }
+        }
+
+        let relation_result = match name {
+            "zip" | "zip_exact" => {
+                if relation_kinds[0] != relation_kinds[1] {
+                    return Err(error("ORNA-EVAL-TYPE"));
+                }
+                relation_kinds[0]
+            }
+            // The result follows the left operand's container kind; the right
+            // side only supplies candidate rows to the as-of selector.
+            "asof_join" => relation_kinds[0],
+            _ => relation_kinds[0],
+        };
+
+        let result = self.collection(name, values, depth)?;
+        if !relation_result {
+            return Ok(result);
+        }
+        match result {
+            Value::List(rows) => Ok(Value::Relation(RelationPlan::from_values(rows))),
+            // `partition` has a scalar tuple result whose two components each
+            // preserve the source container kind.
+            Value::Tuple(parts) if name == "partition" && parts.len() == 2 => {
+                let mut relations = Vec::with_capacity(2);
+                for part in parts {
+                    let Value::List(rows) = part else {
+                        return Err(error("ORNA-EVAL-VALUE"));
+                    };
+                    relations.push(Value::Relation(RelationPlan::from_values(rows)));
+                }
+                Ok(Value::Tuple(relations))
+            }
+            _ => Err(error("ORNA-EVAL-VALUE")),
+        }
+    }
+
     fn for_each_bucket_group(
         &mut self,
         plan: &RelationPlan,
@@ -3927,6 +4009,7 @@ impl Context<'_, '_> {
             source: plan.source.clone(),
             source_identity: plan.source_identity,
             source_union: plan.source_union.clone(),
+            source_values: plan.source_values.clone(),
             stages: plan.stages[..bucket_index].to_vec(),
         };
         let suffix = &plan.stages[bucket_index + 1..];
@@ -3941,6 +4024,7 @@ impl Context<'_, '_> {
                 source: plan.source.clone(),
                 source_identity: plan.source_identity,
                 source_union: plan.source_union.clone(),
+                source_values: plan.source_values.clone(),
                 stages: plan.stages[..bucket_index + 1 + sort_pos].to_vec(),
             };
             let mut groups = Vec::new();
@@ -4392,6 +4476,16 @@ impl Context<'_, '_> {
             return Ok(());
         }
 
+        if let Some(values) = &plan.source_values {
+            for value in values.iter().cloned() {
+                self.step()?;
+                if !visit(self, value)? {
+                    return Ok(());
+                }
+            }
+            return Ok(());
+        }
+
         let mut after = None;
         loop {
             // Relation work has its own cancellation checkpoints. A plan
@@ -4603,6 +4697,7 @@ impl Context<'_, '_> {
             source: plan.source.clone(),
             source_identity: plan.source_identity,
             source_union: plan.source_union.clone(),
+            source_values: plan.source_values.clone(),
             stages: plan.stages[..sort_index].to_vec(),
         };
         let RelationStage::SortBy(key) = &plan.stages[sort_index] else {
@@ -4778,6 +4873,8 @@ impl Context<'_, '_> {
         if let Some((left, right)) = &plan.source_union {
             self.validate_relation_plan_sources(left)?;
             self.validate_relation_plan_sources(right)
+        } else if plan.source_values.is_some() {
+            Ok(())
         } else {
             self.effects
                 .as_deref_mut()
@@ -6339,33 +6436,26 @@ impl Context<'_, '_> {
                     Value::String(zone),
                     Value::String(ambiguous),
                 ],
+            ) => self.resolve_local_time(local, zone, ambiguous, None),
+            (
+                "resolve_local",
+                [
+                    Value::String(local),
+                    Value::String(zone),
+                    Value::String(ambiguous),
+                    gap,
+                ],
             ) => {
-                if !matches!(ambiguous.as_str(), "reject" | "earlier" | "later") {
-                    return Err(error("ORNA-EVAL-VALUE"));
-                }
-                self.step()?;
-                let local = parse_local_datetime(local).ok_or_else(|| error("ORNA-EVAL-VALUE"))?;
-                let zone = resolve_time_zone(zone).map_err(|_| error("ORNA-EVAL-VALUE"))?;
-                let instant = match zone
-                    .resolve_local(local)
-                    .map_err(|_| error("ORNA-EVAL-VALUE"))?
-                {
-                    LocalTimeResolution::Unique { instant, .. } => instant,
-                    LocalTimeResolution::Ambiguous { earlier, .. } if ambiguous == "earlier" => {
-                        earlier
-                    }
-                    LocalTimeResolution::Ambiguous { later, .. } if ambiguous == "later" => later,
-                    // A portable implementation cannot choose a machine-local
-                    // gap policy. Ambiguous times require an explicit choice.
-                    LocalTimeResolution::Ambiguous { .. }
-                    | LocalTimeResolution::Nonexistent { .. } => {
-                        return Err(error("ORNA-EVAL-VALUE"));
-                    }
+                let gap = match gap {
+                    Value::Null | Value::Option(None) => None,
+                    Value::String(gap) => Some(gap.as_str()),
+                    Value::Option(Some(inner)) => match inner.as_ref() {
+                        Value::String(gap) => Some(gap.as_str()),
+                        _ => return Err(error("ORNA-EVAL-TYPE")),
+                    },
+                    _ => return Err(error("ORNA-EVAL-TYPE")),
                 };
-                Ok(Value::Instant {
-                    unix_seconds: instant.unix_seconds,
-                    nanosecond: instant.nanosecond,
-                })
+                self.resolve_local_time(local, zone, ambiguous, gap)
             }
             (
                 "duration.compact.format"
@@ -6405,6 +6495,81 @@ impl Context<'_, '_> {
             ("offset_at" | "resolve_local", _) => Err(error("ORNA-EVAL-TYPE")),
             _ => Err(error("ORNA-EVAL-UNSUPPORTED")),
         }
+    }
+    fn resolve_local_time(
+        &mut self,
+        local_text: &str,
+        zone_name: &str,
+        ambiguous: &str,
+        gap_adjustment: Option<&str>,
+    ) -> Result<Value, EvaluationError> {
+        if !matches!(ambiguous, "reject" | "earlier" | "later")
+            || !matches!(
+                gap_adjustment,
+                None | Some("reject" | "shift_forward" | "shift_backward")
+            )
+        {
+            return Err(error("ORNA-EVAL-VALUE"));
+        }
+        self.step()?;
+        let local = parse_local_datetime(local_text).ok_or_else(|| error("ORNA-EVAL-VALUE"))?;
+        let zone = resolve_time_zone(zone_name).map_err(|_| error("ORNA-EVAL-VALUE"))?;
+        let instant = match zone
+            .resolve_local(local)
+            .map_err(|_| error("ORNA-EVAL-VALUE"))?
+        {
+            LocalTimeResolution::Unique { instant, .. } => instant,
+            LocalTimeResolution::Ambiguous { earlier, .. } if ambiguous == "earlier" => earlier,
+            LocalTimeResolution::Ambiguous { later, .. } if ambiguous == "later" => later,
+            LocalTimeResolution::Ambiguous { .. } => return Err(error("ORNA-EVAL-VALUE")),
+            LocalTimeResolution::Nonexistent { before, after } => {
+                let adjustment = match gap_adjustment {
+                    Some("shift_forward") => "shift_forward",
+                    Some("shift_backward") => "shift_backward",
+                    None | Some("reject") => return Err(error("ORNA-EVAL-VALUE")),
+                    _ => return Err(error("ORNA-EVAL-VALUE")),
+                };
+                let offset_before = zone
+                    .at(before)
+                    .map_err(|_| error("ORNA-EVAL-VALUE"))?
+                    .offset_seconds;
+                let offset_after = zone
+                    .at(after)
+                    .map_err(|_| error("ORNA-EVAL-VALUE"))?
+                    .offset_seconds;
+                let utc = resolve_time_zone("UTC").map_err(|_| error("ORNA-EVAL-VALUE"))?;
+                let LocalTimeResolution::Unique {
+                    instant: local_as_utc,
+                    ..
+                } = utc
+                    .resolve_local(local)
+                    .map_err(|_| error("ORNA-EVAL-VALUE"))?
+                else {
+                    return Err(error("ORNA-EVAL-VALUE"));
+                };
+                let offset = if adjustment == "shift_forward" {
+                    offset_before
+                } else {
+                    offset_after
+                };
+                let shifted = Instant::new(
+                    local_as_utc
+                        .unix_seconds
+                        .checked_sub(i64::from(offset))
+                        .ok_or_else(|| error("ORNA-EVAL-VALUE"))?,
+                    local.nanosecond,
+                )
+                .map_err(|_| error("ORNA-EVAL-VALUE"))?;
+                // Validate the shifted instant against the selected zone's
+                // supported range and transition table before returning it.
+                zone.at(shifted).map_err(|_| error("ORNA-EVAL-VALUE"))?;
+                shifted
+            }
+        };
+        Ok(Value::Instant {
+            unix_seconds: instant.unix_seconds,
+            nanosecond: instant.nanosecond,
+        })
     }
     fn base64(&mut self, name: &str, values: Vec<Value>) -> Result<Value, EvaluationError> {
         match (name, values.as_slice()) {
@@ -9601,7 +9766,11 @@ fn named_arguments(
         "replace" => &["value", "from", "to"],
         "normalise" => &["value", "form"],
         "offset_at" => &["instant", "zone"],
-        "resolve_local" => &["local", "zone", "ambiguous"],
+        "resolve_local" => match values.len() {
+            3 => &["local", "zone", "ambiguous"],
+            4 => &["local", "zone", "ambiguous", "gap"],
+            _ => return Err(error("ORNA-EVAL-UNSUPPORTED")),
+        },
         "duration.compact.format"
         | "duration.clock.format"
         | "duration.words.format"
@@ -10341,13 +10510,28 @@ fn is_relation_source(expression: &Expr) -> bool {
 }
 
 fn relation_call_candidate(
-    _name: &str,
+    name: &str,
     arguments: &[orna_syntax_v1::Argument],
     scope: &Scope,
 ) -> bool {
+    if matches!(name, "union" | "zip" | "zip_exact" | "asof_join") {
+        return arguments
+            .iter()
+            .filter(|argument| {
+                argument.name.as_deref().is_none_or(|name| {
+                    matches!(name, "left" | "right") || (name == "rows" && arguments.len() == 1)
+                })
+            })
+            .any(|argument| relation_expression_candidate(&argument.value, scope));
+    }
     let relation_argument = arguments
         .iter()
         .find(|argument| argument.name.as_deref() == Some("rows"))
+        .or_else(|| {
+            arguments
+                .iter()
+                .find(|argument| argument.name.as_deref() == Some("values"))
+        })
         .or_else(|| arguments.first());
     let Some(argument) = relation_argument else {
         return false;
@@ -10375,6 +10559,16 @@ fn relation_expression_candidate(expression: &Expr, scope: &Scope) -> bool {
             arguments
                 .iter()
                 .find(|argument| argument.name.as_deref() == Some("rows"))
+                .or_else(|| {
+                    arguments
+                        .iter()
+                        .find(|argument| argument.name.as_deref() == Some("values"))
+                })
+                .or_else(|| {
+                    arguments
+                        .iter()
+                        .find(|argument| argument.name.as_deref() == Some("left"))
+                })
                 .or_else(|| arguments.first())
                 .is_some_and(|argument| relation_expression_candidate(&argument.value, scope))
         }
@@ -10392,12 +10586,18 @@ fn relation_named_arguments(
         "filter" => &["rows", "predicate"],
         "map" | "project" | "flat_map" => &["rows", "transform"],
         "sort_by" => &["rows", "key"],
+        "chunk" => &["values", "size"],
+        "flatten" => &["values"],
+        "partition" | "split_when" => &["values", "predicate"],
+        "group_by" | "rank" => &["values", "key"],
+        "zip" | "zip_exact" => &["left", "right"],
+        "asof_join" => &["left", "right", "time", "by"],
         "bucket_by" => match values.len() {
             2 => &["rows", "period"],
             3 => &["rows", "period", "zone"],
             _ => return Err(error("ORNA-EVAL-ARGUMENT")),
         },
-        "distinct" | "pairs" => &["rows"],
+        "distinct" | "unique" | "pairs" => &["rows"],
         "union" => &["left", "right"],
         "take" | "drop" => &["rows", "count"],
         "window" => match values.len() {
@@ -11144,6 +11344,206 @@ mod tests {
             transfer: None,
             cancellation: None,
         }
+    }
+
+    fn evaluate_relation_collection_fixture(
+        source: &str,
+        bindings: &[(&str, Vec<Value>)],
+    ) -> Result<Value, EvaluationError> {
+        fn materialize(
+            context: &mut Context<'_, '_>,
+            value: Value,
+        ) -> Result<Value, EvaluationError> {
+            match value {
+                Value::Relation(plan) => {
+                    Ok(Value::List(context.collect_relation_values(&plan, 0)?))
+                }
+                Value::Tuple(parts) => Ok(Value::Tuple(
+                    parts
+                        .into_iter()
+                        .map(|part| materialize(context, part))
+                        .collect::<Result<Vec<_>, _>>()?,
+                )),
+                Value::List(values) => Ok(Value::List(
+                    values
+                        .into_iter()
+                        .map(|value| materialize(context, value))
+                        .collect::<Result<Vec<_>, _>>()?,
+                )),
+                value => Ok(value),
+            }
+        }
+
+        let parsed = parse_expression(source);
+        assert!(parsed.is_ok(), "{source}: {:?}", parsed.diagnostics);
+        let functions = Functions::new();
+        let mut context = test_context(&functions);
+        let mut scope = Scope(
+            bindings
+                .iter()
+                .map(|(name, values)| {
+                    (
+                        (*name).to_owned(),
+                        Value::Relation(RelationPlan::from_values(values.clone())),
+                    )
+                })
+                .collect(),
+            BTreeSet::new(),
+            BTreeSet::new(),
+            NominalDefinitions::new(),
+            BTreeSet::new(),
+        );
+        let value = context.evaluate(&parsed.value, &mut scope, 0)?;
+        materialize(&mut context, value)
+    }
+
+    #[test]
+    fn relation_collection_group_and_partition_return_computed_relation_rows() {
+        let ints = |values: &[i64]| {
+            values
+                .iter()
+                .map(|value| Value::Int(BigInt::from(*value)))
+                .collect::<Vec<_>>()
+        };
+        let grouped = evaluate_relation_collection_fixture(
+            include_str!("../tests/fixtures/relation-group-by-result-0re2w.orna"),
+            &[("rows", ints(&[31, 12, 22, 13, 33]))],
+        )
+        .expect("group_by computes a relation result");
+        assert_eq!(
+            grouped,
+            Value::List(vec![
+                Value::Tuple(vec![Value::Int(BigInt::from(1)), Value::List(ints(&[31]))]),
+                Value::Tuple(vec![
+                    Value::Int(BigInt::from(2)),
+                    Value::List(ints(&[12, 22])),
+                ]),
+                Value::Tuple(vec![
+                    Value::Int(BigInt::from(3)),
+                    Value::List(ints(&[13, 33])),
+                ]),
+            ])
+        );
+
+        let partitioned = evaluate_relation_collection_fixture(
+            include_str!("../tests/fixtures/relation-partition-result-0re2w.orna"),
+            &[("rows", ints(&[3, 2, 4, 1]))],
+        )
+        .expect("partition computes both result relations");
+        assert_eq!(
+            partitioned,
+            Value::Tuple(vec![Value::List(ints(&[2, 4])), Value::List(ints(&[3, 1]))])
+        );
+    }
+
+    #[test]
+    fn relation_collection_depth_operators_keep_real_values_and_order() {
+        let ints = |values: &[i64]| {
+            values
+                .iter()
+                .map(|value| Value::Int(BigInt::from(*value)))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            evaluate_relation_collection_fixture(
+                include_str!("../tests/fixtures/relation-chunk-result-0re2w.orna"),
+                &[("rows", ints(&[1, 2, 3]))],
+            )
+            .unwrap(),
+            Value::List(vec![Value::List(ints(&[1, 2])), Value::List(ints(&[3]))])
+        );
+        assert_eq!(
+            evaluate_relation_collection_fixture(
+                include_str!("../tests/fixtures/relation-flatten-result-0re2w.orna"),
+                &[(
+                    "rows",
+                    vec![Value::List(ints(&[1, 2])), Value::List(ints(&[3]))]
+                )],
+            )
+            .unwrap(),
+            Value::List(ints(&[1, 2, 3]))
+        );
+        let left = ints(&[1, 2]);
+        let right = ["a", "b", "c"]
+            .into_iter()
+            .map(|value| Value::String(value.into()))
+            .collect::<Vec<_>>();
+        let zipped = Value::List(vec![
+            Value::Tuple(vec![left[0].clone(), right[0].clone()]),
+            Value::Tuple(vec![left[1].clone(), right[1].clone()]),
+        ]);
+        assert_eq!(
+            evaluate_relation_collection_fixture(
+                include_str!("../tests/fixtures/relation-zip-result-0re2w.orna"),
+                &[("left", left.clone()), ("right", right.clone())],
+            )
+            .unwrap(),
+            zipped
+        );
+        assert_eq!(
+            evaluate_relation_collection_fixture(
+                include_str!("../tests/fixtures/relation-zip-exact-result-0re2w.orna"),
+                &[("left", left), ("right", right[..2].to_vec())],
+            )
+            .unwrap(),
+            zipped
+        );
+        assert_eq!(
+            evaluate_relation_collection_fixture(
+                include_str!("../tests/fixtures/relation-unique-result-0re2w.orna"),
+                &[("rows", ints(&[3, 1, 3, 2, 1]))],
+            )
+            .unwrap(),
+            Value::List(ints(&[3, 1, 2]))
+        );
+        assert_eq!(
+            evaluate_relation_collection_fixture(
+                include_str!("../tests/fixtures/relation-split-when-result-0re2w.orna"),
+                &[("rows", ints(&[1, 2, 3, 4]))],
+            )
+            .unwrap(),
+            Value::List(vec![
+                Value::List(ints(&[1])),
+                Value::List(ints(&[2, 3])),
+                Value::List(ints(&[4])),
+            ])
+        );
+        assert_eq!(
+            evaluate_relation_collection_fixture(
+                include_str!("../tests/fixtures/relation-rank-result-0re2w.orna"),
+                &[("rows", ints(&[3, 1, 2, 1]))],
+            )
+            .unwrap(),
+            Value::List(vec![
+                Value::Tuple(vec![
+                    Value::Int(BigInt::from(1)),
+                    Value::Int(BigInt::from(1))
+                ]),
+                Value::Tuple(vec![
+                    Value::Int(BigInt::from(1)),
+                    Value::Int(BigInt::from(1))
+                ]),
+                Value::Tuple(vec![
+                    Value::Int(BigInt::from(2)),
+                    Value::Int(BigInt::from(3))
+                ]),
+                Value::Tuple(vec![
+                    Value::Int(BigInt::from(3)),
+                    Value::Int(BigInt::from(4))
+                ]),
+            ])
+        );
+        assert_eq!(
+            evaluate_relation_collection_fixture(
+                include_str!("../tests/fixtures/relation-asof-result-0re2w.orna"),
+                &[("left", ints(&[10])), ("right", ints(&[9, 11]))],
+            )
+            .unwrap(),
+            Value::List(vec![Value::Tuple(vec![
+                Value::Int(BigInt::from(10)),
+                Value::Option(Some(Box::new(Value::Int(BigInt::from(9))))),
+            ])])
+        );
     }
 
     #[test]
