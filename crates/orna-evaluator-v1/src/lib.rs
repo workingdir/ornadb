@@ -636,6 +636,12 @@ pub struct PureFunction {
 /// Explicitly admitted named functions; no host or module lookup is performed.
 pub type Functions = BTreeMap<String, PureFunction>;
 
+/// Internal key for an import resolved relative to a captured module body.
+/// The separator cannot occur in a source-level Orna name.
+pub(crate) fn module_function_alias_key(namespace: &str, name: &str) -> String {
+    format!("{namespace}::{name}")
+}
+
 /// A payload-free, stable failure suitable for conformance adapters.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct EvaluationError {
@@ -6301,6 +6307,12 @@ impl Context<'_, '_> {
                 }
             } else if self.functions.contains_key(&name) {
                 return Some(name);
+            }
+            let module_alias = module_function_alias_key(namespace, &name);
+            if let Some(alias) = self.aliases.and_then(|aliases| aliases.get(&module_alias))
+                && self.functions.contains_key(alias)
+            {
+                return Some(alias.clone());
             }
         }
         if let Some(alias) = self.aliases.and_then(|aliases| aliases.get(&name))

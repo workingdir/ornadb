@@ -1,0 +1,2 @@
+use std.chain.leaf.{finish};
+pub fn transform(value: Int): Int = finish(value + 2);
