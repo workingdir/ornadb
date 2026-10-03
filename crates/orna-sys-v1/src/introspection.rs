@@ -2892,6 +2892,9 @@ fn explain_query_core_with_segment_rotation_chains(
     let mut paired_scoped_window_limit_restoration_fold: Option<
         QueryPairedScopedWindowLimitRestorationFold,
     > = None;
+    let mut paired_limit_aggregate_spill_restoration_fold: Option<
+        QueryPairedLimitAggregateSpillRestorationFold,
+    > = None;
     let mut paired_aggregate_spill_restoration_fold: Option<
         QueryPairedAggregateSpillRestorationFold,
     > = None;
@@ -3800,6 +3803,55 @@ fn explain_query_core_with_segment_rotation_chains(
                 ),
             );
         }
+        let paired_limit_aggregate_spill_restoration_pair_identity =
+            paired_join_limit_anchor_cascade_fold
+                .as_ref()
+                .zip(paired_aggregate_spill_restoration_fold.as_ref())
+                .map(|(limit_fold, aggregate_fold)| {
+                    query_paired_limit_aggregate_spill_restoration_pair_identity(
+                        limit_fold,
+                        aggregate_fold,
+                    )
+                });
+        let paired_limit_aggregate_spill_restoration_transition =
+            paired_join_limit_anchor_cascade_fold
+                .as_ref()
+                .zip(paired_aggregate_spill_restoration_fold.as_ref())
+                .map(|(limit_fold, aggregate_fold)| {
+                    query_paired_limit_aggregate_spill_restoration_transition(
+                        paired_limit_aggregate_spill_restoration_fold.as_ref(),
+                        limit_fold,
+                        aggregate_fold,
+                    )
+                });
+        if let (Some(pair_identity), Some(limit_fold), Some(aggregate_fold)) = (
+            paired_limit_aggregate_spill_restoration_pair_identity.as_deref(),
+            paired_join_limit_anchor_cascade_fold.as_ref(),
+            paired_aggregate_spill_restoration_fold.as_ref(),
+        ) {
+            paired_limit_aggregate_spill_restoration_fold =
+                Some(query_paired_limit_aggregate_spill_restoration_fold(
+                    paired_limit_aggregate_spill_restoration_fold.as_ref(),
+                    pair_identity,
+                    limit_fold,
+                    aggregate_fold,
+                ));
+        }
+        if let (Some(fold), Some(transition)) = (
+            paired_limit_aggregate_spill_restoration_fold.as_ref(),
+            paired_limit_aggregate_spill_restoration_transition,
+        ) {
+            let mut fold_nodes = BTreeSet::from([right_access, right]);
+            fold_nodes.extend(right_limit_operator_start..right_limit_operator_end);
+            fold_nodes.extend(right_window_operator_start..operators.len());
+            for index in fold_nodes {
+                add_paired_limit_aggregate_spill_restoration_fold_details(
+                    &mut operators[index].details,
+                    fold,
+                    transition,
+                );
+            }
+        }
         if let Some(identity) = paired_window_spill_anchor_fold_id.as_deref() {
             let mut spill_nodes = BTreeSet::from([right_access, right]);
             spill_nodes.extend(right_window_operator_start..operators.len());
@@ -4146,6 +4198,9 @@ fn explain_query_core_with_segment_rotation_chains(
             paired_aggregate_spill_restoration_fold
                 .as_ref()
                 .map(|fold| fold.identity.as_str()),
+            paired_limit_aggregate_spill_restoration_fold
+                .as_ref()
+                .map(|fold| fold.identity.as_str()),
             paired_window_compaction_spill_fold
                 .as_ref()
                 .map(|fold| fold.identity.as_str()),
@@ -4414,6 +4469,16 @@ fn explain_query_core_with_segment_rotation_chains(
         }
         if let Some(fold) = paired_aggregate_spill_restoration_fold.as_ref() {
             add_paired_aggregate_spill_restoration_fold_details(&mut details, fold);
+        }
+        if let (Some(fold), Some(transition)) = (
+            paired_limit_aggregate_spill_restoration_fold.as_ref(),
+            paired_limit_aggregate_spill_restoration_transition,
+        ) {
+            add_paired_limit_aggregate_spill_restoration_fold_details(
+                &mut details,
+                fold,
+                transition,
+            );
         }
         if let Some(identity) = paired_window_compaction_spill_pair_identity.as_deref() {
             add_paired_window_compaction_spill_pair_details(&mut details, identity);
@@ -7122,6 +7187,20 @@ struct QueryWindowSpillCascadeFold {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+struct QueryPairedLimitAggregateSpillRestorationFold {
+    identity: String,
+    pair_identity: String,
+    limit_fold_identity: String,
+    aggregate_restoration_fold_identity: String,
+    limit_pair_count: u64,
+    limit_stage_count: u64,
+    aggregate_pair_count: u64,
+    aggregate_stage_count: u64,
+    spill_pair_count: u64,
+    overflowed: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 struct QueryPairedAggregateSpillRestorationFold {
     identity: String,
     previous_identity: Option<String>,
@@ -7730,6 +7809,146 @@ fn add_paired_limit_aggregate_restoration_fold_details(
     );
     details.insert(
         "paired_limit_aggregate_restoration_overflowed".to_owned(),
+        PlanDetail::Boolean(fold.overflowed),
+    );
+}
+
+/// Combines the cumulative paired limit route with the latest sparse
+/// aggregate spill restoration fold. Either component can advance alone;
+/// sparse joins carry both component identities without changing the fold.
+fn query_paired_limit_aggregate_spill_restoration_pair_identity(
+    limit_fold: &QueryJoinLimitAnchorCascadeFold,
+    aggregate_fold: &QueryPairedAggregateSpillRestorationFold,
+) -> String {
+    let mut hash = Sha256::new();
+    hash.update(b"orna.sys.query-paired-limit-aggregate-spill-restoration-pair.v1\0");
+    hash_part(&mut hash, limit_fold.identity.as_bytes());
+    hash_part(&mut hash, aggregate_fold.identity.as_bytes());
+    format!(
+        "paired-limit-aggregate-spill-restoration-pair:{}",
+        hex(&hash.finalize())
+    )
+}
+
+fn query_paired_limit_aggregate_spill_restoration_fold(
+    previous: Option<&QueryPairedLimitAggregateSpillRestorationFold>,
+    pair_identity: &str,
+    limit_fold: &QueryJoinLimitAnchorCascadeFold,
+    aggregate_fold: &QueryPairedAggregateSpillRestorationFold,
+) -> QueryPairedLimitAggregateSpillRestorationFold {
+    if let Some(previous) = previous
+        && previous.limit_fold_identity == limit_fold.identity
+        && previous.aggregate_restoration_fold_identity == aggregate_fold.identity
+    {
+        return previous.clone();
+    }
+
+    let overflowed = limit_fold.overflowed || aggregate_fold.overflowed;
+    let mut hash = Sha256::new();
+    hash.update(b"orna.sys.query-paired-limit-aggregate-spill-restoration-fold.v1\0");
+    hash_optional_text(
+        &mut hash,
+        previous.map(|previous| previous.identity.as_str()),
+    );
+    hash_part(&mut hash, pair_identity.as_bytes());
+    hash_part(&mut hash, limit_fold.identity.as_bytes());
+    hash_part(&mut hash, aggregate_fold.identity.as_bytes());
+    hash.update(limit_fold.pair_count.to_be_bytes());
+    hash.update(limit_fold.stage_count.to_be_bytes());
+    hash.update(aggregate_fold.aggregate_pair_count.to_be_bytes());
+    hash.update(aggregate_fold.aggregate_stage_count.to_be_bytes());
+    hash.update(aggregate_fold.spill_pair_count.to_be_bytes());
+    hash.update([u8::from(overflowed)]);
+
+    QueryPairedLimitAggregateSpillRestorationFold {
+        identity: format!(
+            "paired-limit-aggregate-spill-restoration-fold:{}",
+            hex(&hash.finalize())
+        ),
+        pair_identity: pair_identity.to_owned(),
+        limit_fold_identity: limit_fold.identity.clone(),
+        aggregate_restoration_fold_identity: aggregate_fold.identity.clone(),
+        limit_pair_count: limit_fold.pair_count,
+        limit_stage_count: limit_fold.stage_count,
+        aggregate_pair_count: aggregate_fold.aggregate_pair_count,
+        aggregate_stage_count: aggregate_fold.aggregate_stage_count,
+        spill_pair_count: aggregate_fold.spill_pair_count,
+        overflowed,
+    }
+}
+
+fn query_paired_limit_aggregate_spill_restoration_transition(
+    previous: Option<&QueryPairedLimitAggregateSpillRestorationFold>,
+    limit_fold: &QueryJoinLimitAnchorCascadeFold,
+    aggregate_fold: &QueryPairedAggregateSpillRestorationFold,
+) -> &'static str {
+    let limit_advanced = previous.is_none_or(|previous| {
+        previous.limit_fold_identity != limit_fold.identity
+    });
+    let aggregate_advanced = previous.is_none_or(|previous| {
+        previous.aggregate_restoration_fold_identity != aggregate_fold.identity
+    });
+    match (limit_advanced, aggregate_advanced) {
+        (true, true) => "advanced_limit_and_aggregate_restoration",
+        (true, false) => "advanced_limit_identity",
+        (false, true) => "advanced_aggregate_restoration",
+        (false, false) => "carried_across_sparse_input",
+    }
+}
+
+fn add_paired_limit_aggregate_spill_restoration_fold_details(
+    details: &mut BTreeMap<String, PlanDetail>,
+    fold: &QueryPairedLimitAggregateSpillRestorationFold,
+    transition: &str,
+) {
+    details.insert(
+        "paired_limit_aggregate_spill_restoration_fold_identity".to_owned(),
+        PlanDetail::Text(fold.identity.clone()),
+    );
+    details.insert(
+        "paired_limit_aggregate_spill_restoration_pair_identity".to_owned(),
+        PlanDetail::Text(fold.pair_identity.clone()),
+    );
+    details.insert(
+        "paired_limit_aggregate_spill_restoration_pairing".to_owned(),
+        PlanDetail::Text(
+            "paired_limit_anchor_cascade_with_sparse_aggregate_spill_restoration".to_owned(),
+        ),
+    );
+    details.insert(
+        "paired_limit_aggregate_spill_restoration_transition".to_owned(),
+        PlanDetail::Text(transition.to_owned()),
+    );
+    details.insert(
+        "paired_limit_aggregate_spill_restoration_limit_fold_identity".to_owned(),
+        PlanDetail::Text(fold.limit_fold_identity.clone()),
+    );
+    details.insert(
+        "paired_limit_aggregate_spill_restoration_aggregate_fold_identity".to_owned(),
+        PlanDetail::Text(fold.aggregate_restoration_fold_identity.clone()),
+    );
+    details.insert(
+        "paired_limit_aggregate_spill_restoration_limit_pair_count".to_owned(),
+        PlanDetail::Integer(fold.limit_pair_count),
+    );
+    details.insert(
+        "paired_limit_aggregate_spill_restoration_limit_stage_count".to_owned(),
+        PlanDetail::Integer(fold.limit_stage_count),
+    );
+    details.insert(
+        "paired_limit_aggregate_spill_restoration_aggregate_pair_count".to_owned(),
+        PlanDetail::Integer(fold.aggregate_pair_count),
+    );
+    details.insert(
+        "paired_limit_aggregate_spill_restoration_aggregate_stage_count".to_owned(),
+        PlanDetail::Integer(fold.aggregate_stage_count),
+    );
+    details.insert(
+        "paired_limit_aggregate_spill_restoration_spill_pair_count".to_owned(),
+        PlanDetail::Integer(fold.spill_pair_count),
+    );
+    details.insert(
+        "paired_limit_aggregate_spill_restoration_overflowed".to_owned(),
         PlanDetail::Boolean(fold.overflowed),
     );
 }
@@ -9591,6 +9810,7 @@ fn query_join_cost_fold(
     paired_scoped_window_compaction_fold_identity: Option<&str>,
     paired_window_spill_cascade_fold_identity: Option<&str>,
     paired_aggregate_spill_restoration_fold_identity: Option<&str>,
+    paired_limit_aggregate_spill_restoration_fold_identity: Option<&str>,
     paired_window_compaction_spill_fold_identity: Option<&str>,
     paired_limit_aggregate_restoration_fold_identity: Option<&str>,
     paired_scoped_window_limit_restoration_fold_identity: Option<&str>,
@@ -9642,6 +9862,10 @@ fn query_join_cost_fold(
     hash_optional_text(
         &mut hash,
         paired_aggregate_spill_restoration_fold_identity,
+    );
+    hash_optional_text(
+        &mut hash,
+        paired_limit_aggregate_spill_restoration_fold_identity,
     );
     hash_optional_text(&mut hash, paired_window_compaction_spill_fold_identity);
     hash_optional_text(
