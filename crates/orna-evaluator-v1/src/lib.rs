@@ -1949,11 +1949,23 @@ impl Value {
                     Raw::Bool(upper_inclusive),
                 ])),
             ),
-            Self::List(values) | Self::Tuple(values) => Raw::Array(
+            Self::List(values) => Raw::Array(
                 values
                     .into_iter()
                     .map(Value::raw)
                     .collect::<Result<_, _>>()?,
+            ),
+            Self::Tuple(values) if values.is_empty() => {
+                Raw::Tag(60014, Box::new(Raw::Array(Vec::new())))
+            }
+            Self::Tuple(values) => Raw::Tag(
+                60015,
+                Box::new(Raw::Array(
+                    values
+                        .into_iter()
+                        .map(Value::raw)
+                        .collect::<Result<_, _>>()?,
+                )),
             ),
             // The finite stream's source identity and digest remain in the
             // live evaluator value; the canonical boundary exposes its real
@@ -1976,16 +1988,27 @@ impl Value {
                 )
             }
             Self::Record(values) => {
-                // OVB map keys are ordered by their canonical text encoding:
-                // text length first, then bytewise lexical order.
-                let mut fields = values.into_iter().collect::<Vec<_>>();
-                fields.sort_by(|(left, _), (right, _)| {
-                    left.len().cmp(&right.len()).then_with(|| left.cmp(right))
-                });
+                // OVB orders map keys by complete deterministic encodings.
+                // Keep the comparator tied to that rule, including CBOR head
+                // length transitions and multi-byte Unicode field names.
+                let mut fields = values
+                    .into_iter()
+                    .map(|(key, value)| {
+                        if !key.nfc().eq(key.chars()) {
+                            return Err(error("ORNA-EVAL-VALUE"));
+                        }
+                        let encoded_key = CanonicalValue::new(Raw::Text(key.clone()))
+                            .map_err(|_| error("ORNA-EVAL-VALUE"))?
+                            .encode()
+                            .map_err(|_| error("ORNA-EVAL-VALUE"))?;
+                        Ok((encoded_key, key, value))
+                    })
+                    .collect::<Result<Vec<_>, EvaluationError>>()?;
+                fields.sort_by(|(left, _, _), (right, _, _)| left.cmp(right));
                 Raw::Map(
                     fields
                         .into_iter()
-                        .map(|(key, value)| value.raw().map(|value| (Raw::Text(key), value)))
+                        .map(|(_, key, value)| value.raw().map(|value| (Raw::Text(key), value)))
                         .collect::<Result<_, _>>()?,
                 )
             }
@@ -2088,6 +2111,20 @@ impl Value {
                     .collect::<Result<Vec<_>, _>>()
                     .map(Self::List)
             }
+            Raw::Tag(60015, boxed) => {
+                let Raw::Array(values) = boxed.as_ref() else {
+                    return Err(error("ORNA-EVAL-VALUE"));
+                };
+                if values.is_empty() {
+                    return Err(error("ORNA-EVAL-VALUE"));
+                }
+                context.items(values.len())?;
+                values
+                    .iter()
+                    .map(|value| Self::from_raw(value, context, depth + 1))
+                    .collect::<Result<Vec<_>, _>>()
+                    .map(Self::Tuple)
+            }
             Raw::Map(values) => {
                 context.items(values.len())?;
                 let mut record = BTreeMap::new();
@@ -2095,6 +2132,9 @@ impl Value {
                     let Raw::Text(key) = key else {
                         return Err(error("ORNA-EVAL-UNSUPPORTED"));
                     };
+                    if !key.nfc().eq(key.chars()) {
+                        return Err(error("ORNA-EVAL-VALUE"));
+                    }
                     context.string(key.clone())?;
                     if record
                         .insert(key.clone(), Self::from_raw(value, context, depth + 1)?)
@@ -5382,14 +5422,14 @@ impl Context<'_, '_> {
     ) -> Result<Value, EvaluationError> {
         self.items(arguments.len() + usize::from(input.is_some()))?;
         let mut supplied_input = input;
-        let mut witness = None;
+        let mut witness: Option<CodecTypeWitness> = None;
         let mut ignore_unknown_fields = false;
         let mut saw_options = false;
         let mut positional = usize::from(supplied_input.is_some());
         for argument in arguments {
             match argument.name.as_deref() {
                 Some("as") if witness.is_none() => {
-                    witness = function_name(&argument.value);
+                    witness = codec_type_witness(&argument.value);
                     if witness.is_none() {
                         return Err(error("ORNA-EVAL-ARGUMENT"));
                     }
@@ -5445,13 +5485,16 @@ impl Context<'_, '_> {
     fn decode_json_with_witness(
         &mut self,
         input: &str,
-        witness: &str,
+        witness: &CodecTypeWitness,
         ignore_unknown_fields: bool,
         scope: &mut Scope,
         depth: usize,
     ) -> Result<Value, EvaluationError> {
         let input = self.string(input.to_owned())?;
         let node = parse_json_node(&input)?;
+        let CodecTypeWitness::Named(witness) = witness else {
+            return json_node_to_value(node, self, depth);
+        };
         let Some(definition) = scope.3.get(witness).cloned() else {
             return json_node_to_value(node, self, depth);
         };
@@ -12238,25 +12281,93 @@ fn codec_decode_operation(name: &str) -> Option<(&'static str, bool)> {
     }
 }
 
+#[derive(Clone, Debug)]
+enum CodecTypeWitness {
+    Named(String),
+    List(Box<Self>),
+    Tuple(Vec<Self>),
+    Record(BTreeMap<String, Self>),
+}
+
+fn codec_type_witness(expression: &Expr) -> Option<CodecTypeWitness> {
+    match expression {
+        Expr::Group { inner, .. } => codec_type_witness(inner),
+        Expr::List { elements, .. } if elements.len() == 1 => Some(CodecTypeWitness::List(
+            Box::new(codec_type_witness(&elements[0])?),
+        )),
+        Expr::Tuple { elements, .. } => Some(CodecTypeWitness::Tuple(
+            elements
+                .iter()
+                .map(codec_type_witness)
+                .collect::<Option<Vec<_>>>()?,
+        )),
+        Expr::Record { fields, .. } => {
+            let mut witness = BTreeMap::new();
+            for field in fields {
+                if !field.name.nfc().eq(field.name.chars())
+                    || witness
+                        .insert(field.name.clone(), codec_type_witness(&field.value)?)
+                        .is_some()
+                {
+                    return None;
+                }
+            }
+            Some(CodecTypeWitness::Record(witness))
+        }
+        _ => function_name(expression).map(CodecTypeWitness::Named),
+    }
+}
+
 fn codec_type_matches(
     value: &Value,
-    witness: &str,
+    witness: &CodecTypeWitness,
     nominal_definitions: &NominalDefinitions,
 ) -> bool {
-    if let Some(definition) = nominal_definitions.get(witness) {
-        return matches!(
-            value,
-            Value::NominalRecord { type_id, .. } if *type_id == definition.type_id
-        );
-    }
     match witness {
-        "Str" | "Text" | "String" => matches!(value, Value::String(_)),
-        "Bool" => matches!(value, Value::Bool(_)),
-        "Int" | "Integer" => matches!(value, Value::Int(_)),
-        "Decimal" => matches!(value, Value::Decimal(_)),
-        "Float" => matches!(value, Value::Float(_)),
-        "Blob" => matches!(value, Value::Blob(_)),
-        _ => false,
+        CodecTypeWitness::Named(witness) => {
+            if let Some(definition) = nominal_definitions.get(witness) {
+                return matches!(
+                    value,
+                    Value::NominalRecord { type_id, .. } if *type_id == definition.type_id
+                );
+            }
+            match witness.as_str() {
+                "Str" | "Text" | "String" => matches!(value, Value::String(_)),
+                "Bool" => matches!(value, Value::Bool(_)),
+                "Int" | "Integer" => matches!(value, Value::Int(_)),
+                "Decimal" => matches!(value, Value::Decimal(_)),
+                "Float" => matches!(value, Value::Float(_)),
+                "Blob" => matches!(value, Value::Blob(_)),
+                "Unit" => matches!(value, Value::Unit),
+                _ => false,
+            }
+        }
+        CodecTypeWitness::List(element) => matches!(
+            value,
+            Value::List(values) if values.iter().all(|value| codec_type_matches(value, element, nominal_definitions))
+        ),
+        CodecTypeWitness::Tuple(elements) => match value {
+            Value::Unit => elements.is_empty(),
+            Value::Tuple(values) => {
+                values.len() == elements.len()
+                    && values.iter().zip(elements).all(|(value, element)| {
+                        codec_type_matches(value, element, nominal_definitions)
+                    })
+            }
+            _ => false,
+        },
+        CodecTypeWitness::Record(witness_fields) => match value {
+            Value::Record(fields) if fields.len() == witness_fields.len() => {
+                fields.iter().all(|(name, value)| {
+                    witness_fields
+                        .get(name)
+                        .is_some_and(|witness| {
+                            codec_type_matches(value, witness, nominal_definitions)
+                        })
+                })
+            }
+            _ => false,
+        },
     }
 }
 
@@ -12567,6 +12678,7 @@ fn lawful_sort_key(value: &Value) -> Result<(), EvaluationError> {
         | Value::Int(_)
         | Value::Decimal(_)
         | Value::Float(_)
+        | Value::Blob(_)
         | Value::String(_)
         | Value::Date(_)
         | Value::Instant { .. }
@@ -12579,6 +12691,10 @@ fn lawful_sort_key(value: &Value) -> Result<(), EvaluationError> {
 fn compare_sort_keys(left: &Value, right: &Value) -> Result<std::cmp::Ordering, EvaluationError> {
     match (left, right) {
         (Value::Bool(left), Value::Bool(right)) => Ok(left.cmp(right)),
+        // Byte strings have a deterministic unsigned lexicographic order.
+        // This lets source code sort by a complete OVB key encoding without
+        // converting those bytes into a lossy textual representation.
+        (Value::Blob(left), Value::Blob(right)) => Ok(left.cmp(right)),
         (Value::String(left), Value::String(right)) => Ok(left.cmp(right)),
         (Value::Date(left), Value::Date(right)) => Ok(left.cmp(right)),
         (
