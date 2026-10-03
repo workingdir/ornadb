@@ -1,0 +1,9 @@
+{ generation: 17, position: "compaction-pin/left-base", }
+
+{ generation: 23, position: "compaction-pin/right-base", }
+
+{ generation: 41, position: "compaction-pin/left-rebound", }
+
+{ generation: 9, position: "compaction-pin/right-rebound", }
+
+{ generation: 0, }
