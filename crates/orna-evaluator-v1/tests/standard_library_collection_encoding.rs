@@ -59,6 +59,14 @@ fn tuple(parts: Vec<Raw>) -> Raw {
     Raw::Tag(60015, Box::new(Raw::Array(parts)))
 }
 
+fn nested_tuple_key(leaf: &str, levels: usize) -> Raw {
+    let mut key = tuple(vec![Raw::Text(leaf.into()), integer(0)]);
+    for suffix in 1..=levels {
+        key = tuple(vec![key, integer(suffix as i64)]);
+    }
+    key
+}
+
 fn value(raw: Raw) -> CanonicalValue {
     CanonicalValue::new(raw).expect("expected test value to be canonical")
 }
@@ -322,6 +330,36 @@ fn encoded_map_projection_orders_deep_tuple_keys_by_complete_ovb_bytes() {
             tuple(vec![encoded_bytes(z_key), encoded_bytes(integer(13))]),
             tuple(vec![encoded_bytes(aa_key), encoded_bytes(integer(12))]),
         ])))
+    );
+}
+
+#[test]
+fn encoded_map_projection_keeps_values_paired_through_deep_key_ordering() {
+    let expected = value(Raw::Array(vec![
+        tuple(vec![
+            encoded_bytes(nested_tuple_key("a", 10)),
+            encoded_bytes(integer(11)),
+        ]),
+        tuple(vec![
+            encoded_bytes(nested_tuple_key("z", 10)),
+            encoded_bytes(integer(13)),
+        ]),
+        tuple(vec![
+            encoded_bytes(nested_tuple_key("aa", 10)),
+            encoded_bytes(integer(12)),
+        ]),
+    ]));
+    assert_eq!(
+        evaluate(include_str!("fixtures/stdlib-map-ovb-deep-order-m6kj2.orna")),
+        Ok(expected)
+    );
+}
+
+#[test]
+fn encoded_map_projection_of_empty_map_is_empty() {
+    assert_eq!(
+        evaluate(include_str!("fixtures/stdlib-map-ovb-empty-m6kj2.orna")),
+        Ok(value(Raw::Array(Vec::new())))
     );
 }
 
