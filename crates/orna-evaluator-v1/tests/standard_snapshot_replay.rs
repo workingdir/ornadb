@@ -143,7 +143,13 @@ fn int(value: i64) -> CanonicalValue {
 }
 
 fn capture_standard_gitlink(project_path: &Path, standard_snapshot: &str, message: &str) -> String {
-    git_output_at(project_path, &["add", "main.orna", ".gitmodules"]);
+    let mut staged_paths = vec!["main.orna", ".gitmodules"];
+    if project_path.join("snapshot_app.orna").is_file() {
+        staged_paths.push("snapshot_app.orna");
+    }
+    let mut add_arguments = vec!["add"];
+    add_arguments.extend(staged_paths);
+    git_output_at(project_path, &add_arguments);
     let gitlink = format!("160000,{standard_snapshot},stdlib/std");
     git_output_at(
         project_path,
@@ -169,6 +175,11 @@ fn module_upgrade_projects() -> (
     fs::write(
         project_path.join("main.orna"),
         include_str!("fixtures/module-upgrade-project.orna"),
+    )
+    .unwrap();
+    fs::write(
+        project_path.join("snapshot_app.orna"),
+        include_str!("fixtures/module-upgrade-app.orna"),
     )
     .unwrap();
     git_output_at(&project_path, &["init", "--quiet"]);
@@ -306,6 +317,82 @@ fn module_upgrade_projects() -> (
             snapshot_v6,
         ],
     )
+}
+
+fn snapshot_matrix_projects() -> (TempDir, Vec<LoadedProject>, Vec<String>) {
+    let directory = tempfile::tempdir().unwrap();
+    let project_path = directory.path().join("project");
+    fs::create_dir_all(&project_path).unwrap();
+    fs::write(
+        project_path.join("main.orna"),
+        include_str!("fixtures/snapshot-matrix-project.orna"),
+    )
+    .unwrap();
+    fs::write(
+        project_path.join("snapshot_app.orna"),
+        include_str!("fixtures/module-upgrade-app.orna"),
+    )
+    .unwrap();
+    git_output_at(&project_path, &["init", "--quiet"]);
+    for (key, value) in [
+        ("user.email", "kieran@drewett.dev"),
+        ("user.name", "kierandrewett"),
+        ("commit.gpgsign", "false"),
+    ] {
+        git_output_at(&project_path, &["config", key, value]);
+    }
+    fs::write(
+        project_path.join(".gitmodules"),
+        "[submodule \"std\"]\n\tpath = stdlib/std\n\turl = https://example.invalid/ornadb-std.git\n",
+    )
+    .unwrap();
+
+    let standard_path = project_path.join("stdlib/std");
+    fs::create_dir_all(&standard_path).unwrap();
+    initialize_repository(&standard_path).unwrap();
+    fs::write(
+        standard_path.join("main.orna"),
+        include_str!("fixtures/snapshot-matrix-std-main.orna"),
+    )
+    .unwrap();
+    let math_versions = [
+        include_str!("fixtures/module-upgrade-std-v1.orna"),
+        include_str!("fixtures/module-upgrade-std-v2.orna"),
+        include_str!("fixtures/module-upgrade-std-v3.orna"),
+        include_str!("fixtures/module-upgrade-std-v4.orna"),
+        include_str!("fixtures/module-upgrade-std-v5.orna"),
+        include_str!("fixtures/module-upgrade-std-v6.orna"),
+    ];
+
+    let mut parent_snapshots = Vec::with_capacity(math_versions.len());
+    let mut standard_snapshots = Vec::with_capacity(math_versions.len());
+    for (index, math_source) in math_versions.into_iter().enumerate() {
+        fs::write(standard_path.join("math.orna"), math_source).unwrap();
+        commit_directory(
+            &standard_path,
+            &format!("real math body snapshot v{}", index + 1),
+        );
+        let standard_snapshot = git_output_at(&standard_path, &["rev-parse", "HEAD"]);
+        parent_snapshots.push(capture_standard_gitlink(
+            &project_path,
+            &standard_snapshot,
+            &format!("capture real math snapshot v{}", index + 1),
+        ));
+        standard_snapshots.push(standard_snapshot);
+    }
+
+    let repository = Repository::discover(&project_path).unwrap();
+    let loader = ProjectLoader::default();
+    let projects = parent_snapshots
+        .iter()
+        .map(|snapshot| {
+            let snapshot = repository.resolve_snapshot(snapshot).unwrap();
+            loader
+                .load_committed_snapshot(&repository, &snapshot)
+                .unwrap()
+        })
+        .collect();
+    (directory, projects, standard_snapshots)
 }
 
 fn write_module_chain_version(
@@ -669,6 +756,20 @@ fn admitted_upgrade_session(project: &LoadedProject) -> AdmittedReplSession {
     session
 }
 
+fn admitted_snapshot_app_session(project: &LoadedProject) -> AdmittedReplSession {
+    let mut session = AdmittedReplSession::from_loaded_project(
+        project,
+        project.standard_sources().iter().cloned(),
+        Limits::default(),
+    )
+    .unwrap_or_else(|error| panic!("failed to admit snapshot app project: {}", error.code()));
+    assert_eq!(
+        session.submit(include_str!("fixtures/module-upgrade-use-app.orna")),
+        Ok(None)
+    );
+    session
+}
+
 fn standard_source<'a>(project: &'a LoadedProject, path: &str) -> &'a str {
     project
         .standard_sources()
@@ -764,6 +865,155 @@ fn module_upgrade_sessions_replay_with_their_captured_standard_snapshot() {
         session_v6.submit(include_str!("fixtures/snapshot-replay-callback-nine.orna")),
         Ok(Some(ints(&[100012])))
     );
+}
+
+#[test]
+fn project_module_executes_a_real_function_from_its_gitlink_pinned_std_snapshot() {
+    let (
+        _directory,
+        project_v1,
+        _project_v2,
+        _project_v3,
+        _project_v4,
+        _project_v5,
+        project_v6,
+        snapshots,
+    ) = module_upgrade_projects();
+    assert_ne!(snapshots[0], snapshots[5]);
+
+    let mut historical = AdmittedReplSession::from_loaded_project(
+        &project_v1,
+        project_v1.standard_sources().iter().cloned(),
+        Limits::default(),
+    )
+    .expect("the historical project's exact std gitlink snapshot admits");
+    let mut current = AdmittedReplSession::from_loaded_project(
+        &project_v6,
+        project_v6.standard_sources().iter().cloned(),
+        Limits::default(),
+    )
+    .expect("the current project's exact std gitlink snapshot admits");
+
+    assert_eq!(project_v1.standard_profile().unwrap().snapshot(), snapshots[0]);
+    assert_eq!(project_v6.standard_profile().unwrap().snapshot(), snapshots[5]);
+    assert_eq!(historical.submit("use snapshot_app;"), Ok(None));
+    assert_eq!(current.submit("use snapshot_app;"), Ok(None));
+    assert_eq!(
+        historical
+            .submit("snapshot_app.value()")
+            .unwrap_or_else(|error| panic!("historical snapshot_app.value failed: {}", error.code())),
+        Some(int(8))
+    );
+    assert_eq!(
+        current
+            .submit("snapshot_app.value()")
+            .unwrap_or_else(|error| panic!("current snapshot_app.value failed: {}", error.code())),
+        Some(int(100_007))
+    );
+}
+
+#[test]
+fn imported_project_module_executes_under_each_captured_standard_snapshot() {
+    let (
+        _directory,
+        project_v1,
+        project_v2,
+        project_v3,
+        project_v4,
+        project_v5,
+        project_v6,
+        snapshots,
+    ) = module_upgrade_projects();
+    let projects = [
+        &project_v1,
+        &project_v2,
+        &project_v3,
+        &project_v4,
+        &project_v5,
+        &project_v6,
+    ];
+    let expected_values = [8, 107, 1007, 1007, 10007, 100007];
+
+    let mut sessions = projects
+        .iter()
+        .map(|project| admitted_snapshot_app_session(project))
+        .collect::<Vec<_>>();
+
+    for (index, ((project, snapshot), (session, expected))) in projects
+        .iter()
+        .zip(&snapshots)
+        .zip(sessions.iter_mut().zip(expected_values))
+        .enumerate()
+    {
+        assert_eq!(
+            project.standard_profile().unwrap().snapshot(),
+            snapshot,
+            "project v{} must retain its captured std gitlink",
+            index + 1
+        );
+        assert_eq!(
+            session.submit(include_str!("fixtures/module-upgrade-call-app.orna")),
+            Ok(Some(int(expected))),
+            "project v{} must execute snapshot_app against its pinned std body",
+            index + 1
+        );
+    }
+
+    let mut replays = sessions.clone();
+    for index in [5, 0, 4, 1, 3, 2] {
+        assert_eq!(
+            replays[index].submit(include_str!("fixtures/module-upgrade-call-app.orna")),
+            Ok(Some(int(expected_values[index]))),
+            "interleaved replay for project v{} must keep its original dependency pin",
+            index + 1
+        );
+    }
+}
+
+#[test]
+fn stepwise_snapshot_replay_matrix_retains_values_after_each_upgrade() {
+    let (_directory, projects, snapshots) = snapshot_matrix_projects();
+    let expected_values = [8, 107, 1007, 10007, 100007, 1000007];
+    let mut retained_sessions = Vec::new();
+
+    assert_eq!(projects.len(), expected_values.len());
+    assert!(snapshots.windows(2).all(|pair| pair[0] != pair[1]));
+    for (upgrade_index, (project, expected)) in projects.iter().zip(expected_values).enumerate() {
+        assert_eq!(
+            project.standard_profile().unwrap().snapshot(),
+            &snapshots[upgrade_index],
+            "upgrade v{} must use its committed std gitlink",
+            upgrade_index + 1
+        );
+        assert_eq!(
+            project
+                .standard_sources()
+                .iter()
+                .map(|(path, _)| path.as_str())
+                .collect::<Vec<_>>(),
+            ["std/main.orna", "std/math.orna"],
+            "matrix snapshots contain only the real imported math body"
+        );
+        let mut session = admitted_snapshot_app_session(project);
+        assert_eq!(
+            session.submit(include_str!("fixtures/module-upgrade-call-app.orna")),
+            Ok(Some(int(expected))),
+            "new project v{} must execute its captured std math body",
+            upgrade_index + 1
+        );
+        retained_sessions.push(session);
+
+        for retained_index in (0..retained_sessions.len()).rev() {
+            assert_eq!(
+                retained_sessions[retained_index]
+                    .submit(include_str!("fixtures/module-upgrade-call-app.orna")),
+                Ok(Some(int(expected_values[retained_index]))),
+                "replay of project v{} must stay pinned after upgrade v{}",
+                retained_index + 1,
+                upgrade_index + 1
+            );
+        }
+    }
 }
 
 #[test]

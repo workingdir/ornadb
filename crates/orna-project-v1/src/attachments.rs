@@ -846,53 +846,136 @@ impl PackageResolver {
         checkpoint: &ReboundPathCheckpoint,
         replacement_waves: &[[PinnedDatabase; 2]],
     ) -> Result<ReboundPathResolution, AttachmentError> {
+        self.extend_nested_terminal_pair_chain_from_checkpoint_with_labels(
+            previous,
+            checkpoint,
+            replacement_waves,
+            &[],
+        )
+        .map(|(route, _)| route)
+    }
+
+    /// Applies ordered checkpoint-rooted pair chains as one atomic cascade.
+    /// Every checkpoint route is appended to retained history, then its exact
+    /// depth label is checked after each later pair fold, including folds from
+    /// subsequent checkpoints. The reference does not define this composition;
+    /// v1 keeps each selected checkpoint independent and preserves all earlier
+    /// checkpoint labels. Failure returns no partial cascade.
+    pub fn extend_nested_terminal_pair_checkpoint_cascades(
+        &self,
+        previous: &ReboundPathResolution,
+        cascades: &[(&ReboundPathCheckpoint, &[[PinnedDatabase; 2]])],
+    ) -> Result<ReboundPathResolution, AttachmentError> {
+        let mut route = previous.clone();
+        let mut retained_checkpoint_labels = Vec::new();
+        for (checkpoint, replacement_waves) in cascades {
+            let (folded, checkpoint_label) = self
+                .extend_nested_terminal_pair_chain_from_checkpoint_with_labels(
+                    &route,
+                    checkpoint,
+                    replacement_waves,
+                    &retained_checkpoint_labels,
+                )?;
+            if let Some(label) = checkpoint_label {
+                retained_checkpoint_labels.push(label);
+            }
+            route = folded;
+        }
+        Ok(route)
+    }
+
+    fn extend_nested_terminal_pair_chain_from_checkpoint_with_labels(
+        &self,
+        previous: &ReboundPathResolution,
+        checkpoint: &ReboundPathCheckpoint,
+        replacement_waves: &[[PinnedDatabase; 2]],
+        retained_checkpoint_labels: &[NestedPairDepthLabel],
+    ) -> Result<(ReboundPathResolution, Option<NestedPairDepthLabel>), AttachmentError> {
+        checkpoint.validate_depth_identity()?;
+        previous.validate_depth_label(&checkpoint.depth_label)?;
         let Some((first, remaining)) = replacement_waves.split_first() else {
-            return Ok(previous.clone());
+            for label in retained_checkpoint_labels {
+                previous.validate_depth_label(label)?;
+            }
+            return Ok((previous.clone(), None));
         };
+        let checkpoint_wave = previous
+            .retained_wave_lengths
+            .len()
+            .checked_add(1)
+            .ok_or(AttachmentError::RetainedSnapshotUnavailable)?;
         let extension =
             self.resolve_nested_rebind_path(&checkpoint.handoff, first.as_slice())?;
-        let route = Self::append_retained_rebound_extension(previous, extension);
-        self.extend_nested_terminal_pair_chain(&route, remaining)
+        let mut route = Self::append_retained_rebound_extension(previous, extension);
+        let retained_checkpoint = route.retained_snapshot_at_depth(checkpoint_wave, 0)?;
+        if !checkpoint.depth_label.matches_session(retained_checkpoint) {
+            return Err(AttachmentError::RetainedSnapshotUnavailable);
+        }
+        let folded_label = NestedPairDepthLabel::from_session(
+            checkpoint_wave,
+            0,
+            retained_checkpoint,
+        );
+        route.validate_depth_label(&folded_label)?;
+        for label in retained_checkpoint_labels {
+            route.validate_depth_label(label)?;
+        }
+
+        for replacements in remaining {
+            let latest_wave = route
+                .retained_wave_lengths
+                .len()
+                .checked_sub(1)
+                .ok_or(AttachmentError::RetainedSnapshotUnavailable)?;
+            let latest_snapshot = route.retained_wave_lengths[latest_wave]
+                .checked_sub(1)
+                .ok_or(AttachmentError::RetainedSnapshotUnavailable)?;
+            route = self.extend_nested_terminal_pair_from_wave(
+                &route,
+                latest_wave,
+                latest_snapshot,
+                replacements.clone(),
+            )?;
+            route.validate_depth_label(&folded_label)?;
+            for label in retained_checkpoint_labels {
+                route.validate_depth_label(label)?;
+            }
+        }
+        Ok((route, Some(folded_label)))
     }
 
     /// Rebinds each terminal pair in a storm from one saved checkpoint.
     /// Every fold starts from the same exact nested pins and appends that
-    /// checkpoint route to the retained history, so repeated pairs cannot
-    /// widen the closure depth or lose their original wave/depth identity.
+    /// checkpoint route to retained history. Each emitted route receives its
+    /// own wave/depth label, and every earlier emitted label is checked after
+    /// each later fold so checkpoint history cannot be silently regrouped.
+    /// The source checkpoint is also validated against its original wave and
+    /// depth in `previous`, preventing replay after that nested identity has
+    /// been discarded or reassigned.
     /// The reference is silent on checkpoint-rooted storm folds; v1 preserves
-    /// the saved depth label on every fold and returns no partial route if a
-    /// replacement fails. An empty storm validates the checkpoint identity.
+    /// exact pins and ordering and returns no partial route if a replacement
+    /// fails. An empty storm validates the checkpoint identity.
     pub fn extend_nested_terminal_pair_storm_from_checkpoint(
         &self,
         previous: &ReboundPathResolution,
         checkpoint: &ReboundPathCheckpoint,
         replacement_waves: &[[PinnedDatabase; 2]],
     ) -> Result<ReboundPathResolution, AttachmentError> {
-        if !checkpoint
-            .depth_label
-            .matches_session(&checkpoint.handoff)
-        {
-            return Err(AttachmentError::RetainedSnapshotUnavailable);
-        }
+        checkpoint.validate_depth_identity()?;
+        previous.validate_depth_label(&checkpoint.depth_label)?;
 
         let mut route = previous.clone();
+        let mut retained_checkpoint_labels = Vec::new();
         for replacements in replacement_waves {
-            let prior_retained_len = route.retained_sessions.len();
-            let folded = self.extend_nested_terminal_pair_chain_from_checkpoint(
-                &route,
-                checkpoint,
-                std::slice::from_ref(replacements),
-            )?;
-            let checkpoint_index = prior_retained_len
-                .checked_add(1)
-                .ok_or(AttachmentError::RetainedSnapshotUnavailable)?;
-            let retained_checkpoint = folded
-                .retained_sessions
-                .get(checkpoint_index)
-                .ok_or(AttachmentError::RetainedSnapshotUnavailable)?;
-            if !checkpoint.depth_label.matches_session(retained_checkpoint) {
-                return Err(AttachmentError::RetainedSnapshotUnavailable);
-            }
+            let (folded, checkpoint_label) = self
+                .extend_nested_terminal_pair_chain_from_checkpoint_with_labels(
+                    &route,
+                    checkpoint,
+                    std::slice::from_ref(replacements),
+                    &retained_checkpoint_labels,
+                )?;
+            let label = checkpoint_label.ok_or(AttachmentError::RetainedSnapshotUnavailable)?;
+            retained_checkpoint_labels.push(label);
             route = folded;
         }
         Ok(route)
@@ -1277,6 +1360,14 @@ impl ReboundPathCheckpoint {
     /// The original retained wave/depth coordinate and exact nested pins.
     pub fn depth_label(&self) -> &NestedPairDepthLabel {
         &self.depth_label
+    }
+
+    fn validate_depth_identity(&self) -> Result<(), AttachmentError> {
+        if self.depth_label.matches_session(&self.handoff) {
+            Ok(())
+        } else {
+            Err(AttachmentError::RetainedSnapshotUnavailable)
+        }
     }
 }
 

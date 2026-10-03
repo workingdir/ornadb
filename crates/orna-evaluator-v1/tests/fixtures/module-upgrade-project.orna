@@ -1,2 +1,5 @@
 use std.collection;
 use std.math;
+use snapshot_app;
+
+pub fn run(): Int = snapshot_app.value();

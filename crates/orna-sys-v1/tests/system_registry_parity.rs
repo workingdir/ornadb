@@ -5,7 +5,7 @@ use std::{
 };
 
 use orna_sys_v1::{
-    SystemProviderAbi, system_api_json, system_api_schema_json, system_binding_stubs,
+    SystemEffect, SystemProviderAbi, system_api_json, system_api_schema_json, system_binding_stubs,
     system_dispatch_table, system_host_operation_registry_json,
     system_host_operation_registry_schema_json, system_provider_abi_json,
     system_provider_abi_schema_json,
@@ -158,7 +158,7 @@ fn copy_output_tree(source: &Path, destination: &Path) -> std::io::Result<()> {
 }
 
 #[test]
-fn generated_sys_artifacts_regenerate_byte_for_byte_across_fresh_registry_builds() {
+fn generated_artifact_determinism_matrix_matches_embedded_and_build_outputs() {
     let regenerated = regenerate();
     let second_build = regenerate();
     assert_eq!(
@@ -169,8 +169,20 @@ fn generated_sys_artifacts_regenerate_byte_for_byte_across_fresh_registry_builds
     let source_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
     let host_registry_json = build_host::generate_host_registry(&source_root)
         .expect("annotated native host operations regenerate deterministically");
+    assert_eq!(
+        host_registry_json,
+        build_host::generate_host_registry(&source_root)
+            .expect("second native host operation registry projection"),
+        "host operation registry bytes are stable across independent source walks"
+    );
     let host_schema_json = build_host::generate_host_registry_schema()
         .expect("native host operation schema regenerates deterministically");
+    assert_eq!(
+        host_schema_json,
+        build_host::generate_host_registry_schema()
+            .expect("second native host operation schema projection"),
+        "host schema bytes are stable across independent generations"
+    );
     let provider_schema_json = build_provider::generate_provider_registry_schema()
         .expect("typed provider schema regenerates deterministically");
     assert_eq!(
@@ -180,73 +192,68 @@ fn generated_sys_artifacts_regenerate_byte_for_byte_across_fresh_registry_builds
         "dispatch schema generation is stable across independent runs"
     );
 
-    assert_eq!(regenerated.api_json, system_api_json());
     let api_hash = format!("{:x}", Sha256::digest(regenerated.api_json.as_bytes()));
     assert_eq!(
         api_hash, SYS_API_V1_SHA256,
         "on-demand API retains the frozen 1.0 bytes"
     );
-    assert_eq!(regenerated.schema_json, system_api_schema_json());
-    assert_eq!(
-        regenerated.provider_abi_json,
-        system_provider_abi_json(),
-        "embedded dispatch table JSON must match a fresh typed-registry projection"
-    );
-    assert_eq!(
-        system_provider_abi_schema_json(),
-        provider_schema_json,
-        "embedded dispatch schema matches a fresh deterministic schema projection"
-    );
-    assert_eq!(
-        regenerated.binding_bundle,
-        system_binding_stubs(),
-        "embedded Orna declaration bundle must match a fresh typed-registry projection"
-    );
-
-    assert_eq!(
-        fs::read_to_string(out_dir.join("api_sys.json")).expect("read build API artifact"),
-        regenerated.api_json
-    );
-    assert_eq!(
-        fs::read_to_string(out_dir.join("system_api_schema.json"))
-            .expect("read build schema artifact"),
-        regenerated.schema_json
-    );
-    assert_eq!(
-        fs::read_to_string(out_dir.join("system_provider_abi.json"))
-            .expect("read build dispatch artifact"),
-        regenerated.provider_abi_json
-    );
-    assert_eq!(
-        fs::read_to_string(out_dir.join("system_provider_abi.schema.json"))
-            .expect("read build dispatch schema artifact"),
-        provider_schema_json
-    );
-    assert_eq!(
-        fs::read_to_string(out_dir.join("system_bindings.orna"))
-            .expect("read build binding bundle"),
-        regenerated.binding_bundle
-    );
-    assert_eq!(
-        system_host_operation_registry_json(),
-        host_registry_json,
-        "embedded host dispatch metadata matches a fresh annotated-method projection"
-    );
-    assert_eq!(
-        system_host_operation_registry_schema_json(),
-        host_schema_json,
-        "embedded host dispatch schema matches a fresh generated schema"
-    );
-    assert_eq!(
-        fs::read_to_string(out_dir.join("system_host_operations.json"))
-            .expect("read build host operation artifact"),
-        host_registry_json
-    );
-    assert_eq!(
-        fs::read_to_string(out_dir.join("system_host_operations.schema.json"))
-            .expect("read build host operation schema artifact"),
-        host_schema_json
-    );
+    let embedded_api_json = system_api_json();
+    let artifact_matrix = [
+        (
+            "api/sys.json",
+            regenerated.api_json.as_str(),
+            embedded_api_json.as_str(),
+            "api_sys.json",
+        ),
+        (
+            "sys API schema",
+            regenerated.schema_json.as_str(),
+            system_api_schema_json(),
+            "system_api_schema.json",
+        ),
+        (
+            "typed provider dispatch registry",
+            regenerated.provider_abi_json.as_str(),
+            system_provider_abi_json(),
+            "system_provider_abi.json",
+        ),
+        (
+            "typed provider dispatch schema",
+            provider_schema_json.as_str(),
+            system_provider_abi_schema_json(),
+            "system_provider_abi.schema.json",
+        ),
+        (
+            "generated Orna stubs",
+            regenerated.binding_bundle.as_str(),
+            system_binding_stubs(),
+            "system_bindings.orna",
+        ),
+        (
+            "host operation registry",
+            host_registry_json.as_str(),
+            system_host_operation_registry_json(),
+            "system_host_operations.json",
+        ),
+        (
+            "host operation schema",
+            host_schema_json.as_str(),
+            system_host_operation_registry_schema_json(),
+            "system_host_operations.schema.json",
+        ),
+    ];
+    for (artifact, generated, embedded, build_output) in artifact_matrix {
+        assert_eq!(
+            generated, embedded,
+            "{artifact} embedded bytes match generation"
+        );
+        assert_eq!(
+            fs::read_to_string(out_dir.join(build_output))
+                .unwrap_or_else(|error| panic!("read {artifact} build output: {error}")),
+            generated,
+            "{artifact} build output bytes match fresh generation"
+        );
+    }
     verify_generated_output_tree(
         out_dir,
         &regenerated,
@@ -355,6 +362,246 @@ fn dispatch_metadata_schema_covers_nullable_roles_and_rejects_unknown_or_invalid
             .contains("invalid sys failure code"),
         "dispatch schema restricts operation failures to the sys vocabulary"
     );
+}
+
+#[test]
+fn dispatch_metadata_regeneration_conforms_across_every_operation_and_role() {
+    const SHARED_PROVIDER_FAILURES: [&str; 3] = [
+        "sys.abi.precondition_failed",
+        "sys.abi.unavailable",
+        "sys.abi.provider_failed",
+    ];
+
+    fn effect_name(effect: SystemEffect) -> &'static str {
+        match effect {
+            SystemEffect::Read => "read",
+            SystemEffect::Invoke => "invoke",
+            SystemEffect::Admin => "admin",
+        }
+    }
+
+    let generated = regenerate();
+    let repeated = regenerate();
+    assert_eq!(
+        generated.provider_abi_json, repeated.provider_abi_json,
+        "independent typed-registry regeneration runs preserve dispatch metadata bytes"
+    );
+    assert_eq!(
+        generated.provider_abi_json,
+        system_provider_abi_json(),
+        "embedded dispatch metadata is the generated registry output"
+    );
+    let generated_schema = build_provider::generate_provider_registry_schema()
+        .expect("dispatch metadata schema regenerates from its generator");
+    assert_eq!(
+        generated_schema,
+        system_provider_abi_schema_json(),
+        "embedded dispatch schema is the deterministic generated schema"
+    );
+
+    let registry: Value = serde_json::from_str(&generated.provider_abi_json)
+        .expect("regenerated dispatch metadata is JSON");
+    let schema: Value = serde_json::from_str(&generated_schema).expect("dispatch schema is JSON");
+    build_host::validate_json_against_schema(&generated.provider_abi_json, &generated_schema)
+        .expect("regenerated dispatch metadata conforms to the generated schema");
+    let table = SystemProviderAbi::from_json(&generated.provider_abi_json)
+        .expect("regenerated metadata parses into the typed dispatch table");
+    assert_eq!(&table, system_dispatch_table());
+
+    let api_json = system_api_json();
+    let api: Value = serde_json::from_str(&api_json).expect("published API is JSON");
+    let api_functions = api["functions"]
+        .as_array()
+        .expect("published API has function inventory")
+        .iter()
+        .map(|function| (function["name"].as_str().expect("function name"), function))
+        .collect::<BTreeMap<_, _>>();
+    let operation_rows = registry["operations"]
+        .as_array()
+        .expect("dispatch metadata has operations");
+    assert_eq!(operation_rows.len(), table.operations().count());
+    assert_eq!(operation_rows.len(), api_functions.len());
+
+    for row in operation_rows {
+        let name = row["name"].as_str().expect("dispatch operation name");
+        let contract = table
+            .operation(name)
+            .unwrap_or_else(|| panic!("missing typed dispatch contract for {name}"));
+        let function = api_functions
+            .get(name)
+            .unwrap_or_else(|| panic!("missing public API declaration for {name}"));
+
+        assert_eq!(
+            row["version"]["major"].as_u64(),
+            Some(contract.version.major.into())
+        );
+        assert_eq!(
+            row["version"]["minor"].as_u64(),
+            Some(contract.version.minor.into())
+        );
+        assert_eq!(
+            row["signature"].as_str(),
+            Some(contract.signature.source.as_str())
+        );
+        assert_eq!(row["signature"], function["signature"]);
+
+        let effects = contract.effects.iter().map(effect_name).collect::<Vec<_>>();
+        assert_eq!(effects.len(), 1, "operation {name} has one declared effect");
+        assert_eq!(row["effect"].as_str(), Some(effects[0]));
+        assert_eq!(row["effect"], function["effect"]);
+
+        let preconditions = contract
+            .preconditions
+            .iter()
+            .map(|precondition| precondition.declaration.as_str())
+            .collect::<Vec<_>>();
+        let metadata_preconditions = row["preconditions"]
+            .as_array()
+            .expect("dispatch preconditions are an array")
+            .iter()
+            .map(|precondition| precondition.as_str().expect("precondition string"))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            metadata_preconditions, preconditions,
+            "preconditions for {name}"
+        );
+
+        let metadata_failures = row["failures"]
+            .as_array()
+            .expect("dispatch failures are an array")
+            .iter()
+            .map(|failure| failure.as_str().expect("failure code string").to_owned())
+            .collect::<BTreeSet<_>>();
+        let typed_failures = contract
+            .failures
+            .iter()
+            .filter(|failure| !SHARED_PROVIDER_FAILURES.contains(&failure.as_str()))
+            .map(|failure| failure.as_str().to_owned())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            metadata_failures, typed_failures,
+            "failure vocabulary for {name}"
+        );
+
+        let role = match (&contract.role, contract.role_version) {
+            (Some(role), Some(version)) => Some(format!(
+                "{}@{}.{}",
+                role.as_str(),
+                version.major,
+                version.minor
+            )),
+            (None, None) => None,
+            _ => panic!("role name/version must be present together for {name}"),
+        };
+        assert_eq!(row["role"].as_str(), role.as_deref(), "role for {name}");
+    }
+
+    let role_rows = registry["roles"]
+        .as_array()
+        .expect("dispatch role inventory");
+    assert_eq!(role_rows.len(), table.roles().count());
+    for row in role_rows {
+        let name = row["name"].as_str().expect("role name");
+        let role = table
+            .role(name)
+            .unwrap_or_else(|| panic!("missing typed semantic role {name}"));
+        assert_eq!(
+            row["version"]["major"].as_u64(),
+            Some(role.version.major.into())
+        );
+        assert_eq!(
+            row["version"]["minor"].as_u64(),
+            Some(role.version.minor.into())
+        );
+
+        let metadata_effects = row["effects"]
+            .as_array()
+            .expect("role effects are an array")
+            .iter()
+            .map(|effect| effect.as_str().expect("effect string").to_owned())
+            .collect::<BTreeSet<_>>();
+        let typed_effects = role
+            .effects
+            .iter()
+            .map(|effect| effect_name(effect).to_owned())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(metadata_effects, typed_effects, "effects for role {name}");
+
+        let metadata_operations = row["operations"]
+            .as_array()
+            .expect("role operations are an array")
+            .iter()
+            .map(|operation| operation.as_str().expect("operation ID string").to_owned())
+            .collect::<BTreeSet<_>>();
+        let typed_operations = role
+            .operations
+            .iter()
+            .map(|operation| operation.as_str().to_owned())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            metadata_operations, typed_operations,
+            "operations for role {name}"
+        );
+        assert_eq!(row["required"].as_bool(), Some(role.required));
+        assert_eq!(row["replaceable"].as_bool(), Some(role.replaceable));
+        assert_eq!(
+            row["builtin_provider"].as_str(),
+            role.builtin_provider
+                .as_ref()
+                .map(|provider| provider.as_str()),
+            "built-in provider for role {name}"
+        );
+    }
+
+    assert_eq!(
+        schema["$schema"], "https://json-schema.org/draft/2020-12/schema",
+        "the conformance matrix exercises the published schema dialect"
+    );
+}
+
+#[test]
+fn dispatch_metadata_schema_rejects_invalid_operation_and_role_fields_matrix() {
+    let registry: Value =
+        serde_json::from_str(system_provider_abi_json()).expect("embedded dispatch metadata");
+    let schema_json = system_provider_abi_schema_json();
+    build_host::validate_json_against_schema(system_provider_abi_json(), schema_json)
+        .expect("generated dispatch metadata conforms before drift probes");
+
+    let operation_field_mutations = [
+        ("name", Value::String(String::new())),
+        ("version", serde_json::json!({"major": "one", "minor": 0})),
+        ("signature", Value::String(String::new())),
+        ("effect", Value::String("mutate".to_owned())),
+        ("preconditions", serde_json::json!([""])),
+        ("failures", serde_json::json!(["vendor.failure"])),
+        ("role", Value::String(String::new())),
+    ];
+    for (field, invalid) in operation_field_mutations {
+        let mut mutated = registry.clone();
+        mutated["operations"][0][field] = invalid;
+        assert!(
+            build_host::validate_json_against_schema(&mutated.to_string(), schema_json).is_err(),
+            "dispatch schema rejects invalid operation field {field}"
+        );
+    }
+
+    let role_field_mutations = [
+        ("name", Value::String(String::new())),
+        ("version", serde_json::json!({"major": 1, "minor": "zero"})),
+        ("effects", serde_json::json!(["mutate"])),
+        ("operations", serde_json::json!([""])),
+        ("required", Value::String("yes".to_owned())),
+        ("replaceable", Value::String("no".to_owned())),
+        ("builtin_provider", Value::String(String::new())),
+    ];
+    for (field, invalid) in role_field_mutations {
+        let mut mutated = registry.clone();
+        mutated["roles"][0][field] = invalid;
+        assert!(
+            build_host::validate_json_against_schema(&mutated.to_string(), schema_json).is_err(),
+            "dispatch schema rejects invalid role field {field}"
+        );
+    }
 }
 
 #[test]
