@@ -2211,6 +2211,56 @@ fn paired_window_folds_keep_values_across_sparse_refresh_compaction_chains() {
     assert_eq!(first, integer_pair(12, 16), "later refreshes do not mutate the first snapshot result");
     assert_eq!(second, integer_pair(18, 24), "later refreshes do not mutate the second snapshot result");
 
+    let lane_names = [
+        "View.Left",
+        "View.Right",
+        "View.Left",
+        "View.Right",
+        "View.Left",
+        "View.Right",
+    ];
+    let cursor_traces = [
+        vec![None, Some(cursors[0].clone()), Some(cursors[1].clone())],
+        vec![None, Some(cursors[0].clone())],
+        vec![
+            None,
+            Some(cursors[0].clone()),
+            Some(cursors[1].clone()),
+            Some(cursors[2].clone()),
+        ],
+        vec![None, Some(cursors[0].clone()), Some(cursors[1].clone())],
+        vec![None, Some(cursors[0].clone()), Some(cursors[1].clone())],
+        vec![None, Some(cursors[0].clone()), Some(cursors[1].clone())],
+    ];
+    assert_eq!(source.lanes.len(), lane_names.len());
+    let scopes = source
+        .lanes
+        .iter()
+        .zip(lane_names)
+        .map(|((source_name, scope, _), expected_name)| {
+            assert_eq!(source_name, expected_name, "each refresh reads left then right");
+            *scope
+        })
+        .collect::<Vec<_>>();
+    for (index, scope) in scopes.iter().enumerate() {
+        assert!(
+            !scopes[..index].contains(scope),
+            "paired refreshes cannot alias sibling or prior snapshot scopes: {scope:?}"
+        );
+    }
+    let mut expected_cursors = Vec::new();
+    for (index, trace) in cursor_traces.into_iter().enumerate() {
+        expected_cursors.extend(
+            trace
+                .into_iter()
+                .map(|cursor| (lane_names[index].to_owned(), scopes[index], cursor)),
+        );
+    }
+    assert_eq!(
+        source.cursors,
+        expected_cursors,
+        "reused compact cursor bytes advance only within each sparse refresh source scope"
+    );
     assert!(source.pending["View.Left"].is_empty());
     assert!(source.pending["View.Right"].is_empty());
 }
