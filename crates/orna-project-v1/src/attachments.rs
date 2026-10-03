@@ -754,6 +754,157 @@ impl PackageResolver {
         Ok(route)
     }
 
+    /// Compacts retained history through paired snapshot folds while keeping
+    /// the current terminal route and the identities of the selected
+    /// snapshots. Each fold keeps exactly two labeled snapshots in the given
+    /// order and discards the other retained history. Labels are resolved by
+    /// their unique snapshot identity, so labels and checkpoints captured
+    /// before a compaction remain usable after their wave/depth coordinates
+    /// move. The reference defines storage compaction as preserving semantic
+    /// rows and checkpoints, but does not define in-memory attach-route
+    /// compaction; v1 applies that preservation rule to the two selected
+    /// closure snapshots and rejects stale, duplicate, or cross-route labels
+    /// atomically.
+    pub fn compact_nested_terminal_pair_history_folds_preserving_terminal_identity(
+        &self,
+        previous: &ReboundPathResolution,
+        folds: &[[NestedPairDepthLabel; 2]],
+    ) -> Result<
+        (
+            ReboundPathResolution,
+            Vec<(NestedPairTerminalRouteIdentity, NestedPairTerminalRouteIdentity)>,
+        ),
+        AttachmentError,
+    > {
+        let mut route = previous.clone();
+        let mut transitions = Vec::with_capacity(folds.len());
+        for fold in folds {
+            let before = route.terminal_route_identity();
+            route = route.compact_retained_depth_pair(fold)?;
+            let after = route.terminal_route_identity();
+            route.validate_terminal_route_identity(&before)?;
+            transitions.push((before, after));
+        }
+        Ok((route, transitions))
+    }
+
+    /// Applies paired history-compaction folds grouped into caller-visible
+    /// pages. Folds run in order across page boundaries, so stable snapshot
+    /// labels from an earlier page still select the same pins after later
+    /// compaction moves their coordinates. The reference is silent on
+    /// paginating in-memory attach history; v1 preserves one transition list
+    /// per input page (including empty pages) and returns no partial result if
+    /// any fold is invalid.
+    pub fn compact_nested_terminal_pair_history_pages_preserving_terminal_identity(
+        &self,
+        previous: &ReboundPathResolution,
+        pages: &[&[[NestedPairDepthLabel; 2]]],
+    ) -> Result<
+        (
+            ReboundPathResolution,
+            Vec<Vec<(NestedPairTerminalRouteIdentity, NestedPairTerminalRouteIdentity)>>,
+        ),
+        AttachmentError,
+    > {
+        let mut route = previous.clone();
+        let mut page_transitions = Vec::with_capacity(pages.len());
+        for page in pages {
+            let (compacted, transitions) = self
+                .compact_nested_terminal_pair_history_folds_preserving_terminal_identity(
+                    &route, page,
+                )?;
+            route = compacted;
+            page_transitions.push(transitions);
+        }
+        Ok((route, page_transitions))
+    }
+
+    /// Repeatedly compacts one labelled terminal pair, rotating its order
+    /// after each fold. `folds_per_page` controls how many rotations occur in
+    /// each page; the orientation carries across page boundaries and a zero
+    /// count preserves an empty page without changing it. The reference does
+    /// not define rotation for attach-history folds; v1 rotates the two exact
+    /// snapshot identities and validates the terminal route after every fold.
+    /// If a label is stale, no partial route is returned.
+    pub fn compact_nested_terminal_pair_history_rotation_pages_preserving_terminal_identity(
+        &self,
+        previous: &ReboundPathResolution,
+        labels: &[NestedPairDepthLabel; 2],
+        folds_per_page: &[usize],
+    ) -> Result<
+        (
+            ReboundPathResolution,
+            Vec<Vec<(NestedPairTerminalRouteIdentity, NestedPairTerminalRouteIdentity)>>,
+        ),
+        AttachmentError,
+    > {
+        let mut route = previous.clone();
+        let mut ordered_labels = [labels[0].clone(), labels[1].clone()];
+        let mut page_transitions = Vec::with_capacity(folds_per_page.len());
+        for fold_count in folds_per_page {
+            let mut transitions = Vec::with_capacity(*fold_count);
+            for _ in 0..*fold_count {
+                let (compacted, fold_transitions) = self
+                    .compact_nested_terminal_pair_history_folds_preserving_terminal_identity(
+                        &route,
+                        std::slice::from_ref(&ordered_labels),
+                    )?;
+                route = compacted;
+                transitions.extend(fold_transitions);
+                ordered_labels.rotate_left(1);
+            }
+            page_transitions.push(transitions);
+        }
+        Ok((route, page_transitions))
+    }
+
+    /// Compacts retained history through paired handoff checkpoints. Each
+    /// fold keeps the two exact checkpoint snapshots in caller order, so a
+    /// checkpoint captured before compaction remains replayable while its
+    /// snapshot is retained. The reference does not define checkpoint-backed
+    /// attach-history compaction; v1 requires both checkpoints to belong to
+    /// this route and validates their identities after every fold.
+    pub fn compact_nested_terminal_pair_checkpoint_folds_preserving_terminal_identity(
+        &self,
+        previous: &ReboundPathResolution,
+        checkpoint_folds: &[[&ReboundPathCheckpoint; 2]],
+    ) -> Result<
+        (
+            ReboundPathResolution,
+            Vec<(NestedPairTerminalRouteIdentity, NestedPairTerminalRouteIdentity)>,
+        ),
+        AttachmentError,
+    > {
+        let mut route = previous.clone();
+        let mut transitions = Vec::with_capacity(checkpoint_folds.len());
+        for checkpoints in checkpoint_folds {
+            for checkpoint in checkpoints {
+                checkpoint.validate_depth_identity()?;
+                route.validate_depth_label(checkpoint.depth_label())?;
+            }
+            let labels = [
+                checkpoints[0].depth_label().clone(),
+                checkpoints[1].depth_label().clone(),
+            ];
+            let (compacted, fold_transitions) = self
+                .compact_nested_terminal_pair_history_folds_preserving_terminal_identity(
+                    &route,
+                    std::slice::from_ref(&labels),
+                )?;
+            route = compacted;
+            for checkpoint in checkpoints {
+                route.validate_depth_label(checkpoint.depth_label())?;
+            }
+            transitions.push(
+                fold_transitions
+                    .into_iter()
+                    .next()
+                    .ok_or(AttachmentError::RetainedSnapshotUnavailable)?,
+            );
+        }
+        Ok((route, transitions))
+    }
+
     /// Continues a terminal-pair chain from an exact retained session. The
     /// first pair uses that session as its handoff root; later pairs continue
     /// from the preceding pair's newest handoff. The reference does not define
@@ -840,11 +991,11 @@ impl PackageResolver {
         previous.validate_depth_label(label)?;
         let mut route = previous.clone();
         for replacements in replacement_waves {
-            route.validate_depth_label(label)?;
+            let (wave, depth) = route.retained_position_for_depth_label(label)?;
             route = self.extend_nested_terminal_pair_from_wave(
                 &route,
-                label.wave,
-                label.depth,
+                wave,
+                depth,
                 replacements.clone(),
             )?;
         }
@@ -1170,14 +1321,7 @@ impl PackageResolver {
         for round in rounds {
             let checkpoints = round
                 .iter()
-                .map(|(label, _)| {
-                    route.validate_depth_label(label)?;
-                    let checkpoint = route.handoff_checkpoint(label.wave, label.depth)?;
-                    if checkpoint.depth_label() != *label {
-                        return Err(AttachmentError::RetainedSnapshotUnavailable);
-                    }
-                    Ok(checkpoint)
-                })
+                .map(|(label, _)| route.handoff_checkpoint_for_depth_label(label))
                 .collect::<Result<Vec<_>, AttachmentError>>()?;
             let storms = round
                 .iter()
@@ -1217,7 +1361,6 @@ impl PackageResolver {
                 .enumerate()
                 .map(|(slot, plan)| match plan {
                     Some((label, replacements)) => {
-                        route.validate_depth_label(label)?;
                         if let Some(retained) = &labels[slot] {
                             if retained != *label {
                                 return Err(AttachmentError::RetainedSnapshotUnavailable);
@@ -1225,10 +1368,7 @@ impl PackageResolver {
                         } else {
                             labels[slot] = Some((*label).clone());
                         }
-                        let checkpoint = route.handoff_checkpoint(label.wave, label.depth)?;
-                        if checkpoint.depth_label() != *label {
-                            return Err(AttachmentError::RetainedSnapshotUnavailable);
-                        }
+                        let checkpoint = route.handoff_checkpoint_for_depth_label(label)?;
                         Ok(Some((checkpoint, *replacements)))
                     }
                     None => Ok(None),
@@ -1271,7 +1411,7 @@ impl PackageResolver {
             let mut checkpoints = round
                 .iter()
                 .map(|(label, replacements)| {
-                    route.validate_depth_label(label)?;
+                    let (wave, depth) = route.retained_position_for_depth_label(label)?;
                     if seen_labels.contains(label) {
                         return Err(AttachmentError::RetainedSnapshotUnavailable);
                     }
@@ -1281,15 +1421,12 @@ impl PackageResolver {
                     }
                     let checkpoint = match replacements {
                         Some(replacement_waves) => {
-                            let checkpoint = route.handoff_checkpoint(label.wave, label.depth)?;
-                            if checkpoint.depth_label() != *label {
-                                return Err(AttachmentError::RetainedSnapshotUnavailable);
-                            }
+                            let checkpoint = route.handoff_checkpoint(wave, depth)?;
                             Some((checkpoint, *replacement_waves))
                         }
                         None => None,
                     };
-                    Ok((label.wave, label.depth, checkpoint))
+                    Ok((wave, depth, checkpoint))
                 })
                 .collect::<Result<Vec<_>, AttachmentError>>()?;
             checkpoints.sort_by_key(|(wave, depth, _)| (*wave, *depth));
@@ -1941,11 +2078,7 @@ impl PackageResolver {
                 storms
                     .iter()
                     .map(|(label, replacements)| {
-                        route.validate_depth_label(label)?;
-                        let checkpoint = route.handoff_checkpoint(label.wave, label.depth)?;
-                        if checkpoint.depth_label() != *label {
-                            return Err(AttachmentError::RetainedSnapshotUnavailable);
-                        }
+                        let checkpoint = route.handoff_checkpoint_for_depth_label(label)?;
                         Ok((checkpoint, *replacements))
                     })
                     .collect::<Result<Vec<_>, AttachmentError>>()
@@ -2016,11 +2149,7 @@ impl PackageResolver {
                             .routes
                             .get(row)
                             .ok_or(AttachmentError::RetainedSnapshotUnavailable)?;
-                        route.validate_depth_label(label)?;
-                        let checkpoint = route.handoff_checkpoint(label.wave, label.depth)?;
-                        if checkpoint.depth_label() != *label {
-                            return Err(AttachmentError::RetainedSnapshotUnavailable);
-                        }
+                        let checkpoint = route.handoff_checkpoint_for_depth_label(label)?;
                         Ok(vec![(checkpoint, *replacements)])
                     }
                     None => Ok(Vec::new()),
@@ -2429,16 +2558,92 @@ impl ReboundPathResolution {
         &self,
         label: &NestedPairDepthLabel,
     ) -> Result<(), AttachmentError> {
-        let session = self.retained_snapshot_at_depth(label.wave, label.depth)?;
-        let snapshot_identity = self.retained_snapshot_identity_at_depth(label.wave, label.depth)?;
-        if Arc::ptr_eq(&self.route_identity, &label.route_identity)
-            && Arc::ptr_eq(snapshot_identity, &label.snapshot_identity)
-            && label.matches_session(session)
-        {
-            Ok(())
-        } else {
-            Err(AttachmentError::RetainedSnapshotUnavailable)
+        self.retained_position_for_depth_label(label).map(|_| ())
+    }
+
+    fn retained_position_for_depth_label(
+        &self,
+        label: &NestedPairDepthLabel,
+    ) -> Result<(usize, usize), AttachmentError> {
+        if !Arc::ptr_eq(&self.route_identity, &label.route_identity) {
+            return Err(AttachmentError::RetainedSnapshotUnavailable);
         }
+        let index = self
+            .retained_snapshot_identities
+            .iter()
+            .position(|identity| Arc::ptr_eq(identity, &label.snapshot_identity))
+            .ok_or(AttachmentError::RetainedSnapshotUnavailable)?;
+        let session = self
+            .retained_sessions
+            .get(index)
+            .ok_or(AttachmentError::RetainedSnapshotUnavailable)?;
+        if !label.matches_session(session) {
+            return Err(AttachmentError::RetainedSnapshotUnavailable);
+        }
+
+        let mut start = 0usize;
+        for (wave, length) in self.retained_wave_lengths.iter().copied().enumerate() {
+            let end = start
+                .checked_add(length)
+                .ok_or(AttachmentError::RetainedSnapshotUnavailable)?;
+            if index < end {
+                return Ok((wave, index - start));
+            }
+            start = end;
+        }
+        Err(AttachmentError::RetainedSnapshotUnavailable)
+    }
+
+    fn handoff_checkpoint_for_depth_label(
+        &self,
+        label: &NestedPairDepthLabel,
+    ) -> Result<ReboundPathCheckpoint, AttachmentError> {
+        let (wave, depth) = self.retained_position_for_depth_label(label)?;
+        self.handoff_checkpoint(wave, depth)
+    }
+
+    fn compact_retained_depth_pair(
+        &self,
+        labels: &[NestedPairDepthLabel; 2],
+    ) -> Result<Self, AttachmentError> {
+        let positions = labels
+            .iter()
+            .map(|label| self.retained_position_for_depth_label(label))
+            .collect::<Result<Vec<_>, _>>()?;
+        let indices = positions
+            .iter()
+            .map(|(wave, depth)| self.retained_snapshot_index(*wave, *depth))
+            .collect::<Result<Vec<_>, _>>()?;
+        if indices[0] == indices[1] {
+            return Err(AttachmentError::RetainedSnapshotUnavailable);
+        }
+
+        let retained_sessions = indices
+            .iter()
+            .map(|index| {
+                self.retained_sessions
+                    .get(*index)
+                    .cloned()
+                    .ok_or(AttachmentError::RetainedSnapshotUnavailable)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let retained_snapshot_identities = indices
+            .iter()
+            .map(|index| {
+                self.retained_snapshot_identities
+                    .get(*index)
+                    .cloned()
+                    .ok_or(AttachmentError::RetainedSnapshotUnavailable)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(Self {
+            final_session: self.final_session.clone(),
+            retained_sessions,
+            retained_wave_lengths: vec![2],
+            route_identity: self.route_identity.clone(),
+            retained_snapshot_identities,
+        })
     }
 
     /// Saves one exact handoff route for replay after later rebinding
@@ -2469,8 +2674,9 @@ impl ReboundPathResolution {
     }
 }
 
-/// A retained wave/depth coordinate bound to exact pins, route lineage, and
-/// the particular retained snapshot created at that coordinate.
+/// A retained wave/depth coordinate and stable identity for one exact pinned
+/// snapshot in a route lineage. Compaction can move the snapshot's current
+/// coordinate while labels captured before the move continue to identify it.
 #[derive(Clone, Debug)]
 pub struct NestedPairDepthLabel {
     wave: usize,
@@ -2528,8 +2734,6 @@ impl PartialEq for NestedPairDepthLabel {
     fn eq(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.route_identity, &other.route_identity)
             && Arc::ptr_eq(&self.snapshot_identity, &other.snapshot_identity)
-            && self.wave == other.wave
-            && self.depth == other.depth
             && self.primary == other.primary
             && self.attached == other.attached
     }
