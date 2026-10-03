@@ -10,6 +10,16 @@ use orna_sys_v1::{
 };
 use serde_json::Value;
 
+#[path = "../build_host.rs"]
+#[allow(dead_code)]
+mod build_host;
+#[path = "../build_provider.rs"]
+#[allow(dead_code)]
+mod build_provider;
+#[path = "../build_support.rs"]
+#[allow(dead_code)]
+mod build_support;
+
 const SHARED_PROVIDER_FAILURES: [&str; 3] = [
     "sys.abi.precondition_failed",
     "sys.abi.unavailable",
@@ -48,6 +58,46 @@ impl SystemOperationProvider for InvokeValueProvider {
             payload: None,
         })
     }
+}
+
+fn round_trip_generated_provider_artifacts() -> SystemProviderAbi {
+    let generated_schema = build_provider::generate_provider_registry_schema()
+        .expect("provider schema regenerates from its generator");
+    assert_eq!(
+        generated_schema,
+        orna_sys_v1::system_provider_abi_schema_json(),
+        "generated provider schema matches its embedded build output"
+    );
+    let schema_value: Value =
+        serde_json::from_str(&generated_schema).expect("generated provider schema is valid JSON");
+    let round_tripped_schema = build_support::canonical_pretty_json(&schema_value)
+        .expect("generated provider schema serializes canonically")
+        + "\n";
+    assert_eq!(
+        round_tripped_schema, generated_schema,
+        "provider schema survives canonical JSON round-trip"
+    );
+
+    let registry_json = system_provider_abi_json();
+    let registry_value: Value =
+        serde_json::from_str(registry_json).expect("embedded generated provider registry");
+    let round_tripped_registry = build_support::canonical_pretty_json(&registry_value)
+        .expect("generated provider registry serializes canonically")
+        + "\n";
+    assert_eq!(
+        round_tripped_registry, registry_json,
+        "provider registry survives canonical JSON round-trip"
+    );
+    build_host::validate_json_against_schema(&round_tripped_registry, &round_tripped_schema)
+        .expect("round-tripped provider registry conforms to the round-tripped schema");
+    let parsed = SystemProviderAbi::from_json(&round_tripped_registry)
+        .expect("round-tripped registry deserializes into the typed table");
+    assert_eq!(
+        &parsed,
+        system_dispatch_table(),
+        "round-tripped typed table equals the baked runtime registry"
+    );
+    parsed
 }
 
 fn assert_generated_edge_diagnostic_parity(
@@ -179,6 +229,130 @@ fn generated_provider_abi_carries_typed_operation_contracts_and_roles() {
         .is_ok()
     );
     assert!(ProviderRoleRegistry::from_baked_abi(abi).is_ok());
+}
+
+#[test]
+fn generated_provider_schema_and_registry_round_trip_before_dispatch() {
+    let round_tripped = round_trip_generated_provider_artifacts();
+    let operation_count = round_tripped.operations().count();
+    let role_count = round_tripped.roles().count();
+    assert_eq!(
+        operation_count,
+        system_dispatch_table().operations().count()
+    );
+    assert_eq!(role_count, system_dispatch_table().roles().count());
+    println!(
+        "generated_provider_schema_registry_round_trip operations={operation_count} roles={role_count} schema_canonical=true registry_canonical=true schema_validated=true typed_table_equal=true total_cases=4"
+    );
+}
+
+#[test]
+fn round_tripped_registry_matches_direct_undeclared_failure_diagnostics() {
+    let baked = system_dispatch_table();
+    let round_tripped = round_trip_generated_provider_artifacts();
+    let registry = ProviderRoleRegistry::from_baked_abi(&round_tripped)
+        .expect("round-tripped typed registry resolves generated provider offers");
+    let undeclared = FailureCode::new("sys.conformance.dispatch_error").unwrap();
+    let mut generated_bindings = 0;
+    let mut provider_bound_cases = 0;
+
+    for contract in baked.operations() {
+        let generated = system_function_descriptor(contract.id.as_str())
+            .unwrap_or_else(|| panic!("missing generated binding for {}", contract.id.as_str()));
+        assert_eq!(generated.name, contract.id.as_str());
+        assert_eq!(generated.signature, contract.signature.source);
+        assert_eq!(
+            contract.effects.iter().next(),
+            Some(generated.effect),
+            "generated binding effect matches {}",
+            contract.id.as_str()
+        );
+        generated_bindings += 1;
+
+        let Some(role_id) = &contract.role else {
+            continue;
+        };
+        let round_tripped_contract = round_tripped
+            .operation(contract.id.as_str())
+            .expect("round-tripped typed table retains every provider-bound contract");
+        assert_eq!(round_tripped_contract, contract);
+        assert!(
+            !contract.declares_failure(&undeclared),
+            "{} does not declare the test failure",
+            contract.id.as_str()
+        );
+        let offer = registry
+            .resolve(role_id.as_str())
+            .expect("round-tripped registry selects the generated provider")
+            .clone();
+        let arguments = contract
+            .signature
+            .parameters
+            .iter()
+            .map(|parameter| {
+                TypedValue::public(
+                    TypeId::new(parameter.ty.canonical()),
+                    parameter.name.as_bytes().to_vec(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let argument_types = contract
+            .signature
+            .parameters
+            .iter()
+            .map(|parameter| parameter.ty.canonical())
+            .collect::<Vec<_>>();
+        let provider_for = || InvokeValueProvider {
+            offer: offer.clone(),
+            operation: contract.id.clone(),
+            argument_types: argument_types.clone(),
+            response: Err(undeclared.clone()),
+            calls: AtomicUsize::new(0),
+        };
+        let direct_provider = provider_for();
+        let registry_provider = provider_for();
+        let expected = Err(ProviderDiagnostic::UndeclaredFailure {
+            operation: contract.id.clone(),
+            code: undeclared.clone(),
+        });
+        let direct = baked.dispatch_to_provider(
+            generated.name,
+            &direct_provider,
+            &arguments,
+            |_| Ok(()),
+        );
+        let mediated = registry.dispatch_to_provider(
+            &round_tripped,
+            generated.name,
+            &registry_provider,
+            &arguments,
+            |_| Ok(()),
+        );
+
+        assert_eq!(
+            direct,
+            expected,
+            "direct dispatch diagnostic for {}",
+            contract.id.as_str()
+        );
+        assert_eq!(
+            mediated, expected,
+            "round-tripped registry diagnostic for {}",
+            contract.id.as_str()
+        );
+        assert_eq!(direct.unwrap_err().code(), "sys.abi.undeclared_failure");
+        assert_eq!(mediated.unwrap_err().code(), "sys.abi.undeclared_failure");
+        assert_eq!(direct_provider.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(registry_provider.calls.load(Ordering::SeqCst), 1);
+        provider_bound_cases += 1;
+    }
+
+    assert_eq!(generated_bindings, baked.operations().count());
+    assert!(provider_bound_cases > 0);
+    println!(
+        "generated_binding_undeclared_failure_parity bindings={generated_bindings} provider_routes={provider_bound_cases} direct_registry_pairs={provider_bound_cases} diagnostic_code=sys.abi.undeclared_failure total_cases={}",
+        generated_bindings + provider_bound_cases * 2
+    );
 }
 
 #[test]
