@@ -1255,15 +1255,46 @@ impl PackageResolver {
             return Err(AttachmentError::RetainedSnapshotUnavailable);
         }
 
+        self.extend_nested_terminal_pair_checkpoint_restoration_stream_validating_terminal_identity_transitions(
+            previous,
+            restoration_folds
+                .iter()
+                .copied()
+                .zip(expected_fold_transitions.iter().cloned()),
+        )
+    }
+
+    /// Consumes paired checkpoint restoration folds once, in order. Each
+    /// yielded fold contains two checkpoint-rooted chains and their expected
+    /// identity edges. A fold must return to the terminal identity it started
+    /// from, and labels emitted earlier in the stream remain bound through
+    /// every later fold. The reference does not specify streamed restore-fold
+    /// semantics; v1 validates each yielded fold before requesting the next
+    /// and returns no partial route if any edge or restoration is invalid.
+    pub fn extend_nested_terminal_pair_checkpoint_restoration_stream_validating_terminal_identity_transitions<'a>(
+        &self,
+        previous: &ReboundPathResolution,
+        restoration_folds: impl IntoIterator<
+            Item = (
+                [(&'a ReboundPathCheckpoint, &'a [[PinnedDatabase; 2]]); 2],
+                [(NestedPairTerminalRouteIdentity, NestedPairTerminalRouteIdentity); 2],
+            ),
+        >,
+    ) -> Result<
+        (
+            ReboundPathResolution,
+            Vec<[(NestedPairTerminalRouteIdentity, NestedPairTerminalRouteIdentity); 2]>,
+        ),
+        AttachmentError,
+    > {
         let mut route = previous.clone();
         let mut retained_checkpoint_labels = Vec::new();
-        let mut all_transitions = Vec::with_capacity(restoration_folds.len());
-        for (fold, expected_transitions) in restoration_folds.iter().zip(expected_fold_transitions)
-        {
+        let mut all_transitions = Vec::new();
+        for (fold, expected_transitions) in restoration_folds {
             let starting_identity = route.terminal_route_identity();
             let mut transitions = Vec::with_capacity(2);
             for ((checkpoint, replacement_waves), (expected_before, expected_after)) in
-                fold.iter().zip(expected_transitions)
+                fold.iter().zip(&expected_transitions)
             {
                 let before = route.terminal_route_identity();
                 route.validate_terminal_route_identity(expected_before)?;
