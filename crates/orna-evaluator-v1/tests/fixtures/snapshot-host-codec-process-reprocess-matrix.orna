@@ -1,47 +1,29 @@
-[
-    {
-        let (first_status, first_stdout, first_stderr) = std.io.process.run("/usr/bin/cat", [], ".", [], std.encoding.base64.decode(""), 2.seconds, 64);
-        let replay = std.io.process.run("/usr/bin/cat", [], ".", [], std.encoding.base64.decode(std.encoding.base64.encode(std.encoding.base64.decode(std.encoding.base64.encode(first_stdout)))), 2.seconds, 64);
-        ((first_status, first_stdout, first_stderr), replay)
-    },
-    {
-        let (first_status, first_stdout, first_stderr) = std.io.process.run("/usr/bin/cat", [], ".", [], std.encoding.base64.decode("AA=="), 2.seconds, 64);
-        let replay = std.io.process.run("/usr/bin/cat", [], ".", [], std.encoding.base64.decode(std.encoding.base64.encode(std.encoding.base64.decode(std.encoding.base64.encode(first_stdout)))), 2.seconds, 64);
-        ((first_status, first_stdout, first_stderr), replay)
-    },
-    {
-        let (first_status, first_stdout, first_stderr) = std.io.process.run("/usr/bin/cat", [], ".", [], std.encoding.base64.decode("AAE="), 2.seconds, 64);
-        let replay = std.io.process.run("/usr/bin/cat", [], ".", [], std.encoding.base64.decode(std.encoding.base64.encode(std.encoding.base64.decode(std.encoding.base64.encode(first_stdout)))), 2.seconds, 64);
-        ((first_status, first_stdout, first_stderr), replay)
-    },
-    {
-        let (first_status, first_stdout, first_stderr) = std.io.process.run("/usr/bin/cat", [], ".", [], std.encoding.base64.decode("AAEC"), 2.seconds, 64);
-        let replay = std.io.process.run("/usr/bin/cat", [], ".", [], std.encoding.base64.decode(std.encoding.base64.encode(std.encoding.base64.decode(std.encoding.base64.encode(first_stdout)))), 2.seconds, 64);
-        ((first_status, first_stdout, first_stderr), replay)
-    },
-    {
-        let (first_status, first_stdout, first_stderr) = std.io.process.run("/usr/bin/cat", [], ".", [], std.encoding.base64.decode("/w=="), 2.seconds, 64);
-        let replay = std.io.process.run("/usr/bin/cat", [], ".", [], std.encoding.base64.decode(std.encoding.base64.encode(std.encoding.base64.decode(std.encoding.base64.encode(first_stdout)))), 2.seconds, 64);
-        ((first_status, first_stdout, first_stderr), replay)
-    },
-    {
-        let (first_status, first_stdout, first_stderr) = std.io.process.run("/usr/bin/cat", [], ".", [], std.encoding.base64.decode("/+4="), 2.seconds, 64);
-        let replay = std.io.process.run("/usr/bin/cat", [], ".", [], std.encoding.base64.decode(std.encoding.base64.encode(std.encoding.base64.decode(std.encoding.base64.encode(first_stdout)))), 2.seconds, 64);
-        ((first_status, first_stdout, first_stderr), replay)
-    },
-    {
-        let (first_status, first_stdout, first_stderr) = std.io.process.run("/usr/bin/cat", [], ".", [], std.encoding.base64.decode("AAECAw=="), 2.seconds, 64);
-        let replay = std.io.process.run("/usr/bin/cat", [], ".", [], std.encoding.base64.decode(std.encoding.base64.encode(std.encoding.base64.decode(std.encoding.base64.encode(first_stdout)))), 2.seconds, 64);
-        ((first_status, first_stdout, first_stderr), replay)
-    },
-    {
-        let (first_status, first_stdout, first_stderr) = std.io.process.run("/usr/bin/cat", [], ".", [], std.encoding.base64.decode("AAECAwQ="), 2.seconds, 64);
-        let replay = std.io.process.run("/usr/bin/cat", [], ".", [], std.encoding.base64.decode(std.encoding.base64.encode(std.encoding.base64.decode(std.encoding.base64.encode(first_stdout)))), 2.seconds, 64);
-        ((first_status, first_stdout, first_stderr), replay)
-    },
-    {
-        let (first_status, first_stdout, first_stderr) = std.io.process.run("/usr/bin/cat", [], ".", [], std.encoding.base64.decode("AAECAwQF"), 2.seconds, 64);
-        let replay = std.io.process.run("/usr/bin/cat", [], ".", [], std.encoding.base64.decode(std.encoding.base64.encode(std.encoding.base64.decode(std.encoding.base64.encode(first_stdout)))), 2.seconds, 64);
-        ((first_status, first_stdout, first_stderr), replay)
-    }
-]
+(() => {
+    let (first_status, first_stdout, first_stderr) = std.io.process.run(
+        "/usr/bin/cat",
+        [],
+        ".",
+        [],
+        std.encoding.base64.decode("__BASE64_INPUT__"),
+        2.seconds,
+        64,
+    );
+    assert first_status == Some(0);
+    assert first_stdout == std.encoding.base64.decode("__BASE64_INPUT__");
+    assert first_stderr == std.encoding.base64.decode("");
+    std.io.process.run(
+        "/usr/bin/cat",
+        [],
+        ".",
+        [],
+        std.encoding.base64.decode(
+            std.encoding.base64.encode(
+                std.encoding.base64.decode(
+                    std.encoding.base64.encode(first_stdout)
+                )
+            )
+        ),
+        2.seconds,
+        64,
+    )
+})()
