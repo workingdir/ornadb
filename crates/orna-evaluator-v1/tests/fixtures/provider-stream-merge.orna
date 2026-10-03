@@ -1,0 +1,7 @@
+std.stream.for_each(
+    std.stream.merge([
+        std.stream.from_provider("left", "merge"),
+        std.stream.from_provider("right", "merge")
+    ]),
+    (value: Str) => { std.io.environment.get(value); }
+)
