@@ -2,12 +2,18 @@ use serde_json::json;
 
 use crate::build_support::canonical_pretty_json;
 
+const U16_DECIMAL_PATTERN: &str =
+    r"(?:[0-9]{1,4}|[1-5][0-9]{4}|6[0-4][0-9]{3}|65[0-4][0-9]{2}|655[0-2][0-9]|6553[0-5])";
+
 /// JSON Schema for the generated typed provider dispatch artifact.
 ///
 /// This is a build artifact alongside the registry, not an independent
 /// descriptor source. Strict object shapes keep the embedded dispatch format
 /// and its dev-only conformance export aligned.
 pub fn generate_provider_registry_schema() -> Result<String, String> {
+    let role_version_pattern = format!(
+        r"^[A-Za-z0-9_-]+(\.[A-Za-z0-9_-]+)*@{U16_DECIMAL_PATTERN}\.{U16_DECIMAL_PATTERN}$"
+    );
     let schema = json!({
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "$id": "https://orna.dev/schemas/sys-provider-abi-v1.json",
@@ -36,8 +42,8 @@ pub fn generate_provider_registry_schema() -> Result<String, String> {
                 "additionalProperties": false,
                 "required": ["major", "minor"],
                 "properties": {
-                    "major": {"type": "integer", "minimum": 0},
-                    "minor": {"type": "integer", "minimum": 0}
+                    "major": {"type": "integer", "minimum": 0, "maximum": u16::MAX},
+                    "minor": {"type": "integer", "minimum": 0, "maximum": u16::MAX}
                 }
             },
             "operation": {
@@ -65,7 +71,7 @@ pub fn generate_provider_registry_schema() -> Result<String, String> {
                     "role": {
                         "type": ["string", "null"],
                         "minLength": 1,
-                        "pattern": "^[A-Za-z0-9_-]+(\\.[A-Za-z0-9_-]+)*@[0-9]+\\.[0-9]+$"
+                        "pattern": role_version_pattern
                     }
                 }
             },
