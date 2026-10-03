@@ -1053,4 +1053,35 @@ fn paired_subscription_handoffs_rebind_reused_batch_cursors_to_fresh_scopes() {
         let right = source.lanes[generation * 2 + 1].0;
         assert_ne!(left, right, "generation {generation} keeps sibling subscriptions distinct");
     }
+    let scopes = source.lanes.iter().map(|(scope, _)| *scope).collect::<Vec<_>>();
+    for (index, scope) in scopes.iter().enumerate() {
+        assert!(
+            !scopes[..index].contains(scope),
+            "every paired refresh owns fresh read scopes even when cursor bytes recur"
+        );
+    }
+    assert_eq!(
+        source.cursors,
+        vec![
+            (scopes[0], None),
+            (scopes[0], Some(vec![11])),
+            (scopes[0], Some(vec![33])),
+            (scopes[1], None),
+            (scopes[1], Some(vec![11])),
+            (scopes[1], Some(vec![44])),
+            (scopes[2], None),
+            (scopes[2], Some(vec![11])),
+            (scopes[2], Some(vec![55])),
+            (scopes[3], None),
+            (scopes[3], Some(vec![11])),
+            (scopes[3], Some(vec![66])),
+            (scopes[4], None),
+            (scopes[4], Some(vec![11])),
+            (scopes[4], Some(vec![33])),
+            (scopes[5], None),
+            (scopes[5], Some(vec![11])),
+            (scopes[5], Some(vec![44])),
+        ],
+        "a repeated continuation resumes only within its new paired subscription scope"
+    );
 }
