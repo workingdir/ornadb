@@ -1,0 +1,1 @@
+std.collection.chunk(size: 2, values: rows)
