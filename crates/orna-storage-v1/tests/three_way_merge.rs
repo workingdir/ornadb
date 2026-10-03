@@ -90,6 +90,7 @@ use orna_storage_v1::{
     restore_paired_checkpoint_redo_sparse_compaction_handoff_chains_preserving_source_identity,
     restore_paired_checkpoint_redo_sparse_wal_handoff_chains_preserving_identity,
     restore_paired_checkpoint_redo_sparse_wal_merge_handoff_chains_preserving_identity,
+    restore_paired_checkpoint_redo_sparse_wal_merge_handoff_chains_preserving_pin_identity,
     restore_paired_checkpoint_redo_sparse_segment_rotation_handoff_chains_preserving_fold_identity,
     restore_paired_checkpoint_redo_sparse_segment_rotation_compaction_handoffs_preserving_identity,
     restore_paired_checkpoint_redo_sparse_segment_rotation_merge_handoffs_preserving_identity,
@@ -36363,6 +36364,305 @@ fn paired_checkpoint_segment_pins_survive_three_sparse_compaction_restore_batche
             fold_ordinal: 4,
             first_order: 40,
             last_order: 41,
+            expected: 2,
+            actual: 1,
+        }),
+    );
+}
+
+#[test]
+fn paired_checkpoint_wal_pins_survive_three_sparse_compaction_restore_batches() {
+    let fold_rows = PAIRED_REDO_FOLD_IDENTITIES
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    let wal_rows = PAIRED_SPARSE_WAL_MERGE_ROTATION_RESTORES
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    let states = PAIRED_CHECKPOINT_REDO
+        .split("\n\n")
+        .map(parse_checkpoint_fixture)
+        .collect::<Vec<_>>();
+    assert_eq!(fold_rows.len(), 3);
+    assert_eq!(wal_rows.len(), 14);
+    assert_eq!(states.len(), 5);
+
+    let folds = fold_rows
+        .iter()
+        .map(|row| BranchMergePairedRedoFoldIdentity {
+            left_fold: row.fields[&id(2)].encode().unwrap(),
+            right_fold: row.fields[&id(3)].encode().unwrap(),
+        })
+        .collect::<Vec<_>>();
+    let log_segments = wal_rows
+        .chunks_exact(2)
+        .map(|pair| BranchMergePairedLogSegmentIdentity {
+            write_ahead_identity: BranchMergePairedWriteAheadIdentity {
+                left_log: pair[0].fields[&id(2)].encode().unwrap(),
+                right_log: pair[0].fields[&id(3)].encode().unwrap(),
+            },
+            segment_identity: BranchMergePairedWriteAheadSegmentIdentity {
+                left_segment: pair[1].fields[&id(2)].encode().unwrap(),
+                right_segment: pair[1].fields[&id(3)].encode().unwrap(),
+            },
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(log_segments.len(), 7);
+
+    let alpha = b"wal-pins/alpha".to_vec();
+    let beta = b"wal-pins/beta".to_vec();
+    let catalog_only = b"wal-pins/catalog-only".to_vec();
+    let observed_late = b"wal-pins/observed-late".to_vec();
+    let left_base = states[0].clone();
+    let right_base = states[1].clone();
+    let left_redo = states[2].clone();
+    let right_redo = states[3].clone();
+    let positionless = states[4].clone();
+    assert_eq!(positionless.position, None);
+
+    let run = |merge_ordinal: usize,
+               fold_ordinal: usize,
+               first_order: u64,
+               last_order: u64,
+               left: Option<CheckpointGeneration>,
+               right: Option<CheckpointGeneration>,
+               redo_fold_identity: &BranchMergePairedRedoFoldIdentity,
+               identity_indexes: &[usize]| {
+        BranchMergePairedCheckpointRedoFoldWalSparseMergeChainCompactionRunSnapshot {
+            merge_ordinal,
+            fold_ordinal,
+            first_order,
+            last_order,
+            left,
+            right,
+            redo_fold_identity: redo_fold_identity.clone(),
+            log_segment_identities: identity_indexes
+                .iter()
+                .map(|&index| log_segments[index].clone())
+                .collect(),
+        }
+    };
+    let stream = |checkpoint_id, runs| {
+        BranchMergePairedCheckpointRedoFoldWalSparseMergeChainCompactionSnapshot {
+            checkpoint_id,
+            runs,
+        }
+    };
+
+    let restore_batches = vec![
+        vec![
+            vec![stream(
+                alpha.clone(),
+                vec![run(
+                    4,
+                    2,
+                    4,
+                    5,
+                    Some(left_base.clone()),
+                    Some(right_base.clone()),
+                    &folds[0],
+                    &[0, 1],
+                )],
+            )],
+            vec![stream(
+                alpha.clone(),
+                vec![run(
+                    9,
+                    1,
+                    4,
+                    4,
+                    Some(left_redo.clone()),
+                    Some(right_base.clone()),
+                    &folds[1],
+                    &[2],
+                )],
+            )],
+        ],
+        vec![
+            vec![stream(
+                alpha.clone(),
+                vec![run(
+                    4,
+                    2,
+                    4,
+                    4,
+                    Some(positionless.clone()),
+                    Some(right_redo.clone()),
+                    &folds[2],
+                    &[4],
+                )],
+            )],
+            vec![stream(
+                beta.clone(),
+                vec![run(
+                    1,
+                    1,
+                    7,
+                    7,
+                    Some(positionless.clone()),
+                    None,
+                    &folds[0],
+                    &[3],
+                )],
+            )],
+        ],
+        vec![vec![
+            stream(
+                alpha.clone(),
+                vec![run(
+                    5,
+                    0,
+                    8,
+                    8,
+                    Some(left_base.clone()),
+                    Some(right_redo.clone()),
+                    &folds[1],
+                    &[5],
+                )],
+            ),
+            stream(
+                observed_late.clone(),
+                vec![run(0, 0, 9, 9, None, None, &folds[0], &[6])],
+            ),
+        ]],
+    ];
+
+    let restored =
+        restore_paired_checkpoint_redo_sparse_wal_merge_handoff_chains_preserving_pin_identity(
+            &[alpha.clone(), beta.clone(), catalog_only.clone()],
+            &restore_batches,
+        )
+        .unwrap();
+    assert_eq!(
+        restored
+            .iter()
+            .map(|stream| stream.checkpoint_id.clone())
+            .collect::<Vec<_>>(),
+        vec![alpha.clone(), beta.clone(), catalog_only.clone(), observed_late.clone()]
+    );
+    let slots = |checkpoint_id: &[u8]| {
+        &restored
+            .iter()
+            .find(|stream| stream.checkpoint_id == checkpoint_id)
+            .unwrap()
+            .slots
+    };
+    assert_eq!(
+        slots(&alpha)
+            .iter()
+            .map(|slot| (
+                slot.restore_ordinal,
+                slot.handoff_ordinal,
+                slot.merge_ordinal,
+                slot.fold_ordinal,
+                slot.order,
+            ))
+            .collect::<Vec<_>>(),
+        vec![
+            (0, 0, 4, 2, 4),
+            (0, 0, 4, 2, 5),
+            (0, 1, 9, 1, 4),
+            (1, 0, 4, 2, 4),
+            (2, 0, 5, 0, 8),
+        ],
+        "restore, handoff, merge, fold, and sparse order remain distinct",
+    );
+    let assert_pin = |actual: Option<&orna_storage_v1::BranchMergePairedCheckpointWalSegmentPinIdentity>,
+                      generation: Option<&CheckpointGeneration>,
+                      checkpoint_id: &[u8],
+                      write_ahead_id: &[u8],
+                      segment_id: &[u8]| {
+        if let Some(generation) = generation {
+            assert_eq!(
+                actual,
+                Some(&orna_storage_v1::BranchMergePairedCheckpointWalSegmentPinIdentity {
+                    checkpoint_id: checkpoint_id.to_vec(),
+                    generation: generation.clone(),
+                    write_ahead_id: write_ahead_id.to_vec(),
+                    segment_id: segment_id.to_vec(),
+                }),
+            );
+        } else {
+            assert!(actual.is_none());
+        }
+    };
+    let assert_pair = |slot_index: usize,
+                       checkpoint_id: &[u8],
+                       left: Option<&CheckpointGeneration>,
+                       right: Option<&CheckpointGeneration>,
+                       identity_index: usize| {
+        let slot = &slots(checkpoint_id)[slot_index];
+        let identity = &log_segments[identity_index];
+        assert_pin(
+            slot.left_pin.as_ref(),
+            left,
+            checkpoint_id,
+            &identity.write_ahead_identity.left_log,
+            &identity.segment_identity.left_segment,
+        );
+        assert_pin(
+            slot.right_pin.as_ref(),
+            right,
+            checkpoint_id,
+            &identity.write_ahead_identity.right_log,
+            &identity.segment_identity.right_segment,
+        );
+        assert_eq!(slot.log_segment_identity, *identity);
+    };
+    assert_pair(0, &alpha, Some(&left_base), Some(&right_base), 0);
+    assert_pair(1, &alpha, Some(&left_base), Some(&right_base), 1);
+    assert_pair(2, &alpha, Some(&left_redo), Some(&right_base), 2);
+    assert_pair(3, &alpha, Some(&positionless), Some(&right_redo), 4);
+    assert_pair(4, &alpha, Some(&left_base), Some(&right_redo), 5);
+    assert_eq!(slots(&alpha)[2].redo_fold_identity, folds[1]);
+    assert_eq!(slots(&alpha)[3].redo_fold_identity, folds[2]);
+    assert_pair(0, &beta, Some(&positionless), None, 3);
+    assert!(slots(&catalog_only).is_empty());
+    assert_eq!(slots(&observed_late).len(), 1);
+    assert_pair(0, &observed_late, None, None, 6);
+
+    let malformed = |first_order, last_order, log_segment_identities| {
+        BranchMergePairedCheckpointRedoFoldWalSparseMergeChainCompactionSnapshot {
+            checkpoint_id: alpha.clone(),
+            runs: vec![BranchMergePairedCheckpointRedoFoldWalSparseMergeChainCompactionRunSnapshot {
+                merge_ordinal: 7,
+                fold_ordinal: 3,
+                first_order,
+                last_order,
+                left: Some(left_base.clone()),
+                right: None,
+                redo_fold_identity: folds[0].clone(),
+                log_segment_identities,
+            }],
+        }
+    };
+    assert_eq!(
+        restore_paired_checkpoint_redo_sparse_wal_merge_handoff_chains_preserving_pin_identity(
+            &[],
+            &[vec![vec![malformed(10, 9, vec![])]],],
+        ),
+        Err(orna_storage_v1::BranchMergePairedCheckpointRedoFoldWalMergeRestoreHandoffError::InvalidOrderRange {
+            restore_ordinal: 0,
+            handoff_ordinal: 0,
+            merge_ordinal: 7,
+            fold_ordinal: 3,
+            first_order: 10,
+            last_order: 9,
+        }),
+    );
+    assert_eq!(
+        restore_paired_checkpoint_redo_sparse_wal_merge_handoff_chains_preserving_pin_identity(
+            &[],
+            &[vec![vec![malformed(10, 11, vec![log_segments[0].clone()])]]],
+        ),
+        Err(orna_storage_v1::BranchMergePairedCheckpointRedoFoldWalMergeRestoreHandoffError::LogSegmentIdentityCountMismatch {
+            restore_ordinal: 0,
+            handoff_ordinal: 0,
+            merge_ordinal: 7,
+            fold_ordinal: 3,
+            first_order: 10,
+            last_order: 11,
             expected: 2,
             actual: 1,
         }),
