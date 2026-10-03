@@ -1,0 +1,20 @@
+pub table Reading(id: Int) {
+    key: (((Int, Str), (Int, Str)), (Int, Str)),
+    expected: (((Int, Str), (Int, Str)), (Int, Str)),
+    assert every(reading =>
+        if reading.id == 1 {
+            reading.key == reading.expected && reading.id == 1
+        } else {
+            reading.key == reading.expected && reading.id == 2
+        });
+}
+
+pub fn main() {
+    Stream.from_list([
+        { id: 1, key: (((1, "east"), (2, "oak")), (3, "red")), expected: (((1, "east"), (2, "oak")), (3, "red")) },
+        { id: 2, key: (((1, "east"), (2, "oak")), (3, "blue")), expected: (((1, "east"), (2, "oak")), (3, "green")) },
+    ], source_identity: "fixture:streams-yfxkj-predicate-nested-pairs-checkpoint-fold-mismatch")
+        | for_each(reading => {
+            Reading.insert(reading);
+        });
+}
