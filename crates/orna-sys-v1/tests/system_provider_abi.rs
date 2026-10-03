@@ -1854,3 +1854,130 @@ fn generated_bindings_round_trip_typed_results_through_both_dispatch_paths() {
         generated_binding_cases + provider_route_cases * 2
     );
 }
+
+#[test]
+fn generated_binding_argument_count_diagnostics_match_every_dispatch_route() {
+    fn expect_diagnostic<T>(result: Result<T, ProviderDiagnostic>) -> ProviderDiagnostic {
+        match result {
+            Err(diagnostic) => diagnostic,
+            Ok(_) => panic!("invalid generated binding dispatch unexpectedly succeeded"),
+        }
+    }
+
+    let table = system_dispatch_table();
+    let registry = ProviderRoleRegistry::from_baked_abi(table)
+        .expect("generated provider offers resolve from the typed registry");
+    let fallback_role = table
+        .roles()
+        .next()
+        .expect("the dispatch table has at least one provider role");
+    let fallback_offer = ProviderOffer {
+        provider: ProviderId::new("fixture.binding_diagnostic").unwrap(),
+        role: fallback_role.id.clone(),
+        version: fallback_role.version,
+        effects: fallback_role.effects.clone(),
+    };
+    let mut generated_binding_cases = 0;
+    let mut provider_bound_diagnostic_cases = 0;
+    let mut unbound_provider_rejections = 0;
+
+    for contract in table.operations() {
+        let operation_name = contract.id.as_str();
+        let generated = system_function_descriptor(operation_name)
+            .unwrap_or_else(|| panic!("missing generated binding for {operation_name}"));
+        assert_eq!(generated.name, operation_name);
+        assert_eq!(generated.signature, contract.signature.source);
+        let offer = match &contract.role {
+            Some(role_id) => registry
+                .resolve(role_id.as_str())
+                .expect("generated binding role has a selected provider")
+                .clone(),
+            None => fallback_offer.clone(),
+        };
+        let mut wrong_arguments = contract
+            .signature
+            .parameters
+            .iter()
+            .map(|parameter| {
+                TypedValue::public(
+                    TypeId::new(parameter.ty.canonical()),
+                    parameter.name.as_bytes().to_vec(),
+                )
+            })
+            .collect::<Vec<_>>();
+        if wrong_arguments.is_empty() {
+            wrong_arguments.push(TypedValue::public(
+                TypeId::new("sys.conformance.Unexpected"),
+                b"extra".to_vec(),
+            ));
+        } else {
+            wrong_arguments.pop();
+        }
+        let provider = || InvokeValueProvider {
+            offer: offer.clone(),
+            operation: contract.id.clone(),
+            argument_types: contract
+                .signature
+                .parameters
+                .iter()
+                .map(|parameter| parameter.ty.canonical())
+                .collect(),
+            response: Ok(TypedValue::public(
+                TypeId::new(contract.signature.result.canonical()),
+                b"must-not-be-returned".to_vec(),
+            )),
+            calls: AtomicUsize::new(0),
+        };
+        let direct_provider = provider();
+        let registry_provider = provider();
+        let direct_diagnostic = expect_diagnostic(table.dispatch_to_provider(
+            generated.name,
+            &direct_provider,
+            &wrong_arguments,
+            |_| Ok(()),
+        ));
+        let registry_diagnostic = expect_diagnostic(registry.dispatch_to_provider(
+            table,
+            generated.name,
+            &registry_provider,
+            &wrong_arguments,
+            |_| Ok(()),
+        ));
+
+        let expected_code = if contract.role.is_some() {
+            provider_bound_diagnostic_cases += 1;
+            assert_eq!(
+                direct_diagnostic,
+                ProviderDiagnostic::ArgumentCountMismatch {
+                    operation: contract.id.clone(),
+                    expected: contract.signature.parameters.len(),
+                    actual: wrong_arguments.len(),
+                },
+                "generated operation reports its typed arity diagnostic for {operation_name}"
+            );
+            "sys.abi.argument_count_mismatch"
+        } else {
+            unbound_provider_rejections += 1;
+            assert_eq!(
+                direct_diagnostic,
+                ProviderDiagnostic::ProviderNotExecutable(fallback_offer.role.clone()),
+                "unroled generated operation reports provider-not-executable for {operation_name}"
+            );
+            "sys.abi.provider_not_executable"
+        };
+        assert_eq!(registry_diagnostic, direct_diagnostic);
+        assert_eq!(direct_diagnostic.code(), expected_code);
+        assert_eq!(registry_diagnostic.code(), expected_code);
+        assert_eq!(direct_provider.calls.load(Ordering::SeqCst), 0);
+        assert_eq!(registry_provider.calls.load(Ordering::SeqCst), 0);
+        generated_binding_cases += 1;
+    }
+
+    assert_eq!(generated_binding_cases, table.operations().count());
+    assert!(provider_bound_diagnostic_cases > 0);
+    assert!(unbound_provider_rejections > 0);
+    println!(
+        "generated_binding_dispatch_diagnostic_parity operations={generated_binding_cases} argument_count_pairs={provider_bound_diagnostic_cases} provider_not_executable_pairs={unbound_provider_rejections} direct_registry_equal=true providers_called=0 total_cases={}",
+        generated_binding_cases * 2
+    );
+}
