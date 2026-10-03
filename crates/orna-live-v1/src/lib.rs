@@ -10502,6 +10502,7 @@ mod tests {
             let mut host = subscribed_host(Some(runtime));
             let committed = Arc::new(std::sync::atomic::AtomicBool::new(false));
             let value = CanonicalValue::unit().encode().unwrap();
+            let expected_key = value.clone();
             let expected_row = value.clone();
             let mutation =
                 TableMutation::new([23; 16], "Hook", value.clone(), Some(value)).unwrap();
@@ -10546,7 +10547,7 @@ mod tests {
                     host.runtime
                         .as_ref()
                         .unwrap()
-                        .committed_table_row("Hook", &[23; 16])
+                        .committed_table_row("Hook", &expected_key)
                 )
                 .unwrap(),
                 (!fail).then_some(expected_row),
