@@ -1,0 +1,50 @@
+pub fn factory_at(pin: sys.SnapshotRef) =
+    sys.database.as_of(pin).energy.factory;
+
+pub fn paired_sparse_omission_replay_recovery(failure: Error) {
+    let saved = [
+        {
+            left: (factory_at(sys.snapshot("HEAD~1000")), fail(failure)),
+            right: (fail(failure), factory_at(sys.snapshot("HEAD~1001"))),
+            witness: factory_at(sys.snapshot("HEAD~1010")),
+        },
+        {
+            left: (factory_at(sys.snapshot("HEAD~1020")), factory_at(sys.snapshot("HEAD~1020"))),
+            right: (factory_at(sys.snapshot("HEAD~1020")), factory_at(sys.snapshot("HEAD~1021"))),
+            witness: factory_at(sys.snapshot("HEAD~1022")),
+        },
+        { witness: factory_at(sys.snapshot("HEAD~1030")) },
+        {
+            left: (factory_at(sys.snapshot("HEAD~1040")), factory_at(sys.snapshot("HEAD~1040"))),
+            right: (factory_at(sys.snapshot("HEAD~1040")), factory_at(sys.snapshot("HEAD~1041"))),
+            witness: factory_at(sys.snapshot("HEAD~1042")),
+        },
+        {
+            left: (factory_at(sys.snapshot("HEAD~1050")), factory_at(sys.snapshot("HEAD~1050"))),
+            right: (factory_at(sys.snapshot("HEAD~1051")), factory_at(sys.snapshot("HEAD~1051"))),
+            witness: factory_at(sys.snapshot("HEAD~1052")),
+        },
+    ];
+    let rolling = saved;
+    rolling = [
+        {
+            left: (factory_at(sys.snapshot("HEAD~1100")), fail(failure)),
+            right: (fail(failure), factory_at(sys.snapshot("HEAD~1101"))),
+            witness: factory_at(sys.snapshot("HEAD~1110")),
+        },
+        {
+            left: (factory_at(sys.snapshot("HEAD~1120")), factory_at(sys.snapshot("HEAD~1120"))),
+            right: (factory_at(sys.snapshot("HEAD~1120")), factory_at(sys.snapshot("HEAD~1121"))),
+            witness: factory_at(sys.snapshot("HEAD~1122")),
+        },
+        { witness: factory_at(sys.snapshot("HEAD~1123")) },
+        {
+            left: (factory_at(sys.snapshot("HEAD~1130")), factory_at(sys.snapshot("HEAD~1130"))),
+            right: (factory_at(sys.snapshot("HEAD~1130")), factory_at(sys.snapshot("HEAD~1131"))),
+            witness: factory_at(sys.snapshot("HEAD~1132")),
+        },
+        { witness: factory_at(sys.snapshot("HEAD~1133")) },
+    ];
+    rolling = saved;
+    { saved: saved, replayed: rolling }
+}
