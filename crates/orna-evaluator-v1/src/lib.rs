@@ -8312,6 +8312,18 @@ impl Context<'_, '_> {
             ("window", [Value::List(values), Value::Int(size), Value::Int(step)]) => {
                 self.windows(values, size, step)
             }
+            ("__strictly_ordered_time_series", [Value::List(points)]) => {
+                self.strictly_ordered_time_series(points)
+            }
+            ("__window_rate", [Value::List(points), Value::Int(size), Value::Int(step)]) => {
+                self.window_time_series_statistics(points, size, step, "rate")
+            }
+            ("__window_derivative", [Value::List(points), Value::Int(size), Value::Int(step)]) => {
+                self.window_time_series_statistics(points, size, step, "derivative")
+            }
+            ("__window_integrate", [Value::List(points), Value::Int(size), Value::Int(step)]) => {
+                self.window_time_series_statistics(points, size, step, "integrate")
+            }
             ("chunk", [_, _])
             | (
                 "flatten" | "distinct" | "unique" | "pairs" | "count" | "first" | "last" | "min"
@@ -8335,6 +8347,10 @@ impl Context<'_, '_> {
             | ("__bucket_by", [_, _, _])
             | ("zip" | "zip_exact", [_, _])
             | ("window", [_, _] | [_, _, _]) => Err(error("ORNA-EVAL-TYPE")),
+            ("__strictly_ordered_time_series", [_]) => Err(error("ORNA-EVAL-TYPE")),
+            ("__window_rate" | "__window_derivative" | "__window_integrate", [_, _, _]) => {
+                Err(error("ORNA-EVAL-TYPE"))
+            }
             ("__list_length" | "__numeric_sum", [_])
             | ("__list_concat", [_, _])
             | ("__stable_sort" | "__group_by" | "__rank", [_, _])
@@ -10083,6 +10099,57 @@ impl Context<'_, '_> {
         }
         Ok(Value::List(windows))
     }
+    fn strictly_ordered_time_series(&mut self, points: &[Value]) -> Result<Value, EvaluationError> {
+        self.items(points.len())?;
+        let mut previous_time: Option<&Value> = None;
+        for point in points {
+            self.step()?;
+            let Value::Tuple(pair) = point else {
+                return Err(error("ORNA-EVAL-TYPE"));
+            };
+            let [time, _] = pair.as_slice() else {
+                return Err(error("ORNA-EVAL-TYPE"));
+            };
+            if !matches!(time, Value::Instant { .. }) {
+                return Err(error("ORNA-EVAL-TYPE"));
+            }
+            if let Some(previous_time) = previous_time
+                && compare_values(previous_time, time)?.is_ge()
+            {
+                return Ok(Value::Bool(false));
+            }
+            previous_time = Some(time);
+        }
+        Ok(Value::Bool(true))
+    }
+    fn window_time_series_statistics(
+        &mut self,
+        points: &[Value],
+        size: &BigInt,
+        step: &BigInt,
+        statistic: &str,
+    ) -> Result<Value, EvaluationError> {
+        // These loops keep long sparse series and their output windows within
+        // the evaluator's bounded step/depth model without recursive source calls.
+        let Value::List(windows) = self.windows(points, size, step)? else {
+            return Err(error("ORNA-EVAL-VALUE"));
+        };
+        let mut results = Vec::with_capacity(windows.len());
+        for window in windows {
+            self.step()?;
+            let Value::List(points) = window else {
+                return Err(error("ORNA-EVAL-VALUE"));
+            };
+            let result = self.stats(statistic, vec![Value::List(points)])?;
+            results.push(if matches!(statistic, "rate" | "integrate") {
+                Value::Option(Some(Box::new(result)))
+            } else {
+                result
+            });
+            self.items(results.len())?;
+        }
+        Ok(Value::List(results))
+    }
     fn shift_left(&self, value: &BigInt, count: &BigInt) -> Result<Value, EvaluationError> {
         if count.is_negative() {
             return Err(error("ORNA-EVAL-VALUE"));
@@ -11204,6 +11271,10 @@ fn named_arguments(
         "__stable_sort" | "__group_by" | "__rank" => &["values", "key"],
         "__asof_join" => &["left", "right", "time", "by"],
         "__bucket_by" => &["rows", "period", "zone"],
+        "__strictly_ordered_time_series" => &["points"],
+        "__window_rate" | "__window_derivative" | "__window_integrate" => {
+            &["points", "size", "step"]
+        }
         "filter" => &["rows", "predicate"],
         "partition" | "split_when" => &["values", "predicate"],
         "group_by" => &["values", "key"],
@@ -11461,6 +11532,10 @@ const STANDARD_BINDING_MODULES: &[StandardBindingModule] = &[
             "__rank",
             "__asof_join",
             "__bucket_by",
+            "__strictly_ordered_time_series",
+            "__window_rate",
+            "__window_derivative",
+            "__window_integrate",
         ],
     },
     StandardBindingModule {
