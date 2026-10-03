@@ -834,6 +834,13 @@ pub struct BranchMergePairedReplayIdentity {
     pub right_replay: Vec<u8>,
 }
 
+/// Opaque directional spill identities, independent of a shared spill label.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BranchMergePairedSpillIdentity {
+    pub left_spill: Vec<u8>,
+    pub right_spill: Vec<u8>,
+}
+
 /// One nested compaction run carrying an independent paired replay identity.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BranchMergePairedCheckpointRedoFoldSpillNestedReplayIdentityRunSnapshot {
@@ -853,6 +860,14 @@ pub struct BranchMergePairedCheckpointRedoFoldSpillNestedReplayIdentityStreamSna
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BranchMergePairedCheckpointRedoFoldSpillNestedReplayIdentitySnapshot {
     pub spill_id: Vec<u8>,
+    pub streams: Vec<BranchMergePairedCheckpointRedoFoldSpillNestedReplayIdentityStreamSnapshot>,
+}
+
+/// One replay-bearing nested spill with paired spill-incarnation identity.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BranchMergePairedCheckpointRedoFoldSpillNestedReplaySpillIdentitySnapshot {
+    pub spill_id: Vec<u8>,
+    pub spill_identity: BranchMergePairedSpillIdentity,
     pub streams: Vec<BranchMergePairedCheckpointRedoFoldSpillNestedReplayIdentityStreamSnapshot>,
 }
 
@@ -974,6 +989,36 @@ pub struct BranchMergePairedCheckpointRedoFoldSpillNestedReplayIdentityRestoreFo
     pub checkpoint_id: CheckpointId,
     pub slots:
         Vec<BranchMergePairedCheckpointRedoFoldSpillNestedReplayIdentityRestoreFoldPinSlotSnapshot>,
+}
+
+/// One restored order retaining both paired spill and replay identities.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BranchMergePairedCheckpointRedoFoldSpillNestedReplaySpillIdentityRestoreFoldPinSlotSnapshot {
+    pub restore_fold_ordinal: usize,
+    pub restore_ordinal: usize,
+    pub spill_ordinal: usize,
+    pub spill_id: Vec<u8>,
+    pub spill_identity: BranchMergePairedSpillIdentity,
+    pub stream_ordinal: usize,
+    pub source_stream_id: Vec<u8>,
+    pub compaction_ordinal: usize,
+    pub merge_ordinal: usize,
+    pub source_stream_ordinal: usize,
+    pub fold_ordinal: usize,
+    pub order: u64,
+    pub left_pin: Option<BranchMergePairedCheckpointSegmentPinIdentity>,
+    pub right_pin: Option<BranchMergePairedCheckpointSegmentPinIdentity>,
+    pub redo_fold_identity: BranchMergePairedRedoFoldIdentity,
+    pub replay_identity: BranchMergePairedReplayIdentity,
+    pub segment_identity: BranchMergePairedWriteAheadSegmentIdentity,
+}
+
+/// Restored replay chains grouped by checkpoint with paired spill identities.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BranchMergePairedCheckpointRedoFoldSpillNestedReplaySpillIdentityRestoreFoldPinStreamSnapshot {
+    pub checkpoint_id: CheckpointId,
+    pub slots:
+        Vec<BranchMergePairedCheckpointRedoFoldSpillNestedReplaySpillIdentityRestoreFoldPinSlotSnapshot>,
 }
 
 /// A malformed spill nested compaction tagged with its outer restore fold.
@@ -4722,6 +4767,85 @@ pub fn restore_paired_checkpoint_redo_sparse_spill_nested_replay_identity_restor
                 })
                 .collect();
             BranchMergePairedCheckpointRedoFoldSpillNestedReplayIdentityRestoreFoldPinStreamSnapshot {
+                checkpoint_id: stream.checkpoint_id,
+                slots,
+            }
+        })
+        .collect())
+}
+
+/// Restores nested replay chains with independent paired spill identities.
+///
+/// The scalar spill label remains the base restore coordinate. The opaque
+/// directional spill pair is rebound by restore fold, batch, and spill
+/// ordinal, then attached to every replay-bearing stream/run occurrence. This
+/// keeps repeated scalar spill labels from collapsing distinct paired spill
+/// incarnations. The reference is silent on this paired identity layer; the
+/// caller-supplied bytes remain opaque and unchanged.
+pub fn restore_paired_checkpoint_redo_sparse_spill_nested_replay_spill_identity_restore_folds_preserving_pin_identity(
+    known_checkpoint_ids: &[CheckpointId],
+    restore_folds: &[Vec<Vec<BranchMergePairedCheckpointRedoFoldSpillNestedReplaySpillIdentitySnapshot>>],
+) -> Result<
+    Vec<BranchMergePairedCheckpointRedoFoldSpillNestedReplaySpillIdentityRestoreFoldPinStreamSnapshot>,
+    BranchMergePairedCheckpointRedoFoldSpillNestedCompactionRestoreFoldError,
+> {
+    let replay_restore_folds = restore_folds
+        .iter()
+        .map(|fold| {
+            fold.iter()
+                .map(|batch| {
+                    batch
+                        .iter()
+                        .map(|spill| {
+                            BranchMergePairedCheckpointRedoFoldSpillNestedReplayIdentitySnapshot {
+                                spill_id: spill.spill_id.clone(),
+                                streams: spill.streams.clone(),
+                            }
+                        })
+                        .collect()
+                })
+                .collect()
+        })
+        .collect::<Vec<_>>();
+    let restored =
+        restore_paired_checkpoint_redo_sparse_spill_nested_replay_identity_restore_folds_preserving_pin_identity(
+            known_checkpoint_ids,
+            &replay_restore_folds,
+        )?;
+
+    Ok(restored
+        .into_iter()
+        .map(|stream| {
+            let slots = stream
+                .slots
+                .into_iter()
+                .map(|slot| {
+                    let spill_identity = restore_folds[slot.restore_fold_ordinal]
+                        [slot.restore_ordinal][slot.spill_ordinal]
+                        .spill_identity
+                        .clone();
+                    BranchMergePairedCheckpointRedoFoldSpillNestedReplaySpillIdentityRestoreFoldPinSlotSnapshot {
+                        restore_fold_ordinal: slot.restore_fold_ordinal,
+                        restore_ordinal: slot.restore_ordinal,
+                        spill_ordinal: slot.spill_ordinal,
+                        spill_id: slot.spill_id,
+                        spill_identity,
+                        stream_ordinal: slot.stream_ordinal,
+                        source_stream_id: slot.source_stream_id,
+                        compaction_ordinal: slot.compaction_ordinal,
+                        merge_ordinal: slot.merge_ordinal,
+                        source_stream_ordinal: slot.source_stream_ordinal,
+                        fold_ordinal: slot.fold_ordinal,
+                        order: slot.order,
+                        left_pin: slot.left_pin,
+                        right_pin: slot.right_pin,
+                        redo_fold_identity: slot.redo_fold_identity,
+                        replay_identity: slot.replay_identity,
+                        segment_identity: slot.segment_identity,
+                    }
+                })
+                .collect();
+            BranchMergePairedCheckpointRedoFoldSpillNestedReplaySpillIdentityRestoreFoldPinStreamSnapshot {
                 checkpoint_id: stream.checkpoint_id,
                 slots,
             }
