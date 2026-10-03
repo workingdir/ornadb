@@ -5,11 +5,13 @@ use orna_evolution_v1::{
 };
 use orna_foundation_v1::OvbRaw;
 use orna_storage_v1::{
-    BranchMergeBudget, BranchMergeConflict, BranchMergeDepthFragmentRecovery,
+    BranchMergeBudget, BranchMergeColumnDepthEvent, BranchMergeColumnDepthFragments,
+    BranchMergeConflict, BranchMergeDepthFragmentRecovery,
     BranchMergeDepthWaveRecovery, BranchMergeError, BranchMergePlan,
     BranchMergeTombstoneEvent, BranchRowSource,
     BranchMergePlanSequenceError, BranchMergePlanSequencer, BranchMergeTombstoneHistory,
-    BranchMergeTabularDepthWave, BranchMergeTableDepthFragments,
+    BranchMergeTabularColumnDepthWave, BranchMergeTabularDepthWave,
+    BranchMergeTableDepthFragments,
     BranchMergeTombstoneHistoryError, KeyRange, MergeSide, MergedSegment, RowSegmentManifest,
     SequencedBranchMergePlan, TableManifest, ThreeWaySnapshot, merge_three_way_snapshots,
 };
@@ -42,6 +44,7 @@ const TOMBSTONE_PAIRED_CHAIN: &str = include_str!("fixtures/merge-tombstone-pair
 const TOMBSTONE_RECOVERY_STORM: &str = include_str!("fixtures/merge-tombstone-recovery-storm.orna");
 const TOMBSTONE_DEPTH_COMMIT_ORDER: &str =
     include_str!("fixtures/merge-tombstone-depth-commit-order.orna");
+const COLUMN_RESTORE_LADDER: &str = include_str!("fixtures/merge-column-restore-ladder.orna");
 const TOMBSTONE_STORM_KEYS: &[&str] = &[
     "a",
     "root",
@@ -25792,6 +25795,181 @@ fn tabular_restore_wave_preserves_peer_depth_labels_and_tombstone_identity() {
         history.submit_tabular_depth_wave(&wave(1)),
         Err(BranchMergeTombstoneHistoryError::DuplicateOrStale { order: 1 }),
         "an exact tabular replay retains the ordinary stale-position result",
+    );
+    assert_eq!(history, committed);
+}
+
+#[test]
+fn column_restore_ladders_keep_uneven_depth_labels_and_fixture_values() {
+    let fixture_rows = COLUMN_RESTORE_LADDER
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    let row = |path: &str| {
+        fixture_rows
+            .iter()
+            .find(|row| row.key == string(path))
+            .unwrap_or_else(|| panic!("the in-crate column fixture supplies {path}"))
+            .clone()
+    };
+    let root = row("root");
+    let child = row("root/child");
+    let deep = row("root/child/deep");
+    assert_eq!(root.fields[&id(2)], string("Ladder root"));
+    assert_eq!(child.fields[&id(3)], string("Bergen"));
+    assert_eq!(deep.fields[&id(2)], string("Ladder deep"));
+
+    let wave = |order| BranchMergeTabularColumnDepthWave {
+        order,
+        columns: BTreeMap::from([
+            (
+                (id(1), id(2)),
+                BranchMergeColumnDepthFragments {
+                    fragment_count: 2,
+                    fragments: BTreeMap::from([
+                        (0, vec![(root.key.clone(), root.fields[&id(2)].clone())]),
+                        (1, vec![(child.key.clone(), child.fields[&id(2)].clone())]),
+                    ]),
+                },
+            ),
+            (
+                (id(1), id(3)),
+                BranchMergeColumnDepthFragments {
+                    fragment_count: 4,
+                    fragments: BTreeMap::from([
+                        (0, vec![(root.key.clone(), root.fields[&id(3)].clone())]),
+                        (1, Vec::new()),
+                        (2, vec![(child.key.clone(), child.fields[&id(3)].clone())]),
+                        (3, vec![(deep.key.clone(), deep.fields[&id(3)].clone())]),
+                    ]),
+                },
+            ),
+        ]),
+    };
+    let empty_plan = |order| SequencedBranchMergePlan {
+        order,
+        plan: BranchMergePlan {
+            schema: Schema { version: EvolutionVersion::V1_0, tables: Vec::new() },
+            tables: BTreeMap::new(),
+            checkpoints: BTreeMap::new(),
+            report: Default::default(),
+        },
+        ordered_row_tombstones: Vec::new(),
+    };
+
+    let mut history = BranchMergeTombstoneHistory::new(0);
+    assert!(history.submit_tabular_column_depth_wave(&wave(1)).unwrap().is_empty());
+    assert!(history.column_events().is_empty());
+    assert_eq!(history.next_order(), Some(0));
+
+    assert!(history.submit(&empty_plan(0)).unwrap().is_empty());
+    assert_eq!(
+        history.column_events(),
+        &[
+            BranchMergeColumnDepthEvent {
+                order: 1,
+                table: id(1),
+                column: id(2),
+                fragment: 0,
+                key: root.key.clone(),
+                value: string("Ladder root"),
+            },
+            BranchMergeColumnDepthEvent {
+                order: 1,
+                table: id(1),
+                column: id(2),
+                fragment: 1,
+                key: child.key.clone(),
+                value: string("Ladder child"),
+            },
+            BranchMergeColumnDepthEvent {
+                order: 1,
+                table: id(1),
+                column: id(3),
+                fragment: 0,
+                key: root.key.clone(),
+                value: string("Oslo"),
+            },
+            BranchMergeColumnDepthEvent {
+                order: 1,
+                table: id(1),
+                column: id(3),
+                fragment: 2,
+                key: child.key.clone(),
+                value: string("Bergen"),
+            },
+            BranchMergeColumnDepthEvent {
+                order: 1,
+                table: id(1),
+                column: id(3),
+                fragment: 3,
+                key: deep.key.clone(),
+                value: string("Trondheim"),
+            },
+        ],
+        "the shorter name branch and longer city branch retain independent labels and fixture-backed values",
+    );
+    assert_eq!(history.next_order(), Some(2));
+    let committed = history.clone();
+
+    let mut shorter_city = wave(1);
+    let city = shorter_city.columns.get_mut(&(id(1), id(3))).unwrap();
+    city.fragment_count = 3;
+    city.fragments = BTreeMap::from([
+        (0, vec![(root.key.clone(), root.fields[&id(3)].clone())]),
+        (1, vec![(child.key.clone(), child.fields[&id(3)].clone())]),
+        (2, vec![(deep.key.clone(), deep.fields[&id(3)].clone())]),
+    ]);
+    assert_eq!(
+        history.submit_tabular_column_depth_wave(&shorter_city),
+        Err(BranchMergeTombstoneHistoryError::TabularColumnFragmentCountMismatch {
+            order: 1,
+            table: id(1),
+            column: id(3),
+            expected: 4,
+            actual: 3,
+        }),
+        "a sibling column cannot donate or remove the restored city's depth positions",
+    );
+    assert_eq!(history, committed);
+
+    let mut missing_empty_depth = wave(1);
+    missing_empty_depth
+        .columns
+        .get_mut(&(id(1), id(3)))
+        .unwrap()
+        .fragments
+        .remove(&1);
+    assert_eq!(
+        history.submit_tabular_column_depth_wave(&missing_empty_depth),
+        Err(BranchMergeTombstoneHistoryError::IncompleteTabularColumnDepthFragments {
+            order: 1,
+            table: id(1),
+            column: id(3),
+        }),
+        "an empty middle fragment still owns depth label one",
+    );
+    assert_eq!(history, committed);
+
+    let mut changed_cell = wave(1);
+    changed_cell
+        .columns
+        .get_mut(&(id(1), id(2)))
+        .unwrap()
+        .fragments
+        .get_mut(&1)
+        .unwrap()[0]
+        .1 = string("Different retry body");
+    assert_eq!(
+        history.submit_tabular_column_depth_wave(&changed_cell),
+        Err(BranchMergeTombstoneHistoryError::ConflictingSubmission { order: 1 }),
+        "a restored column fragment remains bound to its canonical fixture cells",
+    );
+    assert_eq!(history, committed);
+    assert_eq!(
+        history.submit_tabular_column_depth_wave(&wave(1)),
+        Err(BranchMergeTombstoneHistoryError::DuplicateOrStale { order: 1 }),
+        "an exact committed replay remains stale after the retry identity check",
     );
     assert_eq!(history, committed);
 }
