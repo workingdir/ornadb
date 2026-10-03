@@ -1,0 +1,1 @@
+fn pinned_root(seed: Int) = pinned_middle(seed) + std.collection.marker();
