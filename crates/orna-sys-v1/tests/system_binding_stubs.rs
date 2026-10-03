@@ -85,6 +85,126 @@ fn validate_stub_dispatch_inventory(
     Ok(())
 }
 
+fn validate_stub_contract(source: &str, operation: &OperationContract) -> Result<(), String> {
+    let parsed = parse_module(source);
+    if !parsed.is_ok() {
+        return Err(format!("stub does not parse: {:?}", parsed.diagnostics));
+    }
+    validate_stub_dispatch_inventory(source, &[operation.id.as_str()])?;
+
+    let expected_module = operation
+        .signature
+        .callable
+        .rsplit_once('.')
+        .map(|(module, _)| module)
+        .ok_or_else(|| "registered callable has no module path".to_owned())?;
+    let module = source
+        .lines()
+        .find_map(|line| line.strip_prefix("// sys-module: "))
+        .ok_or_else(|| "stub has no module marker".to_owned())?;
+    if module != expected_module {
+        return Err(format!(
+            "stub module `{module}` differs from `{expected_module}`"
+        ));
+    }
+
+    let mut aliases = std::collections::BTreeMap::new();
+    for line in source.lines() {
+        if let Some(alias) = line.strip_prefix("// sys-parameter-alias: ") {
+            let (original, emitted) = alias
+                .split_once('=')
+                .ok_or_else(|| "stub parameter alias is malformed".to_owned())?;
+            aliases.insert(original, emitted);
+        }
+    }
+
+    let Declaration::Function { signature, .. } = &parsed.value.items[0].declaration else {
+        return Err("stub declaration is not a function".to_owned());
+    };
+    let expected_name = local_function_name(operation);
+    if signature.name != expected_name {
+        return Err(format!(
+            "stub function `{}` differs from `{expected_name}`",
+            signature.name
+        ));
+    }
+
+    let generics = signature
+        .generics
+        .iter()
+        .map(|generic| generic.name.as_str())
+        .collect::<Vec<_>>();
+    let expected_generics = operation
+        .signature
+        .type_parameters
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    if generics != expected_generics {
+        return Err(format!(
+            "stub generics {generics:?} differ from {expected_generics:?}"
+        ));
+    }
+    if signature.parameters.len() != operation.signature.parameters.len() {
+        return Err(format!(
+            "stub has {} parameters; registry has {}",
+            signature.parameters.len(),
+            operation.signature.parameters.len()
+        ));
+    }
+
+    for (parsed_parameter, registered_parameter) in signature
+        .parameters
+        .iter()
+        .zip(&operation.signature.parameters)
+    {
+        let source_parameter = &source[parsed_parameter.span.start..parsed_parameter.span.end];
+        let (name, _) = source_parameter
+            .split_once(": ")
+            .ok_or_else(|| "stub parameter has no explicit type".to_owned())?;
+        let expected_name = aliases
+            .get(registered_parameter.name.as_str())
+            .copied()
+            .unwrap_or(registered_parameter.name.as_str());
+        if name != expected_name {
+            return Err(format!(
+                "stub parameter `{name}` differs from `{expected_name}`"
+            ));
+        }
+        let parsed_type = resolve_type(
+            parsed_parameter
+                .annotation
+                .as_ref()
+                .ok_or_else(|| format!("stub parameter `{name}` has no type"))?,
+        )?;
+        if parsed_type != registered_parameter.ty {
+            return Err(format!(
+                "stub parameter `{name}` has a registry-incompatible type"
+            ));
+        }
+        let default = parsed_parameter
+            .default
+            .as_ref()
+            .map(|default| &source[default.span().start..default.span().end]);
+        if default != registered_parameter.default.as_deref() {
+            return Err(format!(
+                "stub parameter `{name}` has a registry-incompatible default"
+            ));
+        }
+    }
+
+    let result = resolve_type(
+        signature
+            .result
+            .as_ref()
+            .ok_or_else(|| "stub has no result type".to_owned())?,
+    )?;
+    if result != operation.signature.result {
+        return Err("stub result type differs from the typed registry".to_owned());
+    }
+    Ok(())
+}
+
 #[test]
 fn generated_sys_stubs_parse_resolve_to_registry_types_and_dispatch_one_to_one() {
     let source = system_binding_stubs();
@@ -304,6 +424,101 @@ fn generated_stub_parity_guard_rejects_missing_duplicate_and_unknown_dispatch_ro
     assert!(
         validate_stub_dispatch_inventory(&unknown, &expected).is_err(),
         "redirecting a generated stub to an unknown registry operation fails the parity guard"
+    );
+}
+
+#[test]
+fn generated_stub_contract_validation_rejects_parseable_and_syntactic_drift() {
+    let fixture = GENERIC_INVOKE_KEYWORD_OVERLOAD_FIXTURE.trim_end();
+    let stub = fixture
+        .split("\n\n")
+        .find(|block| block.lines().any(|line| line == "// sys-op: sys.invoke<T>"))
+        .expect("in-crate fixture includes the generic invoke stub");
+    let operation = system_provider_abi()
+        .operation("sys.invoke<T>")
+        .expect("generic invoke dispatch contract");
+    assert_eq!(
+        validate_stub_contract(stub, operation),
+        Ok(()),
+        "fixture stub conforms to the generated registry contract"
+    );
+
+    fn replace_once(source: &str, from: &str, to: &str) -> String {
+        let replaced = source.replacen(from, to, 1);
+        assert_ne!(
+            replaced, source,
+            "mutation target `{from}` exists in fixture"
+        );
+        replaced
+    }
+
+    let parseable_mutations = [
+        (
+            "module",
+            replace_once(stub, "// sys-module: sys", "// sys-module: std"),
+        ),
+        (
+            "dispatch marker",
+            replace_once(
+                stub,
+                "// sys-op: sys.invoke<T>",
+                "// sys-op: sys.invoke(Value)",
+            ),
+        ),
+        (
+            "function name",
+            replace_once(stub, "pub fn invoke<T>", "pub fn call<T>"),
+        ),
+        (
+            "generic parameter",
+            replace_once(stub, "pub fn invoke<T>", "pub fn invoke<U>"),
+        ),
+        (
+            "keyword parameter alias",
+            replace_once(stub, "as_: T", "target: T"),
+        ),
+        (
+            "parameter type",
+            replace_once(stub, "as_: T", "as_: sys.Ghost"),
+        ),
+        (
+            "default value",
+            replace_once(
+                stub,
+                "transaction: sys.InvokeTransaction = sys.InvokeTransaction.inherit",
+                "transaction: sys.InvokeTransaction = sys.InvokeTransaction.separate",
+            ),
+        ),
+        (
+            "result type",
+            replace_once(stub, "): T =", "): sys.Value ="),
+        ),
+        (
+            "parameter inventory",
+            replace_once(stub, ", idempotency_key: Str? = null", ""),
+        ),
+    ];
+    for (field, mutated) in parseable_mutations {
+        let parsed = parse_module(&mutated);
+        assert!(
+            parsed.is_ok(),
+            "{field} drift remains syntactically valid and must reach contract validation: {:?}",
+            parsed.diagnostics
+        );
+        assert!(
+            validate_stub_contract(&mutated, operation).is_err(),
+            "registry contract validation rejects {field} drift"
+        );
+    }
+
+    let malformed = replace_once(stub, "as_: T", "as_: sys.Value<");
+    assert!(
+        !parse_module(&malformed).is_ok(),
+        "the Orna parser rejects malformed generated type syntax"
+    );
+    assert!(
+        validate_stub_contract(&malformed, operation).is_err(),
+        "stub contract validation rejects syntactic drift before dispatch parity"
     );
 }
 
