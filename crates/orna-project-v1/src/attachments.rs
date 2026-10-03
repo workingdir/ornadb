@@ -1363,6 +1363,45 @@ impl PackageResolver {
         }
         Ok(route)
     }
+
+    /// Applies nested terminal-pair rebind cascades, where each cascade may
+    /// contain several sparse rebind chains, and validates the exact identity
+    /// before and after every cascade. The reference is silent on grouped
+    /// cascade boundaries; v1 rejects a stale edge before a later cascade can
+    /// restore its terminal pins and returns no partial transition history.
+    pub fn extend_nested_terminal_pair_sparse_checkpoint_storm_rebind_cascades_validating_terminal_identity_transitions(
+        &self,
+        previous: &ReboundPathResolution,
+        rebind_cascades: &[&[&[&[(&NestedPairDepthLabel, Option<&[[PinnedDatabase; 2]]>)]]]],
+        expected_transitions: &[(NestedPairTerminalRouteIdentity, NestedPairTerminalRouteIdentity)],
+    ) -> Result<(
+        ReboundPathResolution,
+        Vec<(NestedPairTerminalRouteIdentity, NestedPairTerminalRouteIdentity)>,
+    ), AttachmentError> {
+        if rebind_cascades.len() != expected_transitions.len() {
+            return Err(AttachmentError::RetainedSnapshotUnavailable);
+        }
+
+        let mut route = previous.clone();
+        let mut transitions = Vec::with_capacity(rebind_cascades.len());
+        for (cascade, (expected_before, expected_after)) in
+            rebind_cascades.iter().zip(expected_transitions)
+        {
+            let before = route.terminal_route_identity();
+            route.validate_terminal_route_identity(expected_before)?;
+            route = self
+                .extend_nested_terminal_pair_sparse_checkpoint_storm_chains_from_depth_labels(
+                    &route,
+                    *cascade,
+                )?;
+            route.validate_terminal_route_identity(expected_after)?;
+            let after = route.terminal_route_identity();
+            transitions.push((before, after));
+        }
+
+        Ok((route, transitions))
+    }
+
     /// Applies paired rebinding and omission chains as consecutive terminal
     /// route segments. Each omission chain must preserve the terminal identity
     /// computed by its preceding rebind chain. Returns the final route and the
