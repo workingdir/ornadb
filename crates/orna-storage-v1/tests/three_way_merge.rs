@@ -11,6 +11,7 @@ use orna_storage_v1::{
     BranchMergeColumnRestoreLadderFoldSnapshot,
     BranchMergeColumnRestoreLadderTimelineSnapshot,
     BranchMergeColumnRestoreLadderWaveSlotSnapshot,
+    BranchMergeColumnRestoreStormSnapshot,
     BranchMergeConflict, BranchMergeDepthFragmentRecovery,
     BranchMergeDepthWaveRecovery, BranchMergeError, BranchMergePlan,
     BranchMergeMultiParentColumnDepthLadderWaveEvent,
@@ -26332,6 +26333,141 @@ fn column_ladder_timelines_distinguish_omitted_columns_from_empty_depths() {
             },
         ],
         "each stable column gets an order slot; omitted ladders differ from labeled empty fragments",
+    );
+}
+
+#[test]
+fn column_restore_storms_fold_uneven_ladders_until_a_paired_mode_boundary() {
+    let fixture_rows = COLUMN_RESTORE_LADDER
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    let row = |path: &str| {
+        fixture_rows
+            .iter()
+            .find(|row| row.key == string(path))
+            .unwrap_or_else(|| panic!("the in-crate column fixture supplies {path}"))
+            .clone()
+    };
+    let root = row("root");
+    let child = row("root/child");
+    let deep = row("root/child/deep");
+    let cells = |row: &KeyedRow, column| {
+        vec![(row.key.clone(), row.fields[&id(column)].clone())]
+    };
+    let depth = |fragments: Vec<Vec<(CanonicalValue, CanonicalValue)>>| {
+        BranchMergeColumnDepthFragments {
+            fragment_count: fragments.len(),
+            fragments: fragments.into_iter().enumerate().collect(),
+        }
+    };
+    let wave = |order| {
+        let columns = match order {
+            1 => BTreeMap::from([
+                (
+                    (id(1), id(2)),
+                    depth(vec![cells(&root, 2), cells(&child, 2)]),
+                ),
+                (
+                    (id(1), id(3)),
+                    depth(vec![cells(&root, 3), Vec::new(), cells(&deep, 3)]),
+                ),
+            ]),
+            2 => BTreeMap::from([(
+                (id(1), id(2)),
+                depth(vec![cells(&root, 2), Vec::new()]),
+            )]),
+            3 => BTreeMap::from([(
+                (id(1), id(3)),
+                depth(vec![Vec::new(), cells(&deep, 3)]),
+            )]),
+            5 => BTreeMap::from([(
+                (id(1), id(2)),
+                depth(vec![cells(&root, 2), cells(&deep, 2)]),
+            )]),
+            other => panic!("unexpected column restore order: {other}"),
+        };
+        BranchMergeTabularColumnDepthWave { order, columns }
+    };
+    let empty_plan = |order| SequencedBranchMergePlan {
+        order,
+        plan: BranchMergePlan {
+            schema: Schema { version: EvolutionVersion::V1_0, tables: Vec::new() },
+            tables: BTreeMap::new(),
+            checkpoints: BTreeMap::new(),
+            report: Default::default(),
+        },
+        ordered_row_tombstones: Vec::new(),
+    };
+    let fragment = |label, cells| BranchMergeColumnDepthFragmentSnapshot { label, cells };
+
+    let mut history = BranchMergeTombstoneHistory::new(0);
+    assert!(history.submit_tabular_column_depth_wave(&wave(5)).unwrap().is_empty());
+    assert!(history.submit_tabular_column_depth_wave(&wave(3)).unwrap().is_empty());
+    assert!(history.submit_tabular_column_depth_wave(&wave(2)).unwrap().is_empty());
+    assert!(history.submit_tabular_column_depth_wave(&wave(1)).unwrap().is_empty());
+    assert!(history.column_restore_storms().is_empty());
+    assert!(history.submit(&empty_plan(0)).unwrap().is_empty());
+
+    let first_storm = history.column_restore_storms();
+    assert_eq!(first_storm.len(), 1);
+    assert_eq!((first_storm[0].first_order, first_storm[0].last_order), (1, 3));
+    assert_eq!(
+        first_storm[0]
+            .ladders
+            .iter()
+            .map(|ladder| (ladder.table, ladder.column))
+            .collect::<Vec<_>>(),
+        vec![(id(1), id(2)), (id(1), id(3))],
+    );
+    assert_eq!(
+        first_storm[0].ladders[0].waves[1].fragments,
+        Some(vec![fragment(0, cells(&root, 2)), fragment(1, Vec::new())]),
+        "a present empty depth stays labeled within the storm fold",
+    );
+    assert!(
+        first_storm[0].ladders[0].waves[2]
+            .fragments
+            .is_none(),
+        "the column omitted at order three remains absent from the first storm",
+    );
+    assert!(
+        first_storm[0].ladders[1].waves[1]
+            .fragments
+            .is_none(),
+        "the sibling column omission does not borrow another ladder's depth",
+    );
+    assert_eq!(
+        first_storm[0].ladders[1].waves[2].fragments,
+        Some(vec![fragment(0, Vec::new()), fragment(1, cells(&deep, 3))]),
+        "the city ladder restarts its local depth labels after an omitted wave",
+    );
+
+    assert!(history.submit(&empty_plan(4)).unwrap().is_empty());
+    let storms = history.column_restore_storms();
+    assert_eq!(
+        storms
+            .iter()
+            .map(|storm| (storm.first_order, storm.last_order))
+            .collect::<Vec<_>>(),
+        vec![(1, 3), (5, 5)],
+        "a committed non-column mode separates adjacent column-restore storms",
+    );
+    assert_eq!(
+        storms[1],
+        BranchMergeColumnRestoreStormSnapshot {
+            first_order: 5,
+            last_order: 5,
+            ladders: vec![BranchMergeColumnRestoreLadderTimelineSnapshot {
+                table: id(1),
+                column: id(2),
+                waves: vec![BranchMergeColumnRestoreLadderWaveSlotSnapshot {
+                    order: 5,
+                    fragments: Some(vec![fragment(0, cells(&root, 2)), fragment(1, cells(&deep, 2))]),
+                }],
+            }],
+        },
+        "the following storm keeps its own order and depth labels",
     );
 }
 

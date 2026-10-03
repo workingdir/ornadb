@@ -18469,7 +18469,8 @@ fn merge_multi_parent_checkpoint_value_scoped(
     }
 
     let mut rejected_scope = false;
-    let (merged, effective_parent) = match (accumulated, parent, rollback_anchor, topology_anchor) {
+    let (mut merged, mut effective_parent) =
+        match (accumulated, parent, rollback_anchor, topology_anchor) {
         (
             Type::Record(accumulated_fields),
             Type::Record(parent_fields),
@@ -18790,10 +18791,49 @@ fn merge_multi_parent_checkpoint_value_scoped(
         _ => return scoped_checkpoint_rollback(rollback_anchor, path, rolled_back_paths),
     };
 
-    if !checkpoint_pin_map_widths_match(topology_anchor, &effective_parent)
-        || !checkpoint_value_pin_identity_topology_matches(topology_anchor, &effective_parent)
-        || !nested_checkpoint_compaction_fold_preserves_pin_identity(accumulated, &effective_parent)
+    let paired_boundaries_match = checkpoint_paired_boundary_fold_topology_matches(
+        accumulated,
+        &effective_parent,
+        topology_anchor,
+    );
+    let widths_match = checkpoint_pin_map_widths_match(topology_anchor, &effective_parent);
+    let topology_matches =
+        checkpoint_value_pin_identity_topology_matches(topology_anchor, &effective_parent);
+    let compaction_preserves_identity =
+        nested_checkpoint_compaction_fold_preserves_pin_identity(accumulated, &effective_parent);
+    if !paired_boundaries_match
+        || !widths_match
+        || !topology_matches
+        || !compaction_preserves_identity
     {
+        if widths_match
+            && rollback_conflicting_checkpoint_siblings(
+                &mut merged,
+                &mut effective_parent,
+                rollback_anchor,
+                accumulated,
+                topology_anchor,
+                path,
+                rolled_back_paths,
+            )
+            && checkpoint_paired_boundary_fold_topology_matches(
+                accumulated,
+                &effective_parent,
+                topology_anchor,
+            )
+            && checkpoint_pin_map_widths_match(topology_anchor, &effective_parent)
+            && checkpoint_value_pin_identity_topology_matches(topology_anchor, &effective_parent)
+            && nested_checkpoint_compaction_fold_preserves_pin_identity(
+                accumulated,
+                &effective_parent,
+            )
+        {
+            return Some(ScopedCheckpointFold {
+                merged,
+                effective_parent,
+                rejected_scope: true,
+            });
+        }
         return scoped_checkpoint_rollback(rollback_anchor, path, rolled_back_paths);
     }
 
@@ -18839,29 +18879,216 @@ fn scoped_checkpoint_rollback(
     })
 }
 
+/// A fold can pass every child independently yet create an identity relation
+/// between two sibling paths when their maps are considered together. The
+/// reference is silent on this nested rollback boundary, so restore only the
+/// direct siblings named by that new relation; unrelated nested paths can
+/// continue accumulating labels in later rows.
+fn rollback_conflicting_checkpoint_siblings(
+    merged: &mut Type,
+    effective_parent: &mut Type,
+    rollback_anchor: &Type,
+    accumulated: &Type,
+    topology_anchor: &Type,
+    path: &[SnapshotTopologyBoundary],
+    rolled_back_paths: &mut BTreeSet<Vec<SnapshotTopologyBoundary>>,
+) -> bool {
+    let mut implicated_paths = BTreeSet::new();
+    if !checkpoint_value_pin_identity_topology_matches(topology_anchor, effective_parent) {
+        implicated_paths.extend(checkpoint_topology_mismatch_paths(
+            topology_anchor,
+            effective_parent,
+        ));
+    }
+    if !nested_checkpoint_compaction_fold_preserves_pin_identity(accumulated, effective_parent) {
+        implicated_paths.extend(checkpoint_compaction_mismatch_paths(
+            accumulated,
+            effective_parent,
+        ));
+    }
+
+    let implicated_children = implicated_paths
+        .iter()
+        .filter_map(|scope| scope.first().cloned())
+        .collect::<BTreeSet<_>>();
+    if implicated_children.is_empty() {
+        return false;
+    }
+
+    let mut rolled_back_any = false;
+    match (merged, effective_parent, rollback_anchor) {
+        (Type::Record(merged), Type::Record(effective), Type::Record(anchor)) => {
+            for child in implicated_children {
+                let SnapshotTopologyBoundary::RecordField(name) = child else {
+                    continue;
+                };
+                let Some(anchor_child) = anchor.get(&name) else {
+                    continue;
+                };
+                if !merged.contains_key(&name) || !effective.contains_key(&name) {
+                    continue;
+                }
+                let mut child_path = path.to_vec();
+                child_path.push(SnapshotTopologyBoundary::RecordField(name.clone()));
+                if rolled_back_paths.contains(&child_path) {
+                    continue;
+                }
+                rolled_back_paths.insert(child_path);
+                merged.insert(name.clone(), anchor_child.clone());
+                effective.insert(name, anchor_child.clone());
+                rolled_back_any = true;
+            }
+        }
+        _ => {}
+    }
+    rolled_back_any
+}
+
+fn checkpoint_topology_mismatch_paths(
+    expected: &Type,
+    actual: &Type,
+) -> BTreeSet<Vec<SnapshotTopologyBoundary>> {
+    let mut pin_maps = Vec::new();
+    if !collect_corresponding_snapshot_context_maps_at_path(
+        expected,
+        actual,
+        &mut pin_maps,
+        &mut Vec::new(),
+    ) {
+        return BTreeSet::new();
+    }
+
+    let signatures = |expected_side: bool| {
+        let mut labels = BTreeMap::<String, BTreeSet<Vec<SnapshotTopologyBoundary>>>::new();
+        for pair in pin_maps
+            .iter()
+            .filter(|pair| !pair.expected.is_empty() && !pair.actual.is_empty())
+        {
+            let selectors = if expected_side {
+                &pair.expected
+            } else {
+                &pair.actual
+            };
+            for selector in selectors {
+                labels
+                    .entry(selector.clone())
+                    .or_default()
+                    .insert(pair.boundary_path.clone());
+            }
+        }
+        let mut signatures = BTreeMap::<Vec<Vec<SnapshotTopologyBoundary>>, usize>::new();
+        for membership in labels.into_values() {
+            *signatures
+                .entry(membership.into_iter().collect())
+                .or_default() += 1;
+        }
+        signatures
+    };
+
+    let expected = signatures(true);
+    let actual = signatures(false);
+    expected
+        .iter()
+        .chain(actual.iter())
+        .filter(|(membership, _)| expected.get(*membership) != actual.get(*membership))
+        .flat_map(|(membership, _)| membership.iter().cloned())
+        .collect()
+}
+
+fn checkpoint_compaction_mismatch_paths(
+    accumulated: &Type,
+    parent: &Type,
+) -> BTreeSet<Vec<SnapshotTopologyBoundary>> {
+    let mut pin_maps = Vec::new();
+    if !collect_corresponding_snapshot_context_maps_at_path(
+        accumulated,
+        parent,
+        &mut pin_maps,
+        &mut Vec::new(),
+    ) {
+        return BTreeSet::new();
+    }
+
+    let mut mismatched = BTreeSet::new();
+    for (index, pair) in pin_maps.iter().enumerate() {
+        let folded = pair
+            .expected
+            .union(&pair.actual)
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        for other in &pin_maps[index + 1..] {
+            let other_folded = other
+                .expected
+                .union(&other.actual)
+                .cloned()
+                .collect::<BTreeSet<_>>();
+            let shared_before = pair
+                .expected
+                .intersection(&other.expected)
+                .chain(pair.actual.intersection(&other.actual))
+                .cloned()
+                .collect::<BTreeSet<_>>();
+            if folded.intersection(&other_folded).cloned().collect::<BTreeSet<_>>()
+                != shared_before
+            {
+                mismatched.insert(pair.boundary_path.clone());
+                mismatched.insert(other.boundary_path.clone());
+            }
+        }
+    }
+    mismatched
+}
+
 /// Compare selector topology for paired record boundaries whose values contain
-/// pinned tuples, including boundaries nested inside another record. Do not
-/// cross collection or closure boundaries: their folds have independent
-/// rollback scopes. The reference is silent on nested record pairing, so use
-/// the direct-record rule recursively. This lets a partially omitted first
-/// row acquire its depth relation, then prevents later rows in the same storm
-/// from splitting that learned pair.
+/// pinned tuples, including boundaries nested through records, tuples, and
+/// optional values. Do not cross collection or closure boundaries: their folds
+/// have independent rollback scopes. The reference is silent on these nested
+/// pairings, so use the direct-record rule recursively. This lets a partially
+/// omitted first row acquire its depth relation, then prevents later rows in
+/// the same storm from splitting that learned pair.
 fn checkpoint_paired_boundary_fold_topology_matches(
     accumulated: &Type,
     parent: &Type,
     topology_anchor: &Type,
 ) -> bool {
-    let (Type::Record(accumulated_fields), Type::Record(parent_fields), Type::Record(anchor_fields)) =
-        (accumulated, parent, topology_anchor)
-    else {
-        return true;
-    };
+    checkpoint_paired_boundary_value_topology_matches(accumulated, parent, topology_anchor)
+}
 
-    checkpoint_paired_boundary_record_maps_match(
-        accumulated_fields,
-        parent_fields,
-        anchor_fields,
-    )
+fn checkpoint_paired_boundary_value_topology_matches(
+    accumulated: &Type,
+    parent: &Type,
+    topology_anchor: &Type,
+) -> bool {
+    match (accumulated, parent, topology_anchor) {
+        (Type::Record(accumulated), Type::Record(parent), Type::Record(anchor))
+            if accumulated.keys().eq(parent.keys()) && accumulated.keys().eq(anchor.keys()) =>
+        {
+            checkpoint_paired_boundary_record_maps_match(accumulated, parent, anchor)
+        }
+        (Type::Tuple(accumulated), Type::Tuple(parent), Type::Tuple(anchor))
+            if accumulated.len() == parent.len() && accumulated.len() == anchor.len() =>
+        {
+            accumulated
+                .iter()
+                .zip(parent)
+                .zip(anchor)
+                .all(|((accumulated, parent), anchor)| {
+                    checkpoint_paired_boundary_value_topology_matches(
+                        accumulated, parent, anchor,
+                    )
+                })
+        }
+        (
+            Type::Optional(accumulated),
+            Type::Optional(parent),
+            Type::Optional(anchor),
+        ) => checkpoint_paired_boundary_value_topology_matches(
+            accumulated,
+            parent,
+            anchor,
+        ),
+        _ => true,
+    }
 }
 
 fn checkpoint_paired_boundary_record_maps_match(
@@ -18872,13 +19099,13 @@ fn checkpoint_paired_boundary_record_maps_match(
     let paired_field_names = anchor_fields
         .iter()
         .filter_map(|(name, anchor)| {
-            (type_contains_pinned_tuple_through_records(anchor)
+            (type_contains_pinned_tuple_through_boundaries(anchor)
                 && accumulated_fields
                     .get(name)
-                    .is_some_and(type_contains_pinned_tuple_through_records)
+                    .is_some_and(type_contains_pinned_tuple_through_boundaries)
                 && parent_fields
                     .get(name)
-                    .is_some_and(type_contains_pinned_tuple_through_records))
+                    .is_some_and(type_contains_pinned_tuple_through_boundaries))
             .then_some(name)
         })
         .collect::<Vec<_>>();
@@ -18983,22 +19210,20 @@ fn checkpoint_paired_boundary_record_maps_match(
         else {
             return true;
         };
-        let (Type::Record(anchor), Type::Record(accumulated), Type::Record(parent)) =
-            (anchor, accumulated, parent)
-        else {
-            return true;
-        };
-        if anchor.keys().ne(accumulated.keys()) || anchor.keys().ne(parent.keys()) {
-            return true;
-        }
-        checkpoint_paired_boundary_record_maps_match(accumulated, parent, anchor)
+        checkpoint_paired_boundary_value_topology_matches(accumulated, parent, anchor)
     })
 }
 
-fn type_contains_pinned_tuple_through_records(ty: &Type) -> bool {
+fn type_contains_pinned_tuple_through_boundaries(ty: &Type) -> bool {
     match ty {
-        Type::Record(fields) => fields.values().any(type_contains_pinned_tuple_through_records),
-        Type::Tuple(_) => type_contains_pinned_snapshot_identity(ty),
+        Type::Record(fields) => fields.values().any(type_contains_pinned_tuple_through_boundaries),
+        Type::Tuple(elements) => {
+            type_contains_pinned_snapshot_identity(ty)
+                || elements
+                    .iter()
+                    .any(type_contains_pinned_tuple_through_boundaries)
+        }
+        Type::Optional(element) => type_contains_pinned_tuple_through_boundaries(element),
         _ => false,
     }
 }
@@ -19041,7 +19266,13 @@ fn checkpoint_paths_are_paired_boundaries(
     sibling_record_field_index < shared_tuple_depth_index
         && left[sibling_record_field_index + 1..shared_tuple_depth_index]
             .iter()
-            .all(|boundary| matches!(boundary, SnapshotTopologyBoundary::RecordField(_)))
+            .all(|boundary| {
+                matches!(
+                    boundary,
+                    SnapshotTopologyBoundary::RecordField(_)
+                        | SnapshotTopologyBoundary::OptionalValue
+                )
+            })
 }
 
 /// ORNA-CP-003 and ORNA-SYS-136 define explicit snapshot selection, but do not
@@ -20794,11 +21025,103 @@ fn infer_module_relation(
             return infer_module_relation(inner, table_rows, scope, local, diagnostics);
         }
         Expr::Block {
-            statements,
-            tail: Some(tail),
-            ..
-        } if statements.is_empty() => {
-            return infer_module_relation(tail, table_rows, scope, local, diagnostics);
+            statements, tail, ..
+        } => {
+            let mut locals = local.clone();
+            let mut effects = EffectSummary::default();
+            for statement in statements {
+                match statement {
+                    Statement::Let {
+                        pattern,
+                        annotation,
+                        value,
+                        ..
+                    } => {
+                        let expected = annotation.as_ref().map(|annotation| {
+                            validate_type_annotation(
+                                annotation,
+                                scope,
+                                &BTreeSet::new(),
+                                diagnostics,
+                            );
+                            resolved_type_of(annotation, scope)
+                        });
+                        let is_lambda = matches!(value, Expr::Lambda { .. });
+                        let inferred = if is_lambda {
+                            expected
+                                .as_ref()
+                                .and_then(|expected| {
+                                    infer_module_lambda(
+                                        value,
+                                        expected,
+                                        table_rows,
+                                        scope,
+                                        &locals,
+                                        diagnostics,
+                                    )
+                                })
+                                .unwrap_or_else(|| infer(value, scope, &locals, diagnostics))
+                        } else {
+                            infer_module_relation(value, table_rows, scope, &locals, diagnostics)
+                        };
+                        if let Some(expected) = &expected {
+                            require_same(expected, &inferred.ty, diagnostics);
+                        }
+                        // A lambda's body effects are latent until the bound
+                        // continuation is invoked; its value is pure to bind.
+                        if !is_lambda {
+                            effects.join(&inferred.effects);
+                        }
+                        bind_pattern(pattern, inferred.ty, scope, &mut locals, diagnostics);
+                        if is_lambda
+                            && let Pattern::Name(name, _) = pattern
+                            && let Some(symbol) = locals.get_mut(name)
+                        {
+                            symbol.effects = inferred.effects;
+                        }
+                    }
+                    Statement::Assert { value, .. } => {
+                        let inferred = infer_module_relation(
+                            value,
+                            table_rows,
+                            scope,
+                            &locals,
+                            diagnostics,
+                        );
+                        require_same(&Type::Bool, &inferred.ty, diagnostics);
+                        effects.join(&inferred.effects);
+                    }
+                    Statement::Expression { value, .. } | Statement::Control { value, .. } => {
+                        let inferred = infer_module_relation(
+                            value,
+                            table_rows,
+                            scope,
+                            &locals,
+                            diagnostics,
+                        );
+                        effects.join(&inferred.effects);
+                    }
+                    Statement::Return { .. }
+                    | Statement::Break { .. }
+                    | Statement::Continue { .. }
+                    | Statement::Assignment { .. } => {
+                        diagnostics.push(diag(
+                            DIAG_UNSUPPORTED,
+                            "module predicate continuations do not support control transfer or assignment",
+                        ));
+                    }
+                }
+            }
+            let mut inferred = tail.as_ref().map_or_else(
+                || Inferred {
+                    ty: Type::Tuple(Vec::new()),
+                    effects: EffectSummary::default(),
+                },
+                |tail| infer_module_relation(tail, table_rows, scope, &locals, diagnostics),
+            );
+            effects.join(&inferred.effects);
+            inferred.effects = effects;
+            return inferred;
         }
         Expr::Unary { op, rhs, .. } if op == "!" => {
             let operand = infer_module_relation(rhs, table_rows, scope, local, diagnostics);
@@ -20883,30 +21206,65 @@ fn infer_module_relation(
             effects: EffectSummary::default(),
         };
     };
-    let Expr::Lambda {
-        parameters, body, ..
-    } = &arguments[1].value
-    else {
-        return Inferred {
-            ty: Type::Error,
-            effects: EffectSummary::default(),
-        };
+    let inferred = match &arguments[1].value {
+        Expr::Lambda {
+            parameters, body, ..
+        } => {
+            let [parameter] = parameters.as_slice() else {
+                return Inferred {
+                    ty: Type::Error,
+                    effects: EffectSummary::default(),
+                };
+            };
+            let Pattern::Name(name, _) = &parameter.pattern else {
+                return Inferred {
+                    ty: Type::Error,
+                    effects: EffectSummary::default(),
+                };
+            };
+            let mut locals = local.clone();
+            insert_local_binding(name, row.clone(), &mut locals, diagnostics);
+            infer_module_relation(body, table_rows, scope, &locals, diagnostics)
+        }
+        Expr::Name { text, .. } => {
+            let Some(symbol) = local.get(text) else {
+                return Inferred {
+                    ty: Type::Error,
+                    effects: EffectSummary::default(),
+                };
+            };
+            let Type::Function {
+                parameters,
+                result,
+                ..
+            } = &symbol.ty
+            else {
+                return Inferred {
+                    ty: Type::Error,
+                    effects: EffectSummary::default(),
+                };
+            };
+            if parameters.len() != 1 {
+                diagnostics.push(diag(
+                    DIAG_TYPE,
+                    "module relation continuation must take exactly one row",
+                ));
+            } else {
+                require_same(row, &parameters[0], diagnostics);
+            }
+            require_same(&Type::Bool, result, diagnostics);
+            Inferred {
+                ty: result.as_ref().clone(),
+                effects: symbol.effects.clone(),
+            }
+        }
+        _ => {
+            return Inferred {
+                ty: Type::Error,
+                effects: EffectSummary::default(),
+            };
+        }
     };
-    let [parameter] = parameters.as_slice() else {
-        return Inferred {
-            ty: Type::Error,
-            effects: EffectSummary::default(),
-        };
-    };
-    let Pattern::Name(name, _) = &parameter.pattern else {
-        return Inferred {
-            ty: Type::Error,
-            effects: EffectSummary::default(),
-        };
-    };
-    let mut locals = local.clone();
-    insert_local_binding(name, row.clone(), &mut locals, diagnostics);
-    let inferred = infer_module_relation(body, table_rows, scope, &locals, diagnostics);
     Inferred {
         ty: if inferred.ty == Type::Bool {
             Type::Bool
@@ -20915,6 +21273,72 @@ fn infer_module_relation(
         },
         effects: inferred.effects,
     }
+}
+
+fn infer_module_lambda(
+    value: &Expr,
+    expected: &Type,
+    table_rows: &BTreeMap<String, Type>,
+    scope: &Scope,
+    local: &BTreeMap<String, Symbol>,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Option<Inferred> {
+    let Expr::Lambda {
+        parameters, body, ..
+    } = value
+    else {
+        return None;
+    };
+    let Type::Function {
+        parameters: expected_parameters,
+        result: expected_result,
+        ..
+    } = expected
+    else {
+        return None;
+    };
+    if parameters.len() != expected_parameters.len() {
+        diagnostics.push(diag(
+            DIAG_TYPE,
+            "module relation continuation parameter count does not match its annotation",
+        ));
+    }
+    let mut locals = local.clone();
+    for (index, parameter) in parameters.iter().enumerate() {
+        let Some(expected_parameter) = expected_parameters.get(index) else {
+            continue;
+        };
+        let parameter_type = parameter
+            .annotation
+            .as_ref()
+            .map(type_of)
+            .unwrap_or_else(|| expected_parameter.clone());
+        require_same(expected_parameter, &parameter_type, diagnostics);
+        bind_pattern(
+            &parameter.pattern,
+            parameter_type,
+            scope,
+            &mut locals,
+            diagnostics,
+        );
+    }
+    let inferred = infer_module_relation(body, table_rows, scope, &locals, diagnostics);
+    require_same(expected_result, &inferred.ty, diagnostics);
+    Some(Inferred {
+        ty: Type::Function {
+            parameters: expected_parameters.clone(),
+            default_parameters: BTreeSet::new(),
+            parameter_names: parameters
+                .iter()
+                .map(|parameter| match &parameter.pattern {
+                    Pattern::Name(name, _) if name != "_" => Some(name.clone()),
+                    _ => None,
+                })
+                .collect::<Option<Vec<_>>>(),
+            result: Box::new(inferred.ty),
+        },
+        effects: inferred.effects,
+    })
 }
 
 fn declared_nominal_schema(item: &Item) -> Option<TableSchema> {
