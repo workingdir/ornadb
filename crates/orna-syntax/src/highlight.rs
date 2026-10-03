@@ -627,26 +627,7 @@ fn is_scalar_type(word: &str) -> bool {
 }
 
 fn is_operator(text: &str) -> bool {
-    matches!(
-        text,
-        ":=" | "=>"
-            | "="
-            | "<>"
-            | "!="
-            | "<"
-            | ">"
-            | "<="
-            | ">="
-            | "+"
-            | "-"
-            | "*"
-            | "/"
-            | "%"
-            | "||"
-            | "->"
-            | ":"
-            | "?"
-    )
+    crate::grammar::OPERATORS.contains(&text)
 }
 
 /// Orna and SQL keywords recognised by the classifier, sorted for binary search.
