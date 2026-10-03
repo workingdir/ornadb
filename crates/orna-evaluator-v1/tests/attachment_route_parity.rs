@@ -1525,6 +1525,119 @@ fn fresh_nested_route_pair_chains_evaluate_rebound_closure_values() {
                 &first_stage,
                 &checkpoint_plans,
                 &stale_terminal_anchor_transitions,
+        ),
+        Err(AttachmentError::RetainedSnapshotUnavailable)
+    ));
+
+    let terminal_excursion_plan = [(
+        &saved_middle_handoff,
+        middle_checkpoint_waves.as_slice(),
+    )];
+    let terminal_restore_plan = [(&saved_handoff, anchor_a_waves.as_slice())];
+    let first_restoration_excursion = resolver
+        .extend_nested_terminal_pair_checkpoint_cascades(
+            &first_stage,
+            &terminal_excursion_plan,
+        )
+        .unwrap();
+    let first_restoration_return = resolver
+        .extend_nested_terminal_pair_checkpoint_cascades(
+            &first_restoration_excursion,
+            &terminal_restore_plan,
+        )
+        .unwrap();
+    let starting_terminal_identity = first_stage.terminal_route_identity();
+    let excursion_terminal_identity = first_restoration_excursion.terminal_route_identity();
+    let restored_terminal_identity = first_restoration_return.terminal_route_identity();
+    assert_ne!(
+        starting_terminal_identity,
+        excursion_terminal_identity,
+        "the middle checkpoint moves the terminal route away from its starting pin"
+    );
+    assert_eq!(
+        starting_terminal_identity,
+        restored_terminal_identity,
+        "the paired root checkpoint restores the exact original terminal route identity"
+    );
+    let single_restoration_transitions = [
+        (
+            first_stage.terminal_route_identity(),
+            excursion_terminal_identity.clone(),
+        ),
+        (
+            excursion_terminal_identity.clone(),
+            restored_terminal_identity.clone(),
+        ),
+    ];
+    let restoration_anchor_pair = [
+        terminal_excursion_plan[0],
+        terminal_restore_plan[0],
+    ];
+    let repeated_restoration_folds = [restoration_anchor_pair, restoration_anchor_pair];
+    let expected_restoration_transitions = [
+        single_restoration_transitions.clone(),
+        single_restoration_transitions,
+    ];
+    let (restored_anchor_route, observed_restoration_transitions) = resolver
+        .extend_nested_terminal_pair_checkpoint_restoration_folds_validating_terminal_identity_transitions(
+            &first_stage,
+            &repeated_restoration_folds,
+            &expected_restoration_transitions,
+        )
+        .unwrap();
+    assert_eq!(
+        observed_restoration_transitions,
+        expected_restoration_transitions,
+        "each repeated paired restoration fold records its actual excursion and return edges"
+    );
+    assert_eq!(
+        restored_anchor_route.terminal_route_identity(),
+        starting_terminal_identity,
+        "repeated terminal restoration folds preserve the exact starting identity"
+    );
+    assert_eq!(
+        restored_anchor_route.retained_depth_label(0, 0).unwrap(),
+        saved_handoff.depth_label().clone(),
+        "the root checkpoint label remains attached across repeated restorations"
+    );
+    assert_eq!(
+        restored_anchor_route.retained_depth_label(0, 1).unwrap(),
+        saved_middle_handoff.depth_label().clone(),
+        "the middle checkpoint label remains attached across repeated restorations"
+    );
+    assert_eq!(
+        restored_anchor_route
+            .final_session()
+            .database(aliases[4])
+            .unwrap()
+            .pin()
+            .commit()
+            .as_str(),
+        leaf_middle,
+        "the restored nested route retains its actual starting package commit"
+    );
+
+    let non_restoring_pair = [
+        terminal_excursion_plan[0],
+        terminal_excursion_plan[0],
+    ];
+    let non_restoring_fold = [non_restoring_pair];
+    let non_restoring_transitions = [[
+        (
+            starting_terminal_identity.clone(),
+            excursion_terminal_identity.clone(),
+        ),
+        (
+            excursion_terminal_identity.clone(),
+            excursion_terminal_identity.clone(),
+        ),
+    ]];
+    assert!(matches!(
+        resolver
+            .extend_nested_terminal_pair_checkpoint_restoration_folds_validating_terminal_identity_transitions(
+                &first_stage,
+                &non_restoring_fold,
+                &non_restoring_transitions,
             ),
         Err(AttachmentError::RetainedSnapshotUnavailable)
     ));
