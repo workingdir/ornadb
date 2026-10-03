@@ -2394,6 +2394,12 @@ fn sparse_nested_storm_folds_preserve_terminal_route_identity() {
             &sparse_rounds,
         )
         .unwrap();
+    let attached_pins = |session: &AttachedDatabaseSession| {
+        session
+            .attached()
+            .map(|(alias, database)| (alias.to_owned(), database.pin().clone()))
+            .collect::<Vec<_>>()
+    };
     assert_eq!(
         sparse_folded.retained_depth_label(0, 0).unwrap(),
         outer_label,
@@ -2419,6 +2425,85 @@ fn sparse_nested_storm_folds_preserve_terminal_route_identity() {
         folded.terminal_route_identity(),
         "sparse and positional folds select the same terminal identity"
     );
+
+    let forward_pair_round = [
+        (&outer_label, Some(outer_waves.as_slice())),
+        (&nested_label, Some(nested_waves.as_slice())),
+    ];
+    let reverse_pair_round = [
+        (&nested_label, Some(nested_waves.as_slice())),
+        (&outer_label, Some(outer_waves.as_slice())),
+    ];
+    let forward_pair_fold = resolver
+        .extend_nested_terminal_pair_sparse_checkpoint_storm_rounds_from_depth_labels(
+            &first_stage,
+            &[forward_pair_round.as_slice()],
+        )
+        .unwrap();
+    let reverse_pair_fold = resolver
+        .extend_nested_terminal_pair_sparse_checkpoint_storm_rounds_from_depth_labels(
+            &first_stage,
+            &[reverse_pair_round.as_slice()],
+        )
+        .unwrap();
+    assert_eq!(
+        forward_pair_fold.final_session().primary().pin(),
+        reverse_pair_fold.final_session().primary().pin(),
+        "paired sparse rebinds use label order, not caller entry order"
+    );
+    assert_eq!(
+        attached_pins(forward_pair_fold.final_session()),
+        attached_pins(reverse_pair_fold.final_session()),
+        "reversing a paired round keeps the exact terminal pin route"
+    );
+    assert_eq!(
+        forward_pair_fold
+            .final_session()
+            .database(aliases[4])
+            .unwrap()
+            .pin()
+            .commit()
+            .as_str(),
+        leaf_final,
+        "canonical paired folding keeps the computed terminal package snapshot"
+    );
+
+    let forward_omission_pair = [
+        (&outer_label, None),
+        (&nested_label, Some(nested_waves.as_slice())),
+    ];
+    let reverse_omission_pair = [
+        (&nested_label, Some(nested_waves.as_slice())),
+        (&outer_label, None),
+    ];
+    let forward_omission_fold = resolver
+        .extend_nested_terminal_pair_sparse_checkpoint_storm_rounds_from_depth_labels(
+            &first_stage,
+            &[forward_omission_pair.as_slice()],
+        )
+        .unwrap();
+    let reverse_omission_fold = resolver
+        .extend_nested_terminal_pair_sparse_checkpoint_storm_rounds_from_depth_labels(
+            &first_stage,
+            &[reverse_omission_pair.as_slice()],
+        )
+        .unwrap();
+    assert_eq!(
+        attached_pins(forward_omission_fold.final_session()),
+        attached_pins(reverse_omission_fold.final_session()),
+        "omitting the paired outer route is stable under sparse entry permutation"
+    );
+    assert_eq!(
+        forward_omission_fold.retained_depth_label(0, 0).unwrap(),
+        outer_label,
+        "an omitted depth keeps its original checkpoint identity"
+    );
+    assert_eq!(
+        forward_omission_fold.retained_depth_label(0, 1).unwrap(),
+        nested_label,
+        "the paired active depth remains attached to its original checkpoint"
+    );
+
     let duplicate_sparse_round = [(&outer_label, None), (&outer_label, None)];
     assert!(matches!(
         resolver.extend_nested_terminal_pair_sparse_checkpoint_storm_rounds_from_depth_labels(
@@ -2455,12 +2540,6 @@ fn sparse_nested_storm_folds_preserve_terminal_route_identity() {
         after_omissions.final_session().primary().pin(),
         independent_terminal.final_session().primary().pin()
     );
-    let attached_pins = |session: &AttachedDatabaseSession| {
-        session
-            .attached()
-            .map(|(alias, database)| (alias.to_owned(), database.pin().clone()))
-            .collect::<Vec<_>>()
-    };
     assert_eq!(
         attached_pins(after_omissions.final_session()),
         attached_pins(independent_terminal.final_session())
