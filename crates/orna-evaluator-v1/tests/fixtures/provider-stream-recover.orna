@@ -1,0 +1,7 @@
+std.stream.for_each(
+    std.stream.recover(
+        std.stream.from_provider("events", "recover"),
+        (failure: Error) => "RECOVERED"
+    ),
+    (value: Str) => { std.io.environment.get(value); }
+)
