@@ -696,6 +696,124 @@ fn dispatch_metadata_schema_rejects_invalid_operation_and_role_fields_matrix() {
 }
 
 #[test]
+fn generated_schema_accepts_relationship_shapes_that_typed_dispatch_rejects() {
+    let generated = regenerate();
+    assert_eq!(
+        generated.provider_abi_json,
+        system_provider_abi_json(),
+        "the embedded dispatch artifact is generated from the typed registry"
+    );
+    let schema_json = build_provider::generate_provider_registry_schema()
+        .expect("provider dispatch schema regenerates from its generator");
+    assert_eq!(
+        schema_json,
+        system_provider_abi_schema_json(),
+        "the embedded dispatch schema matches deterministic generated output"
+    );
+    build_host::validate_json_against_schema(system_provider_abi_json(), &schema_json)
+        .expect("the generated dispatch document conforms to its schema");
+    assert_eq!(
+        SystemProviderAbi::from_json(system_provider_abi_json())
+            .expect("the generated dispatch document parses as a typed registry"),
+        *system_dispatch_table(),
+        "the schema-valid embedded document is the runtime dispatch table"
+    );
+
+    let registry: Value =
+        serde_json::from_str(system_provider_abi_json()).expect("embedded dispatch document");
+    let assert_typed_relationship_rejection = |mutated: Value, expected| {
+        let json = mutated.to_string();
+        build_host::validate_json_against_schema(&json, &schema_json)
+            .expect("relationship mutation retains the generated schema shape");
+        assert_eq!(
+            SystemProviderAbi::from_json(&json),
+            Err(expected),
+            "typed dispatch validation rejects relationship drift"
+        );
+    };
+
+    let role_with_multiple_operations = registry["roles"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|role| role["operations"].as_array().unwrap().len() > 1)
+        .expect("the registry has a role with multiple operations");
+    let original_role_name = role_with_multiple_operations["name"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let unknown_role_operation_name = role_with_multiple_operations["operations"][0]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let role_annotation = registry["operations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|operation| operation["name"] == unknown_role_operation_name)
+        .expect("role operation exists in the dispatch list")["role"]
+        .as_str()
+        .expect("role-bound operation declares a role");
+    let (_, version) = role_annotation
+        .rsplit_once('@')
+        .expect("role annotation has a version suffix");
+    let mut unknown_role = registry.clone();
+    unknown_role["roles"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|role| role["name"] == original_role_name)
+        .expect("original role exists")["operations"]
+        .as_array_mut()
+        .unwrap()
+        .retain(|operation| operation.as_str() != Some(unknown_role_operation_name.as_str()));
+    let operation = unknown_role["operations"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|operation| operation["name"] == unknown_role_operation_name)
+        .expect("role operation exists in the dispatch list");
+    operation["role"] = Value::String(format!("sys.cont23_missing_role@{version}"));
+    assert_typed_relationship_rejection(
+        unknown_role,
+        orna_sys_v1::ProviderAbiError::OperationRoleMismatch,
+    );
+
+    let mut missing_reverse_link = registry.clone();
+    let role = &missing_reverse_link["roles"][0];
+    let operation_name = role["operations"][0]
+        .as_str()
+        .expect("role has an operation")
+        .to_owned();
+    let operation = missing_reverse_link["operations"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|operation| operation["name"] == operation_name)
+        .expect("role operation exists in the dispatch list");
+    operation["role"] = Value::Null;
+    assert_typed_relationship_rejection(
+        missing_reverse_link,
+        orna_sys_v1::ProviderAbiError::RoleOperationMissing,
+    );
+
+    let mut mismatched_role_version = registry;
+    let role = &mut mismatched_role_version["roles"][0];
+    let minor = role["version"]["minor"]
+        .as_u64()
+        .expect("role minor version is an integer");
+    role["version"]["minor"] = Value::from(minor + 1);
+    assert_typed_relationship_rejection(
+        mismatched_role_version,
+        orna_sys_v1::ProviderAbiError::OperationRoleVersionMismatch,
+    );
+
+    println!(
+        "generated_schema_typed_dispatch_relationship_parity schema_valid=3 typed_rejections=unknown_role,missing_reverse_link,role_version_mismatch total_cases=3"
+    );
+}
+
+#[test]
 fn generated_artifact_drift_probe_rejects_tampered_outputs_and_stale_modules() {
     let regenerated = regenerate();
     let source_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
