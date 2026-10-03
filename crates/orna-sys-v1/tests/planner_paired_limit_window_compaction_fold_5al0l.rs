@@ -10,6 +10,8 @@ use orna_sys_v1::{
 
 const FIXTURE: &str =
     include_str!("fixtures/planner_paired_limit_window_compaction_fold_5al0l.orna");
+const SCOPED_LIMIT_FIXTURE: &str =
+    include_str!("fixtures/planner_paired_scoped_window_limit_restoration_7lx92.orna");
 
 fn object(reference: &str) -> ObjectRef {
     ObjectRef::descriptive(reference)
@@ -646,5 +648,186 @@ fn nested_aggregate_compaction_identity_tracks_paired_limit_restores() {
         root.details()
             .get("paired_limit_window_compaction_limit_pair_count"),
         Some(&PlanDetail::Integer(3))
+    );
+}
+
+#[test]
+fn scoped_window_identity_tracks_paired_limit_restoration_folds() {
+    let parsed = orna_syntax_v1::parse_module(SCOPED_LIMIT_FIXTURE);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+    assert_eq!(parsed.value.items.len(), 2);
+
+    let declared = [
+        "table:First",
+        "table:Gap",
+        "table:Compact",
+        "table:Restore",
+        "table:Unknown",
+    ];
+    let base_pairs = pairs("table:Anchor", &declared);
+    let limit_descriptors = limits();
+    let aggregate_descriptors = aggregates();
+    let spill_descriptors = spills();
+    let original = plan(
+        "table:Anchor",
+        &declared,
+        &base_pairs,
+        &limit_descriptors,
+        &aggregate_descriptors,
+        &spill_descriptors,
+    );
+    let joins = joins_by_source(&original);
+    let first = joins["table:First"];
+    let gap = joins["table:Gap"];
+    let compact = joins["table:Compact"];
+    let restore = joins["table:Restore"];
+    let unknown = joins["table:Unknown"];
+    let fold_key = "paired_scoped_window_limit_restoration_fold_identity";
+
+    assert_eq!(
+        text(first, "paired_scoped_window_limit_restoration_transition"),
+        "advanced_window_and_limit_restoration"
+    );
+    assert_eq!(
+        text(
+            first,
+            "paired_scoped_window_limit_restoration_window_fold_identity"
+        ),
+        text(first, "paired_scoped_window_compaction_fold_identity"),
+        "the scoped window component is the exact cumulative window fold"
+    );
+    assert_eq!(
+        text(
+            first,
+            "paired_scoped_window_limit_restoration_limit_fold_identity"
+        ),
+        text(first, "paired_limit_aggregate_restoration_fold_identity"),
+        "the limit component is the exact cumulative restoration fold"
+    );
+    assert_eq!(
+        integer(
+            first,
+            "paired_scoped_window_limit_restoration_window_pair_count"
+        ),
+        1
+    );
+    assert_eq!(
+        integer(
+            first,
+            "paired_scoped_window_limit_restoration_window_stage_count"
+        ),
+        2
+    );
+    assert_eq!(
+        integer(
+            first,
+            "paired_scoped_window_limit_restoration_limit_pair_count"
+        ),
+        1
+    );
+    assert_eq!(
+        integer(
+            first,
+            "paired_scoped_window_limit_restoration_limit_stage_count"
+        ),
+        2
+    );
+
+    assert_eq!(
+        text(gap, fold_key),
+        text(first, fold_key),
+        "a sparse join carries the scoped window and restore identities together"
+    );
+    assert_eq!(
+        text(gap, "paired_scoped_window_limit_restoration_transition"),
+        "carried_across_sparse_input"
+    );
+    assert_eq!(
+        text(compact, "paired_scoped_window_limit_restoration_transition"),
+        "advanced_window_and_limit_restoration"
+    );
+    assert_ne!(text(compact, fold_key), text(gap, fold_key));
+    assert_eq!(
+        integer(
+            compact,
+            "paired_scoped_window_limit_restoration_window_pair_count"
+        ),
+        2
+    );
+    assert_eq!(
+        integer(
+            compact,
+            "paired_scoped_window_limit_restoration_limit_pair_count"
+        ),
+        1
+    );
+    assert_ne!(text(restore, fold_key), text(compact, fold_key));
+    assert_eq!(
+        integer(
+            restore,
+            "paired_scoped_window_limit_restoration_limit_pair_count"
+        ),
+        2
+    );
+    assert_ne!(text(unknown, fold_key), text(restore, fold_key));
+    assert_eq!(
+        integer(
+            unknown,
+            "paired_scoped_window_limit_restoration_window_pair_count"
+        ),
+        4
+    );
+    assert_eq!(
+        integer(
+            unknown,
+            "paired_scoped_window_limit_restoration_limit_pair_count"
+        ),
+        3
+    );
+    let mut changed_limits = limit_descriptors.clone();
+    changed_limits[0].limit += 1;
+    let changed_limit = plan(
+        "table:Anchor",
+        &declared,
+        &base_pairs,
+        &changed_limits,
+        &aggregate_descriptors,
+        &spill_descriptors,
+    );
+    let changed_first = joins_by_source(&changed_limit)["table:First"];
+    assert_eq!(
+        text(
+            changed_first,
+            "paired_scoped_window_limit_restoration_window_fold_identity"
+        ),
+        text(
+            changed_first,
+            "paired_scoped_window_compaction_fold_identity"
+        ),
+        "the composite carries the exact scoped window component selected for the changed plan"
+    );
+    assert_ne!(
+        text(
+            first,
+            "paired_scoped_window_limit_restoration_limit_fold_identity"
+        ),
+        text(
+            changed_first,
+            "paired_scoped_window_limit_restoration_limit_fold_identity"
+        ),
+        "changing the paired limit changes the restoration component"
+    );
+    assert_ne!(
+        text(first, fold_key),
+        text(changed_first, fold_key),
+        "the composite identity binds both independent components"
+    );
+    assert_ne!(
+        text(unknown, "join_cost_fold_identity"),
+        text(
+            joins_by_source(&changed_limit)["table:Unknown"],
+            "join_cost_fold_identity"
+        ),
+        "the changed scoped-window restoration fold propagates into later join costs"
     );
 }
