@@ -2844,22 +2844,18 @@ fn nested_aggregate_folds_keep_identity_across_paired_refresh_compaction_chains(
     // The reference does not specify whether opaque provider cursors survive
     // refresh compaction. Keep the documented lexicographic progress within a
     // chain, and treat each `(source, scope)` snapshot as its own chain even
-    // when compact cursor tokens are reused by sibling snapshots.
+    // when both long and compact cursor tokens are reused by sibling snapshots.
+    let long_checkpoint_cursor = vec![0x5a, 0xff, 0x00];
     let compacted_cursor = vec![0x5b];
-    let long_cursors = [
-        vec![0x5a, 0x01, 0xff, 0x00],
-        vec![0x5a, 0x02, 0xff, 0x00],
-        vec![0x5a, 0x03, 0xff, 0x00],
-        vec![0x5a, 0x04, 0xff, 0x00],
-        vec![0x5a, 0x05, 0xff, 0x00],
-        vec![0x5a, 0x06, 0xff, 0x00],
-    ];
-    let restore = |groups: &[&[i64]], long_cursor: &[u8]| {
+    let restore = |groups: &[&[i64]]| {
         assert_eq!(groups.len(), 3, "each checkpoint chain has three pages");
         BTreeMap::from([
-            (None, page(groups[0], Some(long_cursor.to_vec()))),
             (
-                Some(long_cursor.to_vec()),
+                None,
+                page(groups[0], Some(long_checkpoint_cursor.clone())),
+            ),
+            (
+                Some(long_checkpoint_cursor.clone()),
                 page(groups[1], Some(compacted_cursor.clone())),
             ),
             (
@@ -2869,12 +2865,12 @@ fn nested_aggregate_folds_keep_identity_across_paired_refresh_compaction_chains(
         ])
     };
     let mut source = PairedCursorRestoreSource::new([
-        ("View.Left", restore(&[&[1, 2], &[3], &[4]], &long_cursors[0])),
-        ("View.Right", restore(&[&[10], &[20, 30], &[40]], &long_cursors[1])),
-        ("View.Left", restore(&[&[4], &[5, 6], &[7]], &long_cursors[2])),
-        ("View.Right", restore(&[&[2, 4], &[6], &[8]], &long_cursors[3])),
-        ("View.Left", restore(&[&[-1, 3], &[5], &[7]], &long_cursors[4])),
-        ("View.Right", restore(&[&[3], &[6, 9], &[12]], &long_cursors[5])),
+        ("View.Left", restore(&[&[1, 2], &[3], &[4]])),
+        ("View.Right", restore(&[&[10], &[20, 30], &[40]])),
+        ("View.Left", restore(&[&[4], &[5, 6], &[7]])),
+        ("View.Right", restore(&[&[2, 4], &[6], &[8]])),
+        ("View.Left", restore(&[&[-1, 3], &[5], &[7]])),
+        ("View.Right", restore(&[&[3], &[6, 9], &[12]])),
     ]);
     let mut functions = nested_aggregate_compaction_functions();
     functions.insert(
@@ -2936,7 +2932,7 @@ fn nested_aggregate_folds_keep_identity_across_paired_refresh_compaction_chains(
             (
                 lane_names[index].to_owned(),
                 scope,
-                Some(long_cursors[index].clone()),
+                Some(long_checkpoint_cursor.clone()),
             ),
             (
                 lane_names[index].to_owned(),
