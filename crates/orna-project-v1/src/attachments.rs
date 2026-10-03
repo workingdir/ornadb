@@ -1283,6 +1283,29 @@ impl PackageResolver {
         Ok(route)
     }
 
+    /// Applies sparse nested terminal-pair rebind chains and captures the
+    /// computed terminal identity at each chain boundary. The reference is
+    /// silent on returning a route-identity history; v1 reports the exact
+    /// lineage and ordered terminal pins after every chain and returns no
+    /// partial history if a later chain fails.
+    pub fn extend_nested_terminal_pair_sparse_checkpoint_storm_chains_capturing_terminal_identities(
+        &self,
+        previous: &ReboundPathResolution,
+        chains: &[&[&[(&NestedPairDepthLabel, Option<&[[PinnedDatabase; 2]]>)]]],
+    ) -> Result<(ReboundPathResolution, Vec<NestedPairTerminalRouteIdentity>), AttachmentError> {
+        let mut route = previous.clone();
+        let mut terminal_identities = Vec::with_capacity(chains.len());
+        for chain in chains {
+            route = self
+                .extend_nested_terminal_pair_sparse_checkpoint_storm_chains_from_depth_labels(
+                    &route,
+                    &[*chain],
+                )?;
+            terminal_identities.push(route.terminal_route_identity());
+        }
+        Ok((route, terminal_identities))
+    }
+
     /// Applies paired rebinding and omission chains as consecutive terminal
     /// route segments. Each omission chain must preserve the terminal identity
     /// computed by its preceding rebind chain. Returns the final route and the
