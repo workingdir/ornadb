@@ -1,0 +1,13 @@
+{ id: "segment/restore-a-handoff-a-order-10", name: "restore/a-left-segment-10", city: "restore/a-right-segment-10", }
+
+{ id: "segment/restore-a-handoff-a-order-11", name: "restore/a-left-segment-11", city: "restore/a-right-segment-11", }
+
+{ id: "segment/restore-a-handoff-b-order-10", name: "restore/b-left-segment-10", city: "restore/b-right-segment-10", }
+
+{ id: "segment/restore-a-handoff-b-order-12", name: "restore/b-left-segment-12", city: "restore/b-right-segment-12", }
+
+{ id: "segment/restore-b-handoff-a-order-10", name: "restore/c-left-segment-10", city: "restore/c-right-segment-10", }
+
+{ id: "segment/restore-b-handoff-a-order-12", name: "restore/c-left-segment-12", city: "restore/c-right-segment-12", }
+
+{ id: "segment/restore-b-handoff-b-order-14", name: "restore/d-left-segment-14", city: "restore/d-right-segment-14", }
