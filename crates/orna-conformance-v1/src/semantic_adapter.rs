@@ -5189,7 +5189,7 @@ fn literal_value(expr: &Expr) -> Option<Value> {
             orna_syntax_v1::LiteralKind::Null => Value::new(OvbRaw::Null).ok(),
             _ => None,
         },
-        Expr::List { elements, .. } => elements
+        Expr::Tuple { elements, .. } | Expr::List { elements, .. } => elements
             .iter()
             .map(literal_value)
             .collect::<Option<Vec<_>>>()
