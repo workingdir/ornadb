@@ -1844,6 +1844,76 @@ fn paired_pagination_restores_keep_forked_cursor_chains_scoped() {
     assert!(source.pending["View.Right"].is_empty());
 }
 
+#[test]
+fn paired_compacted_cursor_restores_keep_scope_identity() {
+    let cursor_128 = vec![0x20; 128];
+    let continuations = [cursor_128, vec![0x21], vec![0x22], vec![0x23]];
+    assert_eq!(
+        continuations.iter().map(Vec::len).collect::<Vec<_>>(),
+        [128, 1, 1, 1],
+        "checkpoint compaction shrinks cursor payloads without dropping the chain"
+    );
+    for pair in continuations.windows(2) {
+        assert!(pair[0].as_slice() < pair[1].as_slice());
+    }
+    let generations = [
+        ([1, 2, 3, 4], [5, 8, 5, 8], [5, 4, 3, 2]),
+        ([3, 4, 1, 6], [5, 8, 5, 8], [2, 5, 4, 3]),
+        ([1, 6, 3, 2], [5, 8, 5, 8], [3, 2, 5, 4]),
+    ];
+    let mut restores = Vec::new();
+    for (values, filtered_values, depths) in generations {
+        for lane in 0..4 {
+            let source_name = if lane < 2 { "View.Left" } else { "View.Right" };
+            let depth = depths[lane];
+            let restored_pages = (0..depth)
+                .map(|page_index| {
+                    let after = (page_index > 0)
+                        .then(|| continuations[page_index - 1].clone());
+                    let next = (page_index + 1 < depth)
+                        .then(|| continuations[page_index].clone());
+                    let value = if page_index == 0 {
+                        values[lane]
+                    } else {
+                        filtered_values[lane]
+                    };
+                    (after, page(&[value], next))
+                })
+                .collect::<BTreeMap<_, _>>();
+            restores.push((source_name, restored_pages));
+        }
+    }
+    let mut source = PairedCursorRestoreSource::new(restores);
+
+    let first = run_with_fixture_functions(paired_scoped_view_refresh_body(), &mut source).unwrap();
+    assert_eq!(first, integer(14), "first fold restores its compacting paired page chains");
+    let second = run_with_fixture_functions(paired_scoped_view_refresh_body(), &mut source).unwrap();
+    assert_eq!(second, integer(18), "second fold observes its own refreshed values");
+    let third = run_with_fixture_functions(paired_scoped_view_refresh_body(), &mut source).unwrap();
+    assert_eq!(third, integer(16), "third fold observes values after another compacting restore");
+    assert_eq!(first, integer(14), "later compacted restores preserve the first fold value");
+    assert_eq!(second, integer(18), "later compacted restores preserve the second fold value");
+
+    assert_eq!(source.lanes.len(), 12, "three refreshes bind four independent scopes each");
+    for generation in 0..3 {
+        let start = generation * 4;
+        assert_eq!(source.lanes[start].0, "View.Left");
+        assert_eq!(source.lanes[start + 1].0, "View.Left");
+        assert_eq!(source.lanes[start + 2].0, "View.Right");
+        assert_eq!(source.lanes[start + 3].0, "View.Right");
+    }
+    let scopes = source.lanes.iter().map(|(_, scope, _)| *scope).collect::<Vec<_>>();
+    for (index, scope) in scopes.iter().enumerate() {
+        assert!(
+            !scopes[..index].contains(scope),
+            "compacted cursor chains stay separated by fresh source scope: {scope:?}"
+        );
+    }
+    assert_eq!(source.cursors.len(), 42, "all variable-depth compacted restores are resolved");
+    assert!(source.pending["View.Left"].is_empty());
+    assert!(source.pending["View.Right"].is_empty());
+}
+
 fn paired_subscription_cascade_body() -> Expr {
     let left = relation_stage(
         relation_stage(
