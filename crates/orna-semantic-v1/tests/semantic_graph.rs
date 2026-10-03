@@ -13033,6 +13033,95 @@ fn sparse_checkpoint_rebind_chains_keep_paired_three_way_identity() {
 }
 
 #[test]
+fn paired_sparse_snapshot_fold_chain_rejects_late_identity_split() {
+    let source = include_str!("fixtures/historical-paired-sparse-snapshot-fold-chain.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-paired-sparse-snapshot-fold-chain.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    let type_errors = result
+        .diagnostics
+        .iter()
+        .filter(|diagnostic| diagnostic.code() == DIAG_TYPE)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        type_errors.len(),
+        1,
+        "only the later split of a learned paired tuple should fail: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+    let module = result
+        .modules
+        .values()
+        .find(|module| {
+            module
+                .symbols
+                .contains_key("paired_sparse_snapshot_fold_chain")
+        })
+        .expect("paired sparse snapshot fixture module");
+    let Type::Function { result, .. } =
+        &module.symbols["paired_sparse_snapshot_fold_chain"].ty
+    else {
+        panic!("snapshot fold proof must return computed checkpoint values");
+    };
+    let Type::List(row) = result.as_ref() else {
+        panic!("snapshot fold proof must retain its computed row map: {result:?}");
+    };
+    let Type::Record(fields) = row.as_ref() else {
+        panic!("snapshot fold proof rows must remain records: {row:?}");
+    };
+    let tuple_maps = |name: &str| {
+        let Type::Tuple(slots) = fields.get(name).expect("checkpoint field") else {
+            panic!("{name} must remain a paired tuple");
+        };
+        assert_eq!(slots.len(), 2, "{name} preserves both checkpoint slots");
+        slots
+            .iter()
+            .map(|slot| {
+                let mut contexts = BTreeSet::new();
+                collect_snapshot_contexts(slot, &mut contexts);
+                contexts
+            })
+            .collect::<Vec<_>>()
+    };
+    let selectors = |values: &[&str]| {
+        values
+            .iter()
+            .map(|value| format!("selector:HEAD~{value}"))
+            .collect::<BTreeSet<_>>()
+    };
+    assert_eq!(
+        tuple_maps("left_checkpoint"),
+        [selectors(&["9100", "9200", "9400"]), selectors(&["9200", "9400"])],
+        "the failed split must roll both left pins back while accepted rows still fold"
+    );
+    assert_eq!(
+        tuple_maps("right_checkpoint"),
+        [selectors(&["9200", "9400"]), selectors(&["9100", "9200", "9400"])],
+        "paired right pins keep their shared identity through the sparse fold"
+    );
+    let mut witness_contexts = BTreeSet::new();
+    collect_snapshot_contexts(
+        fields.get("witness").expect("witness survives rejected pair"),
+        &mut witness_contexts,
+    );
+    assert_eq!(
+        witness_contexts,
+        selectors(&["9110", "9215", "9220", "9320", "9330", "9420"]),
+        "rejecting the tuple split retains each independent witness value"
+    );
+}
+
+#[test]
 fn tuple_checkpoint_pin_identity_survives_map_compaction_rebind() {
     let source = include_str!("fixtures/historical-tuple-checkpoint-map-compaction-rebind.orna");
     let parsed = orna_syntax_v1::parse_module(source);
