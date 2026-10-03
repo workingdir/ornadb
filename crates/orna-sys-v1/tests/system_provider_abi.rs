@@ -1253,27 +1253,34 @@ fn dispatch_to_provider_checks_arity_argument_types_and_generic_result_binding()
             "version": {"major": 1, "minor": 0},
             "effects": ["read"],
             "operations": ["sys.meta<T>"],
-            "required": true,
+            "required": false,
             "replaceable": true,
-            "builtin_provider": "fixture.metadata"
+            "builtin_provider": null
         }]
     });
     let generic_table = SystemProviderAbi::from_json(&generic_abi.to_string()).unwrap();
     let generic_operation_name = "sys.meta<T>";
     let generic_contract = generic_table.operation(generic_operation_name).unwrap();
     let generic_role = generic_contract.role.as_ref().unwrap();
-    let generic_registry = ProviderRoleRegistry::from_baked_abi(&generic_table).unwrap();
-    let generic_offer = generic_registry
-        .resolve(generic_role.as_str())
-        .unwrap()
-        .clone();
-    let generic_argument = TypedValue::public(TypeId::new("sys.Example"), b"example".to_vec());
+    let generic_offer = ProviderOffer {
+        provider: ProviderId::new("fixture.metadata").unwrap(),
+        role: generic_role.clone(),
+        version: AbiVersion::V1_0,
+        effects: EffectSet::one(SystemEffect::Read),
+    };
+    let generic_arguments = [TypedValue::public(
+        TypeId::new("sys.Example"),
+        b"example".to_vec(),
+    )];
+    let unbound_registry = ProviderRoleRegistry::from_baked_abi(&generic_table).unwrap();
+    let mut generic_registry = ProviderRoleRegistry::from_baked_abi(&generic_table).unwrap();
+    generic_registry.bind(generic_offer.clone()).unwrap();
     let generic_result = TypedValue::public(
         TypeId::new("sys.ValueMetadata<sys.Example>"),
         b"metadata".to_vec(),
     );
     let generic_provider = InvokeValueProvider {
-        offer: generic_offer,
+        offer: generic_offer.clone(),
         operation: generic_contract.id.clone(),
         argument_types: vec!["sys.Example".to_owned()],
         response: Ok(generic_result.clone()),
@@ -1283,10 +1290,44 @@ fn dispatch_to_provider_checks_arity_argument_types_and_generic_result_binding()
         generic_table.dispatch_to_provider(
             generic_operation_name,
             &generic_provider,
-            &[generic_argument],
+            &generic_arguments,
             |_| Ok(())
         ),
-        Ok(orna_sys_v1::SystemDispatchResult::Returned(generic_result))
+        Err(ProviderDiagnostic::RoleUnavailable {
+            role: generic_role.clone(),
+            version: AbiVersion::V1_0,
+        }),
+        "direct dispatch has no baked provider to select for this optional role"
+    );
+    assert_eq!(generic_provider.calls.load(Ordering::SeqCst), 0);
+
+    assert_eq!(
+        unbound_registry.dispatch_to_provider(
+            &generic_table,
+            generic_operation_name,
+            &generic_provider,
+            &generic_arguments,
+            |_| Ok(())
+        ),
+        Err(ProviderDiagnostic::RoleUnavailable {
+            role: generic_role.clone(),
+            version: AbiVersion::V1_0,
+        }),
+        "registry dispatch diagnoses a role without a selected provider"
+    );
+    assert_eq!(generic_provider.calls.load(Ordering::SeqCst), 0);
+
+    assert_eq!(
+        generic_registry.dispatch_to_provider(
+            &generic_table,
+            generic_operation_name,
+            &generic_provider,
+            &generic_arguments,
+            |_| Ok(())
+        ),
+        Ok(orna_sys_v1::SystemDispatchResult::Returned(
+            generic_result.clone()
+        ))
     );
     assert_eq!(generic_provider.calls.load(Ordering::SeqCst), 1);
 
@@ -1317,18 +1358,14 @@ fn dispatch_to_provider_checks_arity_argument_types_and_generic_result_binding()
         generic_table.dispatch_to_provider(
             generic_operation_name,
             &alternate_provider,
-            &[TypedValue::public(
-                TypeId::new("sys.Example"),
-                b"example".to_vec()
-            )],
+            &generic_arguments,
             |_| Ok(())
         ),
-        Err(ProviderDiagnostic::ProviderNotSelected {
+        Err(ProviderDiagnostic::RoleUnavailable {
             role: generic_role.clone(),
-            expected: selected_generic_offer,
-            provided: alternate_generic_offer.clone(),
+            version: AbiVersion::V1_0,
         }),
-        "direct dispatch cannot bypass a replaceable role's selected offer"
+        "direct dispatch cannot bypass the registry for a replaceable role"
     );
     assert_eq!(alternate_provider.calls.load(Ordering::SeqCst), 0);
     assert_eq!(
@@ -1336,10 +1373,7 @@ fn dispatch_to_provider_checks_arity_argument_types_and_generic_result_binding()
             &generic_table,
             generic_operation_name,
             &alternate_provider,
-            &[TypedValue::public(
-                TypeId::new("sys.Example"),
-                b"example".to_vec()
-            )],
+            &generic_arguments,
             |_| Ok(())
         ),
         Ok(orna_sys_v1::SystemDispatchResult::Returned(
@@ -1349,7 +1383,7 @@ fn dispatch_to_provider_checks_arity_argument_types_and_generic_result_binding()
     assert_eq!(alternate_provider.calls.load(Ordering::SeqCst), 1);
 
     println!(
-        "dispatch_to_provider_type_matrix operation={operation_name} rejected=argument_count,argument_type,result_type,direct_unselected_provider generic_bindings=1 selected_replacement=1 total_cases=6"
+        "dispatch_to_provider_type_matrix operation={operation_name} rejected=argument_count,argument_type,result_type,direct_unselected_provider,direct_unbound_role registry_unbound=1 generic_bindings=1 selected_replacement=1 total_cases=8"
     );
 }
 
