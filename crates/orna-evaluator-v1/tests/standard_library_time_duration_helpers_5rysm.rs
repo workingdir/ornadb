@@ -40,7 +40,7 @@ fn pinned_time_session() -> (AdmittedReplSession, StandardDependencyProfile) {
 }
 
 #[test]
-fn duration_helpers_compute_exact_elapsed_values_from_the_pinned_module() {
+fn time_and_duration_helpers_compute_exact_values_from_the_pinned_module() {
     let (mut session, profile) = pinned_time_session();
     for (path, source) in captured_time_sources() {
         profile
@@ -54,17 +54,19 @@ fn duration_helpers_compute_exact_elapsed_values_from_the_pinned_module() {
         session.submit(include_str!("fixtures/stdlib-time-use-5rysm.orna")),
         Ok(None)
     );
-    for assertion in include_str!("fixtures/stdlib-time-duration-helper-values-5rysm.orna")
-        .split("&&")
-        .map(str::trim)
-    {
-        let result = session.submit(assertion);
-        assert_eq!(
-            result,
-            Ok(Some(boolean(true))),
-            "duration helper should compute the documented value: {assertion}; diagnostic={}",
-            result.as_ref().err().map_or("none", |error| error.code())
-        );
+    for fixture in [
+        include_str!("fixtures/stdlib-time-duration-helper-values-5rysm.orna"),
+        include_str!("fixtures/stdlib-time-instant-helper-values-5rysm.orna"),
+    ] {
+        for assertion in fixture.split("&&").map(str::trim) {
+            let result = session.submit(assertion);
+            assert_eq!(
+                result,
+                Ok(Some(boolean(true))),
+                "time helper should compute the documented value: {assertion}; diagnostic={}",
+                result.as_ref().err().map_or("none", |error| error.code())
+            );
+        }
     }
 }
 
