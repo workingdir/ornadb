@@ -2085,6 +2085,8 @@ fn nested_window_aggregates_recompute_real_values_for_paired_restore_chains() {
 
 #[test]
 fn nested_aggregates_keep_values_across_paired_refresh_restore_chains() {
+    // The reference leaves cross-refresh cursor reuse unspecified; each refreshed
+    // source snapshot therefore owns an independent `(source, scope, cursor)` chain.
     let cursors = [vec![0x69], vec![0x69, 0x00], vec![0x69, 0x00, 0xff]];
     let restore = |groups: &[&[i64]], tokens: &[Vec<u8>]| {
         assert_eq!(groups.len(), tokens.len() + 1);
@@ -2152,6 +2154,52 @@ fn nested_aggregates_keep_values_across_paired_refresh_restore_chains() {
     assert_eq!(third, integer_pair(10, 18), "the final restore chain retains both nested totals");
     assert_eq!(first, integer_pair(8, 80), "later paired restores leave the first value snapshot intact");
     assert_eq!(second, integer_pair(20, 16), "later paired restores leave the second value snapshot intact");
+
+    let lane_names = [
+        "View.Left",
+        "View.Right",
+        "View.Left",
+        "View.Right",
+        "View.Left",
+        "View.Right",
+    ];
+    let cursor_traces = [
+        vec![None, Some(cursors[0].clone()), Some(cursors[1].clone())],
+        vec![None, Some(cursors[0].clone())],
+        vec![None, Some(cursors[0].clone())],
+        vec![None, Some(cursors[0].clone()), Some(cursors[1].clone())],
+        vec![None, Some(cursors[0].clone())],
+        vec![None, Some(cursors[0].clone())],
+    ];
+    assert_eq!(source.lanes.len(), lane_names.len());
+    let scopes = source
+        .lanes
+        .iter()
+        .zip(lane_names)
+        .map(|((source_name, scope, _), expected_name)| {
+            assert_eq!(source_name, expected_name, "each refresh restores left then right");
+            *scope
+        })
+        .collect::<Vec<_>>();
+    for (index, scope) in scopes.iter().enumerate() {
+        assert!(
+            !scopes[..index].contains(scope),
+            "paired restores retain distinct identity across sibling sources and refreshes: {scope:?}"
+        );
+    }
+    let mut expected_cursors = Vec::new();
+    for (index, trace) in cursor_traces.into_iter().enumerate() {
+        expected_cursors.extend(
+            trace
+                .into_iter()
+                .map(|cursor| (lane_names[index].to_owned(), scopes[index], cursor)),
+        );
+    }
+    assert_eq!(
+        source.cursors,
+        expected_cursors,
+        "repeated opaque cursors resume only their own nested aggregate restore chain"
+    );
     assert!(source.pending["View.Left"].is_empty());
     assert!(source.pending["View.Right"].is_empty());
 }
