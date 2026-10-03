@@ -52,6 +52,29 @@ fn paired_sparse_window_distinct_folds_keep_frame_and_lane_identity() {
         assert_eq!(session.submit(source), Ok(None), "{stage}: {source}");
     }
 
+    let frames = session
+        .submit(include_str!(
+            "fixtures/stdlib-query-paired-window-frame-folds-y5hv5.orna"
+        ))
+        .unwrap_or_else(|error| panic!("paired frame folds failed with {}", error.code()));
+    let integer = |value: i64| Raw::Int(value.into());
+    let frame = |values: &[i64]| {
+        Raw::Array(values.iter().copied().map(integer).collect())
+    };
+    let expected_frames = CanonicalValue::new(Raw::Tag(
+        60015,
+        Box::new(Raw::Array(vec![
+            Raw::Array(vec![frame(&[1]), frame(&[1, 2])]),
+            Raw::Array(vec![frame(&[2, 1]), frame(&[1, 2])]),
+        ])),
+    ))
+    .expect("paired distinct frame output is canonical");
+    assert_eq!(
+        frames,
+        Some(expected_frames),
+        "each sparse frame folds duplicate members in first-seen order before the outer cascade"
+    );
+
     let left = session
         .submit(include_str!(
             "fixtures/stdlib-query-paired-window-fold-result-y5hv5.orna"
