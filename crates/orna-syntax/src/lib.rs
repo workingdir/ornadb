@@ -5,13 +5,10 @@
 
 use std::{fmt, ops::Range};
 
-pub mod grammar;
-mod highlight;
 mod language_model;
 mod lexer;
 mod parser;
 
-pub use highlight::{HighlightKind, HighlightToken, KEYWORDS, SCALAR_TYPES, highlight};
 pub use language_model::{
     IdentifierKey, LanguageDeclaration, LanguageDeclarationKind, LanguageModel, identifier_key,
     identifier_spelling_matches, qualified_name_matches_keys, qualified_names_match,
@@ -1660,13 +1657,6 @@ impl Parse {
         &self.client_functions
     }
 
-    /// Return context-aware highlight tokens for this source unit.
-    ///
-    /// The classification walks this unit's lossless CST, so declaration
-    /// names are recognised even in partially edited source.
-    pub fn highlight(&self) -> Vec<HighlightToken> {
-        highlight::highlight_tree(&self.syntax)
-    }
 }
 
 /// Parse one Orna source unit.
