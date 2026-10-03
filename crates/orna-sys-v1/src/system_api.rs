@@ -80,6 +80,16 @@ pub static SYSTEM_FUNCTION_DESCRIPTORS: LazyLock<Vec<SystemFunctionDescriptor>> 
             signature: &'a str,
             #[serde(borrow)]
             purpose: &'a str,
+            #[serde(borrow)]
+            documentation: Option<&'a str>,
+            #[serde(borrow)]
+            contract: Option<&'a str>,
+            #[serde(borrow)]
+            preconditions: Option<&'a str>,
+            #[serde(borrow)]
+            ownership: Option<&'a str>,
+            #[serde(borrow)]
+            snapshot_rule: Option<&'a str>,
         }
 
         let api: Api<'static> = serde_json::from_str(GENERATED_SYSTEM_API)
@@ -98,6 +108,11 @@ pub static SYSTEM_FUNCTION_DESCRIPTORS: LazyLock<Vec<SystemFunctionDescriptor>> 
                     effect,
                     signature: function.signature,
                     purpose: function.purpose,
+                    documentation: function.documentation,
+                    contract: function.contract,
+                    preconditions: function.preconditions,
+                    ownership: function.ownership,
+                    snapshot_rule: function.snapshot_rule,
                 }
             })
             .collect()
@@ -139,7 +154,7 @@ pub struct SystemApiFunctionBindings;
 
 impl SystemApiFunctionBindings {
     #[ornasys(
-        function = r###"{"effect":"read","name":"sys.meta","purpose":"Return safe static/nominal/codec/protocol metadata for a value.","signature":"fn sys.meta<T>(value: T): sys.ValueMetadata<T>"}"###,
+        function = r###"{"documentation":"Reports the public type identity, nominal metadata, and registered codec/protocol facts for `value`. The result is descriptive metadata only: it does not expose private payload bytes, evaluate the value, or grant permissions to use it.","effect":"read","name":"sys.meta","purpose":"Return safe static/nominal/codec/protocol metadata for a value.","signature":"fn sys.meta<T>(value: T): sys.ValueMetadata<T>"}"###,
         role = "langitem.sys.meta@1.0",
         type_graph = "system_api_inventory.json",
         schema = "system_api_schema.json"
@@ -158,7 +173,7 @@ impl SystemApiFunctionBindings {
     }
 
     #[ornasys(
-        function = r###"{"effect":"read","name":"sys.resolve","purpose":"Resolve a semantic name with ordinary visibility/import rules.","signature":"fn sys.resolve(name: Str, kind: sys.ObjectKind? = null, at: sys.SnapshotRef = sys.current.snapshot, from: sys.ModuleRef? = null): sys.ObjectRef"}"###
+        function = r###"{"documentation":"Resolves a name using the language's ordinary import and visibility rules. `at` pins the lookup to a snapshot; `from` supplies the module whose imports and visibility are applied. Lookup is descriptive and never invokes the resolved object.","effect":"read","name":"sys.resolve","purpose":"Resolve a visible semantic name using ordinary import rules at a selected snapshot.","signature":"fn sys.resolve(name: Str, kind: sys.ObjectKind? = null, at: sys.SnapshotRef = sys.current.snapshot, from: sys.ModuleRef? = null): sys.ObjectRef"}"###
     )]
     pub fn sys_resolve(&self) -> &'static SystemFunctionDescriptor {
         system_function_descriptor("sys.resolve")
@@ -174,7 +189,7 @@ impl SystemApiFunctionBindings {
     }
 
     #[ornasys(
-        function = r###"{"effect":"read","name":"sys.describe","purpose":"Return structured object description.","signature":"fn sys.describe(object: sys.ObjectRef): sys.ObjectDescription"}"###
+        function = r###"{"documentation":"Returns the structured description associated with an already resolved object reference, including its kind-specific fields and snapshot context. Use this after `sys.resolve` when a client needs machine-readable details; it does not execute the object.","effect":"read","name":"sys.describe","purpose":"Return structured, snapshot-aware details for an already resolved object.","signature":"fn sys.describe(object: sys.ObjectRef): sys.ObjectDescription"}"###
     )]
     pub fn sys_describe(&self) -> &'static SystemFunctionDescriptor {
         system_function_descriptor("sys.describe")
@@ -328,7 +343,7 @@ impl SystemApiFunctionBindings {
     }
 
     #[ornasys(
-        function = r###"{"effect":"read","name":"sys.explain(Diagnostic)","purpose":"Return structured causal explanation.","signature":"fn sys.explain(diagnostic: sys.Diagnostic): sys.Explanation"}"###,
+        function = r###"{"documentation":"Expands a diagnostic into its structured cause, related locations, and stable machine-readable explanation fields. The explanation preserves the diagnostic's identity and does not rewrite or suppress the original diagnostic.","effect":"read","name":"sys.explain(Diagnostic)","purpose":"Return the structured causes and related locations for a diagnostic.","signature":"fn sys.explain(diagnostic: sys.Diagnostic): sys.Explanation"}"###,
         role = "langitem.sys.explain@1.0"
     )]
     pub fn sys_explain_diagnostic(&self) -> &'static SystemFunctionDescriptor {
