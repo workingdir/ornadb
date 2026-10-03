@@ -3430,6 +3430,10 @@ fn explain_query_core_with_stream_rotation_chains(
     let mut paired_scoped_window_limit_restoration_fold: Option<
         QueryPairedScopedWindowLimitRestorationFold,
     > = None;
+    let mut latest_paired_limit_scope_identity: Option<String> = None;
+    let mut paired_scoped_limit_window_restoration_fold: Option<
+        QueryPairedScopedLimitWindowRestorationFold,
+    > = None;
     let mut paired_limit_aggregate_spill_restoration_fold: Option<
         QueryPairedLimitAggregateSpillRestorationFold,
     > = None;
@@ -3990,6 +3994,9 @@ fn explain_query_core_with_stream_rotation_chains(
                     chain_identity,
                 )
             });
+        if let Some(identity) = paired_limit_pushdown_anchor_fold_id.as_deref() {
+            latest_paired_limit_scope_identity = Some(identity.to_owned());
+        }
         let paired_join_limit_anchor_fold_id = join_pair_identity
             .zip(join_pair_anchor_fold_id.as_deref())
             .zip(paired_limit_pushdown_anchor_fold_id.as_deref())
@@ -4320,6 +4327,66 @@ fn explain_query_core_with_stream_rotation_chains(
                     paired_window_spill_cascade_fold.as_ref(),
                 ),
             );
+        }
+        let paired_scoped_limit_window_restoration_pair_identity =
+            latest_paired_limit_scope_identity
+                .as_deref()
+                .zip(paired_join_limit_anchor_cascade_fold.as_ref())
+                .zip(paired_window_compaction_spill_fold.as_ref())
+                .map(|((limit_scope_identity, limit_fold), window_fold)| {
+                    query_paired_scoped_limit_window_restoration_pair_identity(
+                        limit_scope_identity,
+                        limit_fold,
+                        window_fold,
+                    )
+                });
+        let paired_scoped_limit_window_restoration_transition =
+            latest_paired_limit_scope_identity
+                .as_deref()
+                .zip(paired_join_limit_anchor_cascade_fold.as_ref())
+                .zip(paired_window_compaction_spill_fold.as_ref())
+                .map(|((limit_scope_identity, limit_fold), window_fold)| {
+                    query_paired_scoped_limit_window_restoration_transition(
+                        paired_scoped_limit_window_restoration_fold.as_ref(),
+                        limit_scope_identity,
+                        limit_fold,
+                        window_fold,
+                    )
+                });
+        if let (
+            Some(pair_identity),
+            Some(limit_scope_identity),
+            Some(limit_fold),
+            Some(window_fold),
+        ) = (
+            paired_scoped_limit_window_restoration_pair_identity.as_deref(),
+            latest_paired_limit_scope_identity.as_deref(),
+            paired_join_limit_anchor_cascade_fold.as_ref(),
+            paired_window_compaction_spill_fold.as_ref(),
+        ) {
+            paired_scoped_limit_window_restoration_fold =
+                Some(query_paired_scoped_limit_window_restoration_fold(
+                    paired_scoped_limit_window_restoration_fold.as_ref(),
+                    pair_identity,
+                    limit_scope_identity,
+                    limit_fold,
+                    window_fold,
+                ));
+        }
+        if let (Some(fold), Some(transition)) = (
+            paired_scoped_limit_window_restoration_fold.as_ref(),
+            paired_scoped_limit_window_restoration_transition,
+        ) {
+            let mut fold_nodes = BTreeSet::from([right_access, right]);
+            fold_nodes.extend(right_limit_operator_start..right_limit_operator_end);
+            fold_nodes.extend(right_window_operator_start..operators.len());
+            for index in fold_nodes {
+                add_paired_scoped_limit_window_restoration_fold_details(
+                    &mut operators[index].details,
+                    fold,
+                    transition,
+                );
+            }
         }
         let paired_limit_window_compaction_pair_identity =
             query_paired_limit_window_compaction_pair_identity(
@@ -4761,6 +4828,9 @@ fn explain_query_core_with_stream_rotation_chains(
                 .as_ref()
                 .map(|fold| fold.identity.as_str()),
             paired_scoped_window_limit_restoration_fold
+                .as_ref()
+                .map(|fold| fold.identity.as_str()),
+            paired_scoped_limit_window_restoration_fold
                 .as_ref()
                 .map(|fold| fold.identity.as_str()),
             paired_limit_window_compaction_fold
@@ -5256,6 +5326,16 @@ fn explain_query_core_with_stream_rotation_chains(
             paired_scoped_window_limit_restoration_transition,
         ) {
             add_paired_scoped_window_limit_restoration_fold_details(
+                &mut details,
+                fold,
+                transition,
+            );
+        }
+        if let (Some(fold), Some(transition)) = (
+            paired_scoped_limit_window_restoration_fold.as_ref(),
+            paired_scoped_limit_window_restoration_transition,
+        ) {
+            add_paired_scoped_limit_window_restoration_fold_details(
                 &mut details,
                 fold,
                 transition,
@@ -7801,6 +7881,24 @@ struct QueryPairedScopedWindowLimitRestorationFold {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+struct QueryPairedScopedLimitWindowRestorationFold {
+    identity: String,
+    pair_identity: String,
+    scoped_limit_identity: String,
+    limit_cascade_fold_identity: String,
+    window_restoration_fold_identity: String,
+    limit_pair_count: u64,
+    limit_stage_count: u64,
+    window_pair_count: u64,
+    window_stage_count: u64,
+    spill_pair_count: u64,
+    spill_stage_count: u64,
+    unknown_working_set_count: u64,
+    estimated_spill_bytes: Option<u64>,
+    overflowed: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 struct QueryPairedScopedWindowCompactionFold {
     identity: String,
     latest_pair_identity: String,
@@ -8550,6 +8648,204 @@ fn add_paired_window_compaction_spill_fold_details(
         } else {
             details.remove(key);
         }
+    }
+}
+
+/// Combines the latest exact limit scope with cumulative paired window
+/// restoration. ORNA leaves this explain-only digest open, so bind the exact
+/// limit anchor and both accumulated component folds; sparse inputs carry it.
+fn query_paired_scoped_limit_window_restoration_pair_identity(
+    limit_scope_identity: &str,
+    limit_fold: &QueryJoinLimitAnchorCascadeFold,
+    window_fold: &QueryPairedWindowCompactionSpillFold,
+) -> String {
+    let mut hash = Sha256::new();
+    hash.update(b"orna.sys.query-paired-scoped-limit-window-restoration-pair.v1\0");
+    hash_part(&mut hash, limit_scope_identity.as_bytes());
+    hash_part(&mut hash, limit_fold.identity.as_bytes());
+    hash_part(&mut hash, window_fold.identity.as_bytes());
+    format!(
+        "paired-scoped-limit-window-restoration-pair:{}",
+        hex(&hash.finalize())
+    )
+}
+
+fn query_paired_scoped_limit_window_restoration_fold(
+    previous: Option<&QueryPairedScopedLimitWindowRestorationFold>,
+    pair_identity: &str,
+    limit_scope_identity: &str,
+    limit_fold: &QueryJoinLimitAnchorCascadeFold,
+    window_fold: &QueryPairedWindowCompactionSpillFold,
+) -> QueryPairedScopedLimitWindowRestorationFold {
+    if let Some(previous) = previous
+        && previous.scoped_limit_identity == limit_scope_identity
+        && previous.limit_cascade_fold_identity == limit_fold.identity
+        && previous.window_restoration_fold_identity == window_fold.identity
+    {
+        return previous.clone();
+    }
+
+    let totals = window_fold.spill_totals;
+    let overflowed = limit_fold.overflowed
+        || window_fold.overflowed
+        || totals.is_some_and(|totals| totals.overflowed);
+    let spill_stage_count = totals.map_or(0, |totals| totals.stage_count);
+    let unknown_working_set_count = totals.map_or(0, |totals| totals.unknown_working_set_count);
+    let estimated_spill_bytes = totals.and_then(|totals| totals.estimated_bytes);
+
+    let mut hash = Sha256::new();
+    hash.update(b"orna.sys.query-paired-scoped-limit-window-restoration-fold.v1\0");
+    hash_optional_text(
+        &mut hash,
+        previous.map(|previous| previous.identity.as_str()),
+    );
+    hash_part(&mut hash, pair_identity.as_bytes());
+    hash_part(&mut hash, limit_scope_identity.as_bytes());
+    hash_part(&mut hash, limit_fold.identity.as_bytes());
+    hash_part(&mut hash, window_fold.identity.as_bytes());
+    hash.update(limit_fold.pair_count.to_be_bytes());
+    hash.update(limit_fold.stage_count.to_be_bytes());
+    hash.update(window_fold.window_pair_count.to_be_bytes());
+    hash.update(window_fold.window_stage_count.to_be_bytes());
+    hash.update(window_fold.spill_pair_count.to_be_bytes());
+    hash.update(spill_stage_count.to_be_bytes());
+    hash.update(unknown_working_set_count.to_be_bytes());
+    hash_optional_u64(&mut hash, estimated_spill_bytes);
+    hash.update([u8::from(overflowed)]);
+
+    QueryPairedScopedLimitWindowRestorationFold {
+        identity: format!(
+            "paired-scoped-limit-window-restoration-fold:{}",
+            hex(&hash.finalize())
+        ),
+        pair_identity: pair_identity.to_owned(),
+        scoped_limit_identity: limit_scope_identity.to_owned(),
+        limit_cascade_fold_identity: limit_fold.identity.clone(),
+        window_restoration_fold_identity: window_fold.identity.clone(),
+        limit_pair_count: limit_fold.pair_count,
+        limit_stage_count: limit_fold.stage_count,
+        window_pair_count: window_fold.window_pair_count,
+        window_stage_count: window_fold.window_stage_count,
+        spill_pair_count: window_fold.spill_pair_count,
+        spill_stage_count,
+        unknown_working_set_count,
+        estimated_spill_bytes,
+        overflowed,
+    }
+}
+
+fn query_paired_scoped_limit_window_restoration_transition(
+    previous: Option<&QueryPairedScopedLimitWindowRestorationFold>,
+    limit_scope_identity: &str,
+    limit_fold: &QueryJoinLimitAnchorCascadeFold,
+    window_fold: &QueryPairedWindowCompactionSpillFold,
+) -> &'static str {
+    let limit_advanced = previous.is_none_or(|previous| {
+        previous.scoped_limit_identity != limit_scope_identity
+            || previous.limit_cascade_fold_identity != limit_fold.identity
+    });
+    let window_advanced = previous.is_none_or(|previous| {
+        previous.window_restoration_fold_identity != window_fold.identity
+    });
+    match (limit_advanced, window_advanced) {
+        (true, true) => "advanced_limit_scope_and_window_restoration",
+        (true, false) => "advanced_limit_scope",
+        (false, true) => "advanced_window_restoration",
+        (false, false) => "carried_across_sparse_input",
+    }
+}
+
+fn add_paired_scoped_limit_window_restoration_fold_details(
+    details: &mut BTreeMap<String, PlanDetail>,
+    fold: &QueryPairedScopedLimitWindowRestorationFold,
+    transition: &str,
+) {
+    details.insert(
+        "paired_scoped_limit_window_restoration_fold_identity".to_owned(),
+        PlanDetail::Text(fold.identity.clone()),
+    );
+    details.insert(
+        "paired_scoped_limit_window_restoration_pair_identity".to_owned(),
+        PlanDetail::Text(fold.pair_identity.clone()),
+    );
+    details.insert(
+        "paired_scoped_limit_window_restoration_pairing".to_owned(),
+        PlanDetail::Text(
+            "latest_exact_limit_scope_with_cumulative_paired_window_restoration".to_owned(),
+        ),
+    );
+    details.insert(
+        "paired_scoped_limit_window_restoration_transition".to_owned(),
+        PlanDetail::Text(transition.to_owned()),
+    );
+    details.insert(
+        "paired_scoped_limit_window_restoration_limit_scope_identity".to_owned(),
+        PlanDetail::Text(fold.scoped_limit_identity.clone()),
+    );
+    details.insert(
+        "paired_scoped_limit_window_restoration_limit_cascade_fold_identity".to_owned(),
+        PlanDetail::Text(fold.limit_cascade_fold_identity.clone()),
+    );
+    details.insert(
+        "paired_scoped_limit_window_restoration_window_fold_identity".to_owned(),
+        PlanDetail::Text(fold.window_restoration_fold_identity.clone()),
+    );
+    for (key, value) in [
+        (
+            "paired_scoped_limit_window_restoration_limit_pair_count",
+            fold.limit_pair_count,
+        ),
+        (
+            "paired_scoped_limit_window_restoration_limit_stage_count",
+            fold.limit_stage_count,
+        ),
+        (
+            "paired_scoped_limit_window_restoration_window_pair_count",
+            fold.window_pair_count,
+        ),
+        (
+            "paired_scoped_limit_window_restoration_window_stage_count",
+            fold.window_stage_count,
+        ),
+        (
+            "paired_scoped_limit_window_restoration_spill_pair_count",
+            fold.spill_pair_count,
+        ),
+        (
+            "paired_scoped_limit_window_restoration_spill_stage_count",
+            fold.spill_stage_count,
+        ),
+        (
+            "paired_scoped_limit_window_restoration_unknown_working_set_count",
+            fold.unknown_working_set_count,
+        ),
+    ] {
+        details.insert(key.to_owned(), PlanDetail::Integer(value));
+    }
+    details.insert(
+        "paired_scoped_limit_window_restoration_overflowed".to_owned(),
+        PlanDetail::Boolean(fold.overflowed),
+    );
+    let status = if fold.overflowed {
+        "overflow"
+    } else if fold.unknown_working_set_count > 0 {
+        "unknown_working_set"
+    } else if fold.spill_pair_count == 0 {
+        "no_spill_pairs"
+    } else {
+        "computed"
+    };
+    details.insert(
+        "paired_scoped_limit_window_restoration_estimate_status".to_owned(),
+        PlanDetail::Text(status.to_owned()),
+    );
+    if let Some(bytes) = fold.estimated_spill_bytes {
+        details.insert(
+            "paired_scoped_limit_window_restoration_estimated_spill_bytes".to_owned(),
+            PlanDetail::Integer(bytes),
+        );
+    } else {
+        details.remove("paired_scoped_limit_window_restoration_estimated_spill_bytes");
     }
 }
 
@@ -11541,6 +11837,7 @@ fn query_join_cost_fold(
     paired_window_compaction_spill_fold_identity: Option<&str>,
     paired_limit_aggregate_restoration_fold_identity: Option<&str>,
     paired_scoped_window_limit_restoration_fold_identity: Option<&str>,
+    paired_scoped_limit_window_restoration_fold_identity: Option<&str>,
     paired_limit_window_compaction_fold_identity: Option<&str>,
     paired_limit_window_cascade_fold_identity: Option<&str>,
     paired_join_limit_anchor_cascade_fold_identity: Option<&str>,
@@ -11605,6 +11902,10 @@ fn query_join_cost_fold(
     hash_optional_text(
         &mut hash,
         paired_scoped_window_limit_restoration_fold_identity,
+    );
+    hash_optional_text(
+        &mut hash,
+        paired_scoped_limit_window_restoration_fold_identity,
     );
     hash_optional_text(&mut hash, paired_limit_window_compaction_fold_identity);
     hash_optional_text(&mut hash, paired_limit_window_cascade_fold_identity);
