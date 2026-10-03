@@ -1000,3 +1000,88 @@ fn paired_subscription_batch_scopes_survive_three_page_handoffs_and_refresh() {
         "each batch resumes its subscription scope and each refresh starts a new pair"
     );
 }
+
+#[test]
+fn paired_subscription_handoffs_rebind_reused_batch_cursors_to_fresh_scopes() {
+    // Cursor tokens may recur after a refresh. The provider keys each stream
+    // by `RelationReadScope`, so same-source paired subscriptions do not
+    // resume a prior fold's page batches when their opaque cursors reappear.
+    let mut source = PairedSubscriptionSource::new([
+        vec![
+            page(&[1], Some(vec![11])),
+            page(&[3], Some(vec![33])),
+            page(&[5], None),
+        ],
+        vec![
+            page(&[2], Some(vec![11])),
+            page(&[4], Some(vec![44])),
+            page(&[6], None),
+        ],
+        vec![
+            page(&[-3], Some(vec![11])),
+            page(&[5], Some(vec![55])),
+            page(&[7], None),
+        ],
+        vec![
+            page(&[2], Some(vec![11])),
+            page(&[9], Some(vec![66])),
+            page(&[8], None),
+        ],
+        vec![
+            page(&[-1], Some(vec![11])),
+            page(&[3], Some(vec![33])),
+            page(&[7], None),
+        ],
+        vec![
+            page(&[2], Some(vec![11])),
+            page(&[4], Some(vec![44])),
+            page(&[10], None),
+        ],
+    ]);
+
+    for (fold, expected) in [21, 3, 12].into_iter().enumerate() {
+        assert_eq!(
+            run_with_fixture_functions(paired_subscription_cascade_body(), &mut source).unwrap(),
+            integer(expected),
+            "same-source paired refresh fold {fold} computes only its own filtered pages"
+        );
+    }
+
+    assert_eq!(source.lanes.len(), 6);
+    for generation in 0..3 {
+        let left = source.lanes[generation * 2].0;
+        let right = source.lanes[generation * 2 + 1].0;
+        assert_ne!(left, right, "generation {generation} keeps sibling subscriptions distinct");
+    }
+    let scopes = source.lanes.iter().map(|(scope, _)| *scope).collect::<Vec<_>>();
+    for (index, scope) in scopes.iter().enumerate() {
+        assert!(
+            !scopes[..index].contains(scope),
+            "every paired refresh owns fresh read scopes even when cursor bytes recur"
+        );
+    }
+    assert_eq!(
+        source.cursors,
+        vec![
+            (scopes[0], None),
+            (scopes[0], Some(vec![11])),
+            (scopes[0], Some(vec![33])),
+            (scopes[1], None),
+            (scopes[1], Some(vec![11])),
+            (scopes[1], Some(vec![44])),
+            (scopes[2], None),
+            (scopes[2], Some(vec![11])),
+            (scopes[2], Some(vec![55])),
+            (scopes[3], None),
+            (scopes[3], Some(vec![11])),
+            (scopes[3], Some(vec![66])),
+            (scopes[4], None),
+            (scopes[4], Some(vec![11])),
+            (scopes[4], Some(vec![33])),
+            (scopes[5], None),
+            (scopes[5], Some(vec![11])),
+            (scopes[5], Some(vec![44])),
+        ],
+        "a repeated continuation resumes only within its new paired subscription scope"
+    );
+}
