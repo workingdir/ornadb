@@ -1,0 +1,40 @@
+pub fn factory_at(pin: sys.SnapshotRef) =
+    sys.database.as_of(pin).energy.factory;
+
+pub fn accepts_sparse_frame_rebind_chains(failure: Error) {
+    let left = [
+        { frame: { first: (factory_at(sys.snapshot("HEAD~8200")), fail(failure)), second: (factory_at(sys.snapshot("HEAD~8200")), fail(failure)) }, witness: factory_at(sys.snapshot("HEAD~8210")) },
+        { frame: { first: (factory_at(sys.snapshot("HEAD~8220")), factory_at(sys.snapshot("HEAD~8220"))), second: (factory_at(sys.snapshot("HEAD~8220")), factory_at(sys.snapshot("HEAD~8220"))) }, witness: factory_at(sys.snapshot("HEAD~8230")) },
+        { frame: { first: (factory_at(sys.snapshot("HEAD~8240")), factory_at(sys.snapshot("HEAD~8240"))), second: (factory_at(sys.snapshot("HEAD~8240")), factory_at(sys.snapshot("HEAD~8240"))) }, witness: factory_at(sys.snapshot("HEAD~8250")) },
+    ];
+    let right = [
+        { frame: { first: (fail(failure), factory_at(sys.snapshot("HEAD~8100"))), second: (fail(failure), factory_at(sys.snapshot("HEAD~8100"))) }, witness: factory_at(sys.snapshot("HEAD~8110")) },
+        { frame: { first: (factory_at(sys.snapshot("HEAD~8120")), factory_at(sys.snapshot("HEAD~8120"))), second: (factory_at(sys.snapshot("HEAD~8120")), factory_at(sys.snapshot("HEAD~8120"))) }, witness: factory_at(sys.snapshot("HEAD~8130")) },
+        { frame: { first: (factory_at(sys.snapshot("HEAD~8140")), factory_at(sys.snapshot("HEAD~8140"))), second: (factory_at(sys.snapshot("HEAD~8140")), factory_at(sys.snapshot("HEAD~8140"))) }, witness: factory_at(sys.snapshot("HEAD~8150")) },
+    ];
+    let waves = [
+        { frames: left, witness: factory_at(sys.snapshot("HEAD~8400")) },
+        { witness: factory_at(sys.snapshot("HEAD~8410")) },
+        { frames: right, witness: factory_at(sys.snapshot("HEAD~8420")) },
+    ];
+    { waves: waves }
+}
+
+pub fn rejects_sparse_frame_identity_split(failure: Error) {
+    let paired = [
+        { frame: { first: (factory_at(sys.snapshot("HEAD~8500")), fail(failure)), second: (factory_at(sys.snapshot("HEAD~8500")), fail(failure)) } },
+        { frame: { first: (factory_at(sys.snapshot("HEAD~8520")), factory_at(sys.snapshot("HEAD~8520"))), second: (factory_at(sys.snapshot("HEAD~8520")), factory_at(sys.snapshot("HEAD~8520"))) } },
+        { frame: { first: (factory_at(sys.snapshot("HEAD~8540")), factory_at(sys.snapshot("HEAD~8540"))), second: (factory_at(sys.snapshot("HEAD~8540")), factory_at(sys.snapshot("HEAD~8540"))) } },
+    ];
+    let split = [
+        { frame: { first: (fail(failure), factory_at(sys.snapshot("HEAD~8600"))), second: (fail(failure), factory_at(sys.snapshot("HEAD~8601"))) } },
+        { frame: { first: (factory_at(sys.snapshot("HEAD~8620")), factory_at(sys.snapshot("HEAD~8620"))), second: (factory_at(sys.snapshot("HEAD~8630")), factory_at(sys.snapshot("HEAD~8630"))) } },
+        { frame: { first: (factory_at(sys.snapshot("HEAD~8640")), factory_at(sys.snapshot("HEAD~8640"))), second: (factory_at(sys.snapshot("HEAD~8650")), factory_at(sys.snapshot("HEAD~8650"))) } },
+    ];
+    let waves = [
+        { frames: paired },
+        {},
+        { frames: split },
+    ];
+    { waves: waves }
+}
