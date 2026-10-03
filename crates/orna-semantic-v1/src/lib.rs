@@ -20638,11 +20638,103 @@ fn infer_module_relation(
             return infer_module_relation(inner, table_rows, scope, local, diagnostics);
         }
         Expr::Block {
-            statements,
-            tail: Some(tail),
-            ..
-        } if statements.is_empty() => {
-            return infer_module_relation(tail, table_rows, scope, local, diagnostics);
+            statements, tail, ..
+        } => {
+            let mut locals = local.clone();
+            let mut effects = EffectSummary::default();
+            for statement in statements {
+                match statement {
+                    Statement::Let {
+                        pattern,
+                        annotation,
+                        value,
+                        ..
+                    } => {
+                        let expected = annotation.as_ref().map(|annotation| {
+                            validate_type_annotation(
+                                annotation,
+                                scope,
+                                &BTreeSet::new(),
+                                diagnostics,
+                            );
+                            resolved_type_of(annotation, scope)
+                        });
+                        let is_lambda = matches!(value, Expr::Lambda { .. });
+                        let inferred = if is_lambda {
+                            expected
+                                .as_ref()
+                                .and_then(|expected| {
+                                    infer_module_lambda(
+                                        value,
+                                        expected,
+                                        table_rows,
+                                        scope,
+                                        &locals,
+                                        diagnostics,
+                                    )
+                                })
+                                .unwrap_or_else(|| infer(value, scope, &locals, diagnostics))
+                        } else {
+                            infer_module_relation(value, table_rows, scope, &locals, diagnostics)
+                        };
+                        if let Some(expected) = &expected {
+                            require_same(expected, &inferred.ty, diagnostics);
+                        }
+                        // A lambda's body effects are latent until the bound
+                        // continuation is invoked; its value is pure to bind.
+                        if !is_lambda {
+                            effects.join(&inferred.effects);
+                        }
+                        bind_pattern(pattern, inferred.ty, scope, &mut locals, diagnostics);
+                        if is_lambda
+                            && let Pattern::Name(name, _) = pattern
+                            && let Some(symbol) = locals.get_mut(name)
+                        {
+                            symbol.effects = inferred.effects;
+                        }
+                    }
+                    Statement::Assert { value, .. } => {
+                        let inferred = infer_module_relation(
+                            value,
+                            table_rows,
+                            scope,
+                            &locals,
+                            diagnostics,
+                        );
+                        require_same(&Type::Bool, &inferred.ty, diagnostics);
+                        effects.join(&inferred.effects);
+                    }
+                    Statement::Expression { value, .. } | Statement::Control { value, .. } => {
+                        let inferred = infer_module_relation(
+                            value,
+                            table_rows,
+                            scope,
+                            &locals,
+                            diagnostics,
+                        );
+                        effects.join(&inferred.effects);
+                    }
+                    Statement::Return { .. }
+                    | Statement::Break { .. }
+                    | Statement::Continue { .. }
+                    | Statement::Assignment { .. } => {
+                        diagnostics.push(diag(
+                            DIAG_UNSUPPORTED,
+                            "module predicate continuations do not support control transfer or assignment",
+                        ));
+                    }
+                }
+            }
+            let mut inferred = tail.as_ref().map_or_else(
+                || Inferred {
+                    ty: Type::Tuple(Vec::new()),
+                    effects: EffectSummary::default(),
+                },
+                |tail| infer_module_relation(tail, table_rows, scope, &locals, diagnostics),
+            );
+            effects.join(&inferred.effects);
+            inferred.effects = effects;
+            return inferred;
         }
         Expr::Unary { op, rhs, .. } if op == "!" => {
             let operand = infer_module_relation(rhs, table_rows, scope, local, diagnostics);
@@ -20727,30 +20819,65 @@ fn infer_module_relation(
             effects: EffectSummary::default(),
         };
     };
-    let Expr::Lambda {
-        parameters, body, ..
-    } = &arguments[1].value
-    else {
-        return Inferred {
-            ty: Type::Error,
-            effects: EffectSummary::default(),
-        };
+    let inferred = match &arguments[1].value {
+        Expr::Lambda {
+            parameters, body, ..
+        } => {
+            let [parameter] = parameters.as_slice() else {
+                return Inferred {
+                    ty: Type::Error,
+                    effects: EffectSummary::default(),
+                };
+            };
+            let Pattern::Name(name, _) = &parameter.pattern else {
+                return Inferred {
+                    ty: Type::Error,
+                    effects: EffectSummary::default(),
+                };
+            };
+            let mut locals = local.clone();
+            insert_local_binding(name, row.clone(), &mut locals, diagnostics);
+            infer_module_relation(body, table_rows, scope, &locals, diagnostics)
+        }
+        Expr::Name { text, .. } => {
+            let Some(symbol) = local.get(text) else {
+                return Inferred {
+                    ty: Type::Error,
+                    effects: EffectSummary::default(),
+                };
+            };
+            let Type::Function {
+                parameters,
+                result,
+                ..
+            } = &symbol.ty
+            else {
+                return Inferred {
+                    ty: Type::Error,
+                    effects: EffectSummary::default(),
+                };
+            };
+            if parameters.len() != 1 {
+                diagnostics.push(diag(
+                    DIAG_TYPE,
+                    "module relation continuation must take exactly one row",
+                ));
+            } else {
+                require_same(row, &parameters[0], diagnostics);
+            }
+            require_same(&Type::Bool, result, diagnostics);
+            Inferred {
+                ty: result.as_ref().clone(),
+                effects: symbol.effects.clone(),
+            }
+        }
+        _ => {
+            return Inferred {
+                ty: Type::Error,
+                effects: EffectSummary::default(),
+            };
+        }
     };
-    let [parameter] = parameters.as_slice() else {
-        return Inferred {
-            ty: Type::Error,
-            effects: EffectSummary::default(),
-        };
-    };
-    let Pattern::Name(name, _) = &parameter.pattern else {
-        return Inferred {
-            ty: Type::Error,
-            effects: EffectSummary::default(),
-        };
-    };
-    let mut locals = local.clone();
-    insert_local_binding(name, row.clone(), &mut locals, diagnostics);
-    let inferred = infer_module_relation(body, table_rows, scope, &locals, diagnostics);
     Inferred {
         ty: if inferred.ty == Type::Bool {
             Type::Bool
@@ -20759,6 +20886,72 @@ fn infer_module_relation(
         },
         effects: inferred.effects,
     }
+}
+
+fn infer_module_lambda(
+    value: &Expr,
+    expected: &Type,
+    table_rows: &BTreeMap<String, Type>,
+    scope: &Scope,
+    local: &BTreeMap<String, Symbol>,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Option<Inferred> {
+    let Expr::Lambda {
+        parameters, body, ..
+    } = value
+    else {
+        return None;
+    };
+    let Type::Function {
+        parameters: expected_parameters,
+        result: expected_result,
+        ..
+    } = expected
+    else {
+        return None;
+    };
+    if parameters.len() != expected_parameters.len() {
+        diagnostics.push(diag(
+            DIAG_TYPE,
+            "module relation continuation parameter count does not match its annotation",
+        ));
+    }
+    let mut locals = local.clone();
+    for (index, parameter) in parameters.iter().enumerate() {
+        let Some(expected_parameter) = expected_parameters.get(index) else {
+            continue;
+        };
+        let parameter_type = parameter
+            .annotation
+            .as_ref()
+            .map(type_of)
+            .unwrap_or_else(|| expected_parameter.clone());
+        require_same(expected_parameter, &parameter_type, diagnostics);
+        bind_pattern(
+            &parameter.pattern,
+            parameter_type,
+            scope,
+            &mut locals,
+            diagnostics,
+        );
+    }
+    let inferred = infer_module_relation(body, table_rows, scope, &locals, diagnostics);
+    require_same(expected_result, &inferred.ty, diagnostics);
+    Some(Inferred {
+        ty: Type::Function {
+            parameters: expected_parameters.clone(),
+            default_parameters: BTreeSet::new(),
+            parameter_names: parameters
+                .iter()
+                .map(|parameter| match &parameter.pattern {
+                    Pattern::Name(name, _) if name != "_" => Some(name.clone()),
+                    _ => None,
+                })
+                .collect::<Option<Vec<_>>>(),
+            result: Box::new(inferred.ty),
+        },
+        effects: inferred.effects,
+    })
 }
 
 fn declared_nominal_schema(item: &Item) -> Option<TableSchema> {
