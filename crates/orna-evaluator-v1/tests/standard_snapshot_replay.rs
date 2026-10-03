@@ -2401,6 +2401,30 @@ fn paired_module_pin_upgrades_replay_computed_values_deterministically() {
         }
     }
 
+    for index in 0..projects.len() - 1 {
+        for path in ["std/math.orna", "std/collection.orna"] {
+            let mut mixed_sources = projects[index].standard_sources().to_vec();
+            let upgraded_source = standard_source(projects[index + 1], path).to_owned();
+            mixed_sources
+                .iter_mut()
+                .find(|(candidate, _)| candidate == path)
+                .unwrap()
+                .1 = upgraded_source;
+            assert_eq!(
+                AdmittedReplSession::from_loaded_project(
+                    projects[index],
+                    mixed_sources,
+                    Limits::default(),
+                )
+                .unwrap_err()
+                .code(),
+                "ORNA-REPL-STANDARD",
+                "snapshot {} must reject upgraded source {path}",
+                pins[index]
+            );
+        }
+    }
+
     let mut sessions = projects
         .iter()
         .map(|project| {
