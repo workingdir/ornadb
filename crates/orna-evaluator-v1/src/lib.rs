@@ -28,8 +28,8 @@ use serde::{
     Deserialize,
     de::{self, MapAccess, Visitor},
 };
-use sha2::{Digest as _, Sha256};
 use serde_json::value::RawValue;
+use sha2::{Digest as _, Sha256};
 use unicode_normalization::UnicodeNormalization;
 
 mod admitted_repl;
@@ -204,9 +204,10 @@ pub struct StepBudget {
 }
 
 /// One bounded, canonical page of a relation scan. `next` is an exclusive
-/// canonical key cursor owned by the source; when `after` is present, the
-/// next cursor MUST be lexicographically greater than it. An absent cursor
-/// means exhaustion.
+/// canonical key cursor owned by the source read scope; when `after` is
+/// present, the next cursor MUST be lexicographically greater than it. Equal
+/// cursor bytes in different [`RelationReadScope`]s identify independent
+/// continuations. An absent cursor means exhaustion.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RelationPage {
     pub rows: Vec<CanonicalValue>,
@@ -218,9 +219,11 @@ pub struct RelationPage {
 /// Cloned plans retain this identity across their page reads; independently
 /// created sources receive distinct identities, even when their source names
 /// are equal. A newly built plan for a later view refresh receives a fresh
-/// identity. Effect handlers should bind continuation state by both source
-/// name and this identity so paired same-name reads cannot resume one another's
-/// cursors.
+/// identity. The identity follows its source through folds and pagination
+/// handoffs; cursor bytes are checkpoints, not identities, and may be reused
+/// by sibling subscriptions or later refreshes. Effect handlers should bind
+/// each read batch's continuation state by both source name and this identity
+/// so paired same-name reads cannot resume one another's cursors.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct RelationReadScope(u64);
 
@@ -822,6 +825,7 @@ pub trait EffectHandler {
     /// source. Implementations that retain page continuations should key them
     /// by both `source` and `scope`: same-name planned reads are independent,
     /// and a fresh scope starts a fresh observation during a later refresh.
+    /// Repeated cursor bytes do not transfer a continuation between scopes.
     /// The default delegates to [`EffectHandler::scan_relation_page`] to
     /// preserve existing handlers while allowing stateful readers to keep
     /// continuation cursors separate across equal-named view sources.
@@ -1437,6 +1441,33 @@ fn distinct_identity(value: &Value) -> Result<Vec<u8>, EvaluationError> {
         .canonical()?
         .encode()
         .map_err(|_| error("ORNA-EVAL-VALUE"))
+}
+
+/// Keeps the first original value for each canonical collection identity.
+/// Each query invocation constructs its own fold so paired recursive queries
+/// cannot suppress one another's anchor or recursive rows.
+#[derive(Default)]
+struct DistinctValueFold {
+    identities: HashSet<Vec<u8>>,
+    values: Vec<Value>,
+}
+
+impl DistinctValueFold {
+    fn insert(&mut self, value: Value) -> Result<bool, EvaluationError> {
+        if !self.identities.insert(distinct_identity(&value)?) {
+            return Ok(false);
+        }
+        self.values.push(value);
+        Ok(true)
+    }
+
+    fn len(&self) -> usize {
+        self.values.len()
+    }
+
+    fn into_values(self) -> Vec<Value> {
+        self.values
+    }
 }
 
 fn aggregate_task_failures(failures: &[EvaluationError]) -> EvaluationError {
@@ -2452,6 +2483,23 @@ enum RelationRow {
     Skip,
     Yield(Value),
     End,
+}
+
+/// A downstream stage can reject a value after an earlier `take` has already
+/// emitted its full result. Preserve the rejection while also closing the
+/// source scan so the next page is not read just to rediscover that bound.
+fn rejected_relation_rows(
+    stages: &[RelationStage],
+    counters: &[usize],
+    stage_offset: usize,
+) -> Vec<RelationRow> {
+    let mut rows = vec![RelationRow::Skip];
+    if stages.iter().enumerate().any(|(offset, stage)| {
+        matches!(stage, RelationStage::Take(count) if counters[stage_offset + offset] >= *count)
+    }) {
+        rows.push(RelationRow::End);
+    }
+    rows
 }
 
 #[derive(Clone, Debug)]
@@ -4931,11 +4979,7 @@ impl Context<'_, '_> {
             // must remain interruptible even when its callbacks are absent,
             // short-circuiting, or otherwise do not execute.
             self.step()?;
-            let page = self.relation_page(
-                &plan.source,
-                plan.source_identity,
-                after.as_deref(),
-            )?;
+            let page = self.relation_page(&plan.source, plan.source_identity, after.as_deref())?;
             let page_len = page.rows.len();
             for canonical in page.rows {
                 self.step()?;
@@ -4989,30 +5033,13 @@ impl Context<'_, '_> {
             match stage {
                 RelationStage::Filter(predicates) => {
                     if !self.relation_filter_passes(&value, predicates.iter(), depth + 1)? {
-                        let mut rows = vec![RelationRow::Skip];
-                        // Once a preceding take has consumed its bound, a
-                        // downstream filter rejection still exhausts that
-                        // bounded relation. Propagate the stop now so the
-                        // source is not evaluated once more just to discover
-                        // the already-reached bound.
-                        if stages.iter().enumerate().any(|(offset, stage)| {
-                            matches!(stage, RelationStage::Take(count) if counters[stage_offset + offset] >= *count)
-                        }) {
-                            rows.push(RelationRow::End);
-                        }
-                        return Ok(rows);
+                        return Ok(rejected_relation_rows(stages, counters, stage_offset));
                     }
                 }
                 RelationStage::SharedFilter(batch) => {
                     let predicates = batch.chunks().iter().flat_map(|chunk| chunk.iter());
                     if !self.relation_filter_passes(&value, predicates, depth + 1)? {
-                        let mut rows = vec![RelationRow::Skip];
-                        if stages.iter().enumerate().any(|(offset, stage)| {
-                            matches!(stage, RelationStage::Take(count) if counters[stage_offset + offset] >= *count)
-                        }) {
-                            rows.push(RelationRow::End);
-                        }
-                        return Ok(rows);
+                        return Ok(rejected_relation_rows(stages, counters, stage_offset));
                     }
                 }
                 RelationStage::Map(transform) => {
@@ -5021,73 +5048,50 @@ impl Context<'_, '_> {
                 RelationStage::FlatMap(transform) => {
                     self.step()?;
                     let mapped = self.invoke_predicate(transform, value, depth + 1)?;
-                    let Value::List(inner) = mapped else {
-                        return Err(error("ORNA-EVAL-TYPE"));
-                    };
-                    self.items(inner.len())?;
                     let suffix = &stages[local_index + 1..];
-                    let mut rows = Vec::new();
-                    for inner_value in inner {
-                        if inner_value.contains_callable() {
-                            return Err(error("ORNA-EVAL-UNSUPPORTED"));
-                        }
-                        self.step()?;
-                        let inner_rows = self.apply_relation_stages(
-                            inner_value,
-                            suffix,
-                            counters,
-                            distinct_seen,
-                            pair_previous,
-                            window_states,
-                            index + 1,
-                            depth + 1,
-                        )?;
-                        let ended = inner_rows.iter().any(|row| matches!(row, RelationRow::End));
-                        rows.extend(inner_rows);
-                        self.items(rows.len())?;
-                        if ended {
-                            break;
-                        }
-                    }
-                    if !rows.iter().any(|row| matches!(row, RelationRow::End))
-                        && stages.iter().enumerate().any(|(offset, stage)| {
-                            matches!(stage, RelationStage::Take(count) if counters[stage_offset + offset] >= *count)
-                        })
-                    {
-                        rows.push(RelationRow::End);
-                    }
-                    return Ok(rows);
+                    return self.apply_relation_flat_map(
+                        mapped,
+                        stages,
+                        suffix,
+                        counters,
+                        distinct_seen,
+                        pair_previous,
+                        window_states,
+                        stage_offset,
+                        index + 1,
+                        depth + 1,
+                    );
                 }
                 RelationStage::BucketBy(_) => return Err(error("ORNA-EVAL-UNSUPPORTED")),
                 RelationStage::Distinct => {
                     let seen = &mut distinct_seen[index];
                     if !seen.insert(distinct_identity(&value)?) {
-                        return Ok(vec![RelationRow::Skip]);
+                        return Ok(rejected_relation_rows(stages, counters, stage_offset));
                     }
                     self.items(seen.len())?;
                 }
                 RelationStage::Pairs => {
                     let Some(previous) = pair_previous[index].replace(value.clone()) else {
-                        return Ok(vec![RelationRow::Skip]);
+                        return Ok(rejected_relation_rows(stages, counters, stage_offset));
                     };
                     self.items(2)?;
                     value = Value::Tuple(vec![previous, value]);
                 }
                 RelationStage::Window(size, step) => {
-                    self.items(*size)?;
                     let state = window_states[index].get_or_insert_with(|| {
                         RelationWindowState::try_new(*size, *step)
                             .expect("window stage parameters are validated")
                     });
+                    self.items(state.next_item_bound())?;
                     let Some(window) = state.push(value) else {
-                        return Ok(vec![RelationRow::Skip]);
+                        return Ok(rejected_relation_rows(stages, counters, stage_offset));
                     };
                     value = Value::List(window);
                 }
                 RelationStage::Drop(count) => {
                     if counters[index] < *count {
                         counters[index] += 1;
-                        return Ok(vec![RelationRow::Skip]);
+                        return Ok(rejected_relation_rows(stages, counters, stage_offset));
                     }
                 }
                 RelationStage::Take(count) => {
@@ -5105,6 +5109,82 @@ impl Context<'_, '_> {
         if stages.iter().enumerate().any(|(offset, stage)| {
             matches!(stage, RelationStage::Take(count) if counters[stage_offset + offset] >= *count)
         }) {
+            rows.push(RelationRow::End);
+        }
+        Ok(rows)
+    }
+
+    fn apply_relation_flat_map(
+        &mut self,
+        mapped: Value,
+        stages: &[RelationStage],
+        suffix: &[RelationStage],
+        counters: &mut [usize],
+        distinct_seen: &mut [HashSet<Vec<u8>>],
+        pair_previous: &mut [Option<Value>],
+        window_states: &mut [Option<RelationWindowState>],
+        stage_offset: usize,
+        suffix_offset: usize,
+        depth: usize,
+    ) -> Result<Vec<RelationRow>, EvaluationError> {
+        let mut rows = Vec::new();
+        match mapped {
+            Value::List(inner) => {
+                self.items(inner.len())?;
+                for inner_value in inner {
+                    if inner_value.contains_callable() {
+                        return Err(error("ORNA-EVAL-UNSUPPORTED"));
+                    }
+                    self.step()?;
+                    let inner_rows = self.apply_relation_stages(
+                        inner_value,
+                        suffix,
+                        counters,
+                        distinct_seen,
+                        pair_previous,
+                        window_states,
+                        suffix_offset,
+                        depth + 1,
+                    )?;
+                    let ended = inner_rows.iter().any(|row| matches!(row, RelationRow::End));
+                    rows.extend(inner_rows);
+                    self.items(rows.len())?;
+                    if ended {
+                        break;
+                    }
+                }
+            }
+            Value::Relation(plan) => {
+                // The reference fixes flat_map order but leaves query-valued
+                // callbacks implicit. Treat a returned relation as a lateral
+                // child: finish its scoped scan before advancing the outer row.
+                self.for_each_relation_value(&plan, depth + 1, |context, inner_value| {
+                    if inner_value.contains_callable() {
+                        return Err(error("ORNA-EVAL-UNSUPPORTED"));
+                    }
+                    let inner_rows = context.apply_relation_stages(
+                        inner_value,
+                        suffix,
+                        counters,
+                        distinct_seen,
+                        pair_previous,
+                        window_states,
+                        suffix_offset,
+                        depth + 1,
+                    )?;
+                    let ended = inner_rows.iter().any(|row| matches!(row, RelationRow::End));
+                    rows.extend(inner_rows);
+                    context.items(rows.len())?;
+                    Ok(!ended)
+                })?;
+            }
+            _ => return Err(error("ORNA-EVAL-TYPE")),
+        }
+        if !rows.iter().any(|row| matches!(row, RelationRow::End))
+            && stages.iter().enumerate().any(|(offset, stage)| {
+                matches!(stage, RelationStage::Take(count) if counters[stage_offset + offset] >= *count)
+            })
+        {
             rows.push(RelationRow::End);
         }
         Ok(rows)
@@ -5440,7 +5520,10 @@ impl Context<'_, '_> {
                 return Err(error("ORNA-EVAL-ARGUMENT"));
             }
             self.string(name.clone())?;
-            if action_map.insert(name.clone(), descriptor.clone()).is_some() {
+            if action_map
+                .insert(name.clone(), descriptor.clone())
+                .is_some()
+            {
                 return Err(error("ORNA-EVAL-ARGUMENT"));
             }
         }
@@ -8250,6 +8333,9 @@ impl Context<'_, '_> {
         depth: usize,
     ) -> Result<Value, EvaluationError> {
         match (name, values.as_slice()) {
+            ("recursive_cte" | "__recursive_cte", [Value::List(anchor), recursive_term]) => {
+                self.recursive_cte(anchor, recursive_term, depth)
+            }
             ("__list_length", [Value::List(values)]) => self.count(values),
             ("__list_concat", [Value::List(left), Value::List(right)]) => self.union(left, right),
             ("__numeric_sum", [Value::List(values)]) => self.sum(values),
@@ -8421,10 +8507,61 @@ impl Context<'_, '_> {
             | ("__stable_sort" | "__group_by" | "__rank", [_, _])
             | ("__minimum" | "__maximum", [_])
             | ("__asof_join", [_, _, _, _]) => Err(error("ORNA-EVAL-TYPE")),
+            ("recursive_cte" | "__recursive_cte", [_, _]) => Err(error("ORNA-EVAL-TYPE")),
             ("asof_join", _) => Err(error("ORNA-EVAL-ARGUMENT")),
+            ("recursive_cte" | "__recursive_cte", _) => Err(error("ORNA-EVAL-ARGUMENT")),
             _ => Err(error("ORNA-EVAL-UNSUPPORTED")),
         }
     }
+
+    /// Computes a finite breadth-first recursive query, using one canonical
+    /// identity set for the anchor and every recursive round. The invocation
+    /// owns that fold; input anchor order (including any prior lateral
+    /// flat-map order) determines first values and the breadth-first output
+    /// order. The returned order is preserved by downstream window frames;
+    /// sibling calls keep separate folds even when those frames overlap in
+    /// value identity.
+    fn recursive_cte(
+        &mut self,
+        anchor: &[Value],
+        recursive_term: &Value,
+        depth: usize,
+    ) -> Result<Value, EvaluationError> {
+        let mut fold = DistinctValueFold::default();
+        let mut frontier = Vec::new();
+        self.items(anchor.len())?;
+        for value in anchor {
+            self.step()?;
+            if fold.insert(value.clone())? {
+                frontier.push(value.clone());
+                self.items(fold.len())?;
+            }
+        }
+
+        while !frontier.is_empty() {
+            let mut next_frontier = Vec::new();
+            for row in std::mem::take(&mut frontier) {
+                self.step()?;
+                let next = self.invoke_predicate(recursive_term, row, depth + 1)?;
+                let Value::List(candidates) = next else {
+                    return Err(error("ORNA-EVAL-TYPE"));
+                };
+                self.items(candidates.len())?;
+                for value in candidates {
+                    self.step()?;
+                    if fold.insert(value.clone())? {
+                        next_frontier.push(value);
+                        self.items(fold.len())?;
+                        self.items(next_frontier.len())?;
+                    }
+                }
+            }
+            frontier = next_frontier;
+        }
+
+        Ok(Value::List(fold.into_values()))
+    }
+
     fn map(
         &mut self,
         values: &[Value],
@@ -8556,18 +8693,16 @@ impl Context<'_, '_> {
     }
     fn distinct(&mut self, values: &[Value]) -> Result<Value, EvaluationError> {
         self.items(values.len())?;
-        let mut keys = HashSet::new();
-        let mut unique = Vec::new();
+        let mut fold = DistinctValueFold::default();
         for value in values {
             self.step()?;
-            if !keys.insert(distinct_identity(value)?) {
+            if !fold.insert(value.clone())? {
                 continue;
             }
             self.step()?;
-            unique.push(value.clone());
-            self.items(unique.len())?;
+            self.items(fold.len())?;
         }
-        Ok(Value::List(unique))
+        Ok(Value::List(fold.into_values()))
     }
     fn union(&mut self, left: &[Value], right: &[Value]) -> Result<Value, EvaluationError> {
         self.items(left.len())?;
@@ -10405,8 +10540,7 @@ fn parse_json_raw(raw: &str) -> Result<JsonNode, EvaluationError> {
 }
 
 fn parse_json_node(input: &str) -> Result<JsonNode, EvaluationError> {
-    let raw: Box<RawValue> =
-        serde_json::from_str(input).map_err(|_| error("ORNA-EVAL-VALUE"))?;
+    let raw: Box<RawValue> = serde_json::from_str(input).map_err(|_| error("ORNA-EVAL-VALUE"))?;
     parse_json_raw(raw.get())
 }
 
@@ -11301,6 +11435,7 @@ fn named_arguments(
         "parallel" | "race" => &["callbacks"],
         "timeout" => &["callback", "duration"],
         "chunk" => &["values", "size"],
+        "recursive_cte" | "__recursive_cte" => &["anchor", "recursive_term"],
         "flatten" | "unique" | "pairs" => &["values"],
         "distinct" | "count" => &["rows"],
         "last" => &["rows"],
@@ -11357,9 +11492,7 @@ fn named_arguments(
         "__window_rate"
         | "__window_rate_integrate"
         | "__window_derivative"
-        | "__window_integrate" => {
-            &["points", "size", "step"]
-        }
+        | "__window_integrate" => &["points", "size", "step"],
         "filter" => &["rows", "predicate"],
         "partition" | "split_when" => &["values", "predicate"],
         "group_by" => &["values", "key"],
@@ -11588,6 +11721,8 @@ const STANDARD_BINDING_MODULES: &[StandardBindingModule] = &[
             "take",
             "drop",
             "distinct",
+            "recursive_cte",
+            "__recursive_cte",
             "unique",
             "union",
             "count",
@@ -12077,6 +12212,7 @@ fn root_collection_name(expression: &Expr) -> Option<&str> {
             | "rank"
             | "filter"
             | "distinct"
+            | "__recursive_cte"
             | "union"
             | "pairs"
             | "take"
@@ -12515,12 +12651,13 @@ fn is_ui_action_descriptor(value: &Value) -> bool {
     let Value::Record(fields) = value else {
         return false;
     };
-    let has_text = |name: &str| matches!(fields.get(name), Some(Value::String(value)) if !value.is_empty());
+    let has_text =
+        |name: &str| matches!(fields.get(name), Some(Value::String(value)) if !value.is_empty());
     has_text("action_id")
         && has_text("input_type")
-        && fields.get("debug_kind").is_none_or(|value| {
-            matches!(value, Value::Null | Value::String(_))
-        })
+        && fields
+            .get("debug_kind")
+            .is_none_or(|value| matches!(value, Value::Null | Value::String(_)))
 }
 
 fn function_name(expression: &Expr) -> Option<String> {
@@ -12619,11 +12756,9 @@ fn codec_type_matches(
         CodecTypeWitness::Record(witness_fields) => match value {
             Value::Record(fields) if fields.len() == witness_fields.len() => {
                 fields.iter().all(|(name, value)| {
-                    witness_fields
-                        .get(name)
-                        .is_some_and(|witness| {
-                            codec_type_matches(value, witness, nominal_definitions)
-                        })
+                    witness_fields.get(name).is_some_and(|witness| {
+                        codec_type_matches(value, witness, nominal_definitions)
+                    })
                 })
             }
             _ => false,
@@ -13072,8 +13207,7 @@ fn parse_decimal(text: &str) -> Result<(BigInt, BigInt), EvaluationError> {
         .ok_or_else(|| error("ORNA-EVAL-VALUE"))?;
     let coefficient = BigInt::parse_bytes(format!("{whole}{fraction}").as_bytes(), 10)
         .ok_or_else(|| error("ORNA-EVAL-VALUE"))?;
-    let fraction_digits =
-        i64::try_from(fraction.len()).map_err(|_| error("ORNA-EVAL-LIMIT"))?;
+    let fraction_digits = i64::try_from(fraction.len()).map_err(|_| error("ORNA-EVAL-LIMIT"))?;
     let exponent = exponent
         .checked_sub(fraction_digits)
         .ok_or_else(|| error("ORNA-EVAL-LIMIT"))?;
@@ -15083,10 +15217,7 @@ mod tests {
                 ("properties".into(), Value::Record(BTreeMap::new())),
                 (
                     "slots".into(),
-                    Value::Record(BTreeMap::from([(
-                        "content".into(),
-                        Value::List(children),
-                    )])),
+                    Value::Record(BTreeMap::from([("content".into(), Value::List(children))])),
                 ),
                 ("actions".into(), Value::Record(BTreeMap::new())),
             ]))

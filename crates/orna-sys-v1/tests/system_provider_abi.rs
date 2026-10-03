@@ -1,9 +1,12 @@
 use std::collections::BTreeSet;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use orna_sys_v1::{
-    AbiType, AbiVersion, EffectSet, FailureCode, ProviderDiagnostic, ProviderId, ProviderOffer,
-    ProviderRoleRegistry, SemanticRoleId, SystemEffect, SystemProviderAbi, system_api_json,
-    system_dispatch_table, system_provider_abi, system_provider_abi_json, validate_provider_offer,
+    AbiType, AbiVersion, EffectSet, FailureCode, OperationId, ProviderDiagnostic, ProviderFailure,
+    ProviderId, ProviderOffer, ProviderRoleRegistry, SemanticRoleId, SystemEffect,
+    SystemOperationProvider, SystemProviderAbi, TypeId, TypedValue, system_api_json,
+    system_dispatch_table, system_function_descriptor, system_provider_abi,
+    system_provider_abi_json, validate_provider_offer,
 };
 use serde_json::Value;
 
@@ -12,6 +15,40 @@ const SHARED_PROVIDER_FAILURES: [&str; 3] = [
     "sys.abi.unavailable",
     "sys.abi.provider_failed",
 ];
+
+struct InvokeValueProvider {
+    offer: ProviderOffer,
+    operation: OperationId,
+    argument_types: Vec<String>,
+    response: Result<TypedValue, FailureCode>,
+    calls: AtomicUsize,
+}
+
+impl SystemOperationProvider for InvokeValueProvider {
+    fn offer(&self) -> &ProviderOffer {
+        &self.offer
+    }
+
+    fn invoke(
+        &self,
+        operation: &OperationId,
+        arguments: &[TypedValue],
+    ) -> Result<TypedValue, ProviderFailure> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        assert_eq!(operation, &self.operation);
+        assert_eq!(
+            arguments
+                .iter()
+                .map(|argument| argument.static_type().as_str().to_owned())
+                .collect::<Vec<_>>(),
+            self.argument_types
+        );
+        self.response.clone().map_err(|code| ProviderFailure {
+            code,
+            payload: None,
+        })
+    }
+}
 
 #[test]
 fn generated_provider_abi_carries_typed_operation_contracts_and_roles() {
@@ -545,6 +582,21 @@ fn provider_diagnostic_codes_stay_outside_the_public_failure_catalog() {
         ProviderDiagnostic::ProviderNotExecutable(
             SemanticRoleId::new("langitem.fixture.provider").unwrap(),
         ),
+        ProviderDiagnostic::ProviderNotSelected {
+            role: SemanticRoleId::new("langitem.fixture.role").unwrap(),
+            expected: ProviderOffer {
+                provider: ProviderId::new("fixture.selected").unwrap(),
+                role: SemanticRoleId::new("langitem.fixture.role").unwrap(),
+                version: AbiVersion::V1_0,
+                effects: EffectSet::one(SystemEffect::Read),
+            },
+            provided: ProviderOffer {
+                provider: ProviderId::new("fixture.unselected").unwrap(),
+                role: SemanticRoleId::new("langitem.fixture.role").unwrap(),
+                version: AbiVersion::V1_0,
+                effects: EffectSet::one(SystemEffect::Read),
+            },
+        },
     ];
     let diagnostic_codes = diagnostics
         .iter()
@@ -558,6 +610,7 @@ fn provider_diagnostic_codes_stay_outside_the_public_failure_catalog() {
             "sys.abi.effect_incompatible",
             "sys.abi.precondition_failed",
             "sys.abi.provider_not_executable",
+            "sys.abi.provider_not_selected",
             "sys.abi.role_unavailable",
             "sys.abi.role_version_mismatch",
             "sys.abi.undeclared_failure",
@@ -1012,5 +1065,491 @@ fn dispatch_signature_depth_matrix_matches_every_typed_parameter_and_result() {
     println!(
         "dispatch_signature_depth_matrix operations={operation_cases} parameter_types={parameter_type_cases} result_types={result_type_cases} defaulted_parameters={defaulted_parameter_cases} type_shapes={type_shapes:?} total_cases={}",
         operation_cases + parameter_type_cases + result_type_cases
+    );
+}
+
+#[test]
+fn dispatch_to_provider_routes_typed_value_and_declared_failure() {
+    let table = system_dispatch_table();
+    let operation_name = "sys.invoke(Value)";
+    let contract = table
+        .operation(operation_name)
+        .expect("typed registry contains the erased invoke overload");
+    let role_id = contract
+        .role
+        .as_ref()
+        .expect("invoke overload is bound to a semantic provider role");
+    let role_registry = ProviderRoleRegistry::from_baked_abi(table)
+        .expect("baked provider roles link successfully");
+    let offer = role_registry
+        .resolve(role_id.as_str())
+        .expect("invoke provider offer resolves from the typed role registry")
+        .clone();
+    let arguments = contract
+        .signature
+        .parameters
+        .iter()
+        .map(|parameter| {
+            TypedValue::public(
+                TypeId::new(parameter.ty.canonical()),
+                parameter.name.as_bytes().to_vec(),
+            )
+        })
+        .collect::<Vec<_>>();
+    let argument_types = contract
+        .signature
+        .parameters
+        .iter()
+        .map(|parameter| parameter.ty.canonical())
+        .collect::<Vec<_>>();
+    let returned_value = TypedValue::public(
+        TypeId::new(contract.signature.result.canonical()),
+        b"typed-provider-result".to_vec(),
+    );
+    let provider = InvokeValueProvider {
+        offer: offer.clone(),
+        operation: contract.id.clone(),
+        argument_types: argument_types.clone(),
+        response: Ok(returned_value.clone()),
+        calls: AtomicUsize::new(0),
+    };
+    let mut checked_preconditions = 0;
+    assert_eq!(
+        table.dispatch_to_provider(operation_name, &provider, &arguments, |_| {
+            checked_preconditions += 1;
+            Ok(())
+        }),
+        Ok(orna_sys_v1::SystemDispatchResult::Returned(
+            returned_value.clone()
+        ))
+    );
+    assert_eq!(checked_preconditions, contract.preconditions.len());
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
+
+    let failure_code = FailureCode::new("sys.invoke.argument_missing").unwrap();
+    assert!(contract.declares_failure(&failure_code));
+    let failing_provider = InvokeValueProvider {
+        offer,
+        operation: contract.id.clone(),
+        argument_types,
+        response: Err(failure_code.clone()),
+        calls: AtomicUsize::new(0),
+    };
+    assert_eq!(
+        table.dispatch_to_provider(operation_name, &failing_provider, &arguments, |_| Ok(())),
+        Ok(orna_sys_v1::SystemDispatchResult::Failed(failure_code))
+    );
+    println!(
+        "dispatch_to_provider operation={operation_name} typed_arguments={} outcomes=returned_typed_value,declared_failure total_cases=2",
+        arguments.len()
+    );
+}
+
+#[test]
+fn dispatch_to_provider_checks_arity_argument_types_and_generic_result_binding() {
+    let table = system_dispatch_table();
+    let operation_name = "sys.invoke(Value)";
+    let contract = table.operation(operation_name).expect("typed overload");
+    let role_id = contract.role.as_ref().expect("provider-bound operation");
+    let registry = ProviderRoleRegistry::from_baked_abi(table).unwrap();
+    let offer = registry.resolve(role_id.as_str()).unwrap().clone();
+    let arguments = contract
+        .signature
+        .parameters
+        .iter()
+        .map(|parameter| {
+            TypedValue::public(
+                TypeId::new(parameter.ty.canonical()),
+                parameter.name.as_bytes().to_vec(),
+            )
+        })
+        .collect::<Vec<_>>();
+    let argument_types = contract
+        .signature
+        .parameters
+        .iter()
+        .map(|parameter| parameter.ty.canonical())
+        .collect::<Vec<_>>();
+    let provider = InvokeValueProvider {
+        offer: offer.clone(),
+        operation: contract.id.clone(),
+        argument_types: argument_types.clone(),
+        response: Ok(TypedValue::public(
+            TypeId::new(contract.signature.result.canonical()),
+            b"typed-provider-result".to_vec(),
+        )),
+        calls: AtomicUsize::new(0),
+    };
+
+    assert_eq!(
+        table.dispatch_to_provider(
+            operation_name,
+            &provider,
+            &arguments[..arguments.len() - 1],
+            |_| Ok(())
+        ),
+        Err(ProviderDiagnostic::ArgumentCountMismatch {
+            operation: contract.id.clone(),
+            expected: arguments.len(),
+            actual: arguments.len() - 1,
+        })
+    );
+
+    let mut wrong_argument_type = arguments.clone();
+    wrong_argument_type[0] = TypedValue::public(
+        TypeId::new("sys.NotTheDeclaredArgument"),
+        b"invalid-argument".to_vec(),
+    );
+    assert_eq!(
+        table.dispatch_to_provider(operation_name, &provider, &wrong_argument_type, |_| Ok(())),
+        Err(ProviderDiagnostic::ArgumentTypeMismatch {
+            operation: contract.id.clone(),
+            parameter: contract.signature.parameters[0].name.clone(),
+            expected: contract.signature.parameters[0].ty.canonical(),
+            actual: "sys.NotTheDeclaredArgument".to_owned(),
+        })
+    );
+    assert_eq!(
+        provider.calls.load(Ordering::SeqCst),
+        0,
+        "arity and argument-type violations stop before invoking a provider"
+    );
+
+    let wrong_result_provider = InvokeValueProvider {
+        offer,
+        operation: contract.id.clone(),
+        argument_types,
+        response: Ok(TypedValue::public(
+            TypeId::new("sys.NotTheDeclaredResult"),
+            b"invalid-result".to_vec(),
+        )),
+        calls: AtomicUsize::new(0),
+    };
+    assert_eq!(
+        table.dispatch_to_provider(operation_name, &wrong_result_provider, &arguments, |_| Ok(
+            ()
+        )),
+        Err(ProviderDiagnostic::ResultTypeMismatch {
+            operation: contract.id.clone(),
+            expected: contract.signature.result.canonical(),
+            actual: "sys.NotTheDeclaredResult".to_owned(),
+        })
+    );
+    assert_eq!(wrong_result_provider.calls.load(Ordering::SeqCst), 1);
+
+    let generic_abi = serde_json::json!({
+        "abi_version": {"major": 1, "minor": 0},
+        "operations": [{
+            "name": "sys.meta<T>",
+            "version": {"major": 1, "minor": 0},
+            "signature": "fn sys.meta<T>(value: T): sys.ValueMetadata<T>",
+            "effect": "read",
+            "preconditions": [],
+            "failures": [],
+            "role": "langitem.sys.meta@1.0"
+        }],
+        "roles": [{
+            "name": "langitem.sys.meta",
+            "version": {"major": 1, "minor": 0},
+            "effects": ["read"],
+            "operations": ["sys.meta<T>"],
+            "required": false,
+            "replaceable": true,
+            "builtin_provider": null
+        }]
+    });
+    let generic_table = SystemProviderAbi::from_json(&generic_abi.to_string()).unwrap();
+    let generic_operation_name = "sys.meta<T>";
+    let generic_contract = generic_table.operation(generic_operation_name).unwrap();
+    let generic_role = generic_contract.role.as_ref().unwrap();
+    let generic_offer = ProviderOffer {
+        provider: ProviderId::new("fixture.metadata").unwrap(),
+        role: generic_role.clone(),
+        version: AbiVersion::V1_0,
+        effects: EffectSet::one(SystemEffect::Read),
+    };
+    let generic_arguments = [TypedValue::public(
+        TypeId::new("sys.Example"),
+        b"example".to_vec(),
+    )];
+    let unbound_registry = ProviderRoleRegistry::from_baked_abi(&generic_table).unwrap();
+    let mut generic_registry = ProviderRoleRegistry::from_baked_abi(&generic_table).unwrap();
+    generic_registry.bind(generic_offer.clone()).unwrap();
+    let generic_result = TypedValue::public(
+        TypeId::new("sys.ValueMetadata<sys.Example>"),
+        b"metadata".to_vec(),
+    );
+    let generic_provider = InvokeValueProvider {
+        offer: generic_offer.clone(),
+        operation: generic_contract.id.clone(),
+        argument_types: vec!["sys.Example".to_owned()],
+        response: Ok(generic_result.clone()),
+        calls: AtomicUsize::new(0),
+    };
+    assert_eq!(
+        generic_table.dispatch_to_provider(
+            generic_operation_name,
+            &generic_provider,
+            &generic_arguments,
+            |_| Ok(())
+        ),
+        Err(ProviderDiagnostic::RoleUnavailable {
+            role: generic_role.clone(),
+            version: AbiVersion::V1_0,
+        }),
+        "direct dispatch has no baked provider to select for this optional role"
+    );
+    assert_eq!(generic_provider.calls.load(Ordering::SeqCst), 0);
+
+    assert_eq!(
+        unbound_registry.dispatch_to_provider(
+            &generic_table,
+            generic_operation_name,
+            &generic_provider,
+            &generic_arguments,
+            |_| Ok(())
+        ),
+        Err(ProviderDiagnostic::RoleUnavailable {
+            role: generic_role.clone(),
+            version: AbiVersion::V1_0,
+        }),
+        "registry dispatch diagnoses a role without a selected provider"
+    );
+    assert_eq!(generic_provider.calls.load(Ordering::SeqCst), 0);
+
+    assert_eq!(
+        generic_registry.dispatch_to_provider(
+            &generic_table,
+            generic_operation_name,
+            &generic_provider,
+            &generic_arguments,
+            |_| Ok(())
+        ),
+        Ok(orna_sys_v1::SystemDispatchResult::Returned(
+            generic_result.clone()
+        ))
+    );
+    assert_eq!(generic_provider.calls.load(Ordering::SeqCst), 1);
+
+    let selected_generic_offer = generic_registry
+        .resolve(generic_role.as_str())
+        .unwrap()
+        .clone();
+    let alternate_generic_offer = ProviderOffer {
+        provider: ProviderId::new("fixture.generic_alternate").unwrap(),
+        ..selected_generic_offer.clone()
+    };
+    let mut alternate_registry = ProviderRoleRegistry::from_baked_abi(&generic_table).unwrap();
+    alternate_registry
+        .bind(alternate_generic_offer.clone())
+        .expect("replaceable generic role selects a compatible alternate provider");
+    let alternate_result = TypedValue::public(
+        TypeId::new("sys.ValueMetadata<sys.Example>"),
+        b"alternate-metadata".to_vec(),
+    );
+    let alternate_provider = InvokeValueProvider {
+        offer: alternate_generic_offer.clone(),
+        operation: generic_contract.id.clone(),
+        argument_types: vec!["sys.Example".to_owned()],
+        response: Ok(alternate_result.clone()),
+        calls: AtomicUsize::new(0),
+    };
+    assert_eq!(
+        generic_table.dispatch_to_provider(
+            generic_operation_name,
+            &alternate_provider,
+            &generic_arguments,
+            |_| Ok(())
+        ),
+        Err(ProviderDiagnostic::RoleUnavailable {
+            role: generic_role.clone(),
+            version: AbiVersion::V1_0,
+        }),
+        "direct dispatch cannot bypass the registry for a replaceable role"
+    );
+    assert_eq!(alternate_provider.calls.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        alternate_registry.dispatch_to_provider(
+            &generic_table,
+            generic_operation_name,
+            &alternate_provider,
+            &generic_arguments,
+            |_| Ok(())
+        ),
+        Ok(orna_sys_v1::SystemDispatchResult::Returned(
+            alternate_result
+        ))
+    );
+    assert_eq!(alternate_provider.calls.load(Ordering::SeqCst), 1);
+
+    println!(
+        "dispatch_to_provider_type_matrix operation={operation_name} rejected=argument_count,argument_type,result_type,direct_unselected_provider,direct_unbound_role registry_unbound=1 generic_bindings=1 selected_replacement=1 total_cases=8"
+    );
+}
+
+#[test]
+fn registry_dispatch_enforces_provider_selection_and_generated_binding_parity() {
+    let table = system_dispatch_table();
+    let registry = ProviderRoleRegistry::from_baked_abi(table)
+        .expect("generated provider offers resolve from the typed registry");
+    let mut generated_operation_cases = 0;
+    let mut provider_route_cases = 0;
+    let mut unselected_provider_rejections = 0;
+    let mut direct_provider_rejections = 0;
+    let mut replaceable_provider_routes = 0;
+
+    for contract in table.operations() {
+        let operation_name = contract.id.as_str();
+        let generated = system_function_descriptor(operation_name)
+            .unwrap_or_else(|| panic!("missing generated binding for {operation_name}"));
+        assert_eq!(generated.name, operation_name);
+        assert_eq!(generated.signature, contract.signature.source);
+        assert_eq!(
+            contract.effects.iter().next(),
+            Some(generated.effect),
+            "typed dispatch effect matches the generated binding for {operation_name}"
+        );
+        generated_operation_cases += 1;
+
+        let Some(role_id) = &contract.role else {
+            continue;
+        };
+        let selected_offer = registry.resolve(role_id.as_str()).unwrap().clone();
+        let arguments = contract
+            .signature
+            .parameters
+            .iter()
+            .map(|parameter| {
+                TypedValue::public(
+                    TypeId::new(parameter.ty.canonical()),
+                    parameter.name.as_bytes().to_vec(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let argument_types = contract
+            .signature
+            .parameters
+            .iter()
+            .map(|parameter| parameter.ty.canonical())
+            .collect::<Vec<_>>();
+        let result = TypedValue::public(
+            TypeId::new(contract.signature.result.canonical()),
+            b"generated-binding-result".to_vec(),
+        );
+        let provider = InvokeValueProvider {
+            offer: selected_offer.clone(),
+            operation: contract.id.clone(),
+            argument_types: argument_types.clone(),
+            response: Ok(result.clone()),
+            calls: AtomicUsize::new(0),
+        };
+        assert_eq!(
+            registry.dispatch_to_provider(table, generated.name, &provider, &arguments, |_| Ok(())),
+            Ok(orna_sys_v1::SystemDispatchResult::Returned(result)),
+            "registry-selected provider dispatches generated operation {operation_name}"
+        );
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
+        provider_route_cases += 1;
+
+        let unselected_offer = ProviderOffer {
+            provider: ProviderId::new("fixture.unselected").unwrap(),
+            ..selected_offer.clone()
+        };
+        let unselected_provider = InvokeValueProvider {
+            offer: unselected_offer.clone(),
+            operation: contract.id.clone(),
+            argument_types,
+            response: Ok(TypedValue::public(
+                TypeId::new(contract.signature.result.canonical()),
+                b"must-not-run".to_vec(),
+            )),
+            calls: AtomicUsize::new(0),
+        };
+        assert_eq!(
+            registry.dispatch_to_provider(
+                table,
+                operation_name,
+                &unselected_provider,
+                &arguments,
+                |_| Ok(())
+            ),
+            Err(ProviderDiagnostic::ProviderNotSelected {
+                role: role_id.clone(),
+                expected: selected_offer.clone(),
+                provided: unselected_offer.clone(),
+            }),
+            "compatible but unselected provider cannot dispatch {operation_name}"
+        );
+        assert_eq!(unselected_provider.calls.load(Ordering::SeqCst), 0);
+        unselected_provider_rejections += 1;
+
+        assert_eq!(
+            table.dispatch_to_provider(
+                operation_name,
+                &unselected_provider,
+                &arguments,
+                |_| Ok(())
+            ),
+            Err(ProviderDiagnostic::ProviderNotSelected {
+                role: role_id.clone(),
+                expected: selected_offer.clone(),
+                provided: unselected_offer.clone(),
+            }),
+            "direct dispatch cannot bypass selected-offer identity for {operation_name}"
+        );
+        assert_eq!(unselected_provider.calls.load(Ordering::SeqCst), 0);
+        direct_provider_rejections += 1;
+
+        let role = table.role(role_id.as_str()).unwrap();
+        if role.replaceable {
+            let mut replacement_registry = ProviderRoleRegistry::from_baked_abi(table).unwrap();
+            replacement_registry
+                .bind(unselected_offer.clone())
+                .expect("replaceable role accepts the selected alternate provider");
+            let replacement_result = TypedValue::public(
+                TypeId::new(contract.signature.result.canonical()),
+                b"selected-alternate-result".to_vec(),
+            );
+            let replacement_provider = InvokeValueProvider {
+                offer: unselected_offer.clone(),
+                operation: contract.id.clone(),
+                argument_types: contract
+                    .signature
+                    .parameters
+                    .iter()
+                    .map(|parameter| parameter.ty.canonical())
+                    .collect(),
+                response: Ok(replacement_result.clone()),
+                calls: AtomicUsize::new(0),
+            };
+            assert_eq!(
+                replacement_registry.dispatch_to_provider(
+                    table,
+                    operation_name,
+                    &replacement_provider,
+                    &arguments,
+                    |_| Ok(())
+                ),
+                Ok(orna_sys_v1::SystemDispatchResult::Returned(
+                    replacement_result
+                )),
+                "registry-selected replacement dispatches {operation_name}"
+            );
+            assert_eq!(replacement_provider.calls.load(Ordering::SeqCst), 1);
+            replaceable_provider_routes += 1;
+        }
+    }
+
+    assert_eq!(generated_operation_cases, table.operations().count());
+    assert!(provider_route_cases > 0);
+    assert_eq!(provider_route_cases, unselected_provider_rejections);
+    assert_eq!(provider_route_cases, direct_provider_rejections);
+    println!(
+        "generated_binding_provider_dispatch_parity operations={generated_operation_cases} provider_routes={provider_route_cases} unselected_rejections={unselected_provider_rejections} direct_rejections={direct_provider_rejections} replaceable_routes={replaceable_provider_routes} total_cases={}",
+        generated_operation_cases
+            + provider_route_cases
+            + unselected_provider_rejections
+            + direct_provider_rejections
+            + replaceable_provider_routes
     );
 }

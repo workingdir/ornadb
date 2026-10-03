@@ -1,0 +1,25 @@
+pub fn factory_at(pin: sys.SnapshotRef) =
+    sys.database.as_of(pin).energy.factory;
+
+pub fn accepts_bare_pair_identity_across_three_way_omission_chain() {
+    let parents = [
+        { pins: (factory_at(sys.snapshot("HEAD~700")), factory_at(sys.snapshot("HEAD~700"))) },
+        {},
+        { pins: (factory_at(sys.snapshot("HEAD~720")), factory_at(sys.snapshot("HEAD~720"))) },
+        {},
+        { pins: (factory_at(sys.snapshot("HEAD~740")), factory_at(sys.snapshot("HEAD~740"))) },
+    ];
+    { parent_fold: parents }
+}
+
+pub fn rejects_pair_split_after_three_way_omission_chain_without_losing_siblings() {
+    let parents = [
+        { pins: (factory_at(sys.snapshot("HEAD~800")), factory_at(sys.snapshot("HEAD~800"))), witness: factory_at(sys.snapshot("HEAD~801")) },
+        { witness: factory_at(sys.snapshot("HEAD~811")) },
+        { pins: (factory_at(sys.snapshot("HEAD~820")), factory_at(sys.snapshot("HEAD~820"))), witness: factory_at(sys.snapshot("HEAD~821")) },
+        { witness: factory_at(sys.snapshot("HEAD~831")) },
+        { pins: (factory_at(sys.snapshot("HEAD~840")), factory_at(sys.snapshot("HEAD~841"))), witness: factory_at(sys.snapshot("HEAD~842")) },
+        { pins: (factory_at(sys.snapshot("HEAD~850")), factory_at(sys.snapshot("HEAD~850"))), witness: factory_at(sys.snapshot("HEAD~851")) },
+    ];
+    { parent_fold: parents }
+}

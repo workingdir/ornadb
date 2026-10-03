@@ -4,14 +4,14 @@ use num_bigint::BigInt;
 use orna_evaluator_v1::{
     AdmittedReplSession, EffectHandler, Environment, EvaluationError, Functions, Limits,
     NominalDefinition, NominalDefinitions, NominalField, NominalVariant, PureFunction,
-    RelationPage, StepBudget, evaluate_expression, evaluate_expression_with_functions,
+    RelationPage, RelationReadScope, StepBudget, evaluate_expression, evaluate_expression_with_functions,
     evaluate_function, evaluate_parsed, evaluate_parsed_with_nominals, evaluate_repl,
     SysHostBindingRegistry, evaluate_with_functions_and_nominals, invoke_named,
     invoke_named_with_effects, invoke_named_with_effects_and_budget, invoke_named_with_nominals,
 };
 use orna_syntax_v1::{
-    lex, AssignmentOperator, AssignmentTarget, Expr, NameSegment, Pattern, RecordField, Statement,
-    SyntaxSpan, TokenKind,
+    lex, AssignmentOperator, AssignmentTarget, Expr, LambdaParameter, NameSegment, Pattern,
+    RecordField, Statement, SyntaxSpan, TokenKind,
 };
 use orna_value_v1::{Raw, Value, CANONICAL_NAN_BITS};
 
@@ -270,6 +270,19 @@ fn relation_argument(value: Expr, span: &SyntaxSpan) -> orna_syntax_v1::Argument
     }
 }
 
+fn relation_lambda(parameter: &str, body: Expr) -> Expr {
+    let span = relation_span();
+    Expr::Lambda {
+        parameters: vec![LambdaParameter {
+            pattern: Pattern::Name(parameter.into(), span.clone()),
+            annotation: None,
+            span: span.clone(),
+        }],
+        body: Box::new(body),
+        span,
+    }
+}
+
 fn relation_source_expression(source: &str) -> Expr {
     let span = relation_span();
     Expr::Call {
@@ -327,10 +340,13 @@ fn relation_integer(value: i64) -> Expr {
 }
 
 fn relation_pair(left: i64, right: i64) -> Value {
-    Value::new(Raw::Array(vec![
-        Raw::Int(left.into()),
-        Raw::Int(right.into()),
-    ]))
+    Value::new(Raw::Tag(
+        60015,
+        Box::new(Raw::Array(vec![
+            Raw::Int(left.into()),
+            Raw::Int(right.into()),
+        ])),
+    ))
     .unwrap()
 }
 fn relation_window_row(values: &[i64]) -> Value {
@@ -481,6 +497,11 @@ struct UnionRelationEffects {
     cursors: Vec<(String, Option<Vec<u8>>)>,
 }
 
+struct LateralRelationEffects {
+    rows: BTreeMap<String, Vec<Value>>,
+    reads: Vec<(String, RelationReadScope, Option<Vec<u8>>)>,
+}
+
 struct RepeatedUnknownRelationEffects {
     rows: Vec<Value>,
     starts: usize,
@@ -536,6 +557,50 @@ impl EffectHandler for UnionRelationEffects {
         budget.debit(1)?;
         self.cursors
             .push((source.into(), after.map(ToOwned::to_owned)));
+        let rows = self
+            .rows
+            .get(source)
+            .unwrap_or_else(|| panic!("unexpected relation source {source}"));
+        let index = after.map_or(0, |cursor| usize::from(cursor[0]));
+        if index >= rows.len() {
+            return Ok(Some(RelationPage {
+                rows: Vec::new(),
+                next: None,
+            }));
+        }
+        let next = (index + 1 < rows.len()).then(|| vec![(index + 1) as u8]);
+        Ok(Some(RelationPage {
+            rows: vec![rows[index].clone()],
+            next,
+        }))
+    }
+}
+
+impl LateralRelationEffects {
+    fn new(rows: BTreeMap<String, Vec<Value>>) -> Self {
+        Self {
+            rows,
+            reads: Vec::new(),
+        }
+    }
+}
+
+impl EffectHandler for LateralRelationEffects {
+    fn handle(&mut self, _: &Expr, _: &[Value]) -> Result<Option<Value>, EvaluationError> {
+        Ok(None)
+    }
+
+    fn scan_relation_page_scoped(
+        &mut self,
+        source: &str,
+        scope: RelationReadScope,
+        after: Option<&[u8]>,
+        _: usize,
+        budget: &mut StepBudget,
+    ) -> Result<Option<RelationPage>, EvaluationError> {
+        budget.debit(1)?;
+        self.reads
+            .push((source.to_owned(), scope, after.map(ToOwned::to_owned)));
         let rows = self
             .rows
             .get(source)
@@ -9495,6 +9560,62 @@ fn distinct_relation_preserves_first_identity_across_sparse_filter_cascade_union
 }
 
 #[test]
+fn paired_distinct_cascades_preserve_first_values_and_stop_at_sparse_take_bounds() {
+    let body = parsed_expression(include_str!(
+        "fixtures/query-paired-distinct-sparse-cascade-8jk3e.orna"
+    ));
+    let ints = |values: &[i64]| {
+        values
+            .iter()
+            .copied()
+            .map(|value| Value::int(value.into()))
+            .collect()
+    };
+    let mut effects = UnionRelationEffects {
+        rows: BTreeMap::from([
+            ("sys.Storage".into(), ints(&[0, 2, 2, 4])),
+            ("sys.MaintenanceJob".into(), ints(&[4, 6, 5, 2])),
+        ]),
+        cursors: Vec::new(),
+    };
+
+    let result = invoke_relation(body, &mut effects, Limits::default())
+        .unwrap_or_else(|error| panic!("paired sparse distinct cascades failed: {}", error.code()));
+    let expected = Value::new(Raw::Array(vec![
+        Value::option(Some(relation_pair(2, 4)))
+            .expect("first paired identity is canonical")
+            .raw()
+            .clone(),
+        Value::option(Some(Value::int(4.into())))
+            .expect("second retained identity is canonical")
+            .raw()
+            .clone(),
+    ]))
+    .expect("paired fold result is canonical");
+    assert_eq!(
+        result,
+        expected,
+        "branch-local distinct folds keep their first values, then the sparse shared cascade folds the union in order"
+    );
+
+    let first_query_reads = vec![
+        ("sys.Storage".into(), None),
+        ("sys.Storage".into(), Some(vec![1])),
+        ("sys.Storage".into(), Some(vec![2])),
+        ("sys.MaintenanceJob".into(), None),
+    ];
+    assert_eq!(
+        effects.cursors,
+        first_query_reads
+            .iter()
+            .chain(&first_query_reads)
+            .cloned()
+            .collect::<Vec<_>>(),
+        "a duplicate rejected by a completed take must close its branch without reading another page"
+    );
+}
+
+#[test]
 fn distinct_relation_take_zero_short_circuits_source_scanning() {
     let source = relation_source_expression("Note");
     let distinct = relation_stage(source, "distinct", Vec::new());
@@ -9810,6 +9931,287 @@ fn flat_map_relation_invokes_named_callback_once_per_row_and_preserves_inner_ord
         Value::option(Some(relation_pair(13, 1))).expect("option is canonical")
     );
 }
+
+#[test]
+fn lateral_flat_map_keeps_outer_identity_across_sparse_relation_cascades() {
+    let parents = relation_stage(
+        relation_union(
+            relation_source_expression("ParentLeft"),
+            relation_source_expression("ParentRight"),
+        ),
+        "filter",
+        vec![parsed_expression(include_str!(
+            "fixtures/query-lateral-parent-sparse-scope-cascade-0h0s9.orna"
+        ))],
+    );
+    let positive_child = parsed_expression(include_str!(
+        "fixtures/query-lateral-positive-child-0h0s9.orna"
+    ));
+    let children = relation_union(
+        relation_stage(
+            relation_source_expression("ChildLeft"),
+            "filter",
+            vec![positive_child.clone()],
+        ),
+        relation_stage(
+            relation_source_expression("ChildRight"),
+            "filter",
+            vec![positive_child],
+        ),
+    );
+    let children = relation_stage(
+        children,
+        "filter",
+        vec![parsed_expression(include_str!(
+            "fixtures/query-lateral-bound-child-0h0s9.orna"
+        ))],
+    );
+    let children = relation_stage(
+        children,
+        "map",
+        vec![parsed_expression(include_str!(
+            "fixtures/query-lateral-project-parent-0h0s9.orna"
+        ))],
+    );
+    let lateral = relation_named_flat_map_stage(parents, relation_lambda("parent", children));
+    let complete = relation_stage(
+        lateral,
+        "window",
+        vec![relation_integer(7), relation_integer(7)],
+    );
+    let body = relation_terminal(complete, "first");
+    let mut effects = LateralRelationEffects::new(BTreeMap::from([
+        (
+            "ParentLeft".into(),
+            vec![Value::int(0.into()), Value::int(2.into())],
+        ),
+        (
+            "ParentRight".into(),
+            vec![Value::int(3.into()), Value::int(0.into())],
+        ),
+        (
+            "ChildLeft".into(),
+            vec![Value::int(1.into()), Value::int(0.into()), Value::int(3.into())],
+        ),
+        (
+            "ChildRight".into(),
+            vec![Value::int(2.into()), Value::int(0.into()), Value::int(1.into())],
+        ),
+    ]));
+
+    let pair = |outer: i64, inner: i64| {
+        Raw::Tag(
+            60015,
+            Box::new(Raw::Array(vec![Raw::Int(outer.into()), Raw::Int(inner.into())])),
+        )
+    };
+    let expected_rows = Value::new(Raw::Array(vec![
+        pair(2, 1),
+        pair(2, 2),
+        pair(2, 1),
+        pair(3, 1),
+        pair(3, 3),
+        pair(3, 2),
+        pair(3, 1),
+    ]))
+    .unwrap();
+    assert_eq!(
+        invoke_relation(body, &mut effects, Limits::default()).unwrap(),
+        Value::option(Some(expected_rows)).unwrap(),
+        "lateral rows keep their parent key and left-to-right child identity"
+    );
+
+    for source in ["ChildLeft", "ChildRight"] {
+        let reads = effects
+            .reads
+            .iter()
+            .filter(|(read_source, _, _)| read_source == source)
+            .collect::<Vec<_>>();
+        let mut scopes = Vec::new();
+        for (_, scope, _) in &reads {
+            if !scopes.contains(scope) {
+                scopes.push(*scope);
+            }
+        }
+        assert_eq!(
+            scopes.len(),
+            2,
+            "only the two accepted outer rows open a {source} lateral scope"
+        );
+        for scope in scopes {
+            let cursors = reads
+                .iter()
+                .filter(|(_, read_scope, _)| *read_scope == scope)
+                .map(|(_, _, after)| after.clone())
+                .collect::<Vec<_>>();
+            assert_eq!(
+                cursors,
+                vec![None, Some(vec![1]), Some(vec![2])],
+                "each {source} child scope advances its own ordered sparse pages"
+            );
+        }
+    }
+}
+
+#[test]
+fn paired_windows_preserve_lateral_tuple_identity_across_sparse_scopes() {
+    let parents = relation_union(
+        relation_source_expression("ParentLeft"),
+        relation_source_expression("ParentRight"),
+    );
+    let positive_child = parsed_expression("child => child > 0");
+    let children = relation_union(
+        relation_stage(
+            relation_source_expression("ChildLeft"),
+            "filter",
+            vec![positive_child.clone()],
+        ),
+        relation_stage(
+            relation_source_expression("ChildRight"),
+            "filter",
+            vec![positive_child],
+        ),
+    );
+    let children = relation_stage(
+        children,
+        "filter",
+        vec![parsed_expression("child => child <= parent")],
+    );
+    let children = relation_stage(
+        children,
+        "map",
+        vec![parsed_expression(include_str!(
+            "fixtures/query-window-project-parent-ghb9w.orna"
+        ))],
+    );
+    let lateral = relation_named_flat_map_stage(parents, relation_lambda("parent", children));
+    let frames = relation_stage(
+        lateral,
+        "window",
+        vec![relation_integer(2), relation_integer(2)],
+    );
+    let unique_frames = relation_stage(frames, "distinct", Vec::new());
+    let frame_pairs = relation_stage(unique_frames, "pairs", Vec::new());
+    let body = relation_terminal(frame_pairs, "first");
+    let mut effects = LateralRelationEffects::new(BTreeMap::from([
+        (
+            "ParentLeft".into(),
+            vec![Value::int(10.into())],
+        ),
+        ("ParentRight".into(), vec![Value::int(20.into())]),
+        (
+            "ChildLeft".into(),
+            vec![Value::int(1.into()), Value::int(0.into())],
+        ),
+        (
+            "ChildRight".into(),
+            vec![Value::int(2.into()), Value::int(0.into())],
+        ),
+    ]));
+
+    let frame = |parent| {
+        Value::new(Raw::Array(vec![
+            relation_pair(parent, 1).raw().clone(),
+            relation_pair(parent, 2).raw().clone(),
+        ]))
+        .expect("lateral frame is canonical")
+    };
+    let expected = Value::option(Some(
+        Value::new(Raw::Tag(
+            60015,
+            Box::new(Raw::Array(vec![frame(10).raw().clone(), frame(20).raw().clone()])),
+        ))
+        .expect("paired lateral frames are canonical"),
+    ))
+    .expect("paired frame option is canonical");
+    assert_eq!(
+        invoke_relation(body, &mut effects, Limits::default())
+            .unwrap_or_else(|error| panic!("paired lateral windows failed: {}", error.code())),
+        expected,
+        "each complete frame keeps its original parent and child tuple identities"
+    );
+
+    for source in ["ChildLeft", "ChildRight"] {
+        let reads = effects
+            .reads
+            .iter()
+            .filter(|(read_source, _, _)| read_source == source)
+            .collect::<Vec<_>>();
+        let mut scopes = Vec::new();
+        for (_, scope, _) in &reads {
+            if !scopes.contains(scope) {
+                scopes.push(*scope);
+            }
+        }
+        assert_eq!(scopes.len(), 2, "accepted parents open separate {source} scopes");
+        for scope in scopes {
+            let cursors = reads
+                .iter()
+                .filter(|(_, read_scope, _)| *read_scope == scope)
+                .map(|(_, _, after)| after.clone())
+                .collect::<Vec<_>>();
+            assert_eq!(cursors, vec![None, Some(vec![1])]);
+        }
+    }
+}
+
+#[test]
+fn sparse_lateral_input_can_finish_short_of_a_window_larger_than_item_limit() {
+    let children = relation_union(
+        relation_stage(
+            relation_source_expression("ChildLeft"),
+            "filter",
+            vec![parsed_expression("child => child > 0")],
+        ),
+        relation_stage(
+            relation_source_expression("ChildRight"),
+            "filter",
+            vec![parsed_expression("child => child > 0")],
+        ),
+    );
+    let children = relation_stage(
+        children,
+        "filter",
+        vec![parsed_expression("child => child <= parent")],
+    );
+    let children = relation_stage(
+        children,
+        "map",
+        vec![parsed_expression(include_str!(
+            "fixtures/query-window-project-parent-ghb9w.orna"
+        ))],
+    );
+    let lateral = relation_named_flat_map_stage(
+        relation_source_expression("Parent"),
+        relation_lambda("parent", children),
+    );
+    let oversized = relation_stage(
+        lateral,
+        "window",
+        vec![relation_integer(100), relation_integer(1)],
+    );
+    let body = relation_terminal(oversized, "first");
+    let mut effects = LateralRelationEffects::new(BTreeMap::from([
+        ("Parent".into(), vec![Value::int(10.into())]),
+        ("ChildLeft".into(), vec![Value::int(1.into())]),
+        ("ChildRight".into(), vec![Value::int(2.into())]),
+    ]));
+
+    assert_eq!(
+        invoke_relation(
+            body,
+            &mut effects,
+            Limits {
+                max_collection_items: 2,
+                ..Limits::default()
+            },
+        )
+        .unwrap(),
+        Value::option(None).expect("empty complete-window result is canonical"),
+        "only retained values count against the collection bound when no complete frame exists"
+    );
+}
+
 #[test]
 fn flat_map_relation_allows_empty_inner_lists_without_skipping_source_pages() {
     let source = relation_source_expression("Note");

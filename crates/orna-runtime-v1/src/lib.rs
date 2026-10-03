@@ -2285,7 +2285,12 @@ impl RuntimeQuerySession<'_> {
     /// are capped at 1,024 rows as a pragmatic runtime bound; the evaluator
     /// currently requests one row per page. Each continuation reads the
     /// session's latest overlay: a newly staged key after the cursor is seen,
-    /// while a key at or before the cursor does not restart the scan.
+    /// while a key at or before the cursor does not restart the scan. This
+    /// bounds refresh staleness to the exclusive cursor: callers that need
+    /// earlier keys reconsidered start a fresh scan without a cursor. Rows
+    /// already returned in a page, and values already folded from those rows,
+    /// remain the values observed by that read; later overlay changes are
+    /// visible to fresh reads, not retroactively.
     pub fn query_page(
         &self,
         table: &str,
