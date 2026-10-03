@@ -70,6 +70,48 @@ struct ArgumentMapEdgeProvider {
     calls: AtomicUsize,
 }
 
+struct ArgumentMapFailureProvider {
+    offer: ProviderOffer,
+    operation: OperationId,
+    expected_argument_types: Vec<String>,
+    expected_map_payload: Vec<u8>,
+    failure: FailureCode,
+    calls: AtomicUsize,
+}
+
+impl SystemOperationProvider for ArgumentMapFailureProvider {
+    fn offer(&self) -> &ProviderOffer {
+        &self.offer
+    }
+
+    fn invoke(
+        &self,
+        operation: &OperationId,
+        arguments: &[TypedValue],
+    ) -> Result<TypedValue, ProviderFailure> {
+        assert_eq!(operation, &self.operation);
+        assert_eq!(arguments.len(), self.expected_argument_types.len());
+        assert_eq!(
+            arguments
+                .iter()
+                .map(|argument| argument.static_type().as_str().to_owned())
+                .collect::<Vec<_>>(),
+            self.expected_argument_types,
+            "erroring provider receives the generated typed outer arguments"
+        );
+        assert_eq!(
+            arguments[1].canonical(),
+            Some(self.expected_map_payload.as_slice()),
+            "erroring provider receives the argument-map payload unchanged"
+        );
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        Err(ProviderFailure {
+            code: self.failure.clone(),
+            payload: None,
+        })
+    }
+}
+
 impl SystemOperationProvider for ArgumentMapEdgeProvider {
     fn offer(&self) -> &ProviderOffer {
         &self.offer
@@ -2903,6 +2945,279 @@ fn dispatch_to_provider_routes_typed_value_and_declared_failure() {
     println!(
         "dispatch_to_provider operation={operation_name} typed_arguments={} outcomes=returned_typed_value,declared_failure total_cases=2",
         arguments.len()
+    );
+}
+
+#[test]
+fn provider_error_contracts_preserve_variadic_argument_map_edges() {
+    const VARIADIC_ERROR_OPERATIONS: [&str; 4] = [
+        "sys.invoke(Value)",
+        "sys.invoke<T>",
+        "sys.start(Value)",
+        "sys.start<T>",
+    ];
+    const EDGE_CARDINALITIES: [usize; 3] = [0, 1, 4];
+    const SHARED_PROVIDER_FAILURES: [&str; 3] = [
+        "sys.abi.precondition_failed",
+        "sys.abi.unavailable",
+        "sys.abi.provider_failed",
+    ];
+
+    let generated_schema = build_provider::generate_provider_registry_schema()
+        .expect("provider error schema regenerates from its typed source");
+    assert_eq!(generated_schema, system_provider_abi_schema_json());
+    build_host::validate_json_against_schema(system_provider_abi_json(), &generated_schema)
+        .expect("embedded provider error contracts conform to the regenerated schema");
+    let table = system_dispatch_table();
+    let registry = ProviderRoleRegistry::from_baked_abi(table)
+        .expect("generated invoke/start provider offers resolve");
+    let registry_json: Value =
+        serde_json::from_str(system_provider_abi_json()).expect("embedded provider registry");
+    let raw_operations = registry_json["operations"]
+        .as_array()
+        .expect("embedded provider registry has operation rows");
+
+    let mut generated_bindings = 0;
+    let mut map_slots = 0;
+    let mut selected_failure_codes = 0;
+    let mut map_cases = 0;
+    let mut declared_direct_routes = 0;
+    let mut declared_registry_routes = 0;
+    let mut undeclared_direct_routes = 0;
+    let mut undeclared_registry_routes = 0;
+    for operation_name in VARIADIC_ERROR_OPERATIONS {
+        let contract = table
+            .operation(operation_name)
+            .expect("variadic error operation exists in typed registry");
+        let generated = system_function_descriptor(operation_name)
+            .expect("variadic error operation has a macro-generated binding");
+        assert_eq!(generated.signature, contract.signature.source);
+        assert_eq!(contract.effects.iter().next(), Some(generated.effect));
+        generated_bindings += 1;
+
+        let map_indexes = contract
+            .signature
+            .parameters
+            .iter()
+            .enumerate()
+            .filter_map(|(index, parameter)| (parameter.name == "arguments").then_some(index))
+            .collect::<Vec<_>>();
+        assert_eq!(map_indexes, [1], "one fixed map slot in {operation_name}");
+        assert_eq!(
+            contract.signature.parameters[map_indexes[0]].ty,
+            AbiType::Named("sys.ArgumentMap".to_owned())
+        );
+        map_slots += 1;
+        let row = raw_operations
+            .iter()
+            .find(|row| row["name"] == operation_name)
+            .expect("schema row contains the variadic error operation");
+        let raw_failure_codes = row["failures"]
+            .as_array()
+            .expect("schema row publishes failure codes")
+            .iter()
+            .map(|code| code.as_str().expect("failure code is a string"))
+            .collect::<BTreeSet<_>>();
+        for code in &raw_failure_codes {
+            assert!(
+                contract.declares_failure(&FailureCode::new(*code).unwrap()),
+                "typed contract retains schema failure `{code}` for {operation_name}"
+            );
+        }
+
+        let role = contract
+            .role
+            .as_ref()
+            .expect("invoke/start operation has a provider role");
+        let offer = registry
+            .resolve(role.as_str())
+            .expect("variadic error role has a selected provider")
+            .clone();
+        let mut declared_failures = vec![FailureCode::new("sys.abi.provider_failed").unwrap()];
+        assert!(contract.declares_failure(&declared_failures[0]));
+        if let Some(operation_failure) = contract
+            .failures
+            .iter()
+            .find(|code| !SHARED_PROVIDER_FAILURES.contains(&code.as_str()))
+            .cloned()
+        {
+            assert!(raw_failure_codes.contains(operation_failure.as_str()));
+            declared_failures.push(operation_failure);
+        }
+        selected_failure_codes += declared_failures.len();
+
+        let expected_argument_types = contract
+            .signature
+            .parameters
+            .iter()
+            .map(|parameter| {
+                if parameter.ty == AbiType::Named("T".to_owned()) {
+                    "sys.ObjectRef".to_owned()
+                } else {
+                    parameter.ty.canonical()
+                }
+            })
+            .collect::<Vec<_>>();
+        let undeclared_failure = FailureCode::new("sys.conformance.variadic_map_error").unwrap();
+        assert!(!contract.declares_failure(&undeclared_failure));
+
+        for cardinality in EDGE_CARDINALITIES {
+            let argument_map = ArgumentMap::new((0..cardinality).map(|index| Argument {
+                name: format!("arg_{index:02}"),
+                value: TypedValue::public(
+                    TypeId::new("Str"),
+                    format!("value-{index}").into_bytes(),
+                ),
+            }))
+            .expect("distinct argument names form an argument map");
+            let encoded_entries = argument_map
+                .entries()
+                .map(|(name, value)| {
+                    (
+                        name,
+                        value.static_type().as_str(),
+                        value.canonical().expect("map test values are public"),
+                    )
+                })
+                .collect::<Vec<_>>();
+            let map_payload = serde_json::to_vec(&encoded_entries)
+                .expect("argument-map error payload serializes deterministically");
+            let arguments = contract
+                .signature
+                .parameters
+                .iter()
+                .enumerate()
+                .map(|(index, parameter)| {
+                    let (type_id, payload) = if index == map_indexes[0] {
+                        (parameter.ty.canonical(), map_payload.clone())
+                    } else if parameter.ty == AbiType::Named("T".to_owned()) {
+                        (
+                            "sys.ObjectRef".to_owned(),
+                            format!("object-witness-{operation_name}").into_bytes(),
+                        )
+                    } else {
+                        (
+                            parameter.ty.canonical(),
+                            parameter
+                                .default
+                                .as_deref()
+                                .unwrap_or(&parameter.name)
+                                .as_bytes()
+                                .to_vec(),
+                        )
+                    };
+                    TypedValue::public(TypeId::new(type_id), payload)
+                })
+                .collect::<Vec<_>>();
+            map_cases += 1;
+
+            for failure in &declared_failures {
+                let provider_for = || ArgumentMapFailureProvider {
+                    offer: offer.clone(),
+                    operation: contract.id.clone(),
+                    expected_argument_types: expected_argument_types.clone(),
+                    expected_map_payload: map_payload.clone(),
+                    failure: failure.clone(),
+                    calls: AtomicUsize::new(0),
+                };
+                let direct_provider = provider_for();
+                assert_eq!(
+                    table.dispatch_to_provider(
+                        generated.name,
+                        &direct_provider,
+                        &arguments,
+                        |_| Ok(()),
+                    ),
+                    Ok(orna_sys_v1::SystemDispatchResult::Failed(failure.clone())),
+                    "direct route preserves declared error {} for {operation_name} map size {cardinality}",
+                    failure.as_str()
+                );
+                assert_eq!(direct_provider.calls.load(Ordering::SeqCst), 1);
+                declared_direct_routes += 1;
+
+                let registry_provider = provider_for();
+                assert_eq!(
+                    registry.dispatch_to_provider(
+                        table,
+                        generated.name,
+                        &registry_provider,
+                        &arguments,
+                        |_| Ok(()),
+                    ),
+                    Ok(orna_sys_v1::SystemDispatchResult::Failed(failure.clone())),
+                    "selected-provider route preserves declared error {} for {operation_name} map size {cardinality}",
+                    failure.as_str()
+                );
+                assert_eq!(registry_provider.calls.load(Ordering::SeqCst), 1);
+                declared_registry_routes += 1;
+            }
+
+            let undeclared_provider_for = || ArgumentMapFailureProvider {
+                offer: offer.clone(),
+                operation: contract.id.clone(),
+                expected_argument_types: expected_argument_types.clone(),
+                expected_map_payload: map_payload.clone(),
+                failure: undeclared_failure.clone(),
+                calls: AtomicUsize::new(0),
+            };
+            let diagnostic = ProviderDiagnostic::UndeclaredFailure {
+                operation: contract.id.clone(),
+                code: undeclared_failure.clone(),
+            };
+            let undeclared_direct_provider = undeclared_provider_for();
+            assert_eq!(
+                table.dispatch_to_provider(
+                    generated.name,
+                    &undeclared_direct_provider,
+                    &arguments,
+                    |_| Ok(()),
+                ),
+                Err(diagnostic.clone()),
+                "direct route diagnoses undeclared error on map size {cardinality}"
+            );
+            assert_eq!(undeclared_direct_provider.calls.load(Ordering::SeqCst), 1);
+            undeclared_direct_routes += 1;
+
+            let undeclared_registry_provider = undeclared_provider_for();
+            assert_eq!(
+                registry.dispatch_to_provider(
+                    table,
+                    generated.name,
+                    &undeclared_registry_provider,
+                    &arguments,
+                    |_| Ok(()),
+                ),
+                Err(diagnostic),
+                "selected-provider route diagnoses undeclared error on map size {cardinality}"
+            );
+            assert_eq!(undeclared_registry_provider.calls.load(Ordering::SeqCst), 1);
+            undeclared_registry_routes += 1;
+        }
+    }
+
+    assert_eq!(generated_bindings, VARIADIC_ERROR_OPERATIONS.len());
+    assert_eq!(map_slots, VARIADIC_ERROR_OPERATIONS.len());
+    assert_eq!(
+        map_cases,
+        VARIADIC_ERROR_OPERATIONS.len() * EDGE_CARDINALITIES.len()
+    );
+    assert_eq!(selected_failure_codes, 6);
+    assert_eq!(
+        declared_direct_routes,
+        selected_failure_codes * EDGE_CARDINALITIES.len()
+    );
+    assert_eq!(declared_registry_routes, declared_direct_routes);
+    assert_eq!(undeclared_direct_routes, map_cases);
+    assert_eq!(undeclared_registry_routes, map_cases);
+    println!(
+        "provider_variadic_error_contract_parity operations={generated_bindings} cardinalities=0,1,4 map_slots={map_slots} map_cases={map_cases} selected_failure_codes={selected_failure_codes} declared_direct={declared_direct_routes} declared_registry={declared_registry_routes} undeclared_direct={undeclared_direct_routes} undeclared_registry={undeclared_registry_routes} total_cases={}",
+        1 + generated_bindings
+            + map_slots
+            + map_cases
+            + declared_direct_routes
+            + declared_registry_routes
+            + undeclared_direct_routes
+            + undeclared_registry_routes
     );
 }
 
