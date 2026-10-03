@@ -1,0 +1,15 @@
+{ id: "rotation-compaction/a/order-4", name: "segment-left-a4", city: "segment-right-a4", }
+
+{ id: "rotation-compaction/a/order-5", name: "segment-left-a5", city: "segment-right-a5", }
+
+{ id: "rotation-compaction/a-overlap/order-4", name: "segment-left-a4-overlap", city: "segment-right-a4-overlap", }
+
+{ id: "rotation-compaction/a-duplicate-stream/order-4", name: "segment-left-a4-copy", city: "segment-right-a4-copy", }
+
+{ id: "rotation-compaction/beta/order-7", name: "segment-left-beta7", city: "segment-right-beta7", }
+
+{ id: "rotation-compaction/a-handoff/order-7", name: "segment-left-a7", city: "segment-right-a7", }
+
+{ id: "rotation-compaction/a-next-restore/order-4", name: "segment-left-a4-next", city: "segment-right-a4-next", }
+
+{ id: "rotation-compaction/late/order-10", name: "segment-left-late10", city: "segment-right-late10", }
