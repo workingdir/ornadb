@@ -6,6 +6,7 @@ use orna_evolution_v1::{
 use orna_foundation_v1::OvbRaw;
 use orna_storage_v1::{
     BranchMergeBudget, BranchMergeColumnDepthEvent, BranchMergeColumnDepthFragments,
+    BranchMergeColumnDepthLadderEvent,
     BranchMergeConflict, BranchMergeDepthFragmentRecovery,
     BranchMergeDepthWaveRecovery, BranchMergeError, BranchMergePlan,
     BranchMergeMultiParentTabularColumnDepthWave,
@@ -25863,6 +25864,7 @@ fn column_restore_ladders_keep_uneven_depth_labels_and_fixture_values() {
     let mut history = BranchMergeTombstoneHistory::new(0);
     assert!(history.submit_tabular_column_depth_wave(&wave(1)).unwrap().is_empty());
     assert!(history.column_events().is_empty());
+    assert!(history.column_ladder_events().is_empty());
     assert_eq!(history.next_order(), Some(0));
 
     assert!(history.submit(&empty_plan(0)).unwrap().is_empty());
@@ -25911,6 +25913,24 @@ fn column_restore_ladders_keep_uneven_depth_labels_and_fixture_values() {
             },
         ],
         "the shorter name branch and longer city branch retain independent labels and fixture-backed values",
+    );
+    assert_eq!(
+        history.column_ladder_events(),
+        &[
+            BranchMergeColumnDepthLadderEvent {
+                order: 1,
+                table: id(1),
+                column: id(2),
+                depth_labels: vec![0, 1],
+            },
+            BranchMergeColumnDepthLadderEvent {
+                order: 1,
+                table: id(1),
+                column: id(3),
+                depth_labels: vec![0, 1, 2, 3],
+            },
+        ],
+        "released ladders retain every column-local label, including the empty city depth",
     );
     assert_eq!(history.next_order(), Some(2));
     let committed = history.clone();
