@@ -1,0 +1,81 @@
+pub fn factory_at(pin: sys.SnapshotRef) =
+    sys.database.as_of(pin).energy.factory;
+
+pub fn rejects_paired_collapse_rebind_depth_drift(failure: Error) {
+    let rolling = [
+        (
+            factory_at(sys.snapshot("HEAD~101")),
+            factory_at(sys.snapshot("HEAD~101")),
+            fail(failure),
+        ),
+        (
+            factory_at(sys.snapshot("HEAD~102")),
+            fail(failure),
+            factory_at(sys.snapshot("HEAD~102")),
+        ),
+        (
+            fail(failure),
+            factory_at(sys.snapshot("HEAD~103")),
+            factory_at(sys.snapshot("HEAD~103")),
+        ),
+    ];
+    let saved = rolling;
+    rolling = [
+        (
+            factory_at(sys.snapshot("HEAD~201")),
+            factory_at(sys.snapshot("HEAD~201")),
+            factory_at(sys.snapshot("HEAD~201")),
+        ),
+        (
+            factory_at(sys.snapshot("HEAD~202")),
+            factory_at(sys.snapshot("HEAD~203")),
+            factory_at(sys.snapshot("HEAD~204")),
+        ),
+    ];
+    {
+        saved: saved,
+        rebound: rolling,
+    }
+}
+
+pub fn accepts_paired_collapse_rebind_depth_relabel(failure: Error) {
+    let rolling = [
+        (
+            factory_at(sys.snapshot("HEAD~301")),
+            factory_at(sys.snapshot("HEAD~301")),
+            fail(failure),
+        ),
+        (
+            factory_at(sys.snapshot("HEAD~302")),
+            fail(failure),
+            factory_at(sys.snapshot("HEAD~302")),
+        ),
+        (
+            fail(failure),
+            factory_at(sys.snapshot("HEAD~303")),
+            factory_at(sys.snapshot("HEAD~303")),
+        ),
+    ];
+    let saved = rolling;
+    rolling = [
+        (
+            factory_at(sys.snapshot("HEAD~401")),
+            factory_at(sys.snapshot("HEAD~401")),
+            fail(failure),
+        ),
+        (
+            factory_at(sys.snapshot("HEAD~402")),
+            fail(failure),
+            factory_at(sys.snapshot("HEAD~402")),
+        ),
+        (
+            fail(failure),
+            factory_at(sys.snapshot("HEAD~403")),
+            factory_at(sys.snapshot("HEAD~403")),
+        ),
+    ];
+    {
+        saved: saved,
+        rebound: rolling,
+    }
+}
