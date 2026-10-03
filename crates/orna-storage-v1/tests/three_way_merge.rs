@@ -15,6 +15,7 @@ use orna_storage_v1::{
     BranchMergeColumnRestoreStormLadderSnapshot,
     BranchMergeColumnRestoreStormSnapshot,
     BranchMergeColumnRestoreStormDepthLabelWaveSnapshot,
+    BranchMergeColumnRestoreStormDepthPathSnapshot,
     BranchMergeConflict, BranchMergeDepthFragmentRecovery,
     BranchMergeDepthWaveRecovery, BranchMergeError, BranchMergePlan,
     BranchMergeMultiParentColumnDepthLadderWaveEvent,
@@ -25758,7 +25759,6 @@ fn tabular_restore_wave_preserves_peer_depth_labels_and_tombstone_identity() {
         },
         ordered_row_tombstones: Vec::new(),
     };
-
     let mut history = BranchMergeTombstoneHistory::new(0);
     assert!(
         history.submit_tabular_depth_wave(&wave(1)).unwrap().is_empty(),
@@ -26704,6 +26704,18 @@ fn column_restore_storm_depth_labels_pair_local_depths_with_storm_orders() {
         },
         ordered_row_tombstones: Vec::new(),
     };
+    let path_record = |storm_index, first_order, last_order, order, column, label, snapshot_paths| {
+        BranchMergeColumnRestoreStormDepthPathSnapshot {
+            storm_index,
+            first_order,
+            last_order,
+            order,
+            table: id(1),
+            column: id(column),
+            label,
+            snapshot_paths,
+        }
+    };
 
     let mut history = BranchMergeTombstoneHistory::new(0);
     for order in [4, 2, 1] {
@@ -26771,6 +26783,20 @@ fn column_restore_storm_depth_labels_pair_local_depths_with_storm_orders() {
             },
         ]),
         "the paired labels remain bound to actual fixture row keys and values",
+    );
+    assert_eq!(
+        history.column_restore_storm_depth_paths(),
+        vec![
+            path_record(0, 1, 2, 1, 2, 0, vec![root.key.clone()]),
+            path_record(0, 1, 2, 1, 2, 1, vec![child.key.clone()]),
+            path_record(0, 1, 2, 2, 2, 0, vec![root.key.clone()]),
+            path_record(0, 1, 2, 2, 2, 1, Vec::new()),
+            path_record(0, 1, 2, 2, 2, 2, vec![deep.key.clone()]),
+            path_record(0, 1, 2, 1, 3, 0, Vec::new()),
+            path_record(0, 1, 2, 1, 3, 1, vec![deep.key.clone()]),
+            path_record(1, 4, 4, 4, 3, 0, vec![child.key.clone()]),
+        ],
+        "snapshot row-key paths stay attached to their exact paired label, wave, and storm, including empty labels",
     );
 }
 
