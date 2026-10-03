@@ -1536,6 +1536,23 @@ impl SiblingRebindResolution {
             .retained_depth_label(wave, depth)
     }
 
+    /// Saves one retained route from a sibling row without dropping that
+    /// row's route and snapshot identities. `route` is the row's index in the
+    /// input plan. The reference does not define multi-parent checkpoint
+    /// selection; v1 keeps each checkpoint bound to its source row even when
+    /// another row has matching pins and coordinates.
+    pub fn handoff_checkpoint(
+        &self,
+        route: usize,
+        wave: usize,
+        depth: usize,
+    ) -> Result<ReboundPathCheckpoint, AttachmentError> {
+        self.routes
+            .get(route)
+            .ok_or(AttachmentError::RetainedSnapshotUnavailable)?
+            .handoff_checkpoint(wave, depth)
+    }
+
     /// Takes ownership of the sibling results in input order.
     pub fn into_routes(self) -> Vec<ReboundPathResolution> {
         self.routes
