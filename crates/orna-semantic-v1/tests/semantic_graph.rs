@@ -11170,6 +11170,114 @@ fn nested_snapshot_boundary_list_folds_reject_crossed_values() {
 }
 
 #[test]
+fn nested_snapshot_checkpoint_reset_chains_restore_selected_values() {
+    let source = include_str!("fixtures/historical-nested-snapshot-checkpoint-reset-chain.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-nested-snapshot-checkpoint-reset-chain.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert_eq!(
+        result
+            .diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.code() == DIAG_TYPE)
+            .count(),
+        1,
+        "the crossed reset must be rejected without poisoning a later valid reset: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+    let module = result
+        .modules
+        .values()
+        .find(|module| {
+            module
+                .symbols
+                .contains_key("nested_snapshot_checkpoint_reset_chain_values")
+                && module
+                    .symbols
+                    .contains_key("nested_snapshot_reset_recovers_after_crossed_rebind")
+        })
+        .expect("nested checkpoint reset-chain fixture module");
+    let Type::Function {
+        result: chain_result,
+        ..
+    } = &module.symbols["nested_snapshot_checkpoint_reset_chain_values"].ty
+    else {
+        panic!("reset chain must return computed historical values");
+    };
+    let Type::Record(chain) = chain_result.as_ref() else {
+        panic!("reset chain must expose all checkpoint stages: {chain_result:?}");
+    };
+    for (stage, root_selector, leaf_selector) in [
+        ("base", "selector:HEAD~120", "selector:HEAD~90"),
+        ("first_saved", "selector:HEAD~110", "selector:HEAD~80"),
+        ("second_saved", "selector:HEAD~100", "selector:HEAD~70"),
+        ("reset_first", "selector:HEAD~110", "selector:HEAD~60"),
+        ("reset_base", "selector:HEAD~120", "selector:HEAD~50"),
+        ("reset_second", "selector:HEAD~100", "selector:HEAD~40"),
+        (
+            "reset_base_again",
+            "selector:HEAD~120",
+            "selector:HEAD~30",
+        ),
+    ] {
+        let Type::Record(values) = chain.get(stage).expect("checkpoint stage") else {
+            panic!("{stage} must contain real selected values");
+        };
+        for (field, expected) in [("root", root_selector), ("leaf", leaf_selector)] {
+            let value = values.get(field).expect("historical result field");
+            assert_canonical_snapshot_context_maps(value);
+            let mut contexts = BTreeSet::new();
+            collect_snapshot_contexts(value, &mut contexts);
+            assert_eq!(
+                contexts,
+                BTreeSet::from([expected.to_owned()]),
+                "{stage}.{field} must retain the selected checkpoint identity"
+            );
+        }
+    }
+
+    let Type::Function {
+        result: recovered_result,
+        ..
+    } = &module.symbols["nested_snapshot_reset_recovers_after_crossed_rebind"].ty
+    else {
+        panic!("recovery chain must return computed historical values");
+    };
+    let Type::Record(recovered) = recovered_result.as_ref() else {
+        panic!("recovery chain must expose both stages: {recovered_result:?}");
+    };
+    for (stage, root_selector, leaf_selector) in [
+        ("saved", "selector:HEAD~220", "selector:HEAD~190"),
+        ("restored", "selector:HEAD~220", "selector:HEAD~180"),
+    ] {
+        let Type::Record(values) = recovered.get(stage).expect("recovery stage") else {
+            panic!("{stage} must remain a record of computed values");
+        };
+        for (field, expected) in [("root", root_selector), ("leaf", leaf_selector)] {
+            let value = values.get(field).expect("recovery result field");
+            assert_canonical_snapshot_context_maps(value);
+            let mut contexts = BTreeSet::new();
+            collect_snapshot_contexts(value, &mut contexts);
+            assert_eq!(
+                contexts,
+                BTreeSet::from([expected.to_owned()]),
+                "{stage}.{field} must recover its source checkpoint after the rejected reset"
+            );
+        }
+    }
+}
+
+#[test]
 fn paired_checkpoint_snapshot_maps_survive_chained_depth_storms() {
     let source = include_str!(
         "fixtures/historical-paired-checkpoint-snapshot-retention-depth-storm.orna"
