@@ -1,0 +1,11 @@
+{ id: "spill/wave-0", name: "checkpoint/alpha", city: "source-stream/alpha-base" }
+
+{ id: "spill/wave-0", name: "checkpoint/alpha", city: "source-stream/alpha-duplicate" }
+
+{ id: "spill/wave-1", name: "checkpoint/alpha", city: "source-stream/alpha-later" }
+
+{ id: "spill/wave-0", name: "checkpoint/beta", city: "source-stream/beta" }
+
+{ id: "spill/wave-1", name: "checkpoint/late", city: "source-stream/late" }
+
+{ id: "spill/catalog", name: "checkpoint/catalog-only", city: "source-stream/catalog" }
