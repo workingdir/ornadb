@@ -1,0 +1,3 @@
+use std.query as query_ops;
+
+pub fn plan_hint(query: Query<Int>): sys.Plan = query_ops.plan_hint(query);
