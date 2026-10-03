@@ -82,6 +82,8 @@ const PREDICATE_NESTED_PAIRS_EVERY_MISMATCH: &str =
     include_str!("fixtures/streams-jyy6a-predicate-nested-pairs-every-mismatch.orna");
 const PREDICATE_NESTED_PAIRS_CHECKPOINT_FOLD: &str =
     include_str!("fixtures/streams-yfxkj-predicate-nested-pairs-checkpoint-fold.orna");
+const PREDICATE_NESTED_PAIRS_CHECKPOINT_FOLD_MISMATCH: &str =
+    include_str!("fixtures/streams-yfxkj-predicate-nested-pairs-checkpoint-fold-mismatch.orna");
 
 fn nested_pair_key(
     first_id: i64,
@@ -704,6 +706,52 @@ async fn predicate_continuations_find_nested_pairs_across_checkpoints() {
         assert_eq!(row_field(&row, "key"), &expected_key);
         assert_eq!(row_field(&row, "expected"), &expected_value);
     }
+}
+
+#[tokio::test]
+async fn missing_nested_pair_witness_preserves_the_previous_checkpoint() {
+    let (_directory, repository) = repository(PREDICATE_NESTED_PAIRS_CHECKPOINT_FOLD_MISMATCH);
+    let identity = identity();
+    let state = RuntimeState::open(&repository, identity, [0x53; 32])
+        .await
+        .expect("open runtime state");
+    let fixture = source_unit_with(
+        PREDICATE_NESTED_PAIRS_CHECKPOINT_FOLD_MISMATCH,
+        "streams-yfxkj-predicate-nested-pairs-checkpoint-fold-mismatch",
+    );
+    let outcome = DurableTransactionalEvaluator::new("main", Limits::default())
+        .execute_list_stream_source(&repository, identity, [0x54; 16], [0x53; 32], &fixture)
+        .await
+        .expect("execute missing-witness pair fold");
+    assert!(matches!(outcome, StageOutcome::Failed(_)));
+
+    let red = nested_pair_key(1, "east", 2, "oak", 3, "red");
+    let blue = nested_pair_key(1, "east", 2, "oak", 3, "blue");
+    let absent = nested_pair_key(1, "east", 2, "oak", 3, "green");
+    let source_values = vec![
+        nested_pair_row(1, red.clone(), red.clone()),
+        nested_pair_row(2, blue, absent),
+    ];
+    let checkpoint = state
+        .stream_checkpoint(&list_checkpoint_key_for_values(
+            "main",
+            "fixture:streams-yfxkj-predicate-nested-pairs-checkpoint-fold-mismatch",
+            &source_values,
+        ))
+        .await
+        .expect("checkpoint before missing pair witness");
+    assert_eq!(checkpoint.version, 1);
+    assert_eq!(checkpoint.committed.unwrap().token.as_str(), "1");
+
+    let rows = state
+        .committed_table_rows("Reading")
+        .await
+        .expect("read row retained at last successful checkpoint");
+    assert_eq!(rows.len(), 1);
+    let row = Value::decode(&rows[0].1).expect("decode retained first row");
+    assert_eq!(row_field(&row, "id"), &Raw::Int(1.into()));
+    assert_eq!(row_field(&row, "key"), &red);
+    assert_eq!(row_field(&row, "expected"), &red);
 }
 
 #[test]
