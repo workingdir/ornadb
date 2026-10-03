@@ -1,0 +1,6 @@
+std.iterator.collect(
+    std.iterator.adapters.filter_map(
+        std.iterator.from_list([1]),
+        _ => Some(null)
+    )
+)
