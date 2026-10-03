@@ -552,7 +552,6 @@ pub struct BranchMergeColumnRestorePairedSnapshotPathChainFoldSnapshot {
     pub snapshot_path: CanonicalValue,
     pub columns: Vec<BranchMergeColumnRestorePairedSnapshotPathColumnFoldSnapshot>,
 }
-
 /// A canonical column cell released with its source parent identity intact.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BranchMergeParentColumnDepthEvent {
@@ -1921,7 +1920,6 @@ impl BranchMergeTombstoneHistory {
             })
             .collect()
     }
-
     /// Submits a complete paired restore wave from at least two distinct
     /// parent branches. Each parent and stable table-column pair retains its
     /// own fragment count and cell retry identity. Parent provenance remains
