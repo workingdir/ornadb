@@ -982,6 +982,30 @@ fn paired_view_refresh_cursor_omissions_keep_handoff_identity() {
         );
     }
     assert_eq!(source.cursors.len(), 18, "omitted continuations do not issue another page read");
+    assert_eq!(
+        source.cursors,
+        vec![
+            ("View.Left".into(), scopes[0], None),
+            ("View.Left".into(), scopes[0], Some(vec![51])),
+            ("View.Left".into(), scopes[1], None),
+            ("View.Right".into(), scopes[2], None),
+            ("View.Right".into(), scopes[3], None),
+            ("View.Right".into(), scopes[3], Some(vec![61])),
+            ("View.Left".into(), scopes[4], None),
+            ("View.Left".into(), scopes[5], None),
+            ("View.Left".into(), scopes[5], Some(vec![51])),
+            ("View.Right".into(), scopes[6], None),
+            ("View.Right".into(), scopes[6], Some(vec![61])),
+            ("View.Right".into(), scopes[7], None),
+            ("View.Left".into(), scopes[8], None),
+            ("View.Left".into(), scopes[8], Some(vec![51])),
+            ("View.Left".into(), scopes[9], None),
+            ("View.Right".into(), scopes[10], None),
+            ("View.Right".into(), scopes[11], None),
+            ("View.Right".into(), scopes[11], Some(vec![61])),
+        ],
+        "cursor omission ends only its lane, and reused tokens stay with their new handoff scope"
+    );
 }
 
 fn paired_subscription_cascade_body() -> Expr {
