@@ -6637,6 +6637,131 @@ fn sparse_three_way_tuple_folds_learn_and_preserve_paired_pin_identity() {
 }
 
 #[test]
+fn sequential_sparse_tuple_rebinds_keep_sibling_values_deterministic() {
+    let source = include_str!("fixtures/historical-sequential-sparse-tuple-rebind-determinism.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-sequential-sparse-tuple-rebind-determinism.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    let type_diagnostics = result
+        .diagnostics
+        .iter()
+        .filter(|diagnostic| diagnostic.code() == DIAG_TYPE)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        type_diagnostics.len(),
+        1,
+        "only the cascade that splits its learned tuple identity should fail: {:?}",
+        type_diagnostics
+            .iter()
+            .map(|diagnostic| diagnostic.message())
+            .collect::<Vec<_>>()
+    );
+    let module = result
+        .modules
+        .values()
+        .find(|module| {
+            module
+                .symbols
+                .contains_key("accepts_middle_sparse_pair_rebind")
+        })
+        .expect("sequential sparse tuple rebind fixture module");
+    let pin_maps = |function: &str, sibling: &str| {
+        let Type::Function { result, .. } = &module.symbols[function].ty else {
+            panic!("{function} must retain its computed function type");
+        };
+        let Type::Record(fields) = result.as_ref() else {
+            panic!("{function} must return its computed record: {result:?}");
+        };
+        let Type::List(element) = fields.get("parent_fold").expect("parent fold") else {
+            panic!("{function} must retain its folded parent list");
+        };
+        let Type::Record(row) = element.as_ref() else {
+            panic!("{function} must retain its computed row: {element:?}");
+        };
+        let Type::Record(fields) = &row[sibling] else {
+            panic!("{function}.{sibling} must retain its record");
+        };
+        let Type::Tuple(slots) = &fields["pins"] else {
+            panic!("{function}.{sibling} must retain its paired tuple");
+        };
+        assert_eq!(slots.len(), 2, "{function}.{sibling} must retain both slots");
+        slots
+            .iter()
+            .map(|slot| {
+                let mut contexts = BTreeSet::new();
+                collect_snapshot_contexts(slot, &mut contexts);
+                contexts
+            })
+            .collect::<Vec<_>>()
+    };
+
+    assert_eq!(
+        pin_maps("accepts_middle_sparse_pair_rebind", "left"),
+        [
+            BTreeSet::from([
+                "selector:HEAD~10".into(),
+                "selector:HEAD~20".into(),
+                "selector:HEAD~30".into(),
+            ]),
+            BTreeSet::from(["selector:HEAD~10".into(), "selector:HEAD~30".into()]),
+        ],
+        "a stable rebind keeps each concrete pin across a sparse middle row"
+    );
+    assert_eq!(
+        pin_maps("accepts_middle_sparse_pair_rebind", "right"),
+        [
+            BTreeSet::from([
+                "selector:HEAD~11".into(),
+                "selector:HEAD~21".into(),
+                "selector:HEAD~23".into(),
+            ]),
+            BTreeSet::from([
+                "selector:HEAD~12".into(),
+                "selector:HEAD~22".into(),
+                "selector:HEAD~24".into(),
+            ]),
+        ],
+        "an unaffected sibling accumulates every real selector through the same cascade"
+    );
+    assert_eq!(
+        pin_maps(
+            "rejects_middle_sparse_pair_split_without_losing_sibling_rebinds",
+            "left",
+        ),
+        [
+            BTreeSet::from(["selector:HEAD~40".into()]),
+            BTreeSet::from(["selector:HEAD~40".into()]),
+        ],
+        "a late split restores the learned pair together"
+    );
+    assert_eq!(
+        pin_maps(
+            "rejects_middle_sparse_pair_split_without_losing_sibling_rebinds",
+            "right",
+        ),
+        [
+            BTreeSet::from([
+                "selector:HEAD~41".into(),
+                "selector:HEAD~51".into(),
+                "selector:HEAD~53".into(),
+            ]),
+            BTreeSet::from([
+                "selector:HEAD~42".into(),
+                "selector:HEAD~52".into(),
+                "selector:HEAD~54".into(),
+            ]),
+        ],
+        "the rejected pair does not erase the independent sibling cascade"
+    );
+}
+
+#[test]
 fn multi_parent_selector_topology_storm_preserves_label_depth_identity() {
     let source = include_str!("fixtures/historical-multi-parent-selector-topology-storm.orna");
     let parsed = orna_syntax_v1::parse_module(source);
