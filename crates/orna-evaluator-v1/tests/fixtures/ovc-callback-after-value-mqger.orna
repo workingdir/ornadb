@@ -1,0 +1,4 @@
+fn project<T, U>(value: T, callback: fn(T): U): U = callback(value);
+
+fn project_reordered() =
+    project(callback: row => row.name, value: { name: "ada" });
