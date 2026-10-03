@@ -34210,6 +34210,7 @@ fn paired_redo_fold_identity_survives_sparse_compaction_handoff_chains() {
         checkpoint_id: alpha,
         runs: vec![BranchMergePairedCheckpointRedoFoldSparseCompactionHandoffRunSnapshot {
             handoff_ordinal: 3,
+            merge_ordinal: 3,
             fold_ordinal: 7,
             first_order: 9,
             last_order: 8,
@@ -34451,6 +34452,7 @@ fn paired_redo_fold_identity_survives_sparse_restore_handoff_chains() {
                redo_fold_identity: &BranchMergePairedRedoFoldIdentity| {
         BranchMergePairedCheckpointRedoFoldSparseCompactionHandoffRunSnapshot {
             handoff_ordinal,
+            merge_ordinal: handoff_ordinal,
             fold_ordinal,
             first_order,
             last_order,
@@ -34899,6 +34901,7 @@ fn paired_checkpoint_pins_survive_three_sparse_compaction_handoff_restores() {
             runs: vec![
                 orna_storage_v1::BranchMergePairedCheckpointRedoFoldSparseCompactionHandoffRunSnapshot {
                     handoff_ordinal: 8,
+                    merge_ordinal: 8,
                     fold_ordinal: 5,
                     first_order: 31,
                     last_order: 30,
@@ -37284,6 +37287,7 @@ fn paired_redo_fold_identity_survives_sparse_checkpoint_compaction_handoff_chain
     assert_eq!(positionless.position, None);
 
     let run = |handoff_ordinal: usize,
+               merge_ordinal: usize,
                fold_ordinal: usize,
                first_order: u64,
                last_order: u64,
@@ -37292,6 +37296,7 @@ fn paired_redo_fold_identity_survives_sparse_checkpoint_compaction_handoff_chain
                redo_fold_identity: &BranchMergePairedRedoFoldIdentity| {
         BranchMergePairedCheckpointRedoFoldSparseCompactionHandoffRunSnapshot {
             handoff_ordinal,
+            merge_ordinal,
             fold_ordinal,
             first_order,
             last_order,
@@ -37313,6 +37318,7 @@ fn paired_redo_fold_identity_survives_sparse_checkpoint_compaction_handoff_chain
             vec![
                 run(
                     0,
+                    5,
                     2,
                     4,
                     5,
@@ -37322,6 +37328,7 @@ fn paired_redo_fold_identity_survives_sparse_checkpoint_compaction_handoff_chain
                 ),
                 run(
                     0,
+                    6,
                     2,
                     4,
                     4,
@@ -37335,6 +37342,7 @@ fn paired_redo_fold_identity_survives_sparse_checkpoint_compaction_handoff_chain
             duplicate_alpha,
             vec![run(
                 0,
+                7,
                 2,
                 4,
                 4,
@@ -37347,6 +37355,7 @@ fn paired_redo_fold_identity_survives_sparse_checkpoint_compaction_handoff_chain
             beta.clone(),
             vec![run(
                 2,
+                1,
                 1,
                 7,
                 7,
@@ -37361,6 +37370,7 @@ fn paired_redo_fold_identity_survives_sparse_checkpoint_compaction_handoff_chain
             alpha.clone(),
             vec![run(
                 0,
+                8,
                 2,
                 4,
                 4,
@@ -37371,7 +37381,7 @@ fn paired_redo_fold_identity_survives_sparse_checkpoint_compaction_handoff_chain
         ),
         stream(
             observed_late.clone(),
-            vec![run(1, 0, 10, 10, None, None, &folds[0])],
+            vec![run(1, 4, 0, 10, 10, None, None, &folds[0])],
         ),
     ];
 
@@ -37406,18 +37416,19 @@ fn paired_redo_fold_identity_survives_sparse_checkpoint_compaction_handoff_chain
                 slot.stream_ordinal,
                 slot.compaction_ordinal,
                 slot.handoff_ordinal,
+                slot.merge_ordinal,
                 slot.fold_ordinal,
                 slot.order,
             ))
             .collect::<Vec<_>>(),
         vec![
-            (0, 0, 0, 0, 2, 4),
-            (0, 0, 0, 0, 2, 5),
-            (0, 0, 1, 0, 2, 4),
-            (0, 1, 0, 0, 2, 4),
-            (1, 0, 0, 0, 2, 4),
+            (0, 0, 0, 0, 5, 2, 4),
+            (0, 0, 0, 0, 5, 2, 5),
+            (0, 0, 1, 0, 6, 2, 4),
+            (0, 1, 0, 0, 7, 2, 4),
+            (1, 0, 0, 0, 8, 2, 4),
         ],
-        "batch, duplicate stream, compacted run, handoff, fold, and order remain distinct",
+        "batch, duplicate stream, compacted run, handoff, merge, fold, and order remain distinct",
     );
     assert_eq!(slots(&alpha)[0].left, Some(left_base.clone()));
     assert_eq!(slots(&alpha)[1].right, Some(right_base.clone()));
@@ -37444,8 +37455,8 @@ fn paired_redo_fold_identity_survives_sparse_checkpoint_compaction_handoff_chain
                     stream(
                         alpha.clone(),
                         vec![
-                            run(0, 2, 1, 1, None, None, &folds[0]),
-                            run(4, 9, 8, 7, None, None, &folds[1]),
+                            run(0, 3, 2, 1, 1, None, None, &folds[0]),
+                            run(4, 9, 9, 8, 7, None, None, &folds[1]),
                         ],
                     ),
                 ],
@@ -37457,6 +37468,7 @@ fn paired_redo_fold_identity_survives_sparse_checkpoint_compaction_handoff_chain
             stream_ordinal: 1,
             compaction_ordinal: 1,
             handoff_ordinal: 4,
+            merge_ordinal: 9,
             fold_ordinal: 9,
             first_order: 8,
             last_order: 7,
