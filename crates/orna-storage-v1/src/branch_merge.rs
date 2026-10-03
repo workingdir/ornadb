@@ -2069,7 +2069,6 @@ impl BranchMergeTombstoneHistory {
 
         extension_folds
     }
-
     /// Submits a complete paired restore wave from at least two distinct
     /// parent branches. Each parent and stable table-column pair retains its
     /// own fragment count and cell retry identity. Parent provenance remains
