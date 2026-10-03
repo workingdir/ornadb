@@ -238,6 +238,11 @@ fn admitted_source_table_mutation_commits_rolls_back_and_replays_terminally() {
         &failed_context,
     )));
     assert_computed_result(&failed_response);
+    assert_eq!(
+        failed_transaction.request_identity(),
+        Some(failed_identity),
+        "the staged source tuple survives the application-to-host transaction boundary"
+    );
     assert!(matches!(
         failed_response.message,
         Message::Result {
@@ -354,6 +359,11 @@ fn admitted_source_table_mutation_commits_rolls_back_and_replays_terminally() {
             &committed_context,
         )));
     assert_computed_result(&committed_response);
+    assert_eq!(
+        committed_transaction.request_identity(),
+        Some(committed_identity),
+        "each later request carries its own complete session/request tuple"
+    );
     let committed_mutation = committed_transaction.mutations[0].clone();
     assert_ne!(
         failed_mutation.id(),
