@@ -124,6 +124,13 @@ fn dev_provider_registry_export_is_byte_stable_schema_valid_and_runtime_identica
         "provider registry exports from separate processes are byte-stable"
     );
     assert_eq!(exported, system_provider_abi_json().as_bytes());
+    let registry: Value = serde_json::from_slice(&exported).expect("exported provider registry");
+    assert_eq!(
+        build_support::canonical_pretty_json(&registry).expect("canonical provider registry")
+            + "\n",
+        std::str::from_utf8(&exported).expect("provider export is UTF-8"),
+        "provider registry export uses deterministic canonical serialization"
+    );
 
     let first_schema_path = output_dir.join("first/dispatch.schema.json");
     let second_schema_path = output_dir.join("second/dispatch.schema.json");

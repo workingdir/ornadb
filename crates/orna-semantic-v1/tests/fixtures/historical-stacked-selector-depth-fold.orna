@@ -1,0 +1,41 @@
+pub fn factory_at(pin: sys.SnapshotRef) =
+    sys.database.as_of(pin).energy.factory;
+
+pub fn stacked_record_at(root_pin: sys.SnapshotRef, middle_pin: sys.SnapshotRef, leaf_pin: sys.SnapshotRef) = {
+    root: factory_at(root_pin),
+    stack: (
+        factory_at(middle_pin),
+        { leaf: factory_at(leaf_pin) },
+    ),
+};
+
+pub fn rejects_cross_depth_record_fold() {
+    let first = stacked_record_at(
+        sys.snapshot("HEAD~501"),
+        sys.snapshot("HEAD~502"),
+        sys.snapshot("HEAD~503"),
+    );
+    let second = stacked_record_at(
+        sys.snapshot("HEAD~504"),
+        sys.snapshot("HEAD~501"),
+        sys.snapshot("HEAD~505"),
+    );
+    {
+        first: first,
+        second: second,
+        folded: [first, second],
+    }
+}
+
+pub fn accepts_depth_stable_record_fold() = [
+    stacked_record_at(
+        sys.snapshot("HEAD~601"),
+        sys.snapshot("HEAD~602"),
+        sys.snapshot("HEAD~603"),
+    ),
+    stacked_record_at(
+        sys.snapshot("HEAD~604"),
+        sys.snapshot("HEAD~605"),
+        sys.snapshot("HEAD~606"),
+    ),
+];

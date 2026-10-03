@@ -1,0 +1,17 @@
+{
+  id: "root",
+  name: "Ladder root",
+  city: "Oslo",
+}
+
+{
+  id: "root/child",
+  name: "Ladder child",
+  city: "Bergen",
+}
+
+{
+  id: "root/child/deep",
+  name: "Ladder deep",
+  city: "Trondheim",
+}
