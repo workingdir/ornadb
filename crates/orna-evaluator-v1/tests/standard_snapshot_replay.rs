@@ -1185,6 +1185,176 @@ fn module_chain_repository() -> (TempDir, PathBuf, PathBuf) {
     (directory, project_path, standard_path)
 }
 
+fn write_dependency_graph_sources(
+    standard_path: &Path,
+    shared: &str,
+    left: &str,
+    right: &str,
+    aggregate: &str,
+) {
+    for (path, source) in [
+        (
+            "main.orna",
+            include_str!("fixtures/snapshot-dependency-graph-main.orna"),
+        ),
+        ("graph/shared.orna", shared),
+        ("graph/left.orna", left),
+        ("graph/right.orna", right),
+        ("graph/aggregate.orna", aggregate),
+    ] {
+        let path = standard_path.join(path);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, source).unwrap();
+    }
+}
+
+fn dependency_graph_sources(
+    shared: &str,
+    left: &str,
+    right: &str,
+    aggregate: &str,
+) -> Vec<(String, String)> {
+    [
+        (
+            "std/main.orna",
+            include_str!("fixtures/snapshot-dependency-graph-main.orna"),
+        ),
+        ("std/graph/shared.orna", shared),
+        ("std/graph/left.orna", left),
+        ("std/graph/right.orna", right),
+        ("std/graph/aggregate.orna", aggregate),
+    ]
+    .into_iter()
+    .map(|(path, source)| (path.to_owned(), source.to_owned()))
+    .collect()
+}
+
+fn dependency_graph_projects() -> (
+    TempDir,
+    Vec<LoadedProject>,
+    Vec<String>,
+    Vec<Vec<(String, String)>>,
+) {
+    let (directory, project_path, standard_path) = module_chain_repository();
+    fs::write(
+        project_path.join("main.orna"),
+        include_str!("fixtures/snapshot-dependency-graph-project.orna"),
+    )
+    .unwrap();
+    write_dependency_graph_sources(
+        &standard_path,
+        include_str!("fixtures/snapshot-dependency-graph-shared-v1.orna"),
+        include_str!("fixtures/snapshot-dependency-graph-left-v1.orna"),
+        include_str!("fixtures/snapshot-dependency-graph-right-v1.orna"),
+        include_str!("fixtures/snapshot-dependency-graph-aggregate-v1.orna"),
+    );
+
+    let mut standard_snapshots = Vec::with_capacity(5);
+    let mut parent_snapshots = Vec::with_capacity(5);
+    let mut capture = |message: &str| {
+        commit_directory(&standard_path, message);
+        let standard_snapshot = git_output_at(&standard_path, &["rev-parse", "HEAD"]);
+        parent_snapshots.push(capture_standard_gitlink(
+            &project_path,
+            &standard_snapshot,
+            message,
+        ));
+        standard_snapshots.push(standard_snapshot);
+    };
+    capture("dependency graph snapshot v1");
+
+    fs::write(
+        standard_path.join("graph/shared.orna"),
+        include_str!("fixtures/snapshot-dependency-graph-shared-v2.orna"),
+    )
+    .unwrap();
+    capture("upgrade shared graph dependency");
+
+    fs::write(
+        standard_path.join("graph/left.orna"),
+        include_str!("fixtures/snapshot-dependency-graph-left-v2.orna"),
+    )
+    .unwrap();
+    capture("upgrade left graph branch");
+
+    fs::write(
+        standard_path.join("graph/right.orna"),
+        include_str!("fixtures/snapshot-dependency-graph-right-v2.orna"),
+    )
+    .unwrap();
+    capture("upgrade right graph branch");
+
+    fs::write(
+        standard_path.join("graph/aggregate.orna"),
+        include_str!("fixtures/snapshot-dependency-graph-aggregate-v2.orna"),
+    )
+    .unwrap();
+    capture("upgrade graph aggregator");
+    drop(capture);
+
+    let source_bundles = vec![
+        dependency_graph_sources(
+            include_str!("fixtures/snapshot-dependency-graph-shared-v1.orna"),
+            include_str!("fixtures/snapshot-dependency-graph-left-v1.orna"),
+            include_str!("fixtures/snapshot-dependency-graph-right-v1.orna"),
+            include_str!("fixtures/snapshot-dependency-graph-aggregate-v1.orna"),
+        ),
+        dependency_graph_sources(
+            include_str!("fixtures/snapshot-dependency-graph-shared-v2.orna"),
+            include_str!("fixtures/snapshot-dependency-graph-left-v1.orna"),
+            include_str!("fixtures/snapshot-dependency-graph-right-v1.orna"),
+            include_str!("fixtures/snapshot-dependency-graph-aggregate-v1.orna"),
+        ),
+        dependency_graph_sources(
+            include_str!("fixtures/snapshot-dependency-graph-shared-v2.orna"),
+            include_str!("fixtures/snapshot-dependency-graph-left-v2.orna"),
+            include_str!("fixtures/snapshot-dependency-graph-right-v1.orna"),
+            include_str!("fixtures/snapshot-dependency-graph-aggregate-v1.orna"),
+        ),
+        dependency_graph_sources(
+            include_str!("fixtures/snapshot-dependency-graph-shared-v2.orna"),
+            include_str!("fixtures/snapshot-dependency-graph-left-v2.orna"),
+            include_str!("fixtures/snapshot-dependency-graph-right-v2.orna"),
+            include_str!("fixtures/snapshot-dependency-graph-aggregate-v1.orna"),
+        ),
+        dependency_graph_sources(
+            include_str!("fixtures/snapshot-dependency-graph-shared-v2.orna"),
+            include_str!("fixtures/snapshot-dependency-graph-left-v2.orna"),
+            include_str!("fixtures/snapshot-dependency-graph-right-v2.orna"),
+            include_str!("fixtures/snapshot-dependency-graph-aggregate-v2.orna"),
+        ),
+    ];
+
+    let repository = Repository::discover(&project_path).unwrap();
+    let loader = ProjectLoader::default();
+    let projects = parent_snapshots
+        .iter()
+        .zip(&standard_snapshots)
+        .zip(&source_bundles)
+        .map(|((parent_snapshot, standard_snapshot), sources)| {
+            let parent_snapshot = repository.resolve_snapshot(parent_snapshot).unwrap();
+            assert_eq!(
+                repository
+                    .committed_submodule_commit(&parent_snapshot, "stdlib/std")
+                    .unwrap()
+                    .as_str(),
+                standard_snapshot
+            );
+            let profile =
+                StandardDependencyProfile::from_sources(standard_snapshot.clone(), sources.clone())
+                    .unwrap();
+            loader
+                .load_committed_snapshot_with_standard_profile(
+                    &repository,
+                    &parent_snapshot,
+                    Some(profile),
+                )
+                .unwrap()
+        })
+        .collect();
+    (directory, projects, standard_snapshots, source_bundles)
+}
+
 fn module_chain_projects() -> (TempDir, LoadedProject, LoadedProject, [String; 2]) {
     let (directory, project_path, standard_path) = module_chain_repository();
     write_module_chain_version(
@@ -2637,6 +2807,95 @@ fn stepwise_transitive_replay_retains_prior_pins_after_each_upgrade() {
             .unwrap_err()
             .code(),
             "ORNA-REPL-STANDARD"
+        );
+    }
+}
+
+#[test]
+fn diamond_dependency_snapshots_replay_deterministically_when_interleaved() {
+    let (_directory, projects, snapshots, source_bundles) = dependency_graph_projects();
+    assert_eq!(projects.len(), 5);
+    assert!(snapshots.windows(2).all(|pair| pair[0] != pair[1]));
+
+    let expected_results = [1112, 2122, 2322, 2324, 23024];
+    let mut sessions = Vec::with_capacity(projects.len());
+    for (index, project) in projects.iter().enumerate() {
+        let profile = project
+            .standard_profile()
+            .expect("each gitlink pin carries an explicit profile");
+        assert_eq!(profile.snapshot(), snapshots[index]);
+        assert_eq!(
+            project
+                .standard_modules()
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            ["std/graph/aggregate.orna"]
+        );
+        assert_eq!(
+            source_bundles[index]
+                .iter()
+                .map(|(path, _)| path.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "std/main.orna",
+                "std/graph/shared.orna",
+                "std/graph/left.orna",
+                "std/graph/right.orna",
+                "std/graph/aggregate.orna",
+            ]
+        );
+        for (path, source) in &source_bundles[index] {
+            let parsed = orna_syntax_v1::parse_module_with_file(source, path);
+            assert!(parsed.is_ok(), "fixture {path} did not parse: {:?}", parsed.diagnostics);
+        }
+        project
+            .standard_catalogue(source_bundles[index].clone())
+            .unwrap_or_else(|error| {
+                panic!(
+                    "snapshot {} rejected its source catalogue: {error:?}",
+                    snapshots[index]
+                )
+            })
+            .expect("the explicit graph profile creates a catalogue");
+        sessions.push(
+            AdmittedReplSession::from_loaded_project(
+                project,
+                source_bundles[index].clone(),
+                Limits::default(),
+            )
+            .unwrap_or_else(|error| {
+                panic!(
+                    "snapshot {} rejected its graph sources: {}",
+                    snapshots[index],
+                    error.code()
+                )
+            }),
+        );
+    }
+
+    let use_graph = include_str!("fixtures/snapshot-dependency-graph-use.orna");
+    for session in &mut sessions {
+        assert_eq!(
+            session.submit(use_graph),
+            Ok(None),
+            "a captured aggregate dependency should be importable"
+        );
+    }
+    let replay = include_str!("fixtures/snapshot-dependency-graph-call.orna");
+    for index in [4, 2, 0, 3, 1, 4, 0, 1, 3, 2] {
+        let actual = sessions[index].submit(replay).unwrap_or_else(|error| {
+            panic!(
+                "snapshot {} rejected graph replay: {}",
+                snapshots[index],
+                error.code()
+            )
+        });
+        assert_eq!(
+            actual,
+            Some(int(expected_results[index])),
+            "snapshot {} changed its computed graph value during interleaved replay",
+            snapshots[index]
         );
     }
 }
