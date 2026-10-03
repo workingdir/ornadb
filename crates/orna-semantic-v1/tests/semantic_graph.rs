@@ -7297,6 +7297,142 @@ fn nested_sibling_reconciliation_storm_rolls_back_only_crossed_scopes() {
 }
 
 #[test]
+fn nested_sibling_omission_storm_rolls_back_only_the_crossed_depth_leaves() {
+    let source =
+        include_str!("fixtures/historical-nested-sibling-omission-depth-storm.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-nested-sibling-omission-depth-storm.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    let type_diagnostics = result
+        .diagnostics
+        .iter()
+        .filter(|diagnostic| diagnostic.code() == DIAG_TYPE)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        type_diagnostics.len(),
+        1,
+        "only the row that reuses a pin across the omitted sibling depth should be rejected: {:?}",
+        type_diagnostics
+            .iter()
+            .map(|diagnostic| diagnostic.message())
+            .collect::<Vec<_>>()
+    );
+    let module = result
+        .modules
+        .values()
+        .find(|module| {
+            module.symbols.contains_key(
+                "omitted_sibling_depth_storm_keeps_adjacent_depth_labels",
+            )
+        })
+        .expect("nested sibling omission-depth fixture module");
+    let Type::Function { result, .. } = &module.symbols
+        ["omitted_sibling_depth_storm_keeps_adjacent_depth_labels"]
+        .ty
+    else {
+        panic!("omission-depth storm must retain its computed result");
+    };
+    let Type::Record(fields) = result.as_ref() else {
+        panic!("omission-depth storm must return a record: {result:?}");
+    };
+    let Type::List(parent) = fields.get("parent_fold").expect("parent fold") else {
+        panic!("omission-depth storm must retain its parent list");
+    };
+    let Type::Record(parent) = parent.as_ref() else {
+        panic!("folded parent must remain a record: {parent:?}");
+    };
+    let Type::Record(siblings) = parent.get("nested").expect("nested siblings") else {
+        panic!("folded nested field must remain a record");
+    };
+    let pin_contexts = |sibling: &str| {
+        let Type::Record(depths) = &siblings[sibling] else {
+            panic!("{sibling} must retain its depth record");
+        };
+        let Type::Tuple(depths) = &depths["pins"] else {
+            panic!("{sibling} must retain both nested depths");
+        };
+        depths
+            .iter()
+            .map(|depth| {
+                let Type::Tuple(slots) = depth else {
+                    panic!("{sibling} depth must retain its paired pins");
+                };
+                slots
+                    .iter()
+                    .map(|slot| {
+                        let mut contexts = BTreeSet::new();
+                        collect_snapshot_contexts(slot, &mut contexts);
+                        contexts
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>()
+    };
+
+    assert_eq!(
+        pin_contexts("left"),
+        [
+            vec![
+                BTreeSet::new(),
+                BTreeSet::from([
+                    "selector:HEAD~201".into(),
+                    "selector:HEAD~242".into(),
+                    "selector:HEAD~301".into(),
+                ]),
+            ],
+            vec![
+                BTreeSet::from([
+                    "selector:HEAD~120".into(),
+                    "selector:HEAD~220".into(),
+                    "selector:HEAD~240".into(),
+                    "selector:HEAD~320".into(),
+                ]),
+                BTreeSet::from([
+                    "selector:HEAD~121".into(),
+                    "selector:HEAD~221".into(),
+                    "selector:HEAD~241".into(),
+                    "selector:HEAD~321".into(),
+                ]),
+            ],
+        ],
+        "only the crossed left pin leaf returns to its omitted anchor; its adjacent lane and depth keep folding"
+    );
+    assert_eq!(
+        pin_contexts("right"),
+        [
+            vec![
+                BTreeSet::from(["selector:HEAD~100".into()]),
+                BTreeSet::from([
+                    "selector:HEAD~101".into(),
+                    "selector:HEAD~211".into(),
+                    "selector:HEAD~251".into(),
+                    "selector:HEAD~311".into(),
+                ]),
+            ],
+            vec![
+                BTreeSet::from([
+                    "selector:HEAD~230".into(),
+                    "selector:HEAD~260".into(),
+                    "selector:HEAD~330".into(),
+                ]),
+                BTreeSet::from([
+                    "selector:HEAD~231".into(),
+                    "selector:HEAD~261".into(),
+                    "selector:HEAD~331".into(),
+                ]),
+            ],
+        ],
+        "only the paired right pin leaf returns to its original identity while all adjacent pins keep labels"
+    );
+}
+
+#[test]
 fn multi_parent_checkpoint_folds_preserve_labels_across_paired_omissions() {
     let source = include_str!(
         "fixtures/historical-paired-omission-multi-parent-reconciliation.orna"
