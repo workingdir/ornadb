@@ -988,7 +988,7 @@ impl PackageResolver {
         previous: &ReboundPathResolution,
         restoration_folds: &[[(&ReboundPathCheckpoint, &[[PinnedDatabase; 2]]); 2]],
         expected_fold_transitions: &[
-            [(NestedPairTerminalRouteIdentity, NestedPairTerminalRouteIdentity); 2],
+            [(NestedPairTerminalRouteIdentity, NestedPairTerminalRouteIdentity); 2]
         ],
     ) -> Result<
         (
