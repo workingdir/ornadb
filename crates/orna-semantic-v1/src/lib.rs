@@ -7196,15 +7196,18 @@ fn infer(
             let first_parent = element_types.first().cloned();
             let transactional_checkpoint_fold = element_types.len() > 2
                 && first_parent.as_ref().is_some_and(|first| {
-                    matches!(first, Type::Tuple(_))
-                        && type_contains_pinned_snapshot_identity(first)
+                    type_contains_pinned_checkpoint_tuple(first)
+                        || (type_contains_omitted_checkpoint_tuple(first)
+                            && element_types
+                                .iter()
+                                .any(type_contains_pinned_checkpoint_tuple))
                 });
             let mut rejected_checkpoint_parent = false;
             let mut ty = None;
             for value in element_types {
                 if let Some(prior) = &ty {
                     let merged = if transactional_checkpoint_fold {
-                        merge_multi_parent_checkpoint_tuple(
+                        merge_multi_parent_checkpoint_value(
                             prior,
                             &value,
                             first_parent.as_ref().expect("transactional fold has a parent"),
@@ -7648,6 +7651,11 @@ fn infer(
             }
             if let Some(inferred) =
                 infer_relation_collection_call(callee, arguments, scope, local, diagnostics)
+            {
+                return inferred;
+            }
+            if let Some(inferred) =
+                infer_relation_statistics_call(callee, arguments, None, scope, local, diagnostics)
             {
                 return inferred;
             }
@@ -9522,8 +9530,20 @@ fn merge_list_element_types(left: &Type, right: &Type) -> Option<Type> {
         // cannot silently combine terminal values from separate lanes.
         return None;
     }
+    if (type_contains_pinned_checkpoint_tuple(left)
+        || type_contains_pinned_checkpoint_tuple(right))
+        && (!checkpoint_pin_map_widths_match(left, right)
+            || !nested_checkpoint_compaction_fold_preserves_pin_identity(left, right))
+    {
+        return None;
+    }
     if let (Type::Tuple(left), Type::Tuple(right)) = (left, right)
         && !tuple_checkpoint_promotion_matches(left, right)
+    {
+        return None;
+    }
+    if let (Type::Record(left), Type::Record(right)) = (left, right)
+        && !record_checkpoint_promotion_matches(left, right)
     {
         return None;
     }
@@ -9635,6 +9655,13 @@ fn merge_checkpoint_field_map(left: &Type, right: &Type) -> Option<Type> {
             })
         }
         (Type::List(left), Type::List(right)) => {
+            if (type_contains_pinned_checkpoint_tuple(left)
+                || type_contains_pinned_checkpoint_tuple(right))
+                && (!checkpoint_pin_map_widths_match(left, right)
+                    || !nested_checkpoint_compaction_fold_preserves_pin_identity(left, right))
+            {
+                return None;
+            }
             // Tuple shape is a list-element promotion contract: otherwise a
             // later row with narrower checkpoint maps can widen the already
             // inferred tuple slots. Keep this check at collection promotion
@@ -9642,6 +9669,11 @@ fn merge_checkpoint_field_map(left: &Type, right: &Type) -> Option<Type> {
             // its existing binder semantics.
             if let (Type::Tuple(left), Type::Tuple(right)) = (left.as_ref(), right.as_ref())
                 && !tuple_checkpoint_promotion_matches(left, right)
+            {
+                return None;
+            }
+            if let (Type::Record(left), Type::Record(right)) = (left.as_ref(), right.as_ref())
+                && !record_checkpoint_promotion_matches(left, right)
             {
                 return None;
             }
@@ -10095,6 +10127,63 @@ fn standard_collection_module_operation<'a>(
         }
         _ => None,
     }
+}
+
+fn standard_statistics_module_operation<'a>(
+    callee: &'a Expr,
+    scope: &Scope,
+    local: &BTreeMap<String, Symbol>,
+) -> Option<&'a str> {
+    let path = qualified_path(callee)?;
+    match path.as_slice() {
+        ["std", "stats", operation]
+            if !local.contains_key("std") && is_portable_statistics_operation(operation) =>
+        {
+            Some(*operation)
+        }
+        [alias, operation] if !local.contains_key(*alias) => {
+            let namespace = scope.modules.get(*alias)?;
+            if namespace.0.len() == 2
+                && namespace.0[0] == "std"
+                && namespace.0[1] == "stats"
+                && is_portable_statistics_operation(operation)
+                && scope
+                    .available_modules
+                    .get(namespace)
+                    .is_some_and(|module| {
+                        module
+                            .exports
+                            .get(*operation)
+                            .is_some_and(|symbol| symbol.kind == SymbolKind::Function)
+                    })
+            {
+                Some(*operation)
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
+fn is_portable_statistics_operation(operation: &str) -> bool {
+    matches!(
+        operation,
+        "mean"
+            | "median"
+            | "percentile"
+            | "sum"
+            | "min"
+            | "max"
+            | "range"
+            | "mode"
+            | "variance"
+            | "standard_deviation"
+            | "histogram"
+            | "rate"
+            | "derivative"
+            | "integrate"
+    )
 }
 
 // The pinned collection source declares one generic finite-list signature.
@@ -11695,6 +11784,291 @@ fn infer_relation_call(
     })
 }
 
+/// Applies the pinned statistics signatures to relation rows and points.
+/// Finite-list calls keep using the standard module's generic source signatures.
+fn infer_relation_statistics_call(
+    callee: &Expr,
+    arguments: &[orna_syntax_v1::Argument],
+    input: Option<Inferred>,
+    scope: &Scope,
+    local: &BTreeMap<String, Symbol>,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Option<Inferred> {
+    let operation = standard_statistics_module_operation(callee, scope, local)?;
+    let (parameters, required) = match operation {
+        "mean" | "median" | "variance" | "standard_deviation" => {
+            (&["rows", "scale", "rounding"][..], 1)
+        }
+        "percentile" => (&["rows", "p", "interpolation", "scale", "rounding"][..], 3),
+        "sum" | "min" | "max" | "range" | "mode" => (&["rows"][..], 1),
+        "histogram" => (&["rows", "bins", "include_final_upper"][..], 2),
+        "rate" | "derivative" | "integrate" => (&["points"][..], 1),
+        _ => return None,
+    };
+    let implicit = usize::from(input.is_some());
+    let mut malformed = arguments.len() + implicit > parameters.len();
+    let mut slots = vec![None; parameters.len()];
+    if input.is_some() {
+        slots[0] = Some(usize::MAX);
+    }
+    let mut positional = implicit;
+    let mut named_started = false;
+    for (index, argument) in arguments.iter().enumerate() {
+        let slot = match argument.name.as_deref() {
+            Some(name) => {
+                named_started = true;
+                parameters.iter().position(|parameter| *parameter == name)
+            }
+            None if named_started => None,
+            None => {
+                let slot = Some(positional);
+                positional += 1;
+                slot
+            }
+        };
+        match slot {
+            Some(0) if implicit > 0 => malformed = true,
+            Some(slot) if slot < slots.len() && slots[slot].is_none() => {
+                slots[slot] = Some(index);
+            }
+            _ => malformed = true,
+        }
+    }
+    if slots[..required].iter().any(Option::is_none) {
+        malformed = true;
+    }
+
+    if implicit == 0 {
+        let Some(index) = slots[0] else {
+            return None;
+        };
+        let mut probe_diagnostics = Vec::new();
+        if !matches!(
+            infer(
+                &arguments[index].value,
+                scope,
+                local,
+                &mut probe_diagnostics
+            )
+            .ty,
+            Type::Relation(_)
+        ) {
+            return None;
+        }
+    } else if !matches!(
+        input.as_ref().map(|input| &input.ty),
+        Some(Type::Relation(_))
+    ) {
+        return None;
+    }
+
+    let mut effects = input
+        .as_ref()
+        .map_or_else(EffectSummary::default, |input| input.effects.clone());
+    let mut values = vec![None; parameters.len()];
+    if let Some(input) = input {
+        values[0] = Some(input);
+    }
+    for (index, argument) in arguments.iter().enumerate() {
+        let Some(slot) = slots.iter().position(|slot| *slot == Some(index)) else {
+            continue;
+        };
+        let inferred = infer(&argument.value, scope, local, diagnostics);
+        effects.join(&inferred.effects);
+        values[slot] = Some(inferred);
+    }
+
+    let Some(Type::Relation(element)) = values[0].as_ref().map(|value| &value.ty) else {
+        return None;
+    };
+    let element = element.as_ref().clone();
+    let mut valid = !malformed;
+    if malformed {
+        diagnostics.push(diag(
+            DIAG_TYPE,
+            format!("std.stats.{operation} relation arguments do not match its static signature"),
+        ));
+    }
+    let argument_type = |slot: usize| {
+        values
+            .get(slot)
+            .and_then(Option::as_ref)
+            .map(|value| &value.ty)
+    };
+    let numeric = is_statistics_numeric_type(&element);
+    match operation {
+        "mean" | "median" | "variance" | "standard_deviation" | "percentile" => {
+            if !numeric {
+                diagnostics.push(diag(
+                    DIAG_TYPE,
+                    format!("std.stats.{operation} requires numeric relation rows"),
+                ));
+                valid = false;
+            }
+        }
+        "sum" if !is_sum_element_type(&element) => {
+            diagnostics.push(diag(
+                DIAG_TYPE,
+                "std.stats.sum requires numeric relation rows",
+            ));
+            valid = false;
+        }
+        "min" | "max" if !is_sort_key_type(&element) => {
+            diagnostics.push(diag(
+                DIAG_TYPE,
+                format!("std.stats.{operation} requires ordered relation rows"),
+            ));
+            valid = false;
+        }
+        "range" if !numeric => {
+            diagnostics.push(diag(
+                DIAG_TYPE,
+                "std.stats.range requires numeric relation rows",
+            ));
+            valid = false;
+        }
+        "mode" if is_default_float_equality_type(&element) => {
+            diagnostics.push(diag(
+                DIAG_TYPE,
+                "std.stats.mode requires a lawful equality relation; default Float equality is unavailable",
+            ));
+            valid = false;
+        }
+        "histogram" if !is_sort_key_type(&element) => {
+            diagnostics.push(diag(
+                DIAG_TYPE,
+                "std.stats.histogram requires ordered relation rows",
+            ));
+            valid = false;
+        }
+        "rate" | "derivative" | "integrate" => match &element {
+            Type::Tuple(parts)
+                if parts.len() == 2
+                    && parts[0] == Type::Instant
+                    && is_statistics_numeric_type(&parts[1]) => {}
+            _ => {
+                diagnostics.push(diag(
+                    DIAG_TYPE,
+                    format!("std.stats.{operation} requires (Instant, numeric) relation rows"),
+                ));
+                valid = false;
+            }
+        },
+        _ => {}
+    }
+
+    let numeric_argument_slots = match operation {
+        "percentile" => &[1][..],
+        _ => &[][..],
+    };
+    for slot in numeric_argument_slots {
+        if let Some(ty) = argument_type(*slot)
+            && *ty != Type::Error
+            && !is_statistics_numeric_type(ty)
+        {
+            diagnostics.push(diag(
+                DIAG_TYPE,
+                "std.stats.percentile probability must be numeric",
+            ));
+            valid = false;
+        }
+    }
+    if operation == "percentile"
+        && let Some(ty) = argument_type(2)
+        && !matches!(ty, Type::Text | Type::Error)
+    {
+        diagnostics.push(diag(
+            DIAG_TYPE,
+            "std.stats.percentile interpolation must be Str",
+        ));
+        valid = false;
+    }
+    for (slot, base) in [(1, Type::Int), (2, Type::Text)] {
+        let applies = matches!(
+            operation,
+            "mean" | "median" | "variance" | "standard_deviation"
+        ) && slot < parameters.len();
+        if applies
+            && let Some(ty) = argument_type(slot)
+            && *ty != Type::Error
+            && !is_optional_stat_argument(ty, &base)
+        {
+            diagnostics.push(diag(
+                DIAG_TYPE,
+                "statistics scale and rounding options have invalid types",
+            ));
+            valid = false;
+        }
+    }
+    if operation == "percentile" {
+        for (slot, base) in [(3, Type::Int), (4, Type::Text)] {
+            if let Some(ty) = argument_type(slot)
+                && *ty != Type::Error
+                && !is_optional_stat_argument(ty, &base)
+            {
+                diagnostics.push(diag(
+                    DIAG_TYPE,
+                    "statistics scale and rounding options have invalid types",
+                ));
+                valid = false;
+            }
+        }
+    }
+    if operation == "histogram" {
+        if let Some(ty) = argument_type(1)
+            && !matches!(ty, Type::List(bins) if matches!(bins.as_ref(), Type::Tuple(parts) if parts.len() == 2 && parts[0] == element && parts[1] == element))
+            && *ty != Type::Error
+        {
+            diagnostics.push(diag(
+                DIAG_TYPE,
+                "std.stats.histogram bins must be a list of matching boundary pairs",
+            ));
+            valid = false;
+        }
+        if let Some(ty) = argument_type(2)
+            && !matches!(ty, Type::Bool | Type::Error)
+        {
+            diagnostics.push(diag(
+                DIAG_TYPE,
+                "std.stats.histogram include_final_upper must be Bool",
+            ));
+            valid = false;
+        }
+    }
+    effects.may_fail = true;
+    let result = match operation {
+        "sum" => element.clone(),
+        "mode" => Type::List(Box::new(element.clone())),
+        "histogram" => Type::List(Box::new(Type::Int)),
+        "derivative" => Type::List(Box::new(element.clone())),
+        "mean" | "median" | "percentile" | "min" | "max" | "range" | "variance"
+        | "standard_deviation" | "rate" | "integrate" => {
+            Type::Optional(Box::new(if matches!(operation, "rate" | "integrate") {
+                match element {
+                    Type::Tuple(parts) if parts.len() == 2 => parts[1].clone(),
+                    _ => Type::Error,
+                }
+            } else {
+                element.clone()
+            }))
+        }
+        _ => Type::Error,
+    };
+    Some(Inferred {
+        ty: if valid { result } else { Type::Error },
+        effects,
+    })
+}
+
+fn is_statistics_numeric_type(ty: &Type) -> bool {
+    matches!(ty, Type::Int | Type::Decimal | Type::Float)
+        || matches!(ty, Type::Applied { base, .. } if base == "Float")
+}
+
+fn is_optional_stat_argument(ty: &Type, inner: &Type) -> bool {
+    ty == inner || ty == &Type::Null || ty == &Type::Optional(Box::new(inner.clone()))
+}
+
 /// Checks the direct core relation overloads. The finite-list overloads are
 /// intentionally checked by their existing source/profile path; this helper
 /// only claims an unqualified intrinsic when its rows argument is a relation.
@@ -12616,6 +12990,22 @@ fn infer_success_pipeline(
             ty: Type::Error,
             effects: input.effects,
         };
+    }
+    if matches!(&input.ty, Type::Relation(_))
+        && let Expr::Call {
+            callee, arguments, ..
+        } = rhs
+        && standard_statistics_module_operation(callee, scope, local).is_some()
+    {
+        return infer_relation_statistics_call(
+            callee,
+            arguments,
+            Some(input),
+            scope,
+            local,
+            diagnostics,
+        )
+        .expect("recognized statistics module operation has relation input");
     }
     if matches!(&input.ty, Type::Relation(_))
         && let Expr::Call {
@@ -17886,6 +18276,104 @@ fn merge_multi_parent_checkpoint_tuple(
     merge_checkpoint_field_map(&Type::Tuple(accumulated.clone()), &Type::Tuple(parent.clone()))
 }
 
+/// Find a pinned tuple at any structural depth so parent-list inference can
+/// make its reconciliation transactional even when records wrap the tuple.
+fn type_contains_pinned_checkpoint_tuple(ty: &Type) -> bool {
+    match ty {
+        Type::Tuple(_) => type_contains_pinned_snapshot_identity(ty),
+        Type::List(element)
+        | Type::Range(element)
+        | Type::Relation(element)
+        | Type::Stream(element)
+        | Type::Optional(element) => type_contains_pinned_checkpoint_tuple(element),
+        Type::Record(fields) => fields.values().any(type_contains_pinned_checkpoint_tuple),
+        Type::Applied { arguments, .. } => arguments
+            .iter()
+            .any(type_contains_pinned_checkpoint_tuple),
+        Type::Function {
+            parameters, result, ..
+        } => {
+            parameters
+                .iter()
+                .any(type_contains_pinned_checkpoint_tuple)
+                || type_contains_pinned_checkpoint_tuple(result)
+        }
+        Type::MoneyPerUnit { currency, unit } => {
+            type_contains_pinned_checkpoint_tuple(currency)
+                || type_contains_pinned_checkpoint_tuple(unit)
+        }
+        _ => false,
+    }
+}
+
+/// A tuple whose checkpoint leaves are all omitted still fixes the fold shape.
+/// When later rows supply real pins, keep that first-row boundary as the
+/// transactional recovery point instead of letting a failed parent leave a
+/// partially promoted map behind.
+fn type_contains_omitted_checkpoint_tuple(ty: &Type) -> bool {
+    match ty {
+        Type::Tuple(elements) => elements.iter().any(|element| {
+            matches!(element, Type::Bottom) || type_contains_omitted_checkpoint_tuple(element)
+        }),
+        Type::List(element)
+        | Type::Range(element)
+        | Type::Relation(element)
+        | Type::Stream(element)
+        | Type::Optional(element) => type_contains_omitted_checkpoint_tuple(element),
+        Type::Record(fields) => fields.values().any(type_contains_omitted_checkpoint_tuple),
+        Type::Applied { arguments, .. } => arguments
+            .iter()
+            .any(type_contains_omitted_checkpoint_tuple),
+        Type::Function {
+            parameters, result, ..
+        } => {
+            parameters
+                .iter()
+                .any(type_contains_omitted_checkpoint_tuple)
+                || type_contains_omitted_checkpoint_tuple(result)
+        }
+        Type::MoneyPerUnit { currency, unit } => {
+            type_contains_omitted_checkpoint_tuple(currency)
+                || type_contains_omitted_checkpoint_tuple(unit)
+        }
+        _ => false,
+    }
+}
+
+/// Reconcile another parent into a nested checkpoint fold. Source parents
+/// retain the first parent's map widths, while the accumulated maps may grow.
+/// Check identity sharing across every aligned map in the row so nested sibling
+/// tuples cannot promote the same depth label through different record paths.
+fn merge_multi_parent_checkpoint_value(
+    accumulated: &Type,
+    parent: &Type,
+    first_parent: &Type,
+) -> Option<Type> {
+    if matches!(first_parent, Type::Tuple(_)) {
+        return merge_multi_parent_checkpoint_tuple(accumulated, parent, first_parent);
+    }
+    if !checkpoint_pin_map_widths_match(first_parent, parent)
+        || !nested_checkpoint_compaction_fold_preserves_pin_identity(accumulated, parent)
+    {
+        return None;
+    }
+
+    merge_checkpoint_field_map(accumulated, parent)
+}
+
+fn nested_checkpoint_compaction_fold_preserves_pin_identity(left: &Type, right: &Type) -> bool {
+    let mut pin_maps = Vec::new();
+    if !collect_corresponding_snapshot_context_maps_at_path(
+        left,
+        right,
+        &mut pin_maps,
+        &mut Vec::new(),
+    ) {
+        return false;
+    }
+    checkpoint_snapshot_fold_preserves_pin_identity(&pin_maps)
+}
+
 /// A folded tuple map must not invent cross-slot identity by unioning maps
 /// from opposite rows. The reference does not define that compaction case;
 /// only promote when every identity shared after the fold was shared within
@@ -17895,32 +18383,91 @@ fn tuple_checkpoint_compaction_fold_preserves_pin_identity(
     right: &[Type],
 ) -> bool {
     let mut pin_maps = Vec::new();
-    for (left, right) in left.iter().zip(right) {
-        if !collect_corresponding_snapshot_context_maps(left, right, &mut pin_maps) {
+    let mut path = Vec::new();
+    for (index, (left, right)) in left.iter().zip(right).enumerate() {
+        if !collect_corresponding_snapshot_context_maps_at_boundary(
+            left,
+            right,
+            &mut pin_maps,
+            &mut path,
+            SnapshotTopologyBoundary::TupleElement(index),
+        ) {
             return false;
         }
     }
 
-    pin_maps.iter().enumerate().all(|(index, (left, right))| {
-        let folded = left.union(right).cloned().collect::<BTreeSet<_>>();
-        pin_maps[index + 1..]
-            .iter()
-            .all(|(other_left, other_right)| {
-                let folded_other = other_left
-                    .union(other_right)
-                    .cloned()
-                    .collect::<BTreeSet<_>>();
-                let shared_before = left
-                    .intersection(other_left)
-                    .chain(right.intersection(other_right))
-                    .cloned()
-                    .collect::<BTreeSet<_>>();
-                let shared_after = folded
-                    .intersection(&folded_other)
-                    .cloned()
-                    .collect::<BTreeSet<_>>();
-                shared_after == shared_before
+    checkpoint_snapshot_fold_preserves_pin_identity(&pin_maps)
+}
+
+fn record_checkpoint_promotion_matches(
+    left: &BTreeMap<String, Type>,
+    right: &BTreeMap<String, Type>,
+) -> bool {
+    left.len() == right.len()
+        && left.iter().all(|(name, left)| {
+            right.get(name).is_some_and(|right| {
+                checkpoint_pin_map_widths_match(left, right)
             })
+        })
+        && record_checkpoint_compaction_fold_preserves_pin_identity(left, right)
+}
+
+fn record_checkpoint_compaction_fold_preserves_pin_identity(
+    left: &BTreeMap<String, Type>,
+    right: &BTreeMap<String, Type>,
+) -> bool {
+    if left.len() != right.len() {
+        return false;
+    }
+    let mut pin_maps = Vec::new();
+    let mut path = Vec::new();
+    for (name, left) in left {
+        let Some(right) = right.get(name) else {
+            return false;
+        };
+        if !collect_corresponding_snapshot_context_maps_at_boundary(
+            left,
+            right,
+            &mut pin_maps,
+            &mut path,
+            SnapshotTopologyBoundary::RecordField(name.clone()),
+        ) {
+            return false;
+        }
+    }
+
+    checkpoint_snapshot_fold_preserves_pin_identity(&pin_maps)
+}
+
+/// Folding selector maps across collection rows must not invent sharing
+/// between structural checkpoint slots that were independent in both rows.
+fn checkpoint_snapshot_fold_preserves_pin_identity(
+    pin_maps: &[SnapshotContextMapPair],
+) -> bool {
+    pin_maps.iter().enumerate().all(|(index, pair)| {
+        let folded = pair
+            .expected
+            .union(&pair.actual)
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        pin_maps[index + 1..].iter().all(|other| {
+            let folded_other = other
+                .expected
+                .union(&other.actual)
+                .cloned()
+                .collect::<BTreeSet<_>>();
+            let shared_before = pair
+                .expected
+                .intersection(&other.expected)
+                .chain(pair.actual.intersection(&other.actual))
+                .cloned()
+                .collect::<BTreeSet<_>>();
+            let shared_after = folded
+                .intersection(&folded_other)
+                .cloned()
+                .collect::<BTreeSet<_>>();
+            shared_after == shared_before
+        })
     })
 }
 
@@ -17991,18 +18538,47 @@ fn checkpoint_pin_map_widths_match(left: &Type, right: &Type) -> bool {
     }
 }
 
-/// A tuple rebind may rename snapshot selectors, but each selector label must
-/// keep the same tuple-map membership. Pairwise overlap counts lose higher
-/// order label relationships after compaction folds, so compare the full
-/// membership signatures. The reference defines historical pinning but is
-/// silent on local tuple rebind labels across checkpoint compaction.
+/// Structural boundaries for checkpoint selector maps. ORNA-CP-003 exposes
+/// historical checkpoint selection and ORNA-SYS-136 resolves explicit
+/// selectors, but neither specifies local record/tuple folds; preserve the
+/// complete boundary path as the conservative local rule.
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+enum SnapshotTopologyBoundary {
+    ListElement,
+    RangeElement,
+    RelationElement,
+    StreamElement,
+    OptionalValue,
+    TupleElement(usize),
+    RecordField(String),
+    FunctionParameter(usize),
+    FunctionResult,
+    AppliedArgument { base: String, index: usize },
+    MoneyCurrency,
+    MoneyUnit,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct SnapshotContextMapPair {
+    boundary_path: Vec<SnapshotTopologyBoundary>,
+    expected: BTreeSet<String>,
+    actual: BTreeSet<String>,
+}
+
 fn tuple_pin_identity_topology_matches(expected: &[Type], actual: &[Type]) -> bool {
     if expected.len() != actual.len() {
         return false;
     }
     let mut pin_maps = Vec::new();
-    for (expected, actual) in expected.iter().zip(actual) {
-        if !collect_corresponding_snapshot_context_maps(expected, actual, &mut pin_maps) {
+    let mut path = Vec::new();
+    for (index, (expected, actual)) in expected.iter().zip(actual).enumerate() {
+        if !collect_corresponding_snapshot_context_maps_at_boundary(
+            expected,
+            actual,
+            &mut pin_maps,
+            &mut path,
+            SnapshotTopologyBoundary::TupleElement(index),
+        ) {
             return false;
         }
     }
@@ -18020,11 +18596,18 @@ fn record_pin_identity_topology_matches(
     actual: &BTreeMap<String, Type>,
 ) -> bool {
     let mut pin_maps = Vec::new();
+    let mut path = Vec::new();
     for (name, expected) in expected {
         let Some(actual) = actual.get(name) else {
             return false;
         };
-        if !collect_corresponding_snapshot_context_maps(expected, actual, &mut pin_maps) {
+        if !collect_corresponding_snapshot_context_maps_at_boundary(
+            expected,
+            actual,
+            &mut pin_maps,
+            &mut path,
+            SnapshotTopologyBoundary::RecordField(name.clone()),
+        ) {
             return false;
         }
     }
@@ -18033,22 +18616,30 @@ fn record_pin_identity_topology_matches(
 }
 
 fn snapshot_context_topology_matches(
-    pin_maps: &[(BTreeSet<String>, BTreeSet<String>)],
+    pin_maps: &[SnapshotContextMapPair],
 ) -> bool {
     fn membership_signatures(
-        pin_maps: &[(BTreeSet<String>, BTreeSet<String>)],
+        pin_maps: &[SnapshotContextMapPair],
         expected: bool,
-    ) -> BTreeMap<Vec<usize>, usize> {
-        let mut labels = BTreeMap::<String, Vec<usize>>::new();
-        for (map_index, (expected_map, actual_map)) in pin_maps.iter().enumerate() {
-            let selectors = if expected { expected_map } else { actual_map };
+    ) -> BTreeMap<Vec<Vec<SnapshotTopologyBoundary>>, usize> {
+        let mut labels = BTreeMap::<String, BTreeSet<Vec<SnapshotTopologyBoundary>>>::new();
+        for pair in pin_maps {
+            let selectors = if expected {
+                &pair.expected
+            } else {
+                &pair.actual
+            };
             for selector in selectors {
-                labels.entry(selector.clone()).or_default().push(map_index);
+                labels
+                    .entry(selector.clone())
+                    .or_default()
+                    .insert(pair.boundary_path.clone());
             }
         }
 
         let mut signatures = BTreeMap::new();
         for membership in labels.into_values() {
+            let membership = membership.into_iter().collect::<Vec<_>>();
             *signatures.entry(membership).or_insert(0) += 1;
         }
         signatures
@@ -18056,14 +18647,28 @@ fn snapshot_context_topology_matches(
 
     pin_maps
         .iter()
-        .all(|(expected, actual)| expected.len() == actual.len())
+        .all(|pair| pair.expected.len() == pair.actual.len())
         && membership_signatures(pin_maps, true) == membership_signatures(pin_maps, false)
 }
 
-fn collect_corresponding_snapshot_context_maps(
+fn collect_corresponding_snapshot_context_maps_at_boundary(
     expected: &Type,
     actual: &Type,
-    into: &mut Vec<(BTreeSet<String>, BTreeSet<String>)>,
+    into: &mut Vec<SnapshotContextMapPair>,
+    path: &mut Vec<SnapshotTopologyBoundary>,
+    boundary: SnapshotTopologyBoundary,
+) -> bool {
+    path.push(boundary);
+    let matched = collect_corresponding_snapshot_context_maps_at_path(expected, actual, into, path);
+    path.pop();
+    matched
+}
+
+fn collect_corresponding_snapshot_context_maps_at_path(
+    expected: &Type,
+    actual: &Type,
+    into: &mut Vec<SnapshotContextMapPair>,
+    path: &mut Vec<SnapshotTopologyBoundary>,
 ) -> bool {
     // Generic SnapshotRef formals have no concrete checkpoint identity to
     // preserve. A Bottom on one side of a compaction fold is different: its
@@ -18074,10 +18679,10 @@ fn collect_corresponding_snapshot_context_maps(
         return true;
     }
     if matches!(expected, Type::Bottom) {
-        return collect_snapshot_context_maps_from_omitted_value(actual, true, into);
+        return collect_snapshot_context_maps_from_omitted_value_at_path(actual, true, into, path);
     }
     if matches!(actual, Type::Bottom) {
-        return collect_snapshot_context_maps_from_omitted_value(expected, false, into);
+        return collect_snapshot_context_maps_from_omitted_value_at_path(expected, false, into, path);
     }
     if expected == &Type::Named("sys.SnapshotRef".into())
         || actual == &Type::Named("sys.SnapshotRef".into())
@@ -18103,10 +18708,11 @@ fn collect_corresponding_snapshot_context_maps(
         else {
             return false;
         };
-        into.push((
-            BTreeSet::from([expected.clone()]),
-            BTreeSet::from([actual.clone()]),
-        ));
+        into.push(SnapshotContextMapPair {
+            boundary_path: path.clone(),
+            expected: BTreeSet::from([expected.clone()]),
+            actual: BTreeSet::from([actual.clone()]),
+        });
         return true;
     }
     if is_snapshot_context_map_shape(expected) || is_snapshot_context_map_shape(actual) {
@@ -18134,31 +18740,70 @@ fn collect_corresponding_snapshot_context_maps(
         };
         let expected = selectors(expected);
         let actual = selectors(actual);
-        if expected.len() != actual.len() {
-            return false;
-        }
-        into.push((expected, actual));
+        into.push(SnapshotContextMapPair {
+            boundary_path: path.clone(),
+            expected,
+            actual,
+        });
         return true;
     }
 
     match (expected, actual) {
-        (Type::List(expected), Type::List(actual))
-        | (Type::Range(expected), Type::Range(actual))
-        | (Type::Relation(expected), Type::Relation(actual))
-        | (Type::Stream(expected), Type::Stream(actual))
-        | (Type::Optional(expected), Type::Optional(actual)) => {
-            collect_corresponding_snapshot_context_maps(expected, actual, into)
-        }
+        (Type::List(expected), Type::List(actual)) => collect_corresponding_snapshot_context_maps_at_boundary(
+            expected,
+            actual,
+            into,
+            path,
+            SnapshotTopologyBoundary::ListElement,
+        ),
+        (Type::Range(expected), Type::Range(actual)) => collect_corresponding_snapshot_context_maps_at_boundary(
+            expected,
+            actual,
+            into,
+            path,
+            SnapshotTopologyBoundary::RangeElement,
+        ),
+        (Type::Relation(expected), Type::Relation(actual)) => collect_corresponding_snapshot_context_maps_at_boundary(
+            expected,
+            actual,
+            into,
+            path,
+            SnapshotTopologyBoundary::RelationElement,
+        ),
+        (Type::Stream(expected), Type::Stream(actual)) => collect_corresponding_snapshot_context_maps_at_boundary(
+            expected,
+            actual,
+            into,
+            path,
+            SnapshotTopologyBoundary::StreamElement,
+        ),
+        (Type::Optional(expected), Type::Optional(actual)) => collect_corresponding_snapshot_context_maps_at_boundary(
+            expected,
+            actual,
+            into,
+            path,
+            SnapshotTopologyBoundary::OptionalValue,
+        ),
         (Type::Tuple(expected), Type::Tuple(actual)) if expected.len() == actual.len() => {
-            expected.iter().zip(actual).all(|(expected, actual)| {
-                collect_corresponding_snapshot_context_maps(expected, actual, into)
+            expected.iter().zip(actual).enumerate().all(|(index, (expected, actual))| {
+                collect_corresponding_snapshot_context_maps_at_boundary(
+                    expected,
+                    actual,
+                    into,
+                    path,
+                    SnapshotTopologyBoundary::TupleElement(index),
+                )
             })
         }
         (Type::Record(expected), Type::Record(actual)) if expected.len() == actual.len() => {
             expected.iter().all(|(name, expected)| {
-                actual.get(name).is_some_and(|actual| {
-                    collect_corresponding_snapshot_context_maps(expected, actual, into)
-                })
+                actual.get(name).is_some_and(|actual| collect_corresponding_snapshot_context_maps_at_boundary(
+                    expected,
+                    actual,
+                    into,
+                    path,
+                    SnapshotTopologyBoundary::RecordField(name.clone()),
+                ))
             })
         }
         (
@@ -18173,17 +18818,23 @@ fn collect_corresponding_snapshot_context_maps(
                 ..
             },
         ) if expected_parameters.len() == actual_parameters.len() => {
-            expected_parameters
-                .iter()
-                .zip(actual_parameters)
-                .all(|(expected, actual)| {
-                    collect_corresponding_snapshot_context_maps(expected, actual, into)
-                })
-                && collect_corresponding_snapshot_context_maps(
-                    expected_result,
-                    actual_result,
-                    into,
-                )
+            expected_parameters.iter().zip(actual_parameters).enumerate().all(
+                |(index, (expected, actual))| {
+                    collect_corresponding_snapshot_context_maps_at_boundary(
+                        expected,
+                        actual,
+                        into,
+                        path,
+                        SnapshotTopologyBoundary::FunctionParameter(index),
+                    )
+                },
+            ) && collect_corresponding_snapshot_context_maps_at_boundary(
+                expected_result,
+                actual_result,
+                into,
+                path,
+                SnapshotTopologyBoundary::FunctionResult,
+            )
         }
         (
             Type::Applied {
@@ -18195,12 +18846,20 @@ fn collect_corresponding_snapshot_context_maps(
                 arguments: actual_arguments,
             },
         ) if expected_base == actual_base && expected_arguments.len() == actual_arguments.len() => {
-            expected_arguments
-                .iter()
-                .zip(actual_arguments)
-                .all(|(expected, actual)| {
-                    collect_corresponding_snapshot_context_maps(expected, actual, into)
-                })
+            expected_arguments.iter().zip(actual_arguments).enumerate().all(
+                |(index, (expected, actual))| {
+                    collect_corresponding_snapshot_context_maps_at_boundary(
+                        expected,
+                        actual,
+                        into,
+                        path,
+                        SnapshotTopologyBoundary::AppliedArgument {
+                            base: expected_base.clone(),
+                            index,
+                        },
+                    )
+                },
+            )
         }
         (
             Type::MoneyPerUnit {
@@ -18212,17 +18871,29 @@ fn collect_corresponding_snapshot_context_maps(
                 unit: actual_unit,
             },
         ) => {
-            collect_corresponding_snapshot_context_maps(expected_currency, actual_currency, into)
-                && collect_corresponding_snapshot_context_maps(expected_unit, actual_unit, into)
+            collect_corresponding_snapshot_context_maps_at_boundary(
+                expected_currency,
+                actual_currency,
+                into,
+                path,
+                SnapshotTopologyBoundary::MoneyCurrency,
+            ) && collect_corresponding_snapshot_context_maps_at_boundary(
+                expected_unit,
+                actual_unit,
+                into,
+                path,
+                SnapshotTopologyBoundary::MoneyUnit,
+            )
         }
         _ => true,
     }
 }
 
-fn collect_snapshot_context_maps_from_omitted_value(
+fn collect_snapshot_context_maps_from_omitted_value_at_path(
     value: &Type,
     omitted_on_left: bool,
-    into: &mut Vec<(BTreeSet<String>, BTreeSet<String>)>,
+    into: &mut Vec<SnapshotContextMapPair>,
+    path: &mut Vec<SnapshotTopologyBoundary>,
 ) -> bool {
     if matches!(value, Type::Bottom) || value == &Type::Named("sys.SnapshotRef".into()) {
         return true;
@@ -18242,44 +18913,139 @@ fn collect_snapshot_context_maps_from_omitted_value(
             return false;
         }
         let empty = BTreeSet::new();
-        into.push(if omitted_on_left {
+        let (expected, actual) = if omitted_on_left {
             (empty, selectors)
         } else {
             (selectors, empty)
+        };
+        into.push(SnapshotContextMapPair {
+            boundary_path: path.clone(),
+            expected,
+            actual,
         });
         return true;
     }
 
     match value {
-        Type::List(value)
-        | Type::Range(value)
-        | Type::Relation(value)
-        | Type::Stream(value)
-        | Type::Optional(value) => {
-            collect_snapshot_context_maps_from_omitted_value(value, omitted_on_left, into)
-        }
-        Type::Record(fields) => fields.values().all(|value| {
-            collect_snapshot_context_maps_from_omitted_value(value, omitted_on_left, into)
+        Type::List(value) => collect_omitted_at_boundary(
+            value,
+            omitted_on_left,
+            into,
+            path,
+            SnapshotTopologyBoundary::ListElement,
+        ),
+        Type::Range(value) => collect_omitted_at_boundary(
+            value,
+            omitted_on_left,
+            into,
+            path,
+            SnapshotTopologyBoundary::RangeElement,
+        ),
+        Type::Relation(value) => collect_omitted_at_boundary(
+            value,
+            omitted_on_left,
+            into,
+            path,
+            SnapshotTopologyBoundary::RelationElement,
+        ),
+        Type::Stream(value) => collect_omitted_at_boundary(
+            value,
+            omitted_on_left,
+            into,
+            path,
+            SnapshotTopologyBoundary::StreamElement,
+        ),
+        Type::Optional(value) => collect_omitted_at_boundary(
+            value,
+            omitted_on_left,
+            into,
+            path,
+            SnapshotTopologyBoundary::OptionalValue,
+        ),
+        Type::Record(fields) => fields.iter().all(|(name, value)| {
+            collect_omitted_at_boundary(
+                value,
+                omitted_on_left,
+                into,
+                path,
+                SnapshotTopologyBoundary::RecordField(name.clone()),
+            )
         }),
-        Type::Tuple(elements) => elements.iter().all(|value| {
-            collect_snapshot_context_maps_from_omitted_value(value, omitted_on_left, into)
+        Type::Tuple(elements) => elements.iter().enumerate().all(|(index, value)| {
+            collect_omitted_at_boundary(
+                value,
+                omitted_on_left,
+                into,
+                path,
+                SnapshotTopologyBoundary::TupleElement(index),
+            )
         }),
-        Type::Applied { arguments, .. } => arguments.iter().all(|value| {
-            collect_snapshot_context_maps_from_omitted_value(value, omitted_on_left, into)
+        Type::Applied { base, arguments } => arguments.iter().enumerate().all(|(index, value)| {
+            collect_omitted_at_boundary(
+                value,
+                omitted_on_left,
+                into,
+                path,
+                SnapshotTopologyBoundary::AppliedArgument {
+                    base: base.clone(),
+                    index,
+                },
+            )
         }),
         Type::Function {
             parameters, result, ..
         } => {
-            parameters.iter().all(|value| {
-                collect_snapshot_context_maps_from_omitted_value(value, omitted_on_left, into)
-            }) && collect_snapshot_context_maps_from_omitted_value(result, omitted_on_left, into)
+            parameters.iter().enumerate().all(|(index, value)| {
+                collect_omitted_at_boundary(
+                    value,
+                    omitted_on_left,
+                    into,
+                    path,
+                    SnapshotTopologyBoundary::FunctionParameter(index),
+                )
+            }) && collect_omitted_at_boundary(
+                result,
+                omitted_on_left,
+                into,
+                path,
+                SnapshotTopologyBoundary::FunctionResult,
+            )
         }
         Type::MoneyPerUnit { currency, unit } => {
-            collect_snapshot_context_maps_from_omitted_value(currency, omitted_on_left, into)
-                && collect_snapshot_context_maps_from_omitted_value(unit, omitted_on_left, into)
+            collect_omitted_at_boundary(
+                currency,
+                omitted_on_left,
+                into,
+                path,
+                SnapshotTopologyBoundary::MoneyCurrency,
+            ) && collect_omitted_at_boundary(
+                unit,
+                omitted_on_left,
+                into,
+                path,
+                SnapshotTopologyBoundary::MoneyUnit,
+            )
         }
         _ => true,
     }
+}
+
+fn collect_omitted_at_boundary(
+    value: &Type,
+    omitted_on_left: bool,
+    into: &mut Vec<SnapshotContextMapPair>,
+    path: &mut Vec<SnapshotTopologyBoundary>,
+    boundary: SnapshotTopologyBoundary,
+) -> bool {
+    path.push(boundary);
+    let collected = collect_snapshot_context_maps_from_omitted_value_at_path(
+        value,
+        omitted_on_left,
+        into,
+        path,
+    );
+    path.pop();
+    collected
 }
 
 /// Selector identities may change during a local rebind, but the number of
@@ -20718,6 +21484,36 @@ mod tests {
             &Type::Tuple(saved),
             &Type::Tuple(relabeled)
         ));
+    }
+
+    #[test]
+    fn record_checkpoint_compaction_rejects_cross_depth_selector_aliases() {
+        let pin = |selector: &str| contextual_snapshot_ref(selector);
+        let stacked = |root: &str, middle: &str, leaf: &str| {
+            BTreeMap::from([
+                ("root".into(), pin(root)),
+                (
+                    "stack".into(),
+                    Type::Tuple(vec![
+                        pin(middle),
+                        Type::Record(BTreeMap::from([("leaf".into(), pin(leaf))])),
+                    ]),
+                ),
+            ])
+        };
+        let first = stacked("selector:HEAD~501", "selector:HEAD~502", "selector:HEAD~503");
+        let cross_depth =
+            stacked("selector:HEAD~504", "selector:HEAD~501", "selector:HEAD~505");
+        let depth_stable =
+            stacked("selector:HEAD~601", "selector:HEAD~602", "selector:HEAD~603");
+
+        assert!(record_checkpoint_promotion_matches(&first, &depth_stable));
+        assert!(!record_checkpoint_promotion_matches(&first, &cross_depth));
+        assert!(merge_list_element_types(
+            &Type::Record(first),
+            &Type::Record(cross_depth)
+        )
+        .is_none());
     }
 
     #[test]
