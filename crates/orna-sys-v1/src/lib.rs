@@ -36,6 +36,8 @@ pub use introspection::{
     FunctionPlanDescription, FunctionRef, MutableBranchSnapshot,
     QueryDecorrelatedSubqueryDescription, QueryJoinDescription,
     QueryLimitPushdownDescription, QueryMutationDescription, QueryMutationKind,
+    QueryPairedCheckpointSegmentCompactionChainDescription,
+    QueryPairedCheckpointSegmentCompactionStepDescription,
     QueryPartialIndexDescription,
     QuerySourceStatistics, QueryJoinPairIdentityDescription,
     MAX_DEPENDENCY_EDGES, MAX_DEPENDENCY_OBJECTS, MAX_PLAN_EXPRESSIONS,
@@ -48,10 +50,12 @@ pub use introspection::{
     explain_query, explain_query_with_decorrelated_subqueries,
     explain_query_with_join_pair_identities_and_limit_pushdowns,
     explain_query_with_join_pair_identities_and_limit_window_aggregate_pushdowns,
+    explain_query_with_join_pair_identities_limit_window_aggregate_and_spill_pushdowns,
     explain_query_with_partial_indexes,
     explain_query_with_partial_indexes_and_decorrelated_subqueries,
     explain_query_with_partial_indexes_and_decorrelated_subqueries_and_join_pair_identities,
     explain_query_with_partial_indexes_and_join_pair_identities,
+    explain_query_with_partial_indexes_and_paired_checkpoint_segment_compaction_chains,
     explain_query_with_window_aggregate_pushdowns,
     explain_query_with_join_pair_identities,
     explain_query_with_join_pair_identities_and_window_aggregate_pushdowns,
@@ -630,6 +634,18 @@ pub struct SystemFunctionDescriptor {
     pub effect: SystemEffect,
     pub signature: &'static str,
     pub purpose: &'static str,
+    /// Extended source documentation for editor hover and reference views.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub documentation: Option<&'static str>,
+    /// Optional registry details useful when presenting the callable contract.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub contract: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub preconditions: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ownership: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub snapshot_rule: Option<&'static str>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Serialize)]

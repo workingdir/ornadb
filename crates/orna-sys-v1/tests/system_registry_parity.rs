@@ -5,7 +5,7 @@ use std::{
 };
 
 use orna_sys_v1::{
-    SystemEffect, SystemProviderAbi, system_api_json, system_api_schema_json,
+    SystemDispatchTable, SystemEffect, SystemProviderAbi, system_api_json, system_api_schema_json,
     system_binding_modules_json, system_binding_stubs, system_dispatch_table,
     system_function_descriptor, system_host_operation_registry_json,
     system_host_operation_registry_schema_json, system_provider_abi_json,
@@ -1076,6 +1076,116 @@ fn generated_binding_provider_id_schema_rejections_match_typed_parser() {
 }
 
 #[test]
+fn generated_provider_alias_id_edges_match_schema_and_binding_contracts() {
+    const PROVIDER_ID_CASES: [(&str, bool); 12] = [
+        ("-", true),
+        ("_", true),
+        ("9", true),
+        ("_9.edge-name", true),
+        ("orna.sys.v1", true),
+        ("", false),
+        (".", false),
+        (".leading", false),
+        ("trailing.", false),
+        ("double..dot", false),
+        ("white space", false),
+        ("slash/name-é", false),
+    ];
+
+    let schema_json = build_provider::generate_provider_registry_schema()
+        .expect("provider alias schema regenerates from its source generator");
+    assert_eq!(schema_json, system_provider_abi_schema_json());
+    let registry: Value = serde_json::from_str(system_provider_abi_json())
+        .expect("embedded provider alias registry is valid JSON");
+    build_host::validate_json_against_schema(system_provider_abi_json(), &schema_json)
+        .expect("embedded provider registry conforms to its generated schema");
+
+    let alias_table = SystemDispatchTable::from_json(system_provider_abi_json())
+        .expect("generated registry parses through the dispatch-table compatibility alias");
+    let abi_table = SystemProviderAbi::from_json(system_provider_abi_json())
+        .expect("generated registry parses through the provider ABI name");
+    assert_eq!(alias_table, abi_table);
+    assert_eq!(&alias_table, system_dispatch_table());
+
+    let mut generated_binding_cases = 0;
+    for operation in alias_table.operations() {
+        let generated = system_function_descriptor(operation.id.as_str())
+            .unwrap_or_else(|| panic!("missing generated binding for {}", operation.id.as_str()));
+        assert_eq!(generated.name, operation.id.as_str());
+        assert_eq!(generated.signature, operation.signature.source);
+        assert_eq!(
+            operation.effects.iter().next(),
+            Some(generated.effect),
+            "generated binding effect matches {}",
+            operation.id.as_str()
+        );
+        generated_binding_cases += 1;
+    }
+    assert!(generated_binding_cases > 0);
+
+    let role = registry["roles"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|role| role["builtin_provider"].is_string())
+        .expect("generated registry has a built-in provider alias");
+    let role_name = role["name"]
+        .as_str()
+        .expect("built-in provider role has a name");
+    let role_index = registry["roles"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .position(|role| role["name"] == role_name)
+        .expect("built-in provider role has a stable generated row");
+
+    let mut schema_acceptances = 0;
+    let mut schema_rejections = 0;
+    for (provider_id, should_accept) in PROVIDER_ID_CASES {
+        let mut mutated = registry.clone();
+        mutated["roles"][role_index]["builtin_provider"] = Value::String(provider_id.to_owned());
+        let json = mutated.to_string();
+        let schema_result = build_host::validate_json_against_schema(&json, &schema_json);
+        let alias_result = SystemDispatchTable::from_json(&json);
+        let compatibility_result = SystemProviderAbi::from_json(&json);
+
+        assert_eq!(
+            schema_result.is_ok(),
+            should_accept,
+            "generated schema acceptance for provider alias {provider_id:?}"
+        );
+        assert_eq!(
+            alias_result, compatibility_result,
+            "dispatch and provider ABI aliases parse provider ID {provider_id:?} identically"
+        );
+        if should_accept {
+            let parsed = alias_result.expect("schema-valid provider alias parses in typed table");
+            assert_eq!(
+                parsed
+                    .role(role_name)
+                    .and_then(|role| role.builtin_provider.as_ref())
+                    .map(|provider| provider.as_str()),
+                Some(provider_id),
+                "typed dispatch preserves accepted provider alias {provider_id:?}"
+            );
+            schema_acceptances += 1;
+        } else {
+            assert_eq!(
+                alias_result,
+                Err(orna_sys_v1::ProviderAbiError::InvalidProviderId),
+                "typed dispatch rejects provider alias {provider_id:?}"
+            );
+            schema_rejections += 1;
+        }
+    }
+
+    println!(
+        "generated_provider_alias_schema_parity valid_edges={schema_acceptances} invalid_edges={schema_rejections} generated_bindings={generated_binding_cases} total_cases={}",
+        schema_acceptances + schema_rejections + generated_binding_cases
+    );
+}
+
+#[test]
 fn generated_schema_defers_semantic_dispatch_id_uniqueness_to_typed_registry() {
     let schema_json = build_provider::generate_provider_registry_schema()
         .expect("provider dispatch schema regenerates from its generator");
@@ -1346,6 +1456,137 @@ fn generated_dispatch_metadata_rejects_provider_role_version_source_drift() {
     );
     println!(
         "generated_dispatch_metadata_source_validation baseline_parity=embedded,schema,runtime inconsistent_role_versions_rejected=1 total_cases=4"
+    );
+}
+
+#[test]
+fn generated_provider_schema_rejects_versions_outside_typed_u16_range() {
+    let schema_json = build_provider::generate_provider_registry_schema()
+        .expect("provider dispatch schema regenerates from its generator");
+    assert_eq!(schema_json, system_provider_abi_schema_json());
+    let registry: Value =
+        serde_json::from_str(system_provider_abi_json()).expect("embedded dispatch metadata");
+    build_host::validate_json_against_schema(system_provider_abi_json(), &schema_json)
+        .expect("embedded dispatch metadata conforms to its generated schema");
+    let overflow = u64::from(u16::MAX) + 1;
+    let mut overflow_cases = 0;
+    let mut assert_rejected = |label: &str, mutated: Value, expected| {
+        let json = mutated.to_string();
+        assert!(
+            build_host::validate_json_against_schema(&json, &schema_json).is_err(),
+            "generated schema rejects overflowing {label}"
+        );
+        assert_eq!(
+            SystemProviderAbi::from_json(&json),
+            Err(expected),
+            "typed provider registry rejects overflowing {label}"
+        );
+        overflow_cases += 1;
+    };
+
+    for field in ["major", "minor"] {
+        let mut mutated = registry.clone();
+        mutated["abi_version"][field] = Value::from(overflow);
+        assert_rejected(
+            &format!("abi_version.{field}"),
+            mutated,
+            orna_sys_v1::ProviderAbiError::InvalidJson,
+        );
+
+        let mut mutated = registry.clone();
+        mutated["operations"][0]["version"][field] = Value::from(overflow);
+        assert_rejected(
+            &format!("operations[0].version.{field}"),
+            mutated,
+            orna_sys_v1::ProviderAbiError::InvalidJson,
+        );
+
+        let mut mutated = registry.clone();
+        mutated["roles"][0]["version"][field] = Value::from(overflow);
+        assert_rejected(
+            &format!("roles[0].version.{field}"),
+            mutated,
+            orna_sys_v1::ProviderAbiError::InvalidJson,
+        );
+    }
+
+    let operation = registry["operations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|operation| operation["role"].as_str().is_some())
+        .expect("provider registry has a role-bound operation");
+    let role_annotation = operation["role"].as_str().unwrap();
+    let (role_name, version) = role_annotation
+        .rsplit_once('@')
+        .expect("role annotation includes its version");
+    let (major, minor) = version
+        .split_once('.')
+        .expect("role annotation has major and minor versions");
+    for (field, annotation) in [
+        ("major", format!("{role_name}@{overflow}.{minor}")),
+        ("minor", format!("{role_name}@{major}.{overflow}")),
+    ] {
+        let mut mutated = registry.clone();
+        let operation_index = mutated["operations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .position(|candidate| candidate["role"].as_str() == Some(role_annotation))
+            .expect("selected role-bound operation remains in the registry");
+        mutated["operations"][operation_index]["role"] = Value::String(annotation);
+        assert_rejected(
+            &format!("operations[{operation_index}].role {field}"),
+            mutated,
+            orna_sys_v1::ProviderAbiError::InvalidRoleId,
+        );
+    }
+
+    assert_eq!(overflow_cases, 8);
+    println!(
+        "generated_provider_version_overflow_schema_parity u16_max={} overflow={} numeric_version_fields=6 role_annotation_fields=2 schema_rejections={overflow_cases} typed_rejections={overflow_cases} total_cases={}",
+        u16::MAX,
+        overflow,
+        overflow_cases * 2
+    );
+}
+
+#[test]
+fn generated_provider_schema_accepts_reordered_operation_and_role_rows() {
+    let schema_json = build_provider::generate_provider_registry_schema()
+        .expect("provider dispatch schema regenerates from its generator");
+    assert_eq!(schema_json, system_provider_abi_schema_json());
+    let mut reordered: Value =
+        serde_json::from_str(system_provider_abi_json()).expect("embedded dispatch metadata");
+    let operation_count = reordered["operations"]
+        .as_array()
+        .expect("generated operations are an array")
+        .len();
+    let role_count = reordered["roles"]
+        .as_array()
+        .expect("generated roles are an array")
+        .len();
+    reordered["operations"]
+        .as_array_mut()
+        .expect("generated operations are an array")
+        .reverse();
+    reordered["roles"]
+        .as_array_mut()
+        .expect("generated roles are an array")
+        .reverse();
+
+    let reordered_json = reordered.to_string();
+    build_host::validate_json_against_schema(&reordered_json, &schema_json)
+        .expect("schema accepts valid operation and role rows in a different order");
+    let reordered_table = SystemProviderAbi::from_json(&reordered_json)
+        .expect("typed dispatch table accepts reordered operation and role rows");
+    assert_eq!(&reordered_table, system_dispatch_table());
+    assert_eq!(operation_count, reordered_table.operations().count());
+    assert_eq!(role_count, reordered_table.roles().count());
+
+    println!(
+        "generated_provider_row_reorder_schema_parity operations={operation_count} roles={role_count} schema_valid=1 typed_table_equal=1 total_cases={}",
+        operation_count + role_count + 2
     );
 }
 
