@@ -367,6 +367,17 @@ pub struct BranchMergeParentColumnDepthEvent {
     pub value: CanonicalValue,
 }
 
+/// The complete depth labels released for one parent-local table-column branch.
+/// Empty labels remain present even when their fragments carried no cells.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BranchMergeParentColumnDepthLadderEvent {
+    pub order: u64,
+    pub parent: ObjectId,
+    pub table: ObjectId,
+    pub column: ObjectId,
+    pub depth_labels: Vec<usize>,
+}
+
 /// One exact-key tombstone event retained in committed paired history.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BranchMergeTombstoneEvent {
@@ -649,6 +660,7 @@ pub struct BranchMergeTombstoneHistory {
     committed_multi_parent_column_retry_identities:
         BTreeMap<u64, MultiParentColumnFragmentRetryIdentity>,
     parent_column_events: Vec<BranchMergeParentColumnDepthEvent>,
+    parent_column_ladder_events: Vec<BranchMergeParentColumnDepthLadderEvent>,
     committed_plan_identities: BTreeMap<u64, [u8; 32]>,
     duplicate_retry_modes: BTreeMap<u64, BranchMergeTombstoneSubmissionMode>,
     applied_fragment_retry_transactions: Vec<AppliedDepthFragmentRetryTransaction>,
@@ -672,6 +684,7 @@ impl BranchMergeTombstoneHistory {
             column_ladder_events: Vec::new(),
             committed_multi_parent_column_retry_identities: BTreeMap::new(),
             parent_column_events: Vec::new(),
+            parent_column_ladder_events: Vec::new(),
             committed_plan_identities: BTreeMap::new(),
             duplicate_retry_modes: BTreeMap::new(),
             applied_fragment_retry_transactions: Vec::new(),
@@ -1064,7 +1077,9 @@ impl BranchMergeTombstoneHistory {
     /// attached to released cells, even when parents restore the same row and
     /// column with equal or different values. Complete future waves wait for
     /// their lineage prefix, then release in parent, table, column, depth, and
-    /// primary-key order.
+    /// primary-key order. [`Self::parent_column_ladder_events`] exposes each
+    /// parent's complete table-column labels, including empty positions, once
+    /// that wave releases.
     ///
     /// The reference defines stable column identities and three-way merge
     /// behavior, but is silent about depth labels across multi-parent restore
@@ -1150,6 +1165,15 @@ impl BranchMergeTombstoneHistory {
     /// Returns ordered cells released with their source parent identities.
     pub fn parent_column_events(&self) -> &[BranchMergeParentColumnDepthEvent] {
         &self.parent_column_events
+    }
+
+    /// Returns complete depth labels for released parent-local column branches.
+    ///
+    /// A ladder event includes labels whose fragment had no cells. It is
+    /// recorded only after its paired lineage prefix is contiguous and
+    /// released.
+    pub fn parent_column_ladder_events(&self) -> &[BranchMergeParentColumnDepthLadderEvent] {
+        &self.parent_column_ladder_events
     }
 
     /// Associates a complete paired result with an already-complete depth
@@ -1944,6 +1968,7 @@ impl BranchMergeTombstoneHistory {
             let mut column_events = Vec::new();
             let mut column_ladder_events = Vec::new();
             let mut parent_column_events = Vec::new();
+            let mut parent_column_ladder_events = Vec::new();
             let mut table_ladder_events = Vec::new();
             let mut tombstones = match delta {
                 BufferedBranchMergeTombstoneDelta::WholePlan(tombstones) => tombstones,
@@ -1964,6 +1989,8 @@ impl BranchMergeTombstoneHistory {
                 BufferedBranchMergeTombstoneDelta::MultiParentTabularColumnDepthWave(wave) => {
                     parent_column_events = parent_column_depth_wave_events(&wave)
                         .expect("buffered multi-parent waves were validated before insertion");
+                    parent_column_ladder_events =
+                        parent_column_depth_wave_ladder_events(&wave);
                     Vec::new()
                 }
             };
@@ -1980,6 +2007,8 @@ impl BranchMergeTombstoneHistory {
             self.column_events.extend(column_events);
             self.column_ladder_events.extend(column_ladder_events);
             self.parent_column_events.extend(parent_column_events);
+            self.parent_column_ladder_events
+                .extend(parent_column_ladder_events);
             self.next_order = order.checked_add(1);
         }
 
@@ -2564,6 +2593,27 @@ fn parent_column_depth_wave_events(
             .then_with(|| compare_primary_keys_with_encoding_tiebreak(&left.key, &right.key))
     });
     Ok(events)
+}
+
+fn parent_column_depth_wave_ladder_events(
+    wave: &BranchMergeMultiParentTabularColumnDepthWave,
+) -> Vec<BranchMergeParentColumnDepthLadderEvent> {
+    wave.parents
+        .iter()
+        .flat_map(|(parent, columns)| {
+            columns
+                .iter()
+                .map(move |((table, column), depth)| {
+                    BranchMergeParentColumnDepthLadderEvent {
+                        order: wave.order,
+                        parent: *parent,
+                        table: *table,
+                        column: *column,
+                        depth_labels: depth.fragments.keys().copied().collect(),
+                    }
+                })
+        })
+        .collect()
 }
 
 fn parent_column_depth_wave_retry_identity(
