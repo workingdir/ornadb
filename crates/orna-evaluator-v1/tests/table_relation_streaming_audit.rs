@@ -185,6 +185,31 @@ fn paired_pagination_nested_compaction_functions() -> Functions {
         .collect()
 }
 
+fn paired_pagination_compaction_escalation_functions() -> Functions {
+    let parsed = parse_module(include_str!(
+        "fixtures/table_relation_paired_compaction_escalation_yxlyj.orna"
+    ));
+    assert!(parsed.is_ok(), "{:?}", parsed.diagnostics);
+    parsed
+        .value
+        .items
+        .into_iter()
+        .map(|item| {
+            let orna_syntax_v1::Declaration::Function { signature, body } = item.declaration else {
+                panic!("fixture function expected")
+            };
+            (
+                signature.name,
+                PureFunction {
+                    parameters: signature.parameters,
+                    body,
+                    environment: Environment::new(),
+                },
+            )
+        })
+        .collect()
+}
+
 fn sparse_window_fold_functions() -> Functions {
     let parsed = parse_module(include_str!("fixtures/table_relation_sparse_window_fold_d4441.orna"));
     assert!(parsed.is_ok(), "{:?}", parsed.diagnostics);
@@ -2182,6 +2207,51 @@ fn paired_nested_pagination_compaction_body() -> Expr {
         elements: vec![
             nested_pagination_compaction("View.Left"),
             nested_pagination_compaction("View.Right"),
+        ],
+        span: span(),
+    }
+}
+
+fn nested_pagination_compaction_escalation(source: &str, depth: usize) -> Expr {
+    let prefix = relation_stage(
+        relation_source(source),
+        "take",
+        vec![integer_literal(10)],
+    );
+    let adjacent_totals = relation_stage(
+        relation_stage(
+            prefix,
+            "window",
+            vec![integer_literal(2), integer_literal(1)],
+        ),
+        "map",
+        vec![named_function("sum_frame")],
+    );
+    let mut folded = relation_stage(
+        relation_stage(
+            adjacent_totals,
+            "window",
+            vec![integer_literal(3), integer_literal(2)],
+        ),
+        "map",
+        vec![named_function("sum_frame")],
+    );
+    for _ in 0..depth {
+        let frames = relation_stage(
+            folded,
+            "window",
+            vec![integer_literal(2), integer_literal(1)],
+        );
+        folded = relation_stage(frames, "map", vec![named_function("sum_frame")]);
+    }
+    terminal(folded, "sum")
+}
+
+fn paired_pagination_compaction_escalation_body(depth: usize) -> Expr {
+    Expr::Tuple {
+        elements: vec![
+            nested_pagination_compaction_escalation("View.Left", depth),
+            nested_pagination_compaction_escalation("View.Right", depth),
         ],
         span: span(),
     }
@@ -5072,4 +5142,123 @@ fn paired_pagination_nested_compaction_keeps_snapshot_values() {
     );
     assert!(source.pending["View.Left"].is_empty());
     assert!(source.pending["View.Right"].is_empty());
+}
+
+#[test]
+fn paired_pagination_compaction_keeps_identity_through_escalating_folds() {
+    // Increase nested aggregate depth on each paired refresh while the same
+    // ten-row input prefix crosses two long/compact cursor transitions.
+    let long_a_lengths = [255, 256, 511, 512];
+    let long_b_lengths = [512, 511, 256, 255];
+    let long_a = long_a_lengths.map(|length| vec![0x5a; length]);
+    let compact_a = vec![0x5b];
+    let long_b = long_b_lengths.map(|length| vec![0x5b; length]);
+    let compact_b = vec![0x5c];
+    let after_compaction = vec![0x5d];
+
+    let restore = |values: &[i64], a: &[u8], b: &[u8]| {
+        assert_eq!(values.len(), 10);
+        let rows = values.chunks(2).collect::<Vec<_>>();
+        BTreeMap::from([
+            (None, page(rows[0], Some(a.to_vec()))),
+            (Some(a.to_vec()), page(rows[1], Some(compact_a.clone()))),
+            (
+                Some(compact_a.clone()),
+                page(rows[2], Some(b.to_vec())),
+            ),
+            (Some(b.to_vec()), page(rows[3], Some(compact_b.clone()))),
+            (
+                Some(compact_b.clone()),
+                page(rows[4], Some(after_compaction.clone())),
+            ),
+            (Some(after_compaction.clone()), page(&[999_999], None)),
+        ])
+    };
+    let snapshots = [
+        (
+            [1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
+            [10, 20, 30, 40, 50, 60, 70, 80, 90, 100],
+        ),
+        (
+            [11, 12, 13, 14, 15, 16, 17, 18, 19, 20],
+            [2, 4, 6, 8, 10, 12, 14, 16, 18, 20],
+        ),
+        (
+            [-1, -2, -3, -4, -5, -6, -7, -8, -9, -10],
+            [3, 6, 9, 12, 15, 18, 21, 24, 27, 30],
+        ),
+        (
+            [100, 90, 80, 70, 60, 50, 40, 30, 20, 10],
+            [5, 10, 15, 20, 25, 30, 35, 40, 45, 50],
+        ),
+    ];
+    let mut restores = Vec::new();
+    let mut expected_lanes = Vec::new();
+    for (refresh, (left, right)) in snapshots.iter().enumerate() {
+        for (lane, source_name, values) in [
+            (refresh * 2, "View.Left", left.as_slice()),
+            (refresh * 2 + 1, "View.Right", right.as_slice()),
+        ] {
+            restores.push((
+                source_name,
+                restore(
+                    values,
+                    &long_a[lane % long_a.len()],
+                    &long_b[lane % long_b.len()],
+                ),
+            ));
+            expected_lanes.push(source_name);
+        }
+    }
+
+    let mut source = PairedCursorRestoreSource::new(restores);
+    let mut functions = paired_pagination_compaction_escalation_functions();
+    let mut outputs = Vec::new();
+    for (depth, left, right) in [(0, 132, 1320), (1, 558, 396), (2, -264, 792), (3, 2640, 1320)] {
+        functions.insert(
+            "run".into(),
+            PureFunction {
+                parameters: Vec::new(),
+                body: paired_pagination_compaction_escalation_body(depth),
+                environment: Environment::new(),
+            },
+        );
+        outputs.push(
+            invoke_named_with_effects(
+                "run",
+                &functions,
+                &Environment::new(),
+                Limits::default(),
+                &mut source,
+            )
+            .unwrap(),
+        );
+        assert_eq!(outputs.last(), Some(&integer_pair(left, right)));
+    }
+    assert_eq!(
+        outputs,
+        vec![
+            integer_pair(132, 1320),
+            integer_pair(558, 396),
+            integer_pair(-264, 792),
+            integer_pair(2640, 1320),
+        ],
+        "each added nested fold computes the documented pair from its snapshot"
+    );
+    let scopes = source
+        .lanes
+        .iter()
+        .zip(expected_lanes)
+        .map(|((source_name, scope, _), expected_name)| {
+            assert_eq!(source_name, expected_name);
+            *scope
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(scopes.len(), 8);
+    for (index, scope) in scopes.iter().enumerate() {
+        assert!(
+            !scopes[..index].contains(scope),
+            "every escalation refresh uses isolated source scope {scope:?}"
+        );
+    }
 }
