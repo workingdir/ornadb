@@ -1,24 +1,18 @@
 //! Semantic token projection from the frozen 1.0.0 lexer.
 
 use lsp_types::{Range, SemanticToken, SemanticTokenType};
-use orna_syntax_v1::{Parse, SyntaxTree, TokenKind, lex};
+use orna_syntax_v1::{
+    EDITOR_OPERATOR_SPELLINGS, EDITOR_TOKEN_TYPES, Parse, SyntaxTree, TokenKind, lex,
+};
 
 use crate::documents::PositionMapper;
 
 /// LSP token legend supported by this server.
 pub fn legend() -> Vec<SemanticTokenType> {
-    [
-        SemanticTokenType::KEYWORD,
-        SemanticTokenType::FUNCTION,
-        SemanticTokenType::TYPE,
-        SemanticTokenType::ENUM,
-        SemanticTokenType::VARIABLE,
-        SemanticTokenType::STRING,
-        SemanticTokenType::NUMBER,
-        SemanticTokenType::OPERATOR,
-    ]
-    .into_iter()
-    .collect()
+    EDITOR_TOKEN_TYPES
+        .iter()
+        .map(|token_type| SemanticTokenType::new(token_type))
+        .collect()
 }
 
 /// Returns delta-encoded tokens from `orna-syntax-v1` lexer spans.
@@ -116,27 +110,5 @@ fn token_type(
 }
 
 fn is_operator(value: &str) -> bool {
-    matches!(
-        value,
-        "!" | "?"
-            | "??"
-            | "|?"
-            | "|"
-            | "||"
-            | "&&"
-            | "=="
-            | "!="
-            | "<"
-            | "<="
-            | ">"
-            | ">="
-            | "+"
-            | "-"
-            | "*"
-            | "/"
-            | "%"
-            | "=>"
-            | ".."
-            | "..="
-    )
+    EDITOR_OPERATOR_SPELLINGS.contains(&value)
 }

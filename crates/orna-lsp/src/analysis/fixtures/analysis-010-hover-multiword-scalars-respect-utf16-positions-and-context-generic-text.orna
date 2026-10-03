@@ -1,1 +1,0 @@
-CREATE TYPE files.document AS OBJECT (LARGE BOOLEAN, value OBJECT);

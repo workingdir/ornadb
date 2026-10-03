@@ -5,14 +5,22 @@
 //! diagnostic and wire contracts.
 
 mod admission;
+mod editor;
 mod lexer;
 mod parser;
 
 pub use admission::{
     ParseContext, SourceDocumentId, SyntaxAdmissionError, admit_diagnostic, admit_span,
 };
+pub use editor::{
+    GeneratedEditorArtifact, EDITOR_OPERATOR_SPELLINGS, EDITOR_TOKEN_TYPES,
+    generated_editor_artifacts,
+};
 
-pub use lexer::{Keyword, LexError, Token, TokenKind, lex};
+pub use lexer::{
+    BLOCK_COMMENT_END, BLOCK_COMMENT_START, LINE_COMMENT_START, OPERATOR_SPELLINGS,
+    STRING_DELIMITER, Keyword, LexError, Token, TokenKind, lex,
+};
 pub use parser::{
     Argument, AssignmentOperator, AssignmentTarget, CaseArm, ControlKind, Declaration,
     Diagnostic as SyntaxDiagnostic, DimensionExpr, EntryPoint, EnumPayloadField, EnumVariant, Expr,

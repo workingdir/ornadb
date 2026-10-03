@@ -1,3 +1,0 @@
-CREATE SCHEMA people;
-CREATE TYPE people.person AS OBJECT (stored BOOLEAN);
-CREATE SERVER FUNCTION read_value() RETURNS BOOLEAN AS SELECT probe.stored FROM people.person probe;

@@ -1,1 +1,0 @@
-CREATE SERVER FUNCTION app.read_asset(p_asset REF app.asset) RETURNS REF app.asset AS SELECT p_asset;

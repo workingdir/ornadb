@@ -1,1 +1,0 @@
-CREATE CLIENT FUNCTION app.probe() RETURNS INTEGER RETURN std.math.unknown(1);

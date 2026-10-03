@@ -1,6 +1,0 @@
-CREATE SCHEMA expr;
-CREATE TYPE expr.inner AS OBJECT (label TEXT);
-CREATE TYPE expr.item AS OBJECT (nested REF expr.inner, title TEXT);
-CREATE CLIENT FUNCTION expr.read(p_item REF expr.item)
-RETURNS TEXT
-AS '😀' || p_item.nested.label;

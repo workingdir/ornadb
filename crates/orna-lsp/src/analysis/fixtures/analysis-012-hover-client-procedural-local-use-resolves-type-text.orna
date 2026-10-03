@@ -1,5 +1,0 @@
-CREATE CLIENT FUNCTION files.document() RETURNS BOOLEAN IS
-    LET body BOOLEAN := TRUE;
-BEGIN
-    RETURN body;
-END;

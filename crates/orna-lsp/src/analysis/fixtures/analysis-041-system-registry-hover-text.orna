@@ -1,2 +1,0 @@
-CREATE CLIENT FUNCTION app.inspect() RETURNS TEXT
-    RETURN sys.describe(sys.object(1));

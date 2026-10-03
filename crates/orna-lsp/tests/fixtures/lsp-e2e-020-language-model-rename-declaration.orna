@@ -1,2 +1,0 @@
-CREATE SCHEMA app;
-CREATE TYPE app.asset AS OBJECT (id INT);

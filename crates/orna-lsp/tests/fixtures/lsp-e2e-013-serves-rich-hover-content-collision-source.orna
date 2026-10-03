@@ -1,5 +1,0 @@
-CREATE SCHEMA status;
-CREATE SCHEMA product_test;
-CREATE TYPE product_test.probe AS OBJECT (status BOOLEAN DOCUMENTATION 'field status docs');
-CREATE SERVER FUNCTION read_status() RETURNS ROWS (status BOOLEAN) AS
-SELECT p.status FROM product_test.probe p;

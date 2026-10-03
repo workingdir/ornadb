@@ -3,6 +3,25 @@ use unicode_normalization::UnicodeNormalization;
 
 use crate::parser::SourceSpan;
 
+/// Line comment marker defined by the Orna 1.0 lexical specification.
+pub const LINE_COMMENT_START: &str = "//";
+/// Opening marker for nested block comments.
+pub const BLOCK_COMMENT_START: &str = "/*";
+/// Closing marker for nested block comments.
+pub const BLOCK_COMMENT_END: &str = "*/";
+/// Delimiter for source strings.
+pub const STRING_DELIMITER: char = '"';
+/// Multi-character operator and numeric-prefix tokens, longest first.
+const MULTI_CHARACTER_TOKENS: &[&str] = &[
+    "..=", "=>", "==", "!=", "<=", ">=", "??", "|?", "&&", "||", "+=", "-=", "*=",
+    "/=", "..", "0x", "0b",
+];
+/// Operator spellings recognized by the frozen lexer.
+pub const OPERATOR_SPELLINGS: &[&str] = &[
+    "..=", "=>", "==", "!=", "<=", ">=", "??", "|?", "&&", "||", "+=", "-=", "*=",
+    "/=", "..", "|", "!", "=", "<", ">", "+", "-", "*", "/", "%", "^", "?",
+];
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Keyword {
     As,
@@ -255,17 +274,17 @@ impl<'a> Lexer<'a> {
                 self.bump();
                 continue;
             }
-            if self.take("//") {
+            if self.take(LINE_COMMENT_START) {
                 while self.at < self.source.len() && !matches!(self.peek(), '\n' | '\r') {
                     self.bump()
                 }
                 continue;
             }
-            if self.take("/*") {
+            if self.take(BLOCK_COMMENT_START) {
                 self.comment(start);
                 continue;
             }
-            if c == '"' {
+            if c == STRING_DELIMITER {
                 self.string(start);
                 continue;
             }
@@ -282,11 +301,11 @@ impl<'a> Lexer<'a> {
                 self.number_or_time(start);
                 continue;
             }
-            let p = [
-                "..=", "=>", "==", "!=", "<=", ">=", "??", "|?", "&&", "||", "+=", "-=", "*=",
-                "/=", "..", "0x", "0b",
-            ];
-            if let Some(x) = p.into_iter().find(|x| self.rest().starts_with(*x)) {
+            if let Some(x) = MULTI_CHARACTER_TOKENS
+                .iter()
+                .copied()
+                .find(|x| self.rest().starts_with(*x))
+            {
                 self.at += x.len();
                 self.push(TokenKind::Punct(x), start);
                 continue;
@@ -342,9 +361,9 @@ impl<'a> Lexer<'a> {
     fn comment(&mut self, start: usize) {
         let mut depth = 1;
         while self.at < self.source.len() {
-            if self.take("/*") {
+            if self.take(BLOCK_COMMENT_START) {
                 depth += 1
-            } else if self.take("*/") {
+            } else if self.take(BLOCK_COMMENT_END) {
                 depth -= 1;
                 if depth == 0 {
                     return;
@@ -521,7 +540,7 @@ impl<'a> Lexer<'a> {
                 segment_start = self.at;
                 continue;
             }
-            if c == '"' {
+            if c == STRING_DELIMITER {
                 self.bump();
                 if interpolated {
                     if segment_start < self.at - 1 {
@@ -550,7 +569,7 @@ impl<'a> Lexer<'a> {
                 if self.at < self.source.len() {
                     self.bump();
                 }
-            } else if self.peek() == '"' {
+            } else if self.peek() == STRING_DELIMITER {
                 self.bump();
                 return;
             } else {
@@ -573,7 +592,7 @@ impl<'a> Lexer<'a> {
         let c = self.peek();
         self.bump();
         if c != 'u' {
-            if !matches!(c, '"' | '\\' | 'n' | 'r' | 't' | '0') {
+            if !matches!(c, STRING_DELIMITER | '\\' | 'n' | 'r' | 't' | '0') {
                 self.error(
                     "ORNA-LEX-011",
                     "invalid string escape",

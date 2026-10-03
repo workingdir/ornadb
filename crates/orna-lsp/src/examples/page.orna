@@ -1,1 +1,0 @@
-use std.ui.*; pub fn page() = Page("/contacts", _ => Table(contacts.Contact));

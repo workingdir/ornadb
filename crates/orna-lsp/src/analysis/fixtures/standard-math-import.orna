@@ -1,3 +1,0 @@
-use std.math.{increment};
-
-pub fn plus_one(value: Int) = increment(value);

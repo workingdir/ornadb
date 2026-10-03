@@ -1,6 +1,0 @@
-CREATE SCHEMA "app";
-CREATE TYPE "app"."item" AS OBJECT ("item" BOOLEAN);
-CREATE CLIENT FUNCTION "app"."item"("item" BOOLEAN) RETURNS BOOLEAN AS TRUE;
-CREATE CLIENT FUNCTION caller() RETURNS BOOLEAN AS "app"."item"(TRUE);
-CREATE SERVER FUNCTION read_items() RETURNS ROWS ("item" BOOLEAN) AS
-SELECT probe."item" FROM "app"."item" probe;

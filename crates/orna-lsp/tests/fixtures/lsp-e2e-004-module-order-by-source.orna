@@ -1,8 +1,0 @@
-CREATE SCHEMA ordering;
-CREATE TYPE ordering.item AS OBJECT (
-    title TEXT NOT NULL
-);
-CREATE SERVER FUNCTION ordering.list_items()
-RETURNS ROWS (title TEXT)
-AS
-/* 😀 */ SELECT item.title FROM ordering.item item ORDER BY item.title ASC, item.title DESC;

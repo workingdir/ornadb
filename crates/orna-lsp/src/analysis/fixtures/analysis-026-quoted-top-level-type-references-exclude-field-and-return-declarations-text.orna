@@ -1,3 +1,0 @@
-CREATE TYPE "item" AS OBJECT ("item" BOOLEAN);
-CREATE SERVER FUNCTION read_items() RETURNS ROWS ("item" BOOLEAN) AS
-SELECT probe."item" FROM "item" probe;

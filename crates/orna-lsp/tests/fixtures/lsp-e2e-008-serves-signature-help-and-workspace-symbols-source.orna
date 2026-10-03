@@ -1,5 +1,0 @@
-CREATE SCHEMA request_test;
-CREATE SERVER FUNCTION request_test.echo(p_value INTEGER, p_other BOOLEAN)
-RETURNS INTEGER AS SELECT p_value;
-CREATE SERVER FUNCTION request_test.call()
-RETURNS INTEGER AS SELECT request_test.echo(1, TRUE);

@@ -1,1 +1,0 @@
-CREATE TYPE app.task AS OBJECT (done BOOLEAN);
