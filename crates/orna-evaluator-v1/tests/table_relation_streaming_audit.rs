@@ -1656,7 +1656,19 @@ fn paired_cursor_restore_chains_retain_scope_and_snapshot_values() {
             "restored sibling and handoff chains retain independent scopes: {scope:?}"
         );
     }
-    assert_eq!(source.cursors.len(), 18, "each scope restores three cursor-keyed pages");
+    let mut expected_cursors = Vec::new();
+    for scope in scopes.iter().copied() {
+        expected_cursors.extend([
+            ("View.Paired".to_owned(), scope, None),
+            ("View.Paired".to_owned(), scope, Some(cursor_one.clone())),
+            ("View.Paired".to_owned(), scope, Some(cursor_two.clone())),
+        ]);
+    }
+    assert_eq!(
+        source.cursors,
+        expected_cursors,
+        "each restored chain resolves the exact repeated cursor bytes inside its own scope"
+    );
     assert!(source.pending["View.Paired"].is_empty(), "all six restored page maps are consumed");
 }
 
