@@ -1194,11 +1194,12 @@ impl PackageResolver {
 
     /// Applies several sparse-round chains as one nested terminal-pair fold.
     /// Labels seen in an earlier chain remain bound to their original retained
-    /// snapshots and are revalidated after every later chain, including chains
-    /// that omit them. An omission-only chain must also preserve the exact
-    /// terminal route identity. The reference is silent on cross-chain sparse
-    /// folds; v1 carries depth identities across segment boundaries and returns
-    /// no partial route if any chain invalidates one.
+    /// snapshots and are revalidated after every later round, including rounds
+    /// that omit them. Every omission-only round also preserves the exact
+    /// terminal route identity, even after an active round in the same chain.
+    /// The reference is silent on cross-chain sparse folds; v1 carries depth
+    /// identities across segment boundaries and returns no partial route if any
+    /// round invalidates one.
     pub fn extend_nested_terminal_pair_sparse_checkpoint_storm_chains_from_depth_labels(
         &self,
         previous: &ReboundPathResolution,
@@ -1207,31 +1208,28 @@ impl PackageResolver {
         let mut route = previous.clone();
         let mut retained_labels: Vec<NestedPairDepthLabel> = Vec::new();
         for chain in chains {
-            let omission_only = chain
-                .iter()
-                .all(|round| {
-                    round.iter().all(|(_, replacements)| match replacements {
-                        Some(waves) => waves.is_empty(),
-                        None => true,
-                    })
-                });
-            let terminal_identity = omission_only.then(|| route.terminal_route_identity());
-            route = self
-                .extend_nested_terminal_pair_sparse_checkpoint_storm_rounds_from_depth_labels(
-                    &route, chain,
-                )?;
             for round in *chain {
+                let omission_only = round.iter().all(|(_, replacements)| match replacements {
+                    Some(waves) => waves.is_empty(),
+                    None => true,
+                });
+                let terminal_identity = omission_only.then(|| route.terminal_route_identity());
+                route = self
+                    .extend_nested_terminal_pair_sparse_checkpoint_storm_rounds_from_depth_labels(
+                        &route,
+                        std::slice::from_ref(round),
+                    )?;
                 for (label, _) in *round {
                     if !retained_labels.contains(label) {
                         retained_labels.push((*label).clone());
                     }
                 }
-            }
-            for label in &retained_labels {
-                route.validate_depth_label(label)?;
-            }
-            if let Some(identity) = &terminal_identity {
-                route.validate_terminal_route_identity(identity)?;
+                for label in &retained_labels {
+                    route.validate_depth_label(label)?;
+                }
+                if let Some(identity) = &terminal_identity {
+                    route.validate_terminal_route_identity(identity)?;
+                }
             }
         }
         Ok(route)
