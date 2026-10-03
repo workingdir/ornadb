@@ -121,6 +121,11 @@ pub const OPERATORS: &[&str] = &[
 
 /// Delimiter tokens recognized by the 1.0.0 lexer.
 pub const PUNCTUATION: &[&str] = &["{", "}", "(", ")", "[", "]", ",", ";", ":", "."];
+
+pub const LINE_COMMENT_START: &str = "//";
+pub const BLOCK_COMMENT_START: &str = "/*";
+pub const BLOCK_COMMENT_END: &str = "*/";
+pub const STRING_DELIMITER: char = '"';
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Token {
     pub kind: TokenKind,
@@ -205,17 +210,17 @@ impl<'a> Lexer<'a> {
                 self.bump();
                 continue;
             }
-            if self.take("//") {
+            if self.take(LINE_COMMENT_START) {
                 while self.at < self.source.len() && !matches!(self.peek(), '\n' | '\r') {
                     self.bump()
                 }
                 continue;
             }
-            if self.take("/*") {
+            if self.take(BLOCK_COMMENT_START) {
                 self.comment(start);
                 continue;
             }
-            if c == '"' {
+            if c == STRING_DELIMITER {
                 self.string(start);
                 continue;
             }
@@ -270,9 +275,9 @@ impl<'a> Lexer<'a> {
     fn comment(&mut self, start: usize) {
         let mut depth = 1;
         while self.at < self.source.len() {
-            if self.take("/*") {
+            if self.take(BLOCK_COMMENT_START) {
                 depth += 1
-            } else if self.take("*/") {
+            } else if self.take(BLOCK_COMMENT_END) {
                 depth -= 1;
                 if depth == 0 {
                     return;
@@ -449,7 +454,7 @@ impl<'a> Lexer<'a> {
                 segment_start = self.at;
                 continue;
             }
-            if c == '"' {
+            if c == STRING_DELIMITER {
                 self.bump();
                 if interpolated {
                     if segment_start < self.at - 1 {

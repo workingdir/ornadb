@@ -6,7 +6,7 @@
 
 use lsp_types::{Range, SemanticToken, SemanticTokenType};
 use orna_syntax::SourceSpan;
-use orna_syntax_v1::editor::{self, TokenClass};
+use orna_syntax_v1::editor;
 
 use crate::documents::PositionMapper;
 

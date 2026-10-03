@@ -8,8 +8,16 @@ use std::ops::Range;
 
 use crate::{
     Keyword, TokenKind,
-    lexer::{OPERATORS, PUNCTUATION, lex_recovering},
+    lexer::{
+        BLOCK_COMMENT_END, BLOCK_COMMENT_START, LINE_COMMENT_START, OPERATORS, PUNCTUATION,
+        lex_recovering,
+    },
 };
+
+/// Shared editor pattern for the literal candidates emitted by the v1
+/// numeric lexer. The Rust lexer remains authoritative for validation.
+pub const NUMBER_PATTERN: &str = r"(?:[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]*)?(?:Z|[+-][0-9]{2}:[0-9]{2})|[0-9]{4}-[0-9]{2}-[0-9]{2}|0x[0-9A-Fa-f_]*|0b[01_]*|[0-9][0-9_]*(?:\.[0-9_]+)?(?:[eE][+-]?[0-9_]*)?f?)";
+pub const BRACKET_PAIRS: &[(&str, &str)] = &[("(", ")"), ("[", "]"), ("{", "}")];
 
 /// Stable editor-facing token classes from the 1.0.0 lexer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -157,7 +165,7 @@ fn comments_in_gap(source: &str, gap: Range<usize>, out: &mut Vec<HighlightToken
     let bytes = source.as_bytes();
     let mut at = gap.start;
     while at < gap.end {
-        if bytes[at..gap.end].starts_with(b"//") {
+        if source[at..gap.end].starts_with(LINE_COMMENT_START) {
             let start = at;
             at += 2;
             while at < gap.end && !matches!(bytes[at], b'\r' | b'\n') {
@@ -167,15 +175,15 @@ fn comments_in_gap(source: &str, gap: Range<usize>, out: &mut Vec<HighlightToken
                 range: start..at,
                 class: TokenClass::Comment,
             });
-        } else if bytes[at..gap.end].starts_with(b"/*") {
+        } else if source[at..gap.end].starts_with(BLOCK_COMMENT_START) {
             let start = at;
             at += 2;
             let mut depth = 1usize;
             while at < gap.end && depth > 0 {
-                if bytes[at..gap.end].starts_with(b"/*") {
+                if source[at..gap.end].starts_with(BLOCK_COMMENT_START) {
                     depth += 1;
                     at += 2;
-                } else if bytes[at..gap.end].starts_with(b"*/") {
+                } else if source[at..gap.end].starts_with(BLOCK_COMMENT_END) {
                     depth -= 1;
                     at += 2;
                 } else {
@@ -209,6 +217,10 @@ pub fn generated_artifacts() -> Vec<GeneratedArtifact> {
             render_semantic_legend(),
         ),
         artifact(
+            "editors/vscode/language-configuration.json",
+            render_vscode_language_configuration(),
+        ),
+        artifact(
             "editors/tree-sitter-orna/grammar.js",
             render_tree_sitter_grammar(),
         ),
@@ -220,6 +232,39 @@ pub fn generated_artifacts() -> Vec<GeneratedArtifact> {
         artifact("editors/emacs/orna-eglot.el", render_emacs()),
         artifact("editors/sublime/Orna.sublime-syntax", render_sublime()),
     ]
+}
+
+fn render_vscode_language_configuration() -> String {
+    let brackets = BRACKET_PAIRS
+        .iter()
+        .map(|(open, close)| format!("    [{}, {}]", json_string(open), json_string(close)))
+        .collect::<Vec<_>>()
+        .join(",\n");
+    let auto_closing = BRACKET_PAIRS
+        .iter()
+        .map(|(open, close)| {
+            format!(
+                "    {{ \"open\": {}, \"close\": {} }}",
+                json_string(open),
+                json_string(close)
+            )
+        })
+        .chain([format!(
+            "    {{ \"open\": {}, \"close\": {}, \"notIn\": [\"string\", \"comment\"] }}",
+            json_string("\""),
+            json_string("\"")
+        )])
+        .collect::<Vec<_>>()
+        .join(",\n");
+    let surrounding = BRACKET_PAIRS
+        .iter()
+        .map(|(open, close)| format!("    [{}, {}]", json_string(open), json_string(close)))
+        .chain([format!("    [{}, {}]", json_string("\""), json_string("\""))])
+        .collect::<Vec<_>>()
+        .join(",\n");
+    format!(
+        "{{\n  \"comments\": {{\n    \"lineComment\": \"//\",\n    \"blockComment\": [\"/*\", \"*/\"]\n  }},\n  \"brackets\": [\n{brackets}\n  ],\n  \"autoClosingPairs\": [\n{auto_closing}\n  ],\n  \"surroundingPairs\": [\n{surrounding}\n  ]\n}}\n"
+    )
 }
 
 fn artifact(path: &'static str, contents: String) -> GeneratedArtifact {
@@ -277,6 +322,9 @@ fn render_textmate() -> String {
         r"(?<![\p{{L}}\p{{N}}_])(?:{})(?![\p{{L}}\p{{N}}_])",
         regex_alternation(&keywords())
     );
+    let number_re = format!(
+        r"(?<![\p{{L}}\p{{N}}_])(?:{NUMBER_PATTERN})(?![\p{{L}}\p{{N}}_])"
+    );
     let operator_re = regex_alternation(OPERATORS);
     let punctuation_re = regex_alternation(PUNCTUATION);
     let patterns = format!(
@@ -302,7 +350,7 @@ fn render_textmate() -> String {
     ]}},
     "expressions": {{ "patterns": [{{ "include": "#comments" }}, {{ "include": "#string" }}, {{ "include": "#keyword" }}, {{ "include": "#number" }}, {{ "include": "#operator" }}, {{ "include": "#punctuation" }}, {{ "include": "#identifier" }}] }},
     "keyword": {{ "name": "keyword.control.orna", "match": {} }},
-    "number": {{ "name": "constant.numeric.orna", "match": "\\b[0-9][A-Za-z0-9_:.+-]*" }},
+    "number": {{ "name": "constant.numeric.orna", "match": {} }},
     "operator": {{ "name": "keyword.operator.orna", "match": {} }},
     "punctuation": {{ "name": "punctuation.orna", "match": {} }},
     "identifier": {{ "name": "variable.other.orna", "match": "[_\\p{{L}}][_\\p{{L}}\\p{{N}}]*" }}
@@ -310,6 +358,7 @@ fn render_textmate() -> String {
 }}
 "##,
         json_string(&keyword_re),
+        json_string(&number_re),
         json_string(&operator_re),
         json_string(&punctuation_re)
     );
@@ -356,6 +405,7 @@ fn render_tree_sitter_grammar() -> String {
         .map(|word| json_string(word))
         .collect::<Vec<_>>()
         .join(", ");
+    let number_pattern = NUMBER_PATTERN;
     format!(
         r#"// Generated from orna-syntax-v1 lexer token definitions; edit the Rust source instead.
 module.exports = grammar({{
@@ -370,7 +420,7 @@ module.exports = grammar({{
     string: _ => token(seq('"', repeat(choice(/[^"\\]/, /\\./)), '"')),
     keyword: _ => token(prec(2, choice({keyword_choices}))),
     identifier: _ => token(prec(1, /[_\p{{XID_Start}}][_\p{{XID_Continue}}]*/)),
-    number: _ => token(/[0-9][A-Za-z0-9_:.+-]*/),
+    number: _ => token(/{number_pattern}/),
     operator: _ => token(choice({operator_choices})),
     punctuation: _ => token(choice({punctuation_choices}))
   }}
@@ -392,7 +442,10 @@ fn render_vim() -> String {
         keywords().join(" ")
     ));
     out.push_str("syntax region ornaString start=+\"+ skip=+\\\\.+ end=+\"+ contains=ornaInterpolation\nsyntax region ornaInterpolation start=+\\\\{+ end=+}+ contained\nsyntax match ornaComment +//.*$+\nsyntax region ornaComment start=+/\\*+ end=+\\*/+ contains=ornaComment\n");
-    out.push_str("syntax match ornaNumber +\\<[0-9][A-Za-z0-9_:.+-]*+\n");
+    out.push_str(&format!(
+        "syntax match ornaNumber /\\v{}/\n",
+        vim_regex(NUMBER_PATTERN)
+    ));
     out.push_str(&format!(
         "syntax match ornaOperator +\\({}\\)+\n",
         vim_alternation(OPERATORS)
@@ -403,6 +456,10 @@ fn render_vim() -> String {
     ));
     out.push_str("syntax match ornaIdentifier +[_[:alpha:]][_[:alnum:]]*+\nhi def link ornaKeyword Statement\nhi def link ornaString String\nhi def link ornaComment Comment\nhi def link ornaNumber Number\nhi def link ornaOperator Operator\nhi def link ornaPunctuation Delimiter\nhi def link ornaIdentifier Identifier\nlet b:current_syntax = \"orna\"\n");
     out
+}
+
+fn vim_regex(pattern: &str) -> String {
+    pattern.replace("(?:", "\\%(")
 }
 
 fn vim_alternation(values: &[&str]) -> String {
@@ -436,6 +493,7 @@ fn render_emacs() -> String {
         .map(|word| format!("\"{}\"", word.replace('"', "\\\"")))
         .collect::<Vec<_>>()
         .join(" ");
+    let number_pattern = emacs_regex(NUMBER_PATTERN);
     format!(
         r#";;; orna-eglot.el --- Orna 1.0.0 lexical highlighting -*- lexical-binding: t; -*-
 ;; Generated from orna-syntax-v1. Install packaging is maintained separately.
@@ -447,7 +505,7 @@ fn render_emacs() -> String {
     ("//.*$" . font-lock-comment-face)
     ("/\\\\*\\\\(?:.\\\\|\\\\n\\\\)*?\\\\*/" . font-lock-comment-face)
     ("\\\"\\\\(?:\\\\\\\\.\\\\|[^\\\"\\\\]\\\\)*\\\"" . font-lock-string-face)
-    ("\\\\b[0-9][A-Za-z0-9_:.+-]*" . font-lock-constant-face)
+    ({number_pattern} . font-lock-constant-face)
     (,(regexp-opt orna-operators) . font-lock-builtin-face))
   "Lexical highlighting generated from the 1.0.0 lexer.")
 (define-derived-mode orna-mode prog-mode "Orna"
@@ -464,10 +522,19 @@ fn render_emacs() -> String {
     )
 }
 
+fn emacs_regex(pattern: &str) -> String {
+    let regex = pattern
+        .replace("(?:", "\\(?:")
+        .replace('{', "\\{")
+        .replace('}', "\\}");
+    format!("\"{}\"", regex.replace('\\', "\\\\"))
+}
+
 fn render_sublime() -> String {
     let keyword_pattern = regex_alternation(&keywords());
     let operator_pattern = regex_alternation(OPERATORS);
     let punctuation_pattern = regex_alternation(PUNCTUATION);
+    let number_pattern = NUMBER_PATTERN;
     format!(
         r#"%YAML 1.2
 ---
@@ -494,7 +561,7 @@ contexts:
             - include: main
     - match: '(?<![\\p{{L}}\\p{{N}}_])(?:{keyword_pattern})(?![\\p{{L}}\\p{{N}}_])'
       scope: keyword.control.orna
-    - match: '\\b[0-9][A-Za-z0-9_:.+-]*'
+    - match: '{number_pattern}'
       scope: constant.numeric.orna
     - match: '(?:{operator_pattern})'
       scope: keyword.operator.orna

@@ -8,7 +8,7 @@
     ("//.*$" . font-lock-comment-face)
     ("/\\\\*\\\\(?:.\\\\|\\\\n\\\\)*?\\\\*/" . font-lock-comment-face)
     ("\\\"\\\\(?:\\\\\\\\.\\\\|[^\\\"\\\\]\\\\)*\\\"" . font-lock-string-face)
-    ("\\\\b[0-9][A-Za-z0-9_:.+-]*" . font-lock-constant-face)
+    ("\\(?:[0-9]\\{4\\}-[0-9]\\{2\\}-[0-9]\\{2\\}T[0-9]\\{2\\}:[0-9]\\{2\\}:[0-9]\\{2\\}\\(?:\\.[0-9]*)?\\(?:Z|[+-][0-9]\\{2\\}:[0-9]\\{2\\})|[0-9]\\{4\\}-[0-9]\\{2\\}-[0-9]\\{2\\}|0x[0-9A-Fa-f_]*|0b[01_]*|[0-9][0-9_]*\\(?:\\.[0-9_]+)?\\(?:[eE][+-]?[0-9_]*)?f?)" . font-lock-constant-face)
     (,(regexp-opt orna-operators) . font-lock-builtin-face))
   "Lexical highlighting generated from the 1.0.0 lexer.")
 (define-derived-mode orna-mode prog-mode "Orna"

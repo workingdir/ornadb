@@ -1528,10 +1528,6 @@ fn client_target_declaration_span(parse: &Parse, selected_span: &SourceSpan) -> 
 }
 
 /// Returns true only for the final function component of an accepted target.
-pub(crate) fn is_client_target_function_span(parse: &Parse, selected_span: &SourceSpan) -> bool {
-    client_target_function_path_at(parse, selected_span).is_some()
-}
-
 fn client_expression_part_at<'a>(
     expression: &'a ClientExpression,
     selected_span: &SourceSpan,
