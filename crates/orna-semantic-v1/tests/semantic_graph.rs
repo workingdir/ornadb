@@ -13194,6 +13194,102 @@ fn paired_checkpoint_reset_replay_preserves_each_lane_identity() {
 }
 
 #[test]
+fn paired_nested_omission_reset_replay_restores_lane_pin_maps() {
+    let source = include_str!("fixtures/historical-paired-nested-omission-reset-replay.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-paired-nested-omission-reset-replay.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(
+        result.is_ok(),
+        "paired nested omission folds must remain resettable and replay their saved pin maps: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+    let module = result
+        .modules
+        .values()
+        .find(|module| {
+            module
+                .symbols
+                .contains_key("paired_nested_omission_reset_replay_values")
+        })
+        .expect("paired nested omission reset replay module");
+    let Type::Function { result, .. } =
+        &module.symbols["paired_nested_omission_reset_replay_values"].ty
+    else {
+        panic!("paired nested omission replay must be callable");
+    };
+    let Type::Record(stages) = result.as_ref() else {
+        panic!("paired nested omission replay must return saved and replayed values");
+    };
+    let Type::Record(saved_lanes) = stages.get("saved").expect("saved paired values") else {
+        panic!("saved paired value must contain both lanes");
+    };
+    let Type::Record(replayed_lanes) = stages.get("replayed").expect("replayed values") else {
+        panic!("replayed paired value must contain both lanes");
+    };
+    assert_eq!(
+        saved_lanes, replayed_lanes,
+        "resetting after complete and partial paired omission folds must replay each exact saved value"
+    );
+
+    for (lane, pins) in [
+        (
+            "left",
+            [
+                ("root", Some("HEAD~500")),
+                ("terminal", Some("HEAD~430")),
+                ("middle_right", None),
+            ],
+        ),
+        (
+            "right",
+            [
+                ("root", Some("HEAD~450")),
+                ("terminal", Some("HEAD~420")),
+                ("middle_selected", None),
+            ],
+        ),
+    ] {
+        let Type::Record(fields) = replayed_lanes.get(lane).expect("replayed lane") else {
+            panic!("{lane} must retain its computed checkpoint fields");
+        };
+        for (field, selector) in pins {
+            let value = fields.get(field).expect("computed checkpoint field");
+            assert_canonical_snapshot_context_maps(value);
+            let mut contexts = BTreeSet::new();
+            collect_snapshot_contexts(value, &mut contexts);
+            if let Some(selector) = selector {
+                assert_eq!(
+                    contexts,
+                    BTreeSet::from([format!("selector:{selector}")]),
+                    "{lane}.{field} must replay its saved selector"
+                );
+            } else {
+                assert_eq!(
+                    contexts.len(),
+                    1,
+                    "{lane}.{field} must retain one symbolic identity for its omitted pin"
+                );
+                assert!(
+                    contexts.iter().all(|context| context.starts_with("selector:dynamic-call:")),
+                    "{lane}.{field} must remain a symbolic omitted pin, not inherit a storm pin: {contexts:?}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn paired_checkpoint_snapshot_maps_survive_chained_depth_storms() {
     let source = include_str!(
         "fixtures/historical-paired-checkpoint-snapshot-retention-depth-storm.orna"
