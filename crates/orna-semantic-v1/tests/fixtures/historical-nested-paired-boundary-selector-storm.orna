@@ -1,0 +1,48 @@
+pub fn factory_at(pin: sys.SnapshotRef) =
+    sys.database.as_of(pin).energy.factory;
+
+pub fn rejects_nested_paired_boundary_depth_drift_after_selector_storm(failure: Error) {
+    let first = {
+        group: {
+            left: { pins: (factory_at(sys.snapshot("HEAD~1101")), fail(failure)) },
+            right: { pins: (factory_at(sys.snapshot("HEAD~1111")), fail(failure)) },
+        },
+    };
+    let middle = {
+        group: {
+            left: { pins: (factory_at(sys.snapshot("HEAD~1102")), factory_at(sys.snapshot("HEAD~1121"))) },
+            right: { pins: (factory_at(sys.snapshot("HEAD~1112")), factory_at(sys.snapshot("HEAD~1121"))) },
+        },
+    };
+    let last = {
+        group: {
+            left: { pins: (factory_at(sys.snapshot("HEAD~1103")), factory_at(sys.snapshot("HEAD~1131"))) },
+            right: { pins: (factory_at(sys.snapshot("HEAD~1113")), factory_at(sys.snapshot("HEAD~1132"))) },
+        },
+    };
+    { first: first, middle: middle, last: last, folded: [first, middle, last] }
+}
+
+pub fn accepts_nested_paired_boundary_depths_after_selector_storm(failure: Error) {
+    let parents = [
+        {
+            group: {
+                left: { pins: (factory_at(sys.snapshot("HEAD~1151")), fail(failure)) },
+                right: { pins: (factory_at(sys.snapshot("HEAD~1161")), fail(failure)) },
+            },
+        },
+        {
+            group: {
+                left: { pins: (factory_at(sys.snapshot("HEAD~1152")), factory_at(sys.snapshot("HEAD~1171"))) },
+                right: { pins: (factory_at(sys.snapshot("HEAD~1162")), factory_at(sys.snapshot("HEAD~1171"))) },
+            },
+        },
+        {
+            group: {
+                left: { pins: (factory_at(sys.snapshot("HEAD~1153")), factory_at(sys.snapshot("HEAD~1172"))) },
+                right: { pins: (factory_at(sys.snapshot("HEAD~1163")), factory_at(sys.snapshot("HEAD~1172"))) },
+            },
+        },
+    ];
+    { folded: parents }
+}
