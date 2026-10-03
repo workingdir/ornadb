@@ -24,7 +24,7 @@ pub use branch_merge::{
     BranchMergeTombstoneEvent, BranchMergeTombstoneHistory,
     BranchMergeTombstoneHistoryError,
     BranchMergePlanSequenceError, BranchMergePlanSequencer, BranchMergeReport,
-    SequencedBranchMergePlan,
+    BranchMergeTableDepthLadderEvent, SequencedBranchMergePlan,
     BranchRowSource, CheckpointId, KeyRange, MergeSide, MergedSegment, MergedTable,
     RowSegmentManifest, TableManifest, ThreeWaySnapshot, merge_three_way_snapshots,
 };
