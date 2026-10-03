@@ -271,6 +271,9 @@ fn validate_schema_value(
                     "^sys\\.[a-z0-9_]+(\\.[a-z0-9_]+)*$" => Some(valid_sys_failure_code(string)),
                     QUALIFIED_ID_PATTERN => Some(valid_qualified_id(string)),
                     ROLE_ANNOTATION_PATTERN => Some(valid_role_annotation_id(string)),
+                    PROVIDER_ROLE_ANNOTATION_PATTERN => {
+                        Some(valid_provider_role_annotation_id(string))
+                    }
                     _ => None,
                 };
                 if matches == Some(false) {
@@ -286,12 +289,24 @@ fn validate_schema_value(
         Some("integer") => {
             let integer = value
                 .as_i64()
-                .or_else(|| value.as_u64().and_then(|value| i64::try_from(value).ok()))
+                .map(i128::from)
+                .or_else(|| value.as_u64().map(i128::from))
                 .ok_or_else(|| format!("{path}: expected integer"))?;
-            if let Some(minimum) = schema.get("minimum").and_then(Value::as_i64)
+            let bound_as_i128 = |bound: &Value| {
+                bound
+                    .as_i64()
+                    .map(i128::from)
+                    .or_else(|| bound.as_u64().map(i128::from))
+            };
+            if let Some(minimum) = schema.get("minimum").and_then(bound_as_i128)
                 && integer < minimum
             {
                 return Err(format!("{path}: integer is below {minimum}"));
+            }
+            if let Some(maximum) = schema.get("maximum").and_then(bound_as_i128)
+                && integer > maximum
+            {
+                return Err(format!("{path}: integer is above {maximum}"));
             }
         }
         Some("boolean") if !value.is_boolean() => {
@@ -340,6 +355,7 @@ fn valid_sys_failure_code(code: &str) -> bool {
 
 const QUALIFIED_ID_PATTERN: &str = r"^[A-Za-z0-9_-]+(\.[A-Za-z0-9_-]+)*$";
 const ROLE_ANNOTATION_PATTERN: &str = r"^[A-Za-z0-9_-]+(\.[A-Za-z0-9_-]+)*@[0-9]+\.[0-9]+$";
+const PROVIDER_ROLE_ANNOTATION_PATTERN: &str = r"^[A-Za-z0-9_-]+(\.[A-Za-z0-9_-]+)*@(?:[0-9]{1,4}|[1-5][0-9]{4}|6[0-4][0-9]{3}|65[0-4][0-9]{2}|655[0-2][0-9]|6553[0-5])\.(?:[0-9]{1,4}|[1-5][0-9]{4}|6[0-4][0-9]{3}|65[0-4][0-9]{2}|655[0-2][0-9]|6553[0-5])$";
 
 fn valid_qualified_id(value: &str) -> bool {
     !value.is_empty()
@@ -364,6 +380,16 @@ fn valid_role_annotation_id(value: &str) -> bool {
         && !minor.contains('.')
         && major.bytes().all(|byte| byte.is_ascii_digit())
         && minor.bytes().all(|byte| byte.is_ascii_digit())
+}
+
+fn valid_provider_role_annotation_id(value: &str) -> bool {
+    let Some((role, version)) = value.rsplit_once('@') else {
+        return false;
+    };
+    let Some((major, minor)) = version.split_once('.') else {
+        return false;
+    };
+    valid_qualified_id(role) && minor.parse::<u16>().is_ok() && major.parse::<u16>().is_ok()
 }
 
 impl<'ast> Visit<'ast> for Collector {
