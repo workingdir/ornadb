@@ -2532,7 +2532,11 @@ fn sparse_nested_storm_folds_preserve_terminal_route_identity() {
         "the nested checkpoint identity survives a later sparse chain"
     );
     let chained_terminal_identity = chained_sparse_fold.terminal_route_identity();
-    let paired_omission_tail = [(&outer_label, None), (&nested_label, None)];
+    let empty_replacement_waves: [[PinnedDatabase; 2]; 0] = [];
+    let paired_omission_tail = [
+        (&outer_label, Some(empty_replacement_waves.as_slice())),
+        (&nested_label, None),
+    ];
     let omission_tail_chain = [paired_omission_tail.as_slice()];
     let omission_tail_chains = [omission_tail_chain.as_slice()];
     let chained_after_omissions = resolver
