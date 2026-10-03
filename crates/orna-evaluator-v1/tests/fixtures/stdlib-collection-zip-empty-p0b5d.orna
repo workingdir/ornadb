@@ -1,0 +1,1 @@
+collection_ops.zip_exact(collection_ops.take([1], 0), collection_ops.take([""], 0))
