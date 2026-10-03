@@ -1074,6 +1074,101 @@ fn fresh_nested_route_pair_chains_evaluate_rebound_closure_values() {
         Ok(Some(Value::int(96.into())))
     );
 
+    let independent_first_stage = resolver
+        .extend_nested_terminal_pair_chain(&fresh_route, &[first_pair.clone()])
+        .unwrap_or_else(|error| panic!("independent nested pair failed: {error:?}"));
+    let same_pin_foreign_label = independent_first_stage.retained_depth_label(0, 0).unwrap();
+    let attached_pin_route = |session: &AttachedDatabaseSession| {
+        session
+            .attached()
+            .map(|(alias, database)| (alias.to_owned(), database.pin().clone()))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        same_pin_foreign_label.wave(),
+        initial_depth_label.wave()
+    );
+    assert_eq!(
+        same_pin_foreign_label.depth(),
+        initial_depth_label.depth()
+    );
+    assert_eq!(
+        independent_first_stage.retained_wave(0).unwrap()[0]
+            .primary()
+            .pin(),
+        first_stage.retained_wave(0).unwrap()[0].primary().pin()
+    );
+    assert_eq!(
+        attached_pin_route(&independent_first_stage.retained_wave(0).unwrap()[0]),
+        attached_pin_route(&first_stage.retained_wave(0).unwrap()[0])
+    );
+    assert_ne!(same_pin_foreign_label, initial_depth_label);
+
+    let depth_zero_waves = [first_pair.clone()];
+    let depth_one_waves = [second_pair.clone()];
+    let depth_zero_plans = [(&initial_depth_label, depth_zero_waves.as_slice())];
+    let depth_one_plans = [(saved_middle_handoff.depth_label(), depth_one_waves.as_slice())];
+    let depth_label_rounds = [depth_zero_plans.as_slice(), depth_one_plans.as_slice()];
+    let nested_depth_folds = resolver
+        .extend_nested_terminal_pair_checkpoint_storm_rounds_from_depth_labels(
+            &first_stage,
+            &depth_label_rounds,
+        )
+        .unwrap_or_else(|error| panic!("nested depth-label folds failed: {error:?}"));
+    assert_eq!(
+        nested_depth_folds.retained_depth_label(0, 0).unwrap(),
+        initial_depth_label,
+        "the outer source identity survives a later nested-depth fold"
+    );
+    assert_eq!(
+        nested_depth_folds.retained_depth_label(0, 1).unwrap(),
+        *saved_middle_handoff.depth_label(),
+        "the nested handoff identity remains attached to its captured depth"
+    );
+    let foreign_depth_round = [(&same_pin_foreign_label, depth_one_waves.as_slice())];
+    let crossed_depth_rounds = [depth_zero_plans.as_slice(), foreign_depth_round.as_slice()];
+    assert!(matches!(
+        resolver.extend_nested_terminal_pair_checkpoint_storm_rounds_from_depth_labels(
+            &first_stage,
+            &crossed_depth_rounds,
+        ),
+        Err(AttachmentError::RetainedSnapshotUnavailable)
+    ));
+    assert_eq!(
+        nested_depth_folds
+            .final_session()
+            .database(aliases[4])
+            .unwrap()
+            .pin()
+            .commit()
+            .as_str(),
+        leaf_final
+    );
+    let mut nested_depth_evaluation_session =
+        AttachedDatabaseSession::new(parent.primary().clone()).unwrap();
+    nested_depth_evaluation_session
+        .attach_database(
+            nested_depth_folds
+                .final_session()
+                .database(aliases[4])
+                .unwrap()
+                .clone(),
+        )
+        .unwrap();
+    let mut nested_depth_evaluator = AdmittedReplSession::from_attached_database_session(
+        &nested_depth_evaluation_session,
+        Limits::default(),
+    )
+    .unwrap();
+    assert_eq!(
+        nested_depth_evaluator.submit(&format!("use {};", aliases[4])),
+        Ok(None)
+    );
+    assert_eq!(
+        nested_depth_evaluator.submit(&format!("{}.package_value()", aliases[4])),
+        Ok(Some(Value::int(96.into())))
+    );
+
     let later_cascade = resolver
         .extend_nested_terminal_pair_chain(&first_stage, &[second_pair.clone()])
         .unwrap_or_else(|error| panic!("later nested pair cascade failed: {error:?}"));
