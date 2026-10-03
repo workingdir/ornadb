@@ -1442,6 +1442,45 @@ fn generated_provider_schema_rejects_versions_outside_typed_u16_range() {
 }
 
 #[test]
+fn generated_provider_schema_accepts_reordered_operation_and_role_rows() {
+    let schema_json = build_provider::generate_provider_registry_schema()
+        .expect("provider dispatch schema regenerates from its generator");
+    assert_eq!(schema_json, system_provider_abi_schema_json());
+    let mut reordered: Value =
+        serde_json::from_str(system_provider_abi_json()).expect("embedded dispatch metadata");
+    let operation_count = reordered["operations"]
+        .as_array()
+        .expect("generated operations are an array")
+        .len();
+    let role_count = reordered["roles"]
+        .as_array()
+        .expect("generated roles are an array")
+        .len();
+    reordered["operations"]
+        .as_array_mut()
+        .expect("generated operations are an array")
+        .reverse();
+    reordered["roles"]
+        .as_array_mut()
+        .expect("generated roles are an array")
+        .reverse();
+
+    let reordered_json = reordered.to_string();
+    build_host::validate_json_against_schema(&reordered_json, &schema_json)
+        .expect("schema accepts valid operation and role rows in a different order");
+    let reordered_table = SystemProviderAbi::from_json(&reordered_json)
+        .expect("typed dispatch table accepts reordered operation and role rows");
+    assert_eq!(&reordered_table, system_dispatch_table());
+    assert_eq!(operation_count, reordered_table.operations().count());
+    assert_eq!(role_count, reordered_table.roles().count());
+
+    println!(
+        "generated_provider_row_reorder_schema_parity operations={operation_count} roles={role_count} schema_valid=1 typed_table_equal=1 total_cases={}",
+        operation_count + role_count + 2
+    );
+}
+
+#[test]
 fn generated_artifact_drift_probe_rejects_tampered_outputs_and_stale_modules() {
     let regenerated = regenerate();
     let source_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
