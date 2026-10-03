@@ -18264,6 +18264,7 @@ fn merge_multi_parent_checkpoint_tuple(
         .iter()
         .zip(parent)
         .all(|(first, parent)| checkpoint_pin_map_widths_match(first, parent))
+        || !tuple_pin_identity_topology_matches(first_parent, parent)
         || !tuple_checkpoint_compaction_fold_preserves_pin_identity(accumulated, parent)
     {
         return None;
@@ -18303,7 +18304,7 @@ fn type_contains_pinned_checkpoint_tuple(ty: &Type) -> bool {
 }
 
 /// Reconcile a parent row transactionally while preserving the first parent's
-/// selector widths and each nested tuple's boundary-path identity.
+/// selector widths and selector membership at each nested boundary path.
 fn merge_multi_parent_checkpoint_value(
     accumulated: &Type,
     parent: &Type,
@@ -18313,12 +18314,31 @@ fn merge_multi_parent_checkpoint_value(
         return merge_multi_parent_checkpoint_tuple(accumulated, parent, first_parent);
     }
     if !checkpoint_pin_map_widths_match(first_parent, parent)
+        || !checkpoint_value_pin_identity_topology_matches(first_parent, parent)
         || !nested_checkpoint_compaction_fold_preserves_pin_identity(accumulated, parent)
     {
         return None;
     }
 
     merge_checkpoint_field_map(accumulated, parent)
+}
+
+/// ORNA-CP-003 and ORNA-SYS-136 define explicit snapshot selection, but do not
+/// specify multi-parent collection folds. Require each source row to preserve
+/// the first row's alpha-equivalent selector membership across structural
+/// paths before unioning its maps; this prevents a pin label from changing
+/// depth merely because different rows use disjoint selector strings.
+fn checkpoint_value_pin_identity_topology_matches(expected: &Type, actual: &Type) -> bool {
+    if !checkpoint_pin_map_widths_match(expected, actual) {
+        return false;
+    }
+    let mut pin_maps = Vec::new();
+    collect_corresponding_snapshot_context_maps_at_path(
+        expected,
+        actual,
+        &mut pin_maps,
+        &mut Vec::new(),
+    ) && snapshot_context_topology_matches(&pin_maps)
 }
 
 fn nested_checkpoint_compaction_fold_preserves_pin_identity(left: &Type, right: &Type) -> bool {
