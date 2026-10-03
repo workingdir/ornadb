@@ -1138,6 +1138,58 @@ fn divergent_paired_module_projects() -> (TempDir, [LoadedProject; 4], [String; 
     )
 }
 
+fn paired_divergence_convergence_projects() -> (TempDir, [LoadedProject; 5], [String; 5]) {
+    let (directory, projects, pins) = divergent_paired_module_projects();
+    let [base_project, math_project, collection_project, paired_project] = projects;
+    let project_path = directory.path().join("project");
+    let standard_path = project_path.join("stdlib/std");
+
+    git_output_at(
+        &standard_path,
+        &["checkout", "--detach", pins[1].as_str()],
+    );
+    git_output_at(
+        &standard_path,
+        &["merge", "--no-ff", "--no-commit", pins[2].as_str()],
+    );
+    commit_directory(&standard_path, "merge paired module divergence branches");
+    let convergence_pin = git_output_at(&standard_path, &["rev-parse", "HEAD"]);
+    git_output_at(
+        &standard_path,
+        &["branch", "paired-convergence-pin", convergence_pin.as_str()],
+    );
+    let convergence_parent = capture_standard_gitlink(
+        &project_path,
+        &convergence_pin,
+        "capture paired module divergence convergence",
+    );
+
+    let repository = Repository::discover(&project_path).unwrap();
+    let parent = repository
+        .resolve_snapshot(&convergence_parent)
+        .unwrap();
+    let convergence_project = ProjectLoader::default()
+        .load_committed_snapshot(&repository, &parent)
+        .unwrap();
+    (
+        directory,
+        [
+            base_project,
+            math_project,
+            collection_project,
+            paired_project,
+            convergence_project,
+        ],
+        [
+            pins[0].clone(),
+            pins[1].clone(),
+            pins[2].clone(),
+            pins[3].clone(),
+            convergence_pin,
+        ],
+    )
+}
+
 fn paired_divergence_escalation_projects() -> (TempDir, [LoadedProject; 6], [String; 6]) {
     let (directory, projects, pins) = divergent_paired_module_projects();
     let [
