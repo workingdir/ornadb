@@ -2,7 +2,7 @@ use std::ops::Range;
 
 use crate::{
     Diagnostic, SourceSpan,
-    grammar::{
+    legacy_lexical::{
         BLOCK_COMMENT_END, BLOCK_COMMENT_START, LINE_COMMENT_START, QUOTED_IDENTIFIER_DELIMITER,
         STRING_DELIMITER,
     },

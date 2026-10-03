@@ -1,33 +1,29 @@
 {
-  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
-  "name": "Orna",
   "scopeName": "source.orna",
-  "fileTypes": ["orna"],
   "patterns": [
     { "include": "#comments" },
-    { "include": "#strings" },
-    { "include": "#quoted-identifiers" },
-    { "include": "#scalar-types" },
-    { "include": "#keywords" },
-    { "include": "#numbers" },
-    { "include": "#operators" },
+    { "include": "#string" },
+    { "include": "#keyword" },
+    { "include": "#number" },
+    { "include": "#operator" },
     { "include": "#punctuation" },
-    { "include": "#identifiers" }
+    { "include": "#identifier" }
   ],
   "repository": {
-    "comments": {
-      "patterns": [
-        { "match": "--[^\\n]*", "name": "comment.orna" },
-        { "begin": "/\\*", "end": "\\*/", "name": "comment.orna" }
-      ]
-    },
-    "strings": { "match": "'(?:''|[^'])*'", "name": "string.quoted.single.orna" },
-    "quoted-identifiers": { "match": "\"(?:\"\"|[^\"])*\"", "name": "entity.name.quoted.orna" },
-    "scalar-types": { "match": "(?i:\\b(?:CHARACTER\\s+LARGE\\s+OBJECT|BINARY\\s+LARGE\\s+OBJECT|TIMESTAMP|DURATION|BOOLEAN|DECIMAL|INTEGER|BIGINT|BYTES|FLOAT|BOOL|DATE|TEXT|TIME|UUID|VOID|INT)\\b)", "name": "storage.type.orna" },
-    "keywords": { "match": "(?i:\\b(?:DOCUMENTATION|PERSISTABLE|TRANSACTION|CAPABILITY|VOLATILITY|IMMUTABLE|PRIMITIVE|RETURNING|TRANSIENT|CONTRACT|DISABLED|DISTINCT|EXTERNAL|FUNCTION|REQUIRES|RESTRICT|SECURITY|VOLATILE|BETWEEN|CASCADE|DEFAULT|DEFINER|EXECUTE|INSPECT|INVOKER|PRELUDE|RETURNS|RUNTIME|SESSION|ATOMIC|CLIENT|CREATE|DELETE|EXISTS|EXPORT|HAVING|INSERT|KERNEL|MANUAL|OBJECT|OFFSET|OPAQUE|OPTION|RENAME|RETURN|REVOKE|SCHEMA|SEALED|SELECT|SERVER|STABLE|STREAM|UNIQUE|UPDATE|VALUES|ALTER|AWAIT|BEGIN|CHECK|CONST|CROSS|ELSIF|FALSE|FIELD|FINAL|FIRST|GRANT|GROUP|ILIKE|INNER|LIMIT|LOCAL|NULLS|ORDER|OUTER|RIGHT|SCOPE|STATE|TABLE|UNION|VALUE|WHERE|WHILE|CALL|CASE|DESC|DROP|ELSE|ENUM|FROM|FULL|INTO|JOIN|LAST|LEFT|LIKE|LIST|LOOP|NULL|ONLY|READ|ROLE|ROWS|THEN|TRUE|TYPE|USER|WHEN|ADD|ALL|AND|ASC|END|FOR|LET|MAP|NOT|REF|SET|AS|BY|IF|IN|IS|ON|OR|TO)\\b)", "name": "keyword.control.orna" },
-    "numbers": { "match": "\\b[0-9]+\\b", "name": "constant.numeric.orna" },
-    "operators": { "match": "(?:\\|\\||!=|->|:=|<=|<>|=>|>=|\\*|\\+|\\?|%|-|/|:|<|=|>)", "name": "keyword.operator.orna" },
-    "punctuation": { "match": "(?:\\(|\\)|\\.|\\[|\\]|\\{|\\}|,|;)", "name": "punctuation.orna" },
-    "identifiers": { "match": "[\\p{L}_][\\p{L}\\p{N}_]*", "name": "variable.other.orna" }
+    "comments": { "patterns": [
+      { "name": "comment.line.double-slash.orna", "match": "//[^\\r\\n]*" },
+      { "name": "comment.block.orna", "begin": "/\\*", "end": "\\*/", "patterns": [{ "include": "#comments" }] }
+    ]},
+    "string": { "name": "string.quoted.double.orna", "begin": "\\\"", "end": "\\\"", "patterns": [
+      { "name": "constant.character.escape.orna", "match": "\\\\(?:[\\\"\\\\nrt0]|u\\{[0-9A-Fa-f]{1,6}\\})" },
+      { "name": "meta.interpolation.orna", "begin": "(?<!\\\\)\\{", "end": "\\}", "patterns": [{ "include": "#expressions" }] }
+    ]},
+    "expressions": { "patterns": [{ "include": "#comments" }, { "include": "#string" }, { "include": "#keyword" }, { "include": "#number" }, { "include": "#operator" }, { "include": "#punctuation" }, { "include": "#identifier" }] },
+    "keyword": { "name": "keyword.control.orna", "match": "(?<![\\p{L}\\p{N}_])(?:continue|protocol|assert|offset|affine|return|static|break|false|table|while|base|case|else|enum|impl|loop|null|self|true|type|unit|dim|for|let|pub|use|as|fn|if|in)(?![\\p{L}\\p{N}_])" },
+    "number": { "name": "constant.numeric.orna", "match": "\\b[0-9][A-Za-z0-9_:.+-]*" },
+    "operator": { "name": "keyword.operator.orna", "match": "\\.\\.=|=>|==|!=|<=|>=|\\?\\?|\\|\\?|&&|\\|\\||\\+=|-=|\\*=|/=|\\.\\.|\\||!|=|<|>|\\+|-|\\*|/|%|\\^|\\?" },
+    "punctuation": { "name": "punctuation.orna", "match": "\\{|\\}|\\(|\\)|\\[|\\]|,|;|:|\\." },
+    "identifier": { "name": "variable.other.orna", "match": "[_\\p{L}][_\\p{L}\\p{N}]*" }
   }
 }
+

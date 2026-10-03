@@ -3,30 +3,31 @@
 name: Orna
 file_extensions: [orna]
 scope: source.orna
-
 contexts:
   main:
-    - include: comments
-    - match: "'(?:''|[^'])*'"
-      scope: string.quoted.single.orna
-    - match: "\"(?:\"\"|[^\"])*\""
-      scope: entity.name.quoted.orna
-    - match: "(?i:\\b(?:CHARACTER\\s+LARGE\\s+OBJECT|BINARY\\s+LARGE\\s+OBJECT|TIMESTAMP|DURATION|BOOLEAN|DECIMAL|INTEGER|BIGINT|BYTES|FLOAT|BOOL|DATE|TEXT|TIME|UUID|VOID|INT)\\b)"
-      scope: storage.type.orna
-    - match: "(?i:\\b(?:DOCUMENTATION|PERSISTABLE|TRANSACTION|CAPABILITY|VOLATILITY|IMMUTABLE|PRIMITIVE|RETURNING|TRANSIENT|CONTRACT|DISABLED|DISTINCT|EXTERNAL|FUNCTION|REQUIRES|RESTRICT|SECURITY|VOLATILE|BETWEEN|CASCADE|DEFAULT|DEFINER|EXECUTE|INSPECT|INVOKER|PRELUDE|RETURNS|RUNTIME|SESSION|ATOMIC|CLIENT|CREATE|DELETE|EXISTS|EXPORT|HAVING|INSERT|KERNEL|MANUAL|OBJECT|OFFSET|OPAQUE|OPTION|RENAME|RETURN|REVOKE|SCHEMA|SEALED|SELECT|SERVER|STABLE|STREAM|UNIQUE|UPDATE|VALUES|ALTER|AWAIT|BEGIN|CHECK|CONST|CROSS|ELSIF|FALSE|FIELD|FINAL|FIRST|GRANT|GROUP|ILIKE|INNER|LIMIT|LOCAL|NULLS|ORDER|OUTER|RIGHT|SCOPE|STATE|TABLE|UNION|VALUE|WHERE|WHILE|CALL|CASE|DESC|DROP|ELSE|ENUM|FROM|FULL|INTO|JOIN|LAST|LEFT|LIKE|LIST|LOOP|NULL|ONLY|READ|ROLE|ROWS|THEN|TRUE|TYPE|USER|WHEN|ADD|ALL|AND|ASC|END|FOR|LET|MAP|NOT|REF|SET|AS|BY|IF|IN|IS|ON|OR|TO)\\b)"
+    - match: '//.*$'
+      scope: comment.line.orna
+    - begin: '/\\*'
+      end: '\\*/'
+      scope: comment.block.orna
+    - begin: '"'
+      end: '"'
+      scope: string.quoted.double.orna
+      patterns:
+        - match: '\\\\(?:["\\\\nrt0]|u\\{[0-9A-Fa-f]{1,6}\\})'
+          scope: constant.character.escape.orna
+        - begin: '(?<!\\\\)\\{'
+          end: '\\}'
+          scope: meta.interpolation.orna
+          patterns:
+            - include: main
+    - match: '(?<![\\p{L}\\p{N}_])(?:continue|protocol|assert|offset|affine|return|static|break|false|table|while|base|case|else|enum|impl|loop|null|self|true|type|unit|dim|for|let|pub|use|as|fn|if|in)(?![\\p{L}\\p{N}_])'
       scope: keyword.control.orna
-    - match: "\\b[0-9]+\\b"
+    - match: '\\b[0-9][A-Za-z0-9_:.+-]*'
       scope: constant.numeric.orna
-    - match: "(?:\\|\\||!=|->|:=|<=|<>|=>|>=|\\*|\\+|\\?|%|-|/|:|<|=|>)"
+    - match: '(?:\.\.=|=>|==|!=|<=|>=|\?\?|\|\?|&&|\|\||\+=|-=|\*=|/=|\.\.|\||!|=|<|>|\+|-|\*|/|%|\^|\?)'
       scope: keyword.operator.orna
-    - match: "(?:\\(|\\)|\\.|\\[|\\]|\\{|\\}|,|;)"
+    - match: '(?:\{|\}|\(|\)|\[|\]|,|;|:|\.)'
       scope: punctuation.orna
-    - match: "[\\p{L}_][\\p{L}\\p{N}_]*"
+    - match: '[_\\p{L}][_\\p{L}\\p{N}]*'
       scope: variable.other.orna
-
-  comments:
-    - match: "--[^\\n]*"
-      scope: comment.orna
-    - begin: "/\\*"
-      end: "\\*/"
-      scope: comment.orna

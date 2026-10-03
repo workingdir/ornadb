@@ -5,7 +5,7 @@
 
 use std::{fmt, ops::Range};
 
-pub mod grammar;
+mod legacy_lexical;
 mod highlight;
 mod lexer;
 mod parser;

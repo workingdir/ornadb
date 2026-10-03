@@ -39,41 +39,46 @@ pub enum Keyword {
 }
 
 impl Keyword {
+    /// The exact version 1.0.0 reserved-word inventory from ORNA-LEX-007.
+    /// Editor tooling and lexer recognition share this table.
+    pub const ALL: &'static [(&'static str, Self)] = &[
+        ("as", Self::As),
+        ("assert", Self::Assert),
+        ("base", Self::Base),
+        ("break", Self::Break),
+        ("case", Self::Case),
+        ("continue", Self::Continue),
+        ("dim", Self::Dim),
+        ("else", Self::Else),
+        ("enum", Self::Enum),
+        ("false", Self::False),
+        ("fn", Self::Fn),
+        ("for", Self::For),
+        ("if", Self::If),
+        ("impl", Self::Impl),
+        ("in", Self::In),
+        ("let", Self::Let),
+        ("loop", Self::Loop),
+        ("null", Self::Null),
+        ("offset", Self::Offset),
+        ("affine", Self::Affine),
+        ("protocol", Self::Protocol),
+        ("pub", Self::Pub),
+        ("return", Self::Return),
+        ("self", Self::SelfValue),
+        ("static", Self::Static),
+        ("table", Self::Table),
+        ("true", Self::True),
+        ("type", Self::Type),
+        ("unit", Self::Unit),
+        ("use", Self::Use),
+        ("while", Self::While),
+    ];
+
     pub fn from_text(s: &str) -> Option<Self> {
-        Some(match s {
-            "as" => Self::As,
-            "assert" => Self::Assert,
-            "base" => Self::Base,
-            "break" => Self::Break,
-            "case" => Self::Case,
-            "continue" => Self::Continue,
-            "dim" => Self::Dim,
-            "else" => Self::Else,
-            "enum" => Self::Enum,
-            "false" => Self::False,
-            "fn" => Self::Fn,
-            "for" => Self::For,
-            "if" => Self::If,
-            "impl" => Self::Impl,
-            "in" => Self::In,
-            "let" => Self::Let,
-            "loop" => Self::Loop,
-            "null" => Self::Null,
-            "offset" => Self::Offset,
-            "affine" => Self::Affine,
-            "protocol" => Self::Protocol,
-            "pub" => Self::Pub,
-            "return" => Self::Return,
-            "self" => Self::SelfValue,
-            "static" => Self::Static,
-            "table" => Self::Table,
-            "true" => Self::True,
-            "type" => Self::Type,
-            "unit" => Self::Unit,
-            "use" => Self::Use,
-            "while" => Self::While,
-            _ => return None,
-        })
+        Self::ALL
+            .iter()
+            .find_map(|(spelling, keyword)| (*spelling == s).then_some(*keyword))
     }
 }
 
@@ -106,6 +111,16 @@ pub enum TokenKind {
     Punct(&'static str),
     Eof,
 }
+
+/// Operators recognized by the 1.0.0 lexer, ordered longest-first where
+/// spellings overlap. Editor grammars use the same inventory.
+pub const OPERATORS: &[&str] = &[
+    "..=", "=>", "==", "!=", "<=", ">=", "??", "|?", "&&", "||", "+=", "-=", "*=", "/=",
+    "..", "|", "!", "=", "<", ">", "+", "-", "*", "/", "%", "^", "?",
+];
+
+/// Delimiter tokens recognized by the 1.0.0 lexer.
+pub const PUNCTUATION: &[&str] = &["{", "}", "(", ")", "[", "]", ",", ";", ":", "."];
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Token {
     pub kind: TokenKind,
@@ -122,6 +137,17 @@ pub struct LexError {
 /// Lexes UTF-8 source. Comments and whitespace are deliberately omitted from
 /// the grammar stream; their byte locations are retained by every token span.
 pub fn lex(source: &str) -> Result<Vec<Token>, Vec<LexError>> {
+    let (tokens, errors) = lex_recovering(source);
+    if errors.is_empty() {
+        Ok(tokens)
+    } else {
+        Err(errors)
+    }
+}
+
+/// Lexes through recoverable errors so editor clients can keep highlighting
+/// the valid tokens surrounding an unfinished or mistyped token.
+pub(crate) fn lex_recovering(source: &str) -> (Vec<Token>, Vec<LexError>) {
     let mut l = Lexer {
         source,
         at: 0,
@@ -136,11 +162,7 @@ pub fn lex(source: &str) -> Result<Vec<Token>, Vec<LexError>> {
         text: String::new(),
         span: SourceSpan::new(source.len(), source.len()),
     });
-    if l.errors.is_empty() {
-        Ok(l.tokens)
-    } else {
-        Err(l.errors)
-    }
+    (l.tokens, l.errors)
 }
 // Interpolation can recurse before parser admission; bound that lexer stack
 // separately from ordinary braces and sequential string literals.
@@ -210,51 +232,29 @@ impl<'a> Lexer<'a> {
                 self.number_or_time(start);
                 continue;
             }
-            let p = [
-                "..=", "=>", "==", "!=", "<=", ">=", "??", "|?", "&&", "||", "+=", "-=", "*=",
-                "/=", "..", "0x", "0b",
-            ];
-            if let Some(x) = p.into_iter().find(|x| self.rest().starts_with(*x)) {
+            if let Some(x) = OPERATORS
+                .iter()
+                .find(|spelling| self.rest().starts_with(**spelling))
+            {
+                let x = *x;
                 self.at += x.len();
                 self.push(TokenKind::Punct(x), start);
                 continue;
             }
-            let one = match c {
-                '{' => {
-                    if interpolation {
-                        brace_depth += 1;
-                    }
-                    "{"
-                }
-                '}' => "}",
-                '(' => "(",
-                ')' => ")",
-                '[' => "[",
-                ']' => "]",
-                ',' => ",",
-                ';' => ";",
-                ':' => ":",
-                '.' => ".",
-                '|' => "|",
-                '!' => "!",
-                '=' => "=",
-                '<' => "<",
-                '>' => ">",
-                '+' => "+",
-                '-' => "-",
-                '*' => "*",
-                '/' => "/",
-                '%' => "%",
-                '^' => "^",
-                '?' => "?",
-                _ => "",
-            };
-            if one.is_empty() {
-                self.bump();
-                self.error("ORNA-LEX-001", "unexpected character", start, self.at)
-            } else {
+            if c == '{' && interpolation {
+                brace_depth += 1;
+            }
+            let one = PUNCTUATION
+                .iter()
+                .chain(OPERATORS.iter())
+                .find(|spelling| spelling.len() == c.len_utf8() && spelling.starts_with(c))
+                .copied();
+            if let Some(one) = one {
                 self.bump();
                 self.push(TokenKind::Punct(one), start)
+            } else {
+                self.bump();
+                self.error("ORNA-LEX-001", "unexpected character", start, self.at)
             }
         }
         if interpolation {

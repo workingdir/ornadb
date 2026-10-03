@@ -10,11 +10,11 @@ fixture-audit:
 
 # Regenerate checked-in syntax, semantic-token, and editor packaging artifacts.
 editor-artifacts:
-    cargo run --locked -p orna-syntax --example generate_editor_artifacts
+    cargo run --locked -p orna-syntax-v1 --example generate_editor_artifacts
 
 # Reject editor artifacts that drift from orna-syntax metadata and templates.
 editor-artifacts-check:
-    cargo run --locked -p orna-syntax --example generate_editor_artifacts -- --check
+    cargo run --locked -p orna-syntax-v1 --example generate_editor_artifacts -- --check
     node --check editors/tree-sitter-orna/grammar.js
 
 

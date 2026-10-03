@@ -5,6 +5,7 @@
 //! diagnostic and wire contracts.
 
 mod admission;
+pub mod editor;
 mod lexer;
 mod parser;
 
@@ -12,7 +13,7 @@ pub use admission::{
     ParseContext, SourceDocumentId, SyntaxAdmissionError, admit_diagnostic, admit_span,
 };
 
-pub use lexer::{Keyword, LexError, Token, TokenKind, lex};
+pub use lexer::{Keyword, LexError, Token, TokenKind, lex, OPERATORS, PUNCTUATION};
 pub use parser::{
     Argument, AssignmentOperator, AssignmentTarget, CaseArm, ControlKind, Declaration,
     Diagnostic as SyntaxDiagnostic, DimensionExpr, EntryPoint, EnumPayloadField, EnumVariant, Expr,

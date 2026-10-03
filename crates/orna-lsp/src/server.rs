@@ -810,8 +810,8 @@ fn request_semantic_tokens_full(
     let Some(document) = state.document(&uri) else {
         return Ok(serde_json::Value::Null);
     };
-    let (parse, mapper) = parse_document(document);
-    let data = semantic::semantic_tokens(&parse, &mapper, None);
+    let mapper = PositionMapper::new(&document.text);
+    let data = semantic::semantic_tokens(&document.text, &mapper, None);
     Ok(serde_json::to_value(SemanticTokens {
         result_id: None,
         data,
@@ -828,8 +828,8 @@ fn request_semantic_tokens_range(
     let Some(document) = state.document(&uri) else {
         return Ok(serde_json::Value::Null);
     };
-    let (parse, mapper) = parse_document(document);
-    let data = semantic::semantic_tokens(&parse, &mapper, Some(&params.range));
+    let mapper = PositionMapper::new(&document.text);
+    let data = semantic::semantic_tokens(&document.text, &mapper, Some(&params.range));
     Ok(serde_json::to_value(SemanticTokens {
         result_id: None,
         data,

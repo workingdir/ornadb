@@ -5,20 +5,16 @@
 //! own grammar.
 
 use lsp_types::{Range, SemanticToken, SemanticTokenType};
-use orna_syntax::{HighlightKind, Parse, grammar};
+use orna_syntax::SourceSpan;
+use orna_syntax_v1::editor::{self, TokenClass};
 
 use crate::documents::PositionMapper;
 
 /// Build the LSP legend from the shared syntax presentation table.
 pub fn legend() -> Vec<SemanticTokenType> {
-    grammar::semantic_token_types()
+    editor::semantic_token_types()
         .map(SemanticTokenType::new)
         .collect()
-}
-
-/// Maps one classifier kind to its legend index.
-fn legend_index(kind: HighlightKind) -> Option<usize> {
-    grammar::semantic_token_index(kind)
 }
 
 /// Returns the delta-encoded semantic tokens for one document.
@@ -26,28 +22,19 @@ fn legend_index(kind: HighlightKind) -> Option<usize> {
 /// When `range` is present, only token segments that intersect the range are
 /// included, matching the `textDocument/semanticTokens/range` contract.
 pub fn semantic_tokens(
-    parse: &Parse,
+    source: &str,
     mapper: &PositionMapper<'_>,
     range: Option<&Range>,
 ) -> Vec<SemanticToken> {
     let mut data = Vec::new();
     let mut previous_line = 0u32;
     let mut previous_start = 0u32;
-    for token in parse.highlight() {
-        let span = orna_syntax::SourceSpan {
+    for token in editor::highlight(source) {
+        let span = SourceSpan {
             start: token.range.start,
             end: token.range.end,
         };
-        let kind = if matches!(
-            token.kind,
-            orna_syntax::HighlightKind::PropertyName | orna_syntax::HighlightKind::QuotedIdentifier
-        ) && crate::analysis::is_client_target_function_span(parse, &span)
-        {
-            orna_syntax::HighlightKind::FunctionName
-        } else {
-            token.kind
-        };
-        let Some(index) = legend_index(kind) else {
+        let Some(index) = editor::semantic_token_index(token.class) else {
             continue;
         };
         for (position, length) in mapper.segments(&span) {
