@@ -2554,6 +2554,66 @@ fn sparse_nested_storm_folds_preserve_terminal_route_identity() {
         "paired omissions across a later chain preserve the computed terminal identity"
     );
 
+    let middle_terminal_pair = [
+        PinnedDatabase::resolve(
+            aliases[3],
+            package_repository.clone(),
+            &route_three_middle,
+            loader,
+        )
+        .unwrap(),
+        PinnedDatabase::resolve(
+            aliases[4],
+            package_repository.clone(),
+            &leaf_middle,
+            loader,
+        )
+        .unwrap(),
+    ];
+    let middle_waves = [middle_terminal_pair];
+    let active_terminal_round = [
+        (&outer_label, None),
+        (&nested_label, Some(middle_waves.as_slice())),
+    ];
+    let active_terminal_route = resolver
+        .extend_nested_terminal_pair_sparse_checkpoint_storm_rounds_from_depth_labels(
+            &first_stage,
+            &[active_terminal_round.as_slice()],
+        )
+        .unwrap();
+    let active_terminal_identity = active_terminal_route.terminal_route_identity();
+    let following_paired_omission = [(&outer_label, None), (&nested_label, None)];
+    let active_then_omission_chain = [
+        active_terminal_round.as_slice(),
+        following_paired_omission.as_slice(),
+    ];
+    let active_then_omission_chains = [active_then_omission_chain.as_slice()];
+    let route_after_active_then_omission = resolver
+        .extend_nested_terminal_pair_sparse_checkpoint_storm_chains_from_depth_labels(
+            &first_stage,
+            &active_then_omission_chains,
+        )
+        .unwrap();
+    route_after_active_then_omission
+        .validate_terminal_route_identity(&active_terminal_identity)
+        .unwrap();
+    assert_eq!(
+        route_after_active_then_omission.terminal_route_identity(),
+        active_terminal_identity,
+        "paired omissions in the same chain preserve the preceding terminal rebind identity"
+    );
+    assert_eq!(
+        route_after_active_then_omission
+            .final_session()
+            .database(aliases[4])
+            .unwrap()
+            .pin()
+            .commit()
+            .as_str(),
+        leaf_middle,
+        "the omission round keeps the computed terminal package selected by its preceding rebind"
+    );
+
     let duplicate_sparse_round = [(&outer_label, None), (&outer_label, None)];
     assert!(matches!(
         resolver.extend_nested_terminal_pair_sparse_checkpoint_storm_rounds_from_depth_labels(
@@ -2600,6 +2660,28 @@ fn sparse_nested_storm_folds_preserve_terminal_route_identity() {
         after_omissions.validate_terminal_route_identity(&independent_identity),
         Err(AttachmentError::RetainedSnapshotUnavailable)
     ));
+
+    let mut middle_evaluation_session =
+        AttachedDatabaseSession::new(parent.primary().clone()).unwrap();
+    middle_evaluation_session
+        .attach_database(
+            route_after_active_then_omission
+                .final_session()
+                .database(aliases[4])
+                .unwrap()
+                .clone(),
+        )
+        .unwrap();
+    let mut middle_evaluator = AdmittedReplSession::from_attached_database_session(
+        &middle_evaluation_session,
+        Limits::default(),
+    )
+    .unwrap();
+    assert_eq!(middle_evaluator.submit(&format!("use {};", aliases[4])), Ok(None));
+    assert_eq!(
+        middle_evaluator.submit(&format!("{}.package_value()", aliases[4])),
+        Ok(Some(Value::int(94.into())))
+    );
 
     let mut evaluation_session = AttachedDatabaseSession::new(parent.primary().clone()).unwrap();
     evaluation_session
