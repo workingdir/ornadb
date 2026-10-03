@@ -1,0 +1,13 @@
+{ id: "rotation/a-left-10", name: "rotation/a-right-10", city: "fixture/rotation-a-10", }
+
+{ id: "rotation/a-left-11", name: "rotation/a-right-11", city: "fixture/rotation-a-11", }
+
+{ id: "rotation/b-left-10", name: "rotation/b-right-10", city: "fixture/rotation-b-10", }
+
+{ id: "rotation/b-left-12", name: "rotation/b-right-12", city: "fixture/rotation-b-12", }
+
+{ id: "rotation/c-left-10", name: "rotation/c-right-10", city: "fixture/rotation-c-10", }
+
+{ id: "rotation/c-left-12", name: "rotation/c-right-12", city: "fixture/rotation-c-12", }
+
+{ id: "rotation/d-left-14", name: "rotation/d-right-14", city: "fixture/rotation-d-14", }
