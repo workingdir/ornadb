@@ -990,6 +990,28 @@ impl PackageResolver {
         Ok(route)
     }
 
+    /// Folds checkpoint-rooted terminal-pair storms across independent parent
+    /// routes. Each table row is `(route, storms)` and resolves only checkpoints
+    /// captured from that row's route; row order and anchor identity are kept
+    /// independently. The reference is silent on tabular multi-parent folds,
+    /// so v1 validates every row through the single-route checkpoint rules and
+    /// returns no partial batch if any row or fold fails.
+    pub fn extend_sibling_terminal_pair_checkpoint_storms(
+        &self,
+        paths: &[(
+            &ReboundPathResolution,
+            &[(&ReboundPathCheckpoint, &[[PinnedDatabase; 2]])],
+        )],
+    ) -> Result<SiblingRebindResolution, AttachmentError> {
+        let routes = paths
+            .iter()
+            .map(|(previous, storms)| {
+                self.extend_nested_terminal_pair_checkpoint_storms(previous, storms)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(SiblingRebindResolution { routes })
+    }
+
     /// Rebinds each terminal pair in a storm from one saved checkpoint.
     /// Every fold starts from the same exact nested pins and appends that
     /// checkpoint route to retained history. Each emitted route receives its
