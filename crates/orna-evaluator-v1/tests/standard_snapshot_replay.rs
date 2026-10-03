@@ -3008,3 +3008,54 @@ fn dependency_graph_replays_reject_divergence_without_retargeting_values() {
         );
     }
 }
+
+#[test]
+fn dependency_graph_upgrade_programs_compute_values_from_each_pinned_snapshot() {
+    let (_directory, projects, snapshots, source_bundles) = dependency_graph_projects();
+    let expected_results = [1112, 2122, 2322, 2324, 23024];
+    let use_graph = include_str!("fixtures/snapshot-dependency-graph-use.orna");
+    let replay = include_str!("fixtures/snapshot-dependency-graph-call.orna");
+    let mut retained_sessions = Vec::with_capacity(projects.len());
+
+    assert!(snapshots.windows(2).all(|pair| pair[0] != pair[1]));
+    for (upgrade, ((project, snapshot), (sources, expected))) in projects
+        .iter()
+        .zip(&snapshots)
+        .zip(source_bundles.iter().zip(expected_results))
+        .enumerate()
+    {
+        assert_eq!(
+            project.standard_profile().unwrap().snapshot(),
+            snapshot,
+            "upgrade {} must retain its captured standard dependency pin",
+            upgrade + 1
+        );
+        let mut session =
+            AdmittedReplSession::from_loaded_project(project, sources.clone(), Limits::default())
+                .unwrap_or_else(|error| {
+                    panic!(
+                        "upgrade {} could not load its pinned program: {}",
+                        upgrade + 1,
+                        error.code()
+                    )
+                });
+        assert_eq!(session.submit(use_graph), Ok(None));
+        assert_eq!(
+            session.submit(replay),
+            Ok(Some(int(expected))),
+            "upgrade {} must compute from its own dependency snapshot",
+            upgrade + 1
+        );
+        retained_sessions.push(session);
+
+        for retained_index in (0..retained_sessions.len()).rev() {
+            assert_eq!(
+                retained_sessions[retained_index].submit(replay),
+                Ok(Some(int(expected_results[retained_index]))),
+                "program pinned at upgrade {} must keep its value through upgrade {}",
+                retained_index + 1,
+                upgrade + 1
+            );
+        }
+    }
+}
