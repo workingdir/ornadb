@@ -3489,6 +3489,11 @@ fn partial_index_for_join<'a>(
     candidates: &'a [QueryPartialIndexDescription],
 ) -> Option<&'a QueryPartialIndexDescription> {
     let predicate = join.predicate.as_ref()?;
+    // The reference requires an exact table/predicate match but does not
+    // prescribe a tie-break when several indexes satisfy it. Keep the
+    // explain-only choice independent of catalog order by selecting the
+    // lexicographically smallest index identity; a missing exact match stays
+    // a scan rather than inferring predicate implication.
     candidates
         .iter()
         .filter(|candidate| {
@@ -3515,6 +3520,10 @@ fn push_index_lookup(
         (
             "index_selection".to_owned(),
             PlanDetail::Text("exact_table_and_predicate_identity".to_owned()),
+        ),
+        (
+            "index_selection_tie_break".to_owned(),
+            PlanDetail::Text("lexicographically_smallest_matching_index_identity".to_owned()),
         ),
     ]);
     add_partial_index_pair_identity_details(&mut details, candidate);
