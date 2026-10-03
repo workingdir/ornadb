@@ -1,0 +1,4 @@
+[
+    fmt.boolean(true),
+    fmt.boolean(false),
+]
