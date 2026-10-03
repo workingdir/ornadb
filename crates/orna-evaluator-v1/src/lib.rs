@@ -219,9 +219,11 @@ pub struct RelationPage {
 /// Cloned plans retain this identity across their page reads; independently
 /// created sources receive distinct identities, even when their source names
 /// are equal. A newly built plan for a later view refresh receives a fresh
-/// identity. Effect handlers should bind continuation state by both source
-/// name and this identity so paired same-name reads cannot resume one another's
-/// cursors.
+/// identity. The identity follows its source through folds and pagination
+/// handoffs; cursor bytes are checkpoints, not identities, and may be reused
+/// by sibling subscriptions or later refreshes. Effect handlers should bind
+/// continuation state by both source name and this identity so paired same-name
+/// reads cannot resume one another's cursors.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct RelationReadScope(u64);
 
@@ -823,6 +825,7 @@ pub trait EffectHandler {
     /// source. Implementations that retain page continuations should key them
     /// by both `source` and `scope`: same-name planned reads are independent,
     /// and a fresh scope starts a fresh observation during a later refresh.
+    /// Repeated cursor bytes do not transfer a continuation between scopes.
     /// The default delegates to [`EffectHandler::scan_relation_page`] to
     /// preserve existing handlers while allowing stateful readers to keep
     /// continuation cursors separate across equal-named view sources.
