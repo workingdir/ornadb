@@ -3153,3 +3153,255 @@ fn round_tripped_dispatch_metadata_matches_selected_provider_routes() {
         operation_cases + role_cases + provider_route_pairs * 2
     );
 }
+
+#[test]
+fn generated_bindings_match_max_u16_provider_version_contracts() {
+    let max_version = u16::MAX;
+    let mut metadata: Value =
+        serde_json::from_str(system_provider_abi_json()).expect("embedded dispatch metadata");
+    metadata["abi_version"] = serde_json::json!({"major": max_version, "minor": max_version});
+    let operations = metadata["operations"]
+        .as_array_mut()
+        .expect("generated metadata operation inventory");
+    for operation in operations.iter_mut() {
+        operation["version"] = serde_json::json!({"major": max_version, "minor": max_version});
+        if let Some(role_annotation) = operation["role"].as_str() {
+            let role_name = role_annotation
+                .rsplit_once('@')
+                .expect("provider role annotation has a version")
+                .0;
+            operation["role"] = Value::String(format!("{role_name}@{max_version}.{max_version}"));
+        }
+    }
+    for role in metadata["roles"]
+        .as_array_mut()
+        .expect("generated metadata role inventory")
+    {
+        role["version"] = serde_json::json!({"major": max_version, "minor": max_version});
+    }
+
+    let metadata_json = metadata.to_string();
+    let schema_json = orna_sys_v1::system_provider_abi_schema_json();
+    build_host::validate_json_against_schema(&metadata_json, schema_json)
+        .expect("maximum typed provider versions remain valid generated schema values");
+    let table = SystemProviderAbi::from_json(&metadata_json)
+        .expect("maximum typed provider versions deserialize and retain their role links");
+    assert_eq!(
+        table.version(),
+        AbiVersion {
+            major: max_version,
+            minor: max_version
+        }
+    );
+    let registry = ProviderRoleRegistry::from_baked_abi(&table)
+        .expect("maximum provider role versions resolve into selected offers");
+    let stub_operation_ids = system_binding_stubs()
+        .lines()
+        .filter_map(|line| line.strip_prefix("// sys-op: "))
+        .collect::<Vec<_>>();
+    let typed_operation_ids = table
+        .operations()
+        .map(|operation| operation.id.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(stub_operation_ids, typed_operation_ids);
+
+    let mut binding_cases = 0;
+    let mut provider_route_pairs = 0;
+    for contract in table.operations() {
+        let operation_name = contract.id.as_str();
+        let generated = system_function_descriptor(operation_name)
+            .unwrap_or_else(|| panic!("missing generated binding for {operation_name}"));
+        assert_eq!(generated.name, operation_name);
+        assert_eq!(generated.signature, contract.signature.source);
+        assert_eq!(
+            contract.effects.iter().next(),
+            Some(generated.effect),
+            "generated binding parity survives maximum ABI versions for {operation_name}"
+        );
+        assert_eq!(contract.version.major, max_version);
+        assert_eq!(contract.version.minor, max_version);
+        binding_cases += 1;
+
+        let Some(role_id) = &contract.role else {
+            continue;
+        };
+        assert_eq!(
+            contract.role_version,
+            Some(AbiVersion {
+                major: max_version,
+                minor: max_version
+            })
+        );
+        let offer = registry
+            .resolve(role_id.as_str())
+            .expect("maximum-version role has a selected provider")
+            .clone();
+        assert_eq!(offer.version.major, max_version);
+        assert_eq!(offer.version.minor, max_version);
+        let arguments = contract
+            .signature
+            .parameters
+            .iter()
+            .map(|parameter| {
+                TypedValue::public(
+                    TypeId::new(parameter.ty.canonical()),
+                    parameter.name.as_bytes().to_vec(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let argument_types = contract
+            .signature
+            .parameters
+            .iter()
+            .map(|parameter| parameter.ty.canonical())
+            .collect::<Vec<_>>();
+        let result = TypedValue::public(
+            TypeId::new(contract.signature.result.canonical()),
+            b"max-u16-provider-result".to_vec(),
+        );
+        let provider_for = || InvokeValueProvider {
+            offer: offer.clone(),
+            operation: contract.id.clone(),
+            argument_types: argument_types.clone(),
+            response: Ok(result.clone()),
+            calls: AtomicUsize::new(0),
+        };
+        let direct_provider = provider_for();
+        let direct = table
+            .dispatch_to_provider(operation_name, &direct_provider, &arguments, |_| Ok(()))
+            .expect("direct dispatch accepts maximum-version provider contract");
+        let registry_provider = provider_for();
+        let mediated = registry
+            .dispatch_to_provider(
+                &table,
+                generated.name,
+                &registry_provider,
+                &arguments,
+                |_| Ok(()),
+            )
+            .expect("selected registry dispatch accepts maximum-version provider contract");
+        assert_eq!(direct, orna_sys_v1::SystemDispatchResult::Returned(result));
+        assert_eq!(mediated, direct);
+        assert_eq!(direct_provider.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(registry_provider.calls.load(Ordering::SeqCst), 1);
+        provider_route_pairs += 1;
+    }
+
+    assert_eq!(binding_cases, typed_operation_ids.len());
+    assert!(provider_route_pairs > 0);
+    println!(
+        "generated_binding_u16_boundary_parity bindings={binding_cases} provider_routes={provider_route_pairs} schema_acceptance=1 direct_registry_pairs={provider_route_pairs} max_version={max_version}.{max_version} total_cases={}",
+        binding_cases + provider_route_pairs * 3 + 1
+    );
+}
+
+#[test]
+fn generated_bindings_preserve_provider_routes_after_registry_row_reordering() {
+    let mut metadata: Value =
+        serde_json::from_str(system_provider_abi_json()).expect("embedded dispatch metadata");
+    metadata["operations"]
+        .as_array_mut()
+        .expect("generated operation inventory")
+        .reverse();
+    metadata["roles"]
+        .as_array_mut()
+        .expect("generated role inventory")
+        .reverse();
+    let metadata_json = metadata.to_string();
+    let schema_json = orna_sys_v1::system_provider_abi_schema_json();
+    build_host::validate_json_against_schema(&metadata_json, schema_json)
+        .expect("schema accepts reordered but otherwise valid provider metadata");
+    let table = SystemProviderAbi::from_json(&metadata_json)
+        .expect("typed registry accepts reordered provider metadata");
+    assert_eq!(&table, system_dispatch_table());
+    let registry = ProviderRoleRegistry::from_baked_abi(&table)
+        .expect("reordered registry metadata preserves selected provider offers");
+
+    let stub_operation_ids = system_binding_stubs()
+        .lines()
+        .filter_map(|line| line.strip_prefix("// sys-op: "))
+        .collect::<Vec<_>>();
+    let typed_operation_ids = table
+        .operations()
+        .map(|operation| operation.id.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(stub_operation_ids, typed_operation_ids);
+
+    let mut binding_cases = 0;
+    let mut provider_route_pairs = 0;
+    for contract in table.operations() {
+        let operation_name = contract.id.as_str();
+        let generated = system_function_descriptor(operation_name)
+            .unwrap_or_else(|| panic!("missing generated binding for {operation_name}"));
+        assert_eq!(generated.name, operation_name);
+        assert_eq!(generated.signature, contract.signature.source);
+        assert_eq!(
+            contract.effects.iter().next(),
+            Some(generated.effect),
+            "reordering metadata preserves generated binding effect parity for {operation_name}"
+        );
+        binding_cases += 1;
+
+        let Some(role_id) = &contract.role else {
+            continue;
+        };
+        let offer = registry
+            .resolve(role_id.as_str())
+            .expect("reordered role metadata resolves its provider offer")
+            .clone();
+        let arguments = contract
+            .signature
+            .parameters
+            .iter()
+            .map(|parameter| {
+                TypedValue::public(
+                    TypeId::new(parameter.ty.canonical()),
+                    parameter.name.as_bytes().to_vec(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let argument_types = contract
+            .signature
+            .parameters
+            .iter()
+            .map(|parameter| parameter.ty.canonical())
+            .collect::<Vec<_>>();
+        let result = TypedValue::public(
+            TypeId::new(contract.signature.result.canonical()),
+            b"reordered-provider-result".to_vec(),
+        );
+        let provider_for = || InvokeValueProvider {
+            offer: offer.clone(),
+            operation: contract.id.clone(),
+            argument_types: argument_types.clone(),
+            response: Ok(result.clone()),
+            calls: AtomicUsize::new(0),
+        };
+        let direct_provider = provider_for();
+        let direct = table
+            .dispatch_to_provider(operation_name, &direct_provider, &arguments, |_| Ok(()))
+            .expect("direct dispatch accepts the reordered typed contract");
+        let registry_provider = provider_for();
+        let mediated = registry
+            .dispatch_to_provider(
+                &table,
+                generated.name,
+                &registry_provider,
+                &arguments,
+                |_| Ok(()),
+            )
+            .expect("selected provider dispatch accepts the reordered typed contract");
+        assert_eq!(direct, orna_sys_v1::SystemDispatchResult::Returned(result));
+        assert_eq!(mediated, direct);
+        assert_eq!(direct_provider.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(registry_provider.calls.load(Ordering::SeqCst), 1);
+        provider_route_pairs += 1;
+    }
+
+    assert_eq!(binding_cases, typed_operation_ids.len());
+    assert!(provider_route_pairs > 0);
+    println!(
+        "generated_binding_provider_row_reorder_parity bindings={binding_cases} provider_routes={provider_route_pairs} schema_valid=1 direct_registry_pairs={provider_route_pairs} total_cases={}",
+        binding_cases + provider_route_pairs * 3 + 1
+    );
+}
