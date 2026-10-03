@@ -37905,7 +37905,8 @@ fn paired_redo_fold_identity_survives_sparse_checkpoint_spill_restore_chains() {
     let positionless = states[4].clone();
     assert_eq!(positionless.position, None);
 
-    let run = |handoff_ordinal,
+    let run = |merge_ordinal,
+               handoff_ordinal,
                fold_ordinal,
                first_order,
                last_order,
@@ -37914,6 +37915,7 @@ fn paired_redo_fold_identity_survives_sparse_checkpoint_spill_restore_chains() {
                redo_fold_identity: &BranchMergePairedRedoFoldIdentity| {
         orna_storage_v1::BranchMergePairedCheckpointRedoFoldSpillRunSnapshot {
             handoff_ordinal,
+            merge_ordinal,
             fold_ordinal,
             first_order,
             last_order,
@@ -37943,6 +37945,7 @@ fn paired_redo_fold_identity_survives_sparse_checkpoint_spill_restore_chains() {
                 0,
                 vec![
                     run(
+                        5,
                         2,
                         0,
                         2,
@@ -37952,6 +37955,7 @@ fn paired_redo_fold_identity_survives_sparse_checkpoint_spill_restore_chains() {
                         &folds[0],
                     ),
                     run(
+                        6,
                         7,
                         1,
                         3,
@@ -37965,6 +37969,7 @@ fn paired_redo_fold_identity_survives_sparse_checkpoint_spill_restore_chains() {
             stream(
                 1,
                 vec![run(
+                    6,
                     7,
                     1,
                     3,
@@ -37977,6 +37982,7 @@ fn paired_redo_fold_identity_survives_sparse_checkpoint_spill_restore_chains() {
             stream(
                 3,
                 vec![run(
+                    1,
                     4,
                     2,
                     8,
@@ -37993,6 +37999,7 @@ fn paired_redo_fold_identity_survives_sparse_checkpoint_spill_restore_chains() {
         vec![stream(
             2,
             vec![run(
+                8,
                 1,
                 2,
                 5,
@@ -38009,6 +38016,7 @@ fn paired_redo_fold_identity_survives_sparse_checkpoint_spill_restore_chains() {
             vec![stream(
                 0,
                 vec![run(
+                    5,
                     9,
                     1,
                     3,
@@ -38023,11 +38031,19 @@ fn paired_redo_fold_identity_survives_sparse_checkpoint_spill_restore_chains() {
             4,
             vec![stream(
                 4,
-                vec![run(0, 0, 10, 10, None, None, &folds[0])],
+                vec![run(0, 0, 0, 10, 10, None, None, &folds[0])],
             )],
         ),
     ];
 
+    let pinned_restored = orna_storage_v1::restore_paired_checkpoint_redo_sparse_spill_chains_preserving_checkpoint_pin_identity(
+        &[alpha.clone(), beta.clone(), catalog_only.clone()],
+        &[
+            vec![first_spill.clone(), second_spill.clone()],
+            later_spills.clone(),
+        ],
+    )
+    .unwrap();
     let restored = orna_storage_v1::restore_paired_checkpoint_redo_sparse_spill_chains_preserving_source_identity(
         &[alpha.clone(), beta.clone(), catalog_only.clone()],
         &[vec![first_spill, second_spill], later_spills],
@@ -38059,20 +38075,21 @@ fn paired_redo_fold_identity_survives_sparse_checkpoint_spill_restore_chains() {
                 slot.stream_ordinal,
                 slot.source_stream_id.clone(),
                 slot.compaction_ordinal,
+                slot.merge_ordinal,
                 slot.handoff_ordinal,
                 slot.fold_ordinal,
                 slot.order,
             ))
             .collect::<Vec<_>>(),
         vec![
-            (0, 0, spill_id(0), 0, source_stream_id(0), 0, 2, 0, 2),
-            (0, 0, spill_id(0), 0, source_stream_id(0), 0, 2, 0, 3),
-            (0, 0, spill_id(0), 0, source_stream_id(0), 1, 7, 1, 3),
-            (0, 0, spill_id(0), 1, source_stream_id(1), 0, 7, 1, 3),
-            (0, 1, spill_id(2), 0, source_stream_id(2), 0, 1, 2, 5),
-            (1, 0, spill_id(0), 0, source_stream_id(0), 0, 9, 1, 3),
+            (0, 0, spill_id(0), 0, source_stream_id(0), 0, 5, 2, 0, 2),
+            (0, 0, spill_id(0), 0, source_stream_id(0), 0, 5, 2, 0, 3),
+            (0, 0, spill_id(0), 0, source_stream_id(0), 1, 6, 7, 1, 3),
+            (0, 0, spill_id(0), 1, source_stream_id(1), 0, 6, 7, 1, 3),
+            (0, 1, spill_id(2), 0, source_stream_id(2), 0, 8, 1, 2, 5),
+            (1, 0, spill_id(0), 0, source_stream_id(0), 0, 5, 9, 1, 3),
         ],
-        "spill, stream, compaction, handoff, fold, and order identities remain independent",
+        "spill, stream, compaction, merge, handoff, fold, and order identities remain independent",
     );
     assert_eq!(slots(&alpha)[0].left, Some(left_base.clone()));
     assert_eq!(slots(&alpha)[1].right, Some(right_base.clone()));
@@ -38095,11 +38112,48 @@ fn paired_redo_fold_identity_survives_sparse_checkpoint_spill_restore_chains() {
     assert!(slots(&late)[0].right.is_none());
     assert_eq!(slots(&late)[0].source_stream_id, source_stream_id(4));
 
+    for (stream, pinned_stream) in restored.iter().zip(&pinned_restored) {
+        assert_eq!(pinned_stream.checkpoint_id, stream.checkpoint_id);
+        assert_eq!(pinned_stream.slots.len(), stream.slots.len());
+        for (slot, pinned_slot) in stream.slots.iter().zip(&pinned_stream.slots) {
+            assert_eq!(pinned_slot.restore_ordinal, slot.restore_ordinal);
+            assert_eq!(pinned_slot.spill_ordinal, slot.spill_ordinal);
+            assert_eq!(pinned_slot.spill_id, slot.spill_id);
+            assert_eq!(pinned_slot.stream_ordinal, slot.stream_ordinal);
+            assert_eq!(pinned_slot.source_stream_id, slot.source_stream_id);
+            assert_eq!(pinned_slot.compaction_ordinal, slot.compaction_ordinal);
+            assert_eq!(pinned_slot.handoff_ordinal, slot.handoff_ordinal);
+            assert_eq!(pinned_slot.fold_ordinal, slot.fold_ordinal);
+            assert_eq!(pinned_slot.order, slot.order);
+            assert_eq!(pinned_slot.redo_fold_identity, slot.redo_fold_identity);
+            assert_eq!(
+                pinned_slot.left_pin,
+                slot.left.clone().map(|generation| {
+                    orna_storage_v1::BranchMergePairedCheckpointPinIdentity {
+                        checkpoint_id: stream.checkpoint_id.clone(),
+                        generation,
+                    }
+                }),
+                "left pins bind only the exact generation on their checkpoint stream",
+            );
+            assert_eq!(
+                pinned_slot.right_pin,
+                slot.right.clone().map(|generation| {
+                    orna_storage_v1::BranchMergePairedCheckpointPinIdentity {
+                        checkpoint_id: stream.checkpoint_id.clone(),
+                        generation,
+                    }
+                }),
+                "right pins bind only the exact generation on their checkpoint stream",
+            );
+        }
+    }
+
     let malformed = spill(
         0,
         vec![stream(
             1,
-            vec![run(6, 8, 10, 9, None, None, &folds[0])],
+            vec![run(0, 6, 8, 10, 9, None, None, &folds[0])],
         )],
     );
     assert_eq!(
@@ -38116,6 +38170,7 @@ fn paired_redo_fold_identity_survives_sparse_checkpoint_spill_restore_chains() {
             source_stream_id: source_stream_id(1),
             compaction_ordinal: 0,
             handoff_ordinal: 6,
+            merge_ordinal: 0,
             fold_ordinal: 8,
             first_order: 10,
             last_order: 9,
