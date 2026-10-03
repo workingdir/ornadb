@@ -143,6 +143,31 @@ struct ScopedPagedSource {
     cursors: Vec<(String, RelationReadScope, Option<Vec<u8>>)>,
 }
 
+struct PairedViewRefreshSource {
+    pending: BTreeMap<String, VecDeque<VecDeque<RelationPage>>>,
+    lanes: Vec<(String, RelationReadScope, VecDeque<RelationPage>)>,
+    cursors: Vec<(String, RelationReadScope, Option<Vec<u8>>)>,
+}
+
+impl PairedViewRefreshSource {
+    fn new(
+        subscriptions: impl IntoIterator<Item = (&'static str, Vec<RelationPage>)>,
+    ) -> Self {
+        let mut pending = BTreeMap::<String, VecDeque<VecDeque<RelationPage>>>::new();
+        for (source, pages) in subscriptions {
+            pending
+                .entry(source.to_owned())
+                .or_default()
+                .push_back(VecDeque::from(pages));
+        }
+        Self {
+            pending,
+            lanes: Vec::new(),
+            cursors: Vec::new(),
+        }
+    }
+}
+
 impl ScopedPagedSource {
     fn new(pages: impl IntoIterator<Item = (&'static str, Vec<RelationPage>)>) -> Self {
         Self {
@@ -210,6 +235,57 @@ impl EffectHandler for PairedSubscriptionSource {
         };
         self.cursors.push((scope, after.map(ToOwned::to_owned)));
         Ok(Some(self.lanes[lane].1.pop_front().unwrap_or(RelationPage {
+            rows: Vec::new(),
+            next: None,
+        })))
+    }
+}
+
+impl EffectHandler for PairedViewRefreshSource {
+    fn handle(
+        &mut self,
+        _: &Expr,
+        _: &[orna_value_v1::Value],
+    ) -> Result<Option<orna_value_v1::Value>, EvaluationError> {
+        Ok(None)
+    }
+
+    fn scan_relation_page_scoped(
+        &mut self,
+        source: &str,
+        scope: RelationReadScope,
+        after: Option<&[u8]>,
+        limit: usize,
+        budget: &mut StepBudget,
+    ) -> Result<Option<RelationPage>, EvaluationError> {
+        if limit == 0 {
+            return Ok(Some(RelationPage {
+                rows: Vec::new(),
+                next: None,
+            }));
+        }
+        budget.debit(1)?;
+        let lane = match self
+            .lanes
+            .iter()
+            .position(|(existing_source, existing_scope, _)| {
+                existing_source == source && *existing_scope == scope
+            }) {
+            Some(lane) => lane,
+            None => {
+                let Some(pending) = self.pending.get_mut(source) else {
+                    return Ok(None);
+                };
+                let pages = pending
+                    .pop_front()
+                    .expect("each paired view refresh binds one page stream per source");
+                self.lanes.push((source.to_owned(), scope, pages));
+                self.lanes.len() - 1
+            }
+        };
+        self.cursors
+            .push((source.to_owned(), scope, after.map(ToOwned::to_owned)));
+        Ok(Some(self.lanes[lane].2.pop_front().unwrap_or(RelationPage {
             rows: Vec::new(),
             next: None,
         })))
@@ -436,6 +512,72 @@ fn incremental_view_refresh_keeps_values_scoped_across_read_batches() {
         first_refresh.scopes["View.Left"],
         second_refresh.scopes["View.Left"],
         "a later refresh receives a fresh scope for newly computed batches"
+    );
+}
+
+#[test]
+fn paired_view_refresh_handoff_keeps_scoped_batches_independent() {
+    // The reference is silent about carrying a provider's page streams across
+    // paired refresh plans. This test pins the runtime policy: `(source,
+    // scope)` owns a batch stream, and a fresh scope rebinds that source from
+    // its first page even when opaque cursor bytes repeat.
+    let mut source = PairedViewRefreshSource::new([
+        (
+            "View.Left",
+            vec![page(&[1, 2], Some(vec![11])), page(&[3, 4], None)],
+        ),
+        (
+            "View.Right",
+            vec![page(&[4, 5], Some(vec![11])), page(&[6, 7], None)],
+        ),
+        (
+            "View.Left",
+            vec![page(&[-3, 5], Some(vec![11])), page(&[7, 8], None)],
+        ),
+        (
+            "View.Right",
+            vec![page(&[2, 9], Some(vec![11])), page(&[8, 11], None)],
+        ),
+    ]);
+
+    assert_eq!(
+        run_with_fixture_functions(incremental_scoped_view_body(), &mut source).unwrap(),
+        integer(18),
+        "the first paired view fold combines left odd and right even values"
+    );
+    assert_eq!(source.lanes.len(), 2);
+    assert_eq!(source.lanes[0].0, "View.Left");
+    assert_eq!(source.lanes[1].0, "View.Right");
+    let first_left = source.lanes[0].1;
+    let first_right = source.lanes[1].1;
+    assert_ne!(first_left, first_right);
+
+    assert_eq!(
+        run_with_fixture_functions(incremental_scoped_view_body(), &mut source).unwrap(),
+        integer(3),
+        "the refreshed pair folds only its new positive even row"
+    );
+    assert_eq!(source.lanes.len(), 4);
+    assert_eq!(source.lanes[2].0, "View.Left");
+    assert_eq!(source.lanes[3].0, "View.Right");
+    let refreshed_left = source.lanes[2].1;
+    let refreshed_right = source.lanes[3].1;
+    assert_ne!(refreshed_left, refreshed_right);
+    assert_ne!(first_left, refreshed_left);
+    assert_ne!(first_right, refreshed_right);
+    assert_eq!(
+        source.cursors,
+        vec![
+            ("View.Left".into(), first_left, None),
+            ("View.Left".into(), first_left, Some(vec![11])),
+            ("View.Right".into(), first_right, None),
+            ("View.Right".into(), first_right, Some(vec![11])),
+            ("View.Left".into(), refreshed_left, None),
+            ("View.Left".into(), refreshed_left, Some(vec![11])),
+            ("View.Right".into(), refreshed_right, None),
+            ("View.Right".into(), refreshed_right, Some(vec![11])),
+        ],
+        "paired sources keep independent batch cursors and refresh from fresh scopes"
     );
 }
 
