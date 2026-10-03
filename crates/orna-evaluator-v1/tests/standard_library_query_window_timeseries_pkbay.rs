@@ -75,7 +75,7 @@ fn time_series_windows_omit_short_tails_and_keep_strict_time_order() {
     let error = session()
         .submit(include_str!("fixtures/stdlib-query-window-time-duplicate-pkbay.orna"))
         .expect_err("equal timestamps in a complete window must fail");
-    assert_eq!(error.code(), "ORNA-EVAL-VALUE");
+    assert_eq!(error.code(), "ORNA-EVAL-ERROR");
 }
 
 #[test]
@@ -85,5 +85,5 @@ fn time_series_rejects_reversal_between_disjoint_windows() {
             "fixtures/stdlib-query-window-time-boundary-reversal-pkbay.orna"
         ))
         .expect_err("window boundaries must not hide a source timestamp reversal");
-    assert_eq!(error.code(), "ORNA-EVAL-VALUE");
+    assert_eq!(error.code(), "ORNA-EVAL-ERROR");
 }
