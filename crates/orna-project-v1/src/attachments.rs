@@ -1235,6 +1235,26 @@ impl PackageResolver {
         Ok(route)
     }
 
+    /// Applies sparse nested terminal-pair chains only when they preserve a
+    /// caller-captured terminal route identity. The identity is checked before
+    /// and after the complete fold, so a foreign route or unexpected terminal
+    /// change returns no result. The reference is silent on identity-guarded
+    /// omission chains; v1 uses exact lineage and pin equality.
+    pub fn extend_nested_terminal_pair_sparse_checkpoint_storm_chains_preserving_terminal_identity(
+        &self,
+        previous: &ReboundPathResolution,
+        expected_terminal_identity: &NestedPairTerminalRouteIdentity,
+        chains: &[&[&[(&NestedPairDepthLabel, Option<&[[PinnedDatabase; 2]]>)]]],
+    ) -> Result<ReboundPathResolution, AttachmentError> {
+        previous.validate_terminal_route_identity(expected_terminal_identity)?;
+        let route = self
+            .extend_nested_terminal_pair_sparse_checkpoint_storm_chains_from_depth_labels(
+                previous, chains,
+            )?;
+        route.validate_terminal_route_identity(expected_terminal_identity)?;
+        Ok(route)
+    }
+
     /// Folds checkpoint-rooted terminal-pair storms across independent parent
     /// routes. Each table row is `(route, storms)` and resolves only checkpoints
     /// captured from that row's route; row order and anchor identity are kept
