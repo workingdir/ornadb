@@ -204,9 +204,10 @@ pub struct StepBudget {
 }
 
 /// One bounded, canonical page of a relation scan. `next` is an exclusive
-/// canonical key cursor owned by the source; when `after` is present, the
-/// next cursor MUST be lexicographically greater than it. An absent cursor
-/// means exhaustion.
+/// canonical key cursor owned by the source read scope; when `after` is
+/// present, the next cursor MUST be lexicographically greater than it. Equal
+/// cursor bytes in different [`RelationReadScope`]s identify independent
+/// continuations. An absent cursor means exhaustion.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RelationPage {
     pub rows: Vec<CanonicalValue>,
