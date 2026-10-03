@@ -1,0 +1,3 @@
+use sys.query as query_ops;
+
+pub fn explain_sparse_index_omission_chain(query: Query<Int>): sys.Plan = query_ops.plan_hint(query);
