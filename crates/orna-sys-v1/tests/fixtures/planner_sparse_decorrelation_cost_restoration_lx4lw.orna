@@ -1,0 +1,4 @@
+use sys.query as query_ops;
+
+pub fn inspect_sparse_decorrelation_restore_plan(query: Query<Int>): sys.Plan =
+    query_ops.plan_hint(query);
