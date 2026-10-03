@@ -523,3 +523,32 @@ fn paired_subscriptions_rebind_independent_scopes_through_refresh_cascades() {
         "a refresh starts both rebound subscriptions without stale continuation state"
     );
 }
+
+#[test]
+fn paired_read_folds_keep_equal_cursor_bytes_scope_local() {
+    // Cursor tokens are opaque to the evaluator and may be equal across two
+    // subscriptions. Their read scopes still keep continuation batches apart.
+    let mut source = PairedSubscriptionSource::new([
+        vec![page(&[-3, 1], Some(vec![77])), page(&[3, 5], None)],
+        vec![page(&[2, 7], Some(vec![77])), page(&[4, 8], None)],
+    ]);
+
+    assert_eq!(
+        run_with_fixture_functions(paired_subscription_cascade_body(), &mut source).unwrap(),
+        integer(14),
+        "the aggregate folds only the odd left and even right values after both page continuations"
+    );
+    assert_eq!(source.lanes.len(), 2);
+    let scopes = [source.lanes[0].0, source.lanes[1].0];
+    assert_ne!(scopes[0], scopes[1]);
+    assert_eq!(
+        source.cursors,
+        vec![
+            (scopes[0], None),
+            (scopes[0], Some(vec![77])),
+            (scopes[1], None),
+            (scopes[1], Some(vec![77])),
+        ],
+        "equal cursor bytes resume only within their own read scope"
+    );
+}
