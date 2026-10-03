@@ -1,7 +1,7 @@
 default: check
 
 # Run the default local fmt/build/lint/non-ignored test/rustdoc gate.
-check: fixture-audit fmt build lint test sys-artifact-ci rustdoc-check
+check: fixture-audit fmt build lint test lsp-language-model-drift sys-artifact-ci rustdoc-check
 
 # Reject external reference paths and a checkout-local reference tree.
 fixture-audit:
@@ -126,6 +126,12 @@ lint:
 # Run workspace tests excluding #[ignore] tests.
 test:
     cargo test --locked --workspace --all-targets
+
+# Keep LSP language actions and help references aligned with orna-syntax.
+lsp-language-model-drift:
+    cargo test --locked -p orna-syntax language_model
+    cargo test --locked -p orna-lsp language_model
+    cargo test --locked -p orna-lsp signature_help_tracks_model
 
 # Verify provider dispatch metadata export/schema conformance and generated-artifact drift.
 sys-artifact-ci: sys-binding-conformance-ci sys-dispatch-coverage-ci
