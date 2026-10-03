@@ -3945,7 +3945,45 @@ fn paired_window_folds_keep_values_across_sparse_checkpoint_restore_chains() {
     assert_eq!(third, integer_pair(-30, -36), "the final checkpoint pair folds to (-30, -36)");
     assert_eq!(first, integer_pair(30, 36), "later restores leave the first sparse fold unchanged");
     assert_eq!(second, integer_pair(90, 96), "later restores leave the second sparse fold unchanged");
-    assert_eq!(source.lanes.len(), 6, "three refreshes restore a left/right source pair");
+    let lane_names = [
+        "View.Left",
+        "View.Right",
+        "View.Left",
+        "View.Right",
+        "View.Left",
+        "View.Right",
+    ];
+    assert_eq!(source.lanes.len(), lane_names.len());
+    let scopes = source
+        .lanes
+        .iter()
+        .zip(lane_names)
+        .map(|((source_name, scope, _), expected_name)| {
+            assert_eq!(source_name, expected_name, "each restored pair reads left then right");
+            *scope
+        })
+        .collect::<Vec<_>>();
+    for (index, scope) in scopes.iter().enumerate() {
+        assert!(
+            !scopes[..index].contains(scope),
+            "repeated sparse checkpoint bytes bind to distinct refreshed source scopes: {scope:?}"
+        );
+    }
+    let mut expected_cursors = Vec::new();
+    for (index, scope) in scopes.iter().copied().enumerate() {
+        expected_cursors.extend(
+            std::iter::once((lane_names[index].to_owned(), scope, None)).chain(
+                cursors.iter().cloned().map(|cursor| {
+                    (lane_names[index].to_owned(), scope, Some(cursor))
+                }),
+            ),
+        );
+    }
+    assert_eq!(
+        source.cursors,
+        expected_cursors,
+        "the same sparse checkpoint sequence advances independently in each source scope"
+    );
     assert!(source.pending["View.Left"].is_empty());
     assert!(source.pending["View.Right"].is_empty());
 }
