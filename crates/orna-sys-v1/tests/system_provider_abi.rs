@@ -886,3 +886,131 @@ fn dispatch_selector_conformance_matrix_covers_registry_routes_and_misses() {
         exact_route_cases + rejected_selector_cases
     );
 }
+
+#[test]
+fn dispatch_signature_depth_matrix_matches_every_typed_parameter_and_result() {
+    fn reconstructed_signature(signature: &orna_sys_v1::FunctionSignature) -> String {
+        let type_parameters = if signature.type_parameters.is_empty() {
+            String::new()
+        } else {
+            format!("<{}>", signature.type_parameters.join(", "))
+        };
+        let parameters = signature
+            .parameters
+            .iter()
+            .map(|parameter| {
+                let ty = parameter.ty.canonical();
+                match &parameter.default {
+                    Some(default) => format!("{}: {ty} = {default}", parameter.name),
+                    None => format!("{}: {ty}", parameter.name),
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!(
+            "fn {}{}({parameters}): {}",
+            signature.callable,
+            type_parameters,
+            signature.result.canonical()
+        )
+    }
+
+    fn collect_type_shapes(ty: &AbiType, shapes: &mut BTreeSet<&'static str>) {
+        match ty {
+            AbiType::Named(_) => {
+                shapes.insert("named");
+            }
+            AbiType::Applied { arguments, .. } => {
+                shapes.insert("applied");
+                for argument in arguments {
+                    collect_type_shapes(argument, shapes);
+                }
+            }
+            AbiType::List(element) => {
+                shapes.insert("list");
+                collect_type_shapes(element, shapes);
+            }
+            AbiType::Optional(inner) => {
+                shapes.insert("optional");
+                collect_type_shapes(inner, shapes);
+            }
+        }
+    }
+
+    let api: Value = serde_json::from_str(&system_api_json()).expect("generated sys API JSON");
+    let api_functions = api["functions"]
+        .as_array()
+        .expect("generated API function inventory");
+    let table = system_dispatch_table();
+    let mut operation_cases = 0;
+    let mut parameter_type_cases = 0;
+    let mut result_type_cases = 0;
+    let mut defaulted_parameter_cases = 0;
+    let mut type_shapes = BTreeSet::new();
+
+    for contract in table.operations() {
+        let operation_id = contract.id.as_str();
+        let function = api_functions
+            .iter()
+            .find(|function| function["name"] == operation_id)
+            .unwrap_or_else(|| panic!("missing macro-generated descriptor for {operation_id}"));
+        let source_signature = function["signature"]
+            .as_str()
+            .expect("macro-generated signature string");
+        let callable_end = operation_id.find(['(', '<']).unwrap_or(operation_id.len());
+        assert_eq!(
+            contract.signature.callable,
+            &operation_id[..callable_end],
+            "selected overload `{operation_id}` preserves its parsed callable"
+        );
+        assert_eq!(
+            reconstructed_signature(&contract.signature),
+            source_signature,
+            "every parsed parameter, default, generic, and result type round-trips for `{operation_id}`"
+        );
+
+        for parameter in &contract.signature.parameters {
+            parameter_type_cases += 1;
+            defaulted_parameter_cases += usize::from(parameter.default.is_some());
+            collect_type_shapes(&parameter.ty, &mut type_shapes);
+        }
+        collect_type_shapes(&contract.signature.result, &mut type_shapes);
+        result_type_cases += 1;
+
+        let mut checked_preconditions = 0;
+        let selected_signature = table.dispatch(
+            operation_id,
+            |_| {
+                checked_preconditions += 1;
+                Ok(())
+            },
+            |selected| {
+                assert!(
+                    std::ptr::eq(selected, contract),
+                    "dispatch selects the exact typed tree for `{operation_id}`"
+                );
+                Ok(reconstructed_signature(&selected.signature))
+            },
+        );
+        assert_eq!(
+            selected_signature,
+            Ok(orna_sys_v1::SystemDispatchResult::Returned(
+                source_signature.to_owned()
+            )),
+            "dispatch returns the exact macro signature for `{operation_id}`"
+        );
+        assert_eq!(checked_preconditions, contract.preconditions.len());
+        operation_cases += 1;
+    }
+
+    assert_eq!(operation_cases, table.operations().count());
+    assert_eq!(result_type_cases, operation_cases);
+    assert!(type_shapes.contains("named"));
+    assert!(type_shapes.contains("applied"));
+    assert!(type_shapes.contains("list"));
+    assert!(type_shapes.contains("optional"));
+    println!(
+        "dispatch_signature_depth_matrix operations={operation_cases} parameter_types={parameter_type_cases} result_types={result_type_cases} defaulted_parameters={defaulted_parameter_cases} type_shapes={type_shapes:?} total_cases={}",
+        operation_cases + parameter_type_cases + result_type_cases
+    );
+}
