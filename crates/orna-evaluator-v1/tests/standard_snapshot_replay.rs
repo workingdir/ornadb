@@ -276,14 +276,25 @@ fn int(value: i64) -> CanonicalValue {
 }
 
 fn base64_padding_matrix_value() -> CanonicalValue {
-    CanonicalValue::new(Raw::Array(vec![
-        Raw::Bytes(Vec::new()),
-        Raw::Bytes(vec![0]),
-        Raw::Bytes(vec![0, 1]),
-        Raw::Bytes(vec![0, 1, 2]),
-        Raw::Bytes(vec![255]),
-        Raw::Bytes(vec![255, 238]),
-    ]))
+    let cases: [(&[u8], &str); 6] = [
+        (&[], ""),
+        (&[0], "AA=="),
+        (&[0, 1], "AAE="),
+        (&[0, 1, 2], "AAEC"),
+        (&[255], "/w=="),
+        (&[255, 238], "/+4="),
+    ];
+    CanonicalValue::new(Raw::Array(
+        cases
+            .into_iter()
+            .map(|(bytes, encoded)| {
+                Raw::Array(vec![
+                    Raw::Bytes(bytes.to_vec()),
+                    Raw::Text(encoded.to_owned()),
+                ])
+            })
+            .collect(),
+    ))
     .unwrap()
 }
 
