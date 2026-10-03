@@ -1,0 +1,11 @@
+{ id: "redo-frame/50", name: "wal/left-segment-a-incarnation-0", city: "wal/right-segment-a-incarnation-0", }
+
+{ id: "redo-frame/51", name: "wal/left-segment-b-incarnation-1", city: "wal/right-segment-a-incarnation-0", }
+
+{ id: "redo-frame/52", name: "wal/left-segment-b-incarnation-1", city: "wal/right-segment-b-incarnation-1", }
+
+{ id: "redo-frame/54", name: "wal/left-segment-c-incarnation-2", city: "wal/right-segment-b-incarnation-1", }
+
+{ id: "redo-frame/55", name: "wal/left-segment-c-incarnation-2", city: "wal/right-segment-c-incarnation-2", }
+
+{ id: "redo-frame/56", name: "wal/left-segment-c-incarnation-2", city: "wal/right-segment-c-incarnation-2", }
