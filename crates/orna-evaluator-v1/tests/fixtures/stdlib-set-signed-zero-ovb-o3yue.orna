@@ -1,0 +1,1 @@
+std.encoding.ovb.encode(std.set.to_list([-0.0f, 0.0f]))

@@ -1,0 +1,1 @@
+std.encoding.ovb.encode(std.map.to_entries([(-0.0f, "first"), (0.0f, "last")]))
