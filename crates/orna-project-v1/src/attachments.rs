@@ -1648,6 +1648,29 @@ impl ReboundPathResolution {
         &self.final_session
     }
 
+    /// Captures the route lineage and exact pins of the current terminal
+    /// closure. The reference leaves terminal identity across omitted nested
+    /// rebinds unspecified; v1 binds it to the originating route and terminal
+    /// pin set so an unchanged terminal remains verifiable across omissions.
+    pub fn terminal_route_identity(&self) -> NestedPairTerminalRouteIdentity {
+        NestedPairTerminalRouteIdentity::from_session(&self.route_identity, &self.final_session)
+    }
+
+    /// Verifies that this resolution still ends at the exact terminal route
+    /// captured earlier, including its lineage and ordered attached pins.
+    pub fn validate_terminal_route_identity(
+        &self,
+        identity: &NestedPairTerminalRouteIdentity,
+    ) -> Result<(), AttachmentError> {
+        if Arc::ptr_eq(&self.route_identity, &identity.route_identity)
+            && identity.matches_session(&self.final_session)
+        {
+            Ok(())
+        } else {
+            Err(AttachmentError::RetainedSnapshotUnavailable)
+        }
+    }
+
     /// Snapshots retained before each replacement, in path order.
     pub fn retained_sessions(&self) -> &[AttachedDatabaseSession] {
         &self.retained_sessions
@@ -1836,6 +1859,49 @@ impl PartialEq for NestedPairDepthLabel {
 }
 
 impl Eq for NestedPairDepthLabel {}
+
+/// An opaque identity for one resolution's terminal closure. Equality binds
+/// the complete pin route to its originating nested route lineage.
+#[derive(Clone, Debug)]
+pub struct NestedPairTerminalRouteIdentity {
+    route_identity: Arc<()>,
+    primary: PackagePin,
+    attached: Vec<(String, PackagePin)>,
+}
+
+impl NestedPairTerminalRouteIdentity {
+    fn from_session(route_identity: &Arc<()>, session: &AttachedDatabaseSession) -> Self {
+        Self {
+            route_identity: route_identity.clone(),
+            primary: session.primary().pin().clone(),
+            attached: session
+                .attached()
+                .map(|(alias, database)| (alias.to_owned(), database.pin().clone()))
+                .collect(),
+        }
+    }
+
+    fn matches_session(&self, session: &AttachedDatabaseSession) -> bool {
+        self.primary.eq(session.primary().pin())
+            && self
+                .attached
+                .iter()
+                .map(|(alias, pin)| (alias.as_str(), pin))
+                .eq(session
+                    .attached()
+                    .map(|(alias, database)| (alias, database.pin())))
+    }
+}
+
+impl PartialEq for NestedPairTerminalRouteIdentity {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.route_identity, &other.route_identity)
+            && self.primary == other.primary
+            && self.attached == other.attached
+    }
+}
+
+impl Eq for NestedPairTerminalRouteIdentity {}
 
 /// An immutable copy of a retained nested route, suitable for replay after a
 /// later route has been extended or rebound.
