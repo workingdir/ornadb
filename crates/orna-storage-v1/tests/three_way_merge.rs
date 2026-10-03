@@ -14,6 +14,10 @@ use orna_storage_v1::{
     BranchMergeColumnRestoreStormFoldSnapshot,
     BranchMergeColumnRestoreStormLadderSnapshot,
     BranchMergeColumnRestoreStormSnapshot,
+    BranchMergeColumnRestoreStormDepthLabelWaveSnapshot,
+    BranchMergeColumnRestoreStormDepthPathSnapshot,
+    BranchMergeColumnRestoreStormDepthPathFragmentSnapshot,
+    BranchMergeColumnRestoreStormDepthPathWaveSlotSnapshot,
     BranchMergeConflict, BranchMergeDepthFragmentRecovery,
     BranchMergeDepthWaveRecovery, BranchMergeError, BranchMergePlan,
     BranchMergeMultiParentColumnDepthLadderWaveEvent,
@@ -25757,7 +25761,6 @@ fn tabular_restore_wave_preserves_peer_depth_labels_and_tombstone_identity() {
         },
         ordered_row_tombstones: Vec::new(),
     };
-
     let mut history = BranchMergeTombstoneHistory::new(0);
     assert!(
         history.submit_tabular_depth_wave(&wave(1)).unwrap().is_empty(),
@@ -26638,6 +26641,305 @@ fn column_restore_storm_folds_keep_depth_labels_local_across_grouped_storms() {
             },
         ],
         "each paired column retains its labels inside each storm, including absent columns across a storm and labeled empty depths",
+    );
+}
+
+#[test]
+fn column_restore_storm_depth_labels_pair_local_depths_with_storm_orders() {
+    let fixture_rows = COLUMN_RESTORE_LADDER
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    let row = |path: &str| {
+        fixture_rows
+            .iter()
+            .find(|row| row.key == string(path))
+            .unwrap_or_else(|| panic!("the in-crate column fixture supplies {path}"))
+            .clone()
+    };
+    let root = row("root");
+    let child = row("root/child");
+    let deep = row("root/child/deep");
+    let cells = |row: &KeyedRow, column| {
+        vec![(row.key.clone(), row.fields[&id(column)].clone())]
+    };
+    let depth = |fragments: Vec<Vec<(CanonicalValue, CanonicalValue)>>| {
+        BranchMergeColumnDepthFragments {
+            fragment_count: fragments.len(),
+            fragments: fragments.into_iter().enumerate().collect(),
+        }
+    };
+    let wave = |order| {
+        let columns = match order {
+            1 => BTreeMap::from([
+                (
+                    (id(1), id(2)),
+                    depth(vec![cells(&root, 2), cells(&child, 2)]),
+                ),
+                (
+                    (id(1), id(3)),
+                    depth(vec![Vec::new(), cells(&deep, 3)]),
+                ),
+            ]),
+            2 => BTreeMap::from([(
+                (id(1), id(2)),
+                depth(vec![cells(&root, 2), Vec::new(), cells(&deep, 2)]),
+            )]),
+            4 => BTreeMap::from([(
+                (id(1), id(3)),
+                depth(vec![cells(&child, 3)]),
+            )]),
+            other => panic!("unexpected column restore order: {other}"),
+        };
+        BranchMergeTabularColumnDepthWave { order, columns }
+    };
+    let empty_plan = |order| SequencedBranchMergePlan {
+        order,
+        plan: BranchMergePlan {
+            schema: Schema {
+                version: EvolutionVersion::V1_0,
+                tables: Vec::new(),
+            },
+            tables: BTreeMap::new(),
+            checkpoints: BTreeMap::new(),
+            report: Default::default(),
+        },
+        ordered_row_tombstones: Vec::new(),
+    };
+    let path_record = |storm_index, first_order, last_order, order, column, label, snapshot_paths| {
+        BranchMergeColumnRestoreStormDepthPathSnapshot {
+            storm_index,
+            first_order,
+            last_order,
+            order,
+            table: id(1),
+            column: id(column),
+            label,
+            snapshot_paths,
+        }
+    };
+
+    let mut history = BranchMergeTombstoneHistory::new(0);
+    for order in [4, 2, 1] {
+        assert!(history
+            .submit_tabular_column_depth_wave(&wave(order))
+            .unwrap()
+            .is_empty());
+    }
+    assert!(history.submit(&empty_plan(3)).unwrap().is_empty());
+    assert!(history.column_restore_storm_depth_labels().is_empty());
+    assert!(history.submit(&empty_plan(0)).unwrap().is_empty());
+
+    assert_eq!(
+        history.column_restore_storm_depth_labels(),
+        vec![
+            BranchMergeColumnRestoreStormDepthLabelWaveSnapshot {
+                storm_index: 0,
+                first_order: 1,
+                last_order: 2,
+                order: 1,
+                table: id(1),
+                column: id(2),
+                depth_labels: vec![0, 1],
+            },
+            BranchMergeColumnRestoreStormDepthLabelWaveSnapshot {
+                storm_index: 0,
+                first_order: 1,
+                last_order: 2,
+                order: 2,
+                table: id(1),
+                column: id(2),
+                depth_labels: vec![0, 1, 2],
+            },
+            BranchMergeColumnRestoreStormDepthLabelWaveSnapshot {
+                storm_index: 0,
+                first_order: 1,
+                last_order: 2,
+                order: 1,
+                table: id(1),
+                column: id(3),
+                depth_labels: vec![0, 1],
+            },
+            BranchMergeColumnRestoreStormDepthLabelWaveSnapshot {
+                storm_index: 1,
+                first_order: 4,
+                last_order: 4,
+                order: 4,
+                table: id(1),
+                column: id(3),
+                depth_labels: vec![0],
+            },
+        ],
+        "each emitted label set is paired with its stable column, committed storm, and restore order",
+    );
+    assert_eq!(
+        history.column_restore_storm_folds()[0].storms[0].waves[0].fragments,
+        Some(vec![
+            BranchMergeColumnDepthFragmentSnapshot {
+                label: 0,
+                cells: cells(&root, 2),
+            },
+            BranchMergeColumnDepthFragmentSnapshot {
+                label: 1,
+                cells: cells(&child, 2),
+            },
+        ]),
+        "the paired labels remain bound to actual fixture row keys and values",
+    );
+    assert_eq!(
+        history.column_restore_storm_depth_paths(),
+        vec![
+            path_record(0, 1, 2, 1, 2, 0, vec![root.key.clone()]),
+            path_record(0, 1, 2, 1, 2, 1, vec![child.key.clone()]),
+            path_record(0, 1, 2, 2, 2, 0, vec![root.key.clone()]),
+            path_record(0, 1, 2, 2, 2, 1, Vec::new()),
+            path_record(0, 1, 2, 2, 2, 2, vec![deep.key.clone()]),
+            path_record(0, 1, 2, 1, 3, 0, Vec::new()),
+            path_record(0, 1, 2, 1, 3, 1, vec![deep.key.clone()]),
+            path_record(1, 4, 4, 4, 3, 0, vec![child.key.clone()]),
+        ],
+        "snapshot row-key paths stay attached to their exact paired label, wave, and storm, including empty labels",
+    );
+}
+
+#[test]
+fn column_restore_storm_depth_path_slots_preserve_identity_across_omissions() {
+    let fixture_rows = COLUMN_RESTORE_LADDER
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    let row = |path: &str| {
+        fixture_rows
+            .iter()
+            .find(|row| row.key == string(path))
+            .unwrap_or_else(|| panic!("the in-crate column fixture supplies {path}"))
+            .clone()
+    };
+    let root = row("root");
+    let child = row("root/child");
+    let deep = row("root/child/deep");
+    assert_eq!(root.fields[&id(2)], string("Ladder root"));
+    assert_eq!(child.fields[&id(3)], string("Bergen"));
+    assert_eq!(deep.fields[&id(3)], string("Trondheim"));
+
+    let cells = |row: &KeyedRow, column| {
+        vec![(row.key.clone(), row.fields[&id(column)].clone())]
+    };
+    let depth = |fragments: Vec<Vec<(CanonicalValue, CanonicalValue)>>| {
+        BranchMergeColumnDepthFragments {
+            fragment_count: fragments.len(),
+            fragments: fragments.into_iter().enumerate().collect(),
+        }
+    };
+    let wave = |order| {
+        let columns = match order {
+            1 => BTreeMap::from([
+                (
+                    (id(1), id(2)),
+                    depth(vec![cells(&root, 2), cells(&child, 2)]),
+                ),
+                (
+                    (id(1), id(3)),
+                    depth(vec![cells(&root, 3), Vec::new()]),
+                ),
+            ]),
+            2 => BTreeMap::from([(
+                (id(1), id(2)),
+                depth(vec![cells(&deep, 2)]),
+            )]),
+            3 => BTreeMap::from([
+                (
+                    (id(1), id(2)),
+                    depth(vec![cells(&child, 2), cells(&deep, 2)]),
+                ),
+                (
+                    (id(1), id(3)),
+                    depth(vec![cells(&child, 3), cells(&deep, 3)]),
+                ),
+            ]),
+            other => panic!("unexpected column restore order: {other}"),
+        };
+        BranchMergeTabularColumnDepthWave { order, columns }
+    };
+    let empty_plan = |order| SequencedBranchMergePlan {
+        order,
+        plan: BranchMergePlan {
+            schema: Schema {
+                version: EvolutionVersion::V1_0,
+                tables: Vec::new(),
+            },
+            tables: BTreeMap::new(),
+            checkpoints: BTreeMap::new(),
+            report: Default::default(),
+        },
+        ordered_row_tombstones: Vec::new(),
+    };
+    let fragment = |label, snapshot_paths| {
+        BranchMergeColumnRestoreStormDepthPathFragmentSnapshot {
+            label,
+            snapshot_paths,
+        }
+    };
+    let slot = |order, column, fragments| {
+        BranchMergeColumnRestoreStormDepthPathWaveSlotSnapshot {
+            storm_index: 0,
+            first_order: 1,
+            last_order: 3,
+            order,
+            table: id(1),
+            column: id(column),
+            fragments,
+        }
+    };
+
+    let mut history = BranchMergeTombstoneHistory::new(0);
+    for order in [3, 2, 1] {
+        assert!(history
+            .submit_tabular_column_depth_wave(&wave(order))
+            .unwrap()
+            .is_empty());
+    }
+    assert!(history.column_restore_storm_depth_path_slots().is_empty());
+    assert!(history.submit(&empty_plan(0)).unwrap().is_empty());
+    assert_eq!(
+        history.column_restore_storm_depth_path_slots(),
+        vec![
+            slot(
+                1,
+                2,
+                Some(vec![
+                    fragment(0, vec![root.key.clone()]),
+                    fragment(1, vec![child.key.clone()]),
+                ]),
+            ),
+            slot(2, 2, Some(vec![fragment(0, vec![deep.key.clone()])])),
+            slot(
+                3,
+                2,
+                Some(vec![
+                    fragment(0, vec![child.key.clone()]),
+                    fragment(1, vec![deep.key.clone()]),
+                ]),
+            ),
+            slot(
+                1,
+                3,
+                Some(vec![
+                    fragment(0, vec![root.key.clone()]),
+                    fragment(1, Vec::new()),
+                ]),
+            ),
+            slot(2, 3, None),
+            slot(
+                3,
+                3,
+                Some(vec![
+                    fragment(0, vec![child.key.clone()]),
+                    fragment(1, vec![deep.key.clone()]),
+                ]),
+            ),
+        ],
+        "the omitted paired column retains its own empty wave slot and resumes with local labels and exact fixture paths",
     );
 }
 
