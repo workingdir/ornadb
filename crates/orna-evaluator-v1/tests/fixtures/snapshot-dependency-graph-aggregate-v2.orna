@@ -1,0 +1,3 @@
+use std.graph.left.{value};
+use std.graph.right.{value};
+pub fn combine(): Int = std.graph.left.value() * 1000 + std.graph.right.value();
