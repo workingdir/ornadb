@@ -7271,17 +7271,18 @@ fn infer(
             let paired_omission_recovery = first_parent
                 .as_ref()
                 .is_some_and(type_contains_paired_checkpoint_omissions);
-            // A concrete paired anchor can also be re-established after a
-            // sparse parent. Keep that latest accepted map as its recovery
-            // point so a later crossed row does not erase the re-anchor.
+            // A complete anchor, or one concrete lane of a partial first
+            // pair, can grow into a recoverable checkpoint map as later rows
+            // fill omitted pins. Retain the latest accepted map so a later
+            // crossed row cannot erase that sparse-chain identity.
+            let first_parent_can_grow_checkpoint_map = first_parent.as_ref().is_some_and(|parent| {
+                type_contains_pinned_checkpoint_tuple(parent)
+                    && (!type_contains_omitted_checkpoint_tuple(parent)
+                        || type_contains_partially_omitted_pinned_tuple(parent))
+            });
             let checkpoint_reanchor_recovery = paired_omission_recovery
                 || (omitted_pinned_tuple_path
-                    && first_parent
-                        .as_ref()
-                        .is_some_and(type_contains_pinned_checkpoint_tuple)
-                    && !first_parent
-                        .as_ref()
-                        .is_some_and(type_contains_omitted_checkpoint_tuple));
+                    && first_parent_can_grow_checkpoint_map);
             let mut checkpoint_recovery_parent = first_parent.clone();
             // Any omitted row can expose a cross-sibling selector collision.
             // Sparse pinned tuples anywhere in the fold need a local scope so

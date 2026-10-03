@@ -2509,6 +2509,7 @@ fn explain_query_core_with_limit_pushdowns(
         query.source_statistics.as_ref(),
         window_aggregates,
     );
+    let mut decorrelated_pin_chain_identity: Option<String> = None;
     let mut paired_index_anchor_chain_identity: Option<String> = None;
     let mut paired_window_spill_cascade_fold: Option<QueryWindowSpillCascadeFold> = None;
     let mut paired_limit_window_cascade_fold: Option<QueryLimitWindowCascadeFold> = None;
@@ -2758,6 +2759,67 @@ fn explain_query_core_with_limit_pushdowns(
                     work_overflow,
                 )
             });
+        let decorrelated_pin_chain_advance = decorrelated_subquery
+            .zip(decorrelated_index_fold_id.as_deref())
+            .zip(decorrelated_anchor_fold_id.as_deref())
+            .map(|((subquery, selection_identity), anchor_fold_identity)| {
+                let parent_pin_identity = decorrelated_pin_chain_identity
+                    .clone()
+                    .unwrap_or_else(|| {
+                        query_decorrelated_pin_chain_seed_identity(
+                            &query.snapshot,
+                            &left_fold_identity,
+                        )
+                    });
+                let identity = query_decorrelated_pin_chain_identity(
+                    &parent_pin_identity,
+                    &query.snapshot,
+                    &left_fold_identity,
+                    &right_fold_identity,
+                    subquery,
+                    selection_identity,
+                    anchor_fold_identity,
+                    decorrelated_omission_refold_id.as_deref(),
+                    cardinality,
+                    work,
+                    work_overflow,
+                );
+                (
+                    parent_pin_identity,
+                    identity,
+                    subquery.identity.as_str().to_owned(),
+                    selection_identity.to_owned(),
+                    anchor_fold_identity.to_owned(),
+                    decorrelated_omission_refold_id.clone(),
+                )
+            });
+        let next_decorrelated_pin_chain_identity = decorrelated_pin_chain_advance
+            .as_ref()
+            .map(|(_, identity, _, _, _, _)| identity.clone())
+            .or_else(|| decorrelated_pin_chain_identity.clone());
+        let decorrelated_pin_chain_parent_identity = decorrelated_pin_chain_advance
+            .as_ref()
+            .map(|(parent_identity, _, _, _, _, _)| parent_identity.as_str())
+            .or(decorrelated_pin_chain_identity.as_deref());
+        let decorrelated_pin_chain_transition = if decorrelated_pin_chain_advance.is_some() {
+            Some("append_resolved_subquery_pin")
+        } else if next_decorrelated_pin_chain_identity.is_some() {
+            Some("carry_through_sparse_cost_fold")
+        } else {
+            None
+        };
+        let decorrelated_pin_chain_step_subquery_identity = decorrelated_pin_chain_advance
+            .as_ref()
+            .map(|(_, _, identity, _, _, _)| identity.as_str());
+        let decorrelated_pin_chain_step_selection_identity = decorrelated_pin_chain_advance
+            .as_ref()
+            .map(|(_, _, _, identity, _, _)| identity.as_str());
+        let decorrelated_pin_chain_step_anchor_fold_identity = decorrelated_pin_chain_advance
+            .as_ref()
+            .map(|(_, _, _, _, identity, _)| identity.as_str());
+        let decorrelated_pin_chain_step_omission_refold_identity = decorrelated_pin_chain_advance
+            .as_ref()
+            .and_then(|(_, _, _, _, _, identity)| identity.as_deref());
         let window_anchor_fold_id = right_window_identity.as_deref().map(|chain_identity| {
             query_window_anchor_fold_identity(
                 &left_fold_identity,
@@ -2987,6 +3049,26 @@ fn explain_query_core_with_limit_pushdowns(
                 );
             }
         }
+        if let (Some(identity), Some(parent_identity), Some(transition)) = (
+            next_decorrelated_pin_chain_identity.as_deref(),
+            decorrelated_pin_chain_parent_identity,
+            decorrelated_pin_chain_transition,
+        ) {
+            for index in BTreeSet::from([right_access, right]) {
+                add_decorrelated_pin_chain_details(
+                    &mut operators[index].details,
+                    identity,
+                    parent_identity,
+                    &query.snapshot,
+                    &left_fold_identity,
+                    transition,
+                    decorrelated_pin_chain_step_subquery_identity,
+                    decorrelated_pin_chain_step_selection_identity,
+                    decorrelated_pin_chain_step_anchor_fold_identity,
+                    decorrelated_pin_chain_step_omission_refold_identity,
+                );
+            }
+        }
         if let (Some(identity), Some(pair), Some(selection_identity)) = (
             paired_index_refold_id.as_deref(),
             join_pair_identity,
@@ -3133,6 +3215,24 @@ fn explain_query_core_with_limit_pushdowns(
                 selection_identity,
             );
         }
+        if let (Some(identity), Some(parent_identity), Some(transition)) = (
+            next_decorrelated_pin_chain_identity.as_deref(),
+            decorrelated_pin_chain_parent_identity,
+            decorrelated_pin_chain_transition,
+        ) {
+            add_decorrelated_pin_chain_details(
+                &mut details,
+                identity,
+                parent_identity,
+                &query.snapshot,
+                &left_fold_identity,
+                transition,
+                decorrelated_pin_chain_step_subquery_identity,
+                decorrelated_pin_chain_step_selection_identity,
+                decorrelated_pin_chain_step_anchor_fold_identity,
+                decorrelated_pin_chain_step_omission_refold_identity,
+            );
+        }
         if let Some(identity) = window_anchor_fold_id.as_deref() {
             add_window_anchor_fold_details(&mut details, identity);
         }
@@ -3232,6 +3332,7 @@ fn explain_query_core_with_limit_pushdowns(
         ));
         current_cardinality = cardinality;
         join_cost_fold_identity = next_join_cost_fold_identity;
+        decorrelated_pin_chain_identity = next_decorrelated_pin_chain_identity;
         paired_index_anchor_chain_identity = next_paired_index_anchor_chain_identity;
     }
     for limit in nested_input_limits {
@@ -4695,6 +4796,57 @@ fn query_decorrelated_omission_refold_identity(
     format!("decorrelated-omission-refold:{}", hex(&hash.finalize()))
 }
 
+/// Starts a snapshot-pinned chain for resolver-approved decorrelated inputs.
+fn query_decorrelated_pin_chain_seed_identity(
+    snapshot: &SnapshotRef,
+    parent_cost_identity: &str,
+) -> String {
+    let mut hash = Sha256::new();
+    hash.update(b"orna.sys.query-decorrelated-pin-chain-seed.v1\0");
+    hash_part(&mut hash, snapshot.as_str().as_bytes());
+    hash_part(&mut hash, parent_cost_identity.as_bytes());
+    format!("decorrelated-pin-chain:{}", hex(&hash.finalize()))
+}
+
+/// Accumulates pinned subquery outcomes across sparse cost folds. ORNA leaves
+/// this explain-only encoding open; include the snapshot, resolver tuple,
+/// selected-or-omitted index fold, and accumulated parent so rebinds cannot
+/// detach a later subquery from its earlier pin ancestry.
+fn query_decorrelated_pin_chain_identity(
+    parent_pin_identity: &str,
+    snapshot: &SnapshotRef,
+    parent_cost_identity: &str,
+    input_identity: &str,
+    subquery: &QueryDecorrelatedSubqueryDescription,
+    selection_identity: &str,
+    anchor_fold_identity: &str,
+    omission_refold_identity: Option<&str>,
+    cardinality: Cardinality,
+    work: Option<u64>,
+    work_overflow: bool,
+) -> String {
+    let mut hash = Sha256::new();
+    hash.update(b"orna.sys.query-decorrelated-pin-chain.v1\0");
+    hash_part(&mut hash, parent_pin_identity.as_bytes());
+    hash_part(&mut hash, snapshot.as_str().as_bytes());
+    hash_part(&mut hash, parent_cost_identity.as_bytes());
+    hash_part(&mut hash, input_identity.as_bytes());
+    hash_part(&mut hash, subquery.identity.as_str().as_bytes());
+    hash_part(&mut hash, subquery.source.as_str().as_bytes());
+    hash_part(
+        &mut hash,
+        subquery.correlation_predicate.as_str().as_bytes(),
+    );
+    hash_part(&mut hash, selection_identity.as_bytes());
+    hash_part(&mut hash, anchor_fold_identity.as_bytes());
+    hash_optional_text(&mut hash, omission_refold_identity);
+    hash_optional_u64(&mut hash, cardinality.rows);
+    hash_optional_u64(&mut hash, cardinality.bytes);
+    hash_optional_u64(&mut hash, work);
+    hash.update([u8::from(work_overflow)]);
+    format!("decorrelated-pin-chain:{}", hex(&hash.finalize()))
+}
+
 /// Binds a resolver-approved decorrelation to the sparse fold accumulated on
 /// its lateral anchor. The reference leaves explain identity encoding open;
 /// this domain-separated digest prevents equal child subqueries under distinct
@@ -4787,6 +4939,68 @@ fn add_decorrelated_omission_refold_details(
         "decorrelated_omission_refold_pairing".to_owned(),
         PlanDetail::Text("sparse_parent_fold_and_unindexed_subquery_input".to_owned()),
     );
+}
+
+fn add_decorrelated_pin_chain_details(
+    details: &mut BTreeMap<String, PlanDetail>,
+    identity: &str,
+    parent_identity: &str,
+    snapshot: &SnapshotRef,
+    parent_cost_identity: &str,
+    transition: &str,
+    subquery_identity: Option<&str>,
+    selection_identity: Option<&str>,
+    anchor_fold_identity: Option<&str>,
+    omission_refold_identity: Option<&str>,
+) {
+    details.insert(
+        "decorrelated_pin_chain_identity".to_owned(),
+        PlanDetail::Text(identity.to_owned()),
+    );
+    details.insert(
+        "decorrelated_pin_chain_parent_identity".to_owned(),
+        PlanDetail::Text(parent_identity.to_owned()),
+    );
+    details.insert(
+        "decorrelated_pin_chain_snapshot".to_owned(),
+        PlanDetail::Text(snapshot.as_str().to_owned()),
+    );
+    details.insert(
+        "decorrelated_pin_chain_parent_cost_identity".to_owned(),
+        PlanDetail::Text(parent_cost_identity.to_owned()),
+    );
+    details.insert(
+        "decorrelated_pin_chain_transition".to_owned(),
+        PlanDetail::Text(transition.to_owned()),
+    );
+    details.insert(
+        "decorrelated_pin_chain_pairing".to_owned(),
+        PlanDetail::Text("snapshot_pin_subquery_outcome_and_sparse_cost_parent".to_owned()),
+    );
+    if let Some(identity) = subquery_identity {
+        details.insert(
+            "decorrelated_pin_chain_subquery_identity".to_owned(),
+            PlanDetail::Text(identity.to_owned()),
+        );
+    }
+    if let Some(identity) = selection_identity {
+        details.insert(
+            "decorrelated_pin_chain_selection_identity".to_owned(),
+            PlanDetail::Text(identity.to_owned()),
+        );
+    }
+    if let Some(identity) = anchor_fold_identity {
+        details.insert(
+            "decorrelated_pin_chain_anchor_fold_identity".to_owned(),
+            PlanDetail::Text(identity.to_owned()),
+        );
+    }
+    if let Some(identity) = omission_refold_identity {
+        details.insert(
+            "decorrelated_pin_chain_omission_refold_identity".to_owned(),
+            PlanDetail::Text(identity.to_owned()),
+        );
+    }
 }
 
 /// Binds a source's complete resolver-ordered window chain to the accumulated
