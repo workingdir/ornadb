@@ -2177,6 +2177,16 @@ fn explain_query_core_with_subqueries(
         current_cardinality,
         window_aggregates,
     );
+    let mut join_cost_fold_identity = query_join_cost_fold_seed(
+        &query.snapshot,
+        &query.source,
+        query.source_statistics.as_ref(),
+        window_aggregates,
+    );
+    add_join_cost_fold_seed_details(
+        &mut operators[current].details,
+        &join_cost_fold_identity,
+    );
     for (planned_position, (declared_position, join)) in
         planned_query_join_order(&query.joins).into_iter().enumerate()
     {
@@ -2184,14 +2194,14 @@ fn explain_query_core_with_subqueries(
             .checked_sub(declared_join_count)
             .and_then(|offset| decorrelated_subqueries.get(offset));
         let selected_partial_index = partial_index_for_join(join, partial_indexes);
-        let right = if let Some(candidate) = selected_partial_index {
+        let right_access = if let Some(candidate) = selected_partial_index {
             push_index_lookup(&mut operators, candidate, join.statistics.as_ref())
         } else {
             push_scan(&mut operators, join.source.clone(), join.statistics.as_ref())
         };
         let right = push_window_aggregates(
             &mut operators,
-            right,
+            right_access,
             &join.source,
             source_cardinality(join.statistics.as_ref()),
             window_aggregates,
@@ -2220,6 +2230,27 @@ fn explain_query_core_with_subqueries(
             .rows
             .zip(right_cardinality.rows)
             .is_some_and(|(left, right)| left.checked_add(right).is_none());
+        let left_fold_identity = join_cost_fold_identity.clone();
+        let right_fold_identity = query_join_cost_input_identity(
+            &query.snapshot,
+            join,
+            selected_partial_index,
+            window_aggregates,
+        );
+        let next_join_cost_fold_identity = query_join_cost_fold(
+            &left_fold_identity,
+            &right_fold_identity,
+            join_pair_identity,
+            cardinality,
+            work,
+            work_overflow,
+        );
+        for index in BTreeSet::from([right_access, right]) {
+            operators[index].details.insert(
+                "paired_join_cost_fold_identity".to_owned(),
+                PlanDetail::Text(next_join_cost_fold_identity.clone()),
+            );
+        }
         let mut details = BTreeMap::from([(
             "strategy".to_owned(),
             PlanDetail::Text("hash".to_owned()),
@@ -2263,6 +2294,12 @@ fn explain_query_core_with_subqueries(
         if let Some(candidate) = selected_partial_index {
             add_partial_index_pair_identity_details(&mut details, candidate);
         }
+        add_join_cost_fold_details(
+            &mut details,
+            &left_fold_identity,
+            &right_fold_identity,
+            &next_join_cost_fold_identity,
+        );
         let prior = current;
         current = operators.len();
         operators.push(Operator::new(
@@ -2275,6 +2312,7 @@ fn explain_query_core_with_subqueries(
             work,
         ));
         current_cardinality = cardinality;
+        join_cost_fold_identity = next_join_cost_fold_identity;
     }
     for limit in nested_input_limits {
         let cardinality = limit_cardinality(current_cardinality, *limit);
@@ -3340,6 +3378,164 @@ fn add_partial_index_pair_identity_details(
     details.insert(
         "predicate_pushdown_pairing".to_owned(),
         PlanDetail::Text("exact_table_index_and_predicate".to_owned()),
+    );
+}
+
+/// The reference defines structured plan rows and a digest of plan inputs,
+/// but leaves join-fold identity open. Seed a cascade from the pinned source
+/// and any aggregate work already attached to that source.
+fn query_join_cost_fold_seed(
+    snapshot: &SnapshotRef,
+    source: &ObjectRef,
+    statistics: Option<&QuerySourceStatistics>,
+    window_aggregates: &[QueryWindowAggregatePushdownDescription],
+) -> String {
+    let mut hash = Sha256::new();
+    hash.update(b"orna.sys.query-join-cost-seed.v1\0");
+    hash_part(&mut hash, snapshot.as_str().as_bytes());
+    hash_part(&mut hash, source.as_str().as_bytes());
+    hash_query_statistics(&mut hash, statistics);
+    hash_query_window_inputs(&mut hash, source, window_aggregates);
+    format!("join-seed:{}", hex(&hash.finalize()))
+}
+
+fn query_join_cost_input_identity(
+    snapshot: &SnapshotRef,
+    join: &QueryJoinDescription,
+    selected_index: Option<&QueryPartialIndexDescription>,
+    window_aggregates: &[QueryWindowAggregatePushdownDescription],
+) -> String {
+    let mut hash = Sha256::new();
+    hash.update(b"orna.sys.query-join-cost-input.v1\0");
+    hash_part(&mut hash, snapshot.as_str().as_bytes());
+    hash_part(&mut hash, join.source.as_str().as_bytes());
+    hash_optional_text(
+        &mut hash,
+        join.predicate.as_ref().map(ExpressionRef::as_str),
+    );
+    hash_query_statistics(&mut hash, join.statistics.as_ref());
+    if let Some(index) = selected_index {
+        hash.update([1]);
+        hash_part(
+            &mut hash,
+            partial_index_pair_identity(index).as_bytes(),
+        );
+    } else {
+        hash.update([0]);
+    }
+    hash_query_window_inputs(&mut hash, &join.source, window_aggregates);
+    format!("join-input:{}", hex(&hash.finalize()))
+}
+
+fn query_join_cost_fold(
+    left_identity: &str,
+    right_identity: &str,
+    pair: Option<&QueryJoinPairIdentityDescription>,
+    cardinality: Cardinality,
+    work: Option<u64>,
+    work_overflow: bool,
+) -> String {
+    let mut hash = Sha256::new();
+    hash.update(b"orna.sys.query-join-cost-fold.v1\0");
+    hash_part(&mut hash, left_identity.as_bytes());
+    hash_part(&mut hash, right_identity.as_bytes());
+    if let Some(pair) = pair {
+        hash.update([1]);
+        hash_part(&mut hash, pair.identity.as_str().as_bytes());
+        hash_part(&mut hash, pair.left_source.as_str().as_bytes());
+        hash_part(&mut hash, pair.right_source.as_str().as_bytes());
+        hash_optional_text(
+            &mut hash,
+            pair.predicate.as_ref().map(ExpressionRef::as_str),
+        );
+    } else {
+        hash.update([0]);
+    }
+    hash_optional_u64(&mut hash, cardinality.rows);
+    hash_optional_u64(&mut hash, cardinality.bytes);
+    hash_optional_u64(&mut hash, work);
+    hash.update([u8::from(work_overflow)]);
+    format!("join-fold:{}", hex(&hash.finalize()))
+}
+
+fn hash_query_statistics(hash: &mut Sha256, statistics: Option<&QuerySourceStatistics>) {
+    if let Some(statistics) = statistics {
+        hash.update([1]);
+        hash_optional_u64(hash, statistics.estimated_rows);
+        hash_optional_u64(hash, statistics.estimated_bytes);
+        if let Some(branch) = &statistics.mutable_branch {
+            hash.update([1]);
+            hash_part(hash, branch.name.as_bytes());
+            hash.update(branch.generation.to_be_bytes());
+        } else {
+            hash.update([0]);
+        }
+    } else {
+        hash.update([0]);
+    }
+}
+
+fn hash_query_window_inputs(
+    hash: &mut Sha256,
+    source: &ObjectRef,
+    window_aggregates: &[QueryWindowAggregatePushdownDescription],
+) {
+    let matching = window_aggregates
+        .iter()
+        .filter(|aggregate| aggregate.source == *source)
+        .collect::<Vec<_>>();
+    hash.update((matching.len() as u64).to_be_bytes());
+    for aggregate in matching {
+        hash_part(hash, aggregate.identity.as_str().as_bytes());
+        hash_part(hash, aggregate.aggregate.as_str().as_bytes());
+        hash_part(hash, aggregate.frame_identity.as_str().as_bytes());
+        hash_part(hash, aggregate.frame_start.as_detail().as_bytes());
+        hash_part(hash, aggregate.frame_end.as_detail().as_bytes());
+    }
+}
+
+fn hash_optional_text(hash: &mut Sha256, value: Option<&str>) {
+    match value {
+        Some(value) => {
+            hash.update([1]);
+            hash_part(hash, value.as_bytes());
+        }
+        None => hash.update([0]),
+    }
+}
+
+fn add_join_cost_fold_seed_details(details: &mut BTreeMap<String, PlanDetail>, identity: &str) {
+    details.insert(
+        "join_cost_fold_identity".to_owned(),
+        PlanDetail::Text(identity.to_owned()),
+    );
+    details.insert(
+        "join_cost_fold_identity_policy".to_owned(),
+        PlanDetail::Text("snapshot_seed_then_planned_left_fold".to_owned()),
+    );
+}
+
+fn add_join_cost_fold_details(
+    details: &mut BTreeMap<String, PlanDetail>,
+    left_identity: &str,
+    right_identity: &str,
+    fold_identity: &str,
+) {
+    details.insert(
+        "join_cost_fold_identity".to_owned(),
+        PlanDetail::Text(fold_identity.to_owned()),
+    );
+    details.insert(
+        "join_cost_fold_left_identity".to_owned(),
+        PlanDetail::Text(left_identity.to_owned()),
+    );
+    details.insert(
+        "join_cost_fold_right_identity".to_owned(),
+        PlanDetail::Text(right_identity.to_owned()),
+    );
+    details.insert(
+        "join_cost_fold_identity_policy".to_owned(),
+        PlanDetail::Text("snapshot_seed_then_planned_left_fold".to_owned()),
     );
 }
 
