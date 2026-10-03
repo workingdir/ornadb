@@ -5,7 +5,7 @@ use orna_sys_v1::{
     AbiType, AbiVersion, EffectSet, FailureCode, OperationId, ProviderDiagnostic, ProviderFailure,
     ProviderId, ProviderOffer, ProviderRoleRegistry, SemanticRoleId, SystemEffect,
     SystemOperationProvider, SystemProviderAbi, TypeId, TypedValue, system_api_json,
-    system_dispatch_table, system_function_descriptor, system_provider_abi,
+    system_binding_stubs, system_dispatch_table, system_function_descriptor, system_provider_abi,
     system_provider_abi_json, validate_provider_offer,
 };
 use serde_json::Value;
@@ -315,12 +315,8 @@ fn round_tripped_registry_matches_direct_undeclared_failure_diagnostics() {
             operation: contract.id.clone(),
             code: undeclared.clone(),
         });
-        let direct = baked.dispatch_to_provider(
-            generated.name,
-            &direct_provider,
-            &arguments,
-            |_| Ok(()),
-        );
+        let direct =
+            baked.dispatch_to_provider(generated.name, &direct_provider, &arguments, |_| Ok(()));
         let mediated = registry.dispatch_to_provider(
             &round_tripped,
             generated.name,
@@ -336,7 +332,8 @@ fn round_tripped_registry_matches_direct_undeclared_failure_diagnostics() {
             contract.id.as_str()
         );
         assert_eq!(
-            mediated, expected,
+            mediated,
+            expected,
             "round-tripped registry diagnostic for {}",
             contract.id.as_str()
         );
@@ -713,12 +710,8 @@ fn round_tripped_generated_bindings_preserve_provider_edge_diagnostics() {
             };
             let direct_provider = provider_for();
             let round_tripped_provider = provider_for();
-            let direct = baked.dispatch_to_provider(
-                generated.name,
-                &direct_provider,
-                &[],
-                |_| Ok(()),
-            );
+            let direct =
+                baked.dispatch_to_provider(generated.name, &direct_provider, &[], |_| Ok(()));
             let mediated = registry.dispatch_to_provider(
                 &round_tripped,
                 generated.name,
@@ -2458,5 +2451,440 @@ fn generated_binding_argument_count_diagnostics_match_every_dispatch_route() {
     println!(
         "generated_binding_dispatch_diagnostic_parity operations={generated_binding_cases} argument_count_pairs={provider_bound_diagnostic_cases} provider_not_executable_pairs={unbound_provider_rejections} direct_registry_equal=true providers_called=0 total_cases={}",
         generated_binding_cases * 2
+    );
+}
+
+#[test]
+fn generated_idl_dispatch_type_diagnostic_edges_match_every_provider_binding() {
+    let table = system_dispatch_table();
+    let registry = ProviderRoleRegistry::from_baked_abi(table)
+        .expect("generated provider offers resolve from the typed registry");
+    let idl_operation_ids = system_binding_stubs()
+        .lines()
+        .filter_map(|line| line.strip_prefix("// sys-op: "))
+        .collect::<Vec<_>>();
+    let typed_operation_ids = table
+        .operations()
+        .map(|contract| contract.id.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        idl_operation_ids, typed_operation_ids,
+        "generated IDL markers preserve typed registry order and identity"
+    );
+
+    let mut generated_binding_cases = 0;
+    let mut provider_routes = 0;
+    let mut argument_type_pairs = 0;
+    let mut result_type_pairs = 0;
+    let mut unconstrained_generic_parameters = 0;
+
+    for contract in table.operations() {
+        let operation_name = contract.id.as_str();
+        let generated = system_function_descriptor(operation_name)
+            .unwrap_or_else(|| panic!("missing generated binding for {operation_name}"));
+        assert_eq!(generated.name, operation_name);
+        assert_eq!(generated.signature, contract.signature.source);
+        assert_eq!(contract.effects.iter().next(), Some(generated.effect));
+        generated_binding_cases += 1;
+
+        let Some(role_id) = &contract.role else {
+            continue;
+        };
+        let offer = registry
+            .resolve(role_id.as_str())
+            .expect("generated binding role has a selected provider")
+            .clone();
+        let arguments = contract
+            .signature
+            .parameters
+            .iter()
+            .map(|parameter| {
+                TypedValue::public(
+                    TypeId::new(parameter.ty.canonical()),
+                    parameter.name.as_bytes().to_vec(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let argument_types = contract
+            .signature
+            .parameters
+            .iter()
+            .map(|parameter| parameter.ty.canonical())
+            .collect::<Vec<_>>();
+        let expected_result_type = contract.signature.result.canonical();
+
+        for (parameter_index, parameter) in contract.signature.parameters.iter().enumerate() {
+            if matches!(
+                &parameter.ty,
+                AbiType::Named(name)
+                    if contract.signature.type_parameters.iter().any(|generic| generic == name)
+            ) {
+                unconstrained_generic_parameters += 1;
+                continue;
+            }
+
+            let actual_type = format!(
+                "sys.conformance.DispatchMismatch{generated_binding_cases}_{parameter_index}"
+            );
+            assert_ne!(parameter.ty.canonical(), actual_type);
+            let mut wrong_arguments = arguments.clone();
+            wrong_arguments[parameter_index] = TypedValue::public(
+                TypeId::new(actual_type.clone()),
+                b"wrong-typed-idl-argument".to_vec(),
+            );
+            let expected = ProviderDiagnostic::ArgumentTypeMismatch {
+                operation: contract.id.clone(),
+                parameter: parameter.name.clone(),
+                expected: parameter.ty.canonical(),
+                actual: actual_type,
+            };
+            let provider_for = || InvokeValueProvider {
+                offer: offer.clone(),
+                operation: contract.id.clone(),
+                argument_types: argument_types.clone(),
+                response: Ok(TypedValue::public(
+                    TypeId::new(expected_result_type.clone()),
+                    b"must-not-run".to_vec(),
+                )),
+                calls: AtomicUsize::new(0),
+            };
+            let direct_provider = provider_for();
+            let registry_provider = provider_for();
+            let direct = table.dispatch_to_provider(
+                generated.name,
+                &direct_provider,
+                &wrong_arguments,
+                |_| Ok(()),
+            );
+            let mediated = registry.dispatch_to_provider(
+                table,
+                generated.name,
+                &registry_provider,
+                &wrong_arguments,
+                |_| Ok(()),
+            );
+            assert_eq!(direct, Err(expected.clone()));
+            assert_eq!(mediated, Err(expected));
+            assert_eq!(direct.unwrap_err().code(), "sys.abi.argument_type_mismatch");
+            assert_eq!(
+                mediated.unwrap_err().code(),
+                "sys.abi.argument_type_mismatch"
+            );
+            assert_eq!(direct_provider.calls.load(Ordering::SeqCst), 0);
+            assert_eq!(registry_provider.calls.load(Ordering::SeqCst), 0);
+            argument_type_pairs += 1;
+        }
+
+        let wrong_result_type = "sys.conformance.DispatchMismatchResult";
+        assert_ne!(expected_result_type, wrong_result_type);
+        let expected_result_diagnostic = ProviderDiagnostic::ResultTypeMismatch {
+            operation: contract.id.clone(),
+            expected: expected_result_type.clone(),
+            actual: wrong_result_type.to_owned(),
+        };
+        let provider_for_wrong_result = || InvokeValueProvider {
+            offer: offer.clone(),
+            operation: contract.id.clone(),
+            argument_types: argument_types.clone(),
+            response: Ok(TypedValue::public(
+                TypeId::new(wrong_result_type),
+                b"wrong-typed-idl-result".to_vec(),
+            )),
+            calls: AtomicUsize::new(0),
+        };
+        let direct_provider = provider_for_wrong_result();
+        let registry_provider = provider_for_wrong_result();
+        let direct =
+            table.dispatch_to_provider(generated.name, &direct_provider, &arguments, |_| Ok(()));
+        let mediated = registry.dispatch_to_provider(
+            table,
+            generated.name,
+            &registry_provider,
+            &arguments,
+            |_| Ok(()),
+        );
+        assert_eq!(direct, Err(expected_result_diagnostic.clone()));
+        assert_eq!(mediated, Err(expected_result_diagnostic));
+        assert_eq!(direct.unwrap_err().code(), "sys.abi.result_type_mismatch");
+        assert_eq!(mediated.unwrap_err().code(), "sys.abi.result_type_mismatch");
+        assert_eq!(direct_provider.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(registry_provider.calls.load(Ordering::SeqCst), 1);
+        result_type_pairs += 1;
+        provider_routes += 1;
+    }
+
+    assert_eq!(generated_binding_cases, typed_operation_ids.len());
+    assert!(provider_routes > 0);
+    assert_eq!(result_type_pairs, provider_routes);
+    println!(
+        "generated_idl_dispatch_type_diagnostic_parity bindings={generated_binding_cases} provider_routes={provider_routes} argument_type_pairs={argument_type_pairs} result_type_pairs={result_type_pairs} unconstrained_generic_parameters={unconstrained_generic_parameters} direct_registry_equal=true total_cases={}",
+        generated_binding_cases + (argument_type_pairs + result_type_pairs) * 2
+    );
+}
+
+#[test]
+fn generated_bindings_preserve_registry_precondition_failure_edges() {
+    let table = system_dispatch_table();
+    let registry = ProviderRoleRegistry::from_baked_abi(table)
+        .expect("generated provider offers resolve from the typed registry");
+    let idl_operation_ids = system_binding_stubs()
+        .lines()
+        .filter_map(|line| line.strip_prefix("// sys-op: "))
+        .collect::<Vec<_>>();
+    let typed_operation_ids = table
+        .operations()
+        .map(|contract| contract.id.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(idl_operation_ids, typed_operation_ids);
+
+    let declared_precondition = FailureCode::new("sys.abi.precondition_failed").unwrap();
+    let undeclared_precondition =
+        FailureCode::new("sys.conformance.registry_precondition").unwrap();
+    let fallback_role = table
+        .roles()
+        .next()
+        .expect("generated registry has a provider role");
+    let fallback_offer = ProviderOffer {
+        provider: ProviderId::new("fixture.precondition").unwrap(),
+        role: fallback_role.id.clone(),
+        version: fallback_role.version,
+        effects: fallback_role.effects.clone(),
+    };
+    let mut generated_bindings = 0;
+    let mut provider_routes = 0;
+    let mut precondition_routes = 0;
+    let mut diagnostic_pairs = 0;
+
+    for contract in table.operations() {
+        let generated = system_function_descriptor(contract.id.as_str())
+            .unwrap_or_else(|| panic!("missing generated binding for {}", contract.id.as_str()));
+        assert_eq!(generated.name, contract.id.as_str());
+        assert_eq!(generated.signature, contract.signature.source);
+        assert_eq!(contract.effects.iter().next(), Some(generated.effect));
+        generated_bindings += 1;
+
+        let offer = match &contract.role {
+            Some(role_id) => {
+                provider_routes += 1;
+                registry
+                    .resolve(role_id.as_str())
+                    .expect("generated binding role has a selected provider")
+                    .clone()
+            }
+            None => fallback_offer.clone(),
+        };
+        let arguments = contract
+            .signature
+            .parameters
+            .iter()
+            .map(|parameter| {
+                TypedValue::public(
+                    TypeId::new(parameter.ty.canonical()),
+                    parameter.name.as_bytes().to_vec(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let argument_types = contract
+            .signature
+            .parameters
+            .iter()
+            .map(|parameter| parameter.ty.canonical())
+            .collect::<Vec<_>>();
+        let result = TypedValue::public(
+            TypeId::new(contract.signature.result.canonical()),
+            b"must-not-run-after-precondition-failure".to_vec(),
+        );
+
+        if contract.preconditions.is_empty() {
+            continue;
+        }
+        precondition_routes += 1;
+        assert!(contract.declares_failure(&declared_precondition));
+        assert!(!contract.declares_failure(&undeclared_precondition));
+
+        for failure in [&declared_precondition, &undeclared_precondition] {
+            let provider_for = || InvokeValueProvider {
+                offer: offer.clone(),
+                operation: contract.id.clone(),
+                argument_types: argument_types.clone(),
+                response: Ok(result.clone()),
+                calls: AtomicUsize::new(0),
+            };
+            let direct_provider = provider_for();
+            let registry_provider = provider_for();
+            let mut direct_checks = 0;
+            let mut registry_checks = 0;
+            let direct = table.dispatch_to_provider(
+                generated.name,
+                &direct_provider,
+                &arguments,
+                |precondition| {
+                    assert!(contract.preconditions.contains(precondition));
+                    direct_checks += 1;
+                    Err(failure.clone())
+                },
+            );
+            let mediated = registry.dispatch_to_provider(
+                table,
+                generated.name,
+                &registry_provider,
+                &arguments,
+                |precondition| {
+                    assert!(contract.preconditions.contains(precondition));
+                    registry_checks += 1;
+                    Err(failure.clone())
+                },
+            );
+            let expected = if failure == &declared_precondition {
+                Ok(orna_sys_v1::SystemDispatchResult::Failed(failure.clone()))
+            } else {
+                Err(ProviderDiagnostic::UndeclaredFailure {
+                    operation: contract.id.clone(),
+                    code: failure.clone(),
+                })
+            };
+            assert_eq!(direct, expected);
+            assert_eq!(mediated, expected);
+            assert_eq!(direct_checks, 1);
+            assert_eq!(registry_checks, 1);
+            assert_eq!(direct_provider.calls.load(Ordering::SeqCst), 0);
+            assert_eq!(registry_provider.calls.load(Ordering::SeqCst), 0);
+            if failure == &undeclared_precondition {
+                assert_eq!(direct.unwrap_err().code(), "sys.abi.undeclared_failure");
+                assert_eq!(mediated.unwrap_err().code(), "sys.abi.undeclared_failure");
+            }
+            diagnostic_pairs += 1;
+        }
+    }
+
+    assert_eq!(generated_bindings, typed_operation_ids.len());
+    assert!(provider_routes > 0);
+    assert!(precondition_routes > 0);
+    assert_eq!(diagnostic_pairs, precondition_routes * 2);
+    println!(
+        "generated_binding_registry_precondition_edges bindings={generated_bindings} provider_routes={provider_routes} precondition_routes={precondition_routes} declared_pairs={precondition_routes} undeclared_pairs={precondition_routes} codes=precondition_failed,undeclared_failure providers_called=0 total_cases={}",
+        generated_bindings + diagnostic_pairs * 2
+    );
+}
+#[test]
+fn generated_bindings_preserve_registry_provider_failure_edges() {
+    const SHARED_FAILURES: [&str; 3] = [
+        "sys.abi.precondition_failed",
+        "sys.abi.unavailable",
+        "sys.abi.provider_failed",
+    ];
+
+    let table = system_dispatch_table();
+    let registry = ProviderRoleRegistry::from_baked_abi(table)
+        .expect("generated provider offers resolve from the typed registry");
+    let idl_operation_ids = system_binding_stubs()
+        .lines()
+        .filter_map(|line| line.strip_prefix("// sys-op: "))
+        .collect::<Vec<_>>();
+    let typed_operation_ids = table
+        .operations()
+        .map(|contract| contract.id.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(idl_operation_ids, typed_operation_ids);
+    let undeclared = FailureCode::new("sys.conformance.registry_provider_failure").unwrap();
+    let response_codes = SHARED_FAILURES
+        .into_iter()
+        .map(|code| FailureCode::new(code).unwrap())
+        .chain([undeclared])
+        .collect::<Vec<_>>();
+    let mut generated_bindings = 0;
+    let mut provider_routes = 0;
+    let mut shared_failure_pairs = 0;
+    let mut undeclared_failure_pairs = 0;
+
+    for contract in table.operations() {
+        let generated = system_function_descriptor(contract.id.as_str())
+            .unwrap_or_else(|| panic!("missing generated binding for {}", contract.id.as_str()));
+        assert_eq!(generated.name, contract.id.as_str());
+        assert_eq!(generated.signature, contract.signature.source);
+        assert_eq!(contract.effects.iter().next(), Some(generated.effect));
+        generated_bindings += 1;
+
+        let Some(role_id) = &contract.role else {
+            continue;
+        };
+        provider_routes += 1;
+        let offer = registry
+            .resolve(role_id.as_str())
+            .expect("generated binding role has a selected provider")
+            .clone();
+        let arguments = contract
+            .signature
+            .parameters
+            .iter()
+            .map(|parameter| {
+                TypedValue::public(
+                    TypeId::new(parameter.ty.canonical()),
+                    parameter.name.as_bytes().to_vec(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let argument_types = contract
+            .signature
+            .parameters
+            .iter()
+            .map(|parameter| parameter.ty.canonical())
+            .collect::<Vec<_>>();
+
+        for code in &response_codes {
+            let provider_for = || InvokeValueProvider {
+                offer: offer.clone(),
+                operation: contract.id.clone(),
+                argument_types: argument_types.clone(),
+                response: Err(code.clone()),
+                calls: AtomicUsize::new(0),
+            };
+            let direct_provider = provider_for();
+            let registry_provider = provider_for();
+            let direct = table.dispatch_to_provider(
+                generated.name,
+                &direct_provider,
+                &arguments,
+                |_| Ok(()),
+            );
+            let mediated = registry.dispatch_to_provider(
+                table,
+                generated.name,
+                &registry_provider,
+                &arguments,
+                |_| Ok(()),
+            );
+            let expected = if contract.declares_failure(code) {
+                Ok(orna_sys_v1::SystemDispatchResult::Failed(code.clone()))
+            } else {
+                Err(ProviderDiagnostic::UndeclaredFailure {
+                    operation: contract.id.clone(),
+                    code: code.clone(),
+                })
+            };
+            assert_eq!(direct, expected);
+            assert_eq!(mediated, expected);
+            assert_eq!(direct_provider.calls.load(Ordering::SeqCst), 1);
+            assert_eq!(registry_provider.calls.load(Ordering::SeqCst), 1);
+            if contract.declares_failure(code) {
+                shared_failure_pairs += 1;
+            } else {
+                assert_eq!(direct.unwrap_err().code(), "sys.abi.undeclared_failure");
+                assert_eq!(mediated.unwrap_err().code(), "sys.abi.undeclared_failure");
+                undeclared_failure_pairs += 1;
+            }
+        }
+    }
+
+    assert_eq!(generated_bindings, typed_operation_ids.len());
+    assert!(provider_routes > 0);
+    assert_eq!(
+        shared_failure_pairs,
+        provider_routes * SHARED_FAILURES.len()
+    );
+    assert_eq!(undeclared_failure_pairs, provider_routes);
+    println!(
+        "generated_binding_registry_provider_failure_edges bindings={generated_bindings} provider_routes={provider_routes} shared_failure_pairs={shared_failure_pairs} undeclared_failure_pairs={undeclared_failure_pairs} codes=precondition_failed,unavailable,provider_failed,undeclared_failure direct_registry_equal=true providers_called=1 total_cases={}",
+        generated_bindings + (shared_failure_pairs + undeclared_failure_pairs) * 2
     );
 }
