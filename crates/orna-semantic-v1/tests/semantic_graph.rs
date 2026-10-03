@@ -6441,8 +6441,8 @@ fn nested_sibling_pin_reconciliation_storms_preserve_depth_identity() {
             .iter()
             .filter(|diagnostic| diagnostic.code() == DIAG_TYPE)
             .count(),
-        1,
-        "the crossed nested sibling fold must fail transactionally, while its valid storm computes: {:?}",
+        2,
+        "crossed nested sibling folds must fail while their valid storm computes: {:?}",
         result
             .diagnostics
             .iter()
@@ -6539,6 +6539,20 @@ fn nested_sibling_pin_reconciliation_storms_preserve_depth_identity() {
             ],
         ],
         "valid nested reconciliation storms must return all computed labels at each sibling depth"
+    );
+    assert_eq!(
+        nested_pin_maps("nested_pair_rejects_sibling_depth_crossing"),
+        [
+            vec![
+                BTreeSet::from(["selector:HEAD~70".into()]),
+                BTreeSet::from(["selector:HEAD~71".into()])
+            ],
+            vec![
+                BTreeSet::from(["selector:HEAD~80".into()]),
+                BTreeSet::from(["selector:HEAD~81".into()])
+            ],
+        ],
+        "two-parent nested promotion must reject sibling identity crossing and retain both first-row values"
     );
 }
 

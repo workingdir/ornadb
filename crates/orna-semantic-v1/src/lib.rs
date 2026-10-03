@@ -9526,6 +9526,13 @@ fn merge_list_element_types(left: &Type, right: &Type) -> Option<Type> {
         // cannot silently combine terminal values from separate lanes.
         return None;
     }
+    if (type_contains_pinned_checkpoint_tuple(left)
+        || type_contains_pinned_checkpoint_tuple(right))
+        && (!checkpoint_pin_map_widths_match(left, right)
+            || !nested_checkpoint_compaction_fold_preserves_pin_identity(left, right))
+    {
+        return None;
+    }
     if let (Type::Tuple(left), Type::Tuple(right)) = (left, right)
         && !tuple_checkpoint_promotion_matches(left, right)
     {

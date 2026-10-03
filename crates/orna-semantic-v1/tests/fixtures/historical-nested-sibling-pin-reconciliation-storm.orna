@@ -36,3 +36,17 @@ pub fn nested_storm_keeps_every_sibling_depth_label() {
     ];
     { parent_fold: parents }
 }
+
+pub fn nested_pair_rejects_sibling_depth_crossing() {
+    let parents = [
+        {
+            left: { pins: (factory_at(sys.snapshot("HEAD~70")), factory_at(sys.snapshot("HEAD~71"))) },
+            right: { pins: (factory_at(sys.snapshot("HEAD~80")), factory_at(sys.snapshot("HEAD~81"))) },
+        },
+        {
+            left: { pins: (factory_at(sys.snapshot("HEAD~71")), factory_at(sys.snapshot("HEAD~70"))) },
+            right: { pins: (factory_at(sys.snapshot("HEAD~81")), factory_at(sys.snapshot("HEAD~80"))) },
+        },
+    ];
+    { parent_fold: parents }
+}
