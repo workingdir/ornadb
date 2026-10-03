@@ -7270,7 +7270,7 @@ fn infer(
                     .any(type_contains_partially_omitted_pinned_tuple)
                 || element_types
                     .iter()
-                    .any(type_contains_paired_pinned_checkpoint_tuples);
+                    .any(type_contains_paired_pinned_checkpoint_siblings);
             let mut rolled_back_checkpoint_paths = BTreeSet::new();
             let mut rejected_checkpoint_parent = false;
             let mut ty = None;
@@ -19049,50 +19049,61 @@ fn type_contains_paired_checkpoint_omissions(ty: &Type) -> bool {
     }
 }
 
-/// Dense records and tuples can carry independent nested tuple-pin folds even
-/// when no parent omits a slot. Scope a late rebind failure to the conflicting
-/// tuple so a stable sibling keeps the values accumulated through the storm.
-fn type_contains_paired_pinned_checkpoint_tuples(ty: &Type) -> bool {
+/// Dense records and tuples can carry a paired tuple fold alongside another
+/// pinned identity sibling even when no parent omits a slot. Scope a late
+/// rebind failure to the conflicting tuple so the independent sibling keeps
+/// the values accumulated through the storm. The reference is silent about
+/// this mixed-shape boundary; use the smallest failing tuple as the rollback
+/// scope and preserve other computed values.
+fn type_contains_paired_pinned_checkpoint_siblings(ty: &Type) -> bool {
     match ty {
         Type::Record(fields) => {
-            fields
+            let tuple_siblings = fields
                 .values()
                 .filter(|field| type_contains_pinned_checkpoint_tuple(field))
-                .count()
-                >= 2
+                .count();
+            let pinned_siblings = fields
+                .values()
+                .filter(|field| type_contains_pinned_snapshot_identity(field))
+                .count();
+            (tuple_siblings > 0 && pinned_siblings > 1)
                 || fields
                     .values()
-                    .any(type_contains_paired_pinned_checkpoint_tuples)
+                    .any(type_contains_paired_pinned_checkpoint_siblings)
         }
         Type::Tuple(elements) => {
-            elements
+            let tuple_siblings = elements
                 .iter()
                 .filter(|element| type_contains_pinned_checkpoint_tuple(element))
-                .count()
-                >= 2
+                .count();
+            let pinned_siblings = elements
+                .iter()
+                .filter(|element| type_contains_pinned_snapshot_identity(element))
+                .count();
+            (tuple_siblings > 0 && pinned_siblings > 1)
                 || elements
                     .iter()
-                    .any(type_contains_paired_pinned_checkpoint_tuples)
+                    .any(type_contains_paired_pinned_checkpoint_siblings)
         }
         Type::List(element)
         | Type::Range(element)
         | Type::Relation(element)
         | Type::Stream(element)
-        | Type::Optional(element) => type_contains_paired_pinned_checkpoint_tuples(element),
+        | Type::Optional(element) => type_contains_paired_pinned_checkpoint_siblings(element),
         Type::Applied { arguments, .. } => arguments
             .iter()
-            .any(type_contains_paired_pinned_checkpoint_tuples),
+            .any(type_contains_paired_pinned_checkpoint_siblings),
         Type::Function {
             parameters, result, ..
         } => {
             parameters
                 .iter()
-                .any(type_contains_paired_pinned_checkpoint_tuples)
-                || type_contains_paired_pinned_checkpoint_tuples(result)
+                .any(type_contains_paired_pinned_checkpoint_siblings)
+                || type_contains_paired_pinned_checkpoint_siblings(result)
         }
         Type::MoneyPerUnit { currency, unit } => {
-            type_contains_paired_pinned_checkpoint_tuples(currency)
-                || type_contains_paired_pinned_checkpoint_tuples(unit)
+            type_contains_paired_pinned_checkpoint_siblings(currency)
+                || type_contains_paired_pinned_checkpoint_siblings(unit)
         }
         _ => false,
     }
