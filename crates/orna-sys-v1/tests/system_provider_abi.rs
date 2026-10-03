@@ -2,11 +2,12 @@ use std::collections::BTreeSet;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use orna_sys_v1::{
-    AbiType, AbiVersion, EffectSet, FailureCode, OperationId, ProviderDiagnostic, ProviderFailure,
-    ProviderId, ProviderOffer, ProviderRoleRegistry, SemanticRoleId, SystemDispatchTable,
-    SystemEffect, SystemOperationProvider, SystemProviderAbi, TypeId, TypedValue, system_api_json,
-    system_binding_stubs, system_dispatch_table, system_function_descriptor, system_provider_abi,
-    system_provider_abi_json, system_provider_abi_schema_json, validate_provider_offer,
+    AbiType, AbiVersion, Argument, ArgumentMap, EffectSet, FailureCode, OperationId,
+    ProviderDiagnostic, ProviderFailure, ProviderId, ProviderOffer, ProviderRoleRegistry,
+    SemanticRoleId, SystemDispatchTable, SystemEffect, SystemOperationProvider, SystemProviderAbi,
+    TypeId, TypedValue, system_api_json, system_binding_stubs, system_dispatch_table,
+    system_function_descriptor, system_provider_abi, system_provider_abi_json,
+    system_provider_abi_schema_json, validate_provider_offer,
 };
 use serde_json::Value;
 
@@ -57,6 +58,45 @@ impl SystemOperationProvider for InvokeValueProvider {
             code,
             payload: None,
         })
+    }
+}
+
+struct ArgumentMapEdgeProvider {
+    offer: ProviderOffer,
+    operation: OperationId,
+    expected_argument_types: Vec<String>,
+    expected_map_payload: Vec<u8>,
+    result: TypedValue,
+    calls: AtomicUsize,
+}
+
+impl SystemOperationProvider for ArgumentMapEdgeProvider {
+    fn offer(&self) -> &ProviderOffer {
+        &self.offer
+    }
+
+    fn invoke(
+        &self,
+        operation: &OperationId,
+        arguments: &[TypedValue],
+    ) -> Result<TypedValue, ProviderFailure> {
+        assert_eq!(operation, &self.operation);
+        assert_eq!(arguments.len(), self.expected_argument_types.len());
+        assert_eq!(
+            arguments
+                .iter()
+                .map(|argument| argument.static_type().as_str().to_owned())
+                .collect::<Vec<_>>(),
+            self.expected_argument_types,
+            "provider sees the fixed typed outer argument list"
+        );
+        assert_eq!(
+            arguments[1].canonical(),
+            Some(self.expected_map_payload.as_slice()),
+            "provider receives the argument-map payload unchanged in its one slot"
+        );
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        Ok(self.result.clone())
     }
 }
 
@@ -2070,6 +2110,161 @@ fn provider_optional_argument_edges_match_schema_and_dispatch_diagnostics() {
             + present_registry_routes
             + bare_inner_rejections
             + wrong_optional_rejections
+    );
+}
+
+#[test]
+fn provider_argument_map_variadic_cardinalities_match_both_dispatch_routes() {
+    const VARIADIC_OPERATIONS: [&str; 4] = [
+        "sys.invoke(Value)",
+        "sys.invoke<T>",
+        "sys.start(Value)",
+        "sys.start<T>",
+    ];
+    const EDGE_CARDINALITIES: [usize; 3] = [0, 1, 4];
+
+    let table = system_dispatch_table();
+    let generated_schema = build_provider::generate_provider_registry_schema()
+        .expect("provider schema regenerates for argument-map dispatch parity");
+    assert_eq!(generated_schema, system_provider_abi_schema_json());
+    build_host::validate_json_against_schema(system_provider_abi_json(), &generated_schema)
+        .expect("embedded registry conforms to the regenerated provider schema");
+
+    let registry = ProviderRoleRegistry::from_baked_abi(table)
+        .expect("typed provider registry resolves baked role offers");
+    let mut direct_routes = 0;
+    let mut registry_routes = 0;
+    let mut map_cases = 0;
+
+    for operation_name in VARIADIC_OPERATIONS {
+        let contract = table
+            .operation(operation_name)
+            .expect("argument-map overload is in the typed provider table");
+        let generated = system_function_descriptor(operation_name)
+            .expect("argument-map overload has a macro-generated binding");
+        assert_eq!(generated.signature, contract.signature.source);
+        assert_eq!(
+            contract.effects.iter().next(),
+            Some(generated.effect),
+            "generated effect matches {operation_name}"
+        );
+        let map_indexes = contract
+            .signature
+            .parameters
+            .iter()
+            .enumerate()
+            .filter_map(|(index, parameter)| (parameter.name == "arguments").then_some(index))
+            .collect::<Vec<_>>();
+        assert_eq!(map_indexes, [1], "one fixed map slot in {operation_name}");
+        assert_eq!(
+            contract.signature.parameters[map_indexes[0]].ty,
+            AbiType::Named("sys.ArgumentMap".to_owned())
+        );
+
+        let role = contract
+            .role
+            .as_ref()
+            .expect("argument-map overload has a provider role");
+        let offer = registry
+            .resolve(role.as_str())
+            .expect("argument-map operation provider offer resolves")
+            .clone();
+        let expected_argument_types = contract
+            .signature
+            .parameters
+            .iter()
+            .map(|parameter| parameter.ty.canonical())
+            .collect::<Vec<_>>();
+
+        for cardinality in EDGE_CARDINALITIES {
+            let argument_map = ArgumentMap::new((0..cardinality).map(|index| Argument {
+                name: format!("arg_{index:02}"),
+                value: TypedValue::public(
+                    TypeId::new("Str"),
+                    format!("value-{index}").into_bytes(),
+                ),
+            }))
+            .expect("distinct argument names form a map");
+            assert_eq!(argument_map.entries().count(), cardinality);
+            let encoded_entries = argument_map
+                .entries()
+                .map(|(name, value)| {
+                    (
+                        name,
+                        value.static_type().as_str(),
+                        value.canonical().expect("test map values are public"),
+                    )
+                })
+                .collect::<Vec<_>>();
+            let map_payload = serde_json::to_vec(&encoded_entries)
+                .expect("test argument-map payload has deterministic JSON bytes");
+
+            let arguments = contract
+                .signature
+                .parameters
+                .iter()
+                .enumerate()
+                .map(|(index, parameter)| {
+                    let canonical = if index == map_indexes[0] {
+                        map_payload.clone()
+                    } else {
+                        format!("{}-{operation_name}-{cardinality}", parameter.name).into_bytes()
+                    };
+                    TypedValue::public(TypeId::new(parameter.ty.canonical()), canonical)
+                })
+                .collect::<Vec<_>>();
+            let result = TypedValue::public(
+                TypeId::new(contract.signature.result.canonical()),
+                format!("result-{operation_name}-{cardinality}").into_bytes(),
+            );
+            let provider_for = || ArgumentMapEdgeProvider {
+                offer: offer.clone(),
+                operation: contract.id.clone(),
+                expected_argument_types: expected_argument_types.clone(),
+                expected_map_payload: map_payload.clone(),
+                result: result.clone(),
+                calls: AtomicUsize::new(0),
+            };
+
+            let direct_provider = provider_for();
+            assert_eq!(
+                table
+                    .dispatch_to_provider(generated.name, &direct_provider, &arguments, |_| Ok(()))
+                    .expect("direct dispatch accepts the map cardinality edge"),
+                orna_sys_v1::SystemDispatchResult::Returned(result.clone()),
+                "direct route preserves {operation_name} with {cardinality} map entries"
+            );
+            assert_eq!(direct_provider.calls.load(Ordering::SeqCst), 1);
+            direct_routes += 1;
+
+            let registry_provider = provider_for();
+            assert_eq!(
+                registry
+                    .dispatch_to_provider(
+                        table,
+                        generated.name,
+                        &registry_provider,
+                        &arguments,
+                        |_| Ok(()),
+                    )
+                    .expect("selected-provider dispatch accepts the map cardinality edge"),
+                orna_sys_v1::SystemDispatchResult::Returned(result),
+                "registry route preserves {operation_name} with {cardinality} map entries"
+            );
+            assert_eq!(registry_provider.calls.load(Ordering::SeqCst), 1);
+            registry_routes += 1;
+            map_cases += 1;
+        }
+    }
+
+    let operation_count = VARIADIC_OPERATIONS.len();
+    assert_eq!(operation_count, 4);
+    assert_eq!(map_cases, operation_count * EDGE_CARDINALITIES.len());
+    assert_eq!(direct_routes, map_cases);
+    assert_eq!(registry_routes, map_cases);
+    println!(
+        "provider_argument_map_variadic_parity operations={operation_count} cardinalities=0,1,4 map_cases={map_cases} direct_routes={direct_routes} registry_routes={registry_routes} generated_bindings={operation_count} schema_validated=1 total_cases={}",
+        operation_count + map_cases + direct_routes + registry_routes + 1
     );
 }
 
