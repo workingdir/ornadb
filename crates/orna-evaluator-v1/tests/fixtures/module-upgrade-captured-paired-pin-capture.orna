@@ -1,4 +1,4 @@
-let captured_pair = (seed: Int) => [
+fn captured_pair(seed: Int) = [
     math_ops.shift(seed),
     collection_ops.marker(),
     math_ops.shift(seed) + collection_ops.marker(),
