@@ -493,6 +493,13 @@ fn walk_sql_body(node: &SyntaxNode<OrnaLanguage>, tokens: &mut Vec<HighlightToke
                     HighlightKind::StringLiteral,
                 ));
             }
+            SyntaxKind::NumberLiteral => {
+                tokens.push(HighlightToken::new(
+                    start,
+                    end,
+                    HighlightKind::NumberLiteral,
+                ));
+            }
             SyntaxKind::QuotedIdentifier => {
                 tokens.push(HighlightToken::new(
                     start,
