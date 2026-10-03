@@ -7259,18 +7259,15 @@ fn infer(
                 .find(|parent| type_contains_pinned_checkpoint_tuple(parent))
                 .cloned()
                 .or_else(|| first_parent.clone());
-            // Any all-omitted row can expose a cross-sibling selector collision.
-            // A partial pinned tuple in the first row also needs a local scope
-            // to learn and retain its paired identity topology.
+            // Any omitted row can expose a cross-sibling selector collision.
+            // Sparse pinned tuples anywhere in the fold need a local scope so
+            // a later rebind can roll back only the crossed tuple path.
             let scoped_checkpoint_rollback = element_types
                 .iter()
                 .any(type_contains_omitted_checkpoint_tuple)
-                || first_parent
-                    .as_ref()
-                    .is_some_and(type_contains_partially_omitted_pinned_tuple)
-                || first_parent
-                    .as_ref()
-                    .is_some_and(type_contains_paired_checkpoint_omissions);
+                || element_types
+                    .iter()
+                    .any(type_contains_partially_omitted_pinned_tuple);
             let mut rolled_back_checkpoint_paths = BTreeSet::new();
             let mut rejected_checkpoint_parent = false;
             let mut ty = None;
