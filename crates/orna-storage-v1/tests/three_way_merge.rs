@@ -9,6 +9,7 @@ use orna_storage_v1::{
     BranchMergeColumnDepthLadderEvent,
     BranchMergeConflict, BranchMergeDepthFragmentRecovery,
     BranchMergeDepthWaveRecovery, BranchMergeError, BranchMergePlan,
+    BranchMergeMultiParentColumnDepthLadderWaveEvent,
     BranchMergeMultiParentTabularColumnDepthWave,
     BranchMergeParentColumnDepthLadderEvent,
     BranchMergeTombstoneEvent, BranchRowSource,
@@ -26532,9 +26533,11 @@ fn multi_parent_storm_releases_parent_local_fragment_ladder_labels() {
         .unwrap()
         .is_empty());
     assert!(history.parent_column_ladder_events().is_empty());
+    assert!(history.parent_column_ladder_waves().is_empty());
     assert!(history.submit(&empty_plan(0)).unwrap().is_empty());
     assert_eq!(history.next_order(), Some(1));
     assert!(history.parent_column_ladder_events().is_empty());
+    assert!(history.parent_column_ladder_waves().is_empty());
     assert!(history.submit(&empty_plan(1)).unwrap().is_empty());
 
     assert_eq!(history.parent_column_events().len(), 12);
@@ -26593,6 +26596,20 @@ fn multi_parent_storm_releases_parent_local_fragment_ladder_labels() {
             },
         ],
         "each parent retains independent fragment labels and empty positions through storm release",
+    );
+    assert_eq!(
+        history.parent_column_ladder_waves(),
+        &[
+            BranchMergeMultiParentColumnDepthLadderWaveEvent {
+                order: 2,
+                ladders: history.parent_column_ladder_events()[..3].to_vec(),
+            },
+            BranchMergeMultiParentColumnDepthLadderWaveEvent {
+                order: 3,
+                ladders: history.parent_column_ladder_events()[3..].to_vec(),
+            },
+        ],
+        "the storm exposes complete parent-local ladder rosters grouped at each released order",
     );
     let committed = history.clone();
 
