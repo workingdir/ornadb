@@ -1,0 +1,4 @@
+fn core_without_format_parse(): Bool {
+    assert 40 + 2 == 42;
+    true
+}

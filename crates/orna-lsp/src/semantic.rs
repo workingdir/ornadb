@@ -1,42 +1,31 @@
-//! Semantic token computation from the Orna highlight classifier.
-//!
-//! The server advertises a fixed legend. The classifier output maps directly
-//! onto it; punctuation is skipped because editors style it through their
-//! own grammar.
+//! Semantic token projection from the frozen 1.0.0 editor lexer.
 
 use lsp_types::{Range, SemanticToken, SemanticTokenType};
-use orna_syntax::SourceSpan;
-use orna_syntax_v1::editor;
+use orna_syntax_v1::{SyntaxSpan, editor};
 
 use crate::documents::PositionMapper;
 
-/// Build the LSP legend from the shared syntax presentation table.
+/// LSP token legend supported by this server.
 pub fn legend() -> Vec<SemanticTokenType> {
     editor::semantic_token_types()
         .map(SemanticTokenType::new)
         .collect()
 }
 
-/// Returns the delta-encoded semantic tokens for one document.
-///
-/// When `range` is present, only token segments that intersect the range are
-/// included, matching the `textDocument/semanticTokens/range` contract.
+/// Returns delta-encoded tokens projected from the v1 editor token classes.
 pub fn semantic_tokens(
-    source: &str,
+    text: &str,
     mapper: &PositionMapper<'_>,
     range: Option<&Range>,
 ) -> Vec<SemanticToken> {
     let mut data = Vec::new();
     let mut previous_line = 0u32;
     let mut previous_start = 0u32;
-    for token in editor::highlight(source) {
-        let span = SourceSpan {
-            start: token.range.start,
-            end: token.range.end,
-        };
-        let Some(index) = editor::semantic_token_index(token.class) else {
+    for token in editor::highlight(text) {
+        let Some(token_type) = editor::semantic_token_index(token.class) else {
             continue;
         };
+        let span = SyntaxSpan::new(token.range.start, token.range.end);
         for (position, length) in mapper.segments(&span) {
             if length == 0 {
                 continue;
@@ -63,7 +52,7 @@ pub fn semantic_tokens(
                 delta_line,
                 delta_start,
                 length,
-                token_type: index as u32,
+                token_type: token_type as u32,
                 token_modifiers_bitset: 0,
             });
             previous_line = line;
@@ -71,4 +60,36 @@ pub fn semantic_tokens(
         }
     }
     data
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const SOURCE: &str = include_str!("../tests/fixtures/editor-semantic-tokens.orna");
+
+    #[test]
+    fn legend_and_emitted_tokens_follow_v1_editor_classes() {
+        assert_eq!(
+            legend(),
+            [
+                "keyword", "variable", "number", "string", "comment", "operator"
+            ]
+            .into_iter()
+            .map(SemanticTokenType::new)
+            .collect::<Vec<_>>()
+        );
+
+        let expected = editor::highlight(SOURCE)
+            .into_iter()
+            .filter_map(|token| editor::semantic_token_index(token.class))
+            .map(|index| index as u32)
+            .collect::<Vec<_>>();
+        let mapper = PositionMapper::new(SOURCE);
+        let actual = semantic_tokens(SOURCE, &mapper, None)
+            .into_iter()
+            .map(|token| token.token_type)
+            .collect::<Vec<_>>();
+        assert_eq!(actual, expected);
+    }
 }

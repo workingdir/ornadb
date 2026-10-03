@@ -1,18 +1,18 @@
 default: check
 
 # Run the default local fmt/build/lint/non-ignored test/rustdoc gate.
-check: fixture-audit editor-artifacts-check fmt build lint test sys-artifact-ci rustdoc-check
+check: fixture-audit editor-artifacts-check fmt build lint test lsp-language-model-drift sys-artifact-ci rustdoc-check
 
 # Reject external reference paths and a checkout-local reference tree.
 fixture-audit:
     test ! -e reference || (echo "fixture-audit: remove the top-level reference tree" >&2; exit 1)
     cargo test --locked -p orna-syntax --test reference_path_boundary
 
-# Regenerate checked-in syntax, semantic-token, and editor packaging artifacts.
+# Regenerate checked-in syntax and semantic-token artifacts from orna-syntax-v1.
 editor-artifacts:
     cargo run --locked -p orna-syntax-v1 --example generate_editor_artifacts
 
-# Reject editor artifacts that drift from orna-syntax metadata and templates.
+# Reject editor artifacts that drift from orna-syntax-v1 lexer metadata.
 editor-artifacts-check:
     cargo run --locked -p orna-syntax-v1 --example generate_editor_artifacts -- --check
     node --check editors/tree-sitter-orna/grammar.js
@@ -135,6 +135,12 @@ lint:
 # Run workspace tests excluding #[ignore] tests.
 test:
     cargo test --locked --workspace --all-targets
+
+# Keep LSP language actions and help references aligned with orna-syntax.
+lsp-language-model-drift:
+    cargo test --locked -p orna-syntax language_model
+    cargo test --locked -p orna-lsp language_model
+    cargo test --locked -p orna-lsp signature_help_tracks_model
 
 # Verify provider dispatch metadata export/schema conformance and generated-artifact drift.
 sys-artifact-ci: sys-binding-conformance-ci sys-dispatch-coverage-ci
