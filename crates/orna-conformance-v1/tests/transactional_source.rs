@@ -410,6 +410,21 @@ fn parsed_filter_count_pipeline_observes_candidate_rows_and_read_your_writes() {
 }
 
 #[test]
+fn parsed_paired_folds_observe_nested_activation_writes_and_keep_row_identity() {
+    let fixture = include_str!("fixtures/paired-read-your-writes-handoff-folds.orna");
+    let mut runtime = TransactionalEvaluator::new("parent", Limits::default());
+
+    let outcome = runtime.execute_source(&fixture_source(fixture));
+
+    assert!(matches!(outcome, StageOutcome::Passed), "{outcome:?}");
+    let row = runtime
+        .committed_row("Note", &Value::int(2.into()))
+        .expect("updated nested row is committed after both folds pass");
+    assert_eq!(row_field(row, "amount"), &Raw::Int(25.into()));
+    assert_eq!(row_field(row, "label"), &Raw::Text("rebound".into()));
+}
+
+#[test]
 fn parsed_filter_count_failure_rolls_back_candidate_rows() {
     let mut runtime = TransactionalEvaluator::new("parent", Limits::default());
     let outcome = runtime.execute_source(&fixture_source(include_str!(
