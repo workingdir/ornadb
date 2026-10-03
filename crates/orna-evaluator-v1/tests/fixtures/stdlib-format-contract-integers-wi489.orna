@@ -1,0 +1,13 @@
+[
+    fmt.integer(0),
+    fmt.integer(1),
+    fmt.integer(-1),
+    fmt.integer(9),
+    fmt.integer(10),
+    fmt.integer(-10),
+    fmt.integer(99),
+    fmt.integer(100),
+    fmt.integer(-100),
+    fmt.integer(90071992547409931234567890),
+    fmt.integer(-90071992547409931234567890),
+]
