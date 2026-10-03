@@ -1,0 +1,17 @@
+{ id: "checkpoint-restore/sihod/r0", name: "restore/a-left-0", city: "restore/a-right-0", }
+
+{ id: "checkpoint-restore/sihod/r1", name: "restore/a-left-1", city: "restore/a-right-0", }
+
+{ id: "checkpoint-restore/sihod/r2", name: "restore/a-left-1", city: "restore/a-right-1", }
+
+{ id: "checkpoint-restore/sihod/r3", name: "restore/a-left-0", city: "restore/a-right-1", }
+
+{ id: "checkpoint-restore/sihod/beta", name: "restore/beta-left", city: "restore/beta-right", }
+
+{ id: "checkpoint-restore/sihod/second", name: "restore/second-left", city: "restore/second-right", }
+
+{ id: "checkpoint-restore/sihod/late", name: "restore/late-left", city: "restore/late-right", }
+
+{ id: "checkpoint-restore/sihod/third", name: "restore/third-left", city: "restore/third-right", }
+
+{ id: "checkpoint-restore/sihod/rebound", name: "restore/rebound-left", city: "restore/rebound-right", }
