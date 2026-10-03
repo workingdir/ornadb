@@ -1,0 +1,1 @@
+streams.from_list_batches([4, 1, 6, 2, 8], "line-batch-proof", 2)
