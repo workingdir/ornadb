@@ -348,6 +348,11 @@ pub enum ProviderDiagnostic {
         expected: String,
         actual: String,
     },
+    ProviderNotSelected {
+        role: SemanticRoleId,
+        expected: ProviderOffer,
+        provided: ProviderOffer,
+    },
 }
 
 impl ProviderDiagnostic {
@@ -366,6 +371,7 @@ impl ProviderDiagnostic {
             Self::ArgumentCountMismatch { .. } => "sys.abi.argument_count_mismatch",
             Self::ArgumentTypeMismatch { .. } => "sys.abi.argument_type_mismatch",
             Self::ResultTypeMismatch { .. } => "sys.abi.result_type_mismatch",
+            Self::ProviderNotSelected { .. } => "sys.abi.provider_not_selected",
         }
     }
 }
@@ -674,6 +680,21 @@ impl SystemProviderAbi {
             .get(role_id)
             .expect("validated operation role is in the dispatch table");
         validate_provider_offer(role, provider.offer())?;
+        if !role.replaceable
+            && let Some(expected_provider) = &role.builtin_provider
+            && provider.offer().provider != *expected_provider
+        {
+            return Err(ProviderDiagnostic::ProviderNotSelected {
+                role: role.id.clone(),
+                expected: ProviderOffer {
+                    provider: expected_provider.clone(),
+                    role: role.id.clone(),
+                    version: role.version,
+                    effects: role.effects.clone(),
+                },
+                provided: provider.offer().clone(),
+            });
+        }
 
         if arguments.len() != contract.signature.parameters.len() {
             return Err(ProviderDiagnostic::ArgumentCountMismatch {
@@ -894,6 +915,35 @@ impl ProviderRoleRegistry {
         };
         validate_provider_offer(contract, offer)?;
         Ok(offer)
+    }
+
+    /// Dispatches only through the provider offer selected in this registry.
+    /// The typed table still validates the operation contract and provider ABI;
+    /// this link check prevents a compatible but unselected implementation
+    /// from being substituted at the call site.
+    pub fn dispatch_to_provider(
+        &self,
+        abi: &SystemDispatchTable,
+        operation: &str,
+        provider: &dyn SystemOperationProvider,
+        arguments: &[TypedValue],
+        check: impl FnMut(&Precondition) -> Result<(), FailureCode>,
+    ) -> Result<SystemDispatchResult<TypedValue>, ProviderDiagnostic> {
+        let Some(contract) = abi.operation(operation) else {
+            return abi.dispatch_to_provider(operation, provider, arguments, check);
+        };
+        let Some(role_id) = &contract.role else {
+            return abi.dispatch_to_provider(operation, provider, arguments, check);
+        };
+        let expected = self.resolve(role_id.as_str())?;
+        if provider.offer() != expected {
+            return Err(ProviderDiagnostic::ProviderNotSelected {
+                role: role_id.clone(),
+                expected: expected.clone(),
+                provided: provider.offer().clone(),
+            });
+        }
+        abi.dispatch_to_provider(operation, provider, arguments, check)
     }
 
     pub fn validate_required(&self) -> Result<(), ProviderDiagnostic> {

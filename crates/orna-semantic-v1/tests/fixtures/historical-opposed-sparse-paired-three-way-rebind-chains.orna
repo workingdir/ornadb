@@ -1,0 +1,21 @@
+pub fn factory_at(pin: sys.SnapshotRef) =
+    sys.database.as_of(pin).energy.factory;
+
+pub fn accepts_opposed_sparse_paired_rebind_chains(failure: Error) {
+    let left = [
+        { pins: (factory_at(sys.snapshot("HEAD~9000")), fail(failure)), witness: factory_at(sys.snapshot("HEAD~9001")) },
+        { pins: (factory_at(sys.snapshot("HEAD~9020")), factory_at(sys.snapshot("HEAD~9020"))), witness: factory_at(sys.snapshot("HEAD~9021")) },
+        { pins: (factory_at(sys.snapshot("HEAD~9040")), factory_at(sys.snapshot("HEAD~9040"))), witness: factory_at(sys.snapshot("HEAD~9041")) },
+    ];
+    let right = [
+        { pins: (fail(failure), factory_at(sys.snapshot("HEAD~9100"))), witness: factory_at(sys.snapshot("HEAD~9101")) },
+        { pins: (factory_at(sys.snapshot("HEAD~9120")), factory_at(sys.snapshot("HEAD~9120"))), witness: factory_at(sys.snapshot("HEAD~9121")) },
+        { pins: (factory_at(sys.snapshot("HEAD~9140")), factory_at(sys.snapshot("HEAD~9140"))), witness: factory_at(sys.snapshot("HEAD~9141")) },
+    ];
+    let cascades = [
+        { history: left, witness: factory_at(sys.snapshot("HEAD~9300")) },
+        { witness: factory_at(sys.snapshot("HEAD~9310")) },
+        { history: right, witness: factory_at(sys.snapshot("HEAD~9320")) },
+    ];
+    { cascades: cascades }
+}
