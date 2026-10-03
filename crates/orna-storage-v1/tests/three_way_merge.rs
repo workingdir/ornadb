@@ -9,6 +9,7 @@ use orna_storage_v1::{
     BranchMergeDepthWaveRecovery, BranchMergeError, BranchMergePlan,
     BranchMergeTombstoneEvent, BranchRowSource,
     BranchMergePlanSequenceError, BranchMergePlanSequencer, BranchMergeTombstoneHistory,
+    BranchMergeTabularDepthWave, BranchMergeTableDepthFragments,
     BranchMergeTombstoneHistoryError, KeyRange, MergeSide, MergedSegment, RowSegmentManifest,
     SequencedBranchMergePlan, TableManifest, ThreeWaySnapshot, merge_three_way_snapshots,
 };
@@ -25665,4 +25666,132 @@ fn fixture_depth_tombstones_between_split_conflicts_follow_logical_range_order()
             assert_eq!(conflict_keys, vec![middle.key.clone(), tail.key.clone()]);
         }
     }
+}
+
+#[test]
+fn tabular_restore_wave_preserves_peer_depth_labels_and_tombstone_identity() {
+    let fixture_rows = TOMBSTONE_DEPTH_COMMIT_ORDER
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    let fixture_key = |path: &str| {
+        fixture_rows
+            .iter()
+            .find(|row| row.key == string(path))
+            .unwrap_or_else(|| panic!("the in-crate depth fixture supplies {path}"))
+            .key
+            .clone()
+    };
+    let root = fixture_key("root");
+    let child = fixture_key("root/child");
+    assert_eq!(
+        fixture_rows
+            .iter()
+            .find(|row| row.key == root)
+            .unwrap()
+            .fields[&id(2)],
+        string("Storm root"),
+        "the proof uses the real row body from the in-crate ORNA fixture",
+    );
+    assert_eq!(
+        fixture_rows
+            .iter()
+            .find(|row| row.key == child)
+            .unwrap()
+            .fields[&id(2)],
+        string("Storm child"),
+    );
+
+    let wave = |order| BranchMergeTabularDepthWave {
+        order,
+        tables: BTreeMap::from([
+            (
+                id(1),
+                BranchMergeTableDepthFragments {
+                    fragment_count: 2,
+                    fragments: BTreeMap::from([
+                        (0, vec![root.clone()]),
+                        (1, vec![child.clone()]),
+                    ]),
+                },
+            ),
+            (
+                id(2),
+                BranchMergeTableDepthFragments {
+                    fragment_count: 3,
+                    fragments: BTreeMap::from([
+                        (0, vec![root.clone()]),
+                        (1, Vec::new()),
+                        (2, vec![child.clone()]),
+                    ]),
+                },
+            ),
+        ]),
+    };
+    let empty_plan = |order| SequencedBranchMergePlan {
+        order,
+        plan: BranchMergePlan {
+            schema: Schema { version: EvolutionVersion::V1_0, tables: Vec::new() },
+            tables: BTreeMap::new(),
+            checkpoints: BTreeMap::new(),
+            report: Default::default(),
+        },
+        ordered_row_tombstones: Vec::new(),
+    };
+
+    let mut history = BranchMergeTombstoneHistory::new(0);
+    assert!(
+        history.submit_tabular_depth_wave(&wave(1)).unwrap().is_empty(),
+        "a complete peer-table restore waits behind the missing paired prefix",
+    );
+    let released = history.submit(&empty_plan(0)).unwrap();
+    assert_eq!(
+        released,
+        vec![
+            BranchMergeTombstoneEvent { order: 1, table: id(1), key: root.clone() },
+            BranchMergeTombstoneEvent { order: 1, table: id(1), key: child.clone() },
+            BranchMergeTombstoneEvent { order: 1, table: id(2), key: root.clone() },
+            BranchMergeTombstoneEvent { order: 1, table: id(2), key: child.clone() },
+        ],
+        "peer tables commit their local depth deltas once in canonical tabular order",
+    );
+    assert_eq!(history.next_order(), Some(2));
+
+    let committed = history.clone();
+    let mut changed_peer_depth = wave(1);
+    let peer = changed_peer_depth.tables.get_mut(&id(2)).unwrap();
+    peer.fragment_count = 2;
+    peer.fragments = BTreeMap::from([(0, vec![root.clone()]), (1, vec![child.clone()])]);
+    assert_eq!(
+        history.submit_tabular_depth_wave(&changed_peer_depth),
+        Err(BranchMergeTombstoneHistoryError::TabularFragmentCountMismatch {
+            order: 1,
+            table: id(2),
+            expected: 3,
+            actual: 2,
+        }),
+        "a peer table cannot borrow the other table's shorter depth label after restore",
+    );
+    assert_eq!(history, committed, "a changed peer depth leaves the restored history intact");
+
+    let mut changed_peer_fragment = wave(1);
+    changed_peer_fragment
+        .tables
+        .get_mut(&id(2))
+        .unwrap()
+        .fragments
+        .insert(2, vec![fixture_key("root/child/deep")]);
+    assert_eq!(
+        history.submit_tabular_depth_wave(&changed_peer_fragment),
+        Err(BranchMergeTombstoneHistoryError::ConflictingSubmission { order: 1 }),
+        "the peer table's depth slot remains bound to its fixture tombstone",
+    );
+    assert_eq!(history, committed, "a changed peer fragment is rejected without mutation");
+
+    assert_eq!(
+        history.submit_tabular_depth_wave(&wave(1)),
+        Err(BranchMergeTombstoneHistoryError::DuplicateOrStale { order: 1 }),
+        "an exact tabular replay retains the ordinary stale-position result",
+    );
+    assert_eq!(history, committed);
 }
