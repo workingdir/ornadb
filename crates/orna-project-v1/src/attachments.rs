@@ -1519,6 +1519,23 @@ impl SiblingRebindResolution {
         &self.routes
     }
 
+    /// Labels one retained depth from a sibling row without dropping that
+    /// row's route and snapshot identities. `route` is the row's index in the
+    /// input plan. The reference does not define multi-parent label selection;
+    /// v1 keeps each label bound to its source row even when another row has
+    /// matching pins and coordinates.
+    pub fn retained_depth_label(
+        &self,
+        route: usize,
+        wave: usize,
+        depth: usize,
+    ) -> Result<NestedPairDepthLabel, AttachmentError> {
+        self.routes
+            .get(route)
+            .ok_or(AttachmentError::RetainedSnapshotUnavailable)?
+            .retained_depth_label(wave, depth)
+    }
+
     /// Takes ownership of the sibling results in input order.
     pub fn into_routes(self) -> Vec<ReboundPathResolution> {
         self.routes
