@@ -67,6 +67,7 @@ pub use introspection::{
     explain_query_with_partial_indexes_and_join_pair_identities,
     explain_query_with_partial_indexes_and_paired_checkpoint_segment_compaction_chains,
     explain_query_with_paired_cost_restoration_and_window_pushdowns,
+    explain_query_with_paired_cost_restoration_and_window_spill_pushdowns,
     explain_query_with_partial_indexes_and_paired_checkpoint_compaction_and_segment_rotation_chains,
     explain_query_with_partial_indexes_and_paired_checkpoint_rotation_and_stream_compaction_chains,
     explain_query_with_partial_indexes_and_paired_checkpoint_rotation_stream_and_spill_restore_chains,
