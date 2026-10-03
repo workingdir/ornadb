@@ -11,6 +11,12 @@ use serde_json::Value;
 #[path = "../build_host.rs"]
 #[allow(dead_code)]
 mod build_host;
+#[path = "../build_provider.rs"]
+#[allow(dead_code)]
+mod build_provider;
+#[path = "../build_support.rs"]
+#[allow(dead_code)]
+mod build_support;
 
 const GENERIC_KEYWORD_STUB_FIXTURE: &str = include_str!("fixtures/sys-invoke-generic-keyword.orna");
 const GENERIC_START_KEYWORD_STUB_FIXTURE: &str =
@@ -687,6 +693,131 @@ fn generated_provider_optional_arguments_match_schema_and_idl_stubs() {
     println!(
         "generated_provider_optional_idl_parity operations={optional_operations} optional_arguments={optional_parameters} null_defaults={null_default_parameters} schema_validated=1 total_cases={}",
         optional_operations + optional_parameters + 1
+    );
+}
+
+#[test]
+fn generated_provider_argument_map_variadics_keep_one_schema_and_idl_slot() {
+    const VARIADIC_OPERATIONS: [&str; 4] = [
+        "sys.invoke(Value)",
+        "sys.invoke<T>",
+        "sys.start(Value)",
+        "sys.start<T>",
+    ];
+
+    let registry_json = system_provider_abi_json();
+    let schema_json = build_provider::generate_provider_registry_schema()
+        .expect("provider schema regenerates for argument-map parity");
+    assert_eq!(schema_json, system_provider_abi_schema_json());
+    build_host::validate_json_against_schema(registry_json, &schema_json)
+        .expect("embedded provider registry conforms to the regenerated schema");
+    let registry: Value =
+        serde_json::from_str(registry_json).expect("embedded provider registry is valid JSON");
+    let rows = registry["operations"]
+        .as_array()
+        .expect("embedded registry has operation rows");
+
+    let abi = system_provider_abi();
+    let source = system_binding_stubs();
+    let parsed = parse_module(source);
+    assert!(
+        parsed.is_ok(),
+        "generated argument-map declarations parse: {:?}",
+        parsed.diagnostics
+    );
+    let markers = source
+        .lines()
+        .filter_map(|line| line.strip_prefix("// sys-op: "))
+        .collect::<Vec<_>>();
+    let operations = abi.operations().collect::<Vec<_>>();
+    let expected_operations = operations
+        .iter()
+        .map(|operation| operation.id.as_str())
+        .collect::<Vec<_>>();
+    validate_stub_dispatch_inventory(source, &expected_operations)
+        .expect("generated declaration markers match the typed registry");
+
+    let mut map_slots = 0;
+    for operation_name in VARIADIC_OPERATIONS {
+        let contract = abi
+            .operation(operation_name)
+            .expect("argument-map operation exists in the typed registry");
+        let registry_row = rows
+            .iter()
+            .find(|row| row["name"] == operation_name)
+            .expect("schema-validated operation row exists");
+        assert_eq!(
+            registry_row["signature"].as_str(),
+            Some(contract.signature.source.as_str()),
+            "schema row preserves the typed signature for {operation_name}"
+        );
+        let generated = system_function_descriptor(operation_name)
+            .expect("argument-map operation has a macro-generated binding");
+        assert_eq!(generated.signature, contract.signature.source);
+        assert_eq!(
+            contract.effects.iter().next(),
+            Some(generated.effect),
+            "macro-generated effect matches {operation_name}"
+        );
+
+        let registry_map_slots = contract
+            .signature
+            .parameters
+            .iter()
+            .enumerate()
+            .filter(|(_, parameter)| parameter.name == "arguments")
+            .collect::<Vec<_>>();
+        assert_eq!(
+            registry_map_slots.len(),
+            1,
+            "one typed map slot in {operation_name}"
+        );
+        let (map_index, registry_map_parameter) = registry_map_slots[0];
+        assert_eq!(
+            registry_map_parameter.ty,
+            AbiType::Named("sys.ArgumentMap".to_owned()),
+            "map remains one fixed ABI type in {operation_name}"
+        );
+
+        let item_index = markers
+            .iter()
+            .position(|marker| *marker == operation_name)
+            .expect("argument-map operation has a generated IDL marker");
+        let Declaration::Function { signature, .. } = &parsed.value.items[item_index].declaration
+        else {
+            panic!("generated binding {operation_name} is not a function")
+        };
+        assert_eq!(
+            signature.parameters.len(),
+            contract.signature.parameters.len(),
+            "IDL outer arity stays fixed for {operation_name}"
+        );
+        let parsed_map_parameter = &signature.parameters[map_index];
+        let parsed_map_name = &source
+            [parsed_map_parameter.span.start..parsed_map_parameter.span.end]
+            .split_once(": ")
+            .expect("generated argument-map parameter has an explicit type")
+            .0;
+        assert_eq!(*parsed_map_name, "arguments");
+        assert_eq!(
+            resolve_type(
+                parsed_map_parameter
+                    .annotation
+                    .as_ref()
+                    .expect("generated argument-map parameter has a type")
+            )
+            .expect("generated argument-map type resolves"),
+            registry_map_parameter.ty,
+            "IDL carries one sys.ArgumentMap slot for {operation_name}"
+        );
+        map_slots += 1;
+    }
+
+    assert_eq!(map_slots, VARIADIC_OPERATIONS.len());
+    println!(
+        "generated_provider_argument_map_idl_parity operations={} map_slots={map_slots} one_map_slot_per_operation=1 macro_parity=1 schema_validated=1 total_cases={}",
+        VARIADIC_OPERATIONS.len(),
+        VARIADIC_OPERATIONS.len() * 3 + 1
     );
 }
 
