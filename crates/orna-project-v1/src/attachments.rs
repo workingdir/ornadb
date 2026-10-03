@@ -1032,6 +1032,28 @@ impl PackageResolver {
         Ok(SiblingRebindResolution { routes })
     }
 
+    /// Continues a sibling checkpoint-storm result with one plan per parent
+    /// row. Plans are paired with routes by input index, and each checkpoint
+    /// is validated only against the route at that index. The reference is
+    /// silent on nested multi-parent folds; v1 requires matching row counts
+    /// and returns no partial result if any row fails.
+    pub fn extend_sibling_terminal_pair_checkpoint_storms_from_siblings(
+        &self,
+        previous: &SiblingRebindResolution,
+        storms_by_row: &[&[(&ReboundPathCheckpoint, &[[PinnedDatabase; 2]])]],
+    ) -> Result<SiblingRebindResolution, AttachmentError> {
+        if storms_by_row.len() != previous.routes.len() {
+            return Err(AttachmentError::RetainedSnapshotUnavailable);
+        }
+        let paths = previous
+            .routes
+            .iter()
+            .zip(storms_by_row)
+            .map(|(route, storms)| (route, *storms))
+            .collect::<Vec<_>>();
+        self.extend_sibling_terminal_pair_checkpoint_storms(&paths)
+    }
+
     /// Rebinds each terminal pair in a storm from one saved checkpoint.
     /// Every fold starts from the same exact nested pins and appends that
     /// checkpoint route to retained history. Each emitted route receives its
