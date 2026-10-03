@@ -1761,3 +1761,96 @@ fn registry_dispatch_enforces_provider_selection_and_generated_binding_parity() 
             + replaceable_provider_routes
     );
 }
+
+#[test]
+fn generated_bindings_round_trip_typed_results_through_both_dispatch_paths() {
+    let table = system_dispatch_table();
+    let registry = ProviderRoleRegistry::from_baked_abi(table)
+        .expect("generated provider offers resolve from the typed registry");
+    let mut generated_binding_cases = 0;
+    let mut provider_route_cases = 0;
+
+    for contract in table.operations() {
+        let operation_name = contract.id.as_str();
+        let generated = system_function_descriptor(operation_name)
+            .unwrap_or_else(|| panic!("missing generated binding for {operation_name}"));
+        assert_eq!(generated.name, operation_name);
+        assert_eq!(generated.signature, contract.signature.source);
+        assert_eq!(
+            contract.effects.iter().next(),
+            Some(generated.effect),
+            "generated binding effect round-trips for {operation_name}"
+        );
+        generated_binding_cases += 1;
+
+        let Some(role_id) = &contract.role else {
+            continue;
+        };
+        let offer = registry
+            .resolve(role_id.as_str())
+            .expect("generated binding role has a selected provider")
+            .clone();
+        let argument_types = contract
+            .signature
+            .parameters
+            .iter()
+            .map(|parameter| parameter.ty.canonical())
+            .collect::<Vec<_>>();
+        let arguments = contract
+            .signature
+            .parameters
+            .iter()
+            .map(|parameter| {
+                TypedValue::public(
+                    TypeId::new(parameter.ty.canonical()),
+                    parameter.name.as_bytes().to_vec(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let result = TypedValue::public(
+            TypeId::new(contract.signature.result.canonical()),
+            b"generated-binding-round-trip".to_vec(),
+        );
+        let provider_for = || InvokeValueProvider {
+            offer: offer.clone(),
+            operation: contract.id.clone(),
+            argument_types: argument_types.clone(),
+            response: Ok(result.clone()),
+            calls: AtomicUsize::new(0),
+        };
+        let direct_provider = provider_for();
+        let direct_result = table
+            .dispatch_to_provider(operation_name, &direct_provider, &arguments, |_| Ok(()))
+            .expect("direct dispatch accepts the generated typed call");
+        assert_eq!(
+            direct_result,
+            orna_sys_v1::SystemDispatchResult::Returned(result.clone()),
+            "direct dispatch returns the generated operation result for {operation_name}"
+        );
+        assert_eq!(direct_provider.calls.load(Ordering::SeqCst), 1);
+
+        let registry_provider = provider_for();
+        let registry_result = registry
+            .dispatch_to_provider(
+                table,
+                generated.name,
+                &registry_provider,
+                &arguments,
+                |_| Ok(()),
+            )
+            .expect("selected-role registry accepts the generated typed call");
+        assert_eq!(
+            registry_result, direct_result,
+            "selected-role and direct results match for {operation_name}"
+        );
+        assert_eq!(registry_provider.calls.load(Ordering::SeqCst), 1);
+        provider_route_cases += 1;
+    }
+
+    assert_eq!(generated_binding_cases, table.operations().count());
+    assert!(provider_route_cases > 0);
+    println!(
+        "generated_binding_typed_result_round_trip bindings={generated_binding_cases} provider_routes={provider_route_cases} direct_registry_pairs={provider_route_cases} total_cases={}",
+        generated_binding_cases + provider_route_cases * 2
+    );
+}
