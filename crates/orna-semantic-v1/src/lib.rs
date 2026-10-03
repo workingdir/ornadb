@@ -7197,6 +7197,10 @@ fn infer(
             let transactional_checkpoint_fold = element_types.len() > 2
                 && first_parent.as_ref().is_some_and(|first| {
                     type_contains_pinned_checkpoint_tuple(first)
+                        || (type_contains_omitted_checkpoint_tuple(first)
+                            && element_types
+                                .iter()
+                                .any(type_contains_pinned_checkpoint_tuple))
                 });
             let mut rejected_checkpoint_parent = false;
             let mut ty = None;
@@ -18303,8 +18307,44 @@ fn type_contains_pinned_checkpoint_tuple(ty: &Type) -> bool {
     }
 }
 
-/// Reconcile a parent row transactionally while preserving the first parent's
-/// selector widths and selector membership at each nested boundary path.
+/// A tuple whose checkpoint leaves are all omitted still fixes the fold shape.
+/// When later rows supply real pins, keep that first-row boundary as the
+/// transactional recovery point instead of letting a failed parent leave a
+/// partially promoted map behind.
+fn type_contains_omitted_checkpoint_tuple(ty: &Type) -> bool {
+    match ty {
+        Type::Tuple(elements) => elements.iter().any(|element| {
+            matches!(element, Type::Bottom) || type_contains_omitted_checkpoint_tuple(element)
+        }),
+        Type::List(element)
+        | Type::Range(element)
+        | Type::Relation(element)
+        | Type::Stream(element)
+        | Type::Optional(element) => type_contains_omitted_checkpoint_tuple(element),
+        Type::Record(fields) => fields.values().any(type_contains_omitted_checkpoint_tuple),
+        Type::Applied { arguments, .. } => arguments
+            .iter()
+            .any(type_contains_omitted_checkpoint_tuple),
+        Type::Function {
+            parameters, result, ..
+        } => {
+            parameters
+                .iter()
+                .any(type_contains_omitted_checkpoint_tuple)
+                || type_contains_omitted_checkpoint_tuple(result)
+        }
+        Type::MoneyPerUnit { currency, unit } => {
+            type_contains_omitted_checkpoint_tuple(currency)
+                || type_contains_omitted_checkpoint_tuple(unit)
+        }
+        _ => false,
+    }
+}
+
+/// Reconcile another parent into a nested checkpoint fold. Source parents
+/// retain the first parent's map widths and selector membership at each
+/// structural path, while accumulated maps may grow. This keeps the first row
+/// as the transactional recovery point if a later parent changes depth labels.
 fn merge_multi_parent_checkpoint_value(
     accumulated: &Type,
     parent: &Type,
@@ -20006,6 +20046,76 @@ fn infer_module_relation(
     local: &BTreeMap<String, Symbol>,
     diagnostics: &mut Vec<Diagnostic>,
 ) -> Inferred {
+    match value {
+        Expr::Group { inner, .. } => {
+            return infer_module_relation(inner, table_rows, scope, local, diagnostics);
+        }
+        Expr::Block {
+            statements,
+            tail: Some(tail),
+            ..
+        } if statements.is_empty() => {
+            return infer_module_relation(tail, table_rows, scope, local, diagnostics);
+        }
+        Expr::Unary { op, rhs, .. } if op == "!" => {
+            let operand = infer_module_relation(rhs, table_rows, scope, local, diagnostics);
+            return Inferred {
+                ty: if operand.ty == Type::Bool {
+                    Type::Bool
+                } else {
+                    Type::Error
+                },
+                effects: operand.effects,
+            };
+        }
+        // Section 9 predicates compose through ordinary short-circuit Boolean
+        // continuations; keep resolving relation folds in each continuation
+        // instead of treating nested table names as ordinary values.
+        Expr::Binary { lhs, op, rhs, .. } if op == "&&" || op == "||" => {
+            let left = infer_module_relation(lhs, table_rows, scope, local, diagnostics);
+            let right = infer_module_relation(rhs, table_rows, scope, local, diagnostics);
+            let mut effects = left.effects;
+            effects.join(&right.effects);
+            return Inferred {
+                ty: if left.ty == Type::Bool && right.ty == Type::Bool {
+                    Type::Bool
+                } else {
+                    Type::Error
+                },
+                effects,
+            };
+        }
+        Expr::Control {
+            kind: ControlKind::If,
+            binding: None,
+            condition: Some(condition),
+            body: Some(body),
+            arms,
+            alternate: Some(alternate),
+            ..
+        } if arms.is_empty() => {
+            let condition =
+                infer_module_relation(condition, table_rows, scope, local, diagnostics);
+            let body = infer_module_relation(body, table_rows, scope, local, diagnostics);
+            let alternate =
+                infer_module_relation(alternate, table_rows, scope, local, diagnostics);
+            let mut effects = condition.effects;
+            effects.join(&body.effects);
+            effects.join(&alternate.effects);
+            return Inferred {
+                ty: if condition.ty == Type::Bool
+                    && body.ty == Type::Bool
+                    && alternate.ty == Type::Bool
+                {
+                    Type::Bool
+                } else {
+                    Type::Error
+                },
+                effects,
+            };
+        }
+        _ => {}
+    }
     let Expr::Call {
         callee, arguments, ..
     } = value

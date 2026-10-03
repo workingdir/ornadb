@@ -1,0 +1,9 @@
+std.stream.for_each(
+    std.stream.batch(
+        std.stream.buffer(std.stream.from_provider("events", "batch"), 3),
+        2
+    ),
+    (values: [Str]) => {
+        for value in values { std.io.environment.get(value); };
+    }
+)

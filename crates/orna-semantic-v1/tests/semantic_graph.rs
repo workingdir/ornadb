@@ -6675,6 +6675,93 @@ fn nested_sibling_pin_reconciliation_storms_preserve_depth_identity() {
 }
 
 #[test]
+fn multi_parent_checkpoint_folds_preserve_labels_across_paired_omissions() {
+    let source = include_str!(
+        "fixtures/historical-paired-omission-multi-parent-reconciliation.orna"
+    );
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-paired-omission-multi-parent-reconciliation.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert_eq!(
+        result
+            .diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.code() == DIAG_TYPE)
+            .count(),
+        1,
+        "only the deliberately crossed parent must fail: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+    let module = result
+        .modules
+        .values()
+        .find(|module| {
+            module
+                .symbols
+                .contains_key("omitted_first_pair_rolls_back_after_crossed_parent")
+        })
+        .expect("paired-omission reconciliation fixture module");
+    let parent_slots = |function: &str| {
+        let Type::Function { result, .. } = &module.symbols[function].ty else {
+            panic!("{function} must return its computed parent fold");
+        };
+        let Type::Record(fields) = result.as_ref() else {
+            panic!("{function} must return a result record: {result:?}");
+        };
+        let Type::List(element) = fields.get("parent_fold").expect("parent fold result") else {
+            panic!("{function} must return the reconciled list");
+        };
+        let Type::Tuple(slots) = element.as_ref() else {
+            panic!("{function} must preserve the paired tuple: {element:?}");
+        };
+        assert_eq!(slots.len(), 2);
+        slots
+    };
+
+    assert_eq!(
+        parent_slots("omitted_first_pair_rolls_back_after_crossed_parent"),
+        &[Type::Bottom, Type::Bottom],
+        "a failed fold whose first parent omitted both pins must not promote labels from later rows"
+    );
+    let valid_slots = parent_slots("valid_paired_omissions_keep_all_parent_depth_labels");
+    for (slot, expected) in [
+        (
+            0,
+            BTreeSet::from([
+                "selector:HEAD~200".to_owned(),
+                "selector:HEAD~202".to_owned(),
+                "selector:HEAD~204".to_owned(),
+            ]),
+        ),
+        (
+            1,
+            BTreeSet::from([
+                "selector:HEAD~201".to_owned(),
+                "selector:HEAD~203".to_owned(),
+                "selector:HEAD~205".to_owned(),
+            ]),
+        ),
+    ] {
+        let mut contexts = BTreeSet::new();
+        collect_snapshot_contexts(&valid_slots[slot], &mut contexts);
+        assert_eq!(
+            contexts, expected,
+            "valid paired omissions must retain the computed labels in slot {slot}"
+        );
+    }
+}
+
+#[test]
 fn stacked_record_checkpoint_folds_preserve_selector_depth_labels() {
     let source = include_str!("fixtures/historical-stacked-selector-depth-fold.orna");
     let parsed = orna_syntax_v1::parse_module(source);
@@ -6770,8 +6857,6 @@ fn stacked_record_checkpoint_folds_preserve_selector_depth_labels() {
     };
     assert_selectors(&leaf_row["leaf"], &["HEAD~603", "HEAD~606"]);
 }
-
-
 
 #[test]
 fn unknown_direct_pair_sibling_suppresses_pin_promotion() {
