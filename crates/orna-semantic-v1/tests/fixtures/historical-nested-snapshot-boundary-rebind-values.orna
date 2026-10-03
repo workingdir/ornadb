@@ -1,0 +1,40 @@
+pub fn factory_at(pin: sys.SnapshotRef) =
+    sys.database.as_of(pin).energy.factory;
+
+pub fn nested_checkpoint_at(root_pin: sys.SnapshotRef) =
+    (leaf_pin: sys.SnapshotRef) => {
+        root: factory_at(root_pin),
+        leaf: factory_at(leaf_pin),
+    };
+
+pub fn crossed_nested_checkpoint_at(root_pin: sys.SnapshotRef) =
+    (leaf_pin: sys.SnapshotRef) => {
+        root: factory_at(leaf_pin),
+        leaf: factory_at(root_pin),
+    };
+
+pub fn nested_snapshot_boundary_values_survive_rebinding() {
+    let saved = nested_checkpoint_at(sys.snapshot("HEAD~72"));
+    let rolling = saved;
+    rolling = nested_checkpoint_at(sys.snapshot("HEAD~62"));
+
+    let retained = saved(sys.snapshot("HEAD~52"));
+    let rebound = rolling(sys.snapshot("HEAD~51"));
+    {
+        retained: retained,
+        rebound: rebound,
+    }
+}
+
+pub fn crossed_nested_snapshot_boundaries_are_rejected() {
+    let saved = nested_checkpoint_at(sys.snapshot("HEAD~92"));
+    let rolling = saved;
+    rolling = crossed_nested_checkpoint_at(sys.snapshot("HEAD~82"));
+
+    let retained = saved(sys.snapshot("HEAD~72"));
+    let crossed = rolling(sys.snapshot("HEAD~71"));
+    {
+        retained: retained,
+        crossed: crossed,
+    }
+}
