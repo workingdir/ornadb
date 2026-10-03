@@ -638,6 +638,40 @@ pub struct BranchMergeColumnRestorePairedSnapshotPathOccurrenceFoldSnapshot {
     pub snapshot_path: CanonicalValue,
     pub columns: Vec<BranchMergeColumnRestorePairedSnapshotPathOccurrenceColumnFoldSnapshot>,
 }
+
+/// One wave's typed depth identities for a path prefix and its extension.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BranchMergeColumnRestorePairedPathExtensionOccurrenceWaveSnapshot {
+    pub order: u64,
+    pub prefix_occurrence: BranchMergeSnapshotPathOccurrence,
+    pub extension_occurrence: BranchMergeSnapshotPathOccurrence,
+}
+
+/// A strict prefix/extension pair's typed wave identities in one restore storm.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BranchMergeColumnRestorePairedPathExtensionOccurrenceStormSnapshot {
+    pub storm_index: usize,
+    pub first_order: u64,
+    pub last_order: u64,
+    pub waves: Vec<BranchMergeColumnRestorePairedPathExtensionOccurrenceWaveSnapshot>,
+}
+
+/// One stable column's typed prefix/extension history across restore storms.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BranchMergeColumnRestorePairedPathExtensionOccurrenceColumnFoldSnapshot {
+    pub column: ObjectId,
+    pub storms: Vec<BranchMergeColumnRestorePairedPathExtensionOccurrenceStormSnapshot>,
+}
+
+/// A strict path extension and prefix with typed omission states across columns.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BranchMergeColumnRestorePairedPathExtensionOccurrenceFoldSnapshot {
+    pub table: ObjectId,
+    pub prefix_path: CanonicalValue,
+    pub extension_path: CanonicalValue,
+    pub columns: Vec<BranchMergeColumnRestorePairedPathExtensionOccurrenceColumnFoldSnapshot>,
+}
+
 /// A canonical column cell released with its source parent identity intact.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BranchMergeParentColumnDepthEvent {
@@ -2171,6 +2205,70 @@ impl BranchMergeTombstoneHistory {
                 BranchMergeColumnRestorePairedSnapshotPathOccurrenceFoldSnapshot {
                     table: fold.table,
                     snapshot_path: fold.snapshot_path,
+                    columns,
+                }
+            })
+            .collect()
+    }
+
+    /// Folds each strict text-path extension pair with typed occurrence states
+    /// for both paths in every paired column restore wave.
+    ///
+    /// Prefix and extension keep independent local labels. For each side,
+    /// `ColumnOmitted` identifies an absent column, `PathOmitted` identifies a
+    /// present column without that key, and `DepthLabels` names every fragment
+    /// containing the key. MERGE-1 is silent about this combined paired view;
+    /// v1 reuses the slash-boundary extension relation of
+    /// [`Self::column_restore_paired_path_extension_folds`] and does not alter
+    /// canonical keys or align sibling depth labels.
+    pub fn column_restore_paired_path_extension_occurrence_folds(
+        &self,
+    ) -> Vec<BranchMergeColumnRestorePairedPathExtensionOccurrenceFoldSnapshot> {
+        self.column_restore_paired_path_extension_folds()
+            .into_iter()
+            .map(|fold| {
+                let columns = fold
+                    .columns
+                    .into_iter()
+                    .map(|column| {
+                        let storms = column
+                            .storms
+                            .into_iter()
+                            .map(|storm| {
+                                let waves = storm
+                                    .waves
+                                    .into_iter()
+                                    .map(|wave| {
+                                        let occurrence = |labels: Option<Vec<usize>>| match labels {
+                                            None => BranchMergeSnapshotPathOccurrence::ColumnOmitted,
+                                            Some(labels) if labels.is_empty() => BranchMergeSnapshotPathOccurrence::PathOmitted,
+                                            Some(labels) => BranchMergeSnapshotPathOccurrence::DepthLabels(labels),
+                                        };
+                                        BranchMergeColumnRestorePairedPathExtensionOccurrenceWaveSnapshot {
+                                            order: wave.order,
+                                            prefix_occurrence: occurrence(wave.prefix_depth_labels),
+                                            extension_occurrence: occurrence(wave.extension_depth_labels),
+                                        }
+                                    })
+                                    .collect();
+                                BranchMergeColumnRestorePairedPathExtensionOccurrenceStormSnapshot {
+                                    storm_index: storm.storm_index,
+                                    first_order: storm.first_order,
+                                    last_order: storm.last_order,
+                                    waves,
+                                }
+                            })
+                            .collect();
+                        BranchMergeColumnRestorePairedPathExtensionOccurrenceColumnFoldSnapshot {
+                            column: column.column,
+                            storms,
+                        }
+                    })
+                    .collect();
+                BranchMergeColumnRestorePairedPathExtensionOccurrenceFoldSnapshot {
+                    table: fold.table,
+                    prefix_path: fold.prefix_path,
+                    extension_path: fold.extension_path,
                     columns,
                 }
             })
