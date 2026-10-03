@@ -636,6 +636,12 @@ pub struct PureFunction {
 /// Explicitly admitted named functions; no host or module lookup is performed.
 pub type Functions = BTreeMap<String, PureFunction>;
 
+/// Internal key for an import resolved relative to a captured module body.
+/// The separator cannot occur in a source-level Orna name.
+pub(crate) fn module_function_alias_key(namespace: &str, name: &str) -> String {
+    format!("{namespace}::{name}")
+}
+
 /// A payload-free, stable failure suitable for conformance adapters.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct EvaluationError {
@@ -6302,6 +6308,12 @@ impl Context<'_, '_> {
             } else if self.functions.contains_key(&name) {
                 return Some(name);
             }
+            let module_alias = module_function_alias_key(namespace, &name);
+            if let Some(alias) = self.aliases.and_then(|aliases| aliases.get(&module_alias))
+                && self.functions.contains_key(alias)
+            {
+                return Some(alias.clone());
+            }
         }
         if let Some(alias) = self.aliases.and_then(|aliases| aliases.get(&name))
             && self.functions.contains_key(alias)
@@ -10129,24 +10141,41 @@ impl Context<'_, '_> {
         step: &BigInt,
         statistic: &str,
     ) -> Result<Value, EvaluationError> {
-        // These loops keep long sparse series and their output windows within
-        // the evaluator's bounded step/depth model without recursive source calls.
-        let Value::List(windows) = self.windows(points, size, step)? else {
-            return Err(error("ORNA-EVAL-VALUE"));
-        };
-        let mut results = Vec::with_capacity(windows.len());
-        for window in windows {
+        // Visit complete windows in source order and discard each temporary
+        // window after computing its statistic. This keeps sparse timestamp
+        // order attached to each result without retaining every overlapping
+        // window at once.
+        self.items(points.len())?;
+        let size = self.positive_collection_size(size)?;
+        let step = self.positive_collection_size(step)?;
+        if size > points.len() {
+            return Ok(Value::List(Vec::new()));
+        }
+        for _ in points {
             self.step()?;
-            let Value::List(points) = window else {
-                return Err(error("ORNA-EVAL-VALUE"));
-            };
-            let result = self.stats(statistic, vec![Value::List(points)])?;
+        }
+
+        let last_start = points.len() - size;
+        let mut start = 0usize;
+        let mut results = Vec::new();
+        while start <= last_start {
+            let end = start + size;
+            self.items(size)?;
+            self.step()?;
+            let window = points[start..end].to_vec();
+            self.step()?;
+            let result = self.stats(statistic, vec![Value::List(window)])?;
             results.push(if matches!(statistic, "rate" | "integrate") {
                 Value::Option(Some(Box::new(result)))
             } else {
                 result
             });
             self.items(results.len())?;
+
+            let Some(next) = start.checked_add(step) else {
+                break;
+            };
+            start = next;
         }
         Ok(Value::List(results))
     }
