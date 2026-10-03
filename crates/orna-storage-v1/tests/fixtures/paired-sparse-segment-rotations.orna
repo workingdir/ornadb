@@ -1,0 +1,7 @@
+{ id: "redo-frame/40", name: "wal/left-segment-a-incarnation-0", city: "wal/right-segment-a-incarnation-0", }
+
+{ id: "redo-frame/41", name: "wal/left-segment-b-incarnation-1", city: "wal/right-segment-a-incarnation-0", }
+
+{ id: "redo-frame/43", name: "wal/left-segment-b-incarnation-1", city: "wal/right-segment-b-incarnation-1", }
+
+{ id: "redo-frame/44", name: "wal/left-segment-a-incarnation-2", city: "wal/right-segment-b-incarnation-2", }
