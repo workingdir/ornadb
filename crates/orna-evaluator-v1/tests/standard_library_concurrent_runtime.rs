@@ -1,8 +1,11 @@
-use orna_evaluator_v1::{AdmittedReplSession, Limits, SysHostBindingRegistry};
+use orna_evaluator_v1::SysHostBindingRegistry;
 use orna_foundation_v1::CanonicalValue;
 use orna_sys_v1::ClockProvider;
 use orna_value_v1::Raw;
 use std::time::{Duration, Instant};
+
+#[path = "support/pinned_time_text_std.rs"]
+mod pinned_time_text_std;
 
 fn int(value: i64) -> Raw {
     Raw::Int(value.into())
@@ -18,8 +21,7 @@ fn canonical(raw: Raw) -> CanonicalValue {
 
 #[test]
 fn structured_combinators_return_computed_values() {
-    let mut session = AdmittedReplSession::with_reference_standard(Limits::default())
-        .expect("reference standard profile loads");
+    let mut session = pinned_time_text_std::concurrent_session();
     assert_eq!(
         session.submit(include_str!("fixtures/stdlib-use-concurrent-zhw5h.orna")),
         Ok(None)
@@ -60,8 +62,7 @@ fn structured_combinators_return_computed_values() {
 
 #[test]
 fn empty_and_timeout_edges_follow_the_documented_results() {
-    let mut session = AdmittedReplSession::with_reference_standard(Limits::default())
-        .expect("reference standard profile loads");
+    let mut session = pinned_time_text_std::concurrent_session();
     assert_eq!(
         session.submit(include_str!("fixtures/stdlib-use-concurrent-zhw5h.orna")),
         Ok(None)
@@ -104,8 +105,7 @@ fn empty_and_timeout_edges_follow_the_documented_results() {
 
 #[test]
 fn structured_children_fork_host_effects_and_timeout_joins_cancellation() {
-    let mut session = AdmittedReplSession::with_reference_standard(Limits::default())
-        .expect("reference standard profile loads");
+    let mut session = pinned_time_text_std::concurrent_session();
     assert_eq!(
         session.submit(include_str!("fixtures/stdlib-use-concurrent-zhw5h.orna")),
         Ok(None)

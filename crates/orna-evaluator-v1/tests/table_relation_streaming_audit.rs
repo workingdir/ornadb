@@ -149,6 +149,28 @@ struct PairedViewRefreshSource {
     cursors: Vec<(String, RelationReadScope, Option<Vec<u8>>)>,
 }
 
+type CursorRestore = BTreeMap<Option<Vec<u8>>, RelationPage>;
+
+struct PairedCursorRestoreSource {
+    pending: BTreeMap<String, VecDeque<CursorRestore>>,
+    lanes: Vec<(String, RelationReadScope, CursorRestore)>,
+    cursors: Vec<(String, RelationReadScope, Option<Vec<u8>>)>,
+}
+
+impl PairedCursorRestoreSource {
+    fn new(restores: impl IntoIterator<Item = (&'static str, CursorRestore)>) -> Self {
+        let mut pending = BTreeMap::<String, VecDeque<CursorRestore>>::new();
+        for (source, restore) in restores {
+            pending.entry(source.to_owned()).or_default().push_back(restore);
+        }
+        Self {
+            pending,
+            lanes: Vec::new(),
+            cursors: Vec::new(),
+        }
+    }
+}
+
 impl PairedViewRefreshSource {
     fn new(
         subscriptions: impl IntoIterator<Item = (&'static str, Vec<RelationPage>)>,
@@ -289,6 +311,54 @@ impl EffectHandler for PairedViewRefreshSource {
             rows: Vec::new(),
             next: None,
         })))
+    }
+}
+
+impl EffectHandler for PairedCursorRestoreSource {
+    fn handle(
+        &mut self,
+        _: &Expr,
+        _: &[orna_value_v1::Value],
+    ) -> Result<Option<orna_value_v1::Value>, EvaluationError> {
+        Ok(None)
+    }
+
+    fn scan_relation_page_scoped(
+        &mut self,
+        source: &str,
+        scope: RelationReadScope,
+        after: Option<&[u8]>,
+        limit: usize,
+        budget: &mut StepBudget,
+    ) -> Result<Option<RelationPage>, EvaluationError> {
+        if limit == 0 {
+            return Ok(Some(RelationPage {
+                rows: Vec::new(),
+                next: None,
+            }));
+        }
+        budget.debit(1)?;
+        let lane = match self
+            .lanes
+            .iter()
+            .position(|(existing_source, existing_scope, _)| {
+                existing_source == source && *existing_scope == scope
+            }) {
+            Some(lane) => lane,
+            None => {
+                let Some(pending) = self.pending.get_mut(source) else {
+                    return Ok(None);
+                };
+                let Some(restore) = pending.pop_front() else {
+                    return Ok(None);
+                };
+                self.lanes.push((source.to_owned(), scope, restore));
+                self.lanes.len() - 1
+            }
+        };
+        let cursor = after.map(ToOwned::to_owned);
+        self.cursors.push((source.to_owned(), scope, cursor.clone()));
+        Ok(self.lanes[lane].2.get(&cursor).cloned())
     }
 }
 
@@ -1446,6 +1516,160 @@ fn paired_view_prefix_spill_cursors_keep_scope_across_handoffs() {
         expected_cursors,
         "prefix-related cursor byte strings stay exact and scope-local through paired handoffs"
     );
+}
+
+#[test]
+fn paired_view_refresh_spill_folds_keep_cursor_identity() {
+    let cursor_255 = vec![0x6d; 255];
+    let mut cursor_256 = cursor_255.clone();
+    cursor_256.push(0x00);
+    let mut cursor_511 = cursor_256.clone();
+    cursor_511.extend(vec![0x7e; 255]);
+    let mut cursor_512 = cursor_511.clone();
+    cursor_512.push(0xff);
+    assert_eq!(
+        [cursor_255.len(), cursor_256.len(), cursor_511.len(), cursor_512.len()],
+        [255, 256, 511, 512]
+    );
+    assert!(cursor_255.as_slice() < cursor_256.as_slice());
+    assert!(cursor_256.as_slice() < cursor_511.as_slice());
+    assert!(cursor_511.as_slice() < cursor_512.as_slice());
+    let continuations = [cursor_255, cursor_256, cursor_511, cursor_512];
+
+    let generations = [
+        ([1, 2, 3, 4], [5, 8, 5, 8], [5, 4, 3, 2]),
+        ([3, 4, 1, 6], [5, 8, 5, 8], [2, 5, 4, 3]),
+        ([1, 6, 3, 2], [5, 8, 5, 8], [3, 2, 5, 4]),
+    ];
+    let mut subscriptions = Vec::new();
+    for (values, filtered_values, lane_depths) in generations {
+        for lane in 0..4 {
+            let source = if lane < 2 { "View.Left" } else { "View.Right" };
+            let depth = lane_depths[lane];
+            let pages = (0..depth)
+                .map(|page_index| {
+                    let next = (page_index + 1 < depth)
+                        .then(|| continuations[page_index].clone());
+                    let value = if page_index == 0 {
+                        values[lane]
+                    } else {
+                        filtered_values[lane]
+                    };
+                    page(&[value], next)
+                })
+                .collect();
+            subscriptions.push((source, pages));
+        }
+    }
+    let mut source = PairedViewRefreshSource::new(subscriptions);
+
+    let first = run_with_fixture_functions(paired_scoped_view_refresh_body(), &mut source).unwrap();
+    assert_eq!(first, integer(14), "the initial scoped fold filters rows before mapping and summing");
+    let second = run_with_fixture_functions(paired_scoped_view_refresh_body(), &mut source).unwrap();
+    assert_eq!(second, integer(18), "the next refresh observes its own four source values");
+    let third = run_with_fixture_functions(paired_scoped_view_refresh_body(), &mut source).unwrap();
+    assert_eq!(third, integer(16), "the final refresh keeps its own scoped snapshot values");
+    assert_eq!(first, integer(14), "later spill folds do not rewrite the first result");
+    assert_eq!(second, integer(18), "later spill folds do not rewrite the middle result");
+
+    assert_eq!(source.lanes.len(), 12, "three refreshes bind four independent scopes each");
+    for generation in 0..3 {
+        let start = generation * 4;
+        assert_eq!(source.lanes[start].0, "View.Left");
+        assert_eq!(source.lanes[start + 1].0, "View.Left");
+        assert_eq!(source.lanes[start + 2].0, "View.Right");
+        assert_eq!(source.lanes[start + 3].0, "View.Right");
+    }
+    let scopes = source.lanes.iter().map(|(_, scope, _)| *scope).collect::<Vec<_>>();
+    for (index, scope) in scopes.iter().enumerate() {
+        assert!(
+            !scopes[..index].contains(scope),
+            "each spill fold retains a separate paired read scope: {scope:?}"
+        );
+    }
+
+    let depths = generations
+        .iter()
+        .flat_map(|(_, _, lane_depths)| lane_depths)
+        .copied()
+        .collect::<Vec<_>>();
+    let mut expected_cursors = Vec::new();
+    for (lane, depth) in depths.into_iter().enumerate() {
+        let (source_name, scope, _) = &source.lanes[lane];
+        expected_cursors.push((source_name.clone(), *scope, None));
+        for token in continuations.iter().take(depth - 1) {
+            expected_cursors.push((source_name.clone(), *scope, Some(token.clone())));
+        }
+    }
+    assert_eq!(
+        source.cursors,
+        expected_cursors,
+        "255/256/511/512-byte cursor tokens retain every byte and paired scope across refresh folds"
+    );
+}
+
+#[test]
+fn paired_cursor_restore_chains_retain_scope_and_snapshot_values() {
+    let cursor_one = vec![0x72, 0x00, 0xff];
+    let cursor_two = vec![0x72, 0x01];
+    assert!(cursor_one.as_slice() < cursor_two.as_slice());
+    let restore = |values: [i64; 3]| {
+        BTreeMap::from([
+            (None, page(&[values[0]], Some(cursor_one.clone()))),
+            (
+                Some(cursor_one.clone()),
+                page(&[values[1]], Some(cursor_two.clone())),
+            ),
+            (Some(cursor_two.clone()), page(&[values[2]], None)),
+        ])
+    };
+    let mut source = PairedCursorRestoreSource::new([
+        ("View.Paired", restore([-1, 1, 3])),
+        ("View.Paired", restore([2, 4, 6])),
+        ("View.Paired", restore([7, 9, 11])),
+        ("View.Paired", restore([2, 8, 10])),
+        ("View.Paired", restore([-1, 3, 5])),
+        ("View.Paired", restore([2, 4, 8])),
+    ]);
+
+    let first = run_with_fixture_functions(paired_subscription_cascade_body(), &mut source).unwrap();
+    assert_eq!(first, integer(21), "first restore pair folds its filtered source pages");
+    let second = run_with_fixture_functions(paired_subscription_cascade_body(), &mut source).unwrap();
+    assert_eq!(second, integer(3), "second restore pair ignores rows outside its filters");
+    let third = run_with_fixture_functions(paired_subscription_cascade_body(), &mut source).unwrap();
+    assert_eq!(third, integer(12), "third restore pair computes from its own restored pages");
+    assert_eq!(first, integer(21), "later restores leave the first snapshot value captured");
+    assert_eq!(second, integer(3), "later restores leave the second snapshot value captured");
+
+    assert_eq!(source.lanes.len(), 6, "three handoffs bind two paired restore scopes each");
+    let scopes = source
+        .lanes
+        .iter()
+        .map(|(name, scope, _)| {
+            assert_eq!(name, "View.Paired");
+            *scope
+        })
+        .collect::<Vec<_>>();
+    for (index, scope) in scopes.iter().enumerate() {
+        assert!(
+            !scopes[..index].contains(scope),
+            "restored sibling and handoff chains retain independent scopes: {scope:?}"
+        );
+    }
+    let mut expected_cursors = Vec::new();
+    for scope in scopes.iter().copied() {
+        expected_cursors.extend([
+            ("View.Paired".to_owned(), scope, None),
+            ("View.Paired".to_owned(), scope, Some(cursor_one.clone())),
+            ("View.Paired".to_owned(), scope, Some(cursor_two.clone())),
+        ]);
+    }
+    assert_eq!(
+        source.cursors,
+        expected_cursors,
+        "each restored chain resolves the exact repeated cursor bytes inside its own scope"
+    );
+    assert!(source.pending["View.Paired"].is_empty(), "all six restored page maps are consumed");
 }
 
 fn paired_subscription_cascade_body() -> Expr {
