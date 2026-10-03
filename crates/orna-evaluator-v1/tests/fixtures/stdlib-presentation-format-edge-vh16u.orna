@@ -1,0 +1,21 @@
+[
+    std.ui.Text(""),
+    std.ui.Text(" é \n🙂\t "),
+    std.ui.Field("disabled", false),
+    std.ui.Field("zero", 0),
+    std.ui.Code("", null),
+    std.ui.Chart({ label: "empty", points: [0] }, null),
+    std.ui.Input(
+        "count",
+        "Count",
+        null,
+        std.ui.action("count-change", as: Int),
+    ),
+    std.ui.Table([{ name: "Ada" }], columns: ["name", "", "name"]),
+    std.ui.Details([
+        std.ui.Rows([
+            std.ui.Text("nested"),
+            std.ui.Code("", null),
+        ]),
+    ]),
+]
