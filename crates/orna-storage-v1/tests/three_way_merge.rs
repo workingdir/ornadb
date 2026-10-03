@@ -18,6 +18,8 @@ use orna_storage_v1::{
     BranchMergeColumnRestoreStormDepthPathSnapshot,
     BranchMergeColumnRestoreStormDepthPathFragmentSnapshot,
     BranchMergeColumnRestoreStormDepthPathWaveSlotSnapshot,
+    BranchMergeColumnRestoreStormSnapshotPathFoldSnapshot,
+    BranchMergeColumnRestoreStormSnapshotPathWaveSlotSnapshot,
     BranchMergeConflict, BranchMergeDepthFragmentRecovery,
     BranchMergeDepthWaveRecovery, BranchMergeError, BranchMergePlan,
     BranchMergeMultiParentColumnDepthLadderWaveEvent,
@@ -26850,7 +26852,7 @@ fn column_restore_storm_depth_path_slots_preserve_identity_across_omissions() {
             3 => BTreeMap::from([
                 (
                     (id(1), id(2)),
-                    depth(vec![cells(&child, 2), cells(&deep, 2)]),
+                    depth(vec![cells(&child, 2), cells(&deep, 2), cells(&root, 2)]),
                 ),
                 (
                     (id(1), id(3)),
@@ -26891,6 +26893,28 @@ fn column_restore_storm_depth_path_slots_preserve_identity_across_omissions() {
             fragments,
         }
     };
+    let path_fold = |column: u8,
+                     snapshot_path: CanonicalValue,
+                     depth_labels: Vec<Option<Vec<usize>>>| {
+        BranchMergeColumnRestoreStormSnapshotPathFoldSnapshot {
+            storm_index: 0,
+            first_order: 1,
+            last_order: 3,
+            table: id(1),
+            column: id(column),
+            snapshot_path,
+            waves: depth_labels
+                .into_iter()
+                .enumerate()
+                .map(|(index, depth_labels)| {
+                    BranchMergeColumnRestoreStormSnapshotPathWaveSlotSnapshot {
+                        order: index as u64 + 1,
+                        depth_labels,
+                    }
+                })
+                .collect(),
+        }
+    };
 
     let mut history = BranchMergeTombstoneHistory::new(0);
     for order in [3, 2, 1] {
@@ -26919,6 +26943,7 @@ fn column_restore_storm_depth_path_slots_preserve_identity_across_omissions() {
                 Some(vec![
                     fragment(0, vec![child.key.clone()]),
                     fragment(1, vec![deep.key.clone()]),
+                    fragment(2, vec![root.key.clone()]),
                 ]),
             ),
             slot(
@@ -26940,6 +26965,42 @@ fn column_restore_storm_depth_path_slots_preserve_identity_across_omissions() {
             ),
         ],
         "the omitted paired column retains its own empty wave slot and resumes with local labels and exact fixture paths",
+    );
+    assert_eq!(
+        history.column_restore_storm_snapshot_path_folds(),
+        vec![
+            path_fold(
+                2,
+                root.key.clone(),
+                vec![Some(vec![0]), Some(Vec::new()), Some(vec![2])],
+            ),
+            path_fold(
+                2,
+                child.key.clone(),
+                vec![Some(vec![1]), Some(Vec::new()), Some(vec![0])],
+            ),
+            path_fold(
+                2,
+                deep.key.clone(),
+                vec![Some(Vec::new()), Some(vec![0]), Some(vec![1])],
+            ),
+            path_fold(
+                3,
+                root.key.clone(),
+                vec![Some(vec![0]), None, Some(Vec::new())],
+            ),
+            path_fold(
+                3,
+                child.key.clone(),
+                vec![Some(Vec::new()), None, Some(vec![0])],
+            ),
+            path_fold(
+                3,
+                deep.key.clone(),
+                vec![Some(Vec::new()), None, Some(vec![1])],
+            ),
+        ],
+        "each path keeps its stable column identity, local label occurrences, and both column-level and path-level omissions",
     );
 }
 
