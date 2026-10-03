@@ -1,0 +1,4 @@
+streams.batch(
+    streams.from_list([1, 2, 3, 4, 5], "fixture-source"),
+    2
+)

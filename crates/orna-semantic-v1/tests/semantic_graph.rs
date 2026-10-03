@@ -1424,6 +1424,28 @@ fn all_unique_accepts_structural_nullable_keys_and_rejects_float_components() {
 }
 
 #[test]
+fn all_unique_checks_float_components_behind_nominal_keys() {
+    let lawful = analyze(&[ModuleInput::new(
+        "nested-nominal-key.orna",
+        include_str!("fixtures/table-all-unique-nested-nominal-key.orna"),
+    )]);
+    assert!(lawful.is_ok(), "{:?}", lawful.diagnostics);
+
+    let unlawful = analyze(&[ModuleInput::new(
+        "nominal-float-key.orna",
+        include_str!("fixtures/table-all-unique-nominal-float-key.orna"),
+    )]);
+    assert!(has(&unlawful, DIAG_TYPE), "{:?}", unlawful.diagnostics);
+    assert!(
+        unlawful.diagnostics.iter().any(|diagnostic| diagnostic
+            .message()
+            .contains("all_unique selector must return a lawful equality key")),
+        "a nominal key containing Float must be rejected with the key-law explanation: {:?}",
+        unlawful.diagnostics
+    );
+}
+
+#[test]
 fn module_assertion_elaborates_the_reference_projects_nested_relation_predicate() {
     let result = analyze(&[ModuleInput::new(
         "library.orna",
@@ -5779,6 +5801,166 @@ fn omitted_sibling_preserves_width_of_paired_tuple_rebinds() {
 }
 
 #[test]
+fn omitted_rebind_preserves_each_sibling_pin_identity_label() {
+    let source = include_str!("fixtures/historical-omitted-rebind-sibling-pin-labels.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-omitted-rebind-sibling-pin-labels.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert_eq!(
+        result
+            .diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.code() == DIAG_TYPE)
+            .count(),
+        1,
+        "only the call omitting its required right sibling should be rejected: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+
+    let module = result
+        .modules
+        .values()
+        .find(|module| {
+            module
+                .symbols
+                .contains_key("omitted_rebind_keeps_sibling_labels_separate")
+        })
+        .expect("omitted sibling-label fixture module");
+    let Type::Function { result, .. } =
+        &module.symbols["omitted_rebind_keeps_sibling_labels_separate"].ty
+    else {
+        panic!("omitted sibling-label proof must export a function");
+    };
+    let Type::Record(stages) = result.as_ref() else {
+        panic!("omitted sibling-label proof must retain its stage record: {result:?}");
+    };
+
+    let stage = |name: &str| {
+        let Type::Record(fields) = stages.get(name).expect("computed stage") else {
+            panic!("{name} must remain a computed sibling record");
+        };
+        fields
+    };
+    let pin_contexts = |fields: &BTreeMap<String, Type>, name: &str| {
+        let value = fields.get(name).expect("sibling pin field");
+        let mut contexts = BTreeSet::new();
+        collect_snapshot_contexts(value, &mut contexts);
+        assert_eq!(
+            contexts.len(),
+            1,
+            "{name} must keep one pin identity: {contexts:?}"
+        );
+        contexts.into_iter().next().expect("one sibling identity")
+    };
+
+    let complete = stage("complete");
+    for (pin, capture, selector) in [
+        ("left_pin", "left_capture", "selector:HEAD~100"),
+        ("right_pin", "right_capture", "selector:HEAD~99"),
+    ] {
+        let pin_identity = pin_contexts(complete, pin);
+        let capture_identity = pin_contexts(complete, capture);
+        assert_eq!(pin_identity, selector, "complete {pin}");
+        assert_eq!(capture_identity, pin_identity, "complete {capture}");
+    }
+
+    let omitted = stage("omitted");
+    for capture in ["left_capture", "right_capture"] {
+        assert!(
+            matches!(omitted.get(capture), Some(Type::Applied { base, .. }) if base == "sys.HistoricalCallable"),
+            "{capture} must retain its computed historical callable value"
+        );
+    }
+    let left_identity = pin_contexts(omitted, "left_pin");
+    let left_capture_identity = pin_contexts(omitted, "left_capture");
+    let right_identity = pin_contexts(omitted, "right_pin");
+    let right_capture_identity = pin_contexts(omitted, "right_capture");
+    assert_eq!(left_identity, left_capture_identity);
+    assert_eq!(right_identity, right_capture_identity);
+    assert_ne!(
+        left_identity, right_identity,
+        "omitting a sibling must not collapse distinct formal pin labels"
+    );
+    for identity in [&left_identity, &right_identity] {
+        assert!(
+            identity.contains("selector:dynamic-call:"),
+            "omitted sibling labels remain symbolic: {identity}"
+        );
+        assert!(
+            identity.contains(":formal-binder:"),
+            "each symbolic label retains its source binder: {identity}"
+        );
+    }
+}
+
+#[test]
+fn record_rebind_preserves_shared_sibling_pin_depth_labels() {
+    let source =
+        include_str!("fixtures/historical-record-sibling-pin-topology-rebind.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-record-sibling-pin-topology-rebind.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    let type_diagnostics = result
+        .diagnostics
+        .iter()
+        .filter(|diagnostic| diagnostic.code() == DIAG_TYPE)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        type_diagnostics.len(),
+        1,
+        "splitting one shared depth pin across paired record siblings must reject the rebind: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+
+    let module = result
+        .modules
+        .values()
+        .find(|module| {
+            module
+                .symbols
+                .contains_key("record_sibling_depth_rebind_keeps_labels")
+        })
+        .expect("record sibling pin topology fixture module");
+    let Type::Function { result, .. } =
+        &module.symbols["record_sibling_depth_rebind_keeps_labels"].ty
+    else {
+        panic!("valid record depth rebind must remain callable");
+    };
+    let Type::Record(fields) = result.as_ref() else {
+        panic!("valid record depth rebind must return both sibling values: {result:?}");
+    };
+    for (name, selector) in [("left", "HEAD~210"), ("right", "HEAD~209")] {
+        let mut contexts = BTreeSet::new();
+        collect_snapshot_contexts(fields.get(name).expect("paired sibling"), &mut contexts);
+        assert_eq!(
+            contexts,
+            BTreeSet::from([format!("selector:{selector}")]),
+            "valid paired record rebind must retain the {name} depth label"
+        );
+    }
+}
+
+#[test]
 fn unknown_paired_width_suppresses_sibling_pin_promotion() {
     let source = include_str!(
         "fixtures/historical-unknown-paired-width-rebind-suppression.orna"
@@ -5959,6 +6141,198 @@ fn paired_pin_identities_survive_omissions_at_outer_and_middle_depths() {
             );
         }
     }
+}
+
+#[test]
+fn paired_omission_folds_preserve_rebound_depth_labels() {
+    let source = include_str!("fixtures/historical-paired-omission-fold-depth-labels.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-paired-omission-fold-depth-labels.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert_eq!(
+        result
+            .diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.code() == DIAG_TYPE)
+            .count(),
+        1,
+        "only the fold that would merge distinct depth labels is rejected: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+    let module = result
+        .modules
+        .values()
+        .find(|module| {
+            module
+                .symbols
+                .contains_key("paired_omission_fold_depth_labels")
+        })
+        .expect("paired omission-fold fixture module");
+    let summary = format!(
+        "{:?}",
+        module.symbols["paired_omission_fold_depth_labels"].ty
+    );
+    for selector in [
+        "HEAD~850", "HEAD~840", "HEAD~830", "HEAD~820", "HEAD~810", "HEAD~800", "HEAD~700",
+        "HEAD~690", "HEAD~680", "HEAD~670", "HEAD~660", "HEAD~650",
+    ] {
+        assert!(
+            summary.contains(&format!("selector:{selector}")),
+            "a completed paired depth must retain {selector}: {summary}"
+        );
+    }
+    for selector in ["HEAD~780", "HEAD~770", "HEAD~740", "HEAD~730"] {
+        assert!(
+            !summary.contains(selector),
+            "a failed paired omission fold must not promote {selector}: {summary}"
+        );
+    }
+
+    let Type::Function { result, .. } = &module.symbols["safe_paired_omission_fold"].ty else {
+        panic!("safe omission fold must be an executable function");
+    };
+    let Type::List(element) = result.as_ref() else {
+        panic!("safe omission fold must return real tuple values: {result:?}");
+    };
+    let Type::Tuple(pins) = element.as_ref() else {
+        panic!("safe omission fold must preserve both tuple slots: {element:?}");
+    };
+    fn pin_context(ty: &Type) -> &Type {
+        let Type::Applied { base, arguments } = ty else {
+            panic!("folded tuple slots must stay historical callables: {ty:?}");
+        };
+        assert_eq!(base, "sys.HistoricalCallable");
+        let [pin, _] = arguments.as_slice() else {
+            panic!("historical callable must retain its computed pin: {arguments:?}");
+        };
+        pin
+    }
+    assert_eq!(
+        pin_context(&pins[0]),
+        &Type::Applied {
+            base: "sys.SnapshotRefContext".into(),
+            arguments: vec![Type::Named("selector:HEAD~500".into())],
+        },
+        "the omitted first slot keeps its earlier real pin label"
+    );
+    assert_eq!(
+        pin_context(&pins[1]),
+        &Type::Applied {
+            base: "semantic.SnapshotContextMap".into(),
+            arguments: vec![
+                Type::Named("selector:HEAD~501".into()),
+                Type::Named("selector:HEAD~502".into()),
+            ],
+        },
+        "the live second slot keeps both depth labels without absorbing the omitted slot"
+    );
+}
+
+#[test]
+fn paired_collapse_rebinds_preserve_global_depth_label_topology() {
+    let source = include_str!("fixtures/historical-paired-collapse-rebind-depth-labels.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-paired-collapse-rebind-depth-labels.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert_eq!(
+        result
+            .diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.code() == DIAG_TYPE)
+            .count(),
+        1,
+        "a rebind that changes a shared depth label into pairwise labels must fail, while a consistent relabel succeeds: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+    let module = result
+        .modules
+        .values()
+        .find(|module| {
+            module
+                .symbols
+                .contains_key("rejects_paired_collapse_rebind_depth_drift")
+        })
+        .expect("paired collapse rebind fixture module");
+
+    let slot_contexts = |function: &str, field: &str| {
+        let Type::Function { result, .. } = &module.symbols[function].ty else {
+            panic!("{function} must retain its executable result type");
+        };
+        let Type::Record(fields) = result.as_ref() else {
+            panic!("{function} must return saved and rebound values: {result:?}");
+        };
+        let value = fields.get(field).expect("computed paired fold value");
+        let Type::List(element) = value else {
+            panic!("{function}.{field} must remain a collapsed list: {value:?}");
+        };
+        let Type::Tuple(slots) = element.as_ref() else {
+            panic!("{function}.{field} must preserve all tuple positions: {element:?}");
+        };
+        assert_eq!(slots.len(), 3, "{function}.{field} must keep three depth slots");
+        slots
+            .iter()
+            .map(|slot| {
+                let mut contexts = BTreeSet::new();
+                collect_snapshot_contexts(slot, &mut contexts);
+                assert!(!contexts.is_empty(), "{function}.{field} slot must keep real pin values");
+                contexts
+            })
+            .collect::<Vec<_>>()
+    };
+
+    let triangle = vec![
+        BTreeSet::from(["selector:HEAD~101".into(), "selector:HEAD~102".into()]),
+        BTreeSet::from(["selector:HEAD~101".into(), "selector:HEAD~103".into()]),
+        BTreeSet::from(["selector:HEAD~102".into(), "selector:HEAD~103".into()]),
+    ];
+    assert_eq!(
+        slot_contexts("rejects_paired_collapse_rebind_depth_drift", "saved"),
+        triangle,
+        "failed rebind must leave each original pairwise depth label in its slot"
+    );
+    assert_eq!(
+        slot_contexts("rejects_paired_collapse_rebind_depth_drift", "rebound"),
+        triangle,
+        "failed rebind must not promote the star-shaped candidate into saved slots"
+    );
+    assert_eq!(
+        slot_contexts("accepts_paired_collapse_rebind_depth_relabel", "saved"),
+        vec![
+            BTreeSet::from(["selector:HEAD~301".into(), "selector:HEAD~302".into()]),
+            BTreeSet::from(["selector:HEAD~301".into(), "selector:HEAD~303".into()]),
+            BTreeSet::from(["selector:HEAD~302".into(), "selector:HEAD~303".into()]),
+        ],
+        "saved paired folds must retain their original depth labels"
+    );
+    assert_eq!(
+        slot_contexts("accepts_paired_collapse_rebind_depth_relabel", "rebound"),
+        vec![
+            BTreeSet::from(["selector:HEAD~401".into(), "selector:HEAD~402".into()]),
+            BTreeSet::from(["selector:HEAD~401".into(), "selector:HEAD~403".into()]),
+            BTreeSet::from(["selector:HEAD~402".into(), "selector:HEAD~403".into()]),
+        ],
+        "valid relabel must return its computed pairwise depth values"
+    );
 }
 
 #[test]
@@ -8488,6 +8862,99 @@ fn tuple_checkpoint_compaction_fold_preserves_slot_pin_identity() {
         slot_maps("folded"),
         expected,
         "a rejected width fold must not union opposite-slot pins"
+    );
+}
+
+#[test]
+fn tuple_checkpoint_label_fold_rebind_keeps_computed_pin_maps() {
+    let source = include_str!("fixtures/historical-tuple-checkpoint-label-fold.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-tuple-checkpoint-label-fold.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    assert!(
+        result
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code() == DIAG_TYPE),
+        "a folded rebind with changed selector-label membership must fail: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+    let module = result
+        .modules
+        .values()
+        .find(|module| {
+            module
+                .symbols
+                .contains_key("tuple_checkpoint_label_fold_rebind")
+        })
+        .expect("tuple checkpoint label-fold fixture module");
+    let Type::Function { result, .. } =
+        &module.symbols["tuple_checkpoint_label_fold_rebind"].ty
+    else {
+        panic!("tuple checkpoint label-fold proof must return computed values");
+    };
+    let Type::Record(values) = result.as_ref() else {
+        panic!("tuple checkpoint proof must expose saved, retained and candidate values");
+    };
+
+    let slot_maps = |name: &str| {
+        let value = values.get(name).expect("computed checkpoint value");
+        assert_canonical_snapshot_context_maps(value);
+        let Type::List(element) = value else {
+            panic!("{name} must remain a checkpoint list: {value:?}");
+        };
+        let Type::Tuple(slots) = element.as_ref() else {
+            panic!("{name} must retain its tuple element: {element:?}");
+        };
+        assert_eq!(slots.len(), 3, "{name} must preserve all tuple slots");
+        slots
+            .iter()
+            .map(|slot| {
+                let mut selectors = BTreeSet::new();
+                collect_snapshot_contexts(slot, &mut selectors);
+                selectors.retain(|selector| selector.starts_with("selector:HEAD~"));
+                assert!(
+                    !selectors.is_empty(),
+                    "{name} must expose its computed selector map: {slot:?}"
+                );
+                selectors
+            })
+            .collect::<Vec<_>>()
+    };
+
+    let saved = slot_maps("saved");
+    assert_eq!(
+        saved,
+        vec![
+            BTreeSet::from(["selector:HEAD~30".into(), "selector:HEAD~31".into()]),
+            BTreeSet::from(["selector:HEAD~30".into(), "selector:HEAD~32".into()]),
+            BTreeSet::from(["selector:HEAD~31".into(), "selector:HEAD~32".into()]),
+        ],
+        "saved folded maps must have one distinct shared label per slot pair"
+    );
+    assert_eq!(
+        slot_maps("retained"),
+        saved,
+        "failed label-topology rebind must retain saved computed maps"
+    );
+    assert_eq!(
+        slot_maps("candidate"),
+        vec![
+            BTreeSet::from(["selector:HEAD~40".into(), "selector:HEAD~41".into()]),
+            BTreeSet::from(["selector:HEAD~40".into(), "selector:HEAD~42".into()]),
+            BTreeSet::from(["selector:HEAD~40".into(), "selector:HEAD~43".into()]),
+        ],
+        "candidate folded maps must expose the new shared all-slot label"
     );
 }
 

@@ -1,9 +1,9 @@
 use std::collections::BTreeSet;
 
 use orna_sys_v1::{
-    AbiType, AbiVersion, EffectSet, FailureCode, ProviderDiagnostic, ProviderId, ProviderOffer,
-    ProviderRoleRegistry, SemanticRoleId, SystemEffect, system_api_json, system_dispatch_table,
-    system_provider_abi,
+    system_api_json, system_dispatch_table, system_provider_abi, system_provider_abi_json, AbiType,
+    AbiVersion, EffectSet, FailureCode, ProviderDiagnostic, ProviderId, ProviderOffer,
+    ProviderRoleRegistry, SemanticRoleId, SystemEffect, SystemProviderAbi,
 };
 use serde_json::Value;
 
@@ -35,18 +35,14 @@ fn generated_provider_abi_carries_typed_operation_contracts_and_roles() {
         AbiType::Named("sys.SnapshotRef".into())
     );
     assert!(!checkout.preconditions.is_empty());
-    assert!(
-        checkout.declares_failure(
-            &orna_sys_v1::FailureCode::new("sys.abi.precondition_failed").unwrap()
-        )
-    );
-    assert!(
-        abi.validate_failure(
+    assert!(checkout
+        .declares_failure(&orna_sys_v1::FailureCode::new("sys.abi.precondition_failed").unwrap()));
+    assert!(abi
+        .validate_failure(
             checkout.id.as_str(),
             &orna_sys_v1::FailureCode::new("sys.abi.precondition_failed").unwrap(),
         )
-        .is_ok()
-    );
+        .is_ok());
     assert_eq!(
         abi.validate_failure(
             checkout.id.as_str(),
@@ -75,19 +71,157 @@ fn generated_provider_abi_carries_typed_operation_contracts_and_roles() {
         .expect("invoke semantic role is collected from implementations");
     assert_eq!(invoke_role.version, AbiVersion::V1_0);
     assert_eq!(invoke_role.effects, EffectSet::one(SystemEffect::Invoke));
-    assert!(
-        invoke_role
-            .operations
-            .contains(&orna_sys_v1::OperationId::new("sys.invoke(Value)").unwrap())
-    );
-    assert!(
-        abi.validate_failure(
+    assert!(invoke_role
+        .operations
+        .contains(&orna_sys_v1::OperationId::new("sys.invoke(Value)").unwrap()));
+    assert!(abi
+        .validate_failure(
             "sys.invoke(Value)",
             &orna_sys_v1::FailureCode::new("sys.invoke.argument_missing").unwrap(),
         )
-        .is_ok()
-    );
+        .is_ok());
     assert!(ProviderRoleRegistry::from_baked_abi(abi).is_ok());
+}
+
+#[test]
+fn provider_registry_role_edges_are_a_bijective_effect_compatible_sweep() {
+    let abi = system_dispatch_table();
+    let mut role_link_count = BTreeSet::new();
+
+    for role in abi.roles() {
+        assert!(
+            !role.operations.is_empty(),
+            "{} has operations",
+            role.id.as_str()
+        );
+        assert!(
+            !role.required || role.builtin_provider.is_some(),
+            "required role {} resolves to a baked provider",
+            role.id.as_str()
+        );
+        let declared = role.operations.iter().cloned().collect::<BTreeSet<_>>();
+        assert_eq!(
+            declared.len(),
+            role.operations.len(),
+            "{} lists each operation once",
+            role.id.as_str()
+        );
+
+        let linked = abi
+            .operations()
+            .filter(|operation| operation.role.as_ref() == Some(&role.id))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            linked
+                .iter()
+                .map(|operation| operation.id.clone())
+                .collect::<BTreeSet<_>>(),
+            declared,
+            "{} has complete forward and reverse operation links",
+            role.id.as_str()
+        );
+        for operation in linked {
+            assert_eq!(operation.role_version, Some(role.version));
+            assert!(
+                operation.effects.is_subset_of(&role.effects),
+                "{} effects fit role {}",
+                operation.id.as_str(),
+                role.id.as_str()
+            );
+            assert!(role_link_count.insert(operation.id.clone()));
+        }
+    }
+
+    for operation in abi.operations() {
+        assert_eq!(
+            operation.role.is_some(),
+            role_link_count.contains(&operation.id),
+            "{} is linked exactly when it declares a semantic role",
+            operation.id.as_str()
+        );
+    }
+}
+
+#[test]
+fn provider_abi_rejects_nonconformant_role_edges_and_effects() {
+    let baseline: Value = serde_json::from_str(system_provider_abi_json()).unwrap();
+    let first_role = baseline["roles"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|role| {
+            role["operations"]
+                .as_array()
+                .is_some_and(|ops| ops.len() > 1)
+        })
+        .expect("one provider role owns multiple registered operations");
+    let role_name = first_role["name"].as_str().unwrap().to_owned();
+    let first_operation = first_role["operations"].as_array().unwrap()[0]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    let mut duplicate = baseline.clone();
+    let role = duplicate["roles"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|role| role["name"] == role_name)
+        .unwrap();
+    role["operations"]
+        .as_array_mut()
+        .unwrap()
+        .push(serde_json::json!(first_operation));
+    assert_eq!(
+        SystemProviderAbi::from_json(&duplicate.to_string()),
+        Err(orna_sys_v1::ProviderAbiError::DuplicateRoleOperation)
+    );
+
+    let mut missing_reverse_edge = baseline.clone();
+    let role = missing_reverse_edge["roles"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|role| role["name"] == role_name)
+        .unwrap();
+    role["operations"]
+        .as_array_mut()
+        .unwrap()
+        .retain(|operation| operation.as_str() != Some(first_operation.as_str()));
+    assert_eq!(
+        SystemProviderAbi::from_json(&missing_reverse_edge.to_string()),
+        Err(orna_sys_v1::ProviderAbiError::OperationRoleMismatch)
+    );
+
+    let mut wrong_role_version = baseline.clone();
+    let operation = wrong_role_version["operations"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|operation| operation["name"] == first_operation)
+        .unwrap();
+    operation["role"] = serde_json::json!(format!("{role_name}@2.0"));
+    assert_eq!(
+        SystemProviderAbi::from_json(&wrong_role_version.to_string()),
+        Err(orna_sys_v1::ProviderAbiError::OperationRoleVersionMismatch)
+    );
+
+    let mut incompatible_effects = baseline;
+    let role = incompatible_effects["roles"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|role| role["name"] == role_name)
+        .unwrap();
+    role["effects"] = serde_json::json!([]);
+    let incompatible = SystemProviderAbi::from_json(&incompatible_effects.to_string())
+        .expect("well-formed role metadata reaches semantic compatibility validation");
+    assert_eq!(
+        incompatible.validate(),
+        Err(ProviderDiagnostic::EffectIncompatible(
+            SemanticRoleId::new(role_name).unwrap()
+        ))
+    );
 }
 
 #[test]
@@ -103,12 +237,19 @@ fn dispatch_table_enforces_registered_preconditions_and_failure_vocabularies() {
     assert_eq!(accepted.id, contract.id);
 
     let dispatched = table
-        .dispatch(operation, |_| Ok(()), |selected| {
-            assert_eq!(selected.id, contract.id);
-            Ok("native")
-        })
+        .dispatch(
+            operation,
+            |_| Ok(()),
+            |selected| {
+                assert_eq!(selected.id, contract.id);
+                Ok("native")
+            },
+        )
         .expect("dispatch invokes the handler with its selected contract");
-    assert_eq!(dispatched, orna_sys_v1::SystemDispatchResult::Returned("native"));
+    assert_eq!(
+        dispatched,
+        orna_sys_v1::SystemDispatchResult::Returned("native")
+    );
 
     let precondition_failure = FailureCode::new("sys.abi.precondition_failed").unwrap();
     assert_eq!(
@@ -252,8 +393,7 @@ fn every_dispatch_operation_matches_its_published_failure_vocabulary() {
         );
         for code in SHARED_PROVIDER_FAILURES {
             assert!(
-                contract
-                    .declares_failure(&FailureCode::new(code).unwrap()),
+                contract.declares_failure(&FailureCode::new(code).unwrap()),
                 "shared provider boundary code `{code}` is absent from `{operation_id}`"
             );
         }
@@ -365,7 +505,9 @@ fn dispatch_enforces_the_full_failure_set_for_every_operation() {
             if contract.declares_failure(code) {
                 assert_eq!(
                     result,
-                    Ok(orna_sys_v1::SystemDispatchResult::<()>::Failed(code.clone())),
+                    Ok(orna_sys_v1::SystemDispatchResult::<()>::Failed(
+                        code.clone()
+                    )),
                     "declared failure should cross dispatch for `{}`",
                     contract.id.as_str()
                 );
@@ -439,7 +581,10 @@ fn dispatch_checks_each_precondition_and_stops_at_the_failing_position() {
                 Ok(())
             },
         );
-        assert_eq!(successful, Ok(orna_sys_v1::SystemDispatchResult::Returned(())));
+        assert_eq!(
+            successful,
+            Ok(orna_sys_v1::SystemDispatchResult::Returned(()))
+        );
         assert_eq!(checked, contract.preconditions.len());
         assert_eq!(invoked, 1);
 
