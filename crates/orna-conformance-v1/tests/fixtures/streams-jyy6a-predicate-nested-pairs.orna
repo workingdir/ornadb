@@ -1,0 +1,18 @@
+pub table Reading(id: Int) {
+    key: (((Int, Str), (Int, Str)), (Int, Str)),
+    expected: (((Int, Str), (Int, Str)), (Int, Str)),
+    assert all_unique(reading => reading.key);
+    assert every(reading => reading.key == reading.expected);
+}
+
+pub fn main() {
+    Stream.from_list([
+        { id: 1, key: (((1, "east"), (2, "oak")), (3, "red")), expected: (((1, "east"), (2, "oak")), (3, "red")) },
+        { id: 2, key: (((1, "east"), (2, "oak")), (3, "blue")), expected: (((1, "east"), (2, "oak")), (3, "blue")) },
+        { id: 3, key: (((1, "east"), (2, "pine")), (3, "red")), expected: (((1, "east"), (2, "pine")), (3, "red")) },
+        { id: 4, key: (((1, "west"), (2, "oak")), (3, "red")), expected: (((1, "west"), (2, "oak")), (3, "red")) },
+    ], source_identity: "fixture:streams-jyy6a-predicate-nested-pairs")
+        | for_each(reading => {
+            Reading.insert(reading);
+        });
+}
