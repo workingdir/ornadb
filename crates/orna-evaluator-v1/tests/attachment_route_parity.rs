@@ -2242,7 +2242,7 @@ fn sibling_checkpoint_folds_keep_tabular_anchor_identities() {
 }
 
 #[test]
-fn terminal_route_identity_survives_nested_pair_omissions() {
+fn sparse_nested_storm_folds_preserve_terminal_route_identity() {
     let package_source = include_str!("fixtures/attachment-route-package.orna");
     let primary_source = include_str!("fixtures/attachment-route-primary.orna");
     let aliases = [
@@ -2377,13 +2377,64 @@ fn terminal_route_identity_survives_nested_pair_omissions() {
         leaf_final
     );
 
-    let terminal_identity = folded.terminal_route_identity();
-    let no_rebinds = [None, None];
-    let omission_only_rounds = [no_rebinds.as_slice()];
+    let sparse_outer_round = [(&outer_label, Some(outer_waves.as_slice()))];
+    let sparse_mixed_round = [
+        (&outer_label, None),
+        (&nested_label, Some(nested_waves.as_slice())),
+    ];
+    let sparse_tail_round = [(&outer_label, None)];
+    let sparse_rounds = [
+        sparse_outer_round.as_slice(),
+        sparse_mixed_round.as_slice(),
+        sparse_tail_round.as_slice(),
+    ];
+    let sparse_folded = resolver
+        .extend_nested_terminal_pair_sparse_checkpoint_storm_rounds_from_depth_labels(
+            &first_stage,
+            &sparse_rounds,
+        )
+        .unwrap();
+    assert_eq!(
+        sparse_folded.retained_depth_label(0, 0).unwrap(),
+        outer_label,
+        "varying sparse round widths keep the outer route identity keyed by label"
+    );
+    assert_eq!(
+        sparse_folded.retained_depth_label(0, 1).unwrap(),
+        nested_label,
+        "a nested label remains valid even when omitted from the later sparse round"
+    );
+    assert_eq!(
+        sparse_folded
+            .final_session()
+            .database(aliases[4])
+            .unwrap()
+            .pin()
+            .commit()
+            .as_str(),
+        leaf_final
+    );
+    assert_eq!(
+        sparse_folded.terminal_route_identity(),
+        folded.terminal_route_identity(),
+        "sparse and positional folds select the same terminal identity"
+    );
+    let duplicate_sparse_round = [(&outer_label, None), (&outer_label, None)];
+    assert!(matches!(
+        resolver.extend_nested_terminal_pair_sparse_checkpoint_storm_rounds_from_depth_labels(
+            &first_stage,
+            &[duplicate_sparse_round.as_slice()],
+        ),
+        Err(AttachmentError::RetainedSnapshotUnavailable)
+    ));
+
+    let terminal_identity = sparse_folded.terminal_route_identity();
+    let sparse_omission = [(&nested_label, None)];
+    let sparse_omission_rounds = [sparse_omission.as_slice()];
     let after_omissions = resolver
-        .extend_nested_terminal_pair_checkpoint_storm_rounds_from_depth_labels_with_omissions(
-            &folded,
-            &omission_only_rounds,
+        .extend_nested_terminal_pair_sparse_checkpoint_storm_rounds_from_depth_labels(
+            &sparse_folded,
+            &sparse_omission_rounds,
         )
         .unwrap();
     after_omissions
