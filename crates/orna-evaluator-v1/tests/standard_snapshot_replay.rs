@@ -1190,6 +1190,85 @@ fn paired_divergence_convergence_projects() -> (TempDir, [LoadedProject; 5], [St
     )
 }
 
+fn paired_divergence_reanchoring_projects() -> (TempDir, [LoadedProject; 6], [String; 6], [String; 3]) {
+    let (directory, projects, pins) = divergent_paired_module_projects();
+    let [base_project, math_project, collection_project, paired_project] = projects;
+    let project_path = directory.path().join("project");
+
+    fs::write(
+        project_path.join("snapshot_app.orna"),
+        include_str!("fixtures/module-upgrade-divergence-reanchor-app.orna"),
+    )
+    .unwrap();
+    git_output_at(&project_path, &["add", "snapshot_app.orna"]);
+    git_output_at(
+        &project_path,
+        &[
+            "commit",
+            "--quiet",
+            "-m",
+            "create shared project re-anchoring checkpoint",
+        ],
+    );
+    let anchor_parent = git_output_at(&project_path, &["rev-parse", "HEAD"]);
+
+    let repository = Repository::discover(&project_path).unwrap();
+    let mut reanchored_projects = Vec::with_capacity(2);
+    let mut reanchored_parents = Vec::with_capacity(2);
+    for (pin, message) in [
+        (
+            pins[1].as_str(),
+            "re-anchor math divergence under shared project checkpoint",
+        ),
+        (
+            pins[2].as_str(),
+            "re-anchor collection divergence under shared project checkpoint",
+        ),
+    ] {
+        git_output_at(
+            &project_path,
+            &["checkout", "--detach", anchor_parent.as_str()],
+        );
+        let parent = capture_standard_gitlink(&project_path, pin, message);
+        let snapshot = repository.resolve_snapshot(&parent).unwrap();
+        reanchored_projects.push(
+            ProjectLoader::default()
+                .load_committed_snapshot(&repository, &snapshot)
+                .unwrap(),
+        );
+        reanchored_parents.push(parent);
+    }
+
+    let [reanchored_math_project, reanchored_collection_project] =
+        reanchored_projects.try_into().unwrap();
+    let [reanchored_math_parent, reanchored_collection_parent] =
+        reanchored_parents.try_into().unwrap();
+    (
+        directory,
+        [
+            base_project,
+            math_project,
+            collection_project,
+            paired_project,
+            reanchored_math_project,
+            reanchored_collection_project,
+        ],
+        [
+            pins[0].clone(),
+            pins[1].clone(),
+            pins[2].clone(),
+            pins[3].clone(),
+            pins[1].clone(),
+            pins[2].clone(),
+        ],
+        [
+            anchor_parent,
+            reanchored_math_parent,
+            reanchored_collection_parent,
+        ],
+    )
+}
+
 fn paired_divergence_escalation_projects() -> (TempDir, [LoadedProject; 6], [String; 6]) {
     let (directory, projects, pins) = divergent_paired_module_projects();
     let [
