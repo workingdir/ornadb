@@ -2,8 +2,8 @@ use orna_syntax_v1::{Declaration, Expr, LiteralKind, TypeExpr, parse_module};
 use std::{collections::BTreeMap, fs, path::Path};
 
 use orna_sys_v1::{
-    AbiType, EffectSet, OperationContract, SystemEffect, system_binding_stubs, system_provider_abi,
-    system_binding_modules_json, system_provider_abi_json,
+    AbiType, EffectSet, OperationContract, SystemEffect, system_binding_modules_json,
+    system_binding_stubs, system_provider_abi, system_provider_abi_json,
 };
 use serde_json::Value;
 
@@ -662,6 +662,60 @@ fn generated_stub_contract_validation_rejects_parseable_and_syntactic_drift() {
     assert!(
         validate_stub_contract(&malformed, operation).is_err(),
         "stub contract validation rejects syntactic drift before dispatch parity"
+    );
+}
+
+#[test]
+fn generated_idl_placeholder_error_drift_is_rejected_for_every_operation() {
+    const CANONICAL_BODY: &str =
+        "error(code: \"sys.binding.stub\", message: \"generated declaration stub\")";
+    const DRIFTED_BODY: &str =
+        "error(code: \"sys.abi.unavailable\", message: \"generated declaration stub\")";
+
+    let abi = system_provider_abi();
+    let source = system_binding_stubs();
+    let mut validated_stubs = 0;
+    let mut rejected_body_drift = 0;
+
+    for stub in source
+        .split("\n\n")
+        .filter(|block| block.lines().any(|line| line.starts_with("// sys-op: ")))
+    {
+        let operation_id = stub
+            .lines()
+            .find_map(|line| line.strip_prefix("// sys-op: "))
+            .expect("each generated IDL stub has an operation marker");
+        let operation = abi
+            .operation(operation_id)
+            .unwrap_or_else(|| panic!("generated IDL stub names unknown operation {operation_id}"));
+        validate_stub_contract(stub, operation).unwrap_or_else(|error| {
+            panic!("canonical IDL stub {operation_id} violates its contract: {error}")
+        });
+        validated_stubs += 1;
+
+        let drifted = stub.replacen(CANONICAL_BODY, DRIFTED_BODY, 1);
+        assert_ne!(
+            drifted, stub,
+            "{operation_id} has the canonical placeholder body"
+        );
+        assert!(
+            parse_module(&drifted).is_ok(),
+            "placeholder error drift remains parseable for {operation_id}"
+        );
+        let error = validate_stub_contract(&drifted, operation)
+            .expect_err("generated IDL contract rejects placeholder diagnostic drift");
+        assert_eq!(
+            error, "stub body differs from the canonical generated declaration error",
+            "contract identifies the placeholder error drift for {operation_id}"
+        );
+        rejected_body_drift += 1;
+    }
+
+    assert_eq!(validated_stubs, abi.operations().count());
+    assert_eq!(rejected_body_drift, validated_stubs);
+    println!(
+        "generated_idl_placeholder_error_parity operations={validated_stubs} canonical_contracts={validated_stubs} rejected_body_drift={rejected_body_drift} diagnostic=sys.binding.stub total_cases={}",
+        validated_stubs + rejected_body_drift
     );
 }
 
