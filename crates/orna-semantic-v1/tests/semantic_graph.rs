@@ -12839,6 +12839,99 @@ fn paired_checkpoint_map_shape_rebind_preserves_each_real_selector_set() {
 }
 
 #[test]
+fn sparse_checkpoint_rebind_chains_keep_paired_three_way_identity() {
+    let source = include_str!("fixtures/historical-sparse-checkpoint-three-way-rebind-chains.orna");
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "historical-sparse-checkpoint-three-way-rebind-chains.orna",
+            source,
+        )],
+        &historical_nested_callable_catalogue(),
+    );
+    let type_errors = result
+        .diagnostics
+        .iter()
+        .filter(|diagnostic| diagnostic.code() == DIAG_TYPE)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        type_errors.len(),
+        1,
+        "only the checkpoint chain that splits its paired identity should fail: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
+    let module = result
+        .modules
+        .values()
+        .find(|module| module.symbols.contains_key("accepts_sparse_checkpoint_rebind_chains"))
+        .expect("sparse checkpoint rebind fixture module");
+    let Type::Function { result, .. } = &module.symbols["accepts_sparse_checkpoint_rebind_chains"].ty else {
+        panic!("checkpoint chain must return its computed type");
+    };
+    let Type::Record(stages) = result.as_ref() else {
+        panic!("checkpoint chain must return computed stage values: {result:?}");
+    };
+    let tuple_maps = |stage: &str, lane: &str| {
+        let Type::List(row) = stages.get(stage).expect("checkpoint stage") else {
+            panic!("{stage} must retain its checkpoint rows");
+        };
+        let Type::Record(fields) = row.as_ref() else {
+            panic!("{stage} must retain its row record");
+        };
+        let Type::Tuple(slots) = fields.get(lane).expect("checkpoint lane") else {
+            panic!("{stage}.{lane} must remain a paired checkpoint tuple");
+        };
+        assert_eq!(slots.len(), 2, "{stage}.{lane} preserves both tuple slots");
+        slots
+            .iter()
+            .map(|slot| {
+                let mut selectors = BTreeSet::new();
+                collect_snapshot_contexts(slot, &mut selectors);
+                assert!(!selectors.is_empty(), "{stage}.{lane} contains real checkpoint values");
+                selectors
+            })
+            .collect::<Vec<_>>()
+    };
+    let selectors = |values: &[&str]| {
+        values
+            .iter()
+            .map(|value| format!("selector:HEAD~{value}"))
+            .collect::<BTreeSet<_>>()
+    };
+    for (stage, left, right) in [
+        (
+            "saved",
+            [selectors(&["8200", "8220", "8260"]), selectors(&["8220", "8260"])],
+            [selectors(&["8120", "8160"]), selectors(&["8100", "8120", "8160"])],
+        ),
+        (
+            "after_first_rebind",
+            [selectors(&["8320", "8360"]), selectors(&["8320", "8360"])],
+            [selectors(&["8310", "8350"]), selectors(&["8310", "8350"])],
+        ),
+        (
+            "after_second_rebind",
+            [selectors(&["8460", "8480"]), selectors(&["8460", "8480"])],
+            [selectors(&["8450", "8490"]), selectors(&["8450", "8490"])],
+        ),
+        (
+            "restored",
+            [selectors(&["8200", "8220", "8260"]), selectors(&["8220", "8260"])],
+            [selectors(&["8120", "8160"]), selectors(&["8100", "8120", "8160"])],
+        ),
+    ] {
+        assert_eq!(tuple_maps(stage, "left_checkpoint"), left, "{stage} left identity");
+        assert_eq!(tuple_maps(stage, "right_checkpoint"), right, "{stage} right identity");
+        assert_ne!(left, right, "{stage} keeps each checkpoint lane distinct");
+    }
+}
+
+#[test]
 fn tuple_checkpoint_pin_identity_survives_map_compaction_rebind() {
     let source = include_str!("fixtures/historical-tuple-checkpoint-map-compaction-rebind.orna");
     let parsed = orna_syntax_v1::parse_module(source);
