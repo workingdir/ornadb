@@ -1596,6 +1596,7 @@ version = "1.0.0"
 dependencies = [
  "orna-foundation-v1",
  "proptest",
+ "serde_json",
  "unicode-ident",
  "unicode-normalization",
 ]

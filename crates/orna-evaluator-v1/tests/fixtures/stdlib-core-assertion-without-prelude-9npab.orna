@@ -1,0 +1,4 @@
+fn core_assertion_without_prelude(): Bool {
+    assert 2 + 2 == 4;
+    true
+}
