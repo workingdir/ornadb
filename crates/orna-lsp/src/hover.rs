@@ -583,7 +583,11 @@ fn documentation_text(slice: Option<&orna_syntax::SourceSlice>) -> Option<&str> 
     })
 }
 
-fn documentation_for(parse: &Parse, name: &NamePart, modifier: Option<&str>) -> Option<String> {
+pub(crate) fn documentation_for(
+    parse: &Parse,
+    name: &NamePart,
+    modifier: Option<&str>,
+) -> Option<String> {
     let comment = parse.documentation_comment(name);
     match (modifier, comment) {
         (Some(modifier), Some(comment)) => Some(format!("{modifier}\n\n{comment}")),

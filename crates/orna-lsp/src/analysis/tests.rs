@@ -106,6 +106,86 @@ fn declaration_hovers_and_completions_reuse_syntax_doc_comments() {
 }
 
 #[test]
+fn language_model_completion_tracks_syntax_vocabulary_and_declarations() {
+    let text = include_str!("fixtures/language-model-signature.orna");
+    let parse = orna_syntax::parse(text);
+    assert!(parse.diagnostics().is_empty(), "{:?}", parse.diagnostics());
+    let completions = completion_at(&parse, None, None, None);
+
+    for keyword in orna_syntax::KEYWORDS {
+        assert!(
+            completions.iter().any(|item| {
+                item.label == *keyword && item.kind == Some(CompletionItemKind::KEYWORD)
+            }),
+            "keyword completion drift for {keyword}"
+        );
+    }
+    for scalar in orna_syntax::SCALAR_TYPES {
+        assert!(
+            completions.iter().any(|item| {
+                item.label == *scalar && item.kind == Some(CompletionItemKind::TYPE_PARAMETER)
+            }),
+            "scalar completion drift for {scalar}"
+        );
+    }
+    for declaration in parse.language_model().declarations() {
+        let name = declaration.name().parts.last().expect("declaration name");
+        let expected_kind = match declaration.kind() {
+            orna_syntax::LanguageDeclarationKind::Schema => CompletionItemKind::MODULE,
+            orna_syntax::LanguageDeclarationKind::ObjectType => CompletionItemKind::INTERFACE,
+            orna_syntax::LanguageDeclarationKind::EnumType => CompletionItemKind::ENUM,
+            orna_syntax::LanguageDeclarationKind::RecordValueType
+            | orna_syntax::LanguageDeclarationKind::PrimitiveValueType
+            | orna_syntax::LanguageDeclarationKind::OpaqueValueType => CompletionItemKind::STRUCT,
+            orna_syntax::LanguageDeclarationKind::ServerFunction
+            | orna_syntax::LanguageDeclarationKind::ClientFunction => CompletionItemKind::FUNCTION,
+        };
+        assert!(
+            completions
+                .iter()
+                .any(|item| item.label == name.text && item.kind == Some(expected_kind)),
+            "declaration completion drift for {}",
+            name.text
+        );
+    }
+}
+
+#[test]
+fn signature_help_tracks_model_parameter_order_and_doc_comments() {
+    let text = include_str!("fixtures/language-model-signature.orna");
+    let document = Document::new(
+        "file:///language-model-signature.orna".parse().unwrap(),
+        text.to_owned(),
+        1,
+    );
+    let parse = orna_syntax::parse(text);
+    assert!(parse.diagnostics().is_empty(), "{:?}", parse.diagnostics());
+    let mapper = PositionMapper::new(text);
+    let call = text.find("api.fetch_user(42, ").expect("model-backed call");
+    let cursor = call + "api.fetch_user(42, ".len();
+    let signature =
+        super::signature_help(&document, &parse, None, mapper.position(cursor), &mapper)
+            .expect("signature help from parsed function declaration");
+    assert_eq!(signature.active_parameter, Some(1));
+    let signature = &signature.signatures[0];
+    assert_eq!(
+        signature.label,
+        "SERVER FUNCTION api.fetch_user(user_id, include_archived) RETURNS INT"
+    );
+    let parameters = signature.parameters.as_ref().expect("signature parameters");
+    assert!(matches!(
+        &parameters[0].documentation,
+        Some(lsp_types::Documentation::String(documentation))
+            if documentation == "Stable user identifier."
+    ));
+    assert!(matches!(
+        &parameters[1].documentation,
+        Some(lsp_types::Documentation::String(documentation))
+            if documentation == "Include archived records."
+    ));
+}
+
+#[test]
 fn standard_library_loads_the_pinned_1_0_profile() {
     let standard = StandardLibrary::load().expect("pinned 1.0 standard must load");
     let profile = standard

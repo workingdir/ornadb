@@ -180,6 +180,10 @@ const PAIRED_SPARSE_CHECKPOINT_PIN_CHAINS: &str =
 const PAIRED_SEGMENT_FOLD_CHAIN: &str = include_str!("fixtures/paired-segment-fold-chain.orna");
 const PAIRED_SPARSE_ROTATION_SOURCE_STREAMS_F76: &str =
     include_str!("fixtures/paired-sparse-rotation-source-streams-f76.orna");
+const PAIRED_CHECKPOINT_SPILL_STREAMS_XFY5S: &str =
+    include_str!("fixtures/paired-checkpoint-spill-streams-xfy5s.orna");
+const PAIRED_NESTED_STREAM_ROTATION_COMPACTIONS_F77: &str =
+    include_str!("fixtures/paired-nested-stream-rotation-compactions-f77.orna");
 const PAIRED_COMPACTED_SEGMENT_ROTATIONS: &str =
     include_str!("fixtures/paired-compacted-segment-rotations.orna");
 const PAIRED_COMPACTED_LOG_IDENTITIES: &str =
@@ -35670,7 +35674,7 @@ fn paired_redo_fold_identity_survives_sparse_wal_merge_rotation_restore_chains()
         .map(parse_checkpoint_fixture)
         .collect::<Vec<_>>();
     assert_eq!(fold_rows.len(), 3);
-    assert_eq!(wal_rows.len(), 14);
+    assert_eq!(wal_rows.len(), 16);
     assert_eq!(states.len(), 5);
 
     let folds = fold_rows
@@ -35693,7 +35697,7 @@ fn paired_redo_fold_identity_survives_sparse_wal_merge_rotation_restore_chains()
             },
         })
         .collect::<Vec<_>>();
-    assert_eq!(log_segments.len(), 7);
+    assert_eq!(log_segments.len(), 8);
 
     let alpha = b"wal-merge-restore/alpha".to_vec();
     let beta = b"wal-merge-restore/beta".to_vec();
@@ -35735,19 +35739,46 @@ fn paired_redo_fold_identity_survives_sparse_wal_merge_rotation_restore_chains()
         }
     };
 
-    let first_batch_first_handoff = vec![stream(
-        alpha.clone(),
-        vec![run(
-            2,
-            0,
-            4,
-            5,
-            Some(left_base.clone()),
-            Some(right_base.clone()),
-            &folds[0],
-            &[0, 1],
-        )],
-    )];
+    let first_batch_first_handoff = vec![
+        stream(
+            alpha.clone(),
+            vec![
+                run(
+                    2,
+                    0,
+                    4,
+                    5,
+                    Some(left_base.clone()),
+                    Some(right_base.clone()),
+                    &folds[0],
+                    &[0, 1],
+                ),
+                run(
+                    2,
+                    1,
+                    4,
+                    4,
+                    Some(left_redo.clone()),
+                    Some(right_base.clone()),
+                    &folds[1],
+                    &[2],
+                ),
+            ],
+        ),
+        stream(
+            alpha.clone(),
+            vec![run(
+                2,
+                2,
+                4,
+                4,
+                Some(positionless.clone()),
+                None,
+                &folds[2],
+                &[7],
+            )],
+        ),
+    ];
     let first_batch_second_handoff = vec![
         stream(
             alpha.clone(),
@@ -35847,19 +35878,23 @@ fn paired_redo_fold_identity_survives_sparse_wal_merge_rotation_restore_chains()
             .map(|slot| (
                 slot.restore_ordinal,
                 slot.handoff_ordinal,
+                slot.stream_ordinal,
+                slot.compaction_ordinal,
                 slot.merge_ordinal,
                 slot.fold_ordinal,
                 slot.order,
             ))
             .collect::<Vec<_>>(),
         vec![
-            (0, 0, 2, 0, 4),
-            (0, 0, 2, 0, 5),
-            (0, 1, 5, 2, 4),
-            (1, 0, 2, 0, 4),
-            (1, 1, 3, 2, 8),
+            (0, 0, 0, 0, 2, 0, 4),
+            (0, 0, 0, 0, 2, 0, 5),
+            (0, 0, 0, 1, 2, 1, 4),
+            (0, 0, 1, 0, 2, 2, 4),
+            (0, 1, 0, 0, 5, 2, 4),
+            (1, 0, 0, 0, 2, 0, 4),
+            (1, 1, 0, 0, 3, 2, 8),
         ],
-        "restore, handoff, merge, fold, and sparse WAL order stay distinct",
+        "restore, handoff, source stream, compacted run, merge, fold, and sparse WAL order stay distinct",
     );
     assert_eq!(slots(&alpha)[0].left, Some(left_base.clone()));
     assert_eq!(slots(&alpha)[1].right, Some(right_base.clone()));
@@ -35869,9 +35904,14 @@ fn paired_redo_fold_identity_survives_sparse_wal_merge_rotation_restore_chains()
     assert_eq!(slots(&alpha)[1].log_segment_identity, log_segments[1]);
     assert_eq!(slots(&alpha)[2].log_segment_identity, log_segments[2]);
     assert_eq!(slots(&alpha)[3].left, Some(positionless.clone()));
-    assert_eq!(slots(&alpha)[3].log_segment_identity, log_segments[4]);
-    assert_eq!(slots(&alpha)[4].log_segment_identity, log_segments[5]);
+    assert_eq!(slots(&alpha)[3].log_segment_identity, log_segments[7]);
     assert_eq!(slots(&alpha)[3].redo_fold_identity, folds[2]);
+    assert_eq!(slots(&alpha)[4].log_segment_identity, log_segments[2]);
+    assert_eq!(slots(&alpha)[5].log_segment_identity, log_segments[4]);
+    assert_eq!(slots(&alpha)[6].log_segment_identity, log_segments[5]);
+    assert_eq!(slots(&alpha)[4].compaction_ordinal, 0);
+    assert_eq!(slots(&alpha)[5].restore_ordinal, 1);
+    assert_eq!(slots(&alpha)[6].stream_ordinal, 0);
     assert_eq!(slots(&beta)[0].left, Some(positionless.clone()));
     assert!(slots(&beta)[0].right.is_none());
     assert_eq!(slots(&beta)[0].log_segment_identity, log_segments[3]);
@@ -35902,8 +35942,11 @@ fn paired_redo_fold_identity_survives_sparse_wal_merge_rotation_restore_chains()
             &[vec![vec![], vec![malformed_stream(8, 6, 9, 8, vec![])]]],
         ),
         Err(orna_storage_v1::BranchMergePairedCheckpointRedoFoldWalMergeRestoreHandoffError::InvalidOrderRange {
+            checkpoint_id: alpha.clone(),
             restore_ordinal: 0,
             handoff_ordinal: 1,
+            stream_ordinal: 0,
+            compaction_ordinal: 0,
             merge_ordinal: 8,
             fold_ordinal: 6,
             first_order: 9,
@@ -35916,8 +35959,11 @@ fn paired_redo_fold_identity_survives_sparse_wal_merge_rotation_restore_chains()
             &[vec![vec![malformed_stream(4, 6, 20, 21, vec![log_segments[0].clone()])]]],
         ),
         Err(orna_storage_v1::BranchMergePairedCheckpointRedoFoldWalMergeRestoreHandoffError::LogSegmentIdentityCountMismatch {
+            checkpoint_id: alpha.clone(),
             restore_ordinal: 0,
             handoff_ordinal: 0,
+            stream_ordinal: 0,
+            compaction_ordinal: 0,
             merge_ordinal: 4,
             fold_ordinal: 6,
             first_order: 20,
@@ -36619,7 +36665,7 @@ fn paired_checkpoint_wal_pins_survive_three_sparse_compaction_restore_batches() 
         .map(parse_checkpoint_fixture)
         .collect::<Vec<_>>();
     assert_eq!(fold_rows.len(), 3);
-    assert_eq!(wal_rows.len(), 14);
+    assert_eq!(wal_rows.len(), 16);
     assert_eq!(states.len(), 5);
 
     let folds = fold_rows
@@ -36642,7 +36688,7 @@ fn paired_checkpoint_wal_pins_survive_three_sparse_compaction_restore_batches() 
             },
         })
         .collect::<Vec<_>>();
-    assert_eq!(log_segments.len(), 7);
+    assert_eq!(log_segments.len(), 8);
 
     let alpha = b"wal-pins/alpha".to_vec();
     let beta = b"wal-pins/beta".to_vec();
@@ -36788,17 +36834,19 @@ fn paired_checkpoint_wal_pins_survive_three_sparse_compaction_restore_batches() 
             .map(|slot| (
                 slot.restore_ordinal,
                 slot.handoff_ordinal,
+                slot.stream_ordinal,
+                slot.compaction_ordinal,
                 slot.merge_ordinal,
                 slot.fold_ordinal,
                 slot.order,
             ))
             .collect::<Vec<_>>(),
         vec![
-            (0, 0, 4, 2, 4),
-            (0, 0, 4, 2, 5),
-            (0, 1, 9, 1, 4),
-            (1, 0, 4, 2, 4),
-            (2, 0, 5, 0, 8),
+            (0, 0, 0, 0, 4, 2, 4),
+            (0, 0, 0, 0, 4, 2, 5),
+            (0, 1, 0, 0, 9, 1, 4),
+            (1, 0, 0, 0, 4, 2, 4),
+            (2, 0, 0, 0, 5, 0, 8),
         ],
         "restore, handoff, merge, fold, and sparse order remain distinct",
     );
@@ -36877,8 +36925,11 @@ fn paired_checkpoint_wal_pins_survive_three_sparse_compaction_restore_batches() 
             &[vec![vec![malformed(10, 9, vec![])]],],
         ),
         Err(orna_storage_v1::BranchMergePairedCheckpointRedoFoldWalMergeRestoreHandoffError::InvalidOrderRange {
+            checkpoint_id: alpha.clone(),
             restore_ordinal: 0,
             handoff_ordinal: 0,
+            stream_ordinal: 0,
+            compaction_ordinal: 0,
             merge_ordinal: 7,
             fold_ordinal: 3,
             first_order: 10,
@@ -36891,8 +36942,11 @@ fn paired_checkpoint_wal_pins_survive_three_sparse_compaction_restore_batches() 
             &[vec![vec![malformed(10, 11, vec![log_segments[0].clone()])]]],
         ),
         Err(orna_storage_v1::BranchMergePairedCheckpointRedoFoldWalMergeRestoreHandoffError::LogSegmentIdentityCountMismatch {
+            checkpoint_id: alpha.clone(),
             restore_ordinal: 0,
             handoff_ordinal: 0,
+            stream_ordinal: 0,
+            compaction_ordinal: 0,
             merge_ordinal: 7,
             fold_ordinal: 3,
             first_order: 10,
@@ -37659,5 +37713,472 @@ fn repeated_checkpoint_streams_keep_paired_identity_across_sparse_rotation_chain
             actual: 1,
         }),
         "malformed rotation runs report the full source path instead of fabricating a segment",
+    );
+}
+
+#[test]
+fn paired_redo_fold_identity_survives_sparse_checkpoint_spill_restore_chains() {
+    let source_rows = PAIRED_CHECKPOINT_SPILL_STREAMS_XFY5S
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    let fold_rows = PAIRED_REDO_FOLD_IDENTITIES
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    let states = PAIRED_CHECKPOINT_REDO
+        .split("\n\n")
+        .map(parse_checkpoint_fixture)
+        .collect::<Vec<_>>();
+    assert_eq!(source_rows.len(), 6);
+    assert_eq!(fold_rows.len(), 3);
+    assert_eq!(states.len(), 5);
+
+    let spill_id = |row: usize| source_rows[row].key.encode().unwrap();
+    let checkpoint_id = |row: usize| source_rows[row].fields[&id(2)].encode().unwrap();
+    let source_stream_id = |row: usize| source_rows[row].fields[&id(3)].encode().unwrap();
+    let alpha = checkpoint_id(0);
+    let beta = checkpoint_id(3);
+    let late = checkpoint_id(4);
+    let catalog_only = checkpoint_id(5);
+    assert_eq!(alpha, checkpoint_id(1));
+    assert_eq!(alpha, checkpoint_id(2));
+    assert_eq!(spill_id(0), spill_id(1));
+    assert_eq!(spill_id(0), spill_id(3));
+    assert_ne!(source_stream_id(0), source_stream_id(1));
+
+    let folds = fold_rows
+        .iter()
+        .map(|row| BranchMergePairedRedoFoldIdentity {
+            left_fold: row.fields[&id(2)].encode().unwrap(),
+            right_fold: row.fields[&id(3)].encode().unwrap(),
+        })
+        .collect::<Vec<_>>();
+    let left_base = states[0].clone();
+    let right_base = states[1].clone();
+    let left_redo = states[2].clone();
+    let right_redo = states[3].clone();
+    let positionless = states[4].clone();
+    assert_eq!(positionless.position, None);
+
+    let run = |handoff_ordinal,
+               fold_ordinal,
+               first_order,
+               last_order,
+               left,
+               right,
+               redo_fold_identity: &BranchMergePairedRedoFoldIdentity| {
+        orna_storage_v1::BranchMergePairedCheckpointRedoFoldSpillRunSnapshot {
+            handoff_ordinal,
+            fold_ordinal,
+            first_order,
+            last_order,
+            left,
+            right,
+            redo_fold_identity: redo_fold_identity.clone(),
+        }
+    };
+    let stream = |row, runs| {
+        orna_storage_v1::BranchMergePairedCheckpointRedoFoldSpillStreamSnapshot {
+            checkpoint_id: checkpoint_id(row),
+            source_stream_id: source_stream_id(row),
+            runs,
+        }
+    };
+    let spill = |row, streams| {
+        orna_storage_v1::BranchMergePairedCheckpointRedoFoldSpillSnapshot {
+            spill_id: spill_id(row),
+            streams,
+        }
+    };
+
+    let first_spill = spill(
+        0,
+        vec![
+            stream(
+                0,
+                vec![
+                    run(
+                        2,
+                        0,
+                        2,
+                        3,
+                        Some(left_base.clone()),
+                        Some(right_base.clone()),
+                        &folds[0],
+                    ),
+                    run(
+                        7,
+                        1,
+                        3,
+                        3,
+                        Some(left_redo.clone()),
+                        Some(right_base.clone()),
+                        &folds[1],
+                    ),
+                ],
+            ),
+            stream(
+                1,
+                vec![run(
+                    7,
+                    1,
+                    3,
+                    3,
+                    Some(positionless.clone()),
+                    None,
+                    &folds[2],
+                )],
+            ),
+            stream(
+                3,
+                vec![run(
+                    4,
+                    2,
+                    8,
+                    8,
+                    Some(positionless.clone()),
+                    None,
+                    &folds[0],
+                )],
+            ),
+        ],
+    );
+    let second_spill = spill(
+        2,
+        vec![stream(
+            2,
+            vec![run(
+                1,
+                2,
+                5,
+                5,
+                None,
+                Some(right_redo.clone()),
+                &folds[2],
+            )],
+        )],
+    );
+    let later_spills = vec![
+        spill(
+            0,
+            vec![stream(
+                0,
+                vec![run(
+                    9,
+                    1,
+                    3,
+                    3,
+                    Some(positionless.clone()),
+                    Some(right_redo.clone()),
+                    &folds[1],
+                )],
+            )],
+        ),
+        spill(
+            4,
+            vec![stream(
+                4,
+                vec![run(0, 0, 10, 10, None, None, &folds[0])],
+            )],
+        ),
+    ];
+
+    let restored = orna_storage_v1::restore_paired_checkpoint_redo_sparse_spill_chains_preserving_source_identity(
+        &[alpha.clone(), beta.clone(), catalog_only.clone()],
+        &[vec![first_spill, second_spill], later_spills],
+    )
+    .unwrap();
+    let mut expected_ids = vec![alpha.clone(), beta.clone(), catalog_only.clone(), late.clone()];
+    expected_ids.sort();
+    assert_eq!(
+        restored
+            .iter()
+            .map(|stream| stream.checkpoint_id.clone())
+            .collect::<Vec<_>>(),
+        expected_ids,
+    );
+    let slots = |checkpoint_id: &[u8]| {
+        &restored
+            .iter()
+            .find(|stream| stream.checkpoint_id == checkpoint_id)
+            .unwrap()
+            .slots
+    };
+    assert_eq!(
+        slots(&alpha)
+            .iter()
+            .map(|slot| (
+                slot.restore_ordinal,
+                slot.spill_ordinal,
+                slot.spill_id.clone(),
+                slot.stream_ordinal,
+                slot.source_stream_id.clone(),
+                slot.compaction_ordinal,
+                slot.handoff_ordinal,
+                slot.fold_ordinal,
+                slot.order,
+            ))
+            .collect::<Vec<_>>(),
+        vec![
+            (0, 0, spill_id(0), 0, source_stream_id(0), 0, 2, 0, 2),
+            (0, 0, spill_id(0), 0, source_stream_id(0), 0, 2, 0, 3),
+            (0, 0, spill_id(0), 0, source_stream_id(0), 1, 7, 1, 3),
+            (0, 0, spill_id(0), 1, source_stream_id(1), 0, 7, 1, 3),
+            (0, 1, spill_id(2), 0, source_stream_id(2), 0, 1, 2, 5),
+            (1, 0, spill_id(0), 0, source_stream_id(0), 0, 9, 1, 3),
+        ],
+        "spill, stream, compaction, handoff, fold, and order identities remain independent",
+    );
+    assert_eq!(slots(&alpha)[0].left, Some(left_base.clone()));
+    assert_eq!(slots(&alpha)[1].right, Some(right_base.clone()));
+    assert_eq!(slots(&alpha)[2].left, Some(left_redo.clone()));
+    assert_eq!(slots(&alpha)[2].redo_fold_identity, folds[1]);
+    assert_eq!(slots(&alpha)[3].left, Some(positionless.clone()));
+    assert!(slots(&alpha)[3].right.is_none());
+    assert_eq!(slots(&alpha)[3].redo_fold_identity, folds[2]);
+    assert!(slots(&alpha)[4].left.is_none());
+    assert_eq!(slots(&alpha)[4].right, Some(right_redo.clone()));
+    assert_eq!(slots(&alpha)[4].redo_fold_identity, folds[2]);
+    assert_eq!(slots(&alpha)[5].left, Some(positionless.clone()));
+    assert_eq!(slots(&alpha)[5].right, Some(right_redo.clone()));
+    assert_eq!(slots(&alpha)[5].redo_fold_identity, folds[1]);
+    assert_eq!(slots(&beta)[0].left, Some(positionless.clone()));
+    assert_eq!(slots(&beta)[0].redo_fold_identity, folds[0]);
+    assert!(slots(&catalog_only).is_empty());
+    assert_eq!(slots(&late).len(), 1);
+    assert!(slots(&late)[0].left.is_none());
+    assert!(slots(&late)[0].right.is_none());
+    assert_eq!(slots(&late)[0].source_stream_id, source_stream_id(4));
+
+    let malformed = spill(
+        0,
+        vec![stream(
+            1,
+            vec![run(6, 8, 10, 9, None, None, &folds[0])],
+        )],
+    );
+    assert_eq!(
+        orna_storage_v1::restore_paired_checkpoint_redo_sparse_spill_chains_preserving_source_identity(
+            &[],
+            &[vec![malformed]],
+        ),
+        Err(orna_storage_v1::BranchMergePairedCheckpointRedoFoldSpillRestoreError::InvalidOrderRange {
+            checkpoint_id: alpha,
+            restore_ordinal: 0,
+            spill_ordinal: 0,
+            spill_id: spill_id(0),
+            stream_ordinal: 0,
+            source_stream_id: source_stream_id(1),
+            compaction_ordinal: 0,
+            handoff_ordinal: 6,
+            fold_ordinal: 8,
+            first_order: 10,
+            last_order: 9,
+        }),
+    );
+}
+
+#[test]
+fn nested_rotation_compactions_keep_every_three_way_stream_identity() {
+    let segment_rows = PAIRED_NESTED_STREAM_ROTATION_COMPACTIONS_F77
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    let fold_rows = PAIRED_REDO_FOLD_IDENTITIES
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    let states = PAIRED_CHECKPOINT_REDO
+        .split("\n\n")
+        .map(parse_checkpoint_fixture)
+        .collect::<Vec<_>>();
+    assert_eq!(segment_rows.len(), 8);
+    assert!(fold_rows.len() >= 3);
+    assert!(states.len() >= 5);
+
+    let segments = segment_rows
+        .iter()
+        .map(|row| BranchMergePairedWriteAheadSegmentIdentity {
+            left_segment: row.fields[&id(2)].encode().unwrap(),
+            right_segment: row.fields[&id(3)].encode().unwrap(),
+        })
+        .collect::<Vec<_>>();
+    let folds = fold_rows
+        .iter()
+        .map(|row| BranchMergePairedRedoFoldIdentity {
+            left_fold: row.fields[&id(2)].encode().unwrap(),
+            right_fold: row.fields[&id(3)].encode().unwrap(),
+        })
+        .collect::<Vec<_>>();
+    let alpha = b"a/f77/checkpoint/alpha".to_vec();
+    let beta = b"b/f77/checkpoint/beta".to_vec();
+    let late = b"m/f77/checkpoint/late".to_vec();
+    let catalog_only = b"z/f77/checkpoint/catalog-only".to_vec();
+    let run = |merge_ordinal: usize,
+               source_stream_ordinal: usize,
+               fold_ordinal: usize,
+               first_order: u64,
+               last_order: u64,
+               left_state: Option<usize>,
+               right_state: Option<usize>,
+               fold_identity: usize,
+               segment_indices: &[usize]| {
+        orna_storage_v1::BranchMergePairedCheckpointRedoFoldSegmentRotationSparseSourceStreamCompactionRunSnapshot {
+            merge_ordinal,
+            source_stream_ordinal,
+            fold_ordinal,
+            first_order,
+            last_order,
+            left: left_state.map(|index| states[index].clone()),
+            right: right_state.map(|index| states[index].clone()),
+            redo_fold_identity: folds[fold_identity].clone(),
+            segment_identities: segment_indices
+                .iter()
+                .map(|&index| segments[index].clone())
+                .collect(),
+        }
+    };
+    let stream = |checkpoint_id: &[u8], runs| {
+        orna_storage_v1::BranchMergePairedCheckpointRedoFoldSegmentRotationSparseSourceStreamCompactionSnapshot {
+            checkpoint_id: checkpoint_id.to_vec(),
+            runs,
+        }
+    };
+    let restore_handoffs = vec![
+        vec![
+            vec![
+                stream(
+                    &alpha,
+                    vec![
+                        run(2, 1, 0, 4, 5, Some(0), Some(1), 0, &[0, 1]),
+                        run(2, 1, 0, 7, 7, Some(0), Some(1), 0, &[2]),
+                    ],
+                ),
+                stream(
+                    &alpha,
+                    vec![run(2, 1, 1, 4, 4, Some(2), None, 1, &[3])],
+                ),
+                stream(
+                    &beta,
+                    vec![run(4, 0, 2, 8, 8, Some(3), None, 2, &[4])],
+                ),
+                stream(
+                    &late,
+                    vec![run(5, 2, 2, 12, 12, None, None, 2, &[7])],
+                ),
+            ],
+            vec![stream(
+                &alpha,
+                vec![run(2, 1, 2, 4, 4, Some(4), Some(3), 2, &[5])],
+            )],
+        ],
+        vec![vec![stream(
+            &alpha,
+            vec![run(2, 1, 0, 4, 4, Some(0), Some(4), 0, &[6])],
+        )]],
+    ];
+
+    let restored =
+        orna_storage_v1::restore_paired_checkpoint_redo_sparse_segment_rotation_nested_source_stream_compaction_handoffs_preserving_pin_identity(
+            &[alpha.clone(), beta.clone(), catalog_only.clone()],
+            &restore_handoffs,
+        )
+        .unwrap();
+    assert_eq!(
+        restored
+            .iter()
+            .map(|stream| stream.checkpoint_id.clone())
+            .collect::<Vec<_>>(),
+        vec![alpha.clone(), beta.clone(), late.clone(), catalog_only.clone()],
+    );
+    let slots = |checkpoint_id: &[u8]| {
+        &restored
+            .iter()
+            .find(|stream| stream.checkpoint_id == checkpoint_id)
+            .unwrap()
+            .slots
+    };
+    assert_eq!(
+        slots(&alpha)
+            .iter()
+            .map(|slot| (
+                slot.restore_ordinal,
+                slot.handoff_ordinal,
+                slot.restore_stream_ordinal,
+                slot.compaction_ordinal,
+                slot.merge_ordinal,
+                slot.source_stream_ordinal,
+                slot.fold_ordinal,
+                slot.order,
+            ))
+            .collect::<Vec<_>>(),
+        vec![
+            (0, 0, 0, 0, 2, 1, 0, 4),
+            (0, 0, 0, 0, 2, 1, 0, 5),
+            (0, 0, 0, 1, 2, 1, 0, 7),
+            (0, 0, 1, 0, 2, 1, 1, 4),
+            (0, 1, 0, 0, 2, 1, 2, 4),
+            (1, 0, 0, 0, 2, 1, 0, 4),
+        ],
+        "batch, handoff, stream, run, merge, source stream, fold, and order stay distinct",
+    );
+    let pin = |checkpoint_id: &[u8], state: usize, segment: usize, left_side: bool| {
+        Some(orna_storage_v1::BranchMergePairedCheckpointSegmentPinIdentity {
+            checkpoint_id: checkpoint_id.to_vec(),
+            generation: states[state].clone(),
+            segment_id: if left_side {
+                segments[segment].left_segment.clone()
+            } else {
+                segments[segment].right_segment.clone()
+            },
+        })
+    };
+    let alpha_expected = [
+        (pin(&alpha, 0, 0, true), pin(&alpha, 1, 0, false), 0, 0),
+        (pin(&alpha, 0, 1, true), pin(&alpha, 1, 1, false), 0, 1),
+        (pin(&alpha, 0, 2, true), pin(&alpha, 1, 2, false), 0, 2),
+        (pin(&alpha, 2, 3, true), None, 1, 3),
+        (pin(&alpha, 4, 5, true), pin(&alpha, 3, 5, false), 2, 5),
+        (pin(&alpha, 0, 6, true), pin(&alpha, 4, 6, false), 0, 6),
+    ];
+    for (slot, (left_pin, right_pin, fold_identity, segment_identity)) in
+        slots(&alpha).iter().zip(alpha_expected)
+    {
+        assert_eq!(slot.left_pin, left_pin);
+        assert_eq!(slot.right_pin, right_pin);
+        assert_eq!(slot.redo_fold_identity, folds[fold_identity]);
+        assert_eq!(slot.segment_identity, segments[segment_identity]);
+    }
+    assert_eq!(slots(&beta)[0].left_pin, pin(&beta, 3, 4, true));
+    assert!(slots(&beta)[0].right_pin.is_none());
+    assert!(slots(&late)[0].left_pin.is_none());
+    assert!(slots(&late)[0].right_pin.is_none());
+    assert_eq!(slots(&late)[0].segment_identity, segments[7]);
+    assert!(slots(&catalog_only).is_empty());
+
+    let malformed = stream(
+        &alpha,
+        vec![run(9, 7, 6, 20, 21, Some(0), None, 0, &[0])],
+    );
+    assert_eq!(
+        orna_storage_v1::restore_paired_checkpoint_redo_sparse_segment_rotation_nested_source_stream_compaction_handoffs_preserving_pin_identity(
+            &[],
+            &[vec![vec![malformed]]],
+        ),
+        Err(orna_storage_v1::BranchMergePairedCheckpointRedoFoldSegmentRotationNestedSourceStreamRestoreHandoffError::SegmentIdentityCountMismatch {
+            restore_ordinal: 0,
+            handoff_ordinal: 0,
+            restore_stream_ordinal: 0,
+            compaction_ordinal: 0,
+            merge_ordinal: 9,
+            source_stream_ordinal: 7,
+            fold_ordinal: 6,
+            first_order: 20,
+            last_order: 21,
+            expected: 2,
+            actual: 1,
+        }),
+        "an incomplete nested rotation reports all scopes instead of inventing an identity",
     );
 }
