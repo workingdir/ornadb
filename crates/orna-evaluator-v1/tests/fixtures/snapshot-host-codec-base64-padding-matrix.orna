@@ -1,0 +1,8 @@
+[
+    std.encoding.base64.decode(""),
+    std.encoding.base64.decode("AA=="),
+    std.encoding.base64.decode("AAE="),
+    std.encoding.base64.decode("AAEC"),
+    std.encoding.base64.decode("/w=="),
+    std.encoding.base64.decode("/+4=")
+]
