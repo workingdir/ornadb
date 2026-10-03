@@ -1138,6 +1138,115 @@ fn divergent_paired_module_projects() -> (TempDir, [LoadedProject; 4], [String; 
     )
 }
 
+fn paired_divergence_restoration_projects()
+-> (TempDir, [LoadedProject; 6], [String; 6], [String; 6]) {
+    let (directory, projects, pins) = divergent_paired_module_projects();
+    let [
+        base_project,
+        math_project,
+        collection_project,
+        paired_project,
+    ] = projects;
+    let project_path = directory.path().join("project");
+    let standard_path = project_path.join("stdlib/std");
+
+    // Restore each source from the captured baseline pin, preserving each restoration as a new pin.
+    git_output_at(&standard_path, &["checkout", "--detach", pins[3].as_str()]);
+    git_output_at(
+        &standard_path,
+        &["checkout", pins[0].as_str(), "--", "math.orna"],
+    );
+    commit_directory(
+        &standard_path,
+        "restore math source from captured baseline pin",
+    );
+    let math_restored_pin = git_output_at(&standard_path, &["rev-parse", "HEAD"]);
+    git_output_at(
+        &standard_path,
+        &["branch", "math-restoration-pin", math_restored_pin.as_str()],
+    );
+    let math_restored_parent = capture_standard_gitlink(
+        &project_path,
+        &math_restored_pin,
+        "capture math source restoration from baseline pin",
+    );
+
+    git_output_at(
+        &standard_path,
+        &["checkout", "--detach", math_restored_pin.as_str()],
+    );
+    git_output_at(
+        &standard_path,
+        &["checkout", pins[0].as_str(), "--", "collection.orna"],
+    );
+    commit_directory(
+        &standard_path,
+        "restore collection source from captured baseline pin",
+    );
+    let restored_pin = git_output_at(&standard_path, &["rev-parse", "HEAD"]);
+    git_output_at(
+        &standard_path,
+        &["branch", "paired-restoration-pin", restored_pin.as_str()],
+    );
+    let restored_parent = capture_standard_gitlink(
+        &project_path,
+        &restored_pin,
+        "capture paired source restoration from baseline pin",
+    );
+
+    let repository = Repository::discover(&project_path).unwrap();
+    let loader = ProjectLoader::default();
+    let load = |parent: &str| {
+        let snapshot = repository.resolve_snapshot(parent).unwrap();
+        loader
+            .load_committed_snapshot(&repository, &snapshot)
+            .unwrap()
+    };
+    let math_restored_project = load(&math_restored_parent);
+    let restored_project = load(&restored_parent);
+    let project_parents = pins
+        .iter()
+        .map(|pin| {
+            git_output_at(&project_path, &["rev-list", "--all", "--reverse"])
+                .lines()
+                .find(|commit| {
+                    git_output_at(&project_path, &["ls-tree", commit, "stdlib/std"])
+                        .split_whitespace()
+                        .nth(2)
+                        == Some(pin.as_str())
+                })
+                .expect("every captured pin must have a project snapshot")
+                .to_owned()
+        })
+        .collect::<Vec<_>>();
+    let project_parents: [String; 6] = project_parents
+        .into_iter()
+        .chain([math_restored_parent, restored_parent])
+        .collect::<Vec<_>>()
+        .try_into()
+        .unwrap();
+    (
+        directory,
+        [
+            base_project,
+            math_project,
+            collection_project,
+            paired_project,
+            math_restored_project,
+            restored_project,
+        ],
+        [
+            pins[0].clone(),
+            pins[1].clone(),
+            pins[2].clone(),
+            pins[3].clone(),
+            math_restored_pin,
+            restored_pin,
+        ],
+        project_parents,
+    )
+}
+
 fn paired_divergence_convergence_projects() -> (TempDir, [LoadedProject; 5], [String; 5]) {
     let (directory, projects, pins) = divergent_paired_module_projects();
     let [
@@ -4433,6 +4542,171 @@ fn captured_nested_closures_keep_paired_pin_identity_across_divergence_folds() {
             cloned_sessions[index].submit(replay),
             Ok(Some(ints(&expected[index]))),
             "cloned nested closure must retain paired pin {}",
+            pins[index]
+        );
+    }
+}
+
+#[test]
+fn captured_snapshot_identity_survives_paired_divergence_restoration_folds() {
+    let (directory, projects, pins, project_parents) = paired_divergence_restoration_projects();
+    let expected = [
+        [40, 4, 44, 40, 4, 44, 1_014, 1_015],
+        [50, 4, 54, 50, 4, 54, 10_014, 10_015],
+        [40, 5, 45, 40, 5, 45, 1_014, 1_015],
+        [50, 5, 55, 50, 5, 55, 10_014, 10_015],
+        [40, 5, 45, 40, 5, 45, 1_014, 1_015],
+        [40, 4, 44, 40, 4, 44, 1_014, 1_015],
+    ];
+    let expected_math = [
+        include_str!("fixtures/module-upgrade-std-v3.orna"),
+        include_str!("fixtures/module-upgrade-std-v4.orna"),
+        include_str!("fixtures/module-upgrade-std-v3.orna"),
+        include_str!("fixtures/module-upgrade-std-v4.orna"),
+        include_str!("fixtures/module-upgrade-std-v3.orna"),
+        include_str!("fixtures/module-upgrade-std-v3.orna"),
+    ];
+    let expected_collection = [
+        include_str!("fixtures/module-upgrade-std-collection-v4.orna"),
+        include_str!("fixtures/module-upgrade-std-collection-v4.orna"),
+        include_str!("fixtures/module-upgrade-std-collection-v5.orna"),
+        include_str!("fixtures/module-upgrade-std-collection-v5.orna"),
+        include_str!("fixtures/module-upgrade-std-collection-v5.orna"),
+        include_str!("fixtures/module-upgrade-std-collection-v4.orna"),
+    ];
+    let imports = include_str!("fixtures/module-upgrade-paired-divergence-use.orna");
+    let closure = include_str!("fixtures/module-upgrade-divergence-restoration-closure.orna");
+    let replay = include_str!("fixtures/module-upgrade-divergence-restoration-replay.orna");
+    let standard_path = directory.path().join("project/stdlib/std");
+
+    assert!(
+        pins.iter()
+            .enumerate()
+            .all(|(index, pin)| !pins[..index].contains(pin)),
+        "restoration folds must preserve each captured commit identity"
+    );
+    for (pin, parent) in [
+        (pins[4].as_str(), pins[3].as_str()),
+        (pins[5].as_str(), pins[4].as_str()),
+    ] {
+        let ancestry = git_output_at(&standard_path, &["rev-list", "--parents", "-n", "1", pin]);
+        let ancestry = ancestry.split_whitespace().collect::<Vec<_>>();
+        assert_eq!(
+            ancestry.len(),
+            2,
+            "each restoration pin extends one captured pin"
+        );
+        assert_eq!(
+            ancestry[1], parent,
+            "restoration retains its source pin as parent"
+        );
+    }
+    let baseline_tree = git_output_at(
+        &standard_path,
+        &["rev-parse", &format!("{}^{{tree}}", pins[0])],
+    );
+    let collection_branch_tree = git_output_at(
+        &standard_path,
+        &["rev-parse", &format!("{}^{{tree}}", pins[2])],
+    );
+    let math_restoration_tree = git_output_at(
+        &standard_path,
+        &["rev-parse", &format!("{}^{{tree}}", pins[4])],
+    );
+    let final_restoration_tree = git_output_at(
+        &standard_path,
+        &["rev-parse", &format!("{}^{{tree}}", pins[5])],
+    );
+    assert_eq!(
+        math_restoration_tree, collection_branch_tree,
+        "restoring math recovers the collection-only source tree"
+    );
+    assert_eq!(
+        final_restoration_tree, baseline_tree,
+        "restoring both sources recovers the captured baseline tree"
+    );
+    assert_ne!(
+        pins[5], pins[0],
+        "restored source equality must retain the new restoration commit identity"
+    );
+    for (index, (parent, pin)) in project_parents.iter().zip(&pins).enumerate() {
+        let gitlink = git_output_at(
+            &directory.path().join("project"),
+            &["ls-tree", parent.as_str(), "stdlib/std"],
+        );
+        assert_eq!(
+            gitlink.split_whitespace().nth(2),
+            Some(pin.as_str()),
+            "project snapshot {index} must record its captured standard pin"
+        );
+    }
+    for (restoration_index, previous_index) in [(4, 3), (5, 4)] {
+        let ancestry = git_output_at(
+            &directory.path().join("project"),
+            &[
+                "rev-list",
+                "--parents",
+                "-n",
+                "1",
+                project_parents[restoration_index].as_str(),
+            ],
+        );
+        let ancestry = ancestry.split_whitespace().collect::<Vec<_>>();
+        assert_eq!(ancestry.len(), 2, "each restoration snapshot has one parent");
+        assert_eq!(
+            ancestry[1], project_parents[previous_index],
+            "project restoration snapshots preserve the paired fold chain"
+        );
+    }
+
+    let mut sessions = Vec::with_capacity(projects.len());
+    for (index, project) in projects.iter().enumerate() {
+        assert_eq!(
+            project.standard_profile().unwrap().snapshot(),
+            &pins[index],
+            "restoration history {index} must load its captured standard pin"
+        );
+        assert_eq!(
+            standard_source(project, "std/math.orna"),
+            expected_math[index]
+        );
+        assert_eq!(
+            standard_source(project, "std/collection.orna"),
+            expected_collection[index]
+        );
+        let mut session = AdmittedReplSession::from_loaded_project(
+            project,
+            project.standard_sources().iter().cloned(),
+            Limits::default(),
+        )
+        .unwrap();
+        for import in imports.lines() {
+            assert_eq!(session.submit(import), Ok(None));
+        }
+        assert_eq!(session.submit(closure), Ok(None));
+        assert_eq!(
+            session.submit(replay),
+            Ok(Some(ints(&expected[index]))),
+            "nested closure replay must compute from restoration pin {}",
+            pins[index]
+        );
+        sessions.push(session);
+    }
+
+    for index in [5, 0, 4, 3, 2, 1, 5, 2, 0, 4] {
+        assert_eq!(
+            sessions[index].submit(replay),
+            Ok(Some(ints(&expected[index]))),
+            "interleaved replay must retain restoration pin {}",
+            pins[index]
+        );
+    }
+    let mut cloned_sessions = sessions.clone();
+    for index in [4, 5, 1, 3, 0, 2] {
+        assert_eq!(
+            cloned_sessions[index].submit(replay),
+            Ok(Some(ints(&expected[index]))),
+            "cloned replay must retain restoration pin {}",
             pins[index]
         );
     }
