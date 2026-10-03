@@ -1,0 +1,9 @@
+
+// Pragmatic profile extension: a finite recursive query is evaluated in
+// breadth-first rounds. The recursive term runs once per frontier value, and
+// its returned rows form the next round. Canonical distinct identity is folded
+// across the anchor and every round; first-seen order is observable. Evaluator
+// limits bound nonterminating expansions. The Orna 1.0.0 reference does not
+// prescribe recursive CTE syntax.
+pub fn recursive_cte<T>(anchor: [T], recursive_term: fn(T): [T]): [T] =
+    __recursive_cte(anchor, recursive_term);
