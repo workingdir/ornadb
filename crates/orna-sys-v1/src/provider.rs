@@ -332,6 +332,27 @@ pub enum ProviderDiagnostic {
         code: FailureCode,
     },
     ProviderNotExecutable(SemanticRoleId),
+    ArgumentCountMismatch {
+        operation: OperationId,
+        expected: usize,
+        actual: usize,
+    },
+    ArgumentTypeMismatch {
+        operation: OperationId,
+        parameter: String,
+        expected: String,
+        actual: String,
+    },
+    ResultTypeMismatch {
+        operation: OperationId,
+        expected: String,
+        actual: String,
+    },
+    ProviderNotSelected {
+        role: SemanticRoleId,
+        expected: ProviderOffer,
+        provided: ProviderOffer,
+    },
 }
 
 impl ProviderDiagnostic {
@@ -347,7 +368,87 @@ impl ProviderDiagnostic {
             Self::EffectIncompatible(_) => "sys.abi.effect_incompatible",
             Self::UndeclaredFailure { .. } => "sys.abi.undeclared_failure",
             Self::ProviderNotExecutable(_) => "sys.abi.provider_not_executable",
+            Self::ArgumentCountMismatch { .. } => "sys.abi.argument_count_mismatch",
+            Self::ArgumentTypeMismatch { .. } => "sys.abi.argument_type_mismatch",
+            Self::ResultTypeMismatch { .. } => "sys.abi.result_type_mismatch",
+            Self::ProviderNotSelected { .. } => "sys.abi.provider_not_selected",
         }
+    }
+}
+
+fn split_applied_type<'a>(actual: &'a str, constructor: &str) -> Option<Vec<&'a str>> {
+    let arguments = actual
+        .strip_prefix(constructor)?
+        .strip_prefix('<')?
+        .strip_suffix('>')?;
+    let mut result = Vec::new();
+    let mut start = 0;
+    let mut angle_depth = 0usize;
+    let mut list_depth = 0usize;
+    for (index, character) in arguments.char_indices() {
+        match character {
+            '<' => angle_depth += 1,
+            '>' => angle_depth = angle_depth.checked_sub(1)?,
+            '[' => list_depth += 1,
+            ']' => list_depth = list_depth.checked_sub(1)?,
+            ',' if angle_depth == 0 && list_depth == 0 => {
+                result.push(arguments[start..index].trim());
+                start = index + character.len_utf8();
+            }
+            _ => {}
+        }
+    }
+    if angle_depth != 0 || list_depth != 0 {
+        return None;
+    }
+    result.push(arguments[start..].trim());
+    Some(result)
+}
+
+fn matches_abi_type(
+    expected: &AbiType,
+    actual: &str,
+    type_parameters: &[String],
+    inferred_types: &mut BTreeMap<String, String>,
+) -> bool {
+    match expected {
+        AbiType::Named(name) if type_parameters.iter().any(|parameter| parameter == name) => {
+            if actual.is_empty() {
+                return false;
+            }
+            match inferred_types.get(name) {
+                Some(inferred) => inferred == actual,
+                None => {
+                    inferred_types.insert(name.clone(), actual.to_owned());
+                    true
+                }
+            }
+        }
+        AbiType::Named(name) => name == actual,
+        AbiType::Applied {
+            constructor,
+            arguments,
+        } => {
+            let Some(actual_arguments) = split_applied_type(actual, constructor) else {
+                return false;
+            };
+            arguments.len() == actual_arguments.len()
+                && arguments
+                    .iter()
+                    .zip(actual_arguments)
+                    .all(|(expected, actual)| {
+                        matches_abi_type(expected, actual, type_parameters, inferred_types)
+                    })
+        }
+        AbiType::List(element) => actual
+            .strip_prefix('[')
+            .and_then(|actual| actual.strip_suffix(']'))
+            .is_some_and(|actual| {
+                matches_abi_type(element, actual, type_parameters, inferred_types)
+            }),
+        AbiType::Optional(inner) => actual
+            .strip_suffix('?')
+            .is_some_and(|actual| matches_abi_type(inner, actual, type_parameters, inferred_types)),
     }
 }
 
@@ -553,14 +654,26 @@ impl SystemProviderAbi {
     }
 
     /// Resolve a provider-bound operation, check its preconditions and role
-    /// offer, then invoke the selected provider. Provider failures cross this
-    /// boundary only when the typed operation contract declares their code.
+    /// offer, then invoke the baked provider selected by this table. Callers
+    /// using a replaceable or dynamically bound provider must dispatch through
+    /// [`ProviderRoleRegistry::dispatch_to_provider`].
     pub fn dispatch_to_provider(
         &self,
         operation: &str,
         provider: &dyn SystemOperationProvider,
         arguments: &[TypedValue],
         check: impl FnMut(&Precondition) -> Result<(), FailureCode>,
+    ) -> Result<SystemDispatchResult<TypedValue>, ProviderDiagnostic> {
+        self.dispatch_to_provider_with_selected_offer(operation, provider, arguments, check, None)
+    }
+
+    fn dispatch_to_provider_with_selected_offer(
+        &self,
+        operation: &str,
+        provider: &dyn SystemOperationProvider,
+        arguments: &[TypedValue],
+        check: impl FnMut(&Precondition) -> Result<(), FailureCode>,
+        selected_offer: Option<&ProviderOffer>,
     ) -> Result<SystemDispatchResult<TypedValue>, ProviderDiagnostic> {
         let contract = match self.check_preconditions(operation, check) {
             Ok(contract) => contract,
@@ -579,9 +692,81 @@ impl SystemProviderAbi {
             .get(role_id)
             .expect("validated operation role is in the dispatch table");
         validate_provider_offer(role, provider.offer())?;
+        match selected_offer {
+            Some(expected) if provider.offer() != expected => {
+                return Err(ProviderDiagnostic::ProviderNotSelected {
+                    role: role.id.clone(),
+                    expected: expected.clone(),
+                    provided: provider.offer().clone(),
+                });
+            }
+            Some(_) => {}
+            None => {
+                let Some(expected_provider) = &role.builtin_provider else {
+                    return Err(ProviderDiagnostic::RoleUnavailable {
+                        role: role.id.clone(),
+                        version: role.version,
+                    });
+                };
+                let expected = ProviderOffer {
+                    provider: expected_provider.clone(),
+                    role: role.id.clone(),
+                    version: role.version,
+                    effects: role.effects.clone(),
+                };
+                if provider.offer() != &expected {
+                    return Err(ProviderDiagnostic::ProviderNotSelected {
+                        role: role.id.clone(),
+                        expected,
+                        provided: provider.offer().clone(),
+                    });
+                }
+            }
+        }
+
+        if arguments.len() != contract.signature.parameters.len() {
+            return Err(ProviderDiagnostic::ArgumentCountMismatch {
+                operation: contract.id.clone(),
+                expected: contract.signature.parameters.len(),
+                actual: arguments.len(),
+            });
+        }
+        let mut inferred_types = BTreeMap::new();
+        for (parameter, argument) in contract.signature.parameters.iter().zip(arguments) {
+            let actual = argument.static_type().as_str();
+            if !matches_abi_type(
+                &parameter.ty,
+                actual,
+                &contract.signature.type_parameters,
+                &mut inferred_types,
+            ) {
+                return Err(ProviderDiagnostic::ArgumentTypeMismatch {
+                    operation: contract.id.clone(),
+                    parameter: parameter.name.clone(),
+                    expected: parameter.ty.canonical(),
+                    actual: actual.to_owned(),
+                });
+            }
+        }
 
         match provider.invoke(&contract.id, arguments) {
-            Ok(value) => Ok(SystemDispatchResult::Returned(value)),
+            Ok(value) => {
+                let expected = contract.signature.result.canonical();
+                let actual = value.static_type().as_str();
+                if !matches_abi_type(
+                    &contract.signature.result,
+                    actual,
+                    &contract.signature.type_parameters,
+                    &mut inferred_types,
+                ) {
+                    return Err(ProviderDiagnostic::ResultTypeMismatch {
+                        operation: contract.id.clone(),
+                        expected,
+                        actual: actual.to_owned(),
+                    });
+                }
+                Ok(SystemDispatchResult::Returned(value))
+            }
             Err(failure) => {
                 self.validate_failure(operation, &failure.code)?;
                 Ok(SystemDispatchResult::Failed(failure.code))
@@ -758,6 +943,34 @@ impl ProviderRoleRegistry {
         };
         validate_provider_offer(contract, offer)?;
         Ok(offer)
+    }
+
+    /// Dispatches only through the provider offer selected in this registry.
+    /// The typed table still validates the operation contract and provider ABI;
+    /// this link check prevents a compatible but unselected implementation
+    /// from being substituted at the call site.
+    pub fn dispatch_to_provider(
+        &self,
+        abi: &SystemDispatchTable,
+        operation: &str,
+        provider: &dyn SystemOperationProvider,
+        arguments: &[TypedValue],
+        check: impl FnMut(&Precondition) -> Result<(), FailureCode>,
+    ) -> Result<SystemDispatchResult<TypedValue>, ProviderDiagnostic> {
+        let Some(contract) = abi.operation(operation) else {
+            return abi.dispatch_to_provider(operation, provider, arguments, check);
+        };
+        let Some(role_id) = &contract.role else {
+            return abi.dispatch_to_provider(operation, provider, arguments, check);
+        };
+        let expected = self.resolve(role_id.as_str())?;
+        abi.dispatch_to_provider_with_selected_offer(
+            operation,
+            provider,
+            arguments,
+            check,
+            Some(expected),
+        )
     }
 
     pub fn validate_required(&self) -> Result<(), ProviderDiagnostic> {

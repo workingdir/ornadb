@@ -1,0 +1,1 @@
+fn pinned_middle(seed: Int) = pinned_leaf(seed) + std.math.shift(seed + 1);

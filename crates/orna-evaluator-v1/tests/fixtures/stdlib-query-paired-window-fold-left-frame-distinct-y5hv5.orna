@@ -1,0 +1,4 @@
+let left_frame_folds: [[Int]] = collection_ops.map(
+    left_frames,
+    frame => collection_ops.distinct(frame)
+);

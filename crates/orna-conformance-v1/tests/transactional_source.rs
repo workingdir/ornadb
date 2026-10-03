@@ -425,6 +425,58 @@ fn parsed_paired_folds_observe_nested_activation_writes_and_keep_row_identity() 
 }
 
 #[test]
+fn parsed_paired_subscription_folds_compute_candidate_values() {
+    let mut runtime = TransactionalEvaluator::new("parent", Limits::default());
+    let outcome = runtime.execute_source(&fixture_source(include_str!(
+        "fixtures/paired-read-your-writes-subscription-handoff.orna"
+    )));
+
+    assert!(matches!(outcome, StageOutcome::Passed), "{outcome:?}");
+    let one = runtime
+        .committed_row("Note", &Value::int(1.into()))
+        .expect("seeded first paired row commits");
+    assert_eq!(row_field(one, "amount"), &Raw::Int(10.into()));
+    let two = runtime
+        .committed_row("Note", &Value::int(2.into()))
+        .expect("seeded second paired row commits");
+    assert_eq!(row_field(two, "amount"), &Raw::Int(25.into()));
+    assert_eq!(row_field(two, "label"), &Raw::Text("rebound".into()));
+    let three = runtime
+        .committed_row("Note", &Value::int(3.into()))
+        .expect("seeded third paired row commits");
+    assert_eq!(row_field(three, "amount"), &Raw::Int(30.into()));
+    let four = runtime
+        .committed_row("Note", &Value::int(4.into()))
+        .expect("row inserted after the first paired fold commits");
+    assert_eq!(row_field(four, "amount"), &Raw::Int(40.into()));
+    assert_eq!(row_field(four, "label"), &Raw::Text("stable".into()));
+}
+
+#[test]
+fn parsed_paired_subscription_handoffs_retain_scopes_across_read_your_writes() {
+    let mut runtime = TransactionalEvaluator::new("parent", Limits::default());
+    let outcome = runtime.execute_source(&fixture_source(include_str!(
+        "fixtures/paired-read-your-writes-sequential-handoff.orna"
+    )));
+
+    assert!(matches!(outcome, StageOutcome::Passed), "{outcome:?}");
+    let expected = [
+        (1, 11, "rebound"),
+        (2, 25, "rebound"),
+        (3, 33, "stable"),
+        (4, 40, "stable"),
+        (5, 50, "new"),
+    ];
+    for (id, amount, label) in expected {
+        let row = runtime
+            .committed_row("Note", &Value::int(id.into()))
+            .unwrap_or_else(|| panic!("paired handoff should commit Note row {id}"));
+        assert_eq!(row_field(row, "amount"), &Raw::Int(amount.into()), "row {id}");
+        assert_eq!(row_field(row, "label"), &Raw::Text(label.into()), "row {id}");
+    }
+}
+
+#[test]
 fn parsed_filter_count_failure_rolls_back_candidate_rows() {
     let mut runtime = TransactionalEvaluator::new("parent", Limits::default());
     let outcome = runtime.execute_source(&fixture_source(include_str!(

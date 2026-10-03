@@ -451,6 +451,38 @@ fn incremental_scoped_view_body() -> Expr {
     terminal(mapped, "sum")
 }
 
+fn paired_scoped_view_refresh_body() -> Expr {
+    let subscription = |source: &str, parity: &str, bound: &str| {
+        relation_stage(
+            relation_stage(
+                relation_source(source),
+                "filter",
+                vec![named_function(parity)],
+            ),
+            "filter",
+            vec![named_function(bound)],
+        )
+    };
+    let left = relation_stage(
+        subscription("View.Left", "is_odd", "below_five"),
+        "union",
+        vec![subscription("View.Left", "is_even", "below_eight")],
+    );
+    let right = relation_stage(
+        subscription("View.Right", "is_odd", "below_five"),
+        "union",
+        vec![subscription("View.Right", "is_even", "below_eight")],
+    );
+    let paired = relation_stage(left, "union", vec![right]);
+    let positive = relation_stage(
+        paired,
+        "filter",
+        vec![named_function("is_positive")],
+    );
+    let mapped = relation_stage(positive, "map", vec![named_function("add_one")]);
+    terminal(mapped, "sum")
+}
+
 #[test]
 fn incremental_view_refresh_keeps_values_scoped_across_read_batches() {
     let mut first_refresh = ScopedPagedSource::new([
@@ -579,6 +611,236 @@ fn paired_view_refresh_handoff_keeps_scoped_batches_independent() {
         ],
         "paired sources keep independent batch cursors and refresh from fresh scopes"
     );
+}
+
+#[test]
+fn paired_view_cursor_scopes_rebind_across_three_page_refresh_handoffs() {
+    // Reuse the local `.orna` callback fixture while each scoped view crosses
+    // two cursor handoffs. Left and right intentionally share their first
+    // opaque checkpoint; each later refresh gets new page streams.
+    let mut source = PairedViewRefreshSource::new([
+        (
+            "View.Left",
+            vec![
+                page(&[1], Some(vec![11])),
+                page(&[3], Some(vec![33])),
+                page(&[5], None),
+            ],
+        ),
+        (
+            "View.Right",
+            vec![
+                page(&[2], Some(vec![11])),
+                page(&[4], Some(vec![44])),
+                page(&[6], None),
+            ],
+        ),
+        (
+            "View.Left",
+            vec![
+                page(&[-3], Some(vec![11])),
+                page(&[5], Some(vec![55])),
+                page(&[7], None),
+            ],
+        ),
+        (
+            "View.Right",
+            vec![
+                page(&[2], Some(vec![11])),
+                page(&[9], Some(vec![66])),
+                page(&[8], None),
+            ],
+        ),
+    ]);
+
+    assert_eq!(
+        run_with_fixture_functions(incremental_scoped_view_body(), &mut source).unwrap(),
+        integer(21),
+        "first paired fold computes the positive odd and even values over three pages"
+    );
+    assert_eq!(source.lanes.len(), 2);
+    assert_eq!(source.lanes[0].0, "View.Left");
+    assert_eq!(source.lanes[1].0, "View.Right");
+    let first_left = source.lanes[0].1;
+    let first_right = source.lanes[1].1;
+    assert_ne!(first_left, first_right);
+
+    assert_eq!(
+        run_with_fixture_functions(incremental_scoped_view_body(), &mut source).unwrap(),
+        integer(3),
+        "refreshed fold computes only its new positive even value"
+    );
+    assert_eq!(source.lanes.len(), 4);
+    assert_eq!(source.lanes[2].0, "View.Left");
+    assert_eq!(source.lanes[3].0, "View.Right");
+    let refreshed_left = source.lanes[2].1;
+    let refreshed_right = source.lanes[3].1;
+    assert_ne!(refreshed_left, refreshed_right);
+    assert_ne!(first_left, refreshed_left);
+    assert_ne!(first_right, refreshed_right);
+    assert_eq!(
+        source.cursors,
+        vec![
+            ("View.Left".into(), first_left, None),
+            ("View.Left".into(), first_left, Some(vec![11])),
+            ("View.Left".into(), first_left, Some(vec![33])),
+            ("View.Right".into(), first_right, None),
+            ("View.Right".into(), first_right, Some(vec![11])),
+            ("View.Right".into(), first_right, Some(vec![44])),
+            ("View.Left".into(), refreshed_left, None),
+            ("View.Left".into(), refreshed_left, Some(vec![11])),
+            ("View.Left".into(), refreshed_left, Some(vec![55])),
+            ("View.Right".into(), refreshed_right, None),
+            ("View.Right".into(), refreshed_right, Some(vec![11])),
+            ("View.Right".into(), refreshed_right, Some(vec![66])),
+        ],
+        "each view advances within its own cursor scope and refresh begins both at the head"
+    );
+}
+
+#[test]
+fn paired_view_handoffs_rebind_old_cursor_tokens_to_fresh_scopes() {
+    // Cursor bytes are opaque; the reference is silent on token reuse after
+    // multiple paired view refreshes. Each `(source, scope)` owns its stream,
+    // so returning to an older token starts from that refresh's first page.
+    let mut source = PairedViewRefreshSource::new([
+        (
+            "View.Left",
+            vec![
+                page(&[1], Some(vec![11])),
+                page(&[3], Some(vec![33])),
+                page(&[5], None),
+            ],
+        ),
+        (
+            "View.Right",
+            vec![
+                page(&[2], Some(vec![11])),
+                page(&[4], Some(vec![44])),
+                page(&[6], None),
+            ],
+        ),
+        (
+            "View.Left",
+            vec![
+                page(&[-3], Some(vec![11])),
+                page(&[5], Some(vec![55])),
+                page(&[7], None),
+            ],
+        ),
+        (
+            "View.Right",
+            vec![
+                page(&[2], Some(vec![11])),
+                page(&[9], Some(vec![66])),
+                page(&[8], None),
+            ],
+        ),
+        (
+            "View.Left",
+            vec![
+                page(&[-1], Some(vec![11])),
+                page(&[3], Some(vec![33])),
+                page(&[7], None),
+            ],
+        ),
+        (
+            "View.Right",
+            vec![
+                page(&[2], Some(vec![11])),
+                page(&[4], Some(vec![44])),
+                page(&[10], None),
+            ],
+        ),
+    ]);
+
+    for (fold, expected) in [21, 3, 12].into_iter().enumerate() {
+        assert_eq!(
+            run_with_fixture_functions(incremental_scoped_view_body(), &mut source).unwrap(),
+            integer(expected),
+            "paired view refresh fold {fold} computes only that generation's filtered rows"
+        );
+    }
+
+    assert_eq!(source.lanes.len(), 6);
+    for generation in 0..3 {
+        let left = &source.lanes[generation * 2];
+        let right = &source.lanes[generation * 2 + 1];
+        assert_eq!(left.0, "View.Left");
+        assert_eq!(right.0, "View.Right");
+        assert_ne!(left.1, right.1, "generation {generation} keeps sibling view scopes distinct");
+    }
+    let scopes = source.lanes.iter().map(|(_, scope, _)| *scope).collect::<Vec<_>>();
+    for (index, scope) in scopes.iter().enumerate() {
+        assert!(
+            !scopes[..index].contains(scope),
+            "each refresh binds its view to a new scope; repeated cursor bytes do not reuse scope {scope:?}"
+        );
+    }
+    assert_eq!(
+        source.cursors,
+        vec![
+            ("View.Left".into(), scopes[0], None),
+            ("View.Left".into(), scopes[0], Some(vec![11])),
+            ("View.Left".into(), scopes[0], Some(vec![33])),
+            ("View.Right".into(), scopes[1], None),
+            ("View.Right".into(), scopes[1], Some(vec![11])),
+            ("View.Right".into(), scopes[1], Some(vec![44])),
+            ("View.Left".into(), scopes[2], None),
+            ("View.Left".into(), scopes[2], Some(vec![11])),
+            ("View.Left".into(), scopes[2], Some(vec![55])),
+            ("View.Right".into(), scopes[3], None),
+            ("View.Right".into(), scopes[3], Some(vec![11])),
+            ("View.Right".into(), scopes[3], Some(vec![66])),
+            ("View.Left".into(), scopes[4], None),
+            ("View.Left".into(), scopes[4], Some(vec![11])),
+            ("View.Left".into(), scopes[4], Some(vec![33])),
+            ("View.Right".into(), scopes[5], None),
+            ("View.Right".into(), scopes[5], Some(vec![11])),
+            ("View.Right".into(), scopes[5], Some(vec![44])),
+        ],
+        "old cursors may recur after refresh but must only advance within the new scope"
+    );
+}
+
+#[test]
+fn paired_view_subscriptions_keep_cursor_identity_across_refresh_handoffs() {
+    // Each scoped view has two sibling subscriptions. Reusing the same opaque
+    // cursor after refresh must bind every subscription to its new page stream.
+    let mut source = PairedViewRefreshSource::new([
+        ("View.Left", vec![page(&[1], Some(vec![11])), page(&[3], None)]),
+        ("View.Left", vec![page(&[2], Some(vec![11])), page(&[4], None)]),
+        ("View.Right", vec![page(&[-1], Some(vec![11])), page(&[5], None)]),
+        ("View.Right", vec![page(&[6], Some(vec![11])), page(&[8], None)]),
+        ("View.Left", vec![page(&[7], Some(vec![11])), page(&[9], None)]),
+        ("View.Left", vec![page(&[8], Some(vec![11])), page(&[10], None)]),
+        ("View.Right", vec![page(&[5], Some(vec![11])), page(&[7], None)]),
+        ("View.Right", vec![page(&[2], Some(vec![11])), page(&[8], None)]),
+        ("View.Left", vec![page(&[-1], Some(vec![11])), page(&[3], None)]),
+        ("View.Left", vec![page(&[2], Some(vec![11])), page(&[4], None)]),
+        ("View.Right", vec![page(&[1], Some(vec![11])), page(&[5], None)]),
+        ("View.Right", vec![page(&[2], Some(vec![11])), page(&[4], None)]),
+    ]);
+
+    let first = run_with_fixture_functions(paired_scoped_view_refresh_body(), &mut source).unwrap();
+    assert_eq!(first, integer(21));
+    let second = run_with_fixture_functions(paired_scoped_view_refresh_body(), &mut source).unwrap();
+    assert_eq!(second, integer(3));
+    let third = run_with_fixture_functions(paired_scoped_view_refresh_body(), &mut source).unwrap();
+    assert_eq!(third, integer(22));
+    assert_eq!(first, integer(21), "the initial paired-view fold remains captured across refreshes");
+    assert_eq!(second, integer(3), "the second paired-view fold remains captured after the third");
+
+    assert_eq!(source.lanes.len(), 12);
+    for generation in 0..3 {
+        let start = generation * 4;
+        assert_eq!(source.lanes[start].0, "View.Left");
+        assert_eq!(source.lanes[start + 1].0, "View.Left");
+        assert_eq!(source.lanes[start + 2].0, "View.Right");
+        assert_eq!(source.lanes[start + 3].0, "View.Right");
+        assert_ne!(source.lanes[start].1, source.lanes[start + 1].1);
+        assert_ne!(source.lanes[start + 2].1, source.lanes[start + 3].1);
+    }
 }
 
 fn paired_subscription_cascade_body() -> Expr {
@@ -808,5 +1070,257 @@ fn paired_subscription_batch_scopes_survive_three_page_handoffs_and_refresh() {
             (refreshed_scopes[1], Some(vec![44])),
         ],
         "each batch resumes its subscription scope and each refresh starts a new pair"
+    );
+}
+
+#[test]
+fn paired_subscription_handoffs_rebind_reused_batch_cursors_to_fresh_scopes() {
+    // Cursor tokens may recur after a refresh. The provider keys each stream
+    // by `RelationReadScope`, so same-source paired subscriptions do not
+    // resume a prior fold's page batches when their opaque cursors reappear.
+    let mut source = PairedSubscriptionSource::new([
+        vec![
+            page(&[1], Some(vec![11])),
+            page(&[3], Some(vec![33])),
+            page(&[5], None),
+        ],
+        vec![
+            page(&[2], Some(vec![11])),
+            page(&[4], Some(vec![44])),
+            page(&[6], None),
+        ],
+        vec![
+            page(&[-3], Some(vec![11])),
+            page(&[5], Some(vec![55])),
+            page(&[7], None),
+        ],
+        vec![
+            page(&[2], Some(vec![11])),
+            page(&[9], Some(vec![66])),
+            page(&[8], None),
+        ],
+        vec![
+            page(&[-1], Some(vec![11])),
+            page(&[3], Some(vec![33])),
+            page(&[7], None),
+        ],
+        vec![
+            page(&[2], Some(vec![11])),
+            page(&[4], Some(vec![44])),
+            page(&[10], None),
+        ],
+    ]);
+
+    for (fold, expected) in [21, 3, 12].into_iter().enumerate() {
+        assert_eq!(
+            run_with_fixture_functions(paired_subscription_cascade_body(), &mut source).unwrap(),
+            integer(expected),
+            "same-source paired refresh fold {fold} computes only its own filtered pages"
+        );
+    }
+
+    assert_eq!(source.lanes.len(), 6);
+    for generation in 0..3 {
+        let left = source.lanes[generation * 2].0;
+        let right = source.lanes[generation * 2 + 1].0;
+        assert_ne!(left, right, "generation {generation} keeps sibling subscriptions distinct");
+    }
+    let scopes = source.lanes.iter().map(|(scope, _)| *scope).collect::<Vec<_>>();
+    for (index, scope) in scopes.iter().enumerate() {
+        assert!(
+            !scopes[..index].contains(scope),
+            "every paired refresh owns fresh read scopes even when cursor bytes recur"
+        );
+    }
+    assert_eq!(
+        source.cursors,
+        vec![
+            (scopes[0], None),
+            (scopes[0], Some(vec![11])),
+            (scopes[0], Some(vec![33])),
+            (scopes[1], None),
+            (scopes[1], Some(vec![11])),
+            (scopes[1], Some(vec![44])),
+            (scopes[2], None),
+            (scopes[2], Some(vec![11])),
+            (scopes[2], Some(vec![55])),
+            (scopes[3], None),
+            (scopes[3], Some(vec![11])),
+            (scopes[3], Some(vec![66])),
+            (scopes[4], None),
+            (scopes[4], Some(vec![11])),
+            (scopes[4], Some(vec![33])),
+            (scopes[5], None),
+            (scopes[5], Some(vec![11])),
+            (scopes[5], Some(vec![44])),
+        ],
+        "a repeated continuation resumes only within its new paired subscription scope"
+    );
+}
+
+#[test]
+fn paired_subscription_refresh_chain_retains_values_across_variable_page_handoffs() {
+    // The reference is silent about retaining source subscriptions across
+    // refresh folds with different page counts. Each new scoped fold binds a
+    // fresh pair while captured outputs remain values from their own snapshot.
+    let mut source = PairedSubscriptionSource::new([
+        vec![
+            page(&[1], Some(vec![11])),
+            page(&[3], Some(vec![33])),
+            page(&[5], None),
+        ],
+        vec![page(&[2], Some(vec![11])), page(&[4], None)],
+        vec![page(&[-3], Some(vec![11])), page(&[3], None)],
+        vec![
+            page(&[2], Some(vec![11])),
+            page(&[9], Some(vec![66])),
+            page(&[8], None),
+        ],
+        vec![page(&[1], None)],
+        vec![page(&[2], Some(vec![11])), page(&[4], None)],
+    ]);
+
+    let first_fold = run_with_fixture_functions(paired_subscription_cascade_body(), &mut source).unwrap();
+    assert_eq!(first_fold, integer(14));
+    let second_fold = run_with_fixture_functions(paired_subscription_cascade_body(), &mut source).unwrap();
+    assert_eq!(second_fold, integer(7));
+    let third_fold = run_with_fixture_functions(paired_subscription_cascade_body(), &mut source).unwrap();
+    assert_eq!(third_fold, integer(10));
+
+    assert_eq!(first_fold, integer(14), "the first fold remains pinned after two refresh handoffs");
+    assert_eq!(second_fold, integer(7), "the second fold remains pinned after the third fold");
+    assert_eq!(source.lanes.len(), 6);
+    for generation in 0..3 {
+        assert_ne!(
+            source.lanes[generation * 2].0,
+            source.lanes[generation * 2 + 1].0,
+            "refresh generation {generation} owns distinct paired subscription scopes"
+        );
+    }
+    let scopes = source.lanes.iter().map(|(scope, _)| *scope).collect::<Vec<_>>();
+    for (index, scope) in scopes.iter().enumerate() {
+        assert!(
+            !scopes[..index].contains(scope),
+            "all refresh handoffs allocate fresh subscription scopes"
+        );
+    }
+    assert_eq!(
+        source.cursors,
+        vec![
+            (scopes[0], None),
+            (scopes[0], Some(vec![11])),
+            (scopes[0], Some(vec![33])),
+            (scopes[1], None),
+            (scopes[1], Some(vec![11])),
+            (scopes[2], None),
+            (scopes[2], Some(vec![11])),
+            (scopes[3], None),
+            (scopes[3], Some(vec![11])),
+            (scopes[3], Some(vec![66])),
+            (scopes[4], None),
+            (scopes[5], None),
+            (scopes[5], Some(vec![11])),
+        ],
+        "each variable-length fold terminates and resumes only inside its own handoff scope"
+    );
+}
+
+#[test]
+fn paired_subscription_read_batches_preserve_four_page_cursor_fold_chains() {
+    // Each pair traverses four pages before the next refresh handoff. The
+    // first and third generations reuse their complete cursor sequences to
+    // prove that batch identity follows the fresh read scope, not the token.
+    let mut source = PairedSubscriptionSource::new([
+        vec![
+            page(&[-1], Some(vec![11])),
+            page(&[1], Some(vec![22])),
+            page(&[3], Some(vec![33])),
+            page(&[5], None),
+        ],
+        vec![
+            page(&[2], Some(vec![11])),
+            page(&[4], Some(vec![24])),
+            page(&[6], Some(vec![34])),
+            page(&[8], None),
+        ],
+        vec![
+            page(&[7], Some(vec![11])),
+            page(&[9], Some(vec![52])),
+            page(&[11], Some(vec![53])),
+            page(&[13], None),
+        ],
+        vec![
+            page(&[2], Some(vec![11])),
+            page(&[8], Some(vec![64])),
+            page(&[10], Some(vec![65])),
+            page(&[12], None),
+        ],
+        vec![
+            page(&[-1], Some(vec![11])),
+            page(&[3], Some(vec![22])),
+            page(&[5], Some(vec![33])),
+            page(&[7], None),
+        ],
+        vec![
+            page(&[2], Some(vec![11])),
+            page(&[4], Some(vec![24])),
+            page(&[8], Some(vec![34])),
+            page(&[10], None),
+        ],
+    ]);
+
+    let first_fold = run_with_fixture_functions(paired_subscription_cascade_body(), &mut source).unwrap();
+    assert_eq!(first_fold, integer(21));
+    let second_fold = run_with_fixture_functions(paired_subscription_cascade_body(), &mut source).unwrap();
+    assert_eq!(second_fold, integer(3));
+    let third_fold = run_with_fixture_functions(paired_subscription_cascade_body(), &mut source).unwrap();
+    assert_eq!(third_fold, integer(12));
+
+    assert_eq!(first_fold, integer(21), "the first folded result survives both later handoffs");
+    assert_eq!(second_fold, integer(3), "the second folded result survives the third handoff");
+    assert_eq!(source.lanes.len(), 6);
+    for generation in 0..3 {
+        assert_ne!(
+            source.lanes[generation * 2].0,
+            source.lanes[generation * 2 + 1].0,
+            "generation {generation} keeps its left and right read scopes independent"
+        );
+    }
+    let scopes = source.lanes.iter().map(|(scope, _)| *scope).collect::<Vec<_>>();
+    for (index, scope) in scopes.iter().enumerate() {
+        assert!(
+            !scopes[..index].contains(scope),
+            "each refreshed four-page pair receives new read-batch identities"
+        );
+    }
+    assert_eq!(
+        source.cursors,
+        vec![
+            (scopes[0], None),
+            (scopes[0], Some(vec![11])),
+            (scopes[0], Some(vec![22])),
+            (scopes[0], Some(vec![33])),
+            (scopes[1], None),
+            (scopes[1], Some(vec![11])),
+            (scopes[1], Some(vec![24])),
+            (scopes[1], Some(vec![34])),
+            (scopes[2], None),
+            (scopes[2], Some(vec![11])),
+            (scopes[2], Some(vec![52])),
+            (scopes[2], Some(vec![53])),
+            (scopes[3], None),
+            (scopes[3], Some(vec![11])),
+            (scopes[3], Some(vec![64])),
+            (scopes[3], Some(vec![65])),
+            (scopes[4], None),
+            (scopes[4], Some(vec![11])),
+            (scopes[4], Some(vec![22])),
+            (scopes[4], Some(vec![33])),
+            (scopes[5], None),
+            (scopes[5], Some(vec![11])),
+            (scopes[5], Some(vec![24])),
+            (scopes[5], Some(vec![34])),
+        ],
+        "each exact cursor chain stays local to its paired read scope during handoff"
     );
 }

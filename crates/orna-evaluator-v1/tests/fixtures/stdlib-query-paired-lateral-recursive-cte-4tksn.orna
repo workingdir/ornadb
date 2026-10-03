@@ -1,0 +1,22 @@
+(
+    query_ops.recursive_cte(
+        collection_ops.filter(
+            collection_ops.flat_map(
+                [10, 0, 20],
+                parent => [parent * 10 + 1, parent * 10 + 1]
+            ),
+            value => value > 1
+        ),
+        row => [row, row]
+    ),
+    query_ops.recursive_cte(
+        collection_ops.filter(
+            collection_ops.flat_map(
+                [30, 0, 20],
+                parent => [parent * 10 + 1, parent * 10 + 1]
+            ),
+            value => value > 1
+        ),
+        row => [row, row]
+    )
+)

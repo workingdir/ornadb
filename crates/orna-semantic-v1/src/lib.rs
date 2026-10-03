@@ -7245,6 +7245,11 @@ fn infer(
                 element_types.push(value.ty);
             }
 
+            let omitted_pinned_tuple_path =
+                type_sequence_has_omitted_pinned_checkpoint_tuple(&element_types);
+            if omitted_pinned_tuple_path {
+                seed_omitted_pinned_checkpoint_tuple_paths(&mut element_types);
+            }
             let first_parent = element_types.first().cloned();
             let transactional_checkpoint_fold = element_types.len() > 2
                 && first_parent.as_ref().is_some_and(|first| {
@@ -7253,6 +7258,7 @@ fn infer(
                             && element_types
                                 .iter()
                                 .any(type_contains_pinned_checkpoint_tuple))
+                        || omitted_pinned_tuple_path
                 });
             let mut checkpoint_topology_parent = element_types
                 .iter()
@@ -7268,9 +7274,10 @@ fn infer(
                 || element_types
                     .iter()
                     .any(type_contains_partially_omitted_pinned_tuple)
+                || omitted_pinned_tuple_path
                 || element_types
                     .iter()
-                    .any(type_contains_paired_pinned_checkpoint_tuples);
+                    .any(type_contains_paired_pinned_checkpoint_siblings);
             let mut rolled_back_checkpoint_paths = BTreeSet::new();
             let mut rejected_checkpoint_parent = false;
             let mut ty = None;
@@ -9693,6 +9700,22 @@ fn is_terminal_historical_callable(ty: &Type) -> bool {
 }
 
 fn merge_checkpoint_field_map(left: &Type, right: &Type) -> Option<Type> {
+    merge_checkpoint_field_map_inner(left, right, false)
+}
+
+/// Multi-parent folds validate source rows against the first accepted parent
+/// before merging. The accumulated value may therefore have wider context
+/// maps than the next row; retain structural and binder checks while allowing
+/// those already-validated identities to grow through nested callable results.
+fn merge_checkpoint_field_map_multi_parent(left: &Type, right: &Type) -> Option<Type> {
+    merge_checkpoint_field_map_inner(left, right, true)
+}
+
+fn merge_checkpoint_field_map_inner(
+    left: &Type,
+    right: &Type,
+    source_topology_validated: bool,
+) -> Option<Type> {
     if !checkpoint_snapshot_maps_are_valid(left) || !checkpoint_snapshot_maps_are_valid(right) {
         return None;
     }
@@ -9729,7 +9752,11 @@ fn merge_checkpoint_field_map(left: &Type, right: &Type) -> Option<Type> {
                 ([left_snapshot, left_callable], [right_snapshot, right_callable]) => Some(
                     historical_callable_type(
                         &merge_snapshot_context_map(left_snapshot, right_snapshot)?,
-                        &merge_checkpoint_field_map(left_callable, right_callable)?,
+                        &merge_checkpoint_field_map_inner(
+                            left_callable,
+                            right_callable,
+                            source_topology_validated,
+                        )?,
                     ),
                 ),
                 _ => None,
@@ -9752,12 +9779,14 @@ fn merge_checkpoint_field_map(left: &Type, right: &Type) -> Option<Type> {
             if left_parameters.len() != right_parameters.len() {
                 return None;
             }
-            if !function_snapshot_pin_identity_topology_matches(
-                left_parameters,
-                left_result,
-                right_parameters,
-                right_result,
-            ) {
+            if !source_topology_validated
+                && !function_snapshot_pin_identity_topology_matches(
+                    left_parameters,
+                    left_result,
+                    right_parameters,
+                    right_result,
+                )
+            {
                 return None;
             }
             // Distinct checkpoint closures can have the same callable shape
@@ -9774,7 +9803,11 @@ fn merge_checkpoint_field_map(left: &Type, right: &Type) -> Option<Type> {
                         && type_contains_pinned_snapshot_identity(right)
                         && pinned_snapshot_shape_matches(left, right)
                     {
-                        merge_checkpoint_field_map(left, right)
+                        merge_checkpoint_field_map_inner(
+                            left,
+                            right,
+                            source_topology_validated,
+                        )
                     } else {
                         None
                     }
@@ -9789,12 +9822,17 @@ fn merge_checkpoint_field_map(left: &Type, right: &Type) -> Option<Type> {
                 parameter_names: (left_names == right_names)
                     .then(|| left_names.clone())
                     .flatten(),
-                result: Box::new(merge_checkpoint_field_map(left_result, right_result)?),
+                result: Box::new(merge_checkpoint_field_map_inner(
+                    left_result,
+                    right_result,
+                    source_topology_validated,
+                )?),
             })
         }
         (Type::List(left), Type::List(right)) => {
-            if (type_contains_pinned_checkpoint_tuple(left)
-                || type_contains_pinned_checkpoint_tuple(right))
+            if !source_topology_validated
+                && (type_contains_pinned_checkpoint_tuple(left)
+                    || type_contains_pinned_checkpoint_tuple(right))
                 && (!checkpoint_pin_map_widths_match(left, right)
                     || !checkpoint_value_pin_identity_topology_matches(left, right)
                     || !nested_checkpoint_compaction_fold_preserves_pin_identity(left, right))
@@ -9806,29 +9844,39 @@ fn merge_checkpoint_field_map(left: &Type, right: &Type) -> Option<Type> {
             // inferred tuple slots. Keep this check at collection promotion
             // so ordinary tuple rebinding (including Bottom recovery) retains
             // its existing binder semantics.
-            if let (Type::Tuple(left), Type::Tuple(right)) = (left.as_ref(), right.as_ref())
+            if !source_topology_validated
+                && let (Type::Tuple(left), Type::Tuple(right)) = (left.as_ref(), right.as_ref())
                 && !tuple_checkpoint_promotion_matches(left, right)
             {
                 return None;
             }
-            if let (Type::Record(left), Type::Record(right)) = (left.as_ref(), right.as_ref())
+            if !source_topology_validated
+                && let (Type::Record(left), Type::Record(right)) = (left.as_ref(), right.as_ref())
                 && !record_checkpoint_promotion_matches(left, right)
             {
                 return None;
             }
-            Some(Type::List(Box::new(merge_checkpoint_field_map(left, right)?)))
+            Some(Type::List(Box::new(merge_checkpoint_field_map_inner(
+                left,
+                right,
+                source_topology_validated,
+            )?)))
         }
         (Type::Range(left), Type::Range(right)) => {
-            Some(Type::Range(Box::new(merge_checkpoint_field_map(left, right)?)))
+            Some(Type::Range(Box::new(merge_checkpoint_field_map_inner(
+                left,
+                right,
+                source_topology_validated,
+            )?)))
         }
         (Type::Relation(left), Type::Relation(right)) => Some(Type::Relation(Box::new(
-            merge_checkpoint_field_map(left, right)?,
+            merge_checkpoint_field_map_inner(left, right, source_topology_validated)?,
         ))),
         (Type::Stream(left), Type::Stream(right)) => Some(Type::Stream(Box::new(
-            merge_checkpoint_field_map(left, right)?,
+            merge_checkpoint_field_map_inner(left, right, source_topology_validated)?,
         ))),
         (Type::Optional(left), Type::Optional(right)) => Some(Type::Optional(Box::new(
-            merge_checkpoint_field_map(left, right)?,
+            merge_checkpoint_field_map_inner(left, right, source_topology_validated)?,
         ))),
         (Type::Record(left), Type::Record(right)) if left.len() == right.len() => {
             Some(Type::Record(
@@ -9836,7 +9884,11 @@ fn merge_checkpoint_field_map(left: &Type, right: &Type) -> Option<Type> {
                     .map(|(name, left)| {
                         Some((
                             name.clone(),
-                            merge_checkpoint_field_map(left, right.get(name)?)?,
+                            merge_checkpoint_field_map_inner(
+                                left,
+                                right.get(name)?,
+                                source_topology_validated,
+                            )?,
                         ))
                     })
                     .collect::<Option<BTreeMap<_, _>>>()?,
@@ -9846,7 +9898,9 @@ fn merge_checkpoint_field_map(left: &Type, right: &Type) -> Option<Type> {
             Some(Type::Tuple(
                 left.iter()
                     .zip(right)
-                    .map(|(left, right)| merge_checkpoint_field_map(left, right))
+                    .map(|(left, right)| {
+                        merge_checkpoint_field_map_inner(left, right, source_topology_validated)
+                    })
                     .collect::<Option<Vec<_>>>()?,
             ))
         }
@@ -9865,7 +9919,9 @@ fn merge_checkpoint_field_map(left: &Type, right: &Type) -> Option<Type> {
                 arguments: left_arguments
                     .iter()
                     .zip(right_arguments)
-                    .map(|(left, right)| merge_checkpoint_field_map(left, right))
+                    .map(|(left, right)| {
+                        merge_checkpoint_field_map_inner(left, right, source_topology_validated)
+                    })
                     .collect::<Option<Vec<_>>>()?,
             })
         }
@@ -9879,8 +9935,16 @@ fn merge_checkpoint_field_map(left: &Type, right: &Type) -> Option<Type> {
                 unit: right_unit,
             },
         ) => Some(Type::MoneyPerUnit {
-            currency: Box::new(merge_checkpoint_field_map(left_currency, right_currency)?),
-            unit: Box::new(merge_checkpoint_field_map(left_unit, right_unit)?),
+            currency: Box::new(merge_checkpoint_field_map_inner(
+                left_currency,
+                right_currency,
+                source_topology_validated,
+            )?),
+            unit: Box::new(merge_checkpoint_field_map_inner(
+                left_unit,
+                right_unit,
+                source_topology_validated,
+            )?),
         }),
         _ => None,
     }
@@ -18949,10 +19013,10 @@ fn checkpoint_topology_anchor_with_first_pins_local(anchor: &Type, source: &Type
     }
 }
 
-/// Reconcile another parent into a multi-parent tuple checkpoint fold. Each
-/// source parent must have the first parent's map width, while the accumulated
-/// result may grow as it collects more parent labels. The fold guard still
-/// rejects any new cross-slot identity introduced by the accumulated union.
+/// Reconcile another parent into a multi-parent tuple checkpoint fold. Source
+/// parents keep the same paired selector paths, while singleton labels may be
+/// contributed by different sparse lanes. The fold guard rejects any new
+/// cross-slot identity introduced by the accumulated union.
 fn merge_multi_parent_checkpoint_tuple(
     accumulated: &Type,
     parent: &Type,
@@ -18966,17 +19030,16 @@ fn merge_multi_parent_checkpoint_tuple(
     if accumulated.len() != first_parent.len() || parent.len() != first_parent.len() {
         return None;
     }
-    if !first_parent
-        .iter()
-        .zip(parent)
-        .all(|(first, parent)| checkpoint_pin_map_widths_match(first, parent))
-        || !checkpoint_tuple_pin_identity_topology_matches(first_parent, parent)
+    let first_parent_value = Type::Tuple(first_parent.clone());
+    let parent_value = Type::Tuple(parent.clone());
+    if (!checkpoint_value_pin_identity_topology_matches(&first_parent_value, &parent_value)
+        && !checkpoint_value_paired_pin_membership_matches(&first_parent_value, &parent_value))
         || !tuple_checkpoint_compaction_fold_preserves_pin_identity(accumulated, parent)
     {
         return None;
     }
 
-    merge_checkpoint_field_map(&Type::Tuple(accumulated.clone()), &Type::Tuple(parent.clone()))
+    merge_checkpoint_field_map_multi_parent(&Type::Tuple(accumulated.clone()), &parent_value)
 }
 
 /// Find a pinned tuple at any structural depth so parent-list inference can
@@ -19046,6 +19109,252 @@ fn type_contains_omitted_checkpoint_tuple(ty: &Type) -> bool {
     }
 }
 
+/// Find a tuple path that is absent in some parents while carrying snapshot
+/// identities in others. Record-field omission is not represented as a tuple
+/// of `Bottom` slots, so compare aligned structural paths across the fold.
+fn type_sequence_has_omitted_pinned_checkpoint_tuple(types: &[Type]) -> bool {
+    let aligned = types.iter().map(Some).collect::<Vec<_>>();
+    type_sequence_has_omitted_pinned_checkpoint_tuple_at_path(&aligned)
+}
+
+fn type_sequence_has_omitted_pinned_checkpoint_tuple_at_path(
+    types: &[Option<&Type>],
+) -> bool {
+    let contains_pinned_tuple = types
+        .iter()
+        .flatten()
+        .any(|ty| type_contains_pinned_checkpoint_tuple(ty));
+    let contains_omission = types
+        .iter()
+        .any(|ty| ty.is_none_or(|ty| checkpoint_value_is_omitted(ty)));
+    if contains_pinned_tuple && contains_omission {
+        return true;
+    }
+    if types.iter().any(Option::is_none) {
+        return false;
+    }
+    let present = types
+        .iter()
+        .map(|ty| ty.expect("checked aligned parent type"))
+        .collect::<Vec<_>>();
+    let Some(first) = present.first() else {
+        return false;
+    };
+
+    match first {
+        Type::Record(_) if present.iter().all(|ty| matches!(ty, Type::Record(_))) => {
+            let names = present
+                .iter()
+                .flat_map(|ty| match ty {
+                    Type::Record(fields) => fields.keys().cloned().collect::<Vec<_>>(),
+                    _ => Vec::new(),
+                })
+                .collect::<BTreeSet<_>>();
+            names.into_iter().any(|name| {
+                let fields = present
+                    .iter()
+                    .map(|ty| match ty {
+                        Type::Record(fields) => fields.get(&name),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>();
+                type_sequence_has_omitted_pinned_checkpoint_tuple_at_path(&fields)
+            })
+        }
+        Type::Tuple(_) if present.iter().all(|ty| matches!(ty, Type::Tuple(_))) => {
+            let width = present
+                .iter()
+                .filter_map(|ty| match ty {
+                    Type::Tuple(elements) => Some(elements.len()),
+                    _ => None,
+                })
+                .max()
+                .unwrap_or_default();
+            (0..width).any(|index| {
+                let elements = present
+                    .iter()
+                    .map(|ty| match ty {
+                        Type::Tuple(elements) => elements.get(index),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>();
+                type_sequence_has_omitted_pinned_checkpoint_tuple_at_path(&elements)
+            })
+        }
+        Type::List(_) if present.iter().all(|ty| matches!(ty, Type::List(_))) => {
+            let elements = present
+                .iter()
+                .map(|ty| match ty {
+                    Type::List(element) => Some(element.as_ref()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            type_sequence_has_omitted_pinned_checkpoint_tuple_at_path(&elements)
+        }
+        Type::Optional(_) if present.iter().all(|ty| matches!(ty, Type::Optional(_))) => {
+            let elements = present
+                .iter()
+                .map(|ty| match ty {
+                    Type::Optional(element) => Some(element.as_ref()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            type_sequence_has_omitted_pinned_checkpoint_tuple_at_path(&elements)
+        }
+        _ => false,
+    }
+}
+
+/// Give recursively nested fold rows a neutral shape for pinned tuple paths
+/// absent from a sibling. Supplied values still anchor their own fields, while
+/// an omitted pinned tuple starts as Bottom at each structural leaf so a
+/// concrete row can establish its identity topology. The reference does not
+/// define local sparse-record tuple folds; treat omission as an empty
+/// contribution and retain the tuple path for later scoped rollback.
+fn seed_omitted_pinned_checkpoint_tuple_paths(types: &mut [Type]) {
+    fn omitted_shape(value: &Type) -> Type {
+        match value {
+            Type::Tuple(elements) => Type::Tuple(elements.iter().map(omitted_shape).collect()),
+            Type::Record(fields) => Type::Record(
+                fields
+                    .iter()
+                    .map(|(name, value)| (name.clone(), omitted_shape(value)))
+                    .collect(),
+            ),
+            Type::List(element) => Type::List(Box::new(omitted_shape(element))),
+            Type::Optional(element) => Type::Optional(Box::new(omitted_shape(element))),
+            _ => Type::Bottom,
+        }
+    }
+
+    fn seed_aligned_paths(types: &mut [&mut Type]) {
+        let Some(first) = types.first() else {
+            return;
+        };
+        match &**first {
+            Type::Record(_) if types.iter().all(|ty| matches!(**ty, Type::Record(_))) => {
+                let names = types
+                    .iter()
+                    .flat_map(|ty| match &**ty {
+                        Type::Record(fields) => fields.keys().cloned().collect::<Vec<_>>(),
+                        _ => Vec::new(),
+                    })
+                    .collect::<BTreeSet<_>>();
+                for name in names {
+                    let template = types.iter().find_map(|ty| {
+                        let Type::Record(fields) = &**ty else {
+                            return None;
+                        };
+                        let field = fields.get(&name)?;
+                        type_contains_pinned_checkpoint_tuple(field).then(|| field.clone())
+                    });
+                    if let Some(template) = template {
+                        if types.iter().any(|ty| match &**ty {
+                            Type::Record(fields) => fields
+                                .get(&name)
+                                .is_none_or(|field| matches!(field, Type::Bottom)),
+                            _ => false,
+                        }) {
+                            let omitted = omitted_shape(&template);
+                            for ty in types.iter_mut() {
+                                let Type::Record(fields) = &mut **ty else {
+                                    continue;
+                                };
+                                if fields
+                                    .get(&name)
+                                    .is_none_or(|field| matches!(field, Type::Bottom))
+                                {
+                                    fields.insert(name.clone(), omitted.clone());
+                                }
+                            }
+                        }
+                    }
+
+                    let mut children = types
+                        .iter_mut()
+                        .filter_map(|ty| match &mut **ty {
+                            Type::Record(fields) => fields.get_mut(&name),
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>();
+                    seed_aligned_paths(&mut children);
+                }
+            }
+            Type::Tuple(_) if types.iter().all(|ty| matches!(**ty, Type::Tuple(_))) => {
+                let width = types
+                    .iter()
+                    .filter_map(|ty| match &**ty {
+                        Type::Tuple(elements) => Some(elements.len()),
+                        _ => None,
+                    })
+                    .max()
+                    .unwrap_or_default();
+                for index in 0..width {
+                    let template = types.iter().find_map(|ty| {
+                        let Type::Tuple(elements) = &**ty else {
+                            return None;
+                        };
+                        let element = elements.get(index)?;
+                        type_contains_pinned_checkpoint_tuple(element)
+                            .then(|| element.clone())
+                    });
+                    if let Some(template) = template {
+                        if types.iter().any(|ty| match &**ty {
+                            Type::Tuple(elements) => elements
+                                .get(index)
+                                .is_none_or(|element| matches!(element, Type::Bottom)),
+                            _ => false,
+                        }) {
+                            let omitted = omitted_shape(&template);
+                            for ty in types.iter_mut() {
+                                let Type::Tuple(elements) = &mut **ty else {
+                                    continue;
+                                };
+                                if matches!(elements.get(index), Some(Type::Bottom)) {
+                                    elements[index] = omitted.clone();
+                                }
+                            }
+                        }
+                    }
+
+                    let mut children = types
+                        .iter_mut()
+                        .filter_map(|ty| match &mut **ty {
+                            Type::Tuple(elements) => elements.get_mut(index),
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>();
+                    seed_aligned_paths(&mut children);
+                }
+            }
+            Type::List(_) if types.iter().all(|ty| matches!(**ty, Type::List(_))) => {
+                let mut children = types
+                    .iter_mut()
+                    .filter_map(|ty| match &mut **ty {
+                        Type::List(element) => Some(element.as_mut()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>();
+                seed_aligned_paths(&mut children);
+            }
+            Type::Optional(_) if types.iter().all(|ty| matches!(**ty, Type::Optional(_))) => {
+                let mut children = types
+                    .iter_mut()
+                    .filter_map(|ty| match &mut **ty {
+                        Type::Optional(element) => Some(element.as_mut()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>();
+                seed_aligned_paths(&mut children);
+            }
+            _ => {}
+        }
+    }
+
+    let mut aligned = types.iter_mut().collect::<Vec<_>>();
+    seed_aligned_paths(&mut aligned);
+}
+
 /// Paired records can also anchor a scoped rollback when both contain a
 /// partially omitted pinned tuple. A single partial tuple has concrete slots
 /// to continue folding, but paired omissions establish a relationship between
@@ -19090,50 +19399,61 @@ fn type_contains_paired_checkpoint_omissions(ty: &Type) -> bool {
     }
 }
 
-/// Dense records and tuples can carry independent nested tuple-pin folds even
-/// when no parent omits a slot. Scope a late rebind failure to the conflicting
-/// tuple so a stable sibling keeps the values accumulated through the storm.
-fn type_contains_paired_pinned_checkpoint_tuples(ty: &Type) -> bool {
+/// Dense records and tuples can carry a paired tuple fold alongside another
+/// pinned identity sibling even when no parent omits a slot. Scope a late
+/// rebind failure to the conflicting tuple so the independent sibling keeps
+/// the values accumulated through the storm. The reference is silent about
+/// this mixed-shape boundary; use the smallest failing tuple as the rollback
+/// scope and preserve other computed values.
+fn type_contains_paired_pinned_checkpoint_siblings(ty: &Type) -> bool {
     match ty {
         Type::Record(fields) => {
-            fields
+            let tuple_siblings = fields
                 .values()
                 .filter(|field| type_contains_pinned_checkpoint_tuple(field))
-                .count()
-                >= 2
+                .count();
+            let pinned_siblings = fields
+                .values()
+                .filter(|field| type_contains_pinned_snapshot_identity(field))
+                .count();
+            (tuple_siblings > 0 && pinned_siblings > 1)
                 || fields
                     .values()
-                    .any(type_contains_paired_pinned_checkpoint_tuples)
+                    .any(type_contains_paired_pinned_checkpoint_siblings)
         }
         Type::Tuple(elements) => {
-            elements
+            let tuple_siblings = elements
                 .iter()
                 .filter(|element| type_contains_pinned_checkpoint_tuple(element))
-                .count()
-                >= 2
+                .count();
+            let pinned_siblings = elements
+                .iter()
+                .filter(|element| type_contains_pinned_snapshot_identity(element))
+                .count();
+            (tuple_siblings > 0 && pinned_siblings > 1)
                 || elements
                     .iter()
-                    .any(type_contains_paired_pinned_checkpoint_tuples)
+                    .any(type_contains_paired_pinned_checkpoint_siblings)
         }
         Type::List(element)
         | Type::Range(element)
         | Type::Relation(element)
         | Type::Stream(element)
-        | Type::Optional(element) => type_contains_paired_pinned_checkpoint_tuples(element),
+        | Type::Optional(element) => type_contains_paired_pinned_checkpoint_siblings(element),
         Type::Applied { arguments, .. } => arguments
             .iter()
-            .any(type_contains_paired_pinned_checkpoint_tuples),
+            .any(type_contains_paired_pinned_checkpoint_siblings),
         Type::Function {
             parameters, result, ..
         } => {
             parameters
                 .iter()
-                .any(type_contains_paired_pinned_checkpoint_tuples)
-                || type_contains_paired_pinned_checkpoint_tuples(result)
+                .any(type_contains_paired_pinned_checkpoint_siblings)
+                || type_contains_paired_pinned_checkpoint_siblings(result)
         }
         Type::MoneyPerUnit { currency, unit } => {
-            type_contains_paired_pinned_checkpoint_tuples(currency)
-                || type_contains_paired_pinned_checkpoint_tuples(unit)
+            type_contains_paired_pinned_checkpoint_siblings(currency)
+                || type_contains_paired_pinned_checkpoint_siblings(unit)
         }
         _ => false,
     }
@@ -19192,28 +19512,26 @@ fn checkpoint_value_is_omitted(ty: &Type) -> bool {
 }
 
 /// Reconcile another parent into a nested checkpoint fold. Source parents
-/// retain the first parent's map widths and selector membership at each
-/// structural path, while accumulated maps may grow only without introducing
-/// new cross-path identity between nested sibling tuples.
+/// retain the first parent's paired selector membership, while singleton
+/// labels may come from different sparse tuple lanes. Accumulated maps may
+/// grow only without introducing new cross-path identity between siblings.
 fn merge_multi_parent_checkpoint_value(
     accumulated: &Type,
     parent: &Type,
     first_parent: &Type,
 ) -> Option<Type> {
-    if !checkpoint_paired_boundary_fold_topology_matches(accumulated, parent, first_parent) {
+    let paired = checkpoint_paired_boundary_fold_topology_matches(accumulated, parent, first_parent);
+    let source_topology_matches = checkpoint_value_pin_identity_topology_matches(first_parent, parent)
+        || checkpoint_value_paired_pin_membership_matches(first_parent, parent);
+    let compaction = nested_checkpoint_compaction_fold_preserves_pin_identity(accumulated, parent);
+    if !paired || !source_topology_matches || !compaction {
         return None;
     }
     if matches!(first_parent, Type::Tuple(_)) {
         return merge_multi_parent_checkpoint_tuple(accumulated, parent, first_parent);
     }
-    if !checkpoint_pin_map_widths_match(first_parent, parent)
-        || !checkpoint_value_pin_identity_topology_matches(first_parent, parent)
-        || !nested_checkpoint_compaction_fold_preserves_pin_identity(accumulated, parent)
-    {
-        return None;
-    }
 
-    merge_checkpoint_field_map(accumulated, parent)
+    merge_checkpoint_field_map_multi_parent(accumulated, parent)
 }
 
 struct ScopedCheckpointFold {
@@ -19248,6 +19566,19 @@ fn merge_multi_parent_checkpoint_value_scoped(
         });
     }
 
+    // A parent that omits a pinned tuple path contributes no identity. Keep
+    // the accumulated value and topology anchor so a later rebind continues
+    // the same fold instead of freezing the tuple at the omission.
+    if checkpoint_value_is_omitted(parent)
+        && type_contains_pinned_checkpoint_tuple(topology_anchor)
+    {
+        return Some(ScopedCheckpointFold {
+            merged: accumulated.clone(),
+            effective_parent: topology_anchor.clone(),
+            rejected_scope: false,
+        });
+    }
+
     let has_rolled_back_descendant = rolled_back_paths
         .iter()
         .any(|rolled_back| rolled_back.len() > path.len() && rolled_back.starts_with(path));
@@ -19270,18 +19601,28 @@ fn merge_multi_parent_checkpoint_value_scoped(
             Type::Record(parent_fields),
             Type::Record(rollback_fields),
             Type::Record(topology_fields),
-        ) if accumulated_fields.len() == parent_fields.len()
-            && accumulated_fields.len() == rollback_fields.len()
-            && accumulated_fields.len() == topology_fields.len() =>
+        ) if accumulated_fields.keys().eq(rollback_fields.keys())
+            && accumulated_fields.keys().eq(topology_fields.keys())
+            && parent_fields
+                .keys()
+                .all(|name| accumulated_fields.contains_key(name)) =>
         {
             let mut merged_fields = BTreeMap::new();
             let mut effective_fields = BTreeMap::new();
             for (name, accumulated_field) in accumulated_fields {
-                let (Some(parent_field), Some(rollback_field), Some(topology_field)) = (
-                    parent_fields.get(name),
-                    rollback_fields.get(name),
-                    topology_fields.get(name),
-                ) else {
+                let (Some(rollback_field), Some(topology_field)) =
+                    (rollback_fields.get(name), topology_fields.get(name))
+                else {
+                    return scoped_checkpoint_rollback(rollback_anchor, path, rolled_back_paths);
+                };
+                let Some(parent_field) = parent_fields.get(name) else {
+                    if type_contains_pinned_checkpoint_tuple(rollback_field)
+                        || type_contains_pinned_checkpoint_tuple(topology_field)
+                    {
+                        merged_fields.insert(name.clone(), accumulated_field.clone());
+                        effective_fields.insert(name.clone(), topology_field.clone());
+                        continue;
+                    }
                     return scoped_checkpoint_rollback(rollback_anchor, path, rolled_back_paths);
                 };
                 path.push(SnapshotTopologyBoundary::RecordField(name.clone()));
@@ -20196,6 +20537,81 @@ fn checkpoint_value_pin_identity_topology_matches(expected: &Type, actual: &Type
         &mut pin_maps,
         &mut Vec::new(),
     ) && snapshot_context_topology_matches_over_present_maps(&pin_maps)
+}
+
+/// Sparse parent folds may contribute different counts of selector labels to
+/// otherwise paired tuple slots or sibling record fields. Keep paired paths
+/// stable, but let singleton labels remain in the concrete lane where each
+/// sparse source supplied them. The enclosing compaction guard still rejects
+/// new cross-path identity. The reference does not specify these local sparse
+/// multi-parent folds.
+fn checkpoint_value_paired_pin_membership_matches(expected: &Type, actual: &Type) -> bool {
+    fn paired_membership_patterns(
+        pin_maps: &[SnapshotContextMapPair],
+        expected: bool,
+    ) -> BTreeMap<
+        BTreeSet<(Vec<SnapshotTopologyBoundary>, BTreeSet<SnapshotTopologyBoundary>)>,
+        usize,
+    > {
+        let mut memberships = BTreeMap::<
+            String,
+            BTreeMap<Vec<SnapshotTopologyBoundary>, BTreeSet<SnapshotTopologyBoundary>>,
+        >::new();
+        for pair in pin_maps {
+            let selectors = if expected {
+                &pair.expected
+            } else {
+                &pair.actual
+            };
+            let sibling_lanes = pair
+                .boundary_path
+                .iter()
+                .enumerate()
+                .filter_map(|(index, boundary)| match boundary {
+                    SnapshotTopologyBoundary::TupleElement(_)
+                    | SnapshotTopologyBoundary::RecordField(_) => Some((
+                        pair.boundary_path[..index].to_vec(),
+                        boundary.clone(),
+                    )),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            for selector in selectors {
+                for (parent, lane) in &sibling_lanes {
+                    memberships
+                        .entry(selector.clone())
+                        .or_default()
+                        .entry(parent.clone())
+                        .or_default()
+                        .insert(lane.clone());
+                }
+            }
+        }
+        let mut patterns = BTreeMap::new();
+        for parent_memberships in memberships.into_values() {
+            let paired_membership = parent_memberships
+                .into_iter()
+                .filter(|(_, siblings)| siblings.len() > 1)
+                .collect::<BTreeSet<_>>();
+            if !paired_membership.is_empty() {
+                *patterns.entry(paired_membership).or_insert(0) += 1;
+            }
+        }
+        patterns
+    }
+
+    let mut pin_maps = Vec::new();
+    if !collect_corresponding_snapshot_context_maps_at_path(
+        expected,
+        actual,
+        &mut pin_maps,
+        &mut Vec::new(),
+    ) {
+        return false;
+    }
+    let expected_patterns = paired_membership_patterns(&pin_maps, true);
+    let actual_patterns = paired_membership_patterns(&pin_maps, false);
+    !expected_patterns.is_empty() && expected_patterns == actual_patterns
 }
 
 fn checkpoint_tuple_pin_identity_topology_matches(expected: &[Type], actual: &[Type]) -> bool {
