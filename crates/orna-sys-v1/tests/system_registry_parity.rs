@@ -965,6 +965,117 @@ fn generated_bindings_match_schema_valid_provider_edge_mutations() {
 }
 
 #[test]
+fn generated_binding_provider_id_schema_rejections_match_typed_parser() {
+    let schema_json = build_provider::generate_provider_registry_schema()
+        .expect("provider dispatch schema regenerates from its generator");
+    assert_eq!(schema_json, system_provider_abi_schema_json());
+    let registry: Value = serde_json::from_str(system_provider_abi_json())
+        .expect("embedded provider registry is valid JSON");
+    build_host::validate_json_against_schema(system_provider_abi_json(), &schema_json)
+        .expect("embedded provider registry conforms to its generated schema");
+    let table = system_dispatch_table();
+    let mut role_id_rejections = 0;
+    let mut provider_id_rejections = 0;
+    let mut annotation_id_rejections = 0;
+    let mut generated_bindings = 0;
+
+    let assert_rejected = |mutated: Value, expected, label: &str| {
+        let json = mutated.to_string();
+        let schema_error = build_host::validate_json_against_schema(&json, &schema_json)
+            .expect_err("generated provider schema rejects malformed identifiers");
+        assert!(
+            schema_error.contains("identifier pattern"),
+            "schema rejection identifies {label}: {schema_error}"
+        );
+        assert_eq!(
+            SystemProviderAbi::from_json(&json),
+            Err(expected),
+            "typed provider parser rejects the same malformed identifier in {label}"
+        );
+    };
+
+    for role in table.roles() {
+        let role_index = registry["roles"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .position(|raw_role| raw_role["name"] == role.id.as_str())
+            .expect("typed provider role appears in generated registry JSON");
+        let mut invalid_role_id = registry.clone();
+        invalid_role_id["roles"][role_index]["name"] = Value::String("invalid role id".to_owned());
+        assert_rejected(
+            invalid_role_id,
+            orna_sys_v1::ProviderAbiError::InvalidRoleId,
+            "role name",
+        );
+        role_id_rejections += 1;
+
+        if role.builtin_provider.is_some() {
+            let mut invalid_provider_id = registry.clone();
+            invalid_provider_id["roles"][role_index]["builtin_provider"] =
+                Value::String("invalid provider id".to_owned());
+            assert_rejected(
+                invalid_provider_id,
+                orna_sys_v1::ProviderAbiError::InvalidProviderId,
+                "built-in provider",
+            );
+            provider_id_rejections += 1;
+        }
+
+        for operation_id in &role.operations {
+            let operation = table
+                .operation(operation_id.as_str())
+                .expect("provider role edge resolves to its typed operation");
+            let generated =
+                system_function_descriptor(operation.id.as_str()).unwrap_or_else(|| {
+                    panic!("missing generated binding for {}", operation.id.as_str())
+                });
+            assert_eq!(generated.name, operation.id.as_str());
+            assert_eq!(generated.signature, operation.signature.source);
+            assert_eq!(
+                operation.effects.iter().next(),
+                Some(generated.effect),
+                "generated binding effect matches {}",
+                operation.id.as_str()
+            );
+            let operation_index = registry["operations"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .position(|raw_operation| raw_operation["name"] == operation.id.as_str())
+                .expect("generated registry operation row exists");
+            let mut invalid_annotation = registry.clone();
+            invalid_annotation["operations"][operation_index]["role"] = Value::String(format!(
+                "invalid role id@{}.{}",
+                role.version.major, role.version.minor
+            ));
+            assert_rejected(
+                invalid_annotation,
+                orna_sys_v1::ProviderAbiError::InvalidRoleId,
+                "operation role annotation",
+            );
+            annotation_id_rejections += 1;
+            generated_bindings += 1;
+        }
+    }
+
+    assert_eq!(role_id_rejections, table.roles().count());
+    assert_eq!(
+        generated_bindings,
+        table
+            .operations()
+            .filter(|operation| operation.role.is_some())
+            .count()
+    );
+    assert_eq!(annotation_id_rejections, generated_bindings);
+    println!(
+        "generated_binding_provider_id_schema_parity roles={} role_id_rejections={role_id_rejections} provider_id_rejections={provider_id_rejections} operation_annotation_rejections={annotation_id_rejections} generated_bindings={generated_bindings} total_cases={}",
+        table.roles().count(),
+        role_id_rejections + provider_id_rejections + annotation_id_rejections
+    );
+}
+
+#[test]
 fn generated_schema_defers_semantic_dispatch_id_uniqueness_to_typed_registry() {
     let schema_json = build_provider::generate_provider_registry_schema()
         .expect("provider dispatch schema regenerates from its generator");
