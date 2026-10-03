@@ -4194,9 +4194,13 @@ fn paired_refreshes_keep_values_across_sparse_checkpoint_rotation_chains() {
             .collect::<CursorRestore>()
     };
     let mut restores = Vec::new();
+    let mut lane_names = Vec::new();
+    let mut rotated_chains = Vec::new();
     let mut add_restore = |source_name: &'static str, groups: &[&[i64]], epoch: usize| {
         let tokens = checkpoint_epochs[epoch][..groups.len() - 1].to_vec();
         restores.push((source_name, restore(groups, &tokens)));
+        lane_names.push(source_name);
+        rotated_chains.push(tokens);
     };
     add_restore("View.Left", &[&[1, 2], &[4, 3, 6], &[5, 8], &[7, 9], &[10]], 0);
     add_restore("View.Right", &[&[2, 1, 4], &[6, 3], &[8, 5, 10], &[7]], 1);
@@ -4240,7 +4244,48 @@ fn paired_refreshes_keep_values_across_sparse_checkpoint_rotation_chains() {
     assert_eq!(first, integer_pair(30, 36), "later refreshes preserve the first result");
     assert_eq!(second, integer_pair(90, 156), "later refreshes preserve the second result");
     assert_eq!(third, integer_pair(-30, -36), "later refreshes preserve the third result");
-    assert_eq!(source.lanes.len(), 8, "four paired refreshes create eight source scopes");
+    assert_eq!(source.lanes.len(), lane_names.len());
+    let scopes = source
+        .lanes
+        .iter()
+        .zip(lane_names.iter().copied())
+        .map(|((source_name, scope, _), expected_name)| {
+            assert_eq!(source_name, expected_name, "each refresh reads left then right");
+            *scope
+        })
+        .collect::<Vec<_>>();
+    for (index, scope) in scopes.iter().enumerate() {
+        assert!(
+            !scopes[..index].contains(scope),
+            "reused checkpoint epochs bind to distinct paired refresh scopes: {scope:?}"
+        );
+    }
+    assert_eq!(
+        rotated_chains.iter().map(Vec::len).collect::<Vec<_>>(),
+        [4, 3, 3, 2, 3, 3, 2, 3],
+        "each sparse restore follows only the checkpoints present in its page chain"
+    );
+    assert_eq!(
+        rotated_chains
+            .iter()
+            .map(|chain| chain[0][0])
+            .collect::<Vec<_>>(),
+        [0x71, 0x72, 0x73, 0x71, 0x72, 0x73, 0x71, 0x72],
+        "checkpoint epochs rotate and are reused across left/right refresh scopes"
+    );
+    let mut expected_cursors = Vec::new();
+    for (index, chain) in rotated_chains.iter().enumerate() {
+        let source_name = lane_names[index].to_owned();
+        expected_cursors.push((source_name.clone(), scopes[index], None));
+        expected_cursors.extend(chain.iter().cloned().map(|cursor| {
+            (source_name.clone(), scopes[index], Some(cursor))
+        }));
+    }
+    assert_eq!(
+        source.cursors,
+        expected_cursors,
+        "rotated sparse checkpoints resume only their paired source scope"
+    );
     assert!(source.pending["View.Left"].is_empty());
     assert!(source.pending["View.Right"].is_empty());
 }
