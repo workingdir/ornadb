@@ -147,12 +147,15 @@ const LEGACY_SYNTAX_WORDS: &[&str] = &[
     "BIGINT",
     "BOOL",
     "BYTES",
+    "BINARY",
+    "CHARACTER",
     "DATE",
     "DECIMAL",
     "DURATION",
     "FLOAT",
     "INT",
     "INTEGER",
+    "LARGE",
     "TEXT",
     "TIME",
     "TIMESTAMP",
@@ -265,9 +268,13 @@ fn open(client: &mut Client, uri: &str, source: &str) -> Value {
 fn assert_no_legacy_words(value: &Value, surface: &str) {
     match value {
         Value::String(text) => {
+            let matcher_normalized = text
+                .replace("\\\\s+", " ")
+                .replace("\\s+", " ")
+                .replace("\\s\\+", " ");
             for word in LEGACY_SYNTAX_WORDS {
                 assert!(
-                    !contains_word(text, word),
+                    !contains_word(&matcher_normalized, word),
                     "pre-1.0.0 token {word} escaped through {surface}"
                 );
             }
