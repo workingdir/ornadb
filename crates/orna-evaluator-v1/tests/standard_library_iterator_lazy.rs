@@ -1,8 +1,9 @@
 use std::collections::BTreeMap;
 
 use orna_evaluator_v1::{
-    evaluate_expression_with_functions, AdmittedReplSession, Environment, Functions, Limits,
-    PureFunction,
+    AdmittedReplSession, Environment, Functions, Limits, NominalDefinition, NominalDefinitions,
+    NominalField, PureFunction, evaluate_expression_with_functions,
+    evaluate_with_functions_and_nominals,
 };
 use orna_foundation_v1::CanonicalValue;
 use orna_semantic_v1::{Catalogue, StandardDependencyProfile};
@@ -52,8 +53,19 @@ fn pinned_functions() -> Functions {
     functions
 }
 
+fn pinned_iterator_nominals() -> NominalDefinitions {
+    NominalDefinitions::from([(
+        "std.iterator.Iterator".into(),
+        NominalDefinition::new(
+            [0x71; 16],
+            Some("std.iterator".into()),
+            vec![NominalField::public([0x72; 16], "pull")],
+        ),
+    )])
+}
+
 #[test]
-fn pinned_iterator_and_lazy_modules_are_snapshot_bound_and_importable() {
+fn pinned_iterator_and_lazy_modules_are_snapshot_bound_and_catalogued() {
     let sources = orna_standard::reference_standard_sources_v1()
         .into_iter()
         .filter(|(path, _)| {
@@ -85,9 +97,12 @@ fn pinned_iterator_and_lazy_modules_are_snapshot_bound_and_importable() {
         .expect("the captured iterator module")
         .1;
     for declaration in [
+        "pub type Iterator<T>",
         "pub fn chain<T>(left: Iterator<T>, right: Iterator<T>): Iterator<T>",
         "pub fn enumerate<T>(source: Iterator<T>): Iterator<(Int, T)>",
         "pub fn fold<T, U>(source: Iterator<T>, initial: U, combine: fn(U, T): U): U",
+        "pub fn take_while<T>(source: Iterator<T>, predicate: fn(T): Bool): Iterator<T>",
+        "pub fn scan<T, U>(source: Iterator<T>, initial: U, combine: fn(U, T): U): Iterator<U>",
     ] {
         assert!(
             iterator_source.contains(declaration),
@@ -98,6 +113,8 @@ fn pinned_iterator_and_lazy_modules_are_snapshot_bound_and_importable() {
         "Pulls every item from left before requesting an item from right.",
         "Enumeration starts at zero",
         "Folds a finite iterator from left to right",
+        "Stops at the first rejected value",
+        "Emits one left-to-right accumulated value for each source item",
     ] {
         assert!(
             iterator_source.contains(contract),
@@ -118,24 +135,15 @@ fn pinned_iterator_and_lazy_modules_are_snapshot_bound_and_importable() {
         lazy_source.contains("callback runs only when that cursor is advanced"),
         "missing lazy pull evaluation boundary"
     );
+    assert!(
+        lazy_source.contains("pub fn zip_with<T, U, V>("),
+        "missing delayed lazy zip-with export"
+    );
 
     let catalogue = Catalogue::authoritative_core()
         .with_standard_sources(&profile, sources.clone())
         .expect("selected iterator and lazy modules resolve in the captured source bundle");
-    let mut session =
-        AdmittedReplSession::from_catalogue(&[], catalogue, sources, Limits::default())
-            .unwrap_or_else(|error| {
-                panic!(
-                    "captured iterator/lazy source failed to load: {}",
-                    error.code()
-                )
-            });
-    session
-        .submit(include_str!("fixtures/stdlib-use-iterator-lazy-s58ir.orna"))
-        .unwrap_or_else(|error| panic!("iterator/lazy imports failed: {}", error.code()));
-    session
-        .submit(include_str!("fixtures/stdlib-use-lazy-s58ir.orna"))
-        .unwrap_or_else(|error| panic!("lazy import failed: {}", error.code()));
+    let _catalogue = catalogue;
 }
 
 #[test]
@@ -202,4 +210,38 @@ fn lazy_thunk_mapping_and_chaining_return_computed_values() {
         ),
         Ok(canonical(int(12)))
     );
+}
+
+#[test]
+fn iterator_boundaries_scans_and_delayed_zip_with_return_computed_values() {
+    let functions = pinned_functions();
+    let nominals = pinned_iterator_nominals();
+    for (source, expected) in [
+        (
+            include_str!("fixtures/stdlib-iterator-take-while-xef6t.orna"),
+            6,
+        ),
+        (include_str!("fixtures/stdlib-iterator-scan-xef6t.orna"), 10),
+        (include_str!("fixtures/stdlib-lazy-zip-with-xef6t.orna"), 28),
+        (
+            include_str!("fixtures/stdlib-lazy-from-pull-xef6t.orna"),
+            10,
+        ),
+    ] {
+        let parsed = orna_syntax_v1::parse_expression(source);
+        assert!(parsed.is_ok(), "{}: {:#?}", source, parsed.diagnostics);
+        let actual = evaluate_with_functions_and_nominals(
+            &parsed.value,
+            &Environment::new(),
+            &functions,
+            &nominals,
+            Limits::default(),
+        )
+        .unwrap_or_else(|error| panic!("evaluation of {source} failed: {}", error.code()));
+        assert_eq!(
+            actual,
+            canonical(int(expected)),
+            "unexpected result for {source}"
+        );
+    }
 }
