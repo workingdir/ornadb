@@ -3750,6 +3750,108 @@ fn captured_snapshot_identity_survives_paired_divergence_suppression_folds() {
 }
 
 #[test]
+fn captured_snapshot_identity_survives_paired_divergence_convergence_folds() {
+    let (directory, projects, pins) = paired_divergence_convergence_projects();
+    let expected = [
+        [40, 4, 44, 40, 4, 44, 1_007, 1_008],
+        [50, 4, 54, 50, 4, 54, 10_007, 10_008],
+        [40, 5, 45, 40, 5, 45, 1_007, 1_008],
+        [50, 5, 55, 50, 5, 55, 10_007, 10_008],
+        [50, 5, 55, 50, 5, 55, 10_007, 10_008],
+    ];
+    let expected_math = [
+        include_str!("fixtures/module-upgrade-std-v3.orna"),
+        include_str!("fixtures/module-upgrade-std-v4.orna"),
+        include_str!("fixtures/module-upgrade-std-v3.orna"),
+        include_str!("fixtures/module-upgrade-std-v4.orna"),
+        include_str!("fixtures/module-upgrade-std-v4.orna"),
+    ];
+    let expected_collection = [
+        include_str!("fixtures/module-upgrade-std-collection-v4.orna"),
+        include_str!("fixtures/module-upgrade-std-collection-v4.orna"),
+        include_str!("fixtures/module-upgrade-std-collection-v5.orna"),
+        include_str!("fixtures/module-upgrade-std-collection-v5.orna"),
+        include_str!("fixtures/module-upgrade-std-collection-v5.orna"),
+    ];
+    let imports = include_str!("fixtures/module-upgrade-paired-divergence-use.orna");
+    let capture = include_str!("fixtures/module-upgrade-divergence-convergence-capture.orna");
+    let replay = include_str!("fixtures/module-upgrade-divergence-convergence-replay.orna");
+
+    assert!(pins.windows(2).all(|pair| pair[0] != pair[1]));
+    assert_ne!(pins[3], pins[4], "convergence has a distinct snapshot identity");
+    let merge = git_output_at(
+        &directory.path().join("project/stdlib/std"),
+        &["rev-list", "--parents", "-n", "1", pins[4].as_str()],
+    );
+    let merge_parts = merge.split_whitespace().collect::<Vec<_>>();
+    assert_eq!(merge_parts.len(), 3, "convergence pin must have two parents");
+    assert!(merge_parts.contains(&pins[1].as_str()));
+    assert!(merge_parts.contains(&pins[2].as_str()));
+
+    for (index, project) in projects.iter().enumerate() {
+        assert_eq!(
+            project.standard_profile().unwrap().snapshot(),
+            &pins[index],
+            "paired convergence history {index} must retain its captured pin"
+        );
+        assert_eq!(
+            standard_source(project, "std/math.orna"),
+            expected_math[index]
+        );
+        assert_eq!(
+            standard_source(project, "std/collection.orna"),
+            expected_collection[index]
+        );
+    }
+    for path in ["std/math.orna", "std/collection.orna"] {
+        assert_eq!(
+            standard_source(&projects[3], path),
+            standard_source(&projects[4], path),
+            "linear and two-parent convergence resolve the same final {path}"
+        );
+    }
+
+    let mut sessions = Vec::with_capacity(projects.len());
+    for (index, project) in projects.iter().enumerate() {
+        let mut session = AdmittedReplSession::from_loaded_project(
+            project,
+            project.standard_sources().iter().cloned(),
+            Limits::default(),
+        )
+        .unwrap();
+        for import in imports.lines() {
+            assert_eq!(session.submit(import), Ok(None));
+        }
+        assert_eq!(session.submit(capture), Ok(None));
+        assert_eq!(
+            session.submit(replay),
+            Ok(Some(ints(&expected[index]))),
+            "captured replay must compute from convergence history pin {}",
+            pins[index]
+        );
+        sessions.push(session);
+    }
+
+    for index in [4, 0, 3, 2, 1, 4, 3, 0, 2, 1] {
+        assert_eq!(
+            sessions[index].submit(replay),
+            Ok(Some(ints(&expected[index]))),
+            "interleaved replay must preserve convergence history pin {}",
+            pins[index]
+        );
+    }
+    let mut cloned_sessions = sessions.clone();
+    for index in [4, 2, 0, 3, 1] {
+        assert_eq!(
+            cloned_sessions[index].submit(replay),
+            Ok(Some(ints(&expected[index]))),
+            "cloned replay must preserve convergence history pin {}",
+            pins[index]
+        );
+    }
+}
+
+#[test]
 fn captured_paired_resolution_identity_survives_stepwise_repins() {
     let (_directory, projects, pins) = paired_resolution_fold_projects();
     let expected = [
