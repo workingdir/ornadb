@@ -7202,6 +7202,11 @@ fn infer(
                                 .iter()
                                 .any(type_contains_pinned_checkpoint_tuple))
                 });
+            let checkpoint_topology_parent = element_types
+                .iter()
+                .find(|parent| type_contains_pinned_checkpoint_tuple(parent))
+                .cloned()
+                .or_else(|| first_parent.clone());
             let mut rejected_checkpoint_parent = false;
             let mut ty = None;
             for value in element_types {
@@ -7210,7 +7215,9 @@ fn infer(
                         merge_multi_parent_checkpoint_value(
                             prior,
                             &value,
-                            first_parent.as_ref().expect("transactional fold has a parent"),
+                            checkpoint_topology_parent
+                                .as_ref()
+                                .expect("transactional fold has a topology parent"),
                         )
                     } else {
                         merge_list_element_types(prior, &value)
@@ -9533,6 +9540,7 @@ fn merge_list_element_types(left: &Type, right: &Type) -> Option<Type> {
     if (type_contains_pinned_checkpoint_tuple(left)
         || type_contains_pinned_checkpoint_tuple(right))
         && (!checkpoint_pin_map_widths_match(left, right)
+            || !checkpoint_value_pin_identity_topology_matches(left, right)
             || !nested_checkpoint_compaction_fold_preserves_pin_identity(left, right))
     {
         return None;
@@ -9658,6 +9666,7 @@ fn merge_checkpoint_field_map(left: &Type, right: &Type) -> Option<Type> {
             if (type_contains_pinned_checkpoint_tuple(left)
                 || type_contains_pinned_checkpoint_tuple(right))
                 && (!checkpoint_pin_map_widths_match(left, right)
+                    || !checkpoint_value_pin_identity_topology_matches(left, right)
                     || !nested_checkpoint_compaction_fold_preserves_pin_identity(left, right))
             {
                 return None;
@@ -18244,6 +18253,7 @@ fn tuple_checkpoint_promotion_matches(left: &[Type], right: &[Type]) -> bool {
             .iter()
             .zip(right)
             .all(|(left, right)| checkpoint_pin_map_widths_match(left, right))
+        && checkpoint_tuple_pin_identity_topology_matches(left, right)
         && tuple_checkpoint_compaction_fold_preserves_pin_identity(left, right)
 }
 
@@ -18268,6 +18278,7 @@ fn merge_multi_parent_checkpoint_tuple(
         .iter()
         .zip(parent)
         .all(|(first, parent)| checkpoint_pin_map_widths_match(first, parent))
+        || !checkpoint_tuple_pin_identity_topology_matches(first_parent, parent)
         || !tuple_checkpoint_compaction_fold_preserves_pin_identity(accumulated, parent)
     {
         return None;
@@ -18312,9 +18323,12 @@ fn type_contains_pinned_checkpoint_tuple(ty: &Type) -> bool {
 /// partially promoted map behind.
 fn type_contains_omitted_checkpoint_tuple(ty: &Type) -> bool {
     match ty {
-        Type::Tuple(elements) => elements.iter().any(|element| {
-            matches!(element, Type::Bottom) || type_contains_omitted_checkpoint_tuple(element)
-        }),
+        Type::Tuple(elements) => {
+            checkpoint_value_is_omitted(ty)
+                || elements
+                    .iter()
+                    .any(type_contains_omitted_checkpoint_tuple)
+        }
         Type::List(element)
         | Type::Range(element)
         | Type::Relation(element)
@@ -18340,10 +18354,26 @@ fn type_contains_omitted_checkpoint_tuple(ty: &Type) -> bool {
     }
 }
 
+/// A partial tuple still has concrete checkpoint depth labels to fold. Only a
+/// tuple whose every slot is omitted anchors the transactional recovery point;
+/// nested records and tuples can carry that all-omitted shape at any depth.
+fn checkpoint_value_is_omitted(ty: &Type) -> bool {
+    match ty {
+        Type::Bottom => true,
+        Type::Tuple(elements) => {
+            !elements.is_empty() && elements.iter().all(checkpoint_value_is_omitted)
+        }
+        Type::Record(fields) => {
+            !fields.is_empty() && fields.values().all(checkpoint_value_is_omitted)
+        }
+        _ => false,
+    }
+}
+
 /// Reconcile another parent into a nested checkpoint fold. Source parents
-/// retain the first parent's map widths, while the accumulated maps may grow.
-/// Check identity sharing across every aligned map in the row so nested sibling
-/// tuples cannot promote the same depth label through different record paths.
+/// retain the first parent's map widths and selector membership at each
+/// structural path, while accumulated maps may grow only without introducing
+/// new cross-path identity between nested sibling tuples.
 fn merge_multi_parent_checkpoint_value(
     accumulated: &Type,
     parent: &Type,
@@ -18353,12 +18383,66 @@ fn merge_multi_parent_checkpoint_value(
         return merge_multi_parent_checkpoint_tuple(accumulated, parent, first_parent);
     }
     if !checkpoint_pin_map_widths_match(first_parent, parent)
+        || !checkpoint_value_pin_identity_topology_matches(first_parent, parent)
         || !nested_checkpoint_compaction_fold_preserves_pin_identity(accumulated, parent)
     {
         return None;
     }
 
     merge_checkpoint_field_map(accumulated, parent)
+}
+
+/// ORNA-CP-003 and ORNA-SYS-136 define explicit snapshot selection, but do not
+/// specify multi-parent collection folds. Require each source row to preserve
+/// the first row's alpha-equivalent selector membership across structural
+/// paths before unioning its maps; this prevents a pin label from changing
+/// depth merely because different rows use disjoint selector strings.
+fn checkpoint_value_pin_identity_topology_matches(expected: &Type, actual: &Type) -> bool {
+    if !checkpoint_pin_map_widths_match(expected, actual) {
+        return false;
+    }
+    let mut pin_maps = Vec::new();
+    collect_corresponding_snapshot_context_maps_at_path(
+        expected,
+        actual,
+        &mut pin_maps,
+        &mut Vec::new(),
+    ) && snapshot_context_topology_matches_over_present_maps(&pin_maps)
+}
+
+fn checkpoint_tuple_pin_identity_topology_matches(expected: &[Type], actual: &[Type]) -> bool {
+    if expected.len() != actual.len() {
+        return false;
+    }
+    let mut pin_maps = Vec::new();
+    let mut path = Vec::new();
+    for (index, (expected, actual)) in expected.iter().zip(actual).enumerate() {
+        if !collect_corresponding_snapshot_context_maps_at_boundary(
+            expected,
+            actual,
+            &mut pin_maps,
+            &mut path,
+            SnapshotTopologyBoundary::TupleElement(index),
+        ) {
+            return false;
+        }
+    }
+    snapshot_context_topology_matches_over_present_maps(&pin_maps)
+}
+
+/// Ignore a structural path where either source parent omitted a pin. The
+/// accumulated-fold guard still prevents later concrete labels from creating
+/// cross-path identity; this lets an omitted first row acquire its first real
+/// selector topology before subsequent rows are compared against it.
+fn snapshot_context_topology_matches_over_present_maps(
+    pin_maps: &[SnapshotContextMapPair],
+) -> bool {
+    let present = pin_maps
+        .iter()
+        .filter(|pair| !pair.expected.is_empty() && !pair.actual.is_empty())
+        .cloned()
+        .collect::<Vec<_>>();
+    snapshot_context_topology_matches(&present)
 }
 
 fn nested_checkpoint_compaction_fold_preserves_pin_identity(left: &Type, right: &Type) -> bool {
@@ -18409,7 +18493,34 @@ fn record_checkpoint_promotion_matches(
                 checkpoint_pin_map_widths_match(left, right)
             })
         })
+        && checkpoint_record_pin_identity_topology_matches(left, right)
         && record_checkpoint_compaction_fold_preserves_pin_identity(left, right)
+}
+
+fn checkpoint_record_pin_identity_topology_matches(
+    expected: &BTreeMap<String, Type>,
+    actual: &BTreeMap<String, Type>,
+) -> bool {
+    if expected.len() != actual.len() {
+        return false;
+    }
+    let mut pin_maps = Vec::new();
+    let mut path = Vec::new();
+    for (name, expected) in expected {
+        let Some(actual) = actual.get(name) else {
+            return false;
+        };
+        if !collect_corresponding_snapshot_context_maps_at_boundary(
+            expected,
+            actual,
+            &mut pin_maps,
+            &mut path,
+            SnapshotTopologyBoundary::RecordField(name.clone()),
+        ) {
+            return false;
+        }
+    }
+    snapshot_context_topology_matches_over_present_maps(&pin_maps)
 }
 
 fn record_checkpoint_compaction_fold_preserves_pin_identity(

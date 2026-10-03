@@ -1,0 +1,23 @@
+pub fn run(
+    executable: Str,
+    arguments: [Str],
+    working_directory: Str,
+    environment: [(Str, Str)],
+    input: Blob?,
+    timeout: Duration?,
+    max_output_bytes: Int,
+): (Int?, Blob, Blob) = __run(
+    executable, arguments, working_directory, environment, input, timeout, max_output_bytes
+);
+
+fn __run(
+    executable: Str,
+    arguments: [Str],
+    working_directory: Str,
+    environment: [(Str, Str)],
+    input: Blob?,
+    timeout: Duration?,
+    max_output_bytes: Int,
+): (Int?, Blob, Blob) = std.io.process.run(
+    executable, arguments, working_directory, environment, input, timeout, max_output_bytes
+);

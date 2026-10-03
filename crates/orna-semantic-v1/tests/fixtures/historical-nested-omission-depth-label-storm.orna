@@ -1,0 +1,72 @@
+pub fn factory_at(pin: sys.SnapshotRef) =
+    sys.database.as_of(pin).energy.factory;
+
+pub fn nested_omission_storm_rolls_back_after_crossing(failure: Error) {
+    let parents = [
+        {
+            left: { pins: ((fail(failure), fail(failure)), (fail(failure), fail(failure))) },
+            right: { pins: ((factory_at(sys.snapshot("HEAD~100")), factory_at(sys.snapshot("HEAD~101"))), (factory_at(sys.snapshot("HEAD~102")), factory_at(sys.snapshot("HEAD~103")))) },
+        },
+        {
+            left: { pins: ((factory_at(sys.snapshot("HEAD~200")), factory_at(sys.snapshot("HEAD~201"))), (factory_at(sys.snapshot("HEAD~210")), factory_at(sys.snapshot("HEAD~211")))) },
+            right: { pins: ((factory_at(sys.snapshot("HEAD~110")), factory_at(sys.snapshot("HEAD~111"))), (factory_at(sys.snapshot("HEAD~112")), factory_at(sys.snapshot("HEAD~113")))) },
+        },
+        {
+            left: { pins: ((factory_at(sys.snapshot("HEAD~202")), factory_at(sys.snapshot("HEAD~203"))), (factory_at(sys.snapshot("HEAD~212")), factory_at(sys.snapshot("HEAD~213")))) },
+            right: { pins: ((factory_at(sys.snapshot("HEAD~120")), factory_at(sys.snapshot("HEAD~121"))), (factory_at(sys.snapshot("HEAD~122")), factory_at(sys.snapshot("HEAD~123")))) },
+        },
+        {
+            left: { pins: ((factory_at(sys.snapshot("HEAD~201")), factory_at(sys.snapshot("HEAD~200"))), (factory_at(sys.snapshot("HEAD~214")), factory_at(sys.snapshot("HEAD~215")))) },
+            right: { pins: ((factory_at(sys.snapshot("HEAD~130")), factory_at(sys.snapshot("HEAD~131"))), (factory_at(sys.snapshot("HEAD~132")), factory_at(sys.snapshot("HEAD~133")))) },
+        },
+        {
+            left: { pins: ((factory_at(sys.snapshot("HEAD~220")), factory_at(sys.snapshot("HEAD~221"))), (factory_at(sys.snapshot("HEAD~222")), factory_at(sys.snapshot("HEAD~223")))) },
+            right: { pins: ((factory_at(sys.snapshot("HEAD~140")), factory_at(sys.snapshot("HEAD~141"))), (factory_at(sys.snapshot("HEAD~142")), factory_at(sys.snapshot("HEAD~143")))) },
+        },
+    ];
+    { parent_fold: parents }
+}
+
+pub fn nested_omission_storm_keeps_every_depth_label(failure: Error) {
+    let parents = [
+        {
+            left: { pins: ((fail(failure), fail(failure)), (fail(failure), fail(failure))) },
+            right: { pins: ((fail(failure), fail(failure)), (fail(failure), fail(failure))) },
+        },
+        {
+            left: { pins: ((factory_at(sys.snapshot("HEAD~300")), factory_at(sys.snapshot("HEAD~301"))), (fail(failure), fail(failure))) },
+            right: { pins: ((fail(failure), fail(failure)), (factory_at(sys.snapshot("HEAD~400")), factory_at(sys.snapshot("HEAD~401")))) },
+        },
+        {
+            left: { pins: ((fail(failure), fail(failure)), (factory_at(sys.snapshot("HEAD~310")), factory_at(sys.snapshot("HEAD~311")))) },
+            right: { pins: ((factory_at(sys.snapshot("HEAD~410")), factory_at(sys.snapshot("HEAD~411"))), (fail(failure), fail(failure))) },
+        },
+        {
+            left: { pins: ((factory_at(sys.snapshot("HEAD~302")), factory_at(sys.snapshot("HEAD~303"))), (factory_at(sys.snapshot("HEAD~312")), factory_at(sys.snapshot("HEAD~313")))) },
+            right: { pins: ((factory_at(sys.snapshot("HEAD~412")), factory_at(sys.snapshot("HEAD~413"))), (factory_at(sys.snapshot("HEAD~402")), factory_at(sys.snapshot("HEAD~403")))) },
+        },
+        {
+            left: { pins: ((factory_at(sys.snapshot("HEAD~304")), factory_at(sys.snapshot("HEAD~305"))), (factory_at(sys.snapshot("HEAD~314")), factory_at(sys.snapshot("HEAD~315")))) },
+            right: { pins: ((factory_at(sys.snapshot("HEAD~414")), factory_at(sys.snapshot("HEAD~415"))), (factory_at(sys.snapshot("HEAD~404")), factory_at(sys.snapshot("HEAD~405")))) },
+        },
+    ];
+    { parent_fold: parents }
+}
+
+pub fn partial_nested_omission_keeps_prior_depth_labels(failure: Error) {
+    let parents = [
+        {
+            left: { pins: ((fail(failure), 1), (fail(failure), 1)) },
+            right: { pins: ((fail(failure), 1), (fail(failure), 1)) },
+        },
+        {
+            left: { pins: ((factory_at(sys.snapshot("HEAD~502")), 1), (factory_at(sys.snapshot("HEAD~512")), 1)) },
+            right: { pins: ((factory_at(sys.snapshot("HEAD~522")), 1), (factory_at(sys.snapshot("HEAD~532")), 1)) },
+        },
+        {
+            left: { pins: ((factory_at(sys.snapshot("HEAD~512")), 1), (factory_at(sys.snapshot("HEAD~502")), 1)) },
+            right: { pins: ((factory_at(sys.snapshot("HEAD~524")), 1), (factory_at(sys.snapshot("HEAD~534")), 1)) },
+        },
+    ];
+    { parent_fold: parents }
+}
