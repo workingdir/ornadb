@@ -4067,7 +4067,45 @@ fn nested_aggregates_keep_values_across_paired_pagination_compaction_chains() {
     assert_eq!(third, integer_pair(94, 168), "the final page pair computes (94, 168)");
     assert_eq!(first, integer_pair(56, 560), "later refreshes preserve the first nested aggregate pair");
     assert_eq!(second, integer_pair(104, 112), "later refreshes preserve the second nested aggregate pair");
-    assert_eq!(source.lanes.len(), 6, "three refreshes restore paired source chains");
+    let lane_names = [
+        "View.Left",
+        "View.Right",
+        "View.Left",
+        "View.Right",
+        "View.Left",
+        "View.Right",
+    ];
+    assert_eq!(source.lanes.len(), lane_names.len());
+    let scopes = source
+        .lanes
+        .iter()
+        .zip(lane_names)
+        .map(|((source_name, scope, _), expected_name)| {
+            assert_eq!(source_name, expected_name, "nested refreshes read left then right");
+            *scope
+        })
+        .collect::<Vec<_>>();
+    for (index, scope) in scopes.iter().enumerate() {
+        assert!(
+            !scopes[..index].contains(scope),
+            "paired nested page chains keep distinct source scope identities: {scope:?}"
+        );
+    }
+    let mut expected_cursors = Vec::new();
+    for (index, scope) in scopes.iter().copied().enumerate() {
+        expected_cursors.extend(
+            std::iter::once((lane_names[index].to_owned(), scope, None)).chain(
+                cursors.iter().cloned().map(|cursor| {
+                    (lane_names[index].to_owned(), scope, Some(cursor))
+                }),
+            ),
+        );
+    }
+    assert_eq!(
+        source.cursors,
+        expected_cursors,
+        "reused compact pagination cursors restore only the corresponding nested source snapshot"
+    );
     assert!(source.pending["View.Left"].is_empty());
     assert!(source.pending["View.Right"].is_empty());
 }
