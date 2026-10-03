@@ -1290,6 +1290,66 @@ fn generated_provider_schema_drift_cannot_weaken_identifier_guard() {
 }
 
 #[test]
+fn generated_dispatch_metadata_rejects_provider_role_version_source_drift() {
+    let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let collector = build_support::collect_rust_sources(&manifest.join("src"))
+        .expect("annotated implementation methods form a valid provider registry");
+    let registry = collector
+        .type_graph
+        .clone()
+        .expect("annotated provider registry owns its type graph");
+    let schema = collector
+        .schema
+        .clone()
+        .expect("annotated provider registry owns its schema");
+    let mut functions = collector.functions;
+    let baseline = build_support::generate_sys_artifacts(&functions, registry.clone(), &schema)
+        .expect("typed source generates provider dispatch metadata");
+    assert_eq!(baseline.provider_abi_json, system_provider_abi_json());
+    let provider_schema = build_provider::generate_provider_registry_schema()
+        .expect("generated dispatch metadata schema is reproducible");
+    build_host::validate_json_against_schema(&baseline.provider_abi_json, &provider_schema)
+        .expect("generated dispatch metadata conforms to its schema");
+    let parsed = SystemProviderAbi::from_json(&baseline.provider_abi_json)
+        .expect("generated provider metadata parses into the runtime dispatch table");
+    assert_eq!(&parsed, system_dispatch_table());
+
+    let mut role_members = BTreeMap::<String, Vec<(usize, u16, u16)>>::new();
+    for (index, function) in functions.iter().enumerate() {
+        let Some(role) = &function.role else {
+            continue;
+        };
+        let (name, major, minor) =
+            build_support::parse_role_version(role).expect("source role has a parsed version");
+        role_members
+            .entry(name.to_owned())
+            .or_default()
+            .push((index, major, minor));
+    }
+    let (role_name, members) = role_members
+        .into_iter()
+        .find(|(_, members)| members.len() > 1)
+        .expect("provider registry includes a role shared by multiple operations");
+    let (changed_index, major, minor) = members[0];
+    let changed_minor = minor
+        .checked_add(1)
+        .expect("source provider role minor version can be advanced for the drift probe");
+    functions[changed_index].role = Some(format!("{role_name}@{major}.{changed_minor}"));
+
+    let drift = build_support::generate_sys_artifacts(&functions, registry, &schema)
+        .expect_err("inconsistent source role versions stop dispatch metadata generation");
+    assert!(
+        drift.contains(&format!(
+            "semantic role `{role_name}` declares multiple versions"
+        )),
+        "generation diagnostic identifies the inconsistent provider role: {drift}"
+    );
+    println!(
+        "generated_dispatch_metadata_source_validation baseline_parity=embedded,schema,runtime inconsistent_role_versions_rejected=1 total_cases=4"
+    );
+}
+
+#[test]
 fn generated_artifact_drift_probe_rejects_tampered_outputs_and_stale_modules() {
     let regenerated = regenerate();
     let source_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
