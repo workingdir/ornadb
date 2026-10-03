@@ -3597,6 +3597,23 @@ fn captured_dependency_pin_identity_survives_nested_replay_chains() {
         sessions.push(session);
     }
 
+    for index in [3, 0, 2, 1, 3, 1, 0, 2] {
+        assert_eq!(
+            sessions[index].submit(replay),
+            Ok(Some(ints(&expected[index]))),
+            "nested dependency replay must retain pin {} after other pins run",
+            pins[index]
+        );
+    }
+    let mut cloned_sessions = sessions.clone();
+    for index in [2, 0, 3, 1] {
+        assert_eq!(
+            cloned_sessions[index].submit(replay),
+            Ok(Some(ints(&expected[index]))),
+            "cloned nested dependency replay must retain pin {}",
+            pins[index]
+        );
+    }
 }
 
 #[test]
