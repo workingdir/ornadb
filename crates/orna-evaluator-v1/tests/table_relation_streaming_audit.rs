@@ -133,6 +133,31 @@ fn paired_window_refresh_compaction_functions() -> Functions {
         .collect()
 }
 
+fn paired_limit_refresh_compaction_functions() -> Functions {
+    let parsed = parse_module(include_str!(
+        "fixtures/table_relation_paired_limit_refresh_compaction_la0gy.orna"
+    ));
+    assert!(parsed.is_ok(), "{:?}", parsed.diagnostics);
+    parsed
+        .value
+        .items
+        .into_iter()
+        .map(|item| {
+            let orna_syntax_v1::Declaration::Function { signature, body } = item.declaration else {
+                panic!("fixture function expected")
+            };
+            (
+                signature.name,
+                PureFunction {
+                    parameters: signature.parameters,
+                    body,
+                    environment: Environment::new(),
+                },
+            )
+        })
+        .collect()
+}
+
 fn scoped_refresh_aggregate_functions() -> Functions {
     let parsed = parse_module(include_str!(
         "fixtures/table_relation_scoped_refresh_aggregate_restore_4plgl.orna"
@@ -1890,6 +1915,23 @@ fn paired_window_refresh_compaction_body() -> Expr {
     }
 }
 
+fn paired_limit_refresh_compaction_body() -> Expr {
+    let limited_sum = |source: &str| {
+        let first_limit = relation_stage(
+            relation_source(source),
+            "take",
+            vec![integer_literal(4)],
+        );
+        let tightened_limit = relation_stage(first_limit, "take", vec![integer_literal(3)]);
+        let scaled = relation_stage(tightened_limit, "map", vec![named_function("scale_row")]);
+        terminal(scaled, "sum")
+    };
+    Expr::Tuple {
+        elements: vec![limited_sum("View.Left"), limited_sum("View.Right")],
+        span: span(),
+    }
+}
+
 fn paired_scoped_aggregate_restore_body() -> Expr {
     let left = terminal(
         relation_stage(
@@ -2417,6 +2459,77 @@ fn paired_window_folds_keep_values_across_sparse_refresh_compaction_chains() {
         expected_cursors,
         "reused compact cursor bytes advance only within each sparse refresh source scope"
     );
+    assert!(source.pending["View.Left"].is_empty());
+    assert!(source.pending["View.Right"].is_empty());
+}
+
+#[test]
+fn paired_limit_compaction_refreshes_keep_scoped_prefix_values() {
+    // Nested `take` stages tighten the requested prefix. Compacted opaque
+    // continuations are snapshot-local even when all six chains reuse them.
+    let compacted_cursor = vec![0xf0];
+    let after_compaction_cursor = vec![0xf1];
+    let restore = |values: [i64; 4], long_cursor: &[u8]| {
+        BTreeMap::from([
+            (None, page(&[values[0]], Some(long_cursor.to_vec()))),
+            (
+                Some(long_cursor.to_vec()),
+                page(&[values[1]], Some(compacted_cursor.clone())),
+            ),
+            (
+                Some(compacted_cursor.clone()),
+                page(&[values[2]], Some(after_compaction_cursor.clone())),
+            ),
+            (
+                Some(after_compaction_cursor.clone()),
+                page(&[values[3]], None),
+            ),
+        ])
+    };
+    let generations = [
+        ([1, 2, 3, 999], [10, 20, 30, 999]),
+        ([4, 5, 6, 888], [2, 4, 6, 888]),
+        ([3, 7, 9, 777], [1, 8, 10, 777]),
+    ];
+    let mut restores = Vec::new();
+    for (generation, (left, right)) in generations.into_iter().enumerate() {
+        for (lane, (source_name, values)) in
+            [("View.Left", left), ("View.Right", right)].into_iter().enumerate()
+        {
+            let tag = 0x20 + (generation * 2 + lane) as u8;
+            let long_cursor = vec![tag; 128];
+            restores.push((source_name, restore(values, &long_cursor)));
+        }
+    }
+    let mut source = PairedCursorRestoreSource::new(restores);
+    let mut functions = paired_limit_refresh_compaction_functions();
+    functions.insert(
+        "run".into(),
+        PureFunction {
+            parameters: Vec::new(),
+            body: paired_limit_refresh_compaction_body(),
+            environment: Environment::new(),
+        },
+    );
+    let run_refresh = |source: &mut PairedCursorRestoreSource| {
+        invoke_named_with_effects(
+            "run",
+            &functions,
+            &Environment::new(),
+            Limits::default(),
+            source,
+        )
+        .unwrap()
+    };
+
+    let first = run_refresh(&mut source);
+    assert_eq!(first, integer_pair(60, 600), "the first paired prefix scales and sums its first three rows");
+    let second = run_refresh(&mut source);
+    assert_eq!(second, integer_pair(150, 120), "the next compacted pair computes from its own prefixes");
+    let third = run_refresh(&mut source);
+    assert_eq!(third, integer_pair(190, 190), "the final pair keeps each refreshed limit prefix separate");
+    assert_eq!(first, integer_pair(60, 600), "later restores leave the first limited result intact");
+    assert_eq!(second, integer_pair(150, 120), "later restores leave the second limited result intact");
     assert!(source.pending["View.Left"].is_empty());
     assert!(source.pending["View.Right"].is_empty());
 }
