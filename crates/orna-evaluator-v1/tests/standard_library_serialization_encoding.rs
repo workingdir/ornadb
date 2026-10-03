@@ -205,6 +205,56 @@ fn pinned_encoding_modules_compute_canonical_values_and_reject_noncanonical_inpu
 }
 
 #[test]
+fn standard_base64_roundtrips_each_padding_shape_and_rejects_noncanonical_tails() {
+    let encode = include_str!("fixtures/stdlib-base64-edge-encode-etsj1.orna");
+    let decode = include_str!("fixtures/stdlib-base64-edge-decode-etsj1.orna");
+    for (bytes, encoded) in [
+        (&[][..], ""),
+        (&[0][..], "AA=="),
+        (&[0, 1][..], "AAE="),
+        (&[0, 1, 2][..], "AAEC"),
+        (&[255][..], "/w=="),
+        (&[255, 238][..], "/+4="),
+    ] {
+        let environment = Environment::from([(
+            "payload".into(),
+            CanonicalValue::new(Raw::Bytes(bytes.to_vec())).unwrap(),
+        )]);
+        assert_eq!(
+            eval_pinned_with_environment(encode, environment),
+            Ok(text_value(encoded)),
+            "Base64 encoding of {bytes:?}"
+        );
+
+        let environment = Environment::from([("input".into(), text_value(encoded))]);
+        assert_eq!(
+            eval_pinned_with_environment(decode, environment),
+            Ok(CanonicalValue::new(Raw::Bytes(bytes.to_vec())).unwrap()),
+            "Base64 decoding of {encoded:?}"
+        );
+    }
+
+    for invalid in [
+        "A===",   // padding in a data position
+        "AAA",    // omitted required padding
+        "-w==",   // URL-safe alphabet is a separate profile
+        "AA==\n", // whitespace is not ignored
+        "AA=A",   // padding before the final position
+        "AB==",   // nonzero unused four trailing bits
+        "AAB=",   // nonzero unused two trailing bits
+    ] {
+        let environment = Environment::from([("input".into(), text_value(invalid))]);
+        assert_eq!(
+            eval_pinned_with_environment(decode, environment)
+                .unwrap_err()
+                .code(),
+            "ORNA-EVAL-VALUE",
+            "Base64 input {invalid:?} must be rejected"
+        );
+    }
+}
+
+#[test]
 fn exact_money_allocation_distributes_remainders_stably_and_preserves_total() {
     let mut with_std = AdmittedReplSession::with_reference_standard(Limits::default()).unwrap();
     assert_eq!(

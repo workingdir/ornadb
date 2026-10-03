@@ -1,0 +1,18 @@
+text.lower("İ") == "i̇"
+&& text.lower("ΟΣ") == "ος"
+&& text.lower("ΌΣ") == "ός"
+&& text.lower("Ο'Σ") == "ο'ς"
+&& text.lower("ΟΣΑ") == "οσα"
+&& text.lower("\u{1C89}") == "\u{1C8A}"
+&& text.upper("\u{1C8A}") == "\u{1C89}"
+&& text.upper("ßﬃ") == "SSFFI"
+&& text.normalise("Å", "NFC") == "Å"
+&& text.split("🙂a🙂", "🙂") == ["", "a", ""]
+&& text.replace("aaaa", "aa", "x") == "xx"
+&& 0.3.decimal - 0.2.decimal == 0.1.decimal
+&& 1.decimal / 40.decimal == 0.025.decimal
+&& -1.decimal / 40.decimal == -0.025.decimal
+&& (1.decimal / 8.decimal) * 40.decimal == 5.decimal
+&& math.gcd(-42, 30) == 6
+&& math.lcm(-21, 6) == 42
+&& math.pow_nonnegative(2, 100) == first([1267650600228229401496703205376])

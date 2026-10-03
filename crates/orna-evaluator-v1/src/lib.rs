@@ -37,6 +37,7 @@ mod relation;
 mod repl;
 mod sys_bindings;
 mod timezone;
+mod unicode_16_case_properties;
 
 pub use admitted_repl::{AdmittedReplSession, ReplError};
 pub use cancellation::CancellationToken;
@@ -88,6 +89,56 @@ fn unicode_16_white_space(value: char) -> bool {
             | '\u{205F}'
             | '\u{3000}'
     )
+}
+
+fn unicode_16_lowercase(value: &str) -> String {
+    let mut output = String::with_capacity(value.len());
+    let scalars = value.chars().collect::<Vec<_>>();
+    for (index, scalar) in scalars.iter().copied().enumerate() {
+        if scalar == '\u{03a3}' && unicode_16_is_final_sigma(&scalars, index) {
+            output.push('\u{03c2}');
+            continue;
+        }
+        let mapping = unicode_case_mapping::to_lowercase(scalar);
+        if mapping[0] == 0 {
+            output.push(scalar);
+            continue;
+        }
+        for codepoint in mapping.into_iter().take_while(|codepoint| *codepoint != 0) {
+            output.push(char::from_u32(codepoint).expect("Unicode casing table contains scalars"));
+        }
+    }
+    output
+}
+
+fn unicode_16_is_final_sigma(scalars: &[char], index: usize) -> bool {
+    let preceding_cased = scalars[..index]
+        .iter()
+        .rev()
+        .copied()
+        .find(|scalar| !unicode_16_case_properties::is_case_ignorable(*scalar))
+        .is_some_and(unicode_16_case_properties::is_cased);
+    let following_cased = scalars[index + 1..]
+        .iter()
+        .copied()
+        .find(|scalar| !unicode_16_case_properties::is_case_ignorable(*scalar))
+        .is_some_and(unicode_16_case_properties::is_cased);
+    preceding_cased && !following_cased
+}
+
+fn unicode_16_uppercase(value: &str) -> String {
+    let mut output = String::with_capacity(value.len());
+    for scalar in value.chars() {
+        let mapping = unicode_case_mapping::to_uppercase(scalar);
+        if mapping[0] == 0 {
+            output.push(scalar);
+            continue;
+        }
+        for codepoint in mapping.into_iter().take_while(|codepoint| *codepoint != 0) {
+            output.push(char::from_u32(codepoint).expect("Unicode casing table contains scalars"));
+        }
+    }
+    output
 }
 
 /// Explicit resource bounds. All zero values reject evaluation immediately.
@@ -5967,12 +6018,10 @@ impl Context<'_, '_> {
                 _ => Err(error("ORNA-EVAL-VALUE")),
             },
             ("lower", [Value::String(value)]) => {
-                // Case conversion is locale-independent and follows the
-                // runtime's Unicode mapping, not a process locale.
-                self.string(value.to_lowercase()).map(Value::String)
+                self.string(unicode_16_lowercase(value)).map(Value::String)
             }
             ("upper", [Value::String(value)]) => {
-                self.string(value.to_uppercase()).map(Value::String)
+                self.string(unicode_16_uppercase(value)).map(Value::String)
             }
             ("trim" | "lower" | "upper", [_])
             | ("split" | "starts_with" | "ends_with" | "contains", [_, _])
