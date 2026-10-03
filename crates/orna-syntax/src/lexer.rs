@@ -1,6 +1,13 @@
 use std::ops::Range;
 
-use crate::{Diagnostic, SourceSpan, parser::SyntaxKind};
+use crate::{
+    Diagnostic, SourceSpan,
+    grammar::{
+        BLOCK_COMMENT_END, BLOCK_COMMENT_START, LINE_COMMENT_START, QUOTED_IDENTIFIER_DELIMITER,
+        STRING_DELIMITER,
+    },
+    parser::SyntaxKind,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum TokenKind {
@@ -85,12 +92,12 @@ pub(crate) fn lex(source: &str) -> (Vec<Token<'_>>, Vec<Diagnostic>) {
                     .find(|(_, current)| !current.is_whitespace())
                     .map_or(rest.len(), |(index, _)| index);
                 (TokenKind::Whitespace, width)
-            } else if rest.starts_with("--") {
+            } else if rest.starts_with(LINE_COMMENT_START) {
                 let width = rest.find('\n').unwrap_or(rest.len());
                 (TokenKind::LineComment, width)
-            } else if rest.starts_with("/*") {
-                match rest.find("*/") {
-                    Some(end) => (TokenKind::BlockComment, end + 2),
+            } else if rest.starts_with(BLOCK_COMMENT_START) {
+                match rest.find(BLOCK_COMMENT_END) {
+                    Some(end) => (TokenKind::BlockComment, end + BLOCK_COMMENT_END.len()),
                     None => {
                         diagnostics.push(Diagnostic {
                             code: "ORNA0002",
@@ -103,15 +110,15 @@ pub(crate) fn lex(source: &str) -> (Vec<Token<'_>>, Vec<Diagnostic>) {
                         (TokenKind::BlockComment, rest.len())
                     }
                 }
-            } else if character == '"' {
+            } else if character == QUOTED_IDENTIFIER_DELIMITER {
                 let mut index = character.len_utf8();
                 let mut terminated = false;
                 while index < rest.len() {
                     let current = rest[index..].chars().next().expect("valid UTF-8");
                     index += current.len_utf8();
-                    if current == '"' {
-                        if rest[index..].starts_with('"') {
-                            index += '"'.len_utf8();
+                    if current == QUOTED_IDENTIFIER_DELIMITER {
+                        if rest[index..].starts_with(QUOTED_IDENTIFIER_DELIMITER) {
+                            index += QUOTED_IDENTIFIER_DELIMITER.len_utf8();
                         } else {
                             terminated = true;
                             break;
@@ -129,15 +136,15 @@ pub(crate) fn lex(source: &str) -> (Vec<Token<'_>>, Vec<Diagnostic>) {
                     });
                 }
                 (TokenKind::QuotedIdentifier, index)
-            } else if character == '\'' {
+            } else if character == STRING_DELIMITER {
                 let mut index = character.len_utf8();
                 let mut terminated = false;
                 while index < rest.len() {
                     let current = rest[index..].chars().next().expect("valid UTF-8");
                     index += current.len_utf8();
-                    if current == '\'' {
-                        if rest[index..].starts_with('\'') {
-                            index += '\''.len_utf8();
+                    if current == STRING_DELIMITER {
+                        if rest[index..].starts_with(STRING_DELIMITER) {
+                            index += STRING_DELIMITER.len_utf8();
                         } else {
                             terminated = true;
                             break;
