@@ -85,6 +85,31 @@ fn nested_aggregate_refresh_functions() -> Functions {
         .collect()
 }
 
+fn nested_aggregate_compaction_functions() -> Functions {
+    let parsed = parse_module(include_str!(
+        "fixtures/table_relation_nested_aggregate_compaction_3xa7q.orna"
+    ));
+    assert!(parsed.is_ok(), "{:?}", parsed.diagnostics);
+    parsed
+        .value
+        .items
+        .into_iter()
+        .map(|item| {
+            let orna_syntax_v1::Declaration::Function { signature, body } = item.declaration else {
+                panic!("fixture function expected")
+            };
+            (
+                signature.name,
+                PureFunction {
+                    parameters: signature.parameters,
+                    body,
+                    environment: Environment::new(),
+                },
+            )
+        })
+        .collect()
+}
+
 fn sparse_window_fold_functions() -> Functions {
     let parsed = parse_module(include_str!("fixtures/table_relation_sparse_window_fold_d4441.orna"));
     assert!(parsed.is_ok(), "{:?}", parsed.diagnostics);
@@ -2809,6 +2834,121 @@ fn paired_refresh_cursor_restores_preserve_source_scope_identity() {
         source.cursors,
         expected_cursors,
         "reused restoration cursors resolve only within their source and fresh read scope"
+    );
+    assert!(source.pending["View.Left"].is_empty());
+    assert!(source.pending["View.Right"].is_empty());
+}
+
+#[test]
+fn nested_aggregate_folds_keep_identity_across_paired_refresh_compaction_chains() {
+    // The reference does not specify whether opaque provider cursors survive
+    // refresh compaction. Keep the documented lexicographic progress within a
+    // chain, and treat each `(source, scope)` snapshot as its own chain even
+    // when compact cursor tokens are reused by sibling snapshots.
+    let compacted_cursor = vec![0x5b];
+    let long_cursors = [
+        vec![0x5a, 0x01, 0xff, 0x00],
+        vec![0x5a, 0x02, 0xff, 0x00],
+        vec![0x5a, 0x03, 0xff, 0x00],
+        vec![0x5a, 0x04, 0xff, 0x00],
+        vec![0x5a, 0x05, 0xff, 0x00],
+        vec![0x5a, 0x06, 0xff, 0x00],
+    ];
+    let restore = |groups: &[&[i64]], long_cursor: &[u8]| {
+        assert_eq!(groups.len(), 3, "each checkpoint chain has three pages");
+        BTreeMap::from([
+            (None, page(groups[0], Some(long_cursor.to_vec()))),
+            (
+                Some(long_cursor.to_vec()),
+                page(groups[1], Some(compacted_cursor.clone())),
+            ),
+            (
+                Some(compacted_cursor.clone()),
+                page(groups[2], None),
+            ),
+        ])
+    };
+    let mut source = PairedCursorRestoreSource::new([
+        ("View.Left", restore(&[&[1, 2], &[3], &[4]], &long_cursors[0])),
+        ("View.Right", restore(&[&[10], &[20, 30], &[40]], &long_cursors[1])),
+        ("View.Left", restore(&[&[4], &[5, 6], &[7]], &long_cursors[2])),
+        ("View.Right", restore(&[&[2, 4], &[6], &[8]], &long_cursors[3])),
+        ("View.Left", restore(&[&[-1, 3], &[5], &[7]], &long_cursors[4])),
+        ("View.Right", restore(&[&[3], &[6, 9], &[12]], &long_cursors[5])),
+    ]);
+    let mut functions = nested_aggregate_compaction_functions();
+    functions.insert(
+        "run".into(),
+        PureFunction {
+            parameters: Vec::new(),
+            body: paired_nested_aggregate_refresh_body(),
+            environment: Environment::new(),
+        },
+    );
+    let run_refresh = |source: &mut PairedCursorRestoreSource| {
+        invoke_named_with_effects(
+            "run",
+            &functions,
+            &Environment::new(),
+            Limits::default(),
+            source,
+        )
+        .unwrap()
+    };
+
+    let first = run_refresh(&mut source);
+    assert_eq!(first, integer_pair(20, 200), "nested folds compute the first paired snapshot");
+    let second = run_refresh(&mut source);
+    assert_eq!(second, integer_pair(44, 40), "the next compacted pair computes its own nested totals");
+    let third = run_refresh(&mut source);
+    assert_eq!(third, integer_pair(30, 60), "the final pair folds its own pages after compaction");
+    assert_eq!(first, integer_pair(20, 200), "later refreshes retain the first paired value snapshot");
+    assert_eq!(second, integer_pair(44, 40), "later refreshes retain the second paired value snapshot");
+
+    let lane_names = [
+        "View.Left",
+        "View.Right",
+        "View.Left",
+        "View.Right",
+        "View.Left",
+        "View.Right",
+    ];
+    assert_eq!(source.lanes.len(), lane_names.len());
+    let scopes = source
+        .lanes
+        .iter()
+        .zip(lane_names)
+        .map(|((source_name, scope, _), expected_name)| {
+            assert_eq!(source_name, expected_name, "each generation restores left then right");
+            *scope
+        })
+        .collect::<Vec<_>>();
+    for (index, scope) in scopes.iter().enumerate() {
+        assert!(
+            !scopes[..index].contains(scope),
+            "paired compaction chains retain independent snapshot scopes: {scope:?}"
+        );
+    }
+    let mut expected_cursors = Vec::new();
+    for (index, scope) in scopes.iter().copied().enumerate() {
+        expected_cursors.extend([
+            (lane_names[index].to_owned(), scope, None),
+            (
+                lane_names[index].to_owned(),
+                scope,
+                Some(long_cursors[index].clone()),
+            ),
+            (
+                lane_names[index].to_owned(),
+                scope,
+                Some(compacted_cursor.clone()),
+            ),
+        ]);
+    }
+    assert_eq!(
+        source.cursors,
+        expected_cursors,
+        "the shared compact token resumes only inside its paired refresh and source scope"
     );
     assert!(source.pending["View.Left"].is_empty());
     assert!(source.pending["View.Right"].is_empty());
