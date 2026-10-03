@@ -1,0 +1,17 @@
+(
+    query_ops.recursive_cte(
+        collection_ops.distinct(
+            collection_ops.filter([0, 0], value => value > 0)
+        ),
+        row => [row]
+    ),
+    query_ops.recursive_cte(
+        collection_ops.distinct(
+            collection_ops.flat_map(
+                collection_ops.filter([2, 0, 1], value => value > 0),
+                value => [value * 10, value * 10]
+            )
+        ),
+        row => if row < 30 { [row + 10, row + 10] } else { [row] }
+    )
+)

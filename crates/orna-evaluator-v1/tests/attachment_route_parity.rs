@@ -2741,6 +2741,39 @@ fn sparse_nested_storm_folds_preserve_terminal_route_identity() {
         leaf_final,
         "the final sparse chain restores the actual terminal package snapshot"
     );
+    let initial_chain_identity = first_stage.terminal_route_identity();
+    let expected_identity_transitions = [
+        (initial_chain_identity, first_chain_identity.clone()),
+        (first_chain_identity.clone(), middle_chain_identity.clone()),
+        (middle_chain_identity.clone(), restored_chain_identity.clone()),
+    ];
+    let (transition_fold, observed_identity_transitions) = resolver
+        .extend_nested_terminal_pair_sparse_checkpoint_storm_chains_capturing_terminal_identity_transitions(
+            &first_stage,
+            &paired_rebind_chains,
+        )
+        .unwrap();
+    assert_eq!(
+        observed_identity_transitions,
+        expected_identity_transitions,
+        "each sparse rebind chain records its exact before/after terminal identities"
+    );
+    assert_eq!(
+        transition_fold.terminal_route_identity(),
+        restored_chain_identity,
+        "the final route identity matches the last transition destination"
+    );
+    assert_eq!(
+        transition_fold
+            .final_session()
+            .database(aliases[4])
+            .unwrap()
+            .pin()
+            .commit()
+            .as_str(),
+        leaf_final,
+        "the transition fold ends at the concrete final terminal package pin"
+    );
     let (captured_chain_fold, captured_chain_identities) = resolver
         .extend_nested_terminal_pair_sparse_checkpoint_storm_chains_capturing_terminal_identities(
             &first_stage,
