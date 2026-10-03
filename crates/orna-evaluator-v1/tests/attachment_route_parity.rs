@@ -2774,6 +2774,52 @@ fn sparse_nested_storm_folds_preserve_terminal_route_identity() {
         leaf_final,
         "the transition fold ends at the concrete final terminal package pin"
     );
+    let transition_validated_fold = resolver
+        .extend_nested_terminal_pair_sparse_checkpoint_storm_chains_validating_terminal_identity_transitions(
+            &first_stage,
+            &paired_rebind_chains,
+            &expected_identity_transitions,
+        )
+        .unwrap();
+    assert_eq!(
+        transition_validated_fold.terminal_route_identity(),
+        restored_chain_identity,
+        "validating paired identity edges returns the expected terminal route"
+    );
+    assert_eq!(
+        transition_validated_fold
+            .final_session()
+            .database(aliases[4])
+            .unwrap()
+            .pin()
+            .commit()
+            .as_str(),
+        leaf_final,
+        "identity-edge validation preserves the exact final nested package value"
+    );
+    let stale_identity_transitions = [
+        expected_identity_transitions[0].clone(),
+        (middle_chain_identity.clone(), middle_chain_identity.clone()),
+        expected_identity_transitions[2].clone(),
+    ];
+    assert!(matches!(
+        resolver
+            .extend_nested_terminal_pair_sparse_checkpoint_storm_chains_validating_terminal_identity_transitions(
+                &first_stage,
+                &paired_rebind_chains,
+                &stale_identity_transitions,
+            ),
+        Err(AttachmentError::RetainedSnapshotUnavailable)
+    ));
+    assert!(matches!(
+        resolver
+            .extend_nested_terminal_pair_sparse_checkpoint_storm_chains_validating_terminal_identity_transitions(
+                &first_stage,
+                &paired_rebind_chains,
+                &expected_identity_transitions[..2],
+        ),
+        Err(AttachmentError::RetainedSnapshotUnavailable)
+    ));
     let (captured_chain_fold, captured_chain_identities) = resolver
         .extend_nested_terminal_pair_sparse_checkpoint_storm_chains_capturing_terminal_identities(
             &first_stage,
