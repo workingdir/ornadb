@@ -1,0 +1,2 @@
+use std.graph.aggregate.{combine};
+pub fn replay(): Int = std.graph.aggregate.combine();
