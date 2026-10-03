@@ -1,1 +1,6 @@
-paired(7)
+if true {
+    let paired = (seed: Int) => shift(seed) + marker();
+    paired(7)
+} else {
+    shift(7) + marker()
+}

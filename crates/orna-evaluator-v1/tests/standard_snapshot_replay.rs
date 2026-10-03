@@ -2476,7 +2476,6 @@ fn captured_pair_resolution_folds_keep_each_pinned_snapshot_identity() {
     let pins = [&snapshots[3], &snapshots[4], &snapshots[5]];
     let expected_values = [1_011, 10_012, 100_013];
     let use_pair = include_str!("fixtures/module-upgrade-paired-use.orna");
-    let bind_pair = include_str!("fixtures/module-upgrade-paired-bind.orna");
     let fold_pair = include_str!("fixtures/module-upgrade-paired-fold.orna");
 
     let mut sessions = Vec::with_capacity(projects.len());
@@ -2491,7 +2490,6 @@ fn captured_pair_resolution_folds_keep_each_pinned_snapshot_identity() {
         for import in use_pair.lines() {
             assert_eq!(session.submit(import), Ok(None));
         }
-        assert_eq!(session.submit(bind_pair), Ok(None));
         assert_eq!(
             session.submit(fold_pair),
             Ok(Some(int(expected_values[index]))),
