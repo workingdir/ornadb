@@ -1,0 +1,6 @@
+if true {
+    let paired = (seed: Int) => [math.marker(), collection.marker(), math.shift(seed)];
+    paired(7)
+} else {
+    [0, 0, 0]
+}
