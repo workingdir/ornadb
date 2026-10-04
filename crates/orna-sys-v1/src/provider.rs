@@ -985,6 +985,17 @@ impl ProviderRoleRegistry {
     }
 }
 
+/// A nullable field whose presence is part of the generated provider schema.
+/// The field-level deserializer keeps explicit `null` as `None` while making
+/// an omitted property fail deserialization.
+fn deserialize_required_nullable<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(deserializer)
+}
+
 #[derive(Deserialize)]
 struct RawAbi {
     abi_version: AbiVersion,
@@ -1000,6 +1011,7 @@ struct RawOperation {
     effect: String,
     preconditions: Vec<String>,
     failures: Vec<String>,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
     role: Option<String>,
 }
 
@@ -1011,6 +1023,7 @@ struct RawRole {
     operations: Vec<String>,
     required: bool,
     replaceable: bool,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
     builtin_provider: Option<String>,
 }
 
