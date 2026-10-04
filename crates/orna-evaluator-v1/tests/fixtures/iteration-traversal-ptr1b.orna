@@ -1,7 +1,27 @@
-std.iteration.depth_first(1, iteration_proof.neighbors) == [1, 2, 4, 5, 6, 3]
-&& std.iteration.breadth_first(1, iteration_proof.neighbors) == [1, 2, 3, 4, 5, 6]
-&& std.iteration.depth_first(9, iteration_proof.neighbors) == [9]
-&& std.iteration.breadth_first(9, iteration_proof.neighbors) == [9]
-&& std.iteration.reachable(1, 6, iteration_proof.neighbors)
-&& !std.iteration.reachable(1, 9, iteration_proof.neighbors)
-&& std.iteration.reachable(1, 2, iteration_proof.target_edges)
+pub fn traversal_behavior(): Bool {
+    let neighbors = node =>
+        if node == 1 {
+            [2, 3]
+        } else if node == 2 {
+            [4]
+        } else if node == 3 {
+            [4]
+        } else if node == 4 {
+            [1]
+        } else {
+            []
+        };
+    let target_edges = node =>
+        if node == 1 {
+            [2, 3]
+        } else {
+            fail(error(code: "fixture.unexpected_expansion", message: "reachability expanded past target"))
+        };
+    std.iteration.depth_first(9, neighbors) == [9]
+        && std.iteration.breadth_first(9, neighbors) == [9]
+        && std.iteration.depth_first(1, neighbors) == [1, 2, 4, 3]
+        && std.iteration.breadth_first(1, neighbors) == [1, 2, 3, 4]
+        && std.iteration.reachable(1, 4, neighbors)
+        && !std.iteration.reachable(1, 9, neighbors)
+        && std.iteration.reachable(1, 2, target_edges)
+}
