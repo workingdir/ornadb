@@ -630,6 +630,68 @@ fn nested_window_identities_survive_paired_cost_restore_folds_and_sparse_edges()
         "the sparse pair carries its window restore chain while the envelope restore chain advances"
     );
     assert_eq!(
+        text(
+            child_a,
+            "paired_window_cost_restoration_cost_window_restore_envelope_chain_transition"
+        ),
+        "initialized_cost_and_window_restore_envelope_chain"
+    );
+    assert_eq!(
+        text(
+            child_b,
+            "paired_window_cost_restoration_cost_window_restore_envelope_chain_pairing"
+        ),
+        "cumulative_cost_fold_bound_to_paired_window_restore_envelope_chain"
+    );
+    assert_eq!(
+        text(
+            child_b,
+            "paired_window_cost_restoration_cost_window_restore_envelope_chain_transition"
+        ),
+        "advanced_cost_and_window_restore_envelope_chain"
+    );
+    assert_eq!(
+        text(
+            tail,
+            "paired_window_cost_restoration_cost_window_restore_envelope_chain_transition"
+        ),
+        "advanced_cost_and_window_restore_envelope_chain",
+        "the sparse edge advances costs while preserving the paired restore-envelope ancestry"
+    );
+    assert_ne!(
+        text(
+            child_a,
+            "paired_window_cost_restoration_cost_window_restore_envelope_chain_fold_identity"
+        ),
+        text(
+            child_b,
+            "paired_window_cost_restoration_cost_window_restore_envelope_chain_fold_identity"
+        ),
+        "each nested cost step produces a distinct cost and restore-envelope identity"
+    );
+    assert_ne!(
+        text(
+            child_b,
+            "paired_window_cost_restoration_cost_window_restore_envelope_chain_fold_identity"
+        ),
+        text(
+            tail,
+            "paired_window_cost_restoration_cost_window_restore_envelope_chain_fold_identity"
+        ),
+        "the sparse edge retains the changed cost and restore-envelope ancestry"
+    );
+    assert_eq!(
+        text(
+            child_b,
+            "paired_window_cost_restoration_cost_window_restore_envelope_chain_fold_identity"
+        ),
+        text(
+            reordered_joins["pair:table:ChildB"],
+            "paired_window_cost_restoration_cost_window_restore_envelope_chain_fold_identity"
+        ),
+        "reordering descriptors preserves the paired cost and restore-envelope identity"
+    );
+    assert_eq!(
         integer(tail, "paired_window_cost_restoration_restore_fold_count"),
         2
     );
@@ -1273,6 +1335,36 @@ fn nested_window_identities_survive_paired_cost_restore_folds_and_sparse_edges()
             "paired_window_cost_restoration_cost_fold_identity"
         ),
         "the sparse edge carries changed restore ancestry through nested costs"
+    );
+    for changed in [
+        changed_joins["pair:table:ChildB"],
+        changed_root_cost_joins["pair:table:ChildB"],
+        changed_left_pair_cost_joins["pair:table:ChildB"],
+        changed_right_pair_cost_joins["pair:table:ChildB"],
+        changed_restore_joins["pair:table:ChildB"],
+    ] {
+        assert_ne!(
+            text(
+                child_b,
+                "paired_window_cost_restoration_cost_window_restore_envelope_chain_fold_identity"
+            ),
+            text(
+                changed,
+                "paired_window_cost_restoration_cost_window_restore_envelope_chain_fold_identity"
+            ),
+            "the composite identity binds window, cost, and restore ancestry"
+        );
+    }
+    assert_ne!(
+        text(
+            tail,
+            "paired_window_cost_restoration_cost_window_restore_envelope_chain_fold_identity"
+        ),
+        text(
+            changed_restore_joins["pair:table:Tail"],
+            "paired_window_cost_restoration_cost_window_restore_envelope_chain_fold_identity"
+        ),
+        "the sparse edge carries changed restore ancestry in the composite identity"
     );
     for changed in [
         changed_joins["pair:table:ChildB"],
