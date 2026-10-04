@@ -837,6 +837,109 @@ mod tests {
     }
 
     #[test]
+    fn bounded_typed_deltas_resync_one_live_session_without_blocking_its_peer() {
+        let first_limits = Limits {
+            max_collection_items: 16,
+            ..Limits::default()
+        };
+        let second_limits = Limits {
+            max_collection_items: 17,
+            ..Limits::default()
+        };
+        let first_initial = snapshot_with_request(0, "first-before", None);
+        let second_initial = snapshot_with_request(0, "second-before", None);
+        let mut first_io = MemoryIo::default();
+        first_io.incoming.push_back(first_initial.clone());
+        let mut second_io = MemoryIo::default();
+        second_io.incoming.push_back(second_initial.clone());
+        let mut first = LiveSessionDriver::new(
+            first_io,
+            [7; 16],
+            first_limits,
+            Renderer::default(),
+            Allocator::default(),
+        )
+        .unwrap();
+        let mut second = LiveSessionDriver::new(
+            second_io,
+            [7; 16],
+            second_limits,
+            Renderer::default(),
+            Allocator::default(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            block_on(first.receive_once()).unwrap(),
+            LiveSessionEvent::SnapshotPublished { revision: 0 }
+        );
+        assert_eq!(
+            block_on(second.receive_once()).unwrap(),
+            LiveSessionEvent::SnapshotPublished { revision: 0 }
+        );
+
+        let boundary_delta = delta_with_operations(0, 1, vec![replace_text("second-after"); 17]);
+        assert!(boundary_delta.len() < first_limits.max_message_bytes);
+        first.io.incoming.push_back(boundary_delta.clone());
+        assert!(matches!(
+            block_on(first.receive_once()),
+            Ok(LiveSessionEvent::ResyncSent { .. })
+        ));
+        assert_resync_frame(&first.io.sent[0]);
+        assert!(second.io.sent.is_empty());
+        assert_eq!(first.presentation().published().unwrap().revision(), 0);
+        assert_eq!(first.renderer.trees, vec![snapshot_present(&first_initial)]);
+
+        second.io.incoming.push_back(boundary_delta);
+        assert_eq!(
+            block_on(second.receive_once()).unwrap(),
+            LiveSessionEvent::DeltaPublished { revision: 1 }
+        );
+        assert_eq!(second.presentation().published().unwrap().revision(), 1);
+        assert_eq!(
+            second.renderer.trees[1],
+            snapshot_present(&frame(16, [7; 16], snapshot_body(1, "second-after")))
+        );
+        assert_eq!(first.presentation().published().unwrap().revision(), 0);
+
+        let request = Envelope::decode(&first.io.sent[0], first_limits)
+            .unwrap()
+            .request
+            .expect("bounded delta recovery request is correlated");
+        first
+            .io
+            .incoming
+            .push_back(snapshot_with_request(2, "first-recovered", Some(request)));
+        assert_eq!(
+            block_on(first.receive_once()).unwrap(),
+            LiveSessionEvent::SnapshotPublished { revision: 2 }
+        );
+        assert_eq!(
+            first.renderer.trees[1],
+            snapshot_present(&frame(16, [7; 16], snapshot_body(2, "first-recovered")))
+        );
+        assert_eq!(second.presentation().published().unwrap().revision(), 1);
+
+        second
+            .io
+            .incoming
+            .push_back(delta(1, 2, "second-after-recovery"));
+        assert_eq!(
+            block_on(second.receive_once()).unwrap(),
+            LiveSessionEvent::DeltaPublished { revision: 2 }
+        );
+        assert_eq!(first.presentation().published().unwrap().revision(), 2);
+        assert_eq!(
+            second.renderer.trees[2],
+            snapshot_present(&frame(
+                16,
+                [7; 16],
+                snapshot_body(2, "second-after-recovery")
+            ))
+        );
+    }
+
+    #[test]
     fn bad_base_and_mid_patch_failure_send_resync_without_changing_tree() {
         let mut io = MemoryIo::default();
         io.incoming.push_back(snapshot(0));
