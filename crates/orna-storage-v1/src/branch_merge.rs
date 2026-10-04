@@ -1754,6 +1754,42 @@ pub enum BranchMergePairedCheckpointRedoFoldSpillNestedRestoreReplayIdentityRest
     },
 }
 
+/// One nested restore/replay/spill fold with an independent outer checkpoint pair.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BranchMergePairedCheckpointRedoFoldSpillNestedOuterCheckpointIdentityRestoreReplayIdentityRestoreFoldSnapshot {
+    pub outer_checkpoint_identity: BranchMergePairedCheckpointIdentity,
+    pub restore_fold: BranchMergePairedCheckpointRedoFoldSpillNestedRestoreReplayIdentityRestoreFoldSnapshot,
+}
+
+/// One restored nested slot retaining its independent outer checkpoint pair.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BranchMergePairedCheckpointRedoFoldSpillNestedOuterCheckpointIdentityRestoreReplayIdentityRestoreFoldSlotSnapshot {
+    pub outer_checkpoint_identity: BranchMergePairedCheckpointIdentity,
+    pub restored_slot: BranchMergePairedCheckpointRedoFoldSpillNestedRestoreReplayIdentityRestoreFoldSlotSnapshot,
+}
+
+/// A checkpoint stream retaining outer and nested identity pairs.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BranchMergePairedCheckpointRedoFoldSpillNestedOuterCheckpointIdentityRestoreReplayIdentityRestoreFoldStreamSnapshot {
+    pub restore_fold_ordinal: usize,
+    pub outer_checkpoint_identity: BranchMergePairedCheckpointIdentity,
+    pub restore_identity: BranchMergePairedRestoreIdentity,
+    pub checkpoint_identity: BranchMergePairedCheckpointIdentity,
+    pub restore_fold_identity: Vec<u8>,
+    pub checkpoint_id: CheckpointId,
+    pub slots: Vec<BranchMergePairedCheckpointRedoFoldSpillNestedOuterCheckpointIdentityRestoreReplayIdentityRestoreFoldSlotSnapshot>,
+}
+
+/// A malformed nested restore/replay/spill fold tagged with its outer checkpoint pair.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum BranchMergePairedCheckpointRedoFoldSpillNestedOuterCheckpointIdentityRestoreReplayIdentityRestoreError {
+    RestoreFold {
+        restore_fold_ordinal: usize,
+        outer_checkpoint_identity: BranchMergePairedCheckpointIdentity,
+        source: BranchMergePairedCheckpointRedoFoldSpillNestedRestoreReplayIdentityRestoreError,
+    },
+}
+
 /// One nested replay/spill/checkpoint fold with an independent outer restore pair.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BranchMergePairedCheckpointRedoFoldSpillNestedOuterRestoreIdentityRestoreReplayIdentityRestoreFoldSnapshot {
@@ -7380,6 +7416,71 @@ pub fn restore_paired_checkpoint_redo_sparse_spill_nested_outer_restore_identity
             BranchMergePairedCheckpointRedoFoldSpillNestedOuterRestoreIdentityRestoreReplayIdentityRestoreFoldStreamSnapshot {
                 restore_fold_ordinal: stream.restore_fold_ordinal,
                 outer_restore_identity,
+                restore_identity: stream.restore_identity,
+                checkpoint_identity: stream.checkpoint_identity,
+                restore_fold_identity: stream.restore_fold_identity,
+                checkpoint_id: stream.checkpoint_id,
+                slots,
+            }
+        })
+        .collect())
+}
+
+/// Restores nested restore/replay/spill folds while retaining an outer checkpoint pair.
+///
+/// The outer checkpoint identity remains independent from each fold's
+/// checkpoint and restore pairs. It is copied to every checkpoint stream and
+/// slot, including empty catalogues, and tags errors without changing nested
+/// replay, spill, or pin validation.
+pub fn restore_paired_checkpoint_redo_sparse_spill_nested_outer_checkpoint_identity_restore_replay_identity_restore_folds_preserving_pin_identity(
+    restore_folds: &[BranchMergePairedCheckpointRedoFoldSpillNestedOuterCheckpointIdentityRestoreReplayIdentityRestoreFoldSnapshot],
+) -> Result<
+    Vec<BranchMergePairedCheckpointRedoFoldSpillNestedOuterCheckpointIdentityRestoreReplayIdentityRestoreFoldStreamSnapshot>,
+    BranchMergePairedCheckpointRedoFoldSpillNestedOuterCheckpointIdentityRestoreReplayIdentityRestoreError,
+> {
+    let nested_folds = restore_folds
+        .iter()
+        .map(|fold| fold.restore_fold.clone())
+        .collect::<Vec<_>>();
+    let restored =
+        restore_paired_checkpoint_redo_sparse_spill_nested_restore_replay_identity_restore_folds_preserving_pin_identity(
+            &nested_folds,
+        )
+        .map_err(|source| {
+            let restore_fold_ordinal = match &source {
+                BranchMergePairedCheckpointRedoFoldSpillNestedRestoreReplayIdentityRestoreError::RestoreFold {
+                    restore_fold_ordinal,
+                    ..
+                } => *restore_fold_ordinal,
+            };
+            BranchMergePairedCheckpointRedoFoldSpillNestedOuterCheckpointIdentityRestoreReplayIdentityRestoreError::RestoreFold {
+                restore_fold_ordinal,
+                outer_checkpoint_identity: restore_folds[restore_fold_ordinal]
+                    .outer_checkpoint_identity
+                    .clone(),
+                source,
+            }
+        })?;
+
+    Ok(restored
+        .into_iter()
+        .map(|stream| {
+            let outer_checkpoint_identity = restore_folds[stream.restore_fold_ordinal]
+                .outer_checkpoint_identity
+                .clone();
+            let slots = stream
+                .slots
+                .into_iter()
+                .map(|restored_slot| {
+                    BranchMergePairedCheckpointRedoFoldSpillNestedOuterCheckpointIdentityRestoreReplayIdentityRestoreFoldSlotSnapshot {
+                        outer_checkpoint_identity: outer_checkpoint_identity.clone(),
+                        restored_slot,
+                    }
+                })
+                .collect();
+            BranchMergePairedCheckpointRedoFoldSpillNestedOuterCheckpointIdentityRestoreReplayIdentityRestoreFoldStreamSnapshot {
+                restore_fold_ordinal: stream.restore_fold_ordinal,
+                outer_checkpoint_identity,
                 restore_identity: stream.restore_identity,
                 checkpoint_identity: stream.checkpoint_identity,
                 restore_fold_identity: stream.restore_fold_identity,
