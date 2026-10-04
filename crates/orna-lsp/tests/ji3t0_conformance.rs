@@ -314,7 +314,7 @@ fn protocol_conformance_uses_v1_for_every_advertised_editor_feature() {
     let capabilities = &initialized["capabilities"];
     assert_eq!(capabilities["hoverProvider"], true);
     assert_eq!(capabilities["definitionProvider"], true);
-    assert_eq!(capabilities["renameProvider"], true);
+    assert_eq!(capabilities["renameProvider"]["prepareProvider"], true);
     assert!(capabilities["signatureHelpProvider"].is_object());
     assert!(capabilities["completionProvider"].is_object());
     assert!(capabilities["diagnosticProvider"].is_object());
@@ -535,10 +535,15 @@ fn neovim_loads_generated_v1_syntax_and_queries_the_lsp_server() {
     fs::write(
         &script,
         r#"
-vim.opt.runtimepath:prepend(vim.env.ORNA_VIM_RUNTIME)
+vim.opt.runtimepath:prepend(vim.env.ORNA_NEOVIM_RUNTIME)
 vim.cmd("filetype on")
 vim.cmd("syntax on")
+require("orna").setup({
+  cmd = { vim.env.ORNA_LSP_BIN },
+  root_dir = vim.env.ORNA_PROJECT_ROOT,
+})
 vim.cmd("edit " .. vim.fn.fnameescape(vim.env.ORNA_TEST_FIXTURE))
+vim.cmd("source " .. vim.fn.fnameescape(vim.env.ORNA_VIM_SYNTAX))
 local bufnr = vim.api.nvim_get_current_buf()
 assert(vim.bo[bufnr].filetype == "orna", "generated ftdetect did not select the orna filetype")
 assert(vim.v.errmsg == "", "generated syntax raised an editor error: " .. vim.v.errmsg)
@@ -552,16 +557,16 @@ assert(pub_group == "ornaKeyword", "pub has syntax group " .. pub_group)
 assert(fn_group == "ornaKeyword", "fn has syntax group " .. fn_group)
 assert(legacy_group == "ornaIdentifier", "legacy CREATE has syntax group " .. legacy_group)
 
-local client_id = assert(vim.lsp.start({
-  name = "orna-syntax-v1-proof",
-  cmd = { vim.env.ORNA_LSP_BIN },
-  root_dir = vim.env.ORNA_PROJECT_ROOT,
-}, { bufnr = bufnr }), "Neovim did not start orna-lsp")
+local client
 assert(vim.wait(5000, function()
-  local client = vim.lsp.get_client_by_id(client_id)
-  return client ~= nil and client.initialized
-end, 10), "Neovim LSP client did not initialize")
-local client = assert(vim.lsp.get_client_by_id(client_id))
+  for _, attached in ipairs(vim.lsp.get_clients({ bufnr = bufnr })) do
+    if attached.name == "orna" and attached.initialized then
+      client = attached
+      return true
+    end
+  end
+  return false
+end, 10), "generated Neovim setup did not attach orna-lsp")
 local uri = vim.uri_from_bufnr(bufnr)
 local hover, hover_error = client:request_sync("textDocument/hover", {
   textDocument = { uri = uri },
@@ -633,6 +638,7 @@ vim.fn.writefile({
   "PUB=" .. pub_group,
   "FN=" .. fn_group,
   "LEGACY_CREATE=" .. legacy_group,
+  "LSP_ATTACHMENT=pass",
   "LSP_HOVER=pass",
   "LSP_COMPLETION_KEYWORDS=pass",
   "LSP_COMPLETION_ADD=pass",
@@ -655,7 +661,8 @@ vim.cmd("qa!")
         .arg("-c")
         .arg("qa!")
         .current_dir(root)
-        .env("ORNA_VIM_RUNTIME", root.join("editors/vim"))
+        .env("ORNA_VIM_SYNTAX", root.join("editors/vim/syntax/orna.vim"))
+        .env("ORNA_NEOVIM_RUNTIME", root.join("editors/neovim"))
         .env("ORNA_TEST_FIXTURE", &fixture)
         .env("ORNA_LSP_BIN", env!("CARGO_BIN_EXE_orna-lsp"))
         .env("ORNA_PROJECT_ROOT", root)
@@ -699,6 +706,7 @@ vim.cmd("qa!")
             "PUB=ornaKeyword",
             "FN=ornaKeyword",
             "LEGACY_CREATE=ornaIdentifier",
+            "LSP_ATTACHMENT=pass",
             "LSP_HOVER=pass",
             "LSP_COMPLETION_KEYWORDS=pass",
             "LSP_COMPLETION_ADD=pass",
@@ -946,12 +954,41 @@ fn assert_surface_has_no_legacy(
 fn emacs_batch_highlight(root: &Path, source: &str) {
     let plugin = root.join("editors/emacs/orna-eglot.el");
     let fixture = temporary_fixture(source);
+    let emacs = std::env::var_os("ORNA_TEST_EMACS")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("emacs"));
+    let eglot = Command::new(&emacs)
+        .args([
+            "--batch",
+            "--quick",
+            "--eval",
+            "(require 'package)(package-initialize)(princ (if (require 'eglot nil t) \"available\" \"unavailable\"))",
+        ])
+        .output();
+    match eglot {
+        Ok(result)
+            if result.status.success()
+                && String::from_utf8_lossy(&result.stdout).contains("available") => {}
+        Ok(_) => {
+            eprintln!(
+                "SKIP: Emacs Eglot is unavailable; install or enable Eglot for the host probe"
+            );
+            let _ = fs::remove_file(fixture);
+            return;
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            eprintln!("SKIP: Emacs is not installed; set ORNA_TEST_EMACS to its executable");
+            let _ = fs::remove_file(fixture);
+            return;
+        }
+        Err(error) => panic!("probe Emacs at {}: {error}", emacs.display()),
+    }
     let expression = format!(
-        "(progn (load-file {}) (with-temp-buffer (insert-file-contents {}) (orna-mode) (font-lock-ensure) (goto-char (point-min)) (search-forward \"pub\") (unless (eq (get-text-property (- (point) 3) 'face) 'font-lock-keyword-face) (error \"pub is not highlighted as a keyword\"))))",
+        "(progn (require 'package) (package-initialize) (load-file {}) (with-temp-buffer (insert-file-contents {}) (orna-mode) (font-lock-ensure) (goto-char (point-min)) (search-forward \"pub\") (unless (eq (get-text-property (- (point) 3) 'face) 'font-lock-keyword-face) (error \"pub is not highlighted as a keyword\"))))",
         elisp_string(&plugin.display().to_string()),
         elisp_string(&fixture.display().to_string()),
     );
-    let result = match Command::new("emacs")
+    let result = match Command::new(&emacs)
         .args(["--batch", "--quick", "--eval", &expression])
         .output()
     {
