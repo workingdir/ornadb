@@ -99,6 +99,7 @@ pub const REFERENCE_STANDARD_REGEX_UTILITIES_PATH_V1: &str = "std/regex/utilitie
 pub const REFERENCE_STANDARD_TIME_UTILITIES_PATH_V1: &str = "std/time/utilities.orna";
 pub const REFERENCE_STANDARD_SORTING_PATH_V1: &str = "std/sorting.orna";
 pub const REFERENCE_STANDARD_FORMAT_STRINGS_PATH_V1: &str = "std/format/strings.orna";
+pub const REFERENCE_STANDARD_PARSE_UTILITIES_PATH_V1: &str = "std/parse/utilities.orna";
 pub const REFERENCE_STANDARD_ITERATOR_PATH_V1: &str = "std/iterator.orna";
 pub const REFERENCE_STANDARD_LAZY_PATH_V1: &str = "std/lazy.orna";
 pub const REFERENCE_STANDARD_VIEWS_PATH_V1: &str = "std/views.orna";
@@ -211,6 +212,8 @@ const REFERENCE_STANDARD_SORTING_SOURCE_V1: &str =
     include_str!("../../../stdlib/std/sorting.orna");
 const REFERENCE_STANDARD_FORMAT_STRINGS_SOURCE_V1: &str =
     include_str!("../../../stdlib/std/format/strings.orna");
+const REFERENCE_STANDARD_PARSE_UTILITIES_SOURCE_V1: &str =
+    include_str!("../../../stdlib/std/parse/utilities.orna");
 const REFERENCE_STANDARD_TEST_SOURCE_V1: &str = include_str!("../../../stdlib/std/test.orna");
 const REFERENCE_STANDARD_GENERICS_SOURCE_V1: &str =
     include_str!("../../../stdlib/std/generics.orna");
@@ -239,8 +242,8 @@ const REFERENCE_STANDARD_PRELUDE_SOURCE_V1: &str =
 /// This is the current source-backed standard boundary. The retained `orna.std/1`–
 /// `orna.std/11` APIs below model older, explicitly versioned snapshots.
 #[must_use]
-pub fn reference_standard_sources_v1() -> [(String, String); 70] {
-    let mut sources: [(String, String); 70] = [
+pub fn reference_standard_sources_v1() -> [(String, String); 71] {
+    let mut sources: [(String, String); 71] = [
         (
             REFERENCE_STANDARD_MATH_PATH_V1.into(),
             REFERENCE_STANDARD_MATH_SOURCE_V1.into(),
@@ -520,6 +523,10 @@ pub fn reference_standard_sources_v1() -> [(String, String); 70] {
         (
             REFERENCE_STANDARD_FORMAT_STRINGS_PATH_V1.into(),
             REFERENCE_STANDARD_FORMAT_STRINGS_SOURCE_V1.into(),
+        ),
+        (
+            REFERENCE_STANDARD_PARSE_UTILITIES_PATH_V1.into(),
+            REFERENCE_STANDARD_PARSE_UTILITIES_SOURCE_V1.into(),
         ),
     ];
     sources[2]

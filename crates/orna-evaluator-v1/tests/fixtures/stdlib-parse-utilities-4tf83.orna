@@ -1,0 +1,27 @@
+parsing.integer_or("42", -1) == 42
+&& parsing.integer_or("+42", -1) == -1
+&& parsing.integer_or("-0", 7) == 7
+&& parsing.boolean_or("true", false) == true
+&& parsing.boolean_or("false", true) == false
+&& parsing.boolean_or("True", false) == false
+&& parsing.integer_list("1,-2,0", ",") == Some([1, -2, 0])
+&& parsing.integer_list("90071992547409931234567890,3", ",") == Some([90071992547409931234567890, 3])
+&& parsing.integer_list("", ",") != null
+&& parsing.integer_list("1,", ",") == null
+&& parsing.integer_list(",1", ",") == null
+&& parsing.integer_list("1,,2", ",") == null
+&& parsing.integer_list("01,2", ",") == null
+&& parsing.integer_list("1, 2", ",") == null
+&& parsing.integer_list("1,2", "") == null
+&& parsing.boolean_list("true|false|true", "|") == Some([true, false, true])
+&& parsing.boolean_list("", "|") != null
+&& parsing.boolean_list("true|True", "|") == null
+&& parsing.boolean_list("true||false", "|") == null
+&& parsing.boolean_list("true|false", "") == null
+&& parsing.split_once("name=value=tail", "=") == Some(("name", "value=tail"))
+&& parsing.split_once("a::b::c", "::") == Some(("a", "b::c"))
+&& parsing.split_once("=value", "=") == Some(("", "value"))
+&& parsing.split_once("key=", "=") == Some(("key", ""))
+&& parsing.split_once("a.b.c", ".") == Some(("a", "b.c"))
+&& parsing.split_once("missing", "=") == null
+&& parsing.split_once("a=b", "") == null
