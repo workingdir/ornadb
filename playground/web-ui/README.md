@@ -31,7 +31,8 @@ LSP worker. The page does not carry a second language vocabulary or evaluator.
 To prove the assets currently served from the database, start `orna serve` and
 run `npm run prove:served-assists -- http://127.0.0.1:8080`. The proof fetches
 the browser LSP binding and WASM from `/playground/assets`, then checks standard
-completion order, exact-match preselection, and hover documentation.
+completion order, exact-match preselection, hover documentation, and the active
+parameter plus parameter labels for `std.math.clamp` signature help.
 
 To embed the page in another site served from the same database, add a target
 container and load the classic script from the DB asset route:
