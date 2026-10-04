@@ -10,9 +10,14 @@ The S1 Git listing remains at `/`, with committed tree and blob views at
 `/tree/<commit>/<path>` and `/blob/<commit>/<path>`. Its page links to the
 playground at `/playground/`. The Git listing handler serves the page template
 and browser assets from `playground/web-ui/dist/` in the selected committed
-snapshot; it does not read the mutable worktree. `/api/examples` returns only
-committed `.orna` examples from that same database snapshot. The built bundle
-is stored with the database content so `orna serve` is the web host.
+snapshot; it does not read the mutable worktree. The built bundle is stored
+with the database content so `orna serve` is the web host. `/api/examples`
+reads committed rows from `playground.Sample` when `playground.orna` declares
+that table, plus committed `.orna` files under `playground/examples`.
+
+`/playground/embed` serves the same committed page with its marked page header
+hidden. It keeps the database session bridge and allows framing by another
+origin. Both entries use the same sample feed and server runtime.
 
 The page obtains a same-origin session through `POST /orna/session`, then
 connects to the returned `/orna/live/<session>` WebSocket using
@@ -30,11 +35,12 @@ export CARGO_BUILD_JOBS=2 RUST_TEST_THREADS=2
 cargo test -p orna-cli-v1 --test serve_playground_dogfood -- --nocapture
 ```
 
-The test initializes a temporary Orna Git database, commits crate-local
-`.orna`, HTML, and JavaScript fixtures, changes the worktree copies, starts the
-actual `orna-cli-v1 serve` process, and uses curl for the Git listing,
-database-resident playground page and asset, committed examples, and live
-session creation. A WebSocket client then follows the same `orna.present.v1`
+The test initializes a temporary Orna Git database, commits the `Sample`
+schema and row, a legacy `.orna` example, and HTML/JavaScript fixtures, changes
+the worktree copies, starts the actual `orna-cli-v1 serve` process, and uses
+curl for the Git listing, database-resident playground and embed entries,
+assets, committed examples, and live session creation. A WebSocket client then
+follows the same `orna.present.v1`
 watch, fingerprinted Eval, and Resync exchange used by the browser bridge.
 
 The test sends two independently fingerprinted Eval requests before reading

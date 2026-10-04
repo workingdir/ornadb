@@ -25,6 +25,8 @@ const SECOND_SAMPLE: &str = include_str!("fixtures/playground-concurrent-eval.or
 const FOLLOWUP_SAMPLE: &str = include_str!("fixtures/playground-followup-eval.orna");
 const PLAYGROUND_SHELL: &str = include_str!("fixtures/playground-shell.html");
 const PLAYGROUND_BROWSER_ASSET: &str = include_str!("fixtures/playground-browser-asset.js");
+const PLAYGROUND_SCHEMA: &str = include_str!("fixtures/playground-schema.orna");
+const PLAYGROUND_SAMPLE: &str = include_str!("fixtures/playground-sample.orna");
 const BINARY: &str = env!("CARGO_BIN_EXE_orna-cli-v1");
 
 struct RunningServer(Child);
@@ -344,6 +346,12 @@ fn orna_serve_hosts_playground_with_pending_evals_and_snapshot_correct_deltas() 
     );
 
     std::fs::write(project.path().join("main.orna"), MAIN).expect("write crate-local main fixture");
+    std::fs::write(project.path().join("playground.orna"), PLAYGROUND_SCHEMA)
+        .expect("write playground Sample schema");
+    let sample_row = project.path().join("playground/Sample/hello.orna");
+    std::fs::create_dir_all(sample_row.parent().expect("sample row parent"))
+        .expect("create sample row directory");
+    std::fs::write(&sample_row, PLAYGROUND_SAMPLE).expect("write database sample row");
     let example = project.path().join("playground/examples/hello.orna");
     std::fs::create_dir_all(example.parent().expect("example parent"))
         .expect("create committed example directory");
@@ -359,6 +367,8 @@ fn orna_serve_hosts_playground_with_pending_evals_and_snapshot_correct_deltas() 
         &[
             "add",
             "main.orna",
+            "playground.orna",
+            "playground/Sample/hello.orna",
             "playground/examples/hello.orna",
             "playground/web-ui/dist",
         ],
@@ -408,6 +418,12 @@ fn orna_serve_hosts_playground_with_pending_evals_and_snapshot_correct_deltas() 
         page.body
             .contains(LIVE_RUN_EVENTS_WATCH_SOURCE.trim_start_matches('\0'))
     );
+    let embed = curl(&format!("{base_url}/playground/embed"), &[])
+        .expect("curl the database-resident embedded entry");
+    assert_eq!(embed.status, 200);
+    assert!(embed.body.contains("<header class=\"page-header\" data-page-header hidden>"));
+    assert!(response_header(&embed.headers, "content-security-policy")
+        .is_some_and(|policy| policy.contains("frame-ancestors *")));
     let app = curl(&format!("{base_url}/playground/assets/app.js"), &[])
         .expect("curl the playground browser asset");
     assert_eq!(app.status, 200);
@@ -417,7 +433,16 @@ fn orna_serve_hosts_playground_with_pending_evals_and_snapshot_correct_deltas() 
         curl(&format!("{base_url}/api/examples"), &[]).expect("curl committed playground examples");
     assert_eq!(examples.status, 200);
     let examples: JsonValue = serde_json::from_str(&examples.body).expect("example response JSON");
-    assert_eq!(examples["examples"][0]["source"], SAMPLE);
+    assert_eq!(examples["examples"].as_array().map(Vec::len), Some(2));
+    assert!(examples["examples"].as_array().unwrap().iter().any(|example| {
+        example["path"] == "playground/Sample/hello.orna"
+            && example["name"] == "Hello, Orna"
+            && example["source"]
+                == "pub fn double(value: Int): Int = value + value;\ndouble(21)"
+    }));
+    assert!(examples["examples"].as_array().unwrap().iter().any(|example| {
+        example["path"] == "playground/examples/hello.orna" && example["source"] == SAMPLE
+    }));
 
     let database_id = listing
         .body

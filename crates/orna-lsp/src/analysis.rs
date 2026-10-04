@@ -425,7 +425,7 @@ fn source_slice<'a>(text: &'a str, span: &SourceSpan) -> &'a str {
     text.get(span.start..span.end).unwrap_or("")
 }
 
-fn normalized_identifier(text: &str) -> String {
+pub(crate) fn normalized_identifier(text: &str) -> String {
     lex(text)
         .ok()
         .and_then(|tokens| {
@@ -445,7 +445,10 @@ fn token_at(text: &str, byte: usize) -> Option<Token> {
     })
 }
 
-fn symbol_for_name<'a>(symbols: &'a [EditorSymbol], name: &str) -> Option<&'a EditorSymbol> {
+pub(crate) fn symbol_for_name<'a>(
+    symbols: &'a [EditorSymbol],
+    name: &str,
+) -> Option<&'a EditorSymbol> {
     let key = normalized_identifier(name);
     let mut matches = symbols
         .iter()

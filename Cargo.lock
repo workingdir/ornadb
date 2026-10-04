@@ -1259,6 +1259,7 @@ dependencies = [
  "orna-security-v1",
  "orna-semantic-v1",
  "orna-serving-v1",
+ "orna-syntax-v1",
  "orna-value-v1",
  "serde_json",
  "sha2 0.10.9",
