@@ -53,14 +53,14 @@ jobs:
         with:
           path: ${{ runner.temp }}/playground-pages/site
 
-      - name: Deploy to GitHub Pages
-        id: deployment
-        uses: actions/deploy-pages@v4
-
       - name: Install Node.js for published smoke checks
         uses: actions/setup-node@v7
         with:
           node-version: 22.21.1
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
 
       - name: Smoke check the published stable and development channels
         working-directory: playground/web-ui
