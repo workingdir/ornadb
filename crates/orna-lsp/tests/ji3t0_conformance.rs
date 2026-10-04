@@ -381,6 +381,40 @@ fn protocol_conformance_uses_v1_for_every_advertised_editor_feature() {
         position_of(SOURCE, "pub fn add", "pub fn ".len())
     );
 
+    let references = client.request(
+        "textDocument/references",
+        json!({
+            "textDocument":{"uri":uri},
+            "position":call_position,
+            "context":{"includeDeclaration":true}
+        }),
+    );
+    let reference_locations = references.as_array().unwrap();
+    assert_eq!(reference_locations.len(), 2, "{references}");
+    let declaration_position = position_of(SOURCE, "pub fn add", "pub fn ".len());
+    let call_reference_position = position_of(SOURCE, "add(value, 2)", 0);
+    for expected in [&declaration_position, &call_reference_position] {
+        assert!(
+            reference_locations.iter().any(|location| {
+                location["uri"] == uri && location["range"]["start"] == *expected
+            }),
+            "references omitted {expected}: {references}"
+        );
+    }
+    let references_without_declaration = client.request(
+        "textDocument/references",
+        json!({
+            "textDocument":{"uri":uri},
+            "position":call_position,
+            "context":{"includeDeclaration":false}
+        }),
+    );
+    assert_eq!(references_without_declaration.as_array().unwrap().len(), 1);
+    assert_eq!(
+        references_without_declaration[0]["range"]["start"],
+        call_reference_position
+    );
+
     let renamed = client.request(
         "textDocument/rename",
         json!({"textDocument":{"uri":uri},"position":call_position,"newName":"sum"}),
@@ -590,6 +624,48 @@ assert(add_completion.documentation == "Add two integer values.", "add completio
 assert(add_completion.insertText == "add(${1:left}, ${2:right})", "unexpected add completion snippet: " .. vim.inspect(add_completion))
 assert(add_completion.insertTextFormat == 2, "add completion did not advertise snippet formatting: " .. vim.inspect(add_completion))
 
+local expected_reference_positions = vim.fn.json_decode(vim.env.ORNA_REFERENCE_POSITIONS)
+local expected_reference_set = {}
+for _, position in ipairs(expected_reference_positions) do
+  expected_reference_set[tostring(position.line) .. ":" .. tostring(position.character)] = true
+end
+local references, references_error = client:request_sync("textDocument/references", {
+  textDocument = { uri = uri },
+  position = vim.fn.json_decode(vim.env.ORNA_RENAME_POSITION),
+  context = { includeDeclaration = true },
+}, 5000, bufnr)
+assert(references ~= nil and references.err == nil, "Neovim references request failed: " .. vim.inspect(references_error or references))
+assert(#references.result == 2, "Neovim references returned " .. #references.result .. " locations: " .. vim.inspect(references.result))
+for _, location in ipairs(references.result) do
+  assert(location.uri == uri, "Neovim references returned another document: " .. vim.inspect(location))
+  local start = location.range.start
+  local key = tostring(start.line) .. ":" .. tostring(start.character)
+  assert(expected_reference_set[key], "Neovim references returned an unexpected symbol range: " .. vim.inspect(location))
+  expected_reference_set[key] = nil
+end
+assert(next(expected_reference_set) == nil, "Neovim references omitted expected declaration or call sites: " .. vim.inspect(expected_reference_set))
+
+local renamed, rename_error = client:request_sync("textDocument/rename", {
+  textDocument = { uri = uri },
+  position = vim.fn.json_decode(vim.env.ORNA_RENAME_POSITION),
+  newName = "sum",
+}, 5000, bufnr)
+assert(renamed ~= nil and renamed.err == nil, "Neovim rename request failed: " .. vim.inspect(rename_error or renamed))
+local rename_edits = renamed.result.changes[uri]
+assert(rename_edits ~= nil and #rename_edits == 2, "Neovim rename returned unexpected edits: " .. vim.inspect(renamed.result))
+local rename_edit_positions = {}
+for _, edit in ipairs(rename_edits) do
+  assert(edit.newText == "sum", "Neovim rename used unexpected replacement text: " .. vim.inspect(edit))
+  local start = edit.range.start
+  local key = tostring(start.line) .. ":" .. tostring(start.character)
+  rename_edit_positions[key] = true
+end
+assert(#rename_edits == 2, "Neovim rename did not edit both declaration and call")
+for _, position in ipairs(expected_reference_positions) do
+  local key = tostring(position.line) .. ":" .. tostring(position.character)
+  assert(rename_edit_positions[key], "Neovim rename omitted expected location " .. key)
+end
+
 local semantic, semantic_error = client:request_sync("textDocument/semanticTokens/full", {
   textDocument = { uri = uri },
 }, 5000, bufnr)
@@ -649,6 +725,8 @@ vim.fn.writefile({
   "LSP_HOVER=pass",
   "LSP_COMPLETION_KEYWORDS=pass",
   "LSP_COMPLETION_ADD=pass",
+  "LSP_REFERENCES=pass",
+  "LSP_RENAME=pass",
   "LSP_SEMANTIC_PUB=pass",
   "LSP_SEMANTIC_CLASSES=pass",
 }, vim.env.ORNA_EDITOR_RESULT)
@@ -678,6 +756,22 @@ vim.cmd("qa!")
             "ORNA_COMPLETION_POSITION",
             serde_json::to_string(&position_at(SOURCE, SOURCE.find("add(value, 2)").unwrap()))
                 .unwrap(),
+        )
+        .env(
+            "ORNA_RENAME_POSITION",
+            serde_json::to_string(&position_at(
+                SOURCE,
+                SOURCE.find("add(value, 2)").unwrap() + 1,
+            ))
+            .unwrap(),
+        )
+        .env(
+            "ORNA_REFERENCE_POSITIONS",
+            serde_json::to_string(&[
+                position_of(SOURCE, "pub fn add", "pub fn ".len()),
+                position_of(SOURCE, "add(value, 2)", 0),
+            ])
+            .unwrap(),
         )
         .env(
             "ORNA_EXPECTED_KEYWORDS",
@@ -722,6 +816,8 @@ vim.cmd("qa!")
             "LSP_HOVER=pass",
             "LSP_COMPLETION_KEYWORDS=pass",
             "LSP_COMPLETION_ADD=pass",
+            "LSP_REFERENCES=pass",
+            "LSP_RENAME=pass",
             "LSP_SEMANTIC_PUB=pass",
             "LSP_SEMANTIC_CLASSES=pass",
         ]
@@ -740,7 +836,7 @@ fn emacs_extension_loads_v1_highlights_from_the_in_crate_fixture() {
 }
 
 #[test]
-fn emacs_eglot_attaches_and_proves_hover_and_semantic_token_classes() {
+fn emacs_eglot_attaches_and_proves_hover_rename_references_and_semantic_tokens() {
     let Some(emacs) = emacs_binary() else {
         eprintln!("SKIP: Emacs is not installed; set ORNA_TEST_EMACS to its executable");
         return;
@@ -765,9 +861,9 @@ fn emacs_eglot_attaches_and_proves_hover_and_semantic_token_classes() {
         eprintln!("SKIP: Eglot is unavailable in this Emacs installation");
         return;
     }
-    if !availability.contains("semtok=available") {
+    let semantic_tokens_available = availability.contains("semtok=available");
+    if !semantic_tokens_available {
         eprintln!("SKIP: Eglot semantic-token fontification is unavailable in this version");
-        return;
     }
 
     let root = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -807,6 +903,29 @@ fn emacs_eglot_attaches_and_proves_hover_and_semantic_token_classes() {
          (faces (get-text-property position 'face)))
     (unless (or (eq faces face) (and (listp faces) (memq face faces)))
       (error "%s lacks semantic face %s (actual face %S)" needle face faces))))
+(defun orna-test-get (object key)
+  (let ((keyword (intern (concat ":" key)))
+        (symbol (intern key)))
+    (cond
+     ((hash-table-p object) (or (gethash key object) (gethash keyword object) (gethash symbol object)))
+     ((and (listp object) (keywordp (car-safe object))) (plist-get object keyword))
+     ((listp object) (or (cdr (assoc-string key object)) (cdr (assq symbol object)))))))
+(defun orna-test-list (value)
+  (cond ((stringp value) nil)
+        ((vectorp value) (append value nil))
+        ((listp value) value)
+        (t nil)))
+(defun orna-test-position (needle offset)
+  (goto-char (point-min))
+  (search-forward needle)
+  (backward-char (- (length needle) offset))
+  (list (1- (line-number-at-pos)) (current-column)))
+(defun orna-test-position-key (position)
+  (format "%s:%s" (car position) (cadr position)))
+(defun orna-test-location-key (location)
+  (let* ((range (orna-test-get location "range"))
+         (start (orna-test-get range "start")))
+    (format "%s:%s" (orna-test-get start "line") (orna-test-get start "character"))))
 
 (let ((hover-buffer (find-file-noselect {}))
       (semantic-buffer (find-file-noselect {})))
@@ -835,9 +954,51 @@ fn emacs_eglot_attaches_and_proves_hover_and_semantic_token_classes() {
                          (string-match-p "fn add(left: Int, right: Int): Int" hover-info)
                          (string-match-p "Add two integer values\\." hover-info))
               (error "Eglot hover omitted the fixture signature or documentation: %S" hover-info)))
+          (let* ((server (eglot-current-server))
+                 (params (eglot--TextDocumentPositionParams))
+                 (uri (orna-test-get (orna-test-get params "textDocument") "uri"))
+                 (references
+                  (orna-test-list
+                   (jsonrpc-request
+                    server :textDocument/references
+                    (append params (list :context (list :includeDeclaration t))))))
+                 (expected
+                  (sort
+                   (mapcar #'orna-test-position-key
+                           (list (orna-test-position "pub fn add" 7)
+                                 (orna-test-position "add(value, 2)" 0)))
+                   #'string<))
+                 (actual
+                  (sort (mapcar #'orna-test-location-key references) #'string<)))
+            (unless (stringp uri)
+              (error "Eglot did not provide a URI for the attached buffer: %S" params))
+            (unless (= (length references) 2)
+              (error "Eglot references returned %d locations: %S" (length references) references))
+            (unless (equal actual expected)
+              (error "Eglot references differ from declaration and call locations: %S" references))
+            (unless (cl-every (lambda (location)
+                                (equal (orna-test-get location "uri") uri))
+                              references)
+              (error "Eglot references returned a location outside the attached buffer: %S" references))
+            (let* ((rename-params (append params (list :newName "sum")))
+                   (workspace-edit
+                    (jsonrpc-request server :textDocument/rename rename-params))
+                   (changes (orna-test-get workspace-edit "changes"))
+                   (edits (orna-test-list (orna-test-get changes uri)))
+                   (edit-positions
+                    (sort (mapcar #'orna-test-location-key edits) #'string<)))
+              (unless (= (length edits) 2)
+                (error "Eglot rename returned %d edits: %S" (length edits) workspace-edit))
+              (unless (cl-every (lambda (edit) (equal (orna-test-get edit "newText") "sum")) edits)
+                (error "Eglot rename returned an unexpected replacement: %S" edits))
+              (unless (equal edit-positions expected)
+                (error "Eglot rename omitted declaration or call edits: %S" edits)))
+            (princ "EMACS_LSP_REFERENCES=pass\n")
+            (princ "EMACS_LSP_RENAME=pass\n"))
           (princ "EMACS_LSP_ATTACHMENT=pass\n")
           (princ "EMACS_LSP_HOVER=pass\n"))
-        (with-current-buffer semantic-buffer
+        (when (fboundp 'eglot-semantic-tokens-mode)
+         (with-current-buffer semantic-buffer
           (unless (eq major-mode 'orna-mode) (error "Orna semantic fixture did not load"))
           (orna-test-wait-managed semantic-buffer)
           (unless (bound-and-true-p eglot-semantic-tokens-mode)
@@ -888,14 +1049,21 @@ fn emacs_eglot_attaches_and_proves_hover_and_semantic_token_classes() {
     for evidence in [
         "EMACS_LSP_ATTACHMENT=pass",
         "EMACS_LSP_HOVER=pass",
-        "EMACS_LSP_SEMANTIC_CLASSES=pass",
+        "EMACS_LSP_REFERENCES=pass",
+        "EMACS_LSP_RENAME=pass",
     ] {
         assert!(
             stdout.contains(evidence),
             "Emacs omitted {evidence}: {stdout}"
         );
     }
-    println!("Emacs Eglot hover/token evidence:\n{stdout}");
+    if semantic_tokens_available {
+        assert!(
+            stdout.contains("EMACS_LSP_SEMANTIC_CLASSES=pass"),
+            "Emacs omitted semantic-token proof: {stdout}"
+        );
+    }
+    println!("Emacs Eglot hover/rename/references evidence:\n{stdout}");
 }
 
 #[test]
