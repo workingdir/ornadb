@@ -26,5 +26,3 @@ pub fn map_builder_contract(): Bool {
         }
         && map.to_entries(map.remove(merged, "oak")) == [("elm", 9), ("birch", 4), ("maple", 5)]
 }
-
-map_builder_contract()

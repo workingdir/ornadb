@@ -31,5 +31,3 @@ pub fn list_builder_contract(): Bool {
             null: true,
         }
 }
-
-list_builder_contract()

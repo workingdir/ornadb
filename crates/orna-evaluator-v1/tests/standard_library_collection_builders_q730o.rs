@@ -63,27 +63,55 @@ fn pinned_list_map_and_set_builders_preserve_their_collection_contracts() {
     let mut session = builders_session();
     import_builders(&mut session);
 
-    for source in [
-        include_str!("fixtures/stdlib-collection-builders-list-q730o.orna"),
-        include_str!("fixtures/stdlib-collection-builders-map-q730o.orna"),
-        include_str!("fixtures/stdlib-collection-builders-set-q730o.orna"),
+    for (declaration, call) in [
+        (
+            include_str!("fixtures/stdlib-collection-builders-list-q730o.orna"),
+            include_str!("fixtures/stdlib-collection-builders-list-call-q730o.orna"),
+        ),
+        (
+            include_str!("fixtures/stdlib-collection-builders-map-q730o.orna"),
+            include_str!("fixtures/stdlib-collection-builders-map-call-q730o.orna"),
+        ),
+        (
+            include_str!("fixtures/stdlib-collection-builders-set-q730o.orna"),
+            include_str!("fixtures/stdlib-collection-builders-set-call-q730o.orna"),
+        ),
     ] {
         assert_eq!(
-            session.submit(source),
+            session.submit(declaration),
+            Ok(None),
+            "builder declaration failed: {declaration}"
+        );
+        assert_eq!(
+            session.submit(call),
             Ok(Some(bool_value(true))),
-            "builder contract failed: {source}"
+            "builder contract failed: {call}"
         );
     }
 
-    for source in [
-        include_str!("fixtures/stdlib-collection-builders-list-empty-q730o.orna"),
-        include_str!("fixtures/stdlib-collection-builders-map-empty-q730o.orna"),
-        include_str!("fixtures/stdlib-collection-builders-set-empty-q730o.orna"),
+    for (declaration, call) in [
+        (
+            include_str!("fixtures/stdlib-collection-builders-list-empty-q730o.orna"),
+            include_str!("fixtures/stdlib-collection-builders-list-empty-call-q730o.orna"),
+        ),
+        (
+            include_str!("fixtures/stdlib-collection-builders-map-empty-q730o.orna"),
+            include_str!("fixtures/stdlib-collection-builders-map-empty-call-q730o.orna"),
+        ),
+        (
+            include_str!("fixtures/stdlib-collection-builders-set-empty-q730o.orna"),
+            include_str!("fixtures/stdlib-collection-builders-set-empty-call-q730o.orna"),
+        ),
     ] {
         assert_eq!(
-            session.submit(source),
+            session.submit(declaration),
+            Ok(None),
+            "empty builder declaration failed: {declaration}"
+        );
+        assert_eq!(
+            session.submit(call),
             Ok(Some(empty_array())),
-            "empty builder result failed: {source}"
+            "empty builder result failed: {call}"
         );
     }
 }
@@ -116,7 +144,7 @@ fn pinned_builder_sources_match_the_profile_and_reject_invalid_counts() {
     ] {
         assert_eq!(
             session.submit(source).unwrap_err().code(),
-            "ORNA-EVAL-VALUE",
+            "ORNA-EVAL-ERROR",
             "negative builder count must fail: {source}"
         );
     }

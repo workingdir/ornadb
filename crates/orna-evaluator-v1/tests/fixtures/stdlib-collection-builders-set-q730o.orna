@@ -14,5 +14,3 @@ pub fn set_builder_contract(): Bool {
         && set.difference(left, right) == [3, 1]
         && set.remove(left, 1) == [3, 2]
 }
-
-set_builder_contract()
