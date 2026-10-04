@@ -10,6 +10,7 @@ use crate::documents::{Document, PositionMapper};
 const LEXICAL_SOURCE: &str = include_str!("../../tests/fixtures/lexical-v1.orna");
 const EXPRESSIONS_SOURCE: &str = include_str!("../../tests/fixtures/expressions-v1.orna");
 const CALL_SOURCE: &str = include_str!("../../tests/fixtures/call-v1.orna");
+const LOCAL_SCOPES_SOURCE: &str = include_str!("../../tests/fixtures/local-scopes-v1.orna");
 
 fn document(text: &str) -> Document {
     Document::new(
@@ -134,4 +135,106 @@ fn diagnostics_are_exact_parser_errors_and_legacy_create_is_not_accepted() {
             .iter()
             .all(|diagnostic| diagnostic.source.as_deref() == Some("orna-syntax-v1"))
     );
+}
+
+#[test]
+fn local_definitions_and_references_respect_shadowing_scopes() {
+    let document = document(LOCAL_SCOPES_SOURCE);
+    let parse = parse_document(&document);
+    assert!(parse.diagnostics.is_empty(), "{:#?}", parse.diagnostics);
+    let mapper = PositionMapper::new(&document.text);
+
+    let parameter = document.text.find("shadow(input").unwrap() + "shadow(".len();
+    let outer_use =
+        document.text.find("let copied: Int = input").unwrap() + "let copied: Int = ".len();
+    let parameter_definition =
+        definition(&document, &parse, mapper.position(outer_use + 1), &mapper)
+            .expect("outer parameter definition");
+    assert_eq!(
+        mapper.byte_offset(parameter_definition.range.start),
+        parameter
+    );
+    assert_eq!(
+        references(
+            &document,
+            &parse,
+            mapper.position(outer_use + 1),
+            &mapper,
+            true
+        )
+        .len(),
+        4,
+        "parameter declaration, condition, initializer, and shadow initializer"
+    );
+
+    let inner_declaration = document.text.find("let input").unwrap() + "let ".len();
+    let inner_use = document.text.rfind("input\n").unwrap();
+    let inner_definition = definition(&document, &parse, mapper.position(inner_use + 1), &mapper)
+        .expect("inner local definition");
+    assert_eq!(
+        mapper.byte_offset(inner_definition.range.start),
+        inner_declaration
+    );
+    assert_eq!(
+        references(
+            &document,
+            &parse,
+            mapper.position(inner_use + 1),
+            &mapper,
+            true
+        )
+        .len(),
+        2,
+        "inner local declaration and use"
+    );
+
+    let copied_declaration = document.text.find("copied:").unwrap();
+    let copied_use = document.text.rfind("copied\n").unwrap();
+    let copied_definition = definition(&document, &parse, mapper.position(copied_use + 1), &mapper)
+        .expect("local let definition");
+    assert_eq!(
+        mapper.byte_offset(copied_definition.range.start),
+        copied_declaration
+    );
+    assert_eq!(
+        references(
+            &document,
+            &parse,
+            mapper.position(copied_use + 1),
+            &mapper,
+            true
+        )
+        .len(),
+        2,
+        "local declaration and use"
+    );
+
+    for (declaration_text, declaration_offset, use_text, expected_references) in [
+        ("result:", 0, "result }", 2),
+        ("for item", "for ".len(), "item }", 2),
+        ("value =>", 0, "value + value", 3),
+    ] {
+        let declaration_start = document.text.find(declaration_text).unwrap() + declaration_offset;
+        let use_start = document.text.rfind(use_text).unwrap();
+        let selected_definition =
+            definition(&document, &parse, mapper.position(use_start + 1), &mapper)
+                .expect("scoped binding definition");
+        assert_eq!(
+            mapper.byte_offset(selected_definition.range.start),
+            declaration_start,
+            "declaration for {declaration_text}"
+        );
+        assert_eq!(
+            references(
+                &document,
+                &parse,
+                mapper.position(use_start + 1),
+                &mapper,
+                true
+            )
+            .len(),
+            expected_references,
+            "references for {declaration_text}"
+        );
+    }
 }
