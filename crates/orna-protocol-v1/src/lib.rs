@@ -1707,6 +1707,10 @@ fn value_node(value: &CanonicalValue) -> Result<Node> {
     // Protocol serialization is an unprivileged trace boundary; preserve the
     // portable local Error for recovery, but never send its caller text or
     // details across the wire without a disclosure classifier.
+    let node = from_ovb(value.raw())?;
+    if contains_protected_value(&node) {
+        return Err(Error::InvalidValue);
+    }
     let safe = value
         .redacted_for_trace()
         .map_err(|_| Error::InvalidValue)?;
