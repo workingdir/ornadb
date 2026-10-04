@@ -72,6 +72,21 @@ class FixtureManifestTests(unittest.TestCase):
             },
         )
 
+    def test_editor_attachment_input_is_local_and_hash_pinned(self) -> None:
+        workspace = Path(__file__).resolve().parents[1]
+        fixture_path = "crates/orna-lsp/tests/fixtures/ji3t0-lsp-v1.orna"
+        attachment_test = workspace / "crates/orna-lsp/tests/editor_attachment_completion.rs"
+        fixture = workspace / fixture_path
+        source = attachment_test.read_text(encoding="utf-8")
+        digest = hashlib.sha256(fixture.read_bytes()).hexdigest()
+        pinned_line = f"{digest}  {fixture_path}\n"
+
+        self.assertIn('include_str!("fixtures/ji3t0-lsp-v1.orna")', source)
+        self.assertIn(
+            pinned_line,
+            (workspace / "scripts/fixture-manifest.sha256").read_text(encoding="utf-8"),
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
