@@ -1,0 +1,18 @@
+pub fn bump(value: Int): Int {
+    let count: Int = value;
+    count = count + 1;
+    count + count
+}
+
+pub fn scoped(input: Int): Int =
+    if input > 0 {
+        let item: Int = input;
+        item
+    } else {
+        let item: Int = input + 1;
+        item
+    };
+
+pub fn twice(value: Int): Int = value + value;
+
+pub fn uses(value: Int): Int = twice(value) + twice(value);
