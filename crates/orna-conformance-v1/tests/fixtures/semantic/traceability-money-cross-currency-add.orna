@@ -1,0 +1,20 @@
+pub protocol Currency {
+    static code: Str;
+    static minor_digits: Int;
+}
+
+pub type GBP {
+    impl Currency {
+        static code = "GBP";
+        static minor_digits = 2;
+    }
+}
+
+pub type USD {
+    impl Currency {
+        static code = "USD";
+        static minor_digits = 2;
+    }
+}
+
+pub fn add(left: Money<GBP>, right: Money<USD>) = left + right;

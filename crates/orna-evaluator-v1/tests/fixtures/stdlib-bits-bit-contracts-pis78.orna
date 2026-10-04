@@ -1,0 +1,12 @@
+bits.test_bit(5, 0) == Some(true)
+&& bits.test_bit(5, 1) == Some(false)
+&& bits.test_bit(-2, 0) == Some(false)
+&& bits.test_bit(-2, 1) == Some(true)
+&& bits.set_bit(8, 0) == Some(9)
+&& bits.clear_bit(15, 3) == Some(7)
+&& bits.toggle_bit(10, 1) == Some(8)
+&& bits.set_bit(-8, 2) == Some(-4)
+&& bits.test_bit(5, -1) == null
+&& bits.set_bit(5, -1) == null
+&& bits.clear_bit(5, -1) == null
+&& bits.toggle_bit(5, -1) == null

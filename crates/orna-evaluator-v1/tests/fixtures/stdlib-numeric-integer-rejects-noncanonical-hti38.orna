@@ -1,0 +1,5 @@
+numeric.integer_from_text("") == null
+&& numeric.integer_from_text("+42") == null
+&& numeric.integer_from_text(" 42") == null
+&& numeric.integer_from_text("042") == null
+&& numeric.integer_from_text("-0") == null

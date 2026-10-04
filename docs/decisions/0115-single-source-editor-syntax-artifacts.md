@@ -1,6 +1,9 @@
 # ADR 0115: Single-source editor syntax artifacts
 
-**Status:** Accepted for generated lexical and semantic-token metadata
+**Status:** Superseded by the `orna-syntax-v1` editor generator
+
+This record describes the retired pre-1.0 editor pipeline. The current
+artifacts are generated from `orna-syntax-v1`; see [Editor syntax support](../editor-tooling.md).
 
 ## Decision
 
