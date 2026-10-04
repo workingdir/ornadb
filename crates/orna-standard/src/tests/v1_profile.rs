@@ -459,6 +459,45 @@ fn pinned_collection_views_and_slices_typecheck_as_an_ordinary_std_module() {
 }
 
 #[test]
+fn pinned_option_combinators_are_in_the_captured_snapshot() {
+    let sources = reference_standard_sources_v1();
+    let (index, (path, source)) = sources
+        .iter()
+        .enumerate()
+        .find(|(_, (path, _))| path == REFERENCE_STANDARD_OPTION_PATH_V1)
+        .expect("the pinned source bundle includes std.option");
+    assert_eq!(index, 11, "the option module retains its source index");
+    for declaration in [
+        "pub fn and<T, U>",
+        "pub fn or<T>",
+        "pub fn xor<T>",
+        "pub fn flatten<T>(value: T? ?): T?",
+        "pub fn map_or<T, U>",
+        "pub fn map_or_else<T, U>(",
+        "pub fn unwrap_or_else<T>",
+        "pub fn contains<T>",
+        "pub fn zip_with<T, U, V>(",
+    ] {
+        assert!(source.contains(declaration), "missing {declaration}");
+    }
+    for contract in [
+        "never catch failures raised by callbacks",
+        "use `and_then` when",
+        "use `or_else` for a",
+        "exactly one input is present",
+        "calls `fallback` only for null",
+        "callback runs only when both options contain values",
+    ] {
+        assert!(source.contains(contract), "missing option contract `{contract}`");
+    }
+    reference_standard_profile_v1()
+        .verify_source(path, source)
+        .expect("option combinator source bytes are captured by the std profile");
+    reference_standard_catalogue_v1()
+        .expect("option combinators resolve in the captured standard catalogue");
+}
+
+#[test]
 fn pinned_bits_source_includes_bit_and_unsigned_byte_contracts() {
     let sources = reference_standard_sources_v1();
     let (index, (path, source)) = sources
