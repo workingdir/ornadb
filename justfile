@@ -6,6 +6,7 @@ check: fixture-audit editor-artifacts-check fmt build lint test lsp-syntax-v1-pa
 # Reject external reference paths, cross-crate fixtures, and a checkout-local reference tree.
 fixture-audit:
     test ! -e reference || (echo "fixture-audit: remove the top-level reference tree" >&2; exit 1)
+    test ! -e ../reference || (echo "fixture-audit: remove the sibling reference tree" >&2; exit 1)
     cargo test --locked -p orna-syntax-v1 --test fixture_audit
 
 # Regenerate every editor package artifact from orna-syntax-v1.
