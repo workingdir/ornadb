@@ -10,9 +10,9 @@ use std::{
 };
 
 use orna_syntax_v1::Keyword;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
-const SOURCE: &str = include_str!("fixtures/ji3t0-lsp-v1.orna");
+const SOURCE: &str = include_str!("fixtures/ji3t0-lsp-v1-self-contained.orna");
 const SEMANTIC_SOURCE: &str = include_str!("fixtures/editor-semantic-tokens.orna");
 const INVALID_SOURCE: &str = include_str!("fixtures/ji3t0-invalid-v1.orna");
 
@@ -365,10 +365,12 @@ fn protocol_conformance_uses_v1_for_every_advertised_editor_feature() {
     );
     assert_no_legacy_words(&signature, "signature-help response");
     assert_eq!(signature["activeParameter"], 1);
-    assert!(signature["signatures"][0]["label"]
-        .as_str()
-        .unwrap()
-        .contains("fn add("));
+    assert!(
+        signature["signatures"][0]["label"]
+            .as_str()
+            .unwrap()
+            .contains("fn add(")
+    );
 
     let definition = client.request(
         "textDocument/definition",
@@ -870,7 +872,8 @@ fn emacs_eglot_attaches_and_proves_hover_rename_references_and_semantic_tokens()
         .ancestors()
         .nth(2)
         .expect("orna-lsp is under crates");
-    let hover_fixture = root.join("crates/orna-lsp/tests/fixtures/ji3t0-lsp-v1.orna");
+    let hover_fixture =
+        root.join("crates/orna-lsp/tests/fixtures/ji3t0-lsp-v1-self-contained.orna");
     let semantic_fixture = root.join("crates/orna-lsp/tests/fixtures/editor-semantic-tokens.orna");
     assert_eq!(fs::read_to_string(&hover_fixture).unwrap(), SOURCE);
     assert_eq!(
@@ -1124,11 +1127,13 @@ fn vscode_keywords(root: &Path, expected: &BTreeSet<String>) -> (&'static str, B
     let manifest_path = root.join("editors/vscode/package.json");
     let manifest: Value =
         serde_json::from_str(&fs::read_to_string(&manifest_path).unwrap()).unwrap();
-    assert!(manifest["contributes"]["languages"][0]["extensions"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|extension| extension == ".orna"));
+    assert!(
+        manifest["contributes"]["languages"][0]["extensions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|extension| extension == ".orna")
+    );
     assert_eq!(manifest["contributes"]["grammars"][0]["language"], "orna");
     let grammar_path = root.join("editors/vscode").join(
         manifest["contributes"]["grammars"][0]["path"]

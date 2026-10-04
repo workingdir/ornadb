@@ -2185,6 +2185,8 @@ mod tests {
     fn playground_asset_records_match_the_declared_table_and_path_key() {
         const PLAYGROUND_SCHEMA: &str = include_str!("../tests/fixtures/playground-schema.orna");
         const ASSET_APP: &str = include_str!("../tests/fixtures/playground-asset-app.orna");
+        const ASSET_PRESENTATION: &str =
+            include_str!("../tests/fixtures/playground-asset-presentation.orna");
 
         assert!(has_playground_asset_table(PLAYGROUND_SCHEMA));
         assert_eq!(
@@ -2193,6 +2195,17 @@ mod tests {
                 "assets/app.js".into(),
                 "text/javascript; charset=utf-8".into(),
                 "globalThis.ornaPlaygroundReady = true;".into(),
+            ))
+        );
+        assert_eq!(
+            decode_playground_asset(
+                ASSET_PRESENTATION,
+                "asset-6173736574732f70726573656e746174696f6e2e6d6a73"
+            ),
+            Some((
+                "assets/presentation.mjs".into(),
+                "text/javascript; charset=utf-8".into(),
+                "export class LivePresentation {}".into(),
             ))
         );
         assert_eq!(decode_playground_asset(ASSET_APP, "different-id"), None);
