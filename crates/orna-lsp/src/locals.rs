@@ -9,10 +9,20 @@ use orna_syntax_v1::{
 
 #[derive(Clone, Debug)]
 pub(crate) struct LocalBinding {
+    pub name: String,
     pub selection: SyntaxSpan,
+    pub context: SyntaxSpan,
+    pub kind: LocalBindingKind,
     key: String,
     scope: SyntaxSpan,
     visible_after: usize,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum LocalBindingKind {
+    Parameter,
+    Local,
+    Pattern,
 }
 
 #[derive(Clone, Debug)]
@@ -29,7 +39,14 @@ pub(crate) fn bindings(tree: &SyntaxTree) -> Vec<LocalBinding> {
         };
         let body_span = body.span();
         for parameter in &signature.parameters {
-            collect_pattern_bindings(&parameter.pattern, &body_span, body_span.start, &mut output);
+            collect_pattern_bindings(
+                &parameter.pattern,
+                &body_span,
+                body_span.start,
+                &parameter.span,
+                LocalBindingKind::Parameter,
+                &mut output,
+            );
         }
         collect_expr_bindings(body, &mut output);
     }
@@ -39,6 +56,21 @@ pub(crate) fn bindings(tree: &SyntaxTree) -> Vec<LocalBinding> {
 
 pub(crate) fn all_bindings(tree: &SyntaxTree) -> Vec<LocalBinding> {
     bindings(tree)
+}
+
+/// Returns the innermost visible binding for each name at a source position.
+pub(crate) fn visible_bindings(tree: &SyntaxTree, position: usize) -> Vec<LocalBinding> {
+    let bindings = bindings(tree);
+    let keys = bindings
+        .iter()
+        .map(|binding| binding.key.clone())
+        .collect::<BTreeSet<_>>();
+    let mut visible = keys
+        .into_iter()
+        .filter_map(|key| resolve(&bindings, &key, position).cloned())
+        .collect::<Vec<_>>();
+    visible.sort_by_key(|binding| binding.selection.start);
+    visible
 }
 
 /// Finds the local binding selected by an identifier token, either at its
@@ -122,23 +154,25 @@ fn collect_pattern_bindings(
     pattern: &Pattern,
     scope: &SyntaxSpan,
     visible_after: usize,
+    context: &SyntaxSpan,
+    kind: LocalBindingKind,
     output: &mut Vec<LocalBinding>,
 ) {
     match pattern {
         Pattern::Name(name, span) => {
-            push_binding(name, span, scope, visible_after, output);
+            push_binding(name, span, scope, visible_after, context, kind, output);
         }
         Pattern::Tuple { elements, .. } | Pattern::List { elements, .. } => {
             for element in elements {
-                collect_pattern_bindings(element, scope, visible_after, output);
+                collect_pattern_bindings(element, scope, visible_after, context, kind, output);
             }
         }
         Pattern::Record { fields, .. } => {
             for (name, pattern, span) in fields {
                 if let Some(pattern) = pattern {
-                    collect_pattern_bindings(pattern, scope, visible_after, output);
+                    collect_pattern_bindings(pattern, scope, visible_after, context, kind, output);
                 } else {
-                    push_binding(name, span, scope, visible_after, output);
+                    push_binding(name, span, scope, visible_after, context, kind, output);
                 }
             }
         }
@@ -146,13 +180,21 @@ fn collect_pattern_bindings(
             arguments, fields, ..
         } => {
             for pattern in arguments {
-                collect_pattern_bindings(pattern, scope, visible_after, output);
+                collect_pattern_bindings(pattern, scope, visible_after, context, kind, output);
             }
             for field in fields {
                 if let Some(pattern) = &field.pattern {
-                    collect_pattern_bindings(pattern, scope, visible_after, output);
+                    collect_pattern_bindings(pattern, scope, visible_after, context, kind, output);
                 } else {
-                    push_binding(&field.name, &field.span, scope, visible_after, output);
+                    push_binding(
+                        &field.name,
+                        &field.span,
+                        scope,
+                        visible_after,
+                        context,
+                        kind,
+                        output,
+                    );
                 }
             }
         }
@@ -165,10 +207,15 @@ fn push_binding(
     selection: &SyntaxSpan,
     scope: &SyntaxSpan,
     visible_after: usize,
+    context: &SyntaxSpan,
+    kind: LocalBindingKind,
     output: &mut Vec<LocalBinding>,
 ) {
     output.push(LocalBinding {
+        name: name.to_owned(),
         selection: selection.clone(),
+        context: context.clone(),
+        kind,
         key: normalize(name),
         scope: scope.clone(),
         visible_after,
@@ -182,7 +229,14 @@ fn collect_expr_bindings(expression: &Expr, output: &mut Vec<LocalBinding>) {
         } => {
             let body_span = body.span();
             for parameter in parameters {
-                collect_pattern_bindings(&parameter.pattern, &body_span, body_span.start, output);
+                collect_pattern_bindings(
+                    &parameter.pattern,
+                    &body_span,
+                    body_span.start,
+                    &parameter.span,
+                    LocalBindingKind::Parameter,
+                    output,
+                );
             }
             collect_expr_bindings(body, output);
         }
@@ -200,7 +254,14 @@ fn collect_expr_bindings(expression: &Expr, output: &mut Vec<LocalBinding>) {
                 } = statement
                 {
                     collect_expr_bindings(value, output);
-                    collect_pattern_bindings(pattern, span, statement_span.end, output);
+                    collect_pattern_bindings(
+                        pattern,
+                        span,
+                        statement_span.end,
+                        statement_span,
+                        LocalBindingKind::Local,
+                        output,
+                    );
                 } else {
                     collect_statement_bindings(statement, output);
                 }
@@ -228,6 +289,8 @@ fn collect_expr_bindings(expression: &Expr, output: &mut Vec<LocalBinding>) {
                         pattern,
                         &body_span,
                         pattern_span(pattern).end,
+                        &pattern_span(pattern),
+                        LocalBindingKind::Pattern,
                         output,
                     );
                 }
@@ -299,7 +362,14 @@ fn collect_expr_bindings(expression: &Expr, output: &mut Vec<LocalBinding>) {
 
 fn collect_arm_bindings(arm: &CaseArm, output: &mut Vec<LocalBinding>) {
     let visible_after = pattern_span(&arm.pattern).end;
-    collect_pattern_bindings(&arm.pattern, &arm.span, visible_after, output);
+    collect_pattern_bindings(
+        &arm.pattern,
+        &arm.span,
+        visible_after,
+        &arm.span,
+        LocalBindingKind::Pattern,
+        output,
+    );
     if let Some(guard) = &arm.guard {
         collect_expr_bindings(guard, output);
     }
