@@ -15,6 +15,8 @@ mod completion_contract;
 #[allow(dead_code)]
 #[path = "support/hover_semantic_contract.rs"]
 mod hover_semantic_contract;
+#[path = "support/syntax_v1_action_signature_contract.rs"]
+mod syntax_v1_action_signature_contract;
 #[path = "support/syntax_v1_depth_contract.rs"]
 mod syntax_v1_depth_contract;
 
@@ -22,6 +24,8 @@ const SOURCE: &str = include_str!("fixtures/ji3t0-lsp-v1.orna");
 const PROVIDER_SOURCE: &str = include_str!("fixtures/expressions-v1.orna");
 const SEMANTIC_SOURCE: &str = include_str!("fixtures/editor-semantic-tokens.orna");
 const HINTS_SOURCE: &str = include_str!("fixtures/editor-lsp-hints.orna");
+const SIGNATURE_SOURCE: &str = include_str!("fixtures/signature-actions-v1.orna");
+const ACTION_SOURCE: &str = include_str!("fixtures/missing-semicolon-code-action-v1.orna");
 
 #[test]
 fn attachment_input_matches_its_crate_local_fixture() {
@@ -78,6 +82,16 @@ fn vim_lsp_attaches_and_exposes_hover_semantic_tokens_and_completion() {
     let depth_fixture = root.join("crates/orna-lsp/tests/fixtures/editor-lsp-hints.orna");
     assert_eq!(fs::read_to_string(&depth_fixture).unwrap(), HINTS_SOURCE);
     let depth_ranges = syntax_v1_depth_contract::request_ranges(HINTS_SOURCE);
+    let signature_fixture = root.join("crates/orna-lsp/tests/fixtures/signature-actions-v1.orna");
+    assert_eq!(
+        fs::read_to_string(&signature_fixture).unwrap(),
+        SIGNATURE_SOURCE
+    );
+    let action_fixture =
+        root.join("crates/orna-lsp/tests/fixtures/missing-semicolon-code-action-v1.orna");
+    assert_eq!(fs::read_to_string(&action_fixture).unwrap(), ACTION_SOURCE);
+    let action_signature_requests =
+        syntax_v1_action_signature_contract::request_data(SIGNATURE_SOURCE, ACTION_SOURCE);
     let lsp_binary = env!("CARGO_BIN_EXE_orna-lsp");
     let vim_script = format!(
         r#"
@@ -285,6 +299,58 @@ while len(g:orna_depth_responses) < 7 && reltimefloat(reltime()) < s:deadline
     sleep 10m
 endwhile
 call assert_equal(7, len(g:orna_depth_responses), 'vim-lsp semantic/inlay depth requests timed out')
+
+let s:action_signature_requests = json_decode($ORNA_ACTION_SIGNATURE_REQUESTS)
+execute 'edit ' . fnameescape($ORNA_TEST_SIGNATURE_FIXTURE)
+call assert_equal('orna', &filetype)
+let s:deadline = reltimefloat(reltime()) + 10.0
+while !lsp#capabilities#has_completion_provider('orna') && reltimefloat(reltime()) < s:deadline
+    sleep 10m
+endwhile
+call assert_true(lsp#capabilities#has_completion_provider('orna'), 'signature fixture did not attach to orna-lsp')
+let s:signature_document = lsp#get_text_document_identifier()
+for [s:name, s:position_key] in items({{
+    \ 'signature_nested_tuple': 'signature_nested_tuple',
+    \ 'signature_named_argument': 'signature_named_argument',
+    \ 'signature_nested_named_argument': 'signature_nested_named_argument',
+    \ 'signature_shadowed_call': 'signature_shadowed_call',
+\ }})
+    call lsp#send_request('orna', {{
+        \ 'method': 'textDocument/signatureHelp',
+        \ 'params': {{ 'textDocument': s:signature_document, 'position': s:action_signature_requests[s:position_key] }},
+        \ 'on_notification': function('OrnaCaptureDepth', [s:name]),
+    \ }})
+endfor
+
+execute 'edit ' . fnameescape($ORNA_TEST_ACTION_FIXTURE)
+call assert_equal('orna', &filetype)
+let s:deadline = reltimefloat(reltime()) + 10.0
+while !lsp#capabilities#has_completion_provider('orna') && reltimefloat(reltime()) < s:deadline
+    sleep 10m
+endwhile
+call assert_true(lsp#capabilities#has_completion_provider('orna'), 'code-action fixture did not attach to orna-lsp')
+let s:action_document = lsp#get_text_document_identifier()
+let s:action_uri = s:action_document['uri']
+for [s:name, s:range_key, s:kind] in [
+    \ ['code_action_quickfix', 'code_action_full_range', 'quickfix'],
+    \ ['code_action_wrong_kind', 'code_action_full_range', 'refactor'],
+    \ ['code_action_outside_range', 'code_action_outside_range', 'quickfix'],
+\ ]
+    call lsp#send_request('orna', {{
+        \ 'method': 'textDocument/codeAction',
+        \ 'params': {{
+        \     'textDocument': s:action_document,
+        \     'range': s:action_signature_requests[s:range_key],
+        \     'context': {{ 'diagnostics': [], 'only': [s:kind] }},
+        \ }},
+        \ 'on_notification': function('OrnaCaptureDepth', [s:name]),
+    \ }})
+endfor
+let s:deadline = reltimefloat(reltime()) + 10.0
+while len(g:orna_depth_responses) < 14 && reltimefloat(reltime()) < s:deadline
+    sleep 10m
+endwhile
+call assert_equal(14, len(g:orna_depth_responses), 'vim-lsp code-action/signature-help requests timed out')
 call writefile([json_encode({{
     \ 'omnifunc': &l:omnifunc,
     \ 'completion': s:response['result'],
@@ -298,6 +364,14 @@ call writefile([json_encode({{
     \ 'depth_hints_inferred': g:orna_depth_responses.hints_inferred,
     \ 'depth_hints_annotated': g:orna_depth_responses.hints_annotated,
     \ 'depth_hints_shadowed': g:orna_depth_responses.hints_shadowed,
+    \ 'signature_nested_tuple': g:orna_depth_responses.signature_nested_tuple,
+    \ 'signature_named_argument': g:orna_depth_responses.signature_named_argument,
+    \ 'signature_nested_named_argument': g:orna_depth_responses.signature_nested_named_argument,
+    \ 'signature_shadowed_call': g:orna_depth_responses.signature_shadowed_call,
+    \ 'code_action_quickfix': g:orna_depth_responses.code_action_quickfix,
+    \ 'code_action_wrong_kind': g:orna_depth_responses.code_action_wrong_kind,
+    \ 'code_action_outside_range': g:orna_depth_responses.code_action_outside_range,
+    \ 'action_uri': s:action_uri,
     \ 'consumer_uri': s:consumer_document['uri'],
     \ 'provider_uri': s:provider_document['uri'],
     \ 'references': s:references,
@@ -324,9 +398,15 @@ qa!
         .env("ORNA_TEST_PROVIDER", &provider)
         .env("ORNA_TEST_SEMANTIC_FIXTURE", &semantic_fixture)
         .env("ORNA_TEST_DEPTH_FIXTURE", &depth_fixture)
+        .env("ORNA_TEST_SIGNATURE_FIXTURE", &signature_fixture)
+        .env("ORNA_TEST_ACTION_FIXTURE", &action_fixture)
         .env(
             "ORNA_DEPTH_RANGES",
             serde_json::to_string(&depth_ranges).unwrap(),
+        )
+        .env(
+            "ORNA_ACTION_SIGNATURE_REQUESTS",
+            serde_json::to_string(&action_signature_requests).unwrap(),
         )
         .env("ORNA_EDITOR_RESULT", &result_path)
         .output()
@@ -381,6 +461,23 @@ qa!
         &evidence["depth_hints_shadowed"],
         "Vim vim-lsp",
     );
+    syntax_v1_action_signature_contract::assert_signature_help_contract(
+        &evidence["signature_nested_tuple"],
+        &evidence["signature_named_argument"],
+        &evidence["signature_nested_named_argument"],
+        &evidence["signature_shadowed_call"],
+        "Vim vim-lsp",
+    );
+    syntax_v1_action_signature_contract::assert_code_action_contract(
+        ACTION_SOURCE,
+        evidence["action_uri"]
+            .as_str()
+            .expect("Vim action document URI"),
+        &evidence["code_action_quickfix"],
+        &evidence["code_action_wrong_kind"],
+        &evidence["code_action_outside_range"],
+        "Vim vim-lsp",
+    );
     let consumer_uri = evidence["consumer_uri"]
         .as_str()
         .expect("Vim consumer document URI");
@@ -407,7 +504,7 @@ qa!
         "Vim vim-lsp",
     );
     println!(
-        "Vim integration evidence: ATTACHED=pass DEPENDENCY_ORDER=consumer-before-provider OMNIFUNC=pass COMPLETION=pass HOVER=pass REFERENCES=pass RENAME=pass SEMANTIC_TOKENS=pass SEMANTIC_DEPTH=pass RANGED_TOKENS=pass INLAY_HINT_DEPTH=pass"
+        "Vim integration evidence: ATTACHED=pass DEPENDENCY_ORDER=consumer-before-provider OMNIFUNC=pass COMPLETION=pass HOVER=pass REFERENCES=pass RENAME=pass SEMANTIC_TOKENS=pass SEMANTIC_DEPTH=pass RANGED_TOKENS=pass INLAY_HINT_DEPTH=pass SIGNATURE_HELP=pass CODE_ACTION=pass"
     );
 }
 
