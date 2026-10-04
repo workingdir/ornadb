@@ -1,0 +1,12 @@
+/// Unicode prefix for UTF-16 call ranges: café 🧭.
+pub fn leaf(value: Int): Int = value;
+
+pub fn bridge(value: Int): Int = leaf(value);
+
+pub fn caller(value: Int): Int = bridge(leaf(value)) + leaf(value);
+
+pub fn shadowed(leaf: Int): Int = leaf(1);
+
+pub fn isolated(value: Int): Int = value;
+
+pub fn collide(value: Int): Int = value;
