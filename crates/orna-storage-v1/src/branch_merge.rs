@@ -2207,7 +2207,6 @@ pub enum BranchMergePairedCheckpointRedoFoldSpillNestedCompactionIdentityNestedC
     },
 }
 
-
 /// One F164 paired rewind/checkpoint chain fold with its own nested handoff pair.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BranchMergePairedCheckpointRedoFoldSpillNestedHandoffIdentityNestedCompactionIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCompactionIdentityNestedHandoffIdentityNestedCheckpointIdentityNestedCompactionIdentityOuterRestoreIdentityNestedSpillIdentityOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreFoldSnapshot {
@@ -8819,7 +8818,6 @@ pub fn restore_paired_checkpoint_redo_sparse_spill_nested_compaction_identity_ne
         })
         .collect())
 }
-
 
 /// Restores F164 paired rewind/checkpoint chain folds with an independent
 /// nested handoff pair.
