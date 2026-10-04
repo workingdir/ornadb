@@ -4,7 +4,7 @@ use orna_semantic_v1::{Catalogue, ModuleInput, Type, analyze_with_catalogue};
 
 const INFER_SUCCESS: &str = include_str!("fixtures/traceability-infer-success.orna");
 const INFER_UNDERCONSTRAINED: &str =
-    include_str!("../../orna-semantic-v1/tests/fixtures/underconstrained-lambda-field.orna");
+    include_str!("fixtures/semantic/underconstrained-lambda-field.orna");
 const NUMERIC_CONTEXT: &str = include_str!(
     "fixtures/reference/examples/valid/numeric-literal-context.orna"
 );
