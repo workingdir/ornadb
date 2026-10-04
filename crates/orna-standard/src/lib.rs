@@ -96,6 +96,7 @@ pub const REFERENCE_STANDARD_TYPE_UTILS_PATH_V1: &str = "std/type_utils.orna";
 pub const REFERENCE_STANDARD_PATTERN_PATH_V1: &str = "std/pattern.orna";
 pub const REFERENCE_STANDARD_REGEX_PATH_V1: &str = "std/regex.orna";
 pub const REFERENCE_STANDARD_REGEX_UTILITIES_PATH_V1: &str = "std/regex/utilities.orna";
+pub const REFERENCE_STANDARD_TIME_UTILITIES_PATH_V1: &str = "std/time/utilities.orna";
 pub const REFERENCE_STANDARD_ITERATOR_PATH_V1: &str = "std/iterator.orna";
 pub const REFERENCE_STANDARD_LAZY_PATH_V1: &str = "std/lazy.orna";
 pub const REFERENCE_STANDARD_VIEWS_PATH_V1: &str = "std/views.orna";
@@ -202,6 +203,8 @@ const REFERENCE_STANDARD_STREAM_ADAPTERS_SOURCE_V1: &str =
 const REFERENCE_STANDARD_MEMO_SOURCE_V1: &str = include_str!("../../../stdlib/std/memo.orna");
 const REFERENCE_STANDARD_REGEX_UTILITIES_SOURCE_V1: &str =
     include_str!("../../../stdlib/std/regex/utilities.orna");
+const REFERENCE_STANDARD_TIME_UTILITIES_SOURCE_V1: &str =
+    include_str!("../../../stdlib/std/time/utilities.orna");
 const REFERENCE_STANDARD_TEST_SOURCE_V1: &str = include_str!("../../../stdlib/std/test.orna");
 const REFERENCE_STANDARD_GENERICS_SOURCE_V1: &str =
     include_str!("../../../stdlib/std/generics.orna");
@@ -230,8 +233,8 @@ const REFERENCE_STANDARD_PRELUDE_SOURCE_V1: &str =
 /// This is the current source-backed standard boundary. The retained `orna.std/1`–
 /// `orna.std/11` APIs below model older, explicitly versioned snapshots.
 #[must_use]
-pub fn reference_standard_sources_v1() -> [(String, String); 67] {
-    let mut sources: [(String, String); 67] = [
+pub fn reference_standard_sources_v1() -> [(String, String); 68] {
+    let mut sources: [(String, String); 68] = [
         (
             REFERENCE_STANDARD_MATH_PATH_V1.into(),
             REFERENCE_STANDARD_MATH_SOURCE_V1.into(),
@@ -499,6 +502,10 @@ pub fn reference_standard_sources_v1() -> [(String, String); 67] {
         (
             REFERENCE_STANDARD_REGEX_UTILITIES_PATH_V1.into(),
             REFERENCE_STANDARD_REGEX_UTILITIES_SOURCE_V1.into(),
+        ),
+        (
+            REFERENCE_STANDARD_TIME_UTILITIES_PATH_V1.into(),
+            REFERENCE_STANDARD_TIME_UTILITIES_SOURCE_V1.into(),
         ),
     ];
     sources[2]
