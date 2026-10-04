@@ -53,12 +53,16 @@ fn checkpoint_chain(
     source: &str,
     branch_name: &str,
     generation: u64,
+    rebound: bool,
 ) -> QueryPairedCheckpointSegmentCompactionChainDescription {
     QueryPairedCheckpointSegmentCompactionChainDescription {
         join_pair_identity: object(&format!("pair:{source}")),
         branch: branch(branch_name, generation),
         steps: vec![QueryPairedCheckpointSegmentCompactionStepDescription {
-            checkpoint_identity: object(&format!("checkpoint:{source}")),
+            checkpoint_identity: object(&format!(
+                "checkpoint:{source}{}",
+                if rebound { ":rebound" } else { "" }
+            )),
             left_segment_identity: Some(object(&format!("segment:{source}:left"))),
             right_segment_identity: Some(object(&format!("segment:{source}:right"))),
             left_compaction_identity: Some(object(&format!("compact:{source}:left"))),
@@ -114,11 +118,20 @@ fn spill(
     }
 }
 
-fn plan(second_spill_budget: u64, reverse_descriptors: bool) -> orna_sys_v1::ExplainedPlan {
+fn plan(
+    second_spill_budget: u64,
+    reverse_descriptors: bool,
+    changed_root_cost: bool,
+    changed_restore: bool,
+) -> orna_sys_v1::ExplainedPlan {
     let query = QueryPlanDescription {
         snapshot: SnapshotRef::descriptive("snapshot:paired-window-spill-restore-rooh4"),
         source: object("table:Anchor"),
-        source_statistics: Some(statistics(100, 40_000, Some(branch("branch:anchor", 3)))),
+        source_statistics: Some(statistics(
+            if changed_root_cost { 101 } else { 100 },
+            if changed_root_cost { 41_000 } else { 40_000 },
+            Some(branch("branch:anchor", 3)),
+        )),
         joins: vec![
             QueryJoinDescription {
                 source: object("table:ChildB"),
@@ -169,8 +182,8 @@ fn plan(second_spill_budget: u64, reverse_descriptors: bool) -> orna_sys_v1::Exp
         ),
     ];
     let mut checkpoints = vec![
-        checkpoint_chain("table:ChildA", "branch:alpha", 7),
-        checkpoint_chain("table:ChildB", "branch:beta", 8),
+        checkpoint_chain("table:ChildA", "branch:alpha", 7, false),
+        checkpoint_chain("table:ChildB", "branch:beta", 8, changed_restore),
     ];
     let mut rotations = vec![
         rotation_chain("table:ChildA", "branch:alpha", 7),
@@ -226,12 +239,16 @@ fn paired_spill_identity_is_retained_by_nested_window_restore_folds() {
     assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
     assert_eq!(parsed.value.items.len(), 2);
 
-    let baseline = plan(10_000, false);
-    let reordered = plan(10_000, true);
-    let changed_spill = plan(12_000, false);
+    let baseline = plan(10_000, false, false, false);
+    let reordered = plan(10_000, true, false, false);
+    let changed_spill = plan(12_000, false, false, false);
+    let changed_root_cost = plan(10_000, false, true, false);
+    let changed_restore = plan(10_000, false, false, true);
     let joins = joins_by_pair(&baseline);
     let reordered_joins = joins_by_pair(&reordered);
     let changed_joins = joins_by_pair(&changed_spill);
+    let changed_cost_joins = joins_by_pair(&changed_root_cost);
+    let changed_restore_joins = joins_by_pair(&changed_restore);
     let child_a = joins["pair:table:ChildA"];
     let child_b = joins["pair:table:ChildB"];
     let tail = joins["pair:table:Tail"];
@@ -367,5 +384,76 @@ fn paired_spill_identity_is_retained_by_nested_window_restore_folds() {
             "paired_window_cost_restoration_fold_identity"
         ),
         "the sparse tail retains the changed upstream spill identity"
+    );
+    assert_eq!(
+        integer(
+            changed_cost_joins["pair:table:ChildB"],
+            "aggregate_spill_estimated_bytes"
+        ),
+        integer(child_b, "aggregate_spill_estimated_bytes"),
+        "changing upstream cost inputs leaves the spill estimate unchanged"
+    );
+    assert_ne!(
+        text(
+            child_b,
+            "paired_window_cost_restoration_spill_fold_identity"
+        ),
+        text(
+            changed_cost_joins["pair:table:ChildB"],
+            "paired_window_cost_restoration_spill_fold_identity"
+        ),
+        "the nested spill identity binds paired cost ancestry"
+    );
+    assert_ne!(
+        text(
+            tail,
+            "paired_window_cost_restoration_spill_fold_identity"
+        ),
+        text(
+            changed_cost_joins["pair:table:Tail"],
+            "paired_window_cost_restoration_spill_fold_identity"
+        ),
+        "a sparse tail carries changed paired cost ancestry in its spill identity"
+    );
+    assert_eq!(
+        integer(
+            changed_restore_joins["pair:table:ChildB"],
+            "aggregate_spill_estimated_bytes"
+        ),
+        integer(child_b, "aggregate_spill_estimated_bytes"),
+        "changing the paired restore checkpoint leaves the spill estimate unchanged"
+    );
+    assert_ne!(
+        text(
+            child_b,
+            "paired_window_cost_restoration_pair_identity"
+        ),
+        text(
+            changed_restore_joins["pair:table:ChildB"],
+            "paired_window_cost_restoration_pair_identity"
+        ),
+        "the paired cost-window identity binds the exact restore checkpoint"
+    );
+    assert_ne!(
+        text(
+            child_b,
+            "paired_window_cost_restoration_spill_fold_identity"
+        ),
+        text(
+            changed_restore_joins["pair:table:ChildB"],
+            "paired_window_cost_restoration_spill_fold_identity"
+        ),
+        "the nested spill identity binds the exact paired restore checkpoint"
+    );
+    assert_ne!(
+        text(
+            tail,
+            "paired_window_cost_restoration_spill_fold_identity"
+        ),
+        text(
+            changed_restore_joins["pair:table:Tail"],
+            "paired_window_cost_restoration_spill_fold_identity"
+        ),
+        "a sparse tail carries changed restore ancestry in its spill identity"
     );
 }

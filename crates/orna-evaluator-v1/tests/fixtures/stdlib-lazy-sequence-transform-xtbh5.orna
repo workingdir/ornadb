@@ -1,0 +1,1 @@
+std.lazy.force(std.lazy.adapters.collect(std.lazy.adapters.filter(std.lazy.adapters.map(std.lazy.adapters.from_list([1, 2, 3, 4]), value => value * 3), value => value % 2 == 0))) == [6, 12]

@@ -23,9 +23,6 @@ jobs:
         with:
           submodules: recursive
 
-      - name: Install the WebAssembly C compiler
-        run: sudo apt-get update && sudo apt-get install --yes clang
-
       - name: Install Rust and the WebAssembly target
         uses: dtolnay/rust-toolchain@1.95.0
         with:
@@ -36,44 +33,24 @@ jobs:
         with:
           node-version: 22.21.1
           cache: npm
-          cache-dependency-path: playground/site/package-lock.json
+          cache-dependency-path: playground/web-ui/package-lock.json
 
       - name: Install wasm-pack
         run: cargo install wasm-pack --locked --version 0.15.0
 
-      - name: Test the wasm bridge in Node.js
-        run: wasm-pack test --node playground/orna-wasm --locked
+      - name: Check generated editor and Monarch artifacts
+        run: cargo run --locked -p orna-syntax-v1 --example generate_editor_artifacts -- --check
 
-      - name: Build the wasm package
-        run: wasm-pack build playground/orna-wasm --target web --out-dir pkg --release --locked
-
-      - name: Install playground dependencies
-        working-directory: playground/site
+      - name: Install Monaco web UI dependencies
+        working-directory: playground/web-ui
         run: npm ci
 
-      - name: Build and smoke-test the Pages site
-        working-directory: playground/site
-        env:
-          VITE_BASE_PATH: /${{ github.event.repository.name }}/
-        run: npm run build && npm run smoke-test
+      - name: Test and build Monaco web UI
+        working-directory: playground/web-ui
+        run: npm test && npm run build
 
-      - name: Upload Pages artifact
-        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
-        uses: actions/upload-pages-artifact@v5
-        with:
-          path: playground/site/dist
+      - name: Test browser LSP exports through the shared analysis core
+        run: cargo test --locked -p orna-lsp browser_
 
-  deploy:
-    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
-    needs: build
-    runs-on: ubuntu-latest
-    permissions:
-      pages: write
-      id-token: write
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
-    steps:
-      - name: Deploy to GitHub Pages
-        id: deployment
-        uses: actions/deploy-pages@v5
+      - name: Test the in-database playground serve routes
+        run: cargo test --locked -p orna-cli-v1 cli_serve::tests

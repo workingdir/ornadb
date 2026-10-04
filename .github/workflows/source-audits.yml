@@ -1,0 +1,45 @@
+name: Source audits
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: source-audits-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  fixture-and-editor-artifacts:
+    runs-on: ubuntu-latest
+    env:
+      CARGO_BUILD_JOBS: 2
+      RUST_TEST_THREADS: 2
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Reject checkout and sibling reference trees
+        run: |
+          test ! -e reference || { echo "remove the checkout reference tree" >&2; exit 1; }
+          test ! -e ../reference || { echo "remove the sibling reference tree" >&2; exit 1; }
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@1.95.0
+
+      - name: Audit fixture boundaries
+        run: cargo test --locked -p orna-syntax-v1 --test fixture_audit
+
+      - name: Audit editor source and generated artifacts
+        run: cargo test --locked -p orna-syntax-v1 --test editor_artifacts
+
+      - name: Check generated editor bytes
+        run: cargo run --locked -p orna-syntax-v1 --example generate_editor_artifacts -- --check
+
+      - name: Check Tree-sitter grammar syntax
+        run: node --check editors/tree-sitter-orna/grammar.js
