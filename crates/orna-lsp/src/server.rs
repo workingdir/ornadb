@@ -10,24 +10,26 @@ use std::thread::{self, JoinHandle};
 
 use crate::analysis::{self, EditorParse as Parse};
 use crate::documents::{Document, PositionMapper};
-use crate::{inlay, semantic};
+use crate::{editor_ranges, inlay, semantic};
 use lsp_server::{Connection, ErrorCode, Message, Notification, Request, Response, ResponseError};
 use lsp_types::{
-    CodeAction, CodeActionKind, CodeActionOptions, CodeActionOrCommand, CodeActionParams,
+    CallHierarchyItem, CallHierarchyOptions, CallHierarchyServerCapability, CodeAction,
+    CodeActionKind, CodeActionOptions, CodeActionOrCommand, CodeActionParams,
     CodeActionProviderCapability, CompletionOptions, CompletionParams, CompletionResponse,
     Diagnostic, DiagnosticOptions, DiagnosticServerCapabilities, DocumentDiagnosticParams,
     DocumentDiagnosticReport, DocumentLink, DocumentLinkOptions, DocumentLinkParams,
-    DocumentSymbolParams, DocumentSymbolResponse, FullDocumentDiagnosticReport,
-    GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverParams, HoverProviderCapability,
-    InitializeParams, InlayHintOptions, InlayHintParams, InlayHintServerCapabilities,
-    NumberOrString, OneOf, Position, PositionEncodingKind, PrepareRenameResponse,
-    PublishDiagnosticsParams, Range, ReferenceParams, RelatedFullDocumentDiagnosticReport,
-    RelatedUnchangedDocumentDiagnosticReport, RenameOptions, RenameParams, SemanticTokens,
-    SemanticTokensFullOptions, SemanticTokensLegend, SemanticTokensOptions, SemanticTokensParams,
-    SemanticTokensRangeParams, SemanticTokensServerCapabilities, ServerCapabilities,
-    SignatureHelpOptions, TextDocumentContentChangeEvent, TextDocumentSyncCapability,
-    TextDocumentSyncKind, TextDocumentSyncOptions, TextDocumentSyncSaveOptions, TextEdit,
-    UnchangedDocumentDiagnosticReport, Uri, WorkspaceEdit,
+    DocumentSymbolParams, DocumentSymbolResponse, FoldingRange, FoldingRangeParams,
+    FoldingRangeProviderCapability, FullDocumentDiagnosticReport, GotoDefinitionParams,
+    GotoDefinitionResponse, Hover, HoverParams, HoverProviderCapability, InitializeParams,
+    InlayHintOptions, InlayHintParams, InlayHintServerCapabilities, NumberOrString, OneOf,
+    Position, PositionEncodingKind, PrepareRenameResponse, PublishDiagnosticsParams, Range,
+    ReferenceParams, RelatedFullDocumentDiagnosticReport, RelatedUnchangedDocumentDiagnosticReport,
+    RenameOptions, RenameParams, SelectionRangeParams, SelectionRangeProviderCapability,
+    SemanticTokens, SemanticTokensFullOptions, SemanticTokensLegend, SemanticTokensOptions,
+    SemanticTokensParams, SemanticTokensRangeParams, SemanticTokensServerCapabilities,
+    ServerCapabilities, SignatureHelpOptions, TextDocumentContentChangeEvent,
+    TextDocumentSyncCapability, TextDocumentSyncKind, TextDocumentSyncOptions,
+    TextDocumentSyncSaveOptions, TextEdit, UnchangedDocumentDiagnosticReport, Uri, WorkspaceEdit,
 };
 
 /// Transport threads for the server's standard input and output streams.
@@ -264,6 +266,11 @@ fn server_capabilities() -> ServerCapabilities {
             resolve_provider: Some(false),
             work_done_progress_options: Default::default(),
         }),
+        call_hierarchy_provider: Some(CallHierarchyServerCapability::Options(
+            CallHierarchyOptions::default(),
+        )),
+        folding_range_provider: Some(FoldingRangeProviderCapability::Simple(true)),
+        selection_range_provider: Some(SelectionRangeProviderCapability::Simple(true)),
         ..ServerCapabilities::default()
     }
 }
@@ -285,8 +292,13 @@ fn handle_request(state: &mut ServerState, connection: &Connection, request: Req
         "textDocument/semanticTokens/range" => request_semantic_tokens_range(state, request),
         "textDocument/inlayHint" => request_inlay_hints(state, request),
         "textDocument/documentLink" => request_document_links(state, request),
+        "textDocument/foldingRange" => request_folding_ranges(state, request),
+        "textDocument/selectionRange" => request_selection_ranges(state, request),
         "textDocument/completion" => request_completion(state, request),
         "workspace/symbol" => request_workspace_symbols(state, request),
+        "textDocument/prepareCallHierarchy" => request_prepare_call_hierarchy(state, request),
+        "callHierarchy/incomingCalls" => request_incoming_calls(state, request),
+        "callHierarchy/outgoingCalls" => request_outgoing_calls(state, request),
         "textDocument/diagnostic" => request_document_diagnostic(state, request),
         _ => {
             let _ = connection.sender.send(Message::Response(Response {
@@ -1097,29 +1109,297 @@ fn request_workspace_symbols(
     request: Request,
 ) -> Result<serde_json::Value, Box<dyn std::error::Error + Send + Sync>> {
     let (_, params) = request.extract::<lsp_types::WorkspaceSymbolParams>("workspace/symbol")?;
-    let query = params.query.to_ascii_lowercase();
+    let query = params.query.trim().to_lowercase();
     let mut symbols = Vec::new();
-    for document in state.documents.values() {
+    for document in state
+        .documents
+        .values()
+        .filter(|document| document.uri.as_str().ends_with(".orna"))
+    {
         let (parse, mapper) = parse_document(document);
+        if !parse.diagnostics.is_empty() {
+            continue;
+        }
         for symbol in analysis::document_symbols(&parse, &document.text, &mapper) {
-            if symbol.name.to_ascii_lowercase().contains(&query) {
-                symbols.push(lsp_types::WorkspaceSymbol {
-                    name: symbol.name,
-                    kind: symbol.kind,
-                    tags: symbol.tags,
-                    container_name: symbol.detail,
-                    location: lsp_types::OneOf::Left(lsp_types::Location {
-                        uri: document.uri.clone(),
-                        range: symbol.selection_range,
-                    }),
-                    data: None,
-                });
+            if let Some(score) = workspace_symbol_score(&symbol.name, &query) {
+                let range = symbol.selection_range;
+                symbols.push((
+                    score,
+                    symbol.name.to_lowercase(),
+                    document.uri.as_str().to_owned(),
+                    range.start,
+                    lsp_types::WorkspaceSymbol {
+                        name: symbol.name,
+                        kind: symbol.kind,
+                        tags: symbol.tags,
+                        container_name: None,
+                        location: lsp_types::OneOf::Left(lsp_types::Location {
+                            uri: document.uri.clone(),
+                            range,
+                        }),
+                        data: None,
+                    },
+                ));
             }
         }
     }
+    symbols.sort_by(|left, right| {
+        left.0
+            .cmp(&right.0)
+            .then_with(|| left.1.cmp(&right.1))
+            .then_with(|| left.2.cmp(&right.2))
+            .then_with(|| (left.3.line, left.3.character).cmp(&(right.3.line, right.3.character)))
+    });
     Ok(serde_json::to_value(
-        lsp_types::WorkspaceSymbolResponse::Nested(symbols),
+        lsp_types::WorkspaceSymbolResponse::Nested(
+            symbols
+                .into_iter()
+                .map(|(_, _, _, _, symbol)| symbol)
+                .collect(),
+        ),
     )?)
+}
+
+fn workspace_symbol_score(name: &str, query: &str) -> Option<u32> {
+    if query.is_empty() {
+        return Some(0);
+    }
+    let candidate = name.to_lowercase();
+    if candidate == query {
+        return Some(0);
+    }
+    if candidate.starts_with(query) {
+        return Some(10 + candidate.chars().count() as u32 - query.chars().count() as u32);
+    }
+    if let Some(index) = candidate.find(query) {
+        let boundary = index == 0
+            || candidate[..index]
+                .chars()
+                .next_back()
+                .is_some_and(|previous| !previous.is_alphanumeric());
+        return Some(30 + index as u32 - u32::from(boundary) * 5);
+    }
+
+    let query_chars = query.chars().collect::<Vec<_>>();
+    let candidate_chars = candidate.chars().collect::<Vec<_>>();
+    let mut matched = Vec::with_capacity(query_chars.len());
+    let mut cursor = 0usize;
+    for wanted in query_chars {
+        let relative = candidate_chars[cursor..]
+            .iter()
+            .position(|character| *character == wanted)?;
+        matched.push(cursor + relative);
+        cursor += relative + 1;
+    }
+    let first = *matched.first()?;
+    let gaps = matched
+        .windows(2)
+        .map(|pair| pair[1].saturating_sub(pair[0] + 1) as u32)
+        .sum::<u32>();
+    let boundary_bonus = (first == 0
+        || candidate_chars
+            .get(first.wrapping_sub(1))
+            .is_some_and(|previous| !previous.is_alphanumeric())) as u32
+        * 5;
+    Some(100 + first as u32 + gaps * 4 - boundary_bonus)
+}
+
+#[derive(Debug, Clone)]
+struct WorkspaceFunction {
+    document: Document,
+    definition: analysis::FunctionDefinition,
+}
+
+fn workspace_functions(state: &ServerState) -> Vec<WorkspaceFunction> {
+    let mut documents = state
+        .documents
+        .values()
+        .filter(|document| document.uri.as_str().ends_with(".orna"))
+        .collect::<Vec<_>>();
+    documents.sort_by(|left, right| left.uri.as_str().cmp(right.uri.as_str()));
+    let mut functions = Vec::new();
+    for document in documents {
+        let parse = analysis::parse_document(document);
+        if !parse.diagnostics.is_empty() {
+            continue;
+        }
+        functions.extend(
+            analysis::function_definitions(&parse, &document.text)
+                .into_iter()
+                .map(|definition| WorkspaceFunction {
+                    document: document.clone(),
+                    definition,
+                }),
+        );
+    }
+    functions.sort_by(|left, right| {
+        left.document
+            .uri
+            .as_str()
+            .cmp(right.document.uri.as_str())
+            .then_with(|| {
+                left.definition
+                    .selection
+                    .start
+                    .cmp(&right.definition.selection.start)
+            })
+    });
+    functions
+}
+
+fn call_hierarchy_item(function: &WorkspaceFunction) -> CallHierarchyItem {
+    let mapper = PositionMapper::new(&function.document.text);
+    CallHierarchyItem {
+        name: function.definition.name.clone(),
+        kind: lsp_types::SymbolKind::FUNCTION,
+        tags: None,
+        detail: function.definition.detail.clone(),
+        uri: function.document.uri.clone(),
+        range: mapper.range(&function.definition.full),
+        selection_range: mapper.range(&function.definition.selection),
+        data: None,
+    }
+}
+
+fn same_call_hierarchy_function(item: &CallHierarchyItem, function: &WorkspaceFunction) -> bool {
+    let expected = call_hierarchy_item(function);
+    item.uri == expected.uri && item.selection_range == expected.selection_range
+}
+
+fn uniquely_resolved_function(functions: &[WorkspaceFunction], name: &str) -> Option<usize> {
+    let key = analysis::normalized_identifier(name);
+    let mut matches = functions
+        .iter()
+        .enumerate()
+        .filter(|(_, function)| analysis::normalized_identifier(&function.definition.name) == key);
+    let found = matches.next()?.0;
+    matches.next().is_none().then_some(found)
+}
+
+fn request_prepare_call_hierarchy(
+    state: &mut ServerState,
+    request: Request,
+) -> Result<serde_json::Value, Box<dyn std::error::Error + Send + Sync>> {
+    let (_, params) = request
+        .extract::<lsp_types::CallHierarchyPrepareParams>("textDocument/prepareCallHierarchy")?;
+    let uri = params.text_document_position_params.text_document.uri;
+    let functions = workspace_functions(state);
+    let Some(document) = state.document(&uri) else {
+        return Ok(serde_json::Value::Null);
+    };
+    let mapper = PositionMapper::new(&document.text);
+    let byte = mapper.byte_offset(params.text_document_position_params.position);
+    if let Some(function) = functions.iter().find(|function| {
+        function.document.uri == uri
+            && function.definition.selection.start <= byte
+            && byte <= function.definition.selection.end
+    }) {
+        return Ok(serde_json::to_value(vec![call_hierarchy_item(function)])?);
+    }
+
+    let parse = analysis::parse_document(document);
+    let target_name = analysis::function_definitions(&parse, &document.text)
+        .into_iter()
+        .flat_map(|function| {
+            function
+                .calls
+                .into_iter()
+                .map(move |call| (function.selection.start, call))
+        })
+        .filter(|(_, call)| call.selection.start <= byte && byte <= call.selection.end)
+        .min_by_key(|(_, call)| call.selection.end.saturating_sub(call.selection.start))
+        .map(|(_, call)| call.name);
+    let Some(target_name) = target_name else {
+        return Ok(serde_json::Value::Null);
+    };
+    let Some(target) = uniquely_resolved_function(&functions, &target_name) else {
+        return Ok(serde_json::Value::Null);
+    };
+    Ok(serde_json::to_value(vec![call_hierarchy_item(
+        &functions[target],
+    )])?)
+}
+
+fn request_incoming_calls(
+    state: &mut ServerState,
+    request: Request,
+) -> Result<serde_json::Value, Box<dyn std::error::Error + Send + Sync>> {
+    let (_, params) = request
+        .extract::<lsp_types::CallHierarchyIncomingCallsParams>("callHierarchy/incomingCalls")?;
+    let functions = workspace_functions(state);
+    let Some(target) = functions
+        .iter()
+        .position(|function| same_call_hierarchy_function(&params.item, function))
+    else {
+        return Ok(serde_json::to_value(Vec::<
+            lsp_types::CallHierarchyIncomingCall,
+        >::new())?);
+    };
+    let target_name = analysis::normalized_identifier(&functions[target].definition.name);
+    let mut incoming = Vec::new();
+    for caller in &functions {
+        let mut spans = caller
+            .definition
+            .calls
+            .iter()
+            .filter(|call| {
+                uniquely_resolved_function(&functions, &call.name) == Some(target)
+                    && analysis::normalized_identifier(&call.name) == target_name
+            })
+            .map(|call| call.selection.clone())
+            .collect::<Vec<_>>();
+        if spans.is_empty() {
+            continue;
+        }
+        spans.sort_by_key(|span| (span.start, span.end));
+        let mapper = PositionMapper::new(&caller.document.text);
+        incoming.push(lsp_types::CallHierarchyIncomingCall {
+            from: call_hierarchy_item(caller),
+            from_ranges: spans.iter().map(|span| mapper.range(span)).collect(),
+        });
+    }
+    Ok(serde_json::to_value(incoming)?)
+}
+
+fn request_outgoing_calls(
+    state: &mut ServerState,
+    request: Request,
+) -> Result<serde_json::Value, Box<dyn std::error::Error + Send + Sync>> {
+    let (_, params) = request
+        .extract::<lsp_types::CallHierarchyOutgoingCallsParams>("callHierarchy/outgoingCalls")?;
+    let functions = workspace_functions(state);
+    let Some(source) = functions
+        .iter()
+        .position(|function| same_call_hierarchy_function(&params.item, function))
+    else {
+        return Ok(serde_json::to_value(Vec::<
+            lsp_types::CallHierarchyOutgoingCall,
+        >::new())?);
+    };
+    let mut groups: Vec<(usize, Vec<orna_syntax_v1::SyntaxSpan>)> = Vec::new();
+    for call in &functions[source].definition.calls {
+        let Some(target) = uniquely_resolved_function(&functions, &call.name) else {
+            continue;
+        };
+        if let Some((_, spans)) = groups.iter_mut().find(|(index, _)| *index == target) {
+            spans.push(call.selection.clone());
+        } else {
+            groups.push((target, vec![call.selection.clone()]));
+        }
+    }
+    groups.sort_by_key(|(target, _)| *target);
+    let mapper = PositionMapper::new(&functions[source].document.text);
+    let outgoing = groups
+        .into_iter()
+        .map(|(target, mut spans)| {
+            spans.sort_by_key(|span| (span.start, span.end));
+            lsp_types::CallHierarchyOutgoingCall {
+                to: call_hierarchy_item(&functions[target]),
+                from_ranges: spans.iter().map(|span| mapper.range(span)).collect(),
+            }
+        })
+        .collect::<Vec<_>>();
+    Ok(serde_json::to_value(outgoing)?)
 }
 
 fn request_semantic_tokens_full(
@@ -1256,4 +1536,34 @@ fn request_document_links(
         .map(|document| analysis::document_links(document, &state.documents))
         .unwrap_or_default();
     Ok(serde_json::to_value(links)?)
+}
+
+fn request_folding_ranges(
+    state: &mut ServerState,
+    request: Request,
+) -> Result<serde_json::Value, Box<dyn std::error::Error + Send + Sync>> {
+    let (_, params) = request.extract::<FoldingRangeParams>("textDocument/foldingRange")?;
+    let Some(document) = state.document(&params.text_document.uri) else {
+        return Ok(serde_json::Value::Null);
+    };
+    let parse = analysis::parse_document(document);
+    let mapper = PositionMapper::new(&document.text);
+    let ranges: Vec<FoldingRange> =
+        editor_ranges::folding_ranges(&parse.value, &document.text, &mapper);
+    Ok(serde_json::to_value(ranges)?)
+}
+
+fn request_selection_ranges(
+    state: &mut ServerState,
+    request: Request,
+) -> Result<serde_json::Value, Box<dyn std::error::Error + Send + Sync>> {
+    let (_, params) = request.extract::<SelectionRangeParams>("textDocument/selectionRange")?;
+    let Some(document) = state.document(&params.text_document.uri) else {
+        return Ok(serde_json::Value::Null);
+    };
+    let parse = analysis::parse_document(document);
+    let mapper = PositionMapper::new(&document.text);
+    let ranges =
+        editor_ranges::selection_ranges(&parse.value, &document.text, &params.positions, &mapper);
+    Ok(serde_json::to_value(ranges)?)
 }

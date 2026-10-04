@@ -23,6 +23,11 @@ const MISSING_SEMICOLON_SOURCE: &str =
     include_str!("fixtures/missing-semicolon-code-action-v1.orna");
 const DOCUMENT_LINKS_SOURCE: &str = include_str!("fixtures/document-links-v1.orna");
 const DOCUMENT_LINK_TARGET_SOURCE: &str = include_str!("fixtures/document-link-target-v1.orna");
+const WORKSPACE_HIERARCHY_PROVIDER_SOURCE: &str =
+    include_str!("fixtures/workspace-hierarchy-provider-v1.orna");
+const WORKSPACE_HIERARCHY_CALLER_SOURCE: &str =
+    include_str!("fixtures/workspace-hierarchy-caller-v1.orna");
+const FOLDING_SELECTION_SOURCE: &str = include_str!("fixtures/folding-selection-v1.orna");
 
 struct Client {
     child: Child,
@@ -167,6 +172,13 @@ fn initialize(client: &mut Client) {
     assert_eq!(
         result["capabilities"]["documentLinkProvider"]["resolveProvider"],
         false
+    );
+    assert_eq!(result["capabilities"]["foldingRangeProvider"], true);
+    assert_eq!(result["capabilities"]["selectionRangeProvider"], true);
+    let call_hierarchy = &result["capabilities"]["callHierarchyProvider"];
+    assert!(
+        call_hierarchy.as_bool() == Some(true) || call_hierarchy.is_object(),
+        "call hierarchy capability was not enabled: {result}"
     );
     client.notify("initialized", json!({}));
 }
@@ -1103,6 +1115,487 @@ fn syntax_v1_semantic_tokens_and_inlay_hints_follow_scope_and_requested_range() 
     assert!(
         shadow_hints.as_array().unwrap().is_empty(),
         "{shadow_hints}"
+    );
+    client.shutdown();
+}
+
+#[test]
+fn workspace_symbols_rank_stably_and_call_hierarchy_tracks_resolved_calls() {
+    let provider_uri = "file:///workspace/hierarchy/provider.orna";
+    let caller_uri = "file:///workspace/hierarchy/caller.orna";
+    let mut client = Client::spawn();
+    initialize(&mut client);
+
+    let provider_diagnostics = open(
+        &mut client,
+        provider_uri,
+        WORKSPACE_HIERARCHY_PROVIDER_SOURCE,
+    );
+    assert!(
+        provider_diagnostics["diagnostics"]
+            .as_array()
+            .unwrap()
+            .is_empty(),
+        "{provider_diagnostics}"
+    );
+    let caller_diagnostics = open(&mut client, caller_uri, WORKSPACE_HIERARCHY_CALLER_SOURCE);
+    assert!(
+        caller_diagnostics["diagnostics"]
+            .as_array()
+            .unwrap()
+            .is_empty(),
+        "{caller_diagnostics}"
+    );
+
+    let ranked = client.request("workspace/symbol", json!({"query":"mid"}));
+    let ranked_names = ranked
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|symbol| symbol["name"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(ranked_names, ["mid", "remote_mid"], "{ranked}");
+    assert_eq!(ranked[0]["containerName"], Value::Null);
+    assert_eq!(
+        client.request("workspace/symbol", json!({"query":"mid"})),
+        ranked,
+        "workspace symbol order changed between identical requests"
+    );
+
+    let prefix_ranked = client.request("workspace/symbol", json!({"query":"rem"}));
+    assert_eq!(
+        prefix_ranked
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|symbol| symbol["name"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["remote_mid", "remote_root"],
+        "prefix workspace symbol ranking: {prefix_ranked}"
+    );
+
+    let fuzzy = client.request("workspace/symbol", json!({"query":"remi"}));
+    assert_eq!(
+        fuzzy
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|symbol| symbol["name"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["remote_mid"],
+        "fuzzy workspace symbol results: {fuzzy}"
+    );
+
+    let root_definition = WORKSPACE_HIERARCHY_PROVIDER_SOURCE
+        .find("pub fn root")
+        .unwrap();
+    let root_cursor = root_definition + "pub fn ".len();
+    let root_item = client.request(
+        "textDocument/prepareCallHierarchy",
+        json!({
+            "textDocument":{"uri":provider_uri},
+            "position":position_at(WORKSPACE_HIERARCHY_PROVIDER_SOURCE, root_cursor)
+        }),
+    );
+    assert_eq!(root_item.as_array().unwrap().len(), 1, "{root_item}");
+    assert_eq!(root_item[0]["name"], "root");
+    assert_eq!(root_item[0]["uri"], provider_uri);
+    assert_eq!(
+        root_item[0]["selectionRange"],
+        range_at(
+            WORKSPACE_HIERARCHY_PROVIDER_SOURCE,
+            root_cursor,
+            root_cursor + "root".len()
+        )
+    );
+
+    let outgoing = client.request("callHierarchy/outgoingCalls", json!({"item":root_item[0]}));
+    let outgoing_pairs = outgoing
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|call| {
+            (
+                call["to"]["name"].as_str().unwrap(),
+                call["fromRanges"].as_array().unwrap().len(),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(outgoing_pairs, [("seed", 2), ("mid", 1)], "{outgoing}");
+    let seed_calls = [
+        WORKSPACE_HIERARCHY_PROVIDER_SOURCE
+            .find("mid(seed(value))")
+            .map(|offset| offset + "mid(".len())
+            .unwrap(),
+        WORKSPACE_HIERARCHY_PROVIDER_SOURCE
+            .find("+ seed(value)")
+            .map(|offset| offset + "+ ".len())
+            .unwrap(),
+    ];
+    assert_eq!(
+        outgoing[0]["fromRanges"],
+        json!([
+            range_at(
+                WORKSPACE_HIERARCHY_PROVIDER_SOURCE,
+                seed_calls[0],
+                seed_calls[0] + "seed".len()
+            ),
+            range_at(
+                WORKSPACE_HIERARCHY_PROVIDER_SOURCE,
+                seed_calls[1],
+                seed_calls[1] + "seed".len()
+            )
+        ])
+    );
+
+    let incoming = client.request("callHierarchy/incomingCalls", json!({"item":root_item[0]}));
+    assert_eq!(incoming.as_array().unwrap().len(), 2, "{incoming}");
+    assert_eq!(incoming[0]["from"]["name"], "remote_root");
+    assert_eq!(incoming[1]["from"]["name"], "remote_mid");
+    assert_eq!(
+        incoming[0]["fromRanges"][0],
+        range_at(
+            WORKSPACE_HIERARCHY_CALLER_SOURCE,
+            WORKSPACE_HIERARCHY_CALLER_SOURCE
+                .find("root(value)")
+                .unwrap(),
+            WORKSPACE_HIERARCHY_CALLER_SOURCE
+                .find("root(value)")
+                .unwrap()
+                + "root".len()
+        )
+    );
+
+    let seed_cursor = WORKSPACE_HIERARCHY_PROVIDER_SOURCE
+        .find("pub fn seed")
+        .map(|offset| offset + "pub fn ".len())
+        .unwrap();
+    let seed_item = client.request(
+        "textDocument/prepareCallHierarchy",
+        json!({
+            "textDocument":{"uri":provider_uri},
+            "position":position_at(WORKSPACE_HIERARCHY_PROVIDER_SOURCE, seed_cursor)
+        }),
+    );
+    let seed_incoming = client.request("callHierarchy/incomingCalls", json!({"item":seed_item[0]}));
+    assert_eq!(
+        seed_incoming.as_array().unwrap().len(),
+        2,
+        "{seed_incoming}"
+    );
+    assert_eq!(seed_incoming[0]["from"]["name"], "mid");
+    assert_eq!(seed_incoming[1]["from"]["name"], "root");
+    assert_eq!(seed_incoming[1]["fromRanges"].as_array().unwrap().len(), 2);
+
+    let shadow_cursor = WORKSPACE_HIERARCHY_PROVIDER_SOURCE
+        .find("pub fn shadowed")
+        .map(|offset| offset + "pub fn shadowed".len())
+        .unwrap();
+    let shadow_item = client.request(
+        "textDocument/prepareCallHierarchy",
+        json!({
+            "textDocument":{"uri":provider_uri},
+            "position":position_at(WORKSPACE_HIERARCHY_PROVIDER_SOURCE, shadow_cursor)
+        }),
+    );
+    assert_eq!(shadow_item[0]["name"], "shadowed");
+    assert!(
+        client
+            .request(
+                "callHierarchy/outgoingCalls",
+                json!({"item":shadow_item[0]}),
+            )
+            .as_array()
+            .unwrap()
+            .is_empty(),
+        "local parameter call was resolved as a workspace function"
+    );
+
+    let unresolved_cursor = WORKSPACE_HIERARCHY_PROVIDER_SOURCE
+        .find("pub fn unresolved")
+        .map(|offset| offset + "pub fn unresolved".len())
+        .unwrap();
+    let unresolved_item = client.request(
+        "textDocument/prepareCallHierarchy",
+        json!({
+            "textDocument":{"uri":provider_uri},
+            "position":position_at(WORKSPACE_HIERARCHY_PROVIDER_SOURCE, unresolved_cursor)
+        }),
+    );
+    assert!(
+        client
+            .request(
+                "callHierarchy/outgoingCalls",
+                json!({"item":unresolved_item[0]}),
+            )
+            .as_array()
+            .unwrap()
+            .is_empty(),
+        "unresolved call was emitted in the hierarchy"
+    );
+
+    let reference_cursor = WORKSPACE_HIERARCHY_CALLER_SOURCE
+        .find("root(value)")
+        .unwrap();
+    let prepared_reference = client.request(
+        "textDocument/prepareCallHierarchy",
+        json!({
+            "textDocument":{"uri":caller_uri},
+            "position":position_at(WORKSPACE_HIERARCHY_CALLER_SOURCE, reference_cursor)
+        }),
+    );
+    assert_eq!(prepared_reference[0]["name"], "root");
+    assert_eq!(prepared_reference[0]["uri"], provider_uri);
+
+    let ambiguous_cursor = WORKSPACE_HIERARCHY_CALLER_SOURCE
+        .find("collide(value)")
+        .unwrap();
+    let ambiguous_reference = client.request(
+        "textDocument/prepareCallHierarchy",
+        json!({
+            "textDocument":{"uri":caller_uri},
+            "position":position_at(WORKSPACE_HIERARCHY_CALLER_SOURCE, ambiguous_cursor)
+        }),
+    );
+    assert!(
+        ambiguous_reference.is_null(),
+        "ambiguous function reference unexpectedly resolved: {ambiguous_reference}"
+    );
+    client.shutdown();
+}
+
+fn selection_chain(selection: &Value) -> Vec<Value> {
+    let mut chain = Vec::new();
+    let mut current = selection;
+    loop {
+        chain.push(current.clone());
+        let Some(parent) = current.get("parent") else {
+            break;
+        };
+        current = parent;
+    }
+    chain
+}
+
+fn folding_range_at(source: &str, start: usize, end: usize, kind: &str) -> Value {
+    let start = position_at(source, start);
+    let end = position_at(source, end);
+    json!({
+        "startLine": start["line"],
+        "startCharacter": start["character"],
+        "endLine": end["line"],
+        "endCharacter": end["character"],
+        "kind": kind,
+    })
+}
+
+#[test]
+fn folding_and_selection_ranges_follow_syntax_and_preserve_utf16_positions() {
+    let uri = "file:///workspace/folding-selection.orna";
+    let mut client = Client::spawn();
+    initialize(&mut client);
+    let diagnostics = open(&mut client, uri, FOLDING_SELECTION_SOURCE);
+    assert!(
+        diagnostics["diagnostics"].as_array().unwrap().is_empty(),
+        "{diagnostics}"
+    );
+
+    let folds = client.request(
+        "textDocument/foldingRange",
+        json!({"textDocument":{"uri":uri}}),
+    );
+    let folds = folds.as_array().unwrap();
+    assert!(!folds.is_empty(), "no folding ranges were returned");
+    let mut previous = None;
+    let mut unique = std::collections::BTreeSet::new();
+    for fold in folds {
+        let key = (
+            fold["startLine"].as_u64().unwrap(),
+            fold["startCharacter"].as_u64().unwrap(),
+            fold["endLine"].as_u64().unwrap(),
+            fold["endCharacter"].as_u64().unwrap(),
+        );
+        assert!(key.0 < key.2, "single-line fold: {fold}");
+        assert!(
+            previous.is_none_or(|previous| previous <= key),
+            "unsorted folds: {folds:?}"
+        );
+        assert!(unique.insert(key), "duplicate folding coordinates: {fold}");
+        previous = Some(key);
+    }
+    let comment_start = FOLDING_SELECTION_SOURCE.find("/* range docs").unwrap();
+    let comment_end = FOLDING_SELECTION_SOURCE.find("*/").unwrap() + 2;
+    let comment_fold = folds
+        .iter()
+        .find(|fold| fold["kind"] == "comment")
+        .expect("multi-line comment folding range");
+    assert_eq!(
+        comment_fold,
+        &folding_range_at(
+            FOLDING_SELECTION_SOURCE,
+            comment_start,
+            comment_end,
+            "comment"
+        )
+    );
+    let import_start = FOLDING_SELECTION_SOURCE.find("use std.math.{abs}").unwrap();
+    let import_end =
+        FOLDING_SELECTION_SOURCE.find("use std.math.{min}").unwrap() + "use std.math.{min};".len();
+    let import_fold = folds
+        .iter()
+        .find(|fold| fold["kind"] == "imports")
+        .expect("contiguous import folding range");
+    assert_eq!(
+        import_fold,
+        &folding_range_at(
+            FOLDING_SELECTION_SOURCE,
+            import_start,
+            import_end,
+            "imports"
+        )
+    );
+    let line_comment_start = FOLDING_SELECTION_SOURCE.find("// fold together").unwrap();
+    let line_comment_end = FOLDING_SELECTION_SOURCE
+        .find("// contiguous comments")
+        .unwrap()
+        + "// contiguous comments".len();
+    let line_comment_fold = folds
+        .iter()
+        .find(|fold| {
+            fold["kind"] == "comment"
+                && fold["startLine"]
+                    == position_at(FOLDING_SELECTION_SOURCE, line_comment_start)["line"]
+        })
+        .expect("contiguous line-comment folding range");
+    assert_eq!(
+        line_comment_fold,
+        &folding_range_at(
+            FOLDING_SELECTION_SOURCE,
+            line_comment_start,
+            line_comment_end,
+            "comment",
+        )
+    );
+    let control_start = FOLDING_SELECTION_SOURCE.find("if total > 0").unwrap();
+    assert!(
+        folds.iter().any(|fold| {
+            fold["startLine"] == position_at(FOLDING_SELECTION_SOURCE, control_start)["line"]
+                && fold["endLine"]
+                    == position_at(
+                        FOLDING_SELECTION_SOURCE,
+                        FOLDING_SELECTION_SOURCE
+                            .find("\n    }\n}\n\npub enum")
+                            .unwrap()
+                            + 6,
+                    )["line"]
+        }),
+        "control body folding range missing: {folds:?}"
+    );
+    let outer_start = FOLDING_SELECTION_SOURCE.find("pub fn outer").unwrap();
+    let outer_end = FOLDING_SELECTION_SOURCE
+        .find("\n}\n\npub enum Outcome")
+        .unwrap()
+        + 2;
+    assert!(
+        folds.iter().any(|fold| {
+            fold["startLine"] == position_at(FOLDING_SELECTION_SOURCE, outer_start)["line"]
+                && fold["startCharacter"]
+                    == position_at(FOLDING_SELECTION_SOURCE, outer_start)["character"]
+                && fold["endLine"] == position_at(FOLDING_SELECTION_SOURCE, outer_end)["line"]
+        }),
+        "top-level function folding range missing: {folds:?}"
+    );
+    let enum_start = FOLDING_SELECTION_SOURCE.find("pub enum Outcome").unwrap();
+    let enum_end = FOLDING_SELECTION_SOURCE
+        .find("failed { reason: Str },")
+        .unwrap()
+        + "failed { reason: Str },\n}".len();
+    assert!(
+        folds.iter().any(|fold| {
+            fold["startLine"] == position_at(FOLDING_SELECTION_SOURCE, enum_start)["line"]
+                && fold["startCharacter"]
+                    == position_at(FOLDING_SELECTION_SOURCE, enum_start)["character"]
+                && fold["endLine"] == position_at(FOLDING_SELECTION_SOURCE, enum_end)["line"]
+        }),
+        "enum folding range missing: {folds:?}"
+    );
+
+    let value_start = FOLDING_SELECTION_SOURCE.find("abs(value)").unwrap() + "abs(".len();
+    let value_end = value_start + "value".len();
+    let compass_start = FOLDING_SELECTION_SOURCE.find("\"🧭\"").unwrap();
+    let compass_end = compass_start + "\"🧭\"".len();
+    let marker_start = FOLDING_SELECTION_SOURCE
+        .find("\"/* string content, never a comment */\"")
+        .unwrap();
+    let marker_end = marker_start + "\"/* string content, never a comment */\"".len();
+    let blank_line = FOLDING_SELECTION_SOURCE.find("\n\npub fn compass").unwrap() + 1;
+    let selections = client.request(
+        "textDocument/selectionRange",
+        json!({
+            "textDocument":{"uri":uri},
+            "positions":[
+                position_at(FOLDING_SELECTION_SOURCE, value_start + 2),
+                position_at(FOLDING_SELECTION_SOURCE, compass_end - 1),
+                position_of(FOLDING_SELECTION_SOURCE, "compass 🧭 remains", "compass ".len()),
+                position_of(FOLDING_SELECTION_SOURCE, "string content", "string ".len()),
+                position_at(FOLDING_SELECTION_SOURCE, blank_line),
+            ]
+        }),
+    );
+    let selections = selections.as_array().unwrap();
+    assert_eq!(selections.len(), 5, "{selections:?}");
+    let value_chain = selection_chain(&selections[0]);
+    assert_eq!(
+        value_chain[0]["range"],
+        range_at(FOLDING_SELECTION_SOURCE, value_start, value_end)
+    );
+    let call_start = FOLDING_SELECTION_SOURCE.find("abs(value)").unwrap();
+    let call_end = call_start + "abs(value)".len();
+    assert_eq!(
+        value_chain[1]["range"],
+        range_at(FOLDING_SELECTION_SOURCE, call_start, call_end)
+    );
+    let statement_start = FOLDING_SELECTION_SOURCE.find("let total =").unwrap();
+    let statement_end = statement_start + "let total = abs(value)".len();
+    assert_eq!(
+        value_chain[2]["range"],
+        range_at(FOLDING_SELECTION_SOURCE, statement_start, statement_end)
+    );
+    assert!(
+        value_chain.len() >= 5,
+        "selection ancestry must include syntax parents through the document: {value_chain:?}"
+    );
+    assert_eq!(
+        value_chain.last().unwrap()["range"],
+        range_at(FOLDING_SELECTION_SOURCE, 0, FOLDING_SELECTION_SOURCE.len())
+    );
+
+    let compass_chain = selection_chain(&selections[1]);
+    assert_eq!(
+        compass_chain[0]["range"],
+        range_at(FOLDING_SELECTION_SOURCE, compass_start, compass_end),
+        "UTF-16 cursor after supplementary character should select the string token"
+    );
+    let comment_chain = selection_chain(&selections[2]);
+    assert_eq!(
+        comment_chain[0]["range"],
+        range_at(FOLDING_SELECTION_SOURCE, comment_start, comment_end)
+    );
+    let string_chain = selection_chain(&selections[3]);
+    assert_eq!(
+        string_chain[0]["range"],
+        range_at(FOLDING_SELECTION_SOURCE, marker_start, marker_end),
+        "comment delimiters inside strings must remain string selection text"
+    );
+    let blank_chain = selection_chain(&selections[4]);
+    assert_eq!(
+        blank_chain[0]["range"],
+        range_at(FOLDING_SELECTION_SOURCE, blank_line, blank_line),
+        "blank-line cursors should select their line before the document"
+    );
+    assert_eq!(
+        blank_chain[1]["range"],
+        range_at(FOLDING_SELECTION_SOURCE, 0, FOLDING_SELECTION_SOURCE.len())
     );
     client.shutdown();
 }

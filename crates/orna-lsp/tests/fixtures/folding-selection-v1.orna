@@ -1,0 +1,27 @@
+/* range docs
+ * compass 🧭 remains UTF-16 aligned
+ */
+use std.math.{abs};
+use std.math.{min};
+
+use std.text.{slug};
+
+// fold together
+// contiguous comments
+
+pub fn outer(value: Int): Int {
+    let total = abs(value);
+    if total > 0 {
+        total
+    } else {
+        0
+    }
+}
+
+pub enum Outcome {
+    success { value: Int },
+    failed { reason: Str },
+}
+
+pub fn compass(): Str = "🧭";
+pub fn marker(): Str = "/* string content, never a comment */";
