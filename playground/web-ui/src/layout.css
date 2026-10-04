@@ -1,18 +1,3 @@
-:root {
-  color-scheme: light;
-  --page-width: 120rem;
-  --text: #202122;
-  --background: #fff;
-  --surface: #f8f9fa;
-  --border: #a2a9b1;
-  --muted: #54595d;
-  --link: #0645ad;
-  --visited: #0b0080;
-  --code-font: ui-monospace, SFMono-Regular, Consolas, monospace;
-  color: var(--text);
-  background: var(--background);
-  font: 1rem/1.5 Georgia, "Times New Roman", serif;
-}
 
 * { box-sizing: border-box; }
 body { margin: 0; }

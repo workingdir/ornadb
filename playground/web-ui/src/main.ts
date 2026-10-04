@@ -1,7 +1,9 @@
 import { exampleIndexForKey, isExample } from './example-feed';
 import { formatRunResult, formatThrownError, type RunResult } from './results';
 import { servedRuntime } from './runtime';
-import './styles.css';
+import { startStyleReload } from './style-reload';
+import './theme.css';
+import './layout.css';
 
 function requiredElement<T extends Element>(selector: string): T {
   const element = document.querySelector<T>(selector);
@@ -177,3 +179,4 @@ requiredElement<HTMLElement>('[role="tablist"]').addEventListener('keydown', (ev
 
 updateRunButton();
 void loadExamples();
+startStyleReload();

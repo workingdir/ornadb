@@ -1,11 +1,17 @@
 # Orna playground web UI
 
 This directory holds the source for the small browser shell. `npm run build`
-bundles the shell and writes each HTML, CSS, and JavaScript asset as a
-`playground.Asset` row. Commit those generated rows with the source changes.
-`orna serve` reads the rows from the selected database's committed Git snapshot
-and serves them at `/playground/`; it does not serve `dist/` from the
+bundles the shell and writes HTML and JavaScript as `playground.Asset` rows.
+Theme and responsive layout CSS are separate `playground.Theme` and
+`playground.Layout` rows. Commit those generated rows with the source changes.
+`orna serve` reads all of them from the selected database's committed Git
+snapshot and serves them at `/playground/`; it does not serve `dist/` from the
 filesystem.
+
+While the page is open, it checks `/api/playground/revision` every two seconds.
+A new committed `HEAD` causes both stylesheet rows to load and swap together,
+so theme and layout edits appear without restarting `orna serve` or reloading
+the page. Uncommitted CSS changes wait for a commit.
 
 The page loads committed files from `playground/examples` and rows from
 `playground.Sample` through `/api/examples`. Use the example selector's arrow,
