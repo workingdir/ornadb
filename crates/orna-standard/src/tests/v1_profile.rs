@@ -112,8 +112,34 @@ fn pinned_numeric_traits_are_in_the_source_database_and_typecheck() {
     reference_standard_profile_v1()
         .verify_source(path, source)
         .expect("numeric trait source bytes are recorded by the captured std profile");
-    reference_standard_catalogue_v1()
+    let catalogue = reference_standard_catalogue_v1()
         .expect("numeric protocols typecheck in the pinned catalogue");
+    let consumer = include_str!("fixtures/v1_numeric_traits_consumer_9l27r.orna");
+    let parsed = orna_syntax_v1::parse_module_with_file(consumer, "numeric_traits_consumer.orna");
+    assert!(parsed.is_ok(), "{:#?}", parsed.diagnostics);
+    let analysis = analyze_with_catalogue(
+        &[ModuleInput::new("numeric_traits_consumer.orna", consumer)],
+        &catalogue,
+    );
+    assert!(
+        analysis.is_ok(),
+        "{}",
+        analysis
+            .diagnostics
+            .iter()
+            .map(|diagnostic| format!("{}: {}", diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+    let module = analysis
+        .modules
+        .values()
+        .find(|module| module.namespace.display() == "numeric_traits_consumer")
+        .expect("the behavior fixture was analyzed");
+    assert!(matches!(
+        &module.symbols["behavior_proof"].ty,
+        Type::Function { result, .. } if result.as_ref() == &Type::Bool
+    ));
 }
 
 #[test]

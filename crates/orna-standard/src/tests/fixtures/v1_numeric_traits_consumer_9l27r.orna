@@ -1,0 +1,98 @@
+use std.numeric as numeric;
+use std.numeric.{Zero, One, Add, Sub, Mul, Div, Rem, Neg, Signed, Integer, Compare};
+
+pub type ExactInt {
+    pub value: Int,
+
+    impl Zero {
+        fn is_zero(self): Bool = self.value == 0;
+    }
+
+    impl One {
+        fn is_one(self): Bool = self.value == 1;
+    }
+
+    impl Add {
+        fn add(self, right: Self): Self = ExactInt { value: self.value + right.value };
+    }
+
+    impl Sub {
+        fn sub(self, right: Self): Self = ExactInt { value: self.value - right.value };
+    }
+
+    impl Mul {
+        fn mul(self, right: Self): Self = ExactInt { value: self.value * right.value };
+    }
+
+    impl Div {
+        fn div(self, right: Self): Self = ExactInt { value: self.value / right.value };
+    }
+
+    impl Rem {
+        fn rem(self, right: Self): Self = ExactInt { value: self.value % right.value };
+    }
+
+    impl Neg {
+        fn neg(self): Self = ExactInt { value: -self.value };
+    }
+
+    impl Signed {
+        fn abs(self): Self = ExactInt { value: if self.value < 0 { -self.value } else { self.value } };
+        fn signum(self): Self = ExactInt { value: if self.value < 0 { -1 } else { if self.value > 0 { 1 } else { 0 } } };
+        fn is_positive(self): Bool = self.value > 0;
+        fn is_negative(self): Bool = self.value < 0;
+    }
+
+    impl Integer {
+        fn div_rem(self, divisor: Self): (Self, Self) =
+            if self.value % divisor.value < 0 {
+                if divisor.value > 0 {
+                    (
+                        ExactInt { value: (self.value / divisor.value) - 1 },
+                        ExactInt { value: (self.value % divisor.value) + divisor.value },
+                    )
+                } else {
+                    (
+                        ExactInt { value: (self.value / divisor.value) + 1 },
+                        ExactInt { value: (self.value % divisor.value) - divisor.value },
+                    )
+                }
+            } else {
+                (
+                    ExactInt { value: self.value / divisor.value },
+                    ExactInt { value: self.value % divisor.value },
+                )
+            };
+    }
+
+    impl Compare {
+        fn compare(self, right: Self): Int =
+            if self.value < right.value { -1 } else { if self.value > right.value { 1 } else { 0 } };
+    }
+}
+
+pub fn behavior_proof(): Bool =
+    numeric.is_zero(ExactInt { value: 0 })
+    && !numeric.is_zero(ExactInt { value: 3 })
+    && numeric.is_one(ExactInt { value: 1 })
+    && numeric.add(ExactInt { value: 8 }, ExactInt { value: 5 }).value == 13
+    && numeric.sub(ExactInt { value: 8 }, ExactInt { value: 5 }).value == 3
+    && numeric.mul(ExactInt { value: 8 }, ExactInt { value: 5 }).value == 40
+    && numeric.div(ExactInt { value: 17 }, ExactInt { value: 5 }).value == 3
+    && numeric.rem(ExactInt { value: 17 }, ExactInt { value: 5 }).value == 2
+    && numeric.neg(ExactInt { value: 6 }).value == -6
+    && numeric.abs(ExactInt { value: -11 }).value == 11
+    && numeric.signum(ExactInt { value: -11 }).value == -1
+    && numeric.signum(ExactInt { value: 0 }).value == 0
+    && numeric.signum(ExactInt { value: 11 }).value == 1
+    && numeric.is_positive(ExactInt { value: 1 })
+    && !numeric.is_positive(ExactInt { value: 0 })
+    && numeric.is_negative(ExactInt { value: -1 })
+    && !numeric.is_negative(ExactInt { value: 0 })
+    && numeric.div_rem(ExactInt { value: -17 }, ExactInt { value: 5 })
+        == (ExactInt { value: -4 }, ExactInt { value: 3 })
+    && numeric.min(ExactInt { value: 7 }, ExactInt { value: 3 }).value == 3
+    && numeric.max(ExactInt { value: 7 }, ExactInt { value: 3 }).value == 7
+    && numeric.clamp(ExactInt { value: -2 }, ExactInt { value: 0 }, ExactInt { value: 10 }).value == 0
+    && numeric.clamp(ExactInt { value: 12 }, ExactInt { value: 0 }, ExactInt { value: 10 }).value == 10
+    && numeric.clamp(ExactInt { value: 7 }, ExactInt { value: 0 }, ExactInt { value: 10 }).value == 7;
