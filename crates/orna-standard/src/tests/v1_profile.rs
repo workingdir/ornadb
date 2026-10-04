@@ -37,6 +37,7 @@ use crate::{
     REFERENCE_STANDARD_SORTING_PATH_V1,
     REFERENCE_STANDARD_FORMAT_STRINGS_PATH_V1,
     REFERENCE_STANDARD_PARSE_UTILITIES_PATH_V1,
+    REFERENCE_STANDARD_ENCODING_UTILITIES_PATH_V1,
     REFERENCE_STANDARD_ITERATOR_PATH_V1, REFERENCE_STANDARD_ITERATOR_ADAPTERS_PATH_V1,
     REFERENCE_STANDARD_ITERATOR_CONSUMERS_PATH_V1,
     REFERENCE_STANDARD_COLLECTION_ADAPTERS_PATH_V1,
@@ -56,7 +57,7 @@ use crate::{
 #[test]
 fn pinned_ui_presentation_helpers_are_included_as_source() {
     let sources = reference_standard_sources_v1();
-    assert_eq!(sources.len(), 71);
+    assert_eq!(sources.len(), 72);
     assert_eq!(sources[49].0, REFERENCE_STANDARD_UI_PATH_V1);
     let parsed = orna_syntax_v1::parse_module_with_file(
         &sources[49].1,
@@ -879,6 +880,44 @@ fn pinned_parsing_utilities_are_included_and_typecheck() {
     assert!(parsed.is_ok(), "{path}: {:#?}", parsed.diagnostics);
     reference_standard_catalogue_v1()
         .expect("parsing utilities resolve in the captured standard catalogue");
+}
+
+#[test]
+fn pinned_unicode_and_encoding_utilities_are_included_and_typecheck() {
+    let sources = reference_standard_sources_v1();
+    let (index, (path, source)) = sources
+        .iter()
+        .enumerate()
+        .find(|(_, (path, _))| path == REFERENCE_STANDARD_ENCODING_UTILITIES_PATH_V1)
+        .expect("the pinned source bundle includes std.encoding.utilities");
+    assert_eq!(index, 71, "Unicode and encoding utilities append without moving old sources");
+    assert_eq!(path, REFERENCE_STANDARD_ENCODING_UTILITIES_PATH_V1);
+    for declaration in [
+        "pub fn unicode_scalars(value: Str): [Str]",
+        "pub fn unicode_scalar_length(value: Str): Int",
+        "pub fn unicode_reverse(value: Str): Str",
+        "pub fn unicode_slice(value: Str, start: Int, end: Int): Str",
+        "pub fn base64url_encode(input: Blob): Str",
+        "pub fn base64url_decode(input: Str): Blob",
+    ] {
+        assert!(source.contains(declaration), "missing Unicode/encoding utility `{declaration}`");
+    }
+    for contract in [
+        "Unicode scalar values",
+        "combining marks and joiners stay separate",
+        "bounds past the string clamp",
+        "unpadded URL-safe Base64",
+        "nonzero unused trailing bits",
+    ] {
+        assert!(source.contains(contract), "missing Unicode/encoding contract `{contract}`");
+    }
+    reference_standard_profile_v1()
+        .verify_source(path, source)
+        .expect("Unicode and encoding utility bytes match the captured standard profile");
+    let parsed = orna_syntax_v1::parse_module_with_file(source, path);
+    assert!(parsed.is_ok(), "{path}: {:#?}", parsed.diagnostics);
+    reference_standard_catalogue_v1()
+        .expect("Unicode and encoding utilities resolve in the captured standard catalogue");
 }
 
 #[test]
@@ -1784,7 +1823,7 @@ fn reference_standard_uses_pinned_orna_1_source_and_resolves_its_imports() {
     ] {
         assert!(sources[33].1.contains(contract), "missing std.test contract `{contract}`");
     }
-    assert_eq!(sources.len(), 71);
+    assert_eq!(sources.len(), 72);
     assert_eq!(sources[49].0, REFERENCE_STANDARD_UI_PATH_V1);
     for declaration in [
         "pub fn Field<T>(label: Str, value: T): UI",
@@ -2246,7 +2285,7 @@ fn pinned_filesystem_effect_is_visible_to_consumers_and_forbidden_in_assertions(
 #[test]
 fn pinned_filesystem_path_and_metadata_modules_are_captured_and_typecheck() {
     let sources = reference_standard_sources_v1();
-    assert_eq!(sources.len(), 71);
+    assert_eq!(sources.len(), 72);
     for (index, path) in [
         (42, REFERENCE_STANDARD_IO_PATH_MODULE_PATH_V1),
         (43, REFERENCE_STANDARD_IO_METADATA_PATH_V1),
@@ -2310,7 +2349,7 @@ fn pinned_filesystem_path_and_metadata_modules_are_captured_and_typecheck() {
 #[test]
 fn pinned_io_buffer_module_is_captured_and_resolves_stream_adapters() {
     let sources = reference_standard_sources_v1();
-    assert_eq!(sources.len(), 71);
+    assert_eq!(sources.len(), 72);
     let (path, source) = sources
         .iter()
         .find(|(path, _)| path == REFERENCE_STANDARD_IO_BUFFER_PATH_V1)
@@ -2347,7 +2386,7 @@ fn pinned_io_buffer_module_is_captured_and_resolves_stream_adapters() {
 #[test]
 fn pinned_process_and_environment_modules_are_captured_and_typecheck() {
     let sources = reference_standard_sources_v1();
-    assert_eq!(sources.len(), 71);
+    assert_eq!(sources.len(), 72);
     for (index, path) in [
         (44, REFERENCE_STANDARD_IO_PROCESS_PATH_V1),
         (45, REFERENCE_STANDARD_IO_ENVIRONMENT_PATH_V1),
