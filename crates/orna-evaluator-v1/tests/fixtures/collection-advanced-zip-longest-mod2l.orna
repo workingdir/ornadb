@@ -1,0 +1,4 @@
+advanced.zip_longest([1, 2], ["a"]) == [(Some(1), Some("a")), (Some(2), null)]
+&& advanced.zip_longest([1], ["a", "b"]) == [(Some(1), Some("a")), (null, Some("b"))]
+&& advanced.zip_longest([1, 2], ["a", "b"]) == [(Some(1), Some("a")), (Some(2), Some("b"))]
+&& advanced.zip_longest(empty_ints, empty_strings) == empty_int_string_pairs
