@@ -23,12 +23,14 @@ use crate::{
     REFERENCE_STANDARD_SET_PATH_V1,
     REFERENCE_STANDARD_IO_PATH_V1, REFERENCE_STANDARD_FS_PATH_V1,
     REFERENCE_STANDARD_IO_PATH_MODULE_PATH_V1, REFERENCE_STANDARD_IO_METADATA_PATH_V1,
+    REFERENCE_STANDARD_IO_BUFFER_PATH_V1,
     REFERENCE_STANDARD_IO_PROCESS_PATH_V1, REFERENCE_STANDARD_IO_ENVIRONMENT_PATH_V1,
     REFERENCE_STANDARD_CONCURRENT_PATH_V1, REFERENCE_STANDARD_ERROR_PATH_V1,
     REFERENCE_STANDARD_TEST_PATH_V1,
     REFERENCE_STANDARD_GENERICS_PATH_V1, REFERENCE_STANDARD_TYPE_UTILS_PATH_V1,
     REFERENCE_STANDARD_PATTERN_PATH_V1, REFERENCE_STANDARD_REGEX_PATH_V1,
-    REFERENCE_STANDARD_ITERATOR_PATH_V1, REFERENCE_STANDARD_LAZY_PATH_V1,
+    REFERENCE_STANDARD_ITERATOR_PATH_V1, REFERENCE_STANDARD_ITERATOR_ADAPTERS_PATH_V1,
+    REFERENCE_STANDARD_LAZY_PATH_V1,
     REFERENCE_STANDARD_VIEWS_PATH_V1,
     REFERENCE_STANDARD_INTROSPECTION_PATH_V1, REFERENCE_STANDARD_REFLECTION_PATH_V1,
     REFERENCE_STANDARD_ALGORITHM_PATH_V1, REFERENCE_STANDARD_UI_PATH_V1,
@@ -41,7 +43,7 @@ use crate::{
 #[test]
 fn pinned_ui_presentation_helpers_are_included_as_source() {
     let sources = reference_standard_sources_v1();
-    assert_eq!(sources.len(), 55);
+    assert_eq!(sources.len(), 58);
     assert_eq!(sources[49].0, REFERENCE_STANDARD_UI_PATH_V1);
     let parsed = orna_syntax_v1::parse_module_with_file(
         &sources[49].1,
@@ -77,6 +79,64 @@ fn pinned_algorithm_module_is_part_of_the_captured_std_snapshot() {
         .expect("algorithm source bytes are recorded by the captured std profile");
     reference_standard_catalogue_v1()
         .expect("algorithm imports resolve in the captured standard catalogue");
+}
+
+#[test]
+fn pinned_concurrent_result_helpers_are_included_in_the_captured_snapshot() {
+    let sources = reference_standard_sources_v1();
+    let (index, (path, source)) = sources
+        .iter()
+        .enumerate()
+        .find(|(_, (path, _))| path == crate::REFERENCE_STANDARD_CONCURRENT_RESULT_PATH_V1)
+        .expect("the pinned source bundle includes std.concurrent.result");
+    assert_eq!(index, 56, "the async result helper source appends to the bundle");
+    assert_eq!(path, crate::REFERENCE_STANDARD_CONCURRENT_RESULT_PATH_V1);
+    for declaration in [
+        "pub fn values<T, E>(",
+        "pub fn errors<T, E>(",
+        "pub fn partition<T, E>(",
+        "pub fn parallel_partition<T, E>(",
+        "pub fn parallel_map_partition<T, U, E>(",
+    ] {
+        assert!(source.contains(declaration), "missing {declaration}");
+    }
+    crate::reference_standard_profile_v1()
+        .verify_source(path, source)
+        .expect("async result helper source bytes are recorded by the pinned std profile");
+    crate::reference_standard_catalogue_v1()
+        .expect("the concurrent result helper resolves against its pinned dependencies");
+}
+
+#[test]
+fn pinned_iterator_adapters_are_included_in_the_captured_snapshot() {
+    let sources = reference_standard_sources_v1();
+    let (index, (path, source)) = sources
+        .iter()
+        .enumerate()
+        .find(|(_, (path, _))| path == REFERENCE_STANDARD_ITERATOR_ADAPTERS_PATH_V1)
+        .expect("the pinned source bundle includes std.iterator.adapters");
+    assert_eq!(index, 57, "the adapter module appends without moving old sources");
+    assert_eq!(path, REFERENCE_STANDARD_ITERATOR_ADAPTERS_PATH_V1);
+    for declaration in [
+        "pub fn filter_map<T, U>(",
+        "pub fn flat_map<T, U>(",
+        "pub fn flatten<T>(",
+        "pub fn skip_while<T>(",
+    ] {
+        assert!(source.contains(declaration), "missing {declaration}");
+    }
+    for contract in [
+        "Some(null) remains an emitted value",
+        "Drains each mapped cursor before requesting the next source item.",
+        "after the first rejected item",
+    ] {
+        assert!(source.contains(contract), "missing iterator adapter contract `{contract}`");
+    }
+    reference_standard_profile_v1()
+        .verify_source(path, source)
+        .expect("adapter source bytes are recorded by the pinned std profile");
+    reference_standard_catalogue_v1()
+        .expect("the iterator adapter module resolves against the pinned dependencies");
 }
 
 #[test]
@@ -742,6 +802,7 @@ fn reference_standard_uses_pinned_orna_1_source_and_resolves_its_imports() {
     assert_eq!(sources[21].0, REFERENCE_STANDARD_STREAM_PATH_V1);
     for declaration in [
         "pub fn from_list<T>(values: [T], source_identity: Str): Stream<T>",
+        "pub fn from_list_batches<T>(",
         "pub fn for_each<T>(stream: Stream<T>, action: fn(T): Unit): Unit",
         "pub fn batch<T>(stream: Stream<T>, size: Int): Stream<[T]>",
         "pub fn buffer<T>(stream: Stream<T>, capacity: Int): Stream<T>",
@@ -755,6 +816,7 @@ fn reference_standard_uses_pinned_orna_1_source_and_resolves_its_imports() {
     }
     for contract in [
         "canonical typed digest",
+        "final short batch is retained",
         "Process one item at a time",
         "default backpressure",
         "observed arrival order",
@@ -991,6 +1053,7 @@ fn reference_standard_uses_pinned_orna_1_source_and_resolves_its_imports() {
     }
     assert_eq!(sources[16].0, REFERENCE_STANDARD_IO_PATH_V1);
     assert!(sources[16].1.contains("use fs;"));
+    assert!(sources[16].1.contains("use buffer;"));
     assert_eq!(sources[17].0, REFERENCE_STANDARD_FS_PATH_V1);
     for name in [
         "read_text", "write_text", "append_text", "exists", "is_directory", "list",
@@ -1065,7 +1128,7 @@ fn reference_standard_uses_pinned_orna_1_source_and_resolves_its_imports() {
     ] {
         assert!(sources[33].1.contains(contract), "missing std.test contract `{contract}`");
     }
-    assert_eq!(sources.len(), 55);
+    assert_eq!(sources.len(), 58);
     assert_eq!(sources[49].0, REFERENCE_STANDARD_UI_PATH_V1);
     for declaration in [
         "pub fn Field<T>(label: Str, value: T): UI",
@@ -1527,7 +1590,7 @@ fn pinned_filesystem_effect_is_visible_to_consumers_and_forbidden_in_assertions(
 #[test]
 fn pinned_filesystem_path_and_metadata_modules_are_captured_and_typecheck() {
     let sources = reference_standard_sources_v1();
-    assert_eq!(sources.len(), 55);
+    assert_eq!(sources.len(), 58);
     for (index, path) in [
         (42, REFERENCE_STANDARD_IO_PATH_MODULE_PATH_V1),
         (43, REFERENCE_STANDARD_IO_METADATA_PATH_V1),
@@ -1589,9 +1652,46 @@ fn pinned_filesystem_path_and_metadata_modules_are_captured_and_typecheck() {
 }
 
 #[test]
+fn pinned_io_buffer_module_is_captured_and_resolves_stream_adapters() {
+    let sources = reference_standard_sources_v1();
+    assert_eq!(sources.len(), 58);
+    let (path, source) = sources
+        .iter()
+        .find(|(path, _)| path == REFERENCE_STANDARD_IO_BUFFER_PATH_V1)
+        .expect("the pinned std snapshot includes std.io.buffer");
+    for declaration in [
+        "pub fn read_line_batches(",
+        "source_identity: Str",
+        "batch_size: Int",
+        "pub fn write_line_batches(",
+        "std.stream.from_list",
+        "std.stream.batch",
+        "std.collection.flatten",
+        "std.io.writer.write_all_text",
+    ] {
+        assert!(source.contains(declaration), "missing buffer contract `{declaration}`");
+    }
+    let parsed = orna_syntax_v1::parse_module_with_file(source, path);
+    assert!(parsed.is_ok(), "{path}: {:#?}", parsed.diagnostics);
+
+    let profile = reference_standard_profile_v1();
+    profile
+        .verify_source(path, source)
+        .expect("buffer module bytes belong to the captured std snapshot");
+    let mut changed_source = source.clone();
+    changed_source.push_str("\n// changed after snapshot capture\n");
+    assert!(profile.verify_source(path, &changed_source).is_err());
+    Catalogue::authoritative_core()
+        .with_standard_sources(&profile, sources.clone())
+        .expect("the semantic catalogue accepts the full IO buffer snapshot");
+    reference_standard_catalogue_v1()
+        .expect("the IO buffer module and its stream dependencies typecheck");
+}
+
+#[test]
 fn pinned_process_and_environment_modules_are_captured_and_typecheck() {
     let sources = reference_standard_sources_v1();
-    assert_eq!(sources.len(), 55);
+    assert_eq!(sources.len(), 58);
     for (index, path) in [
         (44, REFERENCE_STANDARD_IO_PROCESS_PATH_V1),
         (45, REFERENCE_STANDARD_IO_ENVIRONMENT_PATH_V1),
