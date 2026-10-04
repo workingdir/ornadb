@@ -525,9 +525,19 @@ fn bounded_spill_restore_chain_fold_preserves_unknown_estimates_and_requires_bou
             .contains_key("paired_bounded_window_spill_restore_chain_fold_identity")
     );
     assert!(
-        !no_restore
-            .details()
-            .contains_key("paired_bounded_window_spill_window_chain_fold_identity")
+        text(
+            no_restore,
+            "paired_bounded_window_spill_window_chain_fold_identity"
+        )
+        .starts_with("paired-bounded-window-spill-window-chain:")
+    );
+    assert_eq!(
+        integer(
+            no_restore,
+            "paired_bounded_window_spill_window_chain_window_pair_count"
+        ),
+        3,
+        "paired window chains produce this fold without a restore descriptor"
     );
 }
 
@@ -664,6 +674,11 @@ fn bounded_spill_identity_binds_paired_window_chains_and_carries_across_sparse_t
         text(baseline_project, fold_key),
         text(project(&without_sparse_tail), fold_key),
         "a sparse tail does not advance the bounded spill/window-chain identity"
+    );
+    assert_eq!(
+        text(baseline_project, fold_key),
+        text(project(&reordered), fold_key),
+        "descriptor ordering does not change the paired window-chain identity"
     );
 
     let changed_spill_project = project(&changed_spill);
