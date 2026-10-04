@@ -950,6 +950,45 @@ fn page(values: &[i64], next: Option<Vec<u8>>) -> RelationPage {
     }
 }
 
+fn nested_pagination_cursor_chain() -> [Vec<u8>; 5] {
+    let chain = [
+        vec![0x60; 255],
+        vec![0x61],
+        vec![0x61; 511],
+        vec![0x62],
+        vec![0x63],
+    ];
+    for pair in chain.windows(2) {
+        assert!(pair[0].as_slice() < pair[1].as_slice());
+    }
+    chain
+}
+
+fn nested_pagination_restore(values: &[i64], chain: &[Vec<u8>; 5]) -> CursorRestore {
+    assert_eq!(values.len(), 10);
+    let rows = values.chunks(2).collect::<Vec<_>>();
+    BTreeMap::from([
+        (None, page(rows[0], Some(chain[0].clone()))),
+        (
+            Some(chain[0].clone()),
+            page(rows[1], Some(chain[1].clone())),
+        ),
+        (
+            Some(chain[1].clone()),
+            page(rows[2], Some(chain[2].clone())),
+        ),
+        (
+            Some(chain[2].clone()),
+            page(rows[3], Some(chain[3].clone())),
+        ),
+        (
+            Some(chain[3].clone()),
+            page(rows[4], Some(chain[4].clone())),
+        ),
+        (Some(chain[4].clone()), page(&[999_999], None)),
+    ])
+}
+
 fn run(body: Expr, effects: &mut PagedSource) -> Result<CanonicalValue, EvaluationError> {
     invoke_named_with_effects(
         "run",
@@ -2776,6 +2815,16 @@ fn paired_pagination_nested_spill_body(depth: usize) -> Expr {
         elements: vec![
             nested_pagination_spill("View.Left", depth),
             nested_pagination_spill("View.Right", depth),
+        ],
+        span: span(),
+    }
+}
+
+fn paired_same_source_nested_spill_body(first_depth: usize, second_depth: usize) -> Expr {
+    Expr::Tuple {
+        elements: vec![
+            nested_pagination_spill("View.Paired", first_depth),
+            nested_pagination_spill("View.Paired", second_depth),
         ],
         span: span(),
     }
@@ -7030,4 +7079,67 @@ fn paired_nested_spill_shared_cursors_follow_reverse_lane_order() {
         .all(|(_, _, cursor)| cursor.as_ref() != Some(&after_compaction)));
     assert!(source.pending["View.Left"].is_empty());
     assert!(source.pending["View.Right"].is_empty());
+}
+
+#[test]
+fn paired_nested_folds_keep_identity_across_same_source_restore_chains() {
+    let chain = nested_pagination_cursor_chain();
+    let first = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+    let second = [10, 20, 30, 40, 50, 60, 70, 80, 90, 100];
+    let mut source = PairedCursorRestoreSource::new([
+        ("View.Paired", nested_pagination_restore(&first, &chain)),
+        ("View.Paired", nested_pagination_restore(&second, &chain)),
+    ]);
+    let mut functions = paired_shared_cursor_nested_spill_functions();
+    functions.insert(
+        "run".into(),
+        PureFunction {
+            parameters: Vec::new(),
+            body: paired_same_source_nested_spill_body(0, 1),
+            environment: Environment::new(),
+        },
+    );
+
+    assert_eq!(
+        invoke_named_with_effects(
+            "run",
+            &functions,
+            &Environment::new(),
+            Limits::default(),
+            &mut source,
+        )
+        .unwrap(),
+        integer_pair(308, 5280),
+        "paired folds restore their own values for one source and identical cursors"
+    );
+
+    assert_eq!(source.lanes.len(), 2);
+    assert!(source
+        .lanes
+        .iter()
+        .all(|(source_name, _, _)| source_name == "View.Paired"));
+    assert_ne!(source.lanes[0].1, source.lanes[1].1);
+    let expected_chain = [
+        None,
+        Some(chain[0].clone()),
+        Some(chain[1].clone()),
+        Some(chain[2].clone()),
+        Some(chain[3].clone()),
+    ];
+    let expected_cursors = source
+        .lanes
+        .iter()
+        .flat_map(|(source_name, scope, _)| {
+            expected_chain
+                .iter()
+                .cloned()
+                .map(|cursor| (source_name.clone(), *scope, cursor))
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(source.cursors, expected_cursors);
+    assert!(source
+        .cursors
+        .iter()
+        .all(|(_, _, cursor)| cursor.as_ref() != Some(&chain[4])));
+    assert!(source.pending["View.Paired"].is_empty());
 }
