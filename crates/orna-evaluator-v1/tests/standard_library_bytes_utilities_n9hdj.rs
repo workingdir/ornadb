@@ -43,7 +43,7 @@ fn pinned_bytes_session() -> AdmittedReplSession {
 fn byte_buffer_utilities_validate_ranges_and_preserve_byte_order() {
     let mut session = pinned_bytes_session();
     let fixture = include_str!("fixtures/stdlib-bytes-utilities-n9hdj.orna");
-    for (index, expression) in fixture.split("\n&& ").enumerate() {
+    for (index, expression) in fixture.split("&&").map(str::trim).enumerate() {
         assert_eq!(
             session.submit(expression).unwrap_or_else(|error| panic!(
                 "byte-buffer behavior {index} failed: {} ({expression})",
