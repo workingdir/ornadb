@@ -6,10 +6,12 @@ const webUi = fileURLToPath(new URL('../', import.meta.url));
 const repository = fileURLToPath(new URL('../../../', import.meta.url));
 const distribution = join(webUi, 'dist');
 const assetRows = join(repository, 'playground', 'Asset');
-const themeRows = join(repository, 'playground', 'Theme');
-const layoutRows = join(repository, 'playground', 'Layout');
 const maxAssetBytes = 2 * 1024 * 1024;
-const maxStyleBytes = 256 * 1024;
+const arguments_ = process.argv.slice(2);
+if (arguments_.length > 1 || arguments_.some((argument) => argument !== '--check')) {
+  throw new Error('Usage: node scripts/generate-db-assets.mjs [--check]');
+}
+const checkOnly = arguments_.includes('--check');
 const mediaTypes = new Map([
   ['.html', 'text/html; charset=utf-8'],
   ['.js', 'text/javascript; charset=utf-8'],
@@ -34,90 +36,98 @@ async function collectFiles(directory, prefix = '') {
     const relativePath = prefix ? `${prefix}/${child.name}` : child.name;
     if (child.isDirectory()) files.push(...await collectFiles(path, relativePath));
     else if (child.isFile()) files.push(relativePath);
+    else throw new Error(`Unsupported playground build entry: ${relativePath}`);
   }
   return files;
 }
 
-function rowString(value) {
-  return JSON.stringify(value).replaceAll('{', '\\u{7b}');
+function ornaString(value) {
+  let encoded = '"';
+  for (const character of value) {
+    const codePoint = character.codePointAt(0);
+    if (character === '"') encoded += '\\"';
+    else if (character === '\\') encoded += '\\\\';
+    else if (character === '\n') encoded += '\\n';
+    else if (character === '\r') encoded += '\\r';
+    else if (character === '\t') encoded += '\\t';
+    else if (character === '\0') encoded += '\\0';
+    else if (character === '{' || character === '}' || codePoint < 0x20 || codePoint === 0x7f) {
+      encoded += `\\u{${codePoint.toString(16)}}`;
+    } else encoded += character;
+  }
+  return `${encoded}"`;
 }
 
-async function writeRecord(directory, filename, record) {
-  await mkdir(directory, { recursive: true });
-  const fields = Object.entries(record)
-    .map(([name, value]) => `${name}: ${rowString(value)}`)
-    .join(', ');
-  await writeFile(join(directory, filename), `{ ${fields} }\n`, 'utf8');
+function assetRow(id, path, mediaType, content) {
+  return `{ id: ${ornaString(id)}, path: ${ornaString(path)}, `
+    + `media_type: ${ornaString(mediaType)}, content: ${ornaString(content)} }\n`;
 }
 
-await Promise.all([
-  mkdir(assetRows, { recursive: true }),
-  mkdir(themeRows, { recursive: true }),
-  mkdir(layoutRows, { recursive: true }),
-]);
-const files = await collectFiles('');
-if (!files.includes('index.html')) throw new Error('The Vite output has no index.html shell.');
+async function expectedRows() {
+  const files = await collectFiles('');
+  if (!files.includes('index.html')) throw new Error('The Vite output has no index.html shell.');
 
-const writtenRows = new Set();
-let totalContentBytes = 0;
-for (const path of files) {
-  if (extname(path).toLowerCase() === '.css') continue;
-  const content = await readFile(join(distribution, path));
-  if (content.byteLength > maxAssetBytes) {
-    throw new Error(`Playground DB asset exceeds ${maxAssetBytes} bytes: ${path}`);
-  }
-  const mediaType = mediaTypes.get(extname(path).toLowerCase());
-  if (!mediaType) throw new Error(`Unsupported playground DB asset type: ${path}`);
-  let contentText = content.toString('utf8');
-  if (!Buffer.from(contentText, 'utf8').equals(content)) {
-    throw new Error(`Playground DB assets must be UTF-8 text: ${path}`);
-  }
-  if (path === 'index.html') {
-    const stylesheetLinks = contentText.match(/<link\b[^>]*\brel="stylesheet"[^>]*>/g) ?? [];
-    if (stylesheetLinks.length !== 1) {
-      throw new Error(`Expected one bundled stylesheet link in the generated shell, found ${stylesheetLinks.length}.`);
+  const rows = new Map();
+  let totalContentBytes = 0;
+  for (const path of files) {
+    const content = await readFile(join(distribution, path));
+    if (content.byteLength > maxAssetBytes) {
+      throw new Error(`Playground DB asset exceeds ${maxAssetBytes} bytes: ${path}`);
     }
-    contentText = contentText.replace(
-      stylesheetLinks[0],
-      '<link id="playground-theme" rel="stylesheet" href="/playground/theme.css">' +
-      '<link id="playground-layout" rel="stylesheet" href="/playground/layout.css">',
-    );
-  }
+    const mediaType = mediaTypes.get(extname(path).toLowerCase());
+    if (!mediaType) throw new Error(`Unsupported playground DB asset type: ${path}`);
+    const contentText = content.toString('utf8');
+    if (!Buffer.from(contentText, 'utf8').equals(content)) {
+      throw new Error(`Playground DB assets must be UTF-8 text: ${path}`);
+    }
 
-  const id = `asset-${Buffer.from(path).toString('hex')}`;
-  const rowPath = join(assetRows, `${id}.orna`);
-  const row = [
-    `{ id: ${rowString(id)}, path: ${rowString(path.split(sep).join('/'))}, ` +
-    `media_type: ${rowString(mediaType)}, content: ${rowString(contentText)} }\n`,
-  ].join('');
-  await writeFile(rowPath, row, 'utf8');
-  writtenRows.add(rowPath);
-  totalContentBytes += content.byteLength;
+    const normalizedPath = path.split(sep).join('/');
+    const id = `asset-${Buffer.from(normalizedPath).toString('hex')}`;
+    const rowPath = join(assetRows, `${id}.orna`);
+    rows.set(rowPath, assetRow(id, normalizedPath, mediaType, contentText));
+    totalContentBytes += content.byteLength;
+  }
+  return { rows, totalContentBytes };
 }
 
-for (const name of await readdir(assetRows)) {
-  const path = join(assetRows, name);
-  if (name.startsWith('asset-') && name.endsWith('.orna') && !writtenRows.has(path)) {
-    await rm(path);
+try {
+  const { rows, totalContentBytes } = await expectedRows();
+  if (!checkOnly) await mkdir(assetRows, { recursive: true });
+  let entries = [];
+  try {
+    entries = await readdir(assetRows, { withFileTypes: true });
+  } catch (error) {
+    if (error.code !== 'ENOENT') throw error;
   }
-}
+  const existing = entries
+    .filter((entry) => entry.isFile() && entry.name.startsWith('asset-') && entry.name.endsWith('.orna'))
+    .map((entry) => join(assetRows, entry.name));
+  const stale = existing.filter((rowPath) => !rows.has(rowPath));
+  const changed = [];
+  for (const [rowPath, expected] of rows) {
+    let current;
+    try {
+      current = await readFile(rowPath, 'utf8');
+    } catch (error) {
+      if (error.code !== 'ENOENT') throw error;
+    }
+    if (current !== expected) changed.push([rowPath, expected]);
+  }
 
-for (const [directory, filename, id, name, sourcePath] of [
-  [themeRows, 'wiki-basic.orna', 'wiki-basic', 'Wiki basic', 'theme.css'],
-  [layoutRows, 'responsive.orna', 'responsive', 'Responsive layout', 'layout.css'],
-]) {
-  const css = await readFile(join(webUi, 'src', sourcePath));
-  if (css.byteLength > maxStyleBytes) {
-    throw new Error(`Playground ${sourcePath} exceeds ${maxStyleBytes} bytes.`);
+  if (checkOnly) {
+    if (stale.length || changed.length) {
+      for (const rowPath of stale) console.error(`Stale playground Asset row: ${rowPath}`);
+      for (const [rowPath] of changed) console.error(`Missing or stale playground Asset row: ${rowPath}`);
+      process.exitCode = 1;
+    } else {
+      console.log(`Verified ${rows.size} committed playground Asset rows (${totalContentBytes} content bytes).`);
+    }
+  } else {
+    for (const [rowPath, content] of changed) await writeFile(rowPath, content, 'utf8');
+    for (const rowPath of stale) await rm(rowPath);
+    console.log(`Wrote ${rows.size} committed playground Asset rows (${totalContentBytes} content bytes).`);
   }
-  const cssText = css.toString('utf8');
-  if (!Buffer.from(cssText, 'utf8').equals(css)) {
-    throw new Error(`Playground ${sourcePath} must be UTF-8 text.`);
-  }
-  await writeRecord(directory, filename, { id, name, css: cssText });
+} catch (error) {
+  console.error(error.message);
+  process.exitCode = 1;
 }
-
-console.log(
-  `Wrote ${writtenRows.size} committed playground Asset rows (${totalContentBytes} content bytes), ` +
-  'one Theme row, and one Layout row.',
-);

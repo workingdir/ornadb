@@ -886,6 +886,35 @@ fn discovers_only_reachable_table_rows_with_opaque_path_metadata() {
     );
 }
 
+#[test]
+fn discovers_table_rows_with_dots_in_encoded_key_components() {
+    let (directory, repository) = repository(&[
+        (
+            "main.orna",
+            include_str!("fixtures/playground_asset_main.orna"),
+        ),
+        (
+            "playground.orna",
+            include_str!("fixtures/playground_asset_schema.orna"),
+        ),
+        (
+            "playground/Asset/assets~2fapp.js.orna",
+            include_str!("fixtures/playground_asset_row.orna"),
+        ),
+    ]);
+    commit_all(&directory);
+
+    let loaded = ProjectLoader::default().load(&repository).unwrap();
+
+    assert_eq!(loaded.loose_rows().len(), 1);
+    assert_eq!(
+        loaded.loose_rows()[0].logical_path(),
+        "playground/Asset/assets~2fapp.js.orna"
+    );
+    assert_eq!(loaded.loose_rows()[0].table_path(), "playground/Asset");
+    assert_eq!(loaded.loose_rows()[0].key_path(), ["assets~2fapp.js.orna"]);
+}
+
 #[cfg(unix)]
 #[test]
 fn worktree_row_discovery_skips_unreadable_git_administration() {

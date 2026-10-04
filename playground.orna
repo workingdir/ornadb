@@ -8,13 +8,3 @@ pub table Asset(id: Str) {
     media_type: Str,
     content: Str,
 }
-
-pub table Theme(id: Str) {
-    name: Str,
-    css: Str,
-}
-
-pub table Layout(id: Str) {
-    name: Str,
-    css: Str,
-}

@@ -333,7 +333,6 @@ fn host_route(root: &Path, identity: RuntimeIdentity, request: &Request) -> Resp
     }
     match (request.method.as_str(), request.path.as_str()) {
         ("GET", "/api/examples") => playground_examples(root),
-        ("GET", "/api/playground/revision") => playground_revision(root),
         ("GET", "/api/clone") => match clone_report(root, identity) {
             Ok(report) => Response::new(200, "application/json", report),
             Err(_) => unavailable_response(),
@@ -392,18 +391,6 @@ fn git_listing_route(
     }
     match request.path.as_str() {
         "/" => Some(commit_log_page(root, identity)),
-        "/playground/theme.css" => Some(playground_style(
-            root,
-            "Theme",
-            "wiki-basic",
-            &request.query,
-        )),
-        "/playground/layout.css" => Some(playground_style(
-            root,
-            "Layout",
-            "responsive",
-            &request.query,
-        )),
         "/playground" => Some(playground_asset(root, identity, &request.path)),
         path if path.starts_with("/playground/") => {
             Some(playground_asset(root, identity, &request.path))
@@ -452,8 +439,6 @@ fn commit_log_page(root: &Path, identity: RuntimeIdentity) -> Response {
 
 const MAX_PLAYGROUND_ASSET_BYTES: usize = 2 * 1024 * 1024;
 const MAX_PLAYGROUND_ASSET_ROW_BYTES: usize = 4 * 1024 * 1024;
-const MAX_PLAYGROUND_STYLE_BYTES: usize = 256 * 1024;
-const MAX_PLAYGROUND_STYLE_ROW_BYTES: usize = 512 * 1024;
 const MAX_PLAYGROUND_EXAMPLE_BYTES: usize = 2 * 1024 * 1024;
 const MAX_PLAYGROUND_SAMPLE_BYTES: usize = 64 * 1024;
 const MAX_PLAYGROUND_FILE_EXAMPLES: usize = 100;
@@ -516,106 +501,6 @@ fn playground_asset(root: &Path, identity: RuntimeIdentity, request_path: &str) 
         .headers
         .push(("X-Content-Type-Options".into(), "nosniff".into()));
     response
-}
-
-fn playground_revision(root: &Path) -> Response {
-    let Ok(repository) = Repository::discover(root) else {
-        return unavailable_response();
-    };
-    let Ok(Some(commit)) = repository.head() else {
-        return unavailable_response();
-    };
-    let mut response = Response::new(
-        200,
-        "application/json",
-        format!("{{\"revision\":{}}}", json_string(commit.as_str())).into_bytes(),
-    );
-    response
-        .headers
-        .push(("Cache-Control".into(), "no-store".into()));
-    response
-}
-
-fn playground_style(root: &Path, table: &str, expected_id: &str, query: &str) -> Response {
-    let Ok(repository) = Repository::discover(root) else {
-        return unavailable_response();
-    };
-    let revision = match playground_style_revision(query) {
-        Ok(revision) => revision,
-        Err(()) => return bad_request_response(),
-    };
-    let commit = match revision {
-        Some(revision) => match resolve_listing_commit(&repository, revision) {
-            Some(commit) => commit,
-            None => return not_found_response(),
-        },
-        None => match repository.head() {
-            Ok(Some(commit)) => commit,
-            _ => return unavailable_response(),
-        },
-    };
-    let schema = match repository.read_committed_file(
-        &commit,
-        Path::new("playground.orna"),
-        MAX_PLAYGROUND_SAMPLE_BYTES,
-    ) {
-        Ok(schema) => schema,
-        Err(_) => return unavailable_response(),
-    };
-    let Ok(schema) = String::from_utf8(schema) else {
-        return unavailable_response();
-    };
-    if !has_playground_style_table(&schema, table) {
-        return unavailable_response();
-    }
-    let Ok(record_path) = ManagedPath::new(
-        Path::new("playground")
-            .join(table)
-            .join(format!("{expected_id}.orna")),
-    ) else {
-        return bad_request_response();
-    };
-    let Ok(source) = repository.read_committed_file(
-        &commit,
-        record_path.as_path(),
-        MAX_PLAYGROUND_STYLE_ROW_BYTES,
-    ) else {
-        return not_found_response();
-    };
-    let Ok(source) = String::from_utf8(source) else {
-        return unavailable_response();
-    };
-    let Some((name, css)) = decode_playground_style(&source, expected_id) else {
-        return unavailable_response();
-    };
-    if name.is_empty() || css.len() > MAX_PLAYGROUND_STYLE_BYTES {
-        return unavailable_response();
-    }
-    let mut response = Response::new(200, "text/css; charset=utf-8", css.into_bytes());
-    response
-        .headers
-        .push(("Cache-Control".into(), "no-cache".into()));
-    response
-        .headers
-        .push(("X-Content-Type-Options".into(), "nosniff".into()));
-    response
-}
-
-fn playground_style_revision(query: &str) -> Result<Option<&str>, ()> {
-    if query.is_empty() {
-        return Ok(None);
-    }
-    let mut parameters = query.split('&');
-    let Some((name, revision)) = parameters
-        .next()
-        .and_then(|parameter| parameter.split_once('='))
-    else {
-        return Err(());
-    };
-    if name != "revision" || revision.is_empty() || parameters.next().is_some() {
-        return Err(());
-    }
-    Ok(Some(revision))
 }
 
 fn playground_asset_record_path(asset_path: &str) -> Option<(ManagedPath, String)> {
@@ -892,64 +777,6 @@ fn decode_playground_asset(source: &str, expected_id: &str) -> Option<(String, S
     let media_type = literal_string(unique_record_field(&fields, "media_type")?)?;
     let content = literal_string(unique_record_field(&fields, "content")?)?;
     Some((path, media_type, content))
-}
-
-fn has_playground_style_table(source: &str, expected_table: &str) -> bool {
-    let parsed = parse_module(source);
-    if !parsed.is_ok() {
-        return false;
-    }
-    let mut tables = parsed.value.items.iter().filter_map(|item| {
-        let Declaration::Table {
-            name,
-            keys,
-            members,
-        } = &item.declaration
-        else {
-            return None;
-        };
-        (name == expected_table).then_some((keys, members))
-    });
-    let Some((keys, members)) = tables.next() else {
-        return false;
-    };
-    if tables.next().is_some()
-        || keys.len() != 1
-        || !matches!(
-            &keys[0],
-            orna_syntax_v1::Parameter {
-                pattern: Pattern::Name(name, _),
-                annotation: Some(ty),
-                ..
-            } if name == "id" && is_string_type(ty)
-        )
-    {
-        return false;
-    }
-    ["name", "css"].iter().all(|required| {
-        let mut fields = members.iter().filter_map(|member| match member {
-            orna_syntax_v1::TableMember::Field { name, ty, .. } if name == required => Some(ty),
-            _ => None,
-        });
-        fields.next().is_some_and(is_string_type) && fields.next().is_none()
-    })
-}
-
-fn decode_playground_style(source: &str, expected_id: &str) -> Option<(String, String)> {
-    let parsed = parse_row(source);
-    if !parsed.is_ok() {
-        return None;
-    }
-    let Expr::Record { fields, .. } = parsed.value else {
-        return None;
-    };
-    let id = literal_string(unique_record_field(&fields, "id")?)?;
-    if id != expected_id {
-        return None;
-    }
-    let name = literal_string(unique_record_field(&fields, "name")?)?;
-    let css = literal_string(unique_record_field(&fields, "css")?)?;
-    Some((name, css))
 }
 
 fn has_playground_sample_table(source: &str) -> bool {
@@ -2123,12 +1950,6 @@ mod tests {
             include_str!("../tests/fixtures/playground-asset-uncommitted.orna");
         const ASSET_STALE_INDEX: &str =
             include_str!("../tests/fixtures/playground-asset-index-stale.orna");
-        const PLAYGROUND_THEME: &str = include_str!("../tests/fixtures/playground-theme.orna");
-        const PLAYGROUND_THEME_UPDATED: &str =
-            include_str!("../tests/fixtures/playground-theme-updated.orna");
-        const PLAYGROUND_LAYOUT: &str = include_str!("../tests/fixtures/playground-layout.orna");
-        const PLAYGROUND_LAYOUT_UPDATED: &str =
-            include_str!("../tests/fixtures/playground-layout-updated.orna");
         let directory = tempfile::tempdir().expect("temporary database");
         git_succeeds(
             directory.path(),
@@ -2161,14 +1982,6 @@ mod tests {
             ASSET_STYLE,
         )
         .expect("write database stylesheet asset");
-        let theme_directory = directory.path().join("playground/Theme");
-        std::fs::create_dir_all(&theme_directory).expect("create Theme rows directory");
-        std::fs::write(theme_directory.join("wiki-basic.orna"), PLAYGROUND_THEME)
-            .expect("write database Theme row");
-        let layout_directory = directory.path().join("playground/Layout");
-        std::fs::create_dir_all(&layout_directory).expect("create Layout rows directory");
-        std::fs::write(layout_directory.join("responsive.orna"), PLAYGROUND_LAYOUT)
-            .expect("write database Layout row");
         git_succeeds(
             directory.path(),
             &[
@@ -2177,8 +1990,6 @@ mod tests {
                 "playground/Sample/hello.orna",
                 "playground/examples/legacy.orna",
                 "playground/Asset",
-                "playground/Theme",
-                "playground/Layout",
             ],
         );
         git_succeeds(
@@ -2242,9 +2053,7 @@ mod tests {
         assert_eq!(page.status, 200);
         assert_eq!(page.content_type, "text/html; charset=utf-8");
         let page = String::from_utf8(page.body).expect("database page UTF-8");
-        assert!(page.contains("<main>database shell"));
-        assert!(page.contains("/playground/theme.css"));
-        assert!(page.contains("/playground/layout.css"));
+        assert!(page.contains("<main>database shell</main>"));
         assert!(page.contains(&format!(
             "data-database=\"{}\"",
             format_uuid(identity.database_id)
@@ -2268,7 +2077,7 @@ mod tests {
         }));
         let embed = String::from_utf8(embed.body).expect("embedded page UTF-8");
         assert!(embed.contains("<header data-page-header hidden>"));
-        assert!(embed.contains("<main>database shell"));
+        assert!(embed.contains("<main>database shell</main>"));
         let embed_with_slash = playground_asset(directory.path(), identity, "/playground/embed/");
         assert_eq!(embed_with_slash.status, 200);
         let script = playground_asset(directory.path(), identity, "/playground/assets/app.js");
@@ -2280,39 +2089,12 @@ mod tests {
                 .any(|(name, value)| name == "X-Content-Type-Options" && value == "nosniff")
         );
         assert_eq!(script.content_type, "text/javascript; charset=utf-8");
-        assert_eq!(
-            script.body,
-            b"globalThis.ornaPlaygroundReady = { ready: true };"
-        );
+        assert_eq!(script.body, b"globalThis.ornaPlaygroundReady = true;");
         let stylesheet =
             playground_asset(directory.path(), identity, "/playground/assets/style.css");
         assert_eq!(stylesheet.status, 200);
         assert_eq!(stylesheet.content_type, "text/css; charset=utf-8");
         assert_eq!(stylesheet.body, b"body { color: #202122; }");
-        let theme = playground_style(directory.path(), "Theme", "wiki-basic", "");
-        assert_eq!(theme.status, 200);
-        assert_eq!(theme.content_type, "text/css; charset=utf-8");
-        assert_eq!(theme.body, b":root { --text: #202122; }");
-        assert!(
-            theme
-                .headers
-                .iter()
-                .any(|(name, value)| { name == "Cache-Control" && value == "no-cache" })
-        );
-        let layout = playground_style(directory.path(), "Layout", "responsive", "");
-        assert_eq!(layout.status, 200);
-        assert_eq!(
-            layout.body,
-            b".workspace { display: grid; } @media (max-width: 64rem) { .workspace { grid-template-columns: 1fr; } }"
-        );
-        let initial_revision = playground_revision(directory.path());
-        assert_eq!(initial_revision.status, 200);
-        let initial_revision: serde_json::Value =
-            serde_json::from_slice(&initial_revision.body).expect("initial revision JSON");
-        let initial_revision = initial_revision["revision"]
-            .as_str()
-            .expect("initial committed revision")
-            .to_owned();
         assert!(!directory.path().join("playground/web-ui/dist").exists());
         let uncommitted_asset = playground_asset(
             directory.path(),
@@ -2330,32 +2112,7 @@ mod tests {
             ASSET_STALE_INDEX,
         )
         .expect("replace the shell row with one lacking the embed marker");
-        std::fs::write(
-            theme_directory.join("wiki-basic.orna"),
-            PLAYGROUND_THEME_UPDATED,
-        )
-        .expect("write an uncommitted theme update");
-        std::fs::write(
-            layout_directory.join("responsive.orna"),
-            PLAYGROUND_LAYOUT_UPDATED,
-        )
-        .expect("write an uncommitted layout update");
-        let uncommitted_theme = playground_style(directory.path(), "Theme", "wiki-basic", "");
-        assert_eq!(uncommitted_theme.status, 200);
-        assert_eq!(uncommitted_theme.body, b":root { --text: #202122; }");
-        let uncommitted_revision = playground_revision(directory.path());
-        let uncommitted_revision: serde_json::Value =
-            serde_json::from_slice(&uncommitted_revision.body).expect("uncommitted revision JSON");
-        assert_eq!(uncommitted_revision["revision"], initial_revision);
-        git_succeeds(
-            directory.path(),
-            &[
-                "add",
-                "playground/Asset",
-                "playground/Theme",
-                "playground/Layout",
-            ],
-        );
+        git_succeeds(directory.path(), &["add", "playground/Asset"]);
         git_succeeds(
             directory.path(),
             &[
@@ -2371,38 +2128,6 @@ mod tests {
         );
         let stale_embed = playground_asset(directory.path(), identity, "/playground/embed");
         assert_eq!(stale_embed.status, 503);
-        let updated_theme = playground_style(directory.path(), "Theme", "wiki-basic", "");
-        assert_eq!(updated_theme.status, 200);
-        assert_eq!(updated_theme.body, b":root { --text: #111111; }");
-        let updated_layout = playground_style(directory.path(), "Layout", "responsive", "");
-        assert_eq!(updated_layout.status, 200);
-        assert_eq!(
-            updated_layout.body,
-            b".workspace { display: grid; grid-template-columns: 1fr 1fr; } @media (max-width: 64rem) { .workspace { grid-template-columns: 1fr; } }"
-        );
-        let pinned_old_theme = playground_style(
-            directory.path(),
-            "Theme",
-            "wiki-basic",
-            &format!("revision={initial_revision}"),
-        );
-        assert_eq!(pinned_old_theme.status, 200);
-        assert_eq!(pinned_old_theme.body, b":root { --text: #202122; }");
-        let pinned_old_layout = playground_style(
-            directory.path(),
-            "Layout",
-            "responsive",
-            &format!("revision={initial_revision}"),
-        );
-        assert_eq!(pinned_old_layout.status, 200);
-        assert_eq!(
-            pinned_old_layout.body,
-            b".workspace { display: grid; } @media (max-width: 64rem) { .workspace { grid-template-columns: 1fr; } }"
-        );
-        let updated_revision = playground_revision(directory.path());
-        let updated_revision: serde_json::Value =
-            serde_json::from_slice(&updated_revision.body).expect("updated revision JSON");
-        assert_ne!(updated_revision["revision"], initial_revision);
     }
 
     #[test]
@@ -2435,6 +2160,7 @@ mod tests {
     fn playground_asset_records_match_the_declared_table_and_path_key() {
         const PLAYGROUND_SCHEMA: &str = include_str!("../tests/fixtures/playground-schema.orna");
         const ASSET_APP: &str = include_str!("../tests/fixtures/playground-asset-app.orna");
+        const ASSET_STYLE: &str = include_str!("../tests/fixtures/playground-asset-style.orna");
 
         assert!(has_playground_asset_table(PLAYGROUND_SCHEMA));
         assert_eq!(
@@ -2442,67 +2168,21 @@ mod tests {
             Some((
                 "assets/app.js".into(),
                 "text/javascript; charset=utf-8".into(),
-                "globalThis.ornaPlaygroundReady = { ready: true };".into(),
+                "globalThis.ornaPlaygroundReady = true;".into(),
             ))
         );
         assert_eq!(decode_playground_asset(ASSET_APP, "different-id"), None);
+        assert_eq!(
+            decode_playground_asset(ASSET_STYLE, "asset-6173736574732f7374796c652e637373"),
+            Some((
+                "assets/style.css".into(),
+                "text/css; charset=utf-8".into(),
+                "body { color: #202122; }".into(),
+            ))
+        );
         assert!(!has_playground_asset_table(
             "pub table Asset(id: Int) { path: Str, media_type: Str, content: Str }"
         ));
-    }
-
-    #[test]
-    fn playground_theme_and_layout_records_match_their_declared_tables() {
-        const PLAYGROUND_SCHEMA: &str = include_str!("../tests/fixtures/playground-schema.orna");
-        const PLAYGROUND_THEME: &str = include_str!("../tests/fixtures/playground-theme.orna");
-        const PLAYGROUND_LAYOUT: &str = include_str!("../tests/fixtures/playground-layout.orna");
-
-        assert!(has_playground_style_table(PLAYGROUND_SCHEMA, "Theme"));
-        assert!(has_playground_style_table(PLAYGROUND_SCHEMA, "Layout"));
-        let parsed_theme = parse_row(PLAYGROUND_THEME);
-        assert!(parsed_theme.is_ok(), "{:?}", parsed_theme.diagnostics);
-        let Expr::Record {
-            fields: theme_fields,
-            ..
-        } = parsed_theme.value
-        else {
-            panic!("Theme fixture parses as a record");
-        };
-        assert_eq!(
-            literal_string(unique_record_field(&theme_fields, "id").expect("Theme id")),
-            Some("wiki-basic".into())
-        );
-        assert_eq!(
-            literal_string(unique_record_field(&theme_fields, "name").expect("Theme name")),
-            Some("Wiki basic".into())
-        );
-        assert_eq!(
-            literal_string(unique_record_field(&theme_fields, "css").expect("Theme CSS")),
-            Some(":root { --text: #202122; }".into())
-        );
-        assert_eq!(
-            decode_playground_style(PLAYGROUND_THEME, "wiki-basic"),
-            Some(("Wiki basic".into(), ":root { --text: #202122; }".into()))
-        );
-        assert_eq!(
-            decode_playground_style(PLAYGROUND_LAYOUT, "responsive"),
-            Some((
-                "Responsive layout".into(),
-                ".workspace { display: grid; } @media (max-width: 64rem) { .workspace { grid-template-columns: 1fr; } }".into(),
-            ))
-        );
-        assert_eq!(decode_playground_style(PLAYGROUND_THEME, "other"), None);
-        assert!(!has_playground_style_table(
-            "pub table Theme(id: Int) { name: Str, css: Str }",
-            "Theme"
-        ));
-        assert_eq!(playground_style_revision(""), Ok(None));
-        assert_eq!(playground_style_revision("revision=0123"), Ok(Some("0123")));
-        assert_eq!(
-            playground_style_revision("revision=0123&revision=4567"),
-            Err(())
-        );
-        assert_eq!(playground_style_revision("theme=dark"), Err(()));
     }
 
     #[test]

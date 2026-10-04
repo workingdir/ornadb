@@ -7,6 +7,8 @@
     "dev": "vite",
     "build": "tsc --noEmit && vite build && node scripts/generate-db-assets.mjs",
     "preview": "vite preview",
+    "db-assets:sync": "node scripts/generate-db-assets.mjs",
+    "db-assets:check": "node scripts/generate-db-assets.mjs --check",
     "test": "vitest run"
   },
   "dependencies": {
