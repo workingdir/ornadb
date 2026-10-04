@@ -21,6 +21,8 @@ mod hover_semantic_contract;
 mod syntax_v1_action_signature_contract;
 #[path = "support/syntax_v1_depth_contract.rs"]
 mod syntax_v1_depth_contract;
+#[path = "support/syntax_v1_diagnostics_document_links_contract.rs"]
+mod syntax_v1_diagnostics_document_links_contract;
 #[path = "support/syntax_v1_document_highlight_code_lens_contract.rs"]
 mod syntax_v1_document_highlight_code_lens_contract;
 #[path = "support/syntax_v1_folding_selection_contract.rs"]
@@ -39,6 +41,10 @@ const WORKSPACE_HIERARCHY_CALLER_SOURCE: &str =
 const DOCUMENT_HIGHLIGHT_CODE_LENS_SOURCE: &str =
     include_str!("fixtures/document-highlight-code-lens-v1.orna");
 const FOLDING_SELECTION_SOURCE: &str = include_str!("fixtures/folding-selection-v1.orna");
+const DIAGNOSTIC_SOURCE: &str = include_str!("fixtures/incremental-malformed-v1.orna");
+const DOCUMENT_LINKS_SOURCE: &str = include_str!("fixtures/document-links-v1.orna");
+const DOCUMENT_LINK_TARGET_SOURCE: &str = include_str!("fixtures/library/math.orna");
+const DOCUMENT_LINK_DIRECTORY_TARGET_SOURCE: &str = include_str!("fixtures/library/math/main.orna");
 const INVALID_SOURCE: &str = include_str!("fixtures/ji3t0-invalid-v1.orna");
 
 const LEGACY_SYNTAX_WORDS: &[&str] = &[
@@ -661,6 +667,38 @@ fn neovim_loads_generated_v1_syntax_and_queries_the_lsp_server() {
     );
     let folding_selection_requests =
         syntax_v1_folding_selection_contract::request_data(FOLDING_SELECTION_SOURCE);
+    let diagnostic_fixture =
+        root.join("crates/orna-lsp/tests/fixtures/incremental-malformed-v1.orna");
+    assert_eq!(
+        fs::read_to_string(&diagnostic_fixture).unwrap(),
+        DIAGNOSTIC_SOURCE
+    );
+    let diagnostic_recovery = DIAGNOSTIC_SOURCE
+        .replace("value + ;", "value + 1;")
+        .trim_end()
+        .to_owned();
+    assert!(
+        orna_syntax_v1::parse_module(&diagnostic_recovery)
+            .diagnostics
+            .is_empty()
+    );
+    let document_links_fixture = root.join("crates/orna-lsp/tests/fixtures/document-links-v1.orna");
+    let document_link_target_fixture =
+        root.join("crates/orna-lsp/tests/fixtures/library/math.orna");
+    let document_link_directory_target_fixture =
+        root.join("crates/orna-lsp/tests/fixtures/library/math/main.orna");
+    assert_eq!(
+        fs::read_to_string(&document_links_fixture).unwrap(),
+        DOCUMENT_LINKS_SOURCE
+    );
+    assert_eq!(
+        fs::read_to_string(&document_link_target_fixture).unwrap(),
+        DOCUMENT_LINK_TARGET_SOURCE
+    );
+    assert_eq!(
+        fs::read_to_string(&document_link_directory_target_fixture).unwrap(),
+        DOCUMENT_LINK_DIRECTORY_TARGET_SOURCE
+    );
     let script = temporary_path("lua");
     let result_path = temporary_path("result");
     let completion_result_path = temporary_path("completion.json");
@@ -1045,6 +1083,65 @@ local selection_ranges = hierarchy_request("textDocument/selectionRange", {
   textDocument = { uri = folding_uri },
   positions = folding_selection_requests.selection_positions,
 }, folding_bufnr)
+
+vim.cmd("edit " .. vim.fn.fnameescape(vim.env.ORNA_DIAGNOSTIC_FIXTURE))
+local diagnostic_bufnr = vim.api.nvim_get_current_buf()
+assert(vim.bo[diagnostic_bufnr].filetype == "orna", "diagnostic fixture did not select the orna filetype")
+assert(vim.wait(5000, function()
+  for _, attached in ipairs(vim.lsp.get_clients({ bufnr = diagnostic_bufnr })) do
+    if attached.name == "orna" and attached.initialized then client = attached; return true end
+  end
+  return false
+end, 10), "diagnostic fixture did not attach to orna-lsp")
+local diagnostic_uri = vim.uri_from_bufnr(diagnostic_bufnr)
+local diagnostic_invalid_result = hierarchy_request("textDocument/diagnostic", {
+  textDocument = { uri = diagnostic_uri },
+}, diagnostic_bufnr)
+local diagnostic_invalid = diagnostic_invalid_result.items
+vim.api.nvim_buf_set_lines(diagnostic_bufnr, 0, -1, false, { vim.env.ORNA_DIAGNOSTIC_RECOVERY_SOURCE })
+local diagnostic_recovered_result = hierarchy_request("textDocument/diagnostic", {
+  textDocument = { uri = diagnostic_uri },
+}, diagnostic_bufnr)
+local diagnostic_recovered = diagnostic_recovered_result.items
+
+vim.cmd("edit " .. vim.fn.fnameescape(vim.env.ORNA_DOCUMENT_LINKS_FIXTURE))
+local document_links_bufnr = vim.api.nvim_get_current_buf()
+assert(vim.bo[document_links_bufnr].filetype == "orna", "document-links fixture did not select the orna filetype")
+assert(vim.wait(5000, function()
+  for _, attached in ipairs(vim.lsp.get_clients({ bufnr = document_links_bufnr })) do
+    if attached.name == "orna" and attached.initialized then client = attached; return true end
+  end
+  return false
+end, 10), "document-links fixture did not attach to orna-lsp")
+local document_links_uri = vim.uri_from_bufnr(document_links_bufnr)
+local document_links_unresolved = hierarchy_request("textDocument/documentLink", {
+  textDocument = { uri = document_links_uri },
+}, document_links_bufnr)
+vim.cmd("edit " .. vim.fn.fnameescape(vim.env.ORNA_DOCUMENT_LINK_TARGET_FIXTURE))
+local document_link_target_bufnr = vim.api.nvim_get_current_buf()
+assert(vim.bo[document_link_target_bufnr].filetype == "orna", "document-link target did not select the orna filetype")
+assert(vim.wait(5000, function()
+  for _, attached in ipairs(vim.lsp.get_clients({ bufnr = document_link_target_bufnr })) do
+    if attached.name == "orna" and attached.initialized then client = attached; return true end
+  end
+  return false
+end, 10), "document-link target did not attach to orna-lsp")
+local document_links_target_uri = vim.uri_from_bufnr(document_link_target_bufnr)
+local document_links_resolved = hierarchy_request("textDocument/documentLink", {
+  textDocument = { uri = document_links_uri },
+}, document_links_bufnr)
+vim.cmd("edit " .. vim.fn.fnameescape(vim.env.ORNA_DOCUMENT_LINK_DIRECTORY_FIXTURE))
+local document_link_directory_bufnr = vim.api.nvim_get_current_buf()
+assert(vim.bo[document_link_directory_bufnr].filetype == "orna", "ambiguous document-link target did not select the orna filetype")
+assert(vim.wait(5000, function()
+  for _, attached in ipairs(vim.lsp.get_clients({ bufnr = document_link_directory_bufnr })) do
+    if attached.name == "orna" and attached.initialized then client = attached; return true end
+  end
+  return false
+end, 10), "ambiguous document-link target did not attach to orna-lsp")
+local document_links_ambiguous = hierarchy_request("textDocument/documentLink", {
+  textDocument = { uri = document_links_uri },
+}, document_links_bufnr)
 vim.fn.writefile({ vim.fn.json_encode({
   uri = uri,
   hover = hover_result,
@@ -1086,6 +1183,14 @@ vim.fn.writefile({ vim.fn.json_encode({
   folding_ranges = folding_ranges,
   selection_ranges = selection_ranges,
   folding_uri = folding_uri,
+  diagnostic_invalid = diagnostic_invalid,
+  diagnostic_recovered = diagnostic_recovered,
+  diagnostic_uri = diagnostic_uri,
+  document_links_unresolved = document_links_unresolved,
+  document_links_resolved = document_links_resolved,
+  document_links_ambiguous = document_links_ambiguous,
+  document_links_uri = document_links_uri,
+  document_links_target_uri = document_links_target_uri,
   references = references.result,
   references_without_declaration = references_without_declaration.result,
   rename = renamed.result,
@@ -1112,6 +1217,8 @@ vim.fn.writefile({
   "LSP_CODE_LENS=pass",
   "LSP_FOLDING_RANGE=pass",
   "LSP_SELECTION_RANGE=pass",
+  "LSP_DIAGNOSTICS=pass",
+  "LSP_DOCUMENT_LINKS=pass",
 }, vim.env.ORNA_EDITOR_RESULT)
 client:stop(true)
 vim.cmd("qa!")
@@ -1147,6 +1254,17 @@ vim.cmd("qa!")
             &document_highlight_fixture,
         )
         .env("ORNA_FOLDING_SELECTION_FIXTURE", &folding_selection_fixture)
+        .env("ORNA_DIAGNOSTIC_FIXTURE", &diagnostic_fixture)
+        .env("ORNA_DIAGNOSTIC_RECOVERY_SOURCE", &diagnostic_recovery)
+        .env("ORNA_DOCUMENT_LINKS_FIXTURE", &document_links_fixture)
+        .env(
+            "ORNA_DOCUMENT_LINK_TARGET_FIXTURE",
+            &document_link_target_fixture,
+        )
+        .env(
+            "ORNA_DOCUMENT_LINK_DIRECTORY_FIXTURE",
+            &document_link_directory_target_fixture,
+        )
         .env(
             "ORNA_DEPTH_RANGES",
             serde_json::to_string(&depth_ranges).unwrap(),
@@ -1318,6 +1436,31 @@ vim.cmd("qa!")
         &hover_semantic_result["selection_ranges"],
         "Neovim",
     );
+    syntax_v1_diagnostics_document_links_contract::assert_diagnostics(
+        DIAGNOSTIC_SOURCE,
+        &hover_semantic_result["diagnostic_invalid"],
+        "Neovim",
+    );
+    syntax_v1_diagnostics_document_links_contract::assert_diagnostics_cleared_items(
+        &hover_semantic_result["diagnostic_recovered"],
+        "Neovim",
+    );
+    syntax_v1_diagnostics_document_links_contract::assert_no_document_links(
+        &hover_semantic_result["document_links_unresolved"],
+        "Neovim without open targets",
+    );
+    syntax_v1_diagnostics_document_links_contract::assert_document_link(
+        DOCUMENT_LINKS_SOURCE,
+        &hover_semantic_result["document_links_resolved"],
+        hover_semantic_result["document_links_target_uri"]
+            .as_str()
+            .expect("Neovim document-link target URI"),
+        "Neovim",
+    );
+    syntax_v1_diagnostics_document_links_contract::assert_no_document_links(
+        &hover_semantic_result["document_links_ambiguous"],
+        "Neovim with ambiguous targets",
+    );
     let attached_uri = hover_semantic_result["uri"]
         .as_str()
         .expect("Neovim attached document URI");
@@ -1363,6 +1506,8 @@ vim.cmd("qa!")
             "LSP_CODE_LENS=pass",
             "LSP_FOLDING_RANGE=pass",
             "LSP_SELECTION_RANGE=pass",
+            "LSP_DIAGNOSTICS=pass",
+            "LSP_DOCUMENT_LINKS=pass",
         ]
     );
 }
@@ -1428,6 +1573,22 @@ fn emacs_eglot_attaches_and_proves_hover_rename_references_and_semantic_tokens()
         root.join("crates/orna-lsp/tests/fixtures/document-highlight-code-lens-v1.orna");
     let folding_selection_fixture =
         root.join("crates/orna-lsp/tests/fixtures/folding-selection-v1.orna");
+    let diagnostic_fixture =
+        root.join("crates/orna-lsp/tests/fixtures/incremental-malformed-v1.orna");
+    let diagnostic_recovery = DIAGNOSTIC_SOURCE
+        .replace("value + ;", "value + 1;")
+        .trim_end()
+        .to_owned();
+    assert!(
+        orna_syntax_v1::parse_module(&diagnostic_recovery)
+            .diagnostics
+            .is_empty()
+    );
+    let document_links_fixture = root.join("crates/orna-lsp/tests/fixtures/document-links-v1.orna");
+    let document_link_target_fixture =
+        root.join("crates/orna-lsp/tests/fixtures/library/math.orna");
+    let document_link_directory_target_fixture =
+        root.join("crates/orna-lsp/tests/fixtures/library/math/main.orna");
     assert_eq!(fs::read_to_string(&hover_fixture).unwrap(), SOURCE);
     assert_eq!(
         fs::read_to_string(&semantic_fixture).unwrap(),
@@ -1461,6 +1622,22 @@ fn emacs_eglot_attaches_and_proves_hover_rename_references_and_semantic_tokens()
     assert_eq!(
         fs::read_to_string(&folding_selection_fixture).unwrap(),
         FOLDING_SELECTION_SOURCE
+    );
+    assert_eq!(
+        fs::read_to_string(&diagnostic_fixture).unwrap(),
+        DIAGNOSTIC_SOURCE
+    );
+    assert_eq!(
+        fs::read_to_string(&document_links_fixture).unwrap(),
+        DOCUMENT_LINKS_SOURCE
+    );
+    assert_eq!(
+        fs::read_to_string(&document_link_target_fixture).unwrap(),
+        DOCUMENT_LINK_TARGET_SOURCE
+    );
+    assert_eq!(
+        fs::read_to_string(&document_link_directory_target_fixture).unwrap(),
+        DOCUMENT_LINK_DIRECTORY_TARGET_SOURCE
     );
     let folding_selection_requests =
         syntax_v1_folding_selection_contract::request_data(FOLDING_SELECTION_SOURCE);
@@ -1563,6 +1740,10 @@ fn emacs_eglot_attaches_and_proves_hover_rename_references_and_semantic_tokens()
       (workspace-caller-buffer nil)
       (document-highlight-buffer nil)
       (folding-selection-buffer nil)
+      (diagnostic-buffer nil)
+      (document-links-buffer nil)
+      (document-link-target-buffer nil)
+      (document-link-directory-buffer nil)
       (hover-response nil)
       (semantic-response nil)
       (depth-semantic-response nil)
@@ -1587,6 +1768,14 @@ fn emacs_eglot_attaches_and_proves_hover_rename_references_and_semantic_tokens()
       (folding-ranges nil)
       (selection-ranges nil)
       (folding-uri nil)
+      (diagnostic-invalid nil)
+      (diagnostic-recovered nil)
+      (diagnostic-uri nil)
+      (document-links-unresolved nil)
+      (document-links-resolved nil)
+      (document-links-ambiguous nil)
+      (document-links-uri nil)
+      (document-links-target-uri nil)
       (references-response nil)
       (references-without-declaration-response nil)
       (rename-response nil)
@@ -1930,12 +2119,70 @@ fn emacs_eglot_attaches_and_proves_hover_rename_references_and_semantic_tokens()
                   (jsonrpc-request server :textDocument/selectionRange
                                    (list :textDocument (list :uri uri)
                                          :positions (orna-test-folding-selection-positions))))))
+        (setq diagnostic-buffer
+              (find-file-noselect (getenv "ORNA_DIAGNOSTIC_FIXTURE")))
+        (with-current-buffer diagnostic-buffer
+          (orna-test-wait-managed diagnostic-buffer)
+          (let* ((server (eglot-current-server))
+                 (params (eglot--TextDocumentPositionParams))
+                 (uri (orna-test-get (orna-test-get params "textDocument") "uri")))
+            (unless (stringp uri)
+              (error "Eglot did not provide a URI for the diagnostic fixture: %S" params))
+            (setq diagnostic-uri uri
+                  diagnostic-invalid
+                  (orna-test-get
+                   (jsonrpc-request server :textDocument/diagnostic
+                                    (list :textDocument (list :uri uri)))
+                   "items"))
+            (let ((inhibit-read-only t))
+              (erase-buffer)
+              (insert (getenv "ORNA_DIAGNOSTIC_RECOVERY_SOURCE")))
+            (setq diagnostic-recovered
+                  (orna-test-get
+                   (jsonrpc-request server :textDocument/diagnostic
+                                    (list :textDocument (list :uri uri)))
+                   "items")))
+        (setq document-links-buffer
+              (find-file-noselect (getenv "ORNA_DOCUMENT_LINKS_FIXTURE")))
+        (with-current-buffer document-links-buffer
+          (orna-test-wait-managed document-links-buffer)
+          (let* ((server (eglot-current-server))
+                 (params (eglot--TextDocumentPositionParams))
+                 (uri (orna-test-get (orna-test-get params "textDocument") "uri")))
+            (unless (stringp uri)
+              (error "Eglot did not provide a URI for the document-links fixture: %S" params))
+            (setq document-links-uri uri
+                  workspace-server server
+                  document-links-unresolved
+                  (jsonrpc-request server :textDocument/documentLink
+                                   (list :textDocument (list :uri uri))))))
+        (setq document-link-target-buffer
+              (find-file-noselect (getenv "ORNA_DOCUMENT_LINK_TARGET_FIXTURE")))
+        (with-current-buffer document-link-target-buffer
+          (orna-test-wait-managed document-link-target-buffer)
+          (let* ((params (eglot--TextDocumentPositionParams))
+                 (uri (orna-test-get (orna-test-get params "textDocument") "uri")))
+            (unless (stringp uri)
+              (error "Eglot did not provide a URI for the document-link target: %S" params))
+            (setq document-links-target-uri uri)))
+        (setq document-links-resolved
+              (jsonrpc-request workspace-server :textDocument/documentLink
+                               (list :textDocument (list :uri document-links-uri))))
+        (setq document-link-directory-buffer
+              (find-file-noselect (getenv "ORNA_DOCUMENT_LINK_DIRECTORY_FIXTURE")))
+        (with-current-buffer document-link-directory-buffer
+          (orna-test-wait-managed document-link-directory-buffer))
+        (setq document-links-ambiguous
+              (jsonrpc-request workspace-server :textDocument/documentLink
+                               (list :textDocument (list :uri document-links-uri))))
         (princ "EMACS_LSP_WORKSPACE_SYMBOL=pass\n")
         (princ "EMACS_LSP_CALL_HIERARCHY=pass\n")
         (princ "EMACS_LSP_DOCUMENT_HIGHLIGHT=pass\n")
         (princ "EMACS_LSP_CODE_LENS=pass\n")
         (princ "EMACS_LSP_FOLDING_RANGE=pass\n")
         (princ "EMACS_LSP_SELECTION_RANGE=pass\n")
+        (princ "EMACS_LSP_DIAGNOSTICS=pass\n")
+        (princ "EMACS_LSP_DOCUMENT_LINKS=pass\n")
         (let ((evidence (make-hash-table :test 'equal)))
           (puthash "uri" attached-uri evidence)
           (puthash "hover" hover-response evidence)
@@ -1960,6 +2207,14 @@ fn emacs_eglot_attaches_and_proves_hover_rename_references_and_semantic_tokens()
           (puthash "folding_uri" folding-uri evidence)
           (puthash "folding_ranges" folding-ranges evidence)
           (puthash "selection_ranges" selection-ranges evidence)
+          (puthash "diagnostic_invalid" diagnostic-invalid evidence)
+          (puthash "diagnostic_recovered" diagnostic-recovered evidence)
+          (puthash "diagnostic_uri" diagnostic-uri evidence)
+          (puthash "document_links_unresolved" document-links-unresolved evidence)
+          (puthash "document_links_resolved" document-links-resolved evidence)
+          (puthash "document_links_ambiguous" document-links-ambiguous evidence)
+          (puthash "document_links_uri" document-links-uri evidence)
+          (puthash "document_links_target_uri" document-links-target-uri evidence)
           (maphash (lambda (key value) (puthash key value evidence)) workspace-evidence)
           (puthash "references" references-response evidence)
           (puthash "references_without_declaration"
@@ -1974,8 +2229,12 @@ fn emacs_eglot_attaches_and_proves_hover_rename_references_and_semantic_tokens()
     (when (buffer-live-p action-buffer) (kill-buffer action-buffer))
     (when (buffer-live-p workspace-provider-buffer) (kill-buffer workspace-provider-buffer))
     (when (buffer-live-p workspace-caller-buffer) (kill-buffer workspace-caller-buffer))
+    (when (buffer-live-p folding-selection-buffer) (kill-buffer folding-selection-buffer))
+    (when (buffer-live-p diagnostic-buffer) (kill-buffer diagnostic-buffer))
+    (when (buffer-live-p document-links-buffer) (kill-buffer document-links-buffer))
+    (when (buffer-live-p document-link-target-buffer) (kill-buffer document-link-target-buffer))
     (when (buffer-live-p document-highlight-buffer) (kill-buffer document-highlight-buffer))
-    (when (buffer-live-p folding-selection-buffer) (kill-buffer folding-selection-buffer))))
+    (when (buffer-live-p document-link-directory-buffer) (kill-buffer document-link-directory-buffer))))
 "#,
         elisp_string(&plugin.display().to_string()),
         elisp_string(env!("CARGO_BIN_EXE_orna-lsp")),
@@ -2009,6 +2268,17 @@ fn emacs_eglot_attaches_and_proves_hover_rename_references_and_semantic_tokens()
             &document_highlight_fixture,
         )
         .env("ORNA_FOLDING_SELECTION_FIXTURE", &folding_selection_fixture)
+        .env("ORNA_DIAGNOSTIC_FIXTURE", &diagnostic_fixture)
+        .env("ORNA_DIAGNOSTIC_RECOVERY_SOURCE", &diagnostic_recovery)
+        .env("ORNA_DOCUMENT_LINKS_FIXTURE", &document_links_fixture)
+        .env(
+            "ORNA_DOCUMENT_LINK_TARGET_FIXTURE",
+            &document_link_target_fixture,
+        )
+        .env(
+            "ORNA_DOCUMENT_LINK_DIRECTORY_FIXTURE",
+            &document_link_directory_target_fixture,
+        )
         .env(
             "ORNA_WORKSPACE_HIERARCHY_REQUESTS",
             serde_json::to_string(&workspace_hierarchy_requests).unwrap(),
@@ -2091,6 +2361,31 @@ fn emacs_eglot_attaches_and_proves_hover_rename_references_and_semantic_tokens()
         &hover_semantic_result["selection_ranges"],
         "Emacs Eglot",
     );
+    syntax_v1_diagnostics_document_links_contract::assert_diagnostics(
+        DIAGNOSTIC_SOURCE,
+        &hover_semantic_result["diagnostic_invalid"],
+        "Emacs Eglot",
+    );
+    syntax_v1_diagnostics_document_links_contract::assert_diagnostics_cleared_items(
+        &hover_semantic_result["diagnostic_recovered"],
+        "Emacs Eglot",
+    );
+    syntax_v1_diagnostics_document_links_contract::assert_no_document_links(
+        &hover_semantic_result["document_links_unresolved"],
+        "Emacs Eglot without open targets",
+    );
+    syntax_v1_diagnostics_document_links_contract::assert_document_link(
+        DOCUMENT_LINKS_SOURCE,
+        &hover_semantic_result["document_links_resolved"],
+        hover_semantic_result["document_links_target_uri"]
+            .as_str()
+            .expect("Emacs document-link target URI"),
+        "Emacs Eglot",
+    );
+    syntax_v1_diagnostics_document_links_contract::assert_no_document_links(
+        &hover_semantic_result["document_links_ambiguous"],
+        "Emacs Eglot with ambiguous targets",
+    );
     syntax_v1_depth_contract::assert_semantic_depth_contract(
         HINTS_SOURCE,
         &hover_semantic_result["depth_semantic"],
@@ -2140,6 +2435,8 @@ fn emacs_eglot_attaches_and_proves_hover_rename_references_and_semantic_tokens()
         "EMACS_LSP_CODE_LENS=pass",
         "EMACS_LSP_FOLDING_RANGE=pass",
         "EMACS_LSP_SELECTION_RANGE=pass",
+        "EMACS_LSP_DIAGNOSTICS=pass",
+        "EMACS_LSP_DOCUMENT_LINKS=pass",
     ] {
         assert!(
             stdout.contains(evidence),
