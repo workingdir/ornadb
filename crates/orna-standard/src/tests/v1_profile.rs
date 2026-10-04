@@ -1188,7 +1188,7 @@ fn pinned_timezone_and_calendar_surfaces_typecheck_and_publish_in_snapshot() {
     for declaration in [
         "pub fn timezone_data_version(): Str",
         "pub fn offset_at(instant: Instant, zone: Str): Int",
-        "pub fn resolve_local(local: Str, zone: Str, ambiguous: Str): Instant",
+        "pub fn resolve_local(local: Str, zone: Str, ambiguous: Str, gap: Str? = null): Instant",
     ] {
         assert!(time.contains(declaration), "missing std.time declaration `{declaration}`");
     }
@@ -1724,7 +1724,7 @@ fn reference_standard_uses_pinned_orna_1_source_and_resolves_its_imports() {
         "original value and its runtime type",
         "Inspect fallback",
         "never execute action descriptors",
-        "expected input type checked by the server-created event handle",
+        "server checks that a present value agrees with the event handle",
     ] {
         assert!(sources[49].1.contains(contract), "missing std.ui contract `{contract}`");
     }
