@@ -27,9 +27,12 @@ fn session() -> AdmittedReplSession {
             .verify_source(path, source)
             .expect("executed iteration source matches its pinned profile");
     }
-    session
-        .submit(include_str!("fixtures/iteration-use-ptr1b.orna"))
-        .expect("iteration helper fixture loads");
+    let setup = include_str!("fixtures/iteration-use-ptr1b.orna");
+    let parsed = orna_syntax_v1::parse_module_with_file(setup, "iteration-use-ptr1b.orna");
+    assert!(parsed.is_ok(), "{:#?}", parsed.diagnostics);
+    session.submit(setup).unwrap_or_else(|error| {
+        panic!("iteration helper fixture failed to load: {}", error.code())
+    });
     session
 }
 
