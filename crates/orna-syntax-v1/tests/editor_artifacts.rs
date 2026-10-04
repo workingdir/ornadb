@@ -184,6 +184,35 @@ fn semantic_legend_and_editor_grammars_have_only_v1_lexical_classes() {
 }
 
 #[test]
+fn lsp_attachment_artifacts_expose_completion_on_all_three_editor_surfaces() {
+    let artifacts = editor::generated_artifacts();
+    let content = |path: &str| {
+        artifacts
+            .iter()
+            .find(|artifact| artifact.path == path)
+            .unwrap_or_else(|| panic!("missing generated artifact {path}"))
+            .contents
+            .as_str()
+    };
+
+    let neovim = content("editors/neovim/lua/orna/init.lua");
+    assert!(neovim.contains("vim.filetype.add"));
+    assert!(neovim.contains("nvim_create_autocmd(\"FileType\""));
+    assert!(neovim.contains("vim.lsp.start"));
+    assert!(neovim.contains("pattern = \"orna\""));
+
+    let vim = content("editors/vim/plugin/orna-lsp.vim");
+    assert!(vim.contains("lsp#register_server"));
+    assert!(vim.contains("'allowlist': ['orna']"));
+    assert!(vim.contains("setlocal omnifunc=lsp#complete"));
+
+    let emacs = content("editors/emacs/orna-eglot.el");
+    assert!(emacs.contains("orna-eglot-server-command"));
+    assert!(emacs.contains("(cons '(orna-mode) orna-eglot-server-command)"));
+    assert!(emacs.contains("(add-hook 'orna-mode-hook #'eglot-ensure)"));
+}
+
+#[test]
 fn generated_editor_bytes_are_stable_and_cover_the_complete_editor_tree() {
     let first = editor::generated_artifacts();
     let second = editor::generated_artifacts();

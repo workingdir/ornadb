@@ -25,6 +25,9 @@ const SECOND_SAMPLE: &str = include_str!("fixtures/playground-concurrent-eval.or
 const FOLLOWUP_SAMPLE: &str = include_str!("fixtures/playground-followup-eval.orna");
 const PLAYGROUND_SHELL: &str = include_str!("fixtures/playground-shell.html");
 const PLAYGROUND_BROWSER_ASSET: &str = include_str!("fixtures/playground-browser-asset.js");
+const PLAYGROUND_PRESENTATION_ASSET: &str = include_str!("fixtures/playground-presentation.mjs");
+const PLAYGROUND_HOME_ASSET: &str = include_str!("../src/serve_home.mjs");
+const PLAYGROUND_RUNTIME_ASSET: &str = include_str!("../src/serve_playground.mjs");
 const PLAYGROUND_SCHEMA: &str = include_str!("fixtures/playground-schema.orna");
 const PLAYGROUND_SAMPLE: &str = include_str!("fixtures/playground-sample.orna");
 const BINARY: &str = env!("CARGO_BIN_EXE_orna-cli-v1");
@@ -362,6 +365,24 @@ fn orna_serve_hosts_playground_with_pending_evals_and_snapshot_correct_deltas() 
         .expect("write browser entry page fixture");
     std::fs::write(dist.join("assets/app.js"), PLAYGROUND_BROWSER_ASSET)
         .expect("write browser entry script fixture");
+    let presentation_path = project.path().join("playground/shared/presentation.mjs");
+    std::fs::create_dir_all(
+        presentation_path
+            .parent()
+            .expect("presentation asset parent"),
+    )
+    .expect("create presentation asset directory");
+    std::fs::write(&presentation_path, PLAYGROUND_PRESENTATION_ASSET)
+        .expect("write database presentation runtime");
+    let cli_source_dir = project.path().join("crates/orna-cli-v1/src");
+    std::fs::create_dir_all(&cli_source_dir).expect("create CLI asset directory");
+    std::fs::write(cli_source_dir.join("serve_home.mjs"), PLAYGROUND_HOME_ASSET)
+        .expect("write database home runtime");
+    std::fs::write(
+        cli_source_dir.join("serve_playground.mjs"),
+        PLAYGROUND_RUNTIME_ASSET,
+    )
+    .expect("write database playground runtime");
     git(
         project.path(),
         &[
@@ -371,12 +392,27 @@ fn orna_serve_hosts_playground_with_pending_evals_and_snapshot_correct_deltas() 
             "playground/Sample/hello.orna",
             "playground/examples/hello.orna",
             "playground/web-ui/dist",
+            "playground/shared/presentation.mjs",
+            "crates/orna-cli-v1/src/serve_home.mjs",
+            "crates/orna-cli-v1/src/serve_playground.mjs",
         ],
     );
     std::fs::write(dist.join("index.html"), "uncommitted page")
         .expect("replace page in worktree after commit");
     std::fs::write(dist.join("assets/app.js"), "uncommitted script")
         .expect("replace script in worktree after commit");
+    std::fs::write(&presentation_path, "uncommitted presentation runtime")
+        .expect("replace presentation runtime in worktree after commit");
+    std::fs::write(
+        cli_source_dir.join("serve_home.mjs"),
+        "uncommitted home runtime",
+    )
+    .expect("replace home runtime in worktree after commit");
+    std::fs::write(
+        cli_source_dir.join("serve_playground.mjs"),
+        "uncommitted playground runtime",
+    )
+    .expect("replace playground runtime in worktree after commit");
     git(
         project.path(),
         &[
@@ -413,7 +449,6 @@ fn orna_serve_hosts_playground_with_pending_evals_and_snapshot_correct_deltas() 
     assert_eq!(page.status, 200);
     assert!(page.body.contains("Orna playground"));
     assert!(!page.body.contains("uncommitted page"));
-    assert!(page.body.contains("globalThis.ornaPlaygroundRun"));
     assert!(
         page.body
             .contains(LIVE_RUN_EVENTS_WATCH_SOURCE.trim_start_matches('\0'))
@@ -421,9 +456,35 @@ fn orna_serve_hosts_playground_with_pending_evals_and_snapshot_correct_deltas() 
     let embed = curl(&format!("{base_url}/playground/embed"), &[])
         .expect("curl the database-resident embedded entry");
     assert_eq!(embed.status, 200);
-    assert!(embed.body.contains("<header class=\"page-header\" data-page-header hidden>"));
-    assert!(response_header(&embed.headers, "content-security-policy")
-        .is_some_and(|policy| policy.contains("frame-ancestors *")));
+    assert!(
+        embed
+            .body
+            .contains("<header class=\"page-header\" data-page-header hidden>")
+    );
+    assert!(
+        response_header(&embed.headers, "content-security-policy")
+            .is_some_and(|policy| policy.contains("frame-ancestors *"))
+    );
+    assert!(page.body.contains("id=\"live-bridge\""));
+    assert!(page.body.contains("id=\"live-presentation\""));
+    assert!(page.body.contains("id=\"run-events-source\""));
+    assert!(page.body.contains("src=\"/assets/serve-playground.mjs\""));
+    assert!(page.body.contains("orna/serve/run-events/v1"));
+    let runtime = curl(&format!("{base_url}/assets/serve-playground.mjs"), &[])
+        .expect("curl the playground live module");
+    assert_eq!(runtime.status, 200);
+    assert_eq!(runtime.body, PLAYGROUND_RUNTIME_ASSET);
+    assert!(runtime.body.contains("globalThis.ornaPlaygroundRun"));
+    assert!(!runtime.body.contains("uncommitted"));
+    let presentation_runtime = curl(&format!("{base_url}/assets/presentation.mjs"), &[])
+        .expect("curl the shared presentation runtime");
+    assert_eq!(presentation_runtime.status, 200);
+    assert_eq!(presentation_runtime.body, PLAYGROUND_PRESENTATION_ASSET);
+    assert!(presentation_runtime.body.contains("class LivePresentation"));
+    let home_runtime = curl(&format!("{base_url}/assets/serve-home.mjs"), &[])
+        .expect("curl the database-resident home runtime");
+    assert_eq!(home_runtime.status, 200);
+    assert_eq!(home_runtime.body, PLAYGROUND_HOME_ASSET);
     let app = curl(&format!("{base_url}/playground/assets/app.js"), &[])
         .expect("curl the playground browser asset");
     assert_eq!(app.status, 200);
@@ -434,15 +495,27 @@ fn orna_serve_hosts_playground_with_pending_evals_and_snapshot_correct_deltas() 
     assert_eq!(examples.status, 200);
     let examples: JsonValue = serde_json::from_str(&examples.body).expect("example response JSON");
     assert_eq!(examples["examples"].as_array().map(Vec::len), Some(2));
-    assert!(examples["examples"].as_array().unwrap().iter().any(|example| {
-        example["path"] == "playground/Sample/hello.orna"
-            && example["name"] == "Hello, Orna"
-            && example["source"]
-                == "pub fn double(value: Int): Int = value + value;\ndouble(21)"
-    }));
-    assert!(examples["examples"].as_array().unwrap().iter().any(|example| {
-        example["path"] == "playground/examples/hello.orna" && example["source"] == SAMPLE
-    }));
+    assert!(
+        examples["examples"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|example| {
+                example["path"] == "playground/Sample/hello.orna"
+                    && example["name"] == "Hello, Orna"
+                    && example["source"]
+                        == "pub fn double(value: Int): Int = value + value;\ndouble(21)"
+            })
+    );
+    assert!(
+        examples["examples"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|example| {
+                example["path"] == "playground/examples/hello.orna" && example["source"] == SAMPLE
+            })
+    );
 
     let database_id = listing
         .body

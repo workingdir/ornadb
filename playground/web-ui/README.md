@@ -19,6 +19,10 @@ Commit the generated bundle into the database snapshot with
 `orna serve` exposes only the committed page and assets. Then run it from that
 clone and open http://127.0.0.1:8181/playground/.
 
+The shared presentation runtime and serve bridge modules are also loaded from
+committed Git blobs through `orna serve`'s listing handler. The server does not
+serve worktree-only copies of these UI assets.
+
 The Monaco tokenizer and its keyword metadata are generated from
 `orna-syntax-v1`; check drift with:
 
