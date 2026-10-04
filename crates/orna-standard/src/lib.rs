@@ -67,6 +67,7 @@ pub const REFERENCE_STANDARD_TIME_ISO_PATH_V1: &str = "std/time/duration/iso.orn
 pub const REFERENCE_STANDARD_OPTION_PATH_V1: &str = "std/option.orna";
 pub const REFERENCE_STANDARD_RESULT_PATH_V1: &str = "std/result.orna";
 pub const REFERENCE_STANDARD_ERROR_PATH_V1: &str = "std/error.orna";
+pub const REFERENCE_STANDARD_ERROR_COMBINATORS_PATH_V1: &str = "std/error/combinators.orna";
 pub const REFERENCE_STANDARD_LIST_PATH_V1: &str = "std/list.orna";
 pub const REFERENCE_STANDARD_MAP_PATH_V1: &str = "std/map.orna";
 pub const REFERENCE_STANDARD_SET_PATH_V1: &str = "std/set.orna";
@@ -78,7 +79,10 @@ pub const REFERENCE_STANDARD_IO_PROCESS_PATH_V1: &str = "std/io/process.orna";
 pub const REFERENCE_STANDARD_IO_ENVIRONMENT_PATH_V1: &str = "std/io/environment.orna";
 pub const REFERENCE_STANDARD_IO_READER_PATH_V1: &str = "std/io/reader.orna";
 pub const REFERENCE_STANDARD_IO_WRITER_PATH_V1: &str = "std/io/writer.orna";
+pub const REFERENCE_STANDARD_IO_BUFFER_PATH_V1: &str = "std/io/buffer.orna";
 pub const REFERENCE_STANDARD_CONCURRENT_PATH_V1: &str = "std/concurrent/main.orna";
+pub const REFERENCE_STANDARD_CONCURRENT_RESULT_PATH_V1: &str = "std/concurrent/result.orna";
+pub const REFERENCE_STANDARD_ITERATOR_ADAPTERS_PATH_V1: &str = "std/iterator/adapters.orna";
 pub const REFERENCE_STANDARD_TEST_PATH_V1: &str = "std/test.orna";
 pub const REFERENCE_STANDARD_GENERICS_PATH_V1: &str = "std/generics.orna";
 pub const REFERENCE_STANDARD_TYPE_UTILS_PATH_V1: &str = "std/type_utils.orna";
@@ -92,6 +96,18 @@ pub const REFERENCE_STANDARD_REFLECTION_PATH_V1: &str = "std/reflection.orna";
 pub const REFERENCE_STANDARD_UI_PATH_V1: &str = "std/ui.orna";
 pub const REFERENCE_STANDARD_FORMAT_PATH_V1: &str = "std/format.orna";
 pub const REFERENCE_STANDARD_PARSE_PATH_V1: &str = "std/parse.orna";
+pub const REFERENCE_STANDARD_PRELUDE_PATH_V1: &str = "std/prelude.orna";
+pub const REFERENCE_STANDARD_PRELUDE_EXPORTS_V1: &[&str] = &[
+    "api_version",
+    "count",
+    "first",
+    "is_none",
+    "is_some",
+    "split",
+    "trim",
+    "unique",
+    "version",
+];
 
 const REFERENCE_STANDARD_MATH_SOURCE_V1: &str = include_str!("../../../stdlib/std/math.orna");
 const REFERENCE_STANDARD_COLLECTION_SOURCE_V1: &str =
@@ -136,6 +152,8 @@ const REFERENCE_STANDARD_TIME_ISO_SOURCE_V1: &str =
 const REFERENCE_STANDARD_OPTION_SOURCE_V1: &str = include_str!("../../../stdlib/std/option.orna");
 const REFERENCE_STANDARD_RESULT_SOURCE_V1: &str = include_str!("../../../stdlib/std/result.orna");
 const REFERENCE_STANDARD_ERROR_SOURCE_V1: &str = include_str!("../../../stdlib/std/error.orna");
+const REFERENCE_STANDARD_ERROR_COMBINATORS_SOURCE_V1: &str =
+    include_str!("../../../stdlib/std/error/combinators.orna");
 const REFERENCE_STANDARD_LIST_SOURCE_V1: &str = include_str!("../../../stdlib/std/list.orna");
 const REFERENCE_STANDARD_MAP_SOURCE_V1: &str = include_str!("../../../stdlib/std/map.orna");
 const REFERENCE_STANDARD_SET_SOURCE_V1: &str = include_str!("../../../stdlib/std/set.orna");
@@ -153,8 +171,14 @@ const REFERENCE_STANDARD_IO_READER_SOURCE_V1: &str =
     include_str!("../../../stdlib/std/io/reader.orna");
 const REFERENCE_STANDARD_IO_WRITER_SOURCE_V1: &str =
     include_str!("../../../stdlib/std/io/writer.orna");
+const REFERENCE_STANDARD_IO_BUFFER_SOURCE_V1: &str =
+    include_str!("../../../stdlib/std/io/buffer.orna");
 const REFERENCE_STANDARD_CONCURRENT_SOURCE_V1: &str =
     include_str!("../../../stdlib/std/concurrent/main.orna");
+const REFERENCE_STANDARD_CONCURRENT_RESULT_SOURCE_V1: &str =
+    include_str!("../../../stdlib/std/concurrent/result.orna");
+const REFERENCE_STANDARD_ITERATOR_ADAPTERS_SOURCE_V1: &str =
+    include_str!("../../../stdlib/std/iterator/adapters.orna");
 const REFERENCE_STANDARD_TEST_SOURCE_V1: &str = include_str!("../../../stdlib/std/test.orna");
 const REFERENCE_STANDARD_GENERICS_SOURCE_V1: &str =
     include_str!("../../../stdlib/std/generics.orna");
@@ -175,14 +199,16 @@ const REFERENCE_STANDARD_FORMAT_SOURCE_V1: &str =
     include_str!("../../../stdlib/std/format.orna");
 const REFERENCE_STANDARD_PARSE_SOURCE_V1: &str =
     include_str!("../../../stdlib/std/parse.orna");
+const REFERENCE_STANDARD_PRELUDE_SOURCE_V1: &str =
+    include_str!("../../../stdlib/std/prelude.orna");
 
 /// Source units for the Orna 1.0.0 reference standard dependency.
 ///
 /// This is the current source-backed standard boundary. The retained `orna.std/1`–
 /// `orna.std/11` APIs below model older, explicitly versioned snapshots.
 #[must_use]
-pub fn reference_standard_sources_v1() -> [(String, String); 54] {
-    let mut sources: [(String, String); 54] = [
+pub fn reference_standard_sources_v1() -> [(String, String); 59] {
+    let mut sources: [(String, String); 59] = [
         (
             REFERENCE_STANDARD_MATH_PATH_V1.into(),
             REFERENCE_STANDARD_MATH_SOURCE_V1.into(),
@@ -399,6 +425,26 @@ pub fn reference_standard_sources_v1() -> [(String, String); 54] {
             REFERENCE_STANDARD_PARSE_PATH_V1.into(),
             REFERENCE_STANDARD_PARSE_SOURCE_V1.into(),
         ),
+        (
+            REFERENCE_STANDARD_PRELUDE_PATH_V1.into(),
+            REFERENCE_STANDARD_PRELUDE_SOURCE_V1.into(),
+        ),
+        (
+            REFERENCE_STANDARD_IO_BUFFER_PATH_V1.into(),
+            REFERENCE_STANDARD_IO_BUFFER_SOURCE_V1.into(),
+        ),
+        (
+            REFERENCE_STANDARD_CONCURRENT_RESULT_PATH_V1.into(),
+            REFERENCE_STANDARD_CONCURRENT_RESULT_SOURCE_V1.into(),
+        ),
+        (
+            REFERENCE_STANDARD_ITERATOR_ADAPTERS_PATH_V1.into(),
+            REFERENCE_STANDARD_ITERATOR_ADAPTERS_SOURCE_V1.into(),
+        ),
+        (
+            REFERENCE_STANDARD_ERROR_COMBINATORS_PATH_V1.into(),
+            REFERENCE_STANDARD_ERROR_COMBINATORS_SOURCE_V1.into(),
+        ),
     ];
     sources[2]
         .1
@@ -414,6 +460,10 @@ pub fn reference_standard_profile_v1() -> StandardDependencyProfile {
         reference_standard_sources_v1(),
     )
     .expect("the bundled Orna 1.0.0 standard module path is valid")
+    .with_module_prelude_exports(
+        REFERENCE_STANDARD_PRELUDE_PATH_V1,
+        REFERENCE_STANDARD_PRELUDE_EXPORTS_V1.iter().copied(),
+    )
 }
 
 /// Builds the semantic catalogue from the pinned Orna 1.0.0 source, without

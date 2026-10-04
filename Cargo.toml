@@ -30,6 +30,7 @@ members = [
     "crates/orna-sys-v1",
     "crates/orna-traceability-v1",
     "crates/orna-value-v1",
+    "playground/orna-wasm",
 ]
 resolver = "3"
 

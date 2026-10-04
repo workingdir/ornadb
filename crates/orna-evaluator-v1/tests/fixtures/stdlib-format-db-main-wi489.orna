@@ -1,0 +1,5 @@
+use format;
+use text;
+use format_marker;
+
+pub fn version(): Str = format_marker.label();

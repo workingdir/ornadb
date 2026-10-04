@@ -46,6 +46,8 @@ pub use introspection::{
     QueryPairedCheckpointSpillRestoreOccurrenceDescription,
     QueryPairedStreamRotationChainDescription,
     QueryPairedStreamRotationOccurrenceDescription,
+    QueryPairedWalRotationChainDescription,
+    QueryPairedWalRotationOccurrenceDescription,
     QueryPartialIndexDescription,
     QuerySourceStatistics, QueryJoinPairIdentityDescription,
     MAX_DEPENDENCY_EDGES, MAX_DEPENDENCY_OBJECTS, MAX_PLAN_EXPRESSIONS,
@@ -64,10 +66,13 @@ pub use introspection::{
     explain_query_with_partial_indexes_and_decorrelated_subqueries_and_join_pair_identities,
     explain_query_with_partial_indexes_and_join_pair_identities,
     explain_query_with_partial_indexes_and_paired_checkpoint_segment_compaction_chains,
+    explain_query_with_paired_cost_restoration_and_window_pushdowns,
+    explain_query_with_paired_cost_restoration_and_window_spill_pushdowns,
     explain_query_with_partial_indexes_and_paired_checkpoint_compaction_and_segment_rotation_chains,
     explain_query_with_partial_indexes_and_paired_checkpoint_rotation_and_stream_compaction_chains,
     explain_query_with_partial_indexes_and_paired_checkpoint_rotation_stream_and_spill_restore_chains,
     explain_query_with_partial_indexes_and_paired_checkpoint_stream_rotation_chains,
+    explain_query_with_partial_indexes_and_paired_checkpoint_wal_rotation_chains,
     explain_query_with_window_aggregate_pushdowns,
     explain_query_with_join_pair_identities,
     explain_query_with_join_pair_identities_and_window_aggregate_pushdowns,
@@ -100,6 +105,10 @@ pub use host_clock::*;
 mod host_filesystem;
 pub use host_filesystem::*;
 
+#[cfg(not(target_arch = "wasm32"))]
+mod host_network;
+#[cfg(target_arch = "wasm32")]
+#[path = "host_network_wasm.rs"]
 mod host_network;
 pub use host_network::*;
 
