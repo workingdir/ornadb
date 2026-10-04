@@ -2332,6 +2332,95 @@ pub enum BranchMergePairedCheckpointRedoUndoSegmentRotationNestedCompactionHando
     },
 }
 
+/// One exact paired rewind and compaction lineage for a transaction order.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BranchMergePairedUndoCompactionIdentity {
+    pub undo_chain_identity: BranchMergePairedUndoChainIdentity,
+    pub compaction_identity: BranchMergePairedCompactionIdentity,
+}
+
+/// A nested compaction handoff run retaining paired rewind/compaction identity.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BranchMergePairedCheckpointRedoUndoCompactionNestedCompactionHandoffRunSnapshot {
+    pub merge_ordinal: usize,
+    pub fold_ordinal: usize,
+    pub first_order: u64,
+    pub last_order: u64,
+    pub left: Option<CheckpointGeneration>,
+    pub right: Option<CheckpointGeneration>,
+    pub redo_fold_identity: BranchMergePairedRedoFoldIdentity,
+    /// One indivisible undo-chain/compaction pair for every represented order.
+    pub identities: Vec<BranchMergePairedUndoCompactionIdentity>,
+}
+
+/// One checkpoint/source stream within a nested compaction handoff.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BranchMergePairedCheckpointRedoUndoCompactionNestedCompactionHandoffStreamSnapshot {
+    pub checkpoint_id: CheckpointId,
+    pub source_stream_id: Vec<u8>,
+    pub runs: Vec<
+        BranchMergePairedCheckpointRedoUndoCompactionNestedCompactionHandoffRunSnapshot,
+    >,
+}
+
+/// One restored nested occurrence with complete coordinates and both identities.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BranchMergePairedCheckpointRedoUndoCompactionNestedCompactionHandoffRestoreSlotSnapshot {
+    pub restore_ordinal: usize,
+    pub handoff_ordinal: usize,
+    pub stream_ordinal: usize,
+    pub source_stream_id: Vec<u8>,
+    pub compaction_ordinal: usize,
+    pub merge_ordinal: usize,
+    pub fold_ordinal: usize,
+    pub order: u64,
+    pub left: Option<CheckpointGeneration>,
+    pub right: Option<CheckpointGeneration>,
+    pub redo_fold_identity: BranchMergePairedRedoFoldIdentity,
+    /// Retained whole when either checkpoint generation is absent.
+    pub identity: BranchMergePairedUndoCompactionIdentity,
+}
+
+/// A checkpoint restored across paired rewind/compaction handoffs.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BranchMergePairedCheckpointRedoUndoCompactionNestedCompactionHandoffRestoreStreamSnapshot {
+    pub checkpoint_id: CheckpointId,
+    pub slots: Vec<
+        BranchMergePairedCheckpointRedoUndoCompactionNestedCompactionHandoffRestoreSlotSnapshot,
+    >,
+}
+
+/// A malformed paired rewind/compaction run rejected with its complete path.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum BranchMergePairedCheckpointRedoUndoCompactionNestedCompactionHandoffRestoreError {
+    InvalidOrderRange {
+        checkpoint_id: CheckpointId,
+        restore_ordinal: usize,
+        handoff_ordinal: usize,
+        stream_ordinal: usize,
+        source_stream_id: Vec<u8>,
+        compaction_ordinal: usize,
+        merge_ordinal: usize,
+        fold_ordinal: usize,
+        first_order: u64,
+        last_order: u64,
+    },
+    IdentityCountMismatch {
+        checkpoint_id: CheckpointId,
+        restore_ordinal: usize,
+        handoff_ordinal: usize,
+        stream_ordinal: usize,
+        source_stream_id: Vec<u8>,
+        compaction_ordinal: usize,
+        merge_ordinal: usize,
+        fold_ordinal: usize,
+        first_order: u64,
+        last_order: u64,
+        expected: u128,
+        actual: usize,
+    },
+}
+
 /// A nested source-stream rotation restored with every compaction scope intact.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BranchMergePairedCheckpointRedoFoldSegmentRotationNestedSourceStreamRestorePinHandoffSlotSnapshot {
@@ -7371,6 +7460,125 @@ pub fn restore_paired_checkpoint_redo_sparse_nested_compaction_handoff_chains_pr
         });
         restored.push(
             BranchMergePairedCheckpointRedoUndoSegmentRotationNestedCompactionHandoffRestorePinStreamSnapshot {
+                checkpoint_id,
+                slots,
+            },
+        );
+    }
+    Ok(restored)
+}
+
+/// Restores nested handoffs without separating paired rewind and compaction identity.
+///
+/// Input nesting is restore batch, handoff, then checkpoint/source stream.
+/// Each compacted run retains its merge and redo-fold labels plus one paired
+/// undo-chain/compaction identity for every represented order. Present and
+/// absent checkpoint generations are preserved as supplied. Descending ranges
+/// and incomplete identity vectors are rejected with the checkpoint and all
+/// source coordinates; container positions remain local ordinals.
+pub fn restore_paired_checkpoint_redo_sparse_nested_compaction_handoff_chains_preserving_undo_and_compaction_identity(
+    known_checkpoint_ids: &[CheckpointId],
+    restore_handoffs: &[Vec<Vec<
+        BranchMergePairedCheckpointRedoUndoCompactionNestedCompactionHandoffStreamSnapshot,
+    >>],
+) -> Result<
+    Vec<
+        BranchMergePairedCheckpointRedoUndoCompactionNestedCompactionHandoffRestoreStreamSnapshot,
+    >,
+    BranchMergePairedCheckpointRedoUndoCompactionNestedCompactionHandoffRestoreError,
+> {
+    let checkpoint_ids = known_checkpoint_ids
+        .iter()
+        .cloned()
+        .chain(restore_handoffs.iter().flat_map(|batch| {
+            batch.iter().flat_map(|handoff| {
+                handoff.iter().map(|stream| stream.checkpoint_id.clone())
+            })
+        }))
+        .collect::<BTreeSet<_>>();
+
+    let mut restored = Vec::with_capacity(checkpoint_ids.len());
+    for checkpoint_id in checkpoint_ids {
+        let mut slots = Vec::new();
+        for (restore_ordinal, batch) in restore_handoffs.iter().enumerate() {
+            for (handoff_ordinal, handoff) in batch.iter().enumerate() {
+                for (stream_ordinal, stream) in handoff.iter().enumerate() {
+                    if stream.checkpoint_id != checkpoint_id {
+                        continue;
+                    }
+                    for (compaction_ordinal, run) in stream.runs.iter().enumerate() {
+                        if run.last_order < run.first_order {
+                            return Err(
+                                BranchMergePairedCheckpointRedoUndoCompactionNestedCompactionHandoffRestoreError::InvalidOrderRange {
+                                    checkpoint_id: checkpoint_id.clone(),
+                                    restore_ordinal,
+                                    handoff_ordinal,
+                                    stream_ordinal,
+                                    source_stream_id: stream.source_stream_id.clone(),
+                                    compaction_ordinal,
+                                    merge_ordinal: run.merge_ordinal,
+                                    fold_ordinal: run.fold_ordinal,
+                                    first_order: run.first_order,
+                                    last_order: run.last_order,
+                                },
+                            );
+                        }
+                        let expected =
+                            u128::from(run.last_order) - u128::from(run.first_order) + 1;
+                        if expected != run.identities.len() as u128 {
+                            return Err(
+                                BranchMergePairedCheckpointRedoUndoCompactionNestedCompactionHandoffRestoreError::IdentityCountMismatch {
+                                    checkpoint_id: checkpoint_id.clone(),
+                                    restore_ordinal,
+                                    handoff_ordinal,
+                                    stream_ordinal,
+                                    source_stream_id: stream.source_stream_id.clone(),
+                                    compaction_ordinal,
+                                    merge_ordinal: run.merge_ordinal,
+                                    fold_ordinal: run.fold_ordinal,
+                                    first_order: run.first_order,
+                                    last_order: run.last_order,
+                                    expected,
+                                    actual: run.identities.len(),
+                                },
+                            );
+                        }
+
+                        slots.extend(run.identities.iter().enumerate().map(
+                            |(offset, identity)| {
+                                BranchMergePairedCheckpointRedoUndoCompactionNestedCompactionHandoffRestoreSlotSnapshot {
+                                    restore_ordinal,
+                                    handoff_ordinal,
+                                    stream_ordinal,
+                                    source_stream_id: stream.source_stream_id.clone(),
+                                    compaction_ordinal,
+                                    merge_ordinal: run.merge_ordinal,
+                                    fold_ordinal: run.fold_ordinal,
+                                    order: run.first_order + offset as u64,
+                                    left: run.left.clone(),
+                                    right: run.right.clone(),
+                                    redo_fold_identity: run.redo_fold_identity.clone(),
+                                    identity: identity.clone(),
+                                }
+                            },
+                        ));
+                    }
+                }
+            }
+        }
+        slots.sort_by_key(|slot| {
+            (
+                slot.restore_ordinal,
+                slot.handoff_ordinal,
+                slot.stream_ordinal,
+                slot.compaction_ordinal,
+                slot.merge_ordinal,
+                slot.fold_ordinal,
+                slot.order,
+            )
+        });
+        restored.push(
+            BranchMergePairedCheckpointRedoUndoCompactionNestedCompactionHandoffRestoreStreamSnapshot {
                 checkpoint_id,
                 slots,
             },
