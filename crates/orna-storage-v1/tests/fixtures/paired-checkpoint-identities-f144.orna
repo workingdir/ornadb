@@ -1,0 +1,5 @@
+{ id: "f144/pair/main", name: "f144/checkpoint/main-left", city: "f144/checkpoint/main-right", }
+
+{ id: "f144/pair/retry", name: "f144/checkpoint/retry-left", city: "f144/checkpoint/retry-right", }
+
+{ id: "f144/pair/reused", name: "f144/checkpoint/main-left", city: "f144/checkpoint/main-right", }
