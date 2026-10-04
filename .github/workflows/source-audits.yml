@@ -29,11 +29,22 @@ jobs:
           test ! -e reference || { echo "remove the checkout reference tree" >&2; exit 1; }
           test ! -e ../reference || { echo "remove the sibling reference tree" >&2; exit 1; }
 
+      - name: Prove fixture manifest drift detection
+        run: python3 -m unittest scripts.test_fixture_manifest
+
+      - name: Check fixture paths and content hashes
+        run: python3 scripts/check_fixture_manifest.py --check
+
       - name: Install Rust
         uses: dtolnay/rust-toolchain@1.95.0
 
       - name: Audit fixture boundaries
         run: cargo test --locked -p orna-syntax-v1 --test fixture_audit
+
+      - name: Prove pinned parser fixture behavior
+        run: >-
+          cargo test --locked -p orna-syntax-v1 --lib
+          parser::tests::classifies_complete_incomplete_and_malformed_repl_inputs
 
       - name: Audit editor source and generated artifacts
         run: cargo test --locked -p orna-syntax-v1 --test editor_artifacts
