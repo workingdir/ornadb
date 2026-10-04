@@ -18,6 +18,11 @@ const RENAME_CALLER_SOURCE: &str = include_str!("fixtures/rename-caller-v1.orna"
 const AMBIGUOUS_RENAME_SOURCE: &str = include_str!("fixtures/ambiguous-renames-v1.orna");
 const AMBIGUOUS_RENAME_CALLER_SOURCE: &str =
     include_str!("fixtures/ambiguous-renames-caller-v1.orna");
+const SIGNATURE_ACTIONS_SOURCE: &str = include_str!("fixtures/signature-actions-v1.orna");
+const MISSING_SEMICOLON_SOURCE: &str =
+    include_str!("fixtures/missing-semicolon-code-action-v1.orna");
+const DOCUMENT_LINKS_SOURCE: &str = include_str!("fixtures/document-links-v1.orna");
+const DOCUMENT_LINK_TARGET_SOURCE: &str = include_str!("fixtures/document-link-target-v1.orna");
 
 struct Client {
     child: Child,
@@ -117,9 +122,23 @@ fn initialize(client: &mut Client) {
     assert_eq!(result["capabilities"]["textDocumentSync"]["change"], 2);
     assert_eq!(result["capabilities"]["hoverProvider"], true);
     assert_eq!(
-        result["capabilities"]["renameProvider"]["prepareProvider"],
-        true
+        result["capabilities"]["renameProvider"]["prepareProvider"], true,
+        "initialize capabilities: {result}"
     );
+    assert_ne!(
+        result["capabilities"]["codeActionProvider"]["resolveProvider"], true,
+        "server must not advertise code-action resolution: {result}"
+    );
+    assert_eq!(
+        result["capabilities"]["codeActionProvider"]["codeActionKinds"],
+        json!(["quickfix"]),
+        "initialize capabilities: {result}"
+    );
+    let signature_triggers = result["capabilities"]["signatureHelpProvider"]["triggerCharacters"]
+        .as_array()
+        .unwrap();
+    assert!(signature_triggers.iter().any(|trigger| trigger == "("));
+    assert!(signature_triggers.iter().any(|trigger| trigger == ","));
     let token_types = result["capabilities"]["semanticTokensProvider"]["legend"]["tokenTypes"]
         .as_array()
         .unwrap();
@@ -139,6 +158,14 @@ fn initialize(client: &mut Client) {
     assert!(modifiers.iter().any(|modifier| modifier == "declaration"));
     assert_eq!(
         result["capabilities"]["inlayHintProvider"]["resolveProvider"],
+        false
+    );
+    assert_eq!(
+        result["capabilities"]["diagnosticProvider"]["identifier"],
+        "orna-syntax-v1"
+    );
+    assert_eq!(
+        result["capabilities"]["documentLinkProvider"]["resolveProvider"],
         false
     );
     client.notify("initialized", json!({}));
@@ -181,14 +208,12 @@ fn decoded_semantic_tokens(source: &str, response: &Value) -> Vec<(String, u64, 
 #[test]
 fn v1_workspace_model_powers_editor_features_across_open_files() {
     let uri = "file:///workspace/expressions-v1.orna";
-    let caller_uri = "file:///workspace/call-v1.orna";
+    let caller_uri = "file:///workspace/ji3t0-call-v1.orna";
+    assert!(uri < caller_uri, "provider URI must sort before caller URI");
     let mut client = Client::spawn();
     initialize(&mut client);
-    let diagnostics = open(&mut client, uri, SOURCE);
-    assert!(
-        diagnostics["diagnostics"].as_array().unwrap().is_empty(),
-        "{diagnostics}"
-    );
+    // The caller attaches before its provider. Workspace analysis must follow
+    // the syntax-v1 source dependency order, not didOpen arrival order.
     let caller_diagnostics = open(&mut client, caller_uri, CALL_SOURCE);
     assert!(
         caller_diagnostics["diagnostics"]
@@ -196,6 +221,11 @@ fn v1_workspace_model_powers_editor_features_across_open_files() {
             .unwrap()
             .is_empty(),
         "{caller_diagnostics}"
+    );
+    let diagnostics = open(&mut client, uri, SOURCE);
+    assert!(
+        diagnostics["diagnostics"].as_array().unwrap().is_empty(),
+        "{diagnostics}"
     );
 
     let call_offset = CALL_SOURCE.find("add(value, 2)").unwrap();
@@ -376,6 +406,135 @@ fn incremental_changes_apply_in_order_with_utf16_positions_and_ignore_stale_vers
             .unwrap()
             .is_empty(),
         "stale didChange corrupted the open document: {after_stale_change}"
+    );
+    client.shutdown();
+}
+
+#[test]
+fn pull_diagnostics_reuse_results_and_refresh_after_versioned_changes() {
+    let uri = "file:///workspace/incremental.orna";
+    let mut client = Client::spawn();
+    initialize(&mut client);
+    let published = open(&mut client, uri, INCREMENTAL_SOURCE);
+
+    let first = client.request(
+        "textDocument/diagnostic",
+        json!({"textDocument":{"uri":uri}}),
+    );
+    assert_eq!(first["kind"], "full", "{first}");
+    assert_eq!(first["items"], published["diagnostics"]);
+    let first_id = first["resultId"].as_str().expect("pull result ID");
+    assert!(!first_id.is_empty());
+
+    let unchanged = client.request(
+        "textDocument/diagnostic",
+        json!({
+            "textDocument":{"uri":uri},
+            "previousResultId":first_id
+        }),
+    );
+    assert_eq!(unchanged["kind"], "unchanged", "{unchanged}");
+    assert_eq!(unchanged["resultId"], first_id);
+
+    client.notify(
+        "textDocument/didChange",
+        json!({
+            "textDocument":{"uri":uri,"version":2},
+            "contentChanges":[{"text":DOCUMENT_LINKS_SOURCE}]
+        }),
+    );
+    let updated = client.notification("textDocument/publishDiagnostics");
+    assert_eq!(updated["version"], 2);
+    assert!(updated["diagnostics"].as_array().unwrap().is_empty());
+
+    let refreshed = client.request(
+        "textDocument/diagnostic",
+        json!({
+            "textDocument":{"uri":uri},
+            "previousResultId":first_id
+        }),
+    );
+    assert_eq!(refreshed["kind"], "full", "{refreshed}");
+    assert!(refreshed["items"].as_array().unwrap().is_empty());
+    let refreshed_id = refreshed["resultId"].as_str().expect("new pull result ID");
+    assert_ne!(refreshed_id, first_id);
+
+    let still_current = client.request(
+        "textDocument/diagnostic",
+        json!({
+            "textDocument":{"uri":uri},
+            "previousResultId":refreshed_id
+        }),
+    );
+    assert_eq!(still_current["kind"], "unchanged", "{still_current}");
+    client.shutdown();
+}
+
+#[test]
+fn document_links_resolve_open_imports_and_suppress_missing_or_ambiguous_targets() {
+    let source_uri = "file:///workspace/main.orna";
+    let flat_target_uri = "file:///workspace/library/math.orna";
+    let directory_target_uri = "file:///workspace/library/math/main.orna";
+    let mut client = Client::spawn();
+    initialize(&mut client);
+
+    let source_diagnostics = open(&mut client, source_uri, DOCUMENT_LINKS_SOURCE);
+    assert!(
+        source_diagnostics["diagnostics"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    let no_open_targets = client.request(
+        "textDocument/documentLink",
+        json!({"textDocument":{"uri":source_uri}}),
+    );
+    assert!(
+        no_open_targets.as_array().unwrap().is_empty(),
+        "{no_open_targets}"
+    );
+
+    let target_diagnostics = open(&mut client, flat_target_uri, DOCUMENT_LINK_TARGET_SOURCE);
+    assert!(
+        target_diagnostics["diagnostics"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    let links = client.request(
+        "textDocument/documentLink",
+        json!({"textDocument":{"uri":source_uri}}),
+    );
+    assert_eq!(links.as_array().unwrap().len(), 1, "{links}");
+    assert_eq!(
+        links[0]["range"],
+        range_at(
+            DOCUMENT_LINKS_SOURCE,
+            DOCUMENT_LINKS_SOURCE.find("library.math").unwrap(),
+            DOCUMENT_LINKS_SOURCE.find("library.math").unwrap() + "library.math".len()
+        )
+    );
+    assert_eq!(links[0]["target"], flat_target_uri);
+    assert_eq!(links[0]["tooltip"], "Open module `library.math`");
+
+    let duplicate_diagnostics = open(
+        &mut client,
+        directory_target_uri,
+        DOCUMENT_LINK_TARGET_SOURCE,
+    );
+    assert!(
+        duplicate_diagnostics["diagnostics"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    let ambiguous_links = client.request(
+        "textDocument/documentLink",
+        json!({"textDocument":{"uri":source_uri}}),
+    );
+    assert!(
+        ambiguous_links.as_array().unwrap().is_empty(),
+        "{ambiguous_links}"
     );
     client.shutdown();
 }
@@ -622,6 +781,133 @@ fn ambiguous_global_names_fail_closed_for_definition_references_and_rename() {
         json!({"textDocument":{"uri":first_uri},"position":position,"newName":"unique"}),
     );
     assert!(renamed.is_null(), "{renamed}");
+    client.shutdown();
+}
+
+#[test]
+fn signature_help_tracks_nested_arguments_and_named_parameter_indices() {
+    let uri = "file:///workspace/signature-actions.orna";
+    let mut client = Client::spawn();
+    initialize(&mut client);
+    let diagnostics = open(&mut client, uri, SIGNATURE_ACTIONS_SOURCE);
+    assert!(diagnostics["diagnostics"].as_array().unwrap().is_empty());
+
+    let tuple_value = SIGNATURE_ACTIONS_SOURCE.find("(1, 2)").unwrap() + "(1, ".len();
+    let nested_argument = client.request(
+        "textDocument/signatureHelp",
+        json!({"textDocument":{"uri":uri},"position":position_at(SIGNATURE_ACTIONS_SOURCE,tuple_value)}),
+    );
+    assert!(
+        nested_argument["signatures"][0]["label"]
+            .as_str()
+            .unwrap()
+            .contains("fn wrap(")
+    );
+    assert_eq!(nested_argument["activeParameter"], 0, "{nested_argument}");
+
+    let last_value = SIGNATURE_ACTIONS_SOURCE.find("last: 3").unwrap() + "last: ".len();
+    let named_argument = client.request(
+        "textDocument/signatureHelp",
+        json!({"textDocument":{"uri":uri},"position":position_at(SIGNATURE_ACTIONS_SOURCE,last_value)}),
+    );
+    assert!(
+        named_argument["signatures"][0]["label"]
+            .as_str()
+            .unwrap()
+            .contains("fn wrap(")
+    );
+    assert_eq!(named_argument["activeParameter"], 2, "{named_argument}");
+
+    let extra_value = SIGNATURE_ACTIONS_SOURCE.find("extra: value").unwrap() + "extra: ".len();
+    let nested_named_argument = client.request(
+        "textDocument/signatureHelp",
+        json!({"textDocument":{"uri":uri},"position":position_at(SIGNATURE_ACTIONS_SOURCE,extra_value)}),
+    );
+    assert!(
+        nested_named_argument["signatures"][0]["label"]
+            .as_str()
+            .unwrap()
+            .contains("fn add(")
+    );
+    assert_eq!(
+        nested_named_argument["activeParameter"], 2,
+        "{nested_named_argument}"
+    );
+
+    let shadow_call = SIGNATURE_ACTIONS_SOURCE.find("add(1)").unwrap() + 1;
+    let shadowed_signature = client.request(
+        "textDocument/signatureHelp",
+        json!({"textDocument":{"uri":uri},"position":position_at(SIGNATURE_ACTIONS_SOURCE,shadow_call)}),
+    );
+    assert!(shadowed_signature.is_null(), "{shadowed_signature}");
+    client.shutdown();
+}
+
+#[test]
+fn code_actions_offer_only_verified_missing_semicolon_fixes() {
+    let uri = "file:///workspace/missing-semicolon.orna";
+    let mut client = Client::spawn();
+    initialize(&mut client);
+    let published = open(&mut client, uri, MISSING_SEMICOLON_SOURCE);
+    let diagnostics = published["diagnostics"].as_array().unwrap();
+    assert_eq!(
+        diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic["code"] == "ORNA-PARSE-002")
+            .count(),
+        1,
+        "{published}"
+    );
+
+    let params = json!({
+        "textDocument":{"uri":uri},
+        "range":range_at(MISSING_SEMICOLON_SOURCE, 0, MISSING_SEMICOLON_SOURCE.len()),
+        "context":{"diagnostics":diagnostics,"only":["quickfix"]}
+    });
+    let actions = client.request("textDocument/codeAction", params.clone());
+    assert_eq!(actions.as_array().unwrap().len(), 1, "{actions}");
+    let action = &actions[0];
+    assert_eq!(action["title"], "Insert missing `;`");
+    assert_eq!(action["kind"], "quickfix");
+    assert_eq!(action["isPreferred"], true);
+    assert_eq!(action["diagnostics"][0]["code"], "ORNA-PARSE-002");
+    let edit = &action["edit"]["changes"][uri][0];
+    assert_eq!(edit["newText"], ";");
+
+    let insertion = MISSING_SEMICOLON_SOURCE
+        .find("value\n    intermediate")
+        .unwrap()
+        + "value".len();
+    assert_eq!(
+        edit["range"],
+        range_at(MISSING_SEMICOLON_SOURCE, insertion, insertion)
+    );
+    let repaired = format!(
+        "{};{}",
+        &MISSING_SEMICOLON_SOURCE[..insertion],
+        &MISSING_SEMICOLON_SOURCE[insertion..]
+    );
+    assert!(
+        orna_syntax_v1::parse_module(&repaired)
+            .diagnostics
+            .is_empty()
+    );
+
+    let mut non_quickfix_params = params.clone();
+    non_quickfix_params["context"]["only"] = json!(["refactor"]);
+    assert_eq!(
+        client.request("textDocument/codeAction", non_quickfix_params),
+        json!([])
+    );
+    let outside_diagnostic = json!({
+        "textDocument":{"uri":uri},
+        "range":range_at(MISSING_SEMICOLON_SOURCE, 0, 1),
+        "context":{"diagnostics":diagnostics,"only":["quickfix"]}
+    });
+    assert_eq!(
+        client.request("textDocument/codeAction", outside_diagnostic),
+        json!([])
+    );
     client.shutdown();
 }
 
