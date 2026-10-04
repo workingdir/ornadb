@@ -20,8 +20,9 @@ use lsp_types::{
     ReferenceParams, RelatedFullDocumentDiagnosticReport, RenameParams, SemanticTokens,
     SemanticTokensFullOptions, SemanticTokensLegend, SemanticTokensOptions, SemanticTokensParams,
     SemanticTokensRangeParams, SemanticTokensServerCapabilities, ServerCapabilities,
-    SignatureHelpOptions, TextDocumentSyncCapability, TextDocumentSyncKind,
-    TextDocumentSyncOptions, TextDocumentSyncSaveOptions, TextEdit, Uri, WorkspaceEdit,
+    SignatureHelpOptions, TextDocumentContentChangeEvent, TextDocumentSyncCapability,
+    TextDocumentSyncKind, TextDocumentSyncOptions, TextDocumentSyncSaveOptions, TextEdit, Uri,
+    WorkspaceEdit,
 };
 
 /// Transport threads for the server's standard input and output streams.
@@ -202,7 +203,7 @@ fn server_capabilities() -> ServerCapabilities {
         text_document_sync: Some(TextDocumentSyncCapability::Options(
             TextDocumentSyncOptions {
                 open_close: Some(true),
-                change: Some(TextDocumentSyncKind::FULL),
+                change: Some(TextDocumentSyncKind::INCREMENTAL),
                 will_save: None,
                 will_save_wait_until: None,
                 save: Some(TextDocumentSyncSaveOptions::Supported(true)),
@@ -314,14 +315,19 @@ fn handle_notification(
             ) else {
                 return false;
             };
-            if let Some(change) = params.content_changes.last() {
-                let uri = params.text_document.uri.clone();
-                if let Some(document) = state.documents.get_mut(&uri) {
-                    document.text = change.text.clone();
-                    document.version = params.text_document.version;
-                }
-                publish_diagnostics(state, connection, &uri);
+            let uri = params.text_document.uri.clone();
+            let Some(document) = state.documents.get_mut(&uri) else {
+                return false;
+            };
+            if params.text_document.version <= document.version {
+                return false;
             }
+            let Some(text) = apply_content_changes(&document.text, &params.content_changes) else {
+                return false;
+            };
+            document.text = text;
+            document.version = params.text_document.version;
+            publish_diagnostics(state, connection, &uri);
             false
         }
         "textDocument/didSave" => {
@@ -352,6 +358,30 @@ fn handle_notification(
         }
         _ => false,
     }
+}
+
+/// Applies one ordered `didChange` batch to a candidate copy of the current
+/// source. Ranged changes use UTF-16 positions against the text produced by
+/// all preceding changes in the batch, as required by LSP.
+fn apply_content_changes(
+    source: &str,
+    changes: &[TextDocumentContentChangeEvent],
+) -> Option<String> {
+    let mut candidate = source.to_owned();
+    for change in changes {
+        let Some(range) = change.range else {
+            candidate = change.text.clone();
+            continue;
+        };
+        let mapper = PositionMapper::new(&candidate);
+        let start = mapper.byte_offset(range.start);
+        let end = mapper.byte_offset(range.end);
+        if start > end || !candidate.is_char_boundary(start) || !candidate.is_char_boundary(end) {
+            return None;
+        }
+        candidate.replace_range(start..end, &change.text);
+    }
+    Some(candidate)
 }
 
 /// Recomputes and publishes the diagnostics for one document.
