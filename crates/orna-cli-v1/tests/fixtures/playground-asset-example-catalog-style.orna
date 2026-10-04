@@ -1,1 +1,1 @@
-{ id: "asset-6173736574732f6578616d706c65732e637373", path: "assets/examples.css", media_type: "text/css; charset=utf-8", content: "body { color: #202122; }" }
+{ id: "asset-6173736574732f6578616d706c65732e637373", path: "assets/examples.css", media_type: "text/css; charset=utf-8", content: "body \u{7b} color: #202122; \u{7d}" }

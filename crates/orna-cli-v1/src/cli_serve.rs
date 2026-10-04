@@ -2506,6 +2506,44 @@ mod tests {
     }
 
     #[test]
+    fn playground_example_catalog_rows_decode_for_asset_namespace() {
+        const ROUTE: &str =
+            include_str!("../tests/fixtures/playground-route-example-catalog-style.orna");
+        const ENTRY: &str =
+            include_str!("../tests/fixtures/playground-entry-example-catalog-style.orna");
+        const ASSET: &str =
+            include_str!("../tests/fixtures/playground-asset-example-catalog-style.orna");
+
+        let entry_id = "entry-asset-6173736574732f6578616d706c65732e637373";
+        let asset_id = "asset-6173736574732f6578616d706c65732e637373";
+        assert_eq!(
+            decode_playground_route(
+                ROUTE,
+                "route-2f706c617967726f756e642f6173736574732f6578616d706c65732e637373",
+            ),
+            Some(("/playground/assets/examples.css".into(), entry_id.into()))
+        );
+        assert_eq!(
+            decode_playground_entry(ENTRY, entry_id),
+            Some(("assets/examples.css".into(), PlaygroundEntryKind::Asset))
+        );
+        let parsed_asset = parse_row(ASSET);
+        assert!(
+            parsed_asset.is_ok(),
+            "catalog stylesheet row parse: {:#?}",
+            parsed_asset.diagnostics
+        );
+        assert_eq!(
+            decode_playground_asset(ASSET, asset_id),
+            Some((
+                "assets/examples.css".into(),
+                "text/css; charset=utf-8".into(),
+                "body { color: #202122; }".into(),
+            ))
+        );
+    }
+
+    #[test]
     fn embedded_page_requires_one_header_marker_on_the_header_tag() {
         let mut missing = "<html><body><header>Title</header></body></html>".to_owned();
         assert!(!hide_embedded_page_header(&mut missing));
