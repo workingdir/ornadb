@@ -30,6 +30,12 @@ fn session() -> AdmittedReplSession {
     let setup = include_str!("fixtures/iteration-use-ptr1b.orna");
     let parsed = orna_syntax_v1::parse_module_with_file(setup, "iteration-use-ptr1b.orna");
     assert!(parsed.is_ok(), "{:#?}", parsed.diagnostics);
+    let parsed_repl = orna_syntax_v1::parse_repl(setup);
+    assert!(
+        parsed_repl.is_ok(),
+        "REPL setup parse: {:#?}",
+        parsed_repl.diagnostics
+    );
     session.submit(setup).unwrap_or_else(|error| {
         panic!("iteration helper fixture failed to load: {}", error.code())
     });
