@@ -152,6 +152,22 @@ fn semantic_legend_and_editor_grammars_have_only_v1_lexical_classes() {
             "Tree-sitter is missing {keyword}"
         );
     }
+    let monaco = serde_json::from_str::<serde_json::Value>(content(editor::MONACO_CONFIG_PATH))
+        .expect("generated Monaco configuration is JSON");
+    assert_eq!(monaco["language"]["id"], "orna");
+    assert_eq!(monaco["language"]["extensions"][0], ".orna");
+    assert_eq!(
+        monaco["languageConfiguration"]["comments"]["lineComment"],
+        "//"
+    );
+    assert_eq!(monaco["editorOptions"]["tabSize"], 4);
+    let monarch = monaco["monarchLanguage"]["keywords"]
+        .as_array()
+        .expect("Monaco configuration lists lexer keywords")
+        .iter()
+        .filter_map(serde_json::Value::as_str)
+        .collect::<Vec<_>>();
+    assert_eq!(monarch, ORNA_LEX_007);
 
     let manifest =
         serde_json::from_str::<serde_json::Value>(content(editor::ARTIFACT_MANIFEST_PATH))
@@ -177,6 +193,35 @@ fn semantic_legend_and_editor_grammars_have_only_v1_lexical_classes() {
 }
 
 #[test]
+fn lsp_attachment_artifacts_expose_completion_on_all_three_editor_surfaces() {
+    let artifacts = editor::generated_artifacts();
+    let content = |path: &str| {
+        artifacts
+            .iter()
+            .find(|artifact| artifact.path == path)
+            .unwrap_or_else(|| panic!("missing generated artifact {path}"))
+            .contents
+            .as_str()
+    };
+
+    let neovim = content("editors/neovim/lua/orna/init.lua");
+    assert!(neovim.contains("vim.filetype.add"));
+    assert!(neovim.contains("nvim_create_autocmd(\"FileType\""));
+    assert!(neovim.contains("vim.lsp.start"));
+    assert!(neovim.contains("pattern = \"orna\""));
+
+    let vim = content("editors/vim/plugin/orna-lsp.vim");
+    assert!(vim.contains("lsp#register_server"));
+    assert!(vim.contains("'allowlist': ['orna']"));
+    assert!(vim.contains("setlocal omnifunc=lsp#complete"));
+
+    let emacs = content("editors/emacs/orna-eglot.el");
+    assert!(emacs.contains("orna-eglot-server-command"));
+    assert!(emacs.contains("(cons '(orna-mode) orna-eglot-server-command)"));
+    assert!(emacs.contains("(add-hook 'orna-mode-hook #'eglot-ensure)"));
+}
+
+#[test]
 fn generated_editor_bytes_are_stable_and_cover_the_complete_editor_tree() {
     let first = editor::generated_artifacts();
     let second = editor::generated_artifacts();
@@ -190,6 +235,7 @@ fn generated_editor_bytes_are_stable_and_cover_the_complete_editor_tree() {
     collect_editor_files(&root.join("editors"), root, &mut actual);
     let expected = first
         .iter()
+        .filter(|artifact| artifact.path.starts_with("editors/"))
         .map(|artifact| artifact.path.to_owned())
         .collect::<BTreeSet<_>>();
     assert_eq!(actual, expected, "every editor file must be generated");

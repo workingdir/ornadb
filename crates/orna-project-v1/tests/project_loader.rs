@@ -664,7 +664,7 @@ fn loads_reachable_modules_from_a_committed_snapshot_without_touching_git_state(
 #[test]
 fn loads_private_candidate_source_without_reading_human_edits_or_changing_head() {
     const CANDIDATE_SOURCE: &str =
-        include_str!("../../orna-semantic-v1/tests/fixtures/semantic_consumer_gap.orna");
+        include_str!("fixtures/semantic_consumer_gap.orna");
 
     let (directory, candidate_repository) =
         repository(&[("main.orna", include_str!("fixtures/main_from_head.orna"))]);
@@ -884,6 +884,35 @@ fn discovers_only_reachable_table_rows_with_opaque_path_metadata() {
             "contacts/Contact/malformed.orna"
         ]
     );
+}
+
+#[test]
+fn discovers_table_rows_with_dots_in_encoded_key_components() {
+    let (directory, repository) = repository(&[
+        (
+            "main.orna",
+            include_str!("fixtures/playground_asset_main.orna"),
+        ),
+        (
+            "playground.orna",
+            include_str!("fixtures/playground_asset_schema.orna"),
+        ),
+        (
+            "playground/Asset/assets~2fapp.js.orna",
+            include_str!("fixtures/playground_asset_row.orna"),
+        ),
+    ]);
+    commit_all(&directory);
+
+    let loaded = ProjectLoader::default().load(&repository).unwrap();
+
+    assert_eq!(loaded.loose_rows().len(), 1);
+    assert_eq!(
+        loaded.loose_rows()[0].logical_path(),
+        "playground/Asset/assets~2fapp.js.orna"
+    );
+    assert_eq!(loaded.loose_rows()[0].table_path(), "playground/Asset");
+    assert_eq!(loaded.loose_rows()[0].key_path(), ["assets~2fapp.js.orna"]);
 }
 
 #[cfg(unix)]

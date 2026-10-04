@@ -1,0 +1,5 @@
+fn text_builder_preserves_previous(): Bool {
+    let original = string_builder.from_text("A");
+    let extended = string_builder.append(original, "B");
+    string_builder.build(original) == "A" && string_builder.build(extended) == "AB"
+}

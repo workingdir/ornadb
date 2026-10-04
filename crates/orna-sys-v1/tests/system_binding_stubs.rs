@@ -33,6 +33,16 @@ const GENERIC_OPERATION_STUB_FIXTURE: &str =
     include_str!("fixtures/sys-generic-operation-stubs.orna");
 const STREAM_CONTROL_EDGE_STUB_FIXTURE: &str =
     include_str!("fixtures/sys-provider-stream-control-edges.orna");
+const PROMISE_CALLBACK_STUB_FIXTURE: &str =
+    include_str!("fixtures/sys-provider-promise-callback.orna");
+const STREAM_ITERATOR_EDGE_STUB_FIXTURE: &str =
+    include_str!("fixtures/sys-provider-stream-iterator-edge.orna");
+const PROVIDER_MAP_ENTRY_EDGE_FIXTURE: &str =
+    include_str!("fixtures/provider-map-entry-edges.json");
+const PROVIDER_TUPLE_ENTRY_EDGE_FIXTURE: &str =
+    include_str!("fixtures/provider-tuple-entry-edges.json");
+const PROVIDER_SCHEMA_CAPTURE_EDGE_FIXTURE: &str =
+    include_str!("fixtures/provider-schema-capture-edges.json");
 
 fn resolve_type(ty: &TypeExpr) -> Result<AbiType, String> {
     match ty {
@@ -569,6 +579,121 @@ fn generated_stream_control_edges_match_bindings_and_schema_contracts() {
 }
 
 #[test]
+fn generated_provider_operation_iterator_edges_match_schema_and_bindings() {
+    let generated_schema = build_provider::generate_provider_registry_schema()
+        .expect("provider iterator-edge schema regenerates from its typed source");
+    assert_eq!(generated_schema, system_provider_abi_schema_json());
+    build_host::validate_json_against_schema(system_provider_abi_json(), &generated_schema)
+        .expect("embedded provider iterator conforms to its regenerated schema");
+
+    let registry_json: Value =
+        serde_json::from_str(system_provider_abi_json()).expect("embedded provider registry");
+    let raw_operations = registry_json["operations"]
+        .as_array()
+        .expect("generated provider registry has operation rows");
+    let raw_roles = registry_json["roles"]
+        .as_array()
+        .expect("generated provider registry has role rows");
+    let registry = orna_sys_v1::SystemProviderAbi::from_json(system_provider_abi_json())
+        .expect("schema-validated provider registry parses into typed contracts");
+    let generated_source = system_binding_stubs();
+    let parsed_generated = parse_module(generated_source);
+    assert!(
+        parsed_generated.is_ok(),
+        "generated binding bundle parses: {:?}",
+        parsed_generated.diagnostics
+    );
+    let binding_names = generated_source
+        .lines()
+        .filter_map(|line| line.strip_prefix("// sys-op: "))
+        .collect::<BTreeSet<_>>();
+    let operation_names = registry
+        .operations()
+        .map(|operation| operation.id.as_str())
+        .collect::<BTreeSet<_>>();
+    assert_eq!(binding_names, operation_names);
+
+    let empty_json = serde_json::json!({
+        "abi_version": registry_json["abi_version"].clone(),
+        "operations": [],
+        "roles": [],
+    })
+    .to_string();
+    build_host::validate_json_against_schema(&empty_json, &generated_schema)
+        .expect_err("published provider schema rejects an empty operation iterator");
+    let empty_registry = orna_sys_v1::SystemProviderAbi::from_json(&empty_json)
+        .expect("empty provider iterator edge parses");
+    assert!(empty_registry.operations().next().is_none());
+    assert!(empty_registry.roles().next().is_none());
+
+    let singleton = registry
+        .operations()
+        .find(|operation| operation.role.is_some())
+        .expect("provider ABI has a linked operation for a singleton iterator edge");
+    let singleton_name = singleton.id.as_str();
+    let singleton_row = raw_operations
+        .iter()
+        .find(|row| row["name"] == singleton_name)
+        .expect("singleton operation has a generated schema row")
+        .clone();
+    let singleton_role_name = singleton
+        .role
+        .as_ref()
+        .expect("selected singleton operation has a role")
+        .as_str();
+    let mut singleton_role_row = raw_roles
+        .iter()
+        .find(|row| row["name"] == singleton_role_name)
+        .expect("singleton operation has a generated role row")
+        .clone();
+    singleton_role_row["operations"] = serde_json::json!([singleton_name]);
+    let singleton_json = serde_json::json!({
+        "abi_version": registry_json["abi_version"].clone(),
+        "operations": [singleton_row],
+        "roles": [singleton_role_row],
+    })
+    .to_string();
+    build_host::validate_json_against_schema(&singleton_json, &generated_schema)
+        .expect("singleton provider iterator edge remains schema-valid");
+    let singleton_registry = orna_sys_v1::SystemProviderAbi::from_json(&singleton_json)
+        .expect("singleton provider iterator edge parses");
+    let mut singleton_operations = singleton_registry.operations();
+    assert_eq!(
+        singleton_operations
+            .next()
+            .map(|operation| operation.id.as_str()),
+        Some(singleton_name)
+    );
+    assert!(singleton_operations.next().is_none());
+    let singleton_binding = system_function_descriptor(singleton_name)
+        .expect("singleton iterator contract has a generated binding");
+    assert_eq!(singleton_binding.signature, singleton.signature.source);
+    assert!(binding_names.contains(singleton_name));
+
+    let mut full_operations = registry.operations();
+    let first = full_operations
+        .next()
+        .expect("generated provider iterator has a first operation");
+    let last = registry
+        .operations()
+        .last()
+        .expect("generated provider iterator has a last operation");
+    assert!(binding_names.contains(first.id.as_str()));
+    assert!(binding_names.contains(last.id.as_str()));
+    assert_eq!(
+        registry.operations().count(),
+        raw_operations.len(),
+        "provider iterator cardinality matches its schema rows"
+    );
+    println!(
+        "generated_provider_operation_iterator_edges schema_validations=3 edge_cases=3 empty_schema_rejected=1 singleton=1 full_operations={} generated_bindings={} boundary_bindings=2 total_cases={}",
+        raw_operations.len(),
+        binding_names.len(),
+        3 + raw_operations.len() + binding_names.len() + 2
+    );
+}
+
+#[test]
 fn generated_provider_default_values_match_schema_and_idl_stubs() {
     let registry_json = system_provider_abi_json();
     let schema_json = system_provider_abi_schema_json();
@@ -939,6 +1064,373 @@ fn generated_provider_argument_map_variadics_keep_one_schema_and_idl_slot() {
 }
 
 #[test]
+fn generated_provider_map_entry_fixture_matches_schema_and_bindings() {
+    const OPERATIONS: [&str; 4] = [
+        "sys.invoke(Value)",
+        "sys.invoke<T>",
+        "sys.start(Value)",
+        "sys.start<T>",
+    ];
+    const FIXTURE_CASES: [(&str, usize); 3] = [
+        ("empty", 0),
+        ("empty-key", 1),
+        ("unicode-control-heterogeneous-protected", 6),
+    ];
+
+    let generated_schema = build_provider::generate_provider_registry_schema()
+        .expect("map-entry provider schema regenerates from its typed source");
+    assert_eq!(generated_schema, system_provider_abi_schema_json());
+    build_host::validate_json_against_schema(system_provider_abi_json(), &generated_schema)
+        .expect("embedded map-entry binding contracts conform to the generated schema");
+
+    let fixture: Value = serde_json::from_str(PROVIDER_MAP_ENTRY_EDGE_FIXTURE)
+        .expect("crate-local provider map-entry edge fixture is valid JSON");
+    let cases = fixture["cases"]
+        .as_array()
+        .expect("provider map-entry fixture has cases");
+    assert_eq!(cases.len(), FIXTURE_CASES.len());
+    for (case_name, entry_count) in FIXTURE_CASES {
+        let case = cases
+            .iter()
+            .find(|case| case["name"] == case_name)
+            .unwrap_or_else(|| panic!("fixture retains {case_name} map-entry edges"));
+        assert_eq!(
+            case["entries"].as_array().map(Vec::len),
+            Some(entry_count),
+            "{case_name} fixture cardinality"
+        );
+    }
+
+    let source = system_binding_stubs();
+    let parsed = parse_module(source);
+    assert!(
+        parsed.is_ok(),
+        "generated map-entry bindings parse: {:?}",
+        parsed.diagnostics
+    );
+    let registry = system_provider_abi();
+    let mut typed_contracts = 0;
+    let mut generated_bindings = 0;
+    let mut map_slots = 0;
+    for operation_name in OPERATIONS {
+        let contract = registry
+            .operation(operation_name)
+            .expect("map-entry operation exists in typed provider registry");
+        let generated = system_function_descriptor(operation_name)
+            .expect("map-entry operation has a macro-generated binding");
+        assert_eq!(generated.signature, contract.signature.source);
+        assert_eq!(contract.effects.iter().next(), Some(generated.effect));
+        typed_contracts += 1;
+
+        let marker = format!("// sys-op: {operation_name}");
+        let declaration = source
+            .split("\n\n")
+            .find(|declaration| declaration.lines().any(|line| line == marker))
+            .expect("generated bundle contains each map-entry declaration");
+        validate_stub_contract(declaration, contract)
+            .unwrap_or_else(|error| panic!("{operation_name} binding parity: {error}"));
+        generated_bindings += 1;
+
+        let map_parameters = contract
+            .signature
+            .parameters
+            .iter()
+            .filter(|parameter| parameter.name == "arguments")
+            .collect::<Vec<_>>();
+        assert_eq!(map_parameters.len(), 1);
+        assert_eq!(
+            map_parameters[0].ty,
+            AbiType::Named("sys.ArgumentMap".to_owned())
+        );
+        map_slots += map_parameters.len();
+    }
+
+    assert_eq!(typed_contracts, OPERATIONS.len());
+    assert_eq!(generated_bindings, typed_contracts);
+    assert_eq!(map_slots, OPERATIONS.len());
+    println!(
+        "generated_provider_map_entry_binding_parity operations={generated_bindings} fixture_cases={} fixture_entries={} map_slots={map_slots} schema_validated=1 typed_contracts={typed_contracts} total_cases={}",
+        FIXTURE_CASES.len(),
+        FIXTURE_CASES.iter().map(|(_, count)| count).sum::<usize>(),
+        generated_bindings + FIXTURE_CASES.len() + map_slots + 1
+    );
+}
+
+#[test]
+fn generated_provider_tuple_entry_fixture_matches_schema_and_bindings() {
+    const OPERATIONS: [&str; 4] = [
+        "sys.invoke(Value)",
+        "sys.invoke<T>",
+        "sys.start(Value)",
+        "sys.start<T>",
+    ];
+    const FIXTURE_CASES: [(&str, usize); 4] = [
+        ("empty", 0),
+        ("single-tuple", 1),
+        ("nested-optional-control", 3),
+        ("protected-tuple", 1),
+    ];
+
+    let generated_schema = build_provider::generate_provider_registry_schema()
+        .expect("tuple-entry provider schema regenerates from its typed source");
+    assert_eq!(generated_schema, system_provider_abi_schema_json());
+    build_host::validate_json_against_schema(system_provider_abi_json(), &generated_schema)
+        .expect("embedded tuple-entry binding contracts conform to the generated schema");
+
+    let fixture: Value = serde_json::from_str(PROVIDER_TUPLE_ENTRY_EDGE_FIXTURE)
+        .expect("crate-local provider tuple-entry edge fixture is valid JSON");
+    let cases = fixture["cases"]
+        .as_array()
+        .expect("provider tuple-entry fixture has cases");
+    assert_eq!(cases.len(), FIXTURE_CASES.len());
+    let mut tuple_entries = 0;
+    for (case_name, entry_count) in FIXTURE_CASES {
+        let case = cases
+            .iter()
+            .find(|case| case["name"] == case_name)
+            .unwrap_or_else(|| panic!("fixture retains {case_name} tuple-entry edges"));
+        let entries = case["entries"]
+            .as_array()
+            .unwrap_or_else(|| panic!("{case_name} fixture has an entries array"));
+        assert_eq!(entries.len(), entry_count, "{case_name} fixture cardinality");
+        assert!(
+            entries.iter().all(|entry| {
+                entry["type"]
+                    .as_str()
+                    .is_some_and(|ty| ty.starts_with('(') && ty.ends_with(')'))
+            }),
+            "{case_name} entries retain tuple static types"
+        );
+        tuple_entries += entries.len();
+    }
+
+    let source = system_binding_stubs();
+    let parsed = parse_module(source);
+    assert!(
+        parsed.is_ok(),
+        "generated tuple-entry bindings parse: {:?}",
+        parsed.diagnostics
+    );
+    let registry = system_provider_abi();
+    let mut typed_contracts = 0;
+    let mut generated_bindings = 0;
+    let mut map_slots = 0;
+    for operation_name in OPERATIONS {
+        let contract = registry
+            .operation(operation_name)
+            .expect("tuple-entry operation exists in typed provider registry");
+        let generated = system_function_descriptor(operation_name)
+            .expect("tuple-entry operation has a macro-generated binding");
+        assert_eq!(generated.signature, contract.signature.source);
+        assert_eq!(contract.effects.iter().next(), Some(generated.effect));
+        typed_contracts += 1;
+
+        let marker = format!("// sys-op: {operation_name}");
+        let declaration = source
+            .split("\n\n")
+            .find(|declaration| declaration.lines().any(|line| line == marker))
+            .expect("generated bundle contains each tuple-entry declaration");
+        validate_stub_contract(declaration, contract)
+            .unwrap_or_else(|error| panic!("{operation_name} binding parity: {error}"));
+        generated_bindings += 1;
+
+        let map_parameters = contract
+            .signature
+            .parameters
+            .iter()
+            .filter(|parameter| parameter.name == "arguments")
+            .collect::<Vec<_>>();
+        assert_eq!(map_parameters.len(), 1);
+        assert_eq!(map_parameters[0].ty, AbiType::Named("sys.ArgumentMap".to_owned()));
+        map_slots += map_parameters.len();
+    }
+
+    assert_eq!(typed_contracts, OPERATIONS.len());
+    assert_eq!(generated_bindings, typed_contracts);
+    assert_eq!(map_slots, OPERATIONS.len());
+    assert_eq!(tuple_entries, 5);
+    println!(
+        "generated_provider_tuple_entry_binding_parity operations={generated_bindings} fixture_cases={} tuple_entries={tuple_entries} map_slots={map_slots} schema_validated=1 typed_contracts={typed_contracts} total_cases={}",
+        FIXTURE_CASES.len(),
+        generated_bindings + FIXTURE_CASES.len() + tuple_entries + map_slots + 1
+    );
+}
+
+#[test]
+fn generated_provider_schema_capture_edges_match_bindings() {
+    let fixture: Value = serde_json::from_str(PROVIDER_SCHEMA_CAPTURE_EDGE_FIXTURE)
+        .expect("crate-local provider schema-capture fixture is valid JSON");
+    let operation_name = fixture["operation"]
+        .as_str()
+        .expect("schema-capture fixture identifies a provider operation");
+    let baseline: Value = serde_json::from_str(system_provider_abi_json())
+        .expect("embedded provider registry is valid JSON");
+    let schema_json = build_provider::generate_provider_registry_schema()
+        .expect("provider schema-capture schema regenerates from its typed source");
+    assert_eq!(schema_json, system_provider_abi_schema_json());
+    build_host::validate_json_against_schema(system_provider_abi_json(), &schema_json)
+        .expect("embedded provider registry conforms to its generated schema");
+
+    let operation_index = baseline["operations"]
+        .as_array()
+        .expect("provider registry has operation rows")
+        .iter()
+        .position(|operation| operation["name"] == operation_name)
+        .expect("schema-capture operation exists in the provider registry");
+    let role_annotation = baseline["operations"][operation_index]["role"]
+        .as_str()
+        .expect("schema-capture operation has a provider role");
+    let role_name = role_annotation
+        .split_once('@')
+        .expect("provider role annotation captures its version")
+        .0;
+    let role_index = baseline["roles"]
+        .as_array()
+        .expect("provider registry has role rows")
+        .iter()
+        .position(|role| role["name"] == role_name)
+        .expect("schema-capture operation role exists in the provider registry");
+    let cases = fixture["cases"]
+        .as_array()
+        .expect("schema-capture fixture has edge cases");
+    assert_eq!(cases.len(), 4);
+
+    let mut schema_acceptances = 0;
+    let mut schema_rejections = 0;
+    let mut typed_acceptances = 0;
+    let mut typed_rejections = 0;
+    let mut generated_bindings = 0;
+    let source = system_binding_stubs();
+    for case in cases {
+        let case_name = case["name"]
+            .as_str()
+            .expect("schema-capture case has a stable name");
+        let field = case["field"]
+            .as_str()
+            .expect("schema-capture case identifies a nullable field");
+        let omit = case["omit"]
+            .as_bool()
+            .expect("schema-capture case states field presence");
+        let mut captured = baseline.clone();
+        match field {
+            "operation.role" => {
+                let operation = captured["operations"][operation_index]
+                    .as_object_mut()
+                    .expect("provider operation row is an object");
+                if omit {
+                    operation.remove("role");
+                } else {
+                    operation.insert("role".to_owned(), case["value"].clone());
+                    if case["value"].is_null() {
+                        let role_operations = captured["roles"][role_index]["operations"]
+                            .as_array_mut()
+                            .expect("provider role captures its operation list");
+                        role_operations.retain(|operation| operation != operation_name);
+                        assert!(
+                            !role_operations.is_empty(),
+                            "null-role capture keeps the shared role non-empty"
+                        );
+                    }
+                }
+            }
+            "role.builtin_provider" => {
+                let role = captured["roles"][role_index]
+                    .as_object_mut()
+                    .expect("provider role row is an object");
+                if let Some(required) = case.get("required").and_then(Value::as_bool) {
+                    role.insert("required".to_owned(), Value::Bool(required));
+                }
+                if omit {
+                    role.remove("builtin_provider");
+                } else {
+                    role.insert("builtin_provider".to_owned(), case["value"].clone());
+                }
+            }
+            other => panic!("unexpected schema-capture field {other:?}"),
+        }
+
+        let captured_json = captured.to_string();
+        let schema_result = build_host::validate_json_against_schema(&captured_json, &schema_json);
+        let schema_accepts = case["schema_accepts"]
+            .as_bool()
+            .expect("schema-capture fixture records schema acceptance");
+        assert_eq!(
+            schema_result.is_ok(),
+            schema_accepts,
+            "generated schema capture for {case_name}"
+        );
+        if schema_accepts {
+            schema_acceptances += 1;
+        } else {
+            assert!(
+                schema_result
+                    .expect_err("omitted nullable fields violate the schema")
+                    .contains("missing required field"),
+                "schema identifies omitted nullable property in {case_name}"
+            );
+            schema_rejections += 1;
+        }
+
+        let parsed = orna_sys_v1::SystemProviderAbi::from_json(&captured_json);
+        let typed_accepts = case["typed_parse_accepts"]
+            .as_bool()
+            .expect("schema-capture fixture records typed parser acceptance");
+        assert_eq!(
+            parsed.is_ok(),
+            typed_accepts,
+            "typed schema capture for {case_name}"
+        );
+        match parsed {
+            Ok(table) => {
+                table
+                    .validate()
+                    .unwrap_or_else(|error| panic!("captured provider table validates: {error:?}"));
+                let contract = table
+                    .operation(operation_name)
+                    .expect("captured provider retains the generated operation");
+                let generated = system_function_descriptor(operation_name)
+                    .expect("captured provider operation retains its generated binding");
+                assert_eq!(generated.signature, contract.signature.source);
+                assert_eq!(contract.effects.iter().next(), Some(generated.effect));
+                let marker = format!("// sys-op: {operation_name}");
+                let declaration = source
+                    .split("\n\n")
+                    .find(|declaration| declaration.lines().any(|line| line == marker))
+                    .expect("generated binding bundle retains the captured operation");
+                validate_stub_contract(declaration, contract)
+                    .unwrap_or_else(|error| panic!("{case_name} binding parity: {error}"));
+                generated_bindings += 1;
+                typed_acceptances += 1;
+            }
+            Err(error) => {
+                assert_eq!(
+                    error,
+                    orna_sys_v1::ProviderAbiError::InvalidJson,
+                    "omitted nullable fields are not captured by the typed parser"
+                );
+                typed_rejections += 1;
+            }
+        }
+    }
+
+    assert_eq!(schema_acceptances, 2);
+    assert_eq!(schema_rejections, 2);
+    assert_eq!(typed_acceptances, schema_acceptances);
+    assert_eq!(typed_rejections, schema_rejections);
+    assert_eq!(generated_bindings, schema_acceptances);
+    println!(
+        "generated_provider_schema_capture_binding_parity cases={} schema_acceptances={schema_acceptances} schema_rejections={schema_rejections} typed_acceptances={typed_acceptances} typed_rejections={typed_rejections} generated_bindings={generated_bindings} total_cases={}",
+        cases.len(),
+        cases.len()
+            + schema_acceptances
+            + schema_rejections
+            + typed_acceptances
+            + typed_rejections
+            + generated_bindings
+    );
+}
+
+#[test]
 fn generated_provider_aliases_preserve_argument_map_binding_parity() {
     const PROVIDER_ALIASES: [&str; 4] = ["-", "_", "9", "_9.edge-name"];
     const VARIADIC_OPERATIONS: [&str; 4] = [
@@ -1253,7 +1745,7 @@ fn generated_provider_alias_optional_defaults_match_schema_and_idl() {
 }
 
 #[test]
-fn generated_object_return_bindings_match_schema_registry_and_idl() {
+fn generated_object_and_stream_return_bindings_match_schema_registry_and_idl() {
     const OBJECT_RETURN_OPERATIONS: [&str; 2] = ["sys.invoke<T>", "sys.start<T>"];
 
     let generated_schema = build_provider::generate_provider_registry_schema()
@@ -1261,6 +1753,16 @@ fn generated_object_return_bindings_match_schema_registry_and_idl() {
     assert_eq!(generated_schema, system_provider_abi_schema_json());
     build_host::validate_json_against_schema(system_provider_abi_json(), &generated_schema)
         .expect("embedded provider registry conforms to its regenerated schema");
+    let api_inventory: Value =
+        serde_json::from_str(&system_api_json()).expect("embedded system API inventory");
+    let stream_alias = api_inventory["reference_aliases"]
+        .as_array()
+        .expect("system API inventory exposes reference aliases")
+        .iter()
+        .find(|alias| alias["name"] == "sys.StreamRef")
+        .expect("stream return witness is a generated reference alias");
+    assert_eq!(stream_alias["target"], "sys.Stream");
+    assert_eq!(stream_alias["definition"], "sys.RowRef<sys.Stream>");
     let registry_json: Value =
         serde_json::from_str(system_provider_abi_json()).expect("embedded provider registry");
     let raw_operations = registry_json["operations"]
@@ -1347,7 +1849,7 @@ fn generated_object_return_bindings_match_schema_registry_and_idl() {
     assert_eq!(idl_results, OBJECT_RETURN_OPERATIONS.len());
     assert_eq!(generic_result_witnesses, OBJECT_RETURN_OPERATIONS.len());
     println!(
-        "generated_object_return_binding_parity operations={} schema_rows={schema_rows} typed_contracts={typed_contracts} macro_bindings={generated_bindings} idl_results={idl_results} result_witnesses={generic_result_witnesses} total_cases={}",
+        "generated_object_and_stream_return_binding_parity operations={} schema_rows={schema_rows} typed_contracts={typed_contracts} macro_bindings={generated_bindings} idl_results={idl_results} result_witnesses={generic_result_witnesses} stream_alias=1 total_cases={}",
         OBJECT_RETURN_OPERATIONS.len(),
         schema_rows + typed_contracts + generated_bindings + idl_results + generic_result_witnesses
     );
@@ -1442,6 +1944,385 @@ fn generated_provider_callback_binding_matches_schema_and_idl() {
         "generated_provider_callback_binding_parity schema_validated=1 typed_contracts=1 macro_bindings=1 idl_parameters={} idl_results=1 provider_role=1 total_cases={}",
         signature.parameters.len(),
         5 + signature.parameters.len()
+    );
+}
+
+#[test]
+fn generated_provider_promise_callback_binding_matches_schema_and_idl() {
+    const OPERATIONS: [&str; 2] = ["sys.await", "sys.start<T>"];
+
+    let generated_schema = build_provider::generate_provider_registry_schema()
+        .expect("provider promise schema regenerates from its typed source");
+    assert_eq!(generated_schema, system_provider_abi_schema_json());
+    build_host::validate_json_against_schema(system_provider_abi_json(), &generated_schema)
+        .expect("embedded promise operations conform to the regenerated provider schema");
+
+    let registry_json: Value =
+        serde_json::from_str(system_provider_abi_json()).expect("embedded provider registry");
+    let raw_operations = registry_json["operations"]
+        .as_array()
+        .expect("generated provider registry has operation rows");
+    let registry = orna_sys_v1::SystemProviderAbi::from_json(system_provider_abi_json())
+        .expect("schema-validated promise registry parses into typed contracts");
+    let fixture = PROMISE_CALLBACK_STUB_FIXTURE.trim_end();
+    let parsed = parse_module(fixture);
+    assert!(
+        parsed.is_ok(),
+        "generated promise callback fixture parses: {:?}",
+        parsed.diagnostics
+    );
+    assert_eq!(parsed.value.items.len(), 3);
+    let markers = fixture
+        .lines()
+        .filter_map(|line| line.strip_prefix("// sys-op: "))
+        .collect::<Vec<_>>();
+    assert_eq!(markers, OPERATIONS);
+    let generated_source = system_binding_stubs();
+    let generated_parsed = parse_module(generated_source);
+    assert!(
+        generated_parsed.is_ok(),
+        "complete generated promise binding bundle parses: {:?}",
+        generated_parsed.diagnostics
+    );
+    let generated_markers = generated_source
+        .lines()
+        .filter_map(|line| line.strip_prefix("// sys-op: "))
+        .collect::<Vec<_>>();
+
+    let mut schema_rows = 0;
+    let mut typed_contracts = 0;
+    let mut macro_bindings = 0;
+    let mut idl_operations = 0;
+    for (index, operation_name) in OPERATIONS.iter().enumerate() {
+        let contract = registry
+            .operation(operation_name)
+            .expect("promise callback operation exists in the typed provider registry");
+        let row = raw_operations
+            .iter()
+            .find(|row| row["name"] == *operation_name)
+            .expect("generated schema input contains the promise callback operation");
+        assert_eq!(
+            row["signature"].as_str(),
+            Some(contract.signature.source.as_str()),
+            "schema row and typed promise contract agree for {operation_name}"
+        );
+        schema_rows += 1;
+        typed_contracts += 1;
+
+        let generated = system_function_descriptor(operation_name)
+            .expect("promise operation has a macro-generated binding descriptor");
+        assert_eq!(generated.signature, contract.signature.source);
+        assert_eq!(contract.effects.iter().next(), Some(generated.effect));
+        assert!(contract.role.is_some());
+        macro_bindings += 1;
+
+        let Declaration::Function { signature, .. } = &parsed.value.items[index].declaration else {
+            panic!("generated promise binding {operation_name} is not a function")
+        };
+        let generated_index = generated_markers
+            .iter()
+            .position(|marker| *marker == *operation_name)
+            .expect("generated binding bundle has the promise operation marker");
+        let Declaration::Function {
+            signature: generated_signature,
+            ..
+        } = &generated_parsed.value.items[generated_index].declaration
+        else {
+            panic!("generated bundle entry {operation_name} is not a function")
+        };
+        assert_eq!(
+            signature
+                .generics
+                .iter()
+                .map(|generic| generic.name.as_str())
+                .collect::<Vec<_>>(),
+            contract
+                .signature
+                .type_parameters
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            generated_signature
+                .generics
+                .iter()
+                .map(|generic| generic.name.as_str())
+                .collect::<Vec<_>>(),
+            contract
+                .signature
+                .type_parameters
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            signature.parameters.len(),
+            contract.signature.parameters.len()
+        );
+        assert_eq!(
+            generated_signature.parameters.len(),
+            contract.signature.parameters.len()
+        );
+        for (idl_parameter, registry_parameter) in signature
+            .parameters
+            .iter()
+            .zip(&contract.signature.parameters)
+        {
+            assert_eq!(
+                resolve_type(
+                    idl_parameter
+                        .annotation
+                        .as_ref()
+                        .expect("generated promise IDL parameter is typed")
+                )
+                .expect("generated promise IDL parameter type resolves"),
+                registry_parameter.ty
+            );
+        }
+        for (idl_parameter, registry_parameter) in generated_signature
+            .parameters
+            .iter()
+            .zip(&contract.signature.parameters)
+        {
+            assert_eq!(
+                resolve_type(
+                    idl_parameter
+                        .annotation
+                        .as_ref()
+                        .expect("generated binding parameter is typed")
+                )
+                .expect("generated binding parameter type resolves"),
+                registry_parameter.ty
+            );
+        }
+        assert_eq!(
+            resolve_type(
+                signature
+                    .result
+                    .as_ref()
+                    .expect("generated promise IDL result is typed")
+            )
+            .expect("generated promise IDL result type resolves"),
+            contract.signature.result
+        );
+        assert_eq!(
+            resolve_type(
+                generated_signature
+                    .result
+                    .as_ref()
+                    .expect("generated binding result is typed")
+            )
+            .expect("generated binding result type resolves"),
+            contract.signature.result
+        );
+        idl_operations += 1;
+    }
+
+    let await_contract = registry
+        .operation("sys.await")
+        .expect("await callback contract exists");
+    let start_contract = registry
+        .operation("sys.start<T>")
+        .expect("promise producer contract exists");
+    assert_eq!(
+        start_contract.signature.result, await_contract.signature.parameters[0].ty,
+        "start handle flows directly into await's invocation parameter"
+    );
+    assert_eq!(
+        start_contract.signature.result,
+        AbiType::Applied {
+            constructor: "sys.InvocationHandle".to_owned(),
+            arguments: vec![AbiType::Named("T".to_owned())],
+        }
+    );
+    assert_eq!(
+        await_contract.signature.result,
+        AbiType::Applied {
+            constructor: "sys.InvocationResult".to_owned(),
+            arguments: vec![AbiType::Named("T".to_owned())],
+        }
+    );
+
+    let Declaration::Function {
+        signature: callback_signature,
+        ..
+    } = &parsed.value.items[2].declaration
+    else {
+        panic!("promise completion callback fixture is not a function")
+    };
+    assert_eq!(callback_signature.name, "promise_callback");
+    assert_eq!(callback_signature.generics[0].name, "T");
+    assert_eq!(
+        resolve_type(
+            callback_signature.parameters[0]
+                .annotation
+                .as_ref()
+                .expect("completion callback accepts an invocation handle")
+        )
+        .expect("completion callback input type resolves"),
+        start_contract.signature.result
+    );
+    assert_eq!(
+        resolve_type(
+            callback_signature
+                .result
+                .as_ref()
+                .expect("completion callback returns the await result")
+        )
+        .expect("completion callback result type resolves"),
+        await_contract.signature.result
+    );
+    assert!(fixture.ends_with("= sys.await(invocation);"));
+
+    println!(
+        "generated_provider_promise_callback_binding_parity operations={} schema_validated=1 schema_rows={schema_rows} typed_contracts={typed_contracts} macro_bindings={macro_bindings} idl_operations={idl_operations} handle_result_pairs=1 completion_callback=1 total_cases={}",
+        OPERATIONS.len(),
+        1 + schema_rows + typed_contracts + macro_bindings + idl_operations + 3
+    );
+}
+
+#[test]
+fn generated_provider_stream_iterator_edge_binding_matches_schema_and_idl() {
+    const OPERATIONS: [&str; 2] = ["sys.await", "sys.start<T>"];
+
+    let generated_provider_schema = build_provider::generate_provider_registry_schema()
+        .expect("provider iterator-edge schema regenerates from its typed source");
+    assert_eq!(generated_provider_schema, system_provider_abi_schema_json());
+    build_host::validate_json_against_schema(
+        system_provider_abi_json(),
+        &generated_provider_schema,
+    )
+    .expect("embedded provider iterator-edge contracts validate against their schema");
+    build_host::validate_json_against_schema(&system_api_json(), system_api_schema_json())
+        .expect("embedded stream reference metadata validates against the system API schema");
+
+    let api: Value = serde_json::from_str(&system_api_json())
+        .expect("embedded system API inventory is valid JSON");
+    let stream_alias = api["reference_aliases"]
+        .as_array()
+        .expect("system API inventory exposes reference aliases")
+        .iter()
+        .find(|alias| alias["name"] == "sys.StreamRef")
+        .expect("iterator-edge witness is a generated stream reference alias");
+    assert_eq!(stream_alias["target"], "sys.Stream");
+    assert_eq!(stream_alias["definition"], "sys.RowRef<sys.Stream>");
+
+    let fixture = STREAM_ITERATOR_EDGE_STUB_FIXTURE.trim_end();
+    let parsed = parse_module(fixture);
+    assert!(
+        parsed.is_ok(),
+        "stream iterator-edge fixture parses: {:?}",
+        parsed.diagnostics
+    );
+    assert_eq!(parsed.value.items.len(), 3);
+    let markers = fixture
+        .lines()
+        .filter_map(|line| line.strip_prefix("// sys-op: "))
+        .collect::<Vec<_>>();
+    assert_eq!(markers, OPERATIONS);
+
+    let generated_source = system_binding_stubs();
+    let generated_parsed = parse_module(generated_source);
+    assert!(
+        generated_parsed.is_ok(),
+        "generated iterator-edge binding bundle parses: {:?}",
+        generated_parsed.diagnostics
+    );
+    let generated_markers = generated_source
+        .lines()
+        .filter_map(|line| line.strip_prefix("// sys-op: "))
+        .collect::<Vec<_>>();
+    let registry = system_provider_abi();
+    for (index, operation_name) in OPERATIONS.iter().enumerate() {
+        let contract = registry
+            .operation(operation_name)
+            .expect("stream iterator-edge operation exists in the typed provider registry");
+        let declaration = fixture
+            .split("\n\n")
+            .nth(index)
+            .expect("fixture includes both generated provider declarations");
+        validate_stub_contract(declaration, contract)
+            .unwrap_or_else(|error| panic!("{operation_name} fixture parity: {error}"));
+        assert!(
+            generated_source.contains(declaration),
+            "generated binding bundle retains the {operation_name} iterator-edge declaration"
+        );
+        let generated_index = generated_markers
+            .iter()
+            .position(|marker| *marker == *operation_name)
+            .expect("generated binding bundle marks each iterator-edge operation");
+        let Declaration::Function {
+            signature: generated_signature,
+            ..
+        } = &generated_parsed.value.items[generated_index].declaration
+        else {
+            panic!("generated binding {operation_name} is not a function")
+        };
+        let Declaration::Function { signature, .. } = &parsed.value.items[index].declaration else {
+            panic!("fixture binding {operation_name} is not a function")
+        };
+        assert_eq!(
+            signature
+                .generics
+                .iter()
+                .map(|generic| generic.name.as_str())
+                .collect::<Vec<_>>(),
+            generated_signature
+                .generics
+                .iter()
+                .map(|generic| generic.name.as_str())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            signature.parameters.len(),
+            contract.signature.parameters.len()
+        );
+        assert_eq!(
+            resolve_type(signature.result.as_ref().expect("typed fixture result"))
+                .expect("fixture result type resolves"),
+            contract.signature.result
+        );
+    }
+
+    let Declaration::Function {
+        signature: callback,
+        ..
+    } = &parsed.value.items[2].declaration
+    else {
+        panic!("stream iterator callback fixture is not a function")
+    };
+    assert_eq!(callback.name, "stream_iterator_callback");
+    let stream_ref = AbiType::Named("sys.StreamRef".to_owned());
+    assert_eq!(
+        resolve_type(
+            callback.parameters[0]
+                .annotation
+                .as_ref()
+                .expect("callback accepts an iterator-edge handle")
+        )
+        .expect("callback handle type resolves"),
+        AbiType::Applied {
+            constructor: "sys.InvocationHandle".to_owned(),
+            arguments: vec![stream_ref.clone()],
+        }
+    );
+    assert_eq!(
+        resolve_type(callback.result.as_ref().expect("typed callback result"))
+            .expect("callback result type resolves"),
+        AbiType::Applied {
+            constructor: "sys.InvocationResult".to_owned(),
+            arguments: vec![stream_ref],
+        }
+    );
+    assert!(fixture.ends_with("= sys.await(invocation);"));
+
+    println!(
+        "generated_provider_stream_iterator_edge_binding_parity operations={} schema_validated=1 api_schema_validated=1 stream_alias=1 typed_contracts={} macro_bindings={} iterator_callback=1 total_cases={}",
+        OPERATIONS.len(),
+        OPERATIONS.len(),
+        OPERATIONS.len(),
+        2 + OPERATIONS.len() * 3 + 3
     );
 }
 

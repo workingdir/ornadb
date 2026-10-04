@@ -1,0 +1,27 @@
+std.iterator.consumers.count(std.iterator.from_list([2, 4, 6, 8])) == 4
+&& std.iterator.consumers.count(std.iterator.empty()) == 0
+&& std.iterator.consumers.count_by(
+    std.iterator.from_list([1, 2, 3, 4, 5]),
+    value => value % 2 == 0
+) == 2
+&& std.iterator.consumers.find_map(
+    std.iterator.from_list([1, 2, 3, 4]),
+    value => if value < 3 {
+        null
+    } else if value == 3 {
+        Some(value * 2)
+    } else {
+        fail(error(code: "consumer.find_map.overread", message: "find_map continued after Some"))
+    }
+) == Some(6)
+&& std.iterator.consumers.reduce(
+    std.iterator.from_list([1, 2, 3, 4]),
+    (total, value) => total + value
+) == Some(10)
+&& std.iterator.consumers.reduce(std.iterator.empty(), (left, right) => left + right) == null
+
+&& std.iterator.consumers.find_map(
+    std.iterator.from_list([1, 2]),
+    value => if value == 1 { Some(null) } else { Some(8) }
+) == Some(null)
+&& std.iterator.consumers.find_map(std.iterator.empty(), value => Some(value)) == null

@@ -1,22 +1,25 @@
 //! The executable edge for `orna serve`.
 //!
-//! The reference requires a loopback default but does not prescribe URL
-//! paths, so this host provides a small stable surface: a rendered project and
-//! module browser, per-clone metadata, pure expression queries, Git smart HTTP,
-//! and the existing authenticated `orna.present.v1` session/WebSocket routes.
+//! The host keeps Git-backed pages server-rendered and exposes authenticated
+//! runtime evaluation through the live presentation transport.
 
 use super::*;
-use orna_application_v1::ApplicationLiveAdapter;
+use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
+use orna_application_v1::{ApplicationLiveAdapter, LIVE_RUN_EVENTS_WATCH_SOURCE};
 use orna_live_v1::{
-    HttpConnection, LiveHost, LiveSessionAuthority, LiveTransport,
-    SessionMetadata, SystemCredentialIssuer, TransportLimits, WireRequest,
+    HttpConnection, LiveHost, LiveSessionAuthority, LiveTransport, SessionMetadata,
+    SystemCredentialIssuer, TransportLimits, WireRequest,
 };
-use orna_protocol_v1::{
-    Envelope, Limits as ProtocolLimits, Message, PresentationContext,
+use orna_protocol_v1::{Envelope, Limits as ProtocolLimits, Message, PresentationContext};
+use orna_repository_v1::{
+    CommittedBranch, CommittedLogEntry, CommittedTreeEntryKind, GitCommitRef, ManagedPath,
+    Repository, RuntimeGeneration,
 };
-use orna_repository_v1::{Repository, RuntimeGeneration};
-use orna_security_v1::{Origin, OriginPolicy, SessionBoundary, SessionDeletionAdapter};
+use orna_security_v1::{
+    MAX_SESSION_LEASE, Origin, OriginPolicy, SessionBoundary, SessionDeletionAdapter,
+};
 use orna_serving_v1::Serving;
+use orna_syntax_v1::{Declaration, Expr, LiteralKind, Pattern, TypeExpr, parse_module, parse_row};
 use std::{
     io::{self, BufRead, BufReader, Read, Write},
     net::{SocketAddr, TcpListener, TcpStream},
@@ -28,7 +31,7 @@ use std::{
 const MAX_HEADER_BYTES: usize = 16 * 1024;
 const MAX_REQUEST_BODY_BYTES: usize = 16 * 1024 * 1024;
 const MAX_GIT_REQUEST_BODY_BYTES: usize = 512 * 1024 * 1024;
-const SESSION_LEASE_MS: u64 = 60 * 60 * 1000;
+const SESSION_LEASE_MS: u64 = MAX_SESSION_LEASE;
 
 struct ServeState {
     root: PathBuf,
@@ -145,7 +148,13 @@ pub(super) fn run(endpoint: &Endpoint, port: u16) -> Result<(), Diagnostic> {
         )
     })?;
     let address = listener.status().address;
-    let state = new_serve_state(repository.worktree().to_path_buf(), identity, address, catalogue)?;
+    let state = new_serve_state_with_project(
+        repository.worktree().to_path_buf(),
+        identity,
+        address,
+        catalogue,
+        Some(project),
+    )?;
     writeln!(
         io::stdout().lock(),
         "Serving {} at http://{} (loopback)",
@@ -174,6 +183,16 @@ fn new_serve_state(
     identity: RuntimeIdentity,
     listener_address: SocketAddr,
     catalogue: orna_semantic_v1::Catalogue,
+) -> Result<ServeState, Diagnostic> {
+    new_serve_state_with_project(root, identity, listener_address, catalogue, None)
+}
+
+fn new_serve_state_with_project(
+    root: PathBuf,
+    identity: RuntimeIdentity,
+    listener_address: SocketAddr,
+    catalogue: orna_semantic_v1::Catalogue,
+    project: Option<orna_project_v1::LoadedProject>,
 ) -> Result<ServeState, Diagnostic> {
     let origin = Origin::parse(&format!("http://{listener_address}")).map_err(|_| {
         Diagnostic::target(
@@ -208,11 +227,12 @@ fn new_serve_state(
             "retry `serve`; the local serving state is unavailable",
         )
     })?;
-    let application = ApplicationLiveAdapter::new(ApplicationAuthority::new(
-        catalogue,
-        Limits::default(),
-    ))
-    .with_runtime_identity(identity.database_id, identity.repository_id);
+    let mut application =
+        ApplicationLiveAdapter::new(ApplicationAuthority::new(catalogue, Limits::default()))
+            .with_runtime_identity(identity.database_id, identity.repository_id);
+    if let Some(project) = project {
+        application = application.with_loaded_project(project);
+    }
     Ok(ServeState {
         root,
         identity,
@@ -263,7 +283,11 @@ fn serve_connection(mut stream: TcpStream, state: &mut ServeState) -> io::Result
             let mut stream = reader.into_inner();
             write_response(
                 &mut stream,
-                Response::new(400, "application/json", br#"{"error":"bad_request"}"#.to_vec()),
+                Response::new(
+                    400,
+                    "application/json",
+                    br#"{"error":"bad_request"}"#.to_vec(),
+                ),
             )?;
             return Ok(());
         }
@@ -296,138 +320,1110 @@ fn serve_connection(mut stream: TcpStream, state: &mut ServeState) -> io::Result
     write_response(&mut stream, response)
 }
 
-// The reference leaves concrete page and Git URLs open, so this host uses
-// `/pages/<module path>` for browsable source and mounts standard Git smart
-// HTTP at `/git`. The project root is selected once by `orna serve`; requests
-// never supply a repository path.
+// The project root is selected once by `orna serve`; requests never supply a
+// repository path. Browsing is based on immutable Git commits and trees.
 fn host_route(root: &Path, identity: RuntimeIdentity, request: &Request) -> Response {
     if let Some(response) = git_transport_route(root, request) {
         return response;
     }
+    if let Some(response) = git_listing_route(root, identity, request) {
+        return response;
+    }
     match (request.method.as_str(), request.path.as_str()) {
-        ("GET", "/") => {
-            let host = request_header(request, "host")
-                .filter(|host| {
-                    !host.is_empty()
-                        && host.bytes().all(|byte| {
-                            byte.is_ascii_alphanumeric()
-                                || matches!(byte, b'.' | b'-' | b':' | b'[' | b']')
-                        })
-                })
-                .unwrap_or("127.0.0.1");
-            project_home_page(root, identity, host)
-        }
+        ("GET", "/api/examples") => playground_examples(root),
         ("GET", "/api/clone") => match clone_report(root, identity) {
             Ok(report) => Response::new(200, "application/json", report),
             Err(_) => unavailable_response(),
-        },
-        ("GET", "/api/pages") => match load_current_project(root) {
-            Ok(project) => {
-                let mut pages = String::from("[");
-                for (index, identity) in project.identities().iter().enumerate() {
-                    if index > 0 {
-                        pages.push(',');
-                    }
-                    pages.push_str(&format!(
-                        "{{\"path\":{},\"source\":{}}}",
-                        json_string(&format!(
-                            "/pages/{}",
-                            percent_encode_path(identity.logical_path())
-                        )),
-                        json_string(identity.logical_path()),
-                    ));
-                }
-                pages.push(']');
-                Response::new(200, "application/json", pages.into_bytes())
-            }
-            Err(_) => unavailable_response(),
-        },
-        ("GET", path) if path.starts_with("/pages/") => {
-            let Ok(requested) = percent_decode(&path[7..]) else {
-                return bad_request_response();
-            };
-            module_source_page(root, &requested)
-        }
-        ("POST", "/api/query") => match std::str::from_utf8(&request.body) {
-            Ok(source) => orna_evaluator_v1::evaluate_repl(
-                source,
-                &Environment::new(),
-                Limits::default(),
-            )
-            .map_or_else(
-                |error| {
-                    Response::new(
-                        422,
-                        "application/json",
-                        format!("{{\"error\":{}}}", json_string(error.code())),
-                    )
-                },
-                |value| Response::new(200, "text/plain; charset=utf-8", format!("{value:?}")),
-            ),
-            Err(_) => Response::new(400, "application/json", br#"{"error":"invalid_utf8"}"#.to_vec()),
         },
         _ => not_found_response(),
     }
 }
 
-fn project_home_page(root: &Path, identity: RuntimeIdentity, host: &str) -> Response {
-    let Ok(project) = load_current_project(root) else {
-        return unavailable_response();
-    };
-    let Ok(report) = clone_report(root, identity) else {
-        return unavailable_response();
-    };
-    let report = String::from_utf8_lossy(&report);
-    let clone_url = format!("http://{host}/git");
-    let mut modules = String::new();
-    for module in project.identities() {
-        let logical_path = module.logical_path();
-        let href = format!("/pages/{}", percent_encode_path(logical_path));
-        modules.push_str(&format!(
-            "<li><a href=\"{}\">{}</a></li>",
-            html_escape(&href),
-            html_escape(logical_path),
-        ));
-    }
-    if modules.is_empty() {
-        modules.push_str("<li>No Orna modules are available in this clone.</li>");
-    }
-
-    // The reference recommends an ordinary Orna frontend but does not define
-    // an installed application contract. This server-rendered project browser
-    // therefore renders discovered module and clone data without evaluating
-    // source code or requiring an optional UI package.
-    let page = format!(
-        "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width\"><title>Orna project</title><style>body{{font:16px system-ui,sans-serif;max-width:64rem;margin:2rem auto;padding:0 1rem;color:#17212b}}a{{color:#075985}}pre{{overflow:auto;background:#f1f5f9;padding:1rem;border-radius:.5rem}}input{{min-width:20rem;padding:.5rem}}button{{padding:.5rem}}</style></head><body><header><h1>Orna project</h1><p>Clone: <code>{}</code></p><nav><a href=\"/\">Project</a> · <a href=\"/api/clone\">Clone JSON</a> · <a href=\"/api/pages\">Module index</a></nav><p>Clone this repository with <code>git clone {}</code>.</p></header><main><section><h2>Modules</h2><ul>{}</ul></section><section><h2>Clone HEAD and CWD</h2><pre>{}</pre></section><section><h2>Evaluate an expression</h2><form id=\"query\"><label>Pure Orna expression <input name=\"source\" value=\"1 + 1\"></label> <button>Evaluate</button></form><pre id=\"result\" aria-live=\"polite\"></pre></section></main><script>document.querySelector('#query').addEventListener('submit',async e=>{{e.preventDefault();let r=await fetch('/api/query',{{method:'POST',body:new FormData(e.target).get('source')}});document.querySelector('#result').textContent=await r.text()}})</script></body></html>",
-        html_escape(&root.to_string_lossy()),
-        html_escape(&clone_url),
-        modules,
-        html_escape(&report),
-    );
-    Response::new(200, "text/html; charset=utf-8", page)
+const MAX_LISTING_COMMITS: usize = 100;
+const MAX_LISTING_TREE_ENTRIES: usize = 10_000;
+const MAX_LISTING_FILE_BYTES: usize = 2 * 1024 * 1024;
+const LISTING_STYLE: &str = "<style>:root{--page-width:72ch;--text:#202122;--background:#fff;--link:#0645ad;--visited:#0b0080;--rule:#a2a9b1;--body-font:Georgia,'Times New Roman',serif;--code-font:ui-monospace,monospace}body{max-width:var(--page-width);margin:1.5rem auto;padding:0 1rem;color:var(--text);background:var(--background);font:1rem/1.5 var(--body-font)}a{color:var(--link)}a:visited{color:var(--visited)}pre,textarea{overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;font-family:var(--code-font)}textarea{box-sizing:border-box;width:100%}button{font:inherit}table{border-collapse:collapse}th,td{border:1px solid var(--rule);padding:.2rem .45rem;text-align:left;vertical-align:top}</style>";
+/// Renderer-neutral data used by the simple Inspect-compatible HTML fallback.
+enum InspectionNode {
+    Text(String),
+    Link { label: String, href: String },
+    Record(Vec<(String, Self)>),
+    List(Vec<Self>),
+    OrderedList(Vec<Self>),
+    Code(String),
 }
 
-fn module_source_page(root: &Path, requested: &str) -> Response {
-    let Ok(project) = load_current_project(root) else {
+struct Breadcrumb {
+    label: String,
+    href: String,
+}
+
+fn git_listing_route(
+    root: &Path,
+    identity: RuntimeIdentity,
+    request: &Request,
+) -> Option<Response> {
+    if request.method != "GET" {
+        return None;
+    }
+    match request.path.as_str() {
+        "/" => Some(commit_log_page(root, identity)),
+        "/playground" => Some(playground_asset(root, identity, &request.path)),
+        path if path.starts_with("/playground/") => {
+            Some(playground_asset(root, identity, &request.path))
+        }
+        path if path.starts_with("/tree/") => Some(tree_page(root, &path[6..])),
+        path if path.starts_with("/blob/") => Some(blob_page(root, &path[6..])),
+        _ => None,
+    }
+}
+
+fn commit_log_page(root: &Path, identity: RuntimeIdentity) -> Response {
+    let Ok(repository) = Repository::discover(root) else {
         return unavailable_response();
     };
-    let Some(index) = project
-        .identities()
+    let Ok(entries) = repository.committed_history(MAX_LISTING_COMMITS) else {
+        return unavailable_response();
+    };
+    let rows = entries.iter().map(commit_log_node).collect::<Vec<_>>();
+    let commits = if rows.is_empty() {
+        InspectionNode::Text("No commits in this repository.".into())
+    } else {
+        InspectionNode::OrderedList(rows)
+    };
+    let Ok(branches) = repository.local_branches(MAX_LISTING_BRANCHES) else {
+        return unavailable_response();
+    };
+    let branch_rows = branches.iter().map(branch_node).collect::<Vec<_>>();
+    let branches = if branch_rows.is_empty() {
+        InspectionNode::Text("No local branches in this repository.".into())
+    } else {
+        InspectionNode::List(branch_rows)
+    };
+    let content = InspectionNode::Record(vec![
+        (
+            "Playground".into(),
+            InspectionNode::Link {
+                label: "Open the Orna playground".into(),
+                href: "/playground/".into(),
+            },
+        ),
+        ("Recent commits".into(), commits),
+        ("Branches".into(), branches),
+    ]);
+    render_home_document(identity, &content)
+}
+
+const MAX_PLAYGROUND_ASSET_BYTES: usize = 8 * 1024 * 1024;
+const MAX_PLAYGROUND_ASSET_ROW_BYTES: usize = 16 * 1024 * 1024;
+const MAX_PLAYGROUND_EXAMPLE_BYTES: usize = 2 * 1024 * 1024;
+const MAX_PLAYGROUND_SAMPLE_BYTES: usize = 64 * 1024;
+const MAX_PLAYGROUND_FILE_EXAMPLES: usize = 100;
+const MAX_PLAYGROUND_SAMPLE_ROWS: usize = 100;
+const MAX_PLAYGROUND_EXAMPLES_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
+fn playground_asset(root: &Path, identity: RuntimeIdentity, request_path: &str) -> Response {
+    let Some(route_path) = normalize_playground_route_path(request_path) else {
+        return bad_request_response();
+    };
+    let (media_type, content, kind) = match read_playground_asset(root, &route_path) {
+        Ok(Some(asset)) => asset,
+        Ok(None) => return not_found_response(),
+        Err(()) => return unavailable_response(),
+    };
+    if kind != PlaygroundEntryKind::Asset {
+        let Ok(mut page) = String::from_utf8(content) else {
+            return unavailable_response();
+        };
+        if kind == PlaygroundEntryKind::Embed && !hide_embedded_page_header(&mut page) {
+            return unavailable_response();
+        }
+        let database = format_uuid(identity.database_id);
+        let bridge = format!(
+            "<section id=\"live-bridge\" data-database=\"{}\" hidden></section><section aria-labelledby=\"live-title\"><h2 id=\"live-title\">Live presentation</h2><p id=\"live-status\" role=\"status\" aria-live=\"polite\">Connecting to the database…</p><div id=\"live-presentation\"></div></section><script type=\"application/json\" id=\"run-events-source\">{}</script><script type=\"module\" src=\"/playground/assets/serve-playground.mjs\"></script>",
+            html_escape(&database),
+            json_string(LIVE_RUN_EVENTS_WATCH_SOURCE),
+        );
+        if let Some(body) = find_html_close_tag(&page, b"</body>") {
+            page.insert_str(body, &bridge);
+        } else {
+            return bad_request_response();
+        }
+        let mut response = Response::new(200, "text/html; charset=utf-8", page.into_bytes());
+        response
+            .headers
+            .push(("X-Content-Type-Options".into(), "nosniff".into()));
+        if kind == PlaygroundEntryKind::Embed {
+            response
+                .headers
+                .push(("Content-Security-Policy".into(), "frame-ancestors *".into()));
+        }
+        return response;
+    }
+    let mut response = Response::new(200, media_type, content);
+    response
+        .headers
+        .push(("X-Content-Type-Options".into(), "nosniff".into()));
+    response
+}
+
+fn normalize_playground_route_path(request_path: &str) -> Option<String> {
+    let relative = request_path.strip_prefix("/playground")?;
+    let relative = relative.strip_prefix('/').unwrap_or(relative);
+    let decoded = percent_decode(relative).ok()?;
+    if decoded.contains('\\')
+        || decoded.contains('\0')
+        || decoded.starts_with('/')
+        || decoded.contains("//")
+        || decoded
+            .split('/')
+            .any(|segment| matches!(segment, "." | ".."))
+    {
+        return None;
+    }
+    let relative = match decoded.as_str() {
+        "" => return Some("/playground/".into()),
+        "embed/" => "embed",
+        _ => decoded.as_str(),
+    };
+    Some(format!("/playground/{relative}"))
+}
+
+fn encoded_playground_row_id(prefix: &str, value: &str) -> String {
+    format!(
+        "{prefix}{}",
+        value
+            .as_bytes()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
+    )
+}
+
+fn playground_route_record_path(route_path: &str) -> Option<(ManagedPath, String)> {
+    if !route_path.starts_with("/playground/") {
+        return None;
+    }
+    let id = encoded_playground_row_id("route-", route_path);
+    let record_path =
+        ManagedPath::new(Path::new("playground/Route").join(format!("{id}.orna"))).ok()?;
+    Some((record_path, id))
+}
+
+fn playground_entry_record_path(entry_id: &str) -> Option<ManagedPath> {
+    if entry_id.is_empty()
+        || entry_id.len() > 128
+        || !entry_id
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+    {
+        return None;
+    }
+    ManagedPath::new(Path::new("playground/Entry").join(format!("{entry_id}.orna"))).ok()
+}
+
+fn playground_asset_record_path(asset_path: &str) -> Option<(ManagedPath, String)> {
+    let asset_path = ManagedPath::new(Path::new(asset_path)).ok()?;
+    let normalized = asset_path.as_path().to_str()?;
+    if normalized != "index.html" && !normalized.starts_with("assets/") {
+        return None;
+    }
+    let media_type = playground_content_type(asset_path.as_path());
+    if media_type == "application/octet-stream" {
+        return None;
+    }
+    let id = format!(
+        "asset-{}",
+        normalized
+            .as_bytes()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
+    );
+    let record_path =
+        ManagedPath::new(Path::new("playground/Asset").join(format!("{id}.orna"))).ok()?;
+    Some((record_path, id))
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PlaygroundEntryKind {
+    Page,
+    Embed,
+    Asset,
+}
+
+fn read_playground_asset(
+    root: &Path,
+    requested_route_path: &str,
+) -> Result<Option<(&'static str, Vec<u8>, PlaygroundEntryKind)>, ()> {
+    let repository = Repository::discover(root).map_err(|_| ())?;
+    let Some(commit) = repository.head().map_err(|_| ())? else {
+        return Err(());
+    };
+    let schema = repository
+        .read_committed_file(
+            &commit,
+            Path::new("playground.orna"),
+            MAX_PLAYGROUND_SAMPLE_BYTES,
+        )
+        .map_err(|_| ())?;
+    let schema = String::from_utf8(schema).map_err(|_| ())?;
+    if !has_playground_asset_table(&schema)
+        || !has_playground_route_table(&schema)
+        || !has_playground_entry_table(&schema)
+    {
+        return Err(());
+    }
+    let (route_record, route_id) = playground_route_record_path(requested_route_path).ok_or(())?;
+    let Ok(source) = repository.read_committed_file(
+        &commit,
+        route_record.as_path(),
+        MAX_PLAYGROUND_ASSET_ROW_BYTES,
+    ) else {
+        return Ok(None);
+    };
+    let source = String::from_utf8(source).map_err(|_| ())?;
+    let Some((route_path, entry_id)) = decode_playground_route(&source, &route_id) else {
+        return Err(());
+    };
+    if route_path != requested_route_path {
+        return Err(());
+    }
+    let entry_record = playground_entry_record_path(&entry_id).ok_or(())?;
+    let entry_source = repository
+        .read_committed_file(
+            &commit,
+            entry_record.as_path(),
+            MAX_PLAYGROUND_ASSET_ROW_BYTES,
+        )
+        .map_err(|_| ())?;
+    let entry_source = String::from_utf8(entry_source).map_err(|_| ())?;
+    let Some((asset_path, kind)) = decode_playground_entry(&entry_source, &entry_id) else {
+        return Err(());
+    };
+    if (kind == PlaygroundEntryKind::Asset && !asset_path.starts_with("assets/"))
+        || (kind != PlaygroundEntryKind::Asset && asset_path != "index.html")
+    {
+        return Err(());
+    }
+    let (asset_record, asset_id) = playground_asset_record_path(&asset_path).ok_or(())?;
+    let asset_source = repository
+        .read_committed_file(
+            &commit,
+            asset_record.as_path(),
+            MAX_PLAYGROUND_ASSET_ROW_BYTES,
+        )
+        .map_err(|_| ())?;
+    let asset_source = String::from_utf8(asset_source).map_err(|_| ())?;
+    let Some((path, media_type, content)) = decode_playground_asset(&asset_source, &asset_id)
+    else {
+        return Err(());
+    };
+    let expected_media_type = playground_content_type(Path::new(&path));
+    if path != asset_path
+        || media_type != expected_media_type
+        || media_type == "application/octet-stream"
+    {
+        return Err(());
+    }
+    let content = if media_type == "application/wasm" {
+        BASE64.decode(content.as_bytes()).map_err(|_| ())?
+    } else {
+        content.into_bytes()
+    };
+    if content.len() > MAX_PLAYGROUND_ASSET_BYTES {
+        return Err(());
+    }
+    Ok(Some((expected_media_type, content, kind)))
+}
+
+fn hide_embedded_page_header(page: &mut String) -> bool {
+    const MARKER: &str = "data-page-header";
+    let Some(marker) = page.find(MARKER) else {
+        return false;
+    };
+    if page[marker + MARKER.len()..].contains(MARKER) {
+        return false;
+    }
+    let Some(header_start) = page[..marker].rfind("<header") else {
+        return false;
+    };
+    let name_end = header_start + "<header".len();
+    if !page[name_end..].starts_with(char::is_whitespace)
+        || page[name_end..marker].contains('>')
+        || !page[marker + MARKER.len()..]
+            .chars()
+            .next()
+            .is_some_and(|character| character.is_whitespace() || matches!(character, '>' | '/'))
+    {
+        return false;
+    }
+    page.insert_str(marker + MARKER.len(), " hidden");
+    true
+}
+
+fn find_html_close_tag(html: &str, tag: &[u8]) -> Option<usize> {
+    html.as_bytes()
+        .windows(tag.len())
+        .rposition(|window| window.eq_ignore_ascii_case(tag))
+}
+
+fn playground_content_type(path: &Path) -> &'static str {
+    match path.extension().and_then(std::ffi::OsStr::to_str) {
+        Some("html") => "text/html; charset=utf-8",
+        Some("js" | "mjs") => "text/javascript; charset=utf-8",
+        Some("css") => "text/css; charset=utf-8",
+        Some("json") => "application/json; charset=utf-8",
+        Some("wasm") => "application/wasm",
+        Some("svg") => "image/svg+xml",
+        Some("png") => "image/png",
+        Some("ico") => "image/x-icon",
+        Some("woff") => "font/woff",
+        Some("woff2") => "font/woff2",
+        Some("ttf") => "font/ttf",
+        Some("otf") => "font/otf",
+        Some("eot") => "application/vnd.ms-fontobject",
+        _ => "application/octet-stream",
+    }
+}
+
+fn playground_examples(root: &Path) -> Response {
+    let Ok(repository) = Repository::discover(root) else {
+        return unavailable_response();
+    };
+    let Ok(Some(commit)) = repository.head() else {
+        return unavailable_response();
+    };
+    let sample_table_available = repository
+        .read_committed_file(
+            &commit,
+            Path::new("playground.orna"),
+            MAX_PLAYGROUND_SAMPLE_BYTES,
+        )
+        .ok()
+        .and_then(|schema| String::from_utf8(schema).ok())
+        .is_some_and(|schema| has_playground_sample_table(&schema));
+    let Ok(entries) = repository.list_committed_tree(&commit, MAX_LISTING_TREE_ENTRIES) else {
+        return unavailable_response();
+    };
+    let mut entries = entries;
+    entries.sort_by(|left, right| left.path().as_path().cmp(right.path().as_path()));
+    let mut examples = Vec::new();
+    let mut examples_bytes = 0usize;
+    let mut scanned_file_examples = 0usize;
+    let mut scanned_sample_rows = 0usize;
+    for entry in entries {
+        let path = entry.path().as_path();
+        if !matches!(entry.kind(), CommittedTreeEntryKind::File { .. })
+            || path.extension().and_then(std::ffi::OsStr::to_str) != Some("orna")
+        {
+            continue;
+        }
+        let sample_row =
+            sample_table_available && path.parent() == Some(Path::new("playground/Sample"));
+        let file_example = path.starts_with("playground/examples");
+        if sample_row {
+            if scanned_sample_rows >= MAX_PLAYGROUND_SAMPLE_ROWS {
+                continue;
+            }
+            scanned_sample_rows += 1;
+        } else if file_example {
+            if scanned_file_examples >= MAX_PLAYGROUND_FILE_EXAMPLES {
+                continue;
+            }
+            scanned_file_examples += 1;
+        } else {
+            continue;
+        }
+        let read_limit = if sample_row {
+            MAX_PLAYGROUND_SAMPLE_BYTES
+        } else {
+            MAX_PLAYGROUND_EXAMPLE_BYTES
+        };
+        let Ok(source) = repository.read_committed_file(&commit, path, read_limit) else {
+            continue;
+        };
+        let Ok(source) = String::from_utf8(source) else {
+            continue;
+        };
+        let (name, source) = if sample_row {
+            let Some(id) = path.file_stem().and_then(std::ffi::OsStr::to_str) else {
+                continue;
+            };
+            let Some((name, source)) = decode_playground_sample(&source, id) else {
+                continue;
+            };
+            (name, source)
+        } else {
+            let name = path
+                .file_stem()
+                .and_then(std::ffi::OsStr::to_str)
+                .unwrap_or("example")
+                .to_owned();
+            (name, source)
+        };
+        let example = serde_json::json!({
+            "name": name,
+            "path": path.to_string_lossy(),
+            "source": source,
+        });
+        let Ok(example_bytes) = serde_json::to_vec(&example) else {
+            continue;
+        };
+        let Some(next_bytes) = examples_bytes.checked_add(example_bytes.len()) else {
+            break;
+        };
+        if next_bytes > MAX_PLAYGROUND_EXAMPLES_RESPONSE_BYTES.saturating_sub(128) {
+            continue;
+        }
+        examples_bytes = next_bytes;
+        examples.push(example);
+    }
+    examples.sort_by(|left, right| left["path"].as_str().cmp(&right["path"].as_str()));
+    match serde_json::to_vec(&serde_json::json!({
+        "revision": commit.as_str(),
+        "examples": examples,
+    })) {
+        Ok(body) => Response::new(200, "application/json", body),
+        Err(_) => unavailable_response(),
+    }
+}
+
+fn has_playground_asset_table(source: &str) -> bool {
+    has_playground_record_table(source, "Asset", &["path", "media_type", "content"])
+}
+
+fn has_playground_route_table(source: &str) -> bool {
+    has_playground_record_table(source, "Route", &["path", "entry"])
+}
+
+fn has_playground_entry_table(source: &str) -> bool {
+    has_playground_record_table(source, "Entry", &["asset_path", "kind"])
+}
+
+fn has_playground_record_table(source: &str, table_name: &str, required_fields: &[&str]) -> bool {
+    let parsed = parse_module(source);
+    if !parsed.is_ok() {
+        return false;
+    }
+    let mut tables = parsed.value.items.iter().filter_map(|item| {
+        let Declaration::Table {
+            name,
+            keys,
+            members,
+        } = &item.declaration
+        else {
+            return None;
+        };
+        (name == table_name).then_some((keys, members))
+    });
+    let Some((keys, members)) = tables.next() else {
+        return false;
+    };
+    if tables.next().is_some()
+        || keys.len() != 1
+        || !matches!(
+            &keys[0],
+            orna_syntax_v1::Parameter {
+                pattern: Pattern::Name(name, _),
+                annotation: Some(ty),
+                ..
+            } if name == "id" && is_string_type(ty)
+        )
+    {
+        return false;
+    }
+    required_fields.iter().all(|required| {
+        let mut fields = members.iter().filter_map(|member| match member {
+            orna_syntax_v1::TableMember::Field { name, ty, .. } if name == required => Some(ty),
+            _ => None,
+        });
+        fields.next().is_some_and(is_string_type) && fields.next().is_none()
+    })
+}
+
+fn decode_playground_asset(source: &str, expected_id: &str) -> Option<(String, String, String)> {
+    let parsed = parse_row(source);
+    if !parsed.is_ok() {
+        return None;
+    }
+    let Expr::Record { fields, .. } = parsed.value else {
+        return None;
+    };
+    let id = literal_string(unique_record_field(&fields, "id")?)?;
+    if id != expected_id {
+        return None;
+    }
+    let path = literal_string(unique_record_field(&fields, "path")?)?;
+    let media_type = literal_string(unique_record_field(&fields, "media_type")?)?;
+    let content = literal_string(unique_record_field(&fields, "content")?)?;
+    Some((path, media_type, content))
+}
+
+fn decode_playground_route(source: &str, expected_id: &str) -> Option<(String, String)> {
+    let parsed = parse_row(source);
+    if !parsed.is_ok() {
+        return None;
+    }
+    let Expr::Record { fields, .. } = parsed.value else {
+        return None;
+    };
+    let id = literal_string(unique_record_field(&fields, "id")?)?;
+    if id != expected_id {
+        return None;
+    }
+    let path = literal_string(unique_record_field(&fields, "path")?)?;
+    let entry = literal_string(unique_record_field(&fields, "entry")?)?;
+    Some((path, entry))
+}
+
+fn decode_playground_entry(
+    source: &str,
+    expected_id: &str,
+) -> Option<(String, PlaygroundEntryKind)> {
+    let parsed = parse_row(source);
+    if !parsed.is_ok() {
+        return None;
+    }
+    let Expr::Record { fields, .. } = parsed.value else {
+        return None;
+    };
+    let id = literal_string(unique_record_field(&fields, "id")?)?;
+    if id != expected_id {
+        return None;
+    }
+    let asset_path = literal_string(unique_record_field(&fields, "asset_path")?)?;
+    let kind = match literal_string(unique_record_field(&fields, "kind")?)?.as_str() {
+        "page" => PlaygroundEntryKind::Page,
+        "embed" => PlaygroundEntryKind::Embed,
+        "asset" => PlaygroundEntryKind::Asset,
+        _ => return None,
+    };
+    Some((asset_path, kind))
+}
+
+fn has_playground_sample_table(source: &str) -> bool {
+    let parsed = parse_module(source);
+    if !parsed.is_ok() {
+        return false;
+    }
+    let mut tables = parsed.value.items.iter().filter_map(|item| {
+        let Declaration::Table {
+            name,
+            keys,
+            members,
+        } = &item.declaration
+        else {
+            return None;
+        };
+        (name == "Sample").then_some((keys, members))
+    });
+    let Some((keys, members)) = tables.next() else {
+        return false;
+    };
+    if tables.next().is_some()
+        || keys.len() != 1
+        || !matches!(
+            &keys[0],
+            orna_syntax_v1::Parameter {
+                pattern: Pattern::Name(name, _),
+                annotation: Some(ty),
+                ..
+            } if name == "id" && is_string_type(ty)
+        )
+    {
+        return false;
+    }
+    ["name", "source"].iter().all(|required| {
+        let mut fields = members.iter().filter_map(|member| match member {
+            orna_syntax_v1::TableMember::Field { name, ty, .. } if name == required => Some(ty),
+            _ => None,
+        });
+        fields.next().is_some_and(is_string_type) && fields.next().is_none()
+    })
+}
+
+fn is_string_type(ty: &TypeExpr) -> bool {
+    matches!(ty, TypeExpr::Name { path, arguments, .. } if path.len() == 1 && path[0] == "Str" && arguments.is_empty())
+}
+
+fn decode_playground_sample(source: &str, expected_id: &str) -> Option<(String, String)> {
+    let parsed = parse_row(source);
+    if !parsed.is_ok() {
+        return None;
+    }
+    let Expr::Record { fields, .. } = parsed.value else {
+        return None;
+    };
+    let id = literal_string(unique_record_field(&fields, "id")?)?;
+    let name = literal_string(unique_record_field(&fields, "name")?)?;
+    let source = literal_string(unique_record_field(&fields, "source")?)?;
+    if id != expected_id || name.trim().is_empty() || source.trim().is_empty() {
+        return None;
+    }
+    Some((name, source))
+}
+
+fn unique_record_field<'a>(
+    fields: &'a [orna_syntax_v1::RecordField],
+    name: &str,
+) -> Option<&'a orna_syntax_v1::RecordField> {
+    let mut matches = fields.iter().filter(|field| field.name == name);
+    let field = matches.next()?;
+    matches.next().is_none().then_some(field)
+}
+
+fn literal_string(field: &orna_syntax_v1::RecordField) -> Option<String> {
+    let Expr::Literal {
+        text,
+        kind: LiteralKind::String,
+        ..
+    } = &field.value
+    else {
+        return None;
+    };
+    decode_orna_string(text)
+}
+
+fn decode_orna_string(text: &str) -> Option<String> {
+    let body = text.strip_prefix('"')?.strip_suffix('"')?;
+    let mut decoded = String::with_capacity(body.len());
+    let mut chars = body.chars();
+    while let Some(character) = chars.next() {
+        if character != '\\' {
+            decoded.push(character);
+            continue;
+        }
+        match chars.next()? {
+            '"' => decoded.push('"'),
+            '\\' => decoded.push('\\'),
+            'n' => decoded.push('\n'),
+            'r' => decoded.push('\r'),
+            't' => decoded.push('\t'),
+            '0' => decoded.push('\0'),
+            'u' => {
+                if chars.next()? != '{' {
+                    return None;
+                }
+                let digits = chars
+                    .by_ref()
+                    .take_while(|character| *character != '}')
+                    .collect::<String>();
+                let scalar = u32::from_str_radix(&digits, 16).ok()?;
+                decoded.push(char::from_u32(scalar)?);
+            }
+            _ => return None,
+        }
+    }
+    Some(decoded)
+}
+
+const MAX_LISTING_BRANCHES: usize = 100;
+
+fn commit_log_node(entry: &CommittedLogEntry) -> InspectionNode {
+    let commit = entry.commit().as_str();
+    let href = format!("/tree/{commit}/");
+    let subject = if entry.subject().is_empty() {
+        "(no subject)"
+    } else {
+        entry.subject()
+    };
+    InspectionNode::Record(vec![
+        (
+            "subject".into(),
+            InspectionNode::Link {
+                label: subject.to_owned(),
+                href,
+            },
+        ),
+        ("commit".into(), InspectionNode::Text(commit.to_owned())),
+        (
+            "author".into(),
+            InspectionNode::Text(entry.author().to_owned()),
+        ),
+        (
+            "committed".into(),
+            InspectionNode::Text(entry.committed_at().to_owned()),
+        ),
+    ])
+}
+
+fn branch_node(branch: &CommittedBranch) -> InspectionNode {
+    InspectionNode::Link {
+        label: branch.name().to_owned(),
+        href: format!("/tree/{}/", branch.commit().as_str()),
+    }
+}
+
+fn tree_page(root: &Path, suffix: &str) -> Response {
+    let (object_id, encoded_path) = suffix.split_once('/').unwrap_or((suffix, ""));
+    let Ok(repository) = Repository::discover(root) else {
+        return unavailable_response();
+    };
+    let Some(commit) = resolve_listing_commit(&repository, object_id) else {
+        return not_found_response();
+    };
+    let Ok(decoded_path) = percent_decode(encoded_path) else {
+        return bad_request_response();
+    };
+    let directory = decoded_path.trim_end_matches('/');
+    let directory = if directory.is_empty() {
+        String::new()
+    } else {
+        match ManagedPath::new(directory) {
+            Ok(path) => path.as_path().to_string_lossy().into_owned(),
+            Err(_) => return bad_request_response(),
+        }
+    };
+    let Ok(entries) = repository.list_committed_tree(&commit, MAX_LISTING_TREE_ENTRIES) else {
+        return unavailable_response();
+    };
+    let children = tree_children(&entries, &directory);
+    if !directory.is_empty() && children.is_empty() {
+        return not_found_response();
+    }
+    let rows = children
         .iter()
-        .position(|identity| identity.logical_path() == requested)
+        .map(|child| tree_child_node(&commit, &directory, child))
+        .collect::<Vec<_>>();
+    let content = if rows.is_empty() {
+        InspectionNode::Text("This commit has no files in this tree.".into())
+    } else {
+        InspectionNode::List(rows)
+    };
+    let title = if directory.is_empty() {
+        "Tree".to_owned()
+    } else {
+        directory.clone()
+    };
+    let breadcrumbs = tree_breadcrumbs(&commit, &directory);
+    render_inspection_document(&title, &breadcrumbs, &content)
+}
+
+fn resolve_listing_commit(repository: &Repository, object_id: &str) -> Option<GitCommitRef> {
+    if !matches!(object_id.len(), 40 | 64)
+        || !object_id.bytes().all(|byte| byte.is_ascii_hexdigit())
+    {
+        return None;
+    }
+    repository.resolve_snapshot(object_id).ok()
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TreeChildKind {
+    Directory,
+    File { executable: bool },
+    Symlink,
+    Submodule,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct TreeChild {
+    name: String,
+    kind: TreeChildKind,
+}
+
+fn tree_children(
+    entries: &[orna_repository_v1::CommittedTreeEntry],
+    directory: &str,
+) -> Vec<TreeChild> {
+    let prefix = if directory.is_empty() {
+        String::new()
+    } else {
+        format!("{directory}/")
+    };
+    let mut children = std::collections::BTreeMap::<String, TreeChildKind>::new();
+    for entry in entries {
+        let Some(path) = entry.path().as_path().to_str() else {
+            continue;
+        };
+        let Some(relative) = path.strip_prefix(&prefix) else {
+            continue;
+        };
+        if relative.is_empty() {
+            continue;
+        }
+        let (name, kind) = match relative.split_once('/') {
+            Some((name, _)) => (name, TreeChildKind::Directory),
+            None => (
+                relative,
+                match entry.kind() {
+                    CommittedTreeEntryKind::File { executable } => {
+                        TreeChildKind::File { executable }
+                    }
+                    CommittedTreeEntryKind::Symlink => TreeChildKind::Symlink,
+                    CommittedTreeEntryKind::Submodule => TreeChildKind::Submodule,
+                },
+            ),
+        };
+        children.entry(name.to_owned()).or_insert(kind);
+    }
+    let mut children = children
+        .into_iter()
+        .map(|(name, kind)| TreeChild { name, kind })
+        .collect::<Vec<_>>();
+    children.sort_by(|left, right| {
+        tree_child_rank(&left.kind)
+            .cmp(&tree_child_rank(&right.kind))
+            .then_with(|| left.name.cmp(&right.name))
+    });
+    children
+}
+
+const fn tree_child_rank(kind: &TreeChildKind) -> u8 {
+    match kind {
+        TreeChildKind::Directory => 0,
+        TreeChildKind::File { .. } => 1,
+        TreeChildKind::Symlink => 2,
+        TreeChildKind::Submodule => 3,
+    }
+}
+
+fn tree_child_node(commit: &GitCommitRef, directory: &str, child: &TreeChild) -> InspectionNode {
+    let path = if directory.is_empty() {
+        child.name.clone()
+    } else {
+        format!("{directory}/{}", child.name)
+    };
+    let (label, kind) = match child.kind {
+        TreeChildKind::Directory => {
+            let href = format!("/tree/{}/{}/", commit.as_str(), percent_encode_path(&path));
+            (
+                InspectionNode::Link {
+                    label: format!("{}/", child.name),
+                    href,
+                },
+                "directory",
+            )
+        }
+        TreeChildKind::File { executable } => {
+            let href = format!("/blob/{}/{}", commit.as_str(), percent_encode_path(&path));
+            (
+                InspectionNode::Link {
+                    label: child.name.clone(),
+                    href,
+                },
+                if executable {
+                    "executable file"
+                } else {
+                    "file"
+                },
+            )
+        }
+        TreeChildKind::Symlink => (InspectionNode::Text(child.name.clone()), "symbolic link"),
+        TreeChildKind::Submodule => (InspectionNode::Text(child.name.clone()), "submodule"),
+    };
+    InspectionNode::Record(vec![
+        ("name".into(), label),
+        ("kind".into(), InspectionNode::Text(kind.into())),
+    ])
+}
+
+fn tree_breadcrumbs(commit: &GitCommitRef, directory: &str) -> Vec<Breadcrumb> {
+    let commit_id = commit.as_str();
+    let commit_label = &commit_id[..12];
+    let mut breadcrumbs = vec![
+        Breadcrumb {
+            label: "Commits".into(),
+            href: "/".into(),
+        },
+        Breadcrumb {
+            label: commit_label.into(),
+            href: format!("/tree/{commit_id}/"),
+        },
+    ];
+    let mut prefix = String::new();
+    let parts = directory
+        .split('/')
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>();
+    for (index, part) in parts.iter().enumerate() {
+        if !prefix.is_empty() {
+            prefix.push('/');
+        }
+        prefix.push_str(part);
+        breadcrumbs.push(Breadcrumb {
+            label: (*part).to_owned(),
+            href: format!("/tree/{commit_id}/{}/", percent_encode_path(&prefix)),
+        });
+        if index + 1 == parts.len() {
+            break;
+        }
+    }
+    breadcrumbs
+}
+
+fn blob_page(root: &Path, suffix: &str) -> Response {
+    let Some((object_id, encoded_path)) = suffix.split_once('/') else {
+        return bad_request_response();
+    };
+    let Ok(repository) = Repository::discover(root) else {
+        return unavailable_response();
+    };
+    let Some(commit) = resolve_listing_commit(&repository, object_id) else {
+        return not_found_response();
+    };
+    let Ok(decoded_path) = percent_decode(encoded_path) else {
+        return bad_request_response();
+    };
+    let Ok(path) = ManagedPath::new(&decoded_path) else {
+        return bad_request_response();
+    };
+    let Ok(bytes) = repository.read_committed_file(&commit, path.as_path(), MAX_LISTING_FILE_BYTES)
     else {
         return not_found_response();
     };
-    let Some(module) = project.modules().get(index) else {
-        return unavailable_response();
+    let path = path.as_path().to_string_lossy().into_owned();
+    let (content_type, content) = match std::str::from_utf8(&bytes) {
+        Ok(source)
+            if source.chars().all(|character| {
+                !character.is_control() || matches!(character, '\n' | '\r' | '\t')
+            }) =>
+        {
+            ("UTF-8 text", InspectionNode::Code(source.to_owned()))
+        }
+        _ => (
+            "binary",
+            InspectionNode::Text(format!("Binary content ({} bytes).", bytes.len())),
+        ),
     };
-    let page = format!(
-        "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width\"><title>{} · Orna source</title><style>body{{font:16px system-ui,sans-serif;max-width:72rem;margin:2rem auto;padding:0 1rem;color:#17212b}}a{{color:#075985}}pre{{overflow:auto;background:#0f172a;color:#e2e8f0;padding:1rem;border-radius:.5rem;line-height:1.5}}code{{font-family:ui-monospace,monospace}}</style></head><body><nav><a href=\"/\">← Project</a></nav><main><h1>{}</h1><p>Source from the current clone. Viewing a module does not execute it.</p><pre><code>{}</code></pre></main></body></html>",
-        html_escape(requested),
-        html_escape(requested),
-        html_escape(&module.source),
+    let node = InspectionNode::Record(vec![
+        ("path".into(), InspectionNode::Text(path.clone())),
+        (
+            "content type".into(),
+            InspectionNode::Text(content_type.into()),
+        ),
+        (
+            "size".into(),
+            InspectionNode::Text(format!("{} bytes", bytes.len())),
+        ),
+        ("content".into(), content),
+    ]);
+    let breadcrumbs = file_breadcrumbs(&commit, &path);
+    render_inspection_document(&path, &breadcrumbs, &node)
+}
+
+fn file_breadcrumbs(commit: &GitCommitRef, path: &str) -> Vec<Breadcrumb> {
+    let commit_id = commit.as_str();
+    let commit_label = &commit_id[..12];
+    let mut breadcrumbs = vec![
+        Breadcrumb {
+            label: "Commits".into(),
+            href: "/".into(),
+        },
+        Breadcrumb {
+            label: commit_label.into(),
+            href: format!("/tree/{commit_id}/"),
+        },
+    ];
+    let mut prefix = String::new();
+    let parts = path
+        .split('/')
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>();
+    for part in parts.iter().take(parts.len().saturating_sub(1)) {
+        if !prefix.is_empty() {
+            prefix.push('/');
+        }
+        prefix.push_str(part);
+        breadcrumbs.push(Breadcrumb {
+            label: (*part).to_owned(),
+            href: format!("/tree/{commit_id}/{}/", percent_encode_path(&prefix)),
+        });
+    }
+    breadcrumbs
+}
+
+fn render_inspection_document(
+    title: &str,
+    breadcrumbs: &[Breadcrumb],
+    content: &InspectionNode,
+) -> Response {
+    let mut page = String::from(
+        "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width\"><title>",
     );
-    Response::new(200, "text/html; charset=utf-8", page)
+    page.push_str(&html_escape(title));
+    page.push_str("</title>");
+    page.push_str(LISTING_STYLE);
+    page.push_str("</head><body>");
+    if !breadcrumbs.is_empty() {
+        page.push_str("<nav aria-label=\"Breadcrumb\"><ol>");
+        for breadcrumb in breadcrumbs {
+            page.push_str("<li><a href=\"");
+            page.push_str(&html_escape(&breadcrumb.href));
+            page.push_str("\">");
+            page.push_str(&html_escape(&breadcrumb.label));
+            page.push_str("</a></li>");
+        }
+        page.push_str("</ol></nav>");
+    }
+    page.push_str("<main><h1>");
+    page.push_str(&html_escape(title));
+    page.push_str("</h1>");
+    render_inspection_node(content, &mut page);
+    page.push_str("</main></body></html>");
+    Response::new(200, "text/html; charset=utf-8", page.into_bytes())
+}
+
+fn render_home_document(identity: RuntimeIdentity, content: &InspectionNode) -> Response {
+    let database = format_uuid(identity.database_id);
+    let mut page = String::from(
+        "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width\"><title>Orna</title>",
+    );
+    page.push_str(LISTING_STYLE);
+    page.push_str("</head><body><main><h1>Orna database</h1>");
+    render_inspection_node(content, &mut page);
+    page.push_str(&format!(
+        "<section id=\"live-repl\" data-database=\"{}\"><h2>REPL</h2><label for=\"repl-source\">Orna input</label><textarea id=\"repl-source\" rows=\"4\" spellcheck=\"false\">1 + 1</textarea><button id=\"repl-run\" type=\"button\" disabled>Run</button><p id=\"repl-status\" aria-live=\"polite\">Connecting to the runtime…</p><pre id=\"repl-events\">No run yet.</pre></section><section aria-labelledby=\"live-title\"><h2 id=\"live-title\">Live presentation</h2><p id=\"live-status\" role=\"status\" aria-live=\"polite\">Connecting to the database…</p><div id=\"live-presentation\"></div></section>",
+        html_escape(&database)
+    ));
+    page.push_str(&format!(
+        "</main><script type=\"application/json\" id=\"run-events-source\">{}</script><script type=\"module\" src=\"/playground/assets/serve-home.mjs\"></script></body></html>",
+        json_string(LIVE_RUN_EVENTS_WATCH_SOURCE)
+    ));
+    Response::new(200, "text/html; charset=utf-8", page.into_bytes())
+}
+
+fn render_inspection_node(node: &InspectionNode, page: &mut String) {
+    match node {
+        InspectionNode::Text(value) => page.push_str(&html_escape(value)),
+        InspectionNode::Link { label, href } => {
+            page.push_str("<a href=\"");
+            page.push_str(&html_escape(href));
+            page.push_str("\">");
+            page.push_str(&html_escape(label));
+            page.push_str("</a>");
+        }
+        InspectionNode::Record(fields) => {
+            page.push_str("<dl>");
+            for (label, value) in fields {
+                page.push_str("<dt>");
+                page.push_str(&html_escape(label));
+                page.push_str("</dt><dd>");
+                render_inspection_node(value, page);
+                page.push_str("</dd>");
+            }
+            page.push_str("</dl>");
+        }
+        InspectionNode::List(values) | InspectionNode::OrderedList(values) => {
+            let (open, close) = if matches!(node, InspectionNode::OrderedList(_)) {
+                ("<ol>", "</ol>")
+            } else {
+                ("<ul>", "</ul>")
+            };
+            page.push_str(open);
+            for value in values {
+                page.push_str("<li>");
+                render_inspection_node(value, page);
+                page.push_str("</li>");
+            }
+            page.push_str(close);
+        }
+        InspectionNode::Code(source) => {
+            page.push_str("<pre><code>");
+            page.push_str(&html_escape(source));
+            page.push_str("</code></pre>");
+        }
+    }
 }
 
 fn html_escape(value: &str) -> String {
@@ -468,8 +1464,14 @@ fn percent_decode(path: &str) -> Result<String, ()> {
     let mut index = 0;
     while index < input.len() {
         if input[index] == b'%' {
-            let high = input.get(index + 1).and_then(|byte| hex_digit(*byte)).ok_or(())?;
-            let low = input.get(index + 2).and_then(|byte| hex_digit(*byte)).ok_or(())?;
+            let high = input
+                .get(index + 1)
+                .and_then(|byte| hex_digit(*byte))
+                .ok_or(())?;
+            let low = input
+                .get(index + 2)
+                .and_then(|byte| hex_digit(*byte))
+                .ok_or(())?;
             decoded.push((high << 4) | low);
             index += 3;
         } else {
@@ -661,7 +1663,9 @@ fn parse_cgi_response(output: &[u8]) -> io::Result<Response> {
     for line in header_text.lines() {
         let line = line.trim_end_matches('\r');
         let Some((name, value)) = line.split_once(':') else {
-            return Err(io::Error::other("Git HTTP backend returned malformed headers"));
+            return Err(io::Error::other(
+                "Git HTTP backend returned malformed headers",
+            ));
         };
         let value = value.trim();
         if name.eq_ignore_ascii_case("status") {
@@ -687,16 +1691,9 @@ fn parse_cgi_response(output: &[u8]) -> io::Result<Response> {
     })
 }
 
-fn load_current_project(root: &Path) -> Result<orna_project_v1::LoadedProject, ()> {
-    let repository = Repository::discover(root).map_err(|_| ())?;
-    orna_project_v1::ProjectLoader::default()
-        .load(&repository)
-        .map_err(|_| ())
-}
-
 fn clone_report(root: &Path, identity: RuntimeIdentity) -> io::Result<Vec<u8>> {
-    let repository = Repository::discover(root)
-        .map_err(|_| io::Error::other("clone is unavailable"))?;
+    let repository =
+        Repository::discover(root).map_err(|_| io::Error::other("clone is unavailable"))?;
     let head = repository
         .head()
         .map_err(|_| io::Error::other("clone HEAD is unavailable"))?;
@@ -706,9 +1703,7 @@ fn clone_report(root: &Path, identity: RuntimeIdentity) -> io::Result<Vec<u8>> {
     let head_json = head
         .as_ref()
         .map_or_else(|| "null".to_owned(), |head| json_string(head.as_str()));
-    let branch_json = cwd
-        .branch()
-        .map_or_else(|| "null".to_owned(), json_string);
+    let branch_json = cwd.branch().map_or_else(|| "null".to_owned(), json_string);
     let index_tree_json = cwd
         .index()
         .tree()
@@ -780,7 +1775,9 @@ fn read_request(reader: &mut BufReader<TcpStream>) -> io::Result<Request> {
             .split_once(':')
             .ok_or_else(|| io::Error::other("invalid request header"))?;
         if name.is_empty()
-            || name.bytes().any(|byte| !byte.is_ascii_alphanumeric() && byte != b'-')
+            || name
+                .bytes()
+                .any(|byte| !byte.is_ascii_alphanumeric() && byte != b'-')
             || value.contains(['\r', '\n'])
             || headers
                 .iter()
@@ -932,11 +1929,19 @@ fn now_ms() -> u64 {
 }
 
 fn not_found_response() -> Response {
-    Response::new(404, "application/json", br#"{"error":"not_found"}"#.to_vec())
+    Response::new(
+        404,
+        "application/json",
+        br#"{"error":"not_found"}"#.to_vec(),
+    )
 }
 
 fn bad_request_response() -> Response {
-    Response::new(400, "application/json", br#"{"error":"bad_request"}"#.to_vec())
+    Response::new(
+        400,
+        "application/json",
+        br#"{"error":"bad_request"}"#.to_vec(),
+    )
 }
 
 fn unavailable_response() -> Response {
@@ -953,6 +1958,45 @@ mod tests {
     use std::process::Command;
 
     const SERVE_FIXTURE: &str = include_str!("../tests/fixtures/serve-no-autoload.orna");
+
+    fn git_succeeds(directory: &Path, arguments: &[&str]) {
+        let output = Command::new("git")
+            .args(arguments)
+            .current_dir(directory)
+            .output()
+            .expect("run Git");
+        assert!(
+            output.status.success(),
+            "Git command failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn write_fixture_rows(directory: &Path, table: &str, rows: &[(&str, &str)]) {
+        let table_directory = directory.join("playground").join(table);
+        std::fs::create_dir_all(&table_directory).expect("create playground row directory");
+        for (id, source) in rows {
+            std::fs::write(table_directory.join(format!("{id}.orna")), source)
+                .expect("write crate-local playground row fixture");
+        }
+    }
+
+    fn listing_page(root: &Path, path: &str) -> Response {
+        host_route(
+            root,
+            RuntimeIdentity {
+                database_id: [1; 16],
+                repository_id: [2; 16],
+            },
+            &Request {
+                method: "GET".into(),
+                path: path.into(),
+                query: String::new(),
+                headers: Vec::new(),
+                body: Vec::new(),
+            },
+        )
+    }
 
     #[test]
     fn serving_loads_the_local_main_module_without_evaluating_it() {
@@ -978,19 +2022,6 @@ mod tests {
             database_id: [1; 16],
             repository_id: [2; 16],
         };
-        let pages = host_route(
-            directory.path(),
-            identity,
-            &Request {
-                method: "GET".into(),
-                path: "/api/pages".into(),
-                query: String::new(),
-                headers: Vec::new(),
-                body: Vec::new(),
-            },
-        );
-        assert_eq!(pages.status, 200);
-        assert!(String::from_utf8(pages.body).unwrap().contains("/pages/main.orna"));
         let home = host_route(
             directory.path(),
             identity,
@@ -1003,27 +2034,19 @@ mod tests {
             },
         );
         assert_eq!(home.status, 200);
-        let home = String::from_utf8(home.body).expect("project HTML");
-        assert!(home.contains("Modules"));
-        assert!(home.contains("/pages/main.orna"));
-        assert!(home.contains("git clone http://127.0.0.1/git"));
-        let source_page = host_route(
-            directory.path(),
-            identity,
-            &Request {
-                method: "GET".into(),
-                path: "/pages/main.orna".into(),
-                query: String::new(),
-                headers: Vec::new(),
-                body: Vec::new(),
-            },
-        );
-        assert_eq!(source_page.status, 200);
-        assert_eq!(source_page.content_type, "text/html; charset=utf-8");
-        let source_page = String::from_utf8(source_page.body).expect("source HTML");
-        assert!(source_page.contains("1 / 0"));
-        assert!(source_page.contains("&lt;script&gt;alert(&#39;source&#39;)&lt;/script&gt;"));
-        assert!(!source_page.contains("<script>alert('source')</script>"));
+        let home = String::from_utf8(home.body).expect("commit listing HTML");
+        assert!(home.contains("No commits in this repository."));
+        assert!(home.contains("Open the Orna playground"));
+        assert!(home.contains("href=\"/playground/\""));
+        assert!(home.contains("id=\"live-repl\""));
+        assert!(home.contains("id=\"repl-source\""));
+        assert!(home.contains("id=\"live-presentation\""));
+        assert!(home.contains("id=\"run-events-source\""));
+        assert!(home.contains("src=\"/playground/assets/serve-home.mjs\""));
+        assert!(home.contains("orna/serve/run-events/v1"));
+        assert!(!home.contains("new WebSocket(endpoint"));
+        assert!(!home.contains("/api/query"));
+        assert!(!home.contains("wasm"));
         let query = host_route(
             directory.path(),
             identity,
@@ -1035,8 +2058,605 @@ mod tests {
                 body: b"1 + 1".to_vec(),
             },
         );
-        assert_eq!(query.status, 200);
-        assert_eq!(query.body, b"Value(Int(2))");
+        assert_eq!(query.status, 404);
+    }
+
+    #[test]
+    fn playground_loads_committed_sample_and_asset_rows_from_the_database() {
+        const PLAYGROUND_SAMPLE: &str = include_str!("../tests/fixtures/playground-sample.orna");
+        const PLAYGROUND_SCHEMA: &str = include_str!("../tests/fixtures/playground-schema.orna");
+        const LEGACY_EXAMPLE: &str = include_str!("../tests/fixtures/playground-example.orna");
+        const ASSET_INDEX: &str = include_str!("../tests/fixtures/playground-asset-index.orna");
+        const ASSET_APP: &str = include_str!("../tests/fixtures/playground-asset-app.orna");
+        const ASSET_STYLE: &str = include_str!("../tests/fixtures/playground-asset-style.orna");
+        const ASSET_PRESENTATION: &str =
+            include_str!("../tests/fixtures/playground-asset-presentation.orna");
+        const ASSET_HOME: &str = include_str!("../tests/fixtures/playground-asset-home.orna");
+        const ASSET_PLAYGROUND: &str =
+            include_str!("../tests/fixtures/playground-asset-playground.orna");
+        const ASSET_LSP_JS: &str = include_str!("../tests/fixtures/playground-asset-lsp-js.orna");
+        const ASSET_LSP_WASM: &str =
+            include_str!("../tests/fixtures/playground-asset-lsp-wasm.orna");
+        const ASSET_UNCOMMITTED: &str =
+            include_str!("../tests/fixtures/playground-asset-uncommitted.orna");
+        const ASSET_STALE_INDEX: &str =
+            include_str!("../tests/fixtures/playground-asset-index-stale.orna");
+        const ROUTES: [(&str, &str); 11] = [
+            (
+                "route-2f706c617967726f756e642f",
+                include_str!("../tests/fixtures/playground-route-page.orna"),
+            ),
+            (
+                "route-2f706c617967726f756e642f656d626564",
+                include_str!("../tests/fixtures/playground-route-embed.orna"),
+            ),
+            (
+                "route-2f706c617967726f756e642f6173736574732f6170702e6a73",
+                include_str!("../tests/fixtures/playground-route-app.orna"),
+            ),
+            (
+                "route-2f706c617967726f756e642f6173736574732f7374796c652e637373",
+                include_str!("../tests/fixtures/playground-route-style.orna"),
+            ),
+            (
+                "route-2f706c617967726f756e642f6173736574732f6f726e612d656469746f722d636f6e6669672e6a736f6e",
+                include_str!("../tests/fixtures/playground-route-config.orna"),
+            ),
+            (
+                "route-2f706c617967726f756e642f6173736574732f656d6265642e6a73",
+                include_str!("../tests/fixtures/playground-route-embed-script.orna"),
+            ),
+            (
+                "route-2f706c617967726f756e642f6173736574732f70726573656e746174696f6e2e6d6a73",
+                include_str!("../tests/fixtures/playground-route-presentation.orna"),
+            ),
+            (
+                "route-2f706c617967726f756e642f6173736574732f73657276652d686f6d652e6d6a73",
+                include_str!("../tests/fixtures/playground-route-home-runtime.orna"),
+            ),
+            (
+                "route-2f706c617967726f756e642f6173736574732f73657276652d706c617967726f756e642e6d6a73",
+                include_str!("../tests/fixtures/playground-route-playground-runtime.orna"),
+            ),
+            (
+                "route-2f706c617967726f756e642f6173736574732f6c73702d7761736d2f6f726e615f6c73702e6a73",
+                include_str!("../tests/fixtures/playground-route-lsp-js.orna"),
+            ),
+            (
+                "route-2f706c617967726f756e642f6173736574732f6c73702d7761736d2f6f726e615f6c73705f62672e7761736d",
+                include_str!("../tests/fixtures/playground-route-lsp-wasm.orna"),
+            ),
+        ];
+        const ENTRIES: [(&str, &str); 11] = [
+            (
+                "entry-page",
+                include_str!("../tests/fixtures/playground-entry-page.orna"),
+            ),
+            (
+                "entry-embed",
+                include_str!("../tests/fixtures/playground-entry-embed.orna"),
+            ),
+            (
+                "entry-app",
+                include_str!("../tests/fixtures/playground-entry-app.orna"),
+            ),
+            (
+                "entry-style",
+                include_str!("../tests/fixtures/playground-entry-style.orna"),
+            ),
+            (
+                "entry-config",
+                include_str!("../tests/fixtures/playground-entry-config.orna"),
+            ),
+            (
+                "entry-embed-script",
+                include_str!("../tests/fixtures/playground-entry-embed-script.orna"),
+            ),
+            (
+                "entry-presentation",
+                include_str!("../tests/fixtures/playground-entry-presentation.orna"),
+            ),
+            (
+                "entry-home-runtime",
+                include_str!("../tests/fixtures/playground-entry-home-runtime.orna"),
+            ),
+            (
+                "entry-playground-runtime",
+                include_str!("../tests/fixtures/playground-entry-playground-runtime.orna"),
+            ),
+            (
+                "entry-lsp-js",
+                include_str!("../tests/fixtures/playground-entry-lsp-js.orna"),
+            ),
+            (
+                "entry-lsp-wasm",
+                include_str!("../tests/fixtures/playground-entry-lsp-wasm.orna"),
+            ),
+        ];
+        let directory = tempfile::tempdir().expect("temporary database");
+        git_succeeds(
+            directory.path(),
+            &["init", "--quiet", "--initial-branch=playground"],
+        );
+        std::fs::write(directory.path().join("playground.orna"), PLAYGROUND_SCHEMA)
+            .expect("write Sample table");
+        let sample_path = directory.path().join("playground/Sample/hello.orna");
+        std::fs::create_dir_all(sample_path.parent().expect("sample table directory"))
+            .expect("create Sample rows directory");
+        std::fs::write(&sample_path, PLAYGROUND_SAMPLE).expect("write Sample row");
+        let legacy_path = directory.path().join("playground/examples/legacy.orna");
+        std::fs::create_dir_all(legacy_path.parent().expect("example directory"))
+            .expect("create examples directory");
+        std::fs::write(&legacy_path, LEGACY_EXAMPLE).expect("write committed file example");
+        let asset_directory = directory.path().join("playground/Asset");
+        std::fs::create_dir_all(&asset_directory).expect("create Asset rows directory");
+        std::fs::write(
+            asset_directory.join("asset-696e6465782e68746d6c.orna"),
+            ASSET_INDEX,
+        )
+        .expect("write database shell asset");
+        std::fs::write(
+            asset_directory.join("asset-6173736574732f6170702e6a73.orna"),
+            ASSET_APP,
+        )
+        .expect("write database JavaScript asset");
+        std::fs::write(
+            asset_directory.join("asset-6173736574732f7374796c652e637373.orna"),
+            ASSET_STYLE,
+        )
+        .expect("write database stylesheet asset");
+        write_fixture_rows(directory.path(), "Route", &ROUTES);
+        write_fixture_rows(directory.path(), "Entry", &ENTRIES);
+        for (id, source) in [
+            (
+                "6173736574732f70726573656e746174696f6e2e6d6a73",
+                ASSET_PRESENTATION,
+            ),
+            ("6173736574732f73657276652d686f6d652e6d6a73", ASSET_HOME),
+            (
+                "6173736574732f73657276652d706c617967726f756e642e6d6a73",
+                ASSET_PLAYGROUND,
+            ),
+            (
+                "6173736574732f6c73702d7761736d2f6f726e615f6c73702e6a73",
+                ASSET_LSP_JS,
+            ),
+            (
+                "6173736574732f6c73702d7761736d2f6f726e615f6c73705f62672e7761736d",
+                ASSET_LSP_WASM,
+            ),
+        ] {
+            std::fs::write(asset_directory.join(format!("asset-{id}.orna")), source)
+                .expect("write committed browser support asset");
+        }
+        git_succeeds(
+            directory.path(),
+            &[
+                "add",
+                "playground.orna",
+                "playground/Sample/hello.orna",
+                "playground/examples/legacy.orna",
+                "playground/Asset",
+                "playground/Route",
+                "playground/Entry",
+            ],
+        );
+        git_succeeds(
+            directory.path(),
+            &[
+                "-c",
+                "user.name=kierandrewett",
+                "-c",
+                "user.email=kieran@drewett.dev",
+                "commit",
+                "--quiet",
+                "-m",
+                "add playground sample record",
+            ],
+        );
+        std::fs::write(
+            directory.path().join("playground/Sample/uncommitted.orna"),
+            PLAYGROUND_SAMPLE,
+        )
+        .expect("write uncommitted Sample row");
+        std::fs::write(
+            directory
+                .path()
+                .join("playground/examples/uncommitted.orna"),
+            "99 + 1",
+        )
+        .expect("write uncommitted file example");
+        std::fs::write(
+            asset_directory.join("asset-6173736574732f756e636f6d6d69747465642e6a73.orna"),
+            ASSET_UNCOMMITTED,
+        )
+        .expect("write uncommitted database asset");
+
+        let examples = listing_page(directory.path(), "/api/examples");
+        assert_eq!(examples.status, 200);
+        let examples: serde_json::Value =
+            serde_json::from_slice(&examples.body).expect("example records JSON");
+        let revision = examples["revision"].as_str().expect("committed revision");
+        assert_eq!(revision.len(), 40);
+        assert!(revision.bytes().all(|byte| byte.is_ascii_hexdigit()));
+        assert_eq!(examples["examples"].as_array().map(Vec::len), Some(2));
+        let examples = examples["examples"].as_array().expect("example list");
+        let sample = examples
+            .iter()
+            .find(|example| example["path"] == "playground/Sample/hello.orna")
+            .expect("database record example");
+        assert_eq!(sample["name"], "Hello, Orna");
+        assert_eq!(
+            sample["source"],
+            "pub fn double(value: Int): Int = value + value;\ndouble(21)"
+        );
+        let legacy = examples
+            .iter()
+            .find(|example| example["path"] == "playground/examples/legacy.orna")
+            .expect("committed file example");
+        assert_eq!(legacy["name"], "legacy");
+        assert_eq!(legacy["source"], LEGACY_EXAMPLE);
+
+        let identity = RuntimeIdentity {
+            database_id: [1; 16],
+            repository_id: [2; 16],
+        };
+        let page = playground_asset(directory.path(), identity, "/playground/");
+        assert_eq!(page.status, 200);
+        assert_eq!(page.content_type, "text/html; charset=utf-8");
+        let page = String::from_utf8(page.body).expect("database page UTF-8");
+        assert!(page.contains("<main>database shell</main>"));
+        assert!(page.contains(&format!(
+            "data-database=\"{}\"",
+            format_uuid(identity.database_id)
+        )));
+        assert!(page.contains("id=\"live-bridge\""));
+        assert!(page.contains("id=\"live-presentation\""));
+        assert!(page.contains("id=\"run-events-source\""));
+        assert!(page.contains("src=\"/playground/assets/serve-playground.mjs\""));
+        assert!(page.contains("\\u0000orna/serve/run-events/v1"));
+        let runtime = listing_page(directory.path(), "/playground/assets/serve-playground.mjs");
+        assert_eq!(runtime.status, 200);
+        assert!(
+            String::from_utf8(runtime.body)
+                .expect("playground runtime UTF-8")
+                .contains("globalThis.ornaPlaygroundRun")
+        );
+        let presentation = listing_page(directory.path(), "/playground/assets/presentation.mjs");
+        assert_eq!(presentation.status, 200);
+        assert!(
+            String::from_utf8(presentation.body)
+                .unwrap()
+                .contains("LivePresentation")
+        );
+        let lsp_binding = listing_page(directory.path(), "/playground/assets/lsp-wasm/orna_lsp.js");
+        assert_eq!(lsp_binding.status, 200);
+        assert_eq!(lsp_binding.body, b"export default async function init() {}");
+        let lsp_wasm = listing_page(
+            directory.path(),
+            "/playground/assets/lsp-wasm/orna_lsp_bg.wasm",
+        );
+        assert_eq!(lsp_wasm.status, 200);
+        assert_eq!(lsp_wasm.content_type, "application/wasm");
+        assert_eq!(lsp_wasm.body, b"\0asm\x01\0\0\0");
+        let embed = playground_asset(directory.path(), identity, "/playground/embed");
+        assert_eq!(embed.status, 200);
+        assert!(embed.headers.iter().any(|(name, value)| {
+            name == "Content-Security-Policy" && value == "frame-ancestors *"
+        }));
+        let embed = String::from_utf8(embed.body).expect("embedded page UTF-8");
+        assert!(embed.contains("<header data-page-header hidden>"));
+        assert!(embed.contains("<main>database shell</main>"));
+        let embed_with_slash = playground_asset(directory.path(), identity, "/playground/embed/");
+        assert_eq!(embed_with_slash.status, 200);
+        let script = playground_asset(directory.path(), identity, "/playground/assets/app.js");
+        assert_eq!(script.status, 200);
+        assert!(
+            script
+                .headers
+                .iter()
+                .any(|(name, value)| name == "X-Content-Type-Options" && value == "nosniff")
+        );
+        assert_eq!(script.content_type, "text/javascript; charset=utf-8");
+        assert_eq!(script.body, b"globalThis.ornaPlaygroundReady = true;");
+        let stylesheet =
+            playground_asset(directory.path(), identity, "/playground/assets/style.css");
+        assert_eq!(stylesheet.status, 200);
+        assert_eq!(stylesheet.content_type, "text/css; charset=utf-8");
+        assert_eq!(stylesheet.body, b"body { color: #202122; }");
+        assert!(!directory.path().join("playground/web-ui/dist").exists());
+        let uncommitted_asset = playground_asset(
+            directory.path(),
+            identity,
+            "/playground/assets/uncommitted.js",
+        );
+        assert_eq!(uncommitted_asset.status, 404);
+
+        let traversal =
+            playground_asset(directory.path(), identity, "/playground/%2e%2e/README.txt");
+        assert_eq!(traversal.status, 400);
+
+        std::fs::write(
+            asset_directory.join("asset-696e6465782e68746d6c.orna"),
+            ASSET_STALE_INDEX,
+        )
+        .expect("replace the shell row with one lacking the embed marker");
+        git_succeeds(directory.path(), &["add", "playground/Asset"]);
+        git_succeeds(
+            directory.path(),
+            &[
+                "-c",
+                "user.name=kierandrewett",
+                "-c",
+                "user.email=kieran@drewett.dev",
+                "commit",
+                "--quiet",
+                "-m",
+                "replace playground asset record",
+            ],
+        );
+        let stale_embed = playground_asset(directory.path(), identity, "/playground/embed");
+        assert_eq!(stale_embed.status, 503);
+    }
+
+    #[test]
+    fn playground_sample_records_match_the_declared_table_and_filename_key() {
+        const PLAYGROUND_SAMPLE: &str = include_str!("../tests/fixtures/playground-sample.orna");
+        const PLAYGROUND_SCHEMA: &str = include_str!("../tests/fixtures/playground-schema.orna");
+
+        assert!(has_playground_sample_table(PLAYGROUND_SCHEMA));
+        assert_eq!(
+            decode_playground_sample(PLAYGROUND_SAMPLE, "hello"),
+            Some((
+                "Hello, Orna".into(),
+                "pub fn double(value: Int): Int = value + value;\ndouble(21)".into(),
+            ))
+        );
+        assert_eq!(decode_playground_sample(PLAYGROUND_SAMPLE, "other"), None);
+        assert_eq!(
+            decode_playground_sample(
+                "{ id: \"hello\", id: \"hello\", name: \"Hello\", source: \"1\" }",
+                "hello"
+            ),
+            None
+        );
+        assert!(!has_playground_sample_table(
+            "pub table Sample(id: Int) { name: Str, source: Str }"
+        ));
+    }
+
+    #[test]
+    fn playground_asset_records_match_the_declared_table_and_path_key() {
+        const PLAYGROUND_SCHEMA: &str = include_str!("../tests/fixtures/playground-schema.orna");
+        const ASSET_APP: &str = include_str!("../tests/fixtures/playground-asset-app.orna");
+        const ASSET_PRESENTATION: &str =
+            include_str!("../tests/fixtures/playground-asset-presentation.orna");
+        const ASSET_STYLE: &str = include_str!("../tests/fixtures/playground-asset-style.orna");
+        const ROUTE_PAGE: &str = include_str!("../tests/fixtures/playground-route-page.orna");
+        const ENTRY_PAGE: &str = include_str!("../tests/fixtures/playground-entry-page.orna");
+
+        assert!(has_playground_asset_table(PLAYGROUND_SCHEMA));
+        assert!(has_playground_route_table(PLAYGROUND_SCHEMA));
+        assert!(has_playground_entry_table(PLAYGROUND_SCHEMA));
+        let parsed_presentation = parse_row(ASSET_PRESENTATION);
+        assert!(
+            parsed_presentation.is_ok(),
+            "presentation asset row parse: {:#?}",
+            parsed_presentation.diagnostics
+        );
+        assert_eq!(
+            decode_playground_asset(ASSET_APP, "asset-6173736574732f6170702e6a73"),
+            Some((
+                "assets/app.js".into(),
+                "text/javascript; charset=utf-8".into(),
+                "globalThis.ornaPlaygroundReady = true;".into(),
+            ))
+        );
+        assert_eq!(
+            decode_playground_asset(
+                ASSET_PRESENTATION,
+                "asset-6173736574732f70726573656e746174696f6e2e6d6a73"
+            ),
+            Some((
+                "assets/presentation.mjs".into(),
+                "text/javascript; charset=utf-8".into(),
+                "export class LivePresentation {}".into(),
+            ))
+        );
+        assert_eq!(decode_playground_asset(ASSET_APP, "different-id"), None);
+        assert_eq!(
+            decode_playground_asset(ASSET_STYLE, "asset-6173736574732f7374796c652e637373"),
+            Some((
+                "assets/style.css".into(),
+                "text/css; charset=utf-8".into(),
+                "body { color: #202122; }".into(),
+            ))
+        );
+        assert!(!has_playground_asset_table(
+            "pub table Asset(id: Int) { path: Str, media_type: Str, content: Str }"
+        ));
+        assert!(!has_playground_route_table(
+            "pub table Route(id: Int) { path: Str, entry: Str }"
+        ));
+        assert!(!has_playground_entry_table(
+            "pub table Entry(id: Str) { asset_path: Int, kind: Str }"
+        ));
+        assert_eq!(
+            decode_playground_route(ROUTE_PAGE, "route-2f706c617967726f756e642f"),
+            Some(("/playground/".into(), "entry-page".into()))
+        );
+        assert_eq!(decode_playground_route(ROUTE_PAGE, "different-id"), None);
+        assert_eq!(
+            decode_playground_entry(ENTRY_PAGE, "entry-page"),
+            Some(("index.html".into(), PlaygroundEntryKind::Page))
+        );
+        assert_eq!(decode_playground_entry(ENTRY_PAGE, "different-id"), None);
+        assert_eq!(
+            normalize_playground_route_path("/playground"),
+            Some("/playground/".into())
+        );
+        assert_eq!(
+            normalize_playground_route_path("/playground/embed/"),
+            Some("/playground/embed".into())
+        );
+        assert_eq!(
+            normalize_playground_route_path("/playground/%2e%2e/README.txt"),
+            None
+        );
+    }
+
+    #[test]
+    fn playground_example_catalog_rows_decode_for_asset_namespace() {
+        const ROUTE: &str =
+            include_str!("../tests/fixtures/playground-route-example-catalog-style.orna");
+        const ENTRY: &str =
+            include_str!("../tests/fixtures/playground-entry-example-catalog-style.orna");
+        const ASSET: &str =
+            include_str!("../tests/fixtures/playground-asset-example-catalog-style.orna");
+
+        let entry_id = "entry-asset-6173736574732f6578616d706c65732e637373";
+        let asset_id = "asset-6173736574732f6578616d706c65732e637373";
+        assert_eq!(
+            decode_playground_route(
+                ROUTE,
+                "route-2f706c617967726f756e642f6173736574732f6578616d706c65732e637373",
+            ),
+            Some(("/playground/assets/examples.css".into(), entry_id.into()))
+        );
+        assert_eq!(
+            decode_playground_entry(ENTRY, entry_id),
+            Some(("assets/examples.css".into(), PlaygroundEntryKind::Asset))
+        );
+        let parsed_asset = parse_row(ASSET);
+        assert!(
+            parsed_asset.is_ok(),
+            "catalog stylesheet row parse: {:#?}",
+            parsed_asset.diagnostics
+        );
+        assert_eq!(
+            decode_playground_asset(ASSET, asset_id),
+            Some((
+                "assets/examples.css".into(),
+                "text/css; charset=utf-8".into(),
+                "body { color: #202122; }".into(),
+            ))
+        );
+    }
+
+    #[test]
+    fn embedded_page_requires_one_header_marker_on_the_header_tag() {
+        let mut missing = "<html><body><header>Title</header></body></html>".to_owned();
+        assert!(!hide_embedded_page_header(&mut missing));
+        assert_eq!(missing, "<html><body><header>Title</header></body></html>");
+
+        let mut wrong_tag = "<html><body><main data-page-header></main></body></html>".to_owned();
+        assert!(!hide_embedded_page_header(&mut wrong_tag));
+
+        let mut duplicate =
+            "<header data-page-header>One</header><header data-page-header>Two</header>".to_owned();
+        assert!(!hide_embedded_page_header(&mut duplicate));
+        assert_eq!(
+            duplicate,
+            "<header data-page-header>One</header><header data-page-header>Two</header>"
+        );
+    }
+
+    #[test]
+    fn default_listing_reads_commits_trees_and_files_from_git() {
+        let directory = tempfile::tempdir().expect("temporary database");
+        git_succeeds(
+            directory.path(),
+            &["init", "--quiet", "--initial-branch=listing"],
+        );
+        std::fs::create_dir_all(directory.path().join("src")).expect("source directory");
+        std::fs::write(directory.path().join("main.orna"), SERVE_FIXTURE)
+            .expect("crate-local Orna source fixture");
+        std::fs::write(directory.path().join("src/nested.orna"), SERVE_FIXTURE)
+            .expect("nested Orna source fixture");
+        std::fs::write(directory.path().join("README.txt"), "committed text\n")
+            .expect("generic text file");
+        std::fs::write(directory.path().join("src/data.bin"), [0, 255])
+            .expect("generic binary file");
+        git_succeeds(
+            directory.path(),
+            &["add", "--", "main.orna", "src", "README.txt"],
+        );
+        git_succeeds(
+            directory.path(),
+            &[
+                "-c",
+                "user.name=kierandrewett",
+                "-c",
+                "user.email=kieran@drewett.dev",
+                "commit",
+                "--quiet",
+                "-m",
+                "render <listing> safely",
+            ],
+        );
+        git_succeeds(directory.path(), &["branch", "archive"]);
+        std::fs::write(directory.path().join("uncommitted.txt"), "not in Git yet")
+            .expect("uncommitted worktree file");
+        let repository = Repository::discover(directory.path()).expect("database repository");
+        let commit = repository
+            .head()
+            .expect("read HEAD")
+            .expect("listing commit");
+        let commit_id = commit.as_str();
+
+        let log = listing_page(directory.path(), "/");
+        assert_eq!(log.status, 200);
+        assert_eq!(log.content_type, "text/html; charset=utf-8");
+        let log = String::from_utf8(log.body).expect("commit log HTML");
+        assert!(log.contains("render &lt;listing&gt; safely"));
+        assert!(log.contains(&format!("/tree/{commit_id}/")));
+        assert!(log.contains("Branches"));
+        assert!(log.contains("archive"));
+        assert!(log.contains("listing"));
+        assert!(log.contains("kierandrewett"));
+        assert!(!log.contains("uncommitted.txt"));
+        assert!(log.contains("href=\"/playground/\""));
+        assert!(!log.contains("<header"));
+
+        let tree = listing_page(directory.path(), &format!("/tree/{commit_id}/"));
+        assert_eq!(tree.status, 200);
+        let tree = String::from_utf8(tree.body).expect("tree HTML");
+        assert!(tree.contains(&format!("/tree/{commit_id}/src/")));
+        assert!(tree.contains(&format!("/blob/{commit_id}/main.orna")));
+        assert!(tree.contains(&format!("/blob/{commit_id}/README.txt")));
+        assert!(!tree.contains("uncommitted.txt"));
+
+        let nested_tree = listing_page(directory.path(), &format!("/tree/{commit_id}/src/"));
+        assert_eq!(nested_tree.status, 200);
+        let nested_tree = String::from_utf8(nested_tree.body).expect("nested tree HTML");
+        assert!(nested_tree.contains(&format!("/blob/{commit_id}/src/nested.orna")));
+        assert!(nested_tree.contains(&format!("/blob/{commit_id}/src/data.bin")));
+
+        let source = listing_page(
+            directory.path(),
+            &format!("/blob/{commit_id}/src/nested.orna"),
+        );
+        assert_eq!(source.status, 200);
+        let source = String::from_utf8(source.body).expect("Orna source HTML");
+        assert!(source.contains("pub fn main(): Int = 1 / 0;"));
+        assert!(source.contains("&lt;script&gt;alert(&#39;source&#39;)&lt;/script&gt;"));
+        assert!(!source.contains("<script>alert('source')</script>"));
+
+        let text = listing_page(directory.path(), &format!("/blob/{commit_id}/README.txt"));
+        assert_eq!(text.status, 200);
+        assert!(
+            String::from_utf8(text.body)
+                .unwrap()
+                .contains("committed text")
+        );
+
+        let binary = listing_page(directory.path(), &format!("/blob/{commit_id}/src/data.bin"));
+        assert_eq!(binary.status, 200);
+        assert!(
+            String::from_utf8(binary.body)
+                .unwrap()
+                .contains("Binary content (2 bytes).")
+        );
     }
 
     #[test]
@@ -1071,21 +2691,26 @@ mod tests {
                     .success()
             );
         }
-        std::fs::write(right.path().join("local.txt"), "only in right")
-            .expect("right CWD change");
+        std::fs::write(right.path().join("local.txt"), "only in right").expect("right CWD change");
         let left_report = String::from_utf8(
-            clone_report(left.path(), RuntimeIdentity {
-                database_id: [1; 16],
-                repository_id: [2; 16],
-            })
+            clone_report(
+                left.path(),
+                RuntimeIdentity {
+                    database_id: [1; 16],
+                    repository_id: [2; 16],
+                },
+            )
             .expect("left report"),
         )
         .expect("left JSON");
         let right_report = String::from_utf8(
-            clone_report(right.path(), RuntimeIdentity {
-                database_id: [3; 16],
-                repository_id: [4; 16],
-            })
+            clone_report(
+                right.path(),
+                RuntimeIdentity {
+                    database_id: [3; 16],
+                    repository_id: [4; 16],
+                },
+            )
             .expect("right report"),
         )
         .expect("right JSON");
@@ -1125,7 +2750,9 @@ mod tests {
             peek_websocket_request(&stream)
         });
         let mut client = TcpStream::connect(address).expect("loopback connection");
-        client.write_all(b"GET /orna/live/").expect("first fragment");
+        client
+            .write_all(b"GET /orna/live/")
+            .expect("first fragment");
         std::thread::sleep(StdDuration::from_millis(10));
         client
             .write_all(b"session HTTP/1.1\r\n")
@@ -1185,10 +2812,7 @@ mod tests {
 
     #[test]
     fn smart_http_clones_and_pushes_the_selected_clones_head() {
-        for (index, branch, dirty) in [
-            (0_u8, "http-left", false),
-            (1_u8, "http-right", true),
-        ] {
+        for (index, branch, dirty) in [(0_u8, "http-left", false), (1_u8, "http-right", true)] {
             let source = tempfile::tempdir().expect("source clone");
             std::fs::write(source.path().join("main.orna"), SERVE_FIXTURE)
                 .expect("vendored project source");
@@ -1303,7 +2927,10 @@ mod tests {
                 .output()
                 .expect("cloned HEAD")
                 .stdout;
-            assert_eq!(String::from_utf8(cloned_head).unwrap().trim(), expected_head);
+            assert_eq!(
+                String::from_utf8(cloned_head).unwrap().trim(),
+                expected_head
+            );
             let pushed = Command::new("git")
                 .args([
                     "-c",
@@ -1328,16 +2955,19 @@ mod tests {
                 .output()
                 .expect("published HEAD")
                 .stdout;
-            assert_eq!(String::from_utf8(published_head).unwrap().trim(), expected_head);
+            assert_eq!(
+                String::from_utf8(published_head).unwrap().trim(),
+                expected_head
+            );
 
             let mut client = TcpStream::connect(address).expect("clone report connection");
             client
-                .write_all(
-                    format!("GET /api/clone HTTP/1.1\r\nHost: {address}\r\n\r\n").as_bytes(),
-                )
+                .write_all(format!("GET /api/clone HTTP/1.1\r\nHost: {address}\r\n\r\n").as_bytes())
                 .expect("clone report request");
             let mut response = Vec::new();
-            client.read_to_end(&mut response).expect("clone report response");
+            client
+                .read_to_end(&mut response)
+                .expect("clone report response");
             let response = String::from_utf8(response).expect("clone report UTF-8");
             assert!(response.starts_with("HTTP/1.1 200 OK\r\n"));
             assert!(response.contains(&format!("\"HEAD\":\"{expected_head}\"")));

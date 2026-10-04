@@ -1,0 +1,6 @@
+string_builder.build(string_builder.append_line(string_builder.new(), "first")) == "first\n"
+&& string_builder.build(string_builder.append_line(string_builder.new(), "")) == "\n"
+&& string_builder.build(string_builder.append_line(string_builder.from_text("a"), "β")) == "aβ\n"
+&& string_builder.build(string_builder.append_all(string_builder.from_text("Ω"), ["✨", "漢"])) == "Ω✨漢"
+&& string_builder.is_empty(string_builder.append(string_builder.new(), ""))
+&& !string_builder.is_empty(string_builder.append(string_builder.new(), "x"))

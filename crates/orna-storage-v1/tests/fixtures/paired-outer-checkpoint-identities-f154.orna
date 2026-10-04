@@ -1,0 +1,7 @@
+{ id: "f154/outer-checkpoint/main", name: "f154/left/checkpoint-main", city: "f154/right/checkpoint-alpha", }
+
+{ id: "f154/outer-checkpoint/retry", name: "f154/left/checkpoint-retry", city: "f154/right/checkpoint-beta", }
+
+{ id: "f154/outer-checkpoint/reused", name: "f154/left/checkpoint-main", city: "f154/right/checkpoint-alpha", }
+
+{ id: "f154/outer-checkpoint/malformed", name: "f154/left/checkpoint-malformed", city: "f154/right/checkpoint-delta", }

@@ -6,6 +6,7 @@
 //! evaluator program. Runtime table work is staged against the exact captured
 //! activation context and is never published by this crate.
 
+use num_bigint::BigInt;
 use orna_evaluator_v1::{
     AdmittedReplSession, EffectHandler, Environment, EvaluationError, Functions, Limits,
     PureFunction, RelationPage, StepBudget, invoke_named, invoke_named_with_effects,
@@ -16,8 +17,11 @@ use orna_live_v1::{
     Error as LiveError, LiveAdminEffectDispatcher, LiveApplication, LiveApplicationWorkLease,
     LiveEvalResponse, LiveEvalTransaction,
 };
-use num_bigint::BigInt;
-use orna_protocol_v1::{Envelope, Message, PresentNode, ResultStatus};
+use orna_project_v1::LoadedProject;
+use orna_protocol_v1::{
+    Envelope, Message, PatchList, PresentIdentity, PresentKind, PresentNode, PresentPropertyKey,
+    ResultStatus,
+};
 use orna_runtime_v1::{
     NoFault, RequestIdentity, RuntimeActivationContext, RuntimeError,
     RuntimePublicationMetadataRows, RuntimeTableActivationSnapshot, RuntimeTableRows,
@@ -28,7 +32,7 @@ use orna_semantic_v1::{
 };
 use orna_syntax_v1::{
     CaseArm, Declaration, Expr, FieldInitializer, Item, Pattern, Statement, StringSegment,
-    TableMember, parse_module_with_file,
+    TableMember, parse_module_with_file, parse_repl,
 };
 use sha2::{Digest, Sha256};
 use std::{
@@ -43,6 +47,10 @@ use std::{
 const DIGEST_DOMAIN: &[u8] = b"ORNA-ACTIVATION-DIGEST\0";
 const SOURCE_MUTATION_DOMAIN: &[u8] = b"ORNA-SOURCE-MUTATION\0";
 const MAX_ADMITTED_REPL_SESSIONS: usize = 4096;
+const MAX_RUN_EVENTS_PER_SESSION: usize = 256;
+/// Reserved live-watch source used by the served UI to observe one session's
+/// structured REPL events over ORNA-SERVE-001 presentation updates.
+pub const LIVE_RUN_EVENTS_WATCH_SOURCE: &str = "\0orna/serve/run-events/v1";
 type TableInsertDefaults = BTreeMap<String, Vec<(String, Expr)>>;
 
 /// Errors raised before an application is allowed to execute.
@@ -258,15 +266,13 @@ impl ApplicationAuthority {
         snapshot: &RuntimeTableActivationSnapshot,
     ) -> Result<StagedActivation, ApplicationError> {
         let tables = admitted_table_schemas(&application.module_header);
-        let mut handler = SourceMutationEffectHandler::with_table_rows(
-            tables,
-            snapshot.table_rows().clone(),
-        )?
-        .with_insert_defaults(
-            application.table_insert_defaults.clone(),
-            application.functions.clone(),
-            application.limits,
-        );
+        let mut handler =
+            SourceMutationEffectHandler::with_table_rows(tables, snapshot.table_rows().clone())?
+                .with_insert_defaults(
+                    application.table_insert_defaults.clone(),
+                    application.functions.clone(),
+                    application.limits,
+                );
         let value = invoke_named_with_effects(
             &application.entry,
             &application.functions,
@@ -296,15 +302,13 @@ impl ApplicationAuthority {
         publication_rows: RuntimePublicationMetadataRows,
     ) -> Result<StagedActivation, ApplicationError> {
         let tables = admitted_table_schemas(&application.module_header);
-        let mut handler = SourceMutationEffectHandler::with_publication_rows(
-            tables,
-            publication_rows,
-        )
-        .with_insert_defaults(
-            application.table_insert_defaults.clone(),
-            application.functions.clone(),
-            application.limits,
-        );
+        let mut handler =
+            SourceMutationEffectHandler::with_publication_rows(tables, publication_rows)
+                .with_insert_defaults(
+                    application.table_insert_defaults.clone(),
+                    application.functions.clone(),
+                    application.limits,
+                );
         let value = invoke_named_with_effects(
             &application.entry,
             &application.functions,
@@ -512,9 +516,7 @@ impl ApplicationAuthority {
                         mutation.key().to_vec(),
                         mutation.value().map(<[u8]>::to_vec),
                     )
-                    .map_err(|error: RuntimeError| {
-                        ApplicationError::Runtime(error.to_string())
-                    }),
+                    .map_err(|error: RuntimeError| ApplicationError::Runtime(error.to_string())),
                 }
             })
             .collect::<Result<Vec<_>, _>>()?;
@@ -613,13 +615,12 @@ impl AsyncApplicationEffectDispatcher for LiveEffectAdapter<'_> {
         context: &'a RuntimeActivationContext,
     ) -> ApplicationEffectFuture<'a> {
         match effect {
-            ApplicationEffectRequest::PauseStream { stream, reason } => {
-                self.0.reject_staged_admin_effect(stream, reason, false, context)
-            }
-            ApplicationEffectRequest::ResumeStream { stream } => {
-                self.0
-                    .reject_staged_admin_effect(stream, None, true, context)
-            }
+            ApplicationEffectRequest::PauseStream { stream, reason } => self
+                .0
+                .reject_staged_admin_effect(stream, reason, false, context),
+            ApplicationEffectRequest::ResumeStream { stream } => self
+                .0
+                .reject_staged_admin_effect(stream, None, true, context),
             ApplicationEffectRequest::CancelInvocation { .. } => {
                 Box::pin(async { Err("sys.admin.busy".to_owned()) })
             }
@@ -668,9 +669,10 @@ impl StagedActivation {
         context: &RuntimeActivationContext,
         request: Option<RequestIdentity>,
     ) -> Result<StagedTableActivation, ApplicationError> {
-        if self.snapshot_generation.is_some_and(|generation| {
-            generation != context.capture().generation_digest()
-        }) {
+        if self
+            .snapshot_generation
+            .is_some_and(|generation| generation != context.capture().generation_digest())
+        {
             return Err(ApplicationError::Runtime(
                 "table rows and commit context refer to different CWD generations".into(),
             ));
@@ -752,13 +754,9 @@ impl SourceMutationEffectHandler {
                         "captured table row key did not match its row".into(),
                     ));
                 }
-                handler
-                    .observe_automatic_id(&table, key)
-                    .map_err(|_| {
-                        ApplicationError::Runtime(
-                            "captured automatic table key was invalid".into(),
-                        )
-                    })?;
+                handler.observe_automatic_id(&table, key).map_err(|_| {
+                    ApplicationError::Runtime("captured automatic table key was invalid".into())
+                })?;
                 if decoded.insert(key.clone(), row).is_some() {
                     return Err(ApplicationError::Runtime(
                         "captured table snapshot had duplicate keys".into(),
@@ -939,10 +937,9 @@ impl SourceMutationEffectHandler {
             return Some(name);
         }
         let short_name = path.rsplit('.').next()?;
-        let mut matches = self
-            .tables
-            .keys()
-            .filter(|name| name.as_str() == short_name || name.ends_with(&format!(".{short_name}")));
+        let mut matches = self.tables.keys().filter(|name| {
+            name.as_str() == short_name || name.ends_with(&format!(".{short_name}"))
+        });
         let found = matches.next()?;
         if matches.next().is_some() {
             None
@@ -1093,8 +1090,7 @@ impl SourceMutationEffectHandler {
             .iter()
             .cloned()
             .map(|part| {
-                CanonicalValue::new(part)
-                    .map_err(|_| Self::effect_error("ORNA-EVAL-TABLE-KEY"))
+                CanonicalValue::new(part).map_err(|_| Self::effect_error("ORNA-EVAL-TABLE-KEY"))
             })
             .collect()
     }
@@ -1150,7 +1146,11 @@ impl SourceMutationEffectHandler {
         Ok(OvbRaw::Int(allocated))
     }
 
-    fn observe_automatic_id(&mut self, table: &str, encoded_key: &[u8]) -> Result<(), EvaluationError> {
+    fn observe_automatic_id(
+        &mut self,
+        table: &str,
+        encoded_key: &[u8],
+    ) -> Result<(), EvaluationError> {
         let value = CanonicalValue::decode(encoded_key)
             .map_err(|_| Self::effect_error("ORNA-EVAL-TABLE-KEY"))?;
         self.observe_automatic_id_value(table, value.raw())
@@ -1536,7 +1536,10 @@ impl EffectHandler for SourceMutationEffectHandler {
         let Expr::Field { base, name, .. } = callee else {
             return Ok(None);
         };
-        if !matches!(name.as_str(), "insert" | "upsert" | "update" | "delete" | "rekey") {
+        if !matches!(
+            name.as_str(),
+            "insert" | "upsert" | "update" | "delete" | "rekey"
+        ) {
             return Ok(None);
         }
         let Some(path) = expression_name_path(base) else {
@@ -1667,9 +1670,7 @@ impl EffectHandler for SourceMutationEffectHandler {
                 let mut key_entries = parts
                     .iter()
                     .zip(&admission.keys)
-                    .map(|(part, (name, _))| {
-                        (OvbRaw::Text(name.clone()), part.raw().clone())
-                    })
+                    .map(|(part, (name, _))| (OvbRaw::Text(name.clone()), part.raw().clone()))
                     .collect::<Vec<_>>();
                 key_entries.sort_by(|(left, _), (right, _)| {
                     canonical_map_key(left).cmp(&canonical_map_key(right))
@@ -1749,9 +1750,7 @@ fn encoded_key(key: &CanonicalValue) -> Result<Vec<u8>, EvaluationError> {
 fn expression_name_path(expression: &Expr) -> Option<String> {
     match expression {
         Expr::Name { text, .. } => Some(text.clone()),
-        Expr::Field { base, name, .. } => {
-            Some(format!("{}.{}", expression_name_path(base)?, name))
-        }
+        Expr::Field { base, name, .. } => Some(format!("{}.{}", expression_name_path(base)?, name)),
         _ => None,
     }
 }
@@ -1790,9 +1789,7 @@ fn admitted_table_schemas(
         .collect()
 }
 
-fn automatic_id_counters(
-    tables: &BTreeMap<String, TableSchema>,
-) -> BTreeMap<String, BigInt> {
+fn automatic_id_counters(tables: &BTreeMap<String, TableSchema>) -> BTreeMap<String, BigInt> {
     tables
         .iter()
         .filter_map(|(name, schema)| {
@@ -1842,7 +1839,10 @@ fn table_insert_defaults(items: &[Item]) -> TableInsertDefaults {
 fn module_namespace(logical_path: &str) -> Namespace {
     // Analysis also returns catalogue and standard-library headers; select
     // the original admitted module instead of whichever namespace sorts first.
-    let mut parts = logical_path.split('/').map(str::to_owned).collect::<Vec<_>>();
+    let mut parts = logical_path
+        .split('/')
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
     if let Some(file) = parts.pop() {
         let stem = file.strip_suffix(".orna").unwrap_or(&file);
         if stem != "main" {
@@ -1878,11 +1878,35 @@ struct ApplicationReplSession {
 #[derive(Clone, Debug)]
 pub struct ApplicationLiveAdapter {
     authority: ApplicationAuthority,
+    project: Option<LoadedProject>,
     logical_path: String,
     entry: String,
     sessions: Arc<Mutex<BTreeMap<[u8; 16], ApplicationReplSession>>>,
+    run_events: Arc<Mutex<BTreeMap<[u8; 16], SessionRunEventLog>>>,
     watches: Arc<Mutex<BTreeMap<([u8; 16], [u8; 16]), ApplicationWatch>>>,
     runtime_identity: Option<([u8; 16], [u8; 16])>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct SessionRunEventLog {
+    next_sequence: u64,
+    events: Vec<SessionRunEvent>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct SessionRunEvent {
+    sequence: u64,
+    succeeded: bool,
+    value: CanonicalValue,
+    stdout: String,
+    error: Option<SessionRunError>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct SessionRunError {
+    code: String,
+    line: u64,
+    column: u64,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1899,12 +1923,22 @@ impl ApplicationLiveAdapter {
     pub fn new(authority: ApplicationAuthority) -> Self {
         Self {
             authority,
+            project: None,
             logical_path: "remote_eval.orna".to_owned(),
             entry: "main".to_owned(),
             sessions: Arc::new(Mutex::new(BTreeMap::new())),
+            run_events: Arc::new(Mutex::new(BTreeMap::new())),
             watches: Arc::new(Mutex::new(BTreeMap::new())),
             runtime_identity: None,
         }
+    }
+
+    /// Seeds future per-session REPLs from the serving clone's admitted
+    /// project snapshot and its pinned standard dependency sources.
+    #[must_use]
+    pub fn with_loaded_project(mut self, project: LoadedProject) -> Self {
+        self.project = Some(project);
+        self
     }
 
     /// Pins live snapshots to the clone runtime selected by the executable
@@ -1959,6 +1993,14 @@ impl ApplicationLiveAdapter {
     }
 
     fn new_repl_session(&self) -> Result<AdmittedReplSession, LiveError> {
+        if let Some(project) = &self.project {
+            return AdmittedReplSession::from_loaded_project(
+                project,
+                project.standard_sources().to_vec(),
+                self.authority.limits,
+            )
+            .map_err(|_| LiveError::ApplicationRejected);
+        }
         let sources = reference_standard_sources().into_iter().collect::<Vec<_>>();
         let catalogue = self
             .authority
@@ -2039,7 +2081,95 @@ impl ApplicationLiveAdapter {
         }
     }
 
+    fn record_run_success(&self, session: [u8; 16], value: CanonicalValue) {
+        record_session_run_event(&self.run_events, session, true, value, None);
+    }
+
+    fn record_run_failure(&self, session: [u8; 16], source: &str, code: &str) {
+        let (line, column) = source_error_location(source);
+        record_session_run_event(
+            &self.run_events,
+            session,
+            false,
+            CanonicalValue::new(OvbRaw::Null).expect("null is canonical"),
+            Some(SessionRunError {
+                code: code.to_owned(),
+                line,
+                column,
+            }),
+        );
+    }
+
+    fn run_events_present(&self, session: [u8; 16]) -> Result<PresentNode, LiveError> {
+        let events = self
+            .run_events
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&session)
+            .map_or_else(Vec::new, |log| log.events.clone());
+        let children = events
+            .iter()
+            .map(|event| {
+                let mut properties = vec![
+                    (PresentPropertyKey::Name("kind".into()), text_value("run")),
+                    (
+                        PresentPropertyKey::Name("sequence".into()),
+                        integer_value(event.sequence),
+                    ),
+                    (
+                        PresentPropertyKey::Name("status".into()),
+                        text_value(if event.succeeded { "success" } else { "error" }),
+                    ),
+                    (
+                        PresentPropertyKey::Name("value".into()),
+                        event.value.clone(),
+                    ),
+                    (
+                        PresentPropertyKey::Name("stdout".into()),
+                        text_value(&event.stdout),
+                    ),
+                ];
+                if let Some(error) = &event.error {
+                    properties.extend([
+                        (
+                            PresentPropertyKey::Name("error_code".into()),
+                            text_value(&error.code),
+                        ),
+                        (
+                            PresentPropertyKey::Name("line".into()),
+                            integer_value(error.line),
+                        ),
+                        (
+                            PresentPropertyKey::Name("column".into()),
+                            integer_value(error.column),
+                        ),
+                    ]);
+                }
+                PresentNode::new(
+                    PresentKind::Name("run".into()),
+                    Some(PresentIdentity::Explicit(integer_value(event.sequence))),
+                    properties,
+                    [],
+                )
+                .map_err(|_| LiveError::ApplicationRejected)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        PresentNode::new(
+            PresentKind::Name("run.events".into()),
+            None,
+            [(
+                PresentPropertyKey::Name("count".into()),
+                integer_value(events.len() as u64),
+            )],
+            children,
+        )
+        .map_err(|_| LiveError::ApplicationRejected)
+    }
+
     fn watch_value(&self, session: [u8; 16], source: &str) -> Result<PresentNode, LiveError> {
+        if source == LIVE_RUN_EVENTS_WATCH_SOURCE {
+            return self.run_events_present(session);
+        }
         let repl = self.repl_candidate(session)?;
         let value = repl
             .preview(source)
@@ -2048,6 +2178,75 @@ impl ApplicationLiveAdapter {
         // specializations may be added without making any value unwatchable.
         PresentNode::from_value(value).map_err(|_| LiveError::ApplicationRejected)
     }
+}
+
+fn record_session_run_event(
+    logs: &Arc<Mutex<BTreeMap<[u8; 16], SessionRunEventLog>>>,
+    session: [u8; 16],
+    succeeded: bool,
+    value: CanonicalValue,
+    error: Option<SessionRunError>,
+) {
+    let mut logs = logs
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let log = logs.entry(session).or_insert_with(|| SessionRunEventLog {
+        next_sequence: 1,
+        events: Vec::new(),
+    });
+    let sequence = log.next_sequence;
+    let Some(next_sequence) = sequence.checked_add(1) else {
+        return;
+    };
+    log.next_sequence = next_sequence;
+    if log.events.len() == MAX_RUN_EVENTS_PER_SESSION {
+        log.events.remove(0);
+    }
+    log.events.push(SessionRunEvent {
+        sequence,
+        succeeded,
+        value,
+        // The evaluator currently has no implicit print operation. Keeping
+        // stdout as a typed field leaves the event contract ready for an
+        // explicitly captured host output stream.
+        stdout: String::new(),
+        error,
+    });
+}
+
+fn text_value(value: &str) -> CanonicalValue {
+    CanonicalValue::new(OvbRaw::Text(value.to_owned())).expect("text is canonical")
+}
+
+fn integer_value(value: u64) -> CanonicalValue {
+    CanonicalValue::new(OvbRaw::Int(BigInt::from(value))).expect("integer is canonical")
+}
+
+fn source_error_location(source: &str) -> (u64, u64) {
+    let parsed = parse_repl(source);
+    let offset = parsed.diagnostics.first().map_or_else(
+        || {
+            source
+                .char_indices()
+                .find_map(|(index, character)| (!character.is_whitespace()).then_some(index))
+                .unwrap_or(0)
+        },
+        |diagnostic| diagnostic.span.start.min(source.len()),
+    );
+    let mut line = 1_u64;
+    let mut column = 1_u64;
+    for (index, character) in source.char_indices() {
+        if index >= offset {
+            break;
+        }
+        if character == '\n' {
+            line = line.saturating_add(1);
+            column = 1;
+        } else {
+            column = column.saturating_add(1);
+        }
+    }
+    (line, column)
 }
 
 impl LiveApplication for ApplicationLiveAdapter {
@@ -2062,17 +2261,24 @@ impl LiveApplication for ApplicationLiveAdapter {
                 return Err(LiveError::ApplicationRejected);
             };
             let mut repl = self.repl_candidate(session)?;
-            let result = repl.submit(source);
+            let result = match repl.submit(source) {
+                Ok(result) => result,
+                Err(error) => {
+                    let code = error.code().to_owned();
+                    self.publish_repl_candidate(session, repl);
+                    self.record_run_failure(session, source, &code);
+                    return Err(LiveError::from(ApplicationError::Evaluation(code)));
+                }
+            };
             let value = result
-                .map_err(|error| {
-                    LiveError::from(ApplicationError::Evaluation(error.code().to_owned()))
-                })?
                 .unwrap_or_else(|| CanonicalValue::new(OvbRaw::Null).expect("null is canonical"));
             self.publish_repl_candidate(session, repl);
+            self.record_run_success(session, value.clone());
             return self.success_envelope(request, eval_fingerprint(message)?, value);
         }
         let admitted = self.evaluate_eval_message(message)?;
         let value = self.authority.evaluate(&admitted, &Environment::new())?;
+        self.record_run_success(session, value.clone());
         self.success_envelope(request, eval_fingerprint(message)?, value)
     }
 
@@ -2092,28 +2298,46 @@ impl LiveApplication for ApplicationLiveAdapter {
                 let mut repl = self.repl_candidate(session)?;
                 let staged = match repl.stage_activation(source) {
                     Ok(staged) => staged,
-                    Err(error) if error.code() == "ORNA-REPL-EFFECT" => {
-                        let value = repl
-                            .submit(source)
-                            .map_err(|error| {
-                                LiveError::from(ApplicationError::Evaluation(
-                                    error.code().to_owned(),
-                                ))
-                            })?
-                            .unwrap_or_else(|| {
+                    Err(error) if error.code() == "ORNA-REPL-EFFECT" => match repl.submit(source) {
+                        Ok(value) => {
+                            let value = value.unwrap_or_else(|| {
                                 CanonicalValue::new(OvbRaw::Null).expect("null is canonical")
                             });
+                            self.publish_repl_candidate(session, repl);
+                            self.record_run_success(session, value.clone());
+                            let envelope =
+                                self.success_envelope(request, eval_fingerprint(message)?, value)?;
+                            return Ok(LiveEvalResponse::pure(envelope));
+                        }
+                        Err(error) => {
+                            let code = error.code().to_owned();
+                            self.publish_repl_candidate(session, repl);
+                            self.record_run_failure(session, source, &code);
+                            return Err(LiveError::from(ApplicationError::Evaluation(code)));
+                        }
+                    },
+                    Err(error) => {
+                        let code = error.code().to_owned();
+                        // submit() records the failure status in the REPL's
+                        // private `$?` binding without running effectful input.
+                        let _ = repl.submit(source);
                         self.publish_repl_candidate(session, repl);
-                        let envelope =
-                            self.success_envelope(request, eval_fingerprint(message)?, value)?;
-                        return Ok(LiveEvalResponse::pure(envelope));
+                        self.record_run_failure(session, source, &code);
+                        return Err(LiveError::from(ApplicationError::Evaluation(code)));
                     }
-                    Err(_) => return Err(LiveError::ApplicationRejected),
                 };
                 let mut handler = SourceMutationEffectHandler::new(self.repl_table_schemas());
-                let (value, successor) = repl
-                    .evaluate_staged_with_effects(staged, &mut handler)
-                    .map_err(|_| LiveError::ApplicationRejected)?;
+                let (value, successor) =
+                    match repl.evaluate_staged_with_effects(staged, &mut handler) {
+                        Ok(result) => result,
+                        Err(error) => {
+                            let code = error.code().to_owned();
+                            let _ = repl.submit(source);
+                            self.publish_repl_candidate(session, repl);
+                            self.record_run_failure(session, source, &code);
+                            return Err(LiveError::from(ApplicationError::Evaluation(code)));
+                        }
+                    };
                 let mutations = handler.into_mutations().map_err(LiveError::from)?;
                 let value = value.unwrap_or_else(|| {
                     CanonicalValue::new(OvbRaw::Null).expect("null is canonical")
@@ -2121,9 +2345,17 @@ impl LiveApplication for ApplicationLiveAdapter {
                 let envelope = self.success_envelope(request, eval_fingerprint(message)?, value)?;
                 if mutations.is_empty() {
                     self.publish_repl_candidate(session, successor);
+                    let Message::Result {
+                        value: Some(value), ..
+                    } = &envelope.message
+                    else {
+                        return Err(LiveError::ApplicationRejected);
+                    };
+                    self.record_run_success(session, value.clone());
                     return Ok(LiveEvalResponse::pure(envelope));
                 }
                 let Some(context) = context else {
+                    self.record_run_failure(session, source, "ORNA-REPL-RUNTIME");
                     return Err(LiveError::ApplicationRejected);
                 };
                 let activation = self.authority.stage_source_mutations(
@@ -2139,6 +2371,13 @@ impl LiveApplication for ApplicationLiveAdapter {
                     request_id: request,
                 };
                 let sessions = Arc::clone(&self.sessions);
+                let run_events = Arc::clone(&self.run_events);
+                let event_value = match &envelope.message {
+                    Message::Result {
+                        value: Some(value), ..
+                    } => value.clone(),
+                    _ => return Err(LiveError::ApplicationRejected),
+                };
                 let transaction = LiveEvalTransaction::new(
                     activation.mutations().to_vec(),
                     activation.next_digest(),
@@ -2150,6 +2389,7 @@ impl LiveApplication for ApplicationLiveAdapter {
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner)
                         .insert(session, ApplicationReplSession { repl: successor });
+                    record_session_run_event(&run_events, session, true, event_value, None);
                 });
                 return Ok(LiveEvalResponse::transaction(envelope, transaction));
             }
@@ -2160,11 +2400,16 @@ impl LiveApplication for ApplicationLiveAdapter {
             let envelope =
                 self.success_envelope(request, eval_fingerprint(message)?, staged.value().clone())?;
             if staged.mutations().is_empty() {
+                self.record_run_success(session, staged.value().clone());
                 return Ok(LiveEvalResponse::pure(envelope));
             }
             // Fail closed: admitted source effects require an authoritative
             // staging context captured by the host before evaluation.
             let Some(context) = context else {
+                let Message::Eval { source, .. } = message else {
+                    return Err(LiveError::ApplicationRejected);
+                };
+                self.record_run_failure(session, source, "ORNA-REPL-RUNTIME");
                 return Err(LiveError::ApplicationRejected);
             };
             let activation = staged.stage_for_request(
@@ -2175,6 +2420,8 @@ impl LiveApplication for ApplicationLiveAdapter {
                     request_id: request,
                 },
             )?;
+            let run_events = Arc::clone(&self.run_events);
+            let event_value = staged.value().clone();
             let transaction = LiveEvalTransaction::new(
                 activation.mutations().to_vec(),
                 activation.next_digest(),
@@ -2183,6 +2430,9 @@ impl LiveApplication for ApplicationLiveAdapter {
             .for_request(RequestIdentity {
                 session_id: session,
                 request_id: request,
+            })
+            .after_commit(move || {
+                record_session_run_event(&run_events, session, true, event_value, None);
             });
             Ok(LiveEvalResponse::transaction(envelope, transaction))
         })
@@ -2293,11 +2543,14 @@ impl LiveApplication for ApplicationLiveAdapter {
             return Err(LiveError::ApplicationRejected);
         }
         let present = self.watch_value(session, source)?;
-        let snapshot = database.snapshot.clone().map_or_else(
-            || CanonicalSnapshot::cwd(database.database, runtime, 0.into()),
-            Ok,
-        )
-        .map_err(|_| LiveError::ApplicationRejected)?;
+        let snapshot = database
+            .snapshot
+            .clone()
+            .map_or_else(
+                || CanonicalSnapshot::cwd(database.database, runtime, 0.into()),
+                Ok,
+            )
+            .map_err(|_| LiveError::ApplicationRejected)?;
         let mut watch = [0; 16];
         getrandom::fill(&mut watch).map_err(|_| LiveError::RuntimeUnavailable)?;
         let key = (session, watch);
@@ -2333,18 +2586,35 @@ impl LiveApplication for ApplicationLiveAdapter {
             .watches
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let state = watches.get_mut(&key).ok_or(LiveError::ApplicationRejected)?;
+        let state = watches
+            .get_mut(&key)
+            .ok_or(LiveError::ApplicationRejected)?;
         // This application adapter has no dependency scheduler yet. An
-        // explicit resync therefore re-evaluates the read-only expression
-        // and returns a complete root snapshot; a specialized delta is only
-        // an optimization and cannot be required for a live value to refresh.
+        // explicit resync re-evaluates the read-only expression. When the
+        // renderer-neutral tree changes, publish a root replacement delta;
+        // unchanged trees retain the complete-snapshot fallback.
         let present = self.watch_value(session, &state.source)?;
         if present != state.present {
-            state.revision = state
+            let base_revision = state.revision;
+            let new_revision = state
                 .revision
                 .checked_add(1)
                 .ok_or(LiveError::ApplicationRejected)?;
+            let patches =
+                PatchList::replace_root(&present).map_err(|_| LiveError::ApplicationRejected)?;
+            state.revision = new_revision;
             state.present = present;
+            return Ok(Envelope {
+                request: None,
+                watch: Some(watch),
+                message: Message::Delta {
+                    base_revision,
+                    new_revision,
+                    patches,
+                    snapshot: state.snapshot.clone(),
+                },
+                extensions: BTreeMap::new(),
+            });
         }
         Ok(self.live_snapshot(request, watch, state))
     }
@@ -2580,8 +2850,8 @@ mod tests {
         let Some(watch) = first.watch else {
             panic!("watch snapshots carry a session-scoped handle");
         };
-        let expected_value = CanonicalValue::new(OvbRaw::Int(42.into()))
-            .expect("canonical watched value");
+        let expected_value =
+            CanonicalValue::new(OvbRaw::Int(42.into())).expect("canonical watched value");
         let Message::Snapshot {
             revision,
             present,
@@ -2597,14 +2867,9 @@ mod tests {
             CanonicalSnapshot::cwd([1; 16], [2; 16], 0.into()).unwrap()
         );
 
-        let refreshed = LiveApplication::resync(
-            &mut adapter,
-            session,
-            [5; 16],
-            watch,
-            &Message::Resync,
-        )
-        .expect("explicit resync returns a full replacement snapshot");
+        let refreshed =
+            LiveApplication::resync(&mut adapter, session, [5; 16], watch, &Message::Resync)
+                .expect("explicit resync returns a full replacement snapshot");
         assert_eq!(refreshed.request, Some([5; 16]));
         assert_eq!(refreshed.watch, Some(watch));
         assert_eq!(
@@ -2618,6 +2883,485 @@ mod tests {
                 snapshot: CanonicalSnapshot::cwd([1; 16], [2; 16], 0.into()).unwrap(),
             }
         );
+    }
+
+    #[test]
+    fn served_repl_publishes_values_and_line_column_errors_as_present_deltas() {
+        let authority =
+            ApplicationAuthority::new(Catalogue::authoritative_core(), Limits::default());
+        let mut adapter =
+            ApplicationLiveAdapter::new(authority).with_runtime_identity([1; 16], [2; 16]);
+        let session = [71; 16];
+        let watch_message = Message::Watch {
+            source: LIVE_RUN_EVENTS_WATCH_SOURCE.to_owned(),
+            database: orna_protocol_v1::DatabaseContext {
+                database: [1; 16],
+                snapshot: None,
+            },
+            presentation: orna_protocol_v1::PresentationContext {
+                locale: "en".to_owned(),
+                timezone: None,
+                width: None,
+                theme: "system".to_owned(),
+                supported_kinds: vec!["value".into(), "text".into(), "group".into()],
+            },
+            refresh_floor: None,
+        };
+        let initial = LiveApplication::watch(&mut adapter, session, [72; 16], &watch_message)
+            .expect("run event watch starts");
+        let watch = initial.watch.expect("run event watch has a handle");
+        let Message::Snapshot {
+            revision: 0,
+            present,
+            ..
+        } = initial.message
+        else {
+            panic!("run event watch starts with a snapshot");
+        };
+        assert_eq!(present, expected_run_events(&[]));
+
+        LiveApplication::eval(
+            &mut adapter,
+            session,
+            [73; 16],
+            &eval_message(
+                include_str!("../tests/fixtures/serve-repl-success.orna"),
+                [74; 32],
+            ),
+        )
+        .expect("project-free input evaluates in the admitted REPL");
+        let value_delta =
+            LiveApplication::resync(&mut adapter, session, [75; 16], watch, &Message::Resync)
+                .expect("successful runs update the event watch");
+        let Message::Delta {
+            base_revision: 0,
+            new_revision: 1,
+            patches,
+            ..
+        } = value_delta.message
+        else {
+            panic!("new run event is a presentation delta");
+        };
+        let present = present
+            .apply_patches(&patches, orna_protocol_v1::Limits::default())
+            .expect("the delta applies to the initial tree");
+        assert_eq!(
+            present,
+            expected_run_events(&[expected_run_event(1, true, 42, None)])
+        );
+
+        assert_eq!(
+            source_error_location(include_str!(
+                "../tests/fixtures/serve-repl-error-location.orna"
+            )),
+            (2, 3)
+        );
+        assert_eq!(
+            LiveApplication::eval(
+                &mut adapter,
+                session,
+                [76; 16],
+                &eval_message(
+                    include_str!("../tests/fixtures/serve-repl-error-location.orna"),
+                    [77; 32]
+                ),
+            ),
+            Err(LiveError::ApplicationRejected)
+        );
+        let error_delta =
+            LiveApplication::resync(&mut adapter, session, [78; 16], watch, &Message::Resync)
+                .expect("failed runs update the event watch");
+        let Message::Delta {
+            base_revision: 1,
+            new_revision: 2,
+            patches,
+            ..
+        } = error_delta.message
+        else {
+            panic!("failed run event is a presentation delta");
+        };
+        let present = present
+            .apply_patches(&patches, orna_protocol_v1::Limits::default())
+            .expect("the second delta applies to the updated tree");
+        assert_eq!(
+            present,
+            expected_run_events(&[
+                expected_run_event(1, true, 42, None),
+                expected_run_event(2, false, 0, Some(("ORNA-EVAL-PARSE", 2, 3))),
+            ])
+        );
+    }
+
+    #[test]
+    fn served_repl_typed_run_event_deltas_are_isolated_across_presentations_and_live_sessions() {
+        let authority =
+            ApplicationAuthority::new(Catalogue::authoritative_core(), Limits::default());
+        let mut adapter =
+            ApplicationLiveAdapter::new(authority).with_runtime_identity([1; 16], [2; 16]);
+        let session_a = [71; 16];
+        let session_b = [72; 16];
+        let watch_message = Message::Watch {
+            source: LIVE_RUN_EVENTS_WATCH_SOURCE.to_owned(),
+            database: orna_protocol_v1::DatabaseContext {
+                database: [1; 16],
+                snapshot: None,
+            },
+            presentation: orna_protocol_v1::PresentationContext {
+                locale: "en".to_owned(),
+                timezone: None,
+                width: None,
+                theme: "system".to_owned(),
+                supported_kinds: vec!["value".into(), "text".into(), "group".into()],
+            },
+            refresh_floor: None,
+        };
+        let initial_a = LiveApplication::watch(&mut adapter, session_a, [73; 16], &watch_message)
+            .expect("first session run event watch starts");
+        let initial_b = LiveApplication::watch(&mut adapter, session_b, [74; 16], &watch_message)
+            .expect("second session run event watch starts");
+        let initial_a_second =
+            LiveApplication::watch(&mut adapter, session_a, [83; 16], &watch_message)
+                .expect("first session's second run event watch starts");
+        let initial_b_second =
+            LiveApplication::watch(&mut adapter, session_b, [84; 16], &watch_message)
+                .expect("second session's second run event watch starts");
+        let watch_a = initial_a.watch.expect("first watch has a handle");
+        let watch_b = initial_b.watch.expect("second watch has a handle");
+        let watch_a_second = initial_a_second
+            .watch
+            .expect("first session has a second watch");
+        let watch_b_second = initial_b_second
+            .watch
+            .expect("second session has a second watch");
+        let Message::Snapshot {
+            revision: 0,
+            present: initial_present_a,
+            ..
+        } = initial_a.message
+        else {
+            panic!("first run event watch starts with a snapshot");
+        };
+        let Message::Snapshot {
+            revision: 0,
+            present: initial_present_b,
+            ..
+        } = initial_b.message
+        else {
+            panic!("second run event watch starts with a snapshot");
+        };
+        let Message::Snapshot {
+            revision: 0,
+            present: initial_present_a_second,
+            ..
+        } = initial_a_second.message
+        else {
+            panic!("first session's second watch starts with a snapshot");
+        };
+        let Message::Snapshot {
+            revision: 0,
+            present: initial_present_b_second,
+            ..
+        } = initial_b_second.message
+        else {
+            panic!("second session's second watch starts with a snapshot");
+        };
+        assert_eq!(initial_present_a, expected_run_events(&[]));
+        assert_eq!(initial_present_b, expected_run_events(&[]));
+        assert_eq!(initial_present_a_second, expected_run_events(&[]));
+        assert_eq!(initial_present_b_second, expected_run_events(&[]));
+
+        LiveApplication::eval(
+            &mut adapter,
+            session_a,
+            [75; 16],
+            &eval_message(
+                include_str!("../tests/fixtures/serve-repl-success.orna"),
+                [76; 32],
+            ),
+        )
+        .expect("first session evaluates independently");
+        let delta_a =
+            LiveApplication::resync(&mut adapter, session_a, [77; 16], watch_a, &Message::Resync)
+                .expect("first session sees its typed event delta");
+        let Message::Delta {
+            base_revision: 0,
+            new_revision: 1,
+            patches,
+            ..
+        } = delta_a.message
+        else {
+            panic!("first session event is a revision-one delta");
+        };
+        let present_a = initial_present_a
+            .apply_patches(&patches, orna_protocol_v1::Limits::default())
+            .expect("first session delta applies to its typed snapshot");
+        let expected_a = expected_run_events(&[expected_run_event(1, true, 42, None)]);
+        assert_eq!(present_a, expected_a);
+
+        let delta_a_second = LiveApplication::resync(
+            &mut adapter,
+            session_a,
+            [85; 16],
+            watch_a_second,
+            &Message::Resync,
+        )
+        .expect("first session's second watch advances independently");
+        let Message::Delta {
+            base_revision: 0,
+            new_revision: 1,
+            patches,
+            ..
+        } = delta_a_second.message
+        else {
+            panic!("first session's second watch gets its own revision-one delta");
+        };
+        assert_eq!(
+            initial_present_a_second
+                .apply_patches(&patches, orna_protocol_v1::Limits::default())
+                .expect("second first-session delta applies to its own snapshot"),
+            expected_a
+        );
+
+        let unchanged_b =
+            LiveApplication::resync(&mut adapter, session_b, [78; 16], watch_b, &Message::Resync)
+                .expect("first session event does not affect second watch");
+        assert!(matches!(
+            unchanged_b.message,
+            Message::Snapshot {
+                revision: 0,
+                ref present,
+                ..
+            } if present == &expected_run_events(&[])
+        ));
+        let unchanged_b_second = LiveApplication::resync(
+            &mut adapter,
+            session_b,
+            [86; 16],
+            watch_b_second,
+            &Message::Resync,
+        )
+        .expect("first session event leaves second session's second watch unchanged");
+        assert!(matches!(
+            unchanged_b_second.message,
+            Message::Snapshot {
+                revision: 0,
+                ref present,
+                ..
+            } if present == &expected_run_events(&[])
+        ));
+
+        LiveApplication::eval(
+            &mut adapter,
+            session_b,
+            [79; 16],
+            &eval_message(
+                include_str!("../tests/fixtures/serve-repl-success.orna"),
+                [80; 32],
+            ),
+        )
+        .expect("second session evaluates independently");
+        let delta_b =
+            LiveApplication::resync(&mut adapter, session_b, [81; 16], watch_b, &Message::Resync)
+                .expect("second session sees its own typed event delta");
+        let Message::Delta {
+            base_revision: 0,
+            new_revision: 1,
+            patches,
+            ..
+        } = delta_b.message
+        else {
+            panic!("second session event is a revision-one delta");
+        };
+        let present_b = initial_present_b
+            .apply_patches(&patches, orna_protocol_v1::Limits::default())
+            .expect("second session delta applies to its typed snapshot");
+        assert_eq!(present_b, expected_a);
+
+        let delta_b_second = LiveApplication::resync(
+            &mut adapter,
+            session_b,
+            [87; 16],
+            watch_b_second,
+            &Message::Resync,
+        )
+        .expect("second session's second watch advances independently");
+        let Message::Delta {
+            base_revision: 0,
+            new_revision: 1,
+            patches,
+            ..
+        } = delta_b_second.message
+        else {
+            panic!("second session's second watch gets its own revision-one delta");
+        };
+        assert_eq!(
+            initial_present_b_second
+                .apply_patches(&patches, orna_protocol_v1::Limits::default())
+                .expect("second session's second delta applies to its own snapshot"),
+            expected_a
+        );
+
+        let unchanged_a =
+            LiveApplication::resync(&mut adapter, session_a, [82; 16], watch_a, &Message::Resync)
+                .expect("second session event does not alter first session state");
+        assert!(matches!(
+            unchanged_a.message,
+            Message::Snapshot {
+                revision: 1,
+                ref present,
+                ..
+            } if present == &expected_a
+        ));
+        let unchanged_a_second = LiveApplication::resync(
+            &mut adapter,
+            session_a,
+            [88; 16],
+            watch_a_second,
+            &Message::Resync,
+        )
+        .expect("second session event leaves first session's second watch unchanged");
+        assert!(matches!(
+            unchanged_a_second.message,
+            Message::Snapshot {
+                revision: 1,
+                ref present,
+                ..
+            } if present == &expected_a
+        ));
+    }
+
+    #[test]
+    fn served_repl_is_seeded_from_the_loaded_project_snapshot() {
+        use orna_repository_v1::Repository;
+        use std::{fs, process::Command};
+
+        let root = std::env::temp_dir().join(format!(
+            "orna-served-repl-project-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock is after Unix epoch")
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).expect("project root is created");
+        fs::write(
+            root.join("main.orna"),
+            include_str!("../tests/fixtures/serve-project-main.orna"),
+        )
+        .expect("project root fixture is written");
+        fs::write(
+            root.join("library.orna"),
+            include_str!("../tests/fixtures/serve-project-library.orna"),
+        )
+        .expect("project library fixture is written");
+        assert!(
+            Command::new("git")
+                .args(["init", "--quiet"])
+                .current_dir(&root)
+                .status()
+                .expect("git init starts")
+                .success()
+        );
+        let repository = Repository::discover(&root).expect("test project is a Git worktree");
+        let project = orna_project_v1::ProjectLoader::default()
+            .load_with_standard_profile(&repository, None)
+            .expect("project modules are loaded from the clone");
+        let mut adapter = ApplicationLiveAdapter::new(ApplicationAuthority::new(
+            Catalogue::authoritative_core(),
+            Limits::default(),
+        ))
+        .with_loaded_project(project);
+        LiveApplication::eval(
+            &mut adapter,
+            [81; 16],
+            [82; 16],
+            &eval_message(
+                include_str!("../tests/fixtures/serve-project-repl.orna"),
+                [83; 32],
+            ),
+        )
+        .expect("REPL imports a function from the loaded project");
+        let response = LiveApplication::eval(
+            &mut adapter,
+            [81; 16],
+            [84; 16],
+            &eval_message(
+                include_str!("../tests/fixtures/serve-project-repl-answer.orna"),
+                [85; 32],
+            ),
+        )
+        .expect("REPL evaluates the imported project function");
+        assert!(matches!(
+            response.message,
+            Message::Result {
+                value: Some(value),
+                ..
+            } if value == CanonicalValue::new(OvbRaw::Int(42.into())).unwrap()
+        ));
+        drop(repository);
+        fs::remove_dir_all(root).expect("test project is removed");
+    }
+
+    fn expected_run_event(
+        sequence: u64,
+        succeeded: bool,
+        value: i64,
+        error: Option<(&str, u64, u64)>,
+    ) -> PresentNode {
+        let mut properties = vec![
+            (PresentPropertyKey::Name("kind".into()), text_value("run")),
+            (
+                PresentPropertyKey::Name("sequence".into()),
+                integer_value(sequence),
+            ),
+            (
+                PresentPropertyKey::Name("status".into()),
+                text_value(if succeeded { "success" } else { "error" }),
+            ),
+            (
+                PresentPropertyKey::Name("value".into()),
+                CanonicalValue::new(if succeeded {
+                    OvbRaw::Int(value.into())
+                } else {
+                    OvbRaw::Null
+                })
+                .unwrap(),
+            ),
+            (PresentPropertyKey::Name("stdout".into()), text_value("")),
+        ];
+        if let Some((code, line, column)) = error {
+            properties.extend([
+                (
+                    PresentPropertyKey::Name("error_code".into()),
+                    text_value(code),
+                ),
+                (PresentPropertyKey::Name("line".into()), integer_value(line)),
+                (
+                    PresentPropertyKey::Name("column".into()),
+                    integer_value(column),
+                ),
+            ]);
+        }
+        PresentNode::new(
+            PresentKind::Name("run".into()),
+            Some(PresentIdentity::Explicit(integer_value(sequence))),
+            properties,
+            [],
+        )
+        .unwrap()
+    }
+
+    fn expected_run_events(events: &[PresentNode]) -> PresentNode {
+        PresentNode::new(
+            PresentKind::Name("run.events".into()),
+            None,
+            [(
+                PresentPropertyKey::Name("count".into()),
+                integer_value(events.len() as u64),
+            )],
+            events.to_vec(),
+        )
+        .unwrap()
     }
 
     #[test]
@@ -2938,7 +3682,10 @@ mod tests {
             CanonicalValue::new(OvbRaw::Map(vec![
                 (OvbRaw::Text("id".into()), OvbRaw::Int(id.into())),
                 (OvbRaw::Text("text".into()), OvbRaw::Text(text.into())),
-                (OvbRaw::Text("quantity".into()), OvbRaw::Int(quantity.into())),
+                (
+                    OvbRaw::Text("quantity".into()),
+                    OvbRaw::Int(quantity.into()),
+                ),
             ]))
             .expect("row is canonical")
         };
@@ -3034,10 +3781,12 @@ mod tests {
         )
         .expect_err("insert must fail when its key is already present");
         assert_eq!(error.code(), "ORNA-EVAL-TABLE-DUPLICATE-KEY");
-        assert!(effects
-            .into_mutations()
-            .expect("failed insert leaves no tentative mutation")
-            .is_empty());
+        assert!(
+            effects
+                .into_mutations()
+                .expect("failed insert leaves no tentative mutation")
+                .is_empty()
+        );
     }
 
     #[test]
@@ -3328,10 +4077,12 @@ mod tests {
         )
         .expect_err("deleting an absent key must fail");
         assert_eq!(error.code(), "ORNA-EVAL-TABLE-MISSING-ROW");
-        assert!(effects
-            .into_mutations()
-            .expect("rejected delete leaves an empty mutation log")
-            .is_empty());
+        assert!(
+            effects
+                .into_mutations()
+                .expect("rejected delete leaves an empty mutation log")
+                .is_empty()
+        );
     }
 
     #[test]
@@ -3379,22 +4130,30 @@ mod tests {
         assert_eq!(mutations[0].rekey_to(), None);
         let updated = CanonicalValue::decode(mutations[0].value().expect("updated row"))
             .expect("updated row is canonical");
-        assert_eq!(updated, CanonicalValue::new(OvbRaw::Map(vec![
-            (OvbRaw::Text("id".into()), OvbRaw::Int(1.into())),
-            (OvbRaw::Text("text".into()), OvbRaw::Text("widget".into())),
-            (OvbRaw::Text("quantity".into()), OvbRaw::Int(5.into())),
-        ])).expect("expected row is canonical"));
+        assert_eq!(
+            updated,
+            CanonicalValue::new(OvbRaw::Map(vec![
+                (OvbRaw::Text("id".into()), OvbRaw::Int(1.into())),
+                (OvbRaw::Text("text".into()), OvbRaw::Text("widget".into())),
+                (OvbRaw::Text("quantity".into()), OvbRaw::Int(5.into())),
+            ]))
+            .expect("expected row is canonical")
+        );
 
         assert_eq!(mutations[1].key(), key);
         let new_key = int(2).encode().unwrap();
         assert_eq!(mutations[1].rekey_to(), Some(new_key.as_slice()));
         let rekeyed = CanonicalValue::decode(mutations[1].value().expect("re-keyed row"))
             .expect("re-keyed row is canonical");
-        assert_eq!(rekeyed, CanonicalValue::new(OvbRaw::Map(vec![
-            (OvbRaw::Text("id".into()), OvbRaw::Int(2.into())),
-            (OvbRaw::Text("text".into()), OvbRaw::Text("widget".into())),
-            (OvbRaw::Text("quantity".into()), OvbRaw::Int(5.into())),
-        ])).expect("expected row is canonical"));
+        assert_eq!(
+            rekeyed,
+            CanonicalValue::new(OvbRaw::Map(vec![
+                (OvbRaw::Text("id".into()), OvbRaw::Int(2.into())),
+                (OvbRaw::Text("text".into()), OvbRaw::Text("widget".into())),
+                (OvbRaw::Text("quantity".into()), OvbRaw::Int(5.into())),
+            ]))
+            .expect("expected row is canonical")
+        );
     }
 
     #[test]
@@ -3416,7 +4175,10 @@ mod tests {
             CanonicalValue::new(OvbRaw::Map(vec![
                 (OvbRaw::Text("id".into()), OvbRaw::Int(id.into())),
                 (OvbRaw::Text("text".into()), OvbRaw::Text(text.into())),
-                (OvbRaw::Text("quantity".into()), OvbRaw::Int(quantity.into())),
+                (
+                    OvbRaw::Text("quantity".into()),
+                    OvbRaw::Int(quantity.into()),
+                ),
             ]))
             .expect("captured row is canonical")
         };
@@ -3471,7 +4233,10 @@ mod tests {
             CanonicalValue::new(OvbRaw::Map(vec![
                 (OvbRaw::Text("id".into()), OvbRaw::Int(id.into())),
                 (OvbRaw::Text("text".into()), OvbRaw::Text(text.into())),
-                (OvbRaw::Text("quantity".into()), OvbRaw::Int(quantity.into())),
+                (
+                    OvbRaw::Text("quantity".into()),
+                    OvbRaw::Int(quantity.into()),
+                ),
             ]))
             .expect("row is canonical")
         };
@@ -3496,7 +4261,9 @@ mod tests {
         )
         .expect("reclaimed source key should resolve to its current row identity");
 
-        let mutations = handler.into_mutations().expect("valid ordered mutation log");
+        let mutations = handler
+            .into_mutations()
+            .expect("valid ordered mutation log");
         assert_eq!(mutations.len(), 6);
 
         assert_eq!(mutations[0].key(), key(2));
@@ -3561,7 +4328,10 @@ mod tests {
             CanonicalValue::new(OvbRaw::Map(vec![
                 (OvbRaw::Text("id".into()), OvbRaw::Int(id.into())),
                 (OvbRaw::Text("text".into()), OvbRaw::Text(text.into())),
-                (OvbRaw::Text("quantity".into()), OvbRaw::Int(quantity.into())),
+                (
+                    OvbRaw::Text("quantity".into()),
+                    OvbRaw::Int(quantity.into()),
+                ),
             ]))
             .expect("row is canonical")
         };
@@ -3586,7 +4356,9 @@ mod tests {
         )
         .expect("a recovery insert can reclaim the source key for a later re-key");
 
-        let mutations = handler.into_mutations().expect("valid ordered mutation log");
+        let mutations = handler
+            .into_mutations()
+            .expect("valid ordered mutation log");
         assert_eq!(mutations.len(), 7);
 
         assert_eq!(mutations[0].key(), key(2));
@@ -3659,7 +4431,10 @@ mod tests {
             CanonicalValue::new(OvbRaw::Map(vec![
                 (OvbRaw::Text("id".into()), OvbRaw::Int(id.into())),
                 (OvbRaw::Text("text".into()), OvbRaw::Text(text.into())),
-                (OvbRaw::Text("quantity".into()), OvbRaw::Int(quantity.into())),
+                (
+                    OvbRaw::Text("quantity".into()),
+                    OvbRaw::Int(quantity.into()),
+                ),
             ]))
             .expect("row is canonical")
         };
@@ -3684,7 +4459,9 @@ mod tests {
         )
         .expect("the inserted identity keeps its update when it is re-keyed");
 
-        let mutations = handler.into_mutations().expect("valid ordered mutation log");
+        let mutations = handler
+            .into_mutations()
+            .expect("valid ordered mutation log");
         assert_eq!(mutations.len(), 8);
 
         assert_eq!(mutations[0].key(), key(2));
@@ -3764,7 +4541,10 @@ mod tests {
             CanonicalValue::new(OvbRaw::Map(vec![
                 (OvbRaw::Text("id".into()), OvbRaw::Int(id.into())),
                 (OvbRaw::Text("text".into()), OvbRaw::Text(text.into())),
-                (OvbRaw::Text("quantity".into()), OvbRaw::Int(quantity.into())),
+                (
+                    OvbRaw::Text("quantity".into()),
+                    OvbRaw::Int(quantity.into()),
+                ),
             ]))
             .expect("row is canonical")
         };
@@ -3789,7 +4569,9 @@ mod tests {
         )
         .expect("recovery updates remain attached to the inserted row through re-key");
 
-        let mutations = handler.into_mutations().expect("valid ordered mutation log");
+        let mutations = handler
+            .into_mutations()
+            .expect("valid ordered mutation log");
         assert_eq!(mutations.len(), 9);
 
         assert_eq!(mutations[0].key(), key(2));
@@ -3876,7 +4658,10 @@ mod tests {
             CanonicalValue::new(OvbRaw::Map(vec![
                 (OvbRaw::Text("id".into()), OvbRaw::Int(id.into())),
                 (OvbRaw::Text("text".into()), OvbRaw::Text(text.into())),
-                (OvbRaw::Text("quantity".into()), OvbRaw::Int(quantity.into())),
+                (
+                    OvbRaw::Text("quantity".into()),
+                    OvbRaw::Int(quantity.into()),
+                ),
             ]))
             .expect("row is canonical")
         };
@@ -3901,7 +4686,9 @@ mod tests {
         )
         .expect("the inserted identity survives a later failed re-key and retry");
 
-        let mutations = handler.into_mutations().expect("valid ordered mutation log");
+        let mutations = handler
+            .into_mutations()
+            .expect("valid ordered mutation log");
         assert_eq!(mutations.len(), 13);
 
         assert_eq!(mutations[0].key(), key(2));
@@ -4016,7 +4803,10 @@ mod tests {
             CanonicalValue::new(OvbRaw::Map(vec![
                 (OvbRaw::Text("id".into()), OvbRaw::Int(id.into())),
                 (OvbRaw::Text("text".into()), OvbRaw::Text(text.into())),
-                (OvbRaw::Text("quantity".into()), OvbRaw::Int(quantity.into())),
+                (
+                    OvbRaw::Text("quantity".into()),
+                    OvbRaw::Int(quantity.into()),
+                ),
             ]))
             .expect("row is canonical")
         };
@@ -4041,7 +4831,9 @@ mod tests {
         )
         .expect("recovery moves the inserted destination occupant before retrying");
 
-        let mutations = handler.into_mutations().expect("valid ordered mutation log");
+        let mutations = handler
+            .into_mutations()
+            .expect("valid ordered mutation log");
         assert_eq!(mutations.len(), 12);
 
         let expected = [
@@ -4069,7 +4861,11 @@ mod tests {
                 expected_key.as_deref(),
                 "mutation {index} re-key destination"
             );
-            assert_eq!(mutation.is_insert(), is_insert, "mutation {index} insert flag");
+            assert_eq!(
+                mutation.is_insert(),
+                is_insert,
+                "mutation {index} insert flag"
+            );
             assert_eq!(
                 CanonicalValue::decode(mutation.value().unwrap()).unwrap(),
                 expected_row,
@@ -4085,7 +4881,9 @@ mod tests {
         let application = authority
             .admit_module(
                 "table-rekey-inserted-destination-update-chain.orna",
-                include_str!("../tests/fixtures/table-rekey-inserted-destination-update-chain.orna"),
+                include_str!(
+                    "../tests/fixtures/table-rekey-inserted-destination-update-chain.orna"
+                ),
                 "main",
             )
             .expect("checked-in inserted destination chain should be admitted");
@@ -4097,7 +4895,10 @@ mod tests {
             CanonicalValue::new(OvbRaw::Map(vec![
                 (OvbRaw::Text("id".into()), OvbRaw::Int(id.into())),
                 (OvbRaw::Text("text".into()), OvbRaw::Text(text.into())),
-                (OvbRaw::Text("quantity".into()), OvbRaw::Int(quantity.into())),
+                (
+                    OvbRaw::Text("quantity".into()),
+                    OvbRaw::Int(quantity.into()),
+                ),
             ]))
             .expect("row is canonical")
         };
@@ -4122,7 +4923,9 @@ mod tests {
         )
         .expect("the inserted destination row remains addressable through chained retries");
 
-        let mutations = handler.into_mutations().expect("valid ordered mutation log");
+        let mutations = handler
+            .into_mutations()
+            .expect("valid ordered mutation log");
         assert_eq!(mutations.len(), 15);
 
         let expected = [
@@ -4153,7 +4956,11 @@ mod tests {
                 expected_key.as_deref(),
                 "mutation {index} re-key destination"
             );
-            assert_eq!(mutation.is_insert(), is_insert, "mutation {index} insert flag");
+            assert_eq!(
+                mutation.is_insert(),
+                is_insert,
+                "mutation {index} insert flag"
+            );
             assert_eq!(
                 CanonicalValue::decode(mutation.value().unwrap()).unwrap(),
                 expected_row,
@@ -4181,7 +4988,10 @@ mod tests {
             CanonicalValue::new(OvbRaw::Map(vec![
                 (OvbRaw::Text("id".into()), OvbRaw::Int(id.into())),
                 (OvbRaw::Text("text".into()), OvbRaw::Text(text.into())),
-                (OvbRaw::Text("quantity".into()), OvbRaw::Int(quantity.into())),
+                (
+                    OvbRaw::Text("quantity".into()),
+                    OvbRaw::Int(quantity.into()),
+                ),
             ]))
             .expect("captured row is canonical")
         };
@@ -4206,7 +5016,10 @@ mod tests {
         let mutations = handler.into_mutations().expect("valid mutation log");
         assert_eq!(mutations.len(), 2);
         assert_eq!(mutations[0].key(), int(1).encode().unwrap());
-        assert_eq!(mutations[0].rekey_to(), Some(int(2).encode().unwrap().as_slice()));
+        assert_eq!(
+            mutations[0].rekey_to(),
+            Some(int(2).encode().unwrap().as_slice())
+        );
         assert_eq!(mutations[1].key(), int(2).encode().unwrap());
         assert_eq!(mutations[1].rekey_to(), None);
         let updated = CanonicalValue::decode(mutations[1].value().unwrap()).unwrap();
@@ -4232,7 +5045,10 @@ mod tests {
             CanonicalValue::new(OvbRaw::Map(vec![
                 (OvbRaw::Text("id".into()), OvbRaw::Int(id.into())),
                 (OvbRaw::Text("text".into()), OvbRaw::Text(text.into())),
-                (OvbRaw::Text("quantity".into()), OvbRaw::Int(quantity.into())),
+                (
+                    OvbRaw::Text("quantity".into()),
+                    OvbRaw::Int(quantity.into()),
+                ),
             ]))
             .expect("row is canonical")
         };
@@ -4254,7 +5070,9 @@ mod tests {
         )
         .expect("replacement and re-keyed rows remain independently addressable");
 
-        let mutations = handler.into_mutations().expect("valid ordered mutation log");
+        let mutations = handler
+            .into_mutations()
+            .expect("valid ordered mutation log");
         assert_eq!(mutations.len(), 4);
         assert_eq!(mutations[0].key(), key(1));
         assert_eq!(mutations[0].rekey_to(), Some(key(2).as_slice()));
@@ -4301,7 +5119,10 @@ mod tests {
             CanonicalValue::new(OvbRaw::Map(vec![
                 (OvbRaw::Text("id".into()), OvbRaw::Int(id.into())),
                 (OvbRaw::Text("text".into()), OvbRaw::Text(text.into())),
-                (OvbRaw::Text("quantity".into()), OvbRaw::Int(quantity.into())),
+                (
+                    OvbRaw::Text("quantity".into()),
+                    OvbRaw::Int(quantity.into()),
+                ),
             ]))
             .expect("row is canonical")
         };
@@ -4326,7 +5147,9 @@ mod tests {
         )
         .expect("recovery and later updates should see the unchanged source rows");
 
-        let mutations = handler.into_mutations().expect("valid ordered mutation log");
+        let mutations = handler
+            .into_mutations()
+            .expect("valid ordered mutation log");
         assert_eq!(mutations.len(), 2);
         assert_eq!(mutations[0].key(), key(1));
         assert_eq!(mutations[0].rekey_to(), None);
@@ -4361,7 +5184,10 @@ mod tests {
             CanonicalValue::new(OvbRaw::Map(vec![
                 (OvbRaw::Text("id".into()), OvbRaw::Int(id.into())),
                 (OvbRaw::Text("text".into()), OvbRaw::Text(text.into())),
-                (OvbRaw::Text("quantity".into()), OvbRaw::Int(quantity.into())),
+                (
+                    OvbRaw::Text("quantity".into()),
+                    OvbRaw::Int(quantity.into()),
+                ),
             ]))
             .expect("row is canonical")
         };
@@ -4383,7 +5209,9 @@ mod tests {
         )
         .expect("recovery and later mutations should follow the last successful re-key");
 
-        let mutations = handler.into_mutations().expect("valid ordered mutation log");
+        let mutations = handler
+            .into_mutations()
+            .expect("valid ordered mutation log");
         assert_eq!(mutations.len(), 4);
         assert_eq!(mutations[0].key(), key(1));
         assert_eq!(mutations[0].rekey_to(), Some(key(2).as_slice()));
@@ -4430,7 +5258,10 @@ mod tests {
             CanonicalValue::new(OvbRaw::Map(vec![
                 (OvbRaw::Text("id".into()), OvbRaw::Int(id.into())),
                 (OvbRaw::Text("text".into()), OvbRaw::Text(text.into())),
-                (OvbRaw::Text("quantity".into()), OvbRaw::Int(quantity.into())),
+                (
+                    OvbRaw::Text("quantity".into()),
+                    OvbRaw::Int(quantity.into()),
+                ),
             ]))
             .expect("row is canonical")
         };
@@ -4455,7 +5286,9 @@ mod tests {
         )
         .expect("recovery preserves the source row until the destination is freed");
 
-        let mutations = handler.into_mutations().expect("valid ordered mutation log");
+        let mutations = handler
+            .into_mutations()
+            .expect("valid ordered mutation log");
         assert_eq!(mutations.len(), 5);
         assert_eq!(mutations[0].key(), key(1));
         assert_eq!(mutations[0].rekey_to(), Some(key(3).as_slice()));
@@ -4508,7 +5341,10 @@ mod tests {
             CanonicalValue::new(OvbRaw::Map(vec![
                 (OvbRaw::Text("id".into()), OvbRaw::Int(id.into())),
                 (OvbRaw::Text("text".into()), OvbRaw::Text(text.into())),
-                (OvbRaw::Text("quantity".into()), OvbRaw::Int(quantity.into())),
+                (
+                    OvbRaw::Text("quantity".into()),
+                    OvbRaw::Int(quantity.into()),
+                ),
             ]))
             .expect("row is canonical")
         };
@@ -4533,7 +5369,9 @@ mod tests {
         )
         .expect("recovery deletes the conflict before retrying the re-key");
 
-        let mutations = handler.into_mutations().expect("valid ordered mutation log");
+        let mutations = handler
+            .into_mutations()
+            .expect("valid ordered mutation log");
         assert_eq!(mutations.len(), 4);
         assert_eq!(mutations[0].key(), key(2));
         assert_eq!(mutations[0].rekey_to(), None);
@@ -4577,7 +5415,10 @@ mod tests {
             CanonicalValue::new(OvbRaw::Map(vec![
                 (OvbRaw::Text("id".into()), OvbRaw::Int(id.into())),
                 (OvbRaw::Text("text".into()), OvbRaw::Text(text.into())),
-                (OvbRaw::Text("quantity".into()), OvbRaw::Int(quantity.into())),
+                (
+                    OvbRaw::Text("quantity".into()),
+                    OvbRaw::Int(quantity.into()),
+                ),
             ]))
             .expect("row is canonical")
         };
@@ -4602,7 +5443,9 @@ mod tests {
         )
         .expect("recovered replacement remains the occupied destination on retry");
 
-        let mutations = handler.into_mutations().expect("valid ordered mutation log");
+        let mutations = handler
+            .into_mutations()
+            .expect("valid ordered mutation log");
         assert_eq!(mutations.len(), 4);
         assert_eq!(mutations[0].key(), key(2));
         assert_eq!(mutations[0].rekey_to(), None);
@@ -4638,7 +5481,9 @@ mod tests {
         let application = authority
             .admit_module(
                 "table-rekey-recovered-inserted-destination-update.orna",
-                include_str!("../tests/fixtures/table-rekey-recovered-inserted-destination-update.orna"),
+                include_str!(
+                    "../tests/fixtures/table-rekey-recovered-inserted-destination-update.orna"
+                ),
                 "main",
             )
             .expect("checked-in recovered inserted-destination fixture should be admitted");
@@ -4650,7 +5495,10 @@ mod tests {
             CanonicalValue::new(OvbRaw::Map(vec![
                 (OvbRaw::Text("id".into()), OvbRaw::Int(id.into())),
                 (OvbRaw::Text("text".into()), OvbRaw::Text(text.into())),
-                (OvbRaw::Text("quantity".into()), OvbRaw::Int(quantity.into())),
+                (
+                    OvbRaw::Text("quantity".into()),
+                    OvbRaw::Int(quantity.into()),
+                ),
             ]))
             .expect("row is canonical")
         };
@@ -4675,7 +5523,9 @@ mod tests {
         )
         .expect("the inserted destination update follows its recovery re-key");
 
-        let mutations = handler.into_mutations().expect("valid ordered mutation log");
+        let mutations = handler
+            .into_mutations()
+            .expect("valid ordered mutation log");
         assert_eq!(mutations.len(), 9);
 
         let expected = [
@@ -4700,7 +5550,11 @@ mod tests {
                 expected_key.as_deref(),
                 "mutation {index} re-key destination"
             );
-            assert_eq!(mutation.is_insert(), is_insert, "mutation {index} insert flag");
+            assert_eq!(
+                mutation.is_insert(),
+                is_insert,
+                "mutation {index} insert flag"
+            );
             assert_eq!(
                 CanonicalValue::decode(mutation.value().unwrap()).unwrap(),
                 expected_row,
@@ -4716,7 +5570,9 @@ mod tests {
         let application = authority
             .admit_module(
                 "table-rekey-recovered-inserted-destination-chain.orna",
-                include_str!("../tests/fixtures/table-rekey-recovered-inserted-destination-chain.orna"),
+                include_str!(
+                    "../tests/fixtures/table-rekey-recovered-inserted-destination-chain.orna"
+                ),
                 "main",
             )
             .expect("checked-in inserted-destination recovery chain should be admitted");
@@ -4728,7 +5584,10 @@ mod tests {
             CanonicalValue::new(OvbRaw::Map(vec![
                 (OvbRaw::Text("id".into()), OvbRaw::Int(id.into())),
                 (OvbRaw::Text("text".into()), OvbRaw::Text(text.into())),
-                (OvbRaw::Text("quantity".into()), OvbRaw::Int(quantity.into())),
+                (
+                    OvbRaw::Text("quantity".into()),
+                    OvbRaw::Int(quantity.into()),
+                ),
             ]))
             .expect("row is canonical")
         };
@@ -4753,7 +5612,9 @@ mod tests {
         )
         .expect("the inserted row and reclaimed destination occupant survive retry tails");
 
-        let mutations = handler.into_mutations().expect("valid ordered mutation log");
+        let mutations = handler
+            .into_mutations()
+            .expect("valid ordered mutation log");
         assert_eq!(mutations.len(), 15);
 
         let expected = [
@@ -4784,7 +5645,11 @@ mod tests {
                 expected_key.as_deref(),
                 "mutation {index} re-key destination"
             );
-            assert_eq!(mutation.is_insert(), is_insert, "mutation {index} insert flag");
+            assert_eq!(
+                mutation.is_insert(),
+                is_insert,
+                "mutation {index} insert flag"
+            );
             assert_eq!(
                 CanonicalValue::decode(mutation.value().unwrap()).unwrap(),
                 expected_row,
@@ -4812,7 +5677,10 @@ mod tests {
             CanonicalValue::new(OvbRaw::Map(vec![
                 (OvbRaw::Text("id".into()), OvbRaw::Int(id.into())),
                 (OvbRaw::Text("text".into()), OvbRaw::Text(text.into())),
-                (OvbRaw::Text("quantity".into()), OvbRaw::Int(quantity.into())),
+                (
+                    OvbRaw::Text("quantity".into()),
+                    OvbRaw::Int(quantity.into()),
+                ),
             ]))
             .expect("row is canonical")
         };
@@ -4837,7 +5705,9 @@ mod tests {
         )
         .expect("each recovery occupant preserves its own update before source retry");
 
-        let mutations = handler.into_mutations().expect("valid ordered mutation log");
+        let mutations = handler
+            .into_mutations()
+            .expect("valid ordered mutation log");
         assert_eq!(mutations.len(), 14);
 
         let expected = [
@@ -4867,7 +5737,11 @@ mod tests {
                 expected_key.as_deref(),
                 "mutation {index} re-key destination"
             );
-            assert_eq!(mutation.is_insert(), is_insert, "mutation {index} insert flag");
+            assert_eq!(
+                mutation.is_insert(),
+                is_insert,
+                "mutation {index} insert flag"
+            );
             assert_eq!(
                 CanonicalValue::decode(mutation.value().unwrap()).unwrap(),
                 expected_row,
@@ -4895,7 +5769,10 @@ mod tests {
             CanonicalValue::new(OvbRaw::Map(vec![
                 (OvbRaw::Text("id".into()), OvbRaw::Int(id.into())),
                 (OvbRaw::Text("text".into()), OvbRaw::Text(text.into())),
-                (OvbRaw::Text("quantity".into()), OvbRaw::Int(quantity.into())),
+                (
+                    OvbRaw::Text("quantity".into()),
+                    OvbRaw::Int(quantity.into()),
+                ),
             ]))
             .expect("row is canonical")
         };
@@ -4920,7 +5797,9 @@ mod tests {
         )
         .expect("source retry should see the destination freed by recovery");
 
-        let mutations = handler.into_mutations().expect("valid ordered mutation log");
+        let mutations = handler
+            .into_mutations()
+            .expect("valid ordered mutation log");
         assert_eq!(mutations.len(), 4);
         assert_eq!(mutations[0].key(), key(2));
         assert_eq!(mutations[0].rekey_to(), Some(key(3).as_slice()));
@@ -4970,7 +5849,10 @@ mod tests {
             CanonicalValue::new(OvbRaw::Map(vec![
                 (OvbRaw::Text("id".into()), OvbRaw::Int(id.into())),
                 (OvbRaw::Text("text".into()), OvbRaw::Text(text.into())),
-                (OvbRaw::Text("quantity".into()), OvbRaw::Int(quantity.into())),
+                (
+                    OvbRaw::Text("quantity".into()),
+                    OvbRaw::Int(quantity.into()),
+                ),
             ]))
             .expect("row is canonical")
         };
@@ -4995,7 +5877,9 @@ mod tests {
         )
         .expect("retry failure should preserve replacement and relocated rows");
 
-        let mutations = handler.into_mutations().expect("valid ordered mutation log");
+        let mutations = handler
+            .into_mutations()
+            .expect("valid ordered mutation log");
         assert_eq!(mutations.len(), 6);
 
         assert_eq!(mutations[0].key(), key(2));
@@ -5061,7 +5945,10 @@ mod tests {
             CanonicalValue::new(OvbRaw::Map(vec![
                 (OvbRaw::Text("id".into()), OvbRaw::Int(id.into())),
                 (OvbRaw::Text("text".into()), OvbRaw::Text(text.into())),
-                (OvbRaw::Text("quantity".into()), OvbRaw::Int(quantity.into())),
+                (
+                    OvbRaw::Text("quantity".into()),
+                    OvbRaw::Int(quantity.into()),
+                ),
             ]))
             .expect("row is canonical")
         };
@@ -5086,7 +5973,9 @@ mod tests {
         )
         .expect("the source retry succeeds after each recovered destination move");
 
-        let mutations = handler.into_mutations().expect("valid ordered mutation log");
+        let mutations = handler
+            .into_mutations()
+            .expect("valid ordered mutation log");
         assert_eq!(mutations.len(), 7);
 
         assert_eq!(mutations[0].key(), key(2));
@@ -5159,7 +6048,10 @@ mod tests {
             CanonicalValue::new(OvbRaw::Map(vec![
                 (OvbRaw::Text("id".into()), OvbRaw::Int(id.into())),
                 (OvbRaw::Text("text".into()), OvbRaw::Text(text.into())),
-                (OvbRaw::Text("quantity".into()), OvbRaw::Int(quantity.into())),
+                (
+                    OvbRaw::Text("quantity".into()),
+                    OvbRaw::Int(quantity.into()),
+                ),
             ]))
             .expect("row is canonical")
         };
@@ -5184,7 +6076,9 @@ mod tests {
         )
         .expect("latest recovered destination identity controls each retry");
 
-        let mutations = handler.into_mutations().expect("valid ordered mutation log");
+        let mutations = handler
+            .into_mutations()
+            .expect("valid ordered mutation log");
         assert_eq!(mutations.len(), 9);
 
         assert_eq!(mutations[0].key(), key(2));
@@ -5259,7 +6153,9 @@ mod tests {
         let application = authority
             .admit_module(
                 "table-rekey-repeated-destination-occurrence-updates.orna",
-                include_str!("../tests/fixtures/table-rekey-repeated-destination-occurrence-updates.orna"),
+                include_str!(
+                    "../tests/fixtures/table-rekey-repeated-destination-occurrence-updates.orna"
+                ),
                 "main",
             )
             .expect("checked-in repeated-destination fixture should be admitted");
@@ -5271,7 +6167,10 @@ mod tests {
             CanonicalValue::new(OvbRaw::Map(vec![
                 (OvbRaw::Text("id".into()), OvbRaw::Int(id.into())),
                 (OvbRaw::Text("text".into()), OvbRaw::Text(text.into())),
-                (OvbRaw::Text("quantity".into()), OvbRaw::Int(quantity.into())),
+                (
+                    OvbRaw::Text("quantity".into()),
+                    OvbRaw::Int(quantity.into()),
+                ),
             ]))
             .expect("row is canonical")
         };
@@ -5296,7 +6195,9 @@ mod tests {
         )
         .expect("the same relocated destination can be updated at each retry occurrence");
 
-        let mutations = handler.into_mutations().expect("valid ordered mutation log");
+        let mutations = handler
+            .into_mutations()
+            .expect("valid ordered mutation log");
         assert_eq!(mutations.len(), 12);
 
         let expected = [
@@ -5324,7 +6225,11 @@ mod tests {
                 expected_key.as_deref(),
                 "mutation {index} re-key destination"
             );
-            assert_eq!(mutation.is_insert(), is_insert, "mutation {index} insert flag");
+            assert_eq!(
+                mutation.is_insert(),
+                is_insert,
+                "mutation {index} insert flag"
+            );
             assert_eq!(
                 CanonicalValue::decode(mutation.value().unwrap()).unwrap(),
                 expected_row,
@@ -5340,7 +6245,9 @@ mod tests {
         let application = authority
             .admit_module(
                 "table-rekey-inserted-destination-reclaims-target.orna",
-                include_str!("../tests/fixtures/table-rekey-inserted-destination-reclaims-target.orna"),
+                include_str!(
+                    "../tests/fixtures/table-rekey-inserted-destination-reclaims-target.orna"
+                ),
                 "main",
             )
             .expect("checked-in inserted destination reclaim fixture should be admitted");
@@ -5352,7 +6259,10 @@ mod tests {
             CanonicalValue::new(OvbRaw::Map(vec![
                 (OvbRaw::Text("id".into()), OvbRaw::Int(id.into())),
                 (OvbRaw::Text("text".into()), OvbRaw::Text(text.into())),
-                (OvbRaw::Text("quantity".into()), OvbRaw::Int(quantity.into())),
+                (
+                    OvbRaw::Text("quantity".into()),
+                    OvbRaw::Int(quantity.into()),
+                ),
             ]))
             .expect("row is canonical")
         };
@@ -5377,7 +6287,9 @@ mod tests {
         )
         .expect("the inserted destination identity may reclaim its target before retry");
 
-        let mutations = handler.into_mutations().expect("valid ordered mutation log");
+        let mutations = handler
+            .into_mutations()
+            .expect("valid ordered mutation log");
         assert_eq!(mutations.len(), 12);
 
         let expected = [
@@ -5405,7 +6317,11 @@ mod tests {
                 expected_key.as_deref(),
                 "mutation {index} re-key destination"
             );
-            assert_eq!(mutation.is_insert(), is_insert, "mutation {index} insert flag");
+            assert_eq!(
+                mutation.is_insert(),
+                is_insert,
+                "mutation {index} insert flag"
+            );
             assert_eq!(
                 CanonicalValue::decode(mutation.value().unwrap()).unwrap(),
                 expected_row,
@@ -5421,7 +6337,9 @@ mod tests {
         let application = authority
             .admit_module(
                 "table-rekey-inserted-destination-two-source-retries.orna",
-                include_str!("../tests/fixtures/table-rekey-inserted-destination-two-source-retries.orna"),
+                include_str!(
+                    "../tests/fixtures/table-rekey-inserted-destination-two-source-retries.orna"
+                ),
                 "main",
             )
             .expect("checked-in two-source retry fixture should be admitted");
@@ -5433,7 +6351,10 @@ mod tests {
             CanonicalValue::new(OvbRaw::Map(vec![
                 (OvbRaw::Text("id".into()), OvbRaw::Int(id.into())),
                 (OvbRaw::Text("text".into()), OvbRaw::Text(text.into())),
-                (OvbRaw::Text("quantity".into()), OvbRaw::Int(quantity.into())),
+                (
+                    OvbRaw::Text("quantity".into()),
+                    OvbRaw::Int(quantity.into()),
+                ),
             ]))
             .expect("row is canonical")
         };
@@ -5458,7 +6379,9 @@ mod tests {
         )
         .expect("the inserted blocker follows both sources through separate retry episodes");
 
-        let mutations = handler.into_mutations().expect("valid ordered mutation log");
+        let mutations = handler
+            .into_mutations()
+            .expect("valid ordered mutation log");
         assert_eq!(mutations.len(), 12);
 
         let expected = [
@@ -5486,7 +6409,11 @@ mod tests {
                 expected_key.as_deref(),
                 "mutation {index} re-key destination"
             );
-            assert_eq!(mutation.is_insert(), is_insert, "mutation {index} insert flag");
+            assert_eq!(
+                mutation.is_insert(),
+                is_insert,
+                "mutation {index} insert flag"
+            );
             assert_eq!(
                 CanonicalValue::decode(mutation.value().unwrap()).unwrap(),
                 expected_row,
@@ -5502,7 +6429,9 @@ mod tests {
         let application = authority
             .admit_module(
                 "table-rekey-inserted-blocker-three-source-attempts.orna",
-                include_str!("../tests/fixtures/table-rekey-inserted-blocker-three-source-attempts.orna"),
+                include_str!(
+                    "../tests/fixtures/table-rekey-inserted-blocker-three-source-attempts.orna"
+                ),
                 "main",
             )
             .expect("checked-in three-source blocker fixture should be admitted");
@@ -5514,7 +6443,10 @@ mod tests {
             CanonicalValue::new(OvbRaw::Map(vec![
                 (OvbRaw::Text("id".into()), OvbRaw::Int(id.into())),
                 (OvbRaw::Text("text".into()), OvbRaw::Text(text.into())),
-                (OvbRaw::Text("quantity".into()), OvbRaw::Int(quantity.into())),
+                (
+                    OvbRaw::Text("quantity".into()),
+                    OvbRaw::Int(quantity.into()),
+                ),
             ]))
             .expect("row is canonical")
         };
@@ -5541,7 +6473,9 @@ mod tests {
         )
         .expect("the same inserted blocker reclaims the target across three source attempts");
 
-        let mutations = handler.into_mutations().expect("valid ordered mutation log");
+        let mutations = handler
+            .into_mutations()
+            .expect("valid ordered mutation log");
         assert_eq!(mutations.len(), 11);
 
         let expected = [
@@ -5568,7 +6502,11 @@ mod tests {
                 expected_key.as_deref(),
                 "mutation {index} re-key destination"
             );
-            assert_eq!(mutation.is_insert(), is_insert, "mutation {index} insert flag");
+            assert_eq!(
+                mutation.is_insert(),
+                is_insert,
+                "mutation {index} insert flag"
+            );
             assert_eq!(
                 CanonicalValue::decode(mutation.value().unwrap()).unwrap(),
                 expected_row,
@@ -5584,7 +6522,9 @@ mod tests {
         let application = authority
             .admit_module(
                 "table-rekey-inserted-blocker-three-source-updates.orna",
-                include_str!("../tests/fixtures/table-rekey-inserted-blocker-three-source-updates.orna"),
+                include_str!(
+                    "../tests/fixtures/table-rekey-inserted-blocker-three-source-updates.orna"
+                ),
                 "main",
             )
             .expect("checked-in three-source update fixture should be admitted");
@@ -5596,7 +6536,10 @@ mod tests {
             CanonicalValue::new(OvbRaw::Map(vec![
                 (OvbRaw::Text("id".into()), OvbRaw::Int(id.into())),
                 (OvbRaw::Text("text".into()), OvbRaw::Text(text.into())),
-                (OvbRaw::Text("quantity".into()), OvbRaw::Int(quantity.into())),
+                (
+                    OvbRaw::Text("quantity".into()),
+                    OvbRaw::Int(quantity.into()),
+                ),
             ]))
             .expect("row is canonical")
         };
@@ -5623,7 +6566,9 @@ mod tests {
         )
         .expect("the inserted blocker retains each update as it reclaims the key");
 
-        let mutations = handler.into_mutations().expect("valid ordered mutation log");
+        let mutations = handler
+            .into_mutations()
+            .expect("valid ordered mutation log");
         assert_eq!(mutations.len(), 14);
 
         let expected = [
@@ -5653,7 +6598,11 @@ mod tests {
                 expected_key.as_deref(),
                 "mutation {index} re-key destination"
             );
-            assert_eq!(mutation.is_insert(), is_insert, "mutation {index} insert flag");
+            assert_eq!(
+                mutation.is_insert(),
+                is_insert,
+                "mutation {index} insert flag"
+            );
             assert_eq!(
                 CanonicalValue::decode(mutation.value().unwrap()).unwrap(),
                 expected_row,
@@ -5669,7 +6618,9 @@ mod tests {
         let application = authority
             .admit_module(
                 "table-rekey-source-updates-three-blocker-retries.orna",
-                include_str!("../tests/fixtures/table-rekey-source-updates-three-blocker-retries.orna"),
+                include_str!(
+                    "../tests/fixtures/table-rekey-source-updates-three-blocker-retries.orna"
+                ),
                 "main",
             )
             .expect("checked-in source-update retry fixture should be admitted");
@@ -5681,7 +6632,10 @@ mod tests {
             CanonicalValue::new(OvbRaw::Map(vec![
                 (OvbRaw::Text("id".into()), OvbRaw::Int(id.into())),
                 (OvbRaw::Text("text".into()), OvbRaw::Text(text.into())),
-                (OvbRaw::Text("quantity".into()), OvbRaw::Int(quantity.into())),
+                (
+                    OvbRaw::Text("quantity".into()),
+                    OvbRaw::Int(quantity.into()),
+                ),
             ]))
             .expect("row is canonical")
         };
@@ -5708,7 +6662,9 @@ mod tests {
         )
         .expect("source updates remain attached through each failed target attempt");
 
-        let mutations = handler.into_mutations().expect("valid ordered mutation log");
+        let mutations = handler
+            .into_mutations()
+            .expect("valid ordered mutation log");
         assert_eq!(mutations.len(), 18);
 
         let expected = [
@@ -5742,7 +6698,11 @@ mod tests {
                 expected_key.as_deref(),
                 "mutation {index} re-key destination"
             );
-            assert_eq!(mutation.is_insert(), is_insert, "mutation {index} insert flag");
+            assert_eq!(
+                mutation.is_insert(),
+                is_insert,
+                "mutation {index} insert flag"
+            );
             assert_eq!(
                 CanonicalValue::decode(mutation.value().unwrap()).unwrap(),
                 expected_row,
@@ -5758,7 +6718,9 @@ mod tests {
         let application = authority
             .admit_module(
                 "table-rekey-pending-source-updates-retry-tails.orna",
-                include_str!("../tests/fixtures/table-rekey-pending-source-updates-retry-tails.orna"),
+                include_str!(
+                    "../tests/fixtures/table-rekey-pending-source-updates-retry-tails.orna"
+                ),
                 "main",
             )
             .expect("checked-in pending-source retry fixture should be admitted");
@@ -5770,7 +6732,10 @@ mod tests {
             CanonicalValue::new(OvbRaw::Map(vec![
                 (OvbRaw::Text("id".into()), OvbRaw::Int(id.into())),
                 (OvbRaw::Text("text".into()), OvbRaw::Text(text.into())),
-                (OvbRaw::Text("quantity".into()), OvbRaw::Int(quantity.into())),
+                (
+                    OvbRaw::Text("quantity".into()),
+                    OvbRaw::Int(quantity.into()),
+                ),
             ]))
             .expect("row is canonical")
         };
@@ -5797,7 +6762,9 @@ mod tests {
         )
         .expect("pending sources retain updates made in later retry tails");
 
-        let mutations = handler.into_mutations().expect("valid ordered mutation log");
+        let mutations = handler
+            .into_mutations()
+            .expect("valid ordered mutation log");
         assert_eq!(mutations.len(), 21);
 
         let expected = [
@@ -5834,7 +6801,11 @@ mod tests {
                 expected_key.as_deref(),
                 "mutation {index} re-key destination"
             );
-            assert_eq!(mutation.is_insert(), is_insert, "mutation {index} insert flag");
+            assert_eq!(
+                mutation.is_insert(),
+                is_insert,
+                "mutation {index} insert flag"
+            );
             assert_eq!(
                 CanonicalValue::decode(mutation.value().unwrap()).unwrap(),
                 expected_row,
@@ -5850,7 +6821,9 @@ mod tests {
         let application = authority
             .admit_module(
                 "table-rekey-moved-source-reused-key-retry-tails.orna",
-                include_str!("../tests/fixtures/table-rekey-moved-source-reused-key-retry-tails.orna"),
+                include_str!(
+                    "../tests/fixtures/table-rekey-moved-source-reused-key-retry-tails.orna"
+                ),
                 "main",
             )
             .expect("checked-in moved-source retry fixture should be admitted");
@@ -5862,7 +6835,10 @@ mod tests {
             CanonicalValue::new(OvbRaw::Map(vec![
                 (OvbRaw::Text("id".into()), OvbRaw::Int(id.into())),
                 (OvbRaw::Text("text".into()), OvbRaw::Text(text.into())),
-                (OvbRaw::Text("quantity".into()), OvbRaw::Int(quantity.into())),
+                (
+                    OvbRaw::Text("quantity".into()),
+                    OvbRaw::Int(quantity.into()),
+                ),
             ]))
             .expect("row is canonical")
         };
@@ -5888,7 +6864,9 @@ mod tests {
         )
         .expect("updates remain attached to moved and reused-key rows across retries");
 
-        let mutations = handler.into_mutations().expect("valid ordered mutation log");
+        let mutations = handler
+            .into_mutations()
+            .expect("valid ordered mutation log");
         assert_eq!(mutations.len(), 23);
 
         let expected = [
@@ -5927,7 +6905,11 @@ mod tests {
                 expected_key.as_deref(),
                 "mutation {index} re-key destination"
             );
-            assert_eq!(mutation.is_insert(), is_insert, "mutation {index} insert flag");
+            assert_eq!(
+                mutation.is_insert(),
+                is_insert,
+                "mutation {index} insert flag"
+            );
             assert_eq!(
                 CanonicalValue::decode(mutation.value().unwrap()).unwrap(),
                 expected_row,
@@ -5943,7 +6925,9 @@ mod tests {
         let application = authority
             .admit_module(
                 "table-rekey-moved-source-retry-key-reuse-closure.orna",
-                include_str!("../tests/fixtures/table-rekey-moved-source-retry-key-reuse-closure.orna"),
+                include_str!(
+                    "../tests/fixtures/table-rekey-moved-source-retry-key-reuse-closure.orna"
+                ),
                 "main",
             )
             .expect("checked-in source-key closure fixture should be admitted");
@@ -5955,7 +6939,10 @@ mod tests {
             CanonicalValue::new(OvbRaw::Map(vec![
                 (OvbRaw::Text("id".into()), OvbRaw::Int(id.into())),
                 (OvbRaw::Text("text".into()), OvbRaw::Text(text.into())),
-                (OvbRaw::Text("quantity".into()), OvbRaw::Int(quantity.into())),
+                (
+                    OvbRaw::Text("quantity".into()),
+                    OvbRaw::Int(quantity.into()),
+                ),
             ]))
             .expect("row is canonical")
         };
@@ -5981,7 +6968,9 @@ mod tests {
         )
         .expect("the moved source closes the reused-key cycle after a retry");
 
-        let mutations = handler.into_mutations().expect("valid ordered mutation log");
+        let mutations = handler
+            .into_mutations()
+            .expect("valid ordered mutation log");
         assert_eq!(mutations.len(), 17);
 
         let expected = [
@@ -6014,7 +7003,11 @@ mod tests {
                 expected_key.as_deref(),
                 "mutation {index} re-key destination"
             );
-            assert_eq!(mutation.is_insert(), is_insert, "mutation {index} insert flag");
+            assert_eq!(
+                mutation.is_insert(),
+                is_insert,
+                "mutation {index} insert flag"
+            );
             assert_eq!(
                 CanonicalValue::decode(mutation.value().unwrap()).unwrap(),
                 expected_row,
@@ -6042,7 +7035,10 @@ mod tests {
             CanonicalValue::new(OvbRaw::Map(vec![
                 (OvbRaw::Text("id".into()), OvbRaw::Int(id.into())),
                 (OvbRaw::Text("text".into()), OvbRaw::Text(text.into())),
-                (OvbRaw::Text("quantity".into()), OvbRaw::Int(quantity.into())),
+                (
+                    OvbRaw::Text("quantity".into()),
+                    OvbRaw::Int(quantity.into()),
+                ),
             ]))
             .expect("row is canonical")
         };
@@ -6068,7 +7064,9 @@ mod tests {
         )
         .expect("delete, reclaim, and later key reuse preserve row identity through retries");
 
-        let mutations = handler.into_mutations().expect("valid ordered mutation log");
+        let mutations = handler
+            .into_mutations()
+            .expect("valid ordered mutation log");
         assert_eq!(mutations.len(), 19);
 
         let expected = [
@@ -6103,7 +7101,11 @@ mod tests {
                 expected_key.as_deref(),
                 "mutation {index} re-key destination"
             );
-            assert_eq!(mutation.is_insert(), is_insert, "mutation {index} insert flag");
+            assert_eq!(
+                mutation.is_insert(),
+                is_insert,
+                "mutation {index} insert flag"
+            );
             match expected_row {
                 Some(expected_row) => assert_eq!(
                     CanonicalValue::decode(mutation.value().unwrap()).unwrap(),
@@ -6122,7 +7124,9 @@ mod tests {
         let application = authority
             .admit_module(
                 "table-rekey-delete-moved-source-reuse-final-tail.orna",
-                include_str!("../tests/fixtures/table-rekey-delete-moved-source-reuse-final-tail.orna"),
+                include_str!(
+                    "../tests/fixtures/table-rekey-delete-moved-source-reuse-final-tail.orna"
+                ),
                 "main",
             )
             .expect("checked-in moved-source deletion fixture should be admitted");
@@ -6134,7 +7138,10 @@ mod tests {
             CanonicalValue::new(OvbRaw::Map(vec![
                 (OvbRaw::Text("id".into()), OvbRaw::Int(id.into())),
                 (OvbRaw::Text("text".into()), OvbRaw::Text(text.into())),
-                (OvbRaw::Text("quantity".into()), OvbRaw::Int(quantity.into())),
+                (
+                    OvbRaw::Text("quantity".into()),
+                    OvbRaw::Int(quantity.into()),
+                ),
             ]))
             .expect("row is canonical")
         };
@@ -6160,7 +7167,9 @@ mod tests {
         )
         .expect("deleting a moved source leaves later retry key owners distinct");
 
-        let mutations = handler.into_mutations().expect("valid ordered mutation log");
+        let mutations = handler
+            .into_mutations()
+            .expect("valid ordered mutation log");
         assert_eq!(mutations.len(), 17);
 
         let expected = [
@@ -6193,7 +7202,11 @@ mod tests {
                 expected_key.as_deref(),
                 "mutation {index} re-key destination"
             );
-            assert_eq!(mutation.is_insert(), is_insert, "mutation {index} insert flag");
+            assert_eq!(
+                mutation.is_insert(),
+                is_insert,
+                "mutation {index} insert flag"
+            );
             match expected_row {
                 Some(expected_row) => assert_eq!(
                     CanonicalValue::decode(mutation.value().unwrap()).unwrap(),
@@ -6212,7 +7225,9 @@ mod tests {
         let application = authority
             .admit_module(
                 "table-rekey-returned-source-delete-reuse-final.orna",
-                include_str!("../tests/fixtures/table-rekey-returned-source-delete-reuse-final.orna"),
+                include_str!(
+                    "../tests/fixtures/table-rekey-returned-source-delete-reuse-final.orna"
+                ),
                 "main",
             )
             .expect("checked-in returned-source deletion fixture should be admitted");
@@ -6224,7 +7239,10 @@ mod tests {
             CanonicalValue::new(OvbRaw::Map(vec![
                 (OvbRaw::Text("id".into()), OvbRaw::Int(id.into())),
                 (OvbRaw::Text("text".into()), OvbRaw::Text(text.into())),
-                (OvbRaw::Text("quantity".into()), OvbRaw::Int(quantity.into())),
+                (
+                    OvbRaw::Text("quantity".into()),
+                    OvbRaw::Int(quantity.into()),
+                ),
             ]))
             .expect("row is canonical")
         };
@@ -6250,7 +7268,9 @@ mod tests {
         )
         .expect("returned-source deletion and a later retry keep reused-key owners distinct");
 
-        let mutations = handler.into_mutations().expect("valid ordered mutation log");
+        let mutations = handler
+            .into_mutations()
+            .expect("valid ordered mutation log");
         assert_eq!(mutations.len(), 20);
 
         let expected = [
@@ -6286,7 +7306,11 @@ mod tests {
                 expected_key.as_deref(),
                 "mutation {index} re-key destination"
             );
-            assert_eq!(mutation.is_insert(), is_insert, "mutation {index} insert flag");
+            assert_eq!(
+                mutation.is_insert(),
+                is_insert,
+                "mutation {index} insert flag"
+            );
             match expected_row {
                 Some(expected_row) => assert_eq!(
                     CanonicalValue::decode(mutation.value().unwrap()).unwrap(),
@@ -6305,7 +7329,9 @@ mod tests {
         let application = authority
             .admit_module(
                 "table-rekey-returned-source-delete-competitor-closure.orna",
-                include_str!("../tests/fixtures/table-rekey-returned-source-delete-competitor-closure.orna"),
+                include_str!(
+                    "../tests/fixtures/table-rekey-returned-source-delete-competitor-closure.orna"
+                ),
                 "main",
             )
             .expect("checked-in returned-source competitor fixture should be admitted");
@@ -6317,7 +7343,10 @@ mod tests {
             CanonicalValue::new(OvbRaw::Map(vec![
                 (OvbRaw::Text("id".into()), OvbRaw::Int(id.into())),
                 (OvbRaw::Text("text".into()), OvbRaw::Text(text.into())),
-                (OvbRaw::Text("quantity".into()), OvbRaw::Int(quantity.into())),
+                (
+                    OvbRaw::Text("quantity".into()),
+                    OvbRaw::Int(quantity.into()),
+                ),
             ]))
             .expect("row is canonical")
         };
@@ -6343,7 +7372,9 @@ mod tests {
         )
         .expect("a pending competitor moves aside so the final retry can claim the key");
 
-        let mutations = handler.into_mutations().expect("valid ordered mutation log");
+        let mutations = handler
+            .into_mutations()
+            .expect("valid ordered mutation log");
         assert_eq!(mutations.len(), 22);
 
         let expected = [
@@ -6381,7 +7412,11 @@ mod tests {
                 expected_key.as_deref(),
                 "mutation {index} re-key destination"
             );
-            assert_eq!(mutation.is_insert(), is_insert, "mutation {index} insert flag");
+            assert_eq!(
+                mutation.is_insert(),
+                is_insert,
+                "mutation {index} insert flag"
+            );
             match expected_row {
                 Some(expected_row) => assert_eq!(
                     CanonicalValue::decode(mutation.value().unwrap()).unwrap(),
@@ -6400,7 +7435,9 @@ mod tests {
         let application = authority
             .admit_module(
                 "table-rekey-returned-source-delete-competitor-deletion.orna",
-                include_str!("../tests/fixtures/table-rekey-returned-source-delete-competitor-deletion.orna"),
+                include_str!(
+                    "../tests/fixtures/table-rekey-returned-source-delete-competitor-deletion.orna"
+                ),
                 "main",
             )
             .expect("checked-in returned-source competitor deletion fixture should be admitted");
@@ -6412,7 +7449,10 @@ mod tests {
             CanonicalValue::new(OvbRaw::Map(vec![
                 (OvbRaw::Text("id".into()), OvbRaw::Int(id.into())),
                 (OvbRaw::Text("text".into()), OvbRaw::Text(text.into())),
-                (OvbRaw::Text("quantity".into()), OvbRaw::Int(quantity.into())),
+                (
+                    OvbRaw::Text("quantity".into()),
+                    OvbRaw::Int(quantity.into()),
+                ),
             ]))
             .expect("row is canonical")
         };
@@ -6438,7 +7478,9 @@ mod tests {
         )
         .expect("deleting the key competitor allows the final source retry");
 
-        let mutations = handler.into_mutations().expect("valid ordered mutation log");
+        let mutations = handler
+            .into_mutations()
+            .expect("valid ordered mutation log");
         assert_eq!(mutations.len(), 19);
 
         let expected = [
@@ -6473,7 +7515,11 @@ mod tests {
                 expected_key.as_deref(),
                 "mutation {index} re-key destination"
             );
-            assert_eq!(mutation.is_insert(), is_insert, "mutation {index} insert flag");
+            assert_eq!(
+                mutation.is_insert(),
+                is_insert,
+                "mutation {index} insert flag"
+            );
             match expected_row {
                 Some(expected_row) => assert_eq!(
                     CanonicalValue::decode(mutation.value().unwrap()).unwrap(),
@@ -6504,7 +7550,10 @@ mod tests {
             CanonicalValue::new(OvbRaw::Map(vec![
                 (OvbRaw::Text("id".into()), OvbRaw::Int(id.into())),
                 (OvbRaw::Text("text".into()), OvbRaw::Text(text.into())),
-                (OvbRaw::Text("quantity".into()), OvbRaw::Int(quantity.into())),
+                (
+                    OvbRaw::Text("quantity".into()),
+                    OvbRaw::Int(quantity.into()),
+                ),
             ]))
             .expect("row is canonical")
         };
@@ -6530,7 +7579,9 @@ mod tests {
         )
         .expect("a returned-key competitor can return, retry, and release the final owner");
 
-        let mutations = handler.into_mutations().expect("valid ordered mutation log");
+        let mutations = handler
+            .into_mutations()
+            .expect("valid ordered mutation log");
         assert_eq!(mutations.len(), 24);
 
         let expected = [
@@ -6570,7 +7621,11 @@ mod tests {
                 expected_key.as_deref(),
                 "mutation {index} re-key destination"
             );
-            assert_eq!(mutation.is_insert(), is_insert, "mutation {index} insert flag");
+            assert_eq!(
+                mutation.is_insert(),
+                is_insert,
+                "mutation {index} insert flag"
+            );
             match expected_row {
                 Some(expected_row) => assert_eq!(
                     CanonicalValue::decode(mutation.value().unwrap()).unwrap(),
@@ -6589,7 +7644,9 @@ mod tests {
         let application = authority
             .admit_module(
                 "table-rekey-returned-key-competitor-retry-owner-moves.orna",
-                include_str!("../tests/fixtures/table-rekey-returned-key-competitor-retry-owner-moves.orna"),
+                include_str!(
+                    "../tests/fixtures/table-rekey-returned-key-competitor-retry-owner-moves.orna"
+                ),
                 "main",
             )
             .expect("checked-in returned-key retry owner fixture should be admitted");
@@ -6601,7 +7658,10 @@ mod tests {
             CanonicalValue::new(OvbRaw::Map(vec![
                 (OvbRaw::Text("id".into()), OvbRaw::Int(id.into())),
                 (OvbRaw::Text("text".into()), OvbRaw::Text(text.into())),
-                (OvbRaw::Text("quantity".into()), OvbRaw::Int(quantity.into())),
+                (
+                    OvbRaw::Text("quantity".into()),
+                    OvbRaw::Int(quantity.into()),
+                ),
             ]))
             .expect("row is canonical")
         };
@@ -6627,7 +7687,9 @@ mod tests {
         )
         .expect("the competitor retries after the final owner re-keys away");
 
-        let mutations = handler.into_mutations().expect("valid ordered mutation log");
+        let mutations = handler
+            .into_mutations()
+            .expect("valid ordered mutation log");
         assert_eq!(mutations.len(), 27);
 
         let expected = [
@@ -6670,7 +7732,11 @@ mod tests {
                 expected_key.as_deref(),
                 "mutation {index} re-key destination"
             );
-            assert_eq!(mutation.is_insert(), is_insert, "mutation {index} insert flag");
+            assert_eq!(
+                mutation.is_insert(),
+                is_insert,
+                "mutation {index} insert flag"
+            );
             match expected_row {
                 Some(expected_row) => assert_eq!(
                     CanonicalValue::decode(mutation.value().unwrap()).unwrap(),
@@ -6689,7 +7755,9 @@ mod tests {
         let application = authority
             .admit_module(
                 "table-rekey-returned-key-competitor-claims-return-key.orna",
-                include_str!("../tests/fixtures/table-rekey-returned-key-competitor-claims-return-key.orna"),
+                include_str!(
+                    "../tests/fixtures/table-rekey-returned-key-competitor-claims-return-key.orna"
+                ),
                 "main",
             )
             .expect("checked-in returned-key ownership retry fixture should be admitted");
@@ -6701,7 +7769,10 @@ mod tests {
             CanonicalValue::new(OvbRaw::Map(vec![
                 (OvbRaw::Text("id".into()), OvbRaw::Int(id.into())),
                 (OvbRaw::Text("text".into()), OvbRaw::Text(text.into())),
-                (OvbRaw::Text("quantity".into()), OvbRaw::Int(quantity.into())),
+                (
+                    OvbRaw::Text("quantity".into()),
+                    OvbRaw::Int(quantity.into()),
+                ),
             ]))
             .expect("row is canonical")
         };
@@ -6727,7 +7798,9 @@ mod tests {
         )
         .expect("the owner can retry its source-key return after the competitor moves aside");
 
-        let mutations = handler.into_mutations().expect("valid ordered mutation log");
+        let mutations = handler
+            .into_mutations()
+            .expect("valid ordered mutation log");
         assert_eq!(mutations.len(), 32);
 
         let expected = [
@@ -6775,7 +7848,11 @@ mod tests {
                 expected_key.as_deref(),
                 "mutation {index} re-key destination"
             );
-            assert_eq!(mutation.is_insert(), is_insert, "mutation {index} insert flag");
+            assert_eq!(
+                mutation.is_insert(),
+                is_insert,
+                "mutation {index} insert flag"
+            );
             match expected_row {
                 Some(expected_row) => assert_eq!(
                     CanonicalValue::decode(mutation.value().unwrap()).unwrap(),
@@ -6794,7 +7871,9 @@ mod tests {
         let application = authority
             .admit_module(
                 "table-rekey-competitor-target-blocked-owner-retry-tail.orna",
-                include_str!("../tests/fixtures/table-rekey-competitor-target-blocked-owner-retry-tail.orna"),
+                include_str!(
+                    "../tests/fixtures/table-rekey-competitor-target-blocked-owner-retry-tail.orna"
+                ),
                 "main",
             )
             .expect("checked-in nested competitor closure fixture should be admitted");
@@ -6806,7 +7885,10 @@ mod tests {
             CanonicalValue::new(OvbRaw::Map(vec![
                 (OvbRaw::Text("id".into()), OvbRaw::Int(id.into())),
                 (OvbRaw::Text("text".into()), OvbRaw::Text(text.into())),
-                (OvbRaw::Text("quantity".into()), OvbRaw::Int(quantity.into())),
+                (
+                    OvbRaw::Text("quantity".into()),
+                    OvbRaw::Int(quantity.into()),
+                ),
             ]))
             .expect("row is canonical")
         };
@@ -6833,7 +7915,9 @@ mod tests {
         )
         .expect("the owner retries after the competitor's blocked move closes");
 
-        let mutations = handler.into_mutations().expect("valid ordered mutation log");
+        let mutations = handler
+            .into_mutations()
+            .expect("valid ordered mutation log");
         assert_eq!(mutations.len(), 34);
 
         let expected = [
@@ -6883,7 +7967,11 @@ mod tests {
                 expected_key.as_deref(),
                 "mutation {index} re-key destination"
             );
-            assert_eq!(mutation.is_insert(), is_insert, "mutation {index} insert flag");
+            assert_eq!(
+                mutation.is_insert(),
+                is_insert,
+                "mutation {index} insert flag"
+            );
             match expected_row {
                 Some(expected_row) => assert_eq!(
                     CanonicalValue::decode(mutation.value().unwrap()).unwrap(),
@@ -6902,7 +7990,9 @@ mod tests {
         let application = authority
             .admit_module(
                 "table-rekey-competitor-owner-retry-returned-key-closure.orna",
-                include_str!("../tests/fixtures/table-rekey-competitor-owner-retry-returned-key-closure.orna"),
+                include_str!(
+                    "../tests/fixtures/table-rekey-competitor-owner-retry-returned-key-closure.orna"
+                ),
                 "main",
             )
             .expect("checked-in alternating owner retry fixture should be admitted");
@@ -6914,7 +8004,10 @@ mod tests {
             CanonicalValue::new(OvbRaw::Map(vec![
                 (OvbRaw::Text("id".into()), OvbRaw::Int(id.into())),
                 (OvbRaw::Text("text".into()), OvbRaw::Text(text.into())),
-                (OvbRaw::Text("quantity".into()), OvbRaw::Int(quantity.into())),
+                (
+                    OvbRaw::Text("quantity".into()),
+                    OvbRaw::Int(quantity.into()),
+                ),
             ]))
             .expect("row is canonical")
         };
@@ -6941,7 +8034,9 @@ mod tests {
         )
         .expect("competitor and owner retries can alternate as each key owner moves");
 
-        let mutations = handler.into_mutations().expect("valid ordered mutation log");
+        let mutations = handler
+            .into_mutations()
+            .expect("valid ordered mutation log");
         assert_eq!(mutations.len(), 44);
 
         let expected = [
@@ -7001,7 +8096,11 @@ mod tests {
                 expected_key.as_deref(),
                 "mutation {index} re-key destination"
             );
-            assert_eq!(mutation.is_insert(), is_insert, "mutation {index} insert flag");
+            assert_eq!(
+                mutation.is_insert(),
+                is_insert,
+                "mutation {index} insert flag"
+            );
             match expected_row {
                 Some(expected_row) => assert_eq!(
                     CanonicalValue::decode(mutation.value().unwrap()).unwrap(),
@@ -7020,7 +8119,9 @@ mod tests {
         let application = authority
             .admit_module(
                 "table-rekey-original-owner-key-alternating-retry-tail.orna",
-                include_str!("../tests/fixtures/table-rekey-original-owner-key-alternating-retry-tail.orna"),
+                include_str!(
+                    "../tests/fixtures/table-rekey-original-owner-key-alternating-retry-tail.orna"
+                ),
                 "main",
             )
             .expect("checked-in original owner-key retry fixture should be admitted");
@@ -7032,7 +8133,10 @@ mod tests {
             CanonicalValue::new(OvbRaw::Map(vec![
                 (OvbRaw::Text("id".into()), OvbRaw::Int(id.into())),
                 (OvbRaw::Text("text".into()), OvbRaw::Text(text.into())),
-                (OvbRaw::Text("quantity".into()), OvbRaw::Int(quantity.into())),
+                (
+                    OvbRaw::Text("quantity".into()),
+                    OvbRaw::Int(quantity.into()),
+                ),
             ]))
             .expect("row is canonical")
         };
@@ -7059,7 +8163,9 @@ mod tests {
         )
         .expect("the original owner key can be reclaimed after competitor retries");
 
-        let mutations = handler.into_mutations().expect("valid ordered mutation log");
+        let mutations = handler
+            .into_mutations()
+            .expect("valid ordered mutation log");
         assert_eq!(mutations.len(), 56);
 
         let expected = [
@@ -7131,7 +8237,11 @@ mod tests {
                 expected_key.as_deref(),
                 "mutation {index} re-key destination"
             );
-            assert_eq!(mutation.is_insert(), is_insert, "mutation {index} insert flag");
+            assert_eq!(
+                mutation.is_insert(),
+                is_insert,
+                "mutation {index} insert flag"
+            );
             match expected_row {
                 Some(expected_row) => assert_eq!(
                     CanonicalValue::decode(mutation.value().unwrap()).unwrap(),
@@ -7162,7 +8272,10 @@ mod tests {
             CanonicalValue::new(OvbRaw::Map(vec![
                 (OvbRaw::Text("id".into()), OvbRaw::Int(id.into())),
                 (OvbRaw::Text("text".into()), OvbRaw::Text(text.into())),
-                (OvbRaw::Text("quantity".into()), OvbRaw::Int(quantity.into())),
+                (
+                    OvbRaw::Text("quantity".into()),
+                    OvbRaw::Int(quantity.into()),
+                ),
             ]))
             .expect("row is canonical")
         };
@@ -7187,7 +8300,9 @@ mod tests {
         )
         .expect("owner and competitor retries alternate against the returned key");
 
-        let mutations = handler.into_mutations().expect("valid ordered mutation log");
+        let mutations = handler
+            .into_mutations()
+            .expect("valid ordered mutation log");
         assert_eq!(mutations.len(), 10);
 
         let expected = [
@@ -7213,7 +8328,11 @@ mod tests {
                 expected_key.as_deref(),
                 "mutation {index} re-key destination"
             );
-            assert_eq!(mutation.is_insert(), is_insert, "mutation {index} insert flag");
+            assert_eq!(
+                mutation.is_insert(),
+                is_insert,
+                "mutation {index} insert flag"
+            );
             match expected_row {
                 Some(expected_row) => assert_eq!(
                     CanonicalValue::decode(mutation.value().unwrap()).unwrap(),
@@ -7244,7 +8363,10 @@ mod tests {
             CanonicalValue::new(OvbRaw::Map(vec![
                 (OvbRaw::Text("id".into()), OvbRaw::Int(id.into())),
                 (OvbRaw::Text("text".into()), OvbRaw::Text(text.into())),
-                (OvbRaw::Text("quantity".into()), OvbRaw::Int(quantity.into())),
+                (
+                    OvbRaw::Text("quantity".into()),
+                    OvbRaw::Int(quantity.into()),
+                ),
             ]))
             .expect("row is canonical")
         };
@@ -7269,7 +8391,9 @@ mod tests {
         )
         .expect("owner retry succeeds after deleting the competitor at its original key");
 
-        let mutations = handler.into_mutations().expect("valid ordered mutation log");
+        let mutations = handler
+            .into_mutations()
+            .expect("valid ordered mutation log");
         assert_eq!(mutations.len(), 9);
 
         let expected = [
@@ -7294,7 +8418,11 @@ mod tests {
                 expected_key.as_deref(),
                 "mutation {index} re-key destination"
             );
-            assert_eq!(mutation.is_insert(), is_insert, "mutation {index} insert flag");
+            assert_eq!(
+                mutation.is_insert(),
+                is_insert,
+                "mutation {index} insert flag"
+            );
             match expected_row {
                 Some(expected_row) => assert_eq!(
                     CanonicalValue::decode(mutation.value().unwrap()).unwrap(),
@@ -7313,7 +8441,9 @@ mod tests {
         let application = authority
             .admit_module(
                 "table-rekey-competitor-closure-final-owner-retry.orna",
-                include_str!("../tests/fixtures/table-rekey-competitor-closure-final-owner-retry.orna"),
+                include_str!(
+                    "../tests/fixtures/table-rekey-competitor-closure-final-owner-retry.orna"
+                ),
                 "main",
             )
             .expect("checked-in competitor closure fixture should be admitted");
@@ -7325,7 +8455,10 @@ mod tests {
             CanonicalValue::new(OvbRaw::Map(vec![
                 (OvbRaw::Text("id".into()), OvbRaw::Int(id.into())),
                 (OvbRaw::Text("text".into()), OvbRaw::Text(text.into())),
-                (OvbRaw::Text("quantity".into()), OvbRaw::Int(quantity.into())),
+                (
+                    OvbRaw::Text("quantity".into()),
+                    OvbRaw::Int(quantity.into()),
+                ),
             ]))
             .expect("row is canonical")
         };
@@ -7350,7 +8483,9 @@ mod tests {
         )
         .expect("original owner retry succeeds after nested competitor closure");
 
-        let mutations = handler.into_mutations().expect("valid ordered mutation log");
+        let mutations = handler
+            .into_mutations()
+            .expect("valid ordered mutation log");
         assert_eq!(mutations.len(), 14);
 
         let expected = [
@@ -7380,7 +8515,11 @@ mod tests {
                 expected_key.as_deref(),
                 "mutation {index} re-key destination"
             );
-            assert_eq!(mutation.is_insert(), is_insert, "mutation {index} insert flag");
+            assert_eq!(
+                mutation.is_insert(),
+                is_insert,
+                "mutation {index} insert flag"
+            );
             match expected_row {
                 Some(expected_row) => assert_eq!(
                     CanonicalValue::decode(mutation.value().unwrap()).unwrap(),
@@ -7411,7 +8550,10 @@ mod tests {
             CanonicalValue::new(OvbRaw::Map(vec![
                 (OvbRaw::Text("id".into()), OvbRaw::Int(id.into())),
                 (OvbRaw::Text("text".into()), OvbRaw::Text(text.into())),
-                (OvbRaw::Text("quantity".into()), OvbRaw::Int(quantity.into())),
+                (
+                    OvbRaw::Text("quantity".into()),
+                    OvbRaw::Int(quantity.into()),
+                ),
             ]))
             .expect("row is canonical")
         };
@@ -7437,7 +8579,9 @@ mod tests {
         )
         .expect("the original owner retries after the competitor closes its blocked move");
 
-        let mutations = handler.into_mutations().expect("valid ordered mutation log");
+        let mutations = handler
+            .into_mutations()
+            .expect("valid ordered mutation log");
         assert_eq!(mutations.len(), 11);
 
         let expected = [
@@ -7464,7 +8608,11 @@ mod tests {
                 expected_key.as_deref(),
                 "mutation {index} re-key destination"
             );
-            assert_eq!(mutation.is_insert(), is_insert, "mutation {index} insert flag");
+            assert_eq!(
+                mutation.is_insert(),
+                is_insert,
+                "mutation {index} insert flag"
+            );
             match expected_row {
                 Some(expected_row) => assert_eq!(
                     CanonicalValue::decode(mutation.value().unwrap()).unwrap(),
@@ -7483,7 +8631,9 @@ mod tests {
         let application = authority
             .admit_module(
                 "table-rekey-owner-retry-competitor-target-rekey-closure.orna",
-                include_str!("../tests/fixtures/table-rekey-owner-retry-competitor-target-rekey-closure.orna"),
+                include_str!(
+                    "../tests/fixtures/table-rekey-owner-retry-competitor-target-rekey-closure.orna"
+                ),
                 "main",
             )
             .expect("checked-in competitor target re-key fixture should be admitted");
@@ -7495,7 +8645,10 @@ mod tests {
             CanonicalValue::new(OvbRaw::Map(vec![
                 (OvbRaw::Text("id".into()), OvbRaw::Int(id.into())),
                 (OvbRaw::Text("text".into()), OvbRaw::Text(text.into())),
-                (OvbRaw::Text("quantity".into()), OvbRaw::Int(quantity.into())),
+                (
+                    OvbRaw::Text("quantity".into()),
+                    OvbRaw::Int(quantity.into()),
+                ),
             ]))
             .expect("row is canonical")
         };
@@ -7521,7 +8674,9 @@ mod tests {
         )
         .expect("the original owner retries after the competitor closes its blocked move");
 
-        let mutations = handler.into_mutations().expect("valid ordered mutation log");
+        let mutations = handler
+            .into_mutations()
+            .expect("valid ordered mutation log");
         assert_eq!(mutations.len(), 12);
 
         let expected = [
@@ -7549,7 +8704,11 @@ mod tests {
                 expected_key.as_deref(),
                 "mutation {index} re-key destination"
             );
-            assert_eq!(mutation.is_insert(), is_insert, "mutation {index} insert flag");
+            assert_eq!(
+                mutation.is_insert(),
+                is_insert,
+                "mutation {index} insert flag"
+            );
             match expected_row {
                 Some(expected_row) => assert_eq!(
                     CanonicalValue::decode(mutation.value().unwrap()).unwrap(),
@@ -7568,7 +8727,9 @@ mod tests {
         let application = authority
             .admit_module(
                 "table-rekey-owner-retry-reused-target-closure.orna",
-                include_str!("../tests/fixtures/table-rekey-owner-retry-reused-target-closure.orna"),
+                include_str!(
+                    "../tests/fixtures/table-rekey-owner-retry-reused-target-closure.orna"
+                ),
                 "main",
             )
             .expect("checked-in reused target closure fixture should be admitted");
@@ -7580,7 +8741,10 @@ mod tests {
             CanonicalValue::new(OvbRaw::Map(vec![
                 (OvbRaw::Text("id".into()), OvbRaw::Int(id.into())),
                 (OvbRaw::Text("text".into()), OvbRaw::Text(text.into())),
-                (OvbRaw::Text("quantity".into()), OvbRaw::Int(quantity.into())),
+                (
+                    OvbRaw::Text("quantity".into()),
+                    OvbRaw::Int(quantity.into()),
+                ),
             ]))
             .expect("row is canonical")
         };
@@ -7606,7 +8770,9 @@ mod tests {
         )
         .expect("owner retry succeeds after the competitor closes its reused target");
 
-        let mutations = handler.into_mutations().expect("valid ordered mutation log");
+        let mutations = handler
+            .into_mutations()
+            .expect("valid ordered mutation log");
         assert_eq!(mutations.len(), 17);
 
         let expected = [
@@ -7639,7 +8805,11 @@ mod tests {
                 expected_key.as_deref(),
                 "mutation {index} re-key destination"
             );
-            assert_eq!(mutation.is_insert(), is_insert, "mutation {index} insert flag");
+            assert_eq!(
+                mutation.is_insert(),
+                is_insert,
+                "mutation {index} insert flag"
+            );
             match expected_row {
                 Some(expected_row) => assert_eq!(
                     CanonicalValue::decode(mutation.value().unwrap()).unwrap(),
@@ -7670,7 +8840,10 @@ mod tests {
             CanonicalValue::new(OvbRaw::Map(vec![
                 (OvbRaw::Text("id".into()), OvbRaw::Int(id.into())),
                 (OvbRaw::Text("text".into()), OvbRaw::Text(text.into())),
-                (OvbRaw::Text("quantity".into()), OvbRaw::Int(quantity.into())),
+                (
+                    OvbRaw::Text("quantity".into()),
+                    OvbRaw::Int(quantity.into()),
+                ),
             ]))
             .expect("row is canonical")
         };
@@ -7679,7 +8852,10 @@ mod tests {
             "Note".to_owned(),
             vec![
                 (key(2), row(2, "original destination", 32).encode().unwrap()),
-                (key(3), row(3, "secondary target blocker", 60).encode().unwrap()),
+                (
+                    key(3),
+                    row(3, "secondary target blocker", 60).encode().unwrap(),
+                ),
                 (key(4), row(4, "move target blocker", 50).encode().unwrap()),
                 (key(6), row(6, "second source", 44).encode().unwrap()),
             ],
@@ -7697,7 +8873,9 @@ mod tests {
         )
         .expect("owner retry succeeds after the nested competitor closure releases its target");
 
-        let mutations = handler.into_mutations().expect("valid ordered mutation log");
+        let mutations = handler
+            .into_mutations()
+            .expect("valid ordered mutation log");
         assert_eq!(mutations.len(), 15);
 
         let expected = [
@@ -7708,7 +8886,12 @@ mod tests {
             (2, None, false, Some(row(2, "second source", 45))),
             (4, None, false, Some(row(4, "move target blocker", 55))),
             (3, None, false, Some(row(3, "secondary target blocker", 65))),
-            (3, Some(7), false, Some(row(7, "secondary target blocker", 65))),
+            (
+                3,
+                Some(7),
+                false,
+                Some(row(7, "secondary target blocker", 65)),
+            ),
             (7, None, false, Some(row(7, "secondary target blocker", 66))),
             (4, Some(3), false, Some(row(3, "move target blocker", 55))),
             (3, None, false, Some(row(3, "move target blocker", 56))),
@@ -7728,7 +8911,11 @@ mod tests {
                 expected_key.as_deref(),
                 "mutation {index} re-key destination"
             );
-            assert_eq!(mutation.is_insert(), is_insert, "mutation {index} insert flag");
+            assert_eq!(
+                mutation.is_insert(),
+                is_insert,
+                "mutation {index} insert flag"
+            );
             match expected_row {
                 Some(expected_row) => assert_eq!(
                     CanonicalValue::decode(mutation.value().unwrap()).unwrap(),
@@ -7747,7 +8934,9 @@ mod tests {
         let application = authority
             .admit_module(
                 "table-rekey-owner-retry-owner-in-competitor-closure.orna",
-                include_str!("../tests/fixtures/table-rekey-owner-retry-owner-in-competitor-closure.orna"),
+                include_str!(
+                    "../tests/fixtures/table-rekey-owner-retry-owner-in-competitor-closure.orna"
+                ),
                 "main",
             )
             .expect("checked-in owner and competitor closure fixture should be admitted");
@@ -7759,7 +8948,10 @@ mod tests {
             CanonicalValue::new(OvbRaw::Map(vec![
                 (OvbRaw::Text("id".into()), OvbRaw::Int(id.into())),
                 (OvbRaw::Text("text".into()), OvbRaw::Text(text.into())),
-                (OvbRaw::Text("quantity".into()), OvbRaw::Int(quantity.into())),
+                (
+                    OvbRaw::Text("quantity".into()),
+                    OvbRaw::Int(quantity.into()),
+                ),
             ]))
             .expect("row is canonical")
         };
@@ -7768,7 +8960,10 @@ mod tests {
             "Note".to_owned(),
             vec![
                 (key(2), row(2, "original destination", 32).encode().unwrap()),
-                (key(3), row(3, "secondary target blocker", 60).encode().unwrap()),
+                (
+                    key(3),
+                    row(3, "secondary target blocker", 60).encode().unwrap(),
+                ),
                 (key(4), row(4, "move target blocker", 50).encode().unwrap()),
                 (key(6), row(6, "second source", 44).encode().unwrap()),
             ],
@@ -7786,7 +8981,9 @@ mod tests {
         )
         .expect("owner returns after moving aside inside the nested competitor closure");
 
-        let mutations = handler.into_mutations().expect("valid ordered mutation log");
+        let mutations = handler
+            .into_mutations()
+            .expect("valid ordered mutation log");
         assert_eq!(mutations.len(), 20);
 
         let expected = [
@@ -7802,7 +8999,12 @@ mod tests {
             (7, None, false, Some(row(7, "original destination", 36))),
             (7, Some(8), false, Some(row(8, "original destination", 36))),
             (8, None, false, Some(row(8, "original destination", 37))),
-            (3, Some(7), false, Some(row(7, "secondary target blocker", 65))),
+            (
+                3,
+                Some(7),
+                false,
+                Some(row(7, "secondary target blocker", 65)),
+            ),
             (7, None, false, Some(row(7, "secondary target blocker", 66))),
             (4, Some(3), false, Some(row(3, "move target blocker", 55))),
             (3, None, false, Some(row(3, "move target blocker", 56))),
@@ -7822,7 +9024,11 @@ mod tests {
                 expected_key.as_deref(),
                 "mutation {index} re-key destination"
             );
-            assert_eq!(mutation.is_insert(), is_insert, "mutation {index} insert flag");
+            assert_eq!(
+                mutation.is_insert(),
+                is_insert,
+                "mutation {index} insert flag"
+            );
             match expected_row {
                 Some(expected_row) => assert_eq!(
                     CanonicalValue::decode(mutation.value().unwrap()).unwrap(),
@@ -7841,7 +9047,9 @@ mod tests {
         let application = authority
             .admit_module(
                 "table-rekey-owner-blocks-primary-closure-retry.orna",
-                include_str!("../tests/fixtures/table-rekey-owner-blocks-primary-closure-retry.orna"),
+                include_str!(
+                    "../tests/fixtures/table-rekey-owner-blocks-primary-closure-retry.orna"
+                ),
                 "main",
             )
             .expect("checked-in owner-blocked closure fixture should be admitted");
@@ -7853,7 +9061,10 @@ mod tests {
             CanonicalValue::new(OvbRaw::Map(vec![
                 (OvbRaw::Text("id".into()), OvbRaw::Int(id.into())),
                 (OvbRaw::Text("text".into()), OvbRaw::Text(text.into())),
-                (OvbRaw::Text("quantity".into()), OvbRaw::Int(quantity.into())),
+                (
+                    OvbRaw::Text("quantity".into()),
+                    OvbRaw::Int(quantity.into()),
+                ),
             ]))
             .expect("row is canonical")
         };
@@ -7862,7 +9073,10 @@ mod tests {
             "Note".to_owned(),
             vec![
                 (key(2), row(2, "original destination", 32).encode().unwrap()),
-                (key(3), row(3, "secondary target blocker", 60).encode().unwrap()),
+                (
+                    key(3),
+                    row(3, "secondary target blocker", 60).encode().unwrap(),
+                ),
                 (key(4), row(4, "move target blocker", 50).encode().unwrap()),
                 (key(6), row(6, "second source", 44).encode().unwrap()),
             ],
@@ -7880,7 +9094,9 @@ mod tests {
         )
         .expect("owner returns after blocking and then releasing the competitor closure retry");
 
-        let mutations = handler.into_mutations().expect("valid ordered mutation log");
+        let mutations = handler
+            .into_mutations()
+            .expect("valid ordered mutation log");
         assert_eq!(mutations.len(), 20);
 
         let expected = [
@@ -7891,7 +9107,12 @@ mod tests {
             (2, None, false, Some(row(2, "second source", 45))),
             (4, None, false, Some(row(4, "move target blocker", 55))),
             (3, None, false, Some(row(3, "secondary target blocker", 65))),
-            (3, Some(7), false, Some(row(7, "secondary target blocker", 65))),
+            (
+                3,
+                Some(7),
+                false,
+                Some(row(7, "secondary target blocker", 65)),
+            ),
             (7, None, false, Some(row(7, "secondary target blocker", 66))),
             (5, Some(3), false, Some(row(3, "original destination", 34))),
             (3, None, false, Some(row(3, "original destination", 35))),
@@ -7916,7 +9137,11 @@ mod tests {
                 expected_key.as_deref(),
                 "mutation {index} re-key destination"
             );
-            assert_eq!(mutation.is_insert(), is_insert, "mutation {index} insert flag");
+            assert_eq!(
+                mutation.is_insert(),
+                is_insert,
+                "mutation {index} insert flag"
+            );
             match expected_row {
                 Some(expected_row) => assert_eq!(
                     CanonicalValue::decode(mutation.value().unwrap()).unwrap(),
@@ -7935,7 +9160,9 @@ mod tests {
         let application = authority
             .admit_module(
                 "table-rekey-owner-move-target-closure-inside-competitor.orna",
-                include_str!("../tests/fixtures/table-rekey-owner-move-target-closure-inside-competitor.orna"),
+                include_str!(
+                    "../tests/fixtures/table-rekey-owner-move-target-closure-inside-competitor.orna"
+                ),
                 "main",
             )
             .expect("checked-in owner move closure fixture should be admitted");
@@ -7947,7 +9174,10 @@ mod tests {
             CanonicalValue::new(OvbRaw::Map(vec![
                 (OvbRaw::Text("id".into()), OvbRaw::Int(id.into())),
                 (OvbRaw::Text("text".into()), OvbRaw::Text(text.into())),
-                (OvbRaw::Text("quantity".into()), OvbRaw::Int(quantity.into())),
+                (
+                    OvbRaw::Text("quantity".into()),
+                    OvbRaw::Int(quantity.into()),
+                ),
             ]))
             .expect("row is canonical")
         };
@@ -7956,7 +9186,10 @@ mod tests {
             "Note".to_owned(),
             vec![
                 (key(2), row(2, "original destination", 32).encode().unwrap()),
-                (key(3), row(3, "secondary target blocker", 60).encode().unwrap()),
+                (
+                    key(3),
+                    row(3, "secondary target blocker", 60).encode().unwrap(),
+                ),
                 (key(4), row(4, "move target blocker", 50).encode().unwrap()),
                 (key(6), row(6, "second source", 44).encode().unwrap()),
                 (key(8), row(8, "owner move blocker", 70).encode().unwrap()),
@@ -7975,7 +9208,9 @@ mod tests {
         )
         .expect("owner clears its blocked move before the competitor and owner retry");
 
-        let mutations = handler.into_mutations().expect("valid ordered mutation log");
+        let mutations = handler
+            .into_mutations()
+            .expect("valid ordered mutation log");
         assert_eq!(mutations.len(), 22);
 
         let expected = [
@@ -7986,7 +9221,12 @@ mod tests {
             (2, None, false, Some(row(2, "second source", 45))),
             (4, None, false, Some(row(4, "move target blocker", 55))),
             (3, None, false, Some(row(3, "secondary target blocker", 65))),
-            (3, Some(7), false, Some(row(7, "secondary target blocker", 65))),
+            (
+                3,
+                Some(7),
+                false,
+                Some(row(7, "secondary target blocker", 65)),
+            ),
             (7, None, false, Some(row(7, "secondary target blocker", 66))),
             (5, Some(3), false, Some(row(3, "original destination", 34))),
             (3, None, false, Some(row(3, "original destination", 35))),
@@ -8013,7 +9253,11 @@ mod tests {
                 expected_key.as_deref(),
                 "mutation {index} re-key destination"
             );
-            assert_eq!(mutation.is_insert(), is_insert, "mutation {index} insert flag");
+            assert_eq!(
+                mutation.is_insert(),
+                is_insert,
+                "mutation {index} insert flag"
+            );
             match expected_row {
                 Some(expected_row) => assert_eq!(
                     CanonicalValue::decode(mutation.value().unwrap()).unwrap(),
@@ -8044,7 +9288,10 @@ mod tests {
             CanonicalValue::new(OvbRaw::Map(vec![
                 (OvbRaw::Text("id".into()), OvbRaw::Int(id.into())),
                 (OvbRaw::Text("text".into()), OvbRaw::Text(text.into())),
-                (OvbRaw::Text("quantity".into()), OvbRaw::Int(quantity.into())),
+                (
+                    OvbRaw::Text("quantity".into()),
+                    OvbRaw::Int(quantity.into()),
+                ),
             ]))
             .expect("row is canonical")
         };
@@ -8053,7 +9300,10 @@ mod tests {
             "Note".to_owned(),
             vec![
                 (key(2), row(2, "original destination", 32).encode().unwrap()),
-                (key(3), row(3, "secondary target blocker", 60).encode().unwrap()),
+                (
+                    key(3),
+                    row(3, "secondary target blocker", 60).encode().unwrap(),
+                ),
                 (key(4), row(4, "move target blocker", 50).encode().unwrap()),
                 (key(6), row(6, "second source", 44).encode().unwrap()),
                 (key(8), row(8, "owner move blocker", 70).encode().unwrap()),
@@ -8072,7 +9322,9 @@ mod tests {
         )
         .expect("owner move closure deletes its target blocker before both retries finish");
 
-        let mutations = handler.into_mutations().expect("valid ordered mutation log");
+        let mutations = handler
+            .into_mutations()
+            .expect("valid ordered mutation log");
         assert_eq!(mutations.len(), 21);
 
         let expected = [
@@ -8083,7 +9335,12 @@ mod tests {
             (2, None, false, Some(row(2, "second source", 45))),
             (4, None, false, Some(row(4, "move target blocker", 55))),
             (3, None, false, Some(row(3, "secondary target blocker", 65))),
-            (3, Some(7), false, Some(row(7, "secondary target blocker", 65))),
+            (
+                3,
+                Some(7),
+                false,
+                Some(row(7, "secondary target blocker", 65)),
+            ),
             (7, None, false, Some(row(7, "secondary target blocker", 66))),
             (5, Some(3), false, Some(row(3, "original destination", 34))),
             (3, None, false, Some(row(3, "original destination", 35))),
@@ -8109,7 +9366,11 @@ mod tests {
                 expected_key.as_deref(),
                 "mutation {index} re-key destination"
             );
-            assert_eq!(mutation.is_insert(), is_insert, "mutation {index} insert flag");
+            assert_eq!(
+                mutation.is_insert(),
+                is_insert,
+                "mutation {index} insert flag"
+            );
             match expected_row {
                 Some(expected_row) => assert_eq!(
                     CanonicalValue::decode(mutation.value().unwrap()).unwrap(),
@@ -8128,7 +9389,9 @@ mod tests {
         let application = authority
             .admit_module(
                 "table-rekey-owner-delete-release-target-reuse.orna",
-                include_str!("../tests/fixtures/table-rekey-owner-delete-release-target-reuse.orna"),
+                include_str!(
+                    "../tests/fixtures/table-rekey-owner-delete-release-target-reuse.orna"
+                ),
                 "main",
             )
             .expect("checked-in owner target reuse fixture should be admitted");
@@ -8140,7 +9403,10 @@ mod tests {
             CanonicalValue::new(OvbRaw::Map(vec![
                 (OvbRaw::Text("id".into()), OvbRaw::Int(id.into())),
                 (OvbRaw::Text("text".into()), OvbRaw::Text(text.into())),
-                (OvbRaw::Text("quantity".into()), OvbRaw::Int(quantity.into())),
+                (
+                    OvbRaw::Text("quantity".into()),
+                    OvbRaw::Int(quantity.into()),
+                ),
             ]))
             .expect("row is canonical")
         };
@@ -8149,7 +9415,10 @@ mod tests {
             "Note".to_owned(),
             vec![
                 (key(2), row(2, "original destination", 32).encode().unwrap()),
-                (key(3), row(3, "secondary target blocker", 60).encode().unwrap()),
+                (
+                    key(3),
+                    row(3, "secondary target blocker", 60).encode().unwrap(),
+                ),
                 (key(4), row(4, "move target blocker", 50).encode().unwrap()),
                 (key(6), row(6, "second source", 44).encode().unwrap()),
                 (key(8), row(8, "owner move blocker", 70).encode().unwrap()),
@@ -8168,7 +9437,9 @@ mod tests {
         )
         .expect("owner retries after the deleted target is reused and released again");
 
-        let mutations = handler.into_mutations().expect("valid ordered mutation log");
+        let mutations = handler
+            .into_mutations()
+            .expect("valid ordered mutation log");
         assert_eq!(mutations.len(), 26);
 
         let expected = [
@@ -8179,7 +9450,12 @@ mod tests {
             (2, None, false, Some(row(2, "second source", 45))),
             (4, None, false, Some(row(4, "move target blocker", 55))),
             (3, None, false, Some(row(3, "secondary target blocker", 65))),
-            (3, Some(7), false, Some(row(7, "secondary target blocker", 65))),
+            (
+                3,
+                Some(7),
+                false,
+                Some(row(7, "secondary target blocker", 65)),
+            ),
             (7, None, false, Some(row(7, "secondary target blocker", 66))),
             (5, Some(3), false, Some(row(3, "original destination", 34))),
             (3, None, false, Some(row(3, "original destination", 35))),
@@ -8210,7 +9486,11 @@ mod tests {
                 expected_key.as_deref(),
                 "mutation {index} re-key destination"
             );
-            assert_eq!(mutation.is_insert(), is_insert, "mutation {index} insert flag");
+            assert_eq!(
+                mutation.is_insert(),
+                is_insert,
+                "mutation {index} insert flag"
+            );
             match expected_row {
                 Some(expected_row) => assert_eq!(
                     CanonicalValue::decode(mutation.value().unwrap()).unwrap(),
@@ -8229,7 +9509,9 @@ mod tests {
         let application = authority
             .admit_module(
                 "table-rekey-owner-reused-target-delete-closure.orna",
-                include_str!("../tests/fixtures/table-rekey-owner-reused-target-delete-closure.orna"),
+                include_str!(
+                    "../tests/fixtures/table-rekey-owner-reused-target-delete-closure.orna"
+                ),
                 "main",
             )
             .expect("checked-in reused target deletion fixture should be admitted");
@@ -8241,7 +9523,10 @@ mod tests {
             CanonicalValue::new(OvbRaw::Map(vec![
                 (OvbRaw::Text("id".into()), OvbRaw::Int(id.into())),
                 (OvbRaw::Text("text".into()), OvbRaw::Text(text.into())),
-                (OvbRaw::Text("quantity".into()), OvbRaw::Int(quantity.into())),
+                (
+                    OvbRaw::Text("quantity".into()),
+                    OvbRaw::Int(quantity.into()),
+                ),
             ]))
             .expect("row is canonical")
         };
@@ -8250,7 +9535,10 @@ mod tests {
             "Note".to_owned(),
             vec![
                 (key(2), row(2, "original destination", 32).encode().unwrap()),
-                (key(3), row(3, "secondary target blocker", 60).encode().unwrap()),
+                (
+                    key(3),
+                    row(3, "secondary target blocker", 60).encode().unwrap(),
+                ),
                 (key(4), row(4, "move target blocker", 50).encode().unwrap()),
                 (key(6), row(6, "second source", 44).encode().unwrap()),
                 (key(8), row(8, "owner move blocker", 70).encode().unwrap()),
@@ -8269,7 +9557,9 @@ mod tests {
         )
         .expect("owner retries after the reused target is deleted in its nested closure");
 
-        let mutations = handler.into_mutations().expect("valid ordered mutation log");
+        let mutations = handler
+            .into_mutations()
+            .expect("valid ordered mutation log");
         assert_eq!(mutations.len(), 23);
 
         let expected = [
@@ -8280,7 +9570,12 @@ mod tests {
             (2, None, false, Some(row(2, "second source", 45))),
             (4, None, false, Some(row(4, "move target blocker", 55))),
             (3, None, false, Some(row(3, "secondary target blocker", 65))),
-            (3, Some(7), false, Some(row(7, "secondary target blocker", 65))),
+            (
+                3,
+                Some(7),
+                false,
+                Some(row(7, "secondary target blocker", 65)),
+            ),
             (7, None, false, Some(row(7, "secondary target blocker", 66))),
             (5, Some(3), false, Some(row(3, "original destination", 34))),
             (3, None, false, Some(row(3, "original destination", 35))),
@@ -8308,7 +9603,11 @@ mod tests {
                 expected_key.as_deref(),
                 "mutation {index} re-key destination"
             );
-            assert_eq!(mutation.is_insert(), is_insert, "mutation {index} insert flag");
+            assert_eq!(
+                mutation.is_insert(),
+                is_insert,
+                "mutation {index} insert flag"
+            );
             match expected_row {
                 Some(expected_row) => assert_eq!(
                     CanonicalValue::decode(mutation.value().unwrap()).unwrap(),
@@ -8327,7 +9626,9 @@ mod tests {
         let application = authority
             .admit_module(
                 "table-rekey-owner-target-repeat-delete-reuse-closure.orna",
-                include_str!("../tests/fixtures/table-rekey-owner-target-repeat-delete-reuse-closure.orna"),
+                include_str!(
+                    "../tests/fixtures/table-rekey-owner-target-repeat-delete-reuse-closure.orna"
+                ),
                 "main",
             )
             .expect("checked-in repeated target reuse fixture should be admitted");
@@ -8339,7 +9640,10 @@ mod tests {
             CanonicalValue::new(OvbRaw::Map(vec![
                 (OvbRaw::Text("id".into()), OvbRaw::Int(id.into())),
                 (OvbRaw::Text("text".into()), OvbRaw::Text(text.into())),
-                (OvbRaw::Text("quantity".into()), OvbRaw::Int(quantity.into())),
+                (
+                    OvbRaw::Text("quantity".into()),
+                    OvbRaw::Int(quantity.into()),
+                ),
             ]))
             .expect("row is canonical")
         };
@@ -8348,7 +9652,10 @@ mod tests {
             "Note".to_owned(),
             vec![
                 (key(2), row(2, "original destination", 32).encode().unwrap()),
-                (key(3), row(3, "secondary target blocker", 60).encode().unwrap()),
+                (
+                    key(3),
+                    row(3, "secondary target blocker", 60).encode().unwrap(),
+                ),
                 (key(4), row(4, "move target blocker", 50).encode().unwrap()),
                 (key(6), row(6, "second source", 44).encode().unwrap()),
                 (key(8), row(8, "owner move blocker", 70).encode().unwrap()),
@@ -8367,7 +9674,9 @@ mod tests {
         )
         .expect("owner retries after two successive rows reuse and release its move target");
 
-        let mutations = handler.into_mutations().expect("valid ordered mutation log");
+        let mutations = handler
+            .into_mutations()
+            .expect("valid ordered mutation log");
         assert_eq!(mutations.len(), 27);
 
         let expected = [
@@ -8378,7 +9687,12 @@ mod tests {
             (2, None, false, Some(row(2, "second source", 45))),
             (4, None, false, Some(row(4, "move target blocker", 55))),
             (3, None, false, Some(row(3, "secondary target blocker", 65))),
-            (3, Some(7), false, Some(row(7, "secondary target blocker", 65))),
+            (
+                3,
+                Some(7),
+                false,
+                Some(row(7, "secondary target blocker", 65)),
+            ),
             (7, None, false, Some(row(7, "secondary target blocker", 66))),
             (5, Some(3), false, Some(row(3, "original destination", 34))),
             (3, None, false, Some(row(3, "original destination", 35))),
@@ -8388,7 +9702,12 @@ mod tests {
             (8, None, false, Some(row(8, "move target blocker", 57))),
             (8, None, false, Some(row(8, "move target blocker", 58))),
             (8, None, false, None),
-            (7, Some(8), false, Some(row(8, "secondary target blocker", 66))),
+            (
+                7,
+                Some(8),
+                false,
+                Some(row(8, "secondary target blocker", 66)),
+            ),
             (8, None, false, Some(row(8, "secondary target blocker", 67))),
             (8, None, false, Some(row(8, "secondary target blocker", 68))),
             (8, None, false, None),
@@ -8410,7 +9729,11 @@ mod tests {
                 expected_key.as_deref(),
                 "mutation {index} re-key destination"
             );
-            assert_eq!(mutation.is_insert(), is_insert, "mutation {index} insert flag");
+            assert_eq!(
+                mutation.is_insert(),
+                is_insert,
+                "mutation {index} insert flag"
+            );
             match expected_row {
                 Some(expected_row) => assert_eq!(
                     CanonicalValue::decode(mutation.value().unwrap()).unwrap(),
@@ -8429,7 +9752,9 @@ mod tests {
         let application = authority
             .admit_module(
                 "table-rekey-owner-target-insert-reuse-after-repeats.orna",
-                include_str!("../tests/fixtures/table-rekey-owner-target-insert-reuse-after-repeats.orna"),
+                include_str!(
+                    "../tests/fixtures/table-rekey-owner-target-insert-reuse-after-repeats.orna"
+                ),
                 "main",
             )
             .expect("checked-in inserted target reuse fixture should be admitted");
@@ -8441,7 +9766,10 @@ mod tests {
             CanonicalValue::new(OvbRaw::Map(vec![
                 (OvbRaw::Text("id".into()), OvbRaw::Int(id.into())),
                 (OvbRaw::Text("text".into()), OvbRaw::Text(text.into())),
-                (OvbRaw::Text("quantity".into()), OvbRaw::Int(quantity.into())),
+                (
+                    OvbRaw::Text("quantity".into()),
+                    OvbRaw::Int(quantity.into()),
+                ),
             ]))
             .expect("row is canonical")
         };
@@ -8450,7 +9778,10 @@ mod tests {
             "Note".to_owned(),
             vec![
                 (key(2), row(2, "original destination", 32).encode().unwrap()),
-                (key(3), row(3, "secondary target blocker", 60).encode().unwrap()),
+                (
+                    key(3),
+                    row(3, "secondary target blocker", 60).encode().unwrap(),
+                ),
                 (key(4), row(4, "move target blocker", 50).encode().unwrap()),
                 (key(6), row(6, "second source", 44).encode().unwrap()),
                 (key(8), row(8, "owner move blocker", 70).encode().unwrap()),
@@ -8469,7 +9800,9 @@ mod tests {
         )
         .expect("owner retry follows two deleted reuses and a deleted inserted reuse");
 
-        let mutations = handler.into_mutations().expect("valid ordered mutation log");
+        let mutations = handler
+            .into_mutations()
+            .expect("valid ordered mutation log");
         assert_eq!(mutations.len(), 30);
 
         let expected = [
@@ -8480,7 +9813,12 @@ mod tests {
             (2, None, false, Some(row(2, "second source", 45))),
             (4, None, false, Some(row(4, "move target blocker", 55))),
             (3, None, false, Some(row(3, "secondary target blocker", 65))),
-            (3, Some(7), false, Some(row(7, "secondary target blocker", 65))),
+            (
+                3,
+                Some(7),
+                false,
+                Some(row(7, "secondary target blocker", 65)),
+            ),
             (7, None, false, Some(row(7, "secondary target blocker", 66))),
             (5, Some(3), false, Some(row(3, "original destination", 34))),
             (3, None, false, Some(row(3, "original destination", 35))),
@@ -8490,7 +9828,12 @@ mod tests {
             (8, None, false, Some(row(8, "move target blocker", 57))),
             (8, None, false, Some(row(8, "move target blocker", 58))),
             (8, None, false, None),
-            (7, Some(8), false, Some(row(8, "secondary target blocker", 66))),
+            (
+                7,
+                Some(8),
+                false,
+                Some(row(8, "secondary target blocker", 66)),
+            ),
             (8, None, false, Some(row(8, "secondary target blocker", 67))),
             (8, None, false, Some(row(8, "secondary target blocker", 68))),
             (8, None, false, None),
@@ -8515,7 +9858,11 @@ mod tests {
                 expected_key.as_deref(),
                 "mutation {index} re-key destination"
             );
-            assert_eq!(mutation.is_insert(), is_insert, "mutation {index} insert flag");
+            assert_eq!(
+                mutation.is_insert(),
+                is_insert,
+                "mutation {index} insert flag"
+            );
             match expected_row {
                 Some(expected_row) => assert_eq!(
                     CanonicalValue::decode(mutation.value().unwrap()).unwrap(),
@@ -8534,7 +9881,9 @@ mod tests {
         let application = authority
             .admit_module(
                 "table-rekey-owner-inserted-target-retry-delete-closure.orna",
-                include_str!("../tests/fixtures/table-rekey-owner-inserted-target-retry-delete-closure.orna"),
+                include_str!(
+                    "../tests/fixtures/table-rekey-owner-inserted-target-retry-delete-closure.orna"
+                ),
                 "main",
             )
             .expect("checked-in inserted target closure fixture should be admitted");
@@ -8546,7 +9895,10 @@ mod tests {
             CanonicalValue::new(OvbRaw::Map(vec![
                 (OvbRaw::Text("id".into()), OvbRaw::Int(id.into())),
                 (OvbRaw::Text("text".into()), OvbRaw::Text(text.into())),
-                (OvbRaw::Text("quantity".into()), OvbRaw::Int(quantity.into())),
+                (
+                    OvbRaw::Text("quantity".into()),
+                    OvbRaw::Int(quantity.into()),
+                ),
             ]))
             .expect("row is canonical")
         };
@@ -8555,7 +9907,10 @@ mod tests {
             "Note".to_owned(),
             vec![
                 (key(2), row(2, "original destination", 32).encode().unwrap()),
-                (key(3), row(3, "secondary target blocker", 60).encode().unwrap()),
+                (
+                    key(3),
+                    row(3, "secondary target blocker", 60).encode().unwrap(),
+                ),
                 (key(4), row(4, "move target blocker", 50).encode().unwrap()),
                 (key(6), row(6, "second source", 44).encode().unwrap()),
                 (key(8), row(8, "owner move blocker", 70).encode().unwrap()),
@@ -8574,7 +9929,9 @@ mod tests {
         )
         .expect("owner's caught retry deletes the inserted row blocking its target");
 
-        let mutations = handler.into_mutations().expect("valid ordered mutation log");
+        let mutations = handler
+            .into_mutations()
+            .expect("valid ordered mutation log");
         assert_eq!(mutations.len(), 31);
 
         let expected_tail = [
@@ -8590,27 +9947,36 @@ mod tests {
             (2, None, false, Some(row(2, "original destination", 38))),
         ];
 
-        for (index, (mutation, (old_key, new_key, is_insert, expected_row))) in mutations
-            .iter()
-            .skip(21)
-            .zip(expected_tail)
-            .enumerate()
+        for (index, (mutation, (old_key, new_key, is_insert, expected_row))) in
+            mutations.iter().skip(21).zip(expected_tail).enumerate()
         {
-            assert_eq!(mutation.key(), key(old_key), "tail mutation {index} source key");
+            assert_eq!(
+                mutation.key(),
+                key(old_key),
+                "tail mutation {index} source key"
+            );
             let expected_key = new_key.map(key);
             assert_eq!(
                 mutation.rekey_to(),
                 expected_key.as_deref(),
                 "tail mutation {index} re-key destination"
             );
-            assert_eq!(mutation.is_insert(), is_insert, "tail mutation {index} insert flag");
+            assert_eq!(
+                mutation.is_insert(),
+                is_insert,
+                "tail mutation {index} insert flag"
+            );
             match expected_row {
                 Some(expected_row) => assert_eq!(
                     CanonicalValue::decode(mutation.value().unwrap()).unwrap(),
                     expected_row,
                     "tail mutation {index} row value"
                 ),
-                None => assert_eq!(mutation.value(), None, "tail mutation {index} deletion value"),
+                None => assert_eq!(
+                    mutation.value(),
+                    None,
+                    "tail mutation {index} deletion value"
+                ),
             }
         }
     }
@@ -8622,7 +9988,9 @@ mod tests {
         let application = authority
             .admit_module(
                 "table-rekey-owner-successive-inserted-target-closures.orna",
-                include_str!("../tests/fixtures/table-rekey-owner-successive-inserted-target-closures.orna"),
+                include_str!(
+                    "../tests/fixtures/table-rekey-owner-successive-inserted-target-closures.orna"
+                ),
                 "main",
             )
             .expect("checked-in successive inserted target fixture should be admitted");
@@ -8634,7 +10002,10 @@ mod tests {
             CanonicalValue::new(OvbRaw::Map(vec![
                 (OvbRaw::Text("id".into()), OvbRaw::Int(id.into())),
                 (OvbRaw::Text("text".into()), OvbRaw::Text(text.into())),
-                (OvbRaw::Text("quantity".into()), OvbRaw::Int(quantity.into())),
+                (
+                    OvbRaw::Text("quantity".into()),
+                    OvbRaw::Int(quantity.into()),
+                ),
             ]))
             .expect("row is canonical")
         };
@@ -8643,7 +10014,10 @@ mod tests {
             "Note".to_owned(),
             vec![
                 (key(2), row(2, "original destination", 32).encode().unwrap()),
-                (key(3), row(3, "secondary target blocker", 60).encode().unwrap()),
+                (
+                    key(3),
+                    row(3, "secondary target blocker", 60).encode().unwrap(),
+                ),
                 (key(4), row(4, "move target blocker", 50).encode().unwrap()),
                 (key(6), row(6, "second source", 44).encode().unwrap()),
                 (key(8), row(8, "owner move blocker", 70).encode().unwrap()),
@@ -8662,7 +10036,9 @@ mod tests {
         )
         .expect("owner retries after two inserted rows successively block and release its target");
 
-        let mutations = handler.into_mutations().expect("valid ordered mutation log");
+        let mutations = handler
+            .into_mutations()
+            .expect("valid ordered mutation log");
         assert_eq!(mutations.len(), 35);
 
         let expected_tail = [
@@ -8671,8 +10047,18 @@ mod tests {
             (8, None, false, Some(row(8, "replacement target", 82))),
             (8, None, false, None),
             (8, None, true, Some(row(8, "second replacement target", 90))),
-            (8, None, false, Some(row(8, "second replacement target", 91))),
-            (8, None, false, Some(row(8, "second replacement target", 92))),
+            (
+                8,
+                None,
+                false,
+                Some(row(8, "second replacement target", 91)),
+            ),
+            (
+                8,
+                None,
+                false,
+                Some(row(8, "second replacement target", 92)),
+            ),
             (8, None, false, None),
             (3, Some(8), false, Some(row(8, "original destination", 35))),
             (8, None, false, Some(row(8, "original destination", 36))),
@@ -8682,27 +10068,36 @@ mod tests {
             (2, None, false, Some(row(2, "original destination", 38))),
         ];
 
-        for (index, (mutation, (old_key, new_key, is_insert, expected_row))) in mutations
-            .iter()
-            .skip(21)
-            .zip(expected_tail)
-            .enumerate()
+        for (index, (mutation, (old_key, new_key, is_insert, expected_row))) in
+            mutations.iter().skip(21).zip(expected_tail).enumerate()
         {
-            assert_eq!(mutation.key(), key(old_key), "tail mutation {index} source key");
+            assert_eq!(
+                mutation.key(),
+                key(old_key),
+                "tail mutation {index} source key"
+            );
             let expected_key = new_key.map(key);
             assert_eq!(
                 mutation.rekey_to(),
                 expected_key.as_deref(),
                 "tail mutation {index} re-key destination"
             );
-            assert_eq!(mutation.is_insert(), is_insert, "tail mutation {index} insert flag");
+            assert_eq!(
+                mutation.is_insert(),
+                is_insert,
+                "tail mutation {index} insert flag"
+            );
             match expected_row {
                 Some(expected_row) => assert_eq!(
                     CanonicalValue::decode(mutation.value().unwrap()).unwrap(),
                     expected_row,
                     "tail mutation {index} row value"
                 ),
-                None => assert_eq!(mutation.value(), None, "tail mutation {index} deletion value"),
+                None => assert_eq!(
+                    mutation.value(),
+                    None,
+                    "tail mutation {index} deletion value"
+                ),
             }
         }
     }
@@ -8714,7 +10109,9 @@ mod tests {
         let application = authority
             .admit_module(
                 "table-rekey-owner-inserted-target-rekey-closure.orna",
-                include_str!("../tests/fixtures/table-rekey-owner-inserted-target-rekey-closure.orna"),
+                include_str!(
+                    "../tests/fixtures/table-rekey-owner-inserted-target-rekey-closure.orna"
+                ),
                 "main",
             )
             .expect("checked-in inserted target re-key fixture should be admitted");
@@ -8726,7 +10123,10 @@ mod tests {
             CanonicalValue::new(OvbRaw::Map(vec![
                 (OvbRaw::Text("id".into()), OvbRaw::Int(id.into())),
                 (OvbRaw::Text("text".into()), OvbRaw::Text(text.into())),
-                (OvbRaw::Text("quantity".into()), OvbRaw::Int(quantity.into())),
+                (
+                    OvbRaw::Text("quantity".into()),
+                    OvbRaw::Int(quantity.into()),
+                ),
             ]))
             .expect("row is canonical")
         };
@@ -8735,7 +10135,10 @@ mod tests {
             "Note".to_owned(),
             vec![
                 (key(2), row(2, "original destination", 32).encode().unwrap()),
-                (key(3), row(3, "secondary target blocker", 60).encode().unwrap()),
+                (
+                    key(3),
+                    row(3, "secondary target blocker", 60).encode().unwrap(),
+                ),
                 (key(4), row(4, "move target blocker", 50).encode().unwrap()),
                 (key(6), row(6, "second source", 44).encode().unwrap()),
                 (key(8), row(8, "owner move blocker", 70).encode().unwrap()),
@@ -8754,7 +10157,9 @@ mod tests {
         )
         .expect("owner retry succeeds after its inserted blocker moves aside in the closure");
 
-        let mutations = handler.into_mutations().expect("valid ordered mutation log");
+        let mutations = handler
+            .into_mutations()
+            .expect("valid ordered mutation log");
         assert_eq!(mutations.len(), 35);
 
         let expected_tail = [
@@ -8763,9 +10168,24 @@ mod tests {
             (8, None, false, Some(row(8, "replacement target", 82))),
             (8, None, false, None),
             (8, None, true, Some(row(8, "second replacement target", 90))),
-            (8, None, false, Some(row(8, "second replacement target", 91))),
-            (8, Some(9), false, Some(row(9, "second replacement target", 91))),
-            (9, None, false, Some(row(9, "second replacement target", 92))),
+            (
+                8,
+                None,
+                false,
+                Some(row(8, "second replacement target", 91)),
+            ),
+            (
+                8,
+                Some(9),
+                false,
+                Some(row(9, "second replacement target", 91)),
+            ),
+            (
+                9,
+                None,
+                false,
+                Some(row(9, "second replacement target", 92)),
+            ),
             (3, Some(8), false, Some(row(8, "original destination", 35))),
             (8, None, false, Some(row(8, "original destination", 36))),
             (2, Some(4), false, Some(row(4, "second source", 45))),
@@ -8774,27 +10194,36 @@ mod tests {
             (2, None, false, Some(row(2, "original destination", 38))),
         ];
 
-        for (index, (mutation, (old_key, new_key, is_insert, expected_row))) in mutations
-            .iter()
-            .skip(21)
-            .zip(expected_tail)
-            .enumerate()
+        for (index, (mutation, (old_key, new_key, is_insert, expected_row))) in
+            mutations.iter().skip(21).zip(expected_tail).enumerate()
         {
-            assert_eq!(mutation.key(), key(old_key), "tail mutation {index} source key");
+            assert_eq!(
+                mutation.key(),
+                key(old_key),
+                "tail mutation {index} source key"
+            );
             let expected_key = new_key.map(key);
             assert_eq!(
                 mutation.rekey_to(),
                 expected_key.as_deref(),
                 "tail mutation {index} re-key destination"
             );
-            assert_eq!(mutation.is_insert(), is_insert, "tail mutation {index} insert flag");
+            assert_eq!(
+                mutation.is_insert(),
+                is_insert,
+                "tail mutation {index} insert flag"
+            );
             match expected_row {
                 Some(expected_row) => assert_eq!(
                     CanonicalValue::decode(mutation.value().unwrap()).unwrap(),
                     expected_row,
                     "tail mutation {index} row value"
                 ),
-                None => assert_eq!(mutation.value(), None, "tail mutation {index} deletion value"),
+                None => assert_eq!(
+                    mutation.value(),
+                    None,
+                    "tail mutation {index} deletion value"
+                ),
             }
         }
     }
@@ -8806,7 +10235,9 @@ mod tests {
         let application = authority
             .admit_module(
                 "table-rekey-owner-inserted-target-move-blocked-closure.orna",
-                include_str!("../tests/fixtures/table-rekey-owner-inserted-target-move-blocked-closure.orna"),
+                include_str!(
+                    "../tests/fixtures/table-rekey-owner-inserted-target-move-blocked-closure.orna"
+                ),
                 "main",
             )
             .expect("checked-in occupied move destination fixture should be admitted");
@@ -8818,7 +10249,10 @@ mod tests {
             CanonicalValue::new(OvbRaw::Map(vec![
                 (OvbRaw::Text("id".into()), OvbRaw::Int(id.into())),
                 (OvbRaw::Text("text".into()), OvbRaw::Text(text.into())),
-                (OvbRaw::Text("quantity".into()), OvbRaw::Int(quantity.into())),
+                (
+                    OvbRaw::Text("quantity".into()),
+                    OvbRaw::Int(quantity.into()),
+                ),
             ]))
             .expect("row is canonical")
         };
@@ -8827,11 +10261,17 @@ mod tests {
             "Note".to_owned(),
             vec![
                 (key(2), row(2, "original destination", 32).encode().unwrap()),
-                (key(3), row(3, "secondary target blocker", 60).encode().unwrap()),
+                (
+                    key(3),
+                    row(3, "secondary target blocker", 60).encode().unwrap(),
+                ),
                 (key(4), row(4, "move target blocker", 50).encode().unwrap()),
                 (key(6), row(6, "second source", 44).encode().unwrap()),
                 (key(8), row(8, "owner move blocker", 70).encode().unwrap()),
-                (key(9), row(9, "insert move target blocker", 90).encode().unwrap()),
+                (
+                    key(9),
+                    row(9, "insert move target blocker", 90).encode().unwrap(),
+                ),
             ],
         )]);
         let tables = admitted_table_schemas(&application.module_header);
@@ -8847,7 +10287,9 @@ mod tests {
         )
         .expect("inserted target moves after its occupied destination is released");
 
-        let mutations = handler.into_mutations().expect("valid ordered mutation log");
+        let mutations = handler
+            .into_mutations()
+            .expect("valid ordered mutation log");
         assert_eq!(mutations.len(), 37);
 
         let expected_tail = [
@@ -8856,11 +10298,31 @@ mod tests {
             (8, None, false, Some(row(8, "replacement target", 82))),
             (8, None, false, None),
             (8, None, true, Some(row(8, "second replacement target", 90))),
-            (8, None, false, Some(row(8, "second replacement target", 91))),
-            (9, None, false, Some(row(9, "insert move target blocker", 91))),
+            (
+                8,
+                None,
+                false,
+                Some(row(8, "second replacement target", 91)),
+            ),
+            (
+                9,
+                None,
+                false,
+                Some(row(9, "insert move target blocker", 91)),
+            ),
             (9, None, false, None),
-            (8, Some(9), false, Some(row(9, "second replacement target", 91))),
-            (9, None, false, Some(row(9, "second replacement target", 92))),
+            (
+                8,
+                Some(9),
+                false,
+                Some(row(9, "second replacement target", 91)),
+            ),
+            (
+                9,
+                None,
+                false,
+                Some(row(9, "second replacement target", 92)),
+            ),
             (3, Some(8), false, Some(row(8, "original destination", 35))),
             (8, None, false, Some(row(8, "original destination", 36))),
             (2, Some(4), false, Some(row(4, "second source", 45))),
@@ -8869,27 +10331,36 @@ mod tests {
             (2, None, false, Some(row(2, "original destination", 38))),
         ];
 
-        for (index, (mutation, (old_key, new_key, is_insert, expected_row))) in mutations
-            .iter()
-            .skip(21)
-            .zip(expected_tail)
-            .enumerate()
+        for (index, (mutation, (old_key, new_key, is_insert, expected_row))) in
+            mutations.iter().skip(21).zip(expected_tail).enumerate()
         {
-            assert_eq!(mutation.key(), key(old_key), "tail mutation {index} source key");
+            assert_eq!(
+                mutation.key(),
+                key(old_key),
+                "tail mutation {index} source key"
+            );
             let expected_key = new_key.map(key);
             assert_eq!(
                 mutation.rekey_to(),
                 expected_key.as_deref(),
                 "tail mutation {index} re-key destination"
             );
-            assert_eq!(mutation.is_insert(), is_insert, "tail mutation {index} insert flag");
+            assert_eq!(
+                mutation.is_insert(),
+                is_insert,
+                "tail mutation {index} insert flag"
+            );
             match expected_row {
                 Some(expected_row) => assert_eq!(
                     CanonicalValue::decode(mutation.value().unwrap()).unwrap(),
                     expected_row,
                     "tail mutation {index} row value"
                 ),
-                None => assert_eq!(mutation.value(), None, "tail mutation {index} deletion value"),
+                None => assert_eq!(
+                    mutation.value(),
+                    None,
+                    "tail mutation {index} deletion value"
+                ),
             }
         }
     }
@@ -8901,7 +10372,9 @@ mod tests {
         let application = authority
             .admit_module(
                 "table-rekey-owner-inserted-move-reuse-closure.orna",
-                include_str!("../tests/fixtures/table-rekey-owner-inserted-move-reuse-closure.orna"),
+                include_str!(
+                    "../tests/fixtures/table-rekey-owner-inserted-move-reuse-closure.orna"
+                ),
                 "main",
             )
             .expect("checked-in inserted move reuse fixture should be admitted");
@@ -8913,7 +10386,10 @@ mod tests {
             CanonicalValue::new(OvbRaw::Map(vec![
                 (OvbRaw::Text("id".into()), OvbRaw::Int(id.into())),
                 (OvbRaw::Text("text".into()), OvbRaw::Text(text.into())),
-                (OvbRaw::Text("quantity".into()), OvbRaw::Int(quantity.into())),
+                (
+                    OvbRaw::Text("quantity".into()),
+                    OvbRaw::Int(quantity.into()),
+                ),
             ]))
             .expect("row is canonical")
         };
@@ -8922,11 +10398,17 @@ mod tests {
             "Note".to_owned(),
             vec![
                 (key(2), row(2, "original destination", 32).encode().unwrap()),
-                (key(3), row(3, "secondary target blocker", 60).encode().unwrap()),
+                (
+                    key(3),
+                    row(3, "secondary target blocker", 60).encode().unwrap(),
+                ),
                 (key(4), row(4, "move target blocker", 50).encode().unwrap()),
                 (key(6), row(6, "second source", 44).encode().unwrap()),
                 (key(8), row(8, "owner move blocker", 70).encode().unwrap()),
-                (key(9), row(9, "insert move target blocker", 90).encode().unwrap()),
+                (
+                    key(9),
+                    row(9, "insert move target blocker", 90).encode().unwrap(),
+                ),
             ],
         )]);
         let tables = admitted_table_schemas(&application.module_header);
@@ -8942,7 +10424,9 @@ mod tests {
         )
         .expect("inserted move retry releases a second row that reused its destination");
 
-        let mutations = handler.into_mutations().expect("valid ordered mutation log");
+        let mutations = handler
+            .into_mutations()
+            .expect("valid ordered mutation log");
         assert_eq!(mutations.len(), 41);
 
         let expected_tail = [
@@ -8951,15 +10435,35 @@ mod tests {
             (8, None, false, Some(row(8, "replacement target", 82))),
             (8, None, false, None),
             (8, None, true, Some(row(8, "second replacement target", 90))),
-            (8, None, false, Some(row(8, "second replacement target", 91))),
-            (9, None, false, Some(row(9, "insert move target blocker", 91))),
+            (
+                8,
+                None,
+                false,
+                Some(row(8, "second replacement target", 91)),
+            ),
+            (
+                9,
+                None,
+                false,
+                Some(row(9, "insert move target blocker", 91)),
+            ),
             (9, None, false, None),
             (9, None, true, Some(row(9, "replacement move target", 100))),
             (9, None, false, Some(row(9, "replacement move target", 101))),
             (9, None, false, Some(row(9, "replacement move target", 102))),
             (9, None, false, None),
-            (8, Some(9), false, Some(row(9, "second replacement target", 91))),
-            (9, None, false, Some(row(9, "second replacement target", 92))),
+            (
+                8,
+                Some(9),
+                false,
+                Some(row(9, "second replacement target", 91)),
+            ),
+            (
+                9,
+                None,
+                false,
+                Some(row(9, "second replacement target", 92)),
+            ),
             (3, Some(8), false, Some(row(8, "original destination", 35))),
             (8, None, false, Some(row(8, "original destination", 36))),
             (2, Some(4), false, Some(row(4, "second source", 45))),
@@ -8968,27 +10472,36 @@ mod tests {
             (2, None, false, Some(row(2, "original destination", 38))),
         ];
 
-        for (index, (mutation, (old_key, new_key, is_insert, expected_row))) in mutations
-            .iter()
-            .skip(21)
-            .zip(expected_tail)
-            .enumerate()
+        for (index, (mutation, (old_key, new_key, is_insert, expected_row))) in
+            mutations.iter().skip(21).zip(expected_tail).enumerate()
         {
-            assert_eq!(mutation.key(), key(old_key), "tail mutation {index} source key");
+            assert_eq!(
+                mutation.key(),
+                key(old_key),
+                "tail mutation {index} source key"
+            );
             let expected_key = new_key.map(key);
             assert_eq!(
                 mutation.rekey_to(),
                 expected_key.as_deref(),
                 "tail mutation {index} re-key destination"
             );
-            assert_eq!(mutation.is_insert(), is_insert, "tail mutation {index} insert flag");
+            assert_eq!(
+                mutation.is_insert(),
+                is_insert,
+                "tail mutation {index} insert flag"
+            );
             match expected_row {
                 Some(expected_row) => assert_eq!(
                     CanonicalValue::decode(mutation.value().unwrap()).unwrap(),
                     expected_row,
                     "tail mutation {index} row value"
                 ),
-                None => assert_eq!(mutation.value(), None, "tail mutation {index} deletion value"),
+                None => assert_eq!(
+                    mutation.value(),
+                    None,
+                    "tail mutation {index} deletion value"
+                ),
             }
         }
     }
@@ -9012,7 +10525,10 @@ mod tests {
             CanonicalValue::new(OvbRaw::Map(vec![
                 (OvbRaw::Text("id".into()), OvbRaw::Int(id.into())),
                 (OvbRaw::Text("text".into()), OvbRaw::Text(text.into())),
-                (OvbRaw::Text("quantity".into()), OvbRaw::Int(quantity.into())),
+                (
+                    OvbRaw::Text("quantity".into()),
+                    OvbRaw::Int(quantity.into()),
+                ),
             ]))
             .expect("row is canonical")
         };
@@ -9021,11 +10537,17 @@ mod tests {
             "Note".to_owned(),
             vec![
                 (key(2), row(2, "original destination", 32).encode().unwrap()),
-                (key(3), row(3, "secondary target blocker", 60).encode().unwrap()),
+                (
+                    key(3),
+                    row(3, "secondary target blocker", 60).encode().unwrap(),
+                ),
                 (key(4), row(4, "move target blocker", 50).encode().unwrap()),
                 (key(6), row(6, "second source", 44).encode().unwrap()),
                 (key(8), row(8, "owner move blocker", 70).encode().unwrap()),
-                (key(9), row(9, "insert move target blocker", 90).encode().unwrap()),
+                (
+                    key(9),
+                    row(9, "insert move target blocker", 90).encode().unwrap(),
+                ),
             ],
         )]);
         let tables = admitted_table_schemas(&application.module_header);
@@ -9041,7 +10563,9 @@ mod tests {
         )
         .expect("competitor reuses the inserted move destination after its closure moves it aside");
 
-        let mutations = handler.into_mutations().expect("valid ordered mutation log");
+        let mutations = handler
+            .into_mutations()
+            .expect("valid ordered mutation log");
         assert_eq!(mutations.len(), 44);
 
         let expected_tail = [
@@ -9050,47 +10574,91 @@ mod tests {
             (8, None, false, Some(row(8, "replacement target", 82))),
             (8, None, false, None),
             (8, None, true, Some(row(8, "second replacement target", 90))),
-            (8, None, false, Some(row(8, "second replacement target", 91))),
-            (9, None, false, Some(row(9, "insert move target blocker", 91))),
+            (
+                8,
+                None,
+                false,
+                Some(row(8, "second replacement target", 91)),
+            ),
+            (
+                9,
+                None,
+                false,
+                Some(row(9, "insert move target blocker", 91)),
+            ),
             (9, None, false, None),
             (9, None, true, Some(row(9, "replacement move target", 100))),
             (9, None, false, Some(row(9, "replacement move target", 101))),
             (9, None, false, Some(row(9, "replacement move target", 102))),
             (9, None, false, None),
-            (8, Some(9), false, Some(row(9, "second replacement target", 91))),
-            (9, None, false, Some(row(9, "second replacement target", 92))),
+            (
+                8,
+                Some(9),
+                false,
+                Some(row(9, "second replacement target", 91)),
+            ),
+            (
+                9,
+                None,
+                false,
+                Some(row(9, "second replacement target", 92)),
+            ),
             (3, Some(8), false, Some(row(8, "original destination", 35))),
             (8, None, false, Some(row(8, "original destination", 36))),
-            (9, None, false, Some(row(9, "second replacement target", 93))),
-            (9, Some(10), false, Some(row(10, "second replacement target", 93))),
-            (10, None, false, Some(row(10, "second replacement target", 94))),
+            (
+                9,
+                None,
+                false,
+                Some(row(9, "second replacement target", 93)),
+            ),
+            (
+                9,
+                Some(10),
+                false,
+                Some(row(10, "second replacement target", 93)),
+            ),
+            (
+                10,
+                None,
+                false,
+                Some(row(10, "second replacement target", 94)),
+            ),
             (2, Some(9), false, Some(row(9, "second source", 45))),
             (9, None, false, Some(row(9, "second source", 46))),
             (8, Some(2), false, Some(row(2, "original destination", 36))),
             (2, None, false, Some(row(2, "original destination", 38))),
         ];
 
-        for (index, (mutation, (old_key, new_key, is_insert, expected_row))) in mutations
-            .iter()
-            .skip(21)
-            .zip(expected_tail)
-            .enumerate()
+        for (index, (mutation, (old_key, new_key, is_insert, expected_row))) in
+            mutations.iter().skip(21).zip(expected_tail).enumerate()
         {
-            assert_eq!(mutation.key(), key(old_key), "tail mutation {index} source key");
+            assert_eq!(
+                mutation.key(),
+                key(old_key),
+                "tail mutation {index} source key"
+            );
             let expected_key = new_key.map(key);
             assert_eq!(
                 mutation.rekey_to(),
                 expected_key.as_deref(),
                 "tail mutation {index} re-key destination"
             );
-            assert_eq!(mutation.is_insert(), is_insert, "tail mutation {index} insert flag");
+            assert_eq!(
+                mutation.is_insert(),
+                is_insert,
+                "tail mutation {index} insert flag"
+            );
             match expected_row {
                 Some(expected_row) => assert_eq!(
                     CanonicalValue::decode(mutation.value().unwrap()).unwrap(),
                     expected_row,
                     "tail mutation {index} row value"
                 ),
-                None => assert_eq!(mutation.value(), None, "tail mutation {index} deletion value"),
+                None => assert_eq!(
+                    mutation.value(),
+                    None,
+                    "tail mutation {index} deletion value"
+                ),
             }
         }
     }
@@ -9117,7 +10685,10 @@ mod tests {
             CanonicalValue::new(OvbRaw::Map(vec![
                 (OvbRaw::Text("id".into()), OvbRaw::Int(id.into())),
                 (OvbRaw::Text("text".into()), OvbRaw::Text(text.into())),
-                (OvbRaw::Text("quantity".into()), OvbRaw::Int(quantity.into())),
+                (
+                    OvbRaw::Text("quantity".into()),
+                    OvbRaw::Int(quantity.into()),
+                ),
             ]))
             .expect("row is canonical")
         };
@@ -9164,7 +10735,9 @@ mod tests {
             "the temporary move target should be released after handoff"
         );
 
-        let mutations = handler.into_mutations().expect("valid ordered mutation log");
+        let mutations = handler
+            .into_mutations()
+            .expect("valid ordered mutation log");
         let expected = [
             (3, None, false, None),
             (2, Some(3), false, Some(row(3, "competitor", 20))),
@@ -9291,21 +10864,33 @@ mod tests {
         for (index, (mutation, (old_key, new_key, is_insert, expected_row))) in
             mutations.iter().zip(expected).enumerate()
         {
-            assert_eq!(mutation.key(), key(old_key), "handoff mutation {index} source key");
+            assert_eq!(
+                mutation.key(),
+                key(old_key),
+                "handoff mutation {index} source key"
+            );
             let expected_key = new_key.map(key);
             assert_eq!(
                 mutation.rekey_to(),
                 expected_key.as_deref(),
                 "handoff mutation {index} destination"
             );
-            assert_eq!(mutation.is_insert(), is_insert, "handoff mutation {index} insert flag");
+            assert_eq!(
+                mutation.is_insert(),
+                is_insert,
+                "handoff mutation {index} insert flag"
+            );
             match expected_row {
                 Some(expected_row) => assert_eq!(
                     CanonicalValue::decode(mutation.value().unwrap()).unwrap(),
                     expected_row,
                     "handoff mutation {index} row value"
                 ),
-                None => assert_eq!(mutation.value(), None, "handoff mutation {index} deletion value"),
+                None => assert_eq!(
+                    mutation.value(),
+                    None,
+                    "handoff mutation {index} deletion value"
+                ),
             }
         }
     }
@@ -9332,7 +10917,10 @@ mod tests {
             CanonicalValue::new(OvbRaw::Map(vec![
                 (OvbRaw::Text("id".into()), OvbRaw::Int(id.into())),
                 (OvbRaw::Text("text".into()), OvbRaw::Text(text.into())),
-                (OvbRaw::Text("quantity".into()), OvbRaw::Int(quantity.into())),
+                (
+                    OvbRaw::Text("quantity".into()),
+                    OvbRaw::Int(quantity.into()),
+                ),
             ]))
             .expect("row is canonical")
         };
@@ -9380,7 +10968,9 @@ mod tests {
         );
 
         let owner_after_update = row(1, "owner", 11);
-        let mutations = handler.into_mutations().expect("valid ordered mutation log");
+        let mutations = handler
+            .into_mutations()
+            .expect("valid ordered mutation log");
         assert_eq!(mutations.len(), 4, "the two failed rekeys add no mutations");
         let expected = [
             (1, None, false, Some(owner_after_update)),
@@ -9397,7 +10987,11 @@ mod tests {
                 new_key.map(key).as_deref(),
                 "mutation {index} destination"
             );
-            assert_eq!(mutation.is_insert(), is_insert, "mutation {index} insert flag");
+            assert_eq!(
+                mutation.is_insert(),
+                is_insert,
+                "mutation {index} insert flag"
+            );
             match expected_row {
                 Some(expected_row) => assert_eq!(
                     CanonicalValue::decode(mutation.value().unwrap()).unwrap(),
@@ -9436,7 +11030,10 @@ mod tests {
             CanonicalValue::new(OvbRaw::Map(vec![
                 (OvbRaw::Text("id".into()), OvbRaw::Int(id.into())),
                 (OvbRaw::Text("text".into()), OvbRaw::Text(text.into())),
-                (OvbRaw::Text("quantity".into()), OvbRaw::Int(quantity.into())),
+                (
+                    OvbRaw::Text("quantity".into()),
+                    OvbRaw::Int(quantity.into()),
+                ),
             ]))
             .expect("row is canonical")
         };
@@ -9479,8 +11076,14 @@ mod tests {
             "the competitor's rekey remains in the shared activation overlay"
         );
 
-        let mutations = handler.into_mutations().expect("valid ordered mutation log");
-        assert_eq!(mutations.len(), 2, "the unexpected recovery update is skipped");
+        let mutations = handler
+            .into_mutations()
+            .expect("valid ordered mutation log");
+        assert_eq!(
+            mutations.len(),
+            2,
+            "the unexpected recovery update is skipped"
+        );
         let expected = [
             (2, Some(3), row(3, "competitor", 20)),
             (1, Some(2), row(2, "owner", 10)),
@@ -9528,7 +11131,10 @@ mod tests {
             CanonicalValue::new(OvbRaw::Map(vec![
                 (OvbRaw::Text("id".into()), OvbRaw::Int(id.into())),
                 (OvbRaw::Text("text".into()), OvbRaw::Text(text.into())),
-                (OvbRaw::Text("quantity".into()), OvbRaw::Int(quantity.into())),
+                (
+                    OvbRaw::Text("quantity".into()),
+                    OvbRaw::Int(quantity.into()),
+                ),
             ]))
             .expect("row is canonical")
         };
@@ -9574,7 +11180,9 @@ mod tests {
             "the competitor handoff remains visible through the outer split"
         );
 
-        let mutations = handler.into_mutations().expect("valid ordered mutation log");
+        let mutations = handler
+            .into_mutations()
+            .expect("valid ordered mutation log");
         assert_eq!(mutations.len(), 4, "the failed rekeys add no mutations");
         let expected = [
             (2, Some(4), Some(row(4, "competitor", 20))),
@@ -9591,7 +11199,10 @@ mod tests {
                 new_key.map(key).as_deref(),
                 "mutation {index} destination"
             );
-            assert!(!mutation.is_insert(), "mutation {index} is an update, delete, or rekey");
+            assert!(
+                !mutation.is_insert(),
+                "mutation {index} is an update, delete, or rekey"
+            );
             match expected_row {
                 Some(expected_row) => assert_eq!(
                     CanonicalValue::decode(mutation.value().unwrap()).unwrap(),
@@ -9626,7 +11237,10 @@ mod tests {
             CanonicalValue::new(OvbRaw::Map(vec![
                 (OvbRaw::Text("id".into()), OvbRaw::Int(id.into())),
                 (OvbRaw::Text("text".into()), OvbRaw::Text(text.into())),
-                (OvbRaw::Text("quantity".into()), OvbRaw::Int(quantity.into())),
+                (
+                    OvbRaw::Text("quantity".into()),
+                    OvbRaw::Int(quantity.into()),
+                ),
             ]))
             .expect("row is canonical")
         };
@@ -9667,7 +11281,9 @@ mod tests {
             Some(row(5, "owner", 12))
         );
 
-        let mutations = handler.into_mutations().expect("valid ordered mutation log");
+        let mutations = handler
+            .into_mutations()
+            .expect("valid ordered mutation log");
         assert_eq!(mutations.len(), 8, "failed attempts do not add mutations");
         let expected = [
             (3, Some(4), Some(row(4, "blocker", 30))),
@@ -9711,7 +11327,9 @@ mod tests {
         let application = authority
             .admit_module(
                 "table-rekey-recovery-displaces-target-across-splits.orna",
-                include_str!("../tests/fixtures/table-rekey-recovery-displaces-target-across-splits.orna"),
+                include_str!(
+                    "../tests/fixtures/table-rekey-recovery-displaces-target-across-splits.orna"
+                ),
                 "main",
             )
             .expect("checked-in recovery rekey fixture should be admitted");
@@ -9723,7 +11341,10 @@ mod tests {
             CanonicalValue::new(OvbRaw::Map(vec![
                 (OvbRaw::Text("id".into()), OvbRaw::Int(id.into())),
                 (OvbRaw::Text("text".into()), OvbRaw::Text(text.into())),
-                (OvbRaw::Text("quantity".into()), OvbRaw::Int(quantity.into())),
+                (
+                    OvbRaw::Text("quantity".into()),
+                    OvbRaw::Int(quantity.into()),
+                ),
             ]))
             .expect("row is canonical")
         };
@@ -9764,7 +11385,9 @@ mod tests {
         );
         assert_eq!(handler.current_row("Note", &key(5)).unwrap(), None);
 
-        let mutations = handler.into_mutations().expect("valid ordered mutation log");
+        let mutations = handler
+            .into_mutations()
+            .expect("valid ordered mutation log");
         assert_eq!(mutations.len(), 10, "failed rekeys add no mutations");
         let expected = [
             (3, Some(4), Some(row(4, "blocker", 30))),
@@ -9806,7 +11429,9 @@ mod tests {
         let application = authority
             .admit_module(
                 "table-rekey-owner-moved-target-competitor-reuse-closure.orna",
-                include_str!("../tests/fixtures/table-rekey-owner-moved-target-competitor-reuse-closure.orna"),
+                include_str!(
+                    "../tests/fixtures/table-rekey-owner-moved-target-competitor-reuse-closure.orna"
+                ),
                 "main",
             )
             .expect("checked-in successive moved target fixture should be admitted");
@@ -9818,7 +11443,10 @@ mod tests {
             CanonicalValue::new(OvbRaw::Map(vec![
                 (OvbRaw::Text("id".into()), OvbRaw::Int(id.into())),
                 (OvbRaw::Text("text".into()), OvbRaw::Text(text.into())),
-                (OvbRaw::Text("quantity".into()), OvbRaw::Int(quantity.into())),
+                (
+                    OvbRaw::Text("quantity".into()),
+                    OvbRaw::Int(quantity.into()),
+                ),
             ]))
             .expect("row is canonical")
         };
@@ -9827,11 +11455,17 @@ mod tests {
             "Note".to_owned(),
             vec![
                 (key(2), row(2, "original destination", 32).encode().unwrap()),
-                (key(3), row(3, "secondary target blocker", 60).encode().unwrap()),
+                (
+                    key(3),
+                    row(3, "secondary target blocker", 60).encode().unwrap(),
+                ),
                 (key(4), row(4, "move target blocker", 50).encode().unwrap()),
                 (key(6), row(6, "second source", 44).encode().unwrap()),
                 (key(8), row(8, "owner move blocker", 70).encode().unwrap()),
-                (key(9), row(9, "insert move target blocker", 90).encode().unwrap()),
+                (
+                    key(9),
+                    row(9, "insert move target blocker", 90).encode().unwrap(),
+                ),
             ],
         )]);
         let tables = admitted_table_schemas(&application.module_header);
@@ -9847,7 +11481,9 @@ mod tests {
         )
         .expect("competitor retries after two successive moves of the inserted target");
 
-        let mutations = handler.into_mutations().expect("valid ordered mutation log");
+        let mutations = handler
+            .into_mutations()
+            .expect("valid ordered mutation log");
         assert_eq!(mutations.len(), 119);
 
         let expected_tail = [
@@ -9856,122 +11492,341 @@ mod tests {
             (8, None, false, Some(row(8, "replacement target", 82))),
             (8, None, false, None),
             (8, None, true, Some(row(8, "second replacement target", 90))),
-            (8, None, false, Some(row(8, "second replacement target", 91))),
-            (9, None, false, Some(row(9, "insert move target blocker", 91))),
+            (
+                8,
+                None,
+                false,
+                Some(row(8, "second replacement target", 91)),
+            ),
+            (
+                9,
+                None,
+                false,
+                Some(row(9, "insert move target blocker", 91)),
+            ),
             (9, None, false, None),
             (9, None, true, Some(row(9, "replacement move target", 100))),
             (9, None, false, Some(row(9, "replacement move target", 101))),
             (9, None, false, Some(row(9, "replacement move target", 102))),
             (9, None, false, None),
-            (8, Some(9), false, Some(row(9, "second replacement target", 91))),
-            (9, None, false, Some(row(9, "second replacement target", 92))),
+            (
+                8,
+                Some(9),
+                false,
+                Some(row(9, "second replacement target", 91)),
+            ),
+            (
+                9,
+                None,
+                false,
+                Some(row(9, "second replacement target", 92)),
+            ),
             (3, Some(8), false, Some(row(8, "original destination", 35))),
             (8, None, false, Some(row(8, "original destination", 36))),
-            (9, None, false, Some(row(9, "second replacement target", 93))),
-            (9, Some(10), false, Some(row(10, "second replacement target", 93))),
-            (10, None, false, Some(row(10, "second replacement target", 94))),
+            (
+                9,
+                None,
+                false,
+                Some(row(9, "second replacement target", 93)),
+            ),
+            (
+                9,
+                Some(10),
+                false,
+                Some(row(10, "second replacement target", 93)),
+            ),
+            (
+                10,
+                None,
+                false,
+                Some(row(10, "second replacement target", 94)),
+            ),
             (2, Some(9), false, Some(row(9, "second source", 45))),
             (9, None, false, Some(row(9, "second source", 46))),
-            (10, None, false, Some(row(10, "second replacement target", 95))),
-            (10, Some(11), false, Some(row(11, "second replacement target", 95))),
-            (11, None, false, Some(row(11, "second replacement target", 96))),
+            (
+                10,
+                None,
+                false,
+                Some(row(10, "second replacement target", 95)),
+            ),
+            (
+                10,
+                Some(11),
+                false,
+                Some(row(11, "second replacement target", 95)),
+            ),
+            (
+                11,
+                None,
+                false,
+                Some(row(11, "second replacement target", 96)),
+            ),
             (9, Some(10), false, Some(row(10, "second source", 46))),
             (10, None, false, Some(row(10, "second source", 47))),
             (10, None, false, Some(row(10, "second source", 48))),
             (10, Some(12), false, Some(row(12, "second source", 48))),
             (12, None, false, Some(row(12, "second source", 49))),
-            (11, Some(10), false, Some(row(10, "second replacement target", 96))),
-            (10, None, false, Some(row(10, "second replacement target", 97))),
+            (
+                11,
+                Some(10),
+                false,
+                Some(row(10, "second replacement target", 96)),
+            ),
+            (
+                10,
+                None,
+                false,
+                Some(row(10, "second replacement target", 97)),
+            ),
             (12, Some(11), false, Some(row(11, "second source", 49))),
             (11, None, false, Some(row(11, "second source", 50))),
             (11, None, false, Some(row(11, "second source", 51))),
             (11, Some(13), false, Some(row(13, "second source", 51))),
             (13, None, false, Some(row(13, "second source", 52))),
-            (10, Some(11), false, Some(row(11, "second replacement target", 97))),
-            (11, None, false, Some(row(11, "second replacement target", 98))),
+            (
+                10,
+                Some(11),
+                false,
+                Some(row(11, "second replacement target", 97)),
+            ),
+            (
+                11,
+                None,
+                false,
+                Some(row(11, "second replacement target", 98)),
+            ),
             (13, Some(10), false, Some(row(10, "second source", 52))),
             (10, None, false, Some(row(10, "second source", 53))),
-            (11, None, false, Some(row(11, "second replacement target", 99))),
-            (11, Some(14), false, Some(row(14, "second replacement target", 99))),
-            (14, None, false, Some(row(14, "second replacement target", 100))),
+            (
+                11,
+                None,
+                false,
+                Some(row(11, "second replacement target", 99)),
+            ),
+            (
+                11,
+                Some(14),
+                false,
+                Some(row(14, "second replacement target", 99)),
+            ),
+            (
+                14,
+                None,
+                false,
+                Some(row(14, "second replacement target", 100)),
+            ),
             (10, Some(11), false, Some(row(11, "second source", 53))),
             (11, None, false, Some(row(11, "second source", 54))),
-            (14, Some(10), false, Some(row(10, "second replacement target", 100))),
-            (10, None, false, Some(row(10, "second replacement target", 101))),
+            (
+                14,
+                Some(10),
+                false,
+                Some(row(10, "second replacement target", 100)),
+            ),
+            (
+                10,
+                None,
+                false,
+                Some(row(10, "second replacement target", 101)),
+            ),
             (11, None, false, Some(row(11, "second source", 55))),
             (11, Some(15), false, Some(row(15, "second source", 55))),
             (15, None, false, Some(row(15, "second source", 56))),
-            (10, Some(11), false, Some(row(11, "second replacement target", 101))),
-            (11, None, false, Some(row(11, "second replacement target", 102))),
+            (
+                10,
+                Some(11),
+                false,
+                Some(row(11, "second replacement target", 101)),
+            ),
+            (
+                11,
+                None,
+                false,
+                Some(row(11, "second replacement target", 102)),
+            ),
             (15, Some(10), false, Some(row(10, "second source", 56))),
             (10, None, false, Some(row(10, "second source", 57))),
-            (11, None, false, Some(row(11, "second replacement target", 103))),
-            (11, Some(14), false, Some(row(14, "second replacement target", 103))),
-            (14, None, false, Some(row(14, "second replacement target", 104))),
+            (
+                11,
+                None,
+                false,
+                Some(row(11, "second replacement target", 103)),
+            ),
+            (
+                11,
+                Some(14),
+                false,
+                Some(row(14, "second replacement target", 103)),
+            ),
+            (
+                14,
+                None,
+                false,
+                Some(row(14, "second replacement target", 104)),
+            ),
             (10, Some(11), false, Some(row(11, "second source", 57))),
             (11, None, false, Some(row(11, "second source", 58))),
-            (14, Some(10), false, Some(row(10, "second replacement target", 104))),
-            (10, None, false, Some(row(10, "second replacement target", 105))),
+            (
+                14,
+                Some(10),
+                false,
+                Some(row(10, "second replacement target", 104)),
+            ),
+            (
+                10,
+                None,
+                false,
+                Some(row(10, "second replacement target", 105)),
+            ),
             (11, None, false, Some(row(11, "second source", 59))),
             (11, Some(13), false, Some(row(13, "second source", 59))),
             (13, None, false, Some(row(13, "second source", 60))),
-            (10, Some(11), false, Some(row(11, "second replacement target", 105))),
-            (11, None, false, Some(row(11, "second replacement target", 106))),
+            (
+                10,
+                Some(11),
+                false,
+                Some(row(11, "second replacement target", 105)),
+            ),
+            (
+                11,
+                None,
+                false,
+                Some(row(11, "second replacement target", 106)),
+            ),
             (13, Some(10), false, Some(row(10, "second source", 60))),
             (10, None, false, Some(row(10, "second source", 61))),
-            (11, None, false, Some(row(11, "second replacement target", 107))),
-            (11, Some(12), false, Some(row(12, "second replacement target", 107))),
-            (12, None, false, Some(row(12, "second replacement target", 108))),
+            (
+                11,
+                None,
+                false,
+                Some(row(11, "second replacement target", 107)),
+            ),
+            (
+                11,
+                Some(12),
+                false,
+                Some(row(12, "second replacement target", 107)),
+            ),
+            (
+                12,
+                None,
+                false,
+                Some(row(12, "second replacement target", 108)),
+            ),
             (10, Some(11), false, Some(row(11, "second source", 61))),
             (11, None, false, Some(row(11, "second source", 62))),
-            (12, Some(10), false, Some(row(10, "second replacement target", 108))),
-            (10, None, false, Some(row(10, "second replacement target", 109))),
+            (
+                12,
+                Some(10),
+                false,
+                Some(row(10, "second replacement target", 108)),
+            ),
+            (
+                10,
+                None,
+                false,
+                Some(row(10, "second replacement target", 109)),
+            ),
             (11, None, false, Some(row(11, "second source", 63))),
             (11, Some(15), false, Some(row(15, "second source", 63))),
             (15, None, false, Some(row(15, "second source", 64))),
-            (10, Some(11), false, Some(row(11, "second replacement target", 109))),
-            (11, None, false, Some(row(11, "second replacement target", 110))),
+            (
+                10,
+                Some(11),
+                false,
+                Some(row(11, "second replacement target", 109)),
+            ),
+            (
+                11,
+                None,
+                false,
+                Some(row(11, "second replacement target", 110)),
+            ),
             (15, Some(10), false, Some(row(10, "second source", 64))),
             (10, None, false, Some(row(10, "second source", 65))),
-            (11, None, false, Some(row(11, "second replacement target", 111))),
-            (11, Some(12), false, Some(row(12, "second replacement target", 111))),
-            (12, None, false, Some(row(12, "second replacement target", 112))),
+            (
+                11,
+                None,
+                false,
+                Some(row(11, "second replacement target", 111)),
+            ),
+            (
+                11,
+                Some(12),
+                false,
+                Some(row(12, "second replacement target", 111)),
+            ),
+            (
+                12,
+                None,
+                false,
+                Some(row(12, "second replacement target", 112)),
+            ),
             (10, Some(11), false, Some(row(11, "second source", 65))),
             (11, None, false, Some(row(11, "second source", 66))),
-            (12, Some(10), false, Some(row(10, "second replacement target", 112))),
-            (10, None, false, Some(row(10, "second replacement target", 113))),
+            (
+                12,
+                Some(10),
+                false,
+                Some(row(10, "second replacement target", 112)),
+            ),
+            (
+                10,
+                None,
+                false,
+                Some(row(10, "second replacement target", 113)),
+            ),
             (11, None, false, Some(row(11, "second source", 67))),
             (11, Some(15), false, Some(row(15, "second source", 67))),
             (15, None, false, Some(row(15, "second source", 68))),
-            (10, Some(11), false, Some(row(11, "second replacement target", 113))),
-            (11, None, false, Some(row(11, "second replacement target", 114))),
+            (
+                10,
+                Some(11),
+                false,
+                Some(row(11, "second replacement target", 113)),
+            ),
+            (
+                11,
+                None,
+                false,
+                Some(row(11, "second replacement target", 114)),
+            ),
             (15, Some(10), false, Some(row(10, "second source", 68))),
             (10, None, false, Some(row(10, "second source", 69))),
             (8, Some(2), false, Some(row(2, "original destination", 36))),
             (2, None, false, Some(row(2, "original destination", 38))),
         ];
 
-        for (index, (mutation, (old_key, new_key, is_insert, expected_row))) in mutations
-            .iter()
-            .skip(21)
-            .zip(expected_tail)
-            .enumerate()
+        for (index, (mutation, (old_key, new_key, is_insert, expected_row))) in
+            mutations.iter().skip(21).zip(expected_tail).enumerate()
         {
-            assert_eq!(mutation.key(), key(old_key), "tail mutation {index} source key");
+            assert_eq!(
+                mutation.key(),
+                key(old_key),
+                "tail mutation {index} source key"
+            );
             let expected_key = new_key.map(key);
             assert_eq!(
                 mutation.rekey_to(),
                 expected_key.as_deref(),
                 "tail mutation {index} re-key destination"
             );
-            assert_eq!(mutation.is_insert(), is_insert, "tail mutation {index} insert flag");
+            assert_eq!(
+                mutation.is_insert(),
+                is_insert,
+                "tail mutation {index} insert flag"
+            );
             match expected_row {
                 Some(expected_row) => assert_eq!(
                     CanonicalValue::decode(mutation.value().unwrap()).unwrap(),
                     expected_row,
                     "tail mutation {index} row value"
                 ),
-                None => assert_eq!(mutation.value(), None, "tail mutation {index} deletion value"),
+                None => assert_eq!(
+                    mutation.value(),
+                    None,
+                    "tail mutation {index} deletion value"
+                ),
             }
         }
     }
@@ -10077,16 +11932,18 @@ mod tests {
             )
             .expect("checked-in source fixture is admitted");
         let dispatcher = SuccessfulSourceEffectDispatcher;
-        let staged = block_on(authority.evaluate_staged_with_async_effects(
-            &application,
-            &Environment::from([(
-                "stream".to_owned(),
-                CanonicalValue::new(OvbRaw::Text("fixture-stream".to_owned()))
-                    .expect("canonical stream argument"),
-            )]),
-            &context,
-            &dispatcher,
-        ))
+        let staged = block_on(
+            authority.evaluate_staged_with_async_effects(
+                &application,
+                &Environment::from([(
+                    "stream".to_owned(),
+                    CanonicalValue::new(OvbRaw::Text("fixture-stream".to_owned()))
+                        .expect("canonical stream argument"),
+                )]),
+                &context,
+                &dispatcher,
+            ),
+        )
         .expect("checked-in source table write evaluates for the activation");
         assert_eq!(staged.value().raw(), &OvbRaw::Int(34.into()));
         assert_eq!(staged.mutations().len(), 1);
@@ -10170,10 +12027,7 @@ mod tests {
         assert_eq!(
             fields,
             &vec![
-                (
-                    OvbRaw::Text("id".to_owned()),
-                    OvbRaw::Int(12.into()),
-                ),
+                (OvbRaw::Text("id".to_owned()), OvbRaw::Int(12.into()),),
                 (
                     OvbRaw::Text("text".to_owned()),
                     OvbRaw::Text("staged before pause".to_owned()),

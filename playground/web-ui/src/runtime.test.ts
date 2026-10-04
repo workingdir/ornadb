@@ -1,51 +1,41 @@
 import { describe, expect, it, vi } from 'vitest';
-import { initializeRuntime, type WasmModule } from './runtime';
+import { createServedRuntime, servedRuntime } from './runtime';
 
-describe('WASM runtime adapter', () => {
-  it('initializes the generated package before forwarding complete source to run', async () => {
-    const events: string[] = [];
-    const initialize = vi.fn(async () => { events.push('init'); });
-    const run = vi.fn(() => {
-      events.push('run');
-      return JSON.stringify({ ok: true, values: ['42 : Int'], stdout: '', errors: [] });
-    });
-    class FakeReplSession {
-      evaluate(line: string) {
-        return JSON.stringify({ kind: 'value', text: line });
-      }
-    }
-    const ReplSession = FakeReplSession;
-    const module: WasmModule = { default: initialize, run, ReplSession };
-
-    const runtime = await initializeRuntime(async () => module);
-    await expect(runtime.run('let answer: Int = 42;')).resolves.toEqual({
+describe('Orna server runtime bridge', () => {
+  it('sends source to the served runtime and keeps the run result contract', async () => {
+    const result = {
       ok: true,
-      values: ['42 : Int'],
+      values: ['42'],
       stdout: '',
       errors: [],
-    });
-    await expect(runtime.createReplSession!().evaluate('answer')).resolves.toEqual({
-      kind: 'value',
-      text: 'answer',
-    });
+      ast: 'Literal(42)',
+    };
+    const run = vi.fn(async () => result);
+    const runtime = createServedRuntime(run);
 
-    expect(initialize).toHaveBeenCalledOnce();
-    expect(run).toHaveBeenCalledWith('let answer: Int = 42;');
-    expect(events).toEqual(['init', 'run']);
+    await expect(runtime.run('40 + 2')).resolves.toEqual(result);
+    expect(run).toHaveBeenCalledWith('40 + 2');
   });
 
-  it('rejects a package that does not implement the shared run contract', async () => {
-    await expect(
-      initializeRuntime(async () => ({ default: async () => undefined } as unknown as WasmModule)),
-    ).rejects.toThrow('does not expose init() and run(source)');
+  it('rejects data outside the shared run result contract', async () => {
+    const runtime = createServedRuntime(async () => ({ value: 42 }));
+
+    await expect(runtime.run('1 + 1')).rejects.toThrow('invalid run result');
   });
 
-  it('rejects malformed JSON results from the generated runtime', async () => {
-    const runtime = await initializeRuntime(async () => ({
-      default: async () => undefined,
-      run: () => 'not json',
-    }));
+  it('resolves the served bridge when a run starts', async () => {
+    const root = globalThis as typeof globalThis & { ornaPlaygroundRun?: (source: string) => Promise<unknown> };
+    const previous = root.ornaPlaygroundRun;
+    const result = { ok: true, values: ['2'], stdout: '', errors: [] };
+    delete root.ornaPlaygroundRun;
+    const runtime = servedRuntime();
+    root.ornaPlaygroundRun = vi.fn(async () => result);
 
-    await expect(runtime.run('1')).rejects.toThrow();
+    try {
+      await expect(runtime.run('1 + 1')).resolves.toEqual(result);
+    } finally {
+      if (previous) root.ornaPlaygroundRun = previous;
+      else delete root.ornaPlaygroundRun;
+    }
   });
 });

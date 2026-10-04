@@ -1,35 +1,35 @@
 import { describe, expect, it } from 'vitest';
 import { formatRunResult } from './results';
 
-describe('WASM run result presentation', () => {
-  it('keeps returned values, stdout, and diagnostics in separate sections', () => {
+describe('OrnaDB run result presentation', () => {
+  it('keeps run() values and stdout separate and adds error locations', () => {
     const result = formatRunResult({
       ok: false,
-      values: [42, { answer: 42 }],
+      values: ['42 : Int'],
       stdout: 'starting\nfinished',
-      errors: [{ code: 'ORNA-RUN-001', message: 'example diagnostic' }],
+      errors: [{ message: 'ORNA-S012-UNRESOLVED', line: 3, col: 5 }],
     });
 
     expect(result).toMatchObject({
       succeeded: false,
-      valuesText: '42\n\n{\n  "answer": 42\n}',
-      valuesCount: '2',
+      valuesText: '42 : Int',
+      valuesCount: '1',
       stdoutText: 'starting\nfinished',
       stdoutCount: '2 lines',
-      errorsText: '{\n  "code": "ORNA-RUN-001",\n  "message": "example diagnostic"\n}',
+      errorsText: 'ORNA-S012-UNRESOLVED (line 3, col 5)',
       errorsCount: '1',
     });
   });
 
-  it('preserves falsy values and represents empty sections clearly', () => {
+  it('preserves the runtime display strings and represents empty sections clearly', () => {
     const result = formatRunResult({
       ok: true,
-      values: [0, false, null],
+      values: ['0 : Int', 'false : Bool', 'null : Null'],
       stdout: '',
       errors: [],
     });
 
-    expect(result.valuesText).toBe('0\n\nfalse\n\nnull');
+    expect(result.valuesText).toBe('0 : Int\n\nfalse : Bool\n\nnull : Null');
     expect(result.valuesCount).toBe('3');
     expect(result.stdoutText).toBe('');
     expect(result.stdoutCount).toBe('—');
@@ -37,14 +37,4 @@ describe('WASM run result presentation', () => {
     expect(result.errorsCount).toBe('—');
   });
 
-  it('renders display strings from the WASM runtime without adding JSON quotes', () => {
-    const result = formatRunResult({
-      ok: true,
-      values: ['42 : Int'],
-      stdout: '',
-      errors: [],
-    });
-
-    expect(result.valuesText).toBe('42 : Int');
-  });
 });

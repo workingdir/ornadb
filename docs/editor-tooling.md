@@ -1,11 +1,8 @@
 # Editor syntax support
 
-`orna-syntax` owns the source vocabulary used for syntax highlighting. Its
-`grammar` module publishes comment/string delimiters, operators, punctuation,
-keyword and scalar-type spellings, and one presentation entry for each
-`HighlightKind`. The parser-backed classifier assigns contextual roles such as
-function, property, namespace, and type; `orna-lsp` derives its semantic-token
-legend and indices from that same presentation table.
+`orna-syntax-v1` is the source for editor keyword, scalar-type, delimiter,
+operator, punctuation, and language metadata. The generated editor packages
+and LSP metadata use the frozen Orna 1.0 vocabulary.
 
 The checked-in editor files are generated from this metadata:
 
@@ -15,13 +12,15 @@ The checked-in editor files are generated from this metadata:
 | `editors/vscode/syntaxes/orna.tmLanguage.json` | Same generated grammar for VS Code |
 | `editors/vscode/package.json` | `.orna` association and grammar registration |
 | `editors/vscode/language-configuration.json` | Comments, brackets, and quote pairs |
-| `editors/semantic-token-legend.json` | LSP token order and classifier-to-editor mapping |
-| `editors/tree-sitter-orna/grammar.js` | Parser grammar with keyword tokens derived from `KEYWORDS` and `SCALAR_TYPES` |
-| `editors/tree-sitter-orna/queries/highlights.scm` | Tree-sitter token captures and contextual name roles |
+| `editors/semantic-token-legend.json` | LSP token order and editor mapping |
+| `editors/tree-sitter-orna/grammar.js` | Generated Tree-sitter grammar |
+| `editors/tree-sitter-orna/queries/highlights.scm` | Generated Tree-sitter token captures |
 | `editors/tree-sitter-orna/{tree-sitter.json,package.json}` | Tree-sitter package registration and release metadata |
-| `editors/vim/` | Vim syntax groups and `.orna` file detection |
-| `editors/emacs/orna-eglot.el` | Emacs font-lock mode and Eglot setup |
+| `editors/neovim/lua/orna/init.lua` | Native `.orna` LSP attachment |
+| `editors/vim/` | Vim syntax, filetype detection, and optional `vim-lsp` completion |
+| `editors/emacs/orna-eglot.el` | Emacs font-lock mode and Eglot attachment |
 | `editors/sublime/Orna.sublime-syntax` | Sublime Text lexical scopes |
+| `playground/web-ui/public/assets/orna-editor-config.json` | DB-served Monaco language configuration generated from the v1 lexer |
 
 Regenerate the files after changing syntax metadata, and check for drift with:
 
@@ -30,31 +29,57 @@ just editor-artifacts
 just editor-artifacts-check
 ```
 
-`just check` includes the drift check. It compares every checked-in artifact
-byte-for-byte with the Rust renderer and runs Node's parser check on the
-generated Tree-sitter grammar. The focused `orna-syntax` proof tests load their
-`.orna` source from `crates/orna-syntax/tests/fixtures/` with `include_str!`,
-validate generated JSON manifests, and prove that Tree-sitter, Vim, Emacs,
-Sublime, and TextMate contain the shared keyword and scalar-type inventory.
-
-The Tree-sitter parser shape lives in a template inside `orna-syntax`; its
-keyword token rules and highlight-query vocabulary are rendered from the same
-`KEYWORDS` and `SCALAR_TYPES` tables used by the other editors. The query's
-contextual captures use the `TOKEN_PRESENTATIONS` table for comments, literals,
-names, operators, and punctuation.
+The check compares every checked-in artifact byte-for-byte with the Rust
+renderer and runs Node's parser check on the generated Tree-sitter grammar.
+Focused tests in `orna-syntax-v1` load `.orna` fixtures from that crate with
+`include_str!`, validate the generated metadata, check for v1-only lexical
+classes, and prove byte stability and complete editor-tree coverage.
 
 TextMate, Vim, Emacs, and Sublime fallback grammars recognize lexical patterns
-but do not have the Rust parser's context for distinguishing a declared type,
-function, property, namespace, or variable. These fallback grammars therefore
-scope ordinary identifiers generically; clients with semantic-token support
-receive contextual classifications from `orna-syntax` through `orna-lsp`.
-This is a pragmatic editor mapping because the frozen Orna 1.0.0 reference
-defines source syntax, but does not prescribe editor scopes, semantic-token
-names, or package metadata. This work does not claim that a static grammar
-provides parser-equivalent context.
+but do not have parser context for distinguishing declared types, functions,
+properties, namespaces, and variables. Configure `orna-lsp` separately to
+receive diagnostics, navigation, completion, and semantic tokens. Static
+editor grammars do not claim parser-equivalent context.
 
-The generated VS Code package contributes syntax association only. Configure
-`orna-lsp` separately in the editor to receive diagnostics, navigation, and
-semantic tokens. Focused checks do not launch editor hosts; Tree-sitter
-generation is structurally checked by Node, while the grammar/query package is
-drift-checked as generated text.
+The playground fetches the generated Monaco configuration from
+`/playground/assets/orna-editor-config.json`. `orna-syntax-v1` generates its
+keywords, operators, brackets, and lexical rules from the same lexer used by
+the language server; the browser does not carry a second Orna vocabulary.
+
+## Attach the language server
+
+Neovim uses its native LSP client. Add `editors/neovim` to `runtimepath` and
+call `require("orna").setup()`; pass `cmd = { "/path/to/orna-lsp" }` when the
+server is not on `PATH`. The setup registers `.orna` filetype detection and
+attaches those buffers to `orna-lsp`. A completion plugin can use the attached
+client's LSP completion provider. The native client also exposes server hover
+through `vim.lsp.buf.hover()`, rename through `vim.lsp.buf.rename()`, references
+through `vim.lsp.buf.references()`, and syntax-v1 semantic tokens.
+
+Vim uses the optional [`vim-lsp`](https://github.com/prabirshrestha/vim-lsp)
+client. Add `editors/vim` and the `vim-lsp` plugin to `runtimepath`; the Orna
+plugin registers `orna-lsp` for the `orna` filetype and sets
+`omnifunc=lsp#complete`. Vim's omni completion (`Ctrl-X Ctrl-O` in insert mode)
+then requests completion items from the attached server. Set
+`g:orna_lsp_command` to a command list to use a non-default server path.
+
+Emacs uses Eglot. Load `editors/emacs/orna-eglot.el` and call
+`(orna-setup-eglot)` once; Orna buffers then attach through `eglot-ensure` and
+use Emacs's `completion-at-point` interface. Set `orna-eglot-server-command`
+to a command list before calling the setup function when `orna-lsp` is not on
+`PATH`. Eglot provides hover documentation through ElDoc and applies semantic
+token faces when its `eglot-semantic-tokens-mode` support is available.
+Eglot provides rename through `eglot-rename` and references through its xref
+backend.
+
+The `orna-lsp` integration suite exercises hover, rename, references, and six
+lexical semantic-token classes through Neovim's attached client. Emacs/Eglot
+proves hover, rename, and references through its attached server, plus
+semantic-token fontification when that Eglot feature is available. It also has
+optional Vim/`vim-lsp` completion probes. Host probes report `SKIP` when an
+editor, client runtime, or optional semantic-token support is unavailable.
+
+Generated artifact checks do not launch editor hosts. Tree-sitter generation
+is structurally checked by Node, and the grammar/query package is drift-checked
+as generated text. The `orna-lsp` integration tests separately launch supported
+editor hosts when their client dependencies are available.

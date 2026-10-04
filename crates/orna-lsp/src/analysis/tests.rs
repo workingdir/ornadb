@@ -2,8 +2,8 @@ use lsp_types::CompletionItemKind;
 use orna_syntax_v1::Keyword;
 
 use super::{
-    check_document, completion_at, definition, document_symbols, hover, parse_document, references,
-    signature_help,
+    check_document, completion_at, definition, document_symbols, hover, lsp_diagnostic_message,
+    parse_document, references, signature_help,
 };
 use crate::documents::{Document, PositionMapper};
 
@@ -11,6 +11,7 @@ const LEXICAL_SOURCE: &str = include_str!("../../tests/fixtures/lexical-v1.orna"
 const EXPRESSIONS_SOURCE: &str = include_str!("../../tests/fixtures/expressions-v1.orna");
 const CALL_SOURCE: &str = include_str!("../../tests/fixtures/call-v1.orna");
 const LOCAL_SCOPES_SOURCE: &str = include_str!("../../tests/fixtures/local-scopes-v1.orna");
+const STANDARD_MATH_SOURCE: &str = include_str!("fixtures/standard-math-import.orna");
 
 fn document(text: &str) -> Document {
     Document::new(
@@ -114,12 +115,94 @@ fn model_drives_function_completions_hover_signature_navigation_and_rename_range
 }
 
 #[test]
+fn standard_library_exports_complete_and_hover_from_the_pinned_source_bundle() {
+    let document = document(STANDARD_MATH_SOURCE);
+    let parse = parse_document(&document);
+    assert!(parse.diagnostics.is_empty(), "{:#?}", parse.diagnostics);
+    let mapper = PositionMapper::new(&document.text);
+
+    let import_offset = document.text.find("increment};").unwrap() + "inc".len();
+    let import_completions = completion_at(&parse, &document.text, Some(import_offset), None);
+    let increment = import_completions
+        .iter()
+        .find(|item| item.label == "increment")
+        .expect("public math export in import completion");
+    assert_eq!(increment.kind, Some(CompletionItemKind::FUNCTION));
+    assert_eq!(increment.insert_text.as_deref(), Some("increment"));
+    assert_eq!(increment.insert_text_format, None);
+    assert!(
+        increment
+            .detail
+            .as_deref()
+            .unwrap_or_default()
+            .contains("std.math")
+    );
+    assert!(
+        increment
+            .documentation
+            .as_ref()
+            .is_some_and(|documentation| {
+                matches!(documentation, lsp_types::Documentation::MarkupContent(content)
+            if content.value.contains("exact successor"))
+            })
+    );
+
+    let qualified_offset =
+        document.text.find("std.math.increment(value)").unwrap() + "std.math.inc".len();
+    let qualified_completions = completion_at(&parse, &document.text, Some(qualified_offset), None);
+    assert!(qualified_completions.iter().any(|item| {
+        item.label == "increment" && item.insert_text.as_deref() == Some("increment(${1:value})")
+    }));
+    let qualified_hover = hover(
+        &document,
+        &parse,
+        mapper.position(qualified_offset - 1),
+        &mapper,
+    )
+    .expect("qualified standard export hover");
+    let lsp_types::HoverContents::Markup(qualified_hover) = qualified_hover.contents else {
+        panic!("expected standard-library markdown hover")
+    };
+    assert!(
+        qualified_hover
+            .value
+            .contains("fn increment(value: Int): Int")
+    );
+    assert!(qualified_hover.value.contains("exact successor"));
+
+    let imported_offset = document.text.find("increment(value)").unwrap() + 1;
+    let imported_hover = hover(&document, &parse, mapper.position(imported_offset), &mapper)
+        .expect("imported standard export hover");
+    let lsp_types::HoverContents::Markup(imported_hover) = imported_hover.contents else {
+        panic!("expected standard-library markdown hover")
+    };
+    assert!(imported_hover.value.contains("exact successor"));
+
+    let module_offset = document.text.find("std.math.increment").unwrap() + "std.ma".len();
+    let module_completions = completion_at(&parse, &document.text, Some(module_offset), None);
+    assert!(
+        module_completions
+            .iter()
+            .any(|item| { item.label == "math" && item.kind == Some(CompletionItemKind::MODULE) })
+    );
+}
+
+#[test]
 fn diagnostics_are_exact_parser_errors_and_legacy_create_is_not_accepted() {
     let invalid = document("pub fn broken(value: Int): Int = value + ;");
     let mapper = PositionMapper::new(&invalid.text);
     let diagnostics = check_document(&invalid, &mapper);
     assert_eq!(diagnostics.len(), 1);
     assert_eq!(diagnostics[0].source.as_deref(), Some("orna-syntax-v1"));
+    assert_eq!(
+        diagnostics[0].severity,
+        Some(lsp_types::DiagnosticSeverity::ERROR)
+    );
+    assert!(diagnostics[0].code.is_some());
+    assert_eq!(
+        diagnostics[0].data.as_ref().unwrap()["title"].as_str(),
+        Some(diagnostics[0].message.as_str())
+    );
     let semicolon = invalid.text.find(';').unwrap();
     assert_eq!(mapper.byte_offset(diagnostics[0].range.start), semicolon);
 
@@ -135,6 +218,22 @@ fn diagnostics_are_exact_parser_errors_and_legacy_create_is_not_accepted() {
             .iter()
             .all(|diagnostic| diagnostic.source.as_deref() == Some("orna-syntax-v1"))
     );
+}
+
+#[test]
+fn diagnostic_help_and_notes_are_visible_in_the_lsp_message() {
+    let message = lsp_diagnostic_message(
+        "Missing value",
+        "expected an expression",
+        &["Add a value after `=`.".to_owned()],
+        &["The declaration is incomplete.".to_owned()],
+    );
+    assert_eq!(
+        message,
+        "Missing value: expected an expression\n\nHelp: Add a value after `=`.\n\nNote: The declaration is incomplete."
+    );
+
+    assert_eq!(lsp_diagnostic_message("same", "same", &[], &[]), "same");
 }
 
 #[test]
