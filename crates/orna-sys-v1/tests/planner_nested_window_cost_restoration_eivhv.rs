@@ -428,11 +428,11 @@ fn nested_window_identities_survive_paired_cost_restore_folds_and_sparse_edges()
     );
     assert_eq!(
         text(
-            tail,
+            changed_joins["pair:table:Tail"],
             "paired_window_cost_restoration_window_fold_identity"
         ),
         text(
-            changed_joins["pair:table:Tail"],
+            changed_joins["pair:table:ChildB"],
             "paired_window_cost_restoration_window_fold_identity"
         ),
         "the sparse edge carries the changed paired window identity fold"
