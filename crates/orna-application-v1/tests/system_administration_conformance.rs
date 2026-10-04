@@ -24,9 +24,9 @@ const NONTERMINAL_SOURCE: &str = include_str!("fixtures/admin-nonterminal.orna")
 const MULTIPLE_SOURCE: &str = include_str!("fixtures/admin-multiple.orna");
 const HELPER_SOURCE: &str = include_str!("fixtures/admin-helper.orna");
 const REMOVED_SYS_RUNTIME_SOURCE: &str =
-    include_str!("../../orna-conformance-v1/tests/fixtures/sys-runtime-removed.orna");
+    include_str!("fixtures/sys-runtime-removed.orna");
 const SYS_RT_INFO_SOURCE: &str =
-    include_str!("../../orna-conformance-v1/tests/fixtures/sys-rt-info.orna");
+    include_str!("fixtures/sys-rt-info.orna");
 static NEXT_REPOSITORY: AtomicU64 = AtomicU64::new(0);
 
 struct ActivationContext {

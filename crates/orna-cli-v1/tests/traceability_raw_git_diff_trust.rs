@@ -7,7 +7,7 @@ use std::{
 use tempfile::tempdir;
 
 const SOURCE: &str = include_str!(
-    "../../orna-conformance-v1/tests/fixtures/traceability-diff-trust-secret.orna"
+    "fixtures/traceability-diff-trust-secret.orna"
 );
 
 fn git(repository: &Path, arguments: &[&str]) -> Output {

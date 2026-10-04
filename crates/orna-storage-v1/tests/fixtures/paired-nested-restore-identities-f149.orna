@@ -1,0 +1,7 @@
+{ id: "f149/nested-restore/main", name: "f149/left/nested-main", city: "f149/right/nested-alpha", }
+
+{ id: "f149/nested-restore/retry", name: "f149/left/nested-retry", city: "f149/right/nested-beta", }
+
+{ id: "f149/nested-restore/reused", name: "f149/left/nested-main", city: "f149/right/nested-alpha", }
+
+{ id: "f149/nested-restore/malformed", name: "f149/left/nested-malformed", city: "f149/right/nested-delta", }
