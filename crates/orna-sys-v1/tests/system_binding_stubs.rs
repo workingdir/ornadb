@@ -39,6 +39,8 @@ const STREAM_ITERATOR_EDGE_STUB_FIXTURE: &str =
     include_str!("fixtures/sys-provider-stream-iterator-edge.orna");
 const PROVIDER_MAP_ENTRY_EDGE_FIXTURE: &str =
     include_str!("fixtures/provider-map-entry-edges.json");
+const PROVIDER_TUPLE_ENTRY_EDGE_FIXTURE: &str =
+    include_str!("fixtures/provider-tuple-entry-edges.json");
 const PROVIDER_SCHEMA_CAPTURE_EDGE_FIXTURE: &str =
     include_str!("fixtures/provider-schema-capture-edges.json");
 
@@ -1136,7 +1138,10 @@ fn generated_provider_map_entry_fixture_matches_schema_and_bindings() {
             .filter(|parameter| parameter.name == "arguments")
             .collect::<Vec<_>>();
         assert_eq!(map_parameters.len(), 1);
-        assert_eq!(map_parameters[0].ty, AbiType::Named("sys.ArgumentMap".to_owned()));
+        assert_eq!(
+            map_parameters[0].ty,
+            AbiType::Named("sys.ArgumentMap".to_owned())
+        );
         map_slots += map_parameters.len();
     }
 
@@ -1148,6 +1153,106 @@ fn generated_provider_map_entry_fixture_matches_schema_and_bindings() {
         FIXTURE_CASES.len(),
         FIXTURE_CASES.iter().map(|(_, count)| count).sum::<usize>(),
         generated_bindings + FIXTURE_CASES.len() + map_slots + 1
+    );
+}
+
+#[test]
+fn generated_provider_tuple_entry_fixture_matches_schema_and_bindings() {
+    const OPERATIONS: [&str; 4] = [
+        "sys.invoke(Value)",
+        "sys.invoke<T>",
+        "sys.start(Value)",
+        "sys.start<T>",
+    ];
+    const FIXTURE_CASES: [(&str, usize); 4] = [
+        ("empty", 0),
+        ("single-tuple", 1),
+        ("nested-optional-control", 3),
+        ("protected-tuple", 1),
+    ];
+
+    let generated_schema = build_provider::generate_provider_registry_schema()
+        .expect("tuple-entry provider schema regenerates from its typed source");
+    assert_eq!(generated_schema, system_provider_abi_schema_json());
+    build_host::validate_json_against_schema(system_provider_abi_json(), &generated_schema)
+        .expect("embedded tuple-entry binding contracts conform to the generated schema");
+
+    let fixture: Value = serde_json::from_str(PROVIDER_TUPLE_ENTRY_EDGE_FIXTURE)
+        .expect("crate-local provider tuple-entry edge fixture is valid JSON");
+    let cases = fixture["cases"]
+        .as_array()
+        .expect("provider tuple-entry fixture has cases");
+    assert_eq!(cases.len(), FIXTURE_CASES.len());
+    let mut tuple_entries = 0;
+    for (case_name, entry_count) in FIXTURE_CASES {
+        let case = cases
+            .iter()
+            .find(|case| case["name"] == case_name)
+            .unwrap_or_else(|| panic!("fixture retains {case_name} tuple-entry edges"));
+        let entries = case["entries"]
+            .as_array()
+            .unwrap_or_else(|| panic!("{case_name} fixture has an entries array"));
+        assert_eq!(entries.len(), entry_count, "{case_name} fixture cardinality");
+        assert!(
+            entries.iter().all(|entry| {
+                entry["type"]
+                    .as_str()
+                    .is_some_and(|ty| ty.starts_with('(') && ty.ends_with(')'))
+            }),
+            "{case_name} entries retain tuple static types"
+        );
+        tuple_entries += entries.len();
+    }
+
+    let source = system_binding_stubs();
+    let parsed = parse_module(source);
+    assert!(
+        parsed.is_ok(),
+        "generated tuple-entry bindings parse: {:?}",
+        parsed.diagnostics
+    );
+    let registry = system_provider_abi();
+    let mut typed_contracts = 0;
+    let mut generated_bindings = 0;
+    let mut map_slots = 0;
+    for operation_name in OPERATIONS {
+        let contract = registry
+            .operation(operation_name)
+            .expect("tuple-entry operation exists in typed provider registry");
+        let generated = system_function_descriptor(operation_name)
+            .expect("tuple-entry operation has a macro-generated binding");
+        assert_eq!(generated.signature, contract.signature.source);
+        assert_eq!(contract.effects.iter().next(), Some(generated.effect));
+        typed_contracts += 1;
+
+        let marker = format!("// sys-op: {operation_name}");
+        let declaration = source
+            .split("\n\n")
+            .find(|declaration| declaration.lines().any(|line| line == marker))
+            .expect("generated bundle contains each tuple-entry declaration");
+        validate_stub_contract(declaration, contract)
+            .unwrap_or_else(|error| panic!("{operation_name} binding parity: {error}"));
+        generated_bindings += 1;
+
+        let map_parameters = contract
+            .signature
+            .parameters
+            .iter()
+            .filter(|parameter| parameter.name == "arguments")
+            .collect::<Vec<_>>();
+        assert_eq!(map_parameters.len(), 1);
+        assert_eq!(map_parameters[0].ty, AbiType::Named("sys.ArgumentMap".to_owned()));
+        map_slots += map_parameters.len();
+    }
+
+    assert_eq!(typed_contracts, OPERATIONS.len());
+    assert_eq!(generated_bindings, typed_contracts);
+    assert_eq!(map_slots, OPERATIONS.len());
+    assert_eq!(tuple_entries, 5);
+    println!(
+        "generated_provider_tuple_entry_binding_parity operations={generated_bindings} fixture_cases={} tuple_entries={tuple_entries} map_slots={map_slots} schema_validated=1 typed_contracts={typed_contracts} total_cases={}",
+        FIXTURE_CASES.len(),
+        generated_bindings + FIXTURE_CASES.len() + tuple_entries + map_slots + 1
     );
 }
 

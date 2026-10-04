@@ -1,0 +1,7 @@
+{ id: "f162/nested-handoff/main", name: "f162/left/handoff-main", city: "f162/right/handoff-main", }
+
+{ id: "f162/nested-handoff/retry", name: "f162/left/handoff-retry", city: "f162/right/handoff-retry", }
+
+{ id: "f162/nested-handoff/reused", name: "f162/left/handoff-main", city: "f162/right/handoff-main", }
+
+{ id: "f162/nested-handoff/malformed", name: "f162/left/handoff-malformed", city: "f162/right/handoff-malformed", }
