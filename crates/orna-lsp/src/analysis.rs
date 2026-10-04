@@ -1,17 +1,21 @@
 //! Editor analysis built exclusively on the frozen Orna 1.0 syntax tree.
 #![allow(deprecated)] // lsp-types 0.97 still requires DocumentSymbol::deprecated.
 
-use std::collections::BTreeSet;
+use std::{
+    collections::{BTreeMap, BTreeSet, HashMap},
+    sync::OnceLock,
+};
 
 use lsp_types::{
     CompletionContext, CompletionItem, CompletionItemKind, Diagnostic,
-    DiagnosticRelatedInformation, DiagnosticSeverity, DocumentSymbol, Hover, Location,
-    MarkupContent, MarkupKind, NumberOrString, ParameterInformation, ParameterLabel, Position,
-    SignatureHelp, SignatureInformation, SymbolKind,
+    DiagnosticRelatedInformation, DiagnosticSeverity, DocumentLink, DocumentSymbol, Hover,
+    Location, MarkupContent, MarkupKind, NumberOrString, ParameterInformation, ParameterLabel,
+    Position, SignatureHelp, SignatureInformation, SymbolKind, Uri,
 };
 use orna_syntax_v1::{
-    Argument, Declaration, Expr, Item, Keyword, Parse, Statement, SyntaxSpan as SourceSpan,
-    SyntaxTree, Token, TokenKind, TypeExpr, lex, parse_module_with_file,
+    Argument, Declaration, Expr, ImportSegment, Item, Keyword, Parse, Statement,
+    SyntaxSpan as SourceSpan, SyntaxTree, Token, TokenKind, TypeExpr, UseTail, Visibility, lex,
+    parse_module, parse_module_with_file,
 };
 
 use crate::documents::{Document, PositionMapper};
@@ -67,6 +71,88 @@ pub fn check_document(document: &Document, mapper: &PositionMapper<'_>) -> Vec<D
         .collect()
 }
 
+/// Links explicit imports to a single matching open module document.
+///
+/// The parser supplies exact byte spans for the import path. Resolution is
+/// intentionally limited to open `.orna` documents: a missing or ambiguous
+/// target is left unlinked instead of guessing between the loader's flat-file
+/// and directory-module layouts.
+pub(crate) fn document_links(
+    document: &Document,
+    open_documents: &HashMap<Uri, Document>,
+) -> Vec<DocumentLink> {
+    if !document.uri.as_str().ends_with(".orna") {
+        return Vec::new();
+    }
+
+    let parse = parse_document(document);
+    if !parse.diagnostics.is_empty() {
+        return Vec::new();
+    }
+
+    let mapper = PositionMapper::new(&document.text);
+    parse
+        .value
+        .items
+        .iter()
+        .filter_map(|item| {
+            let Declaration::Use { path, .. } = &item.declaration else {
+                return None;
+            };
+            let first = path.first()?;
+            if matches!(first.name.as_str(), "std" | "sys") {
+                return None;
+            }
+            let last = path.last()?;
+            let module = path
+                .iter()
+                .map(|segment| segment.name.as_str())
+                .collect::<Vec<_>>()
+                .join(".");
+            let target = matching_open_module(document, path, open_documents)?;
+            Some(DocumentLink {
+                range: lsp_types::Range::new(
+                    mapper.position(first.span.start),
+                    mapper.position(last.span.end),
+                ),
+                target: Some(target),
+                tooltip: Some(format!("Open module `{module}`")),
+                data: None,
+            })
+        })
+        .collect()
+}
+
+fn matching_open_module(
+    source: &Document,
+    path: &[ImportSegment],
+    open_documents: &HashMap<Uri, Document>,
+) -> Option<Uri> {
+    let module_path = path
+        .iter()
+        .map(|segment| segment.name.as_str())
+        .collect::<Vec<_>>()
+        .join("/");
+    let flat_suffix = format!("/{module_path}.orna");
+    let directory_suffix = format!("/{module_path}/main.orna");
+    let mut matching_target = None;
+
+    for uri in open_documents.keys() {
+        if uri == &source.uri {
+            continue;
+        }
+        let uri_path = uri.as_str().split(['?', '#']).next().unwrap_or_default();
+        if uri_path.ends_with(&flat_suffix) || uri_path.ends_with(&directory_suffix) {
+            if matching_target.is_some() {
+                return None;
+            }
+            matching_target = Some(uri.clone());
+        }
+    }
+
+    matching_target
+}
+
 pub fn parse_document(document: &Document) -> EditorParse {
     parse_module_with_file(&document.text, document.logical_path())
 }
@@ -90,6 +176,266 @@ pub(crate) struct EditorSymbol {
     pub detail: Option<String>,
     pub documentation: Option<String>,
     pub parameters: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+struct StandardSymbol {
+    module: String,
+    symbol: EditorSymbol,
+}
+
+#[derive(Debug, Default)]
+struct StandardLibraryIndex {
+    modules: BTreeSet<String>,
+    symbols: Vec<StandardSymbol>,
+}
+
+fn standard_library() -> &'static StandardLibraryIndex {
+    static INDEX: OnceLock<StandardLibraryIndex> = OnceLock::new();
+    INDEX.get_or_init(|| {
+        let mut index = StandardLibraryIndex::default();
+        index.modules.insert("std".to_owned());
+        for (path, source) in orna_standard_sources::reference_standard_sources_v1() {
+            let Some(module) = standard_module_name(&path) else {
+                continue;
+            };
+            let parsed = parse_module(&source);
+            let Ok(tokens) = lex(&source) else {
+                continue;
+            };
+            let mut prefix = String::new();
+            for segment in module.split('.') {
+                if !prefix.is_empty() {
+                    prefix.push('.');
+                }
+                prefix.push_str(segment);
+                index.modules.insert(prefix.clone());
+            }
+            index.symbols.extend(
+                parsed
+                    .value
+                    .items
+                    .iter()
+                    .filter(|item| matches!(&item.visibility, Visibility::Public { .. }))
+                    .filter_map(|item| {
+                        symbol_for_item(item, &source, &tokens).map(|symbol| StandardSymbol {
+                            module: module.clone(),
+                            symbol,
+                        })
+                    }),
+            );
+        }
+        index.symbols.sort_by(|left, right| {
+            left.module
+                .cmp(&right.module)
+                .then_with(|| left.symbol.name.cmp(&right.symbol.name))
+        });
+        index
+    })
+}
+
+fn standard_module_name(path: &str) -> Option<String> {
+    let relative = path.strip_prefix("std/")?.strip_suffix(".orna")?;
+    let module_path = if relative == "main" {
+        ""
+    } else {
+        relative.strip_suffix("/main").unwrap_or(relative)
+    };
+    if module_path.is_empty() {
+        Some("std".to_owned())
+    } else {
+        Some(format!("std.{}", module_path.replace('/', ".")))
+    }
+}
+
+fn standard_symbol(module: &str, name: &str) -> Option<&'static StandardSymbol> {
+    standard_library()
+        .symbols
+        .iter()
+        .find(|entry| entry.module == module && entry.symbol.name == name)
+}
+
+fn standard_imported_symbols(parse: &EditorParse) -> Vec<&'static StandardSymbol> {
+    let mut imported = BTreeMap::new();
+    for item in &parse.value.items {
+        let Declaration::Use { path, tail } = &item.declaration else {
+            continue;
+        };
+        let module = path
+            .iter()
+            .map(|segment| segment.name.as_str())
+            .collect::<Vec<_>>()
+            .join(".");
+        match tail {
+            UseTail::Names(names) => {
+                for name in names {
+                    if let Some(symbol) = standard_symbol(&module, &name.name) {
+                        imported.insert((module.clone(), name.name.clone()), symbol);
+                    }
+                }
+            }
+            UseTail::Glob { .. } => {
+                for symbol in standard_library()
+                    .symbols
+                    .iter()
+                    .filter(|symbol| symbol.module == module)
+                {
+                    imported.insert((module.clone(), symbol.symbol.name.clone()), symbol);
+                }
+            }
+            UseTail::None | UseTail::Alias { .. } => {}
+        }
+    }
+    imported.into_values().collect()
+}
+
+fn standard_module_aliases(parse: &EditorParse) -> BTreeMap<String, String> {
+    let mut aliases = BTreeMap::new();
+    for item in &parse.value.items {
+        let Declaration::Use { path, tail } = &item.declaration else {
+            continue;
+        };
+        let module = path
+            .iter()
+            .map(|segment| segment.name.as_str())
+            .collect::<Vec<_>>()
+            .join(".");
+        if !standard_library().modules.contains(&module) {
+            continue;
+        }
+        let alias = match tail {
+            UseTail::Alias { name, .. } => Some(name.as_str()),
+            UseTail::None => path.last().map(|segment| segment.name.as_str()),
+            UseTail::Glob { .. } | UseTail::Names(_) => None,
+        };
+        if let Some(alias) = alias {
+            aliases.insert(alias.to_owned(), module);
+        }
+    }
+    aliases
+}
+
+fn resolve_standard_module(parse: &EditorParse, qualifier: &str) -> Option<String> {
+    if standard_library().modules.contains(qualifier) {
+        return Some(qualifier.to_owned());
+    }
+    let (alias, child_path) = qualifier
+        .split_once('.')
+        .map_or((qualifier, None), |(alias, child)| (alias, Some(child)));
+    let base = standard_module_aliases(parse).remove(alias)?;
+    let module = child_path.map_or(base.clone(), |child| format!("{base}.{child}"));
+    standard_library()
+        .modules
+        .contains(&module)
+        .then_some(module)
+}
+
+fn standard_symbol_at(
+    parse: &EditorParse,
+    text: &str,
+    token: &Token,
+) -> Option<&'static StandardSymbol> {
+    let chain = identifier_chain_at_span(text, &token.span)?;
+    if chain.len() > 1 {
+        let name = chain.last()?;
+        let qualifier = chain[..chain.len() - 1].join(".");
+        if let Some(module) = resolve_standard_module(parse, &qualifier)
+            && let Some(symbol) = standard_symbol(&module, name)
+        {
+            return Some(symbol);
+        }
+    }
+    let mut matches = standard_imported_symbols(parse)
+        .into_iter()
+        .filter(|entry| entry.symbol.name == token.text);
+    let found = matches.next()?;
+    matches.next().is_none().then_some(found)
+}
+
+fn identifier_chain_at_span(text: &str, span: &SourceSpan) -> Option<Vec<String>> {
+    let tokens = lex(text).ok()?;
+    let index = tokens.iter().position(|token| {
+        same_span(&token.span, span) && matches!(token.kind, TokenKind::Identifier { .. })
+    })?;
+    let mut first = index;
+    while first >= 2
+        && tokens[first - 1].text == "."
+        && matches!(tokens[first - 2].kind, TokenKind::Identifier { .. })
+    {
+        first -= 2;
+    }
+    let mut last = index;
+    while last + 2 < tokens.len()
+        && tokens[last + 1].text == "."
+        && matches!(tokens[last + 2].kind, TokenKind::Identifier { .. })
+    {
+        last += 2;
+    }
+    Some(
+        tokens[first..=last]
+            .iter()
+            .step_by(2)
+            .map(|token| token.text.clone())
+            .collect(),
+    )
+}
+
+/// A top-level function and the calls in its body, with source spans kept in
+/// syntax byte offsets until the server maps them to LSP coordinates.
+#[derive(Debug, Clone)]
+pub(crate) struct FunctionDefinition {
+    pub name: String,
+    pub selection: SourceSpan,
+    pub full: SourceSpan,
+    pub detail: Option<String>,
+    pub calls: Vec<FunctionCall>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct FunctionCall {
+    pub name: String,
+    pub selection: SourceSpan,
+}
+
+/// Returns top-level function declarations and syntactic calls that are not
+/// shadowed by a local binding. The caller decides whether declarations from
+/// different open documents resolve uniquely.
+pub(crate) fn function_definitions(parse: &EditorParse, text: &str) -> Vec<FunctionDefinition> {
+    let symbols = declaration_symbols(parse, text);
+    let mut definitions = Vec::new();
+    for item in &parse.value.items {
+        let Declaration::Function { signature, body } = &item.declaration else {
+            continue;
+        };
+        let Some(symbol) = symbols.iter().find(|symbol| {
+            symbol.kind == EditorSymbolKind::Function
+                && same_span(&symbol.full, &item.span)
+                && symbol.name == signature.name
+        }) else {
+            continue;
+        };
+        let mut call_sites = Vec::new();
+        collect_calls(body, &mut call_sites);
+        let calls = call_sites
+            .into_iter()
+            .filter(|call| !callee_resolves_to_local(&parse.value, &call.callee))
+            .filter_map(|call| {
+                Some(FunctionCall {
+                    name: call.name.rsplit('.').next()?.to_owned(),
+                    selection: expression_name_span(&call.callee)?,
+                })
+            })
+            .collect();
+        definitions.push(FunctionDefinition {
+            name: symbol.name.clone(),
+            selection: symbol.selection.clone(),
+            full: symbol.full.clone(),
+            detail: symbol.detail.clone(),
+            calls,
+        });
+    }
+    definitions.sort_by_key(|definition| definition.selection.start);
+    definitions
 }
 
 pub(crate) fn declaration_symbols(parse: &EditorParse, text: &str) -> Vec<EditorSymbol> {
@@ -239,6 +585,15 @@ fn token_at(text: &str, byte: usize) -> Option<Token> {
     })
 }
 
+pub(crate) fn identifier_at(
+    document: &Document,
+    position: Position,
+    mapper: &PositionMapper<'_>,
+) -> Option<(String, SourceSpan)> {
+    let token = token_at(&document.text, mapper.byte_offset(position))?;
+    Some((token.text, token.span))
+}
+
 pub(crate) fn symbol_for_name<'a>(
     symbols: &'a [EditorSymbol],
     name: &str,
@@ -278,7 +633,15 @@ pub fn hover(
     let symbol = symbols
         .iter()
         .find(|symbol| same_span(&symbol.selection, &token.span))
-        .or_else(|| symbol_for_name(&symbols, &token.text))?;
+        .or_else(|| symbol_for_name(&symbols, &token.text));
+    if let Some(symbol) = symbol {
+        return Some(hover_symbol(symbol));
+    }
+    let symbol = standard_symbol_at(parse, &document.text, &token)?;
+    Some(hover_symbol(&symbol.symbol))
+}
+
+fn hover_symbol(symbol: &EditorSymbol) -> Hover {
     let kind = match symbol.kind {
         EditorSymbolKind::Function => "function",
         EditorSymbolKind::Type => "type",
@@ -287,13 +650,13 @@ pub fn hover(
         EditorSymbolKind::Protocol => "protocol",
         EditorSymbolKind::Other => "declaration",
     };
-    Some(crate::hover::declaration(
+    crate::hover::declaration(
         kind,
         &symbol.name,
         symbol.detail.as_deref(),
         &symbol.parameters,
         symbol.documentation.as_deref(),
-    ))
+    )
 }
 
 fn same_span(left: &SourceSpan, right: &SourceSpan) -> bool {
@@ -317,16 +680,31 @@ pub fn signature_help(
         .into_iter()
         .filter(|call| call.span.start <= byte && byte <= call.span.end)
         .min_by_key(|call| call.span.end.saturating_sub(call.span.start))?;
+    if callee_resolves_to_local(&parse.value, &call.callee) {
+        return None;
+    }
     let symbols = declaration_symbols(parse, &document.text);
-    let function = symbol_for_name(&symbols, call.name.rsplit('.').next().unwrap_or(&call.name))?;
+    let function = symbol_for_name(&symbols, call.name.rsplit('.').next().unwrap_or(&call.name))
+        .cloned()
+        .or_else(|| {
+            standard_symbol_for_call(parse, &call.name).map(|entry| entry.symbol.clone())
+        })?;
     if function.kind != EditorSymbolKind::Function {
         return None;
     }
+    let active_argument = active_argument_index(&call, &document.text, byte);
     let active_parameter = call
         .arguments
-        .iter()
-        .take_while(|argument| argument.span.start < byte)
-        .count()
+        .get(active_argument)
+        .and_then(|argument| argument.name.as_deref())
+        .and_then(|name| {
+            let name = normalized_identifier(name);
+            function.parameters.iter().position(|parameter| {
+                parameter_name(parameter)
+                    .is_some_and(|parameter| normalized_identifier(parameter) == name)
+            })
+        })
+        .unwrap_or(active_argument)
         .min(function.parameters.len().saturating_sub(1)) as u32;
     let signature = function
         .detail
@@ -358,11 +736,59 @@ pub fn signature_help(
     })
 }
 
+fn standard_symbol_for_call(parse: &EditorParse, name: &str) -> Option<&'static StandardSymbol> {
+    if let Some((qualifier, symbol_name)) = name.rsplit_once('.') {
+        let module = resolve_standard_module(parse, qualifier)?;
+        return standard_symbol(&module, symbol_name);
+    }
+
+    let mut matches = standard_imported_symbols(parse)
+        .into_iter()
+        .filter(|entry| entry.symbol.name == name);
+    let found = matches.next()?;
+    matches.next().is_none().then_some(found)
+}
+
 #[derive(Debug)]
 struct CallSite {
     name: String,
+    callee: Expr,
     span: SourceSpan,
     arguments: Vec<Argument>,
+}
+
+fn active_argument_index(call: &CallSite, text: &str, position: usize) -> usize {
+    let Ok(tokens) = lex(text) else {
+        return 0;
+    };
+    let is_comma_before = |start: usize, end: usize| {
+        tokens.iter().any(|token| {
+            matches!(token.kind, TokenKind::Punct(","))
+                && token.span.start >= start
+                && token.span.end <= end
+                && token.span.start < position
+        })
+    };
+    let separators = call
+        .arguments
+        .windows(2)
+        .filter(|pair| is_comma_before(pair[0].span.end, pair[1].span.start))
+        .count();
+    let trailing_separator = call
+        .arguments
+        .last()
+        .is_some_and(|last| is_comma_before(last.span.end, call.span.end));
+    separators + usize::from(trailing_separator)
+}
+
+fn callee_resolves_to_local(tree: &SyntaxTree, callee: &Expr) -> bool {
+    match callee {
+        Expr::Name { text, span } => crate::locals::binding_at(tree, text, span).is_some(),
+        Expr::Field { base, .. } | Expr::Group { inner: base, .. } => {
+            callee_resolves_to_local(tree, base)
+        }
+        _ => false,
+    }
 }
 
 fn collect_calls(expression: &Expr, output: &mut Vec<CallSite>) {
@@ -375,6 +801,7 @@ fn collect_calls(expression: &Expr, output: &mut Vec<CallSite>) {
             if let Some(name) = expression_name(callee) {
                 output.push(CallSite {
                     name,
+                    callee: callee.as_ref().clone(),
                     span: span.clone(),
                     arguments: arguments.clone(),
                 });
@@ -393,6 +820,7 @@ fn collect_calls(expression: &Expr, output: &mut Vec<CallSite>) {
             if let Some(name) = expression_name(callee) {
                 output.push(CallSite {
                     name,
+                    callee: callee.as_ref().clone(),
                     span: span.clone(),
                     arguments: arguments.clone(),
                 });
@@ -496,6 +924,17 @@ fn expression_name(expression: &Expr) -> Option<String> {
     match expression {
         Expr::Name { text, .. } => Some(text.clone()),
         Expr::Field { base, name, .. } => Some(format!("{}.{}", expression_name(base)?, name)),
+        _ => None,
+    }
+}
+
+fn expression_name_span(expression: &Expr) -> Option<SourceSpan> {
+    match expression {
+        Expr::Name { span, .. } => Some(span.clone()),
+        Expr::Field { name, span, .. } => {
+            Some(SourceSpan::new(span.end.checked_sub(name.len())?, span.end))
+        }
+        Expr::Group { inner, .. } => expression_name_span(inner),
         _ => None,
     }
 }
@@ -616,52 +1055,191 @@ pub fn completion_at(
     byte: Option<usize>,
     _context: Option<&CompletionContext>,
 ) -> Vec<CompletionItem> {
-    let prefix = byte
-        .and_then(|byte| completion_prefix(text, byte))
+    let (prefix, qualifier) = byte
+        .map(|byte| completion_parts(text, byte))
         .unwrap_or_default();
     let prefix_key = normalized_identifier(&prefix).to_ascii_lowercase();
+    let import_module = byte.and_then(|byte| import_module_before_cursor(text, byte));
+    let qualified_module = qualifier
+        .as_deref()
+        .and_then(|value| resolve_standard_module(parse, value));
+    let module_parent = qualifier
+        .as_deref()
+        .filter(|value| *value == "std" || standard_library().modules.contains(*value));
+    let standard_context = import_module.is_some() || module_parent.is_some();
     let mut completions = Vec::new();
     let mut seen = BTreeSet::new();
     let mut shadowed = BTreeSet::new();
 
-    if let Some(byte) = byte {
-        for binding in crate::locals::visible_bindings(&parse.value, byte) {
-            let key = normalized_identifier(&binding.name);
-            if !completion_matches(&key, &prefix_key) || !seen.insert(key.clone()) {
+    if !standard_context {
+        if let Some(byte) = byte {
+            for binding in crate::locals::visible_bindings(&parse.value, byte) {
+                let key = normalized_identifier(&binding.name);
+                if !completion_matches(&key, &prefix_key) || !seen.insert(key.clone()) {
+                    continue;
+                }
+                shadowed.insert(key.clone());
+                let detail = source_slice(text, &binding.context).trim();
+                let mut item = CompletionItem {
+                    label: binding.name.clone(),
+                    kind: Some(CompletionItemKind::VARIABLE),
+                    detail: Some(match binding.kind {
+                        crate::locals::LocalBindingKind::Parameter => "Parameter".to_owned(),
+                        crate::locals::LocalBindingKind::Local => "Local variable".to_owned(),
+                        crate::locals::LocalBindingKind::Pattern => "Pattern binding".to_owned(),
+                    }),
+                    insert_text: Some(binding.name),
+                    sort_text: Some(completion_sort_text(&prefix_key, 0, &key)),
+                    ..CompletionItem::default()
+                };
+                if !detail.is_empty() {
+                    item.documentation =
+                        Some(lsp_types::Documentation::MarkupContent(MarkupContent {
+                            kind: MarkupKind::Markdown,
+                            value: format!("```orna\n{detail}\n```"),
+                        }));
+                }
+                completions.push(item);
+            }
+        }
+
+        for symbol in declaration_symbols(parse, text) {
+            let key = normalized_identifier(&symbol.name);
+            if !completion_matches(&key, &prefix_key)
+                || shadowed.contains(&key)
+                || !seen.insert(key.clone())
+            {
                 continue;
             }
-            shadowed.insert(key.clone());
-            let detail = source_slice(text, &binding.context).trim();
-            let mut item = CompletionItem {
-                label: binding.name.clone(),
-                kind: Some(CompletionItemKind::VARIABLE),
-                detail: Some(match binding.kind {
-                    crate::locals::LocalBindingKind::Parameter => "Parameter".to_owned(),
-                    crate::locals::LocalBindingKind::Local => "Local variable".to_owned(),
-                    crate::locals::LocalBindingKind::Pattern => "Pattern binding".to_owned(),
-                }),
-                insert_text: Some(binding.name),
-                sort_text: Some(completion_sort_text(&prefix_key, 0, &key)),
-                ..CompletionItem::default()
+            let kind = match symbol.kind {
+                EditorSymbolKind::Function => CompletionItemKind::FUNCTION,
+                EditorSymbolKind::Type => CompletionItemKind::STRUCT,
+                EditorSymbolKind::Enum => CompletionItemKind::ENUM,
+                EditorSymbolKind::Table => CompletionItemKind::CLASS,
+                EditorSymbolKind::Protocol => CompletionItemKind::INTERFACE,
+                EditorSymbolKind::Other => CompletionItemKind::REFERENCE,
             };
-            if !detail.is_empty() {
-                item.documentation = Some(lsp_types::Documentation::MarkupContent(MarkupContent {
-                    kind: MarkupKind::Markdown,
-                    value: format!("```orna\n{detail}\n```"),
-                }));
-            }
-            completions.push(item);
+            let insert_text = if symbol.kind == EditorSymbolKind::Function {
+                let placeholders = symbol
+                    .parameters
+                    .iter()
+                    .enumerate()
+                    .map(|(index, parameter)| {
+                        format!(
+                            "${{{}:{}}}",
+                            index + 1,
+                            parameter_name(parameter).unwrap_or("arg")
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                format!("{}({})", symbol.name, placeholders.join(", "))
+            } else {
+                symbol.name.clone()
+            };
+            completions.push(CompletionItem {
+                label: symbol.name,
+                kind: Some(kind),
+                detail: symbol.detail,
+                documentation: symbol.documentation.map(|value| {
+                    lsp_types::Documentation::MarkupContent(MarkupContent {
+                        kind: MarkupKind::Markdown,
+                        value,
+                    })
+                }),
+                insert_text: Some(insert_text),
+                insert_text_format: Some(lsp_types::InsertTextFormat::SNIPPET),
+                sort_text: Some(completion_sort_text(&prefix_key, 1, &key)),
+                ..CompletionItem::default()
+            });
         }
     }
 
-    for symbol in declaration_symbols(parse, text) {
-        let key = normalized_identifier(&symbol.name);
-        if !completion_matches(&key, &prefix_key)
-            || shadowed.contains(&key)
-            || !seen.insert(key.clone())
-        {
+    if let Some(module) = import_module.as_deref() {
+        append_standard_symbols(
+            &mut completions,
+            &mut seen,
+            standard_library()
+                .symbols
+                .iter()
+                .filter(|entry| entry.module == module),
+            &prefix_key,
+            1,
+            false,
+        );
+    } else if let Some(module) = qualified_module.as_deref() {
+        append_standard_symbols(
+            &mut completions,
+            &mut seen,
+            standard_library()
+                .symbols
+                .iter()
+                .filter(|entry| entry.module == module),
+            &prefix_key,
+            1,
+            true,
+        );
+        append_standard_modules(&mut completions, &mut seen, module, &prefix_key);
+    } else if let Some(parent) = module_parent {
+        append_standard_modules(&mut completions, &mut seen, parent, &prefix_key);
+    } else {
+        if !prefix_key.is_empty() && completion_matches("std", &prefix_key) {
+            completions.push(CompletionItem {
+                label: "std".to_owned(),
+                kind: Some(CompletionItemKind::MODULE),
+                detail: Some("Orna standard library".to_owned()),
+                insert_text: Some("std".to_owned()),
+                sort_text: Some(completion_sort_text(&prefix_key, 1, "std")),
+                ..CompletionItem::default()
+            });
+            seen.insert("std".to_owned());
+        }
+        append_standard_symbols(
+            &mut completions,
+            &mut seen,
+            standard_imported_symbols(parse).into_iter(),
+            &prefix_key,
+            1,
+            true,
+        );
+    }
+
+    if !standard_context {
+        for keyword in Keyword::ALL {
+            let name = keyword.spelling();
+            let key = normalized_identifier(name);
+            if completion_matches(&key, &prefix_key) && seen.insert(key.clone()) {
+                completions.push(CompletionItem {
+                    label: name.to_owned(),
+                    kind: Some(CompletionItemKind::KEYWORD),
+                    detail: Some("Orna 1.0 keyword".to_owned()),
+                    insert_text: Some(name.to_owned()),
+                    sort_text: Some(completion_sort_text(&prefix_key, 2, &key)),
+                    ..CompletionItem::default()
+                });
+            }
+        }
+    }
+    completions.sort_by(|left, right| left.sort_text.cmp(&right.sort_text));
+    if let Some(first) = completions.first_mut() {
+        first.preselect = Some(true);
+    }
+    completions
+}
+
+fn append_standard_symbols<'a>(
+    completions: &mut Vec<CompletionItem>,
+    seen: &mut BTreeSet<String>,
+    symbols: impl Iterator<Item = &'a StandardSymbol>,
+    prefix: &str,
+    group: u8,
+    snippets: bool,
+) {
+    for entry in symbols {
+        let key = normalized_identifier(&entry.symbol.name);
+        if !completion_matches(&key, prefix) || !seen.insert(key.clone()) {
             continue;
         }
+        let symbol = &entry.symbol;
         let kind = match symbol.kind {
             EditorSymbolKind::Function => CompletionItemKind::FUNCTION,
             EditorSymbolKind::Type => CompletionItemKind::STRUCT,
@@ -670,7 +1248,7 @@ pub fn completion_at(
             EditorSymbolKind::Protocol => CompletionItemKind::INTERFACE,
             EditorSymbolKind::Other => CompletionItemKind::REFERENCE,
         };
-        let insert_text = if symbol.kind == EditorSymbolKind::Function {
+        let insert_text = if snippets && symbol.kind == EditorSymbolKind::Function {
             let placeholders = symbol
                 .parameters
                 .iter()
@@ -688,50 +1266,96 @@ pub fn completion_at(
             symbol.name.clone()
         };
         completions.push(CompletionItem {
-            label: symbol.name,
+            label: symbol.name.clone(),
             kind: Some(kind),
-            detail: symbol.detail,
-            documentation: symbol.documentation.map(|value| {
+            detail: Some(format!(
+                "{} · {}",
+                entry.module,
+                symbol.detail.as_deref().unwrap_or(&symbol.name)
+            )),
+            documentation: symbol.documentation.clone().map(|value| {
                 lsp_types::Documentation::MarkupContent(MarkupContent {
                     kind: MarkupKind::Markdown,
                     value,
                 })
             }),
             insert_text: Some(insert_text),
-            insert_text_format: Some(lsp_types::InsertTextFormat::SNIPPET),
-            sort_text: Some(completion_sort_text(&prefix_key, 1, &key)),
+            insert_text_format: snippets.then_some(lsp_types::InsertTextFormat::SNIPPET),
+            sort_text: Some(completion_sort_text(prefix, group, &key)),
             ..CompletionItem::default()
         });
     }
-
-    for keyword in Keyword::ALL {
-        let name = keyword.spelling();
-        let key = normalized_identifier(name);
-        if completion_matches(&key, &prefix_key) && seen.insert(key.clone()) {
-            completions.push(CompletionItem {
-                label: name.to_owned(),
-                kind: Some(CompletionItemKind::KEYWORD),
-                detail: Some("Orna 1.0 keyword".to_owned()),
-                insert_text: Some(name.to_owned()),
-                sort_text: Some(completion_sort_text(&prefix_key, 2, &key)),
-                ..CompletionItem::default()
-            });
-        }
-    }
-    completions.sort_by(|left, right| left.sort_text.cmp(&right.sort_text));
-    if let Some(first) = completions.first_mut() {
-        first.preselect = Some(true);
-    }
-    completions
 }
 
-fn completion_prefix(text: &str, byte: usize) -> Option<String> {
-    let token = lex(text).ok()?.into_iter().find(|token| {
-        matches!(token.kind, TokenKind::Identifier { .. })
-            && token.span.start <= byte
-            && byte <= token.span.end
-    })?;
-    Some(text.get(token.span.start..byte)?.to_owned())
+fn append_standard_modules(
+    completions: &mut Vec<CompletionItem>,
+    seen: &mut BTreeSet<String>,
+    parent: &str,
+    prefix: &str,
+) {
+    let stem = format!("{parent}.");
+    for module in &standard_library().modules {
+        let Some(child) = module.strip_prefix(&stem) else {
+            continue;
+        };
+        if child.contains('.') || !completion_matches(child, prefix) || !seen.insert(child.into()) {
+            continue;
+        }
+        completions.push(CompletionItem {
+            label: child.to_owned(),
+            kind: Some(CompletionItemKind::MODULE),
+            detail: Some(format!("Standard library module {module}")),
+            insert_text: Some(child.to_owned()),
+            sort_text: Some(completion_sort_text(prefix, 0, child)),
+            ..CompletionItem::default()
+        });
+    }
+}
+
+fn completion_parts(text: &str, byte: usize) -> (String, Option<String>) {
+    let Some(prefix_text) = text.get(..byte) else {
+        return (String::new(), None);
+    };
+    let line_start = prefix_text.rfind('\n').map_or(0, |offset| offset + 1);
+    let bytes = text.as_bytes();
+    let mut prefix_start = byte;
+    while prefix_start > line_start && is_identifier_byte(bytes[prefix_start - 1]) {
+        prefix_start -= 1;
+    }
+    let prefix = text.get(prefix_start..byte).unwrap_or_default().to_owned();
+    let mut cursor = prefix_start;
+    let mut segments = Vec::new();
+    while cursor > line_start && bytes[cursor - 1] == b'.' {
+        cursor -= 1;
+        let end = cursor;
+        while cursor > line_start && is_identifier_byte(bytes[cursor - 1]) {
+            cursor -= 1;
+        }
+        if cursor == end {
+            break;
+        }
+        segments.push(text[cursor..end].to_owned());
+    }
+    segments.reverse();
+    let qualifier = (!segments.is_empty()).then(|| segments.join("."));
+    (prefix, qualifier)
+}
+
+fn is_identifier_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || byte == b'_'
+}
+
+fn import_module_before_cursor(text: &str, byte: usize) -> Option<String> {
+    let before_cursor = text.get(..byte)?;
+    let line_start = before_cursor.rfind('\n').map_or(0, |offset| offset + 1);
+    let line = before_cursor.get(line_start..)?.trim_start();
+    let path = line.strip_prefix("use ")?;
+    let brace = path.rfind('{')?;
+    let module = path[..brace].trim().trim_end_matches('.').trim();
+    standard_library()
+        .modules
+        .contains(module)
+        .then(|| module.to_owned())
 }
 
 fn completion_matches(candidate: &str, prefix: &str) -> bool {

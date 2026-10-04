@@ -2,3 +2,19 @@ pub table Sample(id: Str) {
     name: Str,
     source: Str,
 }
+
+pub table Asset(id: Str) {
+    path: Str,
+    media_type: Str,
+    content: Str,
+}
+
+pub table Entry(id: Str) {
+    asset_path: Str,
+    kind: Str,
+}
+
+pub table Route(id: Str) {
+    path: Str,
+    entry: Str,
+}

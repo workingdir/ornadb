@@ -4,6 +4,7 @@
 //! runtime evaluation through the live presentation transport.
 
 use super::*;
+use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 use orna_application_v1::{ApplicationLiveAdapter, LIVE_RUN_EVENTS_WATCH_SOURCE};
 use orna_live_v1::{
     HttpConnection, LiveHost, LiveSessionAuthority, LiveTransport, SessionMetadata,
@@ -328,9 +329,6 @@ fn host_route(root: &Path, identity: RuntimeIdentity, request: &Request) -> Resp
     if let Some(response) = git_listing_route(root, identity, request) {
         return response;
     }
-    if let Some(response) = playground_route(root, identity, request) {
-        return response;
-    }
     match (request.method.as_str(), request.path.as_str()) {
         ("GET", "/api/examples") => playground_examples(root),
         ("GET", "/api/clone") => match clone_report(root, identity) {
@@ -345,7 +343,6 @@ const MAX_LISTING_COMMITS: usize = 100;
 const MAX_LISTING_TREE_ENTRIES: usize = 10_000;
 const MAX_LISTING_FILE_BYTES: usize = 2 * 1024 * 1024;
 const LISTING_STYLE: &str = "<style>:root{--page-width:72ch;--text:#202122;--background:#fff;--link:#0645ad;--visited:#0b0080;--rule:#a2a9b1;--body-font:Georgia,'Times New Roman',serif;--code-font:ui-monospace,monospace}body{max-width:var(--page-width);margin:1.5rem auto;padding:0 1rem;color:var(--text);background:var(--background);font:1rem/1.5 var(--body-font)}a{color:var(--link)}a:visited{color:var(--visited)}pre,textarea{overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;font-family:var(--code-font)}textarea{box-sizing:border-box;width:100%}button{font:inherit}table{border-collapse:collapse}th,td{border:1px solid var(--rule);padding:.2rem .45rem;text-align:left;vertical-align:top}</style>";
-
 /// Renderer-neutral data used by the simple Inspect-compatible HTML fallback.
 enum InspectionNode {
     Text(String),
@@ -371,6 +368,10 @@ fn git_listing_route(
     }
     match request.path.as_str() {
         "/" => Some(commit_log_page(root, identity)),
+        "/playground" => Some(playground_asset(root, identity, &request.path)),
+        path if path.starts_with("/playground/") => {
+            Some(playground_asset(root, identity, &request.path))
+        }
         path if path.starts_with("/tree/") => Some(tree_page(root, &path[6..])),
         path if path.starts_with("/blob/") => Some(blob_page(root, &path[6..])),
         _ => None,
@@ -413,73 +414,34 @@ fn commit_log_page(root: &Path, identity: RuntimeIdentity) -> Response {
     render_home_document(identity, &content)
 }
 
-const MAX_PLAYGROUND_ASSET_BYTES: u64 = 8 * 1024 * 1024;
+const MAX_PLAYGROUND_ASSET_BYTES: usize = 8 * 1024 * 1024;
+const MAX_PLAYGROUND_ASSET_ROW_BYTES: usize = 16 * 1024 * 1024;
 const MAX_PLAYGROUND_EXAMPLE_BYTES: usize = 2 * 1024 * 1024;
 const MAX_PLAYGROUND_SAMPLE_BYTES: usize = 64 * 1024;
 const MAX_PLAYGROUND_FILE_EXAMPLES: usize = 100;
 const MAX_PLAYGROUND_SAMPLE_ROWS: usize = 100;
 const MAX_PLAYGROUND_EXAMPLES_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
-fn playground_route(root: &Path, identity: RuntimeIdentity, request: &Request) -> Option<Response> {
-    if request.method != "GET"
-        || !(request.path == "/playground" || request.path.starts_with("/playground/"))
-    {
-        return None;
-    }
-    Some(playground_asset(root, identity, &request.path))
-}
-
 fn playground_asset(root: &Path, identity: RuntimeIdentity, request_path: &str) -> Response {
-    let relative = request_path
-        .strip_prefix("/playground")
-        .unwrap_or_default()
-        .trim_start_matches('/');
-    let Ok(decoded) = percent_decode(relative) else {
+    let Some(route_path) = normalize_playground_route_path(request_path) else {
         return bad_request_response();
     };
-    if decoded.contains('\\') || decoded.contains('\0') {
-        return bad_request_response();
-    }
-    let embed = matches!(decoded.as_str(), "embed" | "embed/");
-    let asset = if decoded.is_empty() || embed {
-        "index.html"
-    } else {
-        decoded.as_str()
+    let (media_type, content, kind) = match read_playground_asset(root, &route_path) {
+        Ok(Some(asset)) => asset,
+        Ok(None) => return not_found_response(),
+        Err(()) => return unavailable_response(),
     };
-    let Ok(managed) = ManagedPath::new(Path::new("playground/web-ui/dist").join(asset)) else {
-        return bad_request_response();
-    };
-    let dist = root.join("playground/web-ui/dist");
-    let Ok(dist) = std::fs::canonicalize(dist) else {
-        return unavailable_response();
-    };
-    let Ok(path) = std::fs::canonicalize(root.join(managed.as_path())) else {
-        return not_found_response();
-    };
-    if !path.starts_with(&dist) {
-        return bad_request_response();
-    }
-    let Ok(metadata) = std::fs::metadata(&path) else {
-        return not_found_response();
-    };
-    if !metadata.is_file() || metadata.len() > MAX_PLAYGROUND_ASSET_BYTES {
-        return not_found_response();
-    }
-    let Ok(bytes) = std::fs::read(&path) else {
-        return unavailable_response();
-    };
-    if asset == "index.html" {
-        let Ok(mut page) = String::from_utf8(bytes) else {
+    if kind != PlaygroundEntryKind::Asset {
+        let Ok(mut page) = String::from_utf8(content) else {
             return unavailable_response();
         };
-        if embed && !hide_embedded_page_header(&mut page) {
+        if kind == PlaygroundEntryKind::Embed && !hide_embedded_page_header(&mut page) {
             return unavailable_response();
         }
         let database = format_uuid(identity.database_id);
         let bridge = format!(
-            "<section id=\"live-repl\" data-database=\"{}\" hidden><textarea id=\"repl-source\"></textarea><button id=\"repl-run\" type=\"button\"></button><p id=\"repl-status\"></p><div id=\"repl-events\"></div></section><script>const RUN_EVENTS_SOURCE={};\n{}\n</script>",
+            "<section id=\"live-bridge\" data-database=\"{}\" hidden></section><section aria-labelledby=\"live-title\"><h2 id=\"live-title\">Live presentation</h2><p id=\"live-status\" role=\"status\" aria-live=\"polite\">Connecting to the database…</p><div id=\"live-presentation\"></div></section><script type=\"application/json\" id=\"run-events-source\">{}</script><script type=\"module\" src=\"/playground/assets/serve-playground.mjs\"></script>",
             html_escape(&database),
             json_string(LIVE_RUN_EVENTS_WATCH_SOURCE),
-            LIVE_REPL_SCRIPT,
         );
         if let Some(body) = find_html_close_tag(&page, b"</body>") {
             page.insert_str(body, &bridge);
@@ -490,18 +452,188 @@ fn playground_asset(root: &Path, identity: RuntimeIdentity, request_path: &str) 
         response
             .headers
             .push(("X-Content-Type-Options".into(), "nosniff".into()));
-        if embed {
+        if kind == PlaygroundEntryKind::Embed {
             response
                 .headers
                 .push(("Content-Security-Policy".into(), "frame-ancestors *".into()));
         }
         return response;
     }
-    let mut response = Response::new(200, playground_content_type(&path), bytes);
+    let mut response = Response::new(200, media_type, content);
     response
         .headers
         .push(("X-Content-Type-Options".into(), "nosniff".into()));
     response
+}
+
+fn normalize_playground_route_path(request_path: &str) -> Option<String> {
+    let relative = request_path.strip_prefix("/playground")?;
+    let relative = relative.strip_prefix('/').unwrap_or(relative);
+    let decoded = percent_decode(relative).ok()?;
+    if decoded.contains('\\')
+        || decoded.contains('\0')
+        || decoded.starts_with('/')
+        || decoded.contains("//")
+        || decoded
+            .split('/')
+            .any(|segment| matches!(segment, "." | ".."))
+    {
+        return None;
+    }
+    let relative = match decoded.as_str() {
+        "" => return Some("/playground/".into()),
+        "embed/" => "embed",
+        _ => decoded.as_str(),
+    };
+    Some(format!("/playground/{relative}"))
+}
+
+fn encoded_playground_row_id(prefix: &str, value: &str) -> String {
+    format!(
+        "{prefix}{}",
+        value
+            .as_bytes()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
+    )
+}
+
+fn playground_route_record_path(route_path: &str) -> Option<(ManagedPath, String)> {
+    if !route_path.starts_with("/playground/") {
+        return None;
+    }
+    let id = encoded_playground_row_id("route-", route_path);
+    let record_path =
+        ManagedPath::new(Path::new("playground/Route").join(format!("{id}.orna"))).ok()?;
+    Some((record_path, id))
+}
+
+fn playground_entry_record_path(entry_id: &str) -> Option<ManagedPath> {
+    if entry_id.is_empty()
+        || entry_id.len() > 128
+        || !entry_id
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+    {
+        return None;
+    }
+    ManagedPath::new(Path::new("playground/Entry").join(format!("{entry_id}.orna"))).ok()
+}
+
+fn playground_asset_record_path(asset_path: &str) -> Option<(ManagedPath, String)> {
+    let asset_path = ManagedPath::new(Path::new(asset_path)).ok()?;
+    let normalized = asset_path.as_path().to_str()?;
+    if normalized != "index.html" && !normalized.starts_with("assets/") {
+        return None;
+    }
+    let media_type = playground_content_type(asset_path.as_path());
+    if media_type == "application/octet-stream" {
+        return None;
+    }
+    let id = format!(
+        "asset-{}",
+        normalized
+            .as_bytes()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
+    );
+    let record_path =
+        ManagedPath::new(Path::new("playground/Asset").join(format!("{id}.orna"))).ok()?;
+    Some((record_path, id))
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PlaygroundEntryKind {
+    Page,
+    Embed,
+    Asset,
+}
+
+fn read_playground_asset(
+    root: &Path,
+    requested_route_path: &str,
+) -> Result<Option<(&'static str, Vec<u8>, PlaygroundEntryKind)>, ()> {
+    let repository = Repository::discover(root).map_err(|_| ())?;
+    let Some(commit) = repository.head().map_err(|_| ())? else {
+        return Err(());
+    };
+    let schema = repository
+        .read_committed_file(
+            &commit,
+            Path::new("playground.orna"),
+            MAX_PLAYGROUND_SAMPLE_BYTES,
+        )
+        .map_err(|_| ())?;
+    let schema = String::from_utf8(schema).map_err(|_| ())?;
+    if !has_playground_asset_table(&schema)
+        || !has_playground_route_table(&schema)
+        || !has_playground_entry_table(&schema)
+    {
+        return Err(());
+    }
+    let (route_record, route_id) = playground_route_record_path(requested_route_path).ok_or(())?;
+    let Ok(source) = repository.read_committed_file(
+        &commit,
+        route_record.as_path(),
+        MAX_PLAYGROUND_ASSET_ROW_BYTES,
+    ) else {
+        return Ok(None);
+    };
+    let source = String::from_utf8(source).map_err(|_| ())?;
+    let Some((route_path, entry_id)) = decode_playground_route(&source, &route_id) else {
+        return Err(());
+    };
+    if route_path != requested_route_path {
+        return Err(());
+    }
+    let entry_record = playground_entry_record_path(&entry_id).ok_or(())?;
+    let entry_source = repository
+        .read_committed_file(
+            &commit,
+            entry_record.as_path(),
+            MAX_PLAYGROUND_ASSET_ROW_BYTES,
+        )
+        .map_err(|_| ())?;
+    let entry_source = String::from_utf8(entry_source).map_err(|_| ())?;
+    let Some((asset_path, kind)) = decode_playground_entry(&entry_source, &entry_id) else {
+        return Err(());
+    };
+    if (kind == PlaygroundEntryKind::Asset && !asset_path.starts_with("assets/"))
+        || (kind != PlaygroundEntryKind::Asset && asset_path != "index.html")
+    {
+        return Err(());
+    }
+    let (asset_record, asset_id) = playground_asset_record_path(&asset_path).ok_or(())?;
+    let asset_source = repository
+        .read_committed_file(
+            &commit,
+            asset_record.as_path(),
+            MAX_PLAYGROUND_ASSET_ROW_BYTES,
+        )
+        .map_err(|_| ())?;
+    let asset_source = String::from_utf8(asset_source).map_err(|_| ())?;
+    let Some((path, media_type, content)) = decode_playground_asset(&asset_source, &asset_id)
+    else {
+        return Err(());
+    };
+    let expected_media_type = playground_content_type(Path::new(&path));
+    if path != asset_path
+        || media_type != expected_media_type
+        || media_type == "application/octet-stream"
+    {
+        return Err(());
+    }
+    let content = if media_type == "application/wasm" {
+        BASE64.decode(content.as_bytes()).map_err(|_| ())?
+    } else {
+        content.into_bytes()
+    };
+    if content.len() > MAX_PLAYGROUND_ASSET_BYTES {
+        return Err(());
+    }
+    Ok(Some((expected_media_type, content, kind)))
 }
 
 fn hide_embedded_page_header(page: &mut String) -> bool {
@@ -647,10 +779,126 @@ fn playground_examples(root: &Path) -> Response {
         examples.push(example);
     }
     examples.sort_by(|left, right| left["path"].as_str().cmp(&right["path"].as_str()));
-    match serde_json::to_vec(&serde_json::json!({ "examples": examples })) {
+    match serde_json::to_vec(&serde_json::json!({
+        "revision": commit.as_str(),
+        "examples": examples,
+    })) {
         Ok(body) => Response::new(200, "application/json", body),
         Err(_) => unavailable_response(),
     }
+}
+
+fn has_playground_asset_table(source: &str) -> bool {
+    has_playground_record_table(source, "Asset", &["path", "media_type", "content"])
+}
+
+fn has_playground_route_table(source: &str) -> bool {
+    has_playground_record_table(source, "Route", &["path", "entry"])
+}
+
+fn has_playground_entry_table(source: &str) -> bool {
+    has_playground_record_table(source, "Entry", &["asset_path", "kind"])
+}
+
+fn has_playground_record_table(source: &str, table_name: &str, required_fields: &[&str]) -> bool {
+    let parsed = parse_module(source);
+    if !parsed.is_ok() {
+        return false;
+    }
+    let mut tables = parsed.value.items.iter().filter_map(|item| {
+        let Declaration::Table {
+            name,
+            keys,
+            members,
+        } = &item.declaration
+        else {
+            return None;
+        };
+        (name == table_name).then_some((keys, members))
+    });
+    let Some((keys, members)) = tables.next() else {
+        return false;
+    };
+    if tables.next().is_some()
+        || keys.len() != 1
+        || !matches!(
+            &keys[0],
+            orna_syntax_v1::Parameter {
+                pattern: Pattern::Name(name, _),
+                annotation: Some(ty),
+                ..
+            } if name == "id" && is_string_type(ty)
+        )
+    {
+        return false;
+    }
+    required_fields.iter().all(|required| {
+        let mut fields = members.iter().filter_map(|member| match member {
+            orna_syntax_v1::TableMember::Field { name, ty, .. } if name == required => Some(ty),
+            _ => None,
+        });
+        fields.next().is_some_and(is_string_type) && fields.next().is_none()
+    })
+}
+
+fn decode_playground_asset(source: &str, expected_id: &str) -> Option<(String, String, String)> {
+    let parsed = parse_row(source);
+    if !parsed.is_ok() {
+        return None;
+    }
+    let Expr::Record { fields, .. } = parsed.value else {
+        return None;
+    };
+    let id = literal_string(unique_record_field(&fields, "id")?)?;
+    if id != expected_id {
+        return None;
+    }
+    let path = literal_string(unique_record_field(&fields, "path")?)?;
+    let media_type = literal_string(unique_record_field(&fields, "media_type")?)?;
+    let content = literal_string(unique_record_field(&fields, "content")?)?;
+    Some((path, media_type, content))
+}
+
+fn decode_playground_route(source: &str, expected_id: &str) -> Option<(String, String)> {
+    let parsed = parse_row(source);
+    if !parsed.is_ok() {
+        return None;
+    }
+    let Expr::Record { fields, .. } = parsed.value else {
+        return None;
+    };
+    let id = literal_string(unique_record_field(&fields, "id")?)?;
+    if id != expected_id {
+        return None;
+    }
+    let path = literal_string(unique_record_field(&fields, "path")?)?;
+    let entry = literal_string(unique_record_field(&fields, "entry")?)?;
+    Some((path, entry))
+}
+
+fn decode_playground_entry(
+    source: &str,
+    expected_id: &str,
+) -> Option<(String, PlaygroundEntryKind)> {
+    let parsed = parse_row(source);
+    if !parsed.is_ok() {
+        return None;
+    }
+    let Expr::Record { fields, .. } = parsed.value else {
+        return None;
+    };
+    let id = literal_string(unique_record_field(&fields, "id")?)?;
+    if id != expected_id {
+        return None;
+    }
+    let asset_path = literal_string(unique_record_field(&fields, "asset_path")?)?;
+    let kind = match literal_string(unique_record_field(&fields, "kind")?)?.as_str() {
+        "page" => PlaygroundEntryKind::Page,
+        "embed" => PlaygroundEntryKind::Embed,
+        "asset" => PlaygroundEntryKind::Asset,
+        _ => return None,
+    };
+    Some((asset_path, kind))
 }
 
 fn has_playground_sample_table(source: &str) -> bool {
@@ -1125,478 +1373,15 @@ fn render_home_document(identity: RuntimeIdentity, content: &InspectionNode) -> 
     page.push_str("</head><body><main><h1>Orna database</h1>");
     render_inspection_node(content, &mut page);
     page.push_str(&format!(
-        "<section id=\"live-repl\" data-database=\"{}\"><h2>REPL</h2><label for=\"repl-source\">Orna input</label><textarea id=\"repl-source\" rows=\"4\" spellcheck=\"false\">1 + 1</textarea><button id=\"repl-run\" type=\"button\">Run</button><p id=\"repl-status\" aria-live=\"polite\">Starting runtime session…</p><div id=\"repl-events\"></div></section>",
+        "<section id=\"live-repl\" data-database=\"{}\"><h2>REPL</h2><label for=\"repl-source\">Orna input</label><textarea id=\"repl-source\" rows=\"4\" spellcheck=\"false\">1 + 1</textarea><button id=\"repl-run\" type=\"button\" disabled>Run</button><p id=\"repl-status\" aria-live=\"polite\">Connecting to the runtime…</p><pre id=\"repl-events\">No run yet.</pre></section><section aria-labelledby=\"live-title\"><h2 id=\"live-title\">Live presentation</h2><p id=\"live-status\" role=\"status\" aria-live=\"polite\">Connecting to the database…</p><div id=\"live-presentation\"></div></section>",
         html_escape(&database)
     ));
-    page.push_str("</main><script>");
     page.push_str(&format!(
-        "const RUN_EVENTS_SOURCE={};\n",
+        "</main><script type=\"application/json\" id=\"run-events-source\">{}</script><script type=\"module\" src=\"/playground/assets/serve-home.mjs\"></script></body></html>",
         json_string(LIVE_RUN_EVENTS_WATCH_SOURCE)
     ));
-    page.push_str(LIVE_REPL_SCRIPT);
-    page.push_str("</script></body></html>");
     Response::new(200, "text/html; charset=utf-8", page.into_bytes())
 }
-
-const LIVE_REPL_SCRIPT: &str = r#"
-const page = document.querySelector('#live-repl');
-const databaseId = page.dataset.database;
-const source = document.querySelector('#repl-source');
-const runButton = document.querySelector('#repl-run');
-const status = document.querySelector('#repl-status');
-const output = document.querySelector('#repl-events');
-const utf8 = new TextEncoder();
-const pending = new Map();
-let socket;
-let sessionId;
-let sessionBytes;
-let eventWatch;
-let presentation;
-let latestRunResult;
-let markRuntimeReady;
-const runtimeReady = new Promise(resolve => { markRuntimeReady = resolve; });
-
-function byteCompare(left, right) {
-  if (left.length !== right.length) return left.length - right.length;
-  for (let index = 0; index < left.length; index += 1) {
-    if (left[index] !== right[index]) return left[index] - right[index];
-  }
-  return 0;
-}
-
-function cborHead(major, value) {
-  const number = BigInt(value);
-  const prefix = major << 5;
-  if (number < 24n) return Uint8Array.of(prefix | Number(number));
-  let width;
-  let info;
-  if (number <= 0xffn) { width = 1; info = 24; }
-  else if (number <= 0xffffn) { width = 2; info = 25; }
-  else if (number <= 0xffffffffn) { width = 4; info = 26; }
-  else { width = 8; info = 27; }
-  const bytes = new Uint8Array(width);
-  let remaining = number;
-  for (let index = width - 1; index >= 0; index -= 1) {
-    bytes[index] = Number(remaining & 255n);
-    remaining >>= 8n;
-  }
-  return joinBytes([Uint8Array.of(prefix | info), bytes]);
-}
-
-function joinBytes(parts) {
-  const length = parts.reduce((sum, part) => sum + part.length, 0);
-  const output = new Uint8Array(length);
-  let offset = 0;
-  for (const part of parts) { output.set(part, offset); offset += part.length; }
-  return output;
-}
-
-function encodeCbor(value) {
-  if (value === null) return Uint8Array.of(0xf6);
-  if (value === false) return Uint8Array.of(0xf4);
-  if (value === true) return Uint8Array.of(0xf5);
-  if (typeof value === 'number' || typeof value === 'bigint') {
-    const integer = BigInt(value);
-    return integer >= 0n
-      ? cborHead(0, integer)
-      : cborHead(1, -1n - integer);
-  }
-  if (typeof value === 'string') {
-    const bytes = utf8.encode(value);
-    return joinBytes([cborHead(3, bytes.length), bytes]);
-  }
-  if (value instanceof Uint8Array) {
-    return joinBytes([cborHead(2, value.length), value]);
-  }
-  if (Array.isArray(value)) {
-    return joinBytes([cborHead(4, value.length), ...value.map(encodeCbor)]);
-  }
-  if (value instanceof Map) {
-    const entries = [...value.entries()].map(([key, item]) => [encodeCbor(key), item]);
-    entries.sort((left, right) => byteCompare(left[0], right[0]));
-    return joinBytes([
-      cborHead(5, entries.length),
-      ...entries.flatMap(([key, item]) => [key, encodeCbor(item)]),
-    ]);
-  }
-  throw new Error('Unsupported live protocol value.');
-}
-
-function cborArgument(view, state, info) {
-  if (info < 24) return BigInt(info);
-  const width = info === 24 ? 1 : info === 25 ? 2 : info === 26 ? 4 : info === 27 ? 8 : 0;
-  if (!width || state.offset + width > view.byteLength) throw new Error('Invalid live response.');
-  let value = 0n;
-  for (let count = 0; count < width; count += 1) {
-    value = (value << 8n) | BigInt(view.getUint8(state.offset));
-    state.offset += 1;
-  }
-  return value;
-}
-
-function asLength(value) {
-  if (value > BigInt(Number.MAX_SAFE_INTEGER)) throw new Error('Live response is too large.');
-  return Number(value);
-}
-
-function halfFloat(bits) {
-  const sign = (bits & 0x8000) ? -1 : 1;
-  const exponent = (bits >> 10) & 31;
-  const fraction = bits & 1023;
-  if (exponent === 0) return sign * Math.pow(2, -14) * (fraction / 1024);
-  if (exponent === 31) return fraction ? NaN : sign * Infinity;
-  return sign * Math.pow(2, exponent - 15) * (1 + fraction / 1024);
-}
-
-function decodeCbor(bytes) {
-  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-  const state = { offset: 0 };
-  function read() {
-    if (state.offset >= view.byteLength) throw new Error('Incomplete live response.');
-    const first = view.getUint8(state.offset++);
-    const major = first >> 5;
-    const info = first & 31;
-    if (major === 7) {
-      if (info === 20) return false;
-      if (info === 21) return true;
-      if (info === 22) return null;
-      if (info === 25) {
-        const bits = view.getUint16(state.offset);
-        state.offset += 2;
-        return halfFloat(bits);
-      }
-      if (info === 26) {
-        const value = view.getFloat32(state.offset);
-        state.offset += 4;
-        return value;
-      }
-      if (info === 27) {
-        const value = view.getFloat64(state.offset);
-        state.offset += 8;
-        return value;
-      }
-      throw new Error('Unsupported live response value.');
-    }
-    const argument = cborArgument(view, state, info);
-    if (major === 0) return argument <= BigInt(Number.MAX_SAFE_INTEGER) ? Number(argument) : argument;
-    if (major === 1) {
-      const integer = -1n - argument;
-      return integer >= BigInt(Number.MIN_SAFE_INTEGER) ? Number(integer) : integer;
-    }
-    if (major === 2 || major === 3) {
-      const length = asLength(argument);
-      if (state.offset + length > view.byteLength) throw new Error('Incomplete live response.');
-      const slice = bytes.slice(state.offset, state.offset + length);
-      state.offset += length;
-      return major === 2 ? slice : new TextDecoder().decode(slice);
-    }
-    if (major === 4) return Array.from({ length: asLength(argument) }, read);
-    if (major === 5) {
-      const result = new Map();
-      for (let index = 0; index < asLength(argument); index += 1) result.set(read(), read());
-      return result;
-    }
-    if (major === 6) return { tag: Number(argument), value: read() };
-    throw new Error('Unsupported live response value.');
-  }
-  const value = read();
-  if (state.offset !== view.byteLength) throw new Error('Trailing live response bytes.');
-  return value;
-}
-
-function uuidBytes(value) {
-  return Uint8Array.from(value.replaceAll('-', '').match(/../g), part => Number.parseInt(part, 16));
-}
-
-function byteKey(value) {
-  return [...value].map(byte => byte.toString(16).padStart(2, '0')).join('');
-}
-
-function newId() {
-  return crypto.getRandomValues(new Uint8Array(16));
-}
-
-function envelope(code, request, watch, body) {
-  return new Map([[0, 1], [1, code], [2, request], [3, watch], [4, body]]);
-}
-
-function send(envelopeValue, request, watch) {
-  if (!socket || socket.readyState !== WebSocket.OPEN) return Promise.reject(new Error('Runtime session is disconnected.'));
-  const requestKey = byteKey(request);
-  return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => {
-      pending.delete(requestKey);
-      reject(new Error('Runtime response timed out.'));
-    }, 15000);
-    pending.set(requestKey, { resolve, reject, timer, watch: watch ? byteKey(watch) : null });
-    socket.send(encodeCbor(envelopeValue));
-  });
-}
-
-function databaseContext() {
-  return new Map([[0, uuidBytes(databaseId)], [1, null]]);
-}
-
-function presentationContext() {
-  return new Map([
-    [0, 'en'], [1, null], [2, null], [3, 'system'], [4, ['value', 'text', 'group', 'table']],
-  ]);
-}
-
-async function evaluate(sourceText) {
-  const request = newId();
-  const bodyWithoutFingerprint = new Map([
-    [0, sourceText], [1, databaseContext()], [2, presentationContext()],
-  ]);
-  const requestBytes = encodeCbor([sessionBytes, 4, null, bodyWithoutFingerprint]);
-  const domain = utf8.encode('orna.request.v1\0');
-  const fingerprint = new Uint8Array(await crypto.subtle.digest('SHA-256', joinBytes([domain, requestBytes])));
-  const body = new Map(bodyWithoutFingerprint);
-  body.set(3, fingerprint);
-  const response = await send(envelope(4, request, null, body), request, null);
-  if (response.get(1) === 18 && response.get(4).get(0) === 0) status.textContent = 'Run completed.';
-  else status.textContent = 'Run returned an error event.';
-}
-
-async function watchRunEvents() {
-  const request = newId();
-  const body = new Map([[0, RUN_EVENTS_SOURCE], [1, databaseContext()], [2, presentationContext()]]);
-  const response = await send(envelope(5, request, null, body), request, null);
-  eventWatch = response.get(3);
-  if (!eventWatch) throw new Error('Runtime did not open the run event watch.');
-}
-
-async function resyncRunEvents() {
-  if (!eventWatch) return;
-  const request = newId();
-  const response = await send(envelope(2, request, eventWatch, new Map()), request, eventWatch);
-  if (response.get(1) === 19) status.textContent = 'Run event update was rejected.';
-}
-
-function untagged(value) {
-  if (value && typeof value === 'object' && value.tag !== undefined && value.tag !== 2 && value.tag !== 3) {
-    return untagged(value.value);
-  }
-  return value;
-}
-
-function displayText(value) {
-  const plain = untagged(value);
-  if (plain === null || plain === undefined) return '';
-  if (plain && typeof plain === 'object' && (plain.tag === 2 || plain.tag === 3)) {
-    return formatValue(plain);
-  }
-  return String(plain);
-}
-
-function resultFromEvents(node) {
-  if (!node || node.tag !== 60012 || !Array.isArray(node.value)) return undefined;
-  const children = node.value[3];
-  if (!Array.isArray(children) || children.length === 0) return undefined;
-  const latest = children[children.length - 1];
-  if (!latest || latest.tag !== 60012 || !Array.isArray(latest.value)) return undefined;
-  const properties = latest.value[2];
-  if (!(properties instanceof Map)) return undefined;
-  const field = (name) => {
-    for (const [key, value] of properties.entries()) {
-      if (displayText(key) === name) return value;
-    }
-    return undefined;
-  };
-  const succeeded = displayText(field('status')) === 'success';
-  const rawValue = field('value');
-  const printableValue = untagged(rawValue);
-  const valueText = printableValue && typeof printableValue === 'object'
-    ? formatValue(printableValue)
-    : displayText(printableValue);
-  const errorCode = displayText(field('error_code'));
-  const line = Number(displayText(field('line'))) || 1;
-  const column = Number(displayText(field('column'))) || 1;
-  return {
-    ok: succeeded,
-    values: succeeded ? [valueText] : [],
-    stdout: displayText(field('stdout')),
-    errors: succeeded ? [] : [{ message: errorCode || 'Evaluation failed', line, col: column }],
-  };
-}
-
-function publishRunEvents() {
-  latestRunResult = resultFromEvents(presentation);
-  if (latestRunResult) {
-    globalThis.dispatchEvent(new CustomEvent('orna:run-result', { detail: latestRunResult }));
-  }
-}
-
-async function runPlayground(sourceText) {
-  await runtimeReady;
-  if (!socket || socket.readyState !== WebSocket.OPEN) {
-    throw new Error('The OrnaDB runtime session is disconnected.');
-  }
-  await evaluate(sourceText);
-  await resyncRunEvents();
-  if (!latestRunResult) throw new Error('The OrnaDB runtime did not publish a run result.');
-  return latestRunResult;
-}
-
-globalThis.ornaPlaygroundRun = runPlayground;
-
-function formatValue(value) {
-  if (value === null) return 'null';
-  if (value instanceof Uint8Array) return `0x${byteKey(value)}`;
-  if (typeof value === 'bigint') return value.toString();
-  if (Array.isArray(value)) return `[${value.map(formatValue).join(', ')}]`;
-  if (value instanceof Map) {
-    return `{${[...value.entries()].map(([key, item]) => `${formatValue(key)}: ${formatValue(item)}`).join(', ')}}`;
-  }
-  if (typeof value === 'object' && value.tag !== undefined) {
-    if ((value.tag === 2 || value.tag === 3) && value.value instanceof Uint8Array) {
-      let integer = 0n;
-      for (const byte of value.value) integer = (integer << 8n) | BigInt(byte);
-      return (value.tag === 2 ? integer : -1n - integer).toString();
-    }
-    return `tag ${value.tag} ${formatValue(value.value)}`;
-  }
-  return String(value);
-}
-
-function appendPresent(node, parent) {
-  if (!node || node.tag !== 60012 || !Array.isArray(node.value)) {
-    const text = document.createElement('pre');
-    text.textContent = formatValue(node);
-    parent.append(text);
-    return;
-  }
-  const [kind, , properties, children] = node.value;
-  const section = document.createElement('section');
-  const heading = document.createElement('h3');
-  heading.textContent = formatValue(kind);
-  section.append(heading);
-  if (properties instanceof Map && properties.size) {
-    const table = document.createElement('table');
-    const rows = document.createElement('tbody');
-    for (const [name, value] of properties.entries()) {
-      const row = document.createElement('tr');
-      const key = document.createElement('th');
-      const cell = document.createElement('td');
-      key.textContent = formatValue(name);
-      cell.textContent = formatValue(value);
-      row.append(key, cell);
-      rows.append(row);
-    }
-    table.append(rows);
-    section.append(table);
-  }
-  if (Array.isArray(children) && children.length) {
-    const list = document.createElement('ol');
-    for (const child of children) {
-      const item = document.createElement('li');
-      appendPresent(child, item);
-      list.append(item);
-    }
-    section.append(list);
-  }
-  parent.append(section);
-}
-
-function applyPresentationDelta(message) {
-  const body = message.get(4);
-  const patches = body.get(2);
-  for (const patch of patches) {
-    const [operation, path, replacement] = patch;
-    if (operation !== 2 || path.length !== 0) throw new Error('Unsupported presentation update.');
-    presentation = replacement;
-  }
-  output.replaceChildren();
-  if (presentation) appendPresent(presentation, output);
-  publishRunEvents();
-}
-
-function receive(event) {
-  try {
-    const message = decodeCbor(new Uint8Array(event.data));
-    if (!(message instanceof Map)) throw new Error('Invalid runtime message.');
-    const code = message.get(1);
-    const request = message.get(2);
-    const watch = message.get(3);
-    if (code === 16) {
-      presentation = message.get(4).get(1);
-      if (watch) eventWatch ||= watch;
-      output.replaceChildren();
-      appendPresent(presentation, output);
-      publishRunEvents();
-    } else if (code === 17) {
-      applyPresentationDelta(message);
-    }
-    if (request instanceof Uint8Array) {
-      const key = byteKey(request);
-      const waiter = pending.get(key);
-      if (waiter) {
-        clearTimeout(waiter.timer);
-        pending.delete(key);
-        waiter.resolve(message);
-      }
-    } else if (code === 17 && watch instanceof Uint8Array) {
-      const key = byteKey(watch);
-      for (const [requestKey, waiter] of pending.entries()) {
-        if (waiter.watch === key) {
-          clearTimeout(waiter.timer);
-          pending.delete(requestKey);
-          waiter.resolve(message);
-          break;
-        }
-      }
-    }
-  } catch (error) {
-    status.textContent = error instanceof Error ? error.message : String(error);
-  }
-}
-
-async function connect() {
-  const response = await fetch('/orna/session', {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ database: databaseId, protocol: 'orna.present.v1' }),
-  });
-  if (!response.ok) throw new Error('Runtime session could not be created.');
-  const metadata = await response.json();
-  sessionId = metadata.session;
-  sessionBytes = uuidBytes(sessionId);
-  const endpoint = new URL(metadata.websocket_path, location.href);
-  endpoint.protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
-  socket = new WebSocket(endpoint, 'orna.present.v1');
-  socket.binaryType = 'arraybuffer';
-  socket.addEventListener('message', receive);
-  socket.addEventListener('open', async () => {
-    try {
-      status.textContent = 'Runtime session ready.';
-      await watchRunEvents();
-      status.textContent = 'Ready.';
-      markRuntimeReady();
-    } catch (error) {
-      status.textContent = error instanceof Error ? error.message : String(error);
-    }
-  });
-  socket.addEventListener('close', () => { status.textContent = 'Runtime session disconnected.'; });
-  socket.addEventListener('error', () => { status.textContent = 'Runtime connection failed.'; });
-}
-
-runButton.addEventListener('click', async () => {
-  runButton.disabled = true;
-  status.textContent = 'Evaluating in the database runtime…';
-  try {
-    await evaluate(source.value);
-    await resyncRunEvents();
-  } catch (error) {
-    status.textContent = error instanceof Error ? error.message : String(error);
-  } finally {
-    runButton.disabled = false;
-  }
-});
-
-void connect().catch(error => {
-  status.textContent = error instanceof Error ? error.message : String(error);
-});
-"#;
 
 fn render_inspection_node(node: &InspectionNode, page: &mut String) {
     match node {
@@ -2187,6 +1972,15 @@ mod tests {
         );
     }
 
+    fn write_fixture_rows(directory: &Path, table: &str, rows: &[(&str, &str)]) {
+        let table_directory = directory.join("playground").join(table);
+        std::fs::create_dir_all(&table_directory).expect("create playground row directory");
+        for (id, source) in rows {
+            std::fs::write(table_directory.join(format!("{id}.orna")), source)
+                .expect("write crate-local playground row fixture");
+        }
+    }
+
     fn listing_page(root: &Path, path: &str) -> Response {
         host_route(
             root,
@@ -2246,9 +2040,11 @@ mod tests {
         assert!(home.contains("href=\"/playground/\""));
         assert!(home.contains("id=\"live-repl\""));
         assert!(home.contains("id=\"repl-source\""));
-        assert!(home.contains("/orna/session"));
-        assert!(home.contains("metadata.websocket_path"));
-        assert!(home.contains("new WebSocket(endpoint"));
+        assert!(home.contains("id=\"live-presentation\""));
+        assert!(home.contains("id=\"run-events-source\""));
+        assert!(home.contains("src=\"/playground/assets/serve-home.mjs\""));
+        assert!(home.contains("orna/serve/run-events/v1"));
+        assert!(!home.contains("new WebSocket(endpoint"));
         assert!(!home.contains("/api/query"));
         assert!(!home.contains("wasm"));
         let query = host_route(
@@ -2266,10 +2062,117 @@ mod tests {
     }
 
     #[test]
-    fn playground_loads_committed_sample_rows_and_built_assets() {
+    fn playground_loads_committed_sample_and_asset_rows_from_the_database() {
         const PLAYGROUND_SAMPLE: &str = include_str!("../tests/fixtures/playground-sample.orna");
         const PLAYGROUND_SCHEMA: &str = include_str!("../tests/fixtures/playground-schema.orna");
         const LEGACY_EXAMPLE: &str = include_str!("../tests/fixtures/playground-example.orna");
+        const ASSET_INDEX: &str = include_str!("../tests/fixtures/playground-asset-index.orna");
+        const ASSET_APP: &str = include_str!("../tests/fixtures/playground-asset-app.orna");
+        const ASSET_STYLE: &str = include_str!("../tests/fixtures/playground-asset-style.orna");
+        const ASSET_PRESENTATION: &str =
+            include_str!("../tests/fixtures/playground-asset-presentation.orna");
+        const ASSET_HOME: &str = include_str!("../tests/fixtures/playground-asset-home.orna");
+        const ASSET_PLAYGROUND: &str =
+            include_str!("../tests/fixtures/playground-asset-playground.orna");
+        const ASSET_LSP_JS: &str = include_str!("../tests/fixtures/playground-asset-lsp-js.orna");
+        const ASSET_LSP_WASM: &str =
+            include_str!("../tests/fixtures/playground-asset-lsp-wasm.orna");
+        const ASSET_UNCOMMITTED: &str =
+            include_str!("../tests/fixtures/playground-asset-uncommitted.orna");
+        const ASSET_STALE_INDEX: &str =
+            include_str!("../tests/fixtures/playground-asset-index-stale.orna");
+        const ROUTES: [(&str, &str); 11] = [
+            (
+                "route-2f706c617967726f756e642f",
+                include_str!("../tests/fixtures/playground-route-page.orna"),
+            ),
+            (
+                "route-2f706c617967726f756e642f656d626564",
+                include_str!("../tests/fixtures/playground-route-embed.orna"),
+            ),
+            (
+                "route-2f706c617967726f756e642f6173736574732f6170702e6a73",
+                include_str!("../tests/fixtures/playground-route-app.orna"),
+            ),
+            (
+                "route-2f706c617967726f756e642f6173736574732f7374796c652e637373",
+                include_str!("../tests/fixtures/playground-route-style.orna"),
+            ),
+            (
+                "route-2f706c617967726f756e642f6173736574732f6f726e612d656469746f722d636f6e6669672e6a736f6e",
+                include_str!("../tests/fixtures/playground-route-config.orna"),
+            ),
+            (
+                "route-2f706c617967726f756e642f6173736574732f656d6265642e6a73",
+                include_str!("../tests/fixtures/playground-route-embed-script.orna"),
+            ),
+            (
+                "route-2f706c617967726f756e642f6173736574732f70726573656e746174696f6e2e6d6a73",
+                include_str!("../tests/fixtures/playground-route-presentation.orna"),
+            ),
+            (
+                "route-2f706c617967726f756e642f6173736574732f73657276652d686f6d652e6d6a73",
+                include_str!("../tests/fixtures/playground-route-home-runtime.orna"),
+            ),
+            (
+                "route-2f706c617967726f756e642f6173736574732f73657276652d706c617967726f756e642e6d6a73",
+                include_str!("../tests/fixtures/playground-route-playground-runtime.orna"),
+            ),
+            (
+                "route-2f706c617967726f756e642f6173736574732f6c73702d7761736d2f6f726e615f6c73702e6a73",
+                include_str!("../tests/fixtures/playground-route-lsp-js.orna"),
+            ),
+            (
+                "route-2f706c617967726f756e642f6173736574732f6c73702d7761736d2f6f726e615f6c73705f62672e7761736d",
+                include_str!("../tests/fixtures/playground-route-lsp-wasm.orna"),
+            ),
+        ];
+        const ENTRIES: [(&str, &str); 11] = [
+            (
+                "entry-page",
+                include_str!("../tests/fixtures/playground-entry-page.orna"),
+            ),
+            (
+                "entry-embed",
+                include_str!("../tests/fixtures/playground-entry-embed.orna"),
+            ),
+            (
+                "entry-app",
+                include_str!("../tests/fixtures/playground-entry-app.orna"),
+            ),
+            (
+                "entry-style",
+                include_str!("../tests/fixtures/playground-entry-style.orna"),
+            ),
+            (
+                "entry-config",
+                include_str!("../tests/fixtures/playground-entry-config.orna"),
+            ),
+            (
+                "entry-embed-script",
+                include_str!("../tests/fixtures/playground-entry-embed-script.orna"),
+            ),
+            (
+                "entry-presentation",
+                include_str!("../tests/fixtures/playground-entry-presentation.orna"),
+            ),
+            (
+                "entry-home-runtime",
+                include_str!("../tests/fixtures/playground-entry-home-runtime.orna"),
+            ),
+            (
+                "entry-playground-runtime",
+                include_str!("../tests/fixtures/playground-entry-playground-runtime.orna"),
+            ),
+            (
+                "entry-lsp-js",
+                include_str!("../tests/fixtures/playground-entry-lsp-js.orna"),
+            ),
+            (
+                "entry-lsp-wasm",
+                include_str!("../tests/fixtures/playground-entry-lsp-wasm.orna"),
+            ),
+        ];
         let directory = tempfile::tempdir().expect("temporary database");
         git_succeeds(
             directory.path(),
@@ -2285,15 +2188,47 @@ mod tests {
         std::fs::create_dir_all(legacy_path.parent().expect("example directory"))
             .expect("create examples directory");
         std::fs::write(&legacy_path, LEGACY_EXAMPLE).expect("write committed file example");
-        let dist = directory.path().join("playground/web-ui/dist");
-        std::fs::create_dir_all(dist.join("assets")).expect("create built assets");
+        let asset_directory = directory.path().join("playground/Asset");
+        std::fs::create_dir_all(&asset_directory).expect("create Asset rows directory");
         std::fs::write(
-            dist.join("index.html"),
-            "<!doctype html><html><body><header data-page-header>Orna playground</header><main>playground</main></body></html>",
+            asset_directory.join("asset-696e6465782e68746d6c.orna"),
+            ASSET_INDEX,
         )
-        .expect("write built page");
-        std::fs::write(dist.join("assets/app.js"), "console.log('ready')")
-            .expect("write built script");
+        .expect("write database shell asset");
+        std::fs::write(
+            asset_directory.join("asset-6173736574732f6170702e6a73.orna"),
+            ASSET_APP,
+        )
+        .expect("write database JavaScript asset");
+        std::fs::write(
+            asset_directory.join("asset-6173736574732f7374796c652e637373.orna"),
+            ASSET_STYLE,
+        )
+        .expect("write database stylesheet asset");
+        write_fixture_rows(directory.path(), "Route", &ROUTES);
+        write_fixture_rows(directory.path(), "Entry", &ENTRIES);
+        for (id, source) in [
+            (
+                "6173736574732f70726573656e746174696f6e2e6d6a73",
+                ASSET_PRESENTATION,
+            ),
+            ("6173736574732f73657276652d686f6d652e6d6a73", ASSET_HOME),
+            (
+                "6173736574732f73657276652d706c617967726f756e642e6d6a73",
+                ASSET_PLAYGROUND,
+            ),
+            (
+                "6173736574732f6c73702d7761736d2f6f726e615f6c73702e6a73",
+                ASSET_LSP_JS,
+            ),
+            (
+                "6173736574732f6c73702d7761736d2f6f726e615f6c73705f62672e7761736d",
+                ASSET_LSP_WASM,
+            ),
+        ] {
+            std::fs::write(asset_directory.join(format!("asset-{id}.orna")), source)
+                .expect("write committed browser support asset");
+        }
         git_succeeds(
             directory.path(),
             &[
@@ -2301,6 +2236,9 @@ mod tests {
                 "playground.orna",
                 "playground/Sample/hello.orna",
                 "playground/examples/legacy.orna",
+                "playground/Asset",
+                "playground/Route",
+                "playground/Entry",
             ],
         );
         git_succeeds(
@@ -2328,11 +2266,19 @@ mod tests {
             "99 + 1",
         )
         .expect("write uncommitted file example");
+        std::fs::write(
+            asset_directory.join("asset-6173736574732f756e636f6d6d69747465642e6a73.orna"),
+            ASSET_UNCOMMITTED,
+        )
+        .expect("write uncommitted database asset");
 
         let examples = listing_page(directory.path(), "/api/examples");
         assert_eq!(examples.status, 200);
         let examples: serde_json::Value =
             serde_json::from_slice(&examples.body).expect("example records JSON");
+        let revision = examples["revision"].as_str().expect("committed revision");
+        assert_eq!(revision.len(), 40);
+        assert!(revision.bytes().all(|byte| byte.is_ascii_hexdigit()));
         assert_eq!(examples["examples"].as_array().map(Vec::len), Some(2));
         let examples = examples["examples"].as_array().expect("example list");
         let sample = examples
@@ -2358,13 +2304,41 @@ mod tests {
         let page = playground_asset(directory.path(), identity, "/playground/");
         assert_eq!(page.status, 200);
         assert_eq!(page.content_type, "text/html; charset=utf-8");
-        let page = String::from_utf8(page.body).expect("built page UTF-8");
-        assert!(page.contains("<main>playground</main>"));
+        let page = String::from_utf8(page.body).expect("database page UTF-8");
+        assert!(page.contains("<main>database shell</main>"));
         assert!(page.contains(&format!(
             "data-database=\"{}\"",
             format_uuid(identity.database_id)
         )));
-        assert!(page.contains("ornaPlaygroundRun"));
+        assert!(page.contains("id=\"live-bridge\""));
+        assert!(page.contains("id=\"live-presentation\""));
+        assert!(page.contains("id=\"run-events-source\""));
+        assert!(page.contains("src=\"/playground/assets/serve-playground.mjs\""));
+        assert!(page.contains("\\u0000orna/serve/run-events/v1"));
+        let runtime = listing_page(directory.path(), "/playground/assets/serve-playground.mjs");
+        assert_eq!(runtime.status, 200);
+        assert!(
+            String::from_utf8(runtime.body)
+                .expect("playground runtime UTF-8")
+                .contains("globalThis.ornaPlaygroundRun")
+        );
+        let presentation = listing_page(directory.path(), "/playground/assets/presentation.mjs");
+        assert_eq!(presentation.status, 200);
+        assert!(
+            String::from_utf8(presentation.body)
+                .unwrap()
+                .contains("LivePresentation")
+        );
+        let lsp_binding = listing_page(directory.path(), "/playground/assets/lsp-wasm/orna_lsp.js");
+        assert_eq!(lsp_binding.status, 200);
+        assert_eq!(lsp_binding.body, b"export default async function init() {}");
+        let lsp_wasm = listing_page(
+            directory.path(),
+            "/playground/assets/lsp-wasm/orna_lsp_bg.wasm",
+        );
+        assert_eq!(lsp_wasm.status, 200);
+        assert_eq!(lsp_wasm.content_type, "application/wasm");
+        assert_eq!(lsp_wasm.body, b"\0asm\x01\0\0\0");
         let embed = playground_asset(directory.path(), identity, "/playground/embed");
         assert_eq!(embed.status, 200);
         assert!(embed.headers.iter().any(|(name, value)| {
@@ -2372,7 +2346,7 @@ mod tests {
         }));
         let embed = String::from_utf8(embed.body).expect("embedded page UTF-8");
         assert!(embed.contains("<header data-page-header hidden>"));
-        assert!(embed.contains("<main>playground</main>"));
+        assert!(embed.contains("<main>database shell</main>"));
         let embed_with_slash = playground_asset(directory.path(), identity, "/playground/embed/");
         assert_eq!(embed_with_slash.status, 200);
         let script = playground_asset(directory.path(), identity, "/playground/assets/app.js");
@@ -2384,17 +2358,43 @@ mod tests {
                 .any(|(name, value)| name == "X-Content-Type-Options" && value == "nosniff")
         );
         assert_eq!(script.content_type, "text/javascript; charset=utf-8");
-        assert_eq!(script.body, b"console.log('ready')");
+        assert_eq!(script.body, b"globalThis.ornaPlaygroundReady = true;");
+        let stylesheet =
+            playground_asset(directory.path(), identity, "/playground/assets/style.css");
+        assert_eq!(stylesheet.status, 200);
+        assert_eq!(stylesheet.content_type, "text/css; charset=utf-8");
+        assert_eq!(stylesheet.body, b"body { color: #202122; }");
+        assert!(!directory.path().join("playground/web-ui/dist").exists());
+        let uncommitted_asset = playground_asset(
+            directory.path(),
+            identity,
+            "/playground/assets/uncommitted.js",
+        );
+        assert_eq!(uncommitted_asset.status, 404);
 
         let traversal =
             playground_asset(directory.path(), identity, "/playground/%2e%2e/README.txt");
         assert_eq!(traversal.status, 400);
 
         std::fs::write(
-            dist.join("index.html"),
-            "<!doctype html><html><body><main>stale page</main></body></html>",
+            asset_directory.join("asset-696e6465782e68746d6c.orna"),
+            ASSET_STALE_INDEX,
         )
-        .expect("replace the page with a stale build lacking the embed marker");
+        .expect("replace the shell row with one lacking the embed marker");
+        git_succeeds(directory.path(), &["add", "playground/Asset"]);
+        git_succeeds(
+            directory.path(),
+            &[
+                "-c",
+                "user.name=kierandrewett",
+                "-c",
+                "user.email=kieran@drewett.dev",
+                "commit",
+                "--quiet",
+                "-m",
+                "replace playground asset record",
+            ],
+        );
         let stale_embed = playground_asset(directory.path(), identity, "/playground/embed");
         assert_eq!(stale_embed.status, 503);
     }
@@ -2423,6 +2423,124 @@ mod tests {
         assert!(!has_playground_sample_table(
             "pub table Sample(id: Int) { name: Str, source: Str }"
         ));
+    }
+
+    #[test]
+    fn playground_asset_records_match_the_declared_table_and_path_key() {
+        const PLAYGROUND_SCHEMA: &str = include_str!("../tests/fixtures/playground-schema.orna");
+        const ASSET_APP: &str = include_str!("../tests/fixtures/playground-asset-app.orna");
+        const ASSET_PRESENTATION: &str =
+            include_str!("../tests/fixtures/playground-asset-presentation.orna");
+        const ASSET_STYLE: &str = include_str!("../tests/fixtures/playground-asset-style.orna");
+        const ROUTE_PAGE: &str = include_str!("../tests/fixtures/playground-route-page.orna");
+        const ENTRY_PAGE: &str = include_str!("../tests/fixtures/playground-entry-page.orna");
+
+        assert!(has_playground_asset_table(PLAYGROUND_SCHEMA));
+        assert!(has_playground_route_table(PLAYGROUND_SCHEMA));
+        assert!(has_playground_entry_table(PLAYGROUND_SCHEMA));
+        let parsed_presentation = parse_row(ASSET_PRESENTATION);
+        assert!(
+            parsed_presentation.is_ok(),
+            "presentation asset row parse: {:#?}",
+            parsed_presentation.diagnostics
+        );
+        assert_eq!(
+            decode_playground_asset(ASSET_APP, "asset-6173736574732f6170702e6a73"),
+            Some((
+                "assets/app.js".into(),
+                "text/javascript; charset=utf-8".into(),
+                "globalThis.ornaPlaygroundReady = true;".into(),
+            ))
+        );
+        assert_eq!(
+            decode_playground_asset(
+                ASSET_PRESENTATION,
+                "asset-6173736574732f70726573656e746174696f6e2e6d6a73"
+            ),
+            Some((
+                "assets/presentation.mjs".into(),
+                "text/javascript; charset=utf-8".into(),
+                "export class LivePresentation {}".into(),
+            ))
+        );
+        assert_eq!(decode_playground_asset(ASSET_APP, "different-id"), None);
+        assert_eq!(
+            decode_playground_asset(ASSET_STYLE, "asset-6173736574732f7374796c652e637373"),
+            Some((
+                "assets/style.css".into(),
+                "text/css; charset=utf-8".into(),
+                "body { color: #202122; }".into(),
+            ))
+        );
+        assert!(!has_playground_asset_table(
+            "pub table Asset(id: Int) { path: Str, media_type: Str, content: Str }"
+        ));
+        assert!(!has_playground_route_table(
+            "pub table Route(id: Int) { path: Str, entry: Str }"
+        ));
+        assert!(!has_playground_entry_table(
+            "pub table Entry(id: Str) { asset_path: Int, kind: Str }"
+        ));
+        assert_eq!(
+            decode_playground_route(ROUTE_PAGE, "route-2f706c617967726f756e642f"),
+            Some(("/playground/".into(), "entry-page".into()))
+        );
+        assert_eq!(decode_playground_route(ROUTE_PAGE, "different-id"), None);
+        assert_eq!(
+            decode_playground_entry(ENTRY_PAGE, "entry-page"),
+            Some(("index.html".into(), PlaygroundEntryKind::Page))
+        );
+        assert_eq!(decode_playground_entry(ENTRY_PAGE, "different-id"), None);
+        assert_eq!(
+            normalize_playground_route_path("/playground"),
+            Some("/playground/".into())
+        );
+        assert_eq!(
+            normalize_playground_route_path("/playground/embed/"),
+            Some("/playground/embed".into())
+        );
+        assert_eq!(
+            normalize_playground_route_path("/playground/%2e%2e/README.txt"),
+            None
+        );
+    }
+
+    #[test]
+    fn playground_example_catalog_rows_decode_for_asset_namespace() {
+        const ROUTE: &str =
+            include_str!("../tests/fixtures/playground-route-example-catalog-style.orna");
+        const ENTRY: &str =
+            include_str!("../tests/fixtures/playground-entry-example-catalog-style.orna");
+        const ASSET: &str =
+            include_str!("../tests/fixtures/playground-asset-example-catalog-style.orna");
+
+        let entry_id = "entry-asset-6173736574732f6578616d706c65732e637373";
+        let asset_id = "asset-6173736574732f6578616d706c65732e637373";
+        assert_eq!(
+            decode_playground_route(
+                ROUTE,
+                "route-2f706c617967726f756e642f6173736574732f6578616d706c65732e637373",
+            ),
+            Some(("/playground/assets/examples.css".into(), entry_id.into()))
+        );
+        assert_eq!(
+            decode_playground_entry(ENTRY, entry_id),
+            Some(("assets/examples.css".into(), PlaygroundEntryKind::Asset))
+        );
+        let parsed_asset = parse_row(ASSET);
+        assert!(
+            parsed_asset.is_ok(),
+            "catalog stylesheet row parse: {:#?}",
+            parsed_asset.diagnostics
+        );
+        assert_eq!(
+            decode_playground_asset(ASSET, asset_id),
+            Some((
+                "assets/examples.css".into(),
+                "text/css; charset=utf-8".into(),
+                "body { color: #202122; }".into(),
+            ))
+        );
     }
 
     #[test]

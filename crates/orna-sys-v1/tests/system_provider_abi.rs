@@ -13,6 +13,10 @@ use serde_json::Value;
 
 const PROVIDER_MAP_ENTRY_EDGE_FIXTURE: &str =
     include_str!("fixtures/provider-map-entry-edges.json");
+const PROVIDER_TUPLE_ENTRY_EDGE_FIXTURE: &str =
+    include_str!("fixtures/provider-tuple-entry-edges.json");
+const PROVIDER_SCHEMA_CAPTURE_EDGE_FIXTURE: &str =
+    include_str!("fixtures/provider-schema-capture-edges.json");
 
 #[path = "../build_host.rs"]
 #[allow(dead_code)]
@@ -2432,8 +2436,8 @@ fn provider_map_entry_edges_preserve_generated_binding_and_dispatch_contracts() 
                     Argument { name, value }
                 })
                 .collect::<Vec<_>>();
-            let argument_map = ArgumentMap::new(source_entries.iter().cloned())
-                .unwrap_or_else(|error| {
+            let argument_map =
+                ArgumentMap::new(source_entries.iter().cloned()).unwrap_or_else(|error| {
                     panic!("{case_name} fixture forms an argument map: {error:?}")
                 });
             let reversed_map = ArgumentMap::new(source_entries.iter().rev().cloned())
@@ -2559,6 +2563,647 @@ fn provider_map_entry_edges_preserve_generated_binding_and_dispatch_contracts() 
             + direct_routes
             + registry_routes
             + 1
+    );
+}
+
+#[test]
+fn provider_tuple_entry_edges_preserve_generated_binding_and_dispatch_contracts() {
+    const OPERATIONS: [&str; 4] = [
+        "sys.invoke(Value)",
+        "sys.invoke<T>",
+        "sys.start(Value)",
+        "sys.start<T>",
+    ];
+
+    let generated_schema = build_provider::generate_provider_registry_schema()
+        .expect("tuple-entry provider schema regenerates from its typed source");
+    assert_eq!(generated_schema, system_provider_abi_schema_json());
+    build_host::validate_json_against_schema(system_provider_abi_json(), &generated_schema)
+        .expect("embedded tuple-entry provider contracts conform to the generated schema");
+
+    let fixture: Value = serde_json::from_str(PROVIDER_TUPLE_ENTRY_EDGE_FIXTURE)
+        .expect("crate-local provider tuple-entry edge fixture is valid JSON");
+    let cases = fixture["cases"]
+        .as_array()
+        .expect("provider tuple-entry fixture has cases");
+    assert_eq!(cases.len(), 4);
+    let fixture_tuple_entries = cases
+        .iter()
+        .map(|case| {
+            case["entries"]
+                .as_array()
+                .expect("tuple-entry case has an entries array")
+                .len()
+        })
+        .sum::<usize>();
+    assert_eq!(fixture_tuple_entries, 5);
+
+    let table = system_dispatch_table();
+    let registry = ProviderRoleRegistry::from_baked_abi(table)
+        .expect("schema-validated provider roles resolve from the generated table");
+    let mut generated_bindings = 0;
+    let mut tuple_entry_routes = 0;
+    let mut protected_redactions = 0;
+    let mut direct_routes = 0;
+    let mut registry_routes = 0;
+
+    for operation_name in OPERATIONS {
+        let contract = table
+            .operation(operation_name)
+            .expect("tuple-entry operation exists in the generated typed provider table");
+        let generated = system_function_descriptor(operation_name)
+            .expect("tuple-entry operation has a macro-generated binding");
+        assert_eq!(generated.signature, contract.signature.source);
+        assert_eq!(contract.effects.iter().next(), Some(generated.effect));
+        let map_indexes = contract
+            .signature
+            .parameters
+            .iter()
+            .enumerate()
+            .filter_map(|(index, parameter)| (parameter.name == "arguments").then_some(index))
+            .collect::<Vec<_>>();
+        assert_eq!(map_indexes, [1], "one fixed map slot in {operation_name}");
+        assert_eq!(
+            contract.signature.parameters[map_indexes[0]].ty,
+            AbiType::Named("sys.ArgumentMap".to_owned())
+        );
+        generated_bindings += 1;
+
+        let role = contract
+            .role
+            .as_ref()
+            .expect("tuple-entry operation has a provider role");
+        let offer = registry
+            .resolve(role.as_str())
+            .expect("tuple-entry provider offer resolves")
+            .clone();
+        let expected_argument_types = contract
+            .signature
+            .parameters
+            .iter()
+            .map(|parameter| parameter.ty.canonical())
+            .collect::<Vec<_>>();
+
+        for case in cases {
+            let case_name = case["name"]
+                .as_str()
+                .expect("tuple-entry case has a stable name");
+            let source_entries = case["entries"]
+                .as_array()
+                .expect("tuple-entry case has an entries array")
+                .iter()
+                .map(|entry| {
+                    let name = entry["name"]
+                        .as_str()
+                        .expect("tuple entry has a string key")
+                        .to_owned();
+                    let static_type = TypeId::new(
+                        entry["type"]
+                            .as_str()
+                            .expect("tuple entry has a static type"),
+                    );
+                    assert!(
+                        static_type.as_str().starts_with('(')
+                            && static_type.as_str().ends_with(')'),
+                        "{case_name} entry {name} retains a tuple type"
+                    );
+                    let canonical = entry["canonical"]
+                        .as_str()
+                        .expect("tuple entry has canonical fixture bytes")
+                        .as_bytes()
+                        .to_vec();
+                    let value = if entry["protected"].as_bool() == Some(true) {
+                        TypedValue::protected(static_type, canonical)
+                    } else {
+                        TypedValue::public(static_type, canonical)
+                    };
+                    Argument { name, value }
+                })
+                .collect::<Vec<_>>();
+            let argument_map = ArgumentMap::new(source_entries.iter().cloned())
+                .unwrap_or_else(|error| {
+                    panic!("{case_name} fixture forms an argument map: {error:?}")
+                });
+            let reversed_map = ArgumentMap::new(source_entries.iter().rev().cloned())
+                .unwrap_or_else(|error| {
+                    panic!("reversed {case_name} fixture forms an argument map: {error:?}")
+                });
+            assert_eq!(argument_map, reversed_map, "{case_name} order is canonical");
+
+            let encoded_entries = argument_map
+                .entries()
+                .map(|(name, value)| (name, value.static_type().as_str(), value.canonical()))
+                .collect::<Vec<_>>();
+            let map_payload = serde_json::to_vec(&encoded_entries)
+                .expect("tuple-entry edge payload has deterministic JSON bytes");
+            let reversed_payload = serde_json::to_vec(
+                &reversed_map
+                    .entries()
+                    .map(|(name, value)| (name, value.static_type().as_str(), value.canonical()))
+                    .collect::<Vec<_>>(),
+            )
+            .expect("reversed tuple-entry payload has deterministic JSON bytes");
+            assert_eq!(map_payload, reversed_payload);
+            for entry in case["entries"].as_array().expect("entries are present") {
+                if entry["protected"].as_bool() == Some(true) {
+                    assert!(
+                        !String::from_utf8_lossy(&map_payload)
+                            .contains(entry["canonical"].as_str().expect("protected value")),
+                        "{case_name} payload withholds protected tuple-entry bytes"
+                    );
+                    protected_redactions += 1;
+                }
+            }
+
+            let arguments = contract
+                .signature
+                .parameters
+                .iter()
+                .enumerate()
+                .map(|(index, parameter)| {
+                    let canonical = if index == map_indexes[0] {
+                        map_payload.clone()
+                    } else {
+                        format!("{case_name}-{}", parameter.name).into_bytes()
+                    };
+                    TypedValue::public(TypeId::new(parameter.ty.canonical()), canonical)
+                })
+                .collect::<Vec<_>>();
+            let result = TypedValue::public(
+                TypeId::new(contract.signature.result.canonical()),
+                format!("tuple-entry-{operation_name}-{case_name}").into_bytes(),
+            );
+            let provider_for = || ArgumentMapEdgeProvider {
+                offer: offer.clone(),
+                operation: contract.id.clone(),
+                expected_argument_types: expected_argument_types.clone(),
+                expected_map_payload: map_payload.clone(),
+                result: result.clone(),
+                calls: AtomicUsize::new(0),
+            };
+
+            let direct_provider = provider_for();
+            assert_eq!(
+                table
+                    .dispatch_to_provider(generated.name, &direct_provider, &arguments, |_| Ok(()))
+                    .expect("direct route accepts the schema-bound tuple-entry edge"),
+                orna_sys_v1::SystemDispatchResult::Returned(result.clone()),
+                "direct route preserves {operation_name}/{case_name}"
+            );
+            assert_eq!(direct_provider.calls.load(Ordering::SeqCst), 1);
+            direct_routes += 1;
+
+            let registry_provider = provider_for();
+            assert_eq!(
+                registry
+                    .dispatch_to_provider(
+                        table,
+                        generated.name,
+                        &registry_provider,
+                        &arguments,
+                        |_| Ok(()),
+                    )
+                    .expect("selected-provider route accepts the schema-bound tuple-entry edge"),
+                orna_sys_v1::SystemDispatchResult::Returned(result),
+                "selected-provider route preserves {operation_name}/{case_name}"
+            );
+            assert_eq!(registry_provider.calls.load(Ordering::SeqCst), 1);
+            registry_routes += 1;
+            tuple_entry_routes += source_entries.len();
+        }
+    }
+
+    let operation_name = "sys.invoke(Value)";
+    let contract = table
+        .operation(operation_name)
+        .expect("generated table retains sys.invoke(Value)");
+    let generated = system_function_descriptor(operation_name).unwrap();
+    let role = contract.role.as_ref().expect("invoke has a provider role");
+    let offer = registry.resolve(role.as_str()).unwrap().clone();
+    let case = cases
+        .iter()
+        .find(|case| case["name"] == "single-tuple")
+        .expect("tuple fixture has a single-tuple validation case");
+    let validation_entries = case["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|entry| Argument {
+            name: entry["name"].as_str().unwrap().to_owned(),
+            value: TypedValue::public(
+                TypeId::new(entry["type"].as_str().unwrap()),
+                entry["canonical"].as_str().unwrap().as_bytes().to_vec(),
+            ),
+        })
+        .collect::<Vec<_>>();
+    let validation_payload = serde_json::to_vec(
+        &ArgumentMap::new(validation_entries)
+            .unwrap()
+            .entries()
+            .map(|(name, value)| (name, value.static_type().as_str(), value.canonical()))
+            .collect::<Vec<_>>(),
+    )
+    .unwrap();
+    let validation_types = contract
+        .signature
+        .parameters
+        .iter()
+        .map(|parameter| parameter.ty.canonical())
+        .collect::<Vec<_>>();
+    let arguments = contract
+        .signature
+        .parameters
+        .iter()
+        .enumerate()
+        .map(|(index, parameter)| {
+            let static_type = if index == 1 {
+                "sys.ArgumentMap".to_owned()
+            } else {
+                parameter.ty.canonical()
+            };
+            TypedValue::public(
+                TypeId::new(static_type),
+                if index == 1 {
+                    validation_payload.clone()
+                } else {
+                    parameter.name.as_bytes().to_vec()
+                },
+            )
+        })
+        .collect::<Vec<_>>();
+    let mut wrong_argument_types = arguments.clone();
+    wrong_argument_types[1] =
+        TypedValue::public(TypeId::new("sys.Value"), validation_payload.clone());
+    let argument_diagnostic = ProviderDiagnostic::ArgumentTypeMismatch {
+        operation: contract.id.clone(),
+        parameter: "arguments".to_owned(),
+        expected: "sys.ArgumentMap".to_owned(),
+        actual: "sys.Value".to_owned(),
+    };
+    let provider_for = |result: TypedValue| ArgumentMapEdgeProvider {
+        offer: offer.clone(),
+        operation: contract.id.clone(),
+        expected_argument_types: validation_types.clone(),
+        expected_map_payload: validation_payload.clone(),
+        result,
+        calls: AtomicUsize::new(0),
+    };
+    let invalid_direct_provider = provider_for(TypedValue::public(
+        TypeId::new(contract.signature.result.canonical()),
+        b"unused".to_vec(),
+    ));
+    assert_eq!(
+        table.dispatch_to_provider(
+            generated.name,
+            &invalid_direct_provider,
+            &wrong_argument_types,
+            |_| Ok(())
+        ),
+        Err(argument_diagnostic.clone())
+    );
+    assert_eq!(invalid_direct_provider.calls.load(Ordering::SeqCst), 0);
+    let invalid_registry_provider = provider_for(TypedValue::public(
+        TypeId::new(contract.signature.result.canonical()),
+        b"unused".to_vec(),
+    ));
+    assert_eq!(
+        registry.dispatch_to_provider(
+            table,
+            generated.name,
+            &invalid_registry_provider,
+            &wrong_argument_types,
+            |_| Ok(())
+        ),
+        Err(argument_diagnostic)
+    );
+    assert_eq!(invalid_registry_provider.calls.load(Ordering::SeqCst), 0);
+
+    let wrong_result_type = "sys.TupleEntryWrongResult";
+    let result_diagnostic = ProviderDiagnostic::ResultTypeMismatch {
+        operation: contract.id.clone(),
+        expected: contract.signature.result.canonical(),
+        actual: wrong_result_type.to_owned(),
+    };
+    let wrong_direct_provider = provider_for(TypedValue::public(
+        TypeId::new(wrong_result_type),
+        b"wrong".to_vec(),
+    ));
+    assert_eq!(
+        table.dispatch_to_provider(
+            generated.name,
+            &wrong_direct_provider,
+            &arguments,
+            |_| Ok(())
+        ),
+        Err(result_diagnostic.clone())
+    );
+    assert_eq!(wrong_direct_provider.calls.load(Ordering::SeqCst), 1);
+    let wrong_registry_provider = provider_for(TypedValue::public(
+        TypeId::new(wrong_result_type),
+        b"wrong".to_vec(),
+    ));
+    assert_eq!(
+        registry.dispatch_to_provider(
+            table,
+            generated.name,
+            &wrong_registry_provider,
+            &arguments,
+            |_| Ok(())
+        ),
+        Err(result_diagnostic)
+    );
+    assert_eq!(wrong_registry_provider.calls.load(Ordering::SeqCst), 1);
+
+    assert_eq!(generated_bindings, OPERATIONS.len());
+    assert_eq!(tuple_entry_routes, fixture_tuple_entries * OPERATIONS.len());
+    assert_eq!(protected_redactions, OPERATIONS.len());
+    assert_eq!(direct_routes, OPERATIONS.len() * cases.len());
+    assert_eq!(registry_routes, direct_routes);
+    println!(
+        "provider_tuple_entry_edge_parity operations={generated_bindings} cases={} fixture_tuple_entries={fixture_tuple_entries} tuple_entry_routes={tuple_entry_routes} protected_redactions={protected_redactions} schema_validated=1 direct_routes={direct_routes} registry_routes={registry_routes} argument_type_rejections=2 result_type_rejections=2 total_cases={}",
+        cases.len(),
+        generated_bindings
+            + cases.len()
+            + fixture_tuple_entries
+            + tuple_entry_routes
+            + protected_redactions
+            + direct_routes
+            + registry_routes
+            + 4
+            + 1
+    );
+}
+
+#[test]
+fn provider_schema_capture_edges_preserve_dispatch_validation() {
+    let fixture: Value = serde_json::from_str(PROVIDER_SCHEMA_CAPTURE_EDGE_FIXTURE)
+        .expect("crate-local provider schema-capture fixture is valid JSON");
+    let operation_name = fixture["operation"]
+        .as_str()
+        .expect("schema-capture fixture identifies a provider operation");
+    let provider_name = fixture["dynamic_provider"]
+        .as_str()
+        .expect("schema-capture fixture identifies a dynamic provider");
+    let baseline_json = system_provider_abi_json();
+    let baseline: Value =
+        serde_json::from_str(baseline_json).expect("embedded provider registry is valid JSON");
+    let schema_json = build_provider::generate_provider_registry_schema()
+        .expect("provider schema-capture schema regenerates from its typed source");
+    assert_eq!(schema_json, system_provider_abi_schema_json());
+    build_host::validate_json_against_schema(baseline_json, &schema_json)
+        .expect("embedded provider registry conforms to its generated schema");
+    let baseline_table = SystemProviderAbi::from_json(baseline_json)
+        .expect("embedded provider registry parses into the dispatch table");
+
+    let operation_index = baseline["operations"]
+        .as_array()
+        .expect("provider registry has operation rows")
+        .iter()
+        .position(|operation| operation["name"] == operation_name)
+        .expect("schema-capture operation exists in the provider registry");
+    let role_annotation = baseline["operations"][operation_index]["role"]
+        .as_str()
+        .expect("schema-capture operation has a provider role");
+    let role_name = role_annotation
+        .split_once('@')
+        .expect("provider role annotation captures its version")
+        .0;
+    let role_index = baseline["roles"]
+        .as_array()
+        .expect("provider registry has role rows")
+        .iter()
+        .position(|role| role["name"] == role_name)
+        .expect("schema-capture operation role exists in the provider registry");
+    let baseline_role = baseline_table
+        .role(role_name)
+        .expect("schema-capture operation role parses into the typed table");
+    let cases = fixture["cases"]
+        .as_array()
+        .expect("schema-capture fixture has edge cases");
+    assert_eq!(cases.len(), 4);
+
+    let mut schema_acceptances = 0;
+    let mut schema_rejections = 0;
+    let mut typed_acceptances = 0;
+    let mut typed_rejections = 0;
+    let mut direct_route_denials = 0;
+    let mut selected_route_denials = 0;
+    let mut selected_route_successes = 0;
+    let mut provider_invocations = 0;
+
+    for case in cases {
+        let case_name = case["name"]
+            .as_str()
+            .expect("schema-capture case has a stable name");
+        let field = case["field"]
+            .as_str()
+            .expect("schema-capture case identifies a nullable field");
+        let omit = case["omit"]
+            .as_bool()
+            .expect("schema-capture case states field presence");
+        let mut captured = baseline.clone();
+        match field {
+            "operation.role" => {
+                let operation = captured["operations"][operation_index]
+                    .as_object_mut()
+                    .expect("provider operation row is an object");
+                if omit {
+                    operation.remove("role");
+                } else {
+                    operation.insert("role".to_owned(), case["value"].clone());
+                    if case["value"].is_null() {
+                        let role_operations = captured["roles"][role_index]["operations"]
+                            .as_array_mut()
+                            .expect("provider role captures its operation list");
+                        role_operations.retain(|operation| operation != operation_name);
+                        assert!(
+                            !role_operations.is_empty(),
+                            "null-role capture keeps the shared role non-empty"
+                        );
+                    }
+                }
+            }
+            "role.builtin_provider" => {
+                let role = captured["roles"][role_index]
+                    .as_object_mut()
+                    .expect("provider role row is an object");
+                if let Some(required) = case.get("required").and_then(Value::as_bool) {
+                    role.insert("required".to_owned(), Value::Bool(required));
+                }
+                if omit {
+                    role.remove("builtin_provider");
+                } else {
+                    role.insert("builtin_provider".to_owned(), case["value"].clone());
+                }
+            }
+            other => panic!("unexpected schema-capture field {other:?}"),
+        }
+
+        let captured_json = captured.to_string();
+        let schema_result = build_host::validate_json_against_schema(&captured_json, &schema_json);
+        let schema_accepts = case["schema_accepts"]
+            .as_bool()
+            .expect("schema-capture fixture records schema acceptance");
+        assert_eq!(
+            schema_result.is_ok(),
+            schema_accepts,
+            "generated schema capture for {case_name}"
+        );
+        if schema_accepts {
+            schema_acceptances += 1;
+        } else {
+            assert!(
+                schema_result
+                    .expect_err("omitted nullable fields violate the schema")
+                    .contains("missing required field"),
+                "schema identifies omitted nullable property in {case_name}"
+            );
+            schema_rejections += 1;
+        }
+
+        let parsed = SystemProviderAbi::from_json(&captured_json);
+        let typed_accepts = case["typed_parse_accepts"]
+            .as_bool()
+            .expect("schema-capture fixture records typed parser acceptance");
+        assert_eq!(
+            parsed.is_ok(),
+            typed_accepts,
+            "typed schema capture for {case_name}"
+        );
+        let table = match parsed {
+            Ok(table) => {
+                typed_acceptances += 1;
+                table
+            }
+            Err(error) => {
+                assert_eq!(
+                    error,
+                    orna_sys_v1::ProviderAbiError::InvalidJson,
+                    "omitted nullable field is not captured by the typed parser"
+                );
+                typed_rejections += 1;
+                continue;
+            }
+        };
+        table
+            .validate()
+            .unwrap_or_else(|error| panic!("captured dispatch table validates: {error:?}"));
+
+        let contract = table
+            .operation(operation_name)
+            .expect("captured provider retains the generated operation");
+        let generated = system_function_descriptor(operation_name)
+            .expect("captured provider operation retains its generated binding");
+        assert_eq!(generated.signature, contract.signature.source);
+        assert_eq!(contract.effects.iter().next(), Some(generated.effect));
+        let offer = ProviderOffer {
+            provider: ProviderId::new(provider_name).expect("fixture provider ID is valid"),
+            role: baseline_role.id.clone(),
+            version: baseline_role.version,
+            effects: baseline_role.effects.clone(),
+        };
+        let expected_argument_types = contract
+            .signature
+            .parameters
+            .iter()
+            .map(|parameter| parameter.ty.canonical())
+            .collect::<Vec<_>>();
+        let arguments = contract
+            .signature
+            .parameters
+            .iter()
+            .map(|parameter| {
+                TypedValue::public(
+                    TypeId::new(parameter.ty.canonical()),
+                    parameter.name.as_bytes().to_vec(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let result = TypedValue::public(
+            TypeId::new(contract.signature.result.canonical()),
+            case_name.as_bytes().to_vec(),
+        );
+        let provider = InvokeValueProvider {
+            offer: offer.clone(),
+            operation: contract.id.clone(),
+            argument_types: expected_argument_types,
+            response: Ok(result.clone()),
+            calls: AtomicUsize::new(0),
+        };
+
+        match case["dispatch"].as_str() {
+            Some("provider_not_executable") => {
+                assert!(matches!(
+                    table.dispatch_to_provider(operation_name, &provider, &arguments, |_| Ok(())),
+                    Err(ProviderDiagnostic::ProviderNotExecutable(_))
+                ));
+                direct_route_denials += 1;
+                let registry = ProviderRoleRegistry::from_baked_abi(&table)
+                    .expect("unbound generated operation leaves other baked roles valid");
+                assert!(matches!(
+                    registry.dispatch_to_provider(
+                        &table,
+                        operation_name,
+                        &provider,
+                        &arguments,
+                        |_| Ok(())
+                    ),
+                    Err(ProviderDiagnostic::ProviderNotExecutable(_))
+                ));
+                selected_route_denials += 1;
+                assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
+            }
+            Some("direct_unavailable_selected_success") => {
+                assert!(matches!(
+                    table.dispatch_to_provider(operation_name, &provider, &arguments, |_| Ok(())),
+                    Err(ProviderDiagnostic::RoleUnavailable { .. })
+                ));
+                direct_route_denials += 1;
+                let mut registry = ProviderRoleRegistry::from_baked_abi(&table)
+                    .expect("optional schema-captured role permits dynamic selection");
+                registry
+                    .bind(offer)
+                    .expect("dynamic offer satisfies the captured role contract");
+                assert_eq!(
+                    registry
+                        .dispatch_to_provider(
+                            &table,
+                            operation_name,
+                            &provider,
+                            &arguments,
+                            |_| Ok(())
+                        )
+                        .expect("selected provider route accepts the captured role"),
+                    orna_sys_v1::SystemDispatchResult::Returned(result)
+                );
+                selected_route_successes += 1;
+                assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
+                provider_invocations += 1;
+            }
+            dispatch => panic!("unexpected dispatch expectation in {case_name}: {dispatch:?}"),
+        }
+    }
+
+    assert_eq!(schema_acceptances, 2);
+    assert_eq!(schema_rejections, 2);
+    assert_eq!(typed_acceptances, schema_acceptances);
+    assert_eq!(typed_rejections, schema_rejections);
+    assert_eq!(direct_route_denials, 2);
+    assert_eq!(selected_route_denials, 1);
+    assert_eq!(selected_route_successes, 1);
+    assert_eq!(provider_invocations, 1);
+    println!(
+        "provider_schema_capture_dispatch_parity cases={} schema_acceptances={schema_acceptances} schema_rejections={schema_rejections} typed_acceptances={typed_acceptances} typed_rejections={typed_rejections} direct_route_denials={direct_route_denials} selected_route_denials={selected_route_denials} selected_route_successes={selected_route_successes} provider_invocations={provider_invocations} total_cases={}",
+        cases.len(),
+        cases.len()
+            + schema_acceptances
+            + schema_rejections
+            + typed_acceptances
+            + typed_rejections
+            + direct_route_denials
+            + selected_route_denials
+            + selected_route_successes
+            + provider_invocations
     );
 }
 

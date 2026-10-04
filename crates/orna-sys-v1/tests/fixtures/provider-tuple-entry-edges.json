@@ -1,0 +1,28 @@
+{
+  "cases": [
+    {
+      "name": "empty",
+      "entries": []
+    },
+    {
+      "name": "single-tuple",
+      "entries": [
+        { "name": "pair", "type": "(Str, Int)", "canonical": "tuple-entry:zero" }
+      ]
+    },
+    {
+      "name": "nested-optional-control",
+      "entries": [
+        { "name": "nested", "type": "((Bool, Str), [Int?])", "canonical": "nested-tuple-entry:λ" },
+        { "name": "optional", "type": "(Str, Int?)", "canonical": "tuple-entry:null-component" },
+        { "name": "control", "type": "(Bytes, Str)", "canonical": "\u0000\u001f tuple-entry" }
+      ]
+    },
+    {
+      "name": "protected-tuple",
+      "entries": [
+        { "name": "secret", "type": "(SecretRef, Bytes)", "canonical": "tuple-entry-protected-sentinel", "protected": true }
+      ]
+    }
+  ]
+}

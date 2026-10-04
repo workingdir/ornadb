@@ -16,9 +16,11 @@ The checked-in editor files are generated from this metadata:
 | `editors/tree-sitter-orna/grammar.js` | Generated Tree-sitter grammar |
 | `editors/tree-sitter-orna/queries/highlights.scm` | Generated Tree-sitter token captures |
 | `editors/tree-sitter-orna/{tree-sitter.json,package.json}` | Tree-sitter package registration and release metadata |
-| `editors/vim/` | Vim syntax groups and `.orna` file detection |
-| `editors/emacs/orna-eglot.el` | Emacs font-lock mode and Eglot setup |
+| `editors/neovim/lua/orna/init.lua` | Native `.orna` LSP attachment |
+| `editors/vim/` | Vim syntax, filetype detection, and optional `vim-lsp` completion |
+| `editors/emacs/orna-eglot.el` | Emacs font-lock mode and Eglot attachment |
 | `editors/sublime/Orna.sublime-syntax` | Sublime Text lexical scopes |
+| `playground/web-ui/public/assets/orna-editor-config.json` | DB-served Monaco language configuration generated from the v1 lexer |
 
 Regenerate the files after changing syntax metadata, and check for drift with:
 
@@ -39,6 +41,45 @@ properties, namespaces, and variables. Configure `orna-lsp` separately to
 receive diagnostics, navigation, completion, and semantic tokens. Static
 editor grammars do not claim parser-equivalent context.
 
-Focused checks do not launch editor hosts. Tree-sitter generation is
-structurally checked by Node, and the grammar/query package is drift-checked as
-generated text.
+The playground fetches the generated Monaco configuration from
+`/playground/assets/orna-editor-config.json`. `orna-syntax-v1` generates its
+keywords, operators, brackets, and lexical rules from the same lexer used by
+the language server; the browser does not carry a second Orna vocabulary.
+
+## Attach the language server
+
+Neovim uses its native LSP client. Add `editors/neovim` to `runtimepath` and
+call `require("orna").setup()`; pass `cmd = { "/path/to/orna-lsp" }` when the
+server is not on `PATH`. The setup registers `.orna` filetype detection and
+attaches those buffers to `orna-lsp`. A completion plugin can use the attached
+client's LSP completion provider. The native client also exposes server hover
+through `vim.lsp.buf.hover()`, rename through `vim.lsp.buf.rename()`, references
+through `vim.lsp.buf.references()`, and syntax-v1 semantic tokens.
+
+Vim uses the optional [`vim-lsp`](https://github.com/prabirshrestha/vim-lsp)
+client. Add `editors/vim` and the `vim-lsp` plugin to `runtimepath`; the Orna
+plugin registers `orna-lsp` for the `orna` filetype and sets
+`omnifunc=lsp#complete`. Vim's omni completion (`Ctrl-X Ctrl-O` in insert mode)
+then requests completion items from the attached server. Set
+`g:orna_lsp_command` to a command list to use a non-default server path.
+
+Emacs uses Eglot. Load `editors/emacs/orna-eglot.el` and call
+`(orna-setup-eglot)` once; Orna buffers then attach through `eglot-ensure` and
+use Emacs's `completion-at-point` interface. Set `orna-eglot-server-command`
+to a command list before calling the setup function when `orna-lsp` is not on
+`PATH`. Eglot provides hover documentation through ElDoc and applies semantic
+token faces when its `eglot-semantic-tokens-mode` support is available.
+Eglot provides rename through `eglot-rename` and references through its xref
+backend.
+
+The `orna-lsp` integration suite exercises hover, rename, references, and six
+lexical semantic-token classes through Neovim's attached client. Emacs/Eglot
+proves hover, rename, and references through its attached server, plus
+semantic-token fontification when that Eglot feature is available. It also has
+optional Vim/`vim-lsp` completion probes. Host probes report `SKIP` when an
+editor, client runtime, or optional semantic-token support is unavailable.
+
+Generated artifact checks do not launch editor hosts. Tree-sitter generation
+is structurally checked by Node, and the grammar/query package is drift-checked
+as generated text. The `orna-lsp` integration tests separately launch supported
+editor hosts when their client dependencies are available.

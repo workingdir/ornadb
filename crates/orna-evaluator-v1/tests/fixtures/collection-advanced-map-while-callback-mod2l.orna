@@ -1,0 +1,2 @@
+fn optional_times_ten_unless_three(value: Int): Int? =
+    if value != 3 { Some(value * 10) } else { null };
