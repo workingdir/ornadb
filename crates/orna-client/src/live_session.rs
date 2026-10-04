@@ -1947,6 +1947,150 @@ mod tests {
     }
 
     #[test]
+    fn stale_correlated_moved_snapshot_keeps_live_sessions_fenced_independently() {
+        let limits = Limits::default();
+        let initial_children = vec![nested_present_child(18), nested_present_child(1)];
+        let initial = snapshot_with_children(0, "before-move", initial_children.clone());
+        assert!(Envelope::decode(&initial, limits).is_ok());
+
+        let mut first_io = MemoryIo::default();
+        first_io.incoming.push_back(initial.clone());
+        let mut second_io = MemoryIo::default();
+        second_io.incoming.push_back(initial.clone());
+        let mut first = LiveSessionDriver::new(
+            first_io,
+            [7; 16],
+            limits,
+            Renderer::default(),
+            Allocator::default(),
+        )
+        .unwrap();
+        let mut second = LiveSessionDriver::new(
+            second_io,
+            [7; 16],
+            limits,
+            Renderer::default(),
+            Allocator::default(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            block_on(first.receive_once()).unwrap(),
+            LiveSessionEvent::SnapshotPublished { revision: 0 }
+        );
+        assert_eq!(
+            block_on(second.receive_once()).unwrap(),
+            LiveSessionEvent::SnapshotPublished { revision: 0 }
+        );
+
+        let move_beyond_bound = delta_with_operations(
+            0,
+            1,
+            vec![move_between_paths_operation(
+                nested_child_path(0, 1),
+                nested_child_path(19, 0),
+            )],
+        );
+        assert!(move_beyond_bound.len() < limits.max_message_bytes);
+        assert!(Envelope::decode(&move_beyond_bound, limits).is_ok());
+        let first_original = first.presentation().published().cloned().unwrap();
+        let second_original = second.presentation().published().cloned().unwrap();
+        first.io.incoming.push_back(move_beyond_bound.clone());
+        second.io.incoming.push_back(move_beyond_bound);
+        assert!(matches!(
+            block_on(first.receive_once()),
+            Ok(LiveSessionEvent::ResyncSent { .. })
+        ));
+        assert!(matches!(
+            block_on(second.receive_once()),
+            Ok(LiveSessionEvent::ResyncSent { .. })
+        ));
+        assert_resync_frame(&first.io.sent[0]);
+        assert_resync_frame(&second.io.sent[0]);
+
+        let first_request = Envelope::decode(&first.io.sent[0], limits)
+            .unwrap()
+            .request
+            .expect("first moved-tree recovery request is correlated");
+        let second_request = Envelope::decode(&second.io.sent[0], limits)
+            .unwrap()
+            .request
+            .expect("second moved-tree recovery request is correlated");
+        let mut stale_request = first_request;
+        stale_request[0] ^= 0xff;
+        first.io.incoming.push_back(frame_with_request(
+            16,
+            [7; 16],
+            Some(stale_request),
+            snapshot_body_with_children(1, "stale-recovery", initial_children.clone()),
+        ));
+        assert!(matches!(
+            block_on(first.receive_once()),
+            Err(LiveSessionError::Protocol(
+                orna_protocol_v1::Error::InvalidMessage
+            ))
+        ));
+        assert_eq!(first.presentation().published(), Some(&first_original));
+        assert_eq!(first.renderer.trees, vec![snapshot_present(&initial)]);
+        assert_eq!(first.io.sent.len(), 1);
+        assert_eq!(second.presentation().published(), Some(&second_original));
+        assert_eq!(second.renderer.trees, vec![snapshot_present(&initial)]);
+
+        second.io.incoming.push_back(frame_with_request(
+            16,
+            [7; 16],
+            Some(second_request),
+            snapshot_body_with_children(1, "second-recovery", initial_children.clone()),
+        ));
+        assert_eq!(
+            block_on(second.receive_once()).unwrap(),
+            LiveSessionEvent::SnapshotPublished { revision: 1 }
+        );
+        second
+            .io
+            .incoming
+            .push_back(delta(1, 2, "second-after-recovery"));
+        assert_eq!(
+            block_on(second.receive_once()).unwrap(),
+            LiveSessionEvent::DeltaPublished { revision: 2 }
+        );
+        assert_eq!(first.presentation().published(), Some(&first_original));
+
+        first.io.incoming.push_back(frame_with_request(
+            16,
+            [7; 16],
+            Some(first_request),
+            snapshot_body_with_children(1, "first-recovery", initial_children.clone()),
+        ));
+        assert_eq!(
+            block_on(first.receive_once()).unwrap(),
+            LiveSessionEvent::SnapshotPublished { revision: 1 }
+        );
+        first
+            .io
+            .incoming
+            .push_back(delta(1, 2, "first-after-recovery"));
+        assert_eq!(
+            block_on(first.receive_once()).unwrap(),
+            LiveSessionEvent::DeltaPublished { revision: 2 }
+        );
+
+        let first_followup =
+            snapshot_with_children(2, "first-after-recovery", initial_children.clone());
+        let second_followup = snapshot_with_children(2, "second-after-recovery", initial_children);
+        assert_eq!(
+            first.presentation().published().unwrap().present(),
+            &snapshot_present(&first_followup)
+        );
+        assert_eq!(
+            second.presentation().published().unwrap().present(),
+            &snapshot_present(&second_followup)
+        );
+        assert_eq!(first.renderer.trees[2], snapshot_present(&first_followup));
+        assert_eq!(second.renderer.trees[2], snapshot_present(&second_followup));
+    }
+
+    #[test]
     fn bad_base_and_mid_patch_failure_send_resync_without_changing_tree() {
         let mut io = MemoryIo::default();
         io.incoming.push_back(snapshot(0));
