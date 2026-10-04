@@ -7,8 +7,12 @@ use std::{
 
 use serde_json::{Value, json};
 
+#[path = "support/syntax_v1_action_signature_contract.rs"]
+mod syntax_v1_action_signature_contract;
 #[path = "support/syntax_v1_depth_contract.rs"]
 mod syntax_v1_depth_contract;
+#[path = "support/syntax_v1_workspace_hierarchy_contract.rs"]
+mod syntax_v1_workspace_hierarchy_contract;
 
 const SOURCE: &str = include_str!("fixtures/expressions-v1.orna");
 const CALL_SOURCE: &str = include_str!("fixtures/call-v1.orna");
@@ -30,12 +34,20 @@ const WORKSPACE_HIERARCHY_PROVIDER_SOURCE: &str =
     include_str!("fixtures/workspace-hierarchy-provider-v1.orna");
 const WORKSPACE_HIERARCHY_CALLER_SOURCE: &str =
     include_str!("fixtures/workspace-hierarchy-caller-v1.orna");
+const CALL_HIERARCHY_DEPTH_PROVIDER_SOURCE: &str =
+    include_str!("fixtures/call-hierarchy-depth-provider-v1.orna");
+const CALL_HIERARCHY_DEPTH_CALLER_SOURCE: &str =
+    include_str!("fixtures/call-hierarchy-depth-caller-v1.orna");
+const CALL_HIERARCHY_DEPTH_MALFORMED_SOURCE: &str =
+    include_str!("fixtures/call-hierarchy-depth-malformed-v1.orna");
 const FOLDING_SELECTION_SOURCE: &str = include_str!("fixtures/folding-selection-v1.orna");
 const DOCUMENT_HIGHLIGHT_CODE_LENS_SOURCE: &str =
     include_str!("fixtures/document-highlight-code-lens-v1.orna");
 const TYPE_HIERARCHY_PROVIDER_SOURCE: &str =
     include_str!("fixtures/type-hierarchy-provider-v1.orna");
 const TYPE_HIERARCHY_CALLER_SOURCE: &str = include_str!("fixtures/type-hierarchy-caller-v1.orna");
+const INLINE_VALUE_LINKED_EDITING_SOURCE: &str =
+    include_str!("fixtures/inline-value-linked-editing-v1.orna");
 
 struct Client {
     child: Child,
@@ -142,6 +154,8 @@ fn initialize(client: &mut Client) {
         result["capabilities"]["codeLensProvider"]["resolveProvider"],
         false
     );
+    assert!(result["capabilities"]["inlineValueProvider"].is_object());
+    assert_eq!(result["capabilities"]["linkedEditingRangeProvider"], true);
     assert!(result["capabilities"]["typeHierarchyProvider"].is_object());
     assert_eq!(result["capabilities"]["monikerProvider"], true);
     assert_eq!(
@@ -1278,11 +1292,14 @@ fn signature_help_tracks_nested_arguments_and_named_parameter_indices() {
     initialize(&mut client);
     let diagnostics = open(&mut client, uri, SIGNATURE_ACTIONS_SOURCE);
     assert!(diagnostics["diagnostics"].as_array().unwrap().is_empty());
+    let requests = syntax_v1_action_signature_contract::request_data(
+        SIGNATURE_ACTIONS_SOURCE,
+        MISSING_SEMICOLON_SOURCE,
+    );
 
-    let tuple_value = SIGNATURE_ACTIONS_SOURCE.find("(1, 2)").unwrap() + "(1, ".len();
     let nested_argument = client.request(
         "textDocument/signatureHelp",
-        json!({"textDocument":{"uri":uri},"position":position_at(SIGNATURE_ACTIONS_SOURCE,tuple_value)}),
+        json!({"textDocument":{"uri":uri},"position":requests["signature_nested_tuple"]}),
     );
     assert!(
         nested_argument["signatures"][0]["label"]
@@ -1292,10 +1309,9 @@ fn signature_help_tracks_nested_arguments_and_named_parameter_indices() {
     );
     assert_eq!(nested_argument["activeParameter"], 0, "{nested_argument}");
 
-    let last_value = SIGNATURE_ACTIONS_SOURCE.find("last: 3").unwrap() + "last: ".len();
     let named_argument = client.request(
         "textDocument/signatureHelp",
-        json!({"textDocument":{"uri":uri},"position":position_at(SIGNATURE_ACTIONS_SOURCE,last_value)}),
+        json!({"textDocument":{"uri":uri},"position":requests["signature_named_argument"]}),
     );
     assert!(
         named_argument["signatures"][0]["label"]
@@ -1305,10 +1321,9 @@ fn signature_help_tracks_nested_arguments_and_named_parameter_indices() {
     );
     assert_eq!(named_argument["activeParameter"], 2, "{named_argument}");
 
-    let extra_value = SIGNATURE_ACTIONS_SOURCE.find("extra: value").unwrap() + "extra: ".len();
     let nested_named_argument = client.request(
         "textDocument/signatureHelp",
-        json!({"textDocument":{"uri":uri},"position":position_at(SIGNATURE_ACTIONS_SOURCE,extra_value)}),
+        json!({"textDocument":{"uri":uri},"position":requests["signature_nested_named_argument"]}),
     );
     assert!(
         nested_named_argument["signatures"][0]["label"]
@@ -1321,12 +1336,18 @@ fn signature_help_tracks_nested_arguments_and_named_parameter_indices() {
         "{nested_named_argument}"
     );
 
-    let shadow_call = SIGNATURE_ACTIONS_SOURCE.find("add(1)").unwrap() + 1;
     let shadowed_signature = client.request(
         "textDocument/signatureHelp",
-        json!({"textDocument":{"uri":uri},"position":position_at(SIGNATURE_ACTIONS_SOURCE,shadow_call)}),
+        json!({"textDocument":{"uri":uri},"position":requests["signature_shadowed_call"]}),
     );
     assert!(shadowed_signature.is_null(), "{shadowed_signature}");
+    syntax_v1_action_signature_contract::assert_signature_help_contract(
+        &nested_argument,
+        &named_argument,
+        &nested_named_argument,
+        &shadowed_signature,
+        "LSP protocol",
+    );
     client.shutdown();
 }
 
@@ -1337,6 +1358,10 @@ fn code_actions_offer_only_verified_missing_semicolon_fixes() {
     initialize(&mut client);
     let published = open(&mut client, uri, MISSING_SEMICOLON_SOURCE);
     let diagnostics = published["diagnostics"].as_array().unwrap();
+    let requests = syntax_v1_action_signature_contract::request_data(
+        SIGNATURE_ACTIONS_SOURCE,
+        MISSING_SEMICOLON_SOURCE,
+    );
     assert_eq!(
         diagnostics
             .iter()
@@ -1348,7 +1373,7 @@ fn code_actions_offer_only_verified_missing_semicolon_fixes() {
 
     let params = json!({
         "textDocument":{"uri":uri},
-        "range":range_at(MISSING_SEMICOLON_SOURCE, 0, MISSING_SEMICOLON_SOURCE.len()),
+        "range":requests["code_action_full_range"],
         "context":{"diagnostics":diagnostics,"only":["quickfix"]}
     });
     let actions = client.request("textDocument/codeAction", params.clone());
@@ -1382,18 +1407,22 @@ fn code_actions_offer_only_verified_missing_semicolon_fixes() {
 
     let mut non_quickfix_params = params.clone();
     non_quickfix_params["context"]["only"] = json!(["refactor"]);
-    assert_eq!(
-        client.request("textDocument/codeAction", non_quickfix_params),
-        json!([])
-    );
+    let non_quickfix = client.request("textDocument/codeAction", non_quickfix_params);
+    assert_eq!(non_quickfix, json!([]));
     let outside_diagnostic = json!({
         "textDocument":{"uri":uri},
-        "range":range_at(MISSING_SEMICOLON_SOURCE, 0, 1),
+        "range":requests["code_action_outside_range"],
         "context":{"diagnostics":diagnostics,"only":["quickfix"]}
     });
-    assert_eq!(
-        client.request("textDocument/codeAction", outside_diagnostic),
-        json!([])
+    let outside_range = client.request("textDocument/codeAction", outside_diagnostic);
+    assert_eq!(outside_range, json!([]));
+    syntax_v1_action_signature_contract::assert_code_action_contract(
+        MISSING_SEMICOLON_SOURCE,
+        uri,
+        &actions,
+        &non_quickfix,
+        &outside_range,
+        "LSP protocol",
     );
     client.shutdown();
 }
@@ -1610,6 +1639,199 @@ fn syntax_v1_semantic_tokens_and_inlay_hints_follow_scope_and_requested_range() 
 }
 
 #[test]
+fn inline_values_follow_stopped_scope_and_requested_ranges() {
+    let uri = "file:///workspace/inline-value-linked-editing-v1.orna";
+    let mut client = Client::spawn();
+    initialize(&mut client);
+    let diagnostics = open(&mut client, uri, INLINE_VALUE_LINKED_EDITING_SOURCE);
+    assert!(
+        diagnostics["diagnostics"].as_array().unwrap().is_empty(),
+        "{diagnostics}"
+    );
+
+    let copied_use = INLINE_VALUE_LINKED_EDITING_SOURCE
+        .find("copied\n    }")
+        .unwrap();
+    let stopped = range_at(
+        INLINE_VALUE_LINKED_EDITING_SOURCE,
+        copied_use,
+        copied_use + "copied".len(),
+    );
+    let all = client.request(
+        "textDocument/inlineValue",
+        json!({
+            "textDocument":{"uri":uri},
+            "range":range_at(INLINE_VALUE_LINKED_EDITING_SOURCE, 0, INLINE_VALUE_LINKED_EDITING_SOURCE.len()),
+            "context":{"frameId":7,"stoppedLocation":stopped}
+        }),
+    );
+    let all = all.as_array().unwrap();
+    assert_eq!(
+        all.iter()
+            .map(|value| value["variableName"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["input", "copied"]
+    );
+    let copied_initializer = INLINE_VALUE_LINKED_EDITING_SOURCE
+        .find("let copied: Int = input")
+        .unwrap()
+        + "let copied: Int = ".len();
+    assert_eq!(
+        all[0]["range"],
+        range_at(
+            INLINE_VALUE_LINKED_EDITING_SOURCE,
+            copied_initializer,
+            copied_initializer + "input".len()
+        )
+    );
+    assert_eq!(all[0]["caseSensitiveLookup"], false);
+    assert_eq!(
+        all[1]["range"],
+        range_at(
+            INLINE_VALUE_LINKED_EDITING_SOURCE,
+            copied_use,
+            copied_use + "copied".len()
+        )
+    );
+
+    let clipped = client.request(
+        "textDocument/inlineValue",
+        json!({
+            "textDocument":{"uri":uri},
+            "range":stopped,
+            "context":{"frameId":7,"stoppedLocation":stopped}
+        }),
+    );
+    assert_eq!(
+        clipped
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|value| value["variableName"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["copied"]
+    );
+
+    let shadow_use = INLINE_VALUE_LINKED_EDITING_SOURCE.rfind("input").unwrap();
+    let shadow_stop = range_at(
+        INLINE_VALUE_LINKED_EDITING_SOURCE,
+        shadow_use,
+        shadow_use + "input".len(),
+    );
+    let shadow = client.request(
+        "textDocument/inlineValue",
+        json!({
+            "textDocument":{"uri":uri},
+            "range":range_at(INLINE_VALUE_LINKED_EDITING_SOURCE, 0, INLINE_VALUE_LINKED_EDITING_SOURCE.len()),
+            "context":{"frameId":7,"stoppedLocation":shadow_stop}
+        }),
+    );
+    assert_eq!(shadow.as_array().unwrap().len(), 1, "{shadow}");
+    assert_eq!(shadow[0]["variableName"], "input");
+    assert_eq!(shadow[0]["range"], shadow_stop);
+
+    let comment_end = INLINE_VALUE_LINKED_EDITING_SOURCE.find('\n').unwrap();
+    let comment_range = range_at(INLINE_VALUE_LINKED_EDITING_SOURCE, 0, comment_end);
+    let empty = client.request(
+        "textDocument/inlineValue",
+        json!({
+            "textDocument":{"uri":uri},
+            "range":comment_range,
+            "context":{"frameId":7,"stoppedLocation":comment_range}
+        }),
+    );
+    assert_eq!(empty, json!([]));
+    client.shutdown();
+}
+
+#[test]
+fn linked_editing_tracks_exact_local_bindings_and_excludes_shadowed_names() {
+    let uri = "file:///workspace/inline-value-linked-editing-v1.orna";
+    let mut client = Client::spawn();
+    initialize(&mut client);
+    let diagnostics = open(&mut client, uri, INLINE_VALUE_LINKED_EDITING_SOURCE);
+    assert!(
+        diagnostics["diagnostics"].as_array().unwrap().is_empty(),
+        "{diagnostics}"
+    );
+
+    let inner_declaration = INLINE_VALUE_LINKED_EDITING_SOURCE
+        .find("let input")
+        .unwrap()
+        + "let ".len();
+    let inner_use = INLINE_VALUE_LINKED_EDITING_SOURCE.rfind("input").unwrap();
+    let inner = client.request(
+        "textDocument/linkedEditingRange",
+        json!({
+            "textDocument":{"uri":uri},
+            "position":position_at(INLINE_VALUE_LINKED_EDITING_SOURCE, inner_declaration)
+        }),
+    );
+    assert_eq!(
+        inner["ranges"],
+        json!([
+            range_at(
+                INLINE_VALUE_LINKED_EDITING_SOURCE,
+                inner_declaration,
+                inner_declaration + "input".len()
+            ),
+            range_at(
+                INLINE_VALUE_LINKED_EDITING_SOURCE,
+                inner_use,
+                inner_use + "input".len()
+            )
+        ])
+    );
+    assert!(inner["wordPattern"].is_null());
+
+    let outer_declaration = INLINE_VALUE_LINKED_EDITING_SOURCE
+        .find("shadow(input")
+        .unwrap()
+        + "shadow(".len();
+    let outer = client.request(
+        "textDocument/linkedEditingRange",
+        json!({
+            "textDocument":{"uri":uri},
+            "position":position_at(INLINE_VALUE_LINKED_EDITING_SOURCE, outer_declaration)
+        }),
+    );
+    let outer_ranges = outer["ranges"].as_array().unwrap();
+    let expected_outer_ranges = [
+        outer_declaration,
+        INLINE_VALUE_LINKED_EDITING_SOURCE.find("if input").unwrap() + "if ".len(),
+        INLINE_VALUE_LINKED_EDITING_SOURCE
+            .find("let copied: Int = input")
+            .unwrap()
+            + "let copied: Int = ".len(),
+        INLINE_VALUE_LINKED_EDITING_SOURCE
+            .find("let input: Int = input")
+            .unwrap()
+            + "let input: Int = ".len(),
+    ];
+    assert_eq!(outer_ranges.len(), expected_outer_ranges.len(), "{outer}");
+    for (range, start) in outer_ranges.iter().zip(expected_outer_ranges) {
+        assert_eq!(
+            range,
+            &range_at(
+                INLINE_VALUE_LINKED_EDITING_SOURCE,
+                start,
+                start + "input".len()
+            )
+        );
+    }
+
+    let lone_declaration = client.request(
+        "textDocument/linkedEditingRange",
+        json!({
+            "textDocument":{"uri":uri},
+            "position":position_of(INLINE_VALUE_LINKED_EDITING_SOURCE, "total", 1)
+        }),
+    );
+    assert_eq!(lone_declaration, Value::Null);
+    client.shutdown();
+}
+
+#[test]
 fn workspace_symbols_rank_stably_and_call_hierarchy_tracks_resolved_calls() {
     let provider_uri = "file:///workspace/hierarchy/provider.orna";
     let caller_uri = "file:///workspace/hierarchy/caller.orna";
@@ -1636,6 +1858,10 @@ fn workspace_symbols_rank_stably_and_call_hierarchy_tracks_resolved_calls() {
             .is_empty(),
         "{caller_diagnostics}"
     );
+    let hierarchy_positions = syntax_v1_workspace_hierarchy_contract::request_data(
+        WORKSPACE_HIERARCHY_PROVIDER_SOURCE,
+        WORKSPACE_HIERARCHY_CALLER_SOURCE,
+    );
 
     let ranked = client.request("workspace/symbol", json!({"query":"mid"}));
     let ranked_names = ranked
@@ -1646,9 +1872,9 @@ fn workspace_symbols_rank_stably_and_call_hierarchy_tracks_resolved_calls() {
         .collect::<Vec<_>>();
     assert_eq!(ranked_names, ["mid", "remote_mid"], "{ranked}");
     assert_eq!(ranked[0]["containerName"], Value::Null);
+    let ranked_repeat = client.request("workspace/symbol", json!({"query":"mid"}));
     assert_eq!(
-        client.request("workspace/symbol", json!({"query":"mid"})),
-        ranked,
+        ranked_repeat, ranked,
         "workspace symbol order changed between identical requests"
     );
 
@@ -1684,7 +1910,7 @@ fn workspace_symbols_rank_stably_and_call_hierarchy_tracks_resolved_calls() {
         "textDocument/prepareCallHierarchy",
         json!({
             "textDocument":{"uri":provider_uri},
-            "position":position_at(WORKSPACE_HIERARCHY_PROVIDER_SOURCE, root_cursor)
+            "position":hierarchy_positions["root_definition"]
         }),
     );
     assert_eq!(root_item.as_array().unwrap().len(), 1, "{root_item}");
@@ -1756,15 +1982,11 @@ fn workspace_symbols_rank_stably_and_call_hierarchy_tracks_resolved_calls() {
         )
     );
 
-    let seed_cursor = WORKSPACE_HIERARCHY_PROVIDER_SOURCE
-        .find("pub fn seed")
-        .map(|offset| offset + "pub fn ".len())
-        .unwrap();
     let seed_item = client.request(
         "textDocument/prepareCallHierarchy",
         json!({
             "textDocument":{"uri":provider_uri},
-            "position":position_at(WORKSPACE_HIERARCHY_PROVIDER_SOURCE, seed_cursor)
+            "position":hierarchy_positions["seed_definition"]
         }),
     );
     let seed_incoming = client.request("callHierarchy/incomingCalls", json!({"item":seed_item[0]}));
@@ -1777,79 +1999,396 @@ fn workspace_symbols_rank_stably_and_call_hierarchy_tracks_resolved_calls() {
     assert_eq!(seed_incoming[1]["from"]["name"], "root");
     assert_eq!(seed_incoming[1]["fromRanges"].as_array().unwrap().len(), 2);
 
-    let shadow_cursor = WORKSPACE_HIERARCHY_PROVIDER_SOURCE
-        .find("pub fn shadowed")
-        .map(|offset| offset + "pub fn shadowed".len())
-        .unwrap();
     let shadow_item = client.request(
         "textDocument/prepareCallHierarchy",
         json!({
             "textDocument":{"uri":provider_uri},
-            "position":position_at(WORKSPACE_HIERARCHY_PROVIDER_SOURCE, shadow_cursor)
+            "position":hierarchy_positions["shadowed_definition"]
         }),
     );
     assert_eq!(shadow_item[0]["name"], "shadowed");
+    let shadowed_outgoing = client.request(
+        "callHierarchy/outgoingCalls",
+        json!({"item":shadow_item[0]}),
+    );
     assert!(
-        client
-            .request(
-                "callHierarchy/outgoingCalls",
-                json!({"item":shadow_item[0]}),
-            )
-            .as_array()
-            .unwrap()
-            .is_empty(),
+        shadowed_outgoing.as_array().unwrap().is_empty(),
         "local parameter call was resolved as a workspace function"
     );
 
-    let unresolved_cursor = WORKSPACE_HIERARCHY_PROVIDER_SOURCE
-        .find("pub fn unresolved")
-        .map(|offset| offset + "pub fn unresolved".len())
-        .unwrap();
     let unresolved_item = client.request(
         "textDocument/prepareCallHierarchy",
         json!({
             "textDocument":{"uri":provider_uri},
-            "position":position_at(WORKSPACE_HIERARCHY_PROVIDER_SOURCE, unresolved_cursor)
+            "position":hierarchy_positions["unresolved_definition"]
         }),
     );
+    let unresolved_outgoing = client.request(
+        "callHierarchy/outgoingCalls",
+        json!({"item":unresolved_item[0]}),
+    );
     assert!(
-        client
-            .request(
-                "callHierarchy/outgoingCalls",
-                json!({"item":unresolved_item[0]}),
-            )
-            .as_array()
-            .unwrap()
-            .is_empty(),
+        unresolved_outgoing.as_array().unwrap().is_empty(),
         "unresolved call was emitted in the hierarchy"
     );
 
-    let reference_cursor = WORKSPACE_HIERARCHY_CALLER_SOURCE
-        .find("root(value)")
-        .unwrap();
     let prepared_reference = client.request(
         "textDocument/prepareCallHierarchy",
         json!({
             "textDocument":{"uri":caller_uri},
-            "position":position_at(WORKSPACE_HIERARCHY_CALLER_SOURCE, reference_cursor)
+            "position":hierarchy_positions["root_reference"]
         }),
     );
     assert_eq!(prepared_reference[0]["name"], "root");
     assert_eq!(prepared_reference[0]["uri"], provider_uri);
 
-    let ambiguous_cursor = WORKSPACE_HIERARCHY_CALLER_SOURCE
-        .find("collide(value)")
-        .unwrap();
     let ambiguous_reference = client.request(
         "textDocument/prepareCallHierarchy",
         json!({
             "textDocument":{"uri":caller_uri},
-            "position":position_at(WORKSPACE_HIERARCHY_CALLER_SOURCE, ambiguous_cursor)
+            "position":hierarchy_positions["ambiguous_reference"]
         }),
     );
     assert!(
         ambiguous_reference.is_null(),
         "ambiguous function reference unexpectedly resolved: {ambiguous_reference}"
+    );
+    syntax_v1_workspace_hierarchy_contract::assert_contract(
+        WORKSPACE_HIERARCHY_PROVIDER_SOURCE,
+        WORKSPACE_HIERARCHY_CALLER_SOURCE,
+        provider_uri,
+        caller_uri,
+        &json!({
+            "workspace_mid": ranked,
+            "workspace_mid_repeat": ranked_repeat,
+            "workspace_rem": prefix_ranked,
+            "workspace_remi": fuzzy,
+            "call_root_item": root_item,
+            "call_root_outgoing": outgoing,
+            "call_root_incoming": incoming,
+            "call_seed_item": seed_item,
+            "call_seed_incoming": seed_incoming,
+            "call_shadowed_outgoing": shadowed_outgoing,
+            "call_unresolved_outgoing": unresolved_outgoing,
+            "call_root_reference": prepared_reference,
+            "call_ambiguous_reference": ambiguous_reference,
+        }),
+        "LSP protocol",
+    );
+    client.shutdown();
+}
+
+#[test]
+fn prepare_call_hierarchy_and_outgoing_calls_resolve_exact_workspace_calls() {
+    let provider_uri = "file:///workspace/call-hierarchy/provider.orna";
+    let caller_uri = "file:///workspace/call-hierarchy/caller.orna";
+    let mut client = Client::spawn();
+    initialize(&mut client);
+
+    let provider_diagnostics = open(
+        &mut client,
+        provider_uri,
+        CALL_HIERARCHY_DEPTH_PROVIDER_SOURCE,
+    );
+    assert!(
+        provider_diagnostics["diagnostics"]
+            .as_array()
+            .unwrap()
+            .is_empty(),
+        "{provider_diagnostics}"
+    );
+    let caller_diagnostics = open(&mut client, caller_uri, CALL_HIERARCHY_DEPTH_CALLER_SOURCE);
+    assert!(
+        caller_diagnostics["diagnostics"]
+            .as_array()
+            .unwrap()
+            .is_empty(),
+        "{caller_diagnostics}"
+    );
+
+    let caller_name = CALL_HIERARCHY_DEPTH_PROVIDER_SOURCE
+        .find("pub fn caller")
+        .unwrap()
+        + "pub fn ".len();
+    let caller_item = client.request(
+        "textDocument/prepareCallHierarchy",
+        json!({
+            "textDocument":{"uri":provider_uri},
+            "position":position_at(CALL_HIERARCHY_DEPTH_PROVIDER_SOURCE, caller_name)
+        }),
+    );
+    assert_eq!(caller_item.as_array().unwrap().len(), 1, "{caller_item}");
+    assert_eq!(caller_item[0]["name"], "caller");
+    assert_eq!(caller_item[0]["uri"], provider_uri);
+    assert_eq!(
+        caller_item[0]["selectionRange"],
+        range_at(
+            CALL_HIERARCHY_DEPTH_PROVIDER_SOURCE,
+            caller_name,
+            caller_name + "caller".len()
+        )
+    );
+
+    let caller_parameter_start = caller_name + "caller(".len();
+    assert_eq!(
+        client.request(
+            "textDocument/prepareCallHierarchy",
+            json!({
+                "textDocument":{"uri":provider_uri},
+                "position":position_at(CALL_HIERARCHY_DEPTH_PROVIDER_SOURCE, caller_parameter_start)
+            }),
+        ),
+        Value::Null,
+        "a parameter identifier in the function signature is not a call target"
+    );
+
+    let expression_start = CALL_HIERARCHY_DEPTH_PROVIDER_SOURCE
+        .find("= bridge(leaf(value))")
+        .unwrap()
+        + "= ".len();
+    let bridge_start = expression_start;
+    let leaf_start = expression_start + "bridge(".len();
+    let bridge_item = client.request(
+        "textDocument/prepareCallHierarchy",
+        json!({
+            "textDocument":{"uri":provider_uri},
+            "position":position_at(CALL_HIERARCHY_DEPTH_PROVIDER_SOURCE, bridge_start)
+        }),
+    );
+    assert_eq!(bridge_item[0]["name"], "bridge", "{bridge_item}");
+    let leaf_item = client.request(
+        "textDocument/prepareCallHierarchy",
+        json!({
+            "textDocument":{"uri":provider_uri},
+            "position":position_at(CALL_HIERARCHY_DEPTH_PROVIDER_SOURCE, leaf_start)
+        }),
+    );
+    assert_eq!(leaf_item[0]["name"], "leaf", "{leaf_item}");
+    assert_eq!(leaf_item[0]["uri"], provider_uri);
+    let argument_start = leaf_start + "leaf(".len();
+    assert_eq!(
+        client.request(
+            "textDocument/prepareCallHierarchy",
+            json!({
+                "textDocument":{"uri":provider_uri},
+                "position":position_at(CALL_HIERARCHY_DEPTH_PROVIDER_SOURCE, argument_start)
+            }),
+        ),
+        Value::Null,
+        "an argument identifier is not a call target"
+    );
+
+    let outgoing = client.request(
+        "callHierarchy/outgoingCalls",
+        json!({"item":caller_item[0]}),
+    );
+    let pairs = outgoing
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|call| {
+            (
+                call["to"]["name"].as_str().unwrap(),
+                call["fromRanges"].as_array().unwrap().len(),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(pairs, [("leaf", 2), ("bridge", 1)], "{outgoing}");
+    assert!(
+        outgoing
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|call| call["to"]["uri"] == provider_uri),
+        "outgoing target URIs: {outgoing}"
+    );
+    let expected_leaf_ranges = json!([
+        range_at(
+            CALL_HIERARCHY_DEPTH_PROVIDER_SOURCE,
+            leaf_start,
+            leaf_start + "leaf".len()
+        ),
+        range_at(
+            CALL_HIERARCHY_DEPTH_PROVIDER_SOURCE,
+            CALL_HIERARCHY_DEPTH_PROVIDER_SOURCE
+                .find("+ leaf(value)")
+                .unwrap()
+                + "+ ".len(),
+            CALL_HIERARCHY_DEPTH_PROVIDER_SOURCE
+                .find("+ leaf(value)")
+                .unwrap()
+                + "+ ".len()
+                + "leaf".len()
+        )
+    ]);
+    assert_eq!(outgoing[0]["fromRanges"], expected_leaf_ranges);
+    assert_eq!(
+        outgoing[1]["fromRanges"],
+        json!([range_at(
+            CALL_HIERARCHY_DEPTH_PROVIDER_SOURCE,
+            bridge_start,
+            bridge_start + "bridge".len()
+        )])
+    );
+    assert_eq!(
+        client.request(
+            "callHierarchy/outgoingCalls",
+            json!({"item":caller_item[0]}),
+        ),
+        outgoing,
+        "outgoing groups and call-site ranges must be stable"
+    );
+
+    let shadowed_start = CALL_HIERARCHY_DEPTH_PROVIDER_SOURCE
+        .find("= leaf(1)")
+        .unwrap()
+        + "= ".len();
+    assert_eq!(
+        client.request(
+            "textDocument/prepareCallHierarchy",
+            json!({
+                "textDocument":{"uri":provider_uri},
+                "position":position_at(CALL_HIERARCHY_DEPTH_PROVIDER_SOURCE, shadowed_start)
+            }),
+        ),
+        Value::Null,
+        "a local parameter named leaf must shadow the global call target"
+    );
+    let shadowed_name = CALL_HIERARCHY_DEPTH_PROVIDER_SOURCE
+        .find("pub fn shadowed")
+        .unwrap()
+        + "pub fn ".len();
+    let shadowed_item = client.request(
+        "textDocument/prepareCallHierarchy",
+        json!({
+            "textDocument":{"uri":provider_uri},
+            "position":position_at(CALL_HIERARCHY_DEPTH_PROVIDER_SOURCE, shadowed_name)
+        }),
+    );
+    assert!(
+        client
+            .request(
+                "callHierarchy/outgoingCalls",
+                json!({"item":shadowed_item[0]}),
+            )
+            .as_array()
+            .unwrap()
+            .is_empty(),
+        "a parameter call must not be emitted as a workspace call"
+    );
+
+    let remote_name = CALL_HIERARCHY_DEPTH_CALLER_SOURCE
+        .find("pub fn remote")
+        .unwrap()
+        + "pub fn ".len();
+    let remote_item = client.request(
+        "textDocument/prepareCallHierarchy",
+        json!({
+            "textDocument":{"uri":caller_uri},
+            "position":position_at(CALL_HIERARCHY_DEPTH_CALLER_SOURCE, remote_name)
+        }),
+    );
+    let remote_outgoing = client.request(
+        "callHierarchy/outgoingCalls",
+        json!({"item":remote_item[0]}),
+    );
+    assert_eq!(
+        remote_outgoing
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|call| call["to"]["name"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["bridge", "caller"],
+        "cross-file outgoing targets: {remote_outgoing}"
+    );
+    let remote_expression = CALL_HIERARCHY_DEPTH_CALLER_SOURCE
+        .find("= caller(bridge(value))")
+        .unwrap()
+        + "= ".len();
+    assert_eq!(remote_outgoing[0]["to"]["uri"], provider_uri);
+    assert_eq!(
+        remote_outgoing[0]["fromRanges"],
+        json!([range_at(
+            CALL_HIERARCHY_DEPTH_CALLER_SOURCE,
+            remote_expression + "caller(".len(),
+            remote_expression + "caller(".len() + "bridge".len()
+        )])
+    );
+    assert_eq!(remote_outgoing[1]["to"]["uri"], provider_uri);
+    assert_eq!(
+        remote_outgoing[1]["fromRanges"],
+        json!([range_at(
+            CALL_HIERARCHY_DEPTH_CALLER_SOURCE,
+            remote_expression,
+            remote_expression + "caller".len()
+        )])
+    );
+
+    let ambiguous_start = CALL_HIERARCHY_DEPTH_CALLER_SOURCE
+        .find("= collide(value)")
+        .unwrap()
+        + "= ".len();
+    assert_eq!(
+        client.request(
+            "textDocument/prepareCallHierarchy",
+            json!({
+                "textDocument":{"uri":caller_uri},
+                "position":position_at(CALL_HIERARCHY_DEPTH_CALLER_SOURCE, ambiguous_start)
+            }),
+        ),
+        Value::Null,
+        "a call to multiple same-named workspace functions must fail closed"
+    );
+    let ambiguous_name = CALL_HIERARCHY_DEPTH_CALLER_SOURCE
+        .find("pub fn ambiguous")
+        .unwrap()
+        + "pub fn ".len();
+    let ambiguous_item = client.request(
+        "textDocument/prepareCallHierarchy",
+        json!({
+            "textDocument":{"uri":caller_uri},
+            "position":position_at(CALL_HIERARCHY_DEPTH_CALLER_SOURCE, ambiguous_name)
+        }),
+    );
+    assert!(
+        client
+            .request(
+                "callHierarchy/outgoingCalls",
+                json!({"item":ambiguous_item[0]}),
+            )
+            .as_array()
+            .unwrap()
+            .is_empty(),
+        "an ambiguous outgoing target must not be guessed"
+    );
+
+    let malformed_uri = "file:///workspace/call-hierarchy/malformed.orna";
+    let malformed_diagnostics = open(
+        &mut client,
+        malformed_uri,
+        CALL_HIERARCHY_DEPTH_MALFORMED_SOURCE,
+    );
+    assert!(
+        !malformed_diagnostics["diagnostics"]
+            .as_array()
+            .unwrap()
+            .is_empty(),
+        "the malformed fixture must exercise the parser-error path"
+    );
+    let malformed_call = CALL_HIERARCHY_DEPTH_MALFORMED_SOURCE
+        .find("leaf(value)")
+        .unwrap();
+    assert_eq!(
+        client.request(
+            "textDocument/prepareCallHierarchy",
+            json!({
+                "textDocument":{"uri":malformed_uri},
+                "position":position_at(CALL_HIERARCHY_DEPTH_MALFORMED_SOURCE, malformed_call)
+            }),
+        ),
+        Value::Null,
+        "call hierarchy preparation must fail closed on a malformed document"
     );
     client.shutdown();
 }
