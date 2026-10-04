@@ -13,17 +13,18 @@ use orna_foundation_v1::{
     CanonicalValue, Diagnostic as FoundationDiagnostic, DiagnosticSeverity, SafeText,
 };
 use orna_project_v1::{AttachedDatabaseSession, LoadedProject};
+use orna_semantic_v1::StandardDependencyProfile;
 use orna_semantic_v1::{
-    Analysis, Catalogue, EffectSummary, ModuleInput, ReplAdmission, ReplContext,
-    StandardDependencyProfile, SymbolKind, Type, analyze_with_catalogue,
+    Analysis, Catalogue, EffectSummary, ModuleInput, ReplAdmission, ReplContext, SymbolKind, Type,
+    analyze_with_catalogue,
 };
 use orna_syntax_v1::{Declaration, ImportSegment, ReplInput, UseTail, Visibility, parse_module};
 
 use crate::{
     CancellationToken, Environment, EvaluationError, Functions, Limits, PureFunction, ReplSession,
-    module_function_alias_key, parse_admitted_repl, reference_standard_profile,
-    reference_standard_sources,
+    module_function_alias_key, parse_admitted_repl,
 };
+use crate::{reference_standard_profile, reference_standard_sources};
 
 /// Redacted failure from the admitted REPL boundary.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -577,15 +578,18 @@ fn admitted_runtime_sources(
                 }
                 Declaration::Use { .. } => {}
                 // The bounded REPL admits pinned standard functions as
-                // executable source, while enum constructors are still
-                // represented by the semantic catalogue only. Keep an
-                // optional std enum module from preventing unrelated std
-                // functions from loading; ordinary project enums remain
-                // outside this evaluator boundary.
+                // executable source, while declaration-only standard items
+                // remain represented by the semantic catalogue. Keep these
+                // items from preventing unrelated standard functions from
+                // loading; ordinary project declarations remain outside this
+                // evaluator boundary.
                 Declaration::Enum { .. }
                     if namespace
                         .as_deref()
                         .is_some_and(|namespace| namespace.starts_with("std.")) => {}
+                _ if namespace.as_deref().is_some_and(|namespace| {
+                    namespace == "std" || namespace.starts_with("std.")
+                }) => {}
                 _ => return Err(ReplError::fixed("ORNA-REPL-UNSUPPORTED")),
             }
         }

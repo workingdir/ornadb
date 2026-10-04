@@ -1,0 +1,7 @@
+{ id: "f96/restore/pair-0", name: "f96/left/restore-main", city: "f96/right/restore-alpha", }
+
+{ id: "f96/restore/pair-1", name: "f96/left/restore-retry", city: "f96/right/restore-beta", }
+
+{ id: "f96/restore/pair-2", name: "f96/left/restore-main", city: "f96/right/restore-alpha", }
+
+{ id: "f96/restore/pair-3", name: "f96/left/restore-malformed", city: "f96/right/restore-delta", }

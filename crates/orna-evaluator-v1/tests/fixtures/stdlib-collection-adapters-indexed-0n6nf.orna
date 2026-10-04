@@ -1,0 +1,1 @@
+adapters.enumerate([7, 8, 7]) == [(0, 7), (1, 8), (2, 7)] && adapters.enumerate(empty_ints) == empty_indexed_ints && adapters.map_indexed([4, 6, 9], (index, value) => index * 10 + value) == [4, 16, 29] && adapters.map_indexed(empty_ints, (_, value) => value) == empty_ints

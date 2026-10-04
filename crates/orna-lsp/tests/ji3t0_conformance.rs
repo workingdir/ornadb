@@ -6,6 +6,7 @@ use std::{
     io::{BufRead, BufReader, Read, Write},
     path::{Path, PathBuf},
     process::{Child, ChildStdin, ChildStdout, Command, Stdio},
+    sync::atomic::{AtomicU64, Ordering},
 };
 
 use orna_syntax_v1::Keyword;
@@ -519,6 +520,194 @@ fn vim_extension_loads_v1_highlights_from_the_in_crate_fixture() {
 }
 
 #[test]
+fn neovim_loads_generated_v1_syntax_and_queries_the_lsp_server() {
+    let Some(neovim) = neovim_binary() else {
+        eprintln!("SKIP: Neovim is not installed; set ORNA_TEST_NEOVIM to its executable");
+        return;
+    };
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .nth(2)
+        .expect("orna-lsp is under crates");
+    let fixture = temporary_fixture(&format!("{SOURCE}\nCREATE SCHEMA old_syntax;\n"));
+    let script = temporary_path("lua");
+    let result_path = temporary_path("result");
+    fs::write(
+        &script,
+        r#"
+vim.opt.runtimepath:prepend(vim.env.ORNA_VIM_RUNTIME)
+vim.cmd("filetype on")
+vim.cmd("syntax on")
+vim.cmd("edit " .. vim.fn.fnameescape(vim.env.ORNA_TEST_FIXTURE))
+local bufnr = vim.api.nvim_get_current_buf()
+assert(vim.bo[bufnr].filetype == "orna", "generated ftdetect did not select the orna filetype")
+assert(vim.v.errmsg == "", "generated syntax raised an editor error: " .. vim.v.errmsg)
+local function syntax_group(line, column)
+  return vim.fn.synIDattr(vim.fn.synID(line, column, 1), "name")
+end
+local pub_group = syntax_group(2, 1)
+local fn_group = syntax_group(2, 5)
+local legacy_group = syntax_group(7, 1)
+assert(pub_group == "ornaKeyword", "pub has syntax group " .. pub_group)
+assert(fn_group == "ornaKeyword", "fn has syntax group " .. fn_group)
+assert(legacy_group == "ornaIdentifier", "legacy CREATE has syntax group " .. legacy_group)
+
+local client_id = assert(vim.lsp.start({
+  name = "orna-syntax-v1-proof",
+  cmd = { vim.env.ORNA_LSP_BIN },
+  root_dir = vim.env.ORNA_PROJECT_ROOT,
+}, { bufnr = bufnr }), "Neovim did not start orna-lsp")
+assert(vim.wait(5000, function()
+  local client = vim.lsp.get_client_by_id(client_id)
+  return client ~= nil and client.initialized
+end, 10), "Neovim LSP client did not initialize")
+local client = assert(vim.lsp.get_client_by_id(client_id))
+local uri = vim.uri_from_bufnr(bufnr)
+local hover, hover_error = client:request_sync("textDocument/hover", {
+  textDocument = { uri = uri },
+  position = { line = 1, character = 8 },
+}, 5000, bufnr)
+assert(hover ~= nil and hover.err == nil, "Neovim hover request failed: " .. vim.inspect(hover_error or hover))
+local hover_contents = hover.result.contents
+local hover_text = type(hover_contents) == "string" and hover_contents or hover_contents.value
+assert(string.find(hover_text, "fn add(left: Int, right: Int): Int", 1, true), "unexpected hover: " .. hover_text)
+assert(string.find(hover_text, "Add two integer values.", 1, true), "hover lost fixture documentation: " .. hover_text)
+
+local completion, completion_error = client:request_sync("textDocument/completion", {
+  textDocument = { uri = uri },
+  position = vim.fn.json_decode(vim.env.ORNA_COMPLETION_POSITION),
+}, 5000, bufnr)
+assert(completion ~= nil and completion.err == nil, "Neovim completion request failed: " .. vim.inspect(completion_error or completion))
+local completion_items = completion.result.items or completion.result
+local expected_keywords = vim.fn.json_decode(vim.env.ORNA_EXPECTED_KEYWORDS)
+local expected_keyword_set = {}
+for _, keyword in ipairs(expected_keywords) do
+  expected_keyword_set[keyword] = true
+end
+local actual_keyword_set = {}
+local actual_keyword_count = 0
+local add_completion
+for _, item in ipairs(completion_items) do
+  if item.kind == 14 then
+    actual_keyword_set[item.label] = true
+    actual_keyword_count = actual_keyword_count + 1
+    assert(expected_keyword_set[item.label], "unexpected completion keyword: " .. item.label)
+  elseif item.label == "add" then
+    add_completion = item
+  end
+end
+assert(actual_keyword_count == #expected_keywords, "completion keyword inventory has " .. actual_keyword_count .. " entries, expected " .. #expected_keywords)
+for _, keyword in ipairs(expected_keywords) do
+  assert(actual_keyword_set[keyword], "completion keyword missing syntax-v1 token: " .. keyword)
+end
+assert(not actual_keyword_set.CREATE and not actual_keyword_set.SELECT, "pre-v1 keyword escaped into Neovim completions")
+assert(add_completion ~= nil, "Neovim completion omitted fixture function add")
+assert(add_completion.detail == "fn add(left: Int, right: Int): Int", "unexpected add completion detail: " .. vim.inspect(add_completion))
+assert(add_completion.documentation == "Add two integer values.", "add completion lost fixture documentation: " .. vim.inspect(add_completion))
+assert(add_completion.insertText == "add(${1:left}, ${2:right})", "unexpected add completion snippet: " .. vim.inspect(add_completion))
+assert(add_completion.insertTextFormat == 2, "add completion did not advertise snippet formatting: " .. vim.inspect(add_completion))
+
+local semantic, semantic_error = client:request_sync("textDocument/semanticTokens/full", {
+  textDocument = { uri = uri },
+}, 5000, bufnr)
+assert(semantic ~= nil and semantic.err == nil, "Neovim semantic-token request failed: " .. vim.inspect(semantic_error or semantic))
+local token_types = client.server_capabilities.semanticTokensProvider.legend.tokenTypes
+local keyword_type
+for index, token_type in ipairs(token_types) do
+  if token_type == "keyword" then keyword_type = index - 1 end
+end
+assert(keyword_type ~= nil, "orna-lsp did not advertise the syntax-v1 keyword token")
+local line, character = 0, 0
+local found_pub = false
+for index = 1, #semantic.result.data, 5 do
+  local delta_line, delta_start = semantic.result.data[index], semantic.result.data[index + 1]
+  if delta_line == 0 then character = character + delta_start else line, character = line + delta_line, delta_start end
+  if line == 1 and character == 0 and semantic.result.data[index + 3] == keyword_type then
+    found_pub = true
+  end
+end
+assert(found_pub, "Neovim LSP semantic tokens did not mark pub as an Orna 1.0 keyword")
+
+vim.fn.writefile({
+  "FILETYPE=" .. vim.bo[bufnr].filetype,
+  "PUB=" .. pub_group,
+  "FN=" .. fn_group,
+  "LEGACY_CREATE=" .. legacy_group,
+  "LSP_HOVER=pass",
+  "LSP_COMPLETION_KEYWORDS=pass",
+  "LSP_COMPLETION_ADD=pass",
+  "LSP_SEMANTIC_PUB=pass",
+}, vim.env.ORNA_EDITOR_RESULT)
+client:stop(true)
+vim.cmd("qa!")
+"#,
+    )
+    .expect("write Neovim integration script");
+    let output = Command::new(&neovim)
+        .arg("--headless")
+        .arg("-u")
+        .arg("NONE")
+        .arg("-i")
+        .arg("NONE")
+        .arg("-n")
+        .arg("-c")
+        .arg("lua dofile(vim.env.ORNA_PROBE_SCRIPT)")
+        .arg("-c")
+        .arg("qa!")
+        .current_dir(root)
+        .env("ORNA_VIM_RUNTIME", root.join("editors/vim"))
+        .env("ORNA_TEST_FIXTURE", &fixture)
+        .env("ORNA_LSP_BIN", env!("CARGO_BIN_EXE_orna-lsp"))
+        .env("ORNA_PROJECT_ROOT", root)
+        .env(
+            "ORNA_COMPLETION_POSITION",
+            serde_json::to_string(&position_at(SOURCE, SOURCE.find("add(value, 2)").unwrap()))
+                .unwrap(),
+        )
+        .env(
+            "ORNA_EXPECTED_KEYWORDS",
+            serde_json::to_string(&expected_keywords().into_iter().collect::<Vec<_>>()).unwrap(),
+        )
+        .env("ORNA_PROBE_SCRIPT", &script)
+        .env("ORNA_EDITOR_RESULT", &result_path)
+        .output()
+        .unwrap_or_else(|error| panic!("start Neovim at {}: {error}", neovim.display()));
+    let editor_result = fs::read_to_string(&result_path);
+    let _ = fs::remove_file(fixture);
+    let _ = fs::remove_file(script);
+    let _ = fs::remove_file(result_path);
+    let editor_result = editor_result.unwrap_or_else(|error| {
+        panic!(
+            "Neovim did not write integration evidence (exit {:?}): {error}\n{}\n{}",
+            output.status.code(),
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        )
+    });
+    assert!(
+        output.status.success(),
+        "Neovim integration failed (exit {:?}):\n{}\n{}\n{editor_result}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+    println!("Neovim integration evidence:\n{editor_result}");
+    assert_eq!(
+        editor_result.lines().collect::<Vec<_>>(),
+        [
+            "FILETYPE=orna",
+            "PUB=ornaKeyword",
+            "FN=ornaKeyword",
+            "LEGACY_CREATE=ornaIdentifier",
+            "LSP_HOVER=pass",
+            "LSP_COMPLETION_KEYWORDS=pass",
+            "LSP_COMPLETION_ADD=pass",
+            "LSP_SEMANTIC_PUB=pass",
+        ]
+    );
+}
+
+#[test]
 fn emacs_extension_loads_v1_highlights_from_the_in_crate_fixture() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"))
         .ancestors()
@@ -544,6 +733,16 @@ fn expected_keywords() -> BTreeSet<String> {
         .iter()
         .map(|keyword| keyword.spelling().to_owned())
         .collect()
+}
+
+fn neovim_binary() -> Option<PathBuf> {
+    if let Some(path) = std::env::var_os("ORNA_TEST_NEOVIM") {
+        return Some(PathBuf::from(path));
+    }
+    let path = std::env::var_os("PATH")?;
+    std::env::split_paths(&path)
+        .map(|directory| directory.join("nvim"))
+        .find(|candidate| candidate.is_file())
 }
 
 fn assert_fixture_keywords(editor: &str, keywords: &BTreeSet<String>) {
@@ -773,8 +972,18 @@ fn emacs_batch_highlight(root: &Path, source: &str) {
     );
 }
 
+static TEMP_FILE_ID: AtomicU64 = AtomicU64::new(0);
+
+fn temporary_path(extension: &str) -> PathBuf {
+    let id = TEMP_FILE_ID.fetch_add(1, Ordering::Relaxed);
+    std::env::temp_dir().join(format!(
+        "orna-ji3t0-{}-{id}.{extension}",
+        std::process::id()
+    ))
+}
+
 fn temporary_fixture(source: &str) -> PathBuf {
-    let path = std::env::temp_dir().join(format!("orna-ji3t0-{}.orna", std::process::id()));
+    let path = temporary_path("orna");
     fs::write(&path, source).unwrap();
     path
 }

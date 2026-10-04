@@ -1,0 +1,2 @@
+numeric.decimal_from_integer(9007199254740993) == 9007199254740993.decimal
+&& numeric.decimal_from_integer(-42) == -42.decimal

@@ -1,0 +1,2 @@
+use library;
+pub fn main(): Int = library.answer();
