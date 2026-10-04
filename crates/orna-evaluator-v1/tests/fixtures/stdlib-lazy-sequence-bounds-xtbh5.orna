@@ -1,0 +1,1 @@
+std.lazy.force(std.lazy.adapters.collect(std.lazy.adapters.take(std.lazy.adapters.from_iterator(std.iterator.iterate(2, value => value + 2)), 4))) == [2, 4, 6, 8] && std.lazy.force(std.lazy.adapters.collect(std.lazy.adapters.drop(std.lazy.adapters.from_list([1, 2, 3, 4]), 2))) == [3, 4]
