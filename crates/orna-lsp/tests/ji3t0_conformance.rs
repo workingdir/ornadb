@@ -18,7 +18,6 @@ mod completion_contract;
 #[path = "support/hover_semantic_contract.rs"]
 mod hover_semantic_contract;
 
-const SOURCE: &str = include_str!("fixtures/ji3t0-lsp-v1-self-contained.orna");
 const SEMANTIC_SOURCE: &str = include_str!("fixtures/editor-semantic-tokens.orna");
 const INVALID_SOURCE: &str = include_str!("fixtures/ji3t0-invalid-v1.orna");
 
