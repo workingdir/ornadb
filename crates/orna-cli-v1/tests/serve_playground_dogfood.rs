@@ -72,6 +72,14 @@ const ROUTE_EXAMPLE_CATALOG_SCRIPT: &str =
     include_str!("fixtures/playground-route-example-catalog-script.orna");
 const ROUTE_EXAMPLE_CATALOG_STYLE: &str =
     include_str!("fixtures/playground-route-example-catalog-style.orna");
+const LIVE_SNAPSHOT_ROUTE_TEMPLATE: &str =
+    include_str!("fixtures/playground-route-live-snapshot.orna");
+const LIVE_SNAPSHOT_ENTRY_TEMPLATE: &str =
+    include_str!("fixtures/playground-entry-live-snapshot.orna");
+const LIVE_SNAPSHOT_ASSET_TEMPLATE: &str =
+    include_str!("fixtures/playground-asset-live-snapshot.orna");
+const LIVE_SNAPSHOT_SAMPLE_TEMPLATE: &str =
+    include_str!("fixtures/playground-sample-live-snapshot.orna");
 const ENTRY_PRESENTATION: &str = include_str!("fixtures/playground-entry-presentation.orna");
 const ENTRY_HOME_RUNTIME: &str = include_str!("fixtures/playground-entry-home-runtime.orna");
 const ENTRY_PLAYGROUND_RUNTIME: &str =
@@ -1009,15 +1017,17 @@ fn orna_serve_hosts_playground_with_pending_evals_and_snapshot_correct_deltas() 
                         .collect::<String>()
                 )
             };
-            let route = ROUTE_APP.replace("\"entry-app\"", &format!("\"{entry_id}\""));
-            let entry =
-                format!("{{ id: \"{entry_id}\", asset_path: \"{asset_path}\", kind: \"asset\" }}");
-            let asset = format!(
-                "{{ id: \"{asset_id}\", path: \"{asset_path}\", media_type: \"text/javascript; charset=utf-8\", content: \"globalThis.ornaPlaygroundSnapshot = {generation};\" }}"
-            );
-            let sample = format!(
-                "{{ id: \"hello\", name: \"Live snapshot {generation}\", source: \"snapshot-{generation}\" }}"
-            );
+            let route = LIVE_SNAPSHOT_ROUTE_TEMPLATE.replace("entry-live-snapshot", &entry_id);
+            let entry = LIVE_SNAPSHOT_ENTRY_TEMPLATE
+                .replace("entry-live-snapshot", &entry_id)
+                .replace("assets/app-live-snapshot.js", &asset_path);
+            let asset = LIVE_SNAPSHOT_ASSET_TEMPLATE
+                .replace("asset-live-snapshot", &asset_id)
+                .replace("assets/app-live-snapshot.js", &asset_path)
+                .replace("Snapshot = 1;", &format!("Snapshot = {generation};"));
+            let sample = LIVE_SNAPSHOT_SAMPLE_TEMPLATE
+                .replace("Live snapshot 1", &format!("Live snapshot {generation}"))
+                .replace("snapshot-1", &format!("snapshot-{generation}"));
             write_fixture_rows(
                 &writer_root,
                 "Route",
