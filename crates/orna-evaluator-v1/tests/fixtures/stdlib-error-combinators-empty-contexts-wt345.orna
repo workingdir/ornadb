@@ -1,0 +1,10 @@
+std.error.code_chain(
+    std.error.combinators.with_contexts(
+        std.error.caused_by(
+            "root.failure",
+            "root context",
+            std.error.make("leaf.failure", "leaf detail"),
+        ),
+        [],
+    ),
+)
