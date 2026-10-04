@@ -6,6 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+orna-standard-sources = { path = "../orna-standard-sources" }
 orna-artifact = { path = "../orna-artifact" }
 orna-core = { path = "../orna-core" }
 orna-semantic-v1 = { path = "../orna-semantic-v1" }

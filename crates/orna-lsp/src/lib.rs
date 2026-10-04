@@ -10,6 +10,7 @@
 mod analysis;
 pub mod browser;
 mod documents;
+mod editor_ranges;
 mod hover;
 mod inlay;
 mod locals;
