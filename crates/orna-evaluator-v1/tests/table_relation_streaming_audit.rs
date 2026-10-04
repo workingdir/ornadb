@@ -2820,12 +2820,19 @@ fn paired_pagination_nested_spill_body(depth: usize) -> Expr {
     }
 }
 
-fn paired_same_source_nested_spill_body(first_depth: usize, second_depth: usize) -> Expr {
+fn paired_same_source_nested_spill_body(
+    first_depth: usize,
+    second_depth: usize,
+    reverse_order: bool,
+) -> Expr {
+    let first = nested_pagination_spill("View.Paired", first_depth);
+    let second = nested_pagination_spill("View.Paired", second_depth);
     Expr::Tuple {
-        elements: vec![
-            nested_pagination_spill("View.Paired", first_depth),
-            nested_pagination_spill("View.Paired", second_depth),
-        ],
+        elements: if reverse_order {
+            vec![second, first]
+        } else {
+            vec![first, second]
+        },
         span: span(),
     }
 }
@@ -7095,7 +7102,7 @@ fn paired_nested_folds_keep_identity_across_same_source_restore_chains() {
         "run".into(),
         PureFunction {
             parameters: Vec::new(),
-            body: paired_same_source_nested_spill_body(0, 1),
+            body: paired_same_source_nested_spill_body(0, 1, false),
             environment: Environment::new(),
         },
     );
@@ -7151,22 +7158,25 @@ fn paired_nested_fold_restores_keep_scopes_as_fold_depths_change() {
         (
             0,
             1,
+            false,
             [1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
             [10, 20, 30, 40, 50, 60, 70, 80, 90, 100],
             308,
             5280,
         ),
         (
-            2,
             1,
-            [3, 6, 9, 12, 15, 18, 21, 24, 27, 30],
+            2,
+            true,
             [11, 12, 13, 14, 15, 16, 17, 18, 19, 20],
-            2640,
+            [3, 6, 9, 12, 15, 18, 21, 24, 27, 30],
             1488,
+            2640,
         ),
         (
             2,
             3,
+            false,
             [-1, -2, -3, -4, -5, -6, -7, -8, -9, -10],
             [100, 90, 80, 70, 60, 50, 40, 30, 20, 10],
             -880,
@@ -7175,28 +7185,38 @@ fn paired_nested_fold_restores_keep_scopes_as_fold_depths_change() {
     ];
     let restores = cases
         .iter()
-        .flat_map(|(_, _, first, second, _, _)| {
-            [
-                (
-                    "View.Paired",
-                    nested_pagination_restore(first, &chain),
-                ),
-                (
-                    "View.Paired",
-                    nested_pagination_restore(second, &chain),
-                ),
-            ]
+        .flat_map(|(_, _, reverse_order, first, second, _, _)| {
+            let first = nested_pagination_restore(first, &chain);
+            let second = nested_pagination_restore(second, &chain);
+            if *reverse_order {
+                [("View.Paired", second), ("View.Paired", first)]
+            } else {
+                [("View.Paired", first), ("View.Paired", second)]
+            }
         })
         .collect::<Vec<_>>();
     let mut source = PairedCursorRestoreSource::new(restores);
     let mut functions = paired_shared_cursor_nested_spill_functions();
     let mut outputs = Vec::new();
-    for (first_depth, second_depth, _, _, expected_first, expected_second) in cases {
+    for (
+        first_depth,
+        second_depth,
+        reverse_order,
+        _,
+        _,
+        expected_first,
+        expected_second,
+    ) in cases
+    {
         functions.insert(
             "run".into(),
             PureFunction {
                 parameters: Vec::new(),
-                body: paired_same_source_nested_spill_body(first_depth, second_depth),
+                body: paired_same_source_nested_spill_body(
+                    first_depth,
+                    second_depth,
+                    reverse_order,
+                ),
                 environment: Environment::new(),
             },
         );
@@ -7208,9 +7228,14 @@ fn paired_nested_fold_restores_keep_scopes_as_fold_depths_change() {
             &mut source,
         )
         .unwrap();
+        let expected = if reverse_order {
+            integer_pair(expected_second, expected_first)
+        } else {
+            integer_pair(expected_first, expected_second)
+        };
         assert_eq!(
             output,
-            integer_pair(expected_first, expected_second),
+            expected,
             "fold depths {first_depth}/{second_depth} keep the paired restored values"
         );
         outputs.push(output);
