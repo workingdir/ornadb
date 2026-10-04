@@ -1,1 +1,1 @@
-{ id: "responsive", name: "Responsive layout", css: ".workspace { display: grid; grid-template-columns: 1fr 1fr; } @media (max-width: 64rem) { .workspace { grid-template-columns: 1fr; } }" }
+{ id: "responsive", name: "Responsive layout", css: ".workspace \u{7b} display: grid; grid-template-columns: 1fr 1fr; } @media (max-width: 64rem) \u{7b} .workspace \u{7b} grid-template-columns: 1fr; } }" }

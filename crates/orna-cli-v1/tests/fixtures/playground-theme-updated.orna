@@ -1,1 +1,1 @@
-{ id: "wiki-basic", name: "Wiki basic", css: ":root { --text: #111111; }" }
+{ id: "wiki-basic", name: "Wiki basic", css: ":root \u{7b} --text: #111111; }" }

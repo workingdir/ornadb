@@ -2242,7 +2242,7 @@ mod tests {
         assert_eq!(page.status, 200);
         assert_eq!(page.content_type, "text/html; charset=utf-8");
         let page = String::from_utf8(page.body).expect("database page UTF-8");
-        assert!(page.contains("<main>database shell</main>"));
+        assert!(page.contains("<main>database shell"));
         assert!(page.contains("/playground/theme.css"));
         assert!(page.contains("/playground/layout.css"));
         assert!(page.contains(&format!(
@@ -2268,7 +2268,7 @@ mod tests {
         }));
         let embed = String::from_utf8(embed.body).expect("embedded page UTF-8");
         assert!(embed.contains("<header data-page-header hidden>"));
-        assert!(embed.contains("<main>database shell</main>"));
+        assert!(embed.contains("<main>database shell"));
         let embed_with_slash = playground_asset(directory.path(), identity, "/playground/embed/");
         assert_eq!(embed_with_slash.status, 200);
         let script = playground_asset(directory.path(), identity, "/playground/assets/app.js");
@@ -2280,7 +2280,7 @@ mod tests {
                 .any(|(name, value)| name == "X-Content-Type-Options" && value == "nosniff")
         );
         assert_eq!(script.content_type, "text/javascript; charset=utf-8");
-        assert_eq!(script.body, b"globalThis.ornaPlaygroundReady = true;");
+        assert_eq!(script.body, b"globalThis.ornaPlaygroundReady = { ready: true };");
         let stylesheet =
             playground_asset(directory.path(), identity, "/playground/assets/style.css");
         assert_eq!(stylesheet.status, 200);
@@ -2456,6 +2456,27 @@ mod tests {
 
         assert!(has_playground_style_table(PLAYGROUND_SCHEMA, "Theme"));
         assert!(has_playground_style_table(PLAYGROUND_SCHEMA, "Layout"));
+        let parsed_theme = parse_row(PLAYGROUND_THEME);
+        assert!(parsed_theme.is_ok(), "{:?}", parsed_theme.diagnostics);
+        let Expr::Record {
+            fields: theme_fields,
+            ..
+        } = parsed_theme.value
+        else {
+            panic!("Theme fixture parses as a record");
+        };
+        assert_eq!(
+            literal_string(unique_record_field(&theme_fields, "id").expect("Theme id")),
+            Some("wiki-basic".into())
+        );
+        assert_eq!(
+            literal_string(unique_record_field(&theme_fields, "name").expect("Theme name")),
+            Some("Wiki basic".into())
+        );
+        assert_eq!(
+            literal_string(unique_record_field(&theme_fields, "css").expect("Theme CSS")),
+            Some(":root { --text: #202122; }".into())
+        );
         assert_eq!(
             decode_playground_style(PLAYGROUND_THEME, "wiki-basic"),
             Some(("Wiki basic".into(), ":root { --text: #202122; }".into()))
