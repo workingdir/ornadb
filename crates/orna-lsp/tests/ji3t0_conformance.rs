@@ -10,9 +10,12 @@ use std::{
 };
 
 use orna_syntax_v1::Keyword;
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 
 const SOURCE: &str = include_str!("fixtures/ji3t0-lsp-v1-self-contained.orna");
+
+#[path = "support/completion_contract.rs"]
+mod completion_contract;
 const SEMANTIC_SOURCE: &str = include_str!("fixtures/editor-semantic-tokens.orna");
 const INVALID_SOURCE: &str = include_str!("fixtures/ji3t0-invalid-v1.orna");
 
@@ -431,22 +434,7 @@ fn protocol_conformance_uses_v1_for_every_advertised_editor_feature() {
         json!({"textDocument":{"uri":uri},"position":position_at(SOURCE,SOURCE.len())}),
     );
     assert_no_legacy_words(&completion, "completion response");
-    let items = completion.as_array().unwrap();
-    let keyword_kind = serde_json::to_value(lsp_types::CompletionItemKind::KEYWORD).unwrap();
-    let actual_keywords = items
-        .iter()
-        .filter(|item| item["kind"] == keyword_kind)
-        .map(|item| item["label"].as_str().unwrap().to_owned())
-        .collect::<BTreeSet<_>>();
-    let expected_keywords = Keyword::ALL
-        .iter()
-        .map(|keyword| keyword.spelling().to_owned())
-        .collect::<BTreeSet<_>>();
-    assert_eq!(
-        actual_keywords, expected_keywords,
-        "ORNA-LEX-007 completion inventory"
-    );
-    assert!(items.iter().any(|item| item["label"] == "add"));
+    completion_contract::assert_lsp_completion_contract(&completion, "LSP protocol");
 
     let semantic = client.request(
         "textDocument/semanticTokens/full",
@@ -543,9 +531,17 @@ fn neovim_loads_generated_v1_syntax_and_queries_the_lsp_server() {
         .expect("orna-lsp is under crates");
     let fixture_source = format!("{SOURCE}\n{SEMANTIC_SOURCE}\nCREATE SCHEMA old_syntax;\n");
     let semantic_source_line = SOURCE.lines().count() + 1;
+    let legacy_create_line = fixture_source
+        .split_once("CREATE SCHEMA old_syntax;")
+        .expect("legacy source row is in the generated fixture")
+        .0
+        .matches('\n')
+        .count()
+        + 1;
     let fixture = temporary_fixture(&fixture_source);
     let script = temporary_path("lua");
     let result_path = temporary_path("result");
+    let completion_result_path = temporary_path("completion.json");
     fs::write(
         &script,
         r#"
@@ -566,7 +562,7 @@ local function syntax_group(line, column)
 end
 local pub_group = syntax_group(2, 1)
 local fn_group = syntax_group(2, 5)
-local legacy_group = syntax_group(7, 1)
+local legacy_group = syntax_group(tonumber(vim.env.ORNA_LEGACY_CREATE_LINE), 1)
 assert(pub_group == "ornaKeyword", "pub has syntax group " .. pub_group)
 assert(fn_group == "ornaKeyword", "fn has syntax group " .. fn_group)
 assert(legacy_group == "ornaIdentifier", "legacy CREATE has syntax group " .. legacy_group)
@@ -597,6 +593,7 @@ local completion, completion_error = client:request_sync("textDocument/completio
   position = vim.fn.json_decode(vim.env.ORNA_COMPLETION_POSITION),
 }, 5000, bufnr)
 assert(completion ~= nil and completion.err == nil, "Neovim completion request failed: " .. vim.inspect(completion_error or completion))
+vim.fn.writefile({ vim.fn.json_encode(completion.result) }, vim.env.ORNA_COMPLETION_RESULT)
 local completion_items = completion.result.items or completion.result
 local expected_keywords = vim.fn.json_decode(vim.env.ORNA_EXPECTED_KEYWORDS)
 local expected_keyword_set = {}
@@ -621,8 +618,9 @@ for _, keyword in ipairs(expected_keywords) do
 end
 assert(not actual_keyword_set.CREATE and not actual_keyword_set.SELECT, "pre-v1 keyword escaped into Neovim completions")
 assert(add_completion ~= nil, "Neovim completion omitted fixture function add")
-assert(add_completion.detail == "fn add(left: Int, right: Int): Int", "unexpected add completion detail: " .. vim.inspect(add_completion))
-assert(add_completion.documentation == "Add two integer values.", "add completion lost fixture documentation: " .. vim.inspect(add_completion))
+assert(add_completion.detail == "pub fn add(left: Int, right: Int): Int", "unexpected add completion detail: " .. vim.inspect(add_completion))
+assert(add_completion.documentation.kind == "markdown", "add completion documentation is not Markdown: " .. vim.inspect(add_completion))
+assert(add_completion.documentation.value == "Add two integer values.", "add completion lost fixture documentation: " .. vim.inspect(add_completion))
 assert(add_completion.insertText == "add(${1:left}, ${2:right})", "unexpected add completion snippet: " .. vim.inspect(add_completion))
 assert(add_completion.insertTextFormat == 2, "add completion did not advertise snippet formatting: " .. vim.inspect(add_completion))
 
@@ -783,14 +781,18 @@ vim.cmd("qa!")
             "ORNA_SEMANTIC_SOURCE_LINE",
             semantic_source_line.to_string(),
         )
+        .env("ORNA_LEGACY_CREATE_LINE", legacy_create_line.to_string())
+        .env("ORNA_COMPLETION_RESULT", &completion_result_path)
         .env("ORNA_PROBE_SCRIPT", &script)
         .env("ORNA_EDITOR_RESULT", &result_path)
         .output()
         .unwrap_or_else(|error| panic!("start Neovim at {}: {error}", neovim.display()));
     let editor_result = fs::read_to_string(&result_path);
+    let completion_result = fs::read_to_string(&completion_result_path);
     let _ = fs::remove_file(fixture);
     let _ = fs::remove_file(script);
     let _ = fs::remove_file(result_path);
+    let _ = fs::remove_file(&completion_result_path);
     let editor_result = editor_result.unwrap_or_else(|error| {
         panic!(
             "Neovim did not write integration evidence (exit {:?}): {error}\n{}\n{}",
@@ -806,6 +808,10 @@ vim.cmd("qa!")
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr),
     );
+    let completion_result = completion_result.expect("Neovim completion result JSON");
+    let completion_result: Value =
+        serde_json::from_str(&completion_result).expect("decode Neovim completion result");
+    completion_contract::assert_lsp_completion_contract(&completion_result, "Neovim LSP");
     println!("Neovim integration evidence:\n{editor_result}");
     assert_eq!(
         editor_result.lines().collect::<Vec<_>>(),
@@ -1080,10 +1086,7 @@ fn sublime_extension_loads_v1_highlights_from_the_in_crate_fixture() {
 }
 
 fn expected_keywords() -> BTreeSet<String> {
-    Keyword::ALL
-        .iter()
-        .map(|keyword| keyword.spelling().to_owned())
-        .collect()
+    completion_contract::expected_keywords()
 }
 
 fn neovim_binary() -> Option<PathBuf> {

@@ -2187,6 +2187,7 @@ mod tests {
         const ASSET_APP: &str = include_str!("../tests/fixtures/playground-asset-app.orna");
         const ASSET_PRESENTATION: &str =
             include_str!("../tests/fixtures/playground-asset-presentation.orna");
+        const ASSET_STYLE: &str = include_str!("../tests/fixtures/playground-asset-style.orna");
 
         assert!(has_playground_asset_table(PLAYGROUND_SCHEMA));
         let parsed_presentation = parse_row(ASSET_PRESENTATION);
@@ -2215,6 +2216,14 @@ mod tests {
             ))
         );
         assert_eq!(decode_playground_asset(ASSET_APP, "different-id"), None);
+        assert_eq!(
+            decode_playground_asset(ASSET_STYLE, "asset-6173736574732f7374796c652e637373"),
+            Some((
+                "assets/style.css".into(),
+                "text/css; charset=utf-8".into(),
+                "body { color: #202122; }".into(),
+            ))
+        );
         assert!(!has_playground_asset_table(
             "pub table Asset(id: Int) { path: Str, media_type: Str, content: Str }"
         ));

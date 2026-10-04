@@ -127,6 +127,7 @@ eb926ef50a40a4d0a68ad4a5cdba749392f817fb79876dba05186d2be01406f8  crates/orna-cl
 08fb7b1f271028d079a65e7665291bd7bc966760597b97440cbf6c9a4b6fee62  crates/orna-cli-v1/tests/fixtures/playground-asset-lsp-wasm.orna
 c22a16912c68e317a9dfa8f8921b06cfdda0ab4e4bb1f86cf1df32b1b0ecce44  crates/orna-cli-v1/tests/fixtures/playground-asset-playground.orna
 24a0fdae669b059fbc363db64e3659a47e6906c79cf817ed00425a31f3458544  crates/orna-cli-v1/tests/fixtures/playground-asset-presentation.orna
+711a3ba48a7e9624d226ac714dab57be9b2c1017acd08f699bb6d8c767fe7616  crates/orna-cli-v1/tests/fixtures/playground-asset-script.orna
 08340eb547b0ba967e52209fddebe95a7961fb2411a9e0eea843fdde239b9ad9  crates/orna-cli-v1/tests/fixtures/playground-asset-style.orna
 359e1c130ca5f5bff9b7cda734fcef0d434ff9233736c8635297b0c3cd78e378  crates/orna-cli-v1/tests/fixtures/playground-asset-uncommitted.orna
 8127ff458e7054b2fb18990706880fdc3941b4db8b85c5a22ab6fca196130eab  crates/orna-cli-v1/tests/fixtures/playground-browser-asset.js
@@ -2241,6 +2242,7 @@ da104af5135ae1f7625c87d8c8ddc18f28ddbca03a309f19c815e11683206e89  crates/orna-ev
 005d1781a9c800c95ec1fabc4a0d6a0ef18c594c3511875dcaf2fb630d7cc6a0  crates/orna-evaluator-v1/tests/fixtures/stdlib-format-db-project-wi489.orna
 ceada262fe67822732ce849709d28835cb5532bd47d3d86a27957a0528b11882  crates/orna-evaluator-v1/tests/fixtures/stdlib-format-integer-values-qmmt8.orna
 e0ac059671acae1e8b296ec0410ec2e7e61affa346648e4d9d9e096033837372  crates/orna-evaluator-v1/tests/fixtures/stdlib-format-parse-boolean-values-qmmt8.orna
+e4871afb77c4f0a72a9d9370df279d8a8b43978b59693b5bb6591fc13d74ae8c  crates/orna-evaluator-v1/tests/fixtures/stdlib-format-strings-si45g.orna
 56e3fac2804633c9786d16cd23b869060a0c1b50fe86f3e6c04f72d93abe9c92  crates/orna-evaluator-v1/tests/fixtures/stdlib-generics-type-utils-9g7my.orna
 5e41c982f1dce8652ee8e261518b40db9253966dae0210e4f7731ebdf6d2bff8  crates/orna-evaluator-v1/tests/fixtures/stdlib-hash-blob-dmkss.orna
 5e14139dfaa60777e3f0a73e9eeeb9881bcc6f8d041b25236a1dadb55057e2bb  crates/orna-evaluator-v1/tests/fixtures/stdlib-hash-domain-dmkss.orna
@@ -3262,6 +3264,9 @@ e768a5a9fc60f28420c16e273f146bab45c8dbd1abe6523b878250e20e71e5fc  crates/orna-pr
 d884bc75fb536540ef9d177d461f007ab61c15816bb0f12925d9a99e5a642693  crates/orna-project-v1/tests/fixtures/main_with_standard_root_import.orna
 6f3eb2f19fcb3d4d794ccb0315156792916f8bf2d812c9d1582078655881eb4a  crates/orna-project-v1/tests/fixtures/metadata_format.orna
 18b05697784b88d1428dae3ed3d07851ecb12a615af14d10a7f8f81eb95d29bb  crates/orna-project-v1/tests/fixtures/metadata_not_source.orna
+c0cf072e54404dde47e70bcf46aa92c9c47146bd5bdc28b1ca370526fab264bd  crates/orna-project-v1/tests/fixtures/playground_asset_main.orna
+711a3ba48a7e9624d226ac714dab57be9b2c1017acd08f699bb6d8c767fe7616  crates/orna-project-v1/tests/fixtures/playground_asset_row.orna
+2c4f83b4a87aca640883ec13d4d5db3f8f84e6f32667001975bf0ce0b89defef  crates/orna-project-v1/tests/fixtures/playground_asset_schema.orna
 efaba490271b197f215c700a8a5e7aeaad0d4d222512e8d81511d734961a2a1e  crates/orna-project-v1/tests/fixtures/reference-project/library.orna
 9c75a77db0ed8fb1d7b9e8e11e7a62b848711d3c877a2c605cf760f1a5a62ce0  crates/orna-project-v1/tests/fixtures/reference-project/main.orna
 5990194150d9bd904b382828990c0513ddb766e3f6d0a1c250edd04399e95bbe  crates/orna-project-v1/tests/fixtures/reference-project/sensors.orna
@@ -4785,6 +4790,7 @@ e8a18799d994b1c4ac515d1f70407c0a093a74b81f53b1cb92f0873affb2aba5  crates/orna-st
 cbc3e4a2ee90ec8a4a3b2797e600b53e838f67c4a08468e112c6631a9e453b02  crates/orna-storage-v1/tests/fixtures/paired-nested-restore-identities-f157.orna
 529f59605c8a1f1fefe2204441e0cc7012f5367a4184d9e527fab95076ecdef7  crates/orna-storage-v1/tests/fixtures/paired-nested-rewind-identities-akyem.orna
 98da357c4ae2b6de358c939cdf0a679281ad1b6d87f7099a4d6e9bc3a6c7e513  crates/orna-storage-v1/tests/fixtures/paired-nested-rewind-identities-f161.orna
+fbff2a38574187040f0ac730ce582455ef0836e415dba62a995cac1073622545  crates/orna-storage-v1/tests/fixtures/paired-nested-rewind-identities-f167.orna
 2fd1be7d41edb12e0f066a8e5e9a34084f1c86603ba5349396e4240e7c20457b  crates/orna-storage-v1/tests/fixtures/paired-nested-rewind-identities-k4gg1.orna
 2e3e1ae19f4ac162cf54a91701f648dae2cb53739b30cf57ca61aec99f3c802b  crates/orna-storage-v1/tests/fixtures/paired-nested-segment-compactions-9spl2.orna
 81d3866fa0647dcaf88cefc427156eed370b2eca97f7b1d34370e7e7b7b49a8b  crates/orna-storage-v1/tests/fixtures/paired-nested-spill-identities-f151.orna
