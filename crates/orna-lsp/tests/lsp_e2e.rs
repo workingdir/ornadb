@@ -26,6 +26,7 @@ const HOVER_COMPLETION_SOURCE: &str = include_str!("fixtures/hover-completion-v1
 const EDITOR_HINTS_SOURCE: &str = include_str!("fixtures/editor-lsp-hints.orna");
 const SEMANTIC_TOKEN_DEPTH_SOURCE: &str =
     include_str!("fixtures/semantic-token-multiline-modifiers-v1.orna");
+const SEMANTIC_TOKEN_DELTA_SOURCE: &str = include_str!("fixtures/semantic-token-delta-v1.orna");
 const RENAME_PROVIDER_SOURCE: &str = include_str!("fixtures/rename-provider-v1.orna");
 const RENAME_CALLER_SOURCE: &str = include_str!("fixtures/rename-caller-v1.orna");
 const AMBIGUOUS_RENAME_SOURCE: &str = include_str!("fixtures/ambiguous-renames-v1.orna");
@@ -165,6 +166,10 @@ fn initialize(client: &mut Client) {
     assert_eq!(result["capabilities"]["linkedEditingRangeProvider"], true);
     assert!(result["capabilities"]["typeHierarchyProvider"].is_object());
     assert_eq!(result["capabilities"]["monikerProvider"], true);
+    assert_eq!(
+        result["capabilities"]["semanticTokensProvider"]["full"]["delta"], true,
+        "semantic token deltas must be advertised"
+    );
     assert_eq!(
         result["capabilities"]["renameProvider"]["prepareProvider"], true,
         "initialize capabilities: {result}"
@@ -766,6 +771,38 @@ fn decoded_semantic_token_details(source: &str, response: &Value) -> Vec<Decoded
             )
         })
         .collect()
+}
+
+fn apply_semantic_token_delta(previous: &Value, delta: &Value) -> Vec<Value> {
+    let mut data = previous["data"].as_array().unwrap().clone();
+    let edits = delta["edits"].as_array().unwrap();
+    for edit in edits {
+        let start = edit["start"].as_u64().unwrap() as usize;
+        let delete_count = edit["deleteCount"].as_u64().unwrap_or(0) as usize;
+        assert_eq!(start % 5, 0, "edit start splits a semantic token: {edit}");
+        assert_eq!(
+            delete_count % 5,
+            0,
+            "edit deletion splits a semantic token: {edit}"
+        );
+        let end = start + delete_count;
+        assert!(end <= data.len(), "edit exceeds prior token data: {edit}");
+        let inserted = edit["data"].as_array().cloned().unwrap_or_default();
+        data.splice(start..end, inserted);
+    }
+    assert_eq!(data.len() % 5, 0, "delta produced a partial token");
+    data
+}
+
+fn replace_open_document(client: &mut Client, uri: &str, version: i32, text: &str) -> Value {
+    client.notify(
+        "textDocument/didChange",
+        json!({
+            "textDocument":{"uri":uri,"version":version},
+            "contentChanges":[{"text":text}]
+        }),
+    );
+    client.notification("textDocument/publishDiagnostics")
 }
 
 fn semantic_token_at<'a>(
@@ -1942,6 +1979,186 @@ fn semantic_tokens_split_multiline_comments_and_mark_local_modifications() {
         "assignment value reads must not receive the modification modifier"
     );
 
+    client.shutdown();
+}
+
+#[test]
+fn semantic_token_deltas_track_insertions_replacements_and_removals() {
+    let uri = "file:///workspace/semantic-token-delta-v1.orna";
+    let mut client = Client::spawn();
+    initialize(&mut client);
+    let diagnostics = open(&mut client, uri, SEMANTIC_TOKEN_DELTA_SOURCE);
+    assert!(diagnostics["diagnostics"].as_array().unwrap().is_empty());
+
+    let initial = client.request(
+        "textDocument/semanticTokens/full",
+        json!({"textDocument":{"uri":uri}}),
+    );
+    let initial_result_id = initial["resultId"].as_str().unwrap();
+    let unchanged = client.request(
+        "textDocument/semanticTokens/full/delta",
+        json!({
+            "textDocument":{"uri":uri},
+            "previousResultId":initial_result_id
+        }),
+    );
+    assert_eq!(
+        unchanged["edits"],
+        json!([]),
+        "unchanged tokens: {unchanged}"
+    );
+    let unchanged_result_id = unchanged["resultId"].as_str().unwrap().to_owned();
+    assert_ne!(initial_result_id, unchanged_result_id);
+
+    let inserted_source = SEMANTIC_TOKEN_DELTA_SOURCE.replace(
+        "    let cached: User = value;",
+        "    let cached: User = value;\n    let spare: User = cached;",
+    );
+    assert_ne!(inserted_source, SEMANTIC_TOKEN_DELTA_SOURCE);
+    let inserted_diagnostics = replace_open_document(&mut client, uri, 2, &inserted_source);
+    assert_eq!(inserted_diagnostics["version"], 2);
+    let spare_start = inserted_source.find("    let spare").unwrap();
+    let spare_end = inserted_source[spare_start..]
+        .find('\n')
+        .map(|offset| spare_start + offset)
+        .unwrap();
+    let ranged = client.request(
+        "textDocument/semanticTokens/range",
+        json!({
+            "textDocument":{"uri":uri},
+            "range":range_at(&inserted_source, spare_start, spare_end)
+        }),
+    );
+    assert!(
+        decoded_semantic_token_details(&inserted_source, &ranged)
+            .iter()
+            .any(|token| token.3 == "spare" && token.5 & 1 != 0),
+        "range request lost the inserted declaration: {ranged}"
+    );
+
+    let inserted_delta = client.request(
+        "textDocument/semanticTokens/full/delta",
+        json!({
+            "textDocument":{"uri":uri},
+            "previousResultId":unchanged_result_id
+        }),
+    );
+    assert_eq!(inserted_delta["edits"].as_array().unwrap().len(), 1);
+    let inserted_full = client.request(
+        "textDocument/semanticTokens/full",
+        json!({"textDocument":{"uri":uri}}),
+    );
+    assert_eq!(
+        apply_semantic_token_delta(&initial, &inserted_delta),
+        *inserted_full["data"].as_array().unwrap(),
+        "insertion delta must reconstruct the full UTF-16 token stream"
+    );
+    let inserted_tokens = decoded_semantic_token_details(&inserted_source, &inserted_full);
+    let assignment_target = semantic_token_at(
+        &inserted_source,
+        &inserted_tokens,
+        inserted_source.find("cached = cached").unwrap(),
+    );
+    assert_eq!(
+        (assignment_target.3.as_str(), assignment_target.5 & 4),
+        ("cached", 4),
+        "modification modifier must survive the delta baseline"
+    );
+    let inserted_comments = inserted_tokens
+        .iter()
+        .filter(|token| token.4 == 4)
+        .map(|token| token.3.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        inserted_comments,
+        ["/* alpha café 🧭", "     * beta 🐟", "     * gamma */"],
+        "multiline UTF-16 token segments remain stable across insertion"
+    );
+
+    let replaced_source = inserted_source.replace("cached = cached;", "cached = value;");
+    let replaced_diagnostics = replace_open_document(&mut client, uri, 3, &replaced_source);
+    assert_eq!(replaced_diagnostics["version"], 3);
+    let replaced_delta = client.request(
+        "textDocument/semanticTokens/full/delta",
+        json!({
+            "textDocument":{"uri":uri},
+            "previousResultId":inserted_full["resultId"]
+        }),
+    );
+    assert_eq!(replaced_delta["edits"].as_array().unwrap().len(), 1);
+    let replaced_full = client.request(
+        "textDocument/semanticTokens/full",
+        json!({"textDocument":{"uri":uri}}),
+    );
+    assert_eq!(
+        apply_semantic_token_delta(&inserted_full, &replaced_delta),
+        *replaced_full["data"].as_array().unwrap(),
+        "replacement delta must reconstruct changed token classes and modifiers"
+    );
+    assert!(
+        decoded_semantic_token_details(&replaced_source, &replaced_full)
+            .iter()
+            .any(|token| token.3 == "value" && token.4 == 10 && token.5 == 0),
+        "replaced identifier should use the parameter token class: {replaced_full}"
+    );
+
+    let removed_source =
+        replaced_source.replace("pub fn caller(value: User): User = choose(value);\n", "");
+    assert_ne!(removed_source, replaced_source);
+    let removed_diagnostics = replace_open_document(&mut client, uri, 4, &removed_source);
+    assert_eq!(removed_diagnostics["version"], 4);
+    let removed_delta = client.request(
+        "textDocument/semanticTokens/full/delta",
+        json!({
+            "textDocument":{"uri":uri},
+            "previousResultId":replaced_full["resultId"]
+        }),
+    );
+    assert!(
+        removed_delta["edits"][0]["deleteCount"].as_u64().unwrap() > 0,
+        "removal must delete prior token data: {removed_delta}"
+    );
+    assert!(removed_delta["edits"][0].get("data").is_none());
+    let removed_full = client.request(
+        "textDocument/semanticTokens/full",
+        json!({"textDocument":{"uri":uri}}),
+    );
+    assert_eq!(
+        apply_semantic_token_delta(&replaced_full, &removed_delta),
+        *removed_full["data"].as_array().unwrap(),
+        "removal delta must reconstruct the remaining tokens"
+    );
+
+    let stale_result = client.request(
+        "textDocument/semanticTokens/full/delta",
+        json!({
+            "textDocument":{"uri":uri},
+            "previousResultId":"unknown-semantic-token-result"
+        }),
+    );
+    assert!(
+        stale_result["data"].is_array(),
+        "unknown ids fall back to full: {stale_result}"
+    );
+    assert!(stale_result.get("edits").is_none());
+    let stale_result_id = stale_result["resultId"].as_str().unwrap().to_owned();
+    client.notify("textDocument/didClose", json!({"textDocument":{"uri":uri}}));
+    let closed = client.notification("textDocument/publishDiagnostics");
+    assert!(closed["diagnostics"].as_array().unwrap().is_empty());
+    let reopened = open(&mut client, uri, SEMANTIC_TOKEN_DELTA_SOURCE);
+    assert!(reopened["diagnostics"].as_array().unwrap().is_empty());
+    let reopened_delta = client.request(
+        "textDocument/semanticTokens/full/delta",
+        json!({
+            "textDocument":{"uri":uri},
+            "previousResultId":stale_result_id
+        }),
+    );
+    assert!(
+        reopened_delta["data"].is_array(),
+        "a closed document's result id must not survive reopening: {reopened_delta}"
+    );
+    assert!(reopened_delta.get("edits").is_none());
     client.shutdown();
 }
 

@@ -3264,6 +3264,7 @@ e8255da14cded3d550315c1b02df1cec0d77918fcb9c8702ffb114a1b23e8898  crates/orna-ls
 e26462d689c55d2035f4ee535f113c543d433ab4e627569bb0bada85ae1c690a  crates/orna-lsp/tests/fixtures/missing-semicolon-code-action-v1.orna
 034f96a2b28e9117c1edf56db04aebae41c0e67466ef3c8e84ff2aeb0e4e7f1b  crates/orna-lsp/tests/fixtures/rename-caller-v1.orna
 7477e338729cc2d0e79d3b8b240b43ab9b5712bc78dcb44076f1efc3573448b6  crates/orna-lsp/tests/fixtures/rename-provider-v1.orna
+53d7a8fd34196932558e28a0b214c772b8740c970c8bf8cf876d5d8dbf7f7910  crates/orna-lsp/tests/fixtures/semantic-token-delta-v1.orna
 53d7a8fd34196932558e28a0b214c772b8740c970c8bf8cf876d5d8dbf7f7910  crates/orna-lsp/tests/fixtures/semantic-token-multiline-modifiers-v1.orna
 267fa641bc6c9b614d903de2f3ec55fc3ac208160ed88f210d2a11376d961294  crates/orna-lsp/tests/fixtures/signature-actions-v1.orna
 9a14af6c57d9551e81d375f0eb4ea06008bf18026ebd0a960cb4d1b2e57dafc6  crates/orna-lsp/tests/fixtures/tree-sitter-corpus/accepted_actions_inspector.txt
@@ -4845,6 +4846,7 @@ b52da35c06919ab4d099a39d1ba2bfce9ab9e877060d932f73133c51f80f6a19  crates/orna-st
 aaea9d72db18efec836164168cf45d177c9b60532b69360ca389fda2366657d9  crates/orna-storage-v1/tests/fixtures/paired-nested-checkpoint-identities-f166.orna
 a5821a83a8b00df31ea7adf45898643b85fbdb4c7a1aaeef6919d339f87f47e8  crates/orna-storage-v1/tests/fixtures/paired-nested-checkpoint-identities-f170.orna
 462768b6b09b9e829435d7043e42f98ad5b5f1456bc967c041a5068b8b5ddff6  crates/orna-storage-v1/tests/fixtures/paired-nested-checkpoint-identities-f173.orna
+98556ec0352d30e40d418a7b467120537c42ad64761c2b3401532bfac7179c30  crates/orna-storage-v1/tests/fixtures/paired-nested-checkpoint-identities-f177.orna
 669562d095c40aad8c133dd51840c6ec957ca0bda967c90b957a2fded3cc8413  crates/orna-storage-v1/tests/fixtures/paired-nested-checkpoint-restore-folds-f140.orna
 5a938147f8b446f72176865d8a1c0b22b2c7015da212ec6f7d3755f3c670674d  crates/orna-storage-v1/tests/fixtures/paired-nested-checkpoint-spill-folds-f142.orna
 10cf1d8f0fbd9417891c9df04be6792a17f117d69d044c6c1bc7ab9ada85ba87  crates/orna-storage-v1/tests/fixtures/paired-nested-compaction-identities-f153.orna
