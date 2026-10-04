@@ -4843,6 +4843,7 @@ b52da35c06919ab4d099a39d1ba2bfce9ab9e877060d932f73133c51f80f6a19  crates/orna-st
 aaea9d72db18efec836164168cf45d177c9b60532b69360ca389fda2366657d9  crates/orna-storage-v1/tests/fixtures/paired-nested-checkpoint-identities-f166.orna
 a5821a83a8b00df31ea7adf45898643b85fbdb4c7a1aaeef6919d339f87f47e8  crates/orna-storage-v1/tests/fixtures/paired-nested-checkpoint-identities-f170.orna
 462768b6b09b9e829435d7043e42f98ad5b5f1456bc967c041a5068b8b5ddff6  crates/orna-storage-v1/tests/fixtures/paired-nested-checkpoint-identities-f173.orna
+dc75e8a79da373b5458696aaa1e45a80b03a38280c34ad0aaf1ac9e65ba0bebe  crates/orna-storage-v1/tests/fixtures/paired-nested-checkpoint-identities-gjnto.orna
 669562d095c40aad8c133dd51840c6ec957ca0bda967c90b957a2fded3cc8413  crates/orna-storage-v1/tests/fixtures/paired-nested-checkpoint-restore-folds-f140.orna
 5a938147f8b446f72176865d8a1c0b22b2c7015da212ec6f7d3755f3c670674d  crates/orna-storage-v1/tests/fixtures/paired-nested-checkpoint-spill-folds-f142.orna
 10cf1d8f0fbd9417891c9df04be6792a17f117d69d044c6c1bc7ab9ada85ba87  crates/orna-storage-v1/tests/fixtures/paired-nested-compaction-identities-f153.orna
