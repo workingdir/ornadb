@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { completionRankingFields, hoverMarkdown } from './assist-adapter';
+import { completionRankingFields, hoverMarkdown, signatureHelpFields } from './assist-adapter';
 
 describe('LSP completion ranking adapter', () => {
   it('preserves backend ordering and preselection for Monaco', () => {
@@ -38,5 +38,40 @@ describe('LSP completion ranking adapter', () => {
       { language: 'orna', value: 'increment(value)' },
       { value: 'Returns the exact successor.' },
     ])).toBe('```orna\nincrement(value)\n```\n\nReturns the exact successor.');
+  });
+});
+
+describe('LSP signature help adapter', () => {
+  it('preserves standard signature parameter hints and the active argument', () => {
+    expect(signatureHelpFields({
+      signatures: [{
+        label: 'fn clamp(value: Int, lower: Int, upper: Int): Int',
+        documentation: { kind: 'markdown', value: 'Clamps a value to a range.' },
+        parameters: [
+          { label: 'value: Int' },
+          { label: 'lower: Int' },
+          { label: 'upper: Int', documentation: { kind: 'markdown', value: 'Inclusive upper bound.' } },
+        ],
+      }],
+      activeSignature: 0,
+      activeParameter: 2,
+    })).toEqual({
+      signatures: [{
+        label: 'fn clamp(value: Int, lower: Int, upper: Int): Int',
+        documentation: 'Clamps a value to a range.',
+        parameters: [
+          { label: 'value: Int' },
+          { label: 'lower: Int' },
+          { label: 'upper: Int', documentation: 'Inclusive upper bound.' },
+        ],
+      }],
+      activeSignature: 0,
+      activeParameter: 2,
+    });
+  });
+
+  it('returns no provider value when the LSP response has no usable signatures', () => {
+    expect(signatureHelpFields({ signatures: [{ parameters: [] }] })).toBeUndefined();
+    expect(signatureHelpFields(null)).toBeUndefined();
   });
 });
