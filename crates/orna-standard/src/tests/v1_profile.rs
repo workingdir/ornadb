@@ -6,7 +6,8 @@ use crate::{
     REFERENCE_STANDARD_COLLECTION_PATH_V1, REFERENCE_STANDARD_MATH_PATH_V1,
     REFERENCE_STANDARD_MONEY_PATH_V1,
     REFERENCE_STANDARD_BITS_PATH_V1, REFERENCE_STANDARD_QUERY_PATH_V1,
-    REFERENCE_STANDARD_TEXT_PATH_V1, REFERENCE_STANDARD_STATS_PATH_V1,
+    REFERENCE_STANDARD_TEXT_PATH_V1, REFERENCE_STANDARD_TEXT_BUILDER_PATH_V1,
+    REFERENCE_STANDARD_STATS_PATH_V1,
     REFERENCE_STANDARD_TIME_PATH_V1,
     REFERENCE_STANDARD_TIME_CALENDAR_PATH_V1,
     REFERENCE_STANDARD_STREAM_PATH_V1,
@@ -210,6 +211,48 @@ fn pinned_numeric_conversions_are_included_in_the_captured_snapshot() {
     assert!(parsed.is_ok(), "{:#?}", parsed.diagnostics);
     reference_standard_catalogue_v1()
         .expect("the numeric conversion module resolves against the captured std snapshot");
+}
+
+#[test]
+fn pinned_text_builder_is_included_in_the_captured_snapshot() {
+    let sources = reference_standard_sources_v1();
+    let (index, (path, source)) = sources
+        .iter()
+        .enumerate()
+        .find(|(_, (path, _))| path == REFERENCE_STANDARD_TEXT_BUILDER_PATH_V1)
+        .expect("the pinned source bundle includes std.text.builder");
+    assert_eq!(index, 60, "the text builder appends without moving old source entries");
+    assert_eq!(path, REFERENCE_STANDARD_TEXT_BUILDER_PATH_V1);
+    for declaration in [
+        "pub fn new(): [Str]",
+        "pub fn from_text(value: Str): [Str]",
+        "pub fn append(builder: [Str], value: Str): [Str]",
+        "pub fn append_all(builder: [Str], values: [Str]): [Str]",
+        "pub fn append_line(builder: [Str], value: Str): [Str]",
+        "pub fn build(builder: [Str]): Str",
+        "pub fn is_empty(builder: [Str]): Bool",
+    ] {
+        assert!(source.contains(declaration), "missing {declaration}");
+    }
+    for contract in [
+        "ordered [Str] chunks until build joins them",
+        "leaves the original reusable",
+        "Adds one line followed by LF",
+        "Emptiness describes the built text",
+    ] {
+        assert!(source.contains(contract), "missing string builder contract `{contract}`");
+    }
+    let profile = reference_standard_profile_v1();
+    profile
+        .verify_source(path, source)
+        .expect("text builder source bytes are recorded by the captured std profile");
+    let mut changed_source = source.clone();
+    changed_source.push_str("\n// changed after profile capture\n");
+    assert!(profile.verify_source(path, &changed_source).is_err());
+    let parsed = orna_syntax_v1::parse_module_with_file(source, path);
+    assert!(parsed.is_ok(), "{:#?}", parsed.diagnostics);
+    reference_standard_catalogue_v1()
+        .expect("the text builder resolves against the captured standard snapshot");
 }
 
 #[test]
@@ -456,6 +499,81 @@ fn pinned_collection_views_and_slices_typecheck_as_an_ordinary_std_module() {
             .collect::<Vec<_>>()
             .join("; ")
     );
+}
+
+#[test]
+fn pinned_option_combinators_are_in_the_captured_snapshot() {
+    let sources = reference_standard_sources_v1();
+    let (index, (path, source)) = sources
+        .iter()
+        .enumerate()
+        .find(|(_, (path, _))| path == REFERENCE_STANDARD_OPTION_PATH_V1)
+        .expect("the pinned source bundle includes std.option");
+    assert_eq!(index, 11, "the option module retains its source index");
+    for declaration in [
+        "pub fn and<T, U>",
+        "pub fn or<T>",
+        "pub fn xor<T>",
+        "pub fn flatten<T>(value: T? ?): T?",
+        "pub fn map_or<T, U>",
+        "pub fn map_or_else<T, U>(",
+        "pub fn unwrap_or_else<T>",
+        "pub fn contains<T>",
+        "pub fn zip_with<T, U, V>(",
+    ] {
+        assert!(source.contains(declaration), "missing {declaration}");
+    }
+    for contract in [
+        "never catch failures raised by callbacks",
+        "use `and_then` when",
+        "use `or_else` for a",
+        "exactly one input is present",
+        "calls `fallback` only for null",
+        "callback runs only when both options contain values",
+    ] {
+        assert!(source.contains(contract), "missing option contract `{contract}`");
+    }
+    reference_standard_profile_v1()
+        .verify_source(path, source)
+        .expect("option combinator source bytes are captured by the std profile");
+    reference_standard_catalogue_v1()
+        .expect("option combinators resolve in the captured standard catalogue");
+}
+
+#[test]
+fn pinned_bits_source_includes_bit_and_unsigned_byte_contracts() {
+    let sources = reference_standard_sources_v1();
+    let (index, (path, source)) = sources
+        .iter()
+        .enumerate()
+        .find(|(_, (path, _))| path == REFERENCE_STANDARD_BITS_PATH_V1)
+        .expect("the pinned source bundle includes std.bits");
+    assert_eq!(index, 4, "the existing bits module keeps its source index");
+    for declaration in [
+        "pub fn test_bit(value: Int, index: Int): Bool?",
+        "pub fn set_bit(value: Int, index: Int): Int?",
+        "pub fn clear_bit(value: Int, index: Int): Int?",
+        "pub fn toggle_bit(value: Int, index: Int): Int?",
+        "pub fn is_byte(value: Int): Bool",
+        "pub fn unsigned_to_bytes(value: Int, width: Int, order: Str): [Int]?",
+        "pub fn unsigned_from_bytes(bytes: [Int], order: Str): Int?",
+    ] {
+        assert!(source.contains(declaration), "missing {declaration}");
+    }
+    for contract in [
+        "infinite sign extension",
+        "exactly `width` bytes",
+        "Little endian places the least-significant byte first",
+        "most-significant byte first",
+        "Leading zero bytes are accepted",
+    ] {
+        assert!(source.contains(contract), "missing bit/byte contract `{contract}`");
+    }
+    reference_standard_profile_v1()
+        .verify_source(path, source)
+        .expect("bit and byte helper source bytes are captured by the std profile");
+    reference_standard_catalogue_v1()
+        .expect("bit and byte helper imports resolve in the captured catalogue");
 }
 
 #[test]

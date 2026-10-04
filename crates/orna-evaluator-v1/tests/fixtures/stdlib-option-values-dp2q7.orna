@@ -1,0 +1,16 @@
+option.is_some(Some(1))
+&& option.is_none(option.filter(Some(1), value => false))
+&& option.map(Some(2), value => value + 1) == Some(3)
+&& option.map(option.filter(Some(1), value => false), value => value + 1) == null
+&& option.and_then(Some(2), value => Some(value * 3)) == Some(6)
+&& option.and_then(option.filter(Some(1), value => false), value => Some(value * 3)) == null
+&& option.filter(Some(4), value => value % 2 == 0) == Some(4)
+&& option.filter(Some(3), value => value % 2 == 0) == null
+&& option.unwrap_or(Some(5), 99) == 5
+&& option.unwrap_or(null, 99) == 99
+&& option.flatten(Some(Some(7))) == Some(7)
+&& option.flatten(Some(option.filter(Some(7), value => false))) == null
+&& option.flatten(option.map(option.filter(Some(7), value => false), value => Some(value))) == null
+&& option.contains(Some("same"), "same")
+&& !option.contains(Some("same"), "other")
+&& !option.contains(option.filter(Some("same"), value => false), "same")
