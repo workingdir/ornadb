@@ -23,6 +23,8 @@ mod syntax_v1_action_signature_contract;
 mod syntax_v1_depth_contract;
 #[path = "support/syntax_v1_diagnostics_document_links_contract.rs"]
 mod syntax_v1_diagnostics_document_links_contract;
+#[path = "support/syntax_v1_document_highlight_code_lens_contract.rs"]
+mod syntax_v1_document_highlight_code_lens_contract;
 #[path = "support/syntax_v1_folding_selection_contract.rs"]
 mod syntax_v1_folding_selection_contract;
 #[path = "support/syntax_v1_workspace_hierarchy_contract.rs"]
@@ -36,6 +38,8 @@ const WORKSPACE_HIERARCHY_PROVIDER_SOURCE: &str =
     include_str!("fixtures/workspace-hierarchy-provider-v1.orna");
 const WORKSPACE_HIERARCHY_CALLER_SOURCE: &str =
     include_str!("fixtures/workspace-hierarchy-caller-v1.orna");
+const DOCUMENT_HIGHLIGHT_CODE_LENS_SOURCE: &str =
+    include_str!("fixtures/document-highlight-code-lens-v1.orna");
 const FOLDING_SELECTION_SOURCE: &str = include_str!("fixtures/folding-selection-v1.orna");
 const DIAGNOSTIC_SOURCE: &str = include_str!("fixtures/incremental-malformed-v1.orna");
 const DOCUMENT_LINKS_SOURCE: &str = include_str!("fixtures/document-links-v1.orna");
@@ -508,6 +512,53 @@ fn protocol_conformance_uses_v1_for_every_advertised_editor_feature() {
         position_of(INVALID_SOURCE, ";", 0)
     );
 
+    let document_highlight_uri = "file:///workspace/document-highlight-code-lens-v1.orna";
+    open(
+        &mut client,
+        document_highlight_uri,
+        DOCUMENT_HIGHLIGHT_CODE_LENS_SOURCE,
+    );
+    let document_highlights = client.request(
+        "textDocument/documentHighlight",
+        json!({
+            "textDocument":{"uri":document_highlight_uri},
+            "position":syntax_v1_document_highlight_code_lens_contract::document_highlight_position(
+                DOCUMENT_HIGHLIGHT_CODE_LENS_SOURCE,
+            )
+        }),
+    );
+    syntax_v1_document_highlight_code_lens_contract::assert_document_highlights_contract(
+        DOCUMENT_HIGHLIGHT_CODE_LENS_SOURCE,
+        &document_highlights,
+        "LSP protocol",
+    );
+
+    let provider_uri = "file:///workspace/workspace-hierarchy-provider-v1.orna";
+    let caller_uri = "file:///workspace/workspace-hierarchy-caller-v1.orna";
+    open(
+        &mut client,
+        provider_uri,
+        WORKSPACE_HIERARCHY_PROVIDER_SOURCE,
+    );
+    open(&mut client, caller_uri, WORKSPACE_HIERARCHY_CALLER_SOURCE);
+    let provider_code_lenses = client.request(
+        "textDocument/codeLens",
+        json!({"textDocument":{"uri":provider_uri}}),
+    );
+    let caller_code_lenses = client.request(
+        "textDocument/codeLens",
+        json!({"textDocument":{"uri":caller_uri}}),
+    );
+    syntax_v1_document_highlight_code_lens_contract::assert_code_lens_contract(
+        WORKSPACE_HIERARCHY_PROVIDER_SOURCE,
+        WORKSPACE_HIERARCHY_CALLER_SOURCE,
+        provider_uri,
+        caller_uri,
+        &provider_code_lenses,
+        &caller_code_lenses,
+        "LSP protocol",
+    );
+
     client.shutdown();
 }
 
@@ -590,6 +641,8 @@ fn neovim_loads_generated_v1_syntax_and_queries_the_lsp_server() {
         root.join("crates/orna-lsp/tests/fixtures/workspace-hierarchy-provider-v1.orna");
     let workspace_caller_fixture =
         root.join("crates/orna-lsp/tests/fixtures/workspace-hierarchy-caller-v1.orna");
+    let document_highlight_fixture =
+        root.join("crates/orna-lsp/tests/fixtures/document-highlight-code-lens-v1.orna");
     let folding_selection_fixture =
         root.join("crates/orna-lsp/tests/fixtures/folding-selection-v1.orna");
     assert_eq!(
@@ -599,6 +652,10 @@ fn neovim_loads_generated_v1_syntax_and_queries_the_lsp_server() {
     assert_eq!(
         fs::read_to_string(&workspace_caller_fixture).unwrap(),
         WORKSPACE_HIERARCHY_CALLER_SOURCE
+    );
+    assert_eq!(
+        fs::read_to_string(&document_highlight_fixture).unwrap(),
+        DOCUMENT_HIGHLIGHT_CODE_LENS_SOURCE
     );
     let workspace_hierarchy_requests = syntax_v1_workspace_hierarchy_contract::request_data(
         WORKSPACE_HIERARCHY_PROVIDER_SOURCE,
@@ -986,6 +1043,27 @@ local call_ambiguous_reference = hierarchy_request("textDocument/prepareCallHier
   textDocument = { uri = workspace_caller_uri },
   position = workspace_hierarchy_requests.ambiguous_reference,
 }, workspace_caller_bufnr)
+local workspace_provider_code_lenses = hierarchy_request("textDocument/codeLens", {
+  textDocument = { uri = workspace_provider_uri },
+}, workspace_provider_bufnr)
+local workspace_caller_code_lenses = hierarchy_request("textDocument/codeLens", {
+  textDocument = { uri = workspace_caller_uri },
+}, workspace_caller_bufnr)
+
+vim.cmd("edit " .. vim.fn.fnameescape(vim.env.ORNA_DOCUMENT_HIGHLIGHT_FIXTURE))
+local document_highlight_bufnr = vim.api.nvim_get_current_buf()
+assert(vim.bo[document_highlight_bufnr].filetype == "orna", "document-highlight fixture did not select the orna filetype")
+assert(vim.wait(5000, function()
+  for _, attached in ipairs(vim.lsp.get_clients({ bufnr = document_highlight_bufnr })) do
+    if attached.name == "orna" and attached.initialized then client = attached; return true end
+  end
+  return false
+end, 10), "document-highlight fixture did not attach to orna-lsp")
+local document_highlight_uri = vim.uri_from_bufnr(document_highlight_bufnr)
+local document_highlights = hierarchy_request("textDocument/documentHighlight", {
+  textDocument = { uri = document_highlight_uri },
+  position = vim.fn.json_decode(vim.env.ORNA_DOCUMENT_HIGHLIGHT_POSITION),
+}, document_highlight_bufnr)
 
 vim.cmd("edit " .. vim.fn.fnameescape(vim.env.ORNA_FOLDING_SELECTION_FIXTURE))
 local folding_bufnr = vim.api.nvim_get_current_buf()
@@ -1099,6 +1177,9 @@ vim.fn.writefile({ vim.fn.json_encode({
   call_ambiguous_reference = call_ambiguous_reference,
   workspace_provider_uri = workspace_provider_uri,
   workspace_caller_uri = workspace_caller_uri,
+  workspace_provider_code_lenses = workspace_provider_code_lenses,
+  workspace_caller_code_lenses = workspace_caller_code_lenses,
+  document_highlights = document_highlights,
   folding_ranges = folding_ranges,
   selection_ranges = selection_ranges,
   folding_uri = folding_uri,
@@ -1132,6 +1213,8 @@ vim.fn.writefile({
   "LSP_CODE_ACTION=pass",
   "LSP_WORKSPACE_SYMBOL=pass",
   "LSP_CALL_HIERARCHY=pass",
+  "LSP_DOCUMENT_HIGHLIGHT=pass",
+  "LSP_CODE_LENS=pass",
   "LSP_FOLDING_RANGE=pass",
   "LSP_SELECTION_RANGE=pass",
   "LSP_DIAGNOSTICS=pass",
@@ -1166,6 +1249,10 @@ vim.cmd("qa!")
             &workspace_provider_fixture,
         )
         .env("ORNA_WORKSPACE_CALLER_FIXTURE", &workspace_caller_fixture)
+        .env(
+            "ORNA_DOCUMENT_HIGHLIGHT_FIXTURE",
+            &document_highlight_fixture,
+        )
         .env("ORNA_FOLDING_SELECTION_FIXTURE", &folding_selection_fixture)
         .env("ORNA_DIAGNOSTIC_FIXTURE", &diagnostic_fixture)
         .env("ORNA_DIAGNOSTIC_RECOVERY_SOURCE", &diagnostic_recovery)
@@ -1189,6 +1276,15 @@ vim.cmd("qa!")
         .env(
             "ORNA_WORKSPACE_HIERARCHY_REQUESTS",
             serde_json::to_string(&workspace_hierarchy_requests).unwrap(),
+        )
+        .env(
+            "ORNA_DOCUMENT_HIGHLIGHT_POSITION",
+            serde_json::to_string(
+                &syntax_v1_document_highlight_code_lens_contract::document_highlight_position(
+                    DOCUMENT_HIGHLIGHT_CODE_LENS_SOURCE,
+                ),
+            )
+            .unwrap(),
         )
         .env(
             "ORNA_FOLDING_SELECTION_REQUESTS",
@@ -1316,6 +1412,24 @@ vim.cmd("qa!")
         &hover_semantic_result,
         "Neovim",
     );
+    syntax_v1_document_highlight_code_lens_contract::assert_document_highlights_contract(
+        DOCUMENT_HIGHLIGHT_CODE_LENS_SOURCE,
+        &hover_semantic_result["document_highlights"],
+        "Neovim",
+    );
+    syntax_v1_document_highlight_code_lens_contract::assert_code_lens_contract(
+        WORKSPACE_HIERARCHY_PROVIDER_SOURCE,
+        WORKSPACE_HIERARCHY_CALLER_SOURCE,
+        hover_semantic_result["workspace_provider_uri"]
+            .as_str()
+            .expect("Neovim workspace provider URI"),
+        hover_semantic_result["workspace_caller_uri"]
+            .as_str()
+            .expect("Neovim workspace caller URI"),
+        &hover_semantic_result["workspace_provider_code_lenses"],
+        &hover_semantic_result["workspace_caller_code_lenses"],
+        "Neovim",
+    );
     syntax_v1_folding_selection_contract::assert_contract(
         FOLDING_SELECTION_SOURCE,
         &hover_semantic_result["folding_ranges"],
@@ -1388,6 +1502,8 @@ vim.cmd("qa!")
             "LSP_CODE_ACTION=pass",
             "LSP_WORKSPACE_SYMBOL=pass",
             "LSP_CALL_HIERARCHY=pass",
+            "LSP_DOCUMENT_HIGHLIGHT=pass",
+            "LSP_CODE_LENS=pass",
             "LSP_FOLDING_RANGE=pass",
             "LSP_SELECTION_RANGE=pass",
             "LSP_DIAGNOSTICS=pass",
@@ -1453,6 +1569,8 @@ fn emacs_eglot_attaches_and_proves_hover_rename_references_and_semantic_tokens()
         root.join("crates/orna-lsp/tests/fixtures/workspace-hierarchy-provider-v1.orna");
     let workspace_caller_fixture =
         root.join("crates/orna-lsp/tests/fixtures/workspace-hierarchy-caller-v1.orna");
+    let document_highlight_fixture =
+        root.join("crates/orna-lsp/tests/fixtures/document-highlight-code-lens-v1.orna");
     let folding_selection_fixture =
         root.join("crates/orna-lsp/tests/fixtures/folding-selection-v1.orna");
     let diagnostic_fixture =
@@ -1492,6 +1610,10 @@ fn emacs_eglot_attaches_and_proves_hover_rename_references_and_semantic_tokens()
     assert_eq!(
         fs::read_to_string(&workspace_caller_fixture).unwrap(),
         WORKSPACE_HIERARCHY_CALLER_SOURCE
+    );
+    assert_eq!(
+        fs::read_to_string(&document_highlight_fixture).unwrap(),
+        DOCUMENT_HIGHLIGHT_CODE_LENS_SOURCE
     );
     let workspace_hierarchy_requests = syntax_v1_workspace_hierarchy_contract::request_data(
         WORKSPACE_HIERARCHY_PROVIDER_SOURCE,
@@ -1616,6 +1738,7 @@ fn emacs_eglot_attaches_and_proves_hover_rename_references_and_semantic_tokens()
       (action-buffer nil)
       (workspace-provider-buffer nil)
       (workspace-caller-buffer nil)
+      (document-highlight-buffer nil)
       (folding-selection-buffer nil)
       (diagnostic-buffer nil)
       (document-links-buffer nil)
@@ -1883,6 +2006,32 @@ fn emacs_eglot_attaches_and_proves_hover_rename_references_and_semantic_tokens()
               (error "Eglot did not provide a URI for the workspace caller: %S" params))
             (setq workspace-caller-uri uri
                   workspace-server (eglot-current-server))))
+        (puthash "workspace_provider_code_lenses"
+                 (jsonrpc-request
+                  workspace-server :textDocument/codeLens
+                  (list :textDocument (list :uri workspace-provider-uri)))
+                 workspace-evidence)
+        (puthash "workspace_caller_code_lenses"
+                 (jsonrpc-request
+                  workspace-server :textDocument/codeLens
+                  (list :textDocument (list :uri workspace-caller-uri)))
+                 workspace-evidence)
+        (setq document-highlight-buffer
+              (find-file-noselect (getenv "ORNA_DOCUMENT_HIGHLIGHT_FIXTURE")))
+        (with-current-buffer document-highlight-buffer
+          (orna-test-wait-managed document-highlight-buffer)
+          (let* ((params (eglot--TextDocumentPositionParams))
+                 (uri (orna-test-get (orna-test-get params "textDocument") "uri"))
+                 (position (orna-test-position "count =" 1)))
+            (unless (stringp uri)
+              (error "Eglot did not provide a URI for the document-highlight fixture: %S" params))
+            (puthash "document_highlights"
+                     (jsonrpc-request
+                      (eglot-current-server) :textDocument/documentHighlight
+                      (list :textDocument (list :uri uri)
+                            :position (list :line (car position)
+                                            :character (cadr position))))
+                     workspace-evidence)))
         (puthash "workspace_mid"
                  (jsonrpc-request workspace-server :workspace/symbol (list :query "mid"))
                  workspace-evidence)
@@ -2028,6 +2177,8 @@ fn emacs_eglot_attaches_and_proves_hover_rename_references_and_semantic_tokens()
                                (list :textDocument (list :uri document-links-uri))))
         (princ "EMACS_LSP_WORKSPACE_SYMBOL=pass\n")
         (princ "EMACS_LSP_CALL_HIERARCHY=pass\n")
+        (princ "EMACS_LSP_DOCUMENT_HIGHLIGHT=pass\n")
+        (princ "EMACS_LSP_CODE_LENS=pass\n")
         (princ "EMACS_LSP_FOLDING_RANGE=pass\n")
         (princ "EMACS_LSP_SELECTION_RANGE=pass\n")
         (princ "EMACS_LSP_DIAGNOSTICS=pass\n")
@@ -2082,6 +2233,7 @@ fn emacs_eglot_attaches_and_proves_hover_rename_references_and_semantic_tokens()
     (when (buffer-live-p diagnostic-buffer) (kill-buffer diagnostic-buffer))
     (when (buffer-live-p document-links-buffer) (kill-buffer document-links-buffer))
     (when (buffer-live-p document-link-target-buffer) (kill-buffer document-link-target-buffer))
+    (when (buffer-live-p document-highlight-buffer) (kill-buffer document-highlight-buffer))
     (when (buffer-live-p document-link-directory-buffer) (kill-buffer document-link-directory-buffer))))
 "#,
         elisp_string(&plugin.display().to_string()),
@@ -2111,6 +2263,10 @@ fn emacs_eglot_attaches_and_proves_hover_rename_references_and_semantic_tokens()
             &workspace_provider_fixture,
         )
         .env("ORNA_WORKSPACE_CALLER_FIXTURE", &workspace_caller_fixture)
+        .env(
+            "ORNA_DOCUMENT_HIGHLIGHT_FIXTURE",
+            &document_highlight_fixture,
+        )
         .env("ORNA_FOLDING_SELECTION_FIXTURE", &folding_selection_fixture)
         .env("ORNA_DIAGNOSTIC_FIXTURE", &diagnostic_fixture)
         .env("ORNA_DIAGNOSTIC_RECOVERY_SOURCE", &diagnostic_recovery)
@@ -2179,6 +2335,24 @@ fn emacs_eglot_attaches_and_proves_hover_rename_references_and_semantic_tokens()
             .as_str()
             .expect("Emacs Eglot workspace caller URI"),
         &hover_semantic_result,
+        "Emacs Eglot",
+    );
+    syntax_v1_document_highlight_code_lens_contract::assert_document_highlights_contract(
+        DOCUMENT_HIGHLIGHT_CODE_LENS_SOURCE,
+        &hover_semantic_result["document_highlights"],
+        "Emacs Eglot",
+    );
+    syntax_v1_document_highlight_code_lens_contract::assert_code_lens_contract(
+        WORKSPACE_HIERARCHY_PROVIDER_SOURCE,
+        WORKSPACE_HIERARCHY_CALLER_SOURCE,
+        hover_semantic_result["workspace_provider_uri"]
+            .as_str()
+            .expect("Emacs Eglot workspace provider URI"),
+        hover_semantic_result["workspace_caller_uri"]
+            .as_str()
+            .expect("Emacs Eglot workspace caller URI"),
+        &hover_semantic_result["workspace_provider_code_lenses"],
+        &hover_semantic_result["workspace_caller_code_lenses"],
         "Emacs Eglot",
     );
     syntax_v1_folding_selection_contract::assert_contract(
@@ -2257,6 +2431,8 @@ fn emacs_eglot_attaches_and_proves_hover_rename_references_and_semantic_tokens()
         "EMACS_LSP_CODE_ACTION=pass",
         "EMACS_LSP_WORKSPACE_SYMBOL=pass",
         "EMACS_LSP_CALL_HIERARCHY=pass",
+        "EMACS_LSP_DOCUMENT_HIGHLIGHT=pass",
+        "EMACS_LSP_CODE_LENS=pass",
         "EMACS_LSP_FOLDING_RANGE=pass",
         "EMACS_LSP_SELECTION_RANGE=pass",
         "EMACS_LSP_DIAGNOSTICS=pass",
