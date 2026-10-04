@@ -18,6 +18,7 @@ base64 = "0.22.1"
 num-bigint = "0.4.6"
 num-integer = "0.1.47"
 num-traits = "0.2.19"
+getrandom = "0.3.4"
 serde = "1.0"
 serde_json = { version = "1.0.151", features = ["arbitrary_precision", "raw_value"] }
 orna-foundation-v1 = { path = "../orna-foundation-v1" }

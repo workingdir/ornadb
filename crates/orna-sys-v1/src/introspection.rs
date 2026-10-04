@@ -1696,6 +1696,92 @@ pub fn explain_query_with_partial_indexes_and_paired_checkpoint_segment_compacti
     )
 }
 
+/// Explains paired cost-restoration folds with resolver-approved window
+/// aggregate chains. The fold retains each exact source window identity across
+/// restore pairs and sparse joins. ORNA leaves this explain-only identity
+/// composition open; it does not change cardinality or execution.
+pub fn explain_query_with_paired_cost_restoration_and_window_pushdowns(
+    query: &QueryPlanDescription,
+    pairs: &[QueryJoinPairIdentityDescription],
+    window_aggregates: &[QueryWindowAggregatePushdownDescription],
+    checkpoint_chains: &[QueryPairedCheckpointSegmentCompactionChainDescription],
+    segment_rotation_chains: &[QueryPairedSegmentRotationChainDescription],
+    stream_compaction_chains: &[QueryPairedStreamCompactionChainDescription],
+    spill_restore_chains: &[QueryPairedCheckpointSpillRestoreChainDescription],
+    stream_rotation_chains: &[QueryPairedStreamRotationChainDescription],
+    wal_rotation_chains: &[QueryPairedWalRotationChainDescription],
+) -> Result<ExplainedPlan, ExplainError> {
+    explain_query_core_with_wal_rotation_chains(
+        query,
+        1,
+        None,
+        None,
+        &[],
+        &[],
+        &[],
+        None,
+        &[],
+        &[],
+        &[],
+        &[],
+        &[],
+        window_aggregates,
+        pairs,
+        &[],
+        &[],
+        checkpoint_chains,
+        segment_rotation_chains,
+        stream_compaction_chains,
+        spill_restore_chains,
+        stream_rotation_chains,
+        wal_rotation_chains,
+    )
+}
+
+/// Explains paired cost-restoration folds together with exact window spills.
+/// Each spill pair is joined to the window identity and restore chains on the
+/// same input edge, then retained by the cumulative sparse fold. ORNA leaves
+/// this explain-only identity composition open; spill estimates and plan
+/// cardinalities keep their existing behavior.
+pub fn explain_query_with_paired_cost_restoration_and_window_spill_pushdowns(
+    query: &QueryPlanDescription,
+    pairs: &[QueryJoinPairIdentityDescription],
+    window_aggregates: &[QueryWindowAggregatePushdownDescription],
+    window_spills: &[QueryWindowSpillDescription],
+    checkpoint_chains: &[QueryPairedCheckpointSegmentCompactionChainDescription],
+    segment_rotation_chains: &[QueryPairedSegmentRotationChainDescription],
+    stream_compaction_chains: &[QueryPairedStreamCompactionChainDescription],
+    spill_restore_chains: &[QueryPairedCheckpointSpillRestoreChainDescription],
+    stream_rotation_chains: &[QueryPairedStreamRotationChainDescription],
+    wal_rotation_chains: &[QueryPairedWalRotationChainDescription],
+) -> Result<ExplainedPlan, ExplainError> {
+    explain_query_core_with_wal_rotation_chains(
+        query,
+        1,
+        None,
+        None,
+        &[],
+        &[],
+        &[],
+        None,
+        &[],
+        &[],
+        &[],
+        &[],
+        &[],
+        window_aggregates,
+        pairs,
+        &[],
+        window_spills,
+        checkpoint_chains,
+        segment_rotation_chains,
+        stream_compaction_chains,
+        spill_restore_chains,
+        stream_rotation_chains,
+        wal_rotation_chains,
+    )
+}
+
 /// Extends the branch-local checkpoint-compaction fold with paired segment
 /// rotation chains. Rotation entries remain in caller order and retain their
 /// source stream, fold, and order coordinates through sparse join routes.
@@ -3609,6 +3695,27 @@ fn explain_query_core_with_wal_rotation_chains(
     let mut paired_wal_rotation_cost_restoration_fold: Option<
         QueryPairedWalRotationCostRestorationFold,
     > = None;
+    let tracks_window_cost_restoration = !window_aggregates.is_empty()
+        && (!checkpoint_compaction_chains.is_empty()
+            || !segment_rotation_chains.is_empty()
+            || !stream_compaction_chains.is_empty()
+            || !spill_restore_chains.is_empty()
+            || !stream_rotation_chains.is_empty()
+            || !wal_rotation_chains.is_empty());
+    let anchor_window_identity =
+        query_window_pushdown_chain_identity(&query.source, window_aggregates);
+    let mut paired_window_cost_restoration_fold = tracks_window_cost_restoration
+        .then(|| {
+            anchor_window_identity.as_deref().map(|identity| {
+                query_paired_window_cost_restoration_seed(
+                    &query.snapshot,
+                    &join_cost_fold_identity,
+                    &query.source,
+                    identity,
+                )
+            })
+        })
+        .flatten();
     let mut paired_decorrelation_cost_restoration_chain_identity: Option<String> = None;
     let mut paired_window_spill_cascade_fold: Option<QueryWindowSpillCascadeFold> = None;
     let mut paired_window_spill_rule_cost_fold: Option<QueryPairedWindowSpillRuleCostFold> =
@@ -4500,6 +4607,50 @@ fn explain_query_core_with_wal_rotation_chains(
                     (identity, totals)
                 })
             });
+        let paired_window_cost_restoration_chain_identities = [
+            (
+                "checkpoint_compaction",
+                checkpoint_compaction_chain
+                    .map(query_paired_checkpoint_segment_compaction_chain_identity),
+            ),
+            (
+                "segment_rotation",
+                segment_rotation_chain.map(query_paired_segment_rotation_chain_identity),
+            ),
+            (
+                "stream_compaction",
+                stream_compaction_chain.map(query_paired_stream_compaction_chain_identity),
+            ),
+            (
+                "checkpoint_spill_restore",
+                spill_restore_chain.map(query_paired_checkpoint_spill_restore_chain_identity),
+            ),
+            (
+                "stream_rotation",
+                stream_rotation_chain.map(query_paired_stream_rotation_chain_identity),
+            ),
+            (
+                "wal_rotation",
+                wal_rotation_chain.map(query_paired_wal_rotation_chain_identity),
+            ),
+        ];
+        let paired_window_cost_restoration_pair_identity = tracks_window_cost_restoration
+            .then(|| {
+                query_paired_window_cost_restoration_pair_identity(
+                    paired_window_cost_restoration_fold.as_ref(),
+                    &left_fold_identity,
+                    &right_fold_identity,
+                    join_pair_identity,
+                    &join.source,
+                    join.predicate.as_ref(),
+                    right_window_identity.as_deref(),
+                    paired_aggregate_spill_fold
+                        .as_ref()
+                        .map(|(identity, _)| identity.as_str()),
+                    &paired_window_cost_restoration_chain_identities,
+                )
+            })
+            .flatten();
         if let Some((pair_spill_fold_identity, totals)) = paired_aggregate_spill_fold.as_ref() {
             paired_window_spill_cascade_fold = Some(
                 query_paired_window_spill_cascade_fold(
@@ -4520,6 +4671,7 @@ fn explain_query_core_with_wal_rotation_chains(
                         window_aggregates,
                         window_spills,
                         cascade,
+                        paired_window_cost_restoration_pair_identity.as_deref(),
                     ),
                 );
             }
@@ -4785,6 +4937,9 @@ fn explain_query_core_with_wal_rotation_chains(
                     &mut operators[index].details,
                     rule_cost_fold,
                     paired_aggregate_spill_fold.is_some(),
+                    paired_aggregate_spill_fold
+                        .as_ref()
+                        .and_then(|_| paired_window_cost_restoration_pair_identity.as_deref()),
                 );
             }
         }
@@ -5129,6 +5284,7 @@ fn explain_query_core_with_wal_rotation_chains(
                 .as_ref()
                 .map(|fold| fold.identity.as_str()),
             paired_window_spill_rule_cost_pair_identity.as_deref(),
+            paired_window_cost_restoration_pair_identity.as_deref(),
             paired_aggregate_spill_restoration_fold
                 .as_ref()
                 .map(|fold| fold.identity.as_str()),
@@ -5537,6 +5693,73 @@ fn explain_query_core_with_wal_rotation_chains(
             } else {
                 None
             };
+        let paired_window_cost_restoration_fold_identities = [
+            (
+                "checkpoint_cost_restoration",
+                next_paired_checkpoint_cost_restoration_fold
+                    .as_ref()
+                    .map(|fold| fold.identity.as_str()),
+            ),
+            (
+                "segment_rotation_cost_restoration",
+                next_paired_segment_rotation_cost_restoration_fold
+                    .as_ref()
+                    .map(|fold| fold.identity.as_str()),
+            ),
+            (
+                "stream_compaction_cost_restoration",
+                next_paired_stream_compaction_cost_restoration_fold
+                    .as_ref()
+                    .map(|fold| fold.identity.as_str()),
+            ),
+            (
+                "checkpoint_spill_cost_restoration",
+                next_paired_checkpoint_spill_cost_restoration_fold
+                    .as_ref()
+                    .map(|fold| fold.identity.as_str()),
+            ),
+            (
+                "stream_rotation_cost_restoration",
+                next_paired_stream_rotation_cost_restoration_fold
+                    .as_ref()
+                    .map(|fold| fold.identity.as_str()),
+            ),
+            (
+                "wal_rotation_cost_restoration",
+                next_paired_wal_rotation_cost_restoration_fold
+                    .as_ref()
+                    .map(|fold| fold.identity.as_str()),
+            ),
+        ];
+        let paired_window_cost_restoration_transition =
+            paired_window_cost_restoration_pair_identity.as_ref().map(|_| {
+                let has_restore_chain = paired_window_cost_restoration_chain_identities
+                    .iter()
+                    .any(|(_, identity)| identity.is_some());
+                if right_window_identity.is_some() && has_restore_chain {
+                    "append_window_and_cost_restore_pair"
+                } else if right_window_identity.is_some() {
+                    "append_window_pair"
+                } else if has_restore_chain {
+                    "append_cost_restore_pair"
+                } else {
+                    "carry_across_sparse_pair"
+                }
+            });
+        let next_paired_window_cost_restoration_fold = paired_window_cost_restoration_pair_identity
+            .as_deref()
+            .map(|pair_identity| {
+                query_paired_window_cost_restoration_fold(
+                    paired_window_cost_restoration_fold.as_ref(),
+                    pair_identity,
+                    join_pair_identity.map_or(join.source.as_str(), |pair| pair.identity.as_str()),
+                    right_window_identity.as_deref(),
+                    paired_aggregate_spill_fold
+                        .as_ref()
+                        .map(|(identity, _)| identity.as_str()),
+                    &paired_window_cost_restoration_fold_identities,
+                )
+            });
         for index in BTreeSet::from([right_access, right]) {
             operators[index].details.insert(
                 "paired_join_cost_fold_identity".to_owned(),
@@ -5546,6 +5769,21 @@ fn explain_query_core_with_wal_rotation_chains(
                 add_paired_window_spill_rule_cost_pair_identity_details(
                     &mut operators[index].details,
                     identity,
+                );
+            }
+            if let (Some(fold), Some(pair_identity), Some(transition)) = (
+                next_paired_window_cost_restoration_fold.as_ref(),
+                paired_window_cost_restoration_pair_identity.as_deref(),
+                paired_window_cost_restoration_transition,
+            ) {
+                add_paired_window_cost_restoration_fold_details(
+                    &mut operators[index].details,
+                    fold,
+                    pair_identity,
+                    paired_aggregate_spill_fold
+                        .as_ref()
+                        .map(|(identity, _)| identity.as_str()),
+                    transition,
                 );
             }
         }
@@ -5679,6 +5917,9 @@ fn explain_query_core_with_wal_rotation_chains(
                 &mut details,
                 rule_cost_fold,
                 paired_aggregate_spill_fold.is_some(),
+                paired_aggregate_spill_fold
+                    .as_ref()
+                    .and_then(|_| paired_window_cost_restoration_pair_identity.as_deref()),
             );
         }
         if let (Some(fold), Some(transition)) = (
@@ -5918,6 +6159,21 @@ fn explain_query_core_with_wal_rotation_chains(
         );
         if let Some(identity) = paired_window_spill_rule_cost_pair_identity.as_deref() {
             add_paired_window_spill_rule_cost_pair_identity_details(&mut details, identity);
+        }
+        if let (Some(fold), Some(pair_identity), Some(transition)) = (
+            next_paired_window_cost_restoration_fold.as_ref(),
+            paired_window_cost_restoration_pair_identity.as_deref(),
+            paired_window_cost_restoration_transition,
+        ) {
+            add_paired_window_cost_restoration_fold_details(
+                &mut details,
+                fold,
+                pair_identity,
+                paired_aggregate_spill_fold
+                    .as_ref()
+                    .map(|(identity, _)| identity.as_str()),
+                transition,
+            );
         }
         if let (
             Some(fold),
@@ -6218,6 +6474,7 @@ fn explain_query_core_with_wal_rotation_chains(
             next_paired_stream_rotation_cost_restoration_fold;
         paired_wal_rotation_cost_restoration_fold =
             next_paired_wal_rotation_cost_restoration_fold;
+        paired_window_cost_restoration_fold = next_paired_window_cost_restoration_fold;
         paired_decorrelation_cost_restoration_chain_identity =
             next_paired_decorrelation_cost_restoration_chain_identity;
     }
@@ -8699,6 +8956,8 @@ struct QueryPairedWindowSpillRuleCostFold {
     pair_count: u64,
     totals: QueryAggregateSpillTotals,
     rules: BTreeMap<String, QueryWindowSpillRuleCostFold>,
+    restore_pair_identities: BTreeMap<String, String>,
+    restore_fold_identity: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -8869,6 +9128,20 @@ struct QueryPairedWalRotationCostRestorationFold {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+struct QueryPairedWindowCostRestorationFold {
+    identity: String,
+    parent_identity: Option<String>,
+    pair_count: u64,
+    window_pair_count: u64,
+    cost_restore_fold_count: u64,
+    window_identities: BTreeMap<String, String>,
+    spill_pair_identities: BTreeMap<String, String>,
+    spill_fold_identity: Option<String>,
+    cost_restore_fold_identities: BTreeMap<String, String>,
+    overflowed: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 struct QueryPairedLimitWindowCompactionFold {
     identity: String,
     limit_aggregate_identity: Option<String>,
@@ -9033,8 +9306,8 @@ fn add_paired_window_spill_cascade_fold_details(
 
 /// Folds each window aggregate's spill work below the paired spill cascade.
 /// The reference leaves explain-only digest structure open; this adapter uses
-/// the exact aggregate identity as the local rule key and preserves sparse
-/// pair carry independently from each rule's computed totals.
+/// the exact aggregate identity as the local rule key, binds spill pairs to
+/// their nested window-restore pair identity, and preserves sparse pair carry.
 fn query_paired_window_spill_rule_cost_fold(
     previous: Option<&QueryPairedWindowSpillRuleCostFold>,
     pair: &QueryJoinPairIdentityDescription,
@@ -9042,8 +9315,29 @@ fn query_paired_window_spill_rule_cost_fold(
     window_aggregates: &[QueryWindowAggregatePushdownDescription],
     window_spills: &[QueryWindowSpillDescription],
     cascade: &QueryWindowSpillCascadeFold,
+    window_restore_pair_identity: Option<&str>,
 ) -> QueryPairedWindowSpillRuleCostFold {
     let mut rules = previous.map_or_else(BTreeMap::new, |fold| fold.rules.clone());
+    let mut restore_pair_identities = previous
+        .map_or_else(BTreeMap::new, |fold| fold.restore_pair_identities.clone());
+    if let Some(identity) = window_restore_pair_identity {
+        restore_pair_identities.insert(pair.identity.as_str().to_owned(), identity.to_owned());
+    }
+    let restore_fold_identity = if restore_pair_identities.is_empty() {
+        None
+    } else {
+        let mut hash = Sha256::new();
+        hash.update(b"orna.sys.query-paired-window-spill-rule-cost-restore-fold.v1\0");
+        hash.update((restore_pair_identities.len() as u64).to_be_bytes());
+        for (pair_identity, restore_identity) in &restore_pair_identities {
+            hash_part(&mut hash, pair_identity.as_bytes());
+            hash_part(&mut hash, restore_identity.as_bytes());
+        }
+        Some(format!(
+            "paired-window-spill-rule-cost-restore-fold:{}",
+            hex(&hash.finalize())
+        ))
+    };
     for aggregate in window_aggregates
         .iter()
         .filter(|aggregate| aggregate.source == pair.right_source)
@@ -9088,6 +9382,12 @@ fn query_paired_window_spill_rule_cost_fold(
         hash_part(&mut hash, aggregate_identity.as_bytes());
         hash_part(&mut hash, rule_fold.identity.as_bytes());
     }
+    hash.update((restore_pair_identities.len() as u64).to_be_bytes());
+    for (pair_identity, restore_identity) in &restore_pair_identities {
+        hash_part(&mut hash, pair_identity.as_bytes());
+        hash_part(&mut hash, restore_identity.as_bytes());
+    }
+    hash_optional_text(&mut hash, restore_fold_identity.as_deref());
     hash.update(cascade.spill_pair_count.to_be_bytes());
     hash_query_aggregate_spill_totals(&mut hash, cascade.totals);
 
@@ -9099,6 +9399,8 @@ fn query_paired_window_spill_rule_cost_fold(
         pair_count: cascade.spill_pair_count,
         totals: cascade.totals,
         rules,
+        restore_pair_identities,
+        restore_fold_identity,
     }
 }
 
@@ -9205,6 +9507,7 @@ fn add_paired_window_spill_rule_cost_fold_details(
     details: &mut BTreeMap<String, PlanDetail>,
     fold: &QueryPairedWindowSpillRuleCostFold,
     advanced_on_pair: bool,
+    window_restore_pair_identity: Option<&str>,
 ) {
     details.insert(
         "paired_window_spill_rule_cost_fold_identity".to_owned(),
@@ -9213,6 +9516,10 @@ fn add_paired_window_spill_rule_cost_fold_details(
     details.insert(
         "paired_window_spill_rule_cost_pairing".to_owned(),
         PlanDetail::Text("paired_window_spill_chain_with_nested_aggregate_rule_folds".to_owned()),
+    );
+    details.insert(
+        "paired_window_spill_rule_cost_restore_pairing".to_owned(),
+        PlanDetail::Text("exact_restore_pair_identity_bound_into_spill_cost_history".to_owned()),
     );
     details.insert(
         "paired_window_spill_rule_cost_transition".to_owned(),
@@ -9230,6 +9537,26 @@ fn add_paired_window_spill_rule_cost_fold_details(
         "paired_window_spill_rule_cost_rule_count".to_owned(),
         PlanDetail::Integer(fold.rules.len() as u64),
     );
+    details.insert(
+        "paired_window_spill_rule_cost_restore_pair_count".to_owned(),
+        PlanDetail::Integer(fold.restore_pair_identities.len() as u64),
+    );
+    if let Some(identity) = fold.restore_fold_identity.as_ref() {
+        details.insert(
+            "paired_window_spill_rule_cost_restore_fold_identity".to_owned(),
+            PlanDetail::Text(identity.clone()),
+        );
+    } else {
+        details.remove("paired_window_spill_rule_cost_restore_fold_identity");
+    }
+    if let Some(identity) = window_restore_pair_identity {
+        details.insert(
+            "paired_window_spill_rule_cost_restore_pair_identity".to_owned(),
+            PlanDetail::Text(identity.to_owned()),
+        );
+    } else {
+        details.remove("paired_window_spill_rule_cost_restore_pair_identity");
+    }
     details.insert(
         "paired_window_spill_rule_cost_stage_count".to_owned(),
         PlanDetail::Integer(fold.totals.stage_count),
@@ -13252,6 +13579,259 @@ fn query_paired_index_refold_identity(
     format!("paired-index-refold:{}", hex(&hash.finalize()))
 }
 
+fn query_paired_window_cost_restoration_seed(
+    snapshot: &SnapshotRef,
+    parent_cost_identity: &str,
+    source: &ObjectRef,
+    window_identity: &str,
+) -> QueryPairedWindowCostRestorationFold {
+    let window_identities = BTreeMap::from([(
+        source.as_str().to_owned(),
+        window_identity.to_owned(),
+    )]);
+    let mut hash = Sha256::new();
+    hash.update(b"orna.sys.query-paired-window-cost-restoration-seed.v1\0");
+    hash_part(&mut hash, snapshot.as_str().as_bytes());
+    hash_part(&mut hash, parent_cost_identity.as_bytes());
+    hash_part(&mut hash, source.as_str().as_bytes());
+    hash_part(&mut hash, window_identity.as_bytes());
+    QueryPairedWindowCostRestorationFold {
+        identity: format!("paired-window-cost-restoration:{}", hex(&hash.finalize())),
+        parent_identity: None,
+        pair_count: 0,
+        window_pair_count: 1,
+        cost_restore_fold_count: 0,
+        window_identities,
+        spill_pair_identities: BTreeMap::new(),
+        spill_fold_identity: None,
+        cost_restore_fold_identities: BTreeMap::new(),
+        overflowed: false,
+    }
+}
+
+/// The reference leaves planner-local composition open. Bind each window and
+/// restore descriptor to its exact join edge, both cost ancestors, and the
+/// prior combined fold so nested identities remain scoped after reordering.
+fn query_paired_window_cost_restoration_pair_identity(
+    previous: Option<&QueryPairedWindowCostRestorationFold>,
+    left_cost_identity: &str,
+    right_cost_identity: &str,
+    pair: Option<&QueryJoinPairIdentityDescription>,
+    source: &ObjectRef,
+    predicate: Option<&ExpressionRef>,
+    window_identity: Option<&str>,
+    spill_pair_identity: Option<&str>,
+    restore_chain_identities: &[(&str, Option<String>)],
+) -> Option<String> {
+    if previous.is_none()
+        && window_identity.is_none()
+        && spill_pair_identity.is_none()
+        && restore_chain_identities
+            .iter()
+            .all(|(_, identity)| identity.is_none())
+    {
+        return None;
+    }
+
+    let mut hash = Sha256::new();
+    hash.update(b"orna.sys.query-paired-window-cost-restoration-pair.v1\0");
+    hash_optional_text(&mut hash, previous.map(|fold| fold.identity.as_str()));
+    hash_part(&mut hash, left_cost_identity.as_bytes());
+    hash_part(&mut hash, right_cost_identity.as_bytes());
+    if let Some(pair) = pair {
+        hash.update([1]);
+        hash_part(&mut hash, pair.identity.as_str().as_bytes());
+        hash_part(&mut hash, pair.left_source.as_str().as_bytes());
+        hash_part(&mut hash, pair.right_source.as_str().as_bytes());
+        hash_optional_text(&mut hash, pair.predicate.as_ref().map(ExpressionRef::as_str));
+    } else {
+        hash.update([0]);
+        hash_part(&mut hash, source.as_str().as_bytes());
+        hash_optional_text(&mut hash, predicate.map(ExpressionRef::as_str));
+    }
+    hash_optional_text(&mut hash, window_identity);
+    hash_optional_text(&mut hash, spill_pair_identity);
+    hash.update((restore_chain_identities.len() as u64).to_be_bytes());
+    for (kind, identity) in restore_chain_identities {
+        hash_part(&mut hash, kind.as_bytes());
+        hash_optional_text(&mut hash, identity.as_deref());
+    }
+    Some(format!(
+        "paired-window-cost-restoration-pair:{}",
+        hex(&hash.finalize())
+    ))
+}
+
+fn query_paired_window_cost_restoration_fold(
+    previous: Option<&QueryPairedWindowCostRestorationFold>,
+    pair_identity: &str,
+    pair_key: &str,
+    window_identity: Option<&str>,
+    spill_pair_identity: Option<&str>,
+    restore_fold_identities: &[(&str, Option<&str>)],
+) -> QueryPairedWindowCostRestorationFold {
+    let mut overflowed = previous.is_some_and(|fold| fold.overflowed);
+    let mut window_identities =
+        previous.map_or_else(BTreeMap::new, |fold| fold.window_identities.clone());
+    let mut spill_pair_identities = previous
+        .map_or_else(BTreeMap::new, |fold| fold.spill_pair_identities.clone());
+    let mut cost_restore_fold_identities = previous
+        .map_or_else(BTreeMap::new, |fold| fold.cost_restore_fold_identities.clone());
+    if let Some(window_identity) = window_identity {
+        window_identities.insert(pair_key.to_owned(), window_identity.to_owned());
+    }
+    if let Some(spill_pair_identity) = spill_pair_identity {
+        spill_pair_identities.insert(pair_key.to_owned(), spill_pair_identity.to_owned());
+    }
+    let spill_fold_identity = if spill_pair_identities.is_empty() {
+        None
+    } else {
+        let mut spill_hash = Sha256::new();
+        spill_hash.update(b"orna.sys.query-paired-window-cost-restoration-spill-fold.v1\0");
+        spill_hash.update((spill_pair_identities.len() as u64).to_be_bytes());
+        for (pair, spill_identity) in &spill_pair_identities {
+            hash_part(&mut spill_hash, pair.as_bytes());
+            hash_part(&mut spill_hash, spill_identity.as_bytes());
+        }
+        Some(format!(
+            "paired-window-cost-restoration-spill-fold:{}",
+            hex(&spill_hash.finalize())
+        ))
+    };
+    for (kind, identity) in restore_fold_identities {
+        if let Some(identity) = identity {
+            cost_restore_fold_identities.insert((*kind).to_owned(), (*identity).to_owned());
+        }
+    }
+    let pair_count = previous.map_or(1, |fold| {
+        fold.pair_count.checked_add(1).unwrap_or_else(|| {
+            overflowed = true;
+            u64::MAX
+        })
+    });
+    let window_pair_count = previous.map_or(u64::from(window_identity.is_some()), |fold| {
+        fold.window_pair_count
+            .checked_add(u64::from(window_identity.is_some()))
+            .unwrap_or_else(|| {
+                overflowed = true;
+                u64::MAX
+            })
+    });
+    let parent_identity = previous.map(|fold| fold.identity.clone());
+
+    let mut hash = Sha256::new();
+    hash.update(b"orna.sys.query-paired-window-cost-restoration-fold.v1\0");
+    hash_optional_text(&mut hash, parent_identity.as_deref());
+    hash_part(&mut hash, pair_identity.as_bytes());
+    hash.update(pair_count.to_be_bytes());
+    hash.update(window_pair_count.to_be_bytes());
+    hash.update((window_identities.len() as u64).to_be_bytes());
+    for (pair, window) in &window_identities {
+        hash_part(&mut hash, pair.as_bytes());
+        hash_part(&mut hash, window.as_bytes());
+    }
+    hash.update((spill_pair_identities.len() as u64).to_be_bytes());
+    for (pair, spill_identity) in &spill_pair_identities {
+        hash_part(&mut hash, pair.as_bytes());
+        hash_part(&mut hash, spill_identity.as_bytes());
+    }
+    hash_optional_text(&mut hash, spill_fold_identity.as_deref());
+    hash.update((cost_restore_fold_identities.len() as u64).to_be_bytes());
+    for (kind, identity) in &cost_restore_fold_identities {
+        hash_part(&mut hash, kind.as_bytes());
+        hash_part(&mut hash, identity.as_bytes());
+    }
+    hash.update([u8::from(overflowed)]);
+
+    QueryPairedWindowCostRestorationFold {
+        identity: format!("paired-window-cost-restoration:{}", hex(&hash.finalize())),
+        parent_identity,
+        pair_count,
+        window_pair_count,
+        cost_restore_fold_count: cost_restore_fold_identities.len() as u64,
+        window_identities,
+        spill_pair_identities,
+        spill_fold_identity,
+        cost_restore_fold_identities,
+        overflowed,
+    }
+}
+
+fn add_paired_window_cost_restoration_fold_details(
+    details: &mut BTreeMap<String, PlanDetail>,
+    fold: &QueryPairedWindowCostRestorationFold,
+    pair_identity: &str,
+    spill_pair_identity: Option<&str>,
+    transition: &str,
+) {
+    details.insert(
+        "paired_window_cost_restoration_fold_identity".to_owned(),
+        PlanDetail::Text(fold.identity.clone()),
+    );
+    details.insert(
+        "paired_window_cost_restoration_pair_identity".to_owned(),
+        PlanDetail::Text(pair_identity.to_owned()),
+    );
+    if let Some(parent_identity) = fold.parent_identity.as_ref() {
+        details.insert(
+            "paired_window_cost_restoration_parent_identity".to_owned(),
+            PlanDetail::Text(parent_identity.clone()),
+        );
+    }
+    details.insert(
+        "paired_window_cost_restoration_transition".to_owned(),
+        PlanDetail::Text(transition.to_owned()),
+    );
+    details.insert(
+        "paired_window_cost_restoration_pairing".to_owned(),
+        PlanDetail::Text("exact_window_chains_across_paired_cost_restore_folds".to_owned()),
+    );
+    details.insert(
+        "paired_window_cost_restoration_pair_count".to_owned(),
+        PlanDetail::Integer(fold.pair_count),
+    );
+    details.insert(
+        "paired_window_cost_restoration_window_pair_count".to_owned(),
+        PlanDetail::Integer(fold.window_pair_count),
+    );
+    details.insert(
+        "paired_window_cost_restoration_window_count".to_owned(),
+        PlanDetail::Integer(fold.window_identities.len() as u64),
+    );
+    details.insert(
+        "paired_window_cost_restoration_spill_pair_count".to_owned(),
+        PlanDetail::Integer(fold.spill_pair_identities.len() as u64),
+    );
+    if let Some(spill_fold_identity) = fold.spill_fold_identity.as_ref() {
+        details.insert(
+            "paired_window_cost_restoration_spill_fold_identity".to_owned(),
+            PlanDetail::Text(spill_fold_identity.clone()),
+        );
+    } else {
+        details.remove("paired_window_cost_restoration_spill_fold_identity");
+    }
+    details.insert(
+        "paired_window_cost_restoration_spill_pairing".to_owned(),
+        PlanDetail::Text(
+            "exact_spill_pairs_bound_to_nested_window_cost_restore_folds".to_owned(),
+        ),
+    );
+    if let Some(spill_pair_identity) = spill_pair_identity {
+        details.insert(
+            "paired_window_cost_restoration_spill_pair_identity".to_owned(),
+            PlanDetail::Text(spill_pair_identity.to_owned()),
+        );
+    }
+    details.insert(
+        "paired_window_cost_restoration_restore_fold_count".to_owned(),
+        PlanDetail::Integer(fold.cost_restore_fold_count),
+    );
+    details.insert(
+        "paired_window_cost_restoration_overflowed".to_owned(),
+        PlanDetail::Boolean(fold.overflowed),
+    );
+}
+
 fn query_join_cost_fold(
     left_identity: &str,
     right_identity: &str,
@@ -13272,6 +13852,7 @@ fn query_join_cost_fold(
     paired_window_spill_cascade_fold_identity: Option<&str>,
     paired_window_spill_rule_cost_fold_identity: Option<&str>,
     paired_window_spill_rule_cost_pair_identity: Option<&str>,
+    paired_window_cost_restoration_pair_identity: Option<&str>,
     paired_aggregate_spill_restoration_fold_identity: Option<&str>,
     paired_limit_aggregate_spill_restoration_fold_identity: Option<&str>,
     paired_window_compaction_spill_fold_identity: Option<&str>,
@@ -13330,6 +13911,7 @@ fn query_join_cost_fold(
     hash_optional_text(&mut hash, paired_window_spill_cascade_fold_identity);
     hash_optional_text(&mut hash, paired_window_spill_rule_cost_fold_identity);
     hash_optional_text(&mut hash, paired_window_spill_rule_cost_pair_identity);
+    hash_optional_text(&mut hash, paired_window_cost_restoration_pair_identity);
     hash_optional_text(
         &mut hash,
         paired_aggregate_spill_restoration_fold_identity,

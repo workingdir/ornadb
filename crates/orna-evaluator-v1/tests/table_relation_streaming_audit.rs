@@ -160,6 +160,81 @@ fn paired_pagination_nested_escalation_functions() -> Functions {
         .collect()
 }
 
+fn paired_pagination_nested_compaction_functions() -> Functions {
+    let parsed = parse_module(include_str!(
+        "fixtures/table_relation_paired_pagination_nested_compaction_3iro7.orna"
+    ));
+    assert!(parsed.is_ok(), "{:?}", parsed.diagnostics);
+    parsed
+        .value
+        .items
+        .into_iter()
+        .map(|item| {
+            let orna_syntax_v1::Declaration::Function { signature, body } = item.declaration else {
+                panic!("fixture function expected")
+            };
+            (
+                signature.name,
+                PureFunction {
+                    parameters: signature.parameters,
+                    body,
+                    environment: Environment::new(),
+                },
+            )
+        })
+        .collect()
+}
+
+fn paired_pagination_compaction_escalation_functions() -> Functions {
+    let parsed = parse_module(include_str!(
+        "fixtures/table_relation_paired_compaction_escalation_yxlyj.orna"
+    ));
+    assert!(parsed.is_ok(), "{:?}", parsed.diagnostics);
+    parsed
+        .value
+        .items
+        .into_iter()
+        .map(|item| {
+            let orna_syntax_v1::Declaration::Function { signature, body } = item.declaration else {
+                panic!("fixture function expected")
+            };
+            (
+                signature.name,
+                PureFunction {
+                    parameters: signature.parameters,
+                    body,
+                    environment: Environment::new(),
+                },
+            )
+        })
+        .collect()
+}
+
+fn paired_pagination_nested_spill_functions() -> Functions {
+    let parsed = parse_module(include_str!(
+        "fixtures/table_relation_paired_nested_spill_compaction_4x3or.orna"
+    ));
+    assert!(parsed.is_ok(), "{:?}", parsed.diagnostics);
+    parsed
+        .value
+        .items
+        .into_iter()
+        .map(|item| {
+            let orna_syntax_v1::Declaration::Function { signature, body } = item.declaration else {
+                panic!("fixture function expected")
+            };
+            (
+                signature.name,
+                PureFunction {
+                    parameters: signature.parameters,
+                    body,
+                    environment: Environment::new(),
+                },
+            )
+        })
+        .collect()
+}
+
 fn sparse_window_fold_functions() -> Functions {
     let parsed = parse_module(include_str!("fixtures/table_relation_sparse_window_fold_d4441.orna"));
     assert!(parsed.is_ok(), "{:?}", parsed.diagnostics);
@@ -2120,6 +2195,115 @@ fn paired_nested_spill_aggregate_body() -> Expr {
         elements: vec![
             nested_spill_aggregate("View.Left"),
             nested_spill_aggregate("View.Right"),
+        ],
+        span: span(),
+    }
+}
+
+fn nested_pagination_compaction(source: &str) -> Expr {
+    let prefix = relation_stage(
+        relation_source(source),
+        "take",
+        vec![integer_literal(10)],
+    );
+    let adjacent_totals = relation_stage(
+        relation_stage(
+            prefix,
+            "window",
+            vec![integer_literal(2), integer_literal(1)],
+        ),
+        "map",
+        vec![named_function("sum_frame")],
+    );
+    let overlapping_totals = relation_stage(
+        relation_stage(
+            adjacent_totals,
+            "window",
+            vec![integer_literal(3), integer_literal(2)],
+        ),
+        "map",
+        vec![named_function("sum_frame")],
+    );
+    terminal(overlapping_totals, "sum")
+}
+
+fn paired_nested_pagination_compaction_body() -> Expr {
+    Expr::Tuple {
+        elements: vec![
+            nested_pagination_compaction("View.Left"),
+            nested_pagination_compaction("View.Right"),
+        ],
+        span: span(),
+    }
+}
+
+fn nested_pagination_compaction_escalation(source: &str, depth: usize) -> Expr {
+    let prefix = relation_stage(
+        relation_source(source),
+        "take",
+        vec![integer_literal(10)],
+    );
+    let adjacent_totals = relation_stage(
+        relation_stage(
+            prefix,
+            "window",
+            vec![integer_literal(2), integer_literal(1)],
+        ),
+        "map",
+        vec![named_function("sum_frame")],
+    );
+    let mut folded = relation_stage(
+        relation_stage(
+            adjacent_totals,
+            "window",
+            vec![integer_literal(3), integer_literal(2)],
+        ),
+        "map",
+        vec![named_function("sum_frame")],
+    );
+    for _ in 0..depth {
+        let frames = relation_stage(
+            folded,
+            "window",
+            vec![integer_literal(2), integer_literal(1)],
+        );
+        folded = relation_stage(frames, "map", vec![named_function("sum_frame")]);
+    }
+    terminal(folded, "sum")
+}
+
+fn paired_pagination_compaction_escalation_body(depth: usize) -> Expr {
+    Expr::Tuple {
+        elements: vec![
+            nested_pagination_compaction_escalation("View.Left", depth),
+            nested_pagination_compaction_escalation("View.Right", depth),
+        ],
+        span: span(),
+    }
+}
+
+fn nested_pagination_spill(source: &str, depth: usize) -> Expr {
+    let mut folded = relation_stage(
+        relation_source(source),
+        "take",
+        vec![integer_literal(10)],
+    );
+    for _ in 0..3 + depth {
+        let frames = relation_stage(
+            folded,
+            "window",
+            vec![integer_literal(2), integer_literal(1)],
+        );
+        folded = relation_stage(frames, "map", vec![named_function("sum_frame")]);
+    }
+    terminal(folded, "sum")
+}
+
+fn paired_pagination_nested_spill_body(depth: usize) -> Expr {
+    Expr::Tuple {
+        elements: vec![
+            nested_pagination_spill("View.Left", depth),
+            nested_pagination_spill("View.Right", depth),
         ],
         span: span(),
     }
@@ -4838,6 +5022,749 @@ fn paired_pagination_keeps_identity_across_nested_escalation_spill_folds() {
             .all(|(_, _, cursor)| cursor.as_ref() != Some(&after_compaction_cursor)),
         "take(6) stops before requesting the sentinel page"
     );
+    assert!(source.pending["View.Left"].is_empty());
+    assert!(source.pending["View.Right"].is_empty());
+}
+
+#[test]
+fn paired_pagination_nested_compaction_keeps_snapshot_values() {
+    // Two nested window folds read the same ten-row prefix from each paired
+    // snapshot. Cursor tokens cross two compaction boundaries; a sixth page
+    // holds a sentinel beyond the take(10) prefix.
+    let long_a_lengths = [255, 256, 511, 512];
+    let long_b_lengths = [512, 511, 256, 255];
+    let long_a = long_a_lengths.map(|length| vec![0x5a; length]);
+    let compact_a = vec![0x5b];
+    let long_b = long_b_lengths.map(|length| vec![0x5b; length]);
+    let compact_b = vec![0x5c];
+    let after_compaction = vec![0x5d];
+    assert!(compact_a < long_b[0]);
+    assert!(long_b[0] < compact_b);
+    assert!(compact_b < after_compaction);
+
+    let restore = |values: &[i64], a: &[u8], b: &[u8]| {
+        assert_eq!(values.len(), 10);
+        let rows = values.chunks(2).collect::<Vec<_>>();
+        BTreeMap::from([
+            (None, page(rows[0], Some(a.to_vec()))),
+            (
+                Some(a.to_vec()),
+                page(rows[1], Some(compact_a.clone())),
+            ),
+            (
+                Some(compact_a.clone()),
+                page(rows[2], Some(b.to_vec())),
+            ),
+            (
+                Some(b.to_vec()),
+                page(rows[3], Some(compact_b.clone())),
+            ),
+            (
+                Some(compact_b.clone()),
+                page(rows[4], Some(after_compaction.clone())),
+            ),
+            (
+                Some(after_compaction.clone()),
+                page(&[999_999], None),
+            ),
+        ])
+    };
+    let snapshots = [
+        (
+            [1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
+            [10, 20, 30, 40, 50, 60, 70, 80, 90, 100],
+        ),
+        (
+            [11, 12, 13, 14, 15, 16, 17, 18, 19, 20],
+            [2, 4, 6, 8, 10, 12, 14, 16, 18, 20],
+        ),
+        (
+            [-1, -2, -3, -4, -5, -6, -7, -8, -9, -10],
+            [3, 6, 9, 12, 15, 18, 21, 24, 27, 30],
+        ),
+        (
+            [100, 90, 80, 70, 60, 50, 40, 30, 20, 10],
+            [5, 10, 15, 20, 25, 30, 35, 40, 45, 50],
+        ),
+    ];
+    let mut restores = Vec::new();
+    let mut expected_lanes = Vec::new();
+    let mut cursor_tokens = Vec::new();
+    for (refresh, (left, right)) in snapshots.iter().enumerate() {
+        for (lane, source_name, values) in [
+            (refresh * 2, "View.Left", left.as_slice()),
+            (refresh * 2 + 1, "View.Right", right.as_slice()),
+        ] {
+            let a = long_a[lane % long_a.len()].clone();
+            let b = long_b[lane % long_b.len()].clone();
+            restores.push((source_name, restore(values, &a, &b)));
+            expected_lanes.push(source_name);
+            cursor_tokens.push((a, b));
+        }
+    }
+
+    let mut source = PairedCursorRestoreSource::new(restores);
+    let mut functions = paired_pagination_nested_compaction_functions();
+    functions.insert(
+        "run".into(),
+        PureFunction {
+            parameters: Vec::new(),
+            body: paired_nested_pagination_compaction_body(),
+            environment: Environment::new(),
+        },
+    );
+    let mut outputs = Vec::new();
+    for _ in 0..snapshots.len() {
+        outputs.push(
+            invoke_named_with_effects(
+                "run",
+                &functions,
+                &Environment::new(),
+                Limits::default(),
+                &mut source,
+            )
+            .unwrap(),
+        );
+    }
+    assert_eq!(
+        outputs,
+        vec![
+            integer_pair(132, 1320),
+            integer_pair(372, 264),
+            integer_pair(-132, 396),
+            integer_pair(1320, 660),
+        ],
+        "nested folds compute real aggregates from each paired ten-row snapshot"
+    );
+    let scopes = source
+        .lanes
+        .iter()
+        .zip(expected_lanes)
+        .map(|((source_name, scope, _), expected_name)| {
+            assert_eq!(source_name, expected_name);
+            *scope
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(scopes.len(), 8);
+    for (index, scope) in scopes.iter().enumerate() {
+        assert!(
+            !scopes[..index].contains(scope),
+            "each paired snapshot has a distinct scope: {scope:?}"
+        );
+    }
+    assert_eq!(
+        cursor_tokens
+            .iter()
+            .map(|(a, b)| (a.len(), b.len()))
+            .collect::<Vec<_>>(),
+        [
+            (255, 512),
+            (256, 511),
+            (511, 256),
+            (512, 255),
+            (255, 512),
+            (256, 511),
+            (511, 256),
+            (512, 255),
+        ],
+        "both long cursor positions cover the 255/256 and 511/512 byte edges"
+    );
+    let mut expected_cursors = Vec::new();
+    for (index, (a, b)) in cursor_tokens.iter().enumerate() {
+        let (source_name, scope, _) = &source.lanes[index];
+        expected_cursors.extend([
+            (source_name.clone(), *scope, None),
+            (source_name.clone(), *scope, Some(a.clone())),
+            (source_name.clone(), *scope, Some(compact_a.clone())),
+            (source_name.clone(), *scope, Some(b.clone())),
+            (source_name.clone(), *scope, Some(compact_b.clone())),
+        ]);
+    }
+    assert_eq!(
+        source.cursors,
+        expected_cursors,
+        "each snapshot resumes through both compacted cursor transitions"
+    );
+    assert!(
+        source
+            .cursors
+            .iter()
+            .all(|(_, _, cursor)| cursor.as_ref() != Some(&after_compaction)),
+        "take(10) does not request the sixth sentinel page"
+    );
+    assert!(source.pending["View.Left"].is_empty());
+    assert!(source.pending["View.Right"].is_empty());
+}
+
+#[test]
+fn paired_pagination_compaction_keeps_identity_through_escalating_folds() {
+    // Increase nested aggregate depth on each paired refresh while the same
+    // ten-row input prefix crosses two long/compact cursor transitions.
+    let long_a_lengths = [255, 256, 511, 512];
+    let long_b_lengths = [512, 511, 256, 255];
+    let long_a = long_a_lengths.map(|length| vec![0x5a; length]);
+    let compact_a = vec![0x5b];
+    let long_b = long_b_lengths.map(|length| vec![0x5b; length]);
+    let compact_b = vec![0x5c];
+    let after_compaction = vec![0x5d];
+    assert!(long_a.iter().all(|cursor| cursor < &compact_a));
+    assert!(long_b.iter().all(|cursor| &compact_a < cursor));
+    assert!(long_b.iter().all(|cursor| cursor < &compact_b));
+    assert!(compact_b < after_compaction);
+
+    let restore = |values: &[i64], a: &[u8], b: &[u8]| {
+        assert_eq!(values.len(), 10);
+        let rows = values.chunks(2).collect::<Vec<_>>();
+        BTreeMap::from([
+            (None, page(rows[0], Some(a.to_vec()))),
+            (Some(a.to_vec()), page(rows[1], Some(compact_a.clone()))),
+            (
+                Some(compact_a.clone()),
+                page(rows[2], Some(b.to_vec())),
+            ),
+            (Some(b.to_vec()), page(rows[3], Some(compact_b.clone()))),
+            (
+                Some(compact_b.clone()),
+                page(rows[4], Some(after_compaction.clone())),
+            ),
+            (Some(after_compaction.clone()), page(&[999_999], None)),
+        ])
+    };
+    let snapshots = [
+        (
+            [1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
+            [10, 20, 30, 40, 50, 60, 70, 80, 90, 100],
+        ),
+        (
+            [11, 12, 13, 14, 15, 16, 17, 18, 19, 20],
+            [2, 4, 6, 8, 10, 12, 14, 16, 18, 20],
+        ),
+        (
+            [-1, -2, -3, -4, -5, -6, -7, -8, -9, -10],
+            [3, 6, 9, 12, 15, 18, 21, 24, 27, 30],
+        ),
+        (
+            [100, 90, 80, 70, 60, 50, 40, 30, 20, 10],
+            [5, 10, 15, 20, 25, 30, 35, 40, 45, 50],
+        ),
+    ];
+    let mut restores = Vec::new();
+    let mut expected_lanes = Vec::new();
+    let mut cursor_tokens = Vec::new();
+    for (refresh, (left, right)) in snapshots.iter().enumerate() {
+        for (lane, source_name, values) in [
+            (refresh * 2, "View.Left", left.as_slice()),
+            (refresh * 2 + 1, "View.Right", right.as_slice()),
+        ] {
+            restores.push((
+                source_name,
+                restore(
+                    values,
+                    &long_a[lane % long_a.len()],
+                    &long_b[lane % long_b.len()],
+                ),
+            ));
+            expected_lanes.push(source_name);
+            cursor_tokens.push((
+                long_a[lane % long_a.len()].clone(),
+                long_b[lane % long_b.len()].clone(),
+            ));
+        }
+    }
+
+    let mut source = PairedCursorRestoreSource::new(restores);
+    let mut functions = paired_pagination_compaction_escalation_functions();
+    let mut outputs = Vec::new();
+    for (depth, left, right) in [(0, 132, 1320), (1, 558, 396), (2, -264, 792), (3, 2640, 1320)] {
+        functions.insert(
+            "run".into(),
+            PureFunction {
+                parameters: Vec::new(),
+                body: paired_pagination_compaction_escalation_body(depth),
+                environment: Environment::new(),
+            },
+        );
+        outputs.push(
+            invoke_named_with_effects(
+                "run",
+                &functions,
+                &Environment::new(),
+                Limits::default(),
+                &mut source,
+            )
+            .unwrap(),
+        );
+        assert_eq!(outputs.last(), Some(&integer_pair(left, right)));
+    }
+    assert_eq!(
+        outputs,
+        vec![
+            integer_pair(132, 1320),
+            integer_pair(558, 396),
+            integer_pair(-264, 792),
+            integer_pair(2640, 1320),
+        ],
+        "each added nested fold computes the documented pair from its snapshot"
+    );
+    let scopes = source
+        .lanes
+        .iter()
+        .zip(expected_lanes)
+        .map(|((source_name, scope, _), expected_name)| {
+            assert_eq!(source_name, expected_name);
+            *scope
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(scopes.len(), 8);
+    for (index, scope) in scopes.iter().enumerate() {
+        assert!(
+            !scopes[..index].contains(scope),
+            "every escalation refresh uses isolated source scope {scope:?}"
+        );
+    }
+    assert_eq!(
+        cursor_tokens
+            .iter()
+            .map(|(a, b)| (a.len(), b.len()))
+            .collect::<Vec<_>>(),
+        [
+            (255, 512),
+            (256, 511),
+            (511, 256),
+            (512, 255),
+            (255, 512),
+            (256, 511),
+            (511, 256),
+            (512, 255),
+        ],
+        "long cursors in both positions straddle the 255/256 and 511/512 byte edges"
+    );
+    let mut expected_cursors = Vec::new();
+    for (index, (a, b)) in cursor_tokens.iter().enumerate() {
+        let (source_name, scope, _) = &source.lanes[index];
+        expected_cursors.extend([
+            (source_name.clone(), *scope, None),
+            (source_name.clone(), *scope, Some(a.clone())),
+            (source_name.clone(), *scope, Some(compact_a.clone())),
+            (source_name.clone(), *scope, Some(b.clone())),
+            (source_name.clone(), *scope, Some(compact_b.clone())),
+        ]);
+    }
+    assert_eq!(
+        source.cursors,
+        expected_cursors,
+        "escalation reuses each paired snapshot scope through both compactions"
+    );
+    assert!(
+        source
+            .cursors
+            .iter()
+            .all(|(_, _, cursor)| cursor.as_ref() != Some(&after_compaction)),
+        "take(10) stops before the sentinel page as fold depth increases"
+    );
+    assert!(source.pending["View.Left"].is_empty());
+    assert!(source.pending["View.Right"].is_empty());
+}
+
+#[test]
+fn paired_compaction_cursor_collisions_keep_escalation_scope_identity() {
+    // A later refresh starts at the exact short token where its previous
+    // same-source snapshot compacted. Escalation must keep those reads scoped.
+    let compacted_lengths = [511, 512, 255, 256, 511, 512, 255, 256];
+    let cursor_chain = |lane: usize| {
+        let refresh = lane / 2;
+        let base = if lane % 2 == 0 {
+            0x50 + refresh as u8
+        } else {
+            0x58 + refresh as u8
+        };
+        let long_a = if refresh == 0 {
+            vec![base; if lane % 2 == 0 { 255 } else { 256 }]
+        } else {
+            vec![base]
+        };
+        let compact_a = vec![base + 1];
+        let long_b = vec![base + 1; compacted_lengths[lane]];
+        let compact_b = vec![base + 2];
+        let after_compaction = vec![base + 3];
+        (long_a, compact_a, long_b, compact_b, after_compaction)
+    };
+    let cursor_chains = (0..8).map(cursor_chain).collect::<Vec<_>>();
+    let restore = |values: &[i64], chain: &(Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>)| {
+        assert_eq!(values.len(), 10);
+        let rows = values.chunks(2).collect::<Vec<_>>();
+        let (long_a, compact_a, long_b, compact_b, after_compaction) = chain;
+        BTreeMap::from([
+            (None, page(rows[0], Some(long_a.clone()))),
+            (
+                Some(long_a.clone()),
+                page(rows[1], Some(compact_a.clone())),
+            ),
+            (
+                Some(compact_a.clone()),
+                page(rows[2], Some(long_b.clone())),
+            ),
+            (
+                Some(long_b.clone()),
+                page(rows[3], Some(compact_b.clone())),
+            ),
+            (
+                Some(compact_b.clone()),
+                page(rows[4], Some(after_compaction.clone())),
+            ),
+            (
+                Some(after_compaction.clone()),
+                page(&[999_999], None),
+            ),
+        ])
+    };
+    let snapshots = [
+        (
+            [1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
+            [10, 20, 30, 40, 50, 60, 70, 80, 90, 100],
+        ),
+        (
+            [11, 12, 13, 14, 15, 16, 17, 18, 19, 20],
+            [2, 4, 6, 8, 10, 12, 14, 16, 18, 20],
+        ),
+        (
+            [-1, -2, -3, -4, -5, -6, -7, -8, -9, -10],
+            [3, 6, 9, 12, 15, 18, 21, 24, 27, 30],
+        ),
+        (
+            [100, 90, 80, 70, 60, 50, 40, 30, 20, 10],
+            [5, 10, 15, 20, 25, 30, 35, 40, 45, 50],
+        ),
+    ];
+    let mut restores = Vec::new();
+    let mut expected_lanes = Vec::new();
+    for (refresh, (left, right)) in snapshots.iter().enumerate() {
+        for (lane, source_name, values) in [
+            (refresh * 2, "View.Left", left.as_slice()),
+            (refresh * 2 + 1, "View.Right", right.as_slice()),
+        ] {
+            restores.push((source_name, restore(values, &cursor_chains[lane])));
+            expected_lanes.push(source_name);
+        }
+    }
+
+    let mut source = PairedCursorRestoreSource::new(restores);
+    let mut functions = paired_pagination_compaction_escalation_functions();
+    let mut outputs = Vec::new();
+    for (depth, left, right) in [(0, 132, 1320), (1, 558, 396), (2, -264, 792), (3, 2640, 1320)] {
+        functions.insert(
+            "run".into(),
+            PureFunction {
+                parameters: Vec::new(),
+                body: paired_pagination_compaction_escalation_body(depth),
+                environment: Environment::new(),
+            },
+        );
+        outputs.push(
+            invoke_named_with_effects(
+                "run",
+                &functions,
+                &Environment::new(),
+                Limits::default(),
+                &mut source,
+            )
+            .unwrap(),
+        );
+        assert_eq!(outputs.last(), Some(&integer_pair(left, right)));
+    }
+    assert_eq!(
+        outputs,
+        vec![
+            integer_pair(132, 1320),
+            integer_pair(558, 396),
+            integer_pair(-264, 792),
+            integer_pair(2640, 1320),
+        ],
+        "reused compact cursor bytes do not substitute an older snapshot's values"
+    );
+    let scopes = source
+        .lanes
+        .iter()
+        .zip(expected_lanes)
+        .map(|((source_name, scope, _), expected_name)| {
+            assert_eq!(source_name, expected_name);
+            *scope
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(scopes.len(), 8);
+    for (index, scope) in scopes.iter().enumerate() {
+        assert!(
+            !scopes[..index].contains(scope),
+            "each compaction chain and escalation snapshot has a distinct scope: {scope:?}"
+        );
+    }
+    assert_eq!(
+        cursor_chains
+            .iter()
+            .map(|(long_a, _, _, _, _)| long_a.len())
+            .collect::<Vec<_>>(),
+        [255, 256, 1, 1, 1, 1, 1, 1],
+        "fresh-snapshot cursors reuse the previous same-source compact token"
+    );
+    assert_eq!(
+        cursor_chains
+            .iter()
+            .map(|(_, _, long_b, _, _)| long_b.len())
+            .collect::<Vec<_>>(),
+        [511, 512, 255, 256, 511, 512, 255, 256],
+        "the second long-cursor position covers all chunk boundaries"
+    );
+    for previous_refresh in 0..3 {
+        let previous_left = &cursor_chains[previous_refresh * 2];
+        let fresh_left = &cursor_chains[(previous_refresh + 1) * 2];
+        let previous_right = &cursor_chains[previous_refresh * 2 + 1];
+        let fresh_right = &cursor_chains[(previous_refresh + 1) * 2 + 1];
+        assert_eq!(
+            previous_left.1, fresh_left.0,
+            "left refresh {previous_refresh} reuses the exact compact token under a new scope"
+        );
+        assert_eq!(
+            previous_right.1, fresh_right.0,
+            "right refresh {previous_refresh} reuses the exact compact token under a new scope"
+        );
+    }
+    for (long_a, compact_a, long_b, compact_b, after_compaction) in &cursor_chains {
+        assert!(long_a.as_slice() < compact_a.as_slice());
+        assert!(compact_a.as_slice() < long_b.as_slice());
+        assert!(long_b.as_slice() < compact_b.as_slice());
+        assert!(compact_b.as_slice() < after_compaction.as_slice());
+    }
+    let mut expected_cursors = Vec::new();
+    for (index, (long_a, compact_a, long_b, compact_b, _)) in
+        cursor_chains.iter().enumerate()
+    {
+        let (source_name, scope, _) = &source.lanes[index];
+        expected_cursors.extend([
+            (source_name.clone(), *scope, None),
+            (source_name.clone(), *scope, Some(long_a.clone())),
+            (source_name.clone(), *scope, Some(compact_a.clone())),
+            (source_name.clone(), *scope, Some(long_b.clone())),
+            (source_name.clone(), *scope, Some(compact_b.clone())),
+        ]);
+    }
+    assert_eq!(
+        source.cursors,
+        expected_cursors,
+        "each escalation refresh follows its own collision-safe cursor chain"
+    );
+    for (index, chain) in cursor_chains.iter().enumerate() {
+        let scope = source.lanes[index].1;
+        assert!(
+            source
+                .cursors
+                .iter()
+                .all(|(_, read_scope, cursor)| *read_scope != scope
+                    || cursor.as_ref() != Some(&chain.4)),
+            "the sentinel page is not requested within scope {scope:?}"
+        );
+    }
+    assert!(source.pending["View.Left"].is_empty());
+    assert!(source.pending["View.Right"].is_empty());
+}
+
+#[test]
+fn paired_pagination_keeps_nested_spill_identity_across_compactions() {
+    // Three nested spill folds precede each added escalation layer. Each new
+    // same-source snapshot begins with the previous scope's compact token.
+    let compacted_lengths = [511, 512, 255, 256, 511, 512, 255, 256];
+    let cursor_chain = |lane: usize| {
+        let refresh = lane / 2;
+        let base = if lane % 2 == 0 {
+            0x50 + refresh as u8
+        } else {
+            0x58 + refresh as u8
+        };
+        let long_a = if refresh == 0 {
+            vec![base; if lane % 2 == 0 { 255 } else { 256 }]
+        } else {
+            vec![base]
+        };
+        let compact_a = vec![base + 1];
+        let long_b = vec![base + 1; compacted_lengths[lane]];
+        let compact_b = vec![base + 2];
+        let after_compaction = vec![base + 3];
+        (long_a, compact_a, long_b, compact_b, after_compaction)
+    };
+    let cursor_chains = (0..8).map(cursor_chain).collect::<Vec<_>>();
+    let restore = |values: &[i64], chain: &(Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>)| {
+        assert_eq!(values.len(), 10);
+        let rows = values.chunks(2).collect::<Vec<_>>();
+        let (long_a, compact_a, long_b, compact_b, after_compaction) = chain;
+        BTreeMap::from([
+            (None, page(rows[0], Some(long_a.clone()))),
+            (
+                Some(long_a.clone()),
+                page(rows[1], Some(compact_a.clone())),
+            ),
+            (
+                Some(compact_a.clone()),
+                page(rows[2], Some(long_b.clone())),
+            ),
+            (
+                Some(long_b.clone()),
+                page(rows[3], Some(compact_b.clone())),
+            ),
+            (
+                Some(compact_b.clone()),
+                page(rows[4], Some(after_compaction.clone())),
+            ),
+            (
+                Some(after_compaction.clone()),
+                page(&[999_999], None),
+            ),
+        ])
+    };
+    let snapshots = [
+        (
+            [1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
+            [10, 20, 30, 40, 50, 60, 70, 80, 90, 100],
+        ),
+        (
+            [11, 12, 13, 14, 15, 16, 17, 18, 19, 20],
+            [2, 4, 6, 8, 10, 12, 14, 16, 18, 20],
+        ),
+        (
+            [-1, -2, -3, -4, -5, -6, -7, -8, -9, -10],
+            [3, 6, 9, 12, 15, 18, 21, 24, 27, 30],
+        ),
+        (
+            [100, 90, 80, 70, 60, 50, 40, 30, 20, 10],
+            [5, 10, 15, 20, 25, 30, 35, 40, 45, 50],
+        ),
+    ];
+    let mut restores = Vec::new();
+    let mut expected_lanes = Vec::new();
+    for (refresh, (left, right)) in snapshots.iter().enumerate() {
+        for (lane, source_name, values) in [
+            (refresh * 2, "View.Left", left.as_slice()),
+            (refresh * 2 + 1, "View.Right", right.as_slice()),
+        ] {
+            restores.push((source_name, restore(values, &cursor_chains[lane])));
+            expected_lanes.push(source_name);
+        }
+    }
+
+    let mut source = PairedCursorRestoreSource::new(restores);
+    let mut functions = paired_pagination_nested_spill_functions();
+    let mut outputs = Vec::new();
+    for (depth, left, right) in [
+        (0, 308, 3080),
+        (1, 1488, 1056),
+        (2, -880, 2640),
+        (3, 14080, 7040),
+    ] {
+        functions.insert(
+            "run".into(),
+            PureFunction {
+                parameters: Vec::new(),
+                body: paired_pagination_nested_spill_body(depth),
+                environment: Environment::new(),
+            },
+        );
+        outputs.push(
+            invoke_named_with_effects(
+                "run",
+                &functions,
+                &Environment::new(),
+                Limits::default(),
+                &mut source,
+            )
+            .unwrap(),
+        );
+        assert_eq!(outputs.last(), Some(&integer_pair(left, right)));
+    }
+    assert_eq!(
+        outputs,
+        vec![
+            integer_pair(308, 3080),
+            integer_pair(1488, 1056),
+            integer_pair(-880, 2640),
+            integer_pair(14080, 7040),
+        ],
+        "nested spill folds retain each paginated paired snapshot as depth grows"
+    );
+    let scopes = source
+        .lanes
+        .iter()
+        .zip(expected_lanes)
+        .map(|((source_name, scope, _), expected_name)| {
+            assert_eq!(source_name, expected_name);
+            *scope
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(scopes.len(), 8);
+    for (index, scope) in scopes.iter().enumerate() {
+        assert!(
+            !scopes[..index].contains(scope),
+            "nested spill refresh {index} stays on a fresh paired scope: {scope:?}"
+        );
+    }
+    assert_eq!(
+        cursor_chains
+            .iter()
+            .map(|(long_a, _, _, _, _)| long_a.len())
+            .collect::<Vec<_>>(),
+        [255, 256, 1, 1, 1, 1, 1, 1],
+        "each refresh starts by reusing its same-source predecessor's compact token"
+    );
+    assert_eq!(
+        cursor_chains
+            .iter()
+            .map(|(_, _, long_b, _, _)| long_b.len())
+            .collect::<Vec<_>>(),
+        [511, 512, 255, 256, 511, 512, 255, 256],
+        "nested spill reads cross long-cursor chunk boundaries in both positions"
+    );
+    for previous_refresh in 0..3 {
+        for lane_offset in [0, 1] {
+            let previous = &cursor_chains[previous_refresh * 2 + lane_offset];
+            let fresh = &cursor_chains[(previous_refresh + 1) * 2 + lane_offset];
+            assert_eq!(
+                previous.1, fresh.0,
+                "refresh {previous_refresh} lane {lane_offset} reuses a compacted token under a new scope"
+            );
+        }
+    }
+    for (long_a, compact_a, long_b, compact_b, after_compaction) in &cursor_chains {
+        assert!(long_a.as_slice() < compact_a.as_slice());
+        assert!(compact_a.as_slice() < long_b.as_slice());
+        assert!(long_b.as_slice() < compact_b.as_slice());
+        assert!(compact_b.as_slice() < after_compaction.as_slice());
+    }
+    let mut expected_cursors = Vec::new();
+    for (index, (long_a, compact_a, long_b, compact_b, _)) in
+        cursor_chains.iter().enumerate()
+    {
+        let (source_name, scope, _) = &source.lanes[index];
+        expected_cursors.extend([
+            (source_name.clone(), *scope, None),
+            (source_name.clone(), *scope, Some(long_a.clone())),
+            (source_name.clone(), *scope, Some(compact_a.clone())),
+            (source_name.clone(), *scope, Some(long_b.clone())),
+            (source_name.clone(), *scope, Some(compact_b.clone())),
+        ]);
+    }
+    assert_eq!(
+        source.cursors,
+        expected_cursors,
+        "the three nested folds preserve the active page cursor for each paired scope"
+    );
+    for (index, chain) in cursor_chains.iter().enumerate() {
+        let scope = source.lanes[index].1;
+        assert!(
+            source
+                .cursors
+                .iter()
+                .all(|(_, read_scope, cursor)| *read_scope != scope
+                    || cursor.as_ref() != Some(&chain.4)),
+            "the take prefix does not request the sentinel page in scope {scope:?}"
+        );
+    }
     assert!(source.pending["View.Left"].is_empty());
     assert!(source.pending["View.Right"].is_empty());
 }

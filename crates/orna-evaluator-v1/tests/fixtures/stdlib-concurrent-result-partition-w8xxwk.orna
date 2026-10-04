@@ -1,0 +1,3 @@
+std.concurrent.result.values(outcomes) == [4, null, 9]
+&& std.concurrent.result.errors(outcomes) == ["first", "second"]
+&& std.concurrent.result.partition(outcomes) == ([4, null, 9], ["first", "second"])
