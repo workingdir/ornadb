@@ -1,0 +1,9 @@
+pub type EmailAddress {
+    value: Str,
+
+    impl From<Str> {
+        fn from(value) = EmailAddress { value: value };
+    }
+}
+
+pub fn implicit_email(value: Str): EmailAddress = value;
