@@ -1,0 +1,4 @@
+fn list_empty_builder(): [Int] {
+    let empty: [Int] = [];
+    list.reverse(empty)
+}

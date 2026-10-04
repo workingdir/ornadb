@@ -1,0 +1,2 @@
+map.merge([("oak", 1), ("elm", 2)], [("elm", 9), ("maple", 5)]) ==
+    [("oak", 1), ("elm", 9), ("maple", 5)]

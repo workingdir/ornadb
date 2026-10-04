@@ -1,0 +1,8 @@
+bits.unsigned_to_bytes(-1, 1, "little") == null
+&& bits.unsigned_to_bytes(256, 1, "little") == null
+&& bits.unsigned_to_bytes(0, 0, "little") == null
+&& bits.unsigned_to_bytes(1, 1, "network") == null
+&& bits.unsigned_from_bytes([], "little") == null
+&& bits.unsigned_from_bytes([-1], "little") == null
+&& bits.unsigned_from_bytes([256], "big") == null
+&& bits.unsigned_from_bytes([1], "network") == null
