@@ -43,6 +43,8 @@ const PROVIDER_TUPLE_ENTRY_EDGE_FIXTURE: &str =
     include_str!("fixtures/provider-tuple-entry-edges.json");
 const PROVIDER_SCHEMA_CAPTURE_EDGE_FIXTURE: &str =
     include_str!("fixtures/provider-schema-capture-edges.json");
+const PROVIDER_FUNCTION_REFERENCE_EDGE_FIXTURE: &str =
+    include_str!("fixtures/provider-function-reference-edges.json");
 
 fn resolve_type(ty: &TypeExpr) -> Result<AbiType, String> {
     match ty {
@@ -1253,6 +1255,120 @@ fn generated_provider_tuple_entry_fixture_matches_schema_and_bindings() {
         "generated_provider_tuple_entry_binding_parity operations={generated_bindings} fixture_cases={} tuple_entries={tuple_entries} map_slots={map_slots} schema_validated=1 typed_contracts={typed_contracts} total_cases={}",
         FIXTURE_CASES.len(),
         generated_bindings + FIXTURE_CASES.len() + tuple_entries + map_slots + 1
+    );
+}
+
+#[test]
+fn generated_provider_function_reference_edges_match_schema_and_bindings() {
+    let fixture: Value = serde_json::from_str(PROVIDER_FUNCTION_REFERENCE_EDGE_FIXTURE)
+        .expect("crate-local provider function-reference fixture is valid JSON");
+    let operation_name = fixture["operation"]
+        .as_str()
+        .expect("function-reference fixture identifies a provider operation");
+    let parameter_name = fixture["parameter"]
+        .as_str()
+        .expect("function-reference fixture identifies a parameter");
+    let expected_type = fixture["expected_type"]
+        .as_str()
+        .expect("function-reference fixture identifies its expected type");
+    let cases = fixture["cases"]
+        .as_array()
+        .expect("function-reference fixture has edge cases");
+    assert_eq!(cases.len(), 4);
+
+    let generated_schema = build_provider::generate_provider_registry_schema()
+        .expect("provider function-reference schema regenerates from its typed source");
+    assert_eq!(generated_schema, system_provider_abi_schema_json());
+    build_host::validate_json_against_schema(system_provider_abi_json(), &generated_schema)
+        .expect("embedded function-reference operation conforms to its generated schema");
+    let registry = orna_sys_v1::SystemProviderAbi::from_json(system_provider_abi_json())
+        .expect("schema-validated function-reference registry parses into typed contracts");
+    let contract = registry
+        .operation(operation_name)
+        .expect("function-reference operation exists in the typed registry");
+    let parameter_index = contract
+        .signature
+        .parameters
+        .iter()
+        .position(|parameter| parameter.name == parameter_name)
+        .expect("function-reference parameter exists in its operation");
+    assert_eq!(
+        contract.signature.parameters[parameter_index]
+            .ty
+            .canonical(),
+        expected_type
+    );
+
+    let generated = system_function_descriptor(operation_name)
+        .expect("function-reference operation has a macro-generated descriptor");
+    assert_eq!(generated.signature, contract.signature.source);
+    assert_eq!(contract.effects.iter().next(), Some(generated.effect));
+    let source = system_binding_stubs();
+    let parsed = parse_module(source);
+    assert!(
+        parsed.is_ok(),
+        "generated function-reference binding bundle parses: {:?}",
+        parsed.diagnostics
+    );
+    let markers = source
+        .lines()
+        .filter_map(|line| line.strip_prefix("// sys-op: "))
+        .collect::<Vec<_>>();
+    let item_index = markers
+        .iter()
+        .position(|marker| *marker == operation_name)
+        .expect("generated IDL has the function-reference operation marker");
+    let Declaration::Function { signature, .. } = &parsed.value.items[item_index].declaration
+    else {
+        panic!("generated function-reference binding is not a function")
+    };
+    assert_eq!(
+        signature.parameters.len(),
+        contract.signature.parameters.len()
+    );
+    assert_eq!(
+        resolve_type(
+            signature.parameters[parameter_index]
+                .annotation
+                .as_ref()
+                .expect("generated function-reference parameter has a type")
+        )
+        .expect("generated function-reference parameter type resolves")
+        .canonical(),
+        expected_type
+    );
+    assert_eq!(
+        resolve_type(
+            signature
+                .result
+                .as_ref()
+                .expect("generated function-reference result is typed")
+        )
+        .expect("generated function-reference result type resolves"),
+        contract.signature.result
+    );
+
+    for case in cases {
+        let name = case["name"]
+            .as_str()
+            .expect("function-reference fixture case has a stable name");
+        let argument_type = case["argument_type"]
+            .as_str()
+            .expect("function-reference fixture case has an argument type");
+        let accepted = case["accepted"]
+            .as_bool()
+            .expect("function-reference fixture case states acceptance");
+        assert_eq!(
+            accepted,
+            argument_type == expected_type,
+            "fixture acceptance matches the generated {parameter_name} type for {name}"
+        );
+    }
+    println!(
+        "generated_provider_function_reference_binding_parity operation={operation_name} cases={} schema_validated=1 typed_contracts=1 macro_bindings=1 idl_parameters={} callback_parameter={parameter_name} callback_type={expected_type} total_cases={}",
+        cases.len(),
+        signature.parameters.len(),
+        cases.len() + signature.parameters.len() + 5
     );
 }
 
