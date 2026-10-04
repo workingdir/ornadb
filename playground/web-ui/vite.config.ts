@@ -1,10 +1,18 @@
 import { defineConfig } from 'vite';
+import { resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const webUi = fileURLToPath(new URL('.', import.meta.url));
 
 export default defineConfig({
   base: '/playground/',
-  publicDir: false,
+  publicDir: 'public',
   build: {
     rollupOptions: {
+      input: {
+        index: resolve(webUi, 'index.html'),
+        embed: resolve(webUi, 'src/embed.ts'),
+      },
       output: {
         entryFileNames: 'assets/[name].js',
         chunkFileNames: 'assets/[name].js',
