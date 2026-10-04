@@ -1435,6 +1435,28 @@ fn uniquely_resolved_protocol(declarations: &[WorkspaceDeclaration], name: &str)
     matches.next().is_none().then_some(found)
 }
 
+fn workspace_declaration_at<'a>(
+    declarations: &'a [WorkspaceDeclaration],
+    document: &Document,
+    selection: &orna_syntax_v1::SyntaxSpan,
+    mapper: &PositionMapper<'_>,
+    segments: &[SourceSegment<'_>],
+) -> Option<&'a WorkspaceDeclaration> {
+    let selected = project_location(
+        lsp_types::Location {
+            uri: document.uri.clone(),
+            range: mapper.range(selection),
+        },
+        mapper,
+        segments,
+    )?;
+    declarations.iter().find(|declaration| {
+        declaration.document.uri == selected.uri
+            && PositionMapper::new(&declaration.document.text).range(&declaration.symbol.selection)
+                == selected.range
+    })
+}
+
 fn workspace_functions(state: &ServerState) -> Vec<WorkspaceFunction> {
     let mut documents = state
         .documents
@@ -1648,13 +1670,23 @@ fn request_prepare_type_hierarchy(
     ) else {
         return Ok(serde_json::Value::Null);
     };
+    let declarations = workspace_declarations(state);
+    if let Some((_, selection)) = analysis::identifier_at(&document, position, &mapper)
+        && let Some(declaration) =
+            workspace_declaration_at(&declarations, &document, &selection, &mapper, &segments)
+        && is_hierarchy_declaration(declaration)
+    {
+        let Some(item) = type_hierarchy_item(declaration) else {
+            return Ok(serde_json::Value::Null);
+        };
+        return Ok(serde_json::to_value(vec![item])?);
+    }
     let Some(definition) = analysis::definition(&document, &parse, position, &mapper) else {
         return Ok(serde_json::Value::Null);
     };
     let Some(definition) = project_location(definition, &mapper, &segments) else {
         return Ok(serde_json::Value::Null);
     };
-    let declarations = workspace_declarations(state);
     let Some(declaration) = declarations.iter().find(|declaration| {
         is_hierarchy_declaration(declaration)
             && declaration.document.uri == definition.uri
@@ -1800,20 +1832,7 @@ fn request_moniker(
         }])?);
     }
 
-    let Some(definition) = analysis::definition(&document, &parse, position, &mapper) else {
-        return Ok(serde_json::Value::Null);
-    };
-    let Some(definition) = project_location(definition, &mapper, &segments) else {
-        return Ok(serde_json::Value::Null);
-    };
     let declarations = workspace_declarations(state);
-    let Some(declaration) = declarations.iter().find(|declaration| {
-        declaration.document.uri == definition.uri
-            && PositionMapper::new(&declaration.document.text).range(&declaration.symbol.selection)
-                == definition.range
-    }) else {
-        return Ok(serde_json::Value::Null);
-    };
     let clicked = project_location(
         lsp_types::Location {
             uri: document.uri.clone(),
@@ -1822,14 +1841,35 @@ fn request_moniker(
         &mapper,
         &segments,
     );
-    let at_declaration = clicked
-        .is_some_and(|clicked| clicked.uri == definition.uri && clicked.range == definition.range);
+    let direct_declaration =
+        workspace_declaration_at(&declarations, &document, &selection, &mapper, &segments);
+    let resolved_declaration = analysis::definition(&document, &parse, position, &mapper)
+        .and_then(|definition| project_location(definition, &mapper, &segments))
+        .and_then(|definition| {
+            declarations.iter().find(|declaration| {
+                declaration.document.uri == definition.uri
+                    && PositionMapper::new(&declaration.document.text)
+                        .range(&declaration.symbol.selection)
+                        == definition.range
+            })
+        });
+    let Some(declaration) = direct_declaration.or(resolved_declaration) else {
+        return Ok(serde_json::Value::Null);
+    };
+    let at_declaration = clicked.is_some_and(|clicked| {
+        clicked.uri == declaration.document.uri
+            && clicked.range
+                == PositionMapper::new(&declaration.document.text)
+                    .range(&declaration.symbol.selection)
+    });
     let kind = if !declaration.public {
         MonikerKind::Local
-    } else if at_declaration || declaration.document.uri == uri {
+    } else if at_declaration {
         MonikerKind::Export
-    } else {
+    } else if declaration.document.uri != uri {
         MonikerKind::Import
+    } else {
+        MonikerKind::Local
     };
     let moniker_kind = match declaration.symbol.kind {
         analysis::EditorSymbolKind::Function => "function",
