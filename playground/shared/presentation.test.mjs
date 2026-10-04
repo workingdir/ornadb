@@ -83,6 +83,20 @@ test('a failed later patch leaves the published tree unchanged and requests a sn
   assert.equal(owner.awaitingSnapshot, true);
 });
 
+test('validates each intermediate tree and rejects duplicate child identities', () => {
+  const root = present('group', null, new Map([['selected', 'value']]), [
+    present('text', [3n, 'same']),
+  ]);
+  assert.throws(() => applyPatches(root, [
+    [2n, [[0n, 'selected']], { tag: 60012n, value: [] }],
+    [2n, [[0n, 'selected']], 'repaired later'],
+  ]), PresentationError);
+  assert.throws(() => applyPatches(root, [
+    [0n, [[2n, 0n]], present('text', [3n, 'same'])],
+  ]), PresentationError);
+  assert.equal(root.value[2].get('selected'), 'value');
+});
+
 test('rejects revision gaps, older snapshots, conflicting equal snapshots, and foreign watches', () => {
   const owner = new LivePresentation();
   owner.receive(snapshot(9, present()));
@@ -107,6 +121,11 @@ test('decodes canonical envelopes and rejects duplicate keys, trailing data, and
   assert.throws(() => decodeCbor(Uint8Array.of(0xa2, 0x00, 0x01, 0x00, 0x02)), PresentationError);
   assert.throws(() => decodeCbor(Uint8Array.of(0x18, 0x01)), PresentationError);
   assert.throws(() => decodeCbor(Uint8Array.of(0x01, 0x00)), PresentationError);
+  const mandatoryExtension = encodeCbor(new Map([
+    [0n, 1n], [1n, 16n], [2n, REQUEST], [3n, WATCH],
+    [4n, new Map([[0n, 2n], [1n, present()], [2n, null], [32768n, true]])],
+  ]));
+  assert.throws(() => decodeEnvelope(mandatoryExtension), PresentationError);
 });
 
 test('rejects oversized and malformed patch payloads before publishing', () => {

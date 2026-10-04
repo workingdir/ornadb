@@ -8,7 +8,7 @@ const DEFAULT_LIMITS = Object.freeze({
 });
 
 const utf8Encoder = new TextEncoder();
-const utf8Decoder = new TextDecoder('utf-8', { fatal: true });
+const utf8Decoder = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
 
 export class PresentationError extends Error {}
 
@@ -244,6 +244,9 @@ function validatePresent(node, depth = 0, maxDepth = DEFAULT_LIMITS.maxDepth, bu
   if (depth > maxDepth || budget.nodes >= DEFAULT_LIMITS.maxNodes) throw new PresentationError('Present tree is too deep or large.');
   budget.nodes += 1;
   const { stableKey, properties, children } = presentFields(node);
+  if (properties.size > DEFAULT_LIMITS.maxCollectionItems || children.length > DEFAULT_LIMITS.maxCollectionItems) {
+    throw new PresentationError('Present collection exceeds the item limit.');
+  }
   validatePresentKey(stableKey);
   for (const [key, value] of properties.entries()) {
     if (!(typeof key === 'string' || taggedUuid(key))) {
@@ -465,8 +468,13 @@ export function applyPatches(present, patches) {
     throw new PresentationError('Invalid presentation patch list.');
   }
   let candidate = cloneCbor(present);
-  for (const patch of patches) candidate = applyOne(candidate, patch);
-  validatePresent(candidate);
+  for (const patch of patches) {
+    candidate = applyOne(candidate, patch);
+    validatePresent(candidate);
+    if (encodeCbor(candidate).length > DEFAULT_LIMITS.maxBytes) {
+      throw new PresentationError('Patched presentation exceeds the byte limit.');
+    }
+  }
   return candidate;
 }
 
@@ -507,11 +515,21 @@ export function decodeEnvelope(input) {
   if ((code === 18n || code === 19n) && (!optionalBytes16(requestValue) || watchValue !== null)) {
     throw new PresentationError('Invalid live result correlation.');
   }
+  const body = required(envelope, 4);
+  if (!(body instanceof Map)) throw new PresentationError('Invalid live message body.');
+  const knownFields = code === 16n ? [0n, 1n, 2n] : code === 17n ? [0n, 1n, 2n, 3n] : null;
+  if (knownFields) {
+    for (const key of body.keys()) {
+      if (typeof key !== 'bigint' || key < 0n || key > 0xffffn || (!knownFields.includes(key) && key >= 32768n)) {
+        throw new PresentationError('Invalid or mandatory live message extension.');
+      }
+    }
+  }
   return {
     code: Number(code),
     request: requestValue,
     watch: watchValue,
-    body: required(envelope, 4),
+    body,
   };
 }
 
