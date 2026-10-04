@@ -1,0 +1,4 @@
+advanced.filter_map([1, 2, 3, 4], optional_times_ten_after_one) == [20, 30, 40]
+&& advanced.filter_map(empty_ints, value => Some(value)) == empty_ints
+&& advanced.map_while([1, 2, 3, 4], optional_times_ten_unless_three) == [10, 20]
+&& advanced.map_while(empty_ints, value => Some(value)) == empty_ints
