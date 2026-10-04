@@ -1,1 +1,1 @@
-{ id: "increment", name: "Standard library: increment", source: "use std.math.{increment};\nincrement(41)" }
+{ id: "increment", name: "Standard library: increment", source: "use std.math.\u{7b}increment\u{7d};\nincrement(41)" }
