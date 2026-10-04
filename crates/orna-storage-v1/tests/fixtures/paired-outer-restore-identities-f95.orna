@@ -1,0 +1,7 @@
+{ id: "f95/outer-restore/pair-0", name: "f95/left/restore-main", city: "f95/right/restore-alpha", }
+
+{ id: "f95/outer-restore/pair-1", name: "f95/left/restore-retry", city: "f95/right/restore-beta", }
+
+{ id: "f95/outer-restore/pair-2", name: "f95/left/restore-main", city: "f95/right/restore-alpha", }
+
+{ id: "f95/outer-restore/pair-3", name: "f95/left/restore-malformed", city: "f95/right/restore-delta", }
