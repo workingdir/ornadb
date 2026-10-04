@@ -1,0 +1,6 @@
+string_builder.is_empty(string_builder.new())
+&& string_builder.build(string_builder.new()) == ""
+&& string_builder.build(string_builder.from_text("seed")) == "seed"
+&& string_builder.build(string_builder.append(string_builder.new(), "hello")) == "hello"
+&& string_builder.build(string_builder.append_all(string_builder.new(), ["red", "", "blue"])) == "redblue"
+&& string_builder.build(string_builder.append_all(string_builder.from_text("stay"), [])) == "stay"

@@ -4,23 +4,29 @@ import { fileURLToPath } from 'node:url';
 import type { Plugin } from 'vite';
 import { defineConfig } from 'vite';
 
-const wasmPackageDirectory = fileURLToPath(new URL('../orna-wasm/pkg/', import.meta.url));
+const lspPackageDirectory = fileURLToPath(new URL('./public/lsp-wasm/', import.meta.url));
 const monacoEsmDirectory = fileURLToPath(
   new URL('./node_modules/monaco-editor/esm', import.meta.url),
 );
 
-function wasmPackageAssets(): Plugin {
+function lspPackageAssets(): Plugin {
   return {
-    name: 'orna-wasm-package-assets',
+    name: 'orna-lsp-wasm-package-assets',
     configureServer(server) {
-      server.middlewares.use('/orna-wasm/pkg', (request, response, next) => {
-        const requestedName = decodeURIComponent((request.url ?? '').split('?')[0].replace(/^\/+/, ''));
+      server.middlewares.use('/playground/lsp-wasm', (request, response, next) => {
+        let requestedName: string;
+        try {
+          requestedName = decodeURIComponent((request.url ?? '').split('?')[0].replace(/^\/+/, ''));
+        } catch {
+          next();
+          return;
+        }
         if (!requestedName || requestedName.includes('/') || requestedName.includes('\\')) {
           next();
           return;
         }
 
-        void readFile(new URL(requestedName, `file://${wasmPackageDirectory}/`))
+        void readFile(new URL(requestedName, `file://${lspPackageDirectory}/`))
           .then((content) => {
             response.statusCode = 200;
             response.setHeader(
@@ -33,14 +39,14 @@ function wasmPackageAssets(): Plugin {
           .catch(() => {
             response.statusCode = 503;
             response.setHeader('Content-Type', 'text/plain; charset=utf-8');
-            response.end('WASM package is not built. Run npm run wasm:build in playground/web-ui.');
+            response.end('LSP package is not built. Run npm run lsp:build in playground/web-ui.');
           });
       });
     },
     async generateBundle() {
       let files: string[];
       try {
-        files = await readdir(wasmPackageDirectory);
+        files = await readdir(lspPackageDirectory);
       } catch {
         return;
       }
@@ -49,8 +55,8 @@ function wasmPackageAssets(): Plugin {
         if (!['.js', '.wasm'].includes(extname(fileName))) continue;
         this.emitFile({
           type: 'asset',
-          fileName: `orna-wasm/pkg/${fileName}`,
-          source: await readFile(new URL(fileName, `file://${wasmPackageDirectory}/`)),
+          fileName: `lsp-wasm/${fileName}`,
+          source: await readFile(new URL(fileName, `file://${lspPackageDirectory}/`)),
         });
       }
     },
@@ -58,11 +64,22 @@ function wasmPackageAssets(): Plugin {
 }
 
 export default defineConfig({
-  base: './',
+  base: '/playground/',
   publicDir: false,
   resolve: {
     alias: [{ find: 'monaco-editor/esm', replacement: monacoEsmDirectory }],
   },
-  plugins: [wasmPackageAssets()],
-  server: { host: '0.0.0.0' },
+  plugins: [lspPackageAssets()],
+  server: {
+    host: '0.0.0.0',
+    proxy: {
+      '/api': {
+        target: process.env.ORNA_SERVE_URL ?? 'http://127.0.0.1:8181',
+      },
+      '/orna': {
+        target: process.env.ORNA_SERVE_URL ?? 'http://127.0.0.1:8181',
+        ws: true,
+      },
+    },
+  },
 });
