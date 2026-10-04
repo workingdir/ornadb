@@ -1,0 +1,46 @@
+pub table PublicationFixture(id: Str) {
+    payload: Str,
+    assert every(row => row.payload != "");
+}
+
+pub fn storage_pending_rows(storage: sys.Storage): Int = storage.pending_rows;
+pub fn storage_pending_bytes(storage: sys.Storage): Int = storage.pending_bytes;
+pub fn storage_published_rows(storage: sys.Storage): Int = storage.published_rows;
+pub fn storage_published_bytes(storage: sys.Storage): Int = storage.published_bytes;
+pub fn storage_policy_target(storage: sys.Storage): Int = storage.publication_policy.compressed_target_bytes;
+pub fn storage_policy_file_bound(storage: sys.Storage): Int = storage.publication_policy.max_file_bytes;
+pub fn storage_policy_pending_age(storage: sys.Storage): Int = storage.publication_policy.max_pending_age_seconds;
+pub fn storage_last_publication(storage: sys.Storage): Instant? = storage.last_publication;
+
+pub fn maintenance_pending_rows(job: sys.MaintenanceJob): Int = job.pending_rows;
+pub fn maintenance_pending_bytes(job: sys.MaintenanceJob): Int = job.pending_bytes;
+pub fn maintenance_published_rows(job: sys.MaintenanceJob): Int = job.published_rows;
+pub fn maintenance_published_bytes(job: sys.MaintenanceJob): Int = job.published_bytes;
+pub fn maintenance_policy_target(job: sys.MaintenanceJob): Int = job.publication_policy.compressed_target_bytes;
+pub fn maintenance_policy_file_bound(job: sys.MaintenanceJob): Int = job.publication_policy.max_file_bytes;
+pub fn maintenance_policy_pending_age(job: sys.MaintenanceJob): Int = job.publication_policy.max_pending_age_seconds;
+pub fn maintenance_last_publication(job: sys.MaintenanceJob): Instant? = job.last_publication;
+
+pub fn read_storage_pending_rows(): Int = sys.Storage | map(storage => storage.pending_rows) | first() ?? -1;
+pub fn read_storage_pending_bytes(): Int = sys.Storage | map(storage => storage.pending_bytes) | first() ?? -1;
+pub fn read_storage_published_rows(): Int = sys.Storage | map(storage => storage.published_rows) | first() ?? -1;
+pub fn read_storage_policy_target(): Int = sys.Storage | map(storage => storage.publication_policy.compressed_target_bytes) | first() ?? -1;
+pub fn read_maintenance_pending_rows(): Int = sys.MaintenanceJob | map(job => job.pending_rows) | first() ?? -1;
+pub fn read_maintenance_pending_bytes(): Int = sys.MaintenanceJob | map(job => job.pending_bytes) | first() ?? -1;
+pub fn read_maintenance_published_rows(): Int = sys.MaintenanceJob | map(job => job.published_rows) | first() ?? -1;
+pub fn read_maintenance_policy_target(): Int = sys.MaintenanceJob | map(job => job.publication_policy.compressed_target_bytes) | first() ?? -1;
+
+pub fn main(): Bool {
+    let metadata_matches =
+        read_storage_pending_rows() == 1 &&
+        read_storage_pending_bytes() == 7 &&
+        read_storage_published_rows() == 0 &&
+        read_storage_policy_target() == 16_777_216 &&
+        read_maintenance_pending_rows() == 1 &&
+        read_maintenance_pending_bytes() == 7 &&
+        read_maintenance_published_rows() == 0 &&
+        read_maintenance_policy_target() == 16_777_216;
+
+    assert metadata_matches;
+    metadata_matches
+}
