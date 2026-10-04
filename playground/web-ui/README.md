@@ -2,8 +2,9 @@
 
 This directory holds the source for the browser shell. `npm run build`
 bundles the shell and embeddable entry script, copies the generated language
-configuration, and writes each HTML, CSS, JavaScript, worker, and JSON asset as
-a `playground.Asset` row. Commit those generated rows with the source changes.
+configuration, and writes each HTML, CSS, JavaScript, worker, and WebAssembly
+asset as a `playground.Asset` row, including the shared live modules and browser
+LSP package. Commit those generated rows with the source changes.
 `orna serve` reads the rows from the selected database's committed Git snapshot
 and serves them at `/playground/`; it does not serve `dist/` from the
 filesystem.
@@ -22,6 +23,10 @@ Build and test from this directory with:
     npm ci
     npm run build
     npm test -- --reporter=dot
+
+The shell stays responsive. Monaco requests syntax diagnostics, signature
+help, standard-library completion, and hover details from the in-process Orna
+LSP worker. The page does not carry a second language vocabulary or evaluator.
 
 To embed the page in another site served from the same database, add a target
 container and load the classic script from the DB asset route:
