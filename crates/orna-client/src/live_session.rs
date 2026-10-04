@@ -1962,7 +1962,10 @@ mod tests {
             [7; 16],
             limits,
             Renderer::default(),
-            Allocator::default(),
+            Allocator {
+                next: 0,
+                allocations: 0,
+            },
         )
         .unwrap();
         let mut second = LiveSessionDriver::new(
@@ -1970,7 +1973,10 @@ mod tests {
             [7; 16],
             limits,
             Renderer::default(),
-            Allocator::default(),
+            Allocator {
+                next: 10,
+                allocations: 0,
+            },
         )
         .unwrap();
 
@@ -2016,12 +2022,11 @@ mod tests {
             .unwrap()
             .request
             .expect("second moved-tree recovery request is correlated");
-        let mut stale_request = first_request;
-        stale_request[0] ^= 0xff;
+        assert_ne!(first_request, second_request);
         first.io.incoming.push_back(frame_with_request(
             16,
             [7; 16],
-            Some(stale_request),
+            Some(second_request),
             snapshot_body_with_children(1, "stale-recovery", initial_children.clone()),
         ));
         assert!(matches!(
