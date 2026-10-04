@@ -176,6 +176,7 @@ pub(crate) struct EditorSymbol {
     pub detail: Option<String>,
     pub documentation: Option<String>,
     pub parameters: Vec<String>,
+    pub result_type: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -256,8 +257,12 @@ fn standard_symbol(module: &str, name: &str) -> Option<&'static StandardSymbol> 
 }
 
 fn standard_imported_symbols(parse: &EditorParse) -> Vec<&'static StandardSymbol> {
+    standard_imported_symbols_in_tree(&parse.value)
+}
+
+fn standard_imported_symbols_in_tree(tree: &SyntaxTree) -> Vec<&'static StandardSymbol> {
     let mut imported = BTreeMap::new();
-    for item in &parse.value.items {
+    for item in &tree.items {
         let Declaration::Use { path, tail } = &item.declaration else {
             continue;
         };
@@ -290,8 +295,12 @@ fn standard_imported_symbols(parse: &EditorParse) -> Vec<&'static StandardSymbol
 }
 
 fn standard_module_aliases(parse: &EditorParse) -> BTreeMap<String, String> {
+    standard_module_aliases_in_tree(&parse.value)
+}
+
+fn standard_module_aliases_in_tree(tree: &SyntaxTree) -> BTreeMap<String, String> {
     let mut aliases = BTreeMap::new();
-    for item in &parse.value.items {
+    for item in &tree.items {
         let Declaration::Use { path, tail } = &item.declaration else {
             continue;
         };
@@ -316,13 +325,17 @@ fn standard_module_aliases(parse: &EditorParse) -> BTreeMap<String, String> {
 }
 
 fn resolve_standard_module(parse: &EditorParse, qualifier: &str) -> Option<String> {
+    resolve_standard_module_in_tree(&parse.value, qualifier)
+}
+
+fn resolve_standard_module_in_tree(tree: &SyntaxTree, qualifier: &str) -> Option<String> {
     if standard_library().modules.contains(qualifier) {
         return Some(qualifier.to_owned());
     }
     let (alias, child_path) = qualifier
         .split_once('.')
         .map_or((qualifier, None), |(alias, child)| (alias, Some(child)));
-    let base = standard_module_aliases(parse).remove(alias)?;
+    let base = standard_module_aliases_in_tree(tree).remove(alias)?;
     let module = child_path.map_or(base.clone(), |child| format!("{base}.{child}"));
     standard_library()
         .modules
@@ -350,6 +363,40 @@ fn standard_symbol_at(
         .filter(|entry| entry.symbol.name == token.text);
     let found = matches.next()?;
     matches.next().is_none().then_some(found)
+}
+
+pub(crate) fn standard_parameter_names_for_call(
+    tree: &SyntaxTree,
+    name: &str,
+    callee: &Expr,
+) -> Option<Vec<String>> {
+    if callee_resolves_to_local(tree, callee) {
+        return None;
+    }
+    let symbol = standard_symbol_for_call_in_tree(tree, name)?;
+    if symbol.symbol.kind != EditorSymbolKind::Function {
+        return None;
+    }
+    symbol
+        .symbol
+        .parameters
+        .iter()
+        .map(|parameter| parameter_name(parameter).map(str::to_owned))
+        .collect()
+}
+
+pub(crate) fn standard_result_type_for_call(
+    tree: &SyntaxTree,
+    name: &str,
+    callee: &Expr,
+) -> Option<String> {
+    if callee_resolves_to_local(tree, callee) {
+        return None;
+    }
+    let symbol = standard_symbol_for_call_in_tree(tree, name)?;
+    (symbol.symbol.kind == EditorSymbolKind::Function)
+        .then(|| symbol.symbol.result_type.clone())
+        .flatten()
 }
 
 fn identifier_chain_at_span(text: &str, span: &SourceSpan) -> Option<Vec<String>> {
@@ -502,6 +549,13 @@ fn symbol_for_item(item: &Item, text: &str, tokens: &[Token]) -> Option<EditorSy
         ),
         _ => return None,
     };
+    let result_type = match &item.declaration {
+        Declaration::Function { signature, .. } => signature
+            .result
+            .as_ref()
+            .and_then(|result| source_type(text, result)),
+        _ => None,
+    };
     let selection = tokens
         .iter()
         .find(|token| {
@@ -520,6 +574,7 @@ fn symbol_for_item(item: &Item, text: &str, tokens: &[Token]) -> Option<EditorSy
         detail,
         documentation: leading_doc_comment(text, item.span.start),
         parameters,
+        result_type,
     })
 }
 
@@ -737,12 +792,19 @@ pub fn signature_help(
 }
 
 fn standard_symbol_for_call(parse: &EditorParse, name: &str) -> Option<&'static StandardSymbol> {
+    standard_symbol_for_call_in_tree(&parse.value, name)
+}
+
+fn standard_symbol_for_call_in_tree(
+    tree: &SyntaxTree,
+    name: &str,
+) -> Option<&'static StandardSymbol> {
     if let Some((qualifier, symbol_name)) = name.rsplit_once('.') {
-        let module = resolve_standard_module(parse, qualifier)?;
+        let module = resolve_standard_module_in_tree(tree, qualifier)?;
         return standard_symbol(&module, symbol_name);
     }
 
-    let mut matches = standard_imported_symbols(parse)
+    let mut matches = standard_imported_symbols_in_tree(tree)
         .into_iter()
         .filter(|entry| entry.symbol.name == name);
     let found = matches.next()?;
@@ -920,7 +982,7 @@ fn collect_statement_calls(statement: &Statement, output: &mut Vec<CallSite>) {
     }
 }
 
-fn expression_name(expression: &Expr) -> Option<String> {
+pub(crate) fn expression_name(expression: &Expr) -> Option<String> {
     match expression {
         Expr::Name { text, .. } => Some(text.clone()),
         Expr::Field { base, name, .. } => Some(format!("{}.{}", expression_name(base)?, name)),
