@@ -43,7 +43,7 @@ The application owns ordinary tables for its editable content:
 | Logical record | Required fields | Purpose |
 |---|---|---|
 | `std.devtools.Sample` | stable key, display name, source text | Starter programs and user-visible examples. Source remains plain Orna text and is evaluated only after an explicit Run action. |
-| `std.devtools.Asset` | normalized relative path, media type, bytes | HTML shell, small theme CSS, generated editor artifacts, and the shared presentation-protocol client needed by the browser renderer. |
+| `std.devtools.Asset` | normalized relative path, media type, Base64-encoded bytes | HTML shell, small theme CSS, generated editor artifacts, and the shared presentation-protocol client needed by the browser renderer. The committed row stores standard padded Base64 text; `orna serve` decodes the bytes when it serves the asset. |
 
 These are regular Orna table declarations and rows. Their schema declarations,
 source modules, and loose row files participate in ordinary Git history and
