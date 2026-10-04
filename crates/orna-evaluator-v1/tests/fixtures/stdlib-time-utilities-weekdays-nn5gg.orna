@@ -1,0 +1,8 @@
+datetime.is_weekend(2024, 6, 29) == Some(true)
+    && datetime.is_business_day(2024, 6, 29) == Some(false)
+    && datetime.is_weekend(2024, 6, 30) == Some(true)
+    && datetime.is_business_day(2024, 6, 30) == Some(false)
+    && datetime.is_weekend(2024, 7, 1) == Some(false)
+    && datetime.is_business_day(2024, 7, 1) == Some(true)
+    && datetime.is_weekend(2024, 2, 30) == null
+    && datetime.is_business_day(2024, 2, 30) == null

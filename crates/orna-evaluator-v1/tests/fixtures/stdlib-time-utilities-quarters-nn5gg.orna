@@ -1,0 +1,10 @@
+datetime.quarter_of(2024, 1) == Some(1)
+    && datetime.quarter_of(2024, 3) == Some(1)
+    && datetime.quarter_of(2024, 4) == Some(2)
+    && datetime.quarter_of(2024, 12) == Some(4)
+    && datetime.quarter_start(2024, 3) == Some((2024, 1, 1))
+    && datetime.quarter_end(2024, 3) == Some((2024, 3, 31))
+    && datetime.quarter_start(2024, 12) == Some((2024, 10, 1))
+    && datetime.quarter_end(2024, 12) == Some((2024, 12, 31))
+    && datetime.quarter_of(2024, 0) == null
+    && datetime.quarter_start(10000, 1) == null
