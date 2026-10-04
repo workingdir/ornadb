@@ -183,6 +183,10 @@ impl ReplSession {
     }
 
     /// Adds one physical input line and returns `{kind, text}` JSON.
+    ///
+    /// Blank top-level lines echo empty text and remain in session source
+    /// coordinates; blank lines inside an incomplete input remain pending.
+    /// Completed parse and evaluation errors use the locations from `run`.
     pub fn evaluate(&mut self, line: &str) -> String {
         self.evaluate_using(line, &mut run)
     }
@@ -196,6 +200,12 @@ impl Default for ReplSession {
 
 impl ReplSession {
     fn evaluate_using(&mut self, line: &str, runner: &mut impl FnMut(&str) -> String) -> String {
+        if self.pending.is_empty() && line.trim().is_empty() {
+            self.history.push_str(line);
+            self.history.push('\n');
+            return response("echo", "");
+        }
+
         self.pending.push_str(line);
         self.pending.push('\n');
 
@@ -373,6 +383,11 @@ mod tests {
     use serde_json::Value as JsonValue;
 
     const REPL_FIXTURE: &str = include_str!("../tests/fixtures/repl_incremental.orna");
+    const REPL_MULTILINE_FIXTURE: &str = include_str!("../tests/fixtures/repl_multiline.orna");
+    const REPL_MULTILINE_PARSE_ERROR_FIXTURE: &str =
+        include_str!("../tests/fixtures/repl_multiline_parse_error.orna");
+    const REPL_RUNTIME_ERROR_FIXTURE: &str =
+        include_str!("../tests/fixtures/repl_runtime_error.orna");
 
     #[test]
     fn run_returns_values_in_stable_json_shape() {
@@ -416,6 +431,101 @@ mod tests {
         assert_eq!(
             json(&repl.evaluate("2")),
             serde_json::json!({"kind":"value","text":"3 : Int"})
+        );
+    }
+
+    #[test]
+    fn repl_keeps_blank_lines_inside_incomplete_multiline_input() {
+        let mut repl = ReplSession::new();
+        assert_eq!(
+            json(&repl.evaluate("1 +")),
+            serde_json::json!({"kind":"echo","text":"1 +"})
+        );
+        assert_eq!(
+            json(&repl.evaluate("")),
+            serde_json::json!({"kind":"echo","text":"1 +"})
+        );
+        assert_eq!(
+            json(&repl.evaluate("2")),
+            serde_json::json!({"kind":"value","text":"3 : Int"})
+        );
+    }
+
+    #[test]
+    fn repl_multiline_values_match_the_run_contract() {
+        let expected: RunResponse =
+            serde_json::from_str(&run(REPL_MULTILINE_FIXTURE)).expect("valid run JSON");
+        assert!(expected.ok);
+
+        let mut repl = ReplSession::new();
+        let actual = REPL_MULTILINE_FIXTURE
+            .lines()
+            .map(|line| json(&repl.evaluate(line)))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            JsonValue::Array(actual.clone()),
+            serde_json::json!([
+                {"kind":"echo","text":"let answer = 40;"},
+                {"kind":"echo","text":"answer +"},
+                {"kind":"value","text":"42 : Int"},
+                {"kind":"echo","text":"answer +"},
+                {"kind":"value","text":"43 : Int"}
+            ])
+        );
+        let values = actual
+            .iter()
+            .filter(|actual| actual["kind"] == "value")
+            .map(|actual| actual["text"].as_str().unwrap().to_owned())
+            .collect::<Vec<_>>();
+
+        assert_eq!(values, expected.values);
+        assert_eq!(values, ["42 : Int", "43 : Int"]);
+    }
+
+    #[test]
+    fn repl_multiline_parse_errors_match_run_locations_and_recover() {
+        let expected: RunResponse =
+            serde_json::from_str(&run(REPL_MULTILINE_PARSE_ERROR_FIXTURE)).expect("valid run JSON");
+        assert!(!expected.ok);
+        let expected_error = run_error_text(&expected);
+
+        let mut repl = ReplSession::new();
+        let lines = REPL_MULTILINE_PARSE_ERROR_FIXTURE
+            .lines()
+            .collect::<Vec<_>>();
+        assert_eq!(json(&repl.evaluate(lines[0]))["kind"], "echo");
+        assert_eq!(
+            json(&repl.evaluate(lines[1])),
+            serde_json::json!({"kind":"echo","text":""})
+        );
+        assert_eq!(json(&repl.evaluate(lines[2]))["kind"], "echo");
+        assert_eq!(
+            json(&repl.evaluate(lines[3])),
+            serde_json::json!({"kind":"error","text":expected_error})
+        );
+        assert_eq!(
+            json(&repl.evaluate("answer + 2")),
+            serde_json::json!({"kind":"value","text":"42 : Int"})
+        );
+    }
+
+    #[test]
+    fn repl_runtime_errors_match_run_locations_and_recover() {
+        let expected: RunResponse =
+            serde_json::from_str(&run(REPL_RUNTIME_ERROR_FIXTURE)).expect("valid run JSON");
+        assert!(!expected.ok);
+        let expected_error = run_error_text(&expected);
+
+        let mut repl = ReplSession::new();
+        let lines = REPL_RUNTIME_ERROR_FIXTURE.lines().collect::<Vec<_>>();
+        assert_eq!(json(&repl.evaluate(lines[0]))["kind"], "echo");
+        assert_eq!(
+            json(&repl.evaluate(lines[1])),
+            serde_json::json!({"kind":"error","text":expected_error})
+        );
+        assert_eq!(
+            json(&repl.evaluate("answer + 2")),
+            serde_json::json!({"kind":"value","text":"42 : Int"})
         );
     }
 
