@@ -1,1 +1,1 @@
-{ id: "entry-example-catalog", asset_path: "examples.html", kind: "asset" }
+{ id: "entry-example-catalog", asset_path: "assets/examples.html", kind: "asset" }
