@@ -203,13 +203,7 @@ impl ReplSession {
         if parsed.is_incomplete() {
             return response("echo", self.pending.trim_end());
         }
-        if !parsed.is_ok() {
-            let error = parse_error(&self.pending);
-            self.pending.clear();
-            return response("error", &error);
-        }
-
-        let item = matches!(parsed.value, ReplInput::Item(_));
+        let item = parsed.is_ok() && matches!(&parsed.value, ReplInput::Item(_));
         let candidate = format!("{}{}", self.history, self.pending);
         let result = runner(&candidate);
         let Ok(result) = serde_json::from_str::<RunResponse>(&result) else {
@@ -217,12 +211,13 @@ impl ReplSession {
             return response("error", "ORNA-WASM-CONTRACT");
         };
         if !result.ok {
-            let text = result.errors.first().map_or_else(
-                || "ORNA-WASM-RUN".to_owned(),
-                |error| format!("{} (line {}, col {})", error.message, error.line, error.col),
-            );
+            let text = run_error_text(&result);
             self.pending.clear();
             return response("error", &text);
+        }
+        if !parsed.is_ok() {
+            self.pending.clear();
+            return response("error", "ORNA-WASM-CONTRACT");
         }
 
         let has_new_value = !item && result.values.len() > self.value_count;
@@ -259,20 +254,10 @@ fn response(kind: &str, text: &str) -> String {
         .unwrap_or_else(|_| "{\"kind\":\"error\",\"text\":\"ORNA-WASM-JSON\"}".into())
 }
 
-fn parse_error(source: &str) -> String {
-    let parsed = parse_repl_with_file(source, "<playground>");
-    parsed.diagnostics.first().map_or_else(
-        || "ORNA-PARSE-001 (line 1, col 1)".into(),
-        |diagnostic| {
-            let (line, col) = diagnostic
-                .span
-                .start_position
-                .as_ref()
-                .map_or((1, 1), |position| {
-                    (position.line as usize, position.column as usize)
-                });
-            format!("{} (line {line}, col {col})", diagnostic.message)
-        },
+fn run_error_text(result: &RunResponse) -> String {
+    result.errors.first().map_or_else(
+        || "ORNA-WASM-RUN".to_owned(),
+        |error| format!("{} (line {}, col {})", error.message, error.line, error.col),
     )
 }
 
