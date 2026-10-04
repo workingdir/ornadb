@@ -3,99 +3,64 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta name="theme-color" content="#0a1411" />
-    <meta
-      name="description"
-      content="Write Orna and run it in the browser with the WebAssembly runtime."
-    />
-    <title>Orna Playground</title>
+    <meta name="description" content="Edit and run Orna source in the browser." />
+    <title>Orna playground</title>
   </head>
   <body>
-    <div class="app-shell">
-      <header class="topbar">
-        <a class="brand" href="./" aria-label="Orna Playground home">
-          <span class="brand-mark" aria-hidden="true">o</span>
-          <span class="brand-name">orna<span>playground</span></span>
-        </a>
-        <div class="topbar-right">
-          <span class="runtime-status" id="runtime-status" role="status">
-            <span class="status-dot" aria-hidden="true"></span>
-            <span id="runtime-status-text">Loading runtime</span>
-          </span>
-          <button class="run-button" id="run-button" type="button" disabled>
-            <svg viewBox="0 0 16 16" aria-hidden="true">
-              <path d="M4.4 2.9a.8.8 0 0 1 1.2-.7l7.1 5a1 1 0 0 1 0 1.6l-7.1 5a.8.8 0 0 1-1.2-.7V2.9Z" />
-            </svg>
-            <span>Run</span>
-            <kbd>⌘ ↵</kbd>
-          </button>
-        </div>
+    <main>
+      <header class="page-header">
+        <h1>Orna playground</h1>
+        <p><a href="/">Database</a> · Edit and run Orna source.</p>
       </header>
 
-      <main class="workspace">
-        <section class="pane editor-pane" aria-labelledby="editor-title">
-          <div class="pane-toolbar">
-            <div class="pane-heading">
-              <span class="pane-overline">Playground</span>
-              <h1 id="editor-title">Source</h1>
-            </div>
-            <div class="file-pill">
-              <span class="file-indicator" aria-hidden="true"></span>
-              <span>main.orna</span>
-            </div>
+      <div class="workspace">
+        <section class="editor-pane" aria-labelledby="source-title">
+          <div class="pane-heading">
+            <h2 id="source-title">Source</h2>
+            <label for="examples">Example</label>
+            <select id="examples" disabled>
+              <option>Loading examples…</option>
+            </select>
+            <button id="run-button" type="button" disabled>Run</button>
+            <button id="stop-button" type="button" disabled>Stop</button>
           </div>
-          <div class="editor-frame">
-            <div id="editor" aria-label="Orna source editor"></div>
-          </div>
-          <div class="pane-footer">
-            <span>Orna 1.0</span>
-            <span>UTF-8</span>
-            <span id="cursor-position">Ln 1, Col 1</span>
-          </div>
+          <div id="editor" aria-label="Orna source editor"></div>
+          <p class="editor-status" id="editor-status" role="status">Loading editor</p>
         </section>
 
-        <section class="pane output-pane" aria-labelledby="output-title">
-          <div class="pane-toolbar output-toolbar">
-            <div class="pane-heading">
-              <span class="pane-overline">WASM runtime</span>
-              <h2 id="output-title">Execution output</h2>
-            </div>
-            <span class="output-badge" id="execution-state">Waiting</span>
+        <section class="output-pane" aria-labelledby="results-title">
+          <div class="pane-heading">
+            <h2 id="results-title">Results</h2>
+            <span id="execution-state" role="status">Waiting</span>
           </div>
-
-          <div class="output-content" aria-live="polite" aria-atomic="false">
-            <section class="result-section result-values" aria-labelledby="values-title">
-              <div class="result-heading">
-                <h3 id="values-title"><span class="result-icon" aria-hidden="true">∑</span> Values</h3>
-                <span class="result-count" id="values-count">—</span>
-              </div>
-              <pre class="result-body" id="values-output"><span class="empty-result">Values returned by the program appear here.</span></pre>
+          <div class="tabs" role="tablist" aria-label="Execution result views">
+            <button type="button" role="tab" id="tab-output" aria-controls="panel-output" aria-selected="true" data-output-tab="output">Output</button>
+            <button type="button" role="tab" id="tab-values" aria-controls="panel-values" aria-selected="false" data-output-tab="values">Values</button>
+            <button type="button" role="tab" id="tab-errors" aria-controls="panel-errors" aria-selected="false" data-output-tab="errors">Errors</button>
+            <button type="button" role="tab" id="tab-ast" aria-controls="panel-ast" aria-selected="false" data-output-tab="ast">AST</button>
+          </div>
+          <div class="panels" aria-live="polite" aria-atomic="false">
+            <section id="panel-output" role="tabpanel" aria-labelledby="tab-output" data-output-panel="output">
+              <h3>Stdout</h3>
+              <pre id="stdout-output">Run source to see output.</pre>
             </section>
-
-            <section class="result-section result-stdout" aria-labelledby="stdout-title">
-              <div class="result-heading">
-                <h3 id="stdout-title"><span class="result-icon" aria-hidden="true">›_</span> Stdout</h3>
-                <span class="result-count" id="stdout-count">—</span>
-              </div>
-              <pre class="result-body" id="stdout-output"><span class="empty-result">Program output appears here.</span></pre>
+            <section id="panel-values" role="tabpanel" aria-labelledby="tab-values" data-output-panel="values" hidden>
+              <h3>Returned values</h3>
+              <pre id="values-output">Returned values appear here.</pre>
             </section>
-
-            <section class="result-section result-errors" aria-labelledby="errors-title">
-              <div class="result-heading">
-                <h3 id="errors-title"><span class="result-icon" aria-hidden="true">!</span> Errors</h3>
-                <span class="result-count" id="errors-count">—</span>
-              </div>
-              <pre class="result-body" id="errors-output"><span class="empty-result">Diagnostics appear here.</span></pre>
+            <section id="panel-errors" role="tabpanel" aria-labelledby="tab-errors" data-output-panel="errors" hidden>
+              <h3>Errors</h3>
+              <pre id="errors-output">Diagnostics appear here.</pre>
+            </section>
+            <section id="panel-ast" role="tabpanel" aria-labelledby="tab-ast" data-output-panel="ast" hidden>
+              <h3>Syntax tree</h3>
+              <pre id="ast-output">The parsed syntax tree appears here.</pre>
             </section>
           </div>
-
-          <div class="output-footer">
-            <span>Run your source to see results</span>
-            <span class="footer-orna-mark" aria-hidden="true">◈</span>
-          </div>
+          <p class="output-status" id="output-status">Run source to view its results.</p>
         </section>
-      </main>
-    </div>
+      </div>
+    </main>
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>

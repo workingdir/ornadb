@@ -1,0 +1,1 @@
+numeric.decimal_from_text("123.45") == Some(123.45.decimal)

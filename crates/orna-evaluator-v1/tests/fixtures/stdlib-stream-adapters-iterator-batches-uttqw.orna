@@ -1,0 +1,5 @@
+std.stream.adapters.from_iterator_batches(
+    std.iterator.from_list([4, 1, 6, 2, 8]),
+    "iterator-batch-proof",
+    2
+)

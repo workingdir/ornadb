@@ -1,0 +1,1 @@
+adapters.unzip([(1, "a"), (2, "b"), (1, "c")]) == ([1, 2, 1], ["a", "b", "c"]) && adapters.unzip(empty_pairs) == (empty_ints, empty_strs)
