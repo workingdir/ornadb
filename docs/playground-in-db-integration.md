@@ -8,30 +8,35 @@ is the source for the shell, assets, programs, and examples.
 
 `playground.orna` declares `Sample`, `Asset`, `Entry`, and `Route` tables.
 Sample rows and the legacy `playground/examples/*.orna` files feed
-`/api/examples`. The shell, stylesheet, browser client, Monaco worker,
-generated editor configuration, and embeddable entry script are generated as
-`playground.Asset` rows under `playground/Asset/`. Each row records a
-normalized relative path, media type, and UTF-8 content. `playground.Entry`
-rows select a page, embed, or static-asset entry and point to an Asset path;
-`playground.Route` rows map exact public paths to those entries. The build
-generates Route and Entry rows alongside the Asset rows.
-`orna-syntax-v1` generates the editor configuration from the language lexer;
-the browser loads it from `/playground/assets/orna-editor-config.json`.
+`/api/examples`. The shell, browser client, live bridge modules, Orna LSP
+WebAssembly package, Monaco workers, generated editor configuration, and
+embeddable entry script are stored as `playground.Asset` rows under
+`playground/Asset/`. Each row records a normalized relative path and media
+type. Text content is UTF-8; WebAssembly bytes are base64-encoded in the row
+and decoded when served. `playground.Entry` rows select a page, embed, or
+static-asset entry and point to an Asset path. `playground.Route` rows map
+exact public paths to those entries. The build generates Route and Entry rows
+alongside the Asset rows. `orna-syntax-v1` generates editor configuration
+from the language lexer; the browser loads it from
+`/playground/assets/orna-editor-config.json`.
 
-`npm run build` creates the small browser bundle and refreshes these rows.
-Commit the generated rows along with source changes. For each request,
-`orna serve` resolves Route, Entry, and Asset rows from one committed `HEAD`;
-it does not read `playground/web-ui/dist/`. The `/playground/` and
-`/playground/embed` routes use the same shell record, with the embed entry
-hiding the marked page header and applying its framing policy. Static assets
-are returned with their checked media type and `X-Content-Type-Options:
-nosniff`. A commit that changes a Route, Entry, or Asset row is visible on the
-next request without restarting `orna serve`.
+`npm run build` creates the browser bundle and refreshes these rows. Commit the
+generated rows with source changes. For each request, `orna serve` resolves
+Route, Entry, and Asset rows from one committed `HEAD`; it does not read
+`playground/web-ui/dist/` or compile browser helpers into the server binary.
+The `/playground/` and `/playground/embed` routes use the same shell record,
+with the embed entry hiding the marked page header and applying its framing
+policy. Static assets are returned with their checked media type and
+`X-Content-Type-Options: nosniff`. A commit that changes a Route, Entry, or
+Asset row is visible on the next request without restarting `orna serve`.
 
-The `/playground/assets/embed.js` classic script creates an iframe pointed at
-the same database's `/playground/embed` route. Set `data-target` to append the
-iframe to a container, and optionally set `data-height`, `data-title`, or
-`data-loading`. The entry script itself is a committed Asset row.
+Monaco uses the database-served shell assets to run the Orna LSP worker. The
+worker supplies standard-library completion and hover alongside signature
+help and diagnostics. The `/playground/assets/embed.js` classic script creates
+an iframe pointed at the same database's `/playground/embed` route. Set
+`data-target` to append the iframe to a container, and optionally set
+`data-height`, `data-title`, or `data-loading`. The entry script itself is a
+committed Asset row.
 
 The browser sends explicit Run requests to the same clone's
 `orna.present.v1` session. Source evaluation and presentation remain in the
@@ -59,8 +64,8 @@ The test initializes a temporary Orna Git database, commits crate-local
 `.orna` schema, sample, route, entry, and asset fixtures, starts the real
 `orna serve` process without a build directory, then uses curl to check the
 Git listing, database-resident shell, editor configuration, embeddable script,
-CSS/JavaScript rows, committed examples, and live session. It commits a new
-Route and Entry after startup and proves the new URL changes from 404 to 200
-without restarting the server. A WebSocket client follows the existing watch,
-fingerprinted Eval, and Resync exchange to prove independent results and
-presentation deltas.
+CSS/JavaScript and WebAssembly rows, committed examples, and live session. It
+commits a new Route and Entry after startup and proves the new URL changes
+from 404 to 200 without restarting the server. A WebSocket client follows the
+existing watch, fingerprinted Eval, and Resync exchange to prove independent
+results and presentation deltas.

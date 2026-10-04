@@ -38,6 +38,7 @@ use crate::{
     REFERENCE_STANDARD_FORMAT_STRINGS_PATH_V1,
     REFERENCE_STANDARD_PARSE_UTILITIES_PATH_V1,
     REFERENCE_STANDARD_ENCODING_UTILITIES_PATH_V1,
+    REFERENCE_STANDARD_BYTES_PATH_V1,
     REFERENCE_STANDARD_ITERATOR_PATH_V1, REFERENCE_STANDARD_ITERATOR_ADAPTERS_PATH_V1,
     REFERENCE_STANDARD_ITERATOR_CONSUMERS_PATH_V1,
     REFERENCE_STANDARD_COLLECTION_ADAPTERS_PATH_V1,
@@ -57,7 +58,7 @@ use crate::{
 #[test]
 fn pinned_ui_presentation_helpers_are_included_as_source() {
     let sources = reference_standard_sources_v1();
-    assert_eq!(sources.len(), 72);
+    assert_eq!(sources.len(), 73);
     assert_eq!(sources[49].0, REFERENCE_STANDARD_UI_PATH_V1);
     let parsed = orna_syntax_v1::parse_module_with_file(
         &sources[49].1,
@@ -921,6 +922,49 @@ fn pinned_unicode_and_encoding_utilities_are_included_and_typecheck() {
 }
 
 #[test]
+fn pinned_byte_buffer_utilities_are_included_and_typecheck() {
+    let sources = reference_standard_sources_v1();
+    let (index, (path, source)) = sources
+        .iter()
+        .enumerate()
+        .find(|(_, (path, _))| path == REFERENCE_STANDARD_BYTES_PATH_V1)
+        .expect("the pinned source bundle includes std.bytes");
+    assert_eq!(index, 72, "byte utilities append without moving old sources");
+    assert_eq!(path, REFERENCE_STANDARD_BYTES_PATH_V1);
+    for declaration in [
+        "pub fn is_byte(value: Int): Bool",
+        "pub fn is_buffer(values: [Int]): Bool",
+        "pub fn buffer_length(values: [Int]): Int?",
+        "pub fn new_buffer(length: Int): [Int]?",
+        "pub fn append_byte(values: [Int], value: Int): [Int]?",
+        "pub fn concat(left: [Int], right: [Int]): [Int]?",
+        "pub fn slice(values: [Int], start: Int, count: Int): [Int]?",
+        "pub fn chunks(values: [Int], size: Int): [[Int]]?",
+        "pub fn read_unsigned(",
+        "pub fn write_unsigned(",
+    ] {
+        assert!(source.contains(declaration), "missing byte utility `{declaration}`");
+    }
+    for contract in [
+        "immutable lists of unsigned octets",
+        "empty buffer is valid",
+        "zero-length slice at the buffer end is valid",
+        "little` or",
+        "big` byte order",
+        "The write never grows the buffer",
+    ] {
+        assert!(source.contains(contract), "missing byte buffer contract `{contract}`");
+    }
+    reference_standard_profile_v1()
+        .verify_source(path, source)
+        .expect("byte buffer utility bytes match the captured standard profile");
+    let parsed = orna_syntax_v1::parse_module_with_file(source, path);
+    assert!(parsed.is_ok(), "{path}: {:#?}", parsed.diagnostics);
+    reference_standard_catalogue_v1()
+        .expect("byte buffer utilities resolve in the captured standard catalogue");
+}
+
+#[test]
 fn pinned_iterator_and_lazy_surfaces_typecheck_as_ordinary_std_modules() {
     let sources = reference_standard_sources_v1();
     for (index, path) in [
@@ -1304,7 +1348,7 @@ fn pinned_timezone_and_calendar_surfaces_typecheck_and_publish_in_snapshot() {
     for declaration in [
         "pub fn timezone_data_version(): Str",
         "pub fn offset_at(instant: Instant, zone: Str): Int",
-        "pub fn resolve_local(local: Str, zone: Str, ambiguous: Str): Instant",
+        "pub fn resolve_local(local: Str, zone: Str, ambiguous: Str, gap: Str? = null): Instant",
     ] {
         assert!(time.contains(declaration), "missing std.time declaration `{declaration}`");
     }
@@ -1823,7 +1867,7 @@ fn reference_standard_uses_pinned_orna_1_source_and_resolves_its_imports() {
     ] {
         assert!(sources[33].1.contains(contract), "missing std.test contract `{contract}`");
     }
-    assert_eq!(sources.len(), 72);
+    assert_eq!(sources.len(), 73);
     assert_eq!(sources[49].0, REFERENCE_STANDARD_UI_PATH_V1);
     for declaration in [
         "pub fn Field<T>(label: Str, value: T): UI",
@@ -1840,7 +1884,7 @@ fn reference_standard_uses_pinned_orna_1_source_and_resolves_its_imports() {
         "original value and its runtime type",
         "Inspect fallback",
         "never execute action descriptors",
-        "expected input type checked by the server-created event handle",
+        "a present value agrees with the event handle",
     ] {
         assert!(sources[49].1.contains(contract), "missing std.ui contract `{contract}`");
     }
@@ -1907,7 +1951,7 @@ fn reference_standard_uses_pinned_orna_1_source_and_resolves_its_imports() {
     }
     assert_eq!(sources[37].0, REFERENCE_STANDARD_ITERATOR_PATH_V1);
     for declaration in [
-        "pub enum Iterator<T>",
+        "pub type Iterator<T>",
         "pub fn empty<T>(): Iterator<T>",
         "pub fn next<T>(iterator: Iterator<T>): (T?, Iterator<T>)",
         "pub fn from_list<T>(values: [T]): Iterator<T>",
@@ -1925,7 +1969,7 @@ fn reference_standard_uses_pinned_orna_1_source_and_resolves_its_imports() {
     for contract in [
         "Creating or composing one does",
         "replays its computation",
-        "pure callbacks when repeatable observations are required",
+        "callbacks when repeatable observations are required",
         "Use `take` before `collect` on an infinite source",
         "Terminal operation. Finite iterators are required",
         "iterator count must be nonnegative",
@@ -2285,7 +2329,7 @@ fn pinned_filesystem_effect_is_visible_to_consumers_and_forbidden_in_assertions(
 #[test]
 fn pinned_filesystem_path_and_metadata_modules_are_captured_and_typecheck() {
     let sources = reference_standard_sources_v1();
-    assert_eq!(sources.len(), 72);
+    assert_eq!(sources.len(), 73);
     for (index, path) in [
         (42, REFERENCE_STANDARD_IO_PATH_MODULE_PATH_V1),
         (43, REFERENCE_STANDARD_IO_METADATA_PATH_V1),
@@ -2349,7 +2393,7 @@ fn pinned_filesystem_path_and_metadata_modules_are_captured_and_typecheck() {
 #[test]
 fn pinned_io_buffer_module_is_captured_and_resolves_stream_adapters() {
     let sources = reference_standard_sources_v1();
-    assert_eq!(sources.len(), 72);
+    assert_eq!(sources.len(), 73);
     let (path, source) = sources
         .iter()
         .find(|(path, _)| path == REFERENCE_STANDARD_IO_BUFFER_PATH_V1)
@@ -2386,7 +2430,7 @@ fn pinned_io_buffer_module_is_captured_and_resolves_stream_adapters() {
 #[test]
 fn pinned_process_and_environment_modules_are_captured_and_typecheck() {
     let sources = reference_standard_sources_v1();
-    assert_eq!(sources.len(), 72);
+    assert_eq!(sources.len(), 73);
     for (index, path) in [
         (44, REFERENCE_STANDARD_IO_PROCESS_PATH_V1),
         (45, REFERENCE_STANDARD_IO_ENVIRONMENT_PATH_V1),
