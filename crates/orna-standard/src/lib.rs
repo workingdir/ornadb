@@ -91,6 +91,7 @@ pub const STANDARD_LIBRARY_VERSION_IDENTITY: &str = "orna.std/1";
 
 /// Logical source path of the pinned Orna 1.0.0 reference math module.
 pub const REFERENCE_STANDARD_MATH_PATH_V1: &str = "std/math.orna";
+pub const REFERENCE_STANDARD_NUMERIC_PATH_V1: &str = "std/numeric.orna";
 pub const REFERENCE_STANDARD_COLLECTION_PATH_V1: &str = "std/collection.orna";
 pub const REFERENCE_STANDARD_ALGORITHM_PATH_V1: &str = "std/algorithm.orna";
 pub const REFERENCE_STANDARD_QUERY_PATH_V1: &str = "std/query.orna";
@@ -162,6 +163,8 @@ pub const REFERENCE_STANDARD_PRELUDE_EXPORTS_V1: &[&str] = &[
 ];
 
 const REFERENCE_STANDARD_MATH_SOURCE_V1: &str = include_str!("../../../stdlib/std/math.orna");
+const REFERENCE_STANDARD_NUMERIC_SOURCE_V1: &str =
+    include_str!("../../../stdlib/std/numeric.orna");
 const REFERENCE_STANDARD_COLLECTION_SOURCE_V1: &str =
     include_str!("../../../stdlib/std/collection.orna");
 const REFERENCE_STANDARD_ALGORITHM_SOURCE_V1: &str =
@@ -259,8 +262,8 @@ const REFERENCE_STANDARD_PRELUDE_SOURCE_V1: &str =
 /// This is the current source-backed standard boundary. The retained `orna.std/1`–
 /// `orna.std/11` APIs below model older, explicitly versioned snapshots.
 #[must_use]
-pub fn reference_standard_sources_v1() -> [(String, String); 59] {
-    let mut sources: [(String, String); 59] = [
+pub fn reference_standard_sources_v1() -> [(String, String); 60] {
+    let mut sources: [(String, String); 60] = [
         (
             REFERENCE_STANDARD_MATH_PATH_V1.into(),
             REFERENCE_STANDARD_MATH_SOURCE_V1.into(),
@@ -496,6 +499,10 @@ pub fn reference_standard_sources_v1() -> [(String, String); 59] {
         (
             REFERENCE_STANDARD_ERROR_COMBINATORS_PATH_V1.into(),
             REFERENCE_STANDARD_ERROR_COMBINATORS_SOURCE_V1.into(),
+        ),
+        (
+            REFERENCE_STANDARD_NUMERIC_PATH_V1.into(),
+            REFERENCE_STANDARD_NUMERIC_SOURCE_V1.into(),
         ),
     ];
     sources[2]

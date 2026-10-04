@@ -4,6 +4,7 @@ use orna_semantic_v1::{
 
 use crate::{
     REFERENCE_STANDARD_COLLECTION_PATH_V1, REFERENCE_STANDARD_MATH_PATH_V1,
+    REFERENCE_STANDARD_NUMERIC_PATH_V1,
     REFERENCE_STANDARD_MONEY_PATH_V1,
     REFERENCE_STANDARD_BITS_PATH_V1, REFERENCE_STANDARD_QUERY_PATH_V1,
     REFERENCE_STANDARD_TEXT_PATH_V1, REFERENCE_STANDARD_STATS_PATH_V1,
@@ -44,7 +45,7 @@ use crate::{
 #[test]
 fn pinned_ui_presentation_helpers_are_included_as_source() {
     let sources = reference_standard_sources_v1();
-    assert_eq!(sources.len(), 59);
+    assert_eq!(sources.len(), 60);
     assert_eq!(sources[49].0, REFERENCE_STANDARD_UI_PATH_V1);
     let parsed = orna_syntax_v1::parse_module_with_file(
         &sources[49].1,
@@ -80,6 +81,39 @@ fn pinned_algorithm_module_is_part_of_the_captured_std_snapshot() {
         .expect("algorithm source bytes are recorded by the captured std profile");
     reference_standard_catalogue_v1()
         .expect("algorithm imports resolve in the captured standard catalogue");
+}
+
+#[test]
+fn pinned_numeric_traits_are_in_the_source_database_and_typecheck() {
+    let sources = reference_standard_sources_v1();
+    assert_eq!(sources.len(), 60);
+    let (path, source) = sources
+        .iter()
+        .find(|(path, _)| path == REFERENCE_STANDARD_NUMERIC_PATH_V1)
+        .expect("the pinned source bundle includes std.numeric");
+    assert_eq!(path, REFERENCE_STANDARD_NUMERIC_PATH_V1);
+    for declaration in [
+        "pub protocol Zero",
+        "pub protocol One",
+        "pub protocol Add",
+        "pub protocol Sub",
+        "pub protocol Mul",
+        "pub protocol Div",
+        "pub protocol Rem",
+        "pub protocol Neg",
+        "pub protocol Signed",
+        "pub protocol Integer",
+        "pub protocol Compare",
+        "pub fn div_rem<T impl Integer>",
+        "pub fn clamp<T impl Compare>",
+    ] {
+        assert!(source.contains(declaration), "missing {declaration}");
+    }
+    reference_standard_profile_v1()
+        .verify_source(path, source)
+        .expect("numeric trait source bytes are recorded by the captured std profile");
+    reference_standard_catalogue_v1()
+        .expect("numeric protocols typecheck in the pinned catalogue");
 }
 
 #[test]
@@ -1164,7 +1198,7 @@ fn reference_standard_uses_pinned_orna_1_source_and_resolves_its_imports() {
     ] {
         assert!(sources[33].1.contains(contract), "missing std.test contract `{contract}`");
     }
-    assert_eq!(sources.len(), 59);
+    assert_eq!(sources.len(), 60);
     assert_eq!(sources[49].0, REFERENCE_STANDARD_UI_PATH_V1);
     for declaration in [
         "pub fn Field<T>(label: Str, value: T): UI",
@@ -1626,7 +1660,7 @@ fn pinned_filesystem_effect_is_visible_to_consumers_and_forbidden_in_assertions(
 #[test]
 fn pinned_filesystem_path_and_metadata_modules_are_captured_and_typecheck() {
     let sources = reference_standard_sources_v1();
-    assert_eq!(sources.len(), 59);
+    assert_eq!(sources.len(), 60);
     for (index, path) in [
         (42, REFERENCE_STANDARD_IO_PATH_MODULE_PATH_V1),
         (43, REFERENCE_STANDARD_IO_METADATA_PATH_V1),
@@ -1690,7 +1724,7 @@ fn pinned_filesystem_path_and_metadata_modules_are_captured_and_typecheck() {
 #[test]
 fn pinned_io_buffer_module_is_captured_and_resolves_stream_adapters() {
     let sources = reference_standard_sources_v1();
-    assert_eq!(sources.len(), 59);
+    assert_eq!(sources.len(), 60);
     let (path, source) = sources
         .iter()
         .find(|(path, _)| path == REFERENCE_STANDARD_IO_BUFFER_PATH_V1)
@@ -1727,7 +1761,7 @@ fn pinned_io_buffer_module_is_captured_and_resolves_stream_adapters() {
 #[test]
 fn pinned_process_and_environment_modules_are_captured_and_typecheck() {
     let sources = reference_standard_sources_v1();
-    assert_eq!(sources.len(), 59);
+    assert_eq!(sources.len(), 60);
     for (index, path) in [
         (44, REFERENCE_STANDARD_IO_PROCESS_PATH_V1),
         (45, REFERENCE_STANDARD_IO_ENVIRONMENT_PATH_V1),
