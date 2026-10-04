@@ -147,20 +147,38 @@ mod tests {
     fn browser_exports_offer_standard_library_completions_and_hover_documentation() {
         let import_offset = STANDARD_SOURCE.find("increment};").expect("math import") + 3;
         let (line, character) = position(STANDARD_SOURCE, import_offset);
-        let completions: serde_json::Value =
+        let completion_items: serde_json::Value =
             serde_json::from_str(&completions(STANDARD_SOURCE.to_owned(), line, character))
                 .expect("standard completion JSON");
-        let increment = completions
+        let increment = completion_items
             .as_array()
             .expect("completion list")
             .iter()
             .find(|item| item["label"] == "increment")
             .expect("standard-library completion");
-        assert_eq!(increment["insertText"], "increment(${1:value})");
+        assert_eq!(increment["insertText"], "increment");
         assert!(
             increment["documentation"]
                 .to_string()
                 .contains("exact successor")
+        );
+
+        let qualified_offset = STANDARD_SOURCE
+            .find("std.math.increment(value)")
+            .expect("qualified standard call")
+            + "std.math.inc".len();
+        let (line, character) = position(STANDARD_SOURCE, qualified_offset);
+        let qualified_completions: serde_json::Value =
+            serde_json::from_str(&completions(STANDARD_SOURCE.to_owned(), line, character))
+                .expect("qualified standard completion JSON");
+        assert!(
+            qualified_completions
+                .as_array()
+                .expect("completion list")
+                .iter()
+                .any(|item| {
+                    item["label"] == "increment" && item["insertText"] == "increment(${1:value})"
+                })
         );
 
         let hover_offset = STANDARD_SOURCE

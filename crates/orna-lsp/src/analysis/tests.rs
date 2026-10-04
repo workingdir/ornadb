@@ -128,10 +128,8 @@ fn standard_library_exports_complete_and_hover_from_the_pinned_source_bundle() {
         .find(|item| item.label == "increment")
         .expect("public math export in import completion");
     assert_eq!(increment.kind, Some(CompletionItemKind::FUNCTION));
-    assert_eq!(
-        increment.insert_text.as_deref(),
-        Some("increment(${1:value})")
-    );
+    assert_eq!(increment.insert_text.as_deref(), Some("increment"));
+    assert_eq!(increment.insert_text_format, None);
     assert!(
         increment
             .detail

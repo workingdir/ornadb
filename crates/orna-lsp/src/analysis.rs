@@ -13,9 +13,9 @@ use lsp_types::{
     SignatureHelp, SignatureInformation, SymbolKind,
 };
 use orna_syntax_v1::{
-    Argument, Declaration, Expr, ImportSegment, Item, Keyword, Parse, Statement,
-    SyntaxSpan as SourceSpan, SyntaxTree, Token, TokenKind, TypeExpr, UseTail, Visibility, lex,
-    parse_module, parse_module_with_file,
+    Argument, Declaration, Expr, Item, Keyword, Parse, Statement, SyntaxSpan as SourceSpan,
+    SyntaxTree, Token, TokenKind, TypeExpr, UseTail, Visibility, lex, parse_module,
+    parse_module_with_file,
 };
 
 use crate::documents::{Document, PositionMapper};
@@ -113,7 +113,7 @@ fn standard_library() -> &'static StandardLibraryIndex {
     INDEX.get_or_init(|| {
         let mut index = StandardLibraryIndex::default();
         index.modules.insert("std".to_owned());
-        for (path, source) in orna_standard::reference_standard_sources_v1() {
+        for (path, source) in orna_standard_sources::reference_standard_sources_v1() {
             let Some(module) = standard_module_name(&path) else {
                 continue;
             };
@@ -939,6 +939,7 @@ pub fn completion_at(
                 .filter(|entry| entry.module == module),
             &prefix_key,
             1,
+            false,
         );
     } else if let Some(module) = qualified_module.as_deref() {
         append_standard_symbols(
@@ -950,6 +951,7 @@ pub fn completion_at(
                 .filter(|entry| entry.module == module),
             &prefix_key,
             1,
+            true,
         );
         append_standard_modules(&mut completions, &mut seen, module, &prefix_key);
     } else if let Some(parent) = module_parent {
@@ -972,6 +974,7 @@ pub fn completion_at(
             standard_imported_symbols(parse).into_iter(),
             &prefix_key,
             1,
+            true,
         );
     }
 
@@ -1004,6 +1007,7 @@ fn append_standard_symbols<'a>(
     symbols: impl Iterator<Item = &'a StandardSymbol>,
     prefix: &str,
     group: u8,
+    snippets: bool,
 ) {
     for entry in symbols {
         let key = normalized_identifier(&entry.symbol.name);
@@ -1019,7 +1023,7 @@ fn append_standard_symbols<'a>(
             EditorSymbolKind::Protocol => CompletionItemKind::INTERFACE,
             EditorSymbolKind::Other => CompletionItemKind::REFERENCE,
         };
-        let insert_text = if symbol.kind == EditorSymbolKind::Function {
+        let insert_text = if snippets && symbol.kind == EditorSymbolKind::Function {
             let placeholders = symbol
                 .parameters
                 .iter()
@@ -1051,7 +1055,7 @@ fn append_standard_symbols<'a>(
                 })
             }),
             insert_text: Some(insert_text),
-            insert_text_format: Some(lsp_types::InsertTextFormat::SNIPPET),
+            insert_text_format: snippets.then_some(lsp_types::InsertTextFormat::SNIPPET),
             sort_text: Some(completion_sort_text(prefix, group, &key)),
             ..CompletionItem::default()
         });

@@ -1410,6 +1410,7 @@ version = "1.0.0"
 dependencies = [
  "lsp-server",
  "lsp-types",
+ "orna-standard-sources",
  "orna-syntax-v1",
  "serde",
  "serde_json",
@@ -1532,8 +1533,13 @@ dependencies = [
  "orna-artifact",
  "orna-core",
  "orna-semantic-v1",
+ "orna-standard-sources",
  "orna-syntax-v1",
 ]
+
+[[package]]
+name = "orna-standard-sources"
+version = "1.0.0"
 
 [[package]]
 name = "orna-storage-v1"
