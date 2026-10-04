@@ -9185,6 +9185,7 @@ struct QueryPairedWindowCostRestorationFold {
     window_identities: BTreeMap<String, String>,
     spill_pair_identities: BTreeMap<String, QueryPairedWindowCostRestorationSpillPair>,
     spill_fold_identity: Option<String>,
+    window_fold_identity: Option<String>,
     cost_restore_fold_identities: BTreeMap<String, String>,
     cost_pair_identities: BTreeMap<String, QueryPairedWindowCostRestorationCostPair>,
     cost_fold_identity: Option<String>,
@@ -13844,6 +13845,7 @@ fn query_paired_window_cost_restoration_seed(
         window_identities,
         spill_pair_identities: BTreeMap::new(),
         spill_fold_identity: None,
+        window_fold_identity: None,
         cost_restore_fold_identities: BTreeMap::new(),
         cost_pair_identities: BTreeMap::new(),
         cost_fold_identity: None,
@@ -13962,6 +13964,21 @@ fn query_paired_window_cost_restoration_fold(
             hex(&spill_hash.finalize())
         ))
     };
+    let window_fold_identity = if window_identities.is_empty() {
+        None
+    } else {
+        let mut window_hash = Sha256::new();
+        window_hash.update(b"orna.sys.query-paired-window-cost-restoration-window-fold.v1\0");
+        window_hash.update((window_identities.len() as u64).to_be_bytes());
+        for (pair_identity, window_identity) in &window_identities {
+            hash_part(&mut window_hash, pair_identity.as_bytes());
+            hash_part(&mut window_hash, window_identity.as_bytes());
+        }
+        Some(format!(
+            "paired-window-cost-restoration-window-fold:{}",
+            hex(&window_hash.finalize())
+        ))
+    };
     for (kind, identity) in restore_fold_identities {
         if let Some(identity) = identity {
             cost_restore_fold_identities.insert((*kind).to_owned(), (*identity).to_owned());
@@ -14001,7 +14018,7 @@ fn query_paired_window_cost_restoration_fold(
     let parent_identity = previous.map(|fold| fold.identity.clone());
 
     let mut hash = Sha256::new();
-    hash.update(b"orna.sys.query-paired-window-cost-restoration-fold.v3\0");
+    hash.update(b"orna.sys.query-paired-window-cost-restoration-fold.v4\0");
     hash_optional_text(&mut hash, parent_identity.as_deref());
     hash_part(&mut hash, pair_identity.as_bytes());
     hash.update(pair_count.to_be_bytes());
@@ -14018,6 +14035,7 @@ fn query_paired_window_cost_restoration_fold(
         hash_part(&mut hash, spill.cost_window_pair_identity.as_bytes());
     }
     hash_optional_text(&mut hash, spill_fold_identity.as_deref());
+    hash_optional_text(&mut hash, window_fold_identity.as_deref());
     hash.update((cost_restore_fold_identities.len() as u64).to_be_bytes());
     for (kind, identity) in &cost_restore_fold_identities {
         hash_part(&mut hash, kind.as_bytes());
@@ -14035,6 +14053,7 @@ fn query_paired_window_cost_restoration_fold(
         window_identities,
         spill_pair_identities,
         spill_fold_identity,
+        window_fold_identity,
         cost_restore_fold_identities,
         cost_pair_identities,
         cost_fold_identity,
@@ -14079,6 +14098,24 @@ fn add_paired_window_cost_restoration_fold_details(
         "paired_window_cost_restoration_window_pair_count".to_owned(),
         PlanDetail::Integer(fold.window_pair_count),
     );
+    details.insert(
+        "paired_window_cost_restoration_window_identity_pairing".to_owned(),
+        PlanDetail::Text(
+            "exact_pair_window_identities_bound_across_nested_cost_restore_folds".to_owned(),
+        ),
+    );
+    details.insert(
+        "paired_window_cost_restoration_window_identity_pair_count".to_owned(),
+        PlanDetail::Integer(fold.window_identities.len() as u64),
+    );
+    if let Some(window_fold_identity) = fold.window_fold_identity.as_ref() {
+        details.insert(
+            "paired_window_cost_restoration_window_fold_identity".to_owned(),
+            PlanDetail::Text(window_fold_identity.clone()),
+        );
+    } else {
+        details.remove("paired_window_cost_restoration_window_fold_identity");
+    }
     details.insert(
         "paired_window_cost_restoration_window_count".to_owned(),
         PlanDetail::Integer(fold.window_identities.len() as u64),
