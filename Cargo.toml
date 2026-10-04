@@ -4,7 +4,6 @@ members = [
     "crates/orna-application-v1",
     "crates/orna-client",
     "crates/orna-cli-v1",
-    "crates/orna-compiler",
     "crates/orna-core",
     "crates/orna-foundation-v1",
     "crates/orna-conformance-v1",
@@ -27,7 +26,6 @@ members = [
     "crates/orna-standard",
     "crates/orna-storage-v1",
     "crates/orna-stream-v1",
-    "crates/orna-syntax",
     "crates/orna-syntax-v1",
     "crates/orna-sys-v1",
     "crates/orna-traceability-v1",
@@ -42,5 +40,4 @@ rust-version = "1.95"
 license = "Apache-2.0"
 
 [workspace.dependencies]
-rowan = "0.16.1"
 uuid = { version = "1.18.1", features = ["v4"] }
