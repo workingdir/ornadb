@@ -125,6 +125,9 @@ endfunction
 function! OrnaCaptureReferences(data) abort
     let g:orna_references_response = a:data['response']
 endfunction
+function! OrnaCaptureReferencesWithoutDeclaration(data) abort
+    let g:orna_references_without_declaration_response = a:data['response']
+endfunction
 function! OrnaCaptureRename(data) abort
     let g:orna_rename_response = a:data['response']
 endfunction
@@ -185,6 +188,21 @@ endwhile
 call assert_true(exists('g:orna_references_response'), 'vim-lsp references request timed out')
 let s:references = g:orna_references_response['result']
 call lsp#send_request('orna', {{
+    \ 'method': 'textDocument/references',
+    \ 'params': {{
+    \     'textDocument': s:consumer_document,
+    \     'position': lsp#get_position(),
+    \     'context': {{ 'includeDeclaration': v:false }},
+    \ }},
+    \ 'on_notification': function('OrnaCaptureReferencesWithoutDeclaration'),
+\ }})
+let s:deadline = reltimefloat(reltime()) + 10.0
+while !exists('g:orna_references_without_declaration_response') && reltimefloat(reltime()) < s:deadline
+    sleep 10m
+endwhile
+call assert_true(exists('g:orna_references_without_declaration_response'), 'vim-lsp call-site references request timed out')
+let s:references_without_declaration = g:orna_references_without_declaration_response['result']
+call lsp#send_request('orna', {{
     \ 'method': 'textDocument/rename',
     \ 'params': {{
     \     'textDocument': s:consumer_document,
@@ -227,6 +245,7 @@ call writefile([json_encode({{
     \ 'consumer_uri': s:consumer_document['uri'],
     \ 'provider_uri': s:provider_document['uri'],
     \ 'references': s:references,
+    \ 'references_without_declaration': s:references_without_declaration,
     \ 'rename': s:rename,
 \ }})], $ORNA_EDITOR_RESULT)
 if !empty(v:errors)
@@ -298,6 +317,12 @@ qa!
         &evidence["references"],
         true,
         "Vim vim-lsp",
+    );
+    hover_semantic_contract::assert_references_contract(
+        &symbol_sources,
+        &evidence["references_without_declaration"],
+        false,
+        "Vim vim-lsp without declaration",
     );
     hover_semantic_contract::assert_rename_contract(
         &symbol_sources,

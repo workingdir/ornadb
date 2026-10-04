@@ -664,6 +664,12 @@ for _, location in ipairs(references.result) do
   expected_reference_set[key] = nil
 end
 assert(next(expected_reference_set) == nil, "Neovim references omitted expected declaration or call sites: " .. vim.inspect(expected_reference_set))
+local references_without_declaration, references_without_declaration_error = client:request_sync("textDocument/references", {
+  textDocument = { uri = uri },
+  position = vim.fn.json_decode(vim.env.ORNA_RENAME_POSITION),
+  context = { includeDeclaration = false },
+}, 5000, bufnr)
+assert(references_without_declaration ~= nil and references_without_declaration.err == nil, "Neovim call-site references request failed: " .. vim.inspect(references_without_declaration_error or references_without_declaration))
 
 local renamed, rename_error = client:request_sync("textDocument/rename", {
   textDocument = { uri = uri },
@@ -750,6 +756,7 @@ vim.fn.writefile({ vim.fn.json_encode({
   semantic = semantic.result,
   legend = token_types,
   references = references.result,
+  references_without_declaration = references_without_declaration.result,
   rename = renamed.result,
 }) }, vim.env.ORNA_HOVER_SEMANTIC_RESULT)
 
@@ -871,6 +878,12 @@ vim.cmd("qa!")
         &hover_semantic_result["references"],
         true,
         "Neovim",
+    );
+    hover_semantic_contract::assert_references_contract(
+        &[(attached_uri, SOURCE)],
+        &hover_semantic_result["references_without_declaration"],
+        false,
+        "Neovim without declaration",
     );
     hover_semantic_contract::assert_rename_contract(
         &[(attached_uri, SOURCE)],
@@ -1008,6 +1021,7 @@ fn emacs_eglot_attaches_and_proves_hover_rename_references_and_semantic_tokens()
       (hover-response nil)
       (semantic-response nil)
       (references-response nil)
+      (references-without-declaration-response nil)
       (rename-response nil)
       (attached-uri nil))
   (unwind-protect
@@ -1042,6 +1056,10 @@ fn emacs_eglot_attaches_and_proves_hover_rename_references_and_semantic_tokens()
                   (jsonrpc-request
                    server :textDocument/references
                    (append params (list :context (list :includeDeclaration t)))))
+                 (raw-references-without-declaration
+                  (jsonrpc-request
+                   server :textDocument/references
+                   (append params (list :context (list :includeDeclaration :json-false)))))
                  (references
                   (orna-test-list raw-references))
                  (expected
@@ -1057,6 +1075,8 @@ fn emacs_eglot_attaches_and_proves_hover_rename_references_and_semantic_tokens()
               (error "Eglot did not provide a URI for the attached buffer: %S" params))
             (setq attached-uri uri)
             (setq references-response raw-references)
+            (setq references-without-declaration-response
+                  raw-references-without-declaration)
             (unless (= (length references) 2)
               (error "Eglot references returned %d locations: %S" (length references) references))
             (unless (equal actual expected)
@@ -1123,6 +1143,8 @@ fn emacs_eglot_attaches_and_proves_hover_rename_references_and_semantic_tokens()
           (puthash "hover" hover-response evidence)
           (puthash "semantic" semantic-response evidence)
           (puthash "references" references-response evidence)
+          (puthash "references_without_declaration"
+                   references-without-declaration-response evidence)
           (puthash "rename" rename-response evidence)
           (with-temp-file (getenv "ORNA_HOVER_SEMANTIC_RESULT")
             (insert (json-encode evidence)))))
@@ -1169,6 +1191,12 @@ fn emacs_eglot_attaches_and_proves_hover_rename_references_and_semantic_tokens()
         &hover_semantic_result["references"],
         true,
         "Emacs Eglot",
+    );
+    hover_semantic_contract::assert_references_contract(
+        &[(attached_uri, SOURCE)],
+        &hover_semantic_result["references_without_declaration"],
+        false,
+        "Emacs Eglot without declaration",
     );
     hover_semantic_contract::assert_rename_contract(
         &[(attached_uri, SOURCE)],
