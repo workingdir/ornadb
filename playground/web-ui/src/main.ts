@@ -2,6 +2,7 @@ import * as monaco from 'monaco-editor/esm/vs/editor/editor.api.js';
 import EditorWorker from 'monaco-editor/esm/vs/editor/editor.worker.js?worker';
 import '../node_modules/monaco-editor/min/vs/editor/editor.main.css';
 import { loadOrnaEditorConfig, registerOrnaLanguage } from './language';
+import { completionRankingFields, hoverMarkdown } from './assist-adapter';
 import { exampleIndexForKey, isExample } from './example-feed';
 import { formatRunResult, formatThrownError, type RunResult } from './results';
 import { servedRuntime } from './runtime';
@@ -120,6 +121,7 @@ monaco.languages.registerCompletionItemProvider('orna', {
         kind: completionKind(item.kind) ?? monaco.languages.CompletionItemKind.Text,
         insertText: typeof item.insertText === 'string' ? item.insertText : item.label,
         range,
+        ...completionRankingFields(item),
       };
       if (item.detail) suggestion.detail = String(item.detail);
       if (item.documentation) {
@@ -136,25 +138,13 @@ monaco.languages.registerCompletionItemProvider('orna', {
   },
 });
 
-function markdownContents(value: unknown): string {
-  if (typeof value === 'string') return value;
-  if (Array.isArray(value)) return value.map(markdownContents).filter(Boolean).join('\n\n');
-  const record = asRecord(value);
-  if (!record) return '';
-  if (typeof record.value === 'string') {
-    if (typeof record.language === 'string') return `\`\`\`${record.language}\n${record.value}\n\`\`\``;
-    return record.value;
-  }
-  return '';
-}
-
 monaco.languages.registerHoverProvider('orna', {
   async provideHover(model, position) {
     const response = asRecord(await requestLsp('hover', model.getValue(), {
       line: position.lineNumber - 1,
       character: position.column - 1,
     }));
-    const text = markdownContents(response?.contents);
+    const text = hoverMarkdown(response?.contents);
     return text ? { contents: [{ value: text }] } : null;
   },
 });
@@ -177,7 +167,7 @@ monaco.languages.registerSignatureHelpProvider('orna', {
         const label = parameter.label;
         if (typeof label !== 'string' && !Array.isArray(label)) return [];
         const mapped: monaco.languages.ParameterInformation = { label: label as string | [number, number] };
-        if (parameter.documentation) mapped.documentation = markdownContents(parameter.documentation);
+        if (parameter.documentation) mapped.documentation = hoverMarkdown(parameter.documentation);
         return [mapped];
       });
       const mapped: monaco.languages.SignatureInformation = {

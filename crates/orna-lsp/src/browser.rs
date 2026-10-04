@@ -81,6 +81,8 @@ mod tests {
 
     const SOURCE: &str = include_str!("browser/fixtures/browser-intelligence.orna");
     const STANDARD_SOURCE: &str = include_str!("analysis/fixtures/standard-math-import.orna");
+    const RANKED_STANDARD_SOURCE: &str =
+        include_str!("browser/fixtures/standard-completion-ranking.orna");
 
     fn position(source: &str, byte: usize) -> (u32, u32) {
         let prefix = &source[..byte];
@@ -190,6 +192,45 @@ mod tests {
         let hover: serde_json::Value =
             serde_json::from_str(&hover(STANDARD_SOURCE.to_owned(), line, character))
                 .expect("standard hover JSON");
+        assert!(hover.to_string().contains("fn increment(value: Int): Int"));
+        assert!(hover.to_string().contains("exact successor"));
+    }
+
+    #[test]
+    fn browser_standard_completion_ranking_and_hover_match_editor_contract() {
+        let completion_offset = RANKED_STANDARD_SOURCE
+            .find("increment(value)")
+            .expect("standard call")
+            + "increment".len();
+        let (line, character) = position(RANKED_STANDARD_SOURCE, completion_offset);
+        let completion_items: serde_json::Value = serde_json::from_str(&completions(
+            RANKED_STANDARD_SOURCE.to_owned(),
+            line,
+            character,
+        ))
+        .expect("ranked standard completion JSON");
+        let items = completion_items.as_array().expect("completion list");
+        let labels = items
+            .iter()
+            .map(|item| item["label"].as_str().expect("completion label"))
+            .collect::<Vec<_>>();
+        assert_eq!(labels, ["increment", "incremental"]);
+        assert_eq!(items[0]["sortText"], "0-1-increment");
+        assert_eq!(items[0]["preselect"], true);
+        assert_eq!(items[1]["sortText"], "1-1-incremental");
+
+        let hover_offset = RANKED_STANDARD_SOURCE
+            .find("increment(value)")
+            .expect("standard call")
+            + "increment".len()
+            - 1;
+        let (line, character) = position(RANKED_STANDARD_SOURCE, hover_offset);
+        let hover: serde_json::Value = serde_json::from_str(&hover(
+            RANKED_STANDARD_SOURCE.to_owned(),
+            line,
+            character,
+        ))
+        .expect("standard hover JSON");
         assert!(hover.to_string().contains("fn increment(value: Int): Int"));
         assert!(hover.to_string().contains("exact successor"));
     }
