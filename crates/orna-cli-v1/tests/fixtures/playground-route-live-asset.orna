@@ -1,1 +1,1 @@
-{ id: "route-2f706c617967726f756e642f6c6976652f", path: "/playground/live/", entry: "entry-live-asset" }
+{ id: "route-2f706c617967726f756e642f6c6976652d61737365742f", path: "/playground/live-asset/", entry: "entry-live-asset" }

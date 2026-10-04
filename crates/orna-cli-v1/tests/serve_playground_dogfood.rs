@@ -750,18 +750,37 @@ fn orna_serve_hosts_playground_with_pending_evals_and_snapshot_correct_deltas() 
     let live_route_path = format!("{base_url}/playground/live/");
     let before_route_commit = curl(&live_route_path, &[]).expect("curl missing live route");
     assert_eq!(before_route_commit.status, 404);
+    let live_asset_route_path = format!("{base_url}/playground/live-asset/");
+    let before_asset_route_commit =
+        curl(&live_asset_route_path, &[]).expect("curl missing live asset route");
+    assert_eq!(before_asset_route_commit.status, 404);
     write_fixture_rows(
         project.path(),
         "Route",
-        &[("route-2f706c617967726f756e642f6c6976652f", ROUTE_LIVE)],
+        &[
+            ("route-2f706c617967726f756e642f6c6976652f", ROUTE_LIVE),
+            (
+                "route-2f706c617967726f756e642f6c6976652d61737365742f",
+                ROUTE_LIVE_ASSET,
+            ),
+        ],
     );
-    write_fixture_rows(project.path(), "Entry", &[("entry-live", ENTRY_LIVE)]);
+    write_fixture_rows(
+        project.path(),
+        "Entry",
+        &[
+            ("entry-live", ENTRY_LIVE),
+            ("entry-live-asset", ENTRY_LIVE_ASSET),
+        ],
+    );
     git(
         project.path(),
         &[
             "add",
             "playground/Route/route-2f706c617967726f756e642f6c6976652f.orna",
+            "playground/Route/route-2f706c617967726f756e642f6c6976652d61737365742f.orna",
             "playground/Entry/entry-live.orna",
+            "playground/Entry/entry-live-asset.orna",
         ],
     );
     git(
@@ -792,62 +811,28 @@ fn orna_serve_hosts_playground_with_pending_evals_and_snapshot_correct_deltas() 
     );
     assert!(after_route_commit.body.contains("database shell"));
 
-    write_fixture_rows(
-        project.path(),
-        "Route",
-        &[("route-2f706c617967726f756e642f6c6976652f", ROUTE_LIVE_ASSET)],
-    );
-    write_fixture_rows(
-        project.path(),
-        "Entry",
-        &[("entry-live-asset", ENTRY_LIVE_ASSET)],
-    );
-    git(
-        project.path(),
-        &[
-            "add",
-            "playground/Route/route-2f706c617967726f756e642f6c6976652f.orna",
-            "playground/Entry/entry-live-asset.orna",
-        ],
-    );
-    git(
-        project.path(),
-        &[
-            "-c",
-            "user.name=kierandrewett",
-            "-c",
-            "user.email=kieran@drewett.dev",
-            "commit",
-            "--quiet",
-            "-m",
-            "rebind live playground route to an asset entry",
-        ],
-    );
     assert!(
         server
             .0
             .try_wait()
-            .expect("probe orna serve process after route rebinding")
+            .expect("probe orna serve process after route bindings")
             .is_none()
     );
-    let after_entry_rebind =
-        curl(&live_route_path, &[]).expect("curl live route after entry rebinding");
-    assert_eq!(after_entry_rebind.status, 200);
+    let live_asset =
+        curl(&live_asset_route_path, &[]).expect("curl newly committed live asset route");
+    assert_eq!(live_asset.status, 200);
     assert_eq!(
-        response_header(&after_entry_rebind.headers, "content-type"),
+        response_header(&live_asset.headers, "content-type"),
         Some("text/javascript; charset=utf-8")
     );
-    assert_eq!(
-        after_entry_rebind.body,
-        "globalThis.ornaPlaygroundReady = true;"
-    );
+    assert_eq!(live_asset.body, "globalThis.ornaPlaygroundReady = true;");
     println!(
-        "live DB route and entry reload: GET /playground/live/ before route commit -> HTTP {}, after page binding -> HTTP {} ({}) and after asset rebind -> HTTP {} ({}) without restarting orna serve (exit 0)",
+        "live DB route and entry reload: GET /playground/live/ before route commit -> HTTP {} and after page entry -> HTTP {}; GET /playground/live-asset/ before route commit -> HTTP {} and after asset entry -> HTTP {} ({}) without restarting orna serve (exit 0)",
         before_route_commit.status,
         after_route_commit.status,
-        response_header(&after_route_commit.headers, "content-type").unwrap_or("missing"),
-        after_entry_rebind.status,
-        response_header(&after_entry_rebind.headers, "content-type").unwrap_or("missing"),
+        before_asset_route_commit.status,
+        live_asset.status,
+        response_header(&live_asset.headers, "content-type").unwrap_or("missing"),
     );
 
     let examples_started = Instant::now();
