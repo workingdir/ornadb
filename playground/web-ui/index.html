@@ -7,25 +7,33 @@
     <title>Orna playground</title>
   </head>
   <body>
-    <main>
-      <header class="page-header" data-page-header>
-        <h1>Orna playground</h1>
-        <p><a href="/">Database</a> · Edit and run Orna source.</p>
-      </header>
+    <header class="page-header" data-page-header>
+      <h1>Orna playground</h1>
+      <p><a href="/">Database</a> · Choose a committed example or write Orna source.</p>
+    </header>
 
+    <main>
       <div class="workspace">
         <section class="editor-pane" aria-labelledby="source-title">
           <div class="pane-heading">
             <h2 id="source-title">Source</h2>
-            <label for="examples">Example</label>
-            <select id="examples" disabled>
-              <option>Loading examples…</option>
-            </select>
-            <button id="run-button" type="button" disabled>Run</button>
-            <button id="stop-button" type="button" disabled>Stop</button>
+            <div class="example-feed">
+              <label for="examples">Example</label>
+              <select id="examples" aria-describedby="example-key-help" aria-controls="source" disabled>
+                <option>Loading examples…</option>
+              </select>
+              <p class="example-feed-help" id="example-key-help">
+                Use ↑/↓ to browse, Home/End to jump, Page Up/Down to skip five, or type a name.
+              </p>
+              <span class="visually-hidden" id="example-status" role="status" aria-live="polite" aria-atomic="true"></span>
+            </div>
           </div>
-          <div id="editor" aria-label="Orna source editor"></div>
-          <p class="editor-status" id="editor-status" role="status">Loading editor</p>
+          <label class="visually-hidden" for="source">Orna source</label>
+          <textarea id="source" spellcheck="false" autocomplete="off" autocapitalize="off"></textarea>
+          <div class="actions">
+            <button id="run-button" type="button" disabled>Run</button>
+            <span id="editor-status" role="status">Loading examples</span>
+          </div>
         </section>
 
         <section class="output-pane" aria-labelledby="results-title">
@@ -34,10 +42,10 @@
             <span id="execution-state" role="status">Waiting</span>
           </div>
           <div class="tabs" role="tablist" aria-label="Execution result views">
-            <button type="button" role="tab" id="tab-output" aria-controls="panel-output" aria-selected="true" data-output-tab="output">Output</button>
-            <button type="button" role="tab" id="tab-values" aria-controls="panel-values" aria-selected="false" data-output-tab="values">Values</button>
-            <button type="button" role="tab" id="tab-errors" aria-controls="panel-errors" aria-selected="false" data-output-tab="errors">Errors</button>
-            <button type="button" role="tab" id="tab-ast" aria-controls="panel-ast" aria-selected="false" data-output-tab="ast">AST</button>
+            <button type="button" role="tab" id="tab-output" aria-controls="panel-output" aria-selected="true" tabindex="0" data-output-tab="output">Output</button>
+            <button type="button" role="tab" id="tab-values" aria-controls="panel-values" aria-selected="false" tabindex="-1" data-output-tab="values">Values</button>
+            <button type="button" role="tab" id="tab-errors" aria-controls="panel-errors" aria-selected="false" tabindex="-1" data-output-tab="errors">Errors</button>
+            <button type="button" role="tab" id="tab-ast" aria-controls="panel-ast" aria-selected="false" tabindex="-1" data-output-tab="ast">AST</button>
           </div>
           <div class="panels" aria-live="polite" aria-atomic="false">
             <section id="panel-output" role="tabpanel" aria-labelledby="tab-output" data-output-panel="output">

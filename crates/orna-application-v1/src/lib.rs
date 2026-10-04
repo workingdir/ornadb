@@ -2993,6 +2993,134 @@ mod tests {
     }
 
     #[test]
+    fn served_repl_typed_run_event_deltas_are_isolated_across_live_sessions() {
+        let authority =
+            ApplicationAuthority::new(Catalogue::authoritative_core(), Limits::default());
+        let mut adapter =
+            ApplicationLiveAdapter::new(authority).with_runtime_identity([1; 16], [2; 16]);
+        let session_a = [71; 16];
+        let session_b = [72; 16];
+        let watch_message = Message::Watch {
+            source: LIVE_RUN_EVENTS_WATCH_SOURCE.to_owned(),
+            database: orna_protocol_v1::DatabaseContext {
+                database: [1; 16],
+                snapshot: None,
+            },
+            presentation: orna_protocol_v1::PresentationContext {
+                locale: "en".to_owned(),
+                timezone: None,
+                width: None,
+                theme: "system".to_owned(),
+                supported_kinds: vec!["value".into(), "text".into(), "group".into()],
+            },
+            refresh_floor: None,
+        };
+        let initial_a = LiveApplication::watch(&mut adapter, session_a, [73; 16], &watch_message)
+            .expect("first session run event watch starts");
+        let initial_b = LiveApplication::watch(&mut adapter, session_b, [74; 16], &watch_message)
+            .expect("second session run event watch starts");
+        let watch_a = initial_a.watch.expect("first watch has a handle");
+        let watch_b = initial_b.watch.expect("second watch has a handle");
+        let Message::Snapshot {
+            revision: 0,
+            present: initial_present_a,
+            ..
+        } = initial_a.message
+        else {
+            panic!("first run event watch starts with a snapshot");
+        };
+        let Message::Snapshot {
+            revision: 0,
+            present: initial_present_b,
+            ..
+        } = initial_b.message
+        else {
+            panic!("second run event watch starts with a snapshot");
+        };
+        assert_eq!(initial_present_a, expected_run_events(&[]));
+        assert_eq!(initial_present_b, expected_run_events(&[]));
+
+        LiveApplication::eval(
+            &mut adapter,
+            session_a,
+            [75; 16],
+            &eval_message(
+                include_str!("../tests/fixtures/serve-repl-success.orna"),
+                [76; 32],
+            ),
+        )
+        .expect("first session evaluates independently");
+        let delta_a =
+            LiveApplication::resync(&mut adapter, session_a, [77; 16], watch_a, &Message::Resync)
+                .expect("first session sees its typed event delta");
+        let Message::Delta {
+            base_revision: 0,
+            new_revision: 1,
+            patches,
+            ..
+        } = delta_a.message
+        else {
+            panic!("first session event is a revision-one delta");
+        };
+        let present_a = initial_present_a
+            .apply_patches(&patches, orna_protocol_v1::Limits::default())
+            .expect("first session delta applies to its typed snapshot");
+        let expected_a = expected_run_events(&[expected_run_event(1, true, 42, None)]);
+        assert_eq!(present_a, expected_a);
+
+        let unchanged_b =
+            LiveApplication::resync(&mut adapter, session_b, [78; 16], watch_b, &Message::Resync)
+                .expect("first session event does not affect second watch");
+        assert!(matches!(
+            unchanged_b.message,
+            Message::Snapshot {
+                revision: 0,
+                ref present,
+                ..
+            } if present == &expected_run_events(&[])
+        ));
+
+        LiveApplication::eval(
+            &mut adapter,
+            session_b,
+            [79; 16],
+            &eval_message(
+                include_str!("../tests/fixtures/serve-repl-success.orna"),
+                [80; 32],
+            ),
+        )
+        .expect("second session evaluates independently");
+        let delta_b =
+            LiveApplication::resync(&mut adapter, session_b, [81; 16], watch_b, &Message::Resync)
+                .expect("second session sees its own typed event delta");
+        let Message::Delta {
+            base_revision: 0,
+            new_revision: 1,
+            patches,
+            ..
+        } = delta_b.message
+        else {
+            panic!("second session event is a revision-one delta");
+        };
+        let present_b = initial_present_b
+            .apply_patches(&patches, orna_protocol_v1::Limits::default())
+            .expect("second session delta applies to its typed snapshot");
+        assert_eq!(present_b, expected_a);
+
+        let unchanged_a =
+            LiveApplication::resync(&mut adapter, session_a, [82; 16], watch_a, &Message::Resync)
+                .expect("second session event does not alter first session state");
+        assert!(matches!(
+            unchanged_a.message,
+            Message::Snapshot {
+                revision: 1,
+                ref present,
+                ..
+            } if present == &expected_a
+        ));
+    }
+
+    #[test]
     fn served_repl_is_seeded_from_the_loaded_project_snapshot() {
         use orna_repository_v1::Repository;
         use std::{fs, process::Command};
