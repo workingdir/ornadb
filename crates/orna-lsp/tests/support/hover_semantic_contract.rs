@@ -137,3 +137,151 @@ pub fn assert_semantic_token_legend(legend: &Value, editor: &str) {
         "{editor} semantic token legend differs from the syntax-v1 contract"
     );
 }
+
+type SymbolLocation = (String, usize, usize, usize, usize);
+
+pub fn assert_references_contract(
+    sources: &[(&str, &str)],
+    response: &Value,
+    include_declaration: bool,
+    editor: &str,
+) {
+    let locations = response
+        .as_array()
+        .unwrap_or_else(|| panic!("{editor} references result is not an array: {response}"));
+    let expected = expected_symbol_locations(sources, include_declaration, editor);
+    let actual = locations
+        .iter()
+        .map(|location| location_key(location, editor))
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        actual.len(),
+        locations.len(),
+        "{editor} returned duplicate references: {response}"
+    );
+    assert_eq!(
+        actual, expected,
+        "{editor} references differ from syntax-v1 declaration/call locations"
+    );
+}
+
+pub fn assert_rename_contract(
+    sources: &[(&str, &str)],
+    response: &Value,
+    new_name: &str,
+    editor: &str,
+) {
+    let changes = response["changes"]
+        .as_object()
+        .unwrap_or_else(|| panic!("{editor} rename result has no changes map: {response}"));
+    let expected = expected_symbol_locations(sources, true, editor);
+    let expected_uris = expected
+        .iter()
+        .map(|(uri, _, _, _, _)| uri.clone())
+        .collect::<BTreeSet<_>>();
+    let actual_uris = changes.keys().cloned().collect::<BTreeSet<_>>();
+    assert_eq!(
+        actual_uris, expected_uris,
+        "{editor} rename changed a different set of documents"
+    );
+    let mut actual = BTreeSet::new();
+    for (uri, edits) in changes {
+        let edits = edits
+            .as_array()
+            .unwrap_or_else(|| panic!("{editor} rename edits for {uri} are not an array"));
+        for edit in edits {
+            assert_eq!(
+                edit["newText"], new_name,
+                "{editor} rename used unexpected replacement text: {edit}"
+            );
+            let key = location_key_with_uri(uri, edit, editor);
+            assert!(
+                actual.insert(key),
+                "{editor} rename returned a duplicate edit: {edit}"
+            );
+        }
+    }
+    assert_eq!(
+        actual, expected,
+        "{editor} rename differs from syntax-v1 declaration/call locations"
+    );
+}
+
+fn expected_symbol_locations(
+    sources: &[(&str, &str)],
+    include_declaration: bool,
+    editor: &str,
+) -> BTreeSet<SymbolLocation> {
+    let mut locations = BTreeSet::new();
+    for (uri, source) in sources {
+        assert!(source.is_ascii(), "{editor} symbol fixture must be ASCII");
+        for (start, _) in source.match_indices("add(") {
+            let end = start + "add".len();
+            let before = source[..start].chars().next_back();
+            let after = source[end..].chars().next();
+            if before.is_some_and(is_identifier_char) || after != Some('(') {
+                continue;
+            }
+            let is_declaration = source[..start].ends_with("pub fn ");
+            if is_declaration && !include_declaration {
+                continue;
+            }
+            let (line, character) = position_at(source, start);
+            let (end_line, end_character) = position_at(source, end);
+            locations.insert(((*uri).to_owned(), line, character, end_line, end_character));
+        }
+    }
+    assert!(
+        !locations.is_empty(),
+        "{editor} symbol contract fixture has no add declaration/calls"
+    );
+    locations
+}
+
+fn location_key(location: &Value, editor: &str) -> SymbolLocation {
+    let uri = location["uri"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{editor} location has no URI: {location}"));
+    location_key_with_uri(uri, location, editor)
+}
+
+fn location_key_with_uri(uri: &str, location: &Value, editor: &str) -> SymbolLocation {
+    let range = &location["range"];
+    let start = &range["start"];
+    let end = &range["end"];
+    (
+        uri.to_owned(),
+        start["line"]
+            .as_u64()
+            .unwrap_or_else(|| panic!("{editor} range start has no line: {location}"))
+            as usize,
+        start["character"]
+            .as_u64()
+            .unwrap_or_else(|| panic!("{editor} range start has no character: {location}"))
+            as usize,
+        end["line"]
+            .as_u64()
+            .unwrap_or_else(|| panic!("{editor} range end has no line: {location}"))
+            as usize,
+        end["character"]
+            .as_u64()
+            .unwrap_or_else(|| panic!("{editor} range end has no character: {location}"))
+            as usize,
+    )
+}
+
+fn position_at(source: &str, byte: usize) -> (usize, usize) {
+    let prefix = &source[..byte];
+    let line = prefix.bytes().filter(|byte| *byte == b'\n').count();
+    let character = prefix
+        .rsplit('\n')
+        .next()
+        .unwrap_or("")
+        .encode_utf16()
+        .count();
+    (line, character)
+}
+
+fn is_identifier_char(character: char) -> bool {
+    character.is_ascii_alphanumeric() || character == '_'
+}
