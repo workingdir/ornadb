@@ -1,17 +1,17 @@
 //! Editor analysis built exclusively on the frozen Orna 1.0 syntax tree.
 #![allow(deprecated)] // lsp-types 0.97 still requires DocumentSymbol::deprecated.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 
 use lsp_types::{
     CompletionContext, CompletionItem, CompletionItemKind, Diagnostic,
-    DiagnosticRelatedInformation, DiagnosticSeverity, DocumentSymbol, Hover, Location,
-    MarkupContent, MarkupKind, NumberOrString, ParameterInformation, ParameterLabel, Position,
-    SignatureHelp, SignatureInformation, SymbolKind,
+    DiagnosticRelatedInformation, DiagnosticSeverity, DocumentLink, DocumentSymbol, Hover,
+    Location, MarkupContent, MarkupKind, NumberOrString, ParameterInformation, ParameterLabel,
+    Position, SignatureHelp, SignatureInformation, SymbolKind, Uri,
 };
 use orna_syntax_v1::{
-    Argument, Declaration, Expr, Item, Keyword, Parse, Statement, SyntaxSpan as SourceSpan,
-    SyntaxTree, Token, TokenKind, TypeExpr, lex, parse_module_with_file,
+    Argument, Declaration, Expr, ImportSegment, Item, Keyword, Parse, Statement,
+    SyntaxSpan as SourceSpan, SyntaxTree, Token, TokenKind, TypeExpr, lex, parse_module_with_file,
 };
 
 use crate::documents::{Document, PositionMapper};
@@ -65,6 +65,88 @@ pub fn check_document(document: &Document, mapper: &PositionMapper<'_>) -> Vec<D
             }
         })
         .collect()
+}
+
+/// Links explicit imports to a single matching open module document.
+///
+/// The parser supplies exact byte spans for the import path. Resolution is
+/// intentionally limited to open `.orna` documents: a missing or ambiguous
+/// target is left unlinked instead of guessing between the loader's flat-file
+/// and directory-module layouts.
+pub(crate) fn document_links(
+    document: &Document,
+    open_documents: &HashMap<Uri, Document>,
+) -> Vec<DocumentLink> {
+    if !document.uri.as_str().ends_with(".orna") {
+        return Vec::new();
+    }
+
+    let parse = parse_document(document);
+    if !parse.diagnostics.is_empty() {
+        return Vec::new();
+    }
+
+    let mapper = PositionMapper::new(&document.text);
+    parse
+        .value
+        .items
+        .iter()
+        .filter_map(|item| {
+            let Declaration::Use { path, .. } = &item.declaration else {
+                return None;
+            };
+            let first = path.first()?;
+            if matches!(first.name.as_str(), "std" | "sys") {
+                return None;
+            }
+            let last = path.last()?;
+            let module = path
+                .iter()
+                .map(|segment| segment.name.as_str())
+                .collect::<Vec<_>>()
+                .join(".");
+            let target = matching_open_module(document, path, open_documents)?;
+            Some(DocumentLink {
+                range: lsp_types::Range::new(
+                    mapper.position(first.span.start),
+                    mapper.position(last.span.end),
+                ),
+                target: Some(target),
+                tooltip: Some(format!("Open module `{module}`")),
+                data: None,
+            })
+        })
+        .collect()
+}
+
+fn matching_open_module(
+    source: &Document,
+    path: &[ImportSegment],
+    open_documents: &HashMap<Uri, Document>,
+) -> Option<Uri> {
+    let module_path = path
+        .iter()
+        .map(|segment| segment.name.as_str())
+        .collect::<Vec<_>>()
+        .join("/");
+    let flat_suffix = format!("/{module_path}.orna");
+    let directory_suffix = format!("/{module_path}/main.orna");
+    let mut matching_target = None;
+
+    for uri in open_documents.keys() {
+        if uri == &source.uri {
+            continue;
+        }
+        let uri_path = uri.as_str().split(['?', '#']).next().unwrap_or_default();
+        if uri_path.ends_with(&flat_suffix) || uri_path.ends_with(&directory_suffix) {
+            if matching_target.is_some() {
+                return None;
+            }
+            matching_target = Some(uri.clone());
+        }
+    }
+
+    matching_target
 }
 
 pub fn parse_document(document: &Document) -> EditorParse {
@@ -326,16 +408,27 @@ pub fn signature_help(
         .into_iter()
         .filter(|call| call.span.start <= byte && byte <= call.span.end)
         .min_by_key(|call| call.span.end.saturating_sub(call.span.start))?;
+    if callee_resolves_to_local(&parse.value, &call.callee) {
+        return None;
+    }
     let symbols = declaration_symbols(parse, &document.text);
     let function = symbol_for_name(&symbols, call.name.rsplit('.').next().unwrap_or(&call.name))?;
     if function.kind != EditorSymbolKind::Function {
         return None;
     }
+    let active_argument = active_argument_index(&call, &document.text, byte);
     let active_parameter = call
         .arguments
-        .iter()
-        .take_while(|argument| argument.span.start < byte)
-        .count()
+        .get(active_argument)
+        .and_then(|argument| argument.name.as_deref())
+        .and_then(|name| {
+            let name = normalized_identifier(name);
+            function.parameters.iter().position(|parameter| {
+                parameter_name(parameter)
+                    .is_some_and(|parameter| normalized_identifier(parameter) == name)
+            })
+        })
+        .unwrap_or(active_argument)
         .min(function.parameters.len().saturating_sub(1)) as u32;
     let signature = function
         .detail
@@ -370,8 +463,43 @@ pub fn signature_help(
 #[derive(Debug)]
 struct CallSite {
     name: String,
+    callee: Expr,
     span: SourceSpan,
     arguments: Vec<Argument>,
+}
+
+fn active_argument_index(call: &CallSite, text: &str, position: usize) -> usize {
+    let Ok(tokens) = lex(text) else {
+        return 0;
+    };
+    let is_comma_before = |start: usize, end: usize| {
+        tokens.iter().any(|token| {
+            matches!(token.kind, TokenKind::Punct(","))
+                && token.span.start >= start
+                && token.span.end <= end
+                && token.span.start < position
+        })
+    };
+    let separators = call
+        .arguments
+        .windows(2)
+        .filter(|pair| is_comma_before(pair[0].span.end, pair[1].span.start))
+        .count();
+    let trailing_separator = call
+        .arguments
+        .last()
+        .is_some_and(|last| is_comma_before(last.span.end, call.span.end));
+    separators + usize::from(trailing_separator)
+}
+
+fn callee_resolves_to_local(tree: &SyntaxTree, callee: &Expr) -> bool {
+    match callee {
+        Expr::Name { text, span } => crate::locals::binding_at(tree, text, span).is_some(),
+        Expr::Field { base, .. } | Expr::Group { inner: base, .. } => {
+            callee_resolves_to_local(tree, base)
+        }
+        _ => false,
+    }
 }
 
 fn collect_calls(expression: &Expr, output: &mut Vec<CallSite>) {
@@ -384,6 +512,7 @@ fn collect_calls(expression: &Expr, output: &mut Vec<CallSite>) {
             if let Some(name) = expression_name(callee) {
                 output.push(CallSite {
                     name,
+                    callee: callee.as_ref().clone(),
                     span: span.clone(),
                     arguments: arguments.clone(),
                 });
@@ -402,6 +531,7 @@ fn collect_calls(expression: &Expr, output: &mut Vec<CallSite>) {
             if let Some(name) = expression_name(callee) {
                 output.push(CallSite {
                     name,
+                    callee: callee.as_ref().clone(),
                     span: span.clone(),
                     arguments: arguments.clone(),
                 });
