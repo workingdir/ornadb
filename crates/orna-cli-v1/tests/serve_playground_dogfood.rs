@@ -8,8 +8,8 @@ use std::{
 use orna_application_v1::LIVE_RUN_EVENTS_WATCH_SOURCE;
 use orna_foundation_v1::OvbRaw;
 use orna_protocol_v1::{
-    DatabaseContext, Envelope, Limits, Message, PresentationContext, ResultStatus,
-    canonical_request_fingerprint,
+    CanonicalValue, DatabaseContext, Envelope, Limits, Message, PresentKind, PresentNode,
+    PresentPropertyKey, PresentationContext, ResultStatus, canonical_request_fingerprint,
 };
 use serde_json::{Value as JsonValue, json};
 use tungstenite::{
@@ -152,6 +152,142 @@ fn envelope(request: [u8; 16], watch: Option<[u8; 16]>, message: Message) -> Env
     }
 }
 
+fn evaluation(session: [u8; 16], database: [u8; 16], request: [u8; 16], source: &str) -> Envelope {
+    let mut evaluation = envelope(
+        request,
+        None,
+        Message::Eval {
+            source: source.to_owned(),
+            database: database_context(database),
+            presentation: presentation(),
+            fingerprint: [0; 32],
+        },
+    );
+    let fingerprint = canonical_request_fingerprint(session, &evaluation, Limits::default())
+        .expect("browser-compatible evaluation fingerprint");
+    if let Message::Eval {
+        fingerprint: sent, ..
+    } = &mut evaluation.message
+    {
+        *sent = fingerprint;
+    }
+    evaluation
+}
+
+fn send_envelope(socket: &mut tungstenite::WebSocket<MaybeTlsStream<TcpStream>>, sent: Envelope) {
+    socket
+        .send(WebSocketMessage::Binary(
+            sent.encode(Limits::default())
+                .expect("encode browser protocol request")
+                .into(),
+        ))
+        .expect("send browser protocol request");
+}
+
+fn read_envelope(socket: &mut tungstenite::WebSocket<MaybeTlsStream<TcpStream>>) -> Envelope {
+    loop {
+        let incoming = socket.read().expect("read browser protocol response");
+        match incoming {
+            WebSocketMessage::Binary(bytes) => {
+                return Envelope::decode(&bytes, Limits::default())
+                    .expect("server response is a valid Orna presentation envelope");
+            }
+            WebSocketMessage::Ping(bytes) => socket
+                .send(WebSocketMessage::Pong(bytes))
+                .expect("answer server ping"),
+            WebSocketMessage::Close(frame) => {
+                panic!("server closed the live session: {frame:?}");
+            }
+            WebSocketMessage::Text(_) | WebSocketMessage::Pong(_) | WebSocketMessage::Frame(_) => {
+                continue;
+            }
+        }
+    }
+}
+
+fn expected_run_events(events: &[(u64, u64)]) -> PresentNode {
+    let children = events.iter().map(|(sequence, value)| {
+        PresentNode::new(
+            PresentKind::Name("run".into()),
+            Some(orna_protocol_v1::PresentIdentity::Explicit(integer_value(
+                *sequence,
+            ))),
+            [
+                (PresentPropertyKey::Name("kind".into()), text_value("run")),
+                (
+                    PresentPropertyKey::Name("sequence".into()),
+                    integer_value(*sequence),
+                ),
+                (
+                    PresentPropertyKey::Name("status".into()),
+                    text_value("success"),
+                ),
+                (
+                    PresentPropertyKey::Name("value".into()),
+                    integer_value(*value),
+                ),
+                (PresentPropertyKey::Name("stdout".into()), text_value("")),
+            ],
+            [],
+        )
+        .expect("construct expected run event presentation")
+    });
+    PresentNode::new(
+        PresentKind::Name("run.events".into()),
+        None,
+        [(
+            PresentPropertyKey::Name("count".into()),
+            integer_value(
+                u64::try_from(events.len()).expect("run event count fits its presentation"),
+            ),
+        )],
+        children,
+    )
+    .expect("construct expected run events presentation")
+}
+
+fn integer_value(value: u64) -> CanonicalValue {
+    CanonicalValue::new(OvbRaw::Int(value.into())).expect("integer is canonical")
+}
+
+fn text_value(value: &str) -> CanonicalValue {
+    CanonicalValue::new(OvbRaw::Text(value.to_owned())).expect("text is canonical")
+}
+
+fn read_responses_for_requests(
+    socket: &mut tungstenite::WebSocket<MaybeTlsStream<TcpStream>>,
+    requests: &[[u8; 16]],
+) -> Vec<Envelope> {
+    let mut responses = Vec::with_capacity(requests.len());
+    while responses.len() < requests.len() {
+        let response = read_envelope(socket);
+        if let Some(request) = response.request
+            && requests.contains(&request)
+        {
+            assert!(
+                responses
+                    .iter()
+                    .all(|received: &Envelope| received.request != Some(request)),
+                "server returned a duplicate response for {request:?}"
+            );
+            responses.push(response);
+        }
+    }
+    responses
+}
+
+fn read_delta_for_watch(
+    socket: &mut tungstenite::WebSocket<MaybeTlsStream<TcpStream>>,
+    watch: [u8; 16],
+) -> Envelope {
+    loop {
+        let response = read_envelope(socket);
+        if response.watch == Some(watch) && matches!(&response.message, Message::Delta { .. }) {
+            return response;
+        }
+    }
+}
+
 fn presentation() -> PresentationContext {
     PresentationContext {
         locale: "en".into(),
@@ -179,38 +315,17 @@ fn send_and_read_request(
     sent: Envelope,
     expected_request: [u8; 16],
 ) -> Envelope {
-    socket
-        .send(WebSocketMessage::Binary(
-            sent.encode(Limits::default())
-                .expect("encode browser protocol request")
-                .into(),
-        ))
-        .expect("send browser protocol request");
+    send_envelope(socket, sent);
     loop {
-        let incoming = socket.read().expect("read browser protocol response");
-        match incoming {
-            WebSocketMessage::Binary(bytes) => {
-                let envelope = Envelope::decode(&bytes, Limits::default())
-                    .expect("server response is a valid Orna presentation envelope");
-                if envelope.request == Some(expected_request) {
-                    return envelope;
-                }
-            }
-            WebSocketMessage::Ping(bytes) => socket
-                .send(WebSocketMessage::Pong(bytes))
-                .expect("answer server ping"),
-            WebSocketMessage::Close(frame) => {
-                panic!("server closed the live session: {frame:?}");
-            }
-            WebSocketMessage::Text(_) | WebSocketMessage::Pong(_) | WebSocketMessage::Frame(_) => {
-                continue;
-            }
+        let response = read_envelope(socket);
+        if response.request == Some(expected_request) {
+            return response;
         }
     }
 }
 
 #[test]
-fn orna_serve_hosts_git_listing_and_playground_with_live_run_deltas() {
+fn orna_serve_hosts_playground_with_pending_evals_and_snapshot_correct_deltas() {
     let project = tempfile::tempdir().expect("temporary Orna database");
     let initialized = Command::new(BINARY)
         .arg("init")
@@ -389,34 +504,48 @@ fn orna_serve_hosts_git_listing_and_playground_with_live_run_deltas() {
         ),
         response => panic!("run-events watch should start with a snapshot, got {response:?}"),
     };
+    assert_eq!(initial_present, expected_run_events(&[]));
 
-    let mut evaluation = envelope(
-        [0x32; 16],
-        None,
-        Message::Eval {
-            source: SAMPLE.trim().to_owned(),
-            database: database_context(uuid_bytes(database_id)),
-            presentation: presentation(),
-            fingerprint: [0; 32],
-        },
+    let first_eval_request = [0x32; 16];
+    let second_eval_request = [0x34; 16];
+    // Keep both request IDs outstanding from the client perspective; neither
+    // response is read until both fingerprinted Eval messages have been sent.
+    send_envelope(
+        &mut socket,
+        evaluation(
+            session_bytes,
+            uuid_bytes(database_id),
+            first_eval_request,
+            SAMPLE.trim(),
+        ),
     );
-    let fingerprint = canonical_request_fingerprint(session_bytes, &evaluation, Limits::default())
-        .expect("browser-compatible evaluation fingerprint");
-    if let Message::Eval {
-        fingerprint: sent, ..
-    } = &mut evaluation.message
-    {
-        *sent = fingerprint;
+    send_envelope(
+        &mut socket,
+        evaluation(
+            session_bytes,
+            uuid_bytes(database_id),
+            second_eval_request,
+            "40 + 2",
+        ),
+    );
+    let results =
+        read_responses_for_requests(&mut socket, &[first_eval_request, second_eval_request]);
+    for result in results {
+        let expected_value = if result.request == Some(first_eval_request) {
+            2
+        } else {
+            assert_eq!(result.request, Some(second_eval_request));
+            42
+        };
+        assert!(matches!(
+            result.message,
+            Message::Result {
+                status: ResultStatus::Success,
+                value: Some(value),
+                ..
+            } if value.raw() == &OvbRaw::Int(expected_value.into())
+        ));
     }
-    let result = send_and_read_request(&mut socket, evaluation, [0x32; 16]);
-    assert!(matches!(
-        result.message,
-        Message::Result {
-            status: ResultStatus::Success,
-            value: Some(value),
-            ..
-        } if value.raw() == &OvbRaw::Int(2.into())
-    ));
 
     socket
         .send(WebSocketMessage::Binary(
@@ -427,17 +556,7 @@ fn orna_serve_hosts_git_listing_and_playground_with_live_run_deltas() {
         ))
         .expect("send browser resync request");
     // Resync responses are correlated to their watch and carry no request id.
-    let delta = loop {
-        let incoming = socket.read().expect("read run-event presentation delta");
-        if let WebSocketMessage::Binary(bytes) = incoming {
-            let envelope = Envelope::decode(&bytes, Limits::default())
-                .expect("live delta is a valid Orna presentation envelope");
-            if envelope.watch == Some(watch_id) && matches!(envelope.message, Message::Delta { .. })
-            {
-                break envelope;
-            }
-        }
-    };
+    let delta = read_delta_for_watch(&mut socket, watch_id);
     let Message::Delta {
         base_revision,
         new_revision,
@@ -448,12 +567,84 @@ fn orna_serve_hosts_git_listing_and_playground_with_live_run_deltas() {
         panic!("run event update should be a presentation delta");
     };
     assert_eq!((base_revision, new_revision), (0, 1));
-    let updated_present = initial_present
+    let first_updated_present = initial_present
         .apply_patches(&patches, Limits::default())
         .expect("live event delta applies to its initial snapshot");
-    let presentation_debug = format!("{updated_present:?}");
-    assert!(presentation_debug.contains("Text(\"success\")"));
-    assert!(presentation_debug.contains("Int(2)"));
+    let first_completion_order = expected_run_events(&[(1, 2), (2, 42)]);
+    let second_completion_order = expected_run_events(&[(1, 42), (2, 2)]);
+    assert!(
+        first_updated_present == first_completion_order
+            || first_updated_present == second_completion_order,
+        "the first delta should contain exactly both successful runs: {first_updated_present:?}"
+    );
+
+    let third_eval_request = [0x36; 16];
+    let third_result = send_and_read_request(
+        &mut socket,
+        evaluation(
+            session_bytes,
+            uuid_bytes(database_id),
+            third_eval_request,
+            "7 * 7",
+        ),
+        third_eval_request,
+    );
+    assert!(matches!(
+        third_result.message,
+        Message::Result {
+            status: ResultStatus::Success,
+            value: Some(value),
+            ..
+        } if value.raw() == &OvbRaw::Int(49.into())
+    ));
+    send_envelope(
+        &mut socket,
+        envelope([0x37; 16], Some(watch_id), Message::Resync),
+    );
+    let next_delta = read_delta_for_watch(&mut socket, watch_id);
+    let Message::Delta {
+        base_revision,
+        new_revision,
+        patches,
+        ..
+    } = next_delta.message
+    else {
+        panic!("the next run event update should be a presentation delta");
+    };
+    assert_eq!((base_revision, new_revision), (1, 2));
+    let updated_present = first_updated_present
+        .apply_patches(&patches, Limits::default())
+        .expect("next live event delta applies to its matching snapshot");
+    let first_completion_order = expected_run_events(&[(1, 2), (2, 42), (3, 49)]);
+    let second_completion_order = expected_run_events(&[(1, 42), (2, 2), (3, 49)]);
+    assert!(
+        updated_present == first_completion_order || updated_present == second_completion_order,
+        "successive deltas should preserve both runs and append the third: {updated_present:?}"
+    );
+
+    let fresh_watch_request = [0x35; 16];
+    let fresh_watch = send_and_read_request(
+        &mut socket,
+        envelope(
+            fresh_watch_request,
+            None,
+            Message::Watch {
+                source: LIVE_RUN_EVENTS_WATCH_SOURCE.into(),
+                database: database_context(uuid_bytes(database_id)),
+                presentation: presentation(),
+                refresh_floor: None,
+            },
+        ),
+        fresh_watch_request,
+    );
+    assert!(matches!(
+        fresh_watch.message,
+        Message::Snapshot {
+            revision: 0,
+            present,
+            ..
+        } if present == updated_present
+    ));
 
     println!(
         "curl GET / -> HTTP {} (exit 0): Git listing + playground link",
@@ -476,6 +667,8 @@ fn orna_serve_hosts_git_listing_and_playground_with_live_run_deltas() {
         session_response.status
     );
     println!("WebSocket WATCH -> Snapshot revision 0 (exit 0)");
-    println!("WebSocket EVAL sample `1 + 1` -> Result success value 2 (exit 0)");
-    println!("WebSocket RESYNC -> Delta revision 0..1 (exit 0): status success value 2");
+    println!("WebSocket EVAL x2 outstanding -> correlated Results 2 and 42 (exit 0)");
+    println!("WebSocket RESYNC -> Delta revision 0..1 (exit 0): both pipelined run events");
+    println!("WebSocket RESYNC -> Delta revision 1..2 (exit 0): next run event applies");
+    println!("WebSocket WATCH -> fresh Snapshot revision 0 (exit 0): matches applied delta");
 }
