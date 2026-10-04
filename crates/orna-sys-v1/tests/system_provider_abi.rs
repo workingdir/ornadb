@@ -13,6 +13,8 @@ use serde_json::Value;
 
 const PROVIDER_MAP_ENTRY_EDGE_FIXTURE: &str =
     include_str!("fixtures/provider-map-entry-edges.json");
+const PROVIDER_SCHEMA_CAPTURE_EDGE_FIXTURE: &str =
+    include_str!("fixtures/provider-schema-capture-edges.json");
 
 #[path = "../build_host.rs"]
 #[allow(dead_code)]
@@ -2559,6 +2561,279 @@ fn provider_map_entry_edges_preserve_generated_binding_and_dispatch_contracts() 
             + direct_routes
             + registry_routes
             + 1
+    );
+}
+
+#[test]
+fn provider_schema_capture_edges_preserve_dispatch_validation() {
+    let fixture: Value = serde_json::from_str(PROVIDER_SCHEMA_CAPTURE_EDGE_FIXTURE)
+        .expect("crate-local provider schema-capture fixture is valid JSON");
+    let operation_name = fixture["operation"]
+        .as_str()
+        .expect("schema-capture fixture identifies a provider operation");
+    let provider_name = fixture["dynamic_provider"]
+        .as_str()
+        .expect("schema-capture fixture identifies a dynamic provider");
+    let baseline_json = system_provider_abi_json();
+    let baseline: Value =
+        serde_json::from_str(baseline_json).expect("embedded provider registry is valid JSON");
+    let schema_json = build_provider::generate_provider_registry_schema()
+        .expect("provider schema-capture schema regenerates from its typed source");
+    assert_eq!(schema_json, system_provider_abi_schema_json());
+    build_host::validate_json_against_schema(baseline_json, &schema_json)
+        .expect("embedded provider registry conforms to its generated schema");
+    let baseline_table = SystemProviderAbi::from_json(baseline_json)
+        .expect("embedded provider registry parses into the dispatch table");
+
+    let operation_index = baseline["operations"]
+        .as_array()
+        .expect("provider registry has operation rows")
+        .iter()
+        .position(|operation| operation["name"] == operation_name)
+        .expect("schema-capture operation exists in the provider registry");
+    let role_annotation = baseline["operations"][operation_index]["role"]
+        .as_str()
+        .expect("schema-capture operation has a provider role");
+    let role_name = role_annotation
+        .split_once('@')
+        .expect("provider role annotation captures its version")
+        .0;
+    let role_index = baseline["roles"]
+        .as_array()
+        .expect("provider registry has role rows")
+        .iter()
+        .position(|role| role["name"] == role_name)
+        .expect("schema-capture operation role exists in the provider registry");
+    let baseline_role = baseline_table
+        .role(role_name)
+        .expect("schema-capture operation role parses into the typed table");
+    let cases = fixture["cases"]
+        .as_array()
+        .expect("schema-capture fixture has edge cases");
+    assert_eq!(cases.len(), 4);
+
+    let mut schema_acceptances = 0;
+    let mut schema_rejections = 0;
+    let mut typed_acceptances = 0;
+    let mut typed_rejections = 0;
+    let mut direct_route_denials = 0;
+    let mut selected_route_denials = 0;
+    let mut selected_route_successes = 0;
+    let mut provider_invocations = 0;
+
+    for case in cases {
+        let case_name = case["name"]
+            .as_str()
+            .expect("schema-capture case has a stable name");
+        let field = case["field"]
+            .as_str()
+            .expect("schema-capture case identifies a nullable field");
+        let omit = case["omit"]
+            .as_bool()
+            .expect("schema-capture case states field presence");
+        let mut captured = baseline.clone();
+        match field {
+            "operation.role" => {
+                let operation = captured["operations"][operation_index]
+                    .as_object_mut()
+                    .expect("provider operation row is an object");
+                if omit {
+                    operation.remove("role");
+                } else {
+                    operation.insert("role".to_owned(), case["value"].clone());
+                    if case["value"].is_null() {
+                        let role_operations = captured["roles"][role_index]["operations"]
+                            .as_array_mut()
+                            .expect("provider role captures its operation list");
+                        role_operations.retain(|operation| operation != operation_name);
+                        assert!(
+                            !role_operations.is_empty(),
+                            "null-role capture keeps the shared role non-empty"
+                        );
+                    }
+                }
+            }
+            "role.builtin_provider" => {
+                let role = captured["roles"][role_index]
+                    .as_object_mut()
+                    .expect("provider role row is an object");
+                if let Some(required) = case.get("required").and_then(Value::as_bool) {
+                    role.insert("required".to_owned(), Value::Bool(required));
+                }
+                if omit {
+                    role.remove("builtin_provider");
+                } else {
+                    role.insert("builtin_provider".to_owned(), case["value"].clone());
+                }
+            }
+            other => panic!("unexpected schema-capture field {other:?}"),
+        }
+
+        let captured_json = captured.to_string();
+        let schema_result = build_host::validate_json_against_schema(&captured_json, &schema_json);
+        let schema_accepts = case["schema_accepts"]
+            .as_bool()
+            .expect("schema-capture fixture records schema acceptance");
+        assert_eq!(
+            schema_result.is_ok(),
+            schema_accepts,
+            "generated schema capture for {case_name}"
+        );
+        if schema_accepts {
+            schema_acceptances += 1;
+        } else {
+            assert!(
+                schema_result
+                    .expect_err("omitted nullable fields violate the schema")
+                    .contains("missing required field"),
+                "schema identifies omitted nullable property in {case_name}"
+            );
+            schema_rejections += 1;
+        }
+
+        let parsed = SystemProviderAbi::from_json(&captured_json);
+        let typed_accepts = case["typed_parse_accepts"]
+            .as_bool()
+            .expect("schema-capture fixture records typed parser acceptance");
+        assert_eq!(
+            parsed.is_ok(),
+            typed_accepts,
+            "typed schema capture for {case_name}"
+        );
+        let table = match parsed {
+            Ok(table) => {
+                typed_acceptances += 1;
+                table
+            }
+            Err(error) => {
+                assert_eq!(
+                    error,
+                    orna_sys_v1::ProviderAbiError::InvalidJson,
+                    "omitted nullable field is not captured by the typed parser"
+                );
+                typed_rejections += 1;
+                continue;
+            }
+        };
+        table
+            .validate()
+            .unwrap_or_else(|error| panic!("captured dispatch table validates: {error:?}"));
+
+        let contract = table
+            .operation(operation_name)
+            .expect("captured provider retains the generated operation");
+        let generated = system_function_descriptor(operation_name)
+            .expect("captured provider operation retains its generated binding");
+        assert_eq!(generated.signature, contract.signature.source);
+        assert_eq!(contract.effects.iter().next(), Some(generated.effect));
+        let offer = ProviderOffer {
+            provider: ProviderId::new(provider_name).expect("fixture provider ID is valid"),
+            role: baseline_role.id.clone(),
+            version: baseline_role.version,
+            effects: baseline_role.effects.clone(),
+        };
+        let expected_argument_types = contract
+            .signature
+            .parameters
+            .iter()
+            .map(|parameter| parameter.ty.canonical())
+            .collect::<Vec<_>>();
+        let arguments = contract
+            .signature
+            .parameters
+            .iter()
+            .map(|parameter| {
+                TypedValue::public(
+                    TypeId::new(parameter.ty.canonical()),
+                    parameter.name.as_bytes().to_vec(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let result = TypedValue::public(
+            TypeId::new(contract.signature.result.canonical()),
+            case_name.as_bytes().to_vec(),
+        );
+        let provider = InvokeValueProvider {
+            offer: offer.clone(),
+            operation: contract.id.clone(),
+            argument_types: expected_argument_types,
+            response: Ok(result.clone()),
+            calls: AtomicUsize::new(0),
+        };
+
+        match case["dispatch"].as_str() {
+            Some("provider_not_executable") => {
+                assert!(matches!(
+                    table.dispatch_to_provider(operation_name, &provider, &arguments, |_| Ok(())),
+                    Err(ProviderDiagnostic::ProviderNotExecutable(_))
+                ));
+                direct_route_denials += 1;
+                let registry = ProviderRoleRegistry::from_baked_abi(&table)
+                    .expect("unbound generated operation leaves other baked roles valid");
+                assert!(matches!(
+                    registry.dispatch_to_provider(
+                        &table,
+                        operation_name,
+                        &provider,
+                        &arguments,
+                        |_| Ok(())
+                    ),
+                    Err(ProviderDiagnostic::ProviderNotExecutable(_))
+                ));
+                selected_route_denials += 1;
+                assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
+            }
+            Some("direct_unavailable_selected_success") => {
+                assert!(matches!(
+                    table.dispatch_to_provider(operation_name, &provider, &arguments, |_| Ok(())),
+                    Err(ProviderDiagnostic::RoleUnavailable { .. })
+                ));
+                direct_route_denials += 1;
+                let mut registry = ProviderRoleRegistry::from_baked_abi(&table)
+                    .expect("optional schema-captured role permits dynamic selection");
+                registry
+                    .bind(offer)
+                    .expect("dynamic offer satisfies the captured role contract");
+                assert_eq!(
+                    registry
+                        .dispatch_to_provider(
+                            &table,
+                            operation_name,
+                            &provider,
+                            &arguments,
+                            |_| Ok(())
+                        )
+                        .expect("selected provider route accepts the captured role"),
+                    orna_sys_v1::SystemDispatchResult::Returned(result)
+                );
+                selected_route_successes += 1;
+                assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
+                provider_invocations += 1;
+            }
+            dispatch => panic!("unexpected dispatch expectation in {case_name}: {dispatch:?}"),
+        }
+    }
+
+    assert_eq!(schema_acceptances, 2);
+    assert_eq!(schema_rejections, 2);
+    assert_eq!(typed_acceptances, schema_acceptances);
+    assert_eq!(typed_rejections, schema_rejections);
+    assert_eq!(direct_route_denials, 2);
+    assert_eq!(selected_route_denials, 1);
+    assert_eq!(selected_route_successes, 1);
+    assert_eq!(provider_invocations, 1);
+    println!(
+        "provider_schema_capture_dispatch_parity cases={} schema_acceptances={schema_acceptances} schema_rejections={schema_rejections} typed_acceptances={typed_acceptances} typed_rejections={typed_rejections} direct_route_denials={direct_route_denials} selected_route_denials={selected_route_denials} selected_route_successes={selected_route_successes} provider_invocations={provider_invocations} total_cases={}",
+        cases.len(),
+        cases.len()
+            + schema_acceptances
+            + schema_rejections
+            + typed_acceptances
+            + typed_rejections
+            + direct_route_denials
+            + selected_route_denials
+            + selected_route_successes
+            + provider_invocations
     );
 }
 
