@@ -15,6 +15,10 @@ const SOURCE: &str = include_str!("fixtures/ji3t0-lsp-v1-self-contained.orna");
 
 #[path = "support/completion_contract.rs"]
 mod completion_contract;
+#[path = "support/hover_semantic_contract.rs"]
+mod hover_semantic_contract;
+
+const SOURCE: &str = include_str!("fixtures/ji3t0-lsp-v1-self-contained.orna");
 const SEMANTIC_SOURCE: &str = include_str!("fixtures/editor-semantic-tokens.orna");
 const INVALID_SOURCE: &str = include_str!("fixtures/ji3t0-invalid-v1.orna");
 
@@ -350,6 +354,7 @@ fn protocol_conformance_uses_v1_for_every_advertised_editor_feature() {
         json!({"textDocument":{"uri":uri},"position":call_position}),
     );
     assert_no_legacy_words(&hover, "hover response");
+    hover_semantic_contract::assert_hover_contract(&hover, "LSP protocol");
     let hover_text = hover["contents"]["value"].as_str().unwrap();
     assert!(
         hover_text.contains("fn add(left: Int, right: Int): Int"),
@@ -443,6 +448,10 @@ fn protocol_conformance_uses_v1_for_every_advertised_editor_feature() {
     let legends = capabilities["semanticTokensProvider"]["legend"]["tokenTypes"]
         .as_array()
         .unwrap();
+    hover_semantic_contract::assert_semantic_token_legend(
+        &capabilities["semanticTokensProvider"]["legend"]["tokenTypes"],
+        "LSP protocol",
+    );
     let keyword_type = legends.iter().position(|value| value == "keyword").unwrap() as u64;
     let highlighted = semantic_words(SOURCE, &semantic);
     for word in ["pub", "fn"] {
@@ -454,6 +463,20 @@ fn protocol_conformance_uses_v1_for_every_advertised_editor_feature() {
         );
     }
     assert!(highlighted.iter().any(|(text, _)| text == "add"));
+
+    let semantic_uri = "file:///workspace/editor-semantic-tokens.orna";
+    let semantic_open = open(&mut client, semantic_uri, SEMANTIC_SOURCE);
+    assert_no_legacy_words(&semantic_open, "semantic fixture diagnostics");
+    let semantic_fixture = client.request(
+        "textDocument/semanticTokens/full",
+        json!({"textDocument":{"uri":semantic_uri}}),
+    );
+    assert_no_legacy_words(&semantic_fixture, "semantic fixture response");
+    hover_semantic_contract::assert_semantic_token_contract(
+        SEMANTIC_SOURCE,
+        &semantic_fixture,
+        "LSP protocol",
+    );
 
     let broken_uri = "file:///workspace/ji3t0-invalid-v1.orna";
     let broken = open(&mut client, broken_uri, INVALID_SOURCE);
@@ -541,6 +564,7 @@ fn neovim_loads_generated_v1_syntax_and_queries_the_lsp_server() {
     let script = temporary_path("lua");
     let result_path = temporary_path("result");
     let completion_result_path = temporary_path("completion.json");
+    let hover_semantic_result_path = temporary_path("hover-semantic.json");
     fs::write(
         &script,
         r#"
@@ -582,6 +606,7 @@ local hover, hover_error = client:request_sync("textDocument/hover", {
   position = { line = 1, character = 8 },
 }, 5000, bufnr)
 assert(hover ~= nil and hover.err == nil, "Neovim hover request failed: " .. vim.inspect(hover_error or hover))
+local hover_result = hover.result
 local hover_contents = hover.result.contents
 local hover_text = type(hover_contents) == "string" and hover_contents or hover_contents.value
 assert(string.find(hover_text, "fn add(left: Int, right: Int): Int", 1, true), "unexpected hover: " .. hover_text)
@@ -714,6 +739,11 @@ end
 for token_type, found in pairs(expected_classes) do
   assert(found, "Neovim LSP semantic tokens omitted the syntax-v1 " .. token_type .. " class")
 end
+vim.fn.writefile({ vim.fn.json_encode({
+  hover = hover_result,
+  semantic = semantic.result,
+  legend = token_types,
+}) }, vim.env.ORNA_HOVER_SEMANTIC_RESULT)
 
 vim.fn.writefile({
   "FILETYPE=" .. vim.bo[bufnr].filetype,
@@ -782,16 +812,19 @@ vim.cmd("qa!")
         )
         .env("ORNA_LEGACY_CREATE_LINE", legacy_create_line.to_string())
         .env("ORNA_COMPLETION_RESULT", &completion_result_path)
+        .env("ORNA_HOVER_SEMANTIC_RESULT", &hover_semantic_result_path)
         .env("ORNA_PROBE_SCRIPT", &script)
         .env("ORNA_EDITOR_RESULT", &result_path)
         .output()
         .unwrap_or_else(|error| panic!("start Neovim at {}: {error}", neovim.display()));
     let editor_result = fs::read_to_string(&result_path);
     let completion_result = fs::read_to_string(&completion_result_path);
+    let hover_semantic_result = fs::read_to_string(&hover_semantic_result_path);
     let _ = fs::remove_file(fixture);
     let _ = fs::remove_file(script);
     let _ = fs::remove_file(result_path);
     let _ = fs::remove_file(&completion_result_path);
+    let _ = fs::remove_file(&hover_semantic_result_path);
     let editor_result = editor_result.unwrap_or_else(|error| {
         panic!(
             "Neovim did not write integration evidence (exit {:?}): {error}\n{}\n{}",
@@ -811,6 +844,19 @@ vim.cmd("qa!")
     let completion_result: Value =
         serde_json::from_str(&completion_result).expect("decode Neovim completion result");
     completion_contract::assert_lsp_completion_contract(&completion_result, "Neovim LSP");
+    let hover_semantic_result = hover_semantic_result.expect("Neovim hover and semantic JSON");
+    let hover_semantic_result: Value = serde_json::from_str(&hover_semantic_result)
+        .expect("decode Neovim hover and semantic result");
+    hover_semantic_contract::assert_hover_contract(&hover_semantic_result["hover"], "Neovim");
+    hover_semantic_contract::assert_semantic_token_legend(
+        &hover_semantic_result["legend"],
+        "Neovim",
+    );
+    hover_semantic_contract::assert_semantic_token_contract(
+        &fixture_source,
+        &hover_semantic_result["semantic"],
+        "Neovim",
+    );
     println!("Neovim integration evidence:\n{editor_result}");
     assert_eq!(
         editor_result.lines().collect::<Vec<_>>(),
@@ -886,12 +932,14 @@ fn emacs_eglot_attaches_and_proves_hover_rename_references_and_semantic_tokens()
         SEMANTIC_SOURCE
     );
     let script = temporary_path("el");
+    let hover_semantic_result_path = temporary_path("hover-semantic.json");
     let plugin = root.join("editors/emacs/orna-eglot.el");
     let elisp = format!(
         r#";; -*- lexical-binding: t; -*-
 (require 'package)
 (package-initialize)
 (require 'cl-lib)
+(require 'json)
 (require 'eglot)
 (load-file {})
 (setq orna-eglot-server-command (list {}))
@@ -936,7 +984,9 @@ fn emacs_eglot_attaches_and_proves_hover_rename_references_and_semantic_tokens()
     (format "%s:%s" (orna-test-get start "line") (orna-test-get start "character"))))
 
 (let ((hover-buffer (find-file-noselect {}))
-      (semantic-buffer (find-file-noselect {})))
+      (semantic-buffer (find-file-noselect {}))
+      (hover-response nil)
+      (semantic-response nil))
   (unwind-protect
       (progn
         (with-current-buffer hover-buffer
@@ -978,6 +1028,7 @@ fn emacs_eglot_attaches_and_proves_hover_rename_references_and_semantic_tokens()
                    #'string<))
                  (actual
                   (sort (mapcar #'orna-test-location-key references) #'string<)))
+            (setq hover-response (jsonrpc-request server :textDocument/hover params))
             (unless (stringp uri)
               (error "Eglot did not provide a URI for the attached buffer: %S" params))
             (unless (= (length references) 2)
@@ -1031,6 +1082,19 @@ fn emacs_eglot_attaches_and_proves_hover_rename_references_and_semantic_tokens()
           (orna-test-face-p "comment" 'eglot-semantic-comment)
           (orna-test-face-p "+" 'eglot-semantic-operator)
           (princ "EMACS_LSP_SEMANTIC_CLASSES=pass\n")))
+        (with-current-buffer semantic-buffer
+          (orna-test-wait-managed semantic-buffer)
+          (let* ((params (eglot--TextDocumentPositionParams))
+                 (uri (orna-test-get (orna-test-get params "textDocument") "uri")))
+            (setq semantic-response
+                  (jsonrpc-request (eglot-current-server)
+                                   :textDocument/semanticTokens/full
+                                   (list :textDocument (list :uri uri))))))
+        (let ((evidence (make-hash-table :test 'equal)))
+          (puthash "hover" hover-response evidence)
+          (puthash "semantic" semantic-response evidence)
+          (with-temp-file (getenv "ORNA_HOVER_SEMANTIC_RESULT")
+            (insert (json-encode evidence)))))
     (when (buffer-live-p hover-buffer) (kill-buffer hover-buffer))
     (when (buffer-live-p semantic-buffer) (kill-buffer semantic-buffer))))
 "#,
@@ -1044,6 +1108,7 @@ fn emacs_eglot_attaches_and_proves_hover_rename_references_and_semantic_tokens()
         .args(["--batch", "--quick", "--script"])
         .arg(&script)
         .current_dir(root)
+        .env("ORNA_HOVER_SEMANTIC_RESULT", &hover_semantic_result_path)
         .output()
         .unwrap_or_else(|error| panic!("start Emacs at {}: {error}", emacs.display()));
     let _ = fs::remove_file(script);
@@ -1053,6 +1118,17 @@ fn emacs_eglot_attaches_and_proves_hover_rename_references_and_semantic_tokens()
         "Emacs Eglot hover/token proof failed (exit {:?}):\n{stdout}\n{}",
         output.status.code(),
         String::from_utf8_lossy(&output.stderr),
+    );
+    let hover_semantic_result = fs::read_to_string(&hover_semantic_result_path)
+        .expect("Emacs Eglot hover and semantic-token result");
+    let _ = fs::remove_file(&hover_semantic_result_path);
+    let hover_semantic_result: Value = serde_json::from_str(&hover_semantic_result)
+        .expect("decode Emacs Eglot hover and semantic-token result");
+    hover_semantic_contract::assert_hover_contract(&hover_semantic_result["hover"], "Emacs Eglot");
+    hover_semantic_contract::assert_semantic_token_contract(
+        SEMANTIC_SOURCE,
+        &hover_semantic_result["semantic"],
+        "Emacs Eglot",
     );
     for evidence in [
         "EMACS_LSP_ATTACHMENT=pass",
