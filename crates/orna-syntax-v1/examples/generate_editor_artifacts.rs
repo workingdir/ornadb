@@ -58,6 +58,7 @@ fn main() -> ExitCode {
     }
     let expected = artifacts
         .iter()
+        .filter(|artifact| artifact.path.starts_with("editors/"))
         .map(|artifact| artifact.path.to_owned())
         .collect::<BTreeSet<_>>();
     match editor_files(&root.join("editors"), &root) {

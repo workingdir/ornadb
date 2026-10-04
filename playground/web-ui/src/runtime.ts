@@ -1,4 +1,4 @@
-import type { RunResult } from './results';
+import type { RunError, RunResult } from './results';
 
 export interface ReplEvaluation {
   kind: string;
@@ -60,16 +60,31 @@ export async function initializeRuntime(
 
 function decodeRunResult(serialized: string): RunResult {
   const result: unknown = JSON.parse(serialized);
-  if (
-    typeof result !== 'object' || result === null ||
-    typeof (result as Record<string, unknown>).ok !== 'boolean' ||
-    !Array.isArray((result as Record<string, unknown>).values) ||
-    typeof (result as Record<string, unknown>).stdout !== 'string' ||
-    !Array.isArray((result as Record<string, unknown>).errors)
-  ) {
+  if (!isRunResult(result)) {
     throw new Error('The WASM runtime returned an invalid run result.');
   }
-  return result as RunResult;
+  return result;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function isRunResult(value: unknown): value is RunResult {
+  return isRecord(value) &&
+    typeof value.ok === 'boolean' &&
+    Array.isArray(value.values) &&
+    value.values.every((entry) => typeof entry === 'string') &&
+    typeof value.stdout === 'string' &&
+    Array.isArray(value.errors) &&
+    value.errors.every(isRunError);
+}
+
+function isRunError(value: unknown): value is RunError {
+  return isRecord(value) &&
+    typeof value.message === 'string' &&
+    typeof value.line === 'number' && Number.isInteger(value.line) && value.line > 0 &&
+    typeof value.col === 'number' && Number.isInteger(value.col) && value.col > 0;
 }
 
 function decodeReplEvaluation(serialized: string): ReplEvaluation {
