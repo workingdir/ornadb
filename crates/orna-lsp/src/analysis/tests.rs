@@ -2,8 +2,8 @@ use lsp_types::CompletionItemKind;
 use orna_syntax_v1::Keyword;
 
 use super::{
-    check_document, completion_at, definition, document_symbols, hover, parse_document, references,
-    signature_help,
+    check_document, completion_at, definition, document_symbols, hover, lsp_diagnostic_message,
+    parse_document, references, signature_help,
 };
 use crate::documents::{Document, PositionMapper};
 
@@ -120,6 +120,15 @@ fn diagnostics_are_exact_parser_errors_and_legacy_create_is_not_accepted() {
     let diagnostics = check_document(&invalid, &mapper);
     assert_eq!(diagnostics.len(), 1);
     assert_eq!(diagnostics[0].source.as_deref(), Some("orna-syntax-v1"));
+    assert_eq!(
+        diagnostics[0].severity,
+        Some(lsp_types::DiagnosticSeverity::ERROR)
+    );
+    assert!(diagnostics[0].code.is_some());
+    assert_eq!(
+        diagnostics[0].data.as_ref().unwrap()["title"].as_str(),
+        Some(diagnostics[0].message.as_str())
+    );
     let semicolon = invalid.text.find(';').unwrap();
     assert_eq!(mapper.byte_offset(diagnostics[0].range.start), semicolon);
 
@@ -135,6 +144,22 @@ fn diagnostics_are_exact_parser_errors_and_legacy_create_is_not_accepted() {
             .iter()
             .all(|diagnostic| diagnostic.source.as_deref() == Some("orna-syntax-v1"))
     );
+}
+
+#[test]
+fn diagnostic_help_and_notes_are_visible_in_the_lsp_message() {
+    let message = lsp_diagnostic_message(
+        "Missing value",
+        "expected an expression",
+        &["Add a value after `=`.".to_owned()],
+        &["The declaration is incomplete.".to_owned()],
+    );
+    assert_eq!(
+        message,
+        "Missing value: expected an expression\n\nHelp: Add a value after `=`.\n\nNote: The declaration is incomplete."
+    );
+
+    assert_eq!(lsp_diagnostic_message("same", "same", &[], &[]), "same");
 }
 
 #[test]
