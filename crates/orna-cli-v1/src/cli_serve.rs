@@ -14,7 +14,9 @@ use orna_repository_v1::{
     CommittedBranch, CommittedLogEntry, CommittedTreeEntryKind, GitCommitRef, ManagedPath,
     Repository, RuntimeGeneration,
 };
-use orna_security_v1::{Origin, OriginPolicy, SessionBoundary, SessionDeletionAdapter};
+use orna_security_v1::{
+    MAX_SESSION_LEASE, Origin, OriginPolicy, SessionBoundary, SessionDeletionAdapter,
+};
 use orna_serving_v1::Serving;
 use std::{
     io::{self, BufRead, BufReader, Read, Write},
@@ -27,7 +29,7 @@ use std::{
 const MAX_HEADER_BYTES: usize = 16 * 1024;
 const MAX_REQUEST_BODY_BYTES: usize = 16 * 1024 * 1024;
 const MAX_GIT_REQUEST_BODY_BYTES: usize = 512 * 1024 * 1024;
-const SESSION_LEASE_MS: u64 = 60 * 60 * 1000;
+const SESSION_LEASE_MS: u64 = MAX_SESSION_LEASE;
 
 struct ServeState {
     root: PathBuf,
