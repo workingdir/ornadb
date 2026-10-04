@@ -325,6 +325,9 @@ fn host_route(root: &Path, identity: RuntimeIdentity, request: &Request) -> Resp
     if let Some(response) = git_transport_route(root, request) {
         return response;
     }
+    if let Some(response) = frontend_asset_route(request) {
+        return response;
+    }
     if let Some(response) = git_listing_route(root, identity, request) {
         return response;
     }
@@ -342,6 +345,26 @@ const MAX_LISTING_COMMITS: usize = 100;
 const MAX_LISTING_TREE_ENTRIES: usize = 10_000;
 const MAX_LISTING_FILE_BYTES: usize = 2 * 1024 * 1024;
 const LISTING_STYLE: &str = "<style>:root{--page-width:72ch;--text:#202122;--background:#fff;--link:#0645ad;--visited:#0b0080;--rule:#a2a9b1;--body-font:Georgia,'Times New Roman',serif;--code-font:ui-monospace,monospace}body{max-width:var(--page-width);margin:1.5rem auto;padding:0 1rem;color:var(--text);background:var(--background);font:1rem/1.5 var(--body-font)}a{color:var(--link)}a:visited{color:var(--visited)}pre,textarea{overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;font-family:var(--code-font)}textarea{box-sizing:border-box;width:100%}button{font:inherit}table{border-collapse:collapse}th,td{border:1px solid var(--rule);padding:.2rem .45rem;text-align:left;vertical-align:top}</style>";
+const PRESENTATION_MODULE: &str = include_str!("../../../playground/shared/presentation.mjs");
+const HOME_MODULE: &str = include_str!("serve_home.mjs");
+const PLAYGROUND_MODULE: &str = include_str!("serve_playground.mjs");
+
+fn frontend_asset_route(request: &Request) -> Option<Response> {
+    if request.method != "GET" {
+        return None;
+    }
+    let (content_type, content) = match request.path.as_str() {
+        "/assets/presentation.mjs" => ("text/javascript; charset=utf-8", PRESENTATION_MODULE),
+        "/assets/serve-home.mjs" => ("text/javascript; charset=utf-8", HOME_MODULE),
+        "/assets/serve-playground.mjs" => ("text/javascript; charset=utf-8", PLAYGROUND_MODULE),
+        _ => return None,
+    };
+    Some(Response::new(
+        200,
+        content_type,
+        content.as_bytes().to_vec(),
+    ))
+}
 
 /// Renderer-neutral data used by the simple Inspect-compatible HTML fallback.
 enum InspectionNode {
@@ -366,48 +389,16 @@ fn git_listing_route(
     if request.method != "GET" {
         return None;
     }
-    if let Some(path) = frontend_asset_path(&request.path) {
-        return Some(committed_frontend_asset(root, path));
-    }
-    if request.path == "/playground" || request.path.starts_with("/playground/") {
-        return Some(playground_asset(root, identity, &request.path));
-    }
     match request.path.as_str() {
         "/" => Some(commit_log_page(root, identity)),
+        "/playground" => Some(playground_asset(root, identity, &request.path)),
+        path if path.starts_with("/playground/") => {
+            Some(playground_asset(root, identity, &request.path))
+        }
         path if path.starts_with("/tree/") => Some(tree_page(root, &path[6..])),
         path if path.starts_with("/blob/") => Some(blob_page(root, &path[6..])),
         _ => None,
     }
-}
-
-fn frontend_asset_path(request_path: &str) -> Option<&'static str> {
-    match request_path {
-        "/assets/presentation.mjs" => Some("playground/shared/presentation.mjs"),
-        "/assets/serve-home.mjs" => Some("crates/orna-cli-v1/src/serve_home.mjs"),
-        "/assets/serve-playground.mjs" => Some("crates/orna-cli-v1/src/serve_playground.mjs"),
-        _ => None,
-    }
-}
-
-fn committed_frontend_asset(root: &Path, repository_path: &str) -> Response {
-    let Ok(path) = ManagedPath::new(Path::new(repository_path)) else {
-        return bad_request_response();
-    };
-    let Ok(repository) = Repository::discover(root) else {
-        return unavailable_response();
-    };
-    let Ok(Some(commit)) = repository.head() else {
-        return unavailable_response();
-    };
-    let Ok(bytes) = repository.read_committed_file(&commit, path.as_path(), MAX_LISTING_FILE_BYTES)
-    else {
-        return not_found_response();
-    };
-    let mut response = Response::new(200, playground_content_type(path.as_path()), bytes);
-    response
-        .headers
-        .push(("X-Content-Type-Options".into(), "nosniff".into()));
-    response
 }
 
 fn commit_log_page(root: &Path, identity: RuntimeIdentity) -> Response {
@@ -446,7 +437,8 @@ fn commit_log_page(root: &Path, identity: RuntimeIdentity) -> Response {
     render_home_document(identity, &content)
 }
 
-const MAX_PLAYGROUND_ASSET_BYTES: usize = 8 * 1024 * 1024;
+const MAX_PLAYGROUND_ASSET_BYTES: usize = 2 * 1024 * 1024;
+const MAX_PLAYGROUND_ASSET_ROW_BYTES: usize = 4 * 1024 * 1024;
 const MAX_PLAYGROUND_EXAMPLE_BYTES: usize = 2 * 1024 * 1024;
 const MAX_PLAYGROUND_SAMPLE_BYTES: usize = 64 * 1024;
 const MAX_PLAYGROUND_FILE_EXAMPLES: usize = 100;
@@ -469,24 +461,16 @@ fn playground_asset(root: &Path, identity: RuntimeIdentity, request_path: &str) 
     } else {
         decoded.as_str()
     };
-    let Ok(managed) = ManagedPath::new(Path::new("playground/web-ui/dist").join(asset)) else {
+    let Some((record_path, asset_id)) = playground_asset_record_path(asset) else {
         return bad_request_response();
     };
-    let Ok(repository) = Repository::discover(root) else {
-        return unavailable_response();
-    };
-    let Ok(Some(commit)) = repository.head() else {
-        return unavailable_response();
-    };
-    let Ok(bytes) =
-        repository.read_committed_file(&commit, managed.as_path(), MAX_PLAYGROUND_ASSET_BYTES)
-    else {
-        return not_found_response();
+    let (media_type, content) = match read_playground_asset(root, asset, &record_path, &asset_id) {
+        Ok(Some(asset)) => asset,
+        Ok(None) => return not_found_response(),
+        Err(()) => return unavailable_response(),
     };
     if asset == "index.html" {
-        let Ok(mut page) = String::from_utf8(bytes) else {
-            return unavailable_response();
-        };
+        let mut page = content;
         if embed && !hide_embedded_page_header(&mut page) {
             return unavailable_response();
         }
@@ -512,11 +496,79 @@ fn playground_asset(root: &Path, identity: RuntimeIdentity, request_path: &str) 
         }
         return response;
     }
-    let mut response = Response::new(200, playground_content_type(managed.as_path()), bytes);
+    let mut response = Response::new(200, media_type, content.into_bytes());
     response
         .headers
         .push(("X-Content-Type-Options".into(), "nosniff".into()));
     response
+}
+
+fn playground_asset_record_path(asset_path: &str) -> Option<(ManagedPath, String)> {
+    let asset_path = ManagedPath::new(asset_path).ok()?;
+    let normalized = asset_path.as_path().to_str()?;
+    if normalized != "index.html" && !normalized.starts_with("assets/") {
+        return None;
+    }
+    let media_type = playground_content_type(asset_path.as_path());
+    if media_type == "application/octet-stream" {
+        return None;
+    }
+    let id = format!(
+        "asset-{}",
+        normalized
+            .as_bytes()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
+    );
+    let record_path =
+        ManagedPath::new(Path::new("playground/Asset").join(format!("{id}.orna"))).ok()?;
+    Some((record_path, id))
+}
+
+fn read_playground_asset(
+    root: &Path,
+    requested_path: &str,
+    record_path: &ManagedPath,
+    expected_id: &str,
+) -> Result<Option<(&'static str, String)>, ()> {
+    let repository = Repository::discover(root).map_err(|_| ())?;
+    let Some(commit) = repository.head().map_err(|_| ())? else {
+        return Err(());
+    };
+    let schema = repository
+        .read_committed_file(
+            &commit,
+            Path::new("playground.orna"),
+            MAX_PLAYGROUND_SAMPLE_BYTES,
+        )
+        .map_err(|_| ())?;
+    let schema = String::from_utf8(schema).map_err(|_| ())?;
+    if !has_playground_asset_table(&schema) {
+        return Err(());
+    }
+    let Ok(source) = repository.read_committed_file(
+        &commit,
+        record_path.as_path(),
+        MAX_PLAYGROUND_ASSET_ROW_BYTES,
+    ) else {
+        return Ok(None);
+    };
+    let source = String::from_utf8(source).map_err(|_| ())?;
+    let Some((path, media_type, content)) = decode_playground_asset(&source, expected_id) else {
+        return Err(());
+    };
+    let expected_media_type = playground_content_type(Path::new(&path));
+    if path != requested_path
+        || path.is_empty()
+        || !matches!(path.as_str(), "index.html") && !path.starts_with("assets/")
+        || media_type != expected_media_type
+        || media_type == "application/octet-stream"
+        || content.len() > MAX_PLAYGROUND_ASSET_BYTES
+    {
+        return Err(());
+    }
+    Ok(Some((expected_media_type, content)))
 }
 
 fn hide_embedded_page_header(page: &mut String) -> bool {
@@ -666,6 +718,65 @@ fn playground_examples(root: &Path) -> Response {
         Ok(body) => Response::new(200, "application/json", body),
         Err(_) => unavailable_response(),
     }
+}
+
+fn has_playground_asset_table(source: &str) -> bool {
+    let parsed = parse_module(source);
+    if !parsed.is_ok() {
+        return false;
+    }
+    let mut tables = parsed.value.items.iter().filter_map(|item| {
+        let Declaration::Table {
+            name,
+            keys,
+            members,
+        } = &item.declaration
+        else {
+            return None;
+        };
+        (name == "Asset").then_some((keys, members))
+    });
+    let Some((keys, members)) = tables.next() else {
+        return false;
+    };
+    if tables.next().is_some()
+        || keys.len() != 1
+        || !matches!(
+            &keys[0],
+            orna_syntax_v1::Parameter {
+                pattern: Pattern::Name(name, _),
+                annotation: Some(ty),
+                ..
+            } if name == "id" && is_string_type(ty)
+        )
+    {
+        return false;
+    }
+    ["path", "media_type", "content"].iter().all(|required| {
+        let mut fields = members.iter().filter_map(|member| match member {
+            orna_syntax_v1::TableMember::Field { name, ty, .. } if name == required => Some(ty),
+            _ => None,
+        });
+        fields.next().is_some_and(is_string_type) && fields.next().is_none()
+    })
+}
+
+fn decode_playground_asset(source: &str, expected_id: &str) -> Option<(String, String, String)> {
+    let parsed = parse_row(source);
+    if !parsed.is_ok() {
+        return None;
+    }
+    let Expr::Record { fields, .. } = parsed.value else {
+        return None;
+    };
+    let id = literal_string(unique_record_field(&fields, "id")?)?;
+    if id != expected_id {
+        return None;
+    }
+    let path = literal_string(unique_record_field(&fields, "path")?)?;
+    let media_type = literal_string(unique_record_field(&fields, "media_type")?)?;
+    let content = literal_string(unique_record_field(&fields, "content")?)?;
+    Some((path, media_type, content))
 }
 
 fn has_playground_sample_table(source: &str) -> bool {
@@ -1725,16 +1836,6 @@ mod tests {
     use std::process::Command;
 
     const SERVE_FIXTURE: &str = include_str!("../tests/fixtures/serve-no-autoload.orna");
-    const PLAYGROUND_SHELL: &str = include_str!("../tests/fixtures/playground-shell.html");
-    const PLAYGROUND_BROWSER_ASSET: &str =
-        include_str!("../tests/fixtures/playground-browser-asset.js");
-    const PLAYGROUND_PRESENTATION_ASSET: &str =
-        include_str!("../tests/fixtures/playground-presentation.mjs");
-    const PLAYGROUND_HOME_ASSET: &str = include_str!("serve_home.mjs");
-    const PLAYGROUND_RUNTIME_ASSET: &str = include_str!("serve_playground.mjs");
-    const PLAYGROUND_SAMPLE: &str = include_str!("../tests/fixtures/playground-sample.orna");
-    const PLAYGROUND_SCHEMA: &str = include_str!("../tests/fixtures/playground-schema.orna");
-    const LEGACY_EXAMPLE: &str = include_str!("../tests/fixtures/playground-example.orna");
 
     fn git_succeeds(directory: &Path, arguments: &[&str]) {
         let output = Command::new("git")
@@ -1815,6 +1916,14 @@ mod tests {
         assert!(!home.contains("new WebSocket(endpoint"));
         assert!(!home.contains("/api/query"));
         assert!(!home.contains("wasm"));
+        let runtime = listing_page(directory.path(), "/assets/presentation.mjs");
+        assert_eq!(runtime.status, 200);
+        assert_eq!(runtime.content_type, "text/javascript; charset=utf-8");
+        assert!(
+            String::from_utf8(runtime.body)
+                .expect("runtime module UTF-8")
+                .contains("class LivePresentation")
+        );
         let query = host_route(
             directory.path(),
             identity,
@@ -1830,7 +1939,17 @@ mod tests {
     }
 
     #[test]
-    fn playground_loads_committed_sample_rows_and_built_assets() {
+    fn playground_loads_committed_sample_and_asset_rows_from_the_database() {
+        const PLAYGROUND_SAMPLE: &str = include_str!("../tests/fixtures/playground-sample.orna");
+        const PLAYGROUND_SCHEMA: &str = include_str!("../tests/fixtures/playground-schema.orna");
+        const LEGACY_EXAMPLE: &str = include_str!("../tests/fixtures/playground-example.orna");
+        const ASSET_INDEX: &str = include_str!("../tests/fixtures/playground-asset-index.orna");
+        const ASSET_APP: &str = include_str!("../tests/fixtures/playground-asset-app.orna");
+        const ASSET_STYLE: &str = include_str!("../tests/fixtures/playground-asset-style.orna");
+        const ASSET_UNCOMMITTED: &str =
+            include_str!("../tests/fixtures/playground-asset-uncommitted.orna");
+        const ASSET_STALE_INDEX: &str =
+            include_str!("../tests/fixtures/playground-asset-index-stale.orna");
         let directory = tempfile::tempdir().expect("temporary database");
         git_succeeds(
             directory.path(),
@@ -1846,29 +1965,23 @@ mod tests {
         std::fs::create_dir_all(legacy_path.parent().expect("example directory"))
             .expect("create examples directory");
         std::fs::write(&legacy_path, LEGACY_EXAMPLE).expect("write committed file example");
-        let dist = directory.path().join("playground/web-ui/dist");
-        std::fs::create_dir_all(dist.join("assets")).expect("create built assets");
-        std::fs::write(dist.join("index.html"), PLAYGROUND_SHELL).expect("write database page");
-        std::fs::write(dist.join("assets/app.js"), PLAYGROUND_BROWSER_ASSET)
-            .expect("write database script");
-        let presentation_path = directory.path().join("playground/shared/presentation.mjs");
-        std::fs::create_dir_all(
-            presentation_path
-                .parent()
-                .expect("presentation asset directory"),
-        )
-        .expect("create presentation asset directory");
-        std::fs::write(&presentation_path, PLAYGROUND_PRESENTATION_ASSET)
-            .expect("write database presentation runtime");
-        let cli_source_dir = directory.path().join("crates/orna-cli-v1/src");
-        std::fs::create_dir_all(&cli_source_dir).expect("create CLI asset directory");
-        std::fs::write(cli_source_dir.join("serve_home.mjs"), PLAYGROUND_HOME_ASSET)
-            .expect("write database home runtime");
+        let asset_directory = directory.path().join("playground/Asset");
+        std::fs::create_dir_all(&asset_directory).expect("create Asset rows directory");
         std::fs::write(
-            cli_source_dir.join("serve_playground.mjs"),
-            PLAYGROUND_RUNTIME_ASSET,
+            asset_directory.join("asset-696e6465782e68746d6c.orna"),
+            ASSET_INDEX,
         )
-        .expect("write database playground runtime");
+        .expect("write database shell asset");
+        std::fs::write(
+            asset_directory.join("asset-6173736574732f6170702e6a73.orna"),
+            ASSET_APP,
+        )
+        .expect("write database JavaScript asset");
+        std::fs::write(
+            asset_directory.join("asset-6173736574732f7374796c652e637373.orna"),
+            ASSET_STYLE,
+        )
+        .expect("write database stylesheet asset");
         git_succeeds(
             directory.path(),
             &[
@@ -1876,10 +1989,7 @@ mod tests {
                 "playground.orna",
                 "playground/Sample/hello.orna",
                 "playground/examples/legacy.orna",
-                "playground/web-ui/dist",
-                "playground/shared/presentation.mjs",
-                "crates/orna-cli-v1/src/serve_home.mjs",
-                "crates/orna-cli-v1/src/serve_playground.mjs",
+                "playground/Asset",
             ],
         );
         git_succeeds(
@@ -1906,23 +2016,12 @@ mod tests {
                 .join("playground/examples/uncommitted.orna"),
             "99 + 1",
         )
-        .expect("write uncommitted example");
-        std::fs::write(dist.join("index.html"), "uncommitted page")
-            .expect("replace page only in the worktree");
-        std::fs::write(dist.join("assets/app.js"), "uncommitted script")
-            .expect("replace script only in the worktree");
-        std::fs::write(&presentation_path, "uncommitted presentation runtime")
-            .expect("replace presentation runtime only in the worktree");
+        .expect("write uncommitted file example");
         std::fs::write(
-            cli_source_dir.join("serve_playground.mjs"),
-            "uncommitted playground runtime",
+            asset_directory.join("asset-6173736574732f756e636f6d6d69747465642e6a73.orna"),
+            ASSET_UNCOMMITTED,
         )
-        .expect("replace playground runtime only in the worktree");
-        std::fs::write(
-            cli_source_dir.join("serve_home.mjs"),
-            "uncommitted home runtime",
-        )
-        .expect("replace home runtime only in the worktree");
+        .expect("write uncommitted database asset");
 
         let examples = listing_page(directory.path(), "/api/examples");
         assert_eq!(examples.status, 200);
@@ -1953,14 +2052,8 @@ mod tests {
         let page = playground_asset(directory.path(), identity, "/playground/");
         assert_eq!(page.status, 200);
         assert_eq!(page.content_type, "text/html; charset=utf-8");
-        assert!(
-            page.headers
-                .iter()
-                .any(|(name, value)| { name == "X-Content-Type-Options" && value == "nosniff" })
-        );
-        let page = String::from_utf8(page.body).expect("built page UTF-8");
-        assert!(page.contains("<main id=\"app\">Orna playground</main>"));
-        assert!(!page.contains("uncommitted page"));
+        let page = String::from_utf8(page.body).expect("database page UTF-8");
+        assert!(page.contains("<main>database shell</main>"));
         assert!(page.contains(&format!(
             "data-database=\"{}\"",
             format_uuid(identity.database_id)
@@ -1972,26 +2065,19 @@ mod tests {
         assert!(page.contains("\\u0000orna/serve/run-events/v1"));
         let runtime = listing_page(directory.path(), "/assets/serve-playground.mjs");
         assert_eq!(runtime.status, 200);
-        assert_eq!(runtime.body, PLAYGROUND_RUNTIME_ASSET.as_bytes());
-        let presentation = listing_page(directory.path(), "/assets/presentation.mjs");
-        assert_eq!(presentation.status, 200);
-        assert_eq!(presentation.body, PLAYGROUND_PRESENTATION_ASSET.as_bytes());
         assert!(
-            String::from_utf8(presentation.body)
-                .expect("presentation runtime UTF-8")
-                .contains("class LivePresentation")
+            String::from_utf8(runtime.body)
+                .expect("playground runtime UTF-8")
+                .contains("globalThis.ornaPlaygroundRun")
         );
-        let home_runtime = listing_page(directory.path(), "/assets/serve-home.mjs");
-        assert_eq!(home_runtime.status, 200);
-        assert_eq!(home_runtime.body, PLAYGROUND_HOME_ASSET.as_bytes());
         let embed = playground_asset(directory.path(), identity, "/playground/embed");
         assert_eq!(embed.status, 200);
         assert!(embed.headers.iter().any(|(name, value)| {
             name == "Content-Security-Policy" && value == "frame-ancestors *"
         }));
         let embed = String::from_utf8(embed.body).expect("embedded page UTF-8");
-        assert!(embed.contains("<header class=\"page-header\" data-page-header hidden>"));
-        assert!(embed.contains("<main id=\"app\">Orna playground</main>"));
+        assert!(embed.contains("<header data-page-header hidden>"));
+        assert!(embed.contains("<main>database shell</main>"));
         let embed_with_slash = playground_asset(directory.path(), identity, "/playground/embed/");
         assert_eq!(embed_with_slash.status, 200);
         let script = playground_asset(directory.path(), identity, "/playground/assets/app.js");
@@ -2003,31 +2089,30 @@ mod tests {
                 .any(|(name, value)| name == "X-Content-Type-Options" && value == "nosniff")
         );
         assert_eq!(script.content_type, "text/javascript; charset=utf-8");
-        assert_eq!(script.body, PLAYGROUND_BROWSER_ASSET.as_bytes());
-        assert_eq!(
-            playground_asset(directory.path(), identity, "/playground/assets/missing.js").status,
-            404,
-            "assets created only in the worktree are not served"
+        assert_eq!(script.body, b"globalThis.ornaPlaygroundReady = true;");
+        let stylesheet =
+            playground_asset(directory.path(), identity, "/playground/assets/style.css");
+        assert_eq!(stylesheet.status, 200);
+        assert_eq!(stylesheet.content_type, "text/css; charset=utf-8");
+        assert_eq!(stylesheet.body, b"body { color: #202122; }");
+        assert!(!directory.path().join("playground/web-ui/dist").exists());
+        let uncommitted_asset = playground_asset(
+            directory.path(),
+            identity,
+            "/playground/assets/uncommitted.js",
         );
+        assert_eq!(uncommitted_asset.status, 404);
 
         let traversal =
             playground_asset(directory.path(), identity, "/playground/%2e%2e/README.txt");
         assert_eq!(traversal.status, 400);
 
         std::fs::write(
-            dist.join("index.html"),
-            "<!doctype html><html><body><main>stale page</main></body></html>",
+            asset_directory.join("asset-696e6465782e68746d6c.orna"),
+            ASSET_STALE_INDEX,
         )
-        .expect("replace the page with a stale build lacking the embed marker");
-        assert_eq!(
-            playground_asset(directory.path(), identity, "/playground/embed").status,
-            200,
-            "a worktree-only shell change does not replace the committed database entry"
-        );
-        git_succeeds(
-            directory.path(),
-            &["add", "playground/web-ui/dist/index.html"],
-        );
+        .expect("replace the shell row with one lacking the embed marker");
+        git_succeeds(directory.path(), &["add", "playground/Asset"]);
         git_succeeds(
             directory.path(),
             &[
@@ -2038,7 +2123,7 @@ mod tests {
                 "commit",
                 "--quiet",
                 "-m",
-                "replace playground shell",
+                "replace playground asset record",
             ],
         );
         let stale_embed = playground_asset(directory.path(), identity, "/playground/embed");
@@ -2068,6 +2153,26 @@ mod tests {
         );
         assert!(!has_playground_sample_table(
             "pub table Sample(id: Int) { name: Str, source: Str }"
+        ));
+    }
+
+    #[test]
+    fn playground_asset_records_match_the_declared_table_and_path_key() {
+        const PLAYGROUND_SCHEMA: &str = include_str!("../tests/fixtures/playground-schema.orna");
+        const ASSET_APP: &str = include_str!("../tests/fixtures/playground-asset-app.orna");
+
+        assert!(has_playground_asset_table(PLAYGROUND_SCHEMA));
+        assert_eq!(
+            decode_playground_asset(ASSET_APP, "asset-6173736574732f6170702e6a73"),
+            Some((
+                "assets/app.js".into(),
+                "text/javascript; charset=utf-8".into(),
+                "globalThis.ornaPlaygroundReady = true;".into(),
+            ))
+        );
+        assert_eq!(decode_playground_asset(ASSET_APP, "different-id"), None);
+        assert!(!has_playground_asset_table(
+            "pub table Asset(id: Int) { path: Str, media_type: Str, content: Str }"
         ));
     }
 
