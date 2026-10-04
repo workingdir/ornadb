@@ -1,0 +1,5 @@
+/// Unicode prefix: café 🧭 keeps link ranges in UTF-16 coordinates.
+use library.math.{add};
+use missing.module.{Thing};
+use std.math.{abs};
+pub fn caller(value: Int): Int = add(value, 1);

@@ -1182,7 +1182,9 @@ fn logical_path(root: &Path, path: &Path) -> Result<String, ProjectLoadError> {
         components.push(component);
     }
     let logical_path = components.join("/");
-    if !logical_path.ends_with(".orna") || namespace_for_path(&logical_path).is_err() {
+    if !logical_path.ends_with(".orna")
+        || components.iter().any(|part| !portable_component(part))
+    {
         return Err(ProjectLoadError::UnsafePath);
     }
     Ok(logical_path)
