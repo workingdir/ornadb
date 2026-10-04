@@ -15,13 +15,23 @@ mod completion_contract;
 #[allow(dead_code)]
 #[path = "support/hover_semantic_contract.rs"]
 mod hover_semantic_contract;
+#[path = "support/syntax_v1_action_signature_contract.rs"]
+mod syntax_v1_action_signature_contract;
 #[path = "support/syntax_v1_depth_contract.rs"]
 mod syntax_v1_depth_contract;
+#[path = "support/syntax_v1_workspace_hierarchy_contract.rs"]
+mod syntax_v1_workspace_hierarchy_contract;
 
 const SOURCE: &str = include_str!("fixtures/ji3t0-lsp-v1.orna");
 const PROVIDER_SOURCE: &str = include_str!("fixtures/expressions-v1.orna");
 const SEMANTIC_SOURCE: &str = include_str!("fixtures/editor-semantic-tokens.orna");
 const HINTS_SOURCE: &str = include_str!("fixtures/editor-lsp-hints.orna");
+const SIGNATURE_SOURCE: &str = include_str!("fixtures/signature-actions-v1.orna");
+const ACTION_SOURCE: &str = include_str!("fixtures/missing-semicolon-code-action-v1.orna");
+const WORKSPACE_HIERARCHY_PROVIDER_SOURCE: &str =
+    include_str!("fixtures/workspace-hierarchy-provider-v1.orna");
+const WORKSPACE_HIERARCHY_CALLER_SOURCE: &str =
+    include_str!("fixtures/workspace-hierarchy-caller-v1.orna");
 
 #[test]
 fn attachment_input_matches_its_crate_local_fixture() {
@@ -78,6 +88,32 @@ fn vim_lsp_attaches_and_exposes_hover_semantic_tokens_and_completion() {
     let depth_fixture = root.join("crates/orna-lsp/tests/fixtures/editor-lsp-hints.orna");
     assert_eq!(fs::read_to_string(&depth_fixture).unwrap(), HINTS_SOURCE);
     let depth_ranges = syntax_v1_depth_contract::request_ranges(HINTS_SOURCE);
+    let signature_fixture = root.join("crates/orna-lsp/tests/fixtures/signature-actions-v1.orna");
+    assert_eq!(
+        fs::read_to_string(&signature_fixture).unwrap(),
+        SIGNATURE_SOURCE
+    );
+    let action_fixture =
+        root.join("crates/orna-lsp/tests/fixtures/missing-semicolon-code-action-v1.orna");
+    assert_eq!(fs::read_to_string(&action_fixture).unwrap(), ACTION_SOURCE);
+    let action_signature_requests =
+        syntax_v1_action_signature_contract::request_data(SIGNATURE_SOURCE, ACTION_SOURCE);
+    let workspace_hierarchy_requests = syntax_v1_workspace_hierarchy_contract::request_data(
+        WORKSPACE_HIERARCHY_PROVIDER_SOURCE,
+        WORKSPACE_HIERARCHY_CALLER_SOURCE,
+    );
+    let workspace_provider =
+        root.join("crates/orna-lsp/tests/fixtures/workspace-hierarchy-provider-v1.orna");
+    let workspace_caller =
+        root.join("crates/orna-lsp/tests/fixtures/workspace-hierarchy-caller-v1.orna");
+    assert_eq!(
+        fs::read_to_string(&workspace_provider).unwrap(),
+        WORKSPACE_HIERARCHY_PROVIDER_SOURCE
+    );
+    assert_eq!(
+        fs::read_to_string(&workspace_caller).unwrap(),
+        WORKSPACE_HIERARCHY_CALLER_SOURCE
+    );
     let lsp_binary = env!("CARGO_BIN_EXE_orna-lsp");
     let vim_script = format!(
         r#"
@@ -285,6 +321,150 @@ while len(g:orna_depth_responses) < 7 && reltimefloat(reltime()) < s:deadline
     sleep 10m
 endwhile
 call assert_equal(7, len(g:orna_depth_responses), 'vim-lsp semantic/inlay depth requests timed out')
+
+let s:action_signature_requests = json_decode($ORNA_ACTION_SIGNATURE_REQUESTS)
+execute 'edit ' . fnameescape($ORNA_TEST_SIGNATURE_FIXTURE)
+call assert_equal('orna', &filetype)
+let s:deadline = reltimefloat(reltime()) + 10.0
+while !lsp#capabilities#has_completion_provider('orna') && reltimefloat(reltime()) < s:deadline
+    sleep 10m
+endwhile
+call assert_true(lsp#capabilities#has_completion_provider('orna'), 'signature fixture did not attach to orna-lsp')
+let s:signature_document = lsp#get_text_document_identifier()
+for [s:name, s:position_key] in items({{
+    \ 'signature_nested_tuple': 'signature_nested_tuple',
+    \ 'signature_named_argument': 'signature_named_argument',
+    \ 'signature_nested_named_argument': 'signature_nested_named_argument',
+    \ 'signature_shadowed_call': 'signature_shadowed_call',
+\ }})
+    call lsp#send_request('orna', {{
+        \ 'method': 'textDocument/signatureHelp',
+        \ 'params': {{ 'textDocument': s:signature_document, 'position': s:action_signature_requests[s:position_key] }},
+        \ 'on_notification': function('OrnaCaptureDepth', [s:name]),
+    \ }})
+endfor
+
+execute 'edit ' . fnameescape($ORNA_TEST_ACTION_FIXTURE)
+call assert_equal('orna', &filetype)
+let s:deadline = reltimefloat(reltime()) + 10.0
+while !lsp#capabilities#has_completion_provider('orna') && reltimefloat(reltime()) < s:deadline
+    sleep 10m
+endwhile
+call assert_true(lsp#capabilities#has_completion_provider('orna'), 'code-action fixture did not attach to orna-lsp')
+let s:action_document = lsp#get_text_document_identifier()
+let s:action_uri = s:action_document['uri']
+for [s:name, s:range_key, s:kind] in [
+    \ ['code_action_quickfix', 'code_action_full_range', 'quickfix'],
+    \ ['code_action_wrong_kind', 'code_action_full_range', 'refactor'],
+    \ ['code_action_outside_range', 'code_action_outside_range', 'quickfix'],
+\ ]
+    call lsp#send_request('orna', {{
+        \ 'method': 'textDocument/codeAction',
+        \ 'params': {{
+        \     'textDocument': s:action_document,
+        \     'range': s:action_signature_requests[s:range_key],
+        \     'context': {{ 'diagnostics': [], 'only': [s:kind] }},
+        \ }},
+        \ 'on_notification': function('OrnaCaptureDepth', [s:name]),
+    \ }})
+endfor
+let s:deadline = reltimefloat(reltime()) + 10.0
+while len(g:orna_depth_responses) < 14 && reltimefloat(reltime()) < s:deadline
+    sleep 10m
+endwhile
+call assert_equal(14, len(g:orna_depth_responses), 'vim-lsp code-action/signature-help requests timed out')
+
+function! OrnaCaptureWorkspaceHierarchy(name, data) abort
+    let g:orna_workspace_hierarchy_responses[a:name] = a:data['response']['result']
+endfunction
+function! OrnaCaptureWorkspacePrepare(name, data) abort
+    let l:result = a:data['response']['result']
+    let g:orna_workspace_hierarchy_responses[a:name] = l:result
+    if type(l:result) != v:t_list || empty(l:result)
+        return
+    endif
+    let l:item = l:result[0]
+    if a:name ==# 'call_root_item'
+        call lsp#send_request('orna', {{
+            \ 'method': 'callHierarchy/outgoingCalls',
+            \ 'params': {{ 'item': l:item }},
+            \ 'on_notification': function('OrnaCaptureWorkspaceHierarchy', ['call_root_outgoing']),
+        \ }})
+        call lsp#send_request('orna', {{
+            \ 'method': 'callHierarchy/incomingCalls',
+            \ 'params': {{ 'item': l:item }},
+            \ 'on_notification': function('OrnaCaptureWorkspaceHierarchy', ['call_root_incoming']),
+        \ }})
+    elseif a:name ==# 'call_seed_item'
+        call lsp#send_request('orna', {{
+            \ 'method': 'callHierarchy/incomingCalls',
+            \ 'params': {{ 'item': l:item }},
+            \ 'on_notification': function('OrnaCaptureWorkspaceHierarchy', ['call_seed_incoming']),
+        \ }})
+    elseif a:name ==# 'call_shadowed_item'
+        call lsp#send_request('orna', {{
+            \ 'method': 'callHierarchy/outgoingCalls',
+            \ 'params': {{ 'item': l:item }},
+            \ 'on_notification': function('OrnaCaptureWorkspaceHierarchy', ['call_shadowed_outgoing']),
+        \ }})
+    elseif a:name ==# 'call_unresolved_item'
+        call lsp#send_request('orna', {{
+            \ 'method': 'callHierarchy/outgoingCalls',
+            \ 'params': {{ 'item': l:item }},
+            \ 'on_notification': function('OrnaCaptureWorkspaceHierarchy', ['call_unresolved_outgoing']),
+        \ }})
+    endif
+endfunction
+
+execute 'edit ' . fnameescape($ORNA_WORKSPACE_PROVIDER_FIXTURE)
+call assert_equal('orna', &filetype)
+let s:deadline = reltimefloat(reltime()) + 10.0
+while !lsp#capabilities#has_completion_provider('orna') && reltimefloat(reltime()) < s:deadline
+    sleep 10m
+endwhile
+call assert_true(lsp#capabilities#has_completion_provider('orna'), 'workspace provider fixture did not attach')
+let s:workspace_provider_document = lsp#get_text_document_identifier()
+execute 'edit ' . fnameescape($ORNA_WORKSPACE_CALLER_FIXTURE)
+call assert_equal('orna', &filetype)
+let s:deadline = reltimefloat(reltime()) + 10.0
+while !lsp#capabilities#has_completion_provider('orna') && reltimefloat(reltime()) < s:deadline
+    sleep 10m
+endwhile
+call assert_true(lsp#capabilities#has_completion_provider('orna'), 'workspace caller fixture did not attach')
+let s:workspace_caller_document = lsp#get_text_document_identifier()
+let s:workspace_hierarchy_requests = json_decode($ORNA_WORKSPACE_HIERARCHY_REQUESTS)
+let g:orna_workspace_hierarchy_responses = {{}}
+for [s:name, s:query] in items({{
+    \ 'workspace_mid': 'mid',
+    \ 'workspace_mid_repeat': 'mid',
+    \ 'workspace_rem': 'rem',
+    \ 'workspace_remi': 'remi',
+}})
+    call lsp#send_request('orna', {{
+        \ 'method': 'workspace/symbol',
+        \ 'params': {{ 'query': s:query }},
+        \ 'on_notification': function('OrnaCaptureWorkspaceHierarchy', [s:name]),
+    \ }})
+endfor
+for [s:name, s:position_key, s:document] in [
+    \ ['call_root_item', 'root_definition', s:workspace_provider_document],
+    \ ['call_seed_item', 'seed_definition', s:workspace_provider_document],
+    \ ['call_shadowed_item', 'shadowed_definition', s:workspace_provider_document],
+    \ ['call_unresolved_item', 'unresolved_definition', s:workspace_provider_document],
+    \ ['call_root_reference', 'root_reference', s:workspace_caller_document],
+    \ ['call_ambiguous_reference', 'ambiguous_reference', s:workspace_caller_document],
+]
+    call lsp#send_request('orna', {{
+        \ 'method': 'textDocument/prepareCallHierarchy',
+        \ 'params': {{ 'textDocument': s:document, 'position': s:workspace_hierarchy_requests[s:position_key] }},
+        \ 'on_notification': function('OrnaCaptureWorkspacePrepare', [s:name]),
+    \ }})
+endfor
+let s:deadline = reltimefloat(reltime()) + 10.0
+while len(g:orna_workspace_hierarchy_responses) < 15 && reltimefloat(reltime()) < s:deadline
+    sleep 10m
+endwhile
+call assert_equal(15, len(g:orna_workspace_hierarchy_responses), 'vim-lsp workspace-symbol/call-hierarchy requests timed out')
 call writefile([json_encode({{
     \ 'omnifunc': &l:omnifunc,
     \ 'completion': s:response['result'],
@@ -298,6 +478,29 @@ call writefile([json_encode({{
     \ 'depth_hints_inferred': g:orna_depth_responses.hints_inferred,
     \ 'depth_hints_annotated': g:orna_depth_responses.hints_annotated,
     \ 'depth_hints_shadowed': g:orna_depth_responses.hints_shadowed,
+    \ 'signature_nested_tuple': g:orna_depth_responses.signature_nested_tuple,
+    \ 'signature_named_argument': g:orna_depth_responses.signature_named_argument,
+    \ 'signature_nested_named_argument': g:orna_depth_responses.signature_nested_named_argument,
+    \ 'signature_shadowed_call': g:orna_depth_responses.signature_shadowed_call,
+    \ 'code_action_quickfix': g:orna_depth_responses.code_action_quickfix,
+    \ 'code_action_wrong_kind': g:orna_depth_responses.code_action_wrong_kind,
+    \ 'code_action_outside_range': g:orna_depth_responses.code_action_outside_range,
+    \ 'action_uri': s:action_uri,
+    \ 'workspace_mid': g:orna_workspace_hierarchy_responses.workspace_mid,
+    \ 'workspace_mid_repeat': g:orna_workspace_hierarchy_responses.workspace_mid_repeat,
+    \ 'workspace_rem': g:orna_workspace_hierarchy_responses.workspace_rem,
+    \ 'workspace_remi': g:orna_workspace_hierarchy_responses.workspace_remi,
+    \ 'call_root_item': g:orna_workspace_hierarchy_responses.call_root_item,
+    \ 'call_root_outgoing': g:orna_workspace_hierarchy_responses.call_root_outgoing,
+    \ 'call_root_incoming': g:orna_workspace_hierarchy_responses.call_root_incoming,
+    \ 'call_seed_item': g:orna_workspace_hierarchy_responses.call_seed_item,
+    \ 'call_seed_incoming': g:orna_workspace_hierarchy_responses.call_seed_incoming,
+    \ 'call_shadowed_outgoing': g:orna_workspace_hierarchy_responses.call_shadowed_outgoing,
+    \ 'call_unresolved_outgoing': g:orna_workspace_hierarchy_responses.call_unresolved_outgoing,
+    \ 'call_root_reference': g:orna_workspace_hierarchy_responses.call_root_reference,
+    \ 'call_ambiguous_reference': g:orna_workspace_hierarchy_responses.call_ambiguous_reference,
+    \ 'workspace_provider_uri': s:workspace_provider_document['uri'],
+    \ 'workspace_caller_uri': s:workspace_caller_document['uri'],
     \ 'consumer_uri': s:consumer_document['uri'],
     \ 'provider_uri': s:provider_document['uri'],
     \ 'references': s:references,
@@ -324,9 +527,21 @@ qa!
         .env("ORNA_TEST_PROVIDER", &provider)
         .env("ORNA_TEST_SEMANTIC_FIXTURE", &semantic_fixture)
         .env("ORNA_TEST_DEPTH_FIXTURE", &depth_fixture)
+        .env("ORNA_TEST_SIGNATURE_FIXTURE", &signature_fixture)
+        .env("ORNA_TEST_ACTION_FIXTURE", &action_fixture)
+        .env("ORNA_WORKSPACE_PROVIDER_FIXTURE", &workspace_provider)
+        .env("ORNA_WORKSPACE_CALLER_FIXTURE", &workspace_caller)
         .env(
             "ORNA_DEPTH_RANGES",
             serde_json::to_string(&depth_ranges).unwrap(),
+        )
+        .env(
+            "ORNA_ACTION_SIGNATURE_REQUESTS",
+            serde_json::to_string(&action_signature_requests).unwrap(),
+        )
+        .env(
+            "ORNA_WORKSPACE_HIERARCHY_REQUESTS",
+            serde_json::to_string(&workspace_hierarchy_requests).unwrap(),
         )
         .env("ORNA_EDITOR_RESULT", &result_path)
         .output()
@@ -381,6 +596,35 @@ qa!
         &evidence["depth_hints_shadowed"],
         "Vim vim-lsp",
     );
+    syntax_v1_action_signature_contract::assert_signature_help_contract(
+        &evidence["signature_nested_tuple"],
+        &evidence["signature_named_argument"],
+        &evidence["signature_nested_named_argument"],
+        &evidence["signature_shadowed_call"],
+        "Vim vim-lsp",
+    );
+    syntax_v1_action_signature_contract::assert_code_action_contract(
+        ACTION_SOURCE,
+        evidence["action_uri"]
+            .as_str()
+            .expect("Vim action document URI"),
+        &evidence["code_action_quickfix"],
+        &evidence["code_action_wrong_kind"],
+        &evidence["code_action_outside_range"],
+        "Vim vim-lsp",
+    );
+    syntax_v1_workspace_hierarchy_contract::assert_contract(
+        WORKSPACE_HIERARCHY_PROVIDER_SOURCE,
+        WORKSPACE_HIERARCHY_CALLER_SOURCE,
+        evidence["workspace_provider_uri"]
+            .as_str()
+            .expect("Vim workspace provider URI"),
+        evidence["workspace_caller_uri"]
+            .as_str()
+            .expect("Vim workspace caller URI"),
+        &evidence,
+        "Vim vim-lsp",
+    );
     let consumer_uri = evidence["consumer_uri"]
         .as_str()
         .expect("Vim consumer document URI");
@@ -407,7 +651,7 @@ qa!
         "Vim vim-lsp",
     );
     println!(
-        "Vim integration evidence: ATTACHED=pass DEPENDENCY_ORDER=consumer-before-provider OMNIFUNC=pass COMPLETION=pass HOVER=pass REFERENCES=pass RENAME=pass SEMANTIC_TOKENS=pass SEMANTIC_DEPTH=pass RANGED_TOKENS=pass INLAY_HINT_DEPTH=pass"
+        "Vim integration evidence: ATTACHED=pass DEPENDENCY_ORDER=consumer-before-provider OMNIFUNC=pass COMPLETION=pass HOVER=pass REFERENCES=pass RENAME=pass SEMANTIC_TOKENS=pass SEMANTIC_DEPTH=pass RANGED_TOKENS=pass INLAY_HINT_DEPTH=pass SIGNATURE_HELP=pass CODE_ACTION=pass WORKSPACE_SYMBOL=pass CALL_HIERARCHY=pass"
     );
 }
 

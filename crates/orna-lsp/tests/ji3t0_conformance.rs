@@ -17,11 +17,21 @@ const SOURCE: &str = include_str!("fixtures/ji3t0-lsp-v1-self-contained.orna");
 mod completion_contract;
 #[path = "support/hover_semantic_contract.rs"]
 mod hover_semantic_contract;
+#[path = "support/syntax_v1_action_signature_contract.rs"]
+mod syntax_v1_action_signature_contract;
 #[path = "support/syntax_v1_depth_contract.rs"]
 mod syntax_v1_depth_contract;
+#[path = "support/syntax_v1_workspace_hierarchy_contract.rs"]
+mod syntax_v1_workspace_hierarchy_contract;
 
 const SEMANTIC_SOURCE: &str = include_str!("fixtures/editor-semantic-tokens.orna");
 const HINTS_SOURCE: &str = include_str!("fixtures/editor-lsp-hints.orna");
+const SIGNATURE_SOURCE: &str = include_str!("fixtures/signature-actions-v1.orna");
+const ACTION_SOURCE: &str = include_str!("fixtures/missing-semicolon-code-action-v1.orna");
+const WORKSPACE_HIERARCHY_PROVIDER_SOURCE: &str =
+    include_str!("fixtures/workspace-hierarchy-provider-v1.orna");
+const WORKSPACE_HIERARCHY_CALLER_SOURCE: &str =
+    include_str!("fixtures/workspace-hierarchy-caller-v1.orna");
 const INVALID_SOURCE: &str = include_str!("fixtures/ji3t0-invalid-v1.orna");
 
 const LEGACY_SYNTAX_WORDS: &[&str] = &[
@@ -563,6 +573,26 @@ fn neovim_loads_generated_v1_syntax_and_queries_the_lsp_server() {
     let semantic_fixture = temporary_fixture(SEMANTIC_SOURCE);
     let hints_fixture = temporary_fixture(HINTS_SOURCE);
     let depth_ranges = syntax_v1_depth_contract::request_ranges(HINTS_SOURCE);
+    let signature_fixture = temporary_fixture(SIGNATURE_SOURCE);
+    let action_fixture = temporary_fixture(ACTION_SOURCE);
+    let action_signature_requests =
+        syntax_v1_action_signature_contract::request_data(SIGNATURE_SOURCE, ACTION_SOURCE);
+    let workspace_provider_fixture =
+        root.join("crates/orna-lsp/tests/fixtures/workspace-hierarchy-provider-v1.orna");
+    let workspace_caller_fixture =
+        root.join("crates/orna-lsp/tests/fixtures/workspace-hierarchy-caller-v1.orna");
+    assert_eq!(
+        fs::read_to_string(&workspace_provider_fixture).unwrap(),
+        WORKSPACE_HIERARCHY_PROVIDER_SOURCE
+    );
+    assert_eq!(
+        fs::read_to_string(&workspace_caller_fixture).unwrap(),
+        WORKSPACE_HIERARCHY_CALLER_SOURCE
+    );
+    let workspace_hierarchy_requests = syntax_v1_workspace_hierarchy_contract::request_data(
+        WORKSPACE_HIERARCHY_PROVIDER_SOURCE,
+        WORKSPACE_HIERARCHY_CALLER_SOURCE,
+    );
     let script = temporary_path("lua");
     let result_path = temporary_path("result");
     let completion_result_path = temporary_path("completion.json");
@@ -793,6 +823,120 @@ local depth_hints_call = request_hints("hints_call")
 local depth_hints_inferred = request_hints("hints_inferred")
 local depth_hints_annotated = request_hints("hints_annotated")
 local depth_hints_shadowed = request_hints("hints_shadowed")
+
+vim.cmd("edit " .. vim.fn.fnameescape(vim.env.ORNA_SIGNATURE_FIXTURE))
+local signature_bufnr = vim.api.nvim_get_current_buf()
+assert(vim.bo[signature_bufnr].filetype == "orna", "signature fixture did not select the orna filetype")
+assert(vim.wait(5000, function()
+  for _, attached in ipairs(vim.lsp.get_clients({ bufnr = signature_bufnr })) do
+    if attached.name == "orna" and attached.initialized then
+      client = attached
+      return true
+    end
+  end
+  return false
+end, 10), "signature fixture did not attach to orna-lsp")
+local signature_uri = vim.uri_from_bufnr(signature_bufnr)
+local action_signature_requests = vim.fn.json_decode(vim.env.ORNA_ACTION_SIGNATURE_REQUESTS)
+local function request_signature(request_name)
+  local response, request_error = client:request_sync("textDocument/signatureHelp", {
+    textDocument = { uri = signature_uri },
+    position = action_signature_requests[request_name],
+  }, 5000, signature_bufnr)
+  assert(response ~= nil and response.err == nil, "Neovim " .. request_name .. " signature request failed: " .. vim.inspect(request_error or response))
+  return response.result
+end
+local signature_nested_tuple = request_signature("signature_nested_tuple")
+local signature_named_argument = request_signature("signature_named_argument")
+local signature_nested_named_argument = request_signature("signature_nested_named_argument")
+local signature_shadowed_call = request_signature("signature_shadowed_call")
+
+vim.cmd("edit " .. vim.fn.fnameescape(vim.env.ORNA_ACTION_FIXTURE))
+local action_bufnr = vim.api.nvim_get_current_buf()
+assert(vim.bo[action_bufnr].filetype == "orna", "code-action fixture did not select the orna filetype")
+assert(vim.wait(5000, function()
+  for _, attached in ipairs(vim.lsp.get_clients({ bufnr = action_bufnr })) do
+    if attached.name == "orna" and attached.initialized then
+      client = attached
+      return true
+    end
+  end
+  return false
+end, 10), "code-action fixture did not attach to orna-lsp")
+local action_uri = vim.uri_from_bufnr(action_bufnr)
+local function request_action(range_name, only_kind)
+  local response, request_error = client:request_sync("textDocument/codeAction", {
+    textDocument = { uri = action_uri },
+    range = action_signature_requests[range_name],
+    context = { diagnostics = {}, only = { only_kind } },
+  }, 5000, action_bufnr)
+  assert(response ~= nil and response.err == nil, "Neovim code-action request failed: " .. vim.inspect(request_error or response))
+  return response.result
+end
+local code_action_quickfix = request_action("code_action_full_range", "quickfix")
+local code_action_wrong_kind = request_action("code_action_full_range", "refactor")
+local code_action_outside_range = request_action("code_action_outside_range", "quickfix")
+
+local workspace_hierarchy_requests = vim.fn.json_decode(vim.env.ORNA_WORKSPACE_HIERARCHY_REQUESTS)
+local workspace_provider_fixture = vim.env.ORNA_WORKSPACE_PROVIDER_FIXTURE
+vim.cmd("edit " .. vim.fn.fnameescape(workspace_provider_fixture))
+local workspace_provider_bufnr = vim.api.nvim_get_current_buf()
+assert(vim.bo[workspace_provider_bufnr].filetype == "orna", "workspace provider fixture did not select the orna filetype")
+assert(vim.wait(5000, function()
+  for _, attached in ipairs(vim.lsp.get_clients({ bufnr = workspace_provider_bufnr })) do
+    if attached.name == "orna" and attached.initialized then client = attached; return true end
+  end
+  return false
+end, 10), "workspace provider fixture did not attach to orna-lsp")
+local workspace_provider_uri = vim.uri_from_bufnr(workspace_provider_bufnr)
+vim.cmd("edit " .. vim.fn.fnameescape(vim.env.ORNA_WORKSPACE_CALLER_FIXTURE))
+local workspace_caller_bufnr = vim.api.nvim_get_current_buf()
+assert(vim.bo[workspace_caller_bufnr].filetype == "orna", "workspace caller fixture did not select the orna filetype")
+assert(vim.wait(5000, function()
+  for _, attached in ipairs(vim.lsp.get_clients({ bufnr = workspace_caller_bufnr })) do
+    if attached.name == "orna" and attached.initialized then client = attached; return true end
+  end
+  return false
+end, 10), "workspace caller fixture did not attach to orna-lsp")
+local workspace_caller_uri = vim.uri_from_bufnr(workspace_caller_bufnr)
+local function hierarchy_request(method, params, bufnr)
+  local response, request_error = client:request_sync(method, params, 5000, bufnr)
+  assert(response ~= nil and response.err == nil, "Neovim " .. method .. " request failed: " .. vim.inspect(request_error or response))
+  return response.result
+end
+local workspace_mid = hierarchy_request("workspace/symbol", { query = "mid" }, workspace_caller_bufnr)
+local workspace_mid_repeat = hierarchy_request("workspace/symbol", { query = "mid" }, workspace_caller_bufnr)
+local workspace_rem = hierarchy_request("workspace/symbol", { query = "rem" }, workspace_caller_bufnr)
+local workspace_remi = hierarchy_request("workspace/symbol", { query = "remi" }, workspace_caller_bufnr)
+local call_root_item = hierarchy_request("textDocument/prepareCallHierarchy", {
+  textDocument = { uri = workspace_provider_uri },
+  position = workspace_hierarchy_requests.root_definition,
+}, workspace_provider_bufnr)
+local call_root_outgoing = hierarchy_request("callHierarchy/outgoingCalls", { item = call_root_item[1] }, workspace_provider_bufnr)
+local call_root_incoming = hierarchy_request("callHierarchy/incomingCalls", { item = call_root_item[1] }, workspace_provider_bufnr)
+local call_seed_item = hierarchy_request("textDocument/prepareCallHierarchy", {
+  textDocument = { uri = workspace_provider_uri },
+  position = workspace_hierarchy_requests.seed_definition,
+}, workspace_provider_bufnr)
+local call_seed_incoming = hierarchy_request("callHierarchy/incomingCalls", { item = call_seed_item[1] }, workspace_provider_bufnr)
+local call_shadowed_item = hierarchy_request("textDocument/prepareCallHierarchy", {
+  textDocument = { uri = workspace_provider_uri },
+  position = workspace_hierarchy_requests.shadowed_definition,
+}, workspace_provider_bufnr)
+local call_shadowed_outgoing = hierarchy_request("callHierarchy/outgoingCalls", { item = call_shadowed_item[1] }, workspace_provider_bufnr)
+local call_unresolved_item = hierarchy_request("textDocument/prepareCallHierarchy", {
+  textDocument = { uri = workspace_provider_uri },
+  position = workspace_hierarchy_requests.unresolved_definition,
+}, workspace_provider_bufnr)
+local call_unresolved_outgoing = hierarchy_request("callHierarchy/outgoingCalls", { item = call_unresolved_item[1] }, workspace_provider_bufnr)
+local call_root_reference = hierarchy_request("textDocument/prepareCallHierarchy", {
+  textDocument = { uri = workspace_caller_uri },
+  position = workspace_hierarchy_requests.root_reference,
+}, workspace_caller_bufnr)
+local call_ambiguous_reference = hierarchy_request("textDocument/prepareCallHierarchy", {
+  textDocument = { uri = workspace_caller_uri },
+  position = workspace_hierarchy_requests.ambiguous_reference,
+}, workspace_caller_bufnr)
 vim.fn.writefile({ vim.fn.json_encode({
   uri = uri,
   hover = hover_result,
@@ -805,6 +949,29 @@ vim.fn.writefile({ vim.fn.json_encode({
   depth_hints_inferred = depth_hints_inferred,
   depth_hints_annotated = depth_hints_annotated,
   depth_hints_shadowed = depth_hints_shadowed,
+  signature_nested_tuple = signature_nested_tuple,
+  signature_named_argument = signature_named_argument,
+  signature_nested_named_argument = signature_nested_named_argument,
+  signature_shadowed_call = signature_shadowed_call,
+  code_action_quickfix = code_action_quickfix,
+  code_action_wrong_kind = code_action_wrong_kind,
+  code_action_outside_range = code_action_outside_range,
+  action_uri = action_uri,
+  workspace_mid = workspace_mid,
+  workspace_mid_repeat = workspace_mid_repeat,
+  workspace_rem = workspace_rem,
+  workspace_remi = workspace_remi,
+  call_root_item = call_root_item,
+  call_root_outgoing = call_root_outgoing,
+  call_root_incoming = call_root_incoming,
+  call_seed_item = call_seed_item,
+  call_seed_incoming = call_seed_incoming,
+  call_shadowed_outgoing = call_shadowed_outgoing,
+  call_unresolved_outgoing = call_unresolved_outgoing,
+  call_root_reference = call_root_reference,
+  call_ambiguous_reference = call_ambiguous_reference,
+  workspace_provider_uri = workspace_provider_uri,
+  workspace_caller_uri = workspace_caller_uri,
   references = references.result,
   references_without_declaration = references_without_declaration.result,
   rename = renamed.result,
@@ -823,6 +990,10 @@ vim.fn.writefile({
   "LSP_RENAME=pass",
   "LSP_SEMANTIC_PUB=pass",
   "LSP_SEMANTIC_CLASSES=pass",
+  "LSP_SIGNATURE_HELP=pass",
+  "LSP_CODE_ACTION=pass",
+  "LSP_WORKSPACE_SYMBOL=pass",
+  "LSP_CALL_HIERARCHY=pass",
 }, vim.env.ORNA_EDITOR_RESULT)
 client:stop(true)
 vim.cmd("qa!")
@@ -846,9 +1017,24 @@ vim.cmd("qa!")
         .env("ORNA_TEST_FIXTURE", &fixture)
         .env("ORNA_SEMANTIC_FIXTURE", &semantic_fixture)
         .env("ORNA_HINTS_FIXTURE", &hints_fixture)
+        .env("ORNA_SIGNATURE_FIXTURE", &signature_fixture)
+        .env("ORNA_ACTION_FIXTURE", &action_fixture)
+        .env(
+            "ORNA_WORKSPACE_PROVIDER_FIXTURE",
+            &workspace_provider_fixture,
+        )
+        .env("ORNA_WORKSPACE_CALLER_FIXTURE", &workspace_caller_fixture)
         .env(
             "ORNA_DEPTH_RANGES",
             serde_json::to_string(&depth_ranges).unwrap(),
+        )
+        .env(
+            "ORNA_ACTION_SIGNATURE_REQUESTS",
+            serde_json::to_string(&action_signature_requests).unwrap(),
+        )
+        .env(
+            "ORNA_WORKSPACE_HIERARCHY_REQUESTS",
+            serde_json::to_string(&workspace_hierarchy_requests).unwrap(),
         )
         .env("ORNA_LSP_BIN", env!("CARGO_BIN_EXE_orna-lsp"))
         .env("ORNA_PROJECT_ROOT", root)
@@ -890,6 +1076,8 @@ vim.cmd("qa!")
     let _ = fs::remove_file(fixture);
     let _ = fs::remove_file(semantic_fixture);
     let _ = fs::remove_file(hints_fixture);
+    let _ = fs::remove_file(signature_fixture);
+    let _ = fs::remove_file(action_fixture);
     let _ = fs::remove_file(script);
     let _ = fs::remove_file(result_path);
     let _ = fs::remove_file(&completion_result_path);
@@ -941,6 +1129,35 @@ vim.cmd("qa!")
         &hover_semantic_result["depth_hints_shadowed"],
         "Neovim",
     );
+    syntax_v1_action_signature_contract::assert_signature_help_contract(
+        &hover_semantic_result["signature_nested_tuple"],
+        &hover_semantic_result["signature_named_argument"],
+        &hover_semantic_result["signature_nested_named_argument"],
+        &hover_semantic_result["signature_shadowed_call"],
+        "Neovim",
+    );
+    syntax_v1_action_signature_contract::assert_code_action_contract(
+        ACTION_SOURCE,
+        hover_semantic_result["action_uri"]
+            .as_str()
+            .expect("Neovim code-action document URI"),
+        &hover_semantic_result["code_action_quickfix"],
+        &hover_semantic_result["code_action_wrong_kind"],
+        &hover_semantic_result["code_action_outside_range"],
+        "Neovim",
+    );
+    syntax_v1_workspace_hierarchy_contract::assert_contract(
+        WORKSPACE_HIERARCHY_PROVIDER_SOURCE,
+        WORKSPACE_HIERARCHY_CALLER_SOURCE,
+        hover_semantic_result["workspace_provider_uri"]
+            .as_str()
+            .expect("Neovim workspace provider URI"),
+        hover_semantic_result["workspace_caller_uri"]
+            .as_str()
+            .expect("Neovim workspace caller URI"),
+        &hover_semantic_result,
+        "Neovim",
+    );
     let attached_uri = hover_semantic_result["uri"]
         .as_str()
         .expect("Neovim attached document URI");
@@ -978,6 +1195,10 @@ vim.cmd("qa!")
             "LSP_RENAME=pass",
             "LSP_SEMANTIC_PUB=pass",
             "LSP_SEMANTIC_CLASSES=pass",
+            "LSP_SIGNATURE_HELP=pass",
+            "LSP_CODE_ACTION=pass",
+            "LSP_WORKSPACE_SYMBOL=pass",
+            "LSP_CALL_HIERARCHY=pass",
         ]
     );
 }
@@ -1032,6 +1253,13 @@ fn emacs_eglot_attaches_and_proves_hover_rename_references_and_semantic_tokens()
         root.join("crates/orna-lsp/tests/fixtures/ji3t0-lsp-v1-self-contained.orna");
     let semantic_fixture = root.join("crates/orna-lsp/tests/fixtures/editor-semantic-tokens.orna");
     let hints_fixture = root.join("crates/orna-lsp/tests/fixtures/editor-lsp-hints.orna");
+    let signature_fixture = root.join("crates/orna-lsp/tests/fixtures/signature-actions-v1.orna");
+    let action_fixture =
+        root.join("crates/orna-lsp/tests/fixtures/missing-semicolon-code-action-v1.orna");
+    let workspace_provider_fixture =
+        root.join("crates/orna-lsp/tests/fixtures/workspace-hierarchy-provider-v1.orna");
+    let workspace_caller_fixture =
+        root.join("crates/orna-lsp/tests/fixtures/workspace-hierarchy-caller-v1.orna");
     assert_eq!(fs::read_to_string(&hover_fixture).unwrap(), SOURCE);
     assert_eq!(
         fs::read_to_string(&semantic_fixture).unwrap(),
@@ -1039,6 +1267,25 @@ fn emacs_eglot_attaches_and_proves_hover_rename_references_and_semantic_tokens()
     );
     assert_eq!(fs::read_to_string(&hints_fixture).unwrap(), HINTS_SOURCE);
     let depth_ranges = syntax_v1_depth_contract::request_ranges(HINTS_SOURCE);
+    assert_eq!(
+        fs::read_to_string(&signature_fixture).unwrap(),
+        SIGNATURE_SOURCE
+    );
+    assert_eq!(fs::read_to_string(&action_fixture).unwrap(), ACTION_SOURCE);
+    let action_signature_requests =
+        syntax_v1_action_signature_contract::request_data(SIGNATURE_SOURCE, ACTION_SOURCE);
+    assert_eq!(
+        fs::read_to_string(&workspace_provider_fixture).unwrap(),
+        WORKSPACE_HIERARCHY_PROVIDER_SOURCE
+    );
+    assert_eq!(
+        fs::read_to_string(&workspace_caller_fixture).unwrap(),
+        WORKSPACE_HIERARCHY_CALLER_SOURCE
+    );
+    let workspace_hierarchy_requests = syntax_v1_workspace_hierarchy_contract::request_data(
+        WORKSPACE_HIERARCHY_PROVIDER_SOURCE,
+        WORKSPACE_HIERARCHY_CALLER_SOURCE,
+    );
     let script = temporary_path("el");
     let hover_semantic_result_path = temporary_path("hover-semantic.json");
     let plugin = root.join("editors/emacs/orna-eglot.el");
@@ -1095,6 +1342,28 @@ fn emacs_eglot_attaches_and_proves_hover_rename_references_and_semantic_tokens()
                        :character (gethash "character" start))
           :end (list :line (gethash "line" end)
                      :character (gethash "character" end)))))
+(defun orna-test-action-signature-value (name)
+  (gethash name
+           (json-parse-string (getenv "ORNA_ACTION_SIGNATURE_REQUESTS")
+                              :object-type 'hash-table)))
+(defun orna-test-action-signature-position (name)
+  (let ((position (orna-test-action-signature-value name)))
+    (list :line (gethash "line" position)
+          :character (gethash "character" position))))
+(defun orna-test-action-signature-range (name)
+  (let* ((range (orna-test-action-signature-value name))
+         (start (gethash "start" range))
+         (end (gethash "end" range)))
+    (list :start (list :line (gethash "line" start)
+                       :character (gethash "character" start))
+          :end (list :line (gethash "line" end)
+                     :character (gethash "character" end)))))
+(defun orna-test-workspace-hierarchy-position (name)
+  (let* ((requests (json-parse-string (getenv "ORNA_WORKSPACE_HIERARCHY_REQUESTS")
+                                      :object-type 'hash-table))
+         (position (gethash name requests)))
+    (list :line (gethash "line" position)
+          :character (gethash "character" position))))
 (defun orna-test-location-key (location)
   (let* ((range (orna-test-get location "range"))
          (start (orna-test-get range "start")))
@@ -1103,6 +1372,10 @@ fn emacs_eglot_attaches_and_proves_hover_rename_references_and_semantic_tokens()
 (let ((hover-buffer (find-file-noselect {}))
       (semantic-buffer nil)
       (depth-buffer nil)
+      (signature-buffer nil)
+      (action-buffer nil)
+      (workspace-provider-buffer nil)
+      (workspace-caller-buffer nil)
       (hover-response nil)
       (semantic-response nil)
       (depth-semantic-response nil)
@@ -1112,6 +1385,18 @@ fn emacs_eglot_attaches_and_proves_hover_rename_references_and_semantic_tokens()
       (depth-hints-inferred nil)
       (depth-hints-annotated nil)
       (depth-hints-shadowed nil)
+      (signature-nested-tuple nil)
+      (signature-named-argument nil)
+      (signature-nested-named-argument nil)
+      (signature-shadowed-call nil)
+      (code-action-quickfix nil)
+      (code-action-wrong-kind nil)
+      (code-action-outside-range nil)
+      (action-uri nil)
+      (workspace-provider-uri nil)
+      (workspace-caller-uri nil)
+      (workspace-server nil)
+      (workspace-evidence (make-hash-table :test 'equal))
       (references-response nil)
       (references-without-declaration-response nil)
       (rename-response nil)
@@ -1265,6 +1550,155 @@ fn emacs_eglot_attaches_and_proves_hover_rename_references_and_semantic_tokens()
                                          :range (orna-test-depth-range "hints_shadowed"))))
             (unless (stringp uri)
               (error "Eglot did not provide a URI for the depth fixture: %S" params))))
+        (setq signature-buffer (find-file-noselect {}))
+        (with-current-buffer signature-buffer
+          (orna-test-wait-managed signature-buffer)
+          (let* ((server (eglot-current-server))
+                 (params (eglot--TextDocumentPositionParams))
+                 (uri (orna-test-get (orna-test-get params "textDocument") "uri")))
+            (setq signature-nested-tuple
+                  (jsonrpc-request
+                   server :textDocument/signatureHelp
+                   (list :textDocument (list :uri uri)
+                         :position (orna-test-action-signature-position "signature_nested_tuple"))))
+            (setq signature-named-argument
+                  (jsonrpc-request
+                   server :textDocument/signatureHelp
+                   (list :textDocument (list :uri uri)
+                         :position (orna-test-action-signature-position "signature_named_argument"))))
+            (setq signature-nested-named-argument
+                  (jsonrpc-request
+                   server :textDocument/signatureHelp
+                   (list :textDocument (list :uri uri)
+                         :position (orna-test-action-signature-position "signature_nested_named_argument"))))
+            (setq signature-shadowed-call
+                  (jsonrpc-request
+                   server :textDocument/signatureHelp
+                   (list :textDocument (list :uri uri)
+                         :position (orna-test-action-signature-position "signature_shadowed_call"))))
+            (unless (stringp uri)
+              (error "Eglot did not provide a URI for the signature fixture: %S" params))))
+        (setq action-buffer (find-file-noselect {}))
+        (with-current-buffer action-buffer
+          (orna-test-wait-managed action-buffer)
+          (let* ((server (eglot-current-server))
+                 (params (eglot--TextDocumentPositionParams))
+                 (uri (orna-test-get (orna-test-get params "textDocument") "uri")))
+            (setq action-uri uri)
+            (setq code-action-quickfix
+                  (jsonrpc-request
+                   server :textDocument/codeAction
+                   (list :textDocument (list :uri uri)
+                         :range (orna-test-action-signature-range "code_action_full_range")
+                         :context (list :diagnostics [] :only ["quickfix"]))))
+            (setq code-action-wrong-kind
+                  (jsonrpc-request
+                   server :textDocument/codeAction
+                   (list :textDocument (list :uri uri)
+                         :range (orna-test-action-signature-range "code_action_full_range")
+                         :context (list :diagnostics [] :only ["refactor"]))))
+            (setq code-action-outside-range
+                  (jsonrpc-request
+                   server :textDocument/codeAction
+                   (list :textDocument (list :uri uri)
+                         :range (orna-test-action-signature-range "code_action_outside_range")
+                         :context (list :diagnostics [] :only ["quickfix"]))))
+            (unless (stringp uri)
+              (error "Eglot did not provide a URI for the code-action fixture: %S" params))))
+        (princ "EMACS_LSP_SIGNATURE_HELP=pass\n")
+        (princ "EMACS_LSP_CODE_ACTION=pass\n")
+        (setq workspace-provider-buffer
+              (find-file-noselect (getenv "ORNA_WORKSPACE_PROVIDER_FIXTURE")))
+        (with-current-buffer workspace-provider-buffer
+          (orna-test-wait-managed workspace-provider-buffer)
+          (let* ((params (eglot--TextDocumentPositionParams))
+                 (uri (orna-test-get (orna-test-get params "textDocument") "uri")))
+            (unless (stringp uri)
+              (error "Eglot did not provide a URI for the workspace provider: %S" params))
+            (setq workspace-provider-uri uri
+                  workspace-server (eglot-current-server))))
+        (setq workspace-caller-buffer
+              (find-file-noselect (getenv "ORNA_WORKSPACE_CALLER_FIXTURE")))
+        (with-current-buffer workspace-caller-buffer
+          (orna-test-wait-managed workspace-caller-buffer)
+          (let* ((params (eglot--TextDocumentPositionParams))
+                 (uri (orna-test-get (orna-test-get params "textDocument") "uri")))
+            (unless (stringp uri)
+              (error "Eglot did not provide a URI for the workspace caller: %S" params))
+            (setq workspace-caller-uri uri
+                  workspace-server (eglot-current-server))))
+        (puthash "workspace_mid"
+                 (jsonrpc-request workspace-server :workspace/symbol (list :query "mid"))
+                 workspace-evidence)
+        (puthash "workspace_mid_repeat"
+                 (jsonrpc-request workspace-server :workspace/symbol (list :query "mid"))
+                 workspace-evidence)
+        (puthash "workspace_rem"
+                 (jsonrpc-request workspace-server :workspace/symbol (list :query "rem"))
+                 workspace-evidence)
+        (puthash "workspace_remi"
+                 (jsonrpc-request workspace-server :workspace/symbol (list :query "remi"))
+                 workspace-evidence)
+        (let* ((root-item-response
+                (jsonrpc-request
+                 workspace-server :textDocument/prepareCallHierarchy
+                 (list :textDocument (list :uri workspace-provider-uri)
+                       :position (orna-test-workspace-hierarchy-position "root_definition"))))
+               (root-item (car (orna-test-list root-item-response))))
+          (puthash "call_root_item" root-item-response workspace-evidence)
+          (puthash "call_root_outgoing"
+                   (jsonrpc-request workspace-server :callHierarchy/outgoingCalls
+                                    (list :item root-item))
+                   workspace-evidence)
+          (puthash "call_root_incoming"
+                   (jsonrpc-request workspace-server :callHierarchy/incomingCalls
+                                    (list :item root-item))
+                   workspace-evidence))
+        (let* ((seed-item-response
+                (jsonrpc-request
+                 workspace-server :textDocument/prepareCallHierarchy
+                 (list :textDocument (list :uri workspace-provider-uri)
+                       :position (orna-test-workspace-hierarchy-position "seed_definition"))))
+               (seed-item (car (orna-test-list seed-item-response))))
+          (puthash "call_seed_item" seed-item-response workspace-evidence)
+          (puthash "call_seed_incoming"
+                   (jsonrpc-request workspace-server :callHierarchy/incomingCalls
+                                    (list :item seed-item))
+                   workspace-evidence))
+        (let* ((shadowed-item-response
+                (jsonrpc-request
+                 workspace-server :textDocument/prepareCallHierarchy
+                 (list :textDocument (list :uri workspace-provider-uri)
+                       :position (orna-test-workspace-hierarchy-position "shadowed_definition"))))
+               (shadowed-item (car (orna-test-list shadowed-item-response))))
+          (puthash "call_shadowed_outgoing"
+                   (jsonrpc-request workspace-server :callHierarchy/outgoingCalls
+                                    (list :item shadowed-item))
+                   workspace-evidence))
+        (let* ((unresolved-item-response
+                (jsonrpc-request
+                 workspace-server :textDocument/prepareCallHierarchy
+                 (list :textDocument (list :uri workspace-provider-uri)
+                       :position (orna-test-workspace-hierarchy-position "unresolved_definition"))))
+               (unresolved-item (car (orna-test-list unresolved-item-response))))
+          (puthash "call_unresolved_outgoing"
+                   (jsonrpc-request workspace-server :callHierarchy/outgoingCalls
+                                    (list :item unresolved-item))
+                   workspace-evidence))
+        (puthash "call_root_reference"
+                 (jsonrpc-request
+                  workspace-server :textDocument/prepareCallHierarchy
+                  (list :textDocument (list :uri workspace-caller-uri)
+                        :position (orna-test-workspace-hierarchy-position "root_reference")))
+                 workspace-evidence)
+        (puthash "call_ambiguous_reference"
+                 (jsonrpc-request
+                  workspace-server :textDocument/prepareCallHierarchy
+                  (list :textDocument (list :uri workspace-caller-uri)
+                        :position (orna-test-workspace-hierarchy-position "ambiguous_reference")))
+                 workspace-evidence)
+        (princ "EMACS_LSP_WORKSPACE_SYMBOL=pass\n")
+        (princ "EMACS_LSP_CALL_HIERARCHY=pass\n")
         (let ((evidence (make-hash-table :test 'equal)))
           (puthash "uri" attached-uri evidence)
           (puthash "hover" hover-response evidence)
@@ -1276,6 +1710,17 @@ fn emacs_eglot_attaches_and_proves_hover_rename_references_and_semantic_tokens()
           (puthash "depth_hints_inferred" depth-hints-inferred evidence)
           (puthash "depth_hints_annotated" depth-hints-annotated evidence)
           (puthash "depth_hints_shadowed" depth-hints-shadowed evidence)
+          (puthash "signature_nested_tuple" signature-nested-tuple evidence)
+          (puthash "signature_named_argument" signature-named-argument evidence)
+          (puthash "signature_nested_named_argument" signature-nested-named-argument evidence)
+          (puthash "signature_shadowed_call" signature-shadowed-call evidence)
+          (puthash "code_action_quickfix" code-action-quickfix evidence)
+          (puthash "code_action_wrong_kind" code-action-wrong-kind evidence)
+          (puthash "code_action_outside_range" code-action-outside-range evidence)
+          (puthash "action_uri" action-uri evidence)
+          (puthash "workspace_provider_uri" workspace-provider-uri evidence)
+          (puthash "workspace_caller_uri" workspace-caller-uri evidence)
+          (maphash (lambda (key value) (puthash key value evidence)) workspace-evidence)
           (puthash "references" references-response evidence)
           (puthash "references_without_declaration"
                    references-without-declaration-response evidence)
@@ -1284,13 +1729,19 @@ fn emacs_eglot_attaches_and_proves_hover_rename_references_and_semantic_tokens()
             (insert (json-encode evidence)))))
     (when (buffer-live-p hover-buffer) (kill-buffer hover-buffer))
     (when (buffer-live-p semantic-buffer) (kill-buffer semantic-buffer))
-    (when (buffer-live-p depth-buffer) (kill-buffer depth-buffer))))
+    (when (buffer-live-p depth-buffer) (kill-buffer depth-buffer))
+    (when (buffer-live-p signature-buffer) (kill-buffer signature-buffer))
+    (when (buffer-live-p action-buffer) (kill-buffer action-buffer))
+    (when (buffer-live-p workspace-provider-buffer) (kill-buffer workspace-provider-buffer))
+    (when (buffer-live-p workspace-caller-buffer) (kill-buffer workspace-caller-buffer))))
 "#,
         elisp_string(&plugin.display().to_string()),
         elisp_string(env!("CARGO_BIN_EXE_orna-lsp")),
         elisp_string(&hover_fixture.display().to_string()),
         elisp_string(&semantic_fixture.display().to_string()),
         elisp_string(&hints_fixture.display().to_string()),
+        elisp_string(&signature_fixture.display().to_string()),
+        elisp_string(&action_fixture.display().to_string()),
     );
     fs::write(&script, elisp).expect("write Emacs Eglot hover/token probe");
     let output = Command::new(&emacs)
@@ -1301,6 +1752,19 @@ fn emacs_eglot_attaches_and_proves_hover_rename_references_and_semantic_tokens()
         .env(
             "ORNA_DEPTH_RANGES",
             serde_json::to_string(&depth_ranges).unwrap(),
+        )
+        .env(
+            "ORNA_ACTION_SIGNATURE_REQUESTS",
+            serde_json::to_string(&action_signature_requests).unwrap(),
+        )
+        .env(
+            "ORNA_WORKSPACE_PROVIDER_FIXTURE",
+            &workspace_provider_fixture,
+        )
+        .env("ORNA_WORKSPACE_CALLER_FIXTURE", &workspace_caller_fixture)
+        .env(
+            "ORNA_WORKSPACE_HIERARCHY_REQUESTS",
+            serde_json::to_string(&workspace_hierarchy_requests).unwrap(),
         )
         .output()
         .unwrap_or_else(|error| panic!("start Emacs at {}: {error}", emacs.display()));
@@ -1321,6 +1785,35 @@ fn emacs_eglot_attaches_and_proves_hover_rename_references_and_semantic_tokens()
     hover_semantic_contract::assert_semantic_token_contract(
         SEMANTIC_SOURCE,
         &hover_semantic_result["semantic"],
+        "Emacs Eglot",
+    );
+    syntax_v1_action_signature_contract::assert_signature_help_contract(
+        &hover_semantic_result["signature_nested_tuple"],
+        &hover_semantic_result["signature_named_argument"],
+        &hover_semantic_result["signature_nested_named_argument"],
+        &hover_semantic_result["signature_shadowed_call"],
+        "Emacs Eglot",
+    );
+    syntax_v1_action_signature_contract::assert_code_action_contract(
+        ACTION_SOURCE,
+        hover_semantic_result["action_uri"]
+            .as_str()
+            .expect("Emacs Eglot code-action document URI"),
+        &hover_semantic_result["code_action_quickfix"],
+        &hover_semantic_result["code_action_wrong_kind"],
+        &hover_semantic_result["code_action_outside_range"],
+        "Emacs Eglot",
+    );
+    syntax_v1_workspace_hierarchy_contract::assert_contract(
+        WORKSPACE_HIERARCHY_PROVIDER_SOURCE,
+        WORKSPACE_HIERARCHY_CALLER_SOURCE,
+        hover_semantic_result["workspace_provider_uri"]
+            .as_str()
+            .expect("Emacs Eglot workspace provider URI"),
+        hover_semantic_result["workspace_caller_uri"]
+            .as_str()
+            .expect("Emacs Eglot workspace caller URI"),
+        &hover_semantic_result,
         "Emacs Eglot",
     );
     syntax_v1_depth_contract::assert_semantic_depth_contract(
@@ -1364,6 +1857,10 @@ fn emacs_eglot_attaches_and_proves_hover_rename_references_and_semantic_tokens()
         "EMACS_LSP_HOVER=pass",
         "EMACS_LSP_REFERENCES=pass",
         "EMACS_LSP_RENAME=pass",
+        "EMACS_LSP_SIGNATURE_HELP=pass",
+        "EMACS_LSP_CODE_ACTION=pass",
+        "EMACS_LSP_WORKSPACE_SYMBOL=pass",
+        "EMACS_LSP_CALL_HIERARCHY=pass",
     ] {
         assert!(
             stdout.contains(evidence),
