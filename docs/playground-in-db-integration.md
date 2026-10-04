@@ -76,9 +76,10 @@ The test initializes a temporary Orna Git database, commits crate-local
 `orna serve` process without a build directory, then uses curl to check the
 Git listing, database-resident shell, editor configuration, embeddable script,
 CSS/JavaScript and WebAssembly rows, committed examples, and live session. It
-commits a new Route and Entry after startup and proves the new URL changes
-from 404 to 200 without restarting the server. It also checks DB-resident
-Theme/Layout CSS, an uncommitted style remaining invisible, the committed
-revision changing both styles, and the old revision continuing to serve both
-old styles. A WebSocket client follows the existing watch, fingerprinted Eval,
-and Resync exchange to prove independent results and presentation deltas.
+commits new Route and Entry rows after startup and proves the new HTML route
+and JavaScript asset (with the checked media type) change from 404 to 200
+without restarting the server. It also checks DB-resident Theme/Layout CSS,
+an uncommitted style remaining invisible, the committed revision changing both
+styles, and the old revision continuing to serve both old styles. A WebSocket
+client follows the existing watch, fingerprinted Eval, and Resync exchange to
+prove independent results and presentation deltas.
