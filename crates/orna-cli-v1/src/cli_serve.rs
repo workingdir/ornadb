@@ -325,6 +325,9 @@ fn host_route(root: &Path, identity: RuntimeIdentity, request: &Request) -> Resp
     if let Some(response) = git_transport_route(root, request) {
         return response;
     }
+    if let Some(response) = frontend_asset_route(request) {
+        return response;
+    }
     if let Some(response) = git_listing_route(root, identity, request) {
         return response;
     }
@@ -342,6 +345,26 @@ const MAX_LISTING_COMMITS: usize = 100;
 const MAX_LISTING_TREE_ENTRIES: usize = 10_000;
 const MAX_LISTING_FILE_BYTES: usize = 2 * 1024 * 1024;
 const LISTING_STYLE: &str = "<style>:root{--page-width:72ch;--text:#202122;--background:#fff;--link:#0645ad;--visited:#0b0080;--rule:#a2a9b1;--body-font:Georgia,'Times New Roman',serif;--code-font:ui-monospace,monospace}body{max-width:var(--page-width);margin:1.5rem auto;padding:0 1rem;color:var(--text);background:var(--background);font:1rem/1.5 var(--body-font)}a{color:var(--link)}a:visited{color:var(--visited)}pre,textarea{overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;font-family:var(--code-font)}textarea{box-sizing:border-box;width:100%}button{font:inherit}table{border-collapse:collapse}th,td{border:1px solid var(--rule);padding:.2rem .45rem;text-align:left;vertical-align:top}</style>";
+const PRESENTATION_MODULE: &str = include_str!("../../../playground/shared/presentation.mjs");
+const HOME_MODULE: &str = include_str!("serve_home.mjs");
+const PLAYGROUND_MODULE: &str = include_str!("serve_playground.mjs");
+
+fn frontend_asset_route(request: &Request) -> Option<Response> {
+    if request.method != "GET" {
+        return None;
+    }
+    let (content_type, content) = match request.path.as_str() {
+        "/assets/presentation.mjs" => ("text/javascript; charset=utf-8", PRESENTATION_MODULE),
+        "/assets/serve-home.mjs" => ("text/javascript; charset=utf-8", HOME_MODULE),
+        "/assets/serve-playground.mjs" => ("text/javascript; charset=utf-8", PLAYGROUND_MODULE),
+        _ => return None,
+    };
+    Some(Response::new(
+        200,
+        content_type,
+        content.as_bytes().to_vec(),
+    ))
+}
 
 /// Renderer-neutral data used by the simple Inspect-compatible HTML fallback.
 enum InspectionNode {
@@ -453,10 +476,9 @@ fn playground_asset(root: &Path, identity: RuntimeIdentity, request_path: &str) 
         }
         let database = format_uuid(identity.database_id);
         let bridge = format!(
-            "<section id=\"live-repl\" data-database=\"{}\" hidden><textarea id=\"repl-source\"></textarea><button id=\"repl-run\" type=\"button\"></button><p id=\"repl-status\"></p><div id=\"repl-events\"></div></section><script>const RUN_EVENTS_SOURCE={};\n{}\n</script>",
+            "<section id=\"live-bridge\" data-database=\"{}\" hidden></section><section aria-labelledby=\"live-title\"><h2 id=\"live-title\">Live presentation</h2><p id=\"live-status\" role=\"status\" aria-live=\"polite\">Connecting to the database…</p><div id=\"live-presentation\"></div></section><script type=\"application/json\" id=\"run-events-source\">{}</script><script type=\"module\" src=\"/assets/serve-playground.mjs\"></script>",
             html_escape(&database),
             json_string(LIVE_RUN_EVENTS_WATCH_SOURCE),
-            LIVE_REPL_SCRIPT,
         );
         if let Some(body) = find_html_close_tag(&page, b"</body>") {
             page.insert_str(body, &bridge);
@@ -1229,478 +1251,15 @@ fn render_home_document(identity: RuntimeIdentity, content: &InspectionNode) -> 
     page.push_str("</head><body><main><h1>Orna database</h1>");
     render_inspection_node(content, &mut page);
     page.push_str(&format!(
-        "<section id=\"live-repl\" data-database=\"{}\"><h2>REPL</h2><label for=\"repl-source\">Orna input</label><textarea id=\"repl-source\" rows=\"4\" spellcheck=\"false\">1 + 1</textarea><button id=\"repl-run\" type=\"button\">Run</button><p id=\"repl-status\" aria-live=\"polite\">Starting runtime session…</p><div id=\"repl-events\"></div></section>",
+        "<section id=\"live-repl\" data-database=\"{}\"><h2>REPL</h2><label for=\"repl-source\">Orna input</label><textarea id=\"repl-source\" rows=\"4\" spellcheck=\"false\">1 + 1</textarea><button id=\"repl-run\" type=\"button\" disabled>Run</button><p id=\"repl-status\" aria-live=\"polite\">Connecting to the runtime…</p><pre id=\"repl-events\">No run yet.</pre></section><section aria-labelledby=\"live-title\"><h2 id=\"live-title\">Live presentation</h2><p id=\"live-status\" role=\"status\" aria-live=\"polite\">Connecting to the database…</p><div id=\"live-presentation\"></div></section>",
         html_escape(&database)
     ));
-    page.push_str("</main><script>");
     page.push_str(&format!(
-        "const RUN_EVENTS_SOURCE={};\n",
+        "</main><script type=\"application/json\" id=\"run-events-source\">{}</script><script type=\"module\" src=\"/assets/serve-home.mjs\"></script></body></html>",
         json_string(LIVE_RUN_EVENTS_WATCH_SOURCE)
     ));
-    page.push_str(LIVE_REPL_SCRIPT);
-    page.push_str("</script></body></html>");
     Response::new(200, "text/html; charset=utf-8", page.into_bytes())
 }
-
-const LIVE_REPL_SCRIPT: &str = r#"
-const page = document.querySelector('#live-repl');
-const databaseId = page.dataset.database;
-const source = document.querySelector('#repl-source');
-const runButton = document.querySelector('#repl-run');
-const status = document.querySelector('#repl-status');
-const output = document.querySelector('#repl-events');
-const utf8 = new TextEncoder();
-const pending = new Map();
-let socket;
-let sessionId;
-let sessionBytes;
-let eventWatch;
-let presentation;
-let latestRunResult;
-let markRuntimeReady;
-const runtimeReady = new Promise(resolve => { markRuntimeReady = resolve; });
-
-function byteCompare(left, right) {
-  if (left.length !== right.length) return left.length - right.length;
-  for (let index = 0; index < left.length; index += 1) {
-    if (left[index] !== right[index]) return left[index] - right[index];
-  }
-  return 0;
-}
-
-function cborHead(major, value) {
-  const number = BigInt(value);
-  const prefix = major << 5;
-  if (number < 24n) return Uint8Array.of(prefix | Number(number));
-  let width;
-  let info;
-  if (number <= 0xffn) { width = 1; info = 24; }
-  else if (number <= 0xffffn) { width = 2; info = 25; }
-  else if (number <= 0xffffffffn) { width = 4; info = 26; }
-  else { width = 8; info = 27; }
-  const bytes = new Uint8Array(width);
-  let remaining = number;
-  for (let index = width - 1; index >= 0; index -= 1) {
-    bytes[index] = Number(remaining & 255n);
-    remaining >>= 8n;
-  }
-  return joinBytes([Uint8Array.of(prefix | info), bytes]);
-}
-
-function joinBytes(parts) {
-  const length = parts.reduce((sum, part) => sum + part.length, 0);
-  const output = new Uint8Array(length);
-  let offset = 0;
-  for (const part of parts) { output.set(part, offset); offset += part.length; }
-  return output;
-}
-
-function encodeCbor(value) {
-  if (value === null) return Uint8Array.of(0xf6);
-  if (value === false) return Uint8Array.of(0xf4);
-  if (value === true) return Uint8Array.of(0xf5);
-  if (typeof value === 'number' || typeof value === 'bigint') {
-    const integer = BigInt(value);
-    return integer >= 0n
-      ? cborHead(0, integer)
-      : cborHead(1, -1n - integer);
-  }
-  if (typeof value === 'string') {
-    const bytes = utf8.encode(value);
-    return joinBytes([cborHead(3, bytes.length), bytes]);
-  }
-  if (value instanceof Uint8Array) {
-    return joinBytes([cborHead(2, value.length), value]);
-  }
-  if (Array.isArray(value)) {
-    return joinBytes([cborHead(4, value.length), ...value.map(encodeCbor)]);
-  }
-  if (value instanceof Map) {
-    const entries = [...value.entries()].map(([key, item]) => [encodeCbor(key), item]);
-    entries.sort((left, right) => byteCompare(left[0], right[0]));
-    return joinBytes([
-      cborHead(5, entries.length),
-      ...entries.flatMap(([key, item]) => [key, encodeCbor(item)]),
-    ]);
-  }
-  throw new Error('Unsupported live protocol value.');
-}
-
-function cborArgument(view, state, info) {
-  if (info < 24) return BigInt(info);
-  const width = info === 24 ? 1 : info === 25 ? 2 : info === 26 ? 4 : info === 27 ? 8 : 0;
-  if (!width || state.offset + width > view.byteLength) throw new Error('Invalid live response.');
-  let value = 0n;
-  for (let count = 0; count < width; count += 1) {
-    value = (value << 8n) | BigInt(view.getUint8(state.offset));
-    state.offset += 1;
-  }
-  return value;
-}
-
-function asLength(value) {
-  if (value > BigInt(Number.MAX_SAFE_INTEGER)) throw new Error('Live response is too large.');
-  return Number(value);
-}
-
-function halfFloat(bits) {
-  const sign = (bits & 0x8000) ? -1 : 1;
-  const exponent = (bits >> 10) & 31;
-  const fraction = bits & 1023;
-  if (exponent === 0) return sign * Math.pow(2, -14) * (fraction / 1024);
-  if (exponent === 31) return fraction ? NaN : sign * Infinity;
-  return sign * Math.pow(2, exponent - 15) * (1 + fraction / 1024);
-}
-
-function decodeCbor(bytes) {
-  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-  const state = { offset: 0 };
-  function read() {
-    if (state.offset >= view.byteLength) throw new Error('Incomplete live response.');
-    const first = view.getUint8(state.offset++);
-    const major = first >> 5;
-    const info = first & 31;
-    if (major === 7) {
-      if (info === 20) return false;
-      if (info === 21) return true;
-      if (info === 22) return null;
-      if (info === 25) {
-        const bits = view.getUint16(state.offset);
-        state.offset += 2;
-        return halfFloat(bits);
-      }
-      if (info === 26) {
-        const value = view.getFloat32(state.offset);
-        state.offset += 4;
-        return value;
-      }
-      if (info === 27) {
-        const value = view.getFloat64(state.offset);
-        state.offset += 8;
-        return value;
-      }
-      throw new Error('Unsupported live response value.');
-    }
-    const argument = cborArgument(view, state, info);
-    if (major === 0) return argument <= BigInt(Number.MAX_SAFE_INTEGER) ? Number(argument) : argument;
-    if (major === 1) {
-      const integer = -1n - argument;
-      return integer >= BigInt(Number.MIN_SAFE_INTEGER) ? Number(integer) : integer;
-    }
-    if (major === 2 || major === 3) {
-      const length = asLength(argument);
-      if (state.offset + length > view.byteLength) throw new Error('Incomplete live response.');
-      const slice = bytes.slice(state.offset, state.offset + length);
-      state.offset += length;
-      return major === 2 ? slice : new TextDecoder().decode(slice);
-    }
-    if (major === 4) return Array.from({ length: asLength(argument) }, read);
-    if (major === 5) {
-      const result = new Map();
-      for (let index = 0; index < asLength(argument); index += 1) result.set(read(), read());
-      return result;
-    }
-    if (major === 6) return { tag: Number(argument), value: read() };
-    throw new Error('Unsupported live response value.');
-  }
-  const value = read();
-  if (state.offset !== view.byteLength) throw new Error('Trailing live response bytes.');
-  return value;
-}
-
-function uuidBytes(value) {
-  return Uint8Array.from(value.replaceAll('-', '').match(/../g), part => Number.parseInt(part, 16));
-}
-
-function byteKey(value) {
-  return [...value].map(byte => byte.toString(16).padStart(2, '0')).join('');
-}
-
-function newId() {
-  return crypto.getRandomValues(new Uint8Array(16));
-}
-
-function envelope(code, request, watch, body) {
-  return new Map([[0, 1], [1, code], [2, request], [3, watch], [4, body]]);
-}
-
-function send(envelopeValue, request, watch) {
-  if (!socket || socket.readyState !== WebSocket.OPEN) return Promise.reject(new Error('Runtime session is disconnected.'));
-  const requestKey = byteKey(request);
-  return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => {
-      pending.delete(requestKey);
-      reject(new Error('Runtime response timed out.'));
-    }, 15000);
-    pending.set(requestKey, { resolve, reject, timer, watch: watch ? byteKey(watch) : null });
-    socket.send(encodeCbor(envelopeValue));
-  });
-}
-
-function databaseContext() {
-  return new Map([[0, uuidBytes(databaseId)], [1, null]]);
-}
-
-function presentationContext() {
-  return new Map([
-    [0, 'en'], [1, null], [2, null], [3, 'system'], [4, ['value', 'text', 'group', 'table']],
-  ]);
-}
-
-async function evaluate(sourceText) {
-  const request = newId();
-  const bodyWithoutFingerprint = new Map([
-    [0, sourceText], [1, databaseContext()], [2, presentationContext()],
-  ]);
-  const requestBytes = encodeCbor([sessionBytes, 4, null, bodyWithoutFingerprint]);
-  const domain = utf8.encode('orna.request.v1\0');
-  const fingerprint = new Uint8Array(await crypto.subtle.digest('SHA-256', joinBytes([domain, requestBytes])));
-  const body = new Map(bodyWithoutFingerprint);
-  body.set(3, fingerprint);
-  const response = await send(envelope(4, request, null, body), request, null);
-  if (response.get(1) === 18 && response.get(4).get(0) === 0) status.textContent = 'Run completed.';
-  else status.textContent = 'Run returned an error event.';
-}
-
-async function watchRunEvents() {
-  const request = newId();
-  const body = new Map([[0, RUN_EVENTS_SOURCE], [1, databaseContext()], [2, presentationContext()]]);
-  const response = await send(envelope(5, request, null, body), request, null);
-  eventWatch = response.get(3);
-  if (!eventWatch) throw new Error('Runtime did not open the run event watch.');
-}
-
-async function resyncRunEvents() {
-  if (!eventWatch) return;
-  const request = newId();
-  const response = await send(envelope(2, request, eventWatch, new Map()), request, eventWatch);
-  if (response.get(1) === 19) status.textContent = 'Run event update was rejected.';
-}
-
-function untagged(value) {
-  if (value && typeof value === 'object' && value.tag !== undefined && value.tag !== 2 && value.tag !== 3) {
-    return untagged(value.value);
-  }
-  return value;
-}
-
-function displayText(value) {
-  const plain = untagged(value);
-  if (plain === null || plain === undefined) return '';
-  if (plain && typeof plain === 'object' && (plain.tag === 2 || plain.tag === 3)) {
-    return formatValue(plain);
-  }
-  return String(plain);
-}
-
-function resultFromEvents(node) {
-  if (!node || node.tag !== 60012 || !Array.isArray(node.value)) return undefined;
-  const children = node.value[3];
-  if (!Array.isArray(children) || children.length === 0) return undefined;
-  const latest = children[children.length - 1];
-  if (!latest || latest.tag !== 60012 || !Array.isArray(latest.value)) return undefined;
-  const properties = latest.value[2];
-  if (!(properties instanceof Map)) return undefined;
-  const field = (name) => {
-    for (const [key, value] of properties.entries()) {
-      if (displayText(key) === name) return value;
-    }
-    return undefined;
-  };
-  const succeeded = displayText(field('status')) === 'success';
-  const rawValue = field('value');
-  const printableValue = untagged(rawValue);
-  const valueText = printableValue && typeof printableValue === 'object'
-    ? formatValue(printableValue)
-    : displayText(printableValue);
-  const errorCode = displayText(field('error_code'));
-  const line = Number(displayText(field('line'))) || 1;
-  const column = Number(displayText(field('column'))) || 1;
-  return {
-    ok: succeeded,
-    values: succeeded ? [valueText] : [],
-    stdout: displayText(field('stdout')),
-    errors: succeeded ? [] : [{ message: errorCode || 'Evaluation failed', line, col: column }],
-  };
-}
-
-function publishRunEvents() {
-  latestRunResult = resultFromEvents(presentation);
-  if (latestRunResult) {
-    globalThis.dispatchEvent(new CustomEvent('orna:run-result', { detail: latestRunResult }));
-  }
-}
-
-async function runPlayground(sourceText) {
-  await runtimeReady;
-  if (!socket || socket.readyState !== WebSocket.OPEN) {
-    throw new Error('The OrnaDB runtime session is disconnected.');
-  }
-  await evaluate(sourceText);
-  await resyncRunEvents();
-  if (!latestRunResult) throw new Error('The OrnaDB runtime did not publish a run result.');
-  return latestRunResult;
-}
-
-globalThis.ornaPlaygroundRun = runPlayground;
-
-function formatValue(value) {
-  if (value === null) return 'null';
-  if (value instanceof Uint8Array) return `0x${byteKey(value)}`;
-  if (typeof value === 'bigint') return value.toString();
-  if (Array.isArray(value)) return `[${value.map(formatValue).join(', ')}]`;
-  if (value instanceof Map) {
-    return `{${[...value.entries()].map(([key, item]) => `${formatValue(key)}: ${formatValue(item)}`).join(', ')}}`;
-  }
-  if (typeof value === 'object' && value.tag !== undefined) {
-    if ((value.tag === 2 || value.tag === 3) && value.value instanceof Uint8Array) {
-      let integer = 0n;
-      for (const byte of value.value) integer = (integer << 8n) | BigInt(byte);
-      return (value.tag === 2 ? integer : -1n - integer).toString();
-    }
-    return `tag ${value.tag} ${formatValue(value.value)}`;
-  }
-  return String(value);
-}
-
-function appendPresent(node, parent) {
-  if (!node || node.tag !== 60012 || !Array.isArray(node.value)) {
-    const text = document.createElement('pre');
-    text.textContent = formatValue(node);
-    parent.append(text);
-    return;
-  }
-  const [kind, , properties, children] = node.value;
-  const section = document.createElement('section');
-  const heading = document.createElement('h3');
-  heading.textContent = formatValue(kind);
-  section.append(heading);
-  if (properties instanceof Map && properties.size) {
-    const table = document.createElement('table');
-    const rows = document.createElement('tbody');
-    for (const [name, value] of properties.entries()) {
-      const row = document.createElement('tr');
-      const key = document.createElement('th');
-      const cell = document.createElement('td');
-      key.textContent = formatValue(name);
-      cell.textContent = formatValue(value);
-      row.append(key, cell);
-      rows.append(row);
-    }
-    table.append(rows);
-    section.append(table);
-  }
-  if (Array.isArray(children) && children.length) {
-    const list = document.createElement('ol');
-    for (const child of children) {
-      const item = document.createElement('li');
-      appendPresent(child, item);
-      list.append(item);
-    }
-    section.append(list);
-  }
-  parent.append(section);
-}
-
-function applyPresentationDelta(message) {
-  const body = message.get(4);
-  const patches = body.get(2);
-  for (const patch of patches) {
-    const [operation, path, replacement] = patch;
-    if (operation !== 2 || path.length !== 0) throw new Error('Unsupported presentation update.');
-    presentation = replacement;
-  }
-  output.replaceChildren();
-  if (presentation) appendPresent(presentation, output);
-  publishRunEvents();
-}
-
-function receive(event) {
-  try {
-    const message = decodeCbor(new Uint8Array(event.data));
-    if (!(message instanceof Map)) throw new Error('Invalid runtime message.');
-    const code = message.get(1);
-    const request = message.get(2);
-    const watch = message.get(3);
-    if (code === 16) {
-      presentation = message.get(4).get(1);
-      if (watch) eventWatch ||= watch;
-      output.replaceChildren();
-      appendPresent(presentation, output);
-      publishRunEvents();
-    } else if (code === 17) {
-      applyPresentationDelta(message);
-    }
-    if (request instanceof Uint8Array) {
-      const key = byteKey(request);
-      const waiter = pending.get(key);
-      if (waiter) {
-        clearTimeout(waiter.timer);
-        pending.delete(key);
-        waiter.resolve(message);
-      }
-    } else if (code === 17 && watch instanceof Uint8Array) {
-      const key = byteKey(watch);
-      for (const [requestKey, waiter] of pending.entries()) {
-        if (waiter.watch === key) {
-          clearTimeout(waiter.timer);
-          pending.delete(requestKey);
-          waiter.resolve(message);
-          break;
-        }
-      }
-    }
-  } catch (error) {
-    status.textContent = error instanceof Error ? error.message : String(error);
-  }
-}
-
-async function connect() {
-  const response = await fetch('/orna/session', {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ database: databaseId, protocol: 'orna.present.v1' }),
-  });
-  if (!response.ok) throw new Error('Runtime session could not be created.');
-  const metadata = await response.json();
-  sessionId = metadata.session;
-  sessionBytes = uuidBytes(sessionId);
-  const endpoint = new URL(metadata.websocket_path, location.href);
-  endpoint.protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
-  socket = new WebSocket(endpoint, 'orna.present.v1');
-  socket.binaryType = 'arraybuffer';
-  socket.addEventListener('message', receive);
-  socket.addEventListener('open', async () => {
-    try {
-      status.textContent = 'Runtime session ready.';
-      await watchRunEvents();
-      status.textContent = 'Ready.';
-      markRuntimeReady();
-    } catch (error) {
-      status.textContent = error instanceof Error ? error.message : String(error);
-    }
-  });
-  socket.addEventListener('close', () => { status.textContent = 'Runtime session disconnected.'; });
-  socket.addEventListener('error', () => { status.textContent = 'Runtime connection failed.'; });
-}
-
-runButton.addEventListener('click', async () => {
-  runButton.disabled = true;
-  status.textContent = 'Evaluating in the database runtime…';
-  try {
-    await evaluate(source.value);
-    await resyncRunEvents();
-  } catch (error) {
-    status.textContent = error instanceof Error ? error.message : String(error);
-  } finally {
-    runButton.disabled = false;
-  }
-});
-
-void connect().catch(error => {
-  status.textContent = error instanceof Error ? error.message : String(error);
-});
-"#;
 
 fn render_inspection_node(node: &InspectionNode, page: &mut String) {
     match node {
@@ -2350,11 +1909,21 @@ mod tests {
         assert!(home.contains("href=\"/playground/\""));
         assert!(home.contains("id=\"live-repl\""));
         assert!(home.contains("id=\"repl-source\""));
-        assert!(home.contains("/orna/session"));
-        assert!(home.contains("metadata.websocket_path"));
-        assert!(home.contains("new WebSocket(endpoint"));
+        assert!(home.contains("id=\"live-presentation\""));
+        assert!(home.contains("id=\"run-events-source\""));
+        assert!(home.contains("src=\"/assets/serve-home.mjs\""));
+        assert!(home.contains("orna/serve/run-events/v1"));
+        assert!(!home.contains("new WebSocket(endpoint"));
         assert!(!home.contains("/api/query"));
         assert!(!home.contains("wasm"));
+        let runtime = listing_page(directory.path(), "/assets/presentation.mjs");
+        assert_eq!(runtime.status, 200);
+        assert_eq!(runtime.content_type, "text/javascript; charset=utf-8");
+        assert!(
+            String::from_utf8(runtime.body)
+                .expect("runtime module UTF-8")
+                .contains("class LivePresentation")
+        );
         let query = host_route(
             directory.path(),
             identity,
@@ -2489,7 +2058,18 @@ mod tests {
             "data-database=\"{}\"",
             format_uuid(identity.database_id)
         )));
-        assert!(page.contains("ornaPlaygroundRun"));
+        assert!(page.contains("id=\"live-bridge\""));
+        assert!(page.contains("id=\"live-presentation\""));
+        assert!(page.contains("id=\"run-events-source\""));
+        assert!(page.contains("src=\"/assets/serve-playground.mjs\""));
+        assert!(page.contains("\\u0000orna/serve/run-events/v1"));
+        let runtime = listing_page(directory.path(), "/assets/serve-playground.mjs");
+        assert_eq!(runtime.status, 200);
+        assert!(
+            String::from_utf8(runtime.body)
+                .expect("playground runtime UTF-8")
+                .contains("globalThis.ornaPlaygroundRun")
+        );
         let embed = playground_asset(directory.path(), identity, "/playground/embed");
         assert_eq!(embed.status, 200);
         assert!(embed.headers.iter().any(|(name, value)| {

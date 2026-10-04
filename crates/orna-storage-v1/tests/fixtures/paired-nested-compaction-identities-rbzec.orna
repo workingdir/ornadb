@@ -1,0 +1,5 @@
+{ id: "nested-compaction/a", name: "nested/left-a", city: "nested/right-a" }
+
+{ id: "nested-compaction/a-reused", name: "nested/left-a", city: "nested/right-a" }
+
+{ id: "nested-compaction/b", name: "nested/left-b", city: "nested/right-c" }

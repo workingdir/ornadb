@@ -5,7 +5,6 @@ use std::{
     time::{Duration, Instant},
 };
 
-use orna_application_v1::LIVE_RUN_EVENTS_WATCH_SOURCE;
 use orna_foundation_v1::{CanonicalValue, OvbRaw};
 use orna_protocol_v1::{
     DatabaseContext, Envelope, Limits, Message, PresentKind, PresentNode, PresentPropertyKey,
@@ -412,11 +411,19 @@ fn orna_serve_hosts_playground_with_pending_evals_and_snapshot_correct_deltas() 
     assert_eq!(page.status, 200);
     assert!(page.body.contains("Orna playground"));
     assert!(page.body.contains("database shell"));
-    assert!(page.body.contains("globalThis.ornaPlaygroundRun"));
-    assert!(
-        page.body
-            .contains(LIVE_RUN_EVENTS_WATCH_SOURCE.trim_start_matches('\0'))
-    );
+    assert!(page.body.contains("id=\"live-bridge\""));
+    assert!(page.body.contains("id=\"live-presentation\""));
+    assert!(page.body.contains("id=\"run-events-source\""));
+    assert!(page.body.contains("src=\"/assets/serve-playground.mjs\""));
+    assert!(page.body.contains("orna/serve/run-events/v1"));
+    let runtime = curl(&format!("{base_url}/assets/serve-playground.mjs"), &[])
+        .expect("curl the playground live module");
+    assert_eq!(runtime.status, 200);
+    assert!(runtime.body.contains("globalThis.ornaPlaygroundRun"));
+    let presentation_runtime = curl(&format!("{base_url}/assets/presentation.mjs"), &[])
+        .expect("curl the shared presentation runtime");
+    assert_eq!(presentation_runtime.status, 200);
+    assert!(presentation_runtime.body.contains("class LivePresentation"));
     let app = curl(&format!("{base_url}/playground/assets/app.js"), &[])
         .expect("curl the playground browser asset");
     assert_eq!(app.status, 200);

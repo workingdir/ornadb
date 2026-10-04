@@ -18,9 +18,21 @@ const executionState = requiredElement<HTMLElement>('#execution-state');
 const stdoutOutput = requiredElement<HTMLElement>('#stdout-output');
 const valuesOutput = requiredElement<HTMLElement>('#values-output');
 const errorsOutput = requiredElement<HTMLElement>('#errors-output');
+const astOutput = requiredElement<HTMLElement>('#ast-output');
 const outputStatus = requiredElement<HTMLElement>('#output-status');
 const runtime = servedRuntime();
 let activeRun = false;
+let examplesReady = false;
+let liveRuntimeReady = typeof (globalThis as typeof globalThis & { ornaPlaygroundRun?: unknown }).ornaPlaygroundRun === 'function';
+
+function updateRunButton(): void {
+  runButton.disabled = activeRun || !examplesReady || !liveRuntimeReady;
+}
+
+window.addEventListener('orna:runtime-ready', () => {
+  liveRuntimeReady = true;
+  updateRunButton();
+}, { once: true });
 
 function setOutput(target: HTMLElement, value: string, emptyLabel: string): void {
   target.textContent = value.length === 0 ? emptyLabel : value;
@@ -31,14 +43,15 @@ function showResult(result: RunResult): void {
   setOutput(stdoutOutput, formatted.stdoutText, 'No stdout was produced.');
   setOutput(valuesOutput, formatted.valuesText, 'No values were returned.');
   setOutput(errorsOutput, formatted.errorsText, result.ok ? 'No errors.' : 'Execution failed without a diagnostic.');
+  setOutput(astOutput, result.ast ?? '', 'No syntax tree was returned.');
   executionState.textContent = result.ok ? 'Completed' : 'Failed';
   outputStatus.textContent = result.ok ? 'Execution completed.' : 'Execution returned errors.';
 }
 
 async function runSource(): Promise<void> {
-  if (activeRun) return;
+  if (activeRun || !examplesReady || !liveRuntimeReady) return;
   activeRun = true;
-  runButton.disabled = true;
+  updateRunButton();
   executionState.textContent = 'Running';
   outputStatus.textContent = 'Running source in the OrnaDB server runtime.';
   try {
@@ -50,7 +63,7 @@ async function runSource(): Promise<void> {
     outputStatus.textContent = 'The run failed.';
   } finally {
     activeRun = false;
-    runButton.disabled = false;
+    updateRunButton();
   }
 }
 
@@ -100,7 +113,8 @@ async function loadExamples(): Promise<void> {
       examplesSelect.disabled = true;
       editorStatus.textContent = 'No committed examples are available. You can still write source.';
       exampleStatus.textContent = 'No committed examples are available.';
-      runButton.disabled = false;
+      examplesReady = true;
+      updateRunButton();
       return;
     }
     for (const example of examples) {
@@ -114,7 +128,8 @@ async function loadExamples(): Promise<void> {
     examplesSelect.selectedIndex = 0;
     loadSelectedExample();
     editorStatus.textContent = `${examples.length} committed ${examples.length === 1 ? 'example' : 'examples'} loaded.`;
-    runButton.disabled = false;
+    examplesReady = true;
+    updateRunButton();
   } catch (error) {
     const option = document.createElement('option');
     option.textContent = 'Examples unavailable';
@@ -122,7 +137,8 @@ async function loadExamples(): Promise<void> {
     examplesSelect.disabled = true;
     editorStatus.textContent = formatThrownError(error);
     exampleStatus.textContent = 'The committed examples could not be loaded.';
-    runButton.disabled = false;
+    examplesReady = true;
+    updateRunButton();
   }
 }
 
@@ -159,5 +175,5 @@ requiredElement<HTMLElement>('[role="tablist"]').addEventListener('keydown', (ev
   activateResultTab(resultTabs[index], true);
 });
 
-runButton.disabled = true;
+updateRunButton();
 void loadExamples();

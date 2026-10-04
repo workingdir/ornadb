@@ -45,6 +45,7 @@
             <button type="button" role="tab" id="tab-output" aria-controls="panel-output" aria-selected="true" tabindex="0" data-output-tab="output">Output</button>
             <button type="button" role="tab" id="tab-values" aria-controls="panel-values" aria-selected="false" tabindex="-1" data-output-tab="values">Values</button>
             <button type="button" role="tab" id="tab-errors" aria-controls="panel-errors" aria-selected="false" tabindex="-1" data-output-tab="errors">Errors</button>
+            <button type="button" role="tab" id="tab-ast" aria-controls="panel-ast" aria-selected="false" tabindex="-1" data-output-tab="ast">AST</button>
           </div>
           <div class="panels" aria-live="polite" aria-atomic="false">
             <section id="panel-output" role="tabpanel" aria-labelledby="tab-output" data-output-panel="output">
@@ -58,6 +59,10 @@
             <section id="panel-errors" role="tabpanel" aria-labelledby="tab-errors" data-output-panel="errors" hidden>
               <h3>Errors</h3>
               <pre id="errors-output">Diagnostics appear here.</pre>
+            </section>
+            <section id="panel-ast" role="tabpanel" aria-labelledby="tab-ast" data-output-panel="ast" hidden>
+              <h3>Syntax tree</h3>
+              <pre id="ast-output">The parsed syntax tree appears here.</pre>
             </section>
           </div>
           <p class="output-status" id="output-status">Run source to view its results.</p>

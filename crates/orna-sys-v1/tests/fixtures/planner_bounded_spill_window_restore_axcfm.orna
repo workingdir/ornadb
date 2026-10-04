@@ -1,0 +1,3 @@
+use sys.query as query_ops;
+
+pub fn bounded_spill_window_restore(query: Query<Int>): sys.Plan = query_ops.plan_hint(query);
