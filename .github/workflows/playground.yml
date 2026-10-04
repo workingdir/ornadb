@@ -4,15 +4,20 @@ on:
   push:
     branches:
       - main
+      - 'w90*-imp_play*'
   pull_request:
   workflow_dispatch:
 
 permissions:
   contents: read
 
+env:
+  CARGO_BUILD_JOBS: 2
+  RUST_TEST_THREADS: 2
+
 concurrency:
-  group: playground-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  group: playground-${{ github.workflow }}
+  cancel-in-progress: false
 
 jobs:
   build:
@@ -54,3 +59,103 @@ jobs:
 
       - name: Test the in-database playground serve routes
         run: cargo test --locked -p orna-cli-v1 cli_serve::tests
+
+  pages-build:
+    if: github.event_name != 'pull_request'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pages: read
+    steps:
+      - name: Check out the stable source
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.ref_name == 'main' && github.sha || 'main' }}
+          path: stable-source
+          submodules: recursive
+
+      - name: Check out the development source
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+          path: dev-source
+          submodules: recursive
+
+      - name: Install Rust and the WebAssembly target
+        uses: dtolnay/rust-toolchain@1.95.0
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Install Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: 22.21.1
+          cache: npm
+          cache-dependency-path: |
+            stable-source/playground/web-ui/package-lock.json
+            dev-source/playground/web-ui/package-lock.json
+
+      - name: Install wasm-pack
+        run: cargo install wasm-pack --locked --version 0.15.0
+
+      - name: Set up GitHub Pages
+        uses: actions/configure-pages@v5
+
+      - name: Build the stable Pages channel
+        working-directory: stable-source/playground/web-ui
+        env:
+          CHANNEL_BASE: /${{ github.event.repository.name }}/
+          PAGES_SITE: ${{ runner.temp }}/playground-pages/site
+        run: |
+          npm ci
+          npm run build -- --base "$CHANNEL_BASE"
+          mkdir -p "$PAGES_SITE"
+          cp -a dist/. "$PAGES_SITE/"
+
+      - name: Build the development Pages channel
+        working-directory: dev-source/playground/web-ui
+        env:
+          CHANNEL_BASE: /${{ github.event.repository.name }}/dev/
+          PAGES_SITE: ${{ runner.temp }}/playground-pages/site
+        run: |
+          npm ci
+          npm run build -- --base "$CHANNEL_BASE"
+          mkdir -p "$PAGES_SITE/dev"
+          cp -a dist/. "$PAGES_SITE/dev/"
+
+      - name: Smoke check both Pages bundles
+        working-directory: dev-source/playground/web-ui
+        env:
+          PAGES_SITE: ${{ runner.temp }}/playground-pages/site
+        run: node scripts/pages-smoke.mjs "$PAGES_SITE" "${GITHUB_REPOSITORY#*/}"
+
+      - name: Upload the stable and development channels
+        uses: actions/upload-pages-artifact@v4
+        with:
+          path: ${{ runner.temp }}/playground-pages/site
+
+  pages-deploy:
+    if: github.event_name != 'pull_request'
+    needs: pages-build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Check out the development source for smoke checks
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
+
+      - name: Smoke check the published stable and development channels
+        working-directory: playground/web-ui
+        run: node scripts/pages-smoke.mjs "" "${GITHUB_REPOSITORY#*/}" "${{ steps.deployment.outputs.page_url }}"
