@@ -82,7 +82,10 @@ class FixtureManifestTests(unittest.TestCase):
         pinned_line = f"{digest}  {fixture_path}\n"
 
         self.assertIn('include_str!("fixtures/ji3t0-lsp-v1.orna")', source)
-        self.assertIn(pinned_line, (workspace / "scripts/fixture-manifest.sha256").read_text())
+        self.assertIn(
+            pinned_line,
+            (workspace / "scripts/fixture-manifest.sha256").read_text(encoding="utf-8"),
+        )
 
 
 if __name__ == "__main__":
