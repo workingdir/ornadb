@@ -2993,7 +2993,7 @@ mod tests {
     }
 
     #[test]
-    fn served_repl_typed_run_event_deltas_are_isolated_across_live_sessions() {
+    fn served_repl_typed_run_event_deltas_are_isolated_across_presentations_and_live_sessions() {
         let authority =
             ApplicationAuthority::new(Catalogue::authoritative_core(), Limits::default());
         let mut adapter =
@@ -3019,8 +3019,20 @@ mod tests {
             .expect("first session run event watch starts");
         let initial_b = LiveApplication::watch(&mut adapter, session_b, [74; 16], &watch_message)
             .expect("second session run event watch starts");
+        let initial_a_second =
+            LiveApplication::watch(&mut adapter, session_a, [83; 16], &watch_message)
+                .expect("first session's second run event watch starts");
+        let initial_b_second =
+            LiveApplication::watch(&mut adapter, session_b, [84; 16], &watch_message)
+                .expect("second session's second run event watch starts");
         let watch_a = initial_a.watch.expect("first watch has a handle");
         let watch_b = initial_b.watch.expect("second watch has a handle");
+        let watch_a_second = initial_a_second
+            .watch
+            .expect("first session has a second watch");
+        let watch_b_second = initial_b_second
+            .watch
+            .expect("second session has a second watch");
         let Message::Snapshot {
             revision: 0,
             present: initial_present_a,
@@ -3037,8 +3049,26 @@ mod tests {
         else {
             panic!("second run event watch starts with a snapshot");
         };
+        let Message::Snapshot {
+            revision: 0,
+            present: initial_present_a_second,
+            ..
+        } = initial_a_second.message
+        else {
+            panic!("first session's second watch starts with a snapshot");
+        };
+        let Message::Snapshot {
+            revision: 0,
+            present: initial_present_b_second,
+            ..
+        } = initial_b_second.message
+        else {
+            panic!("second session's second watch starts with a snapshot");
+        };
         assert_eq!(initial_present_a, expected_run_events(&[]));
         assert_eq!(initial_present_b, expected_run_events(&[]));
+        assert_eq!(initial_present_a_second, expected_run_events(&[]));
+        assert_eq!(initial_present_b_second, expected_run_events(&[]));
 
         LiveApplication::eval(
             &mut adapter,
@@ -3068,11 +3098,51 @@ mod tests {
         let expected_a = expected_run_events(&[expected_run_event(1, true, 42, None)]);
         assert_eq!(present_a, expected_a);
 
+        let delta_a_second = LiveApplication::resync(
+            &mut adapter,
+            session_a,
+            [85; 16],
+            watch_a_second,
+            &Message::Resync,
+        )
+        .expect("first session's second watch advances independently");
+        let Message::Delta {
+            base_revision: 0,
+            new_revision: 1,
+            patches,
+            ..
+        } = delta_a_second.message
+        else {
+            panic!("first session's second watch gets its own revision-one delta");
+        };
+        assert_eq!(
+            initial_present_a_second
+                .apply_patches(&patches, orna_protocol_v1::Limits::default())
+                .expect("second first-session delta applies to its own snapshot"),
+            expected_a
+        );
+
         let unchanged_b =
             LiveApplication::resync(&mut adapter, session_b, [78; 16], watch_b, &Message::Resync)
                 .expect("first session event does not affect second watch");
         assert!(matches!(
             unchanged_b.message,
+            Message::Snapshot {
+                revision: 0,
+                ref present,
+                ..
+            } if present == &expected_run_events(&[])
+        ));
+        let unchanged_b_second = LiveApplication::resync(
+            &mut adapter,
+            session_b,
+            [86; 16],
+            watch_b_second,
+            &Message::Resync,
+        )
+        .expect("first session event leaves second session's second watch unchanged");
+        assert!(matches!(
+            unchanged_b_second.message,
             Message::Snapshot {
                 revision: 0,
                 ref present,
@@ -3107,11 +3177,51 @@ mod tests {
             .expect("second session delta applies to its typed snapshot");
         assert_eq!(present_b, expected_a);
 
+        let delta_b_second = LiveApplication::resync(
+            &mut adapter,
+            session_b,
+            [87; 16],
+            watch_b_second,
+            &Message::Resync,
+        )
+        .expect("second session's second watch advances independently");
+        let Message::Delta {
+            base_revision: 0,
+            new_revision: 1,
+            patches,
+            ..
+        } = delta_b_second.message
+        else {
+            panic!("second session's second watch gets its own revision-one delta");
+        };
+        assert_eq!(
+            initial_present_b_second
+                .apply_patches(&patches, orna_protocol_v1::Limits::default())
+                .expect("second session's second delta applies to its own snapshot"),
+            expected_a
+        );
+
         let unchanged_a =
             LiveApplication::resync(&mut adapter, session_a, [82; 16], watch_a, &Message::Resync)
                 .expect("second session event does not alter first session state");
         assert!(matches!(
             unchanged_a.message,
+            Message::Snapshot {
+                revision: 1,
+                ref present,
+                ..
+            } if present == &expected_a
+        ));
+        let unchanged_a_second = LiveApplication::resync(
+            &mut adapter,
+            session_a,
+            [88; 16],
+            watch_a_second,
+            &Message::Resync,
+        )
+        .expect("second session event leaves first session's second watch unchanged");
+        assert!(matches!(
+            unchanged_a_second.message,
             Message::Snapshot {
                 revision: 1,
                 ref present,
