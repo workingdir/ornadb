@@ -12,18 +12,22 @@ use std::collections::{BTreeMap, BTreeSet};
 use orna_foundation_v1::{
     CanonicalValue, Diagnostic as FoundationDiagnostic, DiagnosticSeverity, SafeText,
 };
+#[cfg(feature = "project-admission")]
 use orna_project_v1::{AttachedDatabaseSession, LoadedProject};
+#[cfg(feature = "project-admission")]
+use orna_semantic_v1::StandardDependencyProfile;
 use orna_semantic_v1::{
-    Analysis, Catalogue, EffectSummary, ModuleInput, ReplAdmission, ReplContext,
-    StandardDependencyProfile, SymbolKind, Type, analyze_with_catalogue,
+    Analysis, Catalogue, EffectSummary, ModuleInput, ReplAdmission, ReplContext, SymbolKind, Type,
+    analyze_with_catalogue,
 };
 use orna_syntax_v1::{Declaration, ImportSegment, ReplInput, UseTail, Visibility, parse_module};
 
 use crate::{
     CancellationToken, Environment, EvaluationError, Functions, Limits, PureFunction, ReplSession,
-    module_function_alias_key, parse_admitted_repl, reference_standard_profile,
-    reference_standard_sources,
+    module_function_alias_key, parse_admitted_repl,
 };
+#[cfg(feature = "reference-standard")]
+use crate::{reference_standard_profile, reference_standard_sources};
 
 /// Redacted failure from the admitted REPL boundary.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -152,6 +156,7 @@ pub struct AdmittedReplSession {
     limits: Limits,
     semantic: ReplContext,
     runtime: ReplSession,
+    #[cfg(feature = "project-admission")]
     attached_databases: Option<AttachedDatabaseSession>,
 }
 
@@ -163,6 +168,7 @@ impl AdmittedReplSession {
             limits,
             semantic: ReplContext::empty(),
             runtime: ReplSession::new(limits),
+            #[cfg(feature = "project-admission")]
             attached_databases: None,
         }
     }
@@ -171,6 +177,7 @@ impl AdmittedReplSession {
     /// exact, read-only attachments. Non-`std` modules are namespaced by the
     /// attachment alias; an optional `std` attachment is admitted as ordinary
     /// pinned source while core language and `sys` remain intrinsic.
+    #[cfg(feature = "project-admission")]
     pub fn from_attached_database_session(
         databases: &AttachedDatabaseSession,
         limits: Limits,
@@ -199,6 +206,7 @@ impl AdmittedReplSession {
 
     /// The committed database snapshots retained by this evaluator session,
     /// when it was created from an [`AttachedDatabaseSession`].
+    #[cfg(feature = "project-admission")]
     pub fn attached_databases(&self) -> Option<&AttachedDatabaseSession> {
         self.attached_databases.as_ref()
     }
@@ -208,6 +216,7 @@ impl AdmittedReplSession {
     /// The source bundle and semantic catalogue share the profile used by the
     /// local bounded REPL, so ordinary imports (including wildcard imports)
     /// resolve and execute under the same rules.
+    #[cfg(feature = "reference-standard")]
     pub fn with_reference_standard(limits: Limits) -> Result<Self, ReplError> {
         let standard_sources = reference_standard_sources().into_iter().collect::<Vec<_>>();
         let catalogue = Catalogue::authoritative_core()
@@ -248,6 +257,7 @@ impl AdmittedReplSession {
             limits,
             semantic: ReplContext::from_analysis(&analysis).map_err(semantic_error)?,
             runtime,
+            #[cfg(feature = "project-admission")]
             attached_databases: None,
         })
     }
@@ -256,6 +266,7 @@ impl AdmittedReplSession {
     ///
     /// The supplied project is the caller's pinned source set. This boundary
     /// never discovers a host worktree or standard library itself.
+    #[cfg(feature = "project-admission")]
     pub fn from_loaded_project(
         project: &LoadedProject,
         standard_sources: impl IntoIterator<Item = (String, String)>,
@@ -295,6 +306,7 @@ impl AdmittedReplSession {
             limits,
             semantic,
             runtime,
+            #[cfg(feature = "project-admission")]
             attached_databases: None,
         })
     }
@@ -336,6 +348,7 @@ impl AdmittedReplSession {
     /// Environment names, process executables and roots, and clock waits remain
     /// bounded by the capabilities supplied in `bindings`. Missing providers
     /// fail closed; this path does not grant database effects.
+    #[cfg(feature = "native-hosts")]
     pub fn submit_with_sys_host_bindings(
         &mut self,
         source: &str,
@@ -472,6 +485,7 @@ impl AdmittedReplSession {
     }
 }
 
+#[cfg(feature = "project-admission")]
 fn admitted_runtime(
     project: &LoadedProject,
     standard_sources: Vec<(String, String)>,

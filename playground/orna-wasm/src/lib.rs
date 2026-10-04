@@ -389,7 +389,8 @@ mod tests {
     const REPL_RUNTIME_ERROR_FIXTURE: &str =
         include_str!("../tests/fixtures/repl_runtime_error.orna");
 
-    #[test]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
     fn run_returns_values_in_stable_json_shape() {
         let actual: JsonValue = serde_json::from_str(&run(REPL_FIXTURE)).expect("valid JSON");
         assert_eq!(actual["ok"], true);
@@ -398,7 +399,8 @@ mod tests {
         assert_eq!(actual["errors"], serde_json::json!([]));
     }
 
-    #[test]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
     fn run_reports_parse_and_runtime_error_locations() {
         let parsed: RunResponse = serde_json::from_str(&run("1 + )")).expect("valid JSON");
         assert!(!parsed.ok);
@@ -411,7 +413,8 @@ mod tests {
         assert_eq!((runtime.errors[0].line, runtime.errors[0].col), (2, 1));
     }
 
-    #[test]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
     fn repl_echoes_statements_and_renders_incremental_values() {
         let mut repl = ReplSession::new();
         assert_eq!(
@@ -424,7 +427,8 @@ mod tests {
         );
     }
 
-    #[test]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
     fn repl_holds_incomplete_input_until_the_expression_closes() {
         let mut repl = ReplSession::new();
         assert_eq!(json(&repl.evaluate("1 +"))["kind"], "echo");
@@ -434,7 +438,8 @@ mod tests {
         );
     }
 
-    #[test]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
     fn repl_keeps_blank_lines_inside_incomplete_multiline_input() {
         let mut repl = ReplSession::new();
         assert_eq!(
@@ -451,7 +456,8 @@ mod tests {
         );
     }
 
-    #[test]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
     fn repl_multiline_values_match_the_run_contract() {
         let expected: RunResponse =
             serde_json::from_str(&run(REPL_MULTILINE_FIXTURE)).expect("valid run JSON");
@@ -482,7 +488,8 @@ mod tests {
         assert_eq!(values, ["42 : Int", "43 : Int"]);
     }
 
-    #[test]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
     fn repl_multiline_parse_errors_match_run_locations_and_recover() {
         let expected: RunResponse =
             serde_json::from_str(&run(REPL_MULTILINE_PARSE_ERROR_FIXTURE)).expect("valid run JSON");
@@ -509,7 +516,8 @@ mod tests {
         );
     }
 
-    #[test]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
     fn repl_runtime_errors_match_run_locations_and_recover() {
         let expected: RunResponse =
             serde_json::from_str(&run(REPL_RUNTIME_ERROR_FIXTURE)).expect("valid run JSON");
@@ -529,7 +537,8 @@ mod tests {
         );
     }
 
-    #[test]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
     fn repl_does_not_commit_failed_input_and_recovers_on_the_next_line() {
         let mut repl = ReplSession::new();
         let error = json(&repl.evaluate("missing"));
@@ -542,7 +551,8 @@ mod tests {
     }
 
     #[cfg(feature = "test-stub-run")]
-    #[test]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
     fn test_stub_run_feature_can_prove_the_json_runner_boundary() {
         let mut repl = ReplSession::new();
         let mut stub = |source: &str| {
