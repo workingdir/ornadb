@@ -70,6 +70,48 @@ struct ArgumentMapEdgeProvider {
     calls: AtomicUsize,
 }
 
+struct ArgumentMapFailureProvider {
+    offer: ProviderOffer,
+    operation: OperationId,
+    expected_argument_types: Vec<String>,
+    expected_map_payload: Vec<u8>,
+    failure: FailureCode,
+    calls: AtomicUsize,
+}
+
+impl SystemOperationProvider for ArgumentMapFailureProvider {
+    fn offer(&self) -> &ProviderOffer {
+        &self.offer
+    }
+
+    fn invoke(
+        &self,
+        operation: &OperationId,
+        arguments: &[TypedValue],
+    ) -> Result<TypedValue, ProviderFailure> {
+        assert_eq!(operation, &self.operation);
+        assert_eq!(arguments.len(), self.expected_argument_types.len());
+        assert_eq!(
+            arguments
+                .iter()
+                .map(|argument| argument.static_type().as_str().to_owned())
+                .collect::<Vec<_>>(),
+            self.expected_argument_types,
+            "erroring provider receives the generated typed outer arguments"
+        );
+        assert_eq!(
+            arguments[1].canonical(),
+            Some(self.expected_map_payload.as_slice()),
+            "erroring provider receives the argument-map payload unchanged"
+        );
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        Err(ProviderFailure {
+            code: self.failure.clone(),
+            payload: None,
+        })
+    }
+}
+
 impl SystemOperationProvider for ArgumentMapEdgeProvider {
     fn offer(&self) -> &ProviderOffer {
         &self.offer
@@ -2907,6 +2949,279 @@ fn dispatch_to_provider_routes_typed_value_and_declared_failure() {
 }
 
 #[test]
+fn provider_error_contracts_preserve_variadic_argument_map_edges() {
+    const VARIADIC_ERROR_OPERATIONS: [&str; 4] = [
+        "sys.invoke(Value)",
+        "sys.invoke<T>",
+        "sys.start(Value)",
+        "sys.start<T>",
+    ];
+    const EDGE_CARDINALITIES: [usize; 3] = [0, 1, 4];
+    const SHARED_PROVIDER_FAILURES: [&str; 3] = [
+        "sys.abi.precondition_failed",
+        "sys.abi.unavailable",
+        "sys.abi.provider_failed",
+    ];
+
+    let generated_schema = build_provider::generate_provider_registry_schema()
+        .expect("provider error schema regenerates from its typed source");
+    assert_eq!(generated_schema, system_provider_abi_schema_json());
+    build_host::validate_json_against_schema(system_provider_abi_json(), &generated_schema)
+        .expect("embedded provider error contracts conform to the regenerated schema");
+    let table = system_dispatch_table();
+    let registry = ProviderRoleRegistry::from_baked_abi(table)
+        .expect("generated invoke/start provider offers resolve");
+    let registry_json: Value =
+        serde_json::from_str(system_provider_abi_json()).expect("embedded provider registry");
+    let raw_operations = registry_json["operations"]
+        .as_array()
+        .expect("embedded provider registry has operation rows");
+
+    let mut generated_bindings = 0;
+    let mut map_slots = 0;
+    let mut selected_failure_codes = 0;
+    let mut map_cases = 0;
+    let mut declared_direct_routes = 0;
+    let mut declared_registry_routes = 0;
+    let mut undeclared_direct_routes = 0;
+    let mut undeclared_registry_routes = 0;
+    for operation_name in VARIADIC_ERROR_OPERATIONS {
+        let contract = table
+            .operation(operation_name)
+            .expect("variadic error operation exists in typed registry");
+        let generated = system_function_descriptor(operation_name)
+            .expect("variadic error operation has a macro-generated binding");
+        assert_eq!(generated.signature, contract.signature.source);
+        assert_eq!(contract.effects.iter().next(), Some(generated.effect));
+        generated_bindings += 1;
+
+        let map_indexes = contract
+            .signature
+            .parameters
+            .iter()
+            .enumerate()
+            .filter_map(|(index, parameter)| (parameter.name == "arguments").then_some(index))
+            .collect::<Vec<_>>();
+        assert_eq!(map_indexes, [1], "one fixed map slot in {operation_name}");
+        assert_eq!(
+            contract.signature.parameters[map_indexes[0]].ty,
+            AbiType::Named("sys.ArgumentMap".to_owned())
+        );
+        map_slots += 1;
+        let row = raw_operations
+            .iter()
+            .find(|row| row["name"] == operation_name)
+            .expect("schema row contains the variadic error operation");
+        let raw_failure_codes = row["failures"]
+            .as_array()
+            .expect("schema row publishes failure codes")
+            .iter()
+            .map(|code| code.as_str().expect("failure code is a string"))
+            .collect::<BTreeSet<_>>();
+        for code in &raw_failure_codes {
+            assert!(
+                contract.declares_failure(&FailureCode::new(*code).unwrap()),
+                "typed contract retains schema failure `{code}` for {operation_name}"
+            );
+        }
+
+        let role = contract
+            .role
+            .as_ref()
+            .expect("invoke/start operation has a provider role");
+        let offer = registry
+            .resolve(role.as_str())
+            .expect("variadic error role has a selected provider")
+            .clone();
+        let mut declared_failures = vec![FailureCode::new("sys.abi.provider_failed").unwrap()];
+        assert!(contract.declares_failure(&declared_failures[0]));
+        if let Some(operation_failure) = contract
+            .failures
+            .iter()
+            .find(|code| !SHARED_PROVIDER_FAILURES.contains(&code.as_str()))
+            .cloned()
+        {
+            assert!(raw_failure_codes.contains(operation_failure.as_str()));
+            declared_failures.push(operation_failure);
+        }
+        selected_failure_codes += declared_failures.len();
+
+        let expected_argument_types = contract
+            .signature
+            .parameters
+            .iter()
+            .map(|parameter| {
+                if parameter.ty == AbiType::Named("T".to_owned()) {
+                    "sys.ObjectRef".to_owned()
+                } else {
+                    parameter.ty.canonical()
+                }
+            })
+            .collect::<Vec<_>>();
+        let undeclared_failure = FailureCode::new("sys.conformance.variadic_map_error").unwrap();
+        assert!(!contract.declares_failure(&undeclared_failure));
+
+        for cardinality in EDGE_CARDINALITIES {
+            let argument_map = ArgumentMap::new((0..cardinality).map(|index| Argument {
+                name: format!("arg_{index:02}"),
+                value: TypedValue::public(
+                    TypeId::new("Str"),
+                    format!("value-{index}").into_bytes(),
+                ),
+            }))
+            .expect("distinct argument names form an argument map");
+            let encoded_entries = argument_map
+                .entries()
+                .map(|(name, value)| {
+                    (
+                        name,
+                        value.static_type().as_str(),
+                        value.canonical().expect("map test values are public"),
+                    )
+                })
+                .collect::<Vec<_>>();
+            let map_payload = serde_json::to_vec(&encoded_entries)
+                .expect("argument-map error payload serializes deterministically");
+            let arguments = contract
+                .signature
+                .parameters
+                .iter()
+                .enumerate()
+                .map(|(index, parameter)| {
+                    let (type_id, payload) = if index == map_indexes[0] {
+                        (parameter.ty.canonical(), map_payload.clone())
+                    } else if parameter.ty == AbiType::Named("T".to_owned()) {
+                        (
+                            "sys.ObjectRef".to_owned(),
+                            format!("object-witness-{operation_name}").into_bytes(),
+                        )
+                    } else {
+                        (
+                            parameter.ty.canonical(),
+                            parameter
+                                .default
+                                .as_deref()
+                                .unwrap_or(&parameter.name)
+                                .as_bytes()
+                                .to_vec(),
+                        )
+                    };
+                    TypedValue::public(TypeId::new(type_id), payload)
+                })
+                .collect::<Vec<_>>();
+            map_cases += 1;
+
+            for failure in &declared_failures {
+                let provider_for = || ArgumentMapFailureProvider {
+                    offer: offer.clone(),
+                    operation: contract.id.clone(),
+                    expected_argument_types: expected_argument_types.clone(),
+                    expected_map_payload: map_payload.clone(),
+                    failure: failure.clone(),
+                    calls: AtomicUsize::new(0),
+                };
+                let direct_provider = provider_for();
+                assert_eq!(
+                    table.dispatch_to_provider(
+                        generated.name,
+                        &direct_provider,
+                        &arguments,
+                        |_| Ok(()),
+                    ),
+                    Ok(orna_sys_v1::SystemDispatchResult::Failed(failure.clone())),
+                    "direct route preserves declared error {} for {operation_name} map size {cardinality}",
+                    failure.as_str()
+                );
+                assert_eq!(direct_provider.calls.load(Ordering::SeqCst), 1);
+                declared_direct_routes += 1;
+
+                let registry_provider = provider_for();
+                assert_eq!(
+                    registry.dispatch_to_provider(
+                        table,
+                        generated.name,
+                        &registry_provider,
+                        &arguments,
+                        |_| Ok(()),
+                    ),
+                    Ok(orna_sys_v1::SystemDispatchResult::Failed(failure.clone())),
+                    "selected-provider route preserves declared error {} for {operation_name} map size {cardinality}",
+                    failure.as_str()
+                );
+                assert_eq!(registry_provider.calls.load(Ordering::SeqCst), 1);
+                declared_registry_routes += 1;
+            }
+
+            let undeclared_provider_for = || ArgumentMapFailureProvider {
+                offer: offer.clone(),
+                operation: contract.id.clone(),
+                expected_argument_types: expected_argument_types.clone(),
+                expected_map_payload: map_payload.clone(),
+                failure: undeclared_failure.clone(),
+                calls: AtomicUsize::new(0),
+            };
+            let diagnostic = ProviderDiagnostic::UndeclaredFailure {
+                operation: contract.id.clone(),
+                code: undeclared_failure.clone(),
+            };
+            let undeclared_direct_provider = undeclared_provider_for();
+            assert_eq!(
+                table.dispatch_to_provider(
+                    generated.name,
+                    &undeclared_direct_provider,
+                    &arguments,
+                    |_| Ok(()),
+                ),
+                Err(diagnostic.clone()),
+                "direct route diagnoses undeclared error on map size {cardinality}"
+            );
+            assert_eq!(undeclared_direct_provider.calls.load(Ordering::SeqCst), 1);
+            undeclared_direct_routes += 1;
+
+            let undeclared_registry_provider = undeclared_provider_for();
+            assert_eq!(
+                registry.dispatch_to_provider(
+                    table,
+                    generated.name,
+                    &undeclared_registry_provider,
+                    &arguments,
+                    |_| Ok(()),
+                ),
+                Err(diagnostic),
+                "selected-provider route diagnoses undeclared error on map size {cardinality}"
+            );
+            assert_eq!(undeclared_registry_provider.calls.load(Ordering::SeqCst), 1);
+            undeclared_registry_routes += 1;
+        }
+    }
+
+    assert_eq!(generated_bindings, VARIADIC_ERROR_OPERATIONS.len());
+    assert_eq!(map_slots, VARIADIC_ERROR_OPERATIONS.len());
+    assert_eq!(
+        map_cases,
+        VARIADIC_ERROR_OPERATIONS.len() * EDGE_CARDINALITIES.len()
+    );
+    assert_eq!(selected_failure_codes, 6);
+    assert_eq!(
+        declared_direct_routes,
+        selected_failure_codes * EDGE_CARDINALITIES.len()
+    );
+    assert_eq!(declared_registry_routes, declared_direct_routes);
+    assert_eq!(undeclared_direct_routes, map_cases);
+    assert_eq!(undeclared_registry_routes, map_cases);
+    println!(
+        "provider_variadic_error_contract_parity operations={generated_bindings} cardinalities=0,1,4 map_slots={map_slots} map_cases={map_cases} selected_failure_codes={selected_failure_codes} declared_direct={declared_direct_routes} declared_registry={declared_registry_routes} undeclared_direct={undeclared_direct_routes} undeclared_registry={undeclared_registry_routes} total_cases={}",
+        1 + generated_bindings
+            + map_slots
+            + map_cases
+            + declared_direct_routes
+            + declared_registry_routes
+            + undeclared_direct_routes
+            + undeclared_registry_routes
+    );
+}
+
+#[test]
 fn generated_dispatch_diagnostics_match_registry_and_direct_paths() {
     fn expect_diagnostic<T>(result: Result<T, ProviderDiagnostic>) -> ProviderDiagnostic {
         match result {
@@ -3795,6 +4110,311 @@ fn provider_generic_object_returns_preserve_witness_types_on_both_routes() {
             + registry_routes
             + direct_result_mismatches
             + registry_result_mismatches
+    );
+}
+
+#[test]
+fn provider_closure_callbacks_match_precondition_order_and_short_circuit_edges() {
+    const OPERATION_NAME: &str = "sys.invoke(Value)";
+    const PRECONDITION_DECLARATIONS: [&str; 3] = [
+        "callback probe: resolve target",
+        "callback probe: validate arguments",
+        "callback probe: admit invocation",
+    ];
+
+    let generated_schema = build_provider::generate_provider_registry_schema()
+        .expect("provider callback schema regenerates from its source generator");
+    assert_eq!(generated_schema, system_provider_abi_schema_json());
+    let baseline_json: Value =
+        serde_json::from_str(system_provider_abi_json()).expect("embedded provider registry");
+    build_host::validate_json_against_schema(system_provider_abi_json(), &generated_schema)
+        .expect("embedded provider registry conforms to the regenerated schema");
+    let baseline = SystemProviderAbi::from_json(system_provider_abi_json())
+        .expect("embedded provider registry parses into typed contracts");
+    let baseline_contract = baseline
+        .operation(OPERATION_NAME)
+        .expect("generated invoke contract exists");
+    assert!(baseline_contract.preconditions.is_empty());
+    let generated = system_function_descriptor(OPERATION_NAME)
+        .expect("invoke operation has a macro-generated binding");
+    assert_eq!(generated.signature, baseline_contract.signature.source);
+    let baseline_registry = ProviderRoleRegistry::from_baked_abi(&baseline)
+        .expect("embedded invoke provider role resolves");
+    let role = baseline_contract
+        .role
+        .as_ref()
+        .expect("invoke operation carries a provider role");
+    let offer = baseline_registry
+        .resolve(role.as_str())
+        .expect("invoke role has a selected provider offer")
+        .clone();
+    let argument_types = baseline_contract
+        .signature
+        .parameters
+        .iter()
+        .map(|parameter| parameter.ty.canonical())
+        .collect::<Vec<_>>();
+    let arguments = baseline_contract
+        .signature
+        .parameters
+        .iter()
+        .map(|parameter| {
+            TypedValue::public(
+                TypeId::new(parameter.ty.canonical()),
+                parameter
+                    .default
+                    .as_deref()
+                    .unwrap_or(&parameter.name)
+                    .as_bytes()
+                    .to_vec(),
+            )
+        })
+        .collect::<Vec<_>>();
+    let expected_result = TypedValue::public(
+        TypeId::new(baseline_contract.signature.result.canonical()),
+        b"closure-callback-result".to_vec(),
+    );
+    let provider_for = || InvokeValueProvider {
+        offer: offer.clone(),
+        operation: baseline_contract.id.clone(),
+        argument_types: argument_types.clone(),
+        response: Ok(expected_result.clone()),
+        calls: AtomicUsize::new(0),
+    };
+
+    let mut empty_direct_callback = 0;
+    let empty_direct_provider = provider_for();
+    assert_eq!(
+        baseline.dispatch_to_provider(generated.name, &empty_direct_provider, &arguments, |_| {
+            empty_direct_callback += 1;
+            Ok(())
+        },),
+        Ok(orna_sys_v1::SystemDispatchResult::Returned(
+            expected_result.clone()
+        )),
+        "direct provider route succeeds with no declared callbacks"
+    );
+    assert_eq!(empty_direct_callback, 0);
+    assert_eq!(empty_direct_provider.calls.load(Ordering::SeqCst), 1);
+
+    let mut empty_registry_callback = 0;
+    let empty_registry_provider = provider_for();
+    assert_eq!(
+        baseline_registry.dispatch_to_provider(
+            &baseline,
+            generated.name,
+            &empty_registry_provider,
+            &arguments,
+            |_| {
+                empty_registry_callback += 1;
+                Ok(())
+            },
+        ),
+        Ok(orna_sys_v1::SystemDispatchResult::Returned(
+            expected_result.clone()
+        )),
+        "selected-provider route succeeds with no declared callbacks"
+    );
+    assert_eq!(empty_registry_callback, 0);
+    assert_eq!(empty_registry_provider.calls.load(Ordering::SeqCst), 1);
+
+    let mut callback_registry_json = baseline_json;
+    let invoke_row = callback_registry_json["operations"]
+        .as_array_mut()
+        .expect("embedded registry has operation rows")
+        .iter_mut()
+        .find(|row| row["name"] == OPERATION_NAME)
+        .expect("invoke operation has a registry row");
+    invoke_row["preconditions"] = serde_json::json!(PRECONDITION_DECLARATIONS);
+    let callback_registry_source = callback_registry_json.to_string();
+    build_host::validate_json_against_schema(&callback_registry_source, &generated_schema)
+        .expect("callback-bearing invoke row conforms to the generated schema");
+    let callback_table = SystemProviderAbi::from_json(&callback_registry_source)
+        .expect("schema-valid callback contract parses into typed registry");
+    let callback_contract = callback_table
+        .operation(OPERATION_NAME)
+        .expect("callback-bearing invoke contract exists");
+    assert_eq!(
+        callback_contract
+            .preconditions
+            .iter()
+            .map(|precondition| precondition.declaration.as_str())
+            .collect::<Vec<_>>(),
+        PRECONDITION_DECLARATIONS
+    );
+    assert_eq!(callback_contract.signature, baseline_contract.signature);
+    let callback_registry = ProviderRoleRegistry::from_baked_abi(&callback_table)
+        .expect("callback-bearing invoke provider role resolves");
+    let callback_offer = callback_registry
+        .resolve(role.as_str())
+        .expect("callback-bearing invoke role has a selected provider")
+        .clone();
+    let callback_provider_for = || InvokeValueProvider {
+        offer: callback_offer.clone(),
+        operation: callback_contract.id.clone(),
+        argument_types: argument_types.clone(),
+        response: Ok(expected_result.clone()),
+        calls: AtomicUsize::new(0),
+    };
+
+    let mut successful_direct_trace = Vec::new();
+    let successful_direct_provider = callback_provider_for();
+    assert_eq!(
+        callback_table.dispatch_to_provider(
+            generated.name,
+            &successful_direct_provider,
+            &arguments,
+            |precondition| {
+                successful_direct_trace.push(precondition.declaration.clone());
+                Ok(())
+            },
+        ),
+        Ok(orna_sys_v1::SystemDispatchResult::Returned(
+            expected_result.clone()
+        ))
+    );
+    assert_eq!(successful_direct_trace, PRECONDITION_DECLARATIONS);
+    assert_eq!(successful_direct_provider.calls.load(Ordering::SeqCst), 1);
+
+    let mut successful_registry_trace = Vec::new();
+    let successful_registry_provider = callback_provider_for();
+    assert_eq!(
+        callback_registry.dispatch_to_provider(
+            &callback_table,
+            generated.name,
+            &successful_registry_provider,
+            &arguments,
+            |precondition| {
+                successful_registry_trace.push(precondition.declaration.clone());
+                Ok(())
+            },
+        ),
+        Ok(orna_sys_v1::SystemDispatchResult::Returned(
+            expected_result.clone()
+        ))
+    );
+    assert_eq!(successful_registry_trace, PRECONDITION_DECLARATIONS);
+    assert_eq!(successful_registry_provider.calls.load(Ordering::SeqCst), 1);
+
+    let declared_failure = FailureCode::new("sys.invoke.argument_missing").unwrap();
+    assert!(callback_contract.declares_failure(&declared_failure));
+    let mut declared_short_circuit_routes = 0;
+    let mut callback_visits = PRECONDITION_DECLARATIONS.len() * 2;
+    for failing_index in 0..PRECONDITION_DECLARATIONS.len() {
+        let expected_trace = PRECONDITION_DECLARATIONS[..=failing_index].to_vec();
+        let mut direct_trace = Vec::new();
+        let direct_provider = callback_provider_for();
+        assert_eq!(
+            callback_table.dispatch_to_provider(
+                generated.name,
+                &direct_provider,
+                &arguments,
+                |precondition| {
+                    let current_index = direct_trace.len();
+                    direct_trace.push(precondition.declaration.clone());
+                    if current_index == failing_index {
+                        Err(declared_failure.clone())
+                    } else {
+                        Ok(())
+                    }
+                },
+            ),
+            Ok(orna_sys_v1::SystemDispatchResult::Failed(
+                declared_failure.clone()
+            )),
+            "direct callback failure short-circuits at position {failing_index}"
+        );
+        assert_eq!(direct_trace, expected_trace);
+        assert_eq!(direct_provider.calls.load(Ordering::SeqCst), 0);
+        callback_visits += direct_trace.len();
+        declared_short_circuit_routes += 1;
+
+        let mut registry_trace = Vec::new();
+        let registry_provider = callback_provider_for();
+        assert_eq!(
+            callback_registry.dispatch_to_provider(
+                &callback_table,
+                generated.name,
+                &registry_provider,
+                &arguments,
+                |precondition| {
+                    let current_index = registry_trace.len();
+                    registry_trace.push(precondition.declaration.clone());
+                    if current_index == failing_index {
+                        Err(declared_failure.clone())
+                    } else {
+                        Ok(())
+                    }
+                },
+            ),
+            Ok(orna_sys_v1::SystemDispatchResult::Failed(
+                declared_failure.clone()
+            )),
+            "selected-provider callback failure short-circuits at position {failing_index}"
+        );
+        assert_eq!(registry_trace, expected_trace);
+        assert_eq!(registry_provider.calls.load(Ordering::SeqCst), 0);
+        callback_visits += registry_trace.len();
+        declared_short_circuit_routes += 1;
+    }
+
+    let undeclared_failure = FailureCode::new("sys.callback.rejected").unwrap();
+    let expected_undeclared = ProviderDiagnostic::UndeclaredFailure {
+        operation: callback_contract.id.clone(),
+        code: undeclared_failure.clone(),
+    };
+    let mut undeclared_direct_trace = Vec::new();
+    let undeclared_direct_provider = callback_provider_for();
+    assert_eq!(
+        callback_table.dispatch_to_provider(
+            generated.name,
+            &undeclared_direct_provider,
+            &arguments,
+            |precondition| {
+                undeclared_direct_trace.push(precondition.declaration.clone());
+                Err(undeclared_failure.clone())
+            },
+        ),
+        Err(expected_undeclared.clone())
+    );
+    assert_eq!(
+        undeclared_direct_trace,
+        vec![PRECONDITION_DECLARATIONS[0].to_owned()]
+    );
+    assert_eq!(undeclared_direct_provider.calls.load(Ordering::SeqCst), 0);
+    callback_visits += undeclared_direct_trace.len();
+
+    let mut undeclared_registry_trace = Vec::new();
+    let undeclared_registry_provider = callback_provider_for();
+    assert_eq!(
+        callback_registry.dispatch_to_provider(
+            &callback_table,
+            generated.name,
+            &undeclared_registry_provider,
+            &arguments,
+            |precondition| {
+                undeclared_registry_trace.push(precondition.declaration.clone());
+                Err(undeclared_failure.clone())
+            },
+        ),
+        Err(expected_undeclared)
+    );
+    assert_eq!(
+        undeclared_registry_trace,
+        vec![PRECONDITION_DECLARATIONS[0].to_owned()]
+    );
+    assert_eq!(undeclared_registry_provider.calls.load(Ordering::SeqCst), 0);
+    callback_visits += undeclared_registry_trace.len();
+
+    assert_eq!(
+        declared_short_circuit_routes,
+        PRECONDITION_DECLARATIONS.len() * 2
+    );
+    assert_eq!(callback_visits, 20);
+    println!(
+        "provider_closure_callback_parity operation={OPERATION_NAME} schema_validations=2 typed_contracts=2 generated_binding=1 synthetic_preconditions={} empty_callback_routes=2 success_routes=2 declared_short_circuits={declared_short_circuit_routes} undeclared_routes=2 callback_visits={callback_visits} providers_skipped=8 total_cases={}",
+        PRECONDITION_DECLARATIONS.len(),
+        11 + PRECONDITION_DECLARATIONS.len() * 2
     );
 }
 
