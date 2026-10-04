@@ -262,6 +262,31 @@ fn paired_shared_cursor_nested_spill_functions() -> Functions {
         .collect()
 }
 
+fn paired_nested_restore_fold_functions() -> Functions {
+    let parsed = parse_module(include_str!(
+        "fixtures/table_relation_paired_nested_restore_fold_jg2o0.orna"
+    ));
+    assert!(parsed.is_ok(), "{:?}", parsed.diagnostics);
+    parsed
+        .value
+        .items
+        .into_iter()
+        .map(|item| {
+            let orna_syntax_v1::Declaration::Function { signature, body } = item.declaration else {
+                panic!("fixture function expected")
+            };
+            (
+                signature.name,
+                PureFunction {
+                    parameters: signature.parameters,
+                    body,
+                    environment: Environment::new(),
+                },
+            )
+        })
+        .collect()
+}
+
 fn sparse_window_fold_functions() -> Functions {
     let parsed = parse_module(include_str!(
         "fixtures/table_relation_sparse_window_fold_d4441.orna"
@@ -7097,7 +7122,7 @@ fn paired_nested_folds_keep_identity_across_same_source_restore_chains() {
         ("View.Paired", nested_pagination_restore(&first, &chain)),
         ("View.Paired", nested_pagination_restore(&second, &chain)),
     ]);
-    let mut functions = paired_shared_cursor_nested_spill_functions();
+    let mut functions = paired_nested_restore_fold_functions();
     functions.insert(
         "run".into(),
         PureFunction {
@@ -7196,7 +7221,7 @@ fn paired_nested_fold_restores_keep_scopes_as_fold_depths_change() {
         })
         .collect::<Vec<_>>();
     let mut source = PairedCursorRestoreSource::new(restores);
-    let mut functions = paired_shared_cursor_nested_spill_functions();
+    let mut functions = paired_nested_restore_fold_functions();
     let mut outputs = Vec::new();
     for (
         first_depth,
