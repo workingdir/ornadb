@@ -8,8 +8,8 @@ const distribution = join(webUi, 'dist');
 const assetRows = join(repository, 'playground', 'Asset');
 const themeRows = join(repository, 'playground', 'Theme');
 const layoutRows = join(repository, 'playground', 'Layout');
-const maxAssetBytes = 2 * 1024 * 1024;
-const maxAssetRowBytes = 4 * 1024 * 1024;
+const maxAssetBytes = 8 * 1024 * 1024;
+const maxAssetRowBytes = 16 * 1024 * 1024;
 const maxStyleBytes = 256 * 1024;
 const maxStyleRowBytes = 512 * 1024;
 const arguments_ = process.argv.slice(2);
@@ -42,7 +42,7 @@ async function collectFiles(directory, prefix = '') {
     if (child.name.endsWith('.d.ts')) continue;
     const path = join(directory, child.name);
     const relativePath = prefix ? `${prefix}/${child.name}` : child.name;
-    // This ignored local build output is not part of the database-served UI.
+    // Local package output at the root is not part of the database-served UI.
     if (child.isDirectory() && relativePath === 'lsp-wasm') continue;
     if (child.isDirectory()) files.push(...await collectFiles(path, relativePath));
     else if (child.isFile()) files.push(relativePath);
@@ -77,6 +77,12 @@ function styleRow(id, name, css) {
   return `{ id: ${ornaString(id)}, name: ${ornaString(name)}, css: ${ornaString(css)} }\n`;
 }
 
+const extraAssets = [
+  ['assets/presentation.mjs', join(repository, 'playground/shared/presentation.mjs')],
+  ['assets/serve-home.mjs', join(repository, 'crates/orna-cli-v1/src/serve_home.mjs')],
+  ['assets/serve-playground.mjs', join(repository, 'crates/orna-cli-v1/src/serve_playground.mjs')],
+];
+
 async function expectedRows() {
   const files = await collectFiles('');
   if (!files.includes('index.html')) throw new Error('The Vite output has no index.html shell.');
@@ -87,19 +93,28 @@ async function expectedRows() {
 
   const rows = new Map();
   let totalContentBytes = 0;
-  for (const path of files) {
-    // Theme and layout sources are served from their own DB tables. Monaco's
-    // generated CSS stays an Asset because it styles the embedded editor.
+  const sources = [
+    ...files.map((path) => [path, join(distribution, path)]),
+    ...extraAssets,
+  ];
+  for (const [path, sourcePath] of sources) {
+    // This app stylesheet is represented by the Theme and Layout tables. Other
+    // CSS files, including Monaco's editor styles, remain normal Asset rows.
     if (path === bundledStylePath) continue;
-    const content = await readFile(join(distribution, path));
+    const content = await readFile(sourcePath);
     if (content.byteLength > maxAssetBytes) {
       throw new Error(`Playground DB asset exceeds ${maxAssetBytes} bytes: ${path}`);
     }
     const mediaType = mediaTypes.get(extname(path).toLowerCase());
     if (!mediaType) throw new Error(`Unsupported playground DB asset type: ${path}`);
-    let contentText = content.toString('utf8');
-    if (!Buffer.from(contentText, 'utf8').equals(content)) {
-      throw new Error(`Playground DB assets must be UTF-8 text: ${path}`);
+    let contentText;
+    if (mediaType === 'application/wasm') {
+      contentText = content.toString('base64');
+    } else {
+      contentText = content.toString('utf8');
+      if (!Buffer.from(contentText, 'utf8').equals(content)) {
+        throw new Error(`Playground DB assets must be UTF-8 text: ${path}`);
+      }
     }
     if (path === 'index.html') {
       const stylesheetLinks = contentText.match(/<link\b[^>]*\brel="stylesheet"[^>]*>/g) ?? [];
@@ -125,7 +140,7 @@ async function expectedRows() {
       throw new Error(`Playground DB asset row exceeds ${maxAssetRowBytes} bytes: ${path}`);
     }
     rows.set(rowPath, row);
-    totalContentBytes += Buffer.byteLength(contentText);
+    totalContentBytes += content.byteLength;
   }
 
   const styles = new Map();
@@ -197,7 +212,11 @@ try {
       );
     }
   } else {
-    await Promise.all([mkdir(themeRows, { recursive: true }), mkdir(layoutRows, { recursive: true })]);
+    await Promise.all([
+      mkdir(assetRows, { recursive: true }),
+      mkdir(themeRows, { recursive: true }),
+      mkdir(layoutRows, { recursive: true }),
+    ]);
     for (const [rowPath, content] of changed) await writeFile(rowPath, content, 'utf8');
     for (const rowPath of stale) await rm(rowPath);
     for (const [rowPath, content] of changedStyles) await writeFile(rowPath, content, 'utf8');

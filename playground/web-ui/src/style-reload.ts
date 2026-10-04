@@ -76,6 +76,7 @@ export function startStyleReload(): void {
       activeTheme = nextTheme;
       activeLayout = nextLayout;
       currentRevision = revision;
+      window.dispatchEvent(new Event('orna:playground-styles-updated'));
       if (status && replacingCommittedStyles) status.textContent = 'Theme and layout updated.';
     } catch {
       if (status) status.textContent = 'Theme and layout updates are unavailable.';

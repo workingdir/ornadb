@@ -27,6 +27,11 @@ const PLAYGROUND_SCHEMA: &str = include_str!("fixtures/playground-schema.orna");
 const ASSET_INDEX: &str = include_str!("fixtures/playground-asset-index.orna");
 const ASSET_APP: &str = include_str!("fixtures/playground-asset-app.orna");
 const ASSET_STYLE: &str = include_str!("fixtures/playground-asset-style.orna");
+const ASSET_PRESENTATION: &str = include_str!("fixtures/playground-asset-presentation.orna");
+const ASSET_HOME: &str = include_str!("fixtures/playground-asset-home.orna");
+const ASSET_PLAYGROUND: &str = include_str!("fixtures/playground-asset-playground.orna");
+const ASSET_LSP_JS: &str = include_str!("fixtures/playground-asset-lsp-js.orna");
+const ASSET_LSP_WASM: &str = include_str!("fixtures/playground-asset-lsp-wasm.orna");
 const ASSET_EDITOR_CONFIG: &str = include_str!("fixtures/playground-asset-editor-config.orna");
 const ASSET_EMBED: &str = include_str!("fixtures/playground-asset-embed.orna");
 const PLAYGROUND_THEME: &str = include_str!("fixtures/playground-theme.orna");
@@ -108,6 +113,41 @@ fn curl(url: &str, arguments: &[&str]) -> Result<HttpResponse, String> {
         headers: headers.to_owned(),
         body: body.to_owned(),
     })
+}
+
+fn curl_binary(url: &str) -> Result<(u16, String, Vec<u8>), String> {
+    let output = tempfile::NamedTempFile::new().map_err(|error| error.to_string())?;
+    let command = Command::new("curl")
+        .args([
+            "--silent",
+            "--show-error",
+            "--noproxy",
+            "*",
+            "--max-time",
+            "5",
+            "--output",
+        ])
+        .arg(output.path())
+        .args(["--write-out", "%{http_code}\n%{content_type}"])
+        .arg(url)
+        .output()
+        .map_err(|error| format!("curl: {error}"))?;
+    if !command.status.success() {
+        return Err(format!(
+            "curl exit {}: {}",
+            command.status,
+            String::from_utf8_lossy(&command.stderr)
+        ));
+    }
+    let metadata = String::from_utf8(command.stdout).map_err(|error| error.to_string())?;
+    let (status, content_type) = metadata
+        .split_once('\n')
+        .ok_or_else(|| "curl response omitted HTTP metadata".to_owned())?;
+    let status = status
+        .parse::<u16>()
+        .map_err(|error| format!("invalid HTTP status: {error}"))?;
+    let body = std::fs::read(output.path()).map_err(|error| error.to_string())?;
+    Ok((status, content_type.to_owned(), body))
 }
 
 fn response_header<'a>(headers: &'a str, name: &str) -> Option<&'a str> {
@@ -390,6 +430,28 @@ fn orna_serve_hosts_playground_with_pending_evals_and_snapshot_correct_deltas() 
     std::fs::create_dir_all(&layout).expect("create committed Layout rows directory");
     std::fs::write(layout.join("responsive.orna"), PLAYGROUND_LAYOUT)
         .expect("write committed Layout fixture");
+    for (id, source) in [
+        (
+            "6173736574732f70726573656e746174696f6e2e6d6a73",
+            ASSET_PRESENTATION,
+        ),
+        ("6173736574732f73657276652d686f6d652e6d6a73", ASSET_HOME),
+        (
+            "6173736574732f73657276652d706c617967726f756e642e6d6a73",
+            ASSET_PLAYGROUND,
+        ),
+        (
+            "6173736574732f6c73702d7761736d2f6f726e615f6c73702e6a73",
+            ASSET_LSP_JS,
+        ),
+        (
+            "6173736574732f6c73702d7761736d2f6f726e615f6c73705f62672e7761736d",
+            ASSET_LSP_WASM,
+        ),
+    ] {
+        std::fs::write(assets.join(format!("asset-{id}.orna")), source)
+            .expect("write committed browser support fixture");
+    }
     git(
         project.path(),
         &[
@@ -443,16 +505,43 @@ fn orna_serve_hosts_playground_with_pending_evals_and_snapshot_correct_deltas() 
     assert!(page.body.contains("id=\"live-bridge\""));
     assert!(page.body.contains("id=\"live-presentation\""));
     assert!(page.body.contains("id=\"run-events-source\""));
-    assert!(page.body.contains("src=\"/assets/serve-playground.mjs\""));
+    assert!(
+        page.body
+            .contains("src=\"/playground/assets/serve-playground.mjs\"")
+    );
     assert!(page.body.contains("orna/serve/run-events/v1"));
-    let runtime = curl(&format!("{base_url}/assets/serve-playground.mjs"), &[])
-        .expect("curl the playground live module");
+    let runtime = curl(
+        &format!("{base_url}/playground/assets/serve-playground.mjs"),
+        &[],
+    )
+    .expect("curl the playground live module");
     assert_eq!(runtime.status, 200);
     assert!(runtime.body.contains("globalThis.ornaPlaygroundRun"));
-    let presentation_runtime = curl(&format!("{base_url}/assets/presentation.mjs"), &[])
-        .expect("curl the shared presentation runtime");
+    let presentation_runtime = curl(
+        &format!("{base_url}/playground/assets/presentation.mjs"),
+        &[],
+    )
+    .expect("curl the shared presentation runtime");
     assert_eq!(presentation_runtime.status, 200);
     assert!(presentation_runtime.body.contains("class LivePresentation"));
+    let home_runtime = curl(&format!("{base_url}/playground/assets/serve-home.mjs"), &[])
+        .expect("curl the root live module from the database asset row");
+    assert_eq!(home_runtime.status, 200);
+    assert!(home_runtime.body.contains("ornaHomeReady"));
+    let lsp_binding = curl(
+        &format!("{base_url}/playground/assets/lsp-wasm/orna_lsp.js"),
+        &[],
+    )
+    .expect("curl the browser LSP binding from the database asset row");
+    assert_eq!(lsp_binding.status, 200);
+    assert!(lsp_binding.body.contains("export default"));
+    let (status, content_type, lsp_wasm) = curl_binary(&format!(
+        "{base_url}/playground/assets/lsp-wasm/orna_lsp_bg.wasm"
+    ))
+    .expect("curl the browser LSP wasm from the database asset row");
+    assert_eq!(status, 200);
+    assert_eq!(content_type, "application/wasm");
+    assert_eq!(lsp_wasm, b"\0asm\x01\0\0\0");
     let app = curl(&format!("{base_url}/playground/assets/app.js"), &[])
         .expect("curl the playground browser asset");
     assert_eq!(app.status, 200);
