@@ -1,0 +1,5 @@
+numeric.decimal_from_text("") == null
+&& numeric.decimal_from_text("+1.2") == null
+&& numeric.decimal_from_text(" 1.2") == null
+&& numeric.decimal_from_text(".5") == null
+&& numeric.decimal_from_text("1.") == null
