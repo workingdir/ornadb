@@ -1,19 +1,19 @@
 # Orna playground web UI
 
-The Vite page is served by the selected orna serve clone at /playground/.
+The Vite page is served by the selected `orna serve` clone at `/playground/`.
 It loads committed files from `playground/examples` and rows from
 `playground.Sample` through `/api/examples`, runs source through the clone's
-authenticated orna.present.v1 session, and renders the server's
-run-event presentation in the result tabs. Orna evaluation stays in the
-server runtime. The browser worker for editor intelligence loads
-orna-lsp's shared analysis core.
+authenticated `orna.present.v1` session, and renders the server's run-event
+presentation in the result tabs. Orna evaluation stays in the server runtime.
+The browser worker for editor intelligence loads orna-lsp's shared analysis
+core.
 
 Build the page and editor worker artifacts with:
 
     npm ci
     npm run build
 
-Then run orna serve from the clone and open
+Then run `orna serve` from the clone and open
 http://127.0.0.1:8181/playground/. The Monaco tokenizer and its keyword
 metadata are generated from orna-syntax-v1; check drift with:
 
@@ -26,3 +26,12 @@ Embed the editor in another page with an iframe pointed at
 
 That entry hides the database link and allows framing by another origin. It
 uses the same examples, editor, and OrnaDB runtime as `/playground/`.
+
+## GitHub Pages channels
+
+The Pages workflow publishes the stable channel from `main` at
+https://workingdir.github.io/ornadb/ and the development channel from the
+playground milestone branch at https://workingdir.github.io/ornadb/dev/.
+Pull requests run the build checks without publishing. The Pages smoke checks
+each channel's HTML, built assets, and editor WebAssembly modules. Examples and
+source evaluation still use the `orna serve` API described above.
