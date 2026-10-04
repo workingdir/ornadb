@@ -1,0 +1,14 @@
+/// Unicode prefix for range mapping: café 🧭.
+pub fn seed(value: Int): Int = value;
+
+pub fn mid(value: Int): Int = seed(value);
+
+pub fn root(value: Int): Int = /* 🧭 */ mid(seed(value)) + seed(value);
+
+pub fn shadowed(seed: Int): Int = seed(1);
+
+pub fn isolated(value: Int): Int = value;
+
+pub fn unresolved(value: Int): Int = missing(value);
+
+pub fn collide(value: Int): Int = value;
