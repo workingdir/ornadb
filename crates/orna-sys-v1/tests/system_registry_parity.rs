@@ -330,6 +330,36 @@ fn generated_artifact_determinism_matrix_matches_embedded_and_build_outputs() {
 }
 
 #[test]
+fn published_system_api_schema_validates_constants_and_dynamic_maps() {
+    let api_json = system_api_json();
+    let schema_json = system_api_schema_json();
+    build_host::validate_json_against_schema(&api_json, schema_json)
+        .expect("generated API document conforms to its published JSON Schema");
+
+    let api: Value = serde_json::from_str(&api_json).expect("generated sys API JSON");
+    let mut invalid_status = api.clone();
+    invalid_status["status"] = Value::String("draft".to_owned());
+    assert!(
+        build_host::validate_json_against_schema(&invalid_status.to_string(), schema_json)
+            .unwrap_err()
+            .contains("schema constant"),
+        "published API schema rejects status drift"
+    );
+
+    let mut invalid_enum_name = api;
+    invalid_enum_name["enums"]["vendor.invalid"] = serde_json::json!(["value"]);
+    assert!(
+        build_host::validate_json_against_schema(&invalid_enum_name.to_string(), schema_json)
+            .unwrap_err()
+            .contains("property name"),
+        "published API schema constrains dynamic enum keys"
+    );
+    println!(
+        "system_api_schema_validation valid=1 const_rejections=1 property_name_rejections=1 total_cases=3"
+    );
+}
+
+#[test]
 fn dispatch_metadata_schema_covers_nullable_roles_and_rejects_unknown_or_invalid_fields() {
     let dispatch_json = system_provider_abi_json();
     let schema_json = system_provider_abi_schema_json();

@@ -15,6 +15,7 @@ use num_bigint::{BigInt, Sign};
 use num_integer::Integer;
 use num_traits::{Signed, ToPrimitive, Zero};
 use orna_foundation_v1::{CanonicalValue, Diagnostic, DiagnosticSeverity, SafeText};
+#[cfg(feature = "reference-standard")]
 use orna_semantic_v1::StandardDependencyProfile;
 use orna_syntax_v1::{
     AssignmentOperator, AssignmentTarget, ControlKind, Expr, LiteralKind, Parameter, Pattern,
@@ -32,14 +33,17 @@ use serde_json::value::RawValue;
 use sha2::{Digest as _, Sha256};
 use unicode_normalization::UnicodeNormalization;
 
+#[cfg(feature = "core-repl")]
 mod admitted_repl;
 mod cancellation;
 mod relation;
 mod repl;
+#[cfg(feature = "native-hosts")]
 mod sys_bindings;
 mod timezone;
 mod unicode_16_case_properties;
 
+#[cfg(feature = "core-repl")]
 pub use admitted_repl::{AdmittedReplSession, ReplError};
 pub use cancellation::CancellationToken;
 use relation::{
@@ -47,6 +51,7 @@ use relation::{
     RelationLastState, RelationPlan, RelationStage, RelationWindowState,
 };
 pub use repl::{ReplSession, parse_admitted_repl};
+#[cfg(feature = "native-hosts")]
 pub use sys_bindings::SysHostBindingRegistry;
 pub use timezone::{
     Instant, LocalDateTime, LocalTimeResolution, TIMEZONE_DATASET_VERSION, TimeZone, TimeZoneError,
@@ -58,12 +63,14 @@ pub use timezone::{
 /// crate verifies its pinned profile before either boundary admits an import.
 /// Returns the reference standard sources supplied to the bounded REPL.
 #[must_use]
-pub fn reference_standard_sources() -> [(String, String); 58] {
+#[cfg(feature = "reference-standard")]
+pub fn reference_standard_sources() -> [(String, String); 59] {
     orna_standard::reference_standard_sources_v1()
 }
 
 /// Returns the immutable profile that verifies [`reference_standard_sources`].
 #[must_use]
+#[cfg(feature = "reference-standard")]
 pub fn reference_standard_profile() -> StandardDependencyProfile {
     orna_standard::reference_standard_profile_v1()
 }
