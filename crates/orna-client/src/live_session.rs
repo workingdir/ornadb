@@ -717,6 +717,126 @@ mod tests {
     }
 
     #[test]
+    fn separate_live_sessions_reconcile_typed_deltas_and_resync_independently() {
+        let first_initial = snapshot_with_request(0, "first-before", None);
+        let second_initial = snapshot_with_request(0, "second-before", None);
+        let mut first_io = MemoryIo::default();
+        first_io.incoming.push_back(first_initial.clone());
+        let mut second_io = MemoryIo::default();
+        second_io.incoming.push_back(second_initial.clone());
+        let mut first = LiveSessionDriver::new(
+            first_io,
+            [7; 16],
+            Limits::default(),
+            Renderer::default(),
+            Allocator::default(),
+        )
+        .unwrap();
+        let mut second = LiveSessionDriver::new(
+            second_io,
+            [7; 16],
+            Limits::default(),
+            Renderer::default(),
+            Allocator::default(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            block_on(first.receive_once()).unwrap(),
+            LiveSessionEvent::SnapshotPublished { revision: 0 }
+        );
+        assert_eq!(
+            block_on(second.receive_once()).unwrap(),
+            LiveSessionEvent::SnapshotPublished { revision: 0 }
+        );
+        assert_eq!(first.renderer.trees, vec![snapshot_present(&first_initial)]);
+        assert_eq!(
+            second.renderer.trees,
+            vec![snapshot_present(&second_initial)]
+        );
+
+        first.io.incoming.push_back(delta(0, 1, "first-after"));
+        assert_eq!(
+            block_on(first.receive_once()).unwrap(),
+            LiveSessionEvent::DeltaPublished { revision: 1 }
+        );
+        assert_eq!(first.presentation().published().unwrap().revision(), 1);
+        assert_eq!(
+            first.renderer.trees[1],
+            snapshot_present(&frame(16, [7; 16], snapshot_body(1, "first-after")))
+        );
+        assert_eq!(second.presentation().published().unwrap().revision(), 0);
+        assert_eq!(
+            second.renderer.trees,
+            vec![snapshot_present(&second_initial)]
+        );
+
+        second.io.incoming.push_back(delta(0, 1, "second-after"));
+        assert_eq!(
+            block_on(second.receive_once()).unwrap(),
+            LiveSessionEvent::DeltaPublished { revision: 1 }
+        );
+        assert_eq!(
+            second.renderer.trees[1],
+            snapshot_present(&frame(16, [7; 16], snapshot_body(1, "second-after")))
+        );
+        assert_eq!(
+            first.renderer.trees[1],
+            snapshot_present(&frame(16, [7; 16], snapshot_body(1, "first-after")))
+        );
+
+        first.io.incoming.push_back(delta(0, 2, "first-gap"));
+        assert!(matches!(
+            block_on(first.receive_once()),
+            Ok(LiveSessionEvent::ResyncSent { .. })
+        ));
+        assert_resync_frame(&first.io.sent[0]);
+        assert!(second.io.sent.is_empty());
+        assert_eq!(first.presentation().published().unwrap().revision(), 1);
+        assert_eq!(second.presentation().published().unwrap().revision(), 1);
+
+        let request = Envelope::decode(&first.io.sent[0], Limits::default())
+            .unwrap()
+            .request
+            .expect("first session's recovery request is correlated");
+        first
+            .io
+            .incoming
+            .push_back(snapshot_with_request(3, "first-recovered", Some(request)));
+        assert_eq!(
+            block_on(first.receive_once()).unwrap(),
+            LiveSessionEvent::SnapshotPublished { revision: 3 }
+        );
+        assert_eq!(
+            first.renderer.trees[2],
+            snapshot_present(&frame(16, [7; 16], snapshot_body(3, "first-recovered")))
+        );
+        assert_eq!(second.presentation().published().unwrap().revision(), 1);
+        assert_eq!(
+            second.renderer.trees[1],
+            snapshot_present(&frame(16, [7; 16], snapshot_body(1, "second-after")))
+        );
+
+        second
+            .io
+            .incoming
+            .push_back(delta(1, 2, "second-after-recovery"));
+        assert_eq!(
+            block_on(second.receive_once()).unwrap(),
+            LiveSessionEvent::DeltaPublished { revision: 2 }
+        );
+        assert_eq!(
+            second.renderer.trees[2],
+            snapshot_present(&frame(
+                16,
+                [7; 16],
+                snapshot_body(2, "second-after-recovery")
+            ))
+        );
+        assert_eq!(first.presentation().published().unwrap().revision(), 3);
+    }
+
+    #[test]
     fn bad_base_and_mid_patch_failure_send_resync_without_changing_tree() {
         let mut io = MemoryIo::default();
         io.incoming.push_back(snapshot(0));
@@ -862,11 +982,8 @@ mod tests {
     fn initial_snapshot_requires_subscribe_request_correlation() {
         let expected_request = [1; 16];
         let mut io = MemoryIo::default();
-        io.incoming.push_back(snapshot_with_request(
-            0,
-            "wrong-request",
-            Some([2; 16]),
-        ));
+        io.incoming
+            .push_back(snapshot_with_request(0, "wrong-request", Some([2; 16])));
         let mut driver = LiveSessionDriver::new_with_expected_snapshot_request(
             io,
             [7; 16],
