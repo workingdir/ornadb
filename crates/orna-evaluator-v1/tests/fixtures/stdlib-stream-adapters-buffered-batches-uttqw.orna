@@ -1,0 +1,5 @@
+std.stream.adapters.buffered_batches(
+    std.stream.from_list([4, 1, 6, 2, 8], "buffered-batch-proof"),
+    2,
+    1
+)

@@ -1,0 +1,5 @@
+{ id: "f89/checkpoint/pair-0", name: "f89/left/checkpoint-main", city: "f89/right/checkpoint-alpha", }
+
+{ id: "f89/checkpoint/pair-1", name: "f89/left/checkpoint-retry", city: "f89/right/checkpoint-beta", }
+
+{ id: "f89/checkpoint/pair-2", name: "f89/left/checkpoint-error", city: "f89/right/checkpoint-gamma", }
