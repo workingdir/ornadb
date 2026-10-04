@@ -1,0 +1,13 @@
+pub type User { id: Int, }
+
+pub fn add(left: Int, right: Int): Int = left + right;
+
+pub fn caller(seed: Int): Int {
+    let inferred = 41;
+    let annotated: Int = 2;
+    add(inferred, annotated);
+}
+
+pub fn shadowed(add: Int): Int {
+    add(1);
+}
