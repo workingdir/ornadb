@@ -7,9 +7,8 @@
 
 use std::fmt::Write as _;
 
-use orna_evaluator_v1::{Limits, ReplSession as EvaluatorReplSession};
+use orna_evaluator_v1::{AdmittedReplSession, Limits};
 use orna_foundation_v1::CanonicalValue;
-use orna_semantic_v1::ReplContext;
 use orna_syntax_v1::{ReplInput, parse_repl, parse_repl_with_file};
 use orna_value_v1::Raw;
 use serde::{Deserialize, Serialize};
@@ -80,7 +79,7 @@ fn run_internal(source: &str) -> RunResponse {
         return RunResponse::failure(Vec::new(), "ORNA-EVAL-LIMIT", 1, 1);
     }
 
-    let mut session = TypedSession::new(limits);
+    let mut session = AdmittedReplSession::new(limits);
     let mut values = Vec::new();
     let mut pending = String::new();
     let mut pending_line = 1;
@@ -120,11 +119,16 @@ fn run_internal(source: &str) -> RunResponse {
             );
         }
 
-        match session.submit(&parsed.value) {
+        match session.submit(&pending) {
             Ok(Some(value)) => values.push(render_value(&value)),
             Ok(None) => {}
             Err(error) => {
-                return RunResponse::failure(values, error, pending_line, first_column(&pending));
+                return RunResponse::failure(
+                    values,
+                    error.code(),
+                    pending_line,
+                    first_column(&pending),
+                );
             }
         }
         pending.clear();
@@ -145,50 +149,6 @@ fn run_internal(source: &str) -> RunResponse {
     }
 
     RunResponse::success(values)
-}
-
-/// Core-only typed REPL state for wasm builds.
-///
-/// The project-backed evaluator adapter also includes native repository
-/// loading and file-locking dependencies, so the wasm bridge pairs the same
-/// semantic admission and runtime transition directly without enabling that
-/// optional project feature.
-struct TypedSession {
-    semantic: ReplContext,
-    runtime: EvaluatorReplSession,
-}
-
-impl TypedSession {
-    fn new(limits: Limits) -> Self {
-        Self {
-            semantic: ReplContext::empty(),
-            runtime: EvaluatorReplSession::new(limits),
-        }
-    }
-
-    fn submit(&mut self, input: &ReplInput) -> Result<Option<CanonicalValue>, String> {
-        let admission = self.semantic.stage(input).map_err(|diagnostics| {
-            diagnostics.first().map_or_else(
-                || "ORNA-REPL-ADMISSION".to_owned(),
-                |diagnostic| diagnostic.code().to_owned(),
-            )
-        })?;
-        if !admission.effects.effects.is_empty() {
-            return Err("ORNA-REPL-EFFECT".into());
-        }
-
-        let mut runtime = self.runtime.clone();
-        let value = runtime
-            .submit_admitted(input)
-            .map_err(|error| error.code().to_owned())?;
-        let mut semantic = self.semantic.clone();
-        semantic
-            .commit(admission)
-            .map_err(|_| "ORNA-REPL-COMMIT".to_owned())?;
-        self.runtime = runtime;
-        self.semantic = semantic;
-        Ok(value)
-    }
 }
 
 fn line_count(line: &str) -> usize {
@@ -223,6 +183,10 @@ impl ReplSession {
     }
 
     /// Adds one physical input line and returns `{kind, text}` JSON.
+    ///
+    /// Blank top-level lines echo empty text and remain in session source
+    /// coordinates; blank lines inside an incomplete input remain pending.
+    /// Completed parse and evaluation errors use the locations from `run`.
     pub fn evaluate(&mut self, line: &str) -> String {
         self.evaluate_using(line, &mut run)
     }
@@ -236,6 +200,12 @@ impl Default for ReplSession {
 
 impl ReplSession {
     fn evaluate_using(&mut self, line: &str, runner: &mut impl FnMut(&str) -> String) -> String {
+        if self.pending.is_empty() && line.trim().is_empty() {
+            self.history.push_str(line);
+            self.history.push('\n');
+            return response("echo", "");
+        }
+
         self.pending.push_str(line);
         self.pending.push('\n');
 
@@ -243,13 +213,7 @@ impl ReplSession {
         if parsed.is_incomplete() {
             return response("echo", self.pending.trim_end());
         }
-        if !parsed.is_ok() {
-            let error = parse_error(&self.pending);
-            self.pending.clear();
-            return response("error", &error);
-        }
-
-        let item = matches!(parsed.value, ReplInput::Item(_));
+        let item = parsed.is_ok() && matches!(&parsed.value, ReplInput::Item(_));
         let candidate = format!("{}{}", self.history, self.pending);
         let result = runner(&candidate);
         let Ok(result) = serde_json::from_str::<RunResponse>(&result) else {
@@ -257,12 +221,13 @@ impl ReplSession {
             return response("error", "ORNA-WASM-CONTRACT");
         };
         if !result.ok {
-            let text = result.errors.first().map_or_else(
-                || "ORNA-WASM-RUN".to_owned(),
-                |error| format!("{} (line {}, col {})", error.message, error.line, error.col),
-            );
+            let text = run_error_text(&result);
             self.pending.clear();
             return response("error", &text);
+        }
+        if !parsed.is_ok() {
+            self.pending.clear();
+            return response("error", "ORNA-WASM-CONTRACT");
         }
 
         let has_new_value = !item && result.values.len() > self.value_count;
@@ -299,20 +264,10 @@ fn response(kind: &str, text: &str) -> String {
         .unwrap_or_else(|_| "{\"kind\":\"error\",\"text\":\"ORNA-WASM-JSON\"}".into())
 }
 
-fn parse_error(source: &str) -> String {
-    let parsed = parse_repl_with_file(source, "<playground>");
-    parsed.diagnostics.first().map_or_else(
-        || "ORNA-PARSE-001 (line 1, col 1)".into(),
-        |diagnostic| {
-            let (line, col) = diagnostic
-                .span
-                .start_position
-                .as_ref()
-                .map_or((1, 1), |position| {
-                    (position.line as usize, position.column as usize)
-                });
-            format!("{} (line {line}, col {col})", diagnostic.message)
-        },
+fn run_error_text(result: &RunResponse) -> String {
+    result.errors.first().map_or_else(
+        || "ORNA-WASM-RUN".to_owned(),
+        |error| format!("{} (line {}, col {})", error.message, error.line, error.col),
     )
 }
 
@@ -428,8 +383,14 @@ mod tests {
     use serde_json::Value as JsonValue;
 
     const REPL_FIXTURE: &str = include_str!("../tests/fixtures/repl_incremental.orna");
+    const REPL_MULTILINE_FIXTURE: &str = include_str!("../tests/fixtures/repl_multiline.orna");
+    const REPL_MULTILINE_PARSE_ERROR_FIXTURE: &str =
+        include_str!("../tests/fixtures/repl_multiline_parse_error.orna");
+    const REPL_RUNTIME_ERROR_FIXTURE: &str =
+        include_str!("../tests/fixtures/repl_runtime_error.orna");
 
-    #[test]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
     fn run_returns_values_in_stable_json_shape() {
         let actual: JsonValue = serde_json::from_str(&run(REPL_FIXTURE)).expect("valid JSON");
         assert_eq!(actual["ok"], true);
@@ -438,7 +399,8 @@ mod tests {
         assert_eq!(actual["errors"], serde_json::json!([]));
     }
 
-    #[test]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
     fn run_reports_parse_and_runtime_error_locations() {
         let parsed: RunResponse = serde_json::from_str(&run("1 + )")).expect("valid JSON");
         assert!(!parsed.ok);
@@ -451,7 +413,8 @@ mod tests {
         assert_eq!((runtime.errors[0].line, runtime.errors[0].col), (2, 1));
     }
 
-    #[test]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
     fn repl_echoes_statements_and_renders_incremental_values() {
         let mut repl = ReplSession::new();
         assert_eq!(
@@ -464,7 +427,8 @@ mod tests {
         );
     }
 
-    #[test]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
     fn repl_holds_incomplete_input_until_the_expression_closes() {
         let mut repl = ReplSession::new();
         assert_eq!(json(&repl.evaluate("1 +"))["kind"], "echo");
@@ -474,7 +438,107 @@ mod tests {
         );
     }
 
-    #[test]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    fn repl_keeps_blank_lines_inside_incomplete_multiline_input() {
+        let mut repl = ReplSession::new();
+        assert_eq!(
+            json(&repl.evaluate("1 +")),
+            serde_json::json!({"kind":"echo","text":"1 +"})
+        );
+        assert_eq!(
+            json(&repl.evaluate("")),
+            serde_json::json!({"kind":"echo","text":"1 +"})
+        );
+        assert_eq!(
+            json(&repl.evaluate("2")),
+            serde_json::json!({"kind":"value","text":"3 : Int"})
+        );
+    }
+
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    fn repl_multiline_values_match_the_run_contract() {
+        let expected: RunResponse =
+            serde_json::from_str(&run(REPL_MULTILINE_FIXTURE)).expect("valid run JSON");
+        assert!(expected.ok);
+
+        let mut repl = ReplSession::new();
+        let actual = REPL_MULTILINE_FIXTURE
+            .lines()
+            .map(|line| json(&repl.evaluate(line)))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            JsonValue::Array(actual.clone()),
+            serde_json::json!([
+                {"kind":"echo","text":"let answer = 40;"},
+                {"kind":"echo","text":"answer +"},
+                {"kind":"value","text":"42 : Int"},
+                {"kind":"echo","text":"answer +"},
+                {"kind":"value","text":"43 : Int"}
+            ])
+        );
+        let values = actual
+            .iter()
+            .filter(|actual| actual["kind"] == "value")
+            .map(|actual| actual["text"].as_str().unwrap().to_owned())
+            .collect::<Vec<_>>();
+
+        assert_eq!(values, expected.values);
+        assert_eq!(values, ["42 : Int", "43 : Int"]);
+    }
+
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    fn repl_multiline_parse_errors_match_run_locations_and_recover() {
+        let expected: RunResponse =
+            serde_json::from_str(&run(REPL_MULTILINE_PARSE_ERROR_FIXTURE)).expect("valid run JSON");
+        assert!(!expected.ok);
+        let expected_error = run_error_text(&expected);
+
+        let mut repl = ReplSession::new();
+        let lines = REPL_MULTILINE_PARSE_ERROR_FIXTURE
+            .lines()
+            .collect::<Vec<_>>();
+        assert_eq!(json(&repl.evaluate(lines[0]))["kind"], "echo");
+        assert_eq!(
+            json(&repl.evaluate(lines[1])),
+            serde_json::json!({"kind":"echo","text":""})
+        );
+        assert_eq!(json(&repl.evaluate(lines[2]))["kind"], "echo");
+        assert_eq!(
+            json(&repl.evaluate(lines[3])),
+            serde_json::json!({"kind":"error","text":expected_error})
+        );
+        assert_eq!(
+            json(&repl.evaluate("answer + 2")),
+            serde_json::json!({"kind":"value","text":"42 : Int"})
+        );
+    }
+
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    fn repl_runtime_errors_match_run_locations_and_recover() {
+        let expected: RunResponse =
+            serde_json::from_str(&run(REPL_RUNTIME_ERROR_FIXTURE)).expect("valid run JSON");
+        assert!(!expected.ok);
+        let expected_error = run_error_text(&expected);
+
+        let mut repl = ReplSession::new();
+        let lines = REPL_RUNTIME_ERROR_FIXTURE.lines().collect::<Vec<_>>();
+        assert_eq!(json(&repl.evaluate(lines[0]))["kind"], "echo");
+        assert_eq!(
+            json(&repl.evaluate(lines[1])),
+            serde_json::json!({"kind":"error","text":expected_error})
+        );
+        assert_eq!(
+            json(&repl.evaluate("answer + 2")),
+            serde_json::json!({"kind":"value","text":"42 : Int"})
+        );
+    }
+
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
     fn repl_does_not_commit_failed_input_and_recovers_on_the_next_line() {
         let mut repl = ReplSession::new();
         let error = json(&repl.evaluate("missing"));
@@ -487,7 +551,8 @@ mod tests {
     }
 
     #[cfg(feature = "test-stub-run")]
-    #[test]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
     fn test_stub_run_feature_can_prove_the_json_runner_boundary() {
         let mut repl = ReplSession::new();
         let mut stub = |source: &str| {
