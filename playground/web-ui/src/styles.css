@@ -19,7 +19,7 @@ body { margin: 0; }
 main, .page-header { max-width: var(--page-width); margin: 1rem auto; padding: 0 1rem; }
 a { color: var(--link); }
 a:visited { color: var(--visited); }
-button, select, textarea { color: inherit; font: inherit; }
+button, select { color: inherit; font: inherit; }
 button { cursor: pointer; }
 button:disabled, select:disabled { cursor: default; }
 .page-header { border-bottom: 1px solid var(--border); }
@@ -33,7 +33,7 @@ button:disabled, select:disabled { cursor: default; }
 .example-feed label { white-space: nowrap; }
 .example-feed select { min-width: 0; max-width: 100%; }
 .example-feed-help { grid-column: 2; margin: 0; color: var(--muted); font-size: .75rem; line-height: 1.25; }
-#source { display: block; width: 100%; height: clamp(20rem, 68vh, 52rem); min-height: 20rem; padding: .65rem; border: 1px solid var(--border); border-radius: 0; background: var(--background); font: .9rem/1.5 var(--code-font); resize: vertical; tab-size: 4; }
+#source-editor { width: 100%; height: clamp(20rem, 68vh, 52rem); min-height: 20rem; border: 1px solid var(--border); background: var(--background); }
 .actions { display: flex; align-items: center; gap: .75rem; margin-top: .4rem; }
 #run-button { min-height: 2.25rem; padding: .2rem .8rem; }
 #editor-status, .output-status { color: var(--muted); font-size: .875rem; margin: .35rem 0; }
@@ -48,7 +48,7 @@ pre { min-height: 8rem; margin: 0; overflow: auto; white-space: pre-wrap; overfl
 
 @media (max-width: 64rem) {
   .workspace { grid-template-columns: minmax(0, 1fr); }
-  #source { height: clamp(18rem, 56vh, 40rem); }
+  #source-editor { height: clamp(18rem, 56vh, 40rem); }
   .panels { min-height: 14rem; }
 }
 

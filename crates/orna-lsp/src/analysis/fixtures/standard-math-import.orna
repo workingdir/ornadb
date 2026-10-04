@@ -1,3 +1,4 @@
 use std.math.{increment};
 
 pub fn plus_one(value: Int) = increment(value);
+pub fn qualified_plus_one(value: Int): Int = std.math.increment(value);
