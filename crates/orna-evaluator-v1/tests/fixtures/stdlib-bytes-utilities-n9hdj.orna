@@ -1,0 +1,20 @@
+std.bytes.is_byte(0) && std.bytes.is_byte(255) && !std.bytes.is_byte(-1) && !std.bytes.is_byte(256)
+&& std.bytes.is_buffer([]) && std.bytes.is_buffer([0, 127, 255]) && !std.bytes.is_buffer([1, 256])
+&& std.bytes.buffer_length([0, 127, 255]) == Some(3) && std.bytes.buffer_length([1, 256]) == null
+&& std.bytes.new_buffer(0) == Some([]) && std.bytes.new_buffer(4) == Some([0, 0, 0, 0]) && std.bytes.new_buffer(-1) == null
+&& std.bytes.append_byte([1, 2], 255) == Some([1, 2, 255]) && std.bytes.append_byte([1, 256], 2) == null && std.bytes.append_byte([1], 256) == null
+&& std.bytes.concat([1, 2], [3, 4]) == Some([1, 2, 3, 4]) && std.bytes.concat([1, 256], [3]) == null
+&& std.bytes.slice([10, 20, 30, 40], 1, 2) == Some([20, 30]) && std.bytes.slice([10, 20], 2, 0) == Some([])
+&& std.bytes.slice([10, 20], -1, 1) == null && std.bytes.slice([10, 20], 1, 2) == null && std.bytes.slice([10, 256], 0, 1) == null
+&& std.bytes.chunks([1, 2, 3, 4, 5], 2) == Some([[1, 2], [3, 4], [5]])
+&& std.bytes.chunks([], 3) == Some([]) && std.bytes.chunks([1, 2], 0) == null && std.bytes.chunks([1, 256], 2) == null
+&& std.bytes.read_unsigned([18, 52, 86], 0, 2, "big") == Some(4660)
+&& std.bytes.read_unsigned([18, 52, 86], 0, 2, "little") == Some(13330)
+&& std.bytes.read_unsigned([18, 52, 86], 1, 2, "big") == Some(13398)
+&& std.bytes.read_unsigned([18, 52], 1, 2, "big") == null && std.bytes.read_unsigned([18, 52], 0, 0, "big") == null
+&& std.bytes.read_unsigned([18, 256], 0, 2, "big") == null && std.bytes.read_unsigned([18, 52], 0, 2, "network") == null
+&& std.bytes.write_unsigned([0, 0, 99], 0, 4660, 2, "big") == Some([18, 52, 99])
+&& std.bytes.write_unsigned([0, 0, 99], 0, 4660, 2, "little") == Some([52, 18, 99])
+&& std.bytes.write_unsigned([0, 0, 99], 1, 1, 2, "big") == Some([0, 0, 1])
+&& std.bytes.write_unsigned([0, 0], 0, 256, 1, "big") == null && std.bytes.write_unsigned([0, 0], 0, -1, 1, "big") == null
+&& std.bytes.write_unsigned([0, 0], 1, 1, 2, "big") == null && std.bytes.write_unsigned([0, 0], 0, 1, 1, "network") == null
