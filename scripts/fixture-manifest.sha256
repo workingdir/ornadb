@@ -2370,6 +2370,7 @@ ba65300247bb8093bad5a299f40405bc44407c8d133171ca84b83bb6fb3d88b7  crates/orna-ev
 47670352ed04b3ac5806ece0f3fbc7ef7c97d35650cf8891e69efd25a7b73e90  crates/orna-evaluator-v1/tests/fixtures/stdlib-option-without-snapshot-jx1e3.orna
 56ece1419302be304982bd8aa36f767f95c112bbbd33418be442285377593814  crates/orna-evaluator-v1/tests/fixtures/stdlib-ovb-key-sort-w02pm.orna
 f9ffd0fc3a24da8b7455bddbd2a9cde095526669a5cffdcc0619d093807ed3d1  crates/orna-evaluator-v1/tests/fixtures/stdlib-parse-integer-values-qmmt8.orna
+edf7030d8efc7fd3af67684f2cd6f3e237fbbf71c2509a0ad470e49a57241d14  crates/orna-evaluator-v1/tests/fixtures/stdlib-parse-utilities-4tf83.orna
 552a751e73add8b731c16dd44fb21894b5dce913bb8cd1351a3f1155ddd4e224  crates/orna-evaluator-v1/tests/fixtures/stdlib-pattern-without-snapshot-g8rd3.orna
 61e81f27e2e980b1c5f2f481809ab7c2fc5c974b6bb7a48573bbc2bcfffdfe42  crates/orna-evaluator-v1/tests/fixtures/stdlib-pattern-without-snapshot-xt7ge.orna
 eb07f3978d92ae094190ae7cc42834b05ba14b1e307a55bd5f5fc903eab8252c  crates/orna-evaluator-v1/tests/fixtures/stdlib-pinned-prelude-values-9npab.orna
@@ -4776,6 +4777,7 @@ f0eb74074c458edaa3e5c160bdce45fd50b091e564cf4065603c68781358ca1f  crates/orna-st
 0725d77c19c1f1200c9b1e8939d09bd3db72ce151f7ab26b77bdd28cec866de8  crates/orna-storage-v1/tests/fixtures/paired-nested-handoff-identities-f159.orna
 14d5c48b7635eec5fb565eace0373b06f6a5f271e7fabaa2c623af865e6fdf0b  crates/orna-storage-v1/tests/fixtures/paired-nested-handoff-identities-f162.orna
 ac4b5bd45f85752bb533edb822535e86c367ca279b15777b97efa8a1d9bc07bc  crates/orna-storage-v1/tests/fixtures/paired-nested-handoff-identities-f165.orna
+71350754c1396537ec5d34ac06b4baf0d78d3d3e23b4addd0dade5eebfa86b3c  crates/orna-storage-v1/tests/fixtures/paired-nested-handoff-identities-f168.orna
 6cb47f10f48d3d9e44847bee829896c37567d318ae571ef9be9b75e1ed554949  crates/orna-storage-v1/tests/fixtures/paired-nested-handoff-identities-p38rq.orna
 86c408396e12b18f51adbb5a8322c9b4c4d9b363f60643bc708f9d2bf3183cdc  crates/orna-storage-v1/tests/fixtures/paired-nested-handoff-identities-q0rmw.orna
 ec14b6d4fb56a1d52768d3471ca0cd4980ccce1e1c0aa8603e2ffbec16064520  crates/orna-storage-v1/tests/fixtures/paired-nested-replay-identities-f84.orna
