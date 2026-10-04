@@ -6,6 +6,8 @@ const webUi = fileURLToPath(new URL('../', import.meta.url));
 const repository = fileURLToPath(new URL('../../../', import.meta.url));
 const distribution = join(webUi, 'dist');
 const assetRows = join(repository, 'playground', 'Asset');
+const entryRows = join(repository, 'playground', 'Entry');
+const routeRows = join(repository, 'playground', 'Route');
 const themeRows = join(repository, 'playground', 'Theme');
 const layoutRows = join(repository, 'playground', 'Layout');
 const maxAssetBytes = 8 * 1024 * 1024;
@@ -42,11 +44,11 @@ async function collectFiles(directory, prefix = '') {
     if (child.name.endsWith('.d.ts')) continue;
     const path = join(directory, child.name);
     const relativePath = prefix ? `${prefix}/${child.name}` : child.name;
-    // Local package output at the root is not part of the database-served UI.
+    // This ignored local build output is not part of the database-served UI.
     if (child.isDirectory() && relativePath === 'lsp-wasm') continue;
     if (child.isDirectory()) files.push(...await collectFiles(path, relativePath));
     else if (child.isFile()) files.push(relativePath);
-    else throw new Error(`Unsupported playground build entry: ${relativePath}`);
+    else throw new Error('Unsupported playground build entry: ' + relativePath);
   }
   return files;
 }
@@ -62,15 +64,25 @@ function ornaString(value) {
     else if (character === '\t') encoded += '\\t';
     else if (character === '\0') encoded += '\\0';
     else if (character === '{' || character === '}' || codePoint < 0x20 || codePoint === 0x7f) {
-      encoded += `\\u{${codePoint.toString(16)}}`;
+      encoded += '\\u{' + codePoint.toString(16) + '}';
     } else encoded += character;
   }
-  return `${encoded}"`;
+  return encoded + '"';
 }
 
 function assetRow(id, path, mediaType, content) {
+  return '{ id: ' + ornaString(id) + ', path: ' + ornaString(path) + ', '
+    + 'media_type: ' + ornaString(mediaType) + ', content: ' + ornaString(content) + ' }\n';
+}
+
+function entryRow(id, assetPath, kind) {
+  return `{ id: ${ornaString(id)}, asset_path: ${ornaString(assetPath)}, `
+    + `kind: ${ornaString(kind)} }\n`;
+}
+
+function routeRow(id, path, entry) {
   return `{ id: ${ornaString(id)}, path: ${ornaString(path)}, `
-    + `media_type: ${ornaString(mediaType)}, content: ${ornaString(content)} }\n`;
+    + `entry: ${ornaString(entry)} }\n`;
 }
 
 function styleRow(id, name, css) {
@@ -86,39 +98,50 @@ const extraAssets = [
 async function expectedRows() {
   const files = await collectFiles('');
   if (!files.includes('index.html')) throw new Error('The Vite output has no index.html shell.');
-  const bundledStylePath = 'assets/index.css';
-  if (!files.includes(bundledStylePath)) {
-    throw new Error(`The Vite output has no bundled source stylesheet at ${bundledStylePath}.`);
-  }
+  if (!files.includes('assets/index.css')) throw new Error('The Vite output has no combined shell stylesheet.');
 
   const rows = new Map();
+  const styles = new Map();
+  const counts = { Asset: 0, Entry: 0, Route: 0 };
   let totalContentBytes = 0;
+  function addRoute(path, entry) {
+    const id = `route-${Buffer.from(path).toString('hex')}`;
+    rows.set(join(routeRows, `${id}.orna`), routeRow(id, path, entry));
+    counts.Route += 1;
+  }
+
+  rows.set(join(entryRows, 'entry-page.orna'), entryRow('entry-page', 'index.html', 'page'));
+  rows.set(join(entryRows, 'entry-embed.orna'), entryRow('entry-embed', 'index.html', 'embed'));
+  counts.Entry += 2;
+  addRoute('/playground/', 'entry-page');
+  addRoute('/playground/embed', 'entry-embed');
+
   const sources = [
     ...files.map((path) => [path, join(distribution, path)]),
     ...extraAssets,
   ];
   for (const [path, sourcePath] of sources) {
-    // This app stylesheet is represented by the Theme and Layout tables. Other
-    // CSS files, including Monaco's editor styles, remain normal Asset rows.
-    if (path === bundledStylePath) continue;
+    if (path === 'assets/index.css') continue;
     const content = await readFile(sourcePath);
     if (content.byteLength > maxAssetBytes) {
-      throw new Error(`Playground DB asset exceeds ${maxAssetBytes} bytes: ${path}`);
+      throw new Error('Playground DB asset exceeds ' + maxAssetBytes + ' bytes: ' + path);
     }
     const mediaType = mediaTypes.get(extname(path).toLowerCase());
-    if (!mediaType) throw new Error(`Unsupported playground DB asset type: ${path}`);
+    if (!mediaType) throw new Error('Unsupported playground DB asset type: ' + path);
     let contentText;
     if (mediaType === 'application/wasm') {
       contentText = content.toString('base64');
     } else {
       contentText = content.toString('utf8');
       if (!Buffer.from(contentText, 'utf8').equals(content)) {
-        throw new Error(`Playground DB assets must be UTF-8 text: ${path}`);
+        throw new Error('Playground DB assets must be UTF-8 text: ' + path);
       }
     }
-    if (path === 'index.html') {
+
+    const normalizedPath = path.split(sep).join('/');
+    if (normalizedPath === 'index.html') {
       const stylesheetLinks = contentText.match(/<link\b[^>]*\brel="stylesheet"[^>]*>/g) ?? [];
-      const bundledStyleHref = `/playground/${bundledStylePath}`;
+      const bundledStyleHref = '/playground/assets/index.css';
       const bundledStylesheetLinks = stylesheetLinks.filter((link) => (
         link.includes(`href="${bundledStyleHref}"`)
       ));
@@ -131,53 +154,103 @@ async function expectedRows() {
           + '<link id="playground-layout" rel="stylesheet" href="/playground/layout.css">',
       );
     }
-
-    const normalizedPath = path.split(sep).join('/');
-    const id = `asset-${Buffer.from(normalizedPath).toString('hex')}`;
-    const rowPath = join(assetRows, `${id}.orna`);
+    const id = 'asset-' + Buffer.from(normalizedPath).toString('hex');
+    const rowPath = join(assetRows, id + '.orna');
     const row = assetRow(id, normalizedPath, mediaType, contentText);
     if (Buffer.byteLength(row) > maxAssetRowBytes) {
-      throw new Error(`Playground DB asset row exceeds ${maxAssetRowBytes} bytes: ${path}`);
+      throw new Error('Playground DB asset row exceeds ' + maxAssetRowBytes + ' bytes: ' + path);
     }
     rows.set(rowPath, row);
+    counts.Asset += 1;
     totalContentBytes += content.byteLength;
+
+    if (normalizedPath !== 'index.html') {
+      const entryId = `entry-asset-${Buffer.from(normalizedPath).toString('hex')}`;
+      const entryPath = join(entryRows, `${entryId}.orna`);
+      rows.set(entryPath, entryRow(entryId, normalizedPath, 'asset'));
+      counts.Entry += 1;
+      addRoute(`/playground/${normalizedPath}`, entryId);
+    }
   }
 
-  const styles = new Map();
   for (const [directory, filename, id, name, sourcePath] of [
     [themeRows, 'wiki-basic.orna', 'wiki-basic', 'Wiki basic', 'theme.css'],
     [layoutRows, 'responsive.orna', 'responsive', 'Responsive layout', 'layout.css'],
   ]) {
     const css = await readFile(join(webUi, 'src', sourcePath));
     if (css.byteLength > maxStyleBytes) {
-      throw new Error(`Playground ${sourcePath} exceeds ${maxStyleBytes} bytes.`);
+      throw new Error('Playground ' + sourcePath + ' exceeds ' + maxStyleBytes + ' bytes.');
     }
     const cssText = css.toString('utf8');
     if (!Buffer.from(cssText, 'utf8').equals(css)) {
-      throw new Error(`Playground ${sourcePath} must be UTF-8 text.`);
+      throw new Error('Playground ' + sourcePath + ' must be UTF-8 text.');
     }
     const row = styleRow(id, name, cssText);
     if (Buffer.byteLength(row) > maxStyleRowBytes) {
-      throw new Error(`Playground ${sourcePath} row exceeds ${maxStyleRowBytes} bytes.`);
+      throw new Error('Playground ' + sourcePath + ' row exceeds ' + maxStyleRowBytes + ' bytes.');
     }
     styles.set(join(directory, filename), row);
   }
-  return { rows, styles, totalContentBytes };
+  return { rows, styles, totalContentBytes, counts };
 }
 
 try {
-  const { rows, styles, totalContentBytes } = await expectedRows();
-  if (!checkOnly) await mkdir(assetRows, { recursive: true });
-  let entries = [];
-  try {
-    entries = await readdir(assetRows, { withFileTypes: true });
-  } catch (error) {
-    if (error.code !== 'ENOENT') throw error;
+  const { rows, styles, totalContentBytes, counts } = await expectedRows();
+  const directories = [
+    {
+      path: assetRows,
+      isGenerated: (name) => name.startsWith('asset-'),
+    },
+    {
+      path: entryRows,
+      isGenerated: (name) => name.startsWith('entry-asset-'),
+    },
+    {
+      path: routeRows,
+      isGenerated(name) {
+        if (!name.startsWith('route-')) return false;
+        const routeHex = name.slice('route-'.length, -'.orna'.length);
+        if (!/^(?:[0-9a-f]{2})+$/.test(routeHex)) return false;
+        const path = Buffer.from(routeHex, 'hex').toString('utf8');
+        return path === '/playground/' || path === '/playground/embed'
+          || path.startsWith('/playground/assets/');
+      },
+    },
+  ];
+  if (!checkOnly) {
+    for (const directory of directories) await mkdir(directory.path, { recursive: true });
   }
-  const existing = entries
-    .filter((entry) => entry.isFile() && entry.name.startsWith('asset-') && entry.name.endsWith('.orna'))
-    .map((entry) => join(assetRows, entry.name));
-  const stale = existing.filter((rowPath) => !rows.has(rowPath));
+  const stale = [];
+  for (const directory of directories) {
+    let entries = [];
+    try {
+      entries = await readdir(directory.path, { withFileTypes: true });
+    } catch (error) {
+      if (error.code !== 'ENOENT') throw error;
+    }
+    stale.push(...entries
+      .filter((entry) => entry.isFile()
+        && directory.isGenerated(entry.name)
+        && entry.name.endsWith('.orna'))
+      .map((entry) => join(directory.path, entry.name))
+      .filter((rowPath) => !rows.has(rowPath)));
+  }
+  const staleStyles = [];
+  for (const [directory, filename] of [
+    [themeRows, 'wiki-basic.orna'],
+    [layoutRows, 'responsive.orna'],
+  ]) {
+    let entries = [];
+    try {
+      entries = await readdir(directory, { withFileTypes: true });
+    } catch (error) {
+      if (error.code !== 'ENOENT') throw error;
+    }
+    staleStyles.push(...entries
+      .filter((entry) => entry.isFile() && entry.name === filename)
+      .map((entry) => join(directory, entry.name))
+      .filter((rowPath) => !styles.has(rowPath)));
+  }
   const changed = [];
   for (const [rowPath, expected] of rows) {
     let current;
@@ -200,30 +273,24 @@ try {
   }
 
   if (checkOnly) {
-    if (stale.length || changed.length || changedStyles.length) {
-      for (const rowPath of stale) console.error(`Stale playground Asset row: ${rowPath}`);
-      for (const [rowPath] of changed) console.error(`Missing or stale playground Asset row: ${rowPath}`);
+    if (stale.length || changed.length || staleStyles.length || changedStyles.length) {
+      for (const rowPath of stale) console.error(`Stale playground DB row: ${rowPath}`);
+      for (const [rowPath] of changed) console.error(`Missing or stale playground DB row: ${rowPath}`);
+      for (const rowPath of staleStyles) console.error(`Stale playground style row: ${rowPath}`);
       for (const [rowPath] of changedStyles) console.error(`Missing or stale playground style row: ${rowPath}`);
       process.exitCode = 1;
     } else {
-      console.log(
-        `Verified ${rows.size} committed playground Asset rows (${totalContentBytes} content bytes), `
-          + 'one Theme row, and one Layout row.',
-      );
+      console.log(`Verified ${counts.Asset} Asset, ${counts.Entry} Entry, and ${counts.Route} Route rows (${totalContentBytes} asset bytes), one Theme row, and one Layout row.`);
     }
   } else {
-    await Promise.all([
-      mkdir(assetRows, { recursive: true }),
-      mkdir(themeRows, { recursive: true }),
-      mkdir(layoutRows, { recursive: true }),
-    ]);
+    for (const directory of [...directories, { path: themeRows }, { path: layoutRows }]) {
+      await mkdir(directory.path, { recursive: true });
+    }
     for (const [rowPath, content] of changed) await writeFile(rowPath, content, 'utf8');
     for (const rowPath of stale) await rm(rowPath);
     for (const [rowPath, content] of changedStyles) await writeFile(rowPath, content, 'utf8');
-    console.log(
-      `Wrote ${rows.size} committed playground Asset rows (${totalContentBytes} content bytes), `
-        + 'one Theme row, and one Layout row.',
-    );
+    for (const rowPath of staleStyles) await rm(rowPath);
+    console.log(`Wrote ${counts.Asset} Asset, ${counts.Entry} Entry, and ${counts.Route} Route rows (${totalContentBytes} asset bytes), one Theme row, and one Layout row.`);
   }
 } catch (error) {
   console.error(error.message);

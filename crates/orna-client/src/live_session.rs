@@ -1493,6 +1493,168 @@ mod tests {
     }
 
     #[test]
+    fn moved_subtree_depth_failure_after_prior_delta_is_atomic_across_live_sessions() {
+        let first_limits = Limits {
+            max_depth: 64,
+            ..Limits::default()
+        };
+        let second_limits = Limits {
+            max_depth: 66,
+            ..Limits::default()
+        };
+        let initial_children = vec![nested_present_child(18), nested_present_child(1)];
+        let first_initial = snapshot_with_children(0, "before-move", initial_children.clone());
+        let second_initial = snapshot_with_children(0, "before-move", initial_children);
+        assert!(Envelope::decode(&first_initial, first_limits).is_ok());
+
+        let mut first_io = MemoryIo::default();
+        first_io.incoming.push_back(first_initial.clone());
+        let mut second_io = MemoryIo::default();
+        second_io.incoming.push_back(second_initial.clone());
+        let mut first = LiveSessionDriver::new(
+            first_io,
+            [7; 16],
+            first_limits,
+            Renderer::default(),
+            Allocator::default(),
+        )
+        .unwrap();
+        let mut second = LiveSessionDriver::new(
+            second_io,
+            [7; 16],
+            second_limits,
+            Renderer::default(),
+            Allocator::default(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            block_on(first.receive_once()).unwrap(),
+            LiveSessionEvent::SnapshotPublished { revision: 0 }
+        );
+        assert_eq!(
+            block_on(second.receive_once()).unwrap(),
+            LiveSessionEvent::SnapshotPublished { revision: 0 }
+        );
+
+        let relocated_child = nested_child_path(1, 1);
+        let relocation_delta = delta_with_operations(
+            0,
+            1,
+            vec![move_between_paths_operation(
+                nested_child_path(0, 1),
+                relocated_child.clone(),
+            )],
+        );
+        assert!(relocation_delta.len() < first_limits.max_message_bytes);
+        assert!(Envelope::decode(&relocation_delta, first_limits).is_ok());
+        first.io.incoming.push_back(relocation_delta.clone());
+        second.io.incoming.push_back(relocation_delta);
+        assert_eq!(
+            block_on(first.receive_once()).unwrap(),
+            LiveSessionEvent::DeltaPublished { revision: 1 }
+        );
+        assert_eq!(
+            block_on(second.receive_once()).unwrap(),
+            LiveSessionEvent::DeltaPublished { revision: 1 }
+        );
+
+        let relocated_children = vec![present_node_with_children(
+            "nested",
+            vec![nested_present_child(17), nested_present_child(1)],
+        )];
+        let relocated_snapshot =
+            snapshot_with_children(1, "before-move", relocated_children.clone());
+        let relocated_present = snapshot_present(&relocated_snapshot);
+        assert_eq!(first.renderer.trees[1], relocated_present);
+        assert_eq!(second.renderer.trees[1], relocated_present);
+        let first_after_relocation = first.presentation().published().cloned().unwrap();
+
+        let deep_child = nested_child_path(19, 0);
+        let transient_delta = delta_with_operations(
+            1,
+            2,
+            vec![
+                move_between_paths_operation(relocated_child.clone(), deep_child.clone()),
+                move_between_paths_operation(deep_child, relocated_child),
+            ],
+        );
+        assert!(transient_delta.len() < first_limits.max_message_bytes);
+        assert!(Envelope::decode(&transient_delta, first_limits).is_ok());
+        first.io.incoming.push_back(transient_delta.clone());
+        assert!(matches!(
+            block_on(first.receive_once()),
+            Ok(LiveSessionEvent::ResyncSent { .. })
+        ));
+        assert_resync_frame(&first.io.sent[0]);
+        assert_eq!(
+            first.presentation().published(),
+            Some(&first_after_relocation)
+        );
+        assert_eq!(
+            first.renderer.trees,
+            vec![snapshot_present(&first_initial), relocated_present.clone()]
+        );
+
+        second.io.incoming.push_back(transient_delta);
+        assert_eq!(
+            block_on(second.receive_once()).unwrap(),
+            LiveSessionEvent::DeltaPublished { revision: 2 }
+        );
+        assert_eq!(
+            second.presentation().published().unwrap().present(),
+            first_after_relocation.present()
+        );
+        assert_eq!(second.renderer.trees[2], relocated_present);
+        assert_eq!(first.presentation().published().unwrap().revision(), 1);
+
+        let request = Envelope::decode(&first.io.sent[0], first_limits)
+            .unwrap()
+            .request
+            .expect("post-move depth recovery request is correlated");
+        first.io.incoming.push_back(frame_with_request(
+            16,
+            [7; 16],
+            Some(request),
+            snapshot_body_with_children(2, "before-move", relocated_children.clone()),
+        ));
+        assert_eq!(
+            block_on(first.receive_once()).unwrap(),
+            LiveSessionEvent::SnapshotPublished { revision: 2 }
+        );
+        assert_eq!(
+            first.presentation().published().unwrap().present(),
+            second.presentation().published().unwrap().present()
+        );
+
+        let followup_label = "move-depth-recovered";
+        let followup_delta = delta(2, 3, followup_label);
+        first.io.incoming.push_back(followup_delta.clone());
+        second.io.incoming.push_back(followup_delta);
+        assert_eq!(
+            block_on(first.receive_once()).unwrap(),
+            LiveSessionEvent::DeltaPublished { revision: 3 }
+        );
+        assert_eq!(
+            block_on(second.receive_once()).unwrap(),
+            LiveSessionEvent::DeltaPublished { revision: 3 }
+        );
+        assert_eq!(
+            first.presentation().published().unwrap().present(),
+            second.presentation().published().unwrap().present()
+        );
+        let followup_snapshot = snapshot_with_children(3, followup_label, relocated_children);
+        assert_eq!(
+            first.renderer.trees[3],
+            snapshot_present(&followup_snapshot)
+        );
+        assert_eq!(
+            second.renderer.trees[3],
+            snapshot_present(&followup_snapshot)
+        );
+    }
+
+    #[test]
     fn bad_base_and_mid_patch_failure_send_resync_without_changing_tree() {
         let mut io = MemoryIo::default();
         io.incoming.push_back(snapshot(0));

@@ -6,45 +6,53 @@ is the source for the shell, assets, programs, and examples.
 
 ## Database records and routes
 
-`playground.orna` declares `Sample`, `Asset`, `Theme`, and `Layout` tables.
-Sample rows and legacy `playground/examples/*.orna` files feed `/api/examples`.
-The shell, browser client, Monaco worker and editor-support CSS, generated
-editor configuration, LSP package, shared live modules, and embeddable entry
-script are generated as `playground.Asset` rows under `playground/Asset/`. Each
-row stores a normalized relative path, media type, and content. Text uses UTF-8;
-WebAssembly bytes are base64-encoded in the record and decoded when served.
-`orna-syntax-v1` generates editor configuration from the language lexer; the
-browser loads it from `/playground/assets/orna-editor-config.json`. Theme and
-responsive layout CSS are separate named rows under `playground/Theme/` and
-`playground/Layout/`.
+`playground.orna` declares `Sample`, `Asset`, `Entry`, `Route`, `Theme`, and
+`Layout` tables.
+Sample rows and the legacy `playground/examples/*.orna` files feed
+`/api/examples`. The shell, browser client, live bridge modules, Orna LSP
+WebAssembly package, Monaco workers, generated editor configuration, and
+embeddable entry script are stored as `playground.Asset` rows under
+`playground/Asset/`. Each row records a normalized relative path and media
+type. Text content is UTF-8; WebAssembly bytes are base64-encoded in the row
+and decoded when served. `playground.Entry` rows select a page, embed, or
+static-asset entry and point to an Asset path. `playground.Route` rows map
+exact public paths to those entries. The build generates Route and Entry rows
+alongside the Asset rows. `orna-syntax-v1` generates editor configuration
+from the language lexer; the browser loads it from
+`/playground/assets/orna-editor-config.json`.
 
-`npm run build` builds the Orna LSP WebAssembly package and browser bundle, then
-refreshes the Asset, Theme, and Layout rows. Commit generated rows along with
-source changes. At request time, `orna serve` reads each row from committed
-`HEAD` using the repository listing API; it does not read `playground/web-ui/dist/`
-or compile browser helper modules into the server binary.
+Theme and responsive layout CSS are stored as named `playground.Theme` and
+`playground.Layout` rows. The build keeps Monaco's support styles as Asset rows
+and writes the shell's theme and layout styles to those dedicated tables.
+`/playground/theme.css` and `/playground/layout.css` read their rows from the
+committed Git listing, with an optional revision query selecting a specific
+commit.
 
-The `/playground/` and `/playground/embed` routes use the same shell record.
-The embed route hides the marked page header and applies its framing policy.
-Static assets use their checked media type and `X-Content-Type-Options:
-nosniff`. The `/playground/assets/embed.js` classic script creates an iframe
-pointed at `/playground/embed`. Set `data-target` to append the iframe to a
-container, and optionally set `data-height`, `data-title`, or `data-loading`.
-The entry script itself is a committed Asset row.
+`npm run build` creates the browser bundle and refreshes these rows. Commit the
+generated rows with source changes. For each request, `orna serve` resolves
+Route, Entry, and Asset rows from one committed `HEAD`; it does not read
+`playground/web-ui/dist/` or compile browser helpers into the server binary.
+The `/playground/` and `/playground/embed` routes use the same shell record,
+with the embed entry hiding the marked page header and applying its framing
+policy. Static assets are returned with their checked media type and
+`X-Content-Type-Options: nosniff`. A commit that changes a Route, Entry, or
+Asset row is visible on the next request without restarting `orna serve`.
+`/api/playground/revision` reports the committed Git object ID. The open page
+polls it every two seconds and swaps both stylesheet links only after both
+revision-pinned rows load, then updates Monaco's theme from the new CSS tokens.
 
-Monaco's database-served worker supplies standard-library completion and hover
-alongside signature help and diagnostics. The browser sends explicit Run
-requests to the same clone's `orna.present.v1` session. Source evaluation and
-presentation remain in the server runtime; the browser does not contain a
-second evaluator or a language-keyword inventory.
+Monaco uses the database-served shell assets to run the Orna LSP worker. The
+worker supplies standard-library completion and hover alongside signature
+help and diagnostics. The `/playground/assets/embed.js` classic script creates
+an iframe pointed at the same database's `/playground/embed` route. Set
+`data-target` to append the iframe to a container, and optionally set
+`data-height`, `data-title`, or `data-loading`. The entry script itself is a
+committed Asset row.
 
-`/api/playground/revision` reports the current committed Git object ID with
-`Cache-Control: no-store`. The browser checks it every two seconds. If `HEAD`
-changes, it loads both version-pinned stylesheet rows before replacing the
-active theme and layout links. The Monaco editor theme updates from the new CSS
-variables as well. This updates committed CSS without restarting `orna serve`
-or reloading the page. Uncommitted style edits remain invisible until
-committed.
+The browser sends explicit Run requests to the same clone's
+`orna.present.v1` session. Source evaluation and presentation remain in the
+server runtime. The browser does not contain a second evaluator or a
+language-keyword inventory.
 
 ## Responsive and keyboard behavior
 
@@ -64,11 +72,13 @@ cargo test --locked -p orna-cli-v1 --test serve_playground_dogfood -- --nocaptur
 ```
 
 The test initializes a temporary Orna Git database, commits crate-local
-`.orna` schema, sample, Asset, Theme, and Layout fixtures, starts the real
-`orna serve` process without a build directory, and checks the Git listing,
-database-resident shell, editor configuration, LSP package, embeddable script,
-JavaScript and stylesheet routes, committed examples, and live session. It
-commits Theme and Layout updates and proves the style routes and revision
-change without restarting the server. A WebSocket client follows the existing
-watch, fingerprinted Eval, and Resync exchange to prove independent results and
-presentation deltas.
+`.orna` schema, sample, route, entry, and asset fixtures, starts the real
+`orna serve` process without a build directory, then uses curl to check the
+Git listing, database-resident shell, editor configuration, embeddable script,
+CSS/JavaScript and WebAssembly rows, committed examples, and live session. It
+commits a new Route and Entry after startup and proves the new URL changes
+from 404 to 200 without restarting the server. It also checks DB-resident
+Theme/Layout CSS, an uncommitted style remaining invisible, the committed
+revision changing both styles, and the old revision continuing to serve both
+old styles. A WebSocket client follows the existing watch, fingerprinted Eval,
+and Resync exchange to prove independent results and presentation deltas.
