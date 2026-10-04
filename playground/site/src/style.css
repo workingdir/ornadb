@@ -11,6 +11,7 @@
 body { margin: 0; min-width: 680px; min-height: 100vh; }
 
 button, input { font: inherit; }
+select { font: inherit; }
 
 .playground { min-height: 100vh; display: flex; flex-direction: column; }
 .topbar { height: 56px; padding: 0 22px; display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid #293548; background: #151f2e; }
@@ -21,6 +22,8 @@ button, input { font: inherit; }
 .workspace { flex: 1; min-height: 0; padding: 16px; display: grid; grid-template-columns: minmax(0, 1.15fr) minmax(300px, .85fr); gap: 16px; }
 .editor-panel, .output-panel { display: flex; min-height: 0; flex-direction: column; overflow: hidden; border: 1px solid #2a374b; border-radius: 10px; background: #161f2e; }
 .panel-heading { height: 48px; flex: none; padding: 0 14px; display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid #293548; color: #adbacb; font-size: 12px; }
+.sample-picker { display: flex; align-items: center; gap: 9px; color: #adbacb; }
+.sample-picker select { padding: 5px 8px; border: 1px solid #34435a; border-radius: 5px; color: #e5e7eb; background: #111827; font-size: 12px; }
 .primary-button, .quiet-button { border: 1px solid transparent; border-radius: 6px; cursor: pointer; }
 .primary-button { padding: 7px 10px; color: #071a16; background: #8be3c2; font-size: 12px; font-weight: 700; }
 .primary-button:hover { background: #a1f0d2; }
