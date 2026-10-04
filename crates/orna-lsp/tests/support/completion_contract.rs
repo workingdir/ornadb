@@ -39,8 +39,9 @@ pub fn assert_lsp_completion_contract(completion: &Value, editor: &str) {
         .iter()
         .find(|item| item["label"] == "add")
         .unwrap_or_else(|| panic!("{editor} completion omitted fixture function add"));
-    assert_eq!(add["detail"], "fn add(left: Int, right: Int): Int");
-    assert_eq!(add["documentation"], "Add two integer values.");
+    assert_eq!(add["detail"], "pub fn add(left: Int, right: Int): Int");
+    assert_eq!(add["documentation"]["kind"], "markdown");
+    assert_eq!(add["documentation"]["value"], "Add two integer values.");
     assert_eq!(add["insertText"], "add(${1:left}, ${2:right})");
     assert_eq!(add["insertTextFormat"], 2);
 }

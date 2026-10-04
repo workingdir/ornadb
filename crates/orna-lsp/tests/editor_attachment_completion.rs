@@ -1,6 +1,7 @@
 //! Real editor-client attachment proofs for syntax-v1 completion.
 
 use std::{
+    collections::BTreeSet,
     fs,
     path::{Path, PathBuf},
     process::Command,
@@ -175,7 +176,7 @@ qa!
     let evidence: Value = serde_json::from_str(&result).expect("Vim completion evidence JSON");
     assert_eq!(evidence["omnifunc"], "lsp#complete");
     completion_contract::assert_lsp_completion_contract(&evidence["completion"], "Vim vim-lsp");
-    completion_contract::assert_vim_completion_projection(&evidence["adapted"]);
+    assert_vim_completion_projection(&evidence["adapted"]);
     println!("Vim integration evidence: ATTACHED=pass DEPENDENCY_ORDER=consumer-before-provider OMNIFUNC=pass COMPLETION=pass");
 }
 
@@ -282,9 +283,11 @@ fn emacs_eglot_attaches_and_exposes_syntax_v1_completion_at_point() {
             (error "syntax-v1 completion keywords differ: %S" keywords))
           (let ((add (cl-find-if (lambda (item) (equal (orna-test-get item "label") "add")) items)))
             (unless add (error "completion omitted fixture function add"))
-            (unless (equal (orna-test-get add "detail") "fn add(left: Int, right: Int): Int")
+            (unless (equal (orna-test-get add "detail") "pub fn add(left: Int, right: Int): Int")
               (error "unexpected add completion detail: %S" add))
-            (unless (equal (orna-test-get add "documentation") "Add two integer values.")
+            (unless (equal (orna-test-get (orna-test-get add "documentation") "kind") "markdown")
+              (error "add completion documentation is not Markdown: %S" add))
+            (unless (equal (orna-test-get (orna-test-get add "documentation") "value") "Add two integer values.")
               (error "add completion lost fixture documentation: %S" add))
             (unless (equal (orna-test-get add "insertText") "add(${{1:left}}, ${{2:right}})")
               (error "unexpected add completion snippet: %S" add))
@@ -358,6 +361,26 @@ fn assert_v1_attachment_fixture() {
             parsed.diagnostics
         );
     }
+}
+
+fn assert_vim_completion_projection(items: &Value) {
+    let items = items
+        .as_array()
+        .expect("vim-lsp completion projection list");
+    let actual_keywords = items
+        .iter()
+        .filter(|item| item["kind"] == "keyword")
+        .map(|item| item["abbr"].as_str().unwrap().to_owned())
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        actual_keywords,
+        completion_contract::expected_keywords(),
+        "Vim omni completion inventory"
+    );
+    assert!(
+        items.iter().any(|item| item["abbr"] == "add~"),
+        "Vim completion adapter omitted the add snippet candidate"
+    );
 }
 
 fn repo_root() -> PathBuf {

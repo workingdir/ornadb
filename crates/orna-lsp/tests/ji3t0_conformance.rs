@@ -615,8 +615,9 @@ for _, keyword in ipairs(expected_keywords) do
 end
 assert(not actual_keyword_set.CREATE and not actual_keyword_set.SELECT, "pre-v1 keyword escaped into Neovim completions")
 assert(add_completion ~= nil, "Neovim completion omitted fixture function add")
-assert(add_completion.detail == "fn add(left: Int, right: Int): Int", "unexpected add completion detail: " .. vim.inspect(add_completion))
-assert(add_completion.documentation == "Add two integer values.", "add completion lost fixture documentation: " .. vim.inspect(add_completion))
+assert(add_completion.detail == "pub fn add(left: Int, right: Int): Int", "unexpected add completion detail: " .. vim.inspect(add_completion))
+assert(add_completion.documentation.kind == "markdown", "add completion documentation is not Markdown: " .. vim.inspect(add_completion))
+assert(add_completion.documentation.value == "Add two integer values.", "add completion lost fixture documentation: " .. vim.inspect(add_completion))
 assert(add_completion.insertText == "add(${1:left}, ${2:right})", "unexpected add completion snippet: " .. vim.inspect(add_completion))
 assert(add_completion.insertTextFormat == 2, "add completion did not advertise snippet formatting: " .. vim.inspect(add_completion))
 
