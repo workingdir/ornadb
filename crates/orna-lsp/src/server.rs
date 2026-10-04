@@ -9,20 +9,21 @@ use std::thread::{self, JoinHandle};
 
 use crate::analysis::{self, EditorParse as Parse};
 use crate::documents::{Document, PositionMapper};
-use crate::semantic;
+use crate::{inlay, semantic};
 use lsp_server::{Connection, ErrorCode, Message, Notification, Request, Response, ResponseError};
 use lsp_types::{
     CompletionOptions, CompletionParams, CompletionResponse, DiagnosticOptions,
     DiagnosticServerCapabilities, DocumentDiagnosticParams, DocumentDiagnosticReport,
     DocumentSymbolParams, DocumentSymbolResponse, FullDocumentDiagnosticReport,
     GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverParams, HoverProviderCapability,
-    InitializeParams, OneOf, Position, PositionEncodingKind, PublishDiagnosticsParams, Range,
-    ReferenceParams, RelatedFullDocumentDiagnosticReport, RenameParams, SemanticTokens,
-    SemanticTokensFullOptions, SemanticTokensLegend, SemanticTokensOptions, SemanticTokensParams,
-    SemanticTokensRangeParams, SemanticTokensServerCapabilities, ServerCapabilities,
-    SignatureHelpOptions, TextDocumentContentChangeEvent, TextDocumentSyncCapability,
-    TextDocumentSyncKind, TextDocumentSyncOptions, TextDocumentSyncSaveOptions, TextEdit, Uri,
-    WorkspaceEdit,
+    InitializeParams, InlayHintOptions, InlayHintParams, InlayHintServerCapabilities, OneOf,
+    Position, PositionEncodingKind, PrepareRenameResponse, PublishDiagnosticsParams, Range,
+    ReferenceParams, RelatedFullDocumentDiagnosticReport, RenameOptions, RenameParams,
+    SemanticTokens, SemanticTokensFullOptions, SemanticTokensLegend, SemanticTokensOptions,
+    SemanticTokensParams, SemanticTokensRangeParams, SemanticTokensServerCapabilities,
+    ServerCapabilities, SignatureHelpOptions, TextDocumentContentChangeEvent,
+    TextDocumentSyncCapability, TextDocumentSyncKind, TextDocumentSyncOptions,
+    TextDocumentSyncSaveOptions, TextEdit, Uri, WorkspaceEdit,
 };
 
 /// Transport threads for the server's standard input and output streams.
@@ -217,7 +218,10 @@ fn server_capabilities() -> ServerCapabilities {
         }),
         definition_provider: Some(OneOf::Left(true)),
         references_provider: Some(OneOf::Left(true)),
-        rename_provider: Some(OneOf::Left(true)),
+        rename_provider: Some(OneOf::Right(RenameOptions {
+            prepare_provider: Some(true),
+            work_done_progress_options: Default::default(),
+        })),
         document_symbol_provider: Some(OneOf::Left(true)),
         completion_provider: Some(CompletionOptions {
             trigger_characters: Some(vec![".".to_owned(), ":".to_owned()]),
@@ -228,13 +232,19 @@ fn server_capabilities() -> ServerCapabilities {
             SemanticTokensOptions {
                 legend: SemanticTokensLegend {
                     token_types: semantic::legend(),
-                    token_modifiers: Vec::new(),
+                    token_modifiers: semantic::modifiers(),
                 },
                 range: Some(true),
                 full: Some(SemanticTokensFullOptions::Bool(true)),
                 work_done_progress_options: Default::default(),
             },
         )),
+        inlay_hint_provider: Some(OneOf::Right(InlayHintServerCapabilities::Options(
+            InlayHintOptions {
+                resolve_provider: Some(false),
+                ..InlayHintOptions::default()
+            },
+        ))),
         diagnostic_provider: Some(DiagnosticServerCapabilities::Options(DiagnosticOptions {
             identifier: None,
             inter_file_dependencies: false,
@@ -254,10 +264,12 @@ fn handle_request(state: &mut ServerState, connection: &Connection, request: Req
         "textDocument/signatureHelp" => request_signature_help(state, request),
         "textDocument/definition" => request_definition(state, request),
         "textDocument/references" => request_references(state, request),
+        "textDocument/prepareRename" => request_prepare_rename(state, request),
         "textDocument/rename" => request_rename(state, request),
         "textDocument/documentSymbol" => request_document_symbols(state, request),
         "textDocument/semanticTokens/full" => request_semantic_tokens_full(state, request),
         "textDocument/semanticTokens/range" => request_semantic_tokens_range(state, request),
+        "textDocument/inlayHint" => request_inlay_hints(state, request),
         "textDocument/completion" => request_completion(state, request),
         "workspace/symbol" => request_workspace_symbols(state, request),
         "textDocument/diagnostic" => request_document_diagnostic(state, request),
@@ -521,6 +533,17 @@ fn request_rename(
     Ok(serde_json::to_value(workspace_edit)?)
 }
 
+fn request_prepare_rename(
+    state: &mut ServerState,
+    request: Request,
+) -> Result<serde_json::Value, Box<dyn std::error::Error + Send + Sync>> {
+    let (_, params) =
+        request.extract::<lsp_types::TextDocumentPositionParams>("textDocument/prepareRename")?;
+    let uri = params.text_document.uri;
+    let response = semantic_prepare_rename(&state.documents, &uri, params.position);
+    Ok(serde_json::to_value(response)?)
+}
+
 struct SourceSegment<'a> {
     document: &'a Document,
     start: usize,
@@ -645,6 +668,57 @@ fn semantic_rename(
             });
     }
     Some(changes)
+}
+
+fn semantic_prepare_rename(
+    documents: &HashMap<Uri, Document>,
+    uri: &Uri,
+    position: Position,
+) -> Option<PrepareRenameResponse> {
+    let (workspace_document, segments, selected_start) = combined_workspace(documents, uri)?;
+    let selected_document = documents.get(uri)?;
+    if !uri.as_str().ends_with(".orna") {
+        return None;
+    }
+    let combined_position = workspace_position(
+        &workspace_document,
+        selected_start,
+        position,
+        documents,
+        uri,
+    )?;
+    let parse = analysis::parse_document(&workspace_document);
+    if !parse.diagnostics.is_empty() {
+        return None;
+    }
+    let workspace_mapper = PositionMapper::new(&workspace_document.text);
+    let (placeholder, span) =
+        analysis::identifier_at(&workspace_document, combined_position, &workspace_mapper)?;
+    semantic_rename_in_source(
+        &workspace_document,
+        &parse,
+        combined_position,
+        &workspace_mapper,
+        &placeholder,
+    )?;
+
+    let projected = project_location(
+        lsp_types::Location {
+            uri: workspace_document.uri.clone(),
+            range: workspace_mapper.range(&span),
+        },
+        &workspace_mapper,
+        &segments,
+    )?;
+    let selected_mapper = PositionMapper::new(&selected_document.text);
+    let selected_token = analysis::identifier_at(selected_document, position, &selected_mapper)?;
+    if selected_token.0 != placeholder {
+        return None;
+    }
+    Some(PrepareRenameResponse::RangeWithPlaceholder {
+        range: projected.range,
+        placeholder,
+    })
 }
 
 fn semantic_rename_in_source(
@@ -934,6 +1008,24 @@ fn request_semantic_tokens_range(
         result_id: None,
         data,
     })?)
+}
+
+fn request_inlay_hints(
+    state: &mut ServerState,
+    request: Request,
+) -> Result<serde_json::Value, Box<dyn std::error::Error + Send + Sync>> {
+    let (_, params) = request.extract::<InlayHintParams>("textDocument/inlayHint")?;
+    let Some(document) = state.document(&params.text_document.uri) else {
+        return Ok(serde_json::Value::Null);
+    };
+    let parse = analysis::parse_document(document);
+    let mapper = PositionMapper::new(&document.text);
+    Ok(serde_json::to_value(inlay::inlay_hints(
+        &parse,
+        &document.text,
+        &mapper,
+        &params.range,
+    ))?)
 }
 
 fn request_completion(
