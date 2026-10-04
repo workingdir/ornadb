@@ -1,0 +1,45 @@
+fn keyed_hit(): Bool {
+    let (after_first, first) = std.memo.memoize([], 4, value => value * value);
+    let (after_hit, second) = std.memo.memoize(after_first, 4, value => value + 100);
+    first == 16 && second == 16 && after_hit == after_first
+}
+
+fn cached_null(): Bool {
+    let (after_miss, first) = std.memo.memoize([], "empty", key => null);
+    let (after_hit, second) = std.memo.memoize(after_miss, "empty", key => fail(error(
+        code: "memo.proof.unexpected_recompute",
+        message: "cached null must be reused"
+    )));
+    first == null
+        && second == null
+        && after_hit == after_miss
+        && std.memo.get(after_hit, "empty") == Some(null)
+}
+
+fn thunk_hit(): Bool {
+    let (after_miss, first) = std.memo.memoize_thunk(null, () => null);
+    let (after_hit, second) = std.memo.memoize_thunk(after_miss, () => fail(error(
+        code: "memo.proof.unexpected_force",
+        message: "cached thunk must not be forced again"
+    )));
+    first == null && second == null && after_hit == after_miss
+}
+
+fn key_isolation_and_invalidation(): Bool {
+    let (one_entry, first) = std.memo.memoize([], 1, key => key + 3);
+    let (two_entries, second) = std.memo.memoize(one_entry, 2, key => key + 3);
+    let without_first = std.memo.remove(two_entries, 1);
+    let (after_remove, recomputed) = std.memo.memoize(without_first, 1, key => key + 30);
+    let cleared = std.memo.clear(after_remove);
+    let (after_clear, recomputed_again) = std.memo.memoize(cleared, 1, key => key + 40);
+    first == 4
+        && second == 5
+        && std.collection.count(two_entries) == 2
+        && std.memo.get(two_entries, 1) == Some(4)
+        && std.memo.get(two_entries, 2) == Some(5)
+        && std.collection.count(without_first) == 1
+        && recomputed == 31
+        && std.collection.count(cleared) == 0
+        && recomputed_again == 41
+        && std.collection.count(after_clear) == 1
+}

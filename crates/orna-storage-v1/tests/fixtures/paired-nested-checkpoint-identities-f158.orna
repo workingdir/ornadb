@@ -1,0 +1,7 @@
+{ id: "f158/nested-checkpoint/main", name: "f158/left/checkpoint-main", city: "f158/right/checkpoint-alpha", }
+
+{ id: "f158/nested-checkpoint/retry", name: "f158/left/checkpoint-retry", city: "f158/right/checkpoint-beta", }
+
+{ id: "f158/nested-checkpoint/reused", name: "f158/left/checkpoint-main", city: "f158/right/checkpoint-alpha", }
+
+{ id: "f158/nested-checkpoint/malformed", name: "f158/left/checkpoint-malformed", city: "f158/right/checkpoint-delta", }
