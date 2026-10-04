@@ -1,0 +1,18 @@
+pub fn set_builder_contract(): Bool {
+    let left = set.from_list([3, 1, 3, 2]);
+    let right = set.from_list([2, 4, 2]);
+    let empty: [Int] = [];
+    set.to_list(left) == [3, 1, 2]
+        && set.size(left) == 3
+        && set.is_empty(empty)
+        && set.contains(left, 1)
+        && !set.contains(left, 9)
+        && set.insert(left, 1) == [3, 1, 2]
+        && set.insert(left, 4) == [3, 1, 2, 4]
+        && set.union(left, right) == [3, 1, 2, 4]
+        && set.intersection(left, right) == [2]
+        && set.difference(left, right) == [3, 1]
+        && set.remove(left, 1) == [3, 2]
+}
+
+set_builder_contract()

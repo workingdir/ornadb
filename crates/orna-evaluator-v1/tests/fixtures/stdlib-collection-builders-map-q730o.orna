@@ -1,0 +1,30 @@
+pub fn map_builder_contract(): Bool {
+    let source = map.from_entries([
+        ("oak", 1),
+        ("elm", 2),
+        ("oak", 3),
+    ]);
+    let updated = map.insert(source, "elm", 7);
+    let inserted = map.insert(updated, "birch", 4);
+    let merged = map.merge(inserted, [("elm", 9), ("maple", 5)]);
+    map.size(source) == 2
+        && map.to_entries(source) == [("oak", 3), ("elm", 2)]
+        && map.to_entries(updated) == [("oak", 3), ("elm", 7)]
+        && map.to_entries(inserted) == [("oak", 3), ("elm", 7), ("birch", 4)]
+        && map.to_entries(merged) == [("oak", 3), ("elm", 9), ("birch", 4), ("maple", 5)]
+        && map.keys(merged) == ["oak", "elm", "birch", "maple"]
+        && map.values(merged) == [3, 9, 4, 5]
+        && map.contains_key(merged, "birch")
+        && !map.contains_key(merged, "missing")
+        && case map.get(merged, "elm") {
+            Some(value): value == 9,
+            null: false,
+        }
+        && case map.get(merged, "missing") {
+            Some(_): false,
+            null: true,
+        }
+        && map.to_entries(map.remove(merged, "oak")) == [("elm", 9), ("birch", 4), ("maple", 5)]
+}
+
+map_builder_contract()

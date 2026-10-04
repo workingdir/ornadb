@@ -1,0 +1,35 @@
+pub fn list_builder_contract(): Bool {
+    let values = [1, 2, 1, 3];
+    let empty: [Int] = [];
+    list.singleton(7) == [7]
+        && list.length(values) == 4
+        && list.is_empty(empty)
+        && list.append(values, 4) == [1, 2, 1, 3, 4]
+        && list.prepend(values, 0) == [0, 1, 2, 1, 3]
+        && list.concat(values, [4, 5]) == [1, 2, 1, 3, 4, 5]
+        && case list.first(values) {
+            Some(value): value == 1,
+            null: false,
+        }
+        && case list.last(values) {
+            Some(value): value == 3,
+            null: false,
+        }
+        && list.contains(values, 2)
+        && !list.contains(values, 9)
+        && list.take(values, 2) == [1, 2]
+        && list.take(values, 20) == values
+        && list.drop(values, 2) == [1, 3]
+        && list.unique([2, 1, 2, 3, 1]) == [2, 1, 3]
+        && list.reverse(values) == [3, 1, 2, 1]
+        && case list.first(empty) {
+            Some(_): false,
+            null: true,
+        }
+        && case list.last(empty) {
+            Some(_): false,
+            null: true,
+        }
+}
+
+list_builder_contract()
