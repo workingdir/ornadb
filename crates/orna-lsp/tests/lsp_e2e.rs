@@ -21,6 +21,8 @@ const AMBIGUOUS_RENAME_CALLER_SOURCE: &str =
 const SIGNATURE_ACTIONS_SOURCE: &str = include_str!("fixtures/signature-actions-v1.orna");
 const MISSING_SEMICOLON_SOURCE: &str =
     include_str!("fixtures/missing-semicolon-code-action-v1.orna");
+const DOCUMENT_LINKS_SOURCE: &str = include_str!("fixtures/document-links-v1.orna");
+const DOCUMENT_LINK_TARGET_SOURCE: &str = include_str!("fixtures/document-link-target-v1.orna");
 
 struct Client {
     child: Child,
@@ -156,6 +158,14 @@ fn initialize(client: &mut Client) {
     assert!(modifiers.iter().any(|modifier| modifier == "declaration"));
     assert_eq!(
         result["capabilities"]["inlayHintProvider"]["resolveProvider"],
+        false
+    );
+    assert_eq!(
+        result["capabilities"]["diagnosticProvider"]["identifier"],
+        "orna-syntax-v1"
+    );
+    assert_eq!(
+        result["capabilities"]["documentLinkProvider"]["resolveProvider"],
         false
     );
     client.notify("initialized", json!({}));
@@ -396,6 +406,135 @@ fn incremental_changes_apply_in_order_with_utf16_positions_and_ignore_stale_vers
             .unwrap()
             .is_empty(),
         "stale didChange corrupted the open document: {after_stale_change}"
+    );
+    client.shutdown();
+}
+
+#[test]
+fn pull_diagnostics_reuse_results_and_refresh_after_versioned_changes() {
+    let uri = "file:///workspace/incremental.orna";
+    let mut client = Client::spawn();
+    initialize(&mut client);
+    let published = open(&mut client, uri, INCREMENTAL_SOURCE);
+
+    let first = client.request(
+        "textDocument/diagnostic",
+        json!({"textDocument":{"uri":uri}}),
+    );
+    assert_eq!(first["kind"], "full", "{first}");
+    assert_eq!(first["items"], published["diagnostics"]);
+    let first_id = first["resultId"].as_str().expect("pull result ID");
+    assert!(!first_id.is_empty());
+
+    let unchanged = client.request(
+        "textDocument/diagnostic",
+        json!({
+            "textDocument":{"uri":uri},
+            "previousResultId":first_id
+        }),
+    );
+    assert_eq!(unchanged["kind"], "unchanged", "{unchanged}");
+    assert_eq!(unchanged["resultId"], first_id);
+
+    client.notify(
+        "textDocument/didChange",
+        json!({
+            "textDocument":{"uri":uri,"version":2},
+            "contentChanges":[{"text":DOCUMENT_LINKS_SOURCE}]
+        }),
+    );
+    let updated = client.notification("textDocument/publishDiagnostics");
+    assert_eq!(updated["version"], 2);
+    assert!(updated["diagnostics"].as_array().unwrap().is_empty());
+
+    let refreshed = client.request(
+        "textDocument/diagnostic",
+        json!({
+            "textDocument":{"uri":uri},
+            "previousResultId":first_id
+        }),
+    );
+    assert_eq!(refreshed["kind"], "full", "{refreshed}");
+    assert!(refreshed["items"].as_array().unwrap().is_empty());
+    let refreshed_id = refreshed["resultId"].as_str().expect("new pull result ID");
+    assert_ne!(refreshed_id, first_id);
+
+    let still_current = client.request(
+        "textDocument/diagnostic",
+        json!({
+            "textDocument":{"uri":uri},
+            "previousResultId":refreshed_id
+        }),
+    );
+    assert_eq!(still_current["kind"], "unchanged", "{still_current}");
+    client.shutdown();
+}
+
+#[test]
+fn document_links_resolve_open_imports_and_suppress_missing_or_ambiguous_targets() {
+    let source_uri = "file:///workspace/main.orna";
+    let flat_target_uri = "file:///workspace/library/math.orna";
+    let directory_target_uri = "file:///workspace/library/math/main.orna";
+    let mut client = Client::spawn();
+    initialize(&mut client);
+
+    let source_diagnostics = open(&mut client, source_uri, DOCUMENT_LINKS_SOURCE);
+    assert!(
+        source_diagnostics["diagnostics"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    let no_open_targets = client.request(
+        "textDocument/documentLink",
+        json!({"textDocument":{"uri":source_uri}}),
+    );
+    assert!(
+        no_open_targets.as_array().unwrap().is_empty(),
+        "{no_open_targets}"
+    );
+
+    let target_diagnostics = open(&mut client, flat_target_uri, DOCUMENT_LINK_TARGET_SOURCE);
+    assert!(
+        target_diagnostics["diagnostics"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    let links = client.request(
+        "textDocument/documentLink",
+        json!({"textDocument":{"uri":source_uri}}),
+    );
+    assert_eq!(links.as_array().unwrap().len(), 1, "{links}");
+    assert_eq!(
+        links[0]["range"],
+        range_at(
+            DOCUMENT_LINKS_SOURCE,
+            DOCUMENT_LINKS_SOURCE.find("library.math").unwrap(),
+            DOCUMENT_LINKS_SOURCE.find("library.math").unwrap() + "library.math".len()
+        )
+    );
+    assert_eq!(links[0]["target"], flat_target_uri);
+    assert_eq!(links[0]["tooltip"], "Open module `library.math`");
+
+    let duplicate_diagnostics = open(
+        &mut client,
+        directory_target_uri,
+        DOCUMENT_LINK_TARGET_SOURCE,
+    );
+    assert!(
+        duplicate_diagnostics["diagnostics"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    let ambiguous_links = client.request(
+        "textDocument/documentLink",
+        json!({"textDocument":{"uri":source_uri}}),
+    );
+    assert!(
+        ambiguous_links.as_array().unwrap().is_empty(),
+        "{ambiguous_links}"
     );
     client.shutdown();
 }
