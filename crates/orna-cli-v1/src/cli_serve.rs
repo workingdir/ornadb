@@ -2339,6 +2339,14 @@ mod tests {
         let traversal =
             playground_asset(directory.path(), identity, "/playground/%2e%2e/README.txt");
         assert_eq!(traversal.status, 400);
+
+        std::fs::write(
+            dist.join("index.html"),
+            "<!doctype html><html><body><main>stale page</main></body></html>",
+        )
+        .expect("replace the page with a stale build lacking the embed marker");
+        let stale_embed = playground_asset(directory.path(), identity, "/playground/embed");
+        assert_eq!(stale_embed.status, 503);
     }
 
     #[test]
@@ -2355,9 +2363,34 @@ mod tests {
             ))
         );
         assert_eq!(decode_playground_sample(PLAYGROUND_SAMPLE, "other"), None);
+        assert_eq!(
+            decode_playground_sample(
+                "{ id: \"hello\", id: \"hello\", name: \"Hello\", source: \"1\" }",
+                "hello"
+            ),
+            None
+        );
         assert!(!has_playground_sample_table(
             "pub table Sample(id: Int) { name: Str, source: Str }"
         ));
+    }
+
+    #[test]
+    fn embedded_page_requires_one_header_marker_on_the_header_tag() {
+        let mut missing = "<html><body><header>Title</header></body></html>".to_owned();
+        assert!(!hide_embedded_page_header(&mut missing));
+        assert_eq!(missing, "<html><body><header>Title</header></body></html>");
+
+        let mut wrong_tag = "<html><body><main data-page-header></main></body></html>".to_owned();
+        assert!(!hide_embedded_page_header(&mut wrong_tag));
+
+        let mut duplicate =
+            "<header data-page-header>One</header><header data-page-header>Two</header>".to_owned();
+        assert!(!hide_embedded_page_header(&mut duplicate));
+        assert_eq!(
+            duplicate,
+            "<header data-page-header>One</header><header data-page-header>Two</header>"
+        );
     }
 
     #[test]
