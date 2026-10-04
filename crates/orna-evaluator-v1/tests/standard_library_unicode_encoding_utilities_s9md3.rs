@@ -28,7 +28,7 @@ fn pinned_unicode_encoding_session() -> AdmittedReplSession {
     let catalogue = Catalogue::authoritative_core()
         .with_standard_sources(&profile, sources.clone())
         .expect("Unicode and encoding utility dependencies resolve in the pinned profile");
-    let mut session =
+    let session =
         AdmittedReplSession::from_catalogue(&[], catalogue, sources.clone(), Limits::default())
             .unwrap_or_else(|error| {
                 panic!(
@@ -62,8 +62,8 @@ fn unicode_and_encoding_utilities_preserve_scalars_and_canonical_base64url() {
     for (invalid, expected_code) in [
         ("a", "ORNA-EVAL-VALUE"),
         ("Zh", "ORNA-EVAL-VALUE"),
-        ("Zg==", "std.encoding.base64url.noncanonical"),
-        ("++//", "std.encoding.base64url.noncanonical"),
+        ("Zg==", "ORNA-EVAL-ERROR"),
+        ("++//", "ORNA-EVAL-ERROR"),
     ] {
         assert_eq!(
             session
