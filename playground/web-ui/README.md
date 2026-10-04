@@ -1,25 +1,19 @@
-# Orna Playground web UI
+# Orna playground web UI
 
-The web UI uses Monaco for `.orna` editing and the bounded pure evaluator compiled to WebAssembly.
+The Vite page is served by the selected orna serve clone at /playground/.
+It loads committed examples from /api/examples, runs source through the
+clone's authenticated orna.present.v1 session, and renders the server's
+run-event presentation in the result tabs. Orna evaluation stays in the
+server runtime. The browser worker for editor intelligence loads
+orna-lsp's shared analysis core.
 
-## Run locally
+Build the page and editor worker artifacts with:
 
-Install Node.js, Rust with the `wasm32-unknown-unknown` target, and `wasm-pack`. Then run:
+    npm ci
+    npm run build
 
-```sh
-npm ci
-npm run wasm:build
-npm run dev
-```
+Then run orna serve from the clone and open
+http://127.0.0.1:8181/playground/. The Monaco tokenizer and its keyword
+metadata are generated from orna-syntax-v1; check drift with:
 
-`npm run wasm:build` writes generated JavaScript and WebAssembly files to `playground/orna-wasm/pkg/`. Vite serves them during development and copies them into the production build.
-
-The browser runtime supports the pure admitted REPL subset. It returns values and redacted diagnostics; host effects are rejected.
-
-## Verify
-
-```sh
-npm test
-npm run build
-cargo test --manifest-path ../orna-wasm/Cargo.toml
-```
+    cargo run --locked -p orna-syntax-v1 --example generate_editor_artifacts -- --check

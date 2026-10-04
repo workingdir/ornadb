@@ -38,7 +38,7 @@ fn durable_consumer_with_multiple_checkpointed_roots_gets_guidance() {
 #[test]
 fn money_literal_is_typed_exactly_and_cross_currency_addition_is_rejected() {
     let exact = analyze(include_str!(
-        "../../orna-semantic-v1/tests/fixtures/traceability-money-exact-decimal.orna"
+        "fixtures/semantic/traceability-money-exact-decimal.orna"
     ));
     assert!(exact.is_ok(), "{:?}", exact.diagnostics);
     let amount = &exact.modules.values().next().unwrap().exports["amount"];
@@ -52,7 +52,7 @@ fn money_literal_is_typed_exactly_and_cross_currency_addition_is_rejected() {
     ), "unexpected exact-money result type: {:?}", amount.ty);
 
     let mixed = analyze(include_str!(
-        "../../orna-semantic-v1/tests/fixtures/traceability-money-cross-currency-add.orna"
+        "fixtures/semantic/traceability-money-cross-currency-add.orna"
     ));
     assert!(mixed.diagnostics.iter().any(|diagnostic| {
         diagnostic.code() == DIAG_TYPE
