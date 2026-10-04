@@ -3138,6 +3138,8 @@ ed6ace1d8ab50fedcdc72537b49de8aa4cad790a9b858bb49b67ee460dda695c  crates/orna-ls
 2ac7143a5dcab472864d2d6820c6236939d21476a980df28c267024f3f656171  crates/orna-lsp/src/analysis/fixtures/standard-missing-import.orna
 7448019e1215ea705ad3416bc881c489dfcc1720400162ff0b5ef39c83acfeff  crates/orna-lsp/src/browser/fixtures/browser-intelligence.orna
 f4e8d5cfdb20469a0205e848d75d377e63d3b54ad383d005ce0959d27b277110  crates/orna-lsp/tests/fixtures/accepted-corpus.txt
+11b87ed71842d8acde383de01985383af202e3d0d4809866829f0f74b3d78f14  crates/orna-lsp/tests/fixtures/ambiguous-renames-caller-v1.orna
+c760f77a909070dfef8bd78019889c88aee5f22a5139ab0865ae074bd2f6da88  crates/orna-lsp/tests/fixtures/ambiguous-renames-v1.orna
 c75bbee709cc649cc9025108885f1ffae279b05b13edfd66647c6f56003b77d3  crates/orna-lsp/tests/fixtures/call-v1.orna
 36b51d4933bb9530ed36d0fb343b7c288c50abf265d76efbaf1740c57a49a238  crates/orna-lsp/tests/fixtures/editor-lsp-hints.orna
 ae26b76e75c4bf39e03664cb7cb33d461c0061fac79ddc285488509973b6d84a  crates/orna-lsp/tests/fixtures/editor-semantic-tokens.orna
@@ -3169,6 +3171,8 @@ eb087030f705f13b8adb817b3589166bb5a892af6e797353750055260daa4741  crates/orna-ls
 e8255da14cded3d550315c1b02df1cec0d77918fcb9c8702ffb114a1b23e8898  crates/orna-lsp/tests/fixtures/lsp-e2e-019-external-client-hover-preserves-runtime-and-capability-metadata-source.orna
 560c44f3115869620d2b7e6c2aeac2b73d95a72e59edbc40c9e0bbba49b8b303  crates/orna-lsp/tests/fixtures/lsp-e2e-020-language-model-rename-declaration.orna
 274b0acb21ba822516449c11f540fad7b8809b6d54f84df605eb88ecb415bbbf  crates/orna-lsp/tests/fixtures/lsp-e2e-021-language-model-rename-references.orna
+034f96a2b28e9117c1edf56db04aebae41c0e67466ef3c8e84ff2aeb0e4e7f1b  crates/orna-lsp/tests/fixtures/rename-caller-v1.orna
+7477e338729cc2d0e79d3b8b240b43ab9b5712bc78dcb44076f1efc3573448b6  crates/orna-lsp/tests/fixtures/rename-provider-v1.orna
 9a14af6c57d9551e81d375f0eb4ea06008bf18026ebd0a960cb4d1b2e57dafc6  crates/orna-lsp/tests/fixtures/tree-sitter-corpus/accepted_actions_inspector.txt
 c505dd602eed8bd3ebbfa839e703182657981081fa9b5444382085b2212f2a8e  crates/orna-lsp/tests/fixtures/tree-sitter-corpus/accepted_client_fixture.txt
 4ca1b841deb67f165859252bd81ae51d718c706b3bbcf26706538e9afab2dda5  crates/orna-lsp/tests/fixtures/tree-sitter-corpus/alter_drop.txt
@@ -4749,6 +4753,7 @@ b4be81cc6d1f15b08da83aa2c510f3cd0c2dca9af1e1896d2de721d8e5f36f4b  crates/orna-st
 e8a18799d994b1c4ac515d1f70407c0a093a74b81f53b1cb92f0873affb2aba5  crates/orna-storage-v1/tests/fixtures/paired-nested-restore-identities-f149.orna
 20103d6f46763a45a62c83c03133c4443943c19efa2ed7b82a721dd0f68913e0  crates/orna-storage-v1/tests/fixtures/paired-nested-restore-identities-f155.orna
 cbc3e4a2ee90ec8a4a3b2797e600b53e838f67c4a08468e112c6631a9e453b02  crates/orna-storage-v1/tests/fixtures/paired-nested-restore-identities-f157.orna
+98da357c4ae2b6de358c939cdf0a679281ad1b6d87f7099a4d6e9bc3a6c7e513  crates/orna-storage-v1/tests/fixtures/paired-nested-rewind-identities-f161.orna
 2e3e1ae19f4ac162cf54a91701f648dae2cb53739b30cf57ca61aec99f3c802b  crates/orna-storage-v1/tests/fixtures/paired-nested-segment-compactions-9spl2.orna
 81d3866fa0647dcaf88cefc427156eed370b2eca97f7b1d34370e7e7b7b49a8b  crates/orna-storage-v1/tests/fixtures/paired-nested-spill-identities-f151.orna
 2a6b96b566f893b71108b5d78dce25f444e1169d0364439720c4746ce7b89175  crates/orna-storage-v1/tests/fixtures/paired-nested-spill-identities-f98.orna
