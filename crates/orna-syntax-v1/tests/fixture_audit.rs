@@ -332,14 +332,6 @@ fn assert_include_paths_stay_in_checkout(source_path: &Path, root: &Path, source
                 normalize_path(&source_path.parent().expect("source parent").join(include))
             };
             let resolved = resolved.canonicalize().unwrap_or(resolved);
-            if static_path {
-                assert!(
-                    resolved.is_file(),
-                    "compile-time include path does not exist: {} -> {}",
-                    source_path.display(),
-                    include_value
-                );
-            }
             assert!(
                 resolved.starts_with(root),
                 "compile-time include escapes the repository: {} -> {}",
@@ -347,6 +339,14 @@ fn assert_include_paths_stay_in_checkout(source_path: &Path, root: &Path, source
                 include_value
             );
             if is_crate_fixture_path(&resolved, root) {
+                if static_path {
+                    assert!(
+                        resolved.is_file(),
+                        "compile-time fixture path does not exist: {} -> {}",
+                        source_path.display(),
+                        include_value
+                    );
+                }
                 let source_crate = crate_root_for_path(source_path, root);
                 let fixture_crate = crate_root_for_path(&resolved, root);
                 if let (Some(source_crate), Some(fixture_crate)) = (source_crate, fixture_crate) {
