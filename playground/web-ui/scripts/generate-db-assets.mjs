@@ -104,6 +104,22 @@ async function expectedRows() {
   counts.Entry += 2;
   addRoute('/playground/', 'entry-page');
   addRoute('/playground/embed', 'entry-embed');
+  const pages = [
+    {
+      routePath: '/playground/examples/',
+      entryId: 'entry-example-catalog',
+      assetPath: 'assets/examples.html',
+      kind: 'asset',
+    },
+  ];
+  for (const page of pages) {
+    rows.set(
+      join(entryRows, `${page.entryId}.orna`),
+      entryRow(page.entryId, page.assetPath, page.kind),
+    );
+    counts.Entry += 1;
+    addRoute(page.routePath, page.entryId);
+  }
 
   const sources = [
     ...files.map((path) => [path, join(distribution, path)]),
@@ -153,7 +169,7 @@ try {
     },
     {
       path: entryRows,
-      isGenerated: (name) => name.startsWith('entry-asset-'),
+      isGenerated: (name) => name.startsWith('entry-asset-') || name === 'entry-example-catalog.orna',
     },
     {
       path: routeRows,
@@ -163,6 +179,7 @@ try {
         if (!/^(?:[0-9a-f]{2})+$/.test(routeHex)) return false;
         const path = Buffer.from(routeHex, 'hex').toString('utf8');
         return path === '/playground/' || path === '/playground/embed'
+          || path === '/playground/examples/'
           || path.startsWith('/playground/assets/');
       },
     },
