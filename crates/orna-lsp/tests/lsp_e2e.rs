@@ -532,6 +532,43 @@ fn type_hierarchy_and_monikers_resolve_workspace_declarations_and_fail_closed() 
         json!([]),
         "ambiguous protocol names must not create hierarchy edges"
     );
+    let ambiguous_protocol = client.request(
+        "textDocument/prepareTypeHierarchy",
+        json!({
+            "textDocument":{"uri":provider_uri},
+            "position":position_of(TYPE_HIERARCHY_PROVIDER_SOURCE, "Clash", 1)
+        }),
+    );
+    assert_eq!(
+        client.request(
+            "typeHierarchy/subtypes",
+            json!({"item":ambiguous_protocol[0]}),
+        ),
+        json!([]),
+        "duplicate protocol declarations must not claim ambiguous subtypes"
+    );
+
+    let provider_clash_moniker = client.request(
+        "textDocument/moniker",
+        json!({
+            "textDocument":{"uri":provider_uri},
+            "position":position_of(TYPE_HIERARCHY_PROVIDER_SOURCE, "Clash", 1)
+        }),
+    );
+    let caller_clash_moniker = client.request(
+        "textDocument/moniker",
+        json!({
+            "textDocument":{"uri":caller_uri},
+            "position":position_of(TYPE_HIERARCHY_CALLER_SOURCE, "Clash", 1)
+        }),
+    );
+    assert_eq!(provider_clash_moniker[0]["kind"], "export");
+    assert_eq!(caller_clash_moniker[0]["kind"], "export");
+    assert_ne!(
+        provider_clash_moniker[0]["identifier"], caller_clash_moniker[0]["identifier"],
+        "separate declarations keep distinct project monikers despite a shared name"
+    );
+
     let declaration_moniker = client.request(
         "textDocument/moniker",
         json!({
@@ -557,6 +594,26 @@ fn type_hierarchy_and_monikers_resolve_workspace_declarations_and_fail_closed() 
         declaration_moniker["identifier"]
     );
     assert_eq!(imported_moniker["kind"], "import");
+
+    let same_file_moniker = client.request(
+        "textDocument/moniker",
+        json!({
+            "textDocument":{"uri":provider_uri},
+            "position":position_of(
+                TYPE_HIERARCHY_PROVIDER_SOURCE,
+                "DocumentAlias = Document",
+                "DocumentAlias = ".len()
+            )
+        }),
+    );
+    assert_eq!(
+        same_file_moniker[0]["identifier"],
+        declaration_moniker["identifier"]
+    );
+    assert_eq!(
+        same_file_moniker[0]["kind"], "local",
+        "a same-project use of an exported declaration is not an import"
+    );
 
     let local_moniker = client.request(
         "textDocument/moniker",
