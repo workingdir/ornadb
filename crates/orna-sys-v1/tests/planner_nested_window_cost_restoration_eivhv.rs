@@ -466,6 +466,57 @@ fn nested_window_identities_survive_paired_cost_restore_folds_and_sparse_edges()
         "the sparse pair changes the envelope fold while carrying the chain fold"
     );
     assert_eq!(
+        text(
+            child_a,
+            "paired_window_cost_restoration_window_envelope_restore_chain_transition"
+        ),
+        "initialized_window_and_envelope_restore_chain"
+    );
+    assert_ne!(
+        text(
+            child_a,
+            "paired_window_cost_restoration_window_envelope_restore_chain_fold_identity"
+        ),
+        text(
+            child_b,
+            "paired_window_cost_restoration_window_envelope_restore_chain_fold_identity"
+        ),
+        "the nested identity advances with the second window and envelope restore fold"
+    );
+    assert_eq!(
+        text(
+            child_b,
+            "paired_window_cost_restoration_window_envelope_restore_chain_pairing"
+        ),
+        "cumulative_window_fold_bound_to_paired_envelope_restore_chain_fold"
+    );
+    assert_eq!(
+        text(
+            child_b,
+            "paired_window_cost_restoration_window_envelope_restore_chain_transition"
+        ),
+        "advanced_window_and_envelope_restore_chain"
+    );
+    assert_ne!(
+        text(
+            child_b,
+            "paired_window_cost_restoration_window_envelope_restore_chain_fold_identity"
+        ),
+        text(
+            tail,
+            "paired_window_cost_restoration_window_envelope_restore_chain_fold_identity"
+        ),
+        "the sparse pair advances the nested identity through its envelope restore fold"
+    );
+    assert_eq!(
+        text(
+            tail,
+            "paired_window_cost_restoration_window_envelope_restore_chain_transition"
+        ),
+        "advanced_envelope_restore_chain",
+        "the sparse pair carries its window fold while its envelope restore fold advances"
+    );
+    assert_eq!(
         integer(tail, "paired_window_cost_restoration_restore_fold_count"),
         2
     );
@@ -626,6 +677,17 @@ fn nested_window_identities_survive_paired_cost_restore_folds_and_sparse_edges()
             ),
             "descriptor reordering preserves the combined chain-envelope identity"
         );
+        assert_eq!(
+            text(
+                joins[pair_id],
+                "paired_window_cost_restoration_window_envelope_restore_chain_fold_identity"
+            ),
+            text(
+                reordered_joins[pair_id],
+                "paired_window_cost_restoration_window_envelope_restore_chain_fold_identity"
+            ),
+            "descriptor reordering preserves the nested window-envelope identity"
+        );
     }
     assert_ne!(
         text(child_b, "paired_window_cost_restoration_fold_identity"),
@@ -761,6 +823,17 @@ fn nested_window_identities_survive_paired_cost_restore_folds_and_sparse_edges()
             ),
             "changing a window operation changes the combined chain-envelope identity"
         );
+        assert_ne!(
+            text(
+                joins[pair_id],
+                "paired_window_cost_restoration_window_envelope_restore_chain_fold_identity"
+            ),
+            text(
+                changed_joins[pair_id],
+                "paired_window_cost_restoration_window_envelope_restore_chain_fold_identity"
+            ),
+            "changing a window operation changes its nested envelope restore identity"
+        );
     }
     assert_eq!(
         text(
@@ -769,6 +842,20 @@ fn nested_window_identities_survive_paired_cost_restore_folds_and_sparse_edges()
         ),
         "advanced_pair_envelopes",
         "the changed sparse edge still carries its own restore-chain component"
+    );
+    assert_eq!(
+        text(
+            changed_joins["pair:table:ChildB"],
+            "paired_window_cost_restoration_window_envelope_restore_chain_transition"
+        ),
+        "advanced_window_and_envelope_restore_chain"
+    );
+    assert_eq!(
+        text(
+            changed_joins["pair:table:Tail"],
+            "paired_window_cost_restoration_window_envelope_restore_chain_transition"
+        ),
+        "advanced_envelope_restore_chain"
     );
     assert_eq!(
         text(child_b, "paired_window_cost_restoration_pairing"),
@@ -875,6 +962,17 @@ fn nested_window_identities_survive_paired_cost_restore_folds_and_sparse_edges()
         );
         assert_ne!(
             text(
+                child_b,
+                "paired_window_cost_restoration_window_envelope_restore_chain_fold_identity"
+            ),
+            text(
+                changed["pair:table:ChildB"],
+                "paired_window_cost_restoration_window_envelope_restore_chain_fold_identity"
+            ),
+            "cost and restore changes advance the nested window-envelope identity"
+        );
+        assert_ne!(
+            text(
                 tail,
                 "paired_window_cost_restoration_pair_envelope_identity"
             ),
@@ -924,6 +1022,31 @@ fn nested_window_identities_survive_paired_cost_restore_folds_and_sparse_edges()
             ),
             "advanced_pair_envelopes",
             "changed sparse folds advance through their envelope while carrying their chain"
+        );
+        assert_ne!(
+            text(
+                tail,
+                "paired_window_cost_restoration_window_envelope_restore_chain_fold_identity"
+            ),
+            text(
+                changed["pair:table:Tail"],
+                "paired_window_cost_restoration_window_envelope_restore_chain_fold_identity"
+            ),
+            "sparse window-envelope identities retain changed cost and restore ancestry"
+        );
+        assert_eq!(
+            text(
+                changed["pair:table:ChildB"],
+                "paired_window_cost_restoration_window_envelope_restore_chain_transition"
+            ),
+            "advanced_envelope_restore_chain"
+        );
+        assert_eq!(
+            text(
+                changed["pair:table:Tail"],
+                "paired_window_cost_restoration_window_envelope_restore_chain_transition"
+            ),
+            "advanced_envelope_restore_chain"
         );
     }
     assert_ne!(
