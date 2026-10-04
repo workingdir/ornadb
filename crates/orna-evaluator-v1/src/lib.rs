@@ -58,7 +58,7 @@ pub use timezone::{
 /// crate verifies its pinned profile before either boundary admits an import.
 /// Returns the reference standard sources supplied to the bounded REPL.
 #[must_use]
-pub fn reference_standard_sources() -> [(String, String); 58] {
+pub fn reference_standard_sources() -> [(String, String); 59] {
     orna_standard::reference_standard_sources_v1()
 }
 
