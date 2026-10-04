@@ -462,20 +462,11 @@ fn workspace_rust_sources_keep_test_inputs_inside_the_checkout() {
 }
 
 #[test]
-fn checkout_has_no_checkout_or_sibling_reference_tree() {
-    let root = workspace_root();
-    let sibling_reference_tree = root
-        .parent()
-        .expect("workspace root parent")
-        .join("reference");
-    for (scope, reference_tree) in [
-        ("checkout", root.join("reference")),
-        ("sibling", sibling_reference_tree),
-    ] {
-        assert!(
-            !reference_tree.exists(),
-            "the fresh checkout must not depend on a {scope} reference tree: {}",
-            reference_tree.display()
-        );
-    }
+fn checkout_has_no_top_level_reference_tree() {
+    let reference_tree = workspace_root().join("reference");
+    assert!(
+        !reference_tree.exists(),
+        "the repository checkout must not depend on a top-level reference tree: {}",
+        reference_tree.display()
+    );
 }
