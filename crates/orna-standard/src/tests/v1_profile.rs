@@ -39,6 +39,7 @@ use crate::{
     REFERENCE_STANDARD_PARSE_UTILITIES_PATH_V1,
     REFERENCE_STANDARD_ENCODING_UTILITIES_PATH_V1,
     REFERENCE_STANDARD_BYTES_PATH_V1,
+    REFERENCE_STANDARD_COLLECTION_ADVANCED_PATH_V1,
     REFERENCE_STANDARD_ITERATOR_PATH_V1, REFERENCE_STANDARD_ITERATOR_ADAPTERS_PATH_V1,
     REFERENCE_STANDARD_ITERATOR_CONSUMERS_PATH_V1,
     REFERENCE_STANDARD_COLLECTION_ADAPTERS_PATH_V1,
@@ -58,7 +59,7 @@ use crate::{
 #[test]
 fn pinned_ui_presentation_helpers_are_included_as_source() {
     let sources = reference_standard_sources_v1();
-    assert_eq!(sources.len(), 73);
+    assert_eq!(sources.len(), 74);
     assert_eq!(sources[49].0, REFERENCE_STANDARD_UI_PATH_V1);
     let parsed = orna_syntax_v1::parse_module_with_file(
         &sources[49].1,
@@ -239,6 +240,51 @@ fn pinned_collection_adapters_are_included_and_typecheck() {
     assert!(parsed.is_ok(), "{path}: {:#?}", parsed.diagnostics);
     reference_standard_catalogue_v1()
         .expect("collection adapters resolve in the captured standard catalogue");
+}
+
+#[test]
+fn pinned_collection_advanced_adapters_are_included_and_typecheck() {
+    let sources = reference_standard_sources_v1();
+    let (index, (path, source)) = sources
+        .iter()
+        .enumerate()
+        .find(|(_, (path, _))| path == REFERENCE_STANDARD_COLLECTION_ADVANCED_PATH_V1)
+        .expect("the pinned source bundle includes std.collection.advanced");
+    assert_eq!(index, 73, "advanced collection adapters append without moving old sources");
+    assert_eq!(path, REFERENCE_STANDARD_COLLECTION_ADVANCED_PATH_V1);
+    for declaration in [
+        "pub fn filter_map<T, U>(values: [T], transform: fn(T): U?): [U]",
+        "pub fn map_while<T, U>(values: [T], transform: fn(T): U?): [U]",
+        "pub fn take_while<T>(values: [T], predicate: fn(T): Bool): [T]",
+        "pub fn drop_while<T>(values: [T], predicate: fn(T): Bool): [T]",
+        "pub fn intersperse<T>(values: [T], separator: T): [T]",
+        "pub fn scan<T, S>(values: [T], seed: S, stepper: fn(S, T): S): [S]",
+        "pub fn zip_longest<T, U>(left: [T], right: [U]): [(T?, U?)]",
+    ] {
+        assert!(source.contains(declaration), "missing advanced collection adapter `{declaration}`");
+    }
+    for contract in [
+        "keeps only `Some` values",
+        "then stops",
+        "longest leading prefix",
+        "Drops the leading prefix",
+        "empty and singleton lists are unchanged",
+        "the seed is not included",
+        "using null for a missing side",
+    ] {
+        assert!(source.contains(contract), "missing advanced collection contract `{contract}`");
+    }
+    let profile = reference_standard_profile_v1();
+    profile
+        .verify_source(path, source)
+        .expect("advanced collection source bytes match the pinned standard profile");
+    let mut changed_source = source.clone();
+    changed_source.push_str("\n// changed after profile capture\n");
+    assert!(profile.verify_source(path, &changed_source).is_err());
+    let parsed = orna_syntax_v1::parse_module_with_file(source, path);
+    assert!(parsed.is_ok(), "{path}: {:#?}", parsed.diagnostics);
+    reference_standard_catalogue_v1()
+        .expect("advanced collection adapters resolve in the captured standard catalogue");
 }
 
 #[test]
@@ -1867,7 +1913,7 @@ fn reference_standard_uses_pinned_orna_1_source_and_resolves_its_imports() {
     ] {
         assert!(sources[33].1.contains(contract), "missing std.test contract `{contract}`");
     }
-    assert_eq!(sources.len(), 73);
+    assert_eq!(sources.len(), 74);
     assert_eq!(sources[49].0, REFERENCE_STANDARD_UI_PATH_V1);
     for declaration in [
         "pub fn Field<T>(label: Str, value: T): UI",
@@ -2329,7 +2375,7 @@ fn pinned_filesystem_effect_is_visible_to_consumers_and_forbidden_in_assertions(
 #[test]
 fn pinned_filesystem_path_and_metadata_modules_are_captured_and_typecheck() {
     let sources = reference_standard_sources_v1();
-    assert_eq!(sources.len(), 73);
+    assert_eq!(sources.len(), 74);
     for (index, path) in [
         (42, REFERENCE_STANDARD_IO_PATH_MODULE_PATH_V1),
         (43, REFERENCE_STANDARD_IO_METADATA_PATH_V1),
@@ -2393,7 +2439,7 @@ fn pinned_filesystem_path_and_metadata_modules_are_captured_and_typecheck() {
 #[test]
 fn pinned_io_buffer_module_is_captured_and_resolves_stream_adapters() {
     let sources = reference_standard_sources_v1();
-    assert_eq!(sources.len(), 73);
+    assert_eq!(sources.len(), 74);
     let (path, source) = sources
         .iter()
         .find(|(path, _)| path == REFERENCE_STANDARD_IO_BUFFER_PATH_V1)
@@ -2430,7 +2476,7 @@ fn pinned_io_buffer_module_is_captured_and_resolves_stream_adapters() {
 #[test]
 fn pinned_process_and_environment_modules_are_captured_and_typecheck() {
     let sources = reference_standard_sources_v1();
-    assert_eq!(sources.len(), 73);
+    assert_eq!(sources.len(), 74);
     for (index, path) in [
         (44, REFERENCE_STANDARD_IO_PROCESS_PATH_V1),
         (45, REFERENCE_STANDARD_IO_ENVIRONMENT_PATH_V1),
