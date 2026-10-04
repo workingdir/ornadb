@@ -108,7 +108,7 @@ async function expectedRows() {
     {
       routePath: '/playground/examples/',
       entryId: 'entry-example-catalog',
-      assetPath: 'examples.html',
+      assetPath: 'assets/examples.html',
       kind: 'asset',
     },
   ];

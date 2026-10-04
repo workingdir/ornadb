@@ -502,15 +502,15 @@ fn orna_serve_hosts_playground_with_pending_evals_and_snapshot_correct_deltas() 
         ("entry-lsp-wasm", ENTRY_LSP_WASM),
         ("entry-example-catalog", ENTRY_EXAMPLE_CATALOG),
         (
-            "entry-asset-6578616d706c65732e68746d6c",
+            "entry-asset-6173736574732f6578616d706c65732e68746d6c",
             ENTRY_EXAMPLE_CATALOG_ASSET,
         ),
         (
-            "entry-asset-6578616d706c65732e6d6a73",
+            "entry-asset-6173736574732f6578616d706c65732e6d6a73",
             ENTRY_EXAMPLE_CATALOG_SCRIPT,
         ),
         (
-            "entry-asset-6578616d706c65732e637373",
+            "entry-asset-6173736574732f6578616d706c65732e637373",
             ENTRY_EXAMPLE_CATALOG_STYLE,
         ),
     ];
@@ -589,9 +589,18 @@ fn orna_serve_hosts_playground_with_pending_evals_and_snapshot_correct_deltas() 
             ASSET_EDITOR_CONFIG,
         ),
         ("6173736574732f656d6265642e6a73", ASSET_EMBED),
-        ("6578616d706c65732e68746d6c", ASSET_EXAMPLE_CATALOG),
-        ("6578616d706c65732e6d6a73", ASSET_EXAMPLE_CATALOG_SCRIPT),
-        ("6578616d706c65732e637373", ASSET_EXAMPLE_CATALOG_STYLE),
+        (
+            "6173736574732f6578616d706c65732e68746d6c",
+            ASSET_EXAMPLE_CATALOG,
+        ),
+        (
+            "6173736574732f6578616d706c65732e6d6a73",
+            ASSET_EXAMPLE_CATALOG_SCRIPT,
+        ),
+        (
+            "6173736574732f6578616d706c65732e637373",
+            ASSET_EXAMPLE_CATALOG_STYLE,
+        ),
     ] {
         std::fs::write(assets.join(format!("asset-{id}.orna")), source)
             .expect("write committed browser support fixture");
