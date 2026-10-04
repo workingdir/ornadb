@@ -4,6 +4,10 @@
 # JavaScript dependencies and generated browser runtime assets.
 /playground/web-ui/node_modules/
 /playground/web-ui/dist/
+/playground/site/node_modules/
+/playground/site/dist/
+/playground/site/test-results/
+/playground/site/playwright-report/
 /playground/orna-wasm/pkg/
 /playground/orna-wasm/target/
 
