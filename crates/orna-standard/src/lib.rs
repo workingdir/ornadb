@@ -86,6 +86,7 @@ pub const REFERENCE_STANDARD_CONCURRENT_PATH_V1: &str = "std/concurrent/main.orn
 pub const REFERENCE_STANDARD_CONCURRENT_RESULT_PATH_V1: &str = "std/concurrent/result.orna";
 pub const REFERENCE_STANDARD_ITERATOR_ADAPTERS_PATH_V1: &str = "std/iterator/adapters.orna";
 pub const REFERENCE_STANDARD_ITERATOR_CONSUMERS_PATH_V1: &str = "std/iterator/consumers.orna";
+pub const REFERENCE_STANDARD_COLLECTION_ADAPTERS_PATH_V1: &str = "std/collection/adapters.orna";
 pub const REFERENCE_STANDARD_TEST_PATH_V1: &str = "std/test.orna";
 pub const REFERENCE_STANDARD_GENERICS_PATH_V1: &str = "std/generics.orna";
 pub const REFERENCE_STANDARD_TYPE_UTILS_PATH_V1: &str = "std/type_utils.orna";
@@ -188,6 +189,8 @@ const REFERENCE_STANDARD_ITERATOR_ADAPTERS_SOURCE_V1: &str =
     include_str!("../../../stdlib/std/iterator/adapters.orna");
 const REFERENCE_STANDARD_ITERATOR_CONSUMERS_SOURCE_V1: &str =
     include_str!("../../../stdlib/std/iterator/consumers.orna");
+const REFERENCE_STANDARD_COLLECTION_ADAPTERS_SOURCE_V1: &str =
+    include_str!("../../../stdlib/std/collection/adapters.orna");
 const REFERENCE_STANDARD_TEST_SOURCE_V1: &str = include_str!("../../../stdlib/std/test.orna");
 const REFERENCE_STANDARD_GENERICS_SOURCE_V1: &str =
     include_str!("../../../stdlib/std/generics.orna");
@@ -216,8 +219,8 @@ const REFERENCE_STANDARD_PRELUDE_SOURCE_V1: &str =
 /// This is the current source-backed standard boundary. The retained `orna.std/1`–
 /// `orna.std/11` APIs below model older, explicitly versioned snapshots.
 #[must_use]
-pub fn reference_standard_sources_v1() -> [(String, String); 62] {
-    let mut sources: [(String, String); 62] = [
+pub fn reference_standard_sources_v1() -> [(String, String); 63] {
+    let mut sources: [(String, String); 63] = [
         (
             REFERENCE_STANDARD_MATH_PATH_V1.into(),
             REFERENCE_STANDARD_MATH_SOURCE_V1.into(),
@@ -465,6 +468,10 @@ pub fn reference_standard_sources_v1() -> [(String, String); 62] {
         (
             REFERENCE_STANDARD_ITERATOR_CONSUMERS_PATH_V1.into(),
             REFERENCE_STANDARD_ITERATOR_CONSUMERS_SOURCE_V1.into(),
+        ),
+        (
+            REFERENCE_STANDARD_COLLECTION_ADAPTERS_PATH_V1.into(),
+            REFERENCE_STANDARD_COLLECTION_ADAPTERS_SOURCE_V1.into(),
         ),
     ];
     sources[2]
