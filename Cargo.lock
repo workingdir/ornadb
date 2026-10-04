@@ -1225,6 +1225,7 @@ dependencies = [
  "orna-evaluator-v1",
  "orna-foundation-v1",
  "orna-live-v1",
+ "orna-project-v1",
  "orna-protocol-v1",
  "orna-repository-v1",
  "orna-runtime-v1",
