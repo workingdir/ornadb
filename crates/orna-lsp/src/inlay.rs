@@ -240,7 +240,7 @@ fn add_parameter_hints(
                 else {
                     return;
                 };
-                parameters.into_iter().map(Some).collect()
+                parameters
             }
         }
         _ => {
@@ -251,7 +251,7 @@ fn add_parameter_hints(
             else {
                 return;
             };
-            parameters.into_iter().map(Some).collect()
+            parameters
         }
     };
     for (argument, parameter_name) in arguments.iter().zip(&parameter_names) {

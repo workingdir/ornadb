@@ -13,7 +13,7 @@ use lsp_types::{
     Position, SignatureHelp, SignatureInformation, SymbolKind, Uri,
 };
 use orna_syntax_v1::{
-    Argument, Declaration, Expr, ImportSegment, Item, Keyword, Parse, Statement,
+    Argument, Declaration, Expr, ImportSegment, Item, Keyword, Parse, Pattern, Statement,
     SyntaxSpan as SourceSpan, SyntaxTree, Token, TokenKind, TypeExpr, UseTail, Visibility, lex,
     parse_module, parse_module_with_file,
 };
@@ -176,6 +176,7 @@ pub(crate) struct EditorSymbol {
     pub detail: Option<String>,
     pub documentation: Option<String>,
     pub parameters: Vec<String>,
+    pub parameter_names: Vec<Option<String>>,
     pub result_type: Option<String>,
 }
 
@@ -369,7 +370,7 @@ pub(crate) fn standard_parameter_names_for_call(
     tree: &SyntaxTree,
     name: &str,
     callee: &Expr,
-) -> Option<Vec<String>> {
+) -> Option<Vec<Option<String>>> {
     if callee_resolves_to_local(tree, callee) {
         return None;
     }
@@ -377,12 +378,7 @@ pub(crate) fn standard_parameter_names_for_call(
     if symbol.symbol.kind != EditorSymbolKind::Function {
         return None;
     }
-    symbol
-        .symbol
-        .parameters
-        .iter()
-        .map(|parameter| parameter_name(parameter).map(str::to_owned))
-        .collect()
+    Some(symbol.symbol.parameter_names.clone())
 }
 
 pub(crate) fn standard_result_type_for_call(
@@ -394,9 +390,11 @@ pub(crate) fn standard_result_type_for_call(
         return None;
     }
     let symbol = standard_symbol_for_call_in_tree(tree, name)?;
-    (symbol.symbol.kind == EditorSymbolKind::Function)
-        .then(|| symbol.symbol.result_type.clone())
-        .flatten()
+    if symbol.symbol.kind == EditorSymbolKind::Function {
+        symbol.symbol.result_type.clone()
+    } else {
+        None
+    }
 }
 
 fn identifier_chain_at_span(text: &str, span: &SourceSpan) -> Option<Vec<String>> {
@@ -556,6 +554,17 @@ fn symbol_for_item(item: &Item, text: &str, tokens: &[Token]) -> Option<EditorSy
             .and_then(|result| source_type(text, result)),
         _ => None,
     };
+    let parameter_names = match &item.declaration {
+        Declaration::Function { signature, .. } => signature
+            .parameters
+            .iter()
+            .map(|parameter| match &parameter.pattern {
+                Pattern::Name(name, _) => Some(name.clone()),
+                _ => None,
+            })
+            .collect(),
+        _ => Vec::new(),
+    };
     let selection = tokens
         .iter()
         .find(|token| {
@@ -574,8 +583,23 @@ fn symbol_for_item(item: &Item, text: &str, tokens: &[Token]) -> Option<EditorSy
         detail,
         documentation: leading_doc_comment(text, item.span.start),
         parameters,
+        parameter_names,
         result_type,
     })
+}
+
+fn source_type(text: &str, ty: &TypeExpr) -> Option<String> {
+    let span = match ty {
+        TypeExpr::Name { span, .. }
+        | TypeExpr::Optional { span, .. }
+        | TypeExpr::Product { span, .. }
+        | TypeExpr::List { span, .. }
+        | TypeExpr::Record { span, .. }
+        | TypeExpr::Tuple { span, .. }
+        | TypeExpr::Function { span, .. } => span,
+    };
+    let source = source_slice(text, span).trim();
+    (!source.is_empty()).then(|| source.to_owned())
 }
 
 fn leading_doc_comment(text: &str, before: usize) -> Option<String> {
