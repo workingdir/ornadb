@@ -779,7 +779,10 @@ fn playground_examples(root: &Path) -> Response {
         examples.push(example);
     }
     examples.sort_by(|left, right| left["path"].as_str().cmp(&right["path"].as_str()));
-    match serde_json::to_vec(&serde_json::json!({ "examples": examples })) {
+    match serde_json::to_vec(&serde_json::json!({
+        "revision": commit.as_str(),
+        "examples": examples,
+    })) {
         Ok(body) => Response::new(200, "application/json", body),
         Err(_) => unavailable_response(),
     }
@@ -2273,6 +2276,9 @@ mod tests {
         assert_eq!(examples.status, 200);
         let examples: serde_json::Value =
             serde_json::from_slice(&examples.body).expect("example records JSON");
+        let revision = examples["revision"].as_str().expect("committed revision");
+        assert_eq!(revision.len(), 40);
+        assert!(revision.bytes().all(|byte| byte.is_ascii_hexdigit()));
         assert_eq!(examples["examples"].as_array().map(Vec::len), Some(2));
         let examples = examples["examples"].as_array().expect("example list");
         let sample = examples

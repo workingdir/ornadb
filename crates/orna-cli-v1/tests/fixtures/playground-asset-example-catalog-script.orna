@@ -1,0 +1,1 @@
+{ id: "asset-6578616d706c65732e6d6a73", path: "examples.mjs", media_type: "text/javascript; charset=utf-8", content: "const response = await fetch('/api/examples'); const payload = await response.json();" }
