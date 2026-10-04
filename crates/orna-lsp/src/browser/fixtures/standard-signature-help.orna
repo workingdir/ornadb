@@ -1,0 +1,3 @@
+use std.math.{clamp};
+
+pub fn bounded(value: Int, lower: Int, upper: Int): Int = clamp(value, lower, upper);
