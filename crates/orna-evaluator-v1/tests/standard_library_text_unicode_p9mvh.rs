@@ -1,4 +1,6 @@
-use orna_evaluator_v1::{AdmittedReplSession, Limits};
+use orna_evaluator_v1::{
+    AdmittedReplSession, Limits, reference_standard_profile, reference_standard_sources,
+};
 use orna_foundation_v1::CanonicalValue;
 use orna_value_v1::Raw;
 
@@ -53,4 +55,27 @@ fn invalid_normalisation_form_is_rejected_and_text_requires_the_snapshot() {
         .code(),
         "ORNA-S012-UNRESOLVED"
     );
+}
+
+#[test]
+fn text_module_is_captured_in_the_reference_profile() {
+    assert_eq!(unicode_case_mapping::UNICODE_VERSION, (16, 0, 0));
+    assert_eq!(unicode_normalization::UNICODE_VERSION, (16, 0, 0));
+
+    let sources = reference_standard_sources();
+    let text_sources = sources
+        .iter()
+        .filter(|(path, _)| path == "std/text.orna")
+        .collect::<Vec<_>>();
+    assert_eq!(text_sources.len(), 1, "std/text.orna is pinned exactly once");
+
+    let profile = reference_standard_profile();
+    let (path, source) = text_sources[0];
+    profile
+        .verify_source(path, source)
+        .expect("the bundled text source matches its captured profile");
+
+    let mut changed_source = source.clone();
+    changed_source.push_str("\n// changed after profile capture\n");
+    assert!(profile.verify_source(path, &changed_source).is_err());
 }
