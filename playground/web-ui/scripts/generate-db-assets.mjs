@@ -6,6 +6,8 @@ const webUi = fileURLToPath(new URL('../', import.meta.url));
 const repository = fileURLToPath(new URL('../../../', import.meta.url));
 const distribution = join(webUi, 'dist');
 const assetRows = join(repository, 'playground', 'Asset');
+const entryRows = join(repository, 'playground', 'Entry');
+const routeRows = join(repository, 'playground', 'Route');
 const maxAssetBytes = 2 * 1024 * 1024;
 const arguments_ = process.argv.slice(2);
 if (arguments_.length > 1 || arguments_.some((argument) => argument !== '--check')) {
@@ -68,12 +70,35 @@ function assetRow(id, path, mediaType, content) {
     + `media_type: ${ornaString(mediaType)}, content: ${ornaString(content)} }\n`;
 }
 
+function entryRow(id, assetPath, kind) {
+  return `{ id: ${ornaString(id)}, asset_path: ${ornaString(assetPath)}, `
+    + `kind: ${ornaString(kind)} }\n`;
+}
+
+function routeRow(id, path, entry) {
+  return `{ id: ${ornaString(id)}, path: ${ornaString(path)}, `
+    + `entry: ${ornaString(entry)} }\n`;
+}
+
 async function expectedRows() {
   const files = await collectFiles('');
   if (!files.includes('index.html')) throw new Error('The Vite output has no index.html shell.');
 
   const rows = new Map();
+  const counts = { Asset: 0, Entry: 0, Route: 0 };
   let totalContentBytes = 0;
+  function addRoute(path, entry) {
+    const id = `route-${Buffer.from(path).toString('hex')}`;
+    rows.set(join(routeRows, `${id}.orna`), routeRow(id, path, entry));
+    counts.Route += 1;
+  }
+
+  rows.set(join(entryRows, 'entry-page.orna'), entryRow('entry-page', 'index.html', 'page'));
+  rows.set(join(entryRows, 'entry-embed.orna'), entryRow('entry-embed', 'index.html', 'embed'));
+  counts.Entry += 2;
+  addRoute('/playground/', 'entry-page');
+  addRoute('/playground/embed', 'entry-embed');
+
   for (const path of files) {
     const content = await readFile(join(distribution, path));
     if (content.byteLength > maxAssetBytes) {
@@ -90,24 +115,61 @@ async function expectedRows() {
     const id = `asset-${Buffer.from(normalizedPath).toString('hex')}`;
     const rowPath = join(assetRows, `${id}.orna`);
     rows.set(rowPath, assetRow(id, normalizedPath, mediaType, contentText));
+    counts.Asset += 1;
     totalContentBytes += content.byteLength;
+
+    if (normalizedPath !== 'index.html') {
+      const entryId = `entry-asset-${Buffer.from(normalizedPath).toString('hex')}`;
+      const entryPath = join(entryRows, `${entryId}.orna`);
+      rows.set(entryPath, entryRow(entryId, normalizedPath, 'asset'));
+      counts.Entry += 1;
+      addRoute(`/playground/${normalizedPath}`, entryId);
+    }
   }
-  return { rows, totalContentBytes };
+  return { rows, totalContentBytes, counts };
 }
 
 try {
-  const { rows, totalContentBytes } = await expectedRows();
-  if (!checkOnly) await mkdir(assetRows, { recursive: true });
-  let entries = [];
-  try {
-    entries = await readdir(assetRows, { withFileTypes: true });
-  } catch (error) {
-    if (error.code !== 'ENOENT') throw error;
+  const { rows, totalContentBytes, counts } = await expectedRows();
+  const directories = [
+    {
+      path: assetRows,
+      isGenerated: (name) => name.startsWith('asset-'),
+    },
+    {
+      path: entryRows,
+      isGenerated: (name) => name.startsWith('entry-asset-'),
+    },
+    {
+      path: routeRows,
+      isGenerated(name) {
+        if (!name.startsWith('route-')) return false;
+        const routeHex = name.slice('route-'.length, -'.orna'.length);
+        if (!/^(?:[0-9a-f]{2})+$/.test(routeHex)) return false;
+        const path = Buffer.from(routeHex, 'hex').toString('utf8');
+        return path === '/playground/' || path === '/playground/embed'
+          || path.startsWith('/playground/assets/');
+      },
+    },
+  ];
+  if (!checkOnly) {
+    for (const directory of directories) await mkdir(directory.path, { recursive: true });
   }
-  const existing = entries
-    .filter((entry) => entry.isFile() && entry.name.startsWith('asset-') && entry.name.endsWith('.orna'))
-    .map((entry) => join(assetRows, entry.name));
-  const stale = existing.filter((rowPath) => !rows.has(rowPath));
+  const stale = [];
+  for (const directory of directories) {
+    let entries = [];
+    try {
+      entries = await readdir(directory.path, { withFileTypes: true });
+    } catch (error) {
+      if (error.code !== 'ENOENT') throw error;
+    }
+    stale.push(...entries
+      .filter((entry) => entry.isFile()
+        && directory.isGenerated(entry.name)
+        && entry.name.endsWith('.orna'))
+      .map((entry) => join(directory.path, entry.name))
+      .filter((rowPath) => !rows.has(rowPath)));
+  }
   const changed = [];
   for (const [rowPath, expected] of rows) {
     let current;
@@ -121,16 +183,16 @@ try {
 
   if (checkOnly) {
     if (stale.length || changed.length) {
-      for (const rowPath of stale) console.error(`Stale playground Asset row: ${rowPath}`);
+      for (const rowPath of stale) console.error(`Stale playground DB row: ${rowPath}`);
       for (const [rowPath] of changed) console.error(`Missing or stale playground Asset row: ${rowPath}`);
       process.exitCode = 1;
     } else {
-      console.log(`Verified ${rows.size} committed playground Asset rows (${totalContentBytes} content bytes).`);
+      console.log(`Verified ${counts.Asset} Asset, ${counts.Entry} Entry, and ${counts.Route} Route rows (${totalContentBytes} asset bytes).`);
     }
   } else {
     for (const [rowPath, content] of changed) await writeFile(rowPath, content, 'utf8');
     for (const rowPath of stale) await rm(rowPath);
-    console.log(`Wrote ${rows.size} committed playground Asset rows (${totalContentBytes} content bytes).`);
+    console.log(`Wrote ${counts.Asset} Asset, ${counts.Entry} Entry, and ${counts.Route} Route rows (${totalContentBytes} asset bytes).`);
   }
 } catch (error) {
   console.error(error.message);

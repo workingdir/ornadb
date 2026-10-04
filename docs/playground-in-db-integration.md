@@ -6,23 +6,27 @@ is the source for the shell, assets, programs, and examples.
 
 ## Database records and routes
 
-`playground.orna` declares `Sample` and `Asset` tables. Sample rows and the
-legacy `playground/examples/*.orna` files feed `/api/examples`. The shell,
-stylesheet, browser client, Monaco worker, generated editor configuration, and
-embeddable entry script are generated as `playground.Asset` rows under
-`playground/Asset/`. Each row records a normalized relative path, media type,
-and UTF-8 content. `orna-syntax-v1` generates the editor configuration from
-the language lexer; the browser loads it from
-`/playground/assets/orna-editor-config.json`.
+`playground.orna` declares `Sample`, `Asset`, `Entry`, and `Route` tables.
+Sample rows and the legacy `playground/examples/*.orna` files feed
+`/api/examples`. The shell, stylesheet, browser client, Monaco worker,
+generated editor configuration, and embeddable entry script are generated as
+`playground.Asset` rows under `playground/Asset/`. Each row records a
+normalized relative path, media type, and UTF-8 content. `playground.Entry`
+rows select a page, embed, or static-asset entry and point to an Asset path;
+`playground.Route` rows map exact public paths to those entries. The build
+generates Route and Entry rows alongside the Asset rows.
+`orna-syntax-v1` generates the editor configuration from the language lexer;
+the browser loads it from `/playground/assets/orna-editor-config.json`.
 
 `npm run build` creates the small browser bundle and refreshes these rows.
-Commit the generated rows along with source changes. At request time,
-`orna serve` reads the row for the requested asset from the committed `HEAD`
-using the repository listing API; it does not read `playground/web-ui/dist/`.
-The `/playground/` and `/playground/embed` routes use the same shell record,
-with the embed route hiding the marked page header and applying its framing
-policy. Static assets are returned with their checked media type and
-`X-Content-Type-Options: nosniff`.
+Commit the generated rows along with source changes. For each request,
+`orna serve` resolves Route, Entry, and Asset rows from one committed `HEAD`;
+it does not read `playground/web-ui/dist/`. The `/playground/` and
+`/playground/embed` routes use the same shell record, with the embed entry
+hiding the marked page header and applying its framing policy. Static assets
+are returned with their checked media type and `X-Content-Type-Options:
+nosniff`. A commit that changes a Route, Entry, or Asset row is visible on the
+next request without restarting `orna serve`.
 
 The `/playground/assets/embed.js` classic script creates an iframe pointed at
 the same database's `/playground/embed` route. Set `data-target` to append the
@@ -52,9 +56,11 @@ cargo test --locked -p orna-cli-v1 --test serve_playground_dogfood -- --nocaptur
 ```
 
 The test initializes a temporary Orna Git database, commits crate-local
-`.orna` schema, sample, and asset fixtures, starts the real `orna serve`
-process without a build directory, then uses curl to check the Git listing,
-the database-resident shell, editor configuration, embeddable script, and
-CSS/JavaScript rows, committed examples, and the live session. A WebSocket client follows the existing watch,
+`.orna` schema, sample, route, entry, and asset fixtures, starts the real
+`orna serve` process without a build directory, then uses curl to check the
+Git listing, database-resident shell, editor configuration, embeddable script,
+CSS/JavaScript rows, committed examples, and live session. It commits a new
+Route and Entry after startup and proves the new URL changes from 404 to 200
+without restarting the server. A WebSocket client follows the existing watch,
 fingerprinted Eval, and Resync exchange to prove independent results and
 presentation deltas.
