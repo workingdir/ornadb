@@ -8,9 +8,12 @@ is the source for the shell, assets, programs, and examples.
 
 `playground.orna` declares `Sample` and `Asset` tables. Sample rows and the
 legacy `playground/examples/*.orna` files feed `/api/examples`. The shell,
-stylesheet, and browser client are generated as `playground.Asset` rows under
+stylesheet, browser client, Monaco worker, generated editor configuration, and
+embeddable entry script are generated as `playground.Asset` rows under
 `playground/Asset/`. Each row records a normalized relative path, media type,
-and UTF-8 content.
+and UTF-8 content. `orna-syntax-v1` generates the editor configuration from
+the language lexer; the browser loads it from
+`/playground/assets/orna-editor-config.json`.
 
 `npm run build` creates the small browser bundle and refreshes these rows.
 Commit the generated rows along with source changes. At request time,
@@ -20,6 +23,11 @@ The `/playground/` and `/playground/embed` routes use the same shell record,
 with the embed route hiding the marked page header and applying its framing
 policy. Static assets are returned with their checked media type and
 `X-Content-Type-Options: nosniff`.
+
+The `/playground/assets/embed.js` classic script creates an iframe pointed at
+the same database's `/playground/embed` route. Set `data-target` to append the
+iframe to a container, and optionally set `data-height`, `data-title`, or
+`data-loading`. The entry script itself is a committed Asset row.
 
 The browser sends explicit Run requests to the same clone's
 `orna.present.v1` session. Source evaluation and presentation remain in the
@@ -46,7 +54,7 @@ cargo test --locked -p orna-cli-v1 --test serve_playground_dogfood -- --nocaptur
 The test initializes a temporary Orna Git database, commits crate-local
 `.orna` schema, sample, and asset fixtures, starts the real `orna serve`
 process without a build directory, then uses curl to check the Git listing,
-the database-resident shell and its CSS/JavaScript rows, committed examples,
-and the live session. A WebSocket client follows the existing watch,
+the database-resident shell, editor configuration, embeddable script, and
+CSS/JavaScript rows, committed examples, and the live session. A WebSocket client follows the existing watch,
 fingerprinted Eval, and Resync exchange to prove independent results and
 presentation deltas.
