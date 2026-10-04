@@ -82,6 +82,9 @@ jobs:
           path: dev-source
           submodules: recursive
 
+      - name: Provide the lockfile to the stable checkout
+        run: cp dev-source/playground/web-ui/package-lock.json stable-source/playground/web-ui/package-lock.json
+
       - name: Install Rust and the WebAssembly target
         uses: dtolnay/rust-toolchain@1.95.0
         with:
