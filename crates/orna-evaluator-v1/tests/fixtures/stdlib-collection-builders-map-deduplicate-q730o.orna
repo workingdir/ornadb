@@ -1,0 +1,1 @@
+map.from_entries([("oak", 1), ("elm", 2), ("oak", 3)]) == [("oak", 3), ("elm", 2)]
