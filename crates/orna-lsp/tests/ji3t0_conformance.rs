@@ -573,6 +573,40 @@ local hover_text = type(hover_contents) == "string" and hover_contents or hover_
 assert(string.find(hover_text, "fn add(left: Int, right: Int): Int", 1, true), "unexpected hover: " .. hover_text)
 assert(string.find(hover_text, "Add two integer values.", 1, true), "hover lost fixture documentation: " .. hover_text)
 
+local completion, completion_error = client:request_sync("textDocument/completion", {
+  textDocument = { uri = uri },
+  position = vim.fn.json_decode(vim.env.ORNA_COMPLETION_POSITION),
+}, 5000, bufnr)
+assert(completion ~= nil and completion.err == nil, "Neovim completion request failed: " .. vim.inspect(completion_error or completion))
+local completion_items = completion.result.items or completion.result
+local expected_keywords = vim.fn.json_decode(vim.env.ORNA_EXPECTED_KEYWORDS)
+local expected_keyword_set = {}
+for _, keyword in ipairs(expected_keywords) do
+  expected_keyword_set[keyword] = true
+end
+local actual_keyword_set = {}
+local actual_keyword_count = 0
+local add_completion
+for _, item in ipairs(completion_items) do
+  if item.kind == 14 then
+    actual_keyword_set[item.label] = true
+    actual_keyword_count = actual_keyword_count + 1
+    assert(expected_keyword_set[item.label], "unexpected completion keyword: " .. item.label)
+  elseif item.label == "add" then
+    add_completion = item
+  end
+end
+assert(actual_keyword_count == #expected_keywords, "completion keyword inventory has " .. actual_keyword_count .. " entries, expected " .. #expected_keywords)
+for _, keyword in ipairs(expected_keywords) do
+  assert(actual_keyword_set[keyword], "completion keyword missing syntax-v1 token: " .. keyword)
+end
+assert(not actual_keyword_set.CREATE and not actual_keyword_set.SELECT, "pre-v1 keyword escaped into Neovim completions")
+assert(add_completion ~= nil, "Neovim completion omitted fixture function add")
+assert(add_completion.detail == "fn add(left: Int, right: Int): Int", "unexpected add completion detail: " .. vim.inspect(add_completion))
+assert(add_completion.documentation == "Add two integer values.", "add completion lost fixture documentation: " .. vim.inspect(add_completion))
+assert(add_completion.insertText == "add(${1:left}, ${2:right})", "unexpected add completion snippet: " .. vim.inspect(add_completion))
+assert(add_completion.insertTextFormat == 2, "add completion did not advertise snippet formatting: " .. vim.inspect(add_completion))
+
 local semantic, semantic_error = client:request_sync("textDocument/semanticTokens/full", {
   textDocument = { uri = uri },
 }, 5000, bufnr)
@@ -600,6 +634,8 @@ vim.fn.writefile({
   "FN=" .. fn_group,
   "LEGACY_CREATE=" .. legacy_group,
   "LSP_HOVER=pass",
+  "LSP_COMPLETION_KEYWORDS=pass",
+  "LSP_COMPLETION_ADD=pass",
   "LSP_SEMANTIC_PUB=pass",
 }, vim.env.ORNA_EDITOR_RESULT)
 client:stop(true)
@@ -623,6 +659,15 @@ vim.cmd("qa!")
         .env("ORNA_TEST_FIXTURE", &fixture)
         .env("ORNA_LSP_BIN", env!("CARGO_BIN_EXE_orna-lsp"))
         .env("ORNA_PROJECT_ROOT", root)
+        .env(
+            "ORNA_COMPLETION_POSITION",
+            serde_json::to_string(&position_at(SOURCE, SOURCE.find("add(value, 2)").unwrap()))
+                .unwrap(),
+        )
+        .env(
+            "ORNA_EXPECTED_KEYWORDS",
+            serde_json::to_string(&expected_keywords().into_iter().collect::<Vec<_>>()).unwrap(),
+        )
         .env("ORNA_PROBE_SCRIPT", &script)
         .env("ORNA_EDITOR_RESULT", &result_path)
         .output()
@@ -655,6 +700,8 @@ vim.cmd("qa!")
             "FN=ornaKeyword",
             "LEGACY_CREATE=ornaIdentifier",
             "LSP_HOVER=pass",
+            "LSP_COMPLETION_KEYWORDS=pass",
+            "LSP_COMPLETION_ADD=pass",
             "LSP_SEMANTIC_PUB=pass",
         ]
     );
