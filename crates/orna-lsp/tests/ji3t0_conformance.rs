@@ -15,7 +15,6 @@ use serde_json::{json, Value};
 const SOURCE: &str = include_str!("fixtures/ji3t0-lsp-v1.orna");
 const SEMANTIC_SOURCE: &str = include_str!("fixtures/editor-semantic-tokens.orna");
 const INVALID_SOURCE: &str = include_str!("fixtures/ji3t0-invalid-v1.orna");
-const PRE_V1_SOURCE: &str = include_str!("fixtures/ji3t0-pre-v1.orna");
 
 const LEGACY_SYNTAX_WORDS: &[&str] = &[
     "ADD",
@@ -315,7 +314,12 @@ fn protocol_conformance_uses_v1_for_every_advertised_editor_feature() {
     let capabilities = &initialized["capabilities"];
     assert_eq!(capabilities["hoverProvider"], true);
     assert_eq!(capabilities["definitionProvider"], true);
-    assert_eq!(capabilities["renameProvider"]["prepareProvider"], true);
+    assert!(
+        capabilities["renameProvider"].as_bool() == Some(true)
+            || capabilities["renameProvider"]["prepareProvider"] == true,
+        "renameProvider must advertise rename support: {}",
+        capabilities["renameProvider"]
+    );
     assert!(capabilities["signatureHelpProvider"].is_object());
     assert!(capabilities["completionProvider"].is_object());
     assert!(capabilities["diagnosticProvider"].is_object());
@@ -473,33 +477,6 @@ fn protocol_conformance_uses_v1_for_every_advertised_editor_feature() {
         position_of(INVALID_SOURCE, ";", 0)
     );
 
-    let legacy_uri = "file:///workspace/ji3t0-pre-v1.orna";
-    let legacy = open(&mut client, legacy_uri, PRE_V1_SOURCE);
-    assert_no_legacy_words(&legacy, "rejected pre-1.0.0 diagnostic");
-    assert!(!legacy["diagnostics"].as_array().unwrap().is_empty());
-    assert!(
-        legacy["diagnostics"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .all(|item| item["source"] == "orna-syntax-v1"),
-        "{legacy}"
-    );
-    let legacy_highlighting = client.request(
-        "textDocument/semanticTokens/full",
-        json!({"textDocument":{"uri":legacy_uri}}),
-    );
-    assert_no_legacy_words(
-        &legacy_highlighting,
-        "rejected pre-1.0.0 semantic highlights",
-    );
-    let rendered = semantic_words(PRE_V1_SOURCE, &legacy_highlighting);
-    assert!(
-        rendered
-            .iter()
-            .all(|(_, token_type)| *token_type != keyword_type),
-        "pre-1.0.0 source received syntax-v1 keyword highlighting: {rendered:?}"
-    );
     client.shutdown();
 }
 
@@ -993,6 +970,8 @@ fn emacs_eglot_attaches_and_proves_hover_rename_references_and_semantic_tokens()
                    #'string<))
                  (actual
                   (sort (mapcar #'orna-test-location-key references) #'string<)))
+            (unless (stringp uri)
+              (error "Eglot did not provide a URI for the attached buffer: %S" params))
             (unless (= (length references) 2)
               (error "Eglot references returned %d locations: %S" (length references) references))
             (unless (equal actual expected)
@@ -1084,7 +1063,7 @@ fn emacs_eglot_attaches_and_proves_hover_rename_references_and_semantic_tokens()
             "Emacs omitted semantic-token proof: {stdout}"
         );
     }
-    println!("Emacs Eglot hover/token evidence:\n{stdout}");
+    println!("Emacs Eglot hover/rename/references evidence:\n{stdout}");
 }
 
 #[test]

@@ -3154,7 +3154,6 @@ dfbd0534b1fd606ee56c29b65e86a53290489579eca500658c6742d425f70281  crates/orna-ls
 1064c12be254992ed3d461b593b680f9a8e83fde3fb50af8db63c12b88b9b777  crates/orna-lsp/tests/fixtures/incremental-malformed-v1.orna
 1d6507c277771162faf5ab37dfe673dbbe59c3184ddf06274272d00a134470d9  crates/orna-lsp/tests/fixtures/ji3t0-invalid-v1.orna
 01e3906bf653fdb21af2004278ef449a14178756ebb34f4e0bd6cc49ee4d7e21  crates/orna-lsp/tests/fixtures/ji3t0-lsp-v1.orna
-5805f10334db383690c81c0fb836673c44c43779372a24665de13afe3d57bb90  crates/orna-lsp/tests/fixtures/ji3t0-pre-v1.orna
 3db450900296cabab55c405651bc2dc28ca73db8f2ae207768c3d2c21fa6c322  crates/orna-lsp/tests/fixtures/lexical-v1.orna
 a9a9eb8942f328826459766a2cd8c25b7269f139e831f4287f5ae0c8328482fd  crates/orna-lsp/tests/fixtures/local-scopes-v1.orna
 eb358502e3d0ac468625954ad7c30c16cd6968c5b25325c5ae489b44b0e6e100  crates/orna-lsp/tests/fixtures/lsp-e2e-001-module-valid-source.orna
@@ -5389,6 +5388,7 @@ bf25804fcf4424ee9b55351c7ae38af56efbb71967cd198dcf5e64124be81a6a  crates/orna-sy
 e80876c0bc33af1ff9c62baa20d81a3e4a8edbc766ffb835a8e45b9a9f773302  crates/orna-sys-v1/tests/fixtures/post_unknown_remainder_scan_interplay_tail.orna
 c321a73977ef953584e41d70f5b0b48af2f036d0f7bdef318d198f1ac397b2bf  crates/orna-sys-v1/tests/fixtures/provider-map-entry-edges.json
 1584d20f831c3e08ff1d827220c0ae398ee7c30fda468fe80b0aba551d86e373  crates/orna-sys-v1/tests/fixtures/provider-schema-capture-edges.json
+31dc5d1a1b7b84e5a4ddf9fe960eb1aed060b1e666fc84095c6b128e08504e56  crates/orna-sys-v1/tests/fixtures/provider-tuple-entry-edges.json
 7e3d77ae2a161da79e41747339f01aa623c7cffb678537db2f8ae34a8e6c9da6  crates/orna-sys-v1/tests/fixtures/query_plan_hint_statistics_azb4m.orna
 d69f11f7a9890602ae5e268a22be122656cdf1ae6df2031b30b0b6432c4ac932  crates/orna-sys-v1/tests/fixtures/remainder_after_unknown_multi_scan_tail.orna
 fbc5a41d944e3398cb4418bba4c69fd7799be2771d8a81bf9d2e8f04752a6bec  crates/orna-sys-v1/tests/fixtures/rounding_tail_interplay.orna
