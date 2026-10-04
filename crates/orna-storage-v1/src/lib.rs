@@ -30,7 +30,6 @@ pub use branch_merge::{
     BranchMergePairedRestoreIdentity,
     BranchMergePairedThreeWayIdentity,
     BranchMergePairedReplayIdentity,
-    BranchMergePairedRestoreIdentity,
     BranchMergePairedCheckpointRedoSparseFold,
     BranchMergePairedCheckpointRedoFoldSparseChainSlotSnapshot,
     BranchMergePairedCheckpointRedoFoldSparseStreamChainSnapshot,

@@ -231,16 +231,6 @@ pub struct BranchMergePairedCheckpointIdentity {
     pub right_checkpoint: Vec<u8>,
 }
 
-/// Opaque directional identities for one paired restore operation.
-///
-/// These identify the left and right restore incarnations independently of
-/// restore-fold labels, checkpoint and spill identities, and output keys.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct BranchMergePairedRestoreIdentity {
-    pub left_restore: Vec<u8>,
-    pub right_restore: Vec<u8>,
-}
-
 /// The checkpoint-pin pair, merge pair, and redo-fold pair for one occurrence.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BranchMergePairedThreeWayIdentity {
