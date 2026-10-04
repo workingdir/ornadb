@@ -120,6 +120,8 @@ e279a7bfc9c04cf067704ccc6adfdda5b4bf8a958d7f9f1db63065377a7c18ce  crates/orna-cl
 79a0a004fac1dbbab00c544a883c81f7e8f66b77c5dd2d0e96d204cb2c2a15ae  crates/orna-cli-v1/tests/fixtures/init/version-2.orna
 6ec32696932b34a8d30ebe7bdcda8885e2c07ec8f67fb52655d7ab80aa29d1f7  crates/orna-cli-v1/tests/fixtures/lib002-core-only.orna
 a5bd70ee1eea9dfc78fbfa325391ee6d97f50e0929a59ee50ede86105829d69d  crates/orna-cli-v1/tests/fixtures/playground-asset-app.orna
+76aa5947900e831014431f8ff29b4e28286608cfdf81aa8ef26a772960b56a59  crates/orna-cli-v1/tests/fixtures/playground-asset-editor-config.orna
+965eab0d2975e7d2604b1a159775bf918fd5a9a57e4d18142dada860ea7dd5f4  crates/orna-cli-v1/tests/fixtures/playground-asset-embed.orna
 50b895aa1d8529eb8c39715ab7dbe46b78562756f29f0e4bd59ceee44af89f06  crates/orna-cli-v1/tests/fixtures/playground-asset-index-stale.orna
 eb926ef50a40a4d0a68ad4a5cdba749392f817fb79876dba05186d2be01406f8  crates/orna-cli-v1/tests/fixtures/playground-asset-index.orna
 711a3ba48a7e9624d226ac714dab57be9b2c1017acd08f699bb6d8c767fe7616  crates/orna-cli-v1/tests/fixtures/playground-asset-script.orna
@@ -2972,6 +2974,7 @@ ca3dc7bbdc69a27aef773b9d7f7c46abd59378be9e135d10a718897290e10527  crates/orna-ev
 cc38d12814d79e02be9bed2eb9418641379628e842390c0fbb46cc6aa0082536  crates/orna-evaluator-v1/tests/fixtures/stdlib-timezone-gap-reject-1dciz.orna
 0a7c21ccd48c95ee530e52e4c0e40e6161bd202ec3213c0ddacea06a09e35f52  crates/orna-evaluator-v1/tests/fixtures/stdlib-timezone-overlap-reject-b8tgd.orna
 df5e2e26b186336330038ec1ae2fd67a5f68d8c5a3c69651cb74bfdd604b8e13  crates/orna-evaluator-v1/tests/fixtures/stdlib-ui-action-host-bf7ef.orna
+f37a49635d5bfa074d868c1ebdef53a9fe98b682204bacdc37b8d21b6beaf863  crates/orna-evaluator-v1/tests/fixtures/stdlib-unicode-encoding-utilities-s9md3.orna
 63ff95b9b1d56aadac7129693212c7f54fccabd0094c9418320bda0a133e8e4e  crates/orna-evaluator-v1/tests/fixtures/stdlib-use-algorithm-oo3k6.orna
 a0bb3edefa079fdbd1cebf5d61121d44d82f3678f1093c913616c9541df27173  crates/orna-evaluator-v1/tests/fixtures/stdlib-use-bits-2213.orna
 1a05f567ba1a0751544496a81877cef32892e58538aa5aded2d610f7a066e457  crates/orna-evaluator-v1/tests/fixtures/stdlib-use-bits-pis78.orna
