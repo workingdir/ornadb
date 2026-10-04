@@ -8194,10 +8194,19 @@ fn decode_token(value: &str) -> Option<[u8; 32]> {
         .and_then(|bytes| bytes.try_into().ok())
 }
 fn decode_base64(value: &str) -> Option<Vec<u8>> {
-    let value = value.trim_end_matches('=');
-    (!value.contains('='))
-        .then(|| decode_base64url(value))
-        .flatten()
+    let unpadded = value.trim_end_matches('=');
+    let padding = value.len() - unpadded.len();
+    let expected_padding = match unpadded.len() % 4 {
+        0 => 0,
+        2 => 2,
+        3 => 1,
+        _ => return None,
+    };
+    if padding != expected_padding {
+        return None;
+    }
+    let normalized = unpadded.replace('+', "-").replace('/', "_");
+    decode_base64url(&normalized)
 }
 #[allow(clippy::cast_possible_truncation)]
 fn decode_base64url(value: &str) -> Option<Vec<u8>> {
