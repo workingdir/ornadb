@@ -4,7 +4,7 @@ use orna_evaluator_v1::{
 };
 use orna_foundation_v1::CanonicalValue;
 use orna_syntax_v1::{Declaration, parse_expression, parse_module};
-use orna_value_v1::Raw;
+use orna_value_v1::{Raw, Value};
 
 fn object_id(marker: u8) -> Raw {
     Raw::Tag(37, Box::new(Raw::Bytes(vec![marker; 16])))
@@ -25,6 +25,14 @@ fn result_value(variant: u8, field: &str, value: Raw) -> Raw {
             ),
         ])),
     )
+}
+
+fn option_value(value: Option<Raw>) -> Raw {
+    let value = value.map(|value| Value::new(value).expect("nested value is canonical"));
+    Value::option(value)
+        .expect("option is canonical")
+        .raw()
+        .clone()
 }
 
 fn canonical(raw: Raw) -> CanonicalValue {
@@ -88,6 +96,10 @@ fn environment() -> Environment {
             "nested_ok".into(),
             canonical(result_value(2, "value", ok_value.clone())),
         ),
+        (
+            "ok_none".into(),
+            canonical(result_value(2, "value", option_value(None))),
+        ),
     ])
 }
 
@@ -150,6 +162,9 @@ fn result_fallbacks_are_selected_by_the_active_variant() {
 fn result_branch_combinators_preserve_existing_values() {
     assert_true_fixture(include_str!(
         "fixtures/stdlib-result-combinators-branches-vvatu.orna"
+    ));
+    assert_true_fixture(include_str!(
+        "fixtures/stdlib-result-combinators-transpose-vvatu.orna"
     ));
 }
 
