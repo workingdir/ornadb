@@ -1,0 +1,5 @@
+std.regex.utilities.capture_at(sample, 0) == Some("cat")
+    && std.regex.utilities.capture_at(sample, 1) == Some("a")
+    && std.regex.utilities.capture_at(sample, 2) == null
+    && std.regex.utilities.capture_at(sample, 3) == null
+    && std.regex.utilities.capture_at(sample, -1) == null
