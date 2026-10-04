@@ -10481,6 +10481,7 @@ pub fn restore_paired_checkpoint_redo_sparse_spill_nested_rewind_identity_nested
                 checkpoint_identity: stream.checkpoint_identity,
                 restore_fold_identity: stream.restore_fold_identity,
                 checkpoint_id: stream.checkpoint_id,
+                slots,
             }
         })
         .collect())
