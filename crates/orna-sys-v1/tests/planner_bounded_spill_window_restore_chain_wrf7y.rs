@@ -194,7 +194,7 @@ fn plan(
             "spill:middle-unbounded",
             "pair:Middle",
             "table:Middle",
-            "window:middle-unbounded",
+            middle_window_identity,
             Some(80_000),
             1_000,
         ),
