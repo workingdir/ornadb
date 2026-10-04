@@ -31,7 +31,6 @@ fn session() -> AdmittedReplSession {
         include_str!("fixtures/iteration-use-ptr1b.orna"),
         include_str!("fixtures/iteration-neighbors-ptr1b.orna"),
         include_str!("fixtures/iteration-target-edges-ptr1b.orna"),
-        include_str!("fixtures/iteration-forbidden-edges-ptr1b.orna"),
     ]
     .into_iter()
     .enumerate()

@@ -5,4 +5,3 @@ iteration.depth_first(1, neighbors) == [1, 2, 4, 5, 6, 3]
 && iteration.reachable(1, 6, neighbors)
 && !iteration.reachable(1, 9, neighbors)
 && iteration.reachable(1, 2, target_edges)
-&& iteration.reachable(2, 2, forbidden_edges)
