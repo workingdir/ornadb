@@ -1,0 +1,1 @@
+option.map(Some(1), value => fail(error(code: "option.callback.failure", message: "selected callback failed")))
