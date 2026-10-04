@@ -327,9 +327,6 @@ fn host_route(root: &Path, identity: RuntimeIdentity, request: &Request) -> Resp
     if let Some(response) = git_listing_route(root, identity, request) {
         return response;
     }
-    if let Some(response) = playground_route(root, identity, request) {
-        return response;
-    }
     match (request.method.as_str(), request.path.as_str()) {
         ("GET", "/api/examples") => playground_examples(root),
         ("GET", "/api/clone") => match clone_report(root, identity) {
@@ -367,6 +364,9 @@ fn git_listing_route(
 ) -> Option<Response> {
     if request.method != "GET" {
         return None;
+    }
+    if request.path == "/playground" || request.path.starts_with("/playground/") {
+        return Some(playground_asset(root, identity, &request.path));
     }
     match request.path.as_str() {
         "/" => Some(commit_log_page(root, identity)),
@@ -412,17 +412,8 @@ fn commit_log_page(root: &Path, identity: RuntimeIdentity) -> Response {
     render_home_document(identity, &content)
 }
 
-const MAX_PLAYGROUND_ASSET_BYTES: u64 = 8 * 1024 * 1024;
+const MAX_PLAYGROUND_ASSET_BYTES: usize = 8 * 1024 * 1024;
 const MAX_PLAYGROUND_EXAMPLE_BYTES: usize = 2 * 1024 * 1024;
-fn playground_route(root: &Path, identity: RuntimeIdentity, request: &Request) -> Option<Response> {
-    if request.method != "GET"
-        || !(request.path == "/playground" || request.path.starts_with("/playground/"))
-    {
-        return None;
-    }
-    Some(playground_asset(root, identity, &request.path))
-}
-
 fn playground_asset(root: &Path, identity: RuntimeIdentity, request_path: &str) -> Response {
     let relative = request_path
         .strip_prefix("/playground")
@@ -442,24 +433,16 @@ fn playground_asset(root: &Path, identity: RuntimeIdentity, request_path: &str) 
     let Ok(managed) = ManagedPath::new(Path::new("playground/web-ui/dist").join(decoded)) else {
         return bad_request_response();
     };
-    let dist = root.join("playground/web-ui/dist");
-    let Ok(dist) = std::fs::canonicalize(dist) else {
+    let Ok(repository) = Repository::discover(root) else {
         return unavailable_response();
     };
-    let Ok(path) = std::fs::canonicalize(root.join(managed.as_path())) else {
-        return not_found_response();
-    };
-    if !path.starts_with(&dist) {
-        return bad_request_response();
-    }
-    let Ok(metadata) = std::fs::metadata(&path) else {
-        return not_found_response();
-    };
-    if !metadata.is_file() || metadata.len() > MAX_PLAYGROUND_ASSET_BYTES {
-        return not_found_response();
-    }
-    let Ok(bytes) = std::fs::read(&path) else {
+    let Ok(Some(commit)) = repository.head() else {
         return unavailable_response();
+    };
+    let Ok(bytes) =
+        repository.read_committed_file(&commit, managed.as_path(), MAX_PLAYGROUND_ASSET_BYTES)
+    else {
+        return not_found_response();
     };
     if relative == "index.html" {
         let Ok(mut page) = String::from_utf8(bytes) else {
@@ -479,7 +462,7 @@ fn playground_asset(root: &Path, identity: RuntimeIdentity, request_path: &str) 
         }
         return Response::new(200, "text/html; charset=utf-8", page.into_bytes());
     }
-    Response::new(200, playground_content_type(&path), bytes)
+    Response::new(200, playground_content_type(managed.as_path()), bytes)
 }
 
 fn playground_content_type(path: &Path) -> &'static str {
@@ -1940,6 +1923,9 @@ mod tests {
     use std::process::Command;
 
     const SERVE_FIXTURE: &str = include_str!("../tests/fixtures/serve-no-autoload.orna");
+    const PLAYGROUND_SHELL: &str = include_str!("../tests/fixtures/playground-shell.html");
+    const PLAYGROUND_BROWSER_ASSET: &str =
+        include_str!("../tests/fixtures/playground-browser-asset.js");
 
     fn git_succeeds(directory: &Path, arguments: &[&str]) {
         let output = Command::new("git")
@@ -2046,14 +2032,17 @@ mod tests {
         std::fs::write(&example_path, PLAYGROUND_EXAMPLE).expect("write example");
         let dist = directory.path().join("playground/web-ui/dist");
         std::fs::create_dir_all(dist.join("assets")).expect("create built assets");
-        std::fs::write(
-            dist.join("index.html"),
-            "<!doctype html><html><body><main>playground</main></body></html>",
-        )
-        .expect("write built page");
-        std::fs::write(dist.join("assets/app.js"), "console.log('ready')")
-            .expect("write built script");
-        git_succeeds(directory.path(), &["add", "playground/examples/hello.orna"]);
+        std::fs::write(dist.join("index.html"), PLAYGROUND_SHELL).expect("write database page");
+        std::fs::write(dist.join("assets/app.js"), PLAYGROUND_BROWSER_ASSET)
+            .expect("write database script");
+        git_succeeds(
+            directory.path(),
+            &[
+                "add",
+                "playground/examples/hello.orna",
+                "playground/web-ui/dist",
+            ],
+        );
         git_succeeds(
             directory.path(),
             &[
@@ -2074,6 +2063,10 @@ mod tests {
             "99 + 1",
         )
         .expect("write uncommitted example");
+        std::fs::write(dist.join("index.html"), "uncommitted page")
+            .expect("replace page only in the worktree");
+        std::fs::write(dist.join("assets/app.js"), "uncommitted script")
+            .expect("replace script only in the worktree");
 
         let examples = listing_page(directory.path(), "/api/examples");
         assert_eq!(examples.status, 200);
@@ -2094,7 +2087,8 @@ mod tests {
         assert_eq!(page.status, 200);
         assert_eq!(page.content_type, "text/html; charset=utf-8");
         let page = String::from_utf8(page.body).expect("built page UTF-8");
-        assert!(page.contains("<main>playground</main>"));
+        assert!(page.contains("<main id=\"app\">Orna playground</main>"));
+        assert!(!page.contains("uncommitted page"));
         assert!(page.contains(&format!(
             "data-database=\"{}\"",
             format_uuid(identity.database_id)
@@ -2103,7 +2097,12 @@ mod tests {
         let script = playground_asset(directory.path(), identity, "/playground/assets/app.js");
         assert_eq!(script.status, 200);
         assert_eq!(script.content_type, "text/javascript; charset=utf-8");
-        assert_eq!(script.body, b"console.log('ready')");
+        assert_eq!(script.body, PLAYGROUND_BROWSER_ASSET.as_bytes());
+        assert_eq!(
+            playground_asset(directory.path(), identity, "/playground/assets/missing.js").status,
+            404,
+            "assets created only in the worktree are not served"
+        );
 
         let traversal =
             playground_asset(directory.path(), identity, "/playground/%2e%2e/README.txt");

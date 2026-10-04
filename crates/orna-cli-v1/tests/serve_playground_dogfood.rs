@@ -23,6 +23,8 @@ const MAIN: &str = include_str!("fixtures/project-core-main.orna");
 const SAMPLE: &str = include_str!("fixtures/playground-example.orna");
 const SECOND_SAMPLE: &str = include_str!("fixtures/playground-concurrent-eval.orna");
 const FOLLOWUP_SAMPLE: &str = include_str!("fixtures/playground-followup-eval.orna");
+const PLAYGROUND_SHELL: &str = include_str!("fixtures/playground-shell.html");
+const PLAYGROUND_BROWSER_ASSET: &str = include_str!("fixtures/playground-browser-asset.js");
 const BINARY: &str = env!("CARGO_BIN_EXE_orna-cli-v1");
 
 struct RunningServer(Child);
@@ -348,20 +350,23 @@ fn orna_serve_hosts_playground_with_pending_evals_and_snapshot_correct_deltas() 
     std::fs::write(&example, SAMPLE).expect("write crate-local sample fixture");
     let dist = project.path().join("playground/web-ui/dist");
     std::fs::create_dir_all(dist.join("assets")).expect("create built UI asset directory");
-    std::fs::write(
-        dist.join("index.html"),
-        "<!doctype html><html><body><main id=\"app\">Orna playground</main><script type=\"module\" src=\"/playground/assets/app.js\"></script></body></html>",
-    )
-    .expect("write browser entry page fixture");
-    std::fs::write(
-        dist.join("assets/app.js"),
-        "globalThis.ornaPlaygroundReady = true;",
-    )
-    .expect("write browser entry script fixture");
+    std::fs::write(dist.join("index.html"), PLAYGROUND_SHELL)
+        .expect("write browser entry page fixture");
+    std::fs::write(dist.join("assets/app.js"), PLAYGROUND_BROWSER_ASSET)
+        .expect("write browser entry script fixture");
     git(
         project.path(),
-        &["add", "main.orna", "playground/examples/hello.orna"],
+        &[
+            "add",
+            "main.orna",
+            "playground/examples/hello.orna",
+            "playground/web-ui/dist",
+        ],
     );
+    std::fs::write(dist.join("index.html"), "uncommitted page")
+        .expect("replace page in worktree after commit");
+    std::fs::write(dist.join("assets/app.js"), "uncommitted script")
+        .expect("replace script in worktree after commit");
     git(
         project.path(),
         &[
@@ -397,6 +402,7 @@ fn orna_serve_hosts_playground_with_pending_evals_and_snapshot_correct_deltas() 
     let page = curl(&format!("{base_url}/playground/"), &[]).expect("curl the playground page");
     assert_eq!(page.status, 200);
     assert!(page.body.contains("Orna playground"));
+    assert!(!page.body.contains("uncommitted page"));
     assert!(page.body.contains("globalThis.ornaPlaygroundRun"));
     assert!(
         page.body
@@ -405,7 +411,7 @@ fn orna_serve_hosts_playground_with_pending_evals_and_snapshot_correct_deltas() 
     let app = curl(&format!("{base_url}/playground/assets/app.js"), &[])
         .expect("curl the playground browser asset");
     assert_eq!(app.status, 200);
-    assert!(app.body.contains("ornaPlaygroundReady"));
+    assert_eq!(app.body, PLAYGROUND_BROWSER_ASSET);
 
     let examples =
         curl(&format!("{base_url}/api/examples"), &[]).expect("curl committed playground examples");
