@@ -422,35 +422,19 @@ const MAX_PLAYGROUND_FILE_EXAMPLES: usize = 100;
 const MAX_PLAYGROUND_SAMPLE_ROWS: usize = 100;
 const MAX_PLAYGROUND_EXAMPLES_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
 fn playground_asset(root: &Path, identity: RuntimeIdentity, request_path: &str) -> Response {
-    let relative = request_path
-        .strip_prefix("/playground")
-        .unwrap_or_default()
-        .trim_start_matches('/');
-    let Ok(decoded) = percent_decode(relative) else {
+    let Some(route_path) = normalize_playground_route_path(request_path) else {
         return bad_request_response();
     };
-    if decoded.contains('\\') || decoded.contains('\0') {
-        return bad_request_response();
-    }
-    let embed = matches!(decoded.as_str(), "embed" | "embed/");
-    let asset = if decoded.is_empty() || embed {
-        "index.html"
-    } else {
-        decoded.as_str()
-    };
-    let Some((record_path, asset_id)) = playground_asset_record_path(asset) else {
-        return bad_request_response();
-    };
-    let (media_type, content) = match read_playground_asset(root, asset, &record_path, &asset_id) {
+    let (media_type, content, kind) = match read_playground_asset(root, &route_path) {
         Ok(Some(asset)) => asset,
         Ok(None) => return not_found_response(),
         Err(()) => return unavailable_response(),
     };
-    if asset == "index.html" {
+    if kind != PlaygroundEntryKind::Asset {
         let Ok(mut page) = String::from_utf8(content) else {
             return unavailable_response();
         };
-        if embed && !hide_embedded_page_header(&mut page) {
+        if kind == PlaygroundEntryKind::Embed && !hide_embedded_page_header(&mut page) {
             return unavailable_response();
         }
         let database = format_uuid(identity.database_id);
@@ -468,7 +452,7 @@ fn playground_asset(root: &Path, identity: RuntimeIdentity, request_path: &str) 
         response
             .headers
             .push(("X-Content-Type-Options".into(), "nosniff".into()));
-        if embed {
+        if kind == PlaygroundEntryKind::Embed {
             response
                 .headers
                 .push(("Content-Security-Policy".into(), "frame-ancestors *".into()));
@@ -482,8 +466,63 @@ fn playground_asset(root: &Path, identity: RuntimeIdentity, request_path: &str) 
     response
 }
 
+fn normalize_playground_route_path(request_path: &str) -> Option<String> {
+    let relative = request_path.strip_prefix("/playground")?;
+    let relative = relative.strip_prefix('/').unwrap_or(relative);
+    let decoded = percent_decode(relative).ok()?;
+    if decoded.contains('\\')
+        || decoded.contains('\0')
+        || decoded.starts_with('/')
+        || decoded.contains("//")
+        || decoded
+            .split('/')
+            .any(|segment| matches!(segment, "." | ".."))
+    {
+        return None;
+    }
+    let relative = match decoded.as_str() {
+        "" => return Some("/playground/".into()),
+        "embed/" => "embed",
+        _ => decoded.as_str(),
+    };
+    Some(format!("/playground/{relative}"))
+}
+
+fn encoded_playground_row_id(prefix: &str, value: &str) -> String {
+    format!(
+        "{prefix}{}",
+        value
+            .as_bytes()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
+    )
+}
+
+fn playground_route_record_path(route_path: &str) -> Option<(ManagedPath, String)> {
+    if !route_path.starts_with("/playground/") {
+        return None;
+    }
+    let id = encoded_playground_row_id("route-", route_path);
+    let record_path =
+        ManagedPath::new(Path::new("playground/Route").join(format!("{id}.orna"))).ok()?;
+    Some((record_path, id))
+}
+
+fn playground_entry_record_path(entry_id: &str) -> Option<ManagedPath> {
+    if entry_id.is_empty()
+        || entry_id.len() > 128
+        || !entry_id
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+    {
+        return None;
+    }
+    ManagedPath::new(Path::new("playground/Entry").join(format!("{entry_id}.orna"))).ok()
+}
+
 fn playground_asset_record_path(asset_path: &str) -> Option<(ManagedPath, String)> {
-    let asset_path = ManagedPath::new(asset_path).ok()?;
+    let asset_path = ManagedPath::new(Path::new(asset_path)).ok()?;
     let normalized = asset_path.as_path().to_str()?;
     if normalized != "index.html" && !normalized.starts_with("assets/") {
         return None;
@@ -505,12 +544,17 @@ fn playground_asset_record_path(asset_path: &str) -> Option<(ManagedPath, String
     Some((record_path, id))
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PlaygroundEntryKind {
+    Page,
+    Embed,
+    Asset,
+}
+
 fn read_playground_asset(
     root: &Path,
-    requested_path: &str,
-    record_path: &ManagedPath,
-    expected_id: &str,
-) -> Result<Option<(&'static str, Vec<u8>)>, ()> {
+    requested_route_path: &str,
+) -> Result<Option<(&'static str, Vec<u8>, PlaygroundEntryKind)>, ()> {
     let repository = Repository::discover(root).map_err(|_| ())?;
     let Some(commit) = repository.head().map_err(|_| ())? else {
         return Err(());
@@ -523,24 +567,59 @@ fn read_playground_asset(
         )
         .map_err(|_| ())?;
     let schema = String::from_utf8(schema).map_err(|_| ())?;
-    if !has_playground_asset_table(&schema) {
+    if !has_playground_asset_table(&schema)
+        || !has_playground_route_table(&schema)
+        || !has_playground_entry_table(&schema)
+    {
         return Err(());
     }
+    let (route_record, route_id) = playground_route_record_path(requested_route_path).ok_or(())?;
     let Ok(source) = repository.read_committed_file(
         &commit,
-        record_path.as_path(),
+        route_record.as_path(),
         MAX_PLAYGROUND_ASSET_ROW_BYTES,
     ) else {
         return Ok(None);
     };
     let source = String::from_utf8(source).map_err(|_| ())?;
-    let Some((path, media_type, content)) = decode_playground_asset(&source, expected_id) else {
+    let Some((route_path, entry_id)) = decode_playground_route(&source, &route_id) else {
+        return Err(());
+    };
+    if route_path != requested_route_path {
+        return Err(());
+    }
+    let entry_record = playground_entry_record_path(&entry_id).ok_or(())?;
+    let entry_source = repository
+        .read_committed_file(
+            &commit,
+            entry_record.as_path(),
+            MAX_PLAYGROUND_ASSET_ROW_BYTES,
+        )
+        .map_err(|_| ())?;
+    let entry_source = String::from_utf8(entry_source).map_err(|_| ())?;
+    let Some((asset_path, kind)) = decode_playground_entry(&entry_source, &entry_id) else {
+        return Err(());
+    };
+    if (kind == PlaygroundEntryKind::Asset && !asset_path.starts_with("assets/"))
+        || (kind != PlaygroundEntryKind::Asset && asset_path != "index.html")
+    {
+        return Err(());
+    }
+    let (asset_record, asset_id) = playground_asset_record_path(&asset_path).ok_or(())?;
+    let asset_source = repository
+        .read_committed_file(
+            &commit,
+            asset_record.as_path(),
+            MAX_PLAYGROUND_ASSET_ROW_BYTES,
+        )
+        .map_err(|_| ())?;
+    let asset_source = String::from_utf8(asset_source).map_err(|_| ())?;
+    let Some((path, media_type, content)) = decode_playground_asset(&asset_source, &asset_id)
+    else {
         return Err(());
     };
     let expected_media_type = playground_content_type(Path::new(&path));
-    if path != requested_path
-        || path.is_empty()
-        || !matches!(path.as_str(), "index.html") && !path.starts_with("assets/")
+    if path != asset_path
         || media_type != expected_media_type
         || media_type == "application/octet-stream"
     {
@@ -554,7 +633,7 @@ fn read_playground_asset(
     if content.len() > MAX_PLAYGROUND_ASSET_BYTES {
         return Err(());
     }
-    Ok(Some((expected_media_type, content)))
+    Ok(Some((expected_media_type, content, kind)))
 }
 
 fn hide_embedded_page_header(page: &mut String) -> bool {
@@ -707,6 +786,18 @@ fn playground_examples(root: &Path) -> Response {
 }
 
 fn has_playground_asset_table(source: &str) -> bool {
+    has_playground_record_table(source, "Asset", &["path", "media_type", "content"])
+}
+
+fn has_playground_route_table(source: &str) -> bool {
+    has_playground_record_table(source, "Route", &["path", "entry"])
+}
+
+fn has_playground_entry_table(source: &str) -> bool {
+    has_playground_record_table(source, "Entry", &["asset_path", "kind"])
+}
+
+fn has_playground_record_table(source: &str, table_name: &str, required_fields: &[&str]) -> bool {
     let parsed = parse_module(source);
     if !parsed.is_ok() {
         return false;
@@ -720,7 +811,7 @@ fn has_playground_asset_table(source: &str) -> bool {
         else {
             return None;
         };
-        (name == "Asset").then_some((keys, members))
+        (name == table_name).then_some((keys, members))
     });
     let Some((keys, members)) = tables.next() else {
         return false;
@@ -738,7 +829,7 @@ fn has_playground_asset_table(source: &str) -> bool {
     {
         return false;
     }
-    ["path", "media_type", "content"].iter().all(|required| {
+    required_fields.iter().all(|required| {
         let mut fields = members.iter().filter_map(|member| match member {
             orna_syntax_v1::TableMember::Field { name, ty, .. } if name == required => Some(ty),
             _ => None,
@@ -763,6 +854,48 @@ fn decode_playground_asset(source: &str, expected_id: &str) -> Option<(String, S
     let media_type = literal_string(unique_record_field(&fields, "media_type")?)?;
     let content = literal_string(unique_record_field(&fields, "content")?)?;
     Some((path, media_type, content))
+}
+
+fn decode_playground_route(source: &str, expected_id: &str) -> Option<(String, String)> {
+    let parsed = parse_row(source);
+    if !parsed.is_ok() {
+        return None;
+    }
+    let Expr::Record { fields, .. } = parsed.value else {
+        return None;
+    };
+    let id = literal_string(unique_record_field(&fields, "id")?)?;
+    if id != expected_id {
+        return None;
+    }
+    let path = literal_string(unique_record_field(&fields, "path")?)?;
+    let entry = literal_string(unique_record_field(&fields, "entry")?)?;
+    Some((path, entry))
+}
+
+fn decode_playground_entry(
+    source: &str,
+    expected_id: &str,
+) -> Option<(String, PlaygroundEntryKind)> {
+    let parsed = parse_row(source);
+    if !parsed.is_ok() {
+        return None;
+    }
+    let Expr::Record { fields, .. } = parsed.value else {
+        return None;
+    };
+    let id = literal_string(unique_record_field(&fields, "id")?)?;
+    if id != expected_id {
+        return None;
+    }
+    let asset_path = literal_string(unique_record_field(&fields, "asset_path")?)?;
+    let kind = match literal_string(unique_record_field(&fields, "kind")?)?.as_str() {
+        "page" => PlaygroundEntryKind::Page,
+        "embed" => PlaygroundEntryKind::Embed,
+        "asset" => PlaygroundEntryKind::Asset,
+        _ => return None,
+    };
+    Some((asset_path, kind))
 }
 
 fn has_playground_sample_table(source: &str) -> bool {
@@ -1836,6 +1969,15 @@ mod tests {
         );
     }
 
+    fn write_fixture_rows(directory: &Path, table: &str, rows: &[(&str, &str)]) {
+        let table_directory = directory.join("playground").join(table);
+        std::fs::create_dir_all(&table_directory).expect("create playground row directory");
+        for (id, source) in rows {
+            std::fs::write(table_directory.join(format!("{id}.orna")), source)
+                .expect("write crate-local playground row fixture");
+        }
+    }
+
     fn listing_page(root: &Path, path: &str) -> Response {
         host_route(
             root,
@@ -1936,6 +2078,98 @@ mod tests {
             include_str!("../tests/fixtures/playground-asset-uncommitted.orna");
         const ASSET_STALE_INDEX: &str =
             include_str!("../tests/fixtures/playground-asset-index-stale.orna");
+        const ROUTES: [(&str, &str); 11] = [
+            (
+                "route-2f706c617967726f756e642f",
+                include_str!("../tests/fixtures/playground-route-page.orna"),
+            ),
+            (
+                "route-2f706c617967726f756e642f656d626564",
+                include_str!("../tests/fixtures/playground-route-embed.orna"),
+            ),
+            (
+                "route-2f706c617967726f756e642f6173736574732f6170702e6a73",
+                include_str!("../tests/fixtures/playground-route-app.orna"),
+            ),
+            (
+                "route-2f706c617967726f756e642f6173736574732f7374796c652e637373",
+                include_str!("../tests/fixtures/playground-route-style.orna"),
+            ),
+            (
+                "route-2f706c617967726f756e642f6173736574732f6f726e612d656469746f722d636f6e6669672e6a736f6e",
+                include_str!("../tests/fixtures/playground-route-config.orna"),
+            ),
+            (
+                "route-2f706c617967726f756e642f6173736574732f656d6265642e6a73",
+                include_str!("../tests/fixtures/playground-route-embed-script.orna"),
+            ),
+            (
+                "route-2f706c617967726f756e642f6173736574732f70726573656e746174696f6e2e6d6a73",
+                include_str!("../tests/fixtures/playground-route-presentation.orna"),
+            ),
+            (
+                "route-2f706c617967726f756e642f6173736574732f73657276652d686f6d652e6d6a73",
+                include_str!("../tests/fixtures/playground-route-home-runtime.orna"),
+            ),
+            (
+                "route-2f706c617967726f756e642f6173736574732f73657276652d706c617967726f756e642e6d6a73",
+                include_str!("../tests/fixtures/playground-route-playground-runtime.orna"),
+            ),
+            (
+                "route-2f706c617967726f756e642f6173736574732f6c73702d7761736d2f6f726e615f6c73702e6a73",
+                include_str!("../tests/fixtures/playground-route-lsp-js.orna"),
+            ),
+            (
+                "route-2f706c617967726f756e642f6173736574732f6c73702d7761736d2f6f726e615f6c73705f62672e7761736d",
+                include_str!("../tests/fixtures/playground-route-lsp-wasm.orna"),
+            ),
+        ];
+        const ENTRIES: [(&str, &str); 11] = [
+            (
+                "entry-page",
+                include_str!("../tests/fixtures/playground-entry-page.orna"),
+            ),
+            (
+                "entry-embed",
+                include_str!("../tests/fixtures/playground-entry-embed.orna"),
+            ),
+            (
+                "entry-app",
+                include_str!("../tests/fixtures/playground-entry-app.orna"),
+            ),
+            (
+                "entry-style",
+                include_str!("../tests/fixtures/playground-entry-style.orna"),
+            ),
+            (
+                "entry-config",
+                include_str!("../tests/fixtures/playground-entry-config.orna"),
+            ),
+            (
+                "entry-embed-script",
+                include_str!("../tests/fixtures/playground-entry-embed-script.orna"),
+            ),
+            (
+                "entry-presentation",
+                include_str!("../tests/fixtures/playground-entry-presentation.orna"),
+            ),
+            (
+                "entry-home-runtime",
+                include_str!("../tests/fixtures/playground-entry-home-runtime.orna"),
+            ),
+            (
+                "entry-playground-runtime",
+                include_str!("../tests/fixtures/playground-entry-playground-runtime.orna"),
+            ),
+            (
+                "entry-lsp-js",
+                include_str!("../tests/fixtures/playground-entry-lsp-js.orna"),
+            ),
+            (
+                "entry-lsp-wasm",
+                include_str!("../tests/fixtures/playground-entry-lsp-wasm.orna"),
+            ),
+        ];
         let directory = tempfile::tempdir().expect("temporary database");
         git_succeeds(
             directory.path(),
@@ -1968,6 +2202,8 @@ mod tests {
             ASSET_STYLE,
         )
         .expect("write database stylesheet asset");
+        write_fixture_rows(directory.path(), "Route", &ROUTES);
+        write_fixture_rows(directory.path(), "Entry", &ENTRIES);
         for (id, source) in [
             (
                 "6173736574732f70726573656e746174696f6e2e6d6a73",
@@ -1998,6 +2234,8 @@ mod tests {
                 "playground/Sample/hello.orna",
                 "playground/examples/legacy.orna",
                 "playground/Asset",
+                "playground/Route",
+                "playground/Entry",
             ],
         );
         git_succeeds(
@@ -2188,8 +2426,12 @@ mod tests {
         const ASSET_PRESENTATION: &str =
             include_str!("../tests/fixtures/playground-asset-presentation.orna");
         const ASSET_STYLE: &str = include_str!("../tests/fixtures/playground-asset-style.orna");
+        const ROUTE_PAGE: &str = include_str!("../tests/fixtures/playground-route-page.orna");
+        const ENTRY_PAGE: &str = include_str!("../tests/fixtures/playground-entry-page.orna");
 
         assert!(has_playground_asset_table(PLAYGROUND_SCHEMA));
+        assert!(has_playground_route_table(PLAYGROUND_SCHEMA));
+        assert!(has_playground_entry_table(PLAYGROUND_SCHEMA));
         let parsed_presentation = parse_row(ASSET_PRESENTATION);
         assert!(
             parsed_presentation.is_ok(),
@@ -2227,6 +2469,34 @@ mod tests {
         assert!(!has_playground_asset_table(
             "pub table Asset(id: Int) { path: Str, media_type: Str, content: Str }"
         ));
+        assert!(!has_playground_route_table(
+            "pub table Route(id: Int) { path: Str, entry: Str }"
+        ));
+        assert!(!has_playground_entry_table(
+            "pub table Entry(id: Str) { asset_path: Int, kind: Str }"
+        ));
+        assert_eq!(
+            decode_playground_route(ROUTE_PAGE, "route-2f706c617967726f756e642f"),
+            Some(("/playground/".into(), "entry-page".into()))
+        );
+        assert_eq!(decode_playground_route(ROUTE_PAGE, "different-id"), None);
+        assert_eq!(
+            decode_playground_entry(ENTRY_PAGE, "entry-page"),
+            Some(("index.html".into(), PlaygroundEntryKind::Page))
+        );
+        assert_eq!(decode_playground_entry(ENTRY_PAGE, "different-id"), None);
+        assert_eq!(
+            normalize_playground_route_path("/playground"),
+            Some("/playground/".into())
+        );
+        assert_eq!(
+            normalize_playground_route_path("/playground/embed/"),
+            Some("/playground/embed".into())
+        );
+        assert_eq!(
+            normalize_playground_route_path("/playground/%2e%2e/README.txt"),
+            None
+        );
     }
 
     #[test]
