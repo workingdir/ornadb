@@ -651,13 +651,31 @@ mod tests {
     }
 
     fn present_child(label: &str) -> Vec<u8> {
+        present_node_with_children(label, vec![])
+    }
+
+    fn present_node_with_children(label: &str, children: Vec<Vec<u8>>) -> Vec<u8> {
         let mut child = vec![0xd9, 0xea, 0x6c, 0x84, 0x64];
         child.extend(b"text");
         child.extend([0xf6, 0xa1]);
         child.extend(text("label"));
         child.extend(text(label));
-        child.push(0x80);
+        child.extend(array(children));
         child
+    }
+
+    fn nested_present_child(parent_levels: usize) -> Vec<u8> {
+        let mut child = present_child("deepest");
+        for _ in 0..parent_levels {
+            child = present_node_with_children("nested", vec![child]);
+        }
+        child
+    }
+
+    fn nested_child_path(parent_depth: usize, index: u8) -> Vec<u8> {
+        let mut components = vec![array(vec![vec![0x02], vec![0x00]]); parent_depth];
+        components.push(array(vec![vec![0x02], vec![index]]));
+        array(components)
     }
 
     fn add_child_delta(base: u8, next: u8, index: u8, label: &str) -> Vec<u8> {
@@ -671,6 +689,14 @@ mod tests {
 
     fn remove_child_operation(index: u8) -> Vec<u8> {
         let path = array(vec![array(vec![vec![0x02], vec![index]])]);
+        array(vec![vec![0x01], path])
+    }
+
+    fn add_child_at_path_operation(path: Vec<u8>, child: Vec<u8>) -> Vec<u8> {
+        array(vec![vec![0x00], path, child])
+    }
+
+    fn remove_at_path_operation(path: Vec<u8>) -> Vec<u8> {
         array(vec![vec![0x01], path])
     }
 
@@ -1217,6 +1243,126 @@ mod tests {
             snapshot_present(&snapshot_with_children(
                 2,
                 "second-after-transient",
+                initial_children
+            ))
+        );
+    }
+
+    #[test]
+    fn transient_typed_tree_depth_failure_is_atomic_across_live_sessions() {
+        let first_limits = Limits {
+            max_depth: 64,
+            ..Limits::default()
+        };
+        let second_limits = Limits {
+            max_depth: 66,
+            ..Limits::default()
+        };
+        let initial_children = vec![nested_present_child(18)];
+        let first_initial = snapshot_with_children(0, "first-before", initial_children.clone());
+        let second_initial = snapshot_with_children(0, "second-before", initial_children.clone());
+        assert!(Envelope::decode(&first_initial, first_limits).is_ok());
+
+        let mut first_io = MemoryIo::default();
+        first_io.incoming.push_back(first_initial.clone());
+        let mut second_io = MemoryIo::default();
+        second_io.incoming.push_back(second_initial.clone());
+        let mut first = LiveSessionDriver::new(
+            first_io,
+            [7; 16],
+            first_limits,
+            Renderer::default(),
+            Allocator::default(),
+        )
+        .unwrap();
+        let mut second = LiveSessionDriver::new(
+            second_io,
+            [7; 16],
+            second_limits,
+            Renderer::default(),
+            Allocator::default(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            block_on(first.receive_once()).unwrap(),
+            LiveSessionEvent::SnapshotPublished { revision: 0 }
+        );
+        assert_eq!(
+            block_on(second.receive_once()).unwrap(),
+            LiveSessionEvent::SnapshotPublished { revision: 0 }
+        );
+
+        let transient_path = nested_child_path(19, 0);
+        let transient_delta = delta_with_operations(
+            0,
+            1,
+            vec![
+                add_child_at_path_operation(transient_path.clone(), nested_present_child(1)),
+                remove_at_path_operation(transient_path),
+            ],
+        );
+        assert!(transient_delta.len() < first_limits.max_message_bytes);
+        assert!(Envelope::decode(&transient_delta, first_limits).is_ok());
+        let first_before_transient = first.presentation().published().cloned().unwrap();
+        first.io.incoming.push_back(transient_delta.clone());
+        assert!(matches!(
+            block_on(first.receive_once()),
+            Ok(LiveSessionEvent::ResyncSent { .. })
+        ));
+        assert_resync_frame(&first.io.sent[0]);
+        assert_eq!(
+            first.presentation().published(),
+            Some(&first_before_transient)
+        );
+        assert_eq!(first.renderer.trees, vec![snapshot_present(&first_initial)]);
+
+        second.io.incoming.push_back(transient_delta);
+        assert_eq!(
+            block_on(second.receive_once()).unwrap(),
+            LiveSessionEvent::DeltaPublished { revision: 1 }
+        );
+        assert_eq!(second.presentation().published().unwrap().revision(), 1);
+        assert_eq!(second.renderer.trees[1], snapshot_present(&second_initial));
+        assert_eq!(first.presentation().published().unwrap().revision(), 0);
+
+        let request = Envelope::decode(&first.io.sent[0], first_limits)
+            .unwrap()
+            .request
+            .expect("transient depth recovery request is correlated");
+        first.io.incoming.push_back(frame_with_request(
+            16,
+            [7; 16],
+            Some(request),
+            snapshot_body_with_children(2, "first-recovered", initial_children.clone()),
+        ));
+        assert_eq!(
+            block_on(first.receive_once()).unwrap(),
+            LiveSessionEvent::SnapshotPublished { revision: 2 }
+        );
+        assert_eq!(
+            first.renderer.trees[1],
+            snapshot_present(&snapshot_with_children(
+                2,
+                "first-recovered",
+                initial_children.clone()
+            ))
+        );
+
+        second
+            .io
+            .incoming
+            .push_back(delta(1, 2, "second-after-depth"));
+        assert_eq!(
+            block_on(second.receive_once()).unwrap(),
+            LiveSessionEvent::DeltaPublished { revision: 2 }
+        );
+        assert_eq!(first.presentation().published().unwrap().revision(), 2);
+        assert_eq!(
+            second.renderer.trees[2],
+            snapshot_present(&snapshot_with_children(
+                2,
+                "second-after-depth",
                 initial_children
             ))
         );
