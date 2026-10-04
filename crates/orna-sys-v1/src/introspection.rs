@@ -9216,6 +9216,9 @@ struct QueryPairedWindowCostRestorationFold {
     spill_pair_identities: BTreeMap<String, QueryPairedWindowCostRestorationSpillPair>,
     spill_fold_identity: Option<String>,
     window_fold_identity: Option<String>,
+    restore_chain_fold_identity: Option<String>,
+    window_restore_chain_fold_identity: Option<String>,
+    window_restore_chain_transition: Option<&'static str>,
     cost_restore_fold_identities: BTreeMap<String, String>,
     cost_pair_identities: BTreeMap<String, QueryPairedWindowCostRestorationCostPair>,
     cost_fold_identity: Option<String>,
@@ -14062,6 +14065,9 @@ fn query_paired_window_cost_restoration_seed(
         spill_pair_identities: BTreeMap::new(),
         spill_fold_identity: None,
         window_fold_identity: None,
+        restore_chain_fold_identity: None,
+        window_restore_chain_fold_identity: None,
+        window_restore_chain_transition: None,
         cost_restore_fold_identities: BTreeMap::new(),
         cost_pair_identities: BTreeMap::new(),
         cost_fold_identity: None,
@@ -14200,6 +14206,23 @@ fn query_paired_window_cost_restoration_fold(
             cost_restore_fold_identities.insert((*kind).to_owned(), (*identity).to_owned());
         }
     }
+    let restore_chain_fold_identity = if cost_restore_fold_identities.is_empty() {
+        None
+    } else {
+        let mut restore_hash = Sha256::new();
+        restore_hash.update(
+            b"orna.sys.query-paired-window-cost-restoration-restore-chain-fold.v1\0",
+        );
+        restore_hash.update((cost_restore_fold_identities.len() as u64).to_be_bytes());
+        for (kind, identity) in &cost_restore_fold_identities {
+            hash_part(&mut restore_hash, kind.as_bytes());
+            hash_part(&mut restore_hash, identity.as_bytes());
+        }
+        Some(format!(
+            "paired-window-cost-restoration-restore-chain-fold:{}",
+            hex(&restore_hash.finalize())
+        ))
+    };
     let cost_fold_identity = if cost_pair_identities.is_empty() {
         None
     } else {
@@ -14231,9 +14254,45 @@ fn query_paired_window_cost_restoration_fold(
                 u64::MAX
             })
     });
+    let window_restore_chain_fold_identity = match (
+        window_fold_identity.as_deref(),
+        restore_chain_fold_identity.as_deref(),
+    ) {
+        (Some(window_identity), Some(restore_identity)) => {
+            let mut chain_hash = Sha256::new();
+            chain_hash.update(
+                b"orna.sys.query-paired-window-cost-restoration-window-restore-chain-fold.v1\0",
+            );
+            hash_part(&mut chain_hash, window_identity.as_bytes());
+            hash_part(&mut chain_hash, restore_identity.as_bytes());
+            chain_hash.update((window_identities.len() as u64).to_be_bytes());
+            chain_hash.update((cost_restore_fold_identities.len() as u64).to_be_bytes());
+            chain_hash.update([u8::from(overflowed)]);
+            Some(format!(
+                "paired-window-cost-restoration-window-restore-chain-fold:{}",
+                hex(&chain_hash.finalize())
+            ))
+        }
+        _ => None,
+    };
+    let window_restore_chain_transition = window_restore_chain_fold_identity.as_ref().map(|_| {
+        let window_advanced = previous.is_none_or(|fold| {
+            fold.window_fold_identity.as_deref() != window_fold_identity.as_deref()
+        });
+        let restore_chain_advanced = previous.is_none_or(|fold| {
+            fold.restore_chain_fold_identity.as_deref() != restore_chain_fold_identity.as_deref()
+        });
+        match (window_advanced, restore_chain_advanced) {
+            (true, true) => "advanced_window_and_restore_chains",
+            (true, false) => "advanced_window_identity",
+            (false, true) => "advanced_restore_chains",
+            (false, false) => "carried_across_sparse_input",
+        }
+    });
     let parent_identity = previous.map(|fold| fold.identity.clone());
 
     let mut hash = Sha256::new();
+    hash.update(b"orna.sys.query-paired-window-cost-restoration-fold.v5\0");
     hash.update(b"orna.sys.query-paired-window-cost-restoration-fold.v4\0");
     hash_optional_text(&mut hash, parent_identity.as_deref());
     hash_part(&mut hash, pair_identity.as_bytes());
@@ -14252,6 +14311,8 @@ fn query_paired_window_cost_restoration_fold(
     }
     hash_optional_text(&mut hash, spill_fold_identity.as_deref());
     hash_optional_text(&mut hash, window_fold_identity.as_deref());
+    hash_optional_text(&mut hash, restore_chain_fold_identity.as_deref());
+    hash_optional_text(&mut hash, window_restore_chain_fold_identity.as_deref());
     hash.update((cost_restore_fold_identities.len() as u64).to_be_bytes());
     for (kind, identity) in &cost_restore_fold_identities {
         hash_part(&mut hash, kind.as_bytes());
@@ -14270,6 +14331,9 @@ fn query_paired_window_cost_restoration_fold(
         spill_pair_identities,
         spill_fold_identity,
         window_fold_identity,
+        restore_chain_fold_identity,
+        window_restore_chain_fold_identity,
+        window_restore_chain_transition,
         cost_restore_fold_identities,
         cost_pair_identities,
         cost_fold_identity,
@@ -14331,6 +14395,39 @@ fn add_paired_window_cost_restoration_fold_details(
         );
     } else {
         details.remove("paired_window_cost_restoration_window_fold_identity");
+    }
+    if let Some(restore_chain_fold_identity) = fold.restore_chain_fold_identity.as_ref() {
+        details.insert(
+            "paired_window_cost_restoration_restore_chain_fold_identity".to_owned(),
+            PlanDetail::Text(restore_chain_fold_identity.clone()),
+        );
+    } else {
+        details.remove("paired_window_cost_restoration_restore_chain_fold_identity");
+    }
+    if let Some(window_restore_chain_fold_identity) =
+        fold.window_restore_chain_fold_identity.as_ref()
+    {
+        details.insert(
+            "paired_window_cost_restoration_window_restore_chain_fold_identity".to_owned(),
+            PlanDetail::Text(window_restore_chain_fold_identity.clone()),
+        );
+        details.insert(
+            "paired_window_cost_restoration_window_restore_chain_pairing".to_owned(),
+            PlanDetail::Text(
+                "nested_window_identity_bound_to_exact_paired_cost_restore_chain_folds"
+                    .to_owned(),
+            ),
+        );
+        if let Some(transition) = fold.window_restore_chain_transition {
+            details.insert(
+                "paired_window_cost_restoration_window_restore_chain_transition".to_owned(),
+                PlanDetail::Text(transition.to_owned()),
+            );
+        }
+    } else {
+        details.remove("paired_window_cost_restoration_window_restore_chain_fold_identity");
+        details.remove("paired_window_cost_restoration_window_restore_chain_pairing");
+        details.remove("paired_window_cost_restoration_window_restore_chain_transition");
     }
     details.insert(
         "paired_window_cost_restoration_window_count".to_owned(),
