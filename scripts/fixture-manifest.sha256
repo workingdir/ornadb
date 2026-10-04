@@ -3209,6 +3209,8 @@ be56e0480343fb1b62db37a5952fb5901e739ae1f14741ebf1a6eeb81ac34a44  crates/orna-ls
 b8536ae11e060f48cca240185310e5479a24583079031b3d9d5c5119e4a1d640  crates/orna-lsp/tests/fixtures/tree-sitter-corpus/type_value.txt
 b8cc7c3550c58e39c7633e41fbf80d577e7a4dc304ef7b5749ddc46e6c1ce044  crates/orna-lsp/tests/fixtures/tree-sitter-corpus/unicode_identifiers.txt
 566fc40b6a2f7cb2ba529181827880d52d5125ee2da7a59c9280ef7a96b9de94  crates/orna-lsp/tests/fixtures/tree-sitter-corpus/users_roles_grants.txt
+a59093e6c719bb932da951922ecc5ea582c3e1fdc5bfbf7ba44c18ae49869fde  crates/orna-lsp/tests/fixtures/workspace-hierarchy-caller-v1.orna
+838bad5c5ff8eb8b01e4d02648654176e9be569608f5493df55e350e5cf1125f  crates/orna-lsp/tests/fixtures/workspace-hierarchy-provider-v1.orna
 fdcdd57ae1ea86eb2903f6a1c1160ae8e668e41d81b1b615a84663554c21ad85  crates/orna-project-v1/src/fixtures/attached-package-main.orna
 eb7eeca9a84e495c47397f3d74ca5bf760365fd258f0912691d9d12e149673b6  crates/orna-project-v1/src/fixtures/attached-primary-main.orna
 8691c9342a3dc7ef7dbd964bc08221dfd916fe5b4cd307ea435ef866101a8ad0  crates/orna-project-v1/src/fixtures/attached-read-package-main.orna
