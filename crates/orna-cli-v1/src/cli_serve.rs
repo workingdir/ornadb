@@ -325,7 +325,11 @@ fn host_route(root: &Path, identity: RuntimeIdentity, request: &Request) -> Resp
     if let Some(response) = git_listing_route(root, identity, request) {
         return response;
     }
+    if let Some(response) = playground_route(root, identity, request) {
+        return response;
+    }
     match (request.method.as_str(), request.path.as_str()) {
+        ("GET", "/api/examples") => playground_examples(root),
         ("GET", "/api/clone") => match clone_report(root, identity) {
             Ok(report) => Response::new(200, "application/json", report),
             Err(_) => unavailable_response(),
@@ -393,10 +397,141 @@ fn commit_log_page(root: &Path, identity: RuntimeIdentity) -> Response {
         InspectionNode::List(branch_rows)
     };
     let content = InspectionNode::Record(vec![
+        (
+            "Playground".into(),
+            InspectionNode::Link {
+                label: "Open the Orna playground".into(),
+                href: "/playground/".into(),
+            },
+        ),
         ("Recent commits".into(), commits),
         ("Branches".into(), branches),
     ]);
     render_home_document(identity, &content)
+}
+
+const MAX_PLAYGROUND_ASSET_BYTES: u64 = 8 * 1024 * 1024;
+const MAX_PLAYGROUND_EXAMPLE_BYTES: usize = 2 * 1024 * 1024;
+fn playground_route(root: &Path, identity: RuntimeIdentity, request: &Request) -> Option<Response> {
+    if request.method != "GET"
+        || !(request.path == "/playground" || request.path.starts_with("/playground/"))
+    {
+        return None;
+    }
+    Some(playground_asset(root, identity, &request.path))
+}
+
+fn playground_asset(root: &Path, identity: RuntimeIdentity, request_path: &str) -> Response {
+    let relative = request_path
+        .strip_prefix("/playground")
+        .unwrap_or_default()
+        .trim_start_matches('/');
+    let relative = if relative.is_empty() {
+        "index.html"
+    } else {
+        relative
+    };
+    let Ok(decoded) = percent_decode(relative) else {
+        return bad_request_response();
+    };
+    if decoded.contains('\\') || decoded.contains('\0') {
+        return bad_request_response();
+    }
+    let Ok(managed) = ManagedPath::new(Path::new("playground/web-ui/dist").join(decoded)) else {
+        return bad_request_response();
+    };
+    let dist = root.join("playground/web-ui/dist");
+    let Ok(dist) = std::fs::canonicalize(dist) else {
+        return unavailable_response();
+    };
+    let Ok(path) = std::fs::canonicalize(root.join(managed.as_path())) else {
+        return not_found_response();
+    };
+    if !path.starts_with(&dist) {
+        return bad_request_response();
+    }
+    let Ok(metadata) = std::fs::metadata(&path) else {
+        return not_found_response();
+    };
+    if !metadata.is_file() || metadata.len() > MAX_PLAYGROUND_ASSET_BYTES {
+        return not_found_response();
+    }
+    let Ok(bytes) = std::fs::read(&path) else {
+        return unavailable_response();
+    };
+    if relative == "index.html" {
+        let Ok(mut page) = String::from_utf8(bytes) else {
+            return unavailable_response();
+        };
+        let database = format_uuid(identity.database_id);
+        let bridge = format!(
+            "<section id=\"live-repl\" data-database=\"{}\" hidden><textarea id=\"repl-source\"></textarea><button id=\"repl-run\" type=\"button\"></button><p id=\"repl-status\"></p><div id=\"repl-events\"></div></section><script>const RUN_EVENTS_SOURCE={};\n{}\n</script>",
+            html_escape(&database),
+            json_string(LIVE_RUN_EVENTS_WATCH_SOURCE),
+            LIVE_REPL_SCRIPT,
+        );
+        if let Some(body) = page.rfind("</body>") {
+            page.insert_str(body, &bridge);
+        } else {
+            return bad_request_response();
+        }
+        return Response::new(200, "text/html; charset=utf-8", page.into_bytes());
+    }
+    Response::new(200, playground_content_type(&path), bytes)
+}
+
+fn playground_content_type(path: &Path) -> &'static str {
+    match path.extension().and_then(std::ffi::OsStr::to_str) {
+        Some("html") => "text/html; charset=utf-8",
+        Some("js" | "mjs") => "text/javascript; charset=utf-8",
+        Some("css") => "text/css; charset=utf-8",
+        Some("json") => "application/json; charset=utf-8",
+        Some("wasm") => "application/wasm",
+        Some("svg") => "image/svg+xml",
+        Some("png") => "image/png",
+        Some("ico") => "image/x-icon",
+        _ => "application/octet-stream",
+    }
+}
+
+fn playground_examples(root: &Path) -> Response {
+    let Ok(repository) = Repository::discover(root) else {
+        return unavailable_response();
+    };
+    let Ok(Some(commit)) = repository.head() else {
+        return unavailable_response();
+    };
+    let Ok(entries) = repository.list_committed_tree(&commit, MAX_LISTING_TREE_ENTRIES) else {
+        return unavailable_response();
+    };
+    let mut examples = Vec::new();
+    for entry in entries {
+        let path = entry.path().as_path();
+        if !matches!(entry.kind(), CommittedTreeEntryKind::File { .. })
+            || !path.starts_with("playground/examples")
+            || path.extension().and_then(std::ffi::OsStr::to_str) != Some("orna")
+        {
+            continue;
+        }
+        let Ok(source) =
+            repository.read_committed_file(&commit, path, MAX_PLAYGROUND_EXAMPLE_BYTES)
+        else {
+            continue;
+        };
+        let Ok(source) = String::from_utf8(source) else {
+            continue;
+        };
+        examples.push(serde_json::json!({
+            "name": path.file_stem().and_then(std::ffi::OsStr::to_str).unwrap_or("example"),
+            "path": path.to_string_lossy(),
+            "source": source,
+        }));
+    }
+    examples.sort_by(|left, right| left["path"].as_str().cmp(&right["path"].as_str()));
+    match serde_json::to_vec(&serde_json::json!({ "examples": examples })) {
+        Ok(body) => Response::new(200, "application/json", body),
+        Err(_) => unavailable_response(),
+    }
 }
 
 const MAX_LISTING_BRANCHES: usize = 100;
@@ -782,6 +917,9 @@ let sessionId;
 let sessionBytes;
 let eventWatch;
 let presentation;
+let latestRunResult;
+let markRuntimeReady;
+const runtimeReady = new Promise(resolve => { markRuntimeReady = resolve; });
 
 function byteCompare(left, right) {
   if (left.length !== right.length) return left.length - right.length;
@@ -1000,6 +1138,73 @@ async function resyncRunEvents() {
   if (response.get(1) === 19) status.textContent = 'Run event update was rejected.';
 }
 
+function untagged(value) {
+  if (value && typeof value === 'object' && value.tag !== undefined && value.tag !== 2 && value.tag !== 3) {
+    return untagged(value.value);
+  }
+  return value;
+}
+
+function displayText(value) {
+  const plain = untagged(value);
+  if (plain === null || plain === undefined) return '';
+  if (plain && typeof plain === 'object' && (plain.tag === 2 || plain.tag === 3)) {
+    return formatValue(plain);
+  }
+  return String(plain);
+}
+
+function resultFromEvents(node) {
+  if (!node || node.tag !== 60012 || !Array.isArray(node.value)) return undefined;
+  const children = node.value[3];
+  if (!Array.isArray(children) || children.length === 0) return undefined;
+  const latest = children[children.length - 1];
+  if (!latest || latest.tag !== 60012 || !Array.isArray(latest.value)) return undefined;
+  const properties = latest.value[2];
+  if (!(properties instanceof Map)) return undefined;
+  const field = (name) => {
+    for (const [key, value] of properties.entries()) {
+      if (displayText(key) === name) return value;
+    }
+    return undefined;
+  };
+  const succeeded = displayText(field('status')) === 'success';
+  const rawValue = field('value');
+  const printableValue = untagged(rawValue);
+  const valueText = printableValue && typeof printableValue === 'object'
+    ? formatValue(printableValue)
+    : displayText(printableValue);
+  const errorCode = displayText(field('error_code'));
+  const line = Number(displayText(field('line'))) || 1;
+  const column = Number(displayText(field('column'))) || 1;
+  return {
+    ok: succeeded,
+    values: succeeded ? [valueText] : [],
+    stdout: displayText(field('stdout')),
+    errors: succeeded ? [] : [{ message: errorCode || 'Evaluation failed', line, col: column }],
+  };
+}
+
+function publishRunEvents() {
+  latestRunResult = resultFromEvents(presentation);
+  if (latestRunResult) {
+    globalThis.dispatchEvent(new CustomEvent('orna:run-result', { detail: latestRunResult }));
+  }
+}
+
+async function runPlayground(sourceText) {
+  await runtimeReady;
+  if (!socket || socket.readyState !== WebSocket.OPEN) {
+    throw new Error('The OrnaDB runtime session is disconnected.');
+  }
+  await evaluate(sourceText);
+  await resyncRunEvents();
+  if (!latestRunResult) throw new Error('The OrnaDB runtime did not publish a run result.');
+  return latestRunResult;
+}
+
+globalThis.ornaPlaygroundRun = runPlayground;
+
 function formatValue(value) {
   if (value === null) return 'null';
   if (value instanceof Uint8Array) return `0x${byteKey(value)}`;
@@ -1068,6 +1273,7 @@ function applyPresentationDelta(message) {
   }
   output.replaceChildren();
   if (presentation) appendPresent(presentation, output);
+  publishRunEvents();
 }
 
 function receive(event) {
@@ -1082,6 +1288,7 @@ function receive(event) {
       if (watch) eventWatch ||= watch;
       output.replaceChildren();
       appendPresent(presentation, output);
+      publishRunEvents();
     } else if (code === 17) {
       applyPresentationDelta(message);
     }
@@ -1129,6 +1336,7 @@ async function connect() {
       status.textContent = 'Runtime session ready.';
       await watchRunEvents();
       status.textContent = 'Ready.';
+      markRuntimeReady();
     } catch (error) {
       status.textContent = error instanceof Error ? error.message : String(error);
     }
@@ -1799,6 +2007,8 @@ mod tests {
         assert_eq!(home.status, 200);
         let home = String::from_utf8(home.body).expect("commit listing HTML");
         assert!(home.contains("No commits in this repository."));
+        assert!(home.contains("Open the Orna playground"));
+        assert!(home.contains("href=\"/playground/\""));
         assert!(home.contains("id=\"live-repl\""));
         assert!(home.contains("id=\"repl-source\""));
         assert!(home.contains("/orna/session"));
@@ -1818,6 +2028,84 @@ mod tests {
             },
         );
         assert_eq!(query.status, 404);
+    }
+
+    #[test]
+    fn playground_loads_committed_examples_and_built_assets() {
+        const PLAYGROUND_EXAMPLE: &str = include_str!("../tests/fixtures/playground-example.orna");
+        let directory = tempfile::tempdir().expect("temporary database");
+        git_succeeds(
+            directory.path(),
+            &["init", "--quiet", "--initial-branch=playground"],
+        );
+        let example_path = directory.path().join("playground/examples/hello.orna");
+        std::fs::create_dir_all(example_path.parent().expect("example parent"))
+            .expect("create examples directory");
+        std::fs::write(&example_path, PLAYGROUND_EXAMPLE).expect("write example");
+        let dist = directory.path().join("playground/web-ui/dist");
+        std::fs::create_dir_all(dist.join("assets")).expect("create built assets");
+        std::fs::write(
+            dist.join("index.html"),
+            "<!doctype html><html><body><main>playground</main></body></html>",
+        )
+        .expect("write built page");
+        std::fs::write(dist.join("assets/app.js"), "console.log('ready')")
+            .expect("write built script");
+        git_succeeds(directory.path(), &["add", "playground/examples/hello.orna"]);
+        git_succeeds(
+            directory.path(),
+            &[
+                "-c",
+                "user.name=kierandrewett",
+                "-c",
+                "user.email=kieran@drewett.dev",
+                "commit",
+                "--quiet",
+                "-m",
+                "add playground example",
+            ],
+        );
+        std::fs::write(
+            directory
+                .path()
+                .join("playground/examples/uncommitted.orna"),
+            "99 + 1",
+        )
+        .expect("write uncommitted example");
+
+        let examples = listing_page(directory.path(), "/api/examples");
+        assert_eq!(examples.status, 200);
+        let examples: serde_json::Value =
+            serde_json::from_slice(&examples.body).expect("example records JSON");
+        assert_eq!(examples["examples"].as_array().map(Vec::len), Some(1));
+        assert_eq!(
+            examples["examples"][0]["path"],
+            "playground/examples/hello.orna"
+        );
+        assert_eq!(examples["examples"][0]["source"], PLAYGROUND_EXAMPLE);
+
+        let identity = RuntimeIdentity {
+            database_id: [1; 16],
+            repository_id: [2; 16],
+        };
+        let page = playground_asset(directory.path(), identity, "/playground/");
+        assert_eq!(page.status, 200);
+        assert_eq!(page.content_type, "text/html; charset=utf-8");
+        let page = String::from_utf8(page.body).expect("built page UTF-8");
+        assert!(page.contains("<main>playground</main>"));
+        assert!(page.contains(&format!(
+            "data-database=\"{}\"",
+            format_uuid(identity.database_id)
+        )));
+        assert!(page.contains("ornaPlaygroundRun"));
+        let script = playground_asset(directory.path(), identity, "/playground/assets/app.js");
+        assert_eq!(script.status, 200);
+        assert_eq!(script.content_type, "text/javascript; charset=utf-8");
+        assert_eq!(script.body, b"console.log('ready')");
+
+        let traversal =
+            playground_asset(directory.path(), identity, "/playground/%2e%2e/README.txt");
+        assert_eq!(traversal.status, 400);
     }
 
     #[test]
@@ -1874,7 +2162,7 @@ mod tests {
         assert!(log.contains("listing"));
         assert!(log.contains("kierandrewett"));
         assert!(!log.contains("uncommitted.txt"));
-        assert!(!log.contains("<script"));
+        assert!(log.contains("href=\"/playground/\""));
         assert!(!log.contains("<header"));
 
         let tree = listing_page(directory.path(), &format!("/tree/{commit_id}/"));
