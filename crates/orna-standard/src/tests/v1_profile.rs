@@ -32,6 +32,7 @@ use crate::{
     REFERENCE_STANDARD_TEST_PATH_V1,
     REFERENCE_STANDARD_GENERICS_PATH_V1, REFERENCE_STANDARD_TYPE_UTILS_PATH_V1,
     REFERENCE_STANDARD_PATTERN_PATH_V1, REFERENCE_STANDARD_REGEX_PATH_V1,
+    REFERENCE_STANDARD_REGEX_UTILITIES_PATH_V1,
     REFERENCE_STANDARD_ITERATOR_PATH_V1, REFERENCE_STANDARD_ITERATOR_ADAPTERS_PATH_V1,
     REFERENCE_STANDARD_ITERATOR_CONSUMERS_PATH_V1,
     REFERENCE_STANDARD_COLLECTION_ADAPTERS_PATH_V1,
@@ -51,7 +52,7 @@ use crate::{
 #[test]
 fn pinned_ui_presentation_helpers_are_included_as_source() {
     let sources = reference_standard_sources_v1();
-    assert_eq!(sources.len(), 66);
+    assert_eq!(sources.len(), 67);
     assert_eq!(sources[49].0, REFERENCE_STANDARD_UI_PATH_V1);
     let parsed = orna_syntax_v1::parse_module_with_file(
         &sources[49].1,
@@ -674,6 +675,47 @@ fn pinned_regex_and_pattern_surfaces_are_versioned_and_snapshot_bound() {
         "{:#?}",
         analysis.diagnostics
     );
+}
+
+#[test]
+fn pinned_regex_utilities_are_included_and_typecheck() {
+    let sources = reference_standard_sources_v1();
+    let (index, (path, source)) = sources
+        .iter()
+        .enumerate()
+        .find(|(_, (path, _))| path == REFERENCE_STANDARD_REGEX_UTILITIES_PATH_V1)
+        .expect("the pinned source bundle includes std.regex.utilities");
+    assert_eq!(index, 66, "regex utilities append without moving old sources");
+    assert_eq!(path, REFERENCE_STANDARD_REGEX_UTILITIES_PATH_V1);
+    for declaration in [
+        "pub fn capture_at(value: std.regex.Match, index: Int): Str?",
+        "pub fn span(value: std.regex.Match): (Int, Int)",
+        "pub fn span_length(value: std.regex.Match): Int",
+        "pub fn is_zero_width(value: std.regex.Match): Bool",
+        "pub fn matched_texts(values: [std.regex.Match]): [Str]",
+        "pub fn spans(values: [std.regex.Match]): [(Int, Int)]",
+        "pub fn capture_column(values: [std.regex.Match], index: Int): [Str?]",
+        "pub fn zero_width_count(values: [std.regex.Match]): Int",
+    ] {
+        assert!(source.contains(declaration), "missing regex utility `{declaration}`");
+    }
+    for contract in [
+        "Negative,",
+        "nonparticipating groups all return null",
+        "half-open scalar spans",
+        "Preserve the source order, duplicate text, and empty matches",
+        "result stays aligned with the input match list",
+    ] {
+        assert!(source.contains(contract), "missing regex utility contract `{contract}`");
+    }
+    let profile = reference_standard_profile_v1();
+    profile
+        .verify_source(path, source)
+        .expect("regex utility bytes match the captured standard profile");
+    let parsed = orna_syntax_v1::parse_module_with_file(source, path);
+    assert!(parsed.is_ok(), "{path}: {:#?}", parsed.diagnostics);
+    reference_standard_catalogue_v1()
+        .expect("regex utilities resolve in the captured standard catalogue");
 }
 
 #[test]
@@ -1579,7 +1621,7 @@ fn reference_standard_uses_pinned_orna_1_source_and_resolves_its_imports() {
     ] {
         assert!(sources[33].1.contains(contract), "missing std.test contract `{contract}`");
     }
-    assert_eq!(sources.len(), 66);
+    assert_eq!(sources.len(), 67);
     assert_eq!(sources[49].0, REFERENCE_STANDARD_UI_PATH_V1);
     for declaration in [
         "pub fn Field<T>(label: Str, value: T): UI",
@@ -2041,7 +2083,7 @@ fn pinned_filesystem_effect_is_visible_to_consumers_and_forbidden_in_assertions(
 #[test]
 fn pinned_filesystem_path_and_metadata_modules_are_captured_and_typecheck() {
     let sources = reference_standard_sources_v1();
-    assert_eq!(sources.len(), 66);
+    assert_eq!(sources.len(), 67);
     for (index, path) in [
         (42, REFERENCE_STANDARD_IO_PATH_MODULE_PATH_V1),
         (43, REFERENCE_STANDARD_IO_METADATA_PATH_V1),
@@ -2105,7 +2147,7 @@ fn pinned_filesystem_path_and_metadata_modules_are_captured_and_typecheck() {
 #[test]
 fn pinned_io_buffer_module_is_captured_and_resolves_stream_adapters() {
     let sources = reference_standard_sources_v1();
-    assert_eq!(sources.len(), 66);
+    assert_eq!(sources.len(), 67);
     let (path, source) = sources
         .iter()
         .find(|(path, _)| path == REFERENCE_STANDARD_IO_BUFFER_PATH_V1)
@@ -2142,7 +2184,7 @@ fn pinned_io_buffer_module_is_captured_and_resolves_stream_adapters() {
 #[test]
 fn pinned_process_and_environment_modules_are_captured_and_typecheck() {
     let sources = reference_standard_sources_v1();
-    assert_eq!(sources.len(), 66);
+    assert_eq!(sources.len(), 67);
     for (index, path) in [
         (44, REFERENCE_STANDARD_IO_PROCESS_PATH_V1),
         (45, REFERENCE_STANDARD_IO_ENVIRONMENT_PATH_V1),

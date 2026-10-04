@@ -13,6 +13,11 @@ const INCREMENTAL_SOURCE: &str = include_str!("fixtures/incremental-malformed-v1
 const LOCAL_SCOPES_SOURCE: &str = include_str!("fixtures/local-scopes-v1.orna");
 const HOVER_COMPLETION_SOURCE: &str = include_str!("fixtures/hover-completion-v1.orna");
 const EDITOR_HINTS_SOURCE: &str = include_str!("fixtures/editor-lsp-hints.orna");
+const RENAME_PROVIDER_SOURCE: &str = include_str!("fixtures/rename-provider-v1.orna");
+const RENAME_CALLER_SOURCE: &str = include_str!("fixtures/rename-caller-v1.orna");
+const AMBIGUOUS_RENAME_SOURCE: &str = include_str!("fixtures/ambiguous-renames-v1.orna");
+const AMBIGUOUS_RENAME_CALLER_SOURCE: &str =
+    include_str!("fixtures/ambiguous-renames-caller-v1.orna");
 
 struct Client {
     child: Child,
@@ -111,6 +116,10 @@ fn initialize(client: &mut Client) {
     assert_eq!(result["capabilities"]["positionEncoding"], "utf-16");
     assert_eq!(result["capabilities"]["textDocumentSync"]["change"], 2);
     assert_eq!(result["capabilities"]["hoverProvider"], true);
+    assert_eq!(
+        result["capabilities"]["renameProvider"]["prepareProvider"],
+        true
+    );
     let token_types = result["capabilities"]["semanticTokensProvider"]["legend"]["tokenTypes"]
         .as_array()
         .unwrap();
@@ -399,6 +408,29 @@ fn local_navigation_and_rename_follow_shadowed_bindings() {
         }),
     );
     assert_eq!(references.as_array().unwrap().len(), 2);
+    let references_without_declaration = client.request(
+        "textDocument/references",
+        json!({
+            "textDocument":{"uri":uri},
+            "position":inner_position,
+            "context":{"includeDeclaration":false}
+        }),
+    );
+    assert_eq!(references_without_declaration.as_array().unwrap().len(), 1);
+
+    let prepared = client.request(
+        "textDocument/prepareRename",
+        json!({"textDocument":{"uri":uri},"position":inner_position}),
+    );
+    assert_eq!(prepared["placeholder"], "input");
+    assert_eq!(
+        prepared["range"],
+        range_at(
+            LOCAL_SCOPES_SOURCE,
+            inner_use - 1,
+            inner_use - 1 + "input".len()
+        )
+    );
 
     let local_rename = client.request(
         "textDocument/rename",
@@ -424,6 +456,172 @@ fn local_navigation_and_rename_follow_shadowed_bindings() {
             .iter()
             .all(|edit| edit["newText"] == "renamed_input")
     );
+
+    let invalid_rename = client.request(
+        "textDocument/rename",
+        json!({"textDocument":{"uri":uri},"position":inner_position,"newName":"not-valid"}),
+    );
+    assert!(invalid_rename.is_null(), "{invalid_rename}");
+    let non_identifier = client.request(
+        "textDocument/prepareRename",
+        json!({
+            "textDocument":{"uri":uri},
+            "position":position_of(LOCAL_SCOPES_SOURCE, "1", 0)
+        }),
+    );
+    assert!(non_identifier.is_null(), "{non_identifier}");
+    client.shutdown();
+}
+
+#[test]
+fn references_and_rename_project_utf16_ranges_across_open_files() {
+    let provider_uri = "file:///workspace/a-provider.orna";
+    let caller_uri = "file:///workspace/z-caller.orna";
+    let mut client = Client::spawn();
+    initialize(&mut client);
+    let provider_diagnostics = open(&mut client, provider_uri, RENAME_PROVIDER_SOURCE);
+    let caller_diagnostics = open(&mut client, caller_uri, RENAME_CALLER_SOURCE);
+    assert!(
+        provider_diagnostics["diagnostics"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        caller_diagnostics["diagnostics"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+
+    let call_start = RENAME_CALLER_SOURCE.find("target(value)").unwrap();
+    let call_position = position_at(RENAME_CALLER_SOURCE, call_start + 1);
+    let prepared = client.request(
+        "textDocument/prepareRename",
+        json!({"textDocument":{"uri":caller_uri},"position":call_position}),
+    );
+    assert_eq!(prepared["placeholder"], "target");
+    assert_eq!(
+        prepared["range"],
+        range_at(
+            RENAME_CALLER_SOURCE,
+            call_start,
+            call_start + "target".len()
+        )
+    );
+
+    let with_declaration = client.request(
+        "textDocument/references",
+        json!({
+            "textDocument":{"uri":caller_uri},
+            "position":call_position,
+            "context":{"includeDeclaration":true}
+        }),
+    );
+    let locations = with_declaration.as_array().unwrap();
+    assert_eq!(locations.len(), 3, "{with_declaration}");
+    assert_eq!(locations[0]["uri"], provider_uri);
+    let declaration_start = RENAME_PROVIDER_SOURCE.find("pub fn target").unwrap() + "pub fn ".len();
+    assert_eq!(
+        locations[0]["range"],
+        range_at(
+            RENAME_PROVIDER_SOURCE,
+            declaration_start,
+            declaration_start + "target".len()
+        )
+    );
+    assert_eq!(locations[1]["uri"], provider_uri);
+    assert_eq!(locations[2]["uri"], caller_uri);
+
+    let without_declaration = client.request(
+        "textDocument/references",
+        json!({
+            "textDocument":{"uri":caller_uri},
+            "position":call_position,
+            "context":{"includeDeclaration":false}
+        }),
+    );
+    assert_eq!(without_declaration.as_array().unwrap().len(), 2);
+    assert!(
+        without_declaration
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|location| location["range"]["start"] != locations[0]["range"]["start"])
+    );
+
+    let renamed = client.request(
+        "textDocument/rename",
+        json!({"textDocument":{"uri":caller_uri},"position":call_position,"newName":"renamed_target"}),
+    );
+    let provider_edits = renamed["changes"][provider_uri].as_array().unwrap();
+    let caller_edits = renamed["changes"][caller_uri].as_array().unwrap();
+    assert_eq!(provider_edits.len(), 2, "{renamed}");
+    assert_eq!(caller_edits.len(), 1, "{renamed}");
+    assert!(
+        provider_edits
+            .iter()
+            .chain(caller_edits)
+            .all(|edit| edit["newText"] == "renamed_target")
+    );
+
+    for rejected_name in ["not-valid", "let", "remote"] {
+        let rejected = client.request(
+            "textDocument/rename",
+            json!({"textDocument":{"uri":caller_uri},"position":call_position,"newName":rejected_name}),
+        );
+        assert!(rejected.is_null(), "rename to {rejected_name}: {rejected}");
+    }
+    client.shutdown();
+}
+
+#[test]
+fn ambiguous_global_names_fail_closed_for_definition_references_and_rename() {
+    let first_uri = "file:///workspace/ambiguous-first.orna";
+    let second_uri = "file:///workspace/ambiguous-second.orna";
+    let mut client = Client::spawn();
+    initialize(&mut client);
+    let first_diagnostics = open(&mut client, first_uri, AMBIGUOUS_RENAME_SOURCE);
+    let second_diagnostics = open(&mut client, second_uri, AMBIGUOUS_RENAME_CALLER_SOURCE);
+    assert!(
+        first_diagnostics["diagnostics"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        second_diagnostics["diagnostics"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+
+    let call_start = AMBIGUOUS_RENAME_SOURCE.find("shared(value)").unwrap();
+    let position = position_at(AMBIGUOUS_RENAME_SOURCE, call_start + 1);
+    let definition = client.request(
+        "textDocument/definition",
+        json!({"textDocument":{"uri":first_uri},"position":position}),
+    );
+    assert!(definition.is_null(), "{definition}");
+    let references = client.request(
+        "textDocument/references",
+        json!({
+            "textDocument":{"uri":first_uri},
+            "position":position,
+            "context":{"includeDeclaration":true}
+        }),
+    );
+    assert_eq!(references, json!([]));
+    let prepared = client.request(
+        "textDocument/prepareRename",
+        json!({"textDocument":{"uri":first_uri},"position":position}),
+    );
+    assert!(prepared.is_null(), "{prepared}");
+    let renamed = client.request(
+        "textDocument/rename",
+        json!({"textDocument":{"uri":first_uri},"position":position,"newName":"unique"}),
+    );
+    assert!(renamed.is_null(), "{renamed}");
     client.shutdown();
 }
 
