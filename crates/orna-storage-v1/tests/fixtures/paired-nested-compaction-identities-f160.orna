@@ -1,0 +1,7 @@
+{ id: "f160/nested-compaction/main", name: "f160/left/compaction-main", city: "f160/right/compaction-main", }
+
+{ id: "f160/nested-compaction/retry", name: "f160/left/compaction-retry", city: "f160/right/compaction-retry", }
+
+{ id: "f160/nested-compaction/reused", name: "f160/left/compaction-main", city: "f160/right/compaction-main", }
+
+{ id: "f160/nested-compaction/malformed", name: "f160/left/compaction-malformed", city: "f160/right/compaction-malformed", }

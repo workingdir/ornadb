@@ -245,6 +245,8 @@ const PAIRED_NESTED_CHECKPOINT_IDENTITIES_F158: &str =
     include_str!("fixtures/paired-nested-checkpoint-identities-f158.orna");
 const PAIRED_NESTED_HANDOFF_IDENTITIES_F159: &str =
     include_str!("fixtures/paired-nested-handoff-identities-f159.orna");
+const PAIRED_NESTED_COMPACTION_IDENTITIES_F160: &str =
+    include_str!("fixtures/paired-nested-compaction-identities-f160.orna");
 const PAIRED_RESTORE_IDENTITIES_F88: &str =
     include_str!("fixtures/paired-restore-identities-f88.orna");
 const PAIRED_CHECKPOINT_REPLAY_IDENTITIES_F89: &str =
@@ -49697,6 +49699,239 @@ fn nested_handoff_identity_survives_paired_checkpoint_restore_compaction_folds_f
         } => {
             assert_eq!(restore_fold_ordinal, 0);
             assert_eq!(nested_handoff_identity, handoff_pair(3));
+            assert_eq!(source, expected_source);
+        }
+    }
+}
+
+#[test]
+fn nested_compaction_identity_survives_paired_handoff_checkpoint_folds_f160() {
+    let compaction_rows = PAIRED_NESTED_COMPACTION_IDENTITIES_F160
+        .split("\n\n")
+        .map(|record| parse_fixture(record, RowKeyKind::Explicit))
+        .collect::<Vec<_>>();
+    let generations = PAIRED_CHECKPOINT_REDO
+        .split("\n\n")
+        .map(parse_checkpoint_fixture)
+        .collect::<Vec<_>>();
+    let compaction_pair = |row: usize| orna_storage_v1::BranchMergePairedCompactionIdentity {
+        left_compaction: compaction_rows[row].fields[&id(2)].encode().unwrap(),
+        right_compaction: compaction_rows[row].fields[&id(3)].encode().unwrap(),
+    };
+    let alpha = b"f160/checkpoint/alpha".to_vec();
+    let catalog_only = b"f160/checkpoint/catalog-only".to_vec();
+    let make_f159_fold = |row: usize, order: Option<u64>| {
+        let known_checkpoint_ids = if row == 0 {
+            vec![alpha.clone(), catalog_only.clone()]
+        } else {
+            vec![alpha.clone()]
+        };
+        let restore_batches = order
+            .map(|order| {
+                let segment_identities = if order == u64::MAX {
+                    Vec::new()
+                } else {
+                    vec![orna_storage_v1::BranchMergePairedWriteAheadSegmentIdentity {
+                        left_segment: b"f160/segment/left".to_vec(),
+                        right_segment: b"f160/segment/right".to_vec(),
+                    }]
+                };
+                vec![vec![
+                    orna_storage_v1::BranchMergePairedCheckpointRedoFoldSpillNestedSpillIdentitySnapshot {
+                        spill: orna_storage_v1::BranchMergePairedCheckpointRedoFoldSpillNestedPairedCheckpointCompactionSnapshot {
+                            spill_id: b"f160/spill/shared-label".to_vec(),
+                            streams: vec![
+                                orna_storage_v1::BranchMergePairedCheckpointRedoFoldSpillNestedPairedCheckpointCompactionStreamSnapshot {
+                                    checkpoint_id: alpha.clone(),
+                                    source_stream_id: b"f160/source/shared-label".to_vec(),
+                                    runs: vec![
+                                        orna_storage_v1::BranchMergePairedCheckpointRedoFoldSpillNestedPairedCheckpointCompactionRunSnapshot {
+                                            merge_ordinal: 5,
+                                            source_stream_ordinal: 2,
+                                            fold_ordinal: 4,
+                                            first_order: order,
+                                            last_order: order,
+                                            left: Some(orna_storage_v1::BranchMergePairedCheckpointPinIdentity {
+                                                checkpoint_id: b"f160/pin/left".to_vec(),
+                                                generation: generations[0].clone(),
+                                            }),
+                                            right: Some(orna_storage_v1::BranchMergePairedCheckpointPinIdentity {
+                                                checkpoint_id: b"f160/pin/right".to_vec(),
+                                                generation: generations[1].clone(),
+                                            }),
+                                            redo_fold_identity: orna_storage_v1::BranchMergePairedRedoFoldIdentity {
+                                                left_fold: b"f160/fold/left".to_vec(),
+                                                right_fold: b"f160/fold/right".to_vec(),
+                                            },
+                                            segment_identities,
+                                        },
+                                    ],
+                                },
+                            ],
+                        },
+                        spill_identity: orna_storage_v1::BranchMergePairedSpillIdentity {
+                            left_spill: b"f160/spill-identity/left".to_vec(),
+                            right_spill: b"f160/spill-identity/right".to_vec(),
+                        },
+                    },
+                ]]
+            })
+            .unwrap_or_default();
+        let fold = orna_storage_v1::BranchMergePairedCheckpointRedoFoldSpillNestedSpillIdentityRestoreFoldSnapshot {
+            checkpoint_identity: orna_storage_v1::BranchMergePairedCheckpointIdentity {
+                left_checkpoint: b"f160/checkpoint/inner-left".to_vec(),
+                right_checkpoint: b"f160/checkpoint/inner-right".to_vec(),
+            },
+            restore_fold_identity: b"f160/restore-fold/shared-label".to_vec(),
+            known_checkpoint_ids,
+            restore_batches,
+        };
+        let fold = orna_storage_v1::BranchMergePairedCheckpointRedoFoldSpillNestedRestoreIdentityRestoreFoldSnapshot {
+            restore_identity: orna_storage_v1::BranchMergePairedRestoreIdentity {
+                left_restore: b"f160/restore/inner-left".to_vec(),
+                right_restore: b"f160/restore/inner-right".to_vec(),
+            },
+            restore_fold: fold,
+        };
+        let fold = orna_storage_v1::BranchMergePairedCheckpointRedoFoldSpillNestedRestoreCheckpointIdentityRestoreFoldSnapshot {
+            nested_checkpoint_identity: orna_storage_v1::BranchMergePairedCheckpointIdentity {
+                left_checkpoint: b"f160/checkpoint/fold-left".to_vec(),
+                right_checkpoint: b"f160/checkpoint/fold-right".to_vec(),
+            },
+            restore_fold: fold,
+        };
+        let fold = orna_storage_v1::BranchMergePairedCheckpointRedoFoldSpillNestedOuterSpillIdentityRestoreCheckpointIdentityRestoreFoldSnapshot {
+            outer_spill_identity: orna_storage_v1::BranchMergePairedSpillIdentity {
+                left_spill: b"f160/outer-spill/left".to_vec(),
+                right_spill: b"f160/outer-spill/right".to_vec(),
+            },
+            restore_fold: fold,
+        };
+        let fold = orna_storage_v1::BranchMergePairedCheckpointRedoFoldSpillNestedRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreFoldSnapshot {
+            nested_restore_identity: orna_storage_v1::BranchMergePairedRestoreIdentity {
+                left_restore: b"f160/nested-restore/left".to_vec(),
+                right_restore: b"f160/nested-restore/right".to_vec(),
+            },
+            restore_fold: fold,
+        };
+        let fold = orna_storage_v1::BranchMergePairedCheckpointRedoFoldSpillNestedOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreFoldSnapshot {
+            outer_checkpoint_identity: orna_storage_v1::BranchMergePairedCheckpointIdentity {
+                left_checkpoint: b"f160/outer-checkpoint/left".to_vec(),
+                right_checkpoint: b"f160/outer-checkpoint/right".to_vec(),
+            },
+            restore_fold: fold,
+        };
+        let fold = orna_storage_v1::BranchMergePairedCheckpointRedoFoldSpillNestedSpillIdentityOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreFoldSnapshot {
+            nested_spill_identity: orna_storage_v1::BranchMergePairedSpillIdentity {
+                left_spill: b"f160/nested-spill/left".to_vec(),
+                right_spill: b"f160/nested-spill/right".to_vec(),
+            },
+            restore_fold: fold,
+        };
+        let fold = orna_storage_v1::BranchMergePairedCheckpointRedoFoldSpillNestedOuterRestoreIdentityNestedSpillIdentityOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreFoldSnapshot {
+            outer_restore_identity: orna_storage_v1::BranchMergePairedRestoreIdentity {
+                left_restore: b"f160/outer-restore/left".to_vec(),
+                right_restore: b"f160/outer-restore/right".to_vec(),
+            },
+            restore_fold: fold,
+        };
+        let fold = orna_storage_v1::BranchMergePairedCheckpointRedoFoldSpillNestedCompactionIdentityOuterRestoreIdentityNestedSpillIdentityOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreFoldSnapshot {
+            nested_compaction_identity: orna_storage_v1::BranchMergePairedCompactionIdentity {
+                left_compaction: b"f160/handoff-fold/compaction-left".to_vec(),
+                right_compaction: b"f160/handoff-fold/compaction-right".to_vec(),
+            },
+            restore_fold: fold,
+        };
+        let fold = orna_storage_v1::BranchMergePairedCheckpointRedoFoldSpillNestedCheckpointIdentityNestedCompactionIdentityOuterRestoreIdentityNestedSpillIdentityOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreFoldSnapshot {
+            nested_checkpoint_identity: orna_storage_v1::BranchMergePairedCheckpointIdentity {
+                left_checkpoint: b"f160/nested-checkpoint/left".to_vec(),
+                right_checkpoint: b"f160/nested-checkpoint/right".to_vec(),
+            },
+            restore_fold: fold,
+        };
+        orna_storage_v1::BranchMergePairedCheckpointRedoFoldSpillNestedHandoffIdentityNestedCheckpointIdentityNestedCompactionIdentityOuterRestoreIdentityNestedSpillIdentityOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreFoldSnapshot {
+            nested_handoff_identity: orna_storage_v1::BranchMergePairedHandoffIdentity {
+                left_handoff: b"f160/handoff/left".to_vec(),
+                right_handoff: b"f160/handoff/right".to_vec(),
+            },
+            restore_fold: fold,
+        }
+    };
+    let folds = [
+        make_f159_fold(0, Some(10)),
+        make_f159_fold(1, Some(20)),
+        make_f159_fold(2, None),
+    ]
+    .into_iter()
+    .enumerate()
+    .map(|(row, restore_fold)| {
+        orna_storage_v1::BranchMergePairedCheckpointRedoFoldSpillNestedCompactionIdentityNestedHandoffIdentityNestedCheckpointIdentityNestedCompactionIdentityOuterRestoreIdentityNestedSpillIdentityOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreFoldSnapshot {
+            nested_compaction_identity: compaction_pair(row),
+            restore_fold,
+        }
+    })
+    .collect::<Vec<_>>();
+    let restored = orna_storage_v1::restore_paired_checkpoint_redo_sparse_spill_nested_compaction_identity_nested_handoff_identity_nested_checkpoint_identity_nested_compaction_identity_outer_restore_identity_nested_spill_identity_outer_checkpoint_identity_restore_identity_outer_spill_identity_restore_checkpoint_identity_restore_folds_preserving_pin_identity(&folds).unwrap();
+    let stream = |restore_fold_ordinal, checkpoint_id: &[u8]| {
+        restored
+            .iter()
+            .find(|stream| {
+                stream.restore_fold_ordinal == restore_fold_ordinal
+                    && stream.checkpoint_id == checkpoint_id
+            })
+            .unwrap()
+    };
+    assert_eq!(restored.len(), 4);
+    let main = stream(0, &alpha);
+    let catalog = stream(0, &catalog_only);
+    let retry = stream(1, &alpha);
+    let reused = stream(2, &alpha);
+    assert_ne!(compaction_pair(0), compaction_pair(1));
+    assert_eq!(compaction_pair(0), compaction_pair(2));
+    assert_eq!(main.nested_compaction_identity, compaction_pair(0));
+    assert_eq!(main.slots[0].nested_compaction_identity, compaction_pair(0));
+    assert_eq!(
+        main.slots[0]
+            .restored_slot
+            .nested_handoff_identity
+            .left_handoff,
+        b"f160/handoff/left".to_vec()
+    );
+    assert_eq!(
+        main.handoff_nested_compaction_identity.left_compaction,
+        b"f160/handoff-fold/compaction-left".to_vec()
+    );
+    assert_ne!(
+        main.nested_compaction_identity,
+        main.handoff_nested_compaction_identity
+    );
+    assert_eq!(retry.nested_compaction_identity, compaction_pair(1));
+    assert_eq!(retry.slots[0].nested_compaction_identity, compaction_pair(1));
+    assert_eq!(reused.nested_compaction_identity, compaction_pair(2));
+    assert!(reused.slots.is_empty());
+    assert_eq!(catalog.nested_compaction_identity, compaction_pair(0));
+    assert!(catalog.slots.is_empty());
+
+    let malformed = orna_storage_v1::BranchMergePairedCheckpointRedoFoldSpillNestedCompactionIdentityNestedHandoffIdentityNestedCheckpointIdentityNestedCompactionIdentityOuterRestoreIdentityNestedSpillIdentityOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreFoldSnapshot {
+        nested_compaction_identity: compaction_pair(3),
+        restore_fold: make_f159_fold(3, Some(u64::MAX)),
+    };
+    let expected_source = orna_storage_v1::restore_paired_checkpoint_redo_sparse_spill_nested_handoff_identity_nested_checkpoint_identity_nested_compaction_identity_outer_restore_identity_nested_spill_identity_outer_checkpoint_identity_restore_identity_outer_spill_identity_restore_checkpoint_identity_restore_folds_preserving_pin_identity(&[
+        malformed.restore_fold.clone(),
+    ])
+    .unwrap_err();
+    match orna_storage_v1::restore_paired_checkpoint_redo_sparse_spill_nested_compaction_identity_nested_handoff_identity_nested_checkpoint_identity_nested_compaction_identity_outer_restore_identity_nested_spill_identity_outer_checkpoint_identity_restore_identity_outer_spill_identity_restore_checkpoint_identity_restore_folds_preserving_pin_identity(&[
+        malformed,
+    ])
+    .unwrap_err()
+    {
+        orna_storage_v1::BranchMergePairedCheckpointRedoFoldSpillNestedCompactionIdentityNestedHandoffIdentityNestedCheckpointIdentityNestedCompactionIdentityOuterRestoreIdentityNestedSpillIdentityOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreError::RestoreFold {
+            restore_fold_ordinal,
+            nested_compaction_identity,
+            source,
+        } => {
+            assert_eq!(restore_fold_ordinal, 0);
+            assert_eq!(nested_compaction_identity, compaction_pair(3));
             assert_eq!(source, expected_source);
         }
     }
