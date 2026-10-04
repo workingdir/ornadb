@@ -15,18 +15,16 @@ fn functions() -> Functions {
     {
         add_module_functions(&mut functions, &path, &source);
     }
-    for source in [
-        include_str!("fixtures/iteration-neighbors-ptr1b.orna"),
-        include_str!("fixtures/iteration-target-edges-ptr1b.orna"),
-    ] {
-        add_module_functions(&mut functions, "iteration_proof.orna", source);
-    }
+    add_module_functions(
+        &mut functions,
+        "iteration_proof.orna",
+        include_str!("fixtures/iteration-traversal-ptr1b.orna"),
+    );
     for name in [
         "std.collection.count",
         "std.iteration.fold",
         "std.iteration.depth_first",
-        "iteration_proof.neighbors",
-        "iteration_proof.target_edges",
+        "iteration_proof.traversal_behavior",
     ] {
         assert!(
             functions.contains_key(name),
@@ -71,27 +69,20 @@ fn add_module_functions(functions: &mut Functions, path: &str, source: &str) {
 
 fn assert_true_fixture(fixture: &str) {
     let functions = functions();
-    for expression in fixture.split("&&").map(str::trim) {
-        let parsed = parse_expression(expression);
-        assert!(parsed.is_ok(), "{expression}: {:#?}", parsed.diagnostics);
-        let actual = evaluate_with_functions(
-            &parsed.value,
-            &Environment::new(),
-            &functions,
-            Limits::default(),
-        )
-        .unwrap_or_else(|error| {
-            panic!(
-                "iteration behavior proof failed for `{expression}`: {}",
-                error.code()
-            )
-        });
-        assert_eq!(
-            actual,
-            CanonicalValue::new(Raw::Bool(true)).expect("true is canonical"),
-            "iteration behavior fixture failed: {expression}",
-        );
-    }
+    let parsed = parse_expression(fixture);
+    assert!(parsed.is_ok(), "{:#?}", parsed.diagnostics);
+    let actual = evaluate_with_functions(
+        &parsed.value,
+        &Environment::new(),
+        &functions,
+        Limits::default(),
+    )
+    .unwrap_or_else(|error| panic!("iteration behavior proof failed: {}", error.code()));
+    assert_eq!(
+        actual,
+        CanonicalValue::new(Raw::Bool(true)).expect("true is canonical"),
+        "iteration behavior fixture failed: {fixture}",
+    );
 }
 
 #[test]
@@ -101,5 +92,13 @@ fn finite_folds_preserve_order_and_stop_after_the_boundary() {
 
 #[test]
 fn graph_walks_keep_order_visit_cycles_once_and_short_circuit_reachability() {
-    assert_true_fixture(include_str!("fixtures/iteration-traversal-ptr1b.orna"));
+    // Nested source calls use enough evaluator frames to exceed the test
+    // harness's default worker stack for even this small cyclic graph.
+    std::thread::Builder::new()
+        .name("iteration traversal proof".into())
+        .stack_size(16 * 1024 * 1024)
+        .spawn(|| assert_true_fixture(include_str!("fixtures/iteration-traversal-call-ptr1b.orna")))
+        .expect("traversal proof thread starts")
+        .join()
+        .expect("traversal behavior proof succeeds");
 }
