@@ -676,6 +676,23 @@ mod tests {
     }
 
     #[test]
+    fn tab_indentation_uses_the_same_scalar_column_in_run_and_repl() {
+        let source = "\tmissing";
+        let expected: RunResponse = serde_json::from_str(&run(source)).expect("valid run JSON");
+        assert!(!expected.ok);
+        assert_eq!((expected.errors[0].line, expected.errors[0].col), (1, 2));
+
+        let mut repl = ReplSession::new();
+        assert_eq!(
+            json(&repl.evaluate(source)),
+            serde_json::json!({
+                "kind":"error",
+                "text":run_error_text(&expected)
+            })
+        );
+    }
+
+    #[test]
     fn repl_runtime_errors_match_run_locations_and_recover() {
         let expected: RunResponse =
             serde_json::from_str(&run(REPL_RUNTIME_ERROR_FIXTURE)).expect("valid run JSON");
