@@ -438,7 +438,7 @@ fn live_application_reads_publication_relations_from_durable_runtime_rows() {
     .expect("seed one durable unpublished mutation for relation reads");
     let activation_context = block_on(runtime._state.begin_activation()).unwrap();
     let authority = ApplicationAuthority::new(Catalogue::authoritative_core(), Limits::default());
-    let source = include_str!("../../orna-runtime-v1/tests/fixtures/publication_metadata.orna");
+    let source = include_str!("fixtures/publication_metadata.orna");
     authority
         .admit_module("publication_metadata.orna", source, "main")
         .expect("the real relation source fixture must pass application admission");
