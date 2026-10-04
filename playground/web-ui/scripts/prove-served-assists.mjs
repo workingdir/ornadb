@@ -26,9 +26,10 @@ const lsp = await import(bindingUrl);
 await lsp.default(await wasmResponse.arrayBuffer());
 
 const source = [
-  'use std.math.{increment};',
+  'use std.math.{clamp, increment};',
   'pub fn incremental(value: Int): Int = value + 2;',
   'pub fn exercise(value: Int): Int = increment(value);',
+  'pub fn bounded(value: Int, lower: Int, upper: Int): Int = clamp(value, lower, upper);',
 ].join('\n');
 function positionAt(offset) {
   const prefix = source.slice(0, offset);
@@ -55,5 +56,24 @@ const hoverText = JSON.stringify(hover);
 assert.match(hoverText, /fn increment\(value: Int\): Int/);
 assert.match(hoverText, /exact successor/);
 
+const clampOffset = source.indexOf('clamp(value, lower, upper)');
+assert.notEqual(clampOffset, -1);
+const signaturePosition = positionAt(clampOffset + 'clamp(value, lower, '.length);
+const signature = JSON.parse(lsp.signature_help(
+  source,
+  signaturePosition.line,
+  signaturePosition.character,
+));
+assert.equal(signature.activeSignature, 0);
+assert.equal(signature.activeParameter, 2);
+assert.match(signature.signatures[0].label, /pub fn clamp\(value: Int, lower: Int, upper: Int\): Int/);
+assert.match(JSON.stringify(signature.signatures[0].documentation), /inclusive interval/);
+assert.deepEqual(signature.signatures[0].parameters.map(({ label }) => label), [
+  'value: Int',
+  'lower: Int',
+  'upper: Int',
+]);
+
 console.log('served WASM completion order: increment, incremental; exact match preselected');
 console.log('served WASM hover: std.math.increment signature and documentation verified');
+console.log('served WASM signature help: std.math.clamp active upper parameter and hints verified');

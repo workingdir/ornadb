@@ -11,6 +11,10 @@ use serde_json::{Value, json};
 mod syntax_v1_action_signature_contract;
 #[path = "support/syntax_v1_depth_contract.rs"]
 mod syntax_v1_depth_contract;
+#[path = "support/syntax_v1_folding_selection_contract.rs"]
+mod syntax_v1_folding_selection_contract;
+#[path = "support/syntax_v1_workspace_hierarchy_contract.rs"]
+mod syntax_v1_workspace_hierarchy_contract;
 
 const SOURCE: &str = include_str!("fixtures/expressions-v1.orna");
 const CALL_SOURCE: &str = include_str!("fixtures/call-v1.orna");
@@ -18,6 +22,8 @@ const INCREMENTAL_SOURCE: &str = include_str!("fixtures/incremental-malformed-v1
 const LOCAL_SCOPES_SOURCE: &str = include_str!("fixtures/local-scopes-v1.orna");
 const HOVER_COMPLETION_SOURCE: &str = include_str!("fixtures/hover-completion-v1.orna");
 const EDITOR_HINTS_SOURCE: &str = include_str!("fixtures/editor-lsp-hints.orna");
+const SEMANTIC_TOKEN_DEPTH_SOURCE: &str =
+    include_str!("fixtures/semantic-token-multiline-modifiers-v1.orna");
 const RENAME_PROVIDER_SOURCE: &str = include_str!("fixtures/rename-provider-v1.orna");
 const RENAME_CALLER_SOURCE: &str = include_str!("fixtures/rename-caller-v1.orna");
 const AMBIGUOUS_RENAME_SOURCE: &str = include_str!("fixtures/ambiguous-renames-v1.orna");
@@ -32,6 +38,12 @@ const WORKSPACE_HIERARCHY_PROVIDER_SOURCE: &str =
     include_str!("fixtures/workspace-hierarchy-provider-v1.orna");
 const WORKSPACE_HIERARCHY_CALLER_SOURCE: &str =
     include_str!("fixtures/workspace-hierarchy-caller-v1.orna");
+const CALL_HIERARCHY_DEPTH_PROVIDER_SOURCE: &str =
+    include_str!("fixtures/call-hierarchy-depth-provider-v1.orna");
+const CALL_HIERARCHY_DEPTH_CALLER_SOURCE: &str =
+    include_str!("fixtures/call-hierarchy-depth-caller-v1.orna");
+const CALL_HIERARCHY_DEPTH_MALFORMED_SOURCE: &str =
+    include_str!("fixtures/call-hierarchy-depth-malformed-v1.orna");
 const FOLDING_SELECTION_SOURCE: &str = include_str!("fixtures/folding-selection-v1.orna");
 const DOCUMENT_HIGHLIGHT_CODE_LENS_SOURCE: &str =
     include_str!("fixtures/document-highlight-code-lens-v1.orna");
@@ -184,7 +196,13 @@ fn initialize(client: &mut Client) {
     let modifiers = result["capabilities"]["semanticTokensProvider"]["legend"]["tokenModifiers"]
         .as_array()
         .unwrap();
-    assert!(modifiers.iter().any(|modifier| modifier == "declaration"));
+    assert_eq!(
+        modifiers
+            .iter()
+            .map(|modifier| modifier.as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["declaration", "readonly", "modification"]
+    );
     assert_eq!(
         result["capabilities"]["inlayHintProvider"]["resolveProvider"],
         false
@@ -696,6 +714,69 @@ fn decoded_semantic_tokens(source: &str, response: &Value) -> Vec<(String, u64, 
             )
         })
         .collect()
+}
+
+type DecodedSemanticToken = (usize, usize, usize, String, u64, u64);
+
+fn utf16_boundary_byte(line: &str, utf16_offset: usize) -> usize {
+    let mut current_utf16 = 0;
+    for (byte, character) in line.char_indices() {
+        if current_utf16 == utf16_offset {
+            return byte;
+        }
+        current_utf16 += character.len_utf16();
+        assert!(
+            current_utf16 <= utf16_offset,
+            "semantic token boundary splits a UTF-16 surrogate pair at {utf16_offset} in {line:?}"
+        );
+    }
+    assert_eq!(current_utf16, utf16_offset, "UTF-16 column exceeds line");
+    line.len()
+}
+
+fn decoded_semantic_token_details(source: &str, response: &Value) -> Vec<DecodedSemanticToken> {
+    let data = response["data"].as_array().unwrap();
+    assert_eq!(data.len() % 5, 0, "semantic token data: {response}");
+    let mut line = 0usize;
+    let mut character = 0usize;
+    data.chunks_exact(5)
+        .map(|token| {
+            let delta_line = token[0].as_u64().unwrap() as usize;
+            let delta_start = token[1].as_u64().unwrap() as usize;
+            if delta_line == 0 {
+                character += delta_start;
+            } else {
+                line += delta_line;
+                character = delta_start;
+            }
+            let length = token[2].as_u64().unwrap() as usize;
+            let line_text = source.lines().nth(line).unwrap();
+            let start_byte = utf16_boundary_byte(line_text, character);
+            let end_byte = utf16_boundary_byte(line_text, character + length);
+            (
+                line,
+                character,
+                length,
+                line_text[start_byte..end_byte].to_owned(),
+                token[3].as_u64().unwrap(),
+                token[4].as_u64().unwrap(),
+            )
+        })
+        .collect()
+}
+
+fn semantic_token_at<'a>(
+    source: &str,
+    tokens: &'a [DecodedSemanticToken],
+    byte: usize,
+) -> &'a DecodedSemanticToken {
+    let position = position_at(source, byte);
+    let line = position["line"].as_u64().unwrap() as usize;
+    let character = position["character"].as_u64().unwrap() as usize;
+    tokens
+        .iter()
+        .find(|token| token.0 == line && token.1 == character)
+        .unwrap_or_else(|| panic!("no semantic token at {line}:{character}: {tokens:?}"))
 }
 
 #[test]
@@ -1631,6 +1712,197 @@ fn syntax_v1_semantic_tokens_and_inlay_hints_follow_scope_and_requested_range() 
 }
 
 #[test]
+fn semantic_tokens_split_multiline_comments_and_mark_local_modifications() {
+    let uri = "file:///workspace/semantic-token-multiline-modifiers-v1.orna";
+    let mut client = Client::spawn();
+    initialize(&mut client);
+    let diagnostics = open(&mut client, uri, SEMANTIC_TOKEN_DEPTH_SOURCE);
+    assert!(
+        diagnostics["diagnostics"].as_array().unwrap().is_empty(),
+        "{diagnostics}"
+    );
+
+    let full = client.request(
+        "textDocument/semanticTokens/full",
+        json!({"textDocument":{"uri":uri}}),
+    );
+    let tokens = decoded_semantic_token_details(SEMANTIC_TOKEN_DEPTH_SOURCE, &full);
+    let comments = tokens
+        .iter()
+        .filter(|token| token.4 == 4)
+        .cloned()
+        .collect::<Vec<_>>();
+    let expected_comments = [
+        (3, 4, "/* alpha café 🧭"),
+        (4, 0, "     * beta 🐟"),
+        (5, 0, "     * gamma */"),
+    ];
+    assert_eq!(comments.len(), expected_comments.len(), "{comments:?}");
+    for (token, (line, character, text)) in comments.iter().zip(expected_comments) {
+        assert_eq!(
+            (
+                token.0,
+                token.1,
+                token.2,
+                token.3.as_str(),
+                token.4,
+                token.5
+            ),
+            (line, character, text.encode_utf16().count(), text, 4, 0),
+            "multiline comment segment: {token:?}"
+        );
+    }
+
+    let beta_start = SEMANTIC_TOKEN_DEPTH_SOURCE.find("beta").unwrap();
+    let ranged = client.request(
+        "textDocument/semanticTokens/range",
+        json!({
+            "textDocument":{"uri":uri},
+            "range":range_at(
+                SEMANTIC_TOKEN_DEPTH_SOURCE,
+                beta_start,
+                beta_start + "beta".len()
+            )
+        }),
+    );
+    assert_eq!(
+        decoded_semantic_token_details(SEMANTIC_TOKEN_DEPTH_SOURCE, &ranged),
+        vec![comments[1].clone()],
+        "a range inside a multiline comment returns its complete line segment"
+    );
+
+    let user_declaration = semantic_token_at(
+        SEMANTIC_TOKEN_DEPTH_SOURCE,
+        &tokens,
+        SEMANTIC_TOKEN_DEPTH_SOURCE.find("pub type User").unwrap() + "pub type ".len(),
+    );
+    assert_eq!(
+        (
+            user_declaration.3.as_str(),
+            user_declaration.4,
+            user_declaration.5
+        ),
+        ("User", 6, 3),
+        "declaration + readonly modifier bits"
+    );
+    let type_reference_start =
+        SEMANTIC_TOKEN_DEPTH_SOURCE.find("value: User").unwrap() + "value: ".len();
+    let type_reference =
+        semantic_token_at(SEMANTIC_TOKEN_DEPTH_SOURCE, &tokens, type_reference_start);
+    assert_eq!(
+        (
+            type_reference.3.as_str(),
+            type_reference.4,
+            type_reference.5
+        ),
+        ("User", 6, 2),
+        "resolved type reference readonly modifier bit"
+    );
+
+    let function_declaration_start =
+        SEMANTIC_TOKEN_DEPTH_SOURCE.find("pub fn choose").unwrap() + "pub fn ".len();
+    let function_declaration = semantic_token_at(
+        SEMANTIC_TOKEN_DEPTH_SOURCE,
+        &tokens,
+        function_declaration_start,
+    );
+    assert_eq!(
+        (
+            function_declaration.3.as_str(),
+            function_declaration.4,
+            function_declaration.5
+        ),
+        ("choose", 9, 3),
+        "function declaration + readonly modifier bits"
+    );
+    let function_reference_start =
+        SEMANTIC_TOKEN_DEPTH_SOURCE.find("= choose").unwrap() + "= ".len();
+    let function_reference = semantic_token_at(
+        SEMANTIC_TOKEN_DEPTH_SOURCE,
+        &tokens,
+        function_reference_start,
+    );
+    assert_eq!(
+        (
+            function_reference.3.as_str(),
+            function_reference.4,
+            function_reference.5
+        ),
+        ("choose", 9, 2),
+        "resolved function reference readonly modifier bit"
+    );
+
+    let parameter_declaration_start = SEMANTIC_TOKEN_DEPTH_SOURCE
+        .find("pub fn choose(value")
+        .unwrap()
+        + "pub fn choose(".len();
+    let parameter_declaration = semantic_token_at(
+        SEMANTIC_TOKEN_DEPTH_SOURCE,
+        &tokens,
+        parameter_declaration_start,
+    );
+    assert_eq!(
+        (
+            parameter_declaration.3.as_str(),
+            parameter_declaration.4,
+            parameter_declaration.5
+        ),
+        ("value", 10, 1),
+        "parameter declaration modifier bit"
+    );
+    let parameter_reference_start =
+        SEMANTIC_TOKEN_DEPTH_SOURCE.find("= value").unwrap() + "= ".len();
+    let parameter_reference = semantic_token_at(
+        SEMANTIC_TOKEN_DEPTH_SOURCE,
+        &tokens,
+        parameter_reference_start,
+    );
+    assert_eq!(
+        (
+            parameter_reference.3.as_str(),
+            parameter_reference.4,
+            parameter_reference.5
+        ),
+        ("value", 10, 0),
+        "parameter read must not inherit declaration or write modifiers"
+    );
+
+    let local_declaration_start =
+        SEMANTIC_TOKEN_DEPTH_SOURCE.find("let cached").unwrap() + "let ".len();
+    let local_declaration = semantic_token_at(
+        SEMANTIC_TOKEN_DEPTH_SOURCE,
+        &tokens,
+        local_declaration_start,
+    );
+    assert_eq!(
+        (
+            local_declaration.3.as_str(),
+            local_declaration.4,
+            local_declaration.5
+        ),
+        ("cached", 1, 1),
+        "local declaration modifier bit"
+    );
+    let local_write_start = SEMANTIC_TOKEN_DEPTH_SOURCE.find("cached =").unwrap();
+    let local_write = semantic_token_at(SEMANTIC_TOKEN_DEPTH_SOURCE, &tokens, local_write_start);
+    assert_eq!(
+        (local_write.3.as_str(), local_write.4, local_write.5),
+        ("cached", 1, 4),
+        "resolved assignment target modification bit"
+    );
+    let local_read_start =
+        SEMANTIC_TOKEN_DEPTH_SOURCE.find("cached = cached").unwrap() + "cached = ".len();
+    let local_read = semantic_token_at(SEMANTIC_TOKEN_DEPTH_SOURCE, &tokens, local_read_start);
+    assert_eq!(
+        (local_read.3.as_str(), local_read.4, local_read.5),
+        ("cached", 1, 0),
+        "assignment value reads must not receive the modification modifier"
+    );
+
+    client.shutdown();
+}
+
+#[test]
 fn inline_values_follow_stopped_scope_and_requested_ranges() {
     let uri = "file:///workspace/inline-value-linked-editing-v1.orna";
     let mut client = Client::spawn();
@@ -1850,6 +2122,10 @@ fn workspace_symbols_rank_stably_and_call_hierarchy_tracks_resolved_calls() {
             .is_empty(),
         "{caller_diagnostics}"
     );
+    let hierarchy_positions = syntax_v1_workspace_hierarchy_contract::request_data(
+        WORKSPACE_HIERARCHY_PROVIDER_SOURCE,
+        WORKSPACE_HIERARCHY_CALLER_SOURCE,
+    );
 
     let ranked = client.request("workspace/symbol", json!({"query":"mid"}));
     let ranked_names = ranked
@@ -1860,9 +2136,9 @@ fn workspace_symbols_rank_stably_and_call_hierarchy_tracks_resolved_calls() {
         .collect::<Vec<_>>();
     assert_eq!(ranked_names, ["mid", "remote_mid"], "{ranked}");
     assert_eq!(ranked[0]["containerName"], Value::Null);
+    let ranked_repeat = client.request("workspace/symbol", json!({"query":"mid"}));
     assert_eq!(
-        client.request("workspace/symbol", json!({"query":"mid"})),
-        ranked,
+        ranked_repeat, ranked,
         "workspace symbol order changed between identical requests"
     );
 
@@ -1898,7 +2174,7 @@ fn workspace_symbols_rank_stably_and_call_hierarchy_tracks_resolved_calls() {
         "textDocument/prepareCallHierarchy",
         json!({
             "textDocument":{"uri":provider_uri},
-            "position":position_at(WORKSPACE_HIERARCHY_PROVIDER_SOURCE, root_cursor)
+            "position":hierarchy_positions["root_definition"]
         }),
     );
     assert_eq!(root_item.as_array().unwrap().len(), 1, "{root_item}");
@@ -1970,15 +2246,11 @@ fn workspace_symbols_rank_stably_and_call_hierarchy_tracks_resolved_calls() {
         )
     );
 
-    let seed_cursor = WORKSPACE_HIERARCHY_PROVIDER_SOURCE
-        .find("pub fn seed")
-        .map(|offset| offset + "pub fn ".len())
-        .unwrap();
     let seed_item = client.request(
         "textDocument/prepareCallHierarchy",
         json!({
             "textDocument":{"uri":provider_uri},
-            "position":position_at(WORKSPACE_HIERARCHY_PROVIDER_SOURCE, seed_cursor)
+            "position":hierarchy_positions["seed_definition"]
         }),
     );
     let seed_incoming = client.request("callHierarchy/incomingCalls", json!({"item":seed_item[0]}));
@@ -1991,79 +2263,396 @@ fn workspace_symbols_rank_stably_and_call_hierarchy_tracks_resolved_calls() {
     assert_eq!(seed_incoming[1]["from"]["name"], "root");
     assert_eq!(seed_incoming[1]["fromRanges"].as_array().unwrap().len(), 2);
 
-    let shadow_cursor = WORKSPACE_HIERARCHY_PROVIDER_SOURCE
-        .find("pub fn shadowed")
-        .map(|offset| offset + "pub fn shadowed".len())
-        .unwrap();
     let shadow_item = client.request(
         "textDocument/prepareCallHierarchy",
         json!({
             "textDocument":{"uri":provider_uri},
-            "position":position_at(WORKSPACE_HIERARCHY_PROVIDER_SOURCE, shadow_cursor)
+            "position":hierarchy_positions["shadowed_definition"]
         }),
     );
     assert_eq!(shadow_item[0]["name"], "shadowed");
+    let shadowed_outgoing = client.request(
+        "callHierarchy/outgoingCalls",
+        json!({"item":shadow_item[0]}),
+    );
     assert!(
-        client
-            .request(
-                "callHierarchy/outgoingCalls",
-                json!({"item":shadow_item[0]}),
-            )
-            .as_array()
-            .unwrap()
-            .is_empty(),
+        shadowed_outgoing.as_array().unwrap().is_empty(),
         "local parameter call was resolved as a workspace function"
     );
 
-    let unresolved_cursor = WORKSPACE_HIERARCHY_PROVIDER_SOURCE
-        .find("pub fn unresolved")
-        .map(|offset| offset + "pub fn unresolved".len())
-        .unwrap();
     let unresolved_item = client.request(
         "textDocument/prepareCallHierarchy",
         json!({
             "textDocument":{"uri":provider_uri},
-            "position":position_at(WORKSPACE_HIERARCHY_PROVIDER_SOURCE, unresolved_cursor)
+            "position":hierarchy_positions["unresolved_definition"]
         }),
     );
+    let unresolved_outgoing = client.request(
+        "callHierarchy/outgoingCalls",
+        json!({"item":unresolved_item[0]}),
+    );
     assert!(
-        client
-            .request(
-                "callHierarchy/outgoingCalls",
-                json!({"item":unresolved_item[0]}),
-            )
-            .as_array()
-            .unwrap()
-            .is_empty(),
+        unresolved_outgoing.as_array().unwrap().is_empty(),
         "unresolved call was emitted in the hierarchy"
     );
 
-    let reference_cursor = WORKSPACE_HIERARCHY_CALLER_SOURCE
-        .find("root(value)")
-        .unwrap();
     let prepared_reference = client.request(
         "textDocument/prepareCallHierarchy",
         json!({
             "textDocument":{"uri":caller_uri},
-            "position":position_at(WORKSPACE_HIERARCHY_CALLER_SOURCE, reference_cursor)
+            "position":hierarchy_positions["root_reference"]
         }),
     );
     assert_eq!(prepared_reference[0]["name"], "root");
     assert_eq!(prepared_reference[0]["uri"], provider_uri);
 
-    let ambiguous_cursor = WORKSPACE_HIERARCHY_CALLER_SOURCE
-        .find("collide(value)")
-        .unwrap();
     let ambiguous_reference = client.request(
         "textDocument/prepareCallHierarchy",
         json!({
             "textDocument":{"uri":caller_uri},
-            "position":position_at(WORKSPACE_HIERARCHY_CALLER_SOURCE, ambiguous_cursor)
+            "position":hierarchy_positions["ambiguous_reference"]
         }),
     );
     assert!(
         ambiguous_reference.is_null(),
         "ambiguous function reference unexpectedly resolved: {ambiguous_reference}"
+    );
+    syntax_v1_workspace_hierarchy_contract::assert_contract(
+        WORKSPACE_HIERARCHY_PROVIDER_SOURCE,
+        WORKSPACE_HIERARCHY_CALLER_SOURCE,
+        provider_uri,
+        caller_uri,
+        &json!({
+            "workspace_mid": ranked,
+            "workspace_mid_repeat": ranked_repeat,
+            "workspace_rem": prefix_ranked,
+            "workspace_remi": fuzzy,
+            "call_root_item": root_item,
+            "call_root_outgoing": outgoing,
+            "call_root_incoming": incoming,
+            "call_seed_item": seed_item,
+            "call_seed_incoming": seed_incoming,
+            "call_shadowed_outgoing": shadowed_outgoing,
+            "call_unresolved_outgoing": unresolved_outgoing,
+            "call_root_reference": prepared_reference,
+            "call_ambiguous_reference": ambiguous_reference,
+        }),
+        "LSP protocol",
+    );
+    client.shutdown();
+}
+
+#[test]
+fn prepare_call_hierarchy_and_outgoing_calls_resolve_exact_workspace_calls() {
+    let provider_uri = "file:///workspace/call-hierarchy/provider.orna";
+    let caller_uri = "file:///workspace/call-hierarchy/caller.orna";
+    let mut client = Client::spawn();
+    initialize(&mut client);
+
+    let provider_diagnostics = open(
+        &mut client,
+        provider_uri,
+        CALL_HIERARCHY_DEPTH_PROVIDER_SOURCE,
+    );
+    assert!(
+        provider_diagnostics["diagnostics"]
+            .as_array()
+            .unwrap()
+            .is_empty(),
+        "{provider_diagnostics}"
+    );
+    let caller_diagnostics = open(&mut client, caller_uri, CALL_HIERARCHY_DEPTH_CALLER_SOURCE);
+    assert!(
+        caller_diagnostics["diagnostics"]
+            .as_array()
+            .unwrap()
+            .is_empty(),
+        "{caller_diagnostics}"
+    );
+
+    let caller_name = CALL_HIERARCHY_DEPTH_PROVIDER_SOURCE
+        .find("pub fn caller")
+        .unwrap()
+        + "pub fn ".len();
+    let caller_item = client.request(
+        "textDocument/prepareCallHierarchy",
+        json!({
+            "textDocument":{"uri":provider_uri},
+            "position":position_at(CALL_HIERARCHY_DEPTH_PROVIDER_SOURCE, caller_name)
+        }),
+    );
+    assert_eq!(caller_item.as_array().unwrap().len(), 1, "{caller_item}");
+    assert_eq!(caller_item[0]["name"], "caller");
+    assert_eq!(caller_item[0]["uri"], provider_uri);
+    assert_eq!(
+        caller_item[0]["selectionRange"],
+        range_at(
+            CALL_HIERARCHY_DEPTH_PROVIDER_SOURCE,
+            caller_name,
+            caller_name + "caller".len()
+        )
+    );
+
+    let caller_parameter_start = caller_name + "caller(".len();
+    assert_eq!(
+        client.request(
+            "textDocument/prepareCallHierarchy",
+            json!({
+                "textDocument":{"uri":provider_uri},
+                "position":position_at(CALL_HIERARCHY_DEPTH_PROVIDER_SOURCE, caller_parameter_start)
+            }),
+        ),
+        Value::Null,
+        "a parameter identifier in the function signature is not a call target"
+    );
+
+    let expression_start = CALL_HIERARCHY_DEPTH_PROVIDER_SOURCE
+        .find("= bridge(leaf(value))")
+        .unwrap()
+        + "= ".len();
+    let bridge_start = expression_start;
+    let leaf_start = expression_start + "bridge(".len();
+    let bridge_item = client.request(
+        "textDocument/prepareCallHierarchy",
+        json!({
+            "textDocument":{"uri":provider_uri},
+            "position":position_at(CALL_HIERARCHY_DEPTH_PROVIDER_SOURCE, bridge_start)
+        }),
+    );
+    assert_eq!(bridge_item[0]["name"], "bridge", "{bridge_item}");
+    let leaf_item = client.request(
+        "textDocument/prepareCallHierarchy",
+        json!({
+            "textDocument":{"uri":provider_uri},
+            "position":position_at(CALL_HIERARCHY_DEPTH_PROVIDER_SOURCE, leaf_start)
+        }),
+    );
+    assert_eq!(leaf_item[0]["name"], "leaf", "{leaf_item}");
+    assert_eq!(leaf_item[0]["uri"], provider_uri);
+    let argument_start = leaf_start + "leaf(".len();
+    assert_eq!(
+        client.request(
+            "textDocument/prepareCallHierarchy",
+            json!({
+                "textDocument":{"uri":provider_uri},
+                "position":position_at(CALL_HIERARCHY_DEPTH_PROVIDER_SOURCE, argument_start)
+            }),
+        ),
+        Value::Null,
+        "an argument identifier is not a call target"
+    );
+
+    let outgoing = client.request(
+        "callHierarchy/outgoingCalls",
+        json!({"item":caller_item[0]}),
+    );
+    let pairs = outgoing
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|call| {
+            (
+                call["to"]["name"].as_str().unwrap(),
+                call["fromRanges"].as_array().unwrap().len(),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(pairs, [("leaf", 2), ("bridge", 1)], "{outgoing}");
+    assert!(
+        outgoing
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|call| call["to"]["uri"] == provider_uri),
+        "outgoing target URIs: {outgoing}"
+    );
+    let expected_leaf_ranges = json!([
+        range_at(
+            CALL_HIERARCHY_DEPTH_PROVIDER_SOURCE,
+            leaf_start,
+            leaf_start + "leaf".len()
+        ),
+        range_at(
+            CALL_HIERARCHY_DEPTH_PROVIDER_SOURCE,
+            CALL_HIERARCHY_DEPTH_PROVIDER_SOURCE
+                .find("+ leaf(value)")
+                .unwrap()
+                + "+ ".len(),
+            CALL_HIERARCHY_DEPTH_PROVIDER_SOURCE
+                .find("+ leaf(value)")
+                .unwrap()
+                + "+ ".len()
+                + "leaf".len()
+        )
+    ]);
+    assert_eq!(outgoing[0]["fromRanges"], expected_leaf_ranges);
+    assert_eq!(
+        outgoing[1]["fromRanges"],
+        json!([range_at(
+            CALL_HIERARCHY_DEPTH_PROVIDER_SOURCE,
+            bridge_start,
+            bridge_start + "bridge".len()
+        )])
+    );
+    assert_eq!(
+        client.request(
+            "callHierarchy/outgoingCalls",
+            json!({"item":caller_item[0]}),
+        ),
+        outgoing,
+        "outgoing groups and call-site ranges must be stable"
+    );
+
+    let shadowed_start = CALL_HIERARCHY_DEPTH_PROVIDER_SOURCE
+        .find("= leaf(1)")
+        .unwrap()
+        + "= ".len();
+    assert_eq!(
+        client.request(
+            "textDocument/prepareCallHierarchy",
+            json!({
+                "textDocument":{"uri":provider_uri},
+                "position":position_at(CALL_HIERARCHY_DEPTH_PROVIDER_SOURCE, shadowed_start)
+            }),
+        ),
+        Value::Null,
+        "a local parameter named leaf must shadow the global call target"
+    );
+    let shadowed_name = CALL_HIERARCHY_DEPTH_PROVIDER_SOURCE
+        .find("pub fn shadowed")
+        .unwrap()
+        + "pub fn ".len();
+    let shadowed_item = client.request(
+        "textDocument/prepareCallHierarchy",
+        json!({
+            "textDocument":{"uri":provider_uri},
+            "position":position_at(CALL_HIERARCHY_DEPTH_PROVIDER_SOURCE, shadowed_name)
+        }),
+    );
+    assert!(
+        client
+            .request(
+                "callHierarchy/outgoingCalls",
+                json!({"item":shadowed_item[0]}),
+            )
+            .as_array()
+            .unwrap()
+            .is_empty(),
+        "a parameter call must not be emitted as a workspace call"
+    );
+
+    let remote_name = CALL_HIERARCHY_DEPTH_CALLER_SOURCE
+        .find("pub fn remote")
+        .unwrap()
+        + "pub fn ".len();
+    let remote_item = client.request(
+        "textDocument/prepareCallHierarchy",
+        json!({
+            "textDocument":{"uri":caller_uri},
+            "position":position_at(CALL_HIERARCHY_DEPTH_CALLER_SOURCE, remote_name)
+        }),
+    );
+    let remote_outgoing = client.request(
+        "callHierarchy/outgoingCalls",
+        json!({"item":remote_item[0]}),
+    );
+    assert_eq!(
+        remote_outgoing
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|call| call["to"]["name"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["bridge", "caller"],
+        "cross-file outgoing targets: {remote_outgoing}"
+    );
+    let remote_expression = CALL_HIERARCHY_DEPTH_CALLER_SOURCE
+        .find("= caller(bridge(value))")
+        .unwrap()
+        + "= ".len();
+    assert_eq!(remote_outgoing[0]["to"]["uri"], provider_uri);
+    assert_eq!(
+        remote_outgoing[0]["fromRanges"],
+        json!([range_at(
+            CALL_HIERARCHY_DEPTH_CALLER_SOURCE,
+            remote_expression + "caller(".len(),
+            remote_expression + "caller(".len() + "bridge".len()
+        )])
+    );
+    assert_eq!(remote_outgoing[1]["to"]["uri"], provider_uri);
+    assert_eq!(
+        remote_outgoing[1]["fromRanges"],
+        json!([range_at(
+            CALL_HIERARCHY_DEPTH_CALLER_SOURCE,
+            remote_expression,
+            remote_expression + "caller".len()
+        )])
+    );
+
+    let ambiguous_start = CALL_HIERARCHY_DEPTH_CALLER_SOURCE
+        .find("= collide(value)")
+        .unwrap()
+        + "= ".len();
+    assert_eq!(
+        client.request(
+            "textDocument/prepareCallHierarchy",
+            json!({
+                "textDocument":{"uri":caller_uri},
+                "position":position_at(CALL_HIERARCHY_DEPTH_CALLER_SOURCE, ambiguous_start)
+            }),
+        ),
+        Value::Null,
+        "a call to multiple same-named workspace functions must fail closed"
+    );
+    let ambiguous_name = CALL_HIERARCHY_DEPTH_CALLER_SOURCE
+        .find("pub fn ambiguous")
+        .unwrap()
+        + "pub fn ".len();
+    let ambiguous_item = client.request(
+        "textDocument/prepareCallHierarchy",
+        json!({
+            "textDocument":{"uri":caller_uri},
+            "position":position_at(CALL_HIERARCHY_DEPTH_CALLER_SOURCE, ambiguous_name)
+        }),
+    );
+    assert!(
+        client
+            .request(
+                "callHierarchy/outgoingCalls",
+                json!({"item":ambiguous_item[0]}),
+            )
+            .as_array()
+            .unwrap()
+            .is_empty(),
+        "an ambiguous outgoing target must not be guessed"
+    );
+
+    let malformed_uri = "file:///workspace/call-hierarchy/malformed.orna";
+    let malformed_diagnostics = open(
+        &mut client,
+        malformed_uri,
+        CALL_HIERARCHY_DEPTH_MALFORMED_SOURCE,
+    );
+    assert!(
+        !malformed_diagnostics["diagnostics"]
+            .as_array()
+            .unwrap()
+            .is_empty(),
+        "the malformed fixture must exercise the parser-error path"
+    );
+    let malformed_call = CALL_HIERARCHY_DEPTH_MALFORMED_SOURCE
+        .find("leaf(value)")
+        .unwrap();
+    assert_eq!(
+        client.request(
+            "textDocument/prepareCallHierarchy",
+            json!({
+                "textDocument":{"uri":malformed_uri},
+                "position":position_at(CALL_HIERARCHY_DEPTH_MALFORMED_SOURCE, malformed_call)
+            }),
+        ),
+        Value::Null,
+        "call hierarchy preparation must fail closed on a malformed document"
     );
     client.shutdown();
 }
@@ -2103,12 +2692,14 @@ fn folding_and_selection_ranges_follow_syntax_and_preserve_utf16_positions() {
         diagnostics["diagnostics"].as_array().unwrap().is_empty(),
         "{diagnostics}"
     );
+    let folding_selection_requests =
+        syntax_v1_folding_selection_contract::request_data(FOLDING_SELECTION_SOURCE);
 
-    let folds = client.request(
+    let folds_response = client.request(
         "textDocument/foldingRange",
         json!({"textDocument":{"uri":uri}}),
     );
-    let folds = folds.as_array().unwrap();
+    let folds = folds_response.as_array().unwrap();
     assert!(!folds.is_empty(), "no folding ranges were returned");
     let mut previous = None;
     let mut unique = std::collections::BTreeSet::new();
@@ -2233,20 +2824,14 @@ fn folding_and_selection_ranges_follow_syntax_and_preserve_utf16_positions() {
         .unwrap();
     let marker_end = marker_start + "\"/* string content, never a comment */\"".len();
     let blank_line = FOLDING_SELECTION_SOURCE.find("\n\npub fn compass").unwrap() + 1;
-    let selections = client.request(
+    let selections_response = client.request(
         "textDocument/selectionRange",
         json!({
             "textDocument":{"uri":uri},
-            "positions":[
-                position_at(FOLDING_SELECTION_SOURCE, value_start + 2),
-                position_at(FOLDING_SELECTION_SOURCE, compass_end - 1),
-                position_of(FOLDING_SELECTION_SOURCE, "compass 🧭 remains", "compass ".len()),
-                position_of(FOLDING_SELECTION_SOURCE, "string content", "string ".len()),
-                position_at(FOLDING_SELECTION_SOURCE, blank_line),
-            ]
+            "positions":folding_selection_requests["selection_positions"].clone()
         }),
     );
-    let selections = selections.as_array().unwrap();
+    let selections = selections_response.as_array().unwrap();
     assert_eq!(selections.len(), 5, "{selections:?}");
     let value_chain = selection_chain(&selections[0]);
     assert_eq!(
@@ -2300,6 +2885,12 @@ fn folding_and_selection_ranges_follow_syntax_and_preserve_utf16_positions() {
     assert_eq!(
         blank_chain[1]["range"],
         range_at(FOLDING_SELECTION_SOURCE, 0, FOLDING_SELECTION_SOURCE.len())
+    );
+    syntax_v1_folding_selection_contract::assert_contract(
+        FOLDING_SELECTION_SOURCE,
+        &folds_response,
+        &selections_response,
+        "LSP protocol",
     );
     client.shutdown();
 }

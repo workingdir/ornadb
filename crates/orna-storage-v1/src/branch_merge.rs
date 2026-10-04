@@ -2757,6 +2757,126 @@ pub enum BranchMergePairedCheckpointRedoFoldSpillNestedRewindIdentityNestedCheck
     },
 }
 
+/// One F174 rewind/checkpoint fold chain carrying an outer nested handoff pair.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BranchMergePairedCheckpointRedoFoldSpillNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedRewindIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedCompactionIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCompactionIdentityNestedHandoffIdentityNestedCheckpointIdentityNestedCompactionIdentityOuterRestoreIdentityNestedSpillIdentityOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreFoldSnapshot {
+    pub nested_handoff_identity: BranchMergePairedHandoffIdentity,
+    pub restore_fold: BranchMergePairedCheckpointRedoFoldSpillNestedRewindIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedRewindIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedCompactionIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCompactionIdentityNestedHandoffIdentityNestedCheckpointIdentityNestedCompactionIdentityOuterRestoreIdentityNestedSpillIdentityOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreFoldSnapshot,
+}
+
+/// One restored slot retaining its enclosing nested handoff pair.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BranchMergePairedCheckpointRedoFoldSpillNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedRewindIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedCompactionIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCompactionIdentityNestedHandoffIdentityNestedCheckpointIdentityNestedCompactionIdentityOuterRestoreIdentityNestedSpillIdentityOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreFoldSlotSnapshot {
+    pub nested_handoff_identity: BranchMergePairedHandoffIdentity,
+    pub restored_slot: BranchMergePairedCheckpointRedoFoldSpillNestedRewindIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedRewindIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedCompactionIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCompactionIdentityNestedHandoffIdentityNestedCheckpointIdentityNestedCompactionIdentityOuterRestoreIdentityNestedSpillIdentityOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreFoldSlotSnapshot,
+}
+
+/// One stream retaining the outer handoff pair and F174 chain identities.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BranchMergePairedCheckpointRedoFoldSpillNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedRewindIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedCompactionIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCompactionIdentityNestedHandoffIdentityNestedCheckpointIdentityNestedCompactionIdentityOuterRestoreIdentityNestedSpillIdentityOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreFoldStreamSnapshot {
+    pub restore_fold_ordinal: usize,
+    pub nested_handoff_identity: BranchMergePairedHandoffIdentity,
+    pub nested_rewind_identity: BranchMergePairedUndoChainIdentity,
+    pub nested_checkpoint_identity: BranchMergePairedCheckpointIdentity,
+    pub checkpoint_handoff_chain_nested_rewind_identity: BranchMergePairedUndoChainIdentity,
+    pub rewind_checkpoint_nested_handoff_identity: BranchMergePairedHandoffIdentity,
+    pub handoff_rewind_chain_nested_checkpoint_identity: BranchMergePairedCheckpointIdentity,
+    pub rewind_handoff_chain_nested_rewind_identity: BranchMergePairedUndoChainIdentity,
+    pub handoff_chain_nested_rewind_identity: BranchMergePairedUndoChainIdentity,
+    pub rewind_checkpoint_chain_nested_handoff_identity: BranchMergePairedHandoffIdentity,
+    pub rewind_handoff_chain_nested_checkpoint_identity: BranchMergePairedCheckpointIdentity,
+    pub rewind_chain_nested_handoff_identity: BranchMergePairedHandoffIdentity,
+    pub nested_compaction_identity: BranchMergePairedCompactionIdentity,
+    pub handoff_chain_nested_checkpoint_identity: BranchMergePairedCheckpointIdentity,
+    pub checkpoint_nested_handoff_identity: BranchMergePairedHandoffIdentity,
+    pub checkpoint_nested_rewind_identity: BranchMergePairedUndoChainIdentity,
+    pub checkpoint_nested_compaction_identity: BranchMergePairedCompactionIdentity,
+    pub rewind_nested_handoff_identity: BranchMergePairedHandoffIdentity,
+    pub handoff_nested_checkpoint_identity: BranchMergePairedCheckpointIdentity,
+    pub handoff_nested_compaction_identity: BranchMergePairedCompactionIdentity,
+    pub outer_restore_identity: BranchMergePairedRestoreIdentity,
+    pub nested_spill_identity: BranchMergePairedSpillIdentity,
+    pub outer_checkpoint_identity: BranchMergePairedCheckpointIdentity,
+    pub nested_restore_identity: BranchMergePairedRestoreIdentity,
+    pub outer_spill_identity: BranchMergePairedSpillIdentity,
+    pub fold_nested_checkpoint_identity: BranchMergePairedCheckpointIdentity,
+    pub restore_identity: BranchMergePairedRestoreIdentity,
+    pub checkpoint_identity: BranchMergePairedCheckpointIdentity,
+    pub restore_fold_identity: Vec<u8>,
+    pub checkpoint_id: CheckpointId,
+    pub slots: Vec<BranchMergePairedCheckpointRedoFoldSpillNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedRewindIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedCompactionIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCompactionIdentityNestedHandoffIdentityNestedCheckpointIdentityNestedCompactionIdentityOuterRestoreIdentityNestedSpillIdentityOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreFoldSlotSnapshot>,
+}
+
+/// A malformed F174 fold tagged with its enclosing nested handoff pair.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum BranchMergePairedCheckpointRedoFoldSpillNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedRewindIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedCompactionIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCompactionIdentityNestedHandoffIdentityNestedCheckpointIdentityNestedCompactionIdentityOuterRestoreIdentityNestedSpillIdentityOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreError {
+    RestoreFold {
+        restore_fold_ordinal: usize,
+        nested_handoff_identity: BranchMergePairedHandoffIdentity,
+        source: BranchMergePairedCheckpointRedoFoldSpillNestedRewindIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedRewindIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedCompactionIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCompactionIdentityNestedHandoffIdentityNestedCheckpointIdentityNestedCompactionIdentityOuterRestoreIdentityNestedSpillIdentityOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreError,
+    },
+}
+
+/// One F175 checkpoint-chain fold handoff carrying an outer nested rewind pair.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BranchMergePairedCheckpointRedoFoldSpillNestedRewindIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedRewindIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedCompactionIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCompactionIdentityNestedHandoffIdentityNestedCheckpointIdentityNestedCompactionIdentityOuterRestoreIdentityNestedSpillIdentityOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreFoldSnapshot {
+    pub nested_rewind_identity: BranchMergePairedUndoChainIdentity,
+    pub restore_fold: BranchMergePairedCheckpointRedoFoldSpillNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedRewindIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedCompactionIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCompactionIdentityNestedHandoffIdentityNestedCheckpointIdentityNestedCompactionIdentityOuterRestoreIdentityNestedSpillIdentityOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreFoldSnapshot,
+}
+
+/// One restored slot retaining its enclosing nested rewind pair.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BranchMergePairedCheckpointRedoFoldSpillNestedRewindIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedRewindIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedCompactionIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCompactionIdentityNestedHandoffIdentityNestedCheckpointIdentityNestedCompactionIdentityOuterRestoreIdentityNestedSpillIdentityOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreFoldSlotSnapshot {
+    pub nested_rewind_identity: BranchMergePairedUndoChainIdentity,
+    pub restored_slot: BranchMergePairedCheckpointRedoFoldSpillNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedRewindIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedCompactionIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCompactionIdentityNestedHandoffIdentityNestedCheckpointIdentityNestedCompactionIdentityOuterRestoreIdentityNestedSpillIdentityOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreFoldSlotSnapshot,
+}
+
+/// One stream retaining the outer rewind pair and F175 chain identities.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BranchMergePairedCheckpointRedoFoldSpillNestedRewindIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedRewindIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedCompactionIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCompactionIdentityNestedHandoffIdentityNestedCheckpointIdentityNestedCompactionIdentityOuterRestoreIdentityNestedSpillIdentityOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreFoldStreamSnapshot {
+    pub restore_fold_ordinal: usize,
+    pub nested_rewind_identity: BranchMergePairedUndoChainIdentity,
+    pub nested_handoff_identity: BranchMergePairedHandoffIdentity,
+    pub checkpoint_chain_nested_rewind_identity: BranchMergePairedUndoChainIdentity,
+    pub nested_checkpoint_identity: BranchMergePairedCheckpointIdentity,
+    pub checkpoint_handoff_chain_nested_rewind_identity: BranchMergePairedUndoChainIdentity,
+    pub rewind_checkpoint_nested_handoff_identity: BranchMergePairedHandoffIdentity,
+    pub handoff_rewind_chain_nested_checkpoint_identity: BranchMergePairedCheckpointIdentity,
+    pub rewind_handoff_chain_nested_rewind_identity: BranchMergePairedUndoChainIdentity,
+    pub handoff_chain_nested_rewind_identity: BranchMergePairedUndoChainIdentity,
+    pub rewind_checkpoint_chain_nested_handoff_identity: BranchMergePairedHandoffIdentity,
+    pub rewind_handoff_chain_nested_checkpoint_identity: BranchMergePairedCheckpointIdentity,
+    pub rewind_chain_nested_handoff_identity: BranchMergePairedHandoffIdentity,
+    pub nested_compaction_identity: BranchMergePairedCompactionIdentity,
+    pub handoff_chain_nested_checkpoint_identity: BranchMergePairedCheckpointIdentity,
+    pub checkpoint_nested_handoff_identity: BranchMergePairedHandoffIdentity,
+    pub checkpoint_nested_rewind_identity: BranchMergePairedUndoChainIdentity,
+    pub checkpoint_nested_compaction_identity: BranchMergePairedCompactionIdentity,
+    pub rewind_nested_handoff_identity: BranchMergePairedHandoffIdentity,
+    pub handoff_nested_checkpoint_identity: BranchMergePairedCheckpointIdentity,
+    pub handoff_nested_compaction_identity: BranchMergePairedCompactionIdentity,
+    pub outer_restore_identity: BranchMergePairedRestoreIdentity,
+    pub nested_spill_identity: BranchMergePairedSpillIdentity,
+    pub outer_checkpoint_identity: BranchMergePairedCheckpointIdentity,
+    pub nested_restore_identity: BranchMergePairedRestoreIdentity,
+    pub outer_spill_identity: BranchMergePairedSpillIdentity,
+    pub fold_nested_checkpoint_identity: BranchMergePairedCheckpointIdentity,
+    pub restore_identity: BranchMergePairedRestoreIdentity,
+    pub checkpoint_identity: BranchMergePairedCheckpointIdentity,
+    pub restore_fold_identity: Vec<u8>,
+    pub checkpoint_id: CheckpointId,
+    pub slots: Vec<BranchMergePairedCheckpointRedoFoldSpillNestedRewindIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedRewindIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedCompactionIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCompactionIdentityNestedHandoffIdentityNestedCheckpointIdentityNestedCompactionIdentityOuterRestoreIdentityNestedSpillIdentityOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreFoldSlotSnapshot>,
+}
+
+/// A malformed F175 fold tagged with its enclosing nested rewind pair.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum BranchMergePairedCheckpointRedoFoldSpillNestedRewindIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedRewindIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedCompactionIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCompactionIdentityNestedHandoffIdentityNestedCheckpointIdentityNestedCompactionIdentityOuterRestoreIdentityNestedSpillIdentityOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreError {
+    RestoreFold {
+        restore_fold_ordinal: usize,
+        nested_rewind_identity: BranchMergePairedUndoChainIdentity,
+        source: BranchMergePairedCheckpointRedoFoldSpillNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedRewindIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedCompactionIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCompactionIdentityNestedHandoffIdentityNestedCheckpointIdentityNestedCompactionIdentityOuterRestoreIdentityNestedSpillIdentityOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreError,
+    },
+}
 /// One paired-checkpoint compaction run retaining its independent replay pair.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BranchMergePairedCheckpointRedoFoldSpillNestedRestoreReplayIdentityRunSnapshot {
@@ -10176,6 +10296,167 @@ pub fn restore_paired_checkpoint_redo_sparse_spill_nested_rewind_identity_nested
                 nested_checkpoint_identity: stream.nested_checkpoint_identity,
                 checkpoint_handoff_chain_nested_rewind_identity: stream.nested_rewind_identity,
                 nested_handoff_identity: stream.nested_handoff_identity,
+                handoff_rewind_chain_nested_checkpoint_identity: stream.handoff_rewind_chain_nested_checkpoint_identity,
+                rewind_handoff_chain_nested_rewind_identity: stream.rewind_handoff_chain_nested_rewind_identity,
+                handoff_chain_nested_rewind_identity: stream.handoff_chain_nested_rewind_identity,
+                rewind_checkpoint_chain_nested_handoff_identity: stream.rewind_checkpoint_chain_nested_handoff_identity,
+                rewind_handoff_chain_nested_checkpoint_identity: stream.rewind_handoff_chain_nested_checkpoint_identity,
+                rewind_chain_nested_handoff_identity: stream.rewind_chain_nested_handoff_identity,
+                nested_compaction_identity: stream.nested_compaction_identity,
+                handoff_chain_nested_checkpoint_identity: stream.handoff_chain_nested_checkpoint_identity,
+                checkpoint_nested_handoff_identity: stream.checkpoint_nested_handoff_identity,
+                checkpoint_nested_rewind_identity: stream.checkpoint_nested_rewind_identity,
+                checkpoint_nested_compaction_identity: stream.checkpoint_nested_compaction_identity,
+                rewind_nested_handoff_identity: stream.rewind_nested_handoff_identity,
+                handoff_nested_checkpoint_identity: stream.handoff_nested_checkpoint_identity,
+                handoff_nested_compaction_identity: stream.handoff_nested_compaction_identity,
+                outer_restore_identity: stream.outer_restore_identity,
+                nested_spill_identity: stream.nested_spill_identity,
+                outer_checkpoint_identity: stream.outer_checkpoint_identity,
+                nested_restore_identity: stream.nested_restore_identity,
+                outer_spill_identity: stream.outer_spill_identity,
+                fold_nested_checkpoint_identity: stream.fold_nested_checkpoint_identity,
+                restore_identity: stream.restore_identity,
+                checkpoint_identity: stream.checkpoint_identity,
+                restore_fold_identity: stream.restore_fold_identity,
+                checkpoint_id: stream.checkpoint_id,
+                slots,
+            }
+        })
+        .collect())
+}
+
+/// Restores F174 rewind/checkpoint fold chains with an independent nested
+/// handoff pair.
+///
+/// The supplied handoff pair is retained on every stream and slot, including
+/// empty catalogue streams. It remains distinct from the F172 handoff identity
+/// already carried by the F174 chain, and errors preserve F174's source.
+pub fn restore_paired_checkpoint_redo_sparse_spill_nested_handoff_identity_nested_rewind_identity_nested_checkpoint_identity_nested_handoff_identity_nested_rewind_identity_nested_checkpoint_identity_nested_rewind_identity_nested_handoff_identity_nested_rewind_identity_nested_checkpoint_identity_nested_handoff_identity_nested_compaction_identity_nested_checkpoint_identity_nested_handoff_identity_nested_rewind_identity_nested_compaction_identity_nested_handoff_identity_nested_checkpoint_identity_nested_compaction_identity_outer_restore_identity_nested_spill_identity_outer_checkpoint_identity_restore_identity_outer_spill_identity_restore_checkpoint_identity_restore_folds_preserving_pin_identity(
+    restore_folds: &[BranchMergePairedCheckpointRedoFoldSpillNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedRewindIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedCompactionIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCompactionIdentityNestedHandoffIdentityNestedCheckpointIdentityNestedCompactionIdentityOuterRestoreIdentityNestedSpillIdentityOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreFoldSnapshot],
+) -> Result<Vec<BranchMergePairedCheckpointRedoFoldSpillNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedRewindIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedCompactionIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCompactionIdentityNestedHandoffIdentityNestedCheckpointIdentityNestedCompactionIdentityOuterRestoreIdentityNestedSpillIdentityOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreFoldStreamSnapshot>, BranchMergePairedCheckpointRedoFoldSpillNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedRewindIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedCompactionIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCompactionIdentityNestedHandoffIdentityNestedCheckpointIdentityNestedCompactionIdentityOuterRestoreIdentityNestedSpillIdentityOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreError> {
+    let inner_folds = restore_folds
+        .iter()
+        .map(|fold| fold.restore_fold.clone())
+        .collect::<Vec<_>>();
+    let restored = restore_paired_checkpoint_redo_sparse_spill_nested_rewind_identity_nested_checkpoint_identity_nested_handoff_identity_nested_rewind_identity_nested_checkpoint_identity_nested_rewind_identity_nested_handoff_identity_nested_rewind_identity_nested_checkpoint_identity_nested_handoff_identity_nested_compaction_identity_nested_checkpoint_identity_nested_handoff_identity_nested_rewind_identity_nested_compaction_identity_nested_handoff_identity_nested_checkpoint_identity_nested_compaction_identity_outer_restore_identity_nested_spill_identity_outer_checkpoint_identity_restore_identity_outer_spill_identity_restore_checkpoint_identity_restore_folds_preserving_pin_identity(&inner_folds).map_err(|source| {
+        let restore_fold_ordinal = match &source {
+            BranchMergePairedCheckpointRedoFoldSpillNestedRewindIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedRewindIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedCompactionIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCompactionIdentityNestedHandoffIdentityNestedCheckpointIdentityNestedCompactionIdentityOuterRestoreIdentityNestedSpillIdentityOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreError::RestoreFold {
+                restore_fold_ordinal,
+                ..
+            } => *restore_fold_ordinal,
+        };
+        BranchMergePairedCheckpointRedoFoldSpillNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedRewindIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedCompactionIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCompactionIdentityNestedHandoffIdentityNestedCheckpointIdentityNestedCompactionIdentityOuterRestoreIdentityNestedSpillIdentityOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreError::RestoreFold {
+            restore_fold_ordinal,
+            nested_handoff_identity: restore_folds[restore_fold_ordinal]
+                .nested_handoff_identity
+                .clone(),
+            source,
+        }
+    })?;
+
+    Ok(restored
+        .into_iter()
+        .map(|stream| {
+            let nested_handoff_identity = restore_folds[stream.restore_fold_ordinal]
+                .nested_handoff_identity
+                .clone();
+            let slots = stream
+                .slots
+                .into_iter()
+                .map(|restored_slot| BranchMergePairedCheckpointRedoFoldSpillNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedRewindIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedCompactionIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCompactionIdentityNestedHandoffIdentityNestedCheckpointIdentityNestedCompactionIdentityOuterRestoreIdentityNestedSpillIdentityOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreFoldSlotSnapshot {
+                    nested_handoff_identity: nested_handoff_identity.clone(),
+                    restored_slot,
+                })
+                .collect();
+            BranchMergePairedCheckpointRedoFoldSpillNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedRewindIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedCompactionIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCompactionIdentityNestedHandoffIdentityNestedCheckpointIdentityNestedCompactionIdentityOuterRestoreIdentityNestedSpillIdentityOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreFoldStreamSnapshot {
+                restore_fold_ordinal: stream.restore_fold_ordinal,
+                nested_handoff_identity,
+                nested_rewind_identity: stream.nested_rewind_identity,
+                nested_checkpoint_identity: stream.nested_checkpoint_identity,
+                checkpoint_handoff_chain_nested_rewind_identity: stream.checkpoint_handoff_chain_nested_rewind_identity,
+                rewind_checkpoint_nested_handoff_identity: stream.nested_handoff_identity,
+                handoff_rewind_chain_nested_checkpoint_identity: stream.handoff_rewind_chain_nested_checkpoint_identity,
+                rewind_handoff_chain_nested_rewind_identity: stream.rewind_handoff_chain_nested_rewind_identity,
+                handoff_chain_nested_rewind_identity: stream.handoff_chain_nested_rewind_identity,
+                rewind_checkpoint_chain_nested_handoff_identity: stream.rewind_checkpoint_chain_nested_handoff_identity,
+                rewind_handoff_chain_nested_checkpoint_identity: stream.rewind_handoff_chain_nested_checkpoint_identity,
+                rewind_chain_nested_handoff_identity: stream.rewind_chain_nested_handoff_identity,
+                nested_compaction_identity: stream.nested_compaction_identity,
+                handoff_chain_nested_checkpoint_identity: stream.handoff_chain_nested_checkpoint_identity,
+                checkpoint_nested_handoff_identity: stream.checkpoint_nested_handoff_identity,
+                checkpoint_nested_rewind_identity: stream.checkpoint_nested_rewind_identity,
+                checkpoint_nested_compaction_identity: stream.checkpoint_nested_compaction_identity,
+                rewind_nested_handoff_identity: stream.rewind_nested_handoff_identity,
+                handoff_nested_checkpoint_identity: stream.handoff_nested_checkpoint_identity,
+                handoff_nested_compaction_identity: stream.handoff_nested_compaction_identity,
+                outer_restore_identity: stream.outer_restore_identity,
+                nested_spill_identity: stream.nested_spill_identity,
+                outer_checkpoint_identity: stream.outer_checkpoint_identity,
+                nested_restore_identity: stream.nested_restore_identity,
+                outer_spill_identity: stream.outer_spill_identity,
+                fold_nested_checkpoint_identity: stream.fold_nested_checkpoint_identity,
+                restore_identity: stream.restore_identity,
+                checkpoint_identity: stream.checkpoint_identity,
+                restore_fold_identity: stream.restore_fold_identity,
+                checkpoint_id: stream.checkpoint_id,
+                slots,
+            }
+        })
+        .collect())
+}
+
+/// Restores F175 checkpoint-chain fold handoffs with an independent nested
+/// rewind pair.
+///
+/// The supplied rewind pair is retained on every stream and slot, including
+/// empty catalogue streams. It remains distinct from F174's rewind identity
+/// already carried by the F175 chain, and errors preserve F175's source.
+pub fn restore_paired_checkpoint_redo_sparse_spill_nested_rewind_identity_nested_handoff_identity_nested_rewind_identity_nested_checkpoint_identity_nested_handoff_identity_nested_rewind_identity_nested_checkpoint_identity_nested_rewind_identity_nested_handoff_identity_nested_rewind_identity_nested_checkpoint_identity_nested_handoff_identity_nested_compaction_identity_nested_checkpoint_identity_nested_handoff_identity_nested_rewind_identity_nested_compaction_identity_nested_handoff_identity_nested_checkpoint_identity_nested_compaction_identity_outer_restore_identity_nested_spill_identity_outer_checkpoint_identity_restore_identity_outer_spill_identity_restore_checkpoint_identity_restore_folds_preserving_pin_identity(
+    restore_folds: &[BranchMergePairedCheckpointRedoFoldSpillNestedRewindIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedRewindIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedCompactionIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCompactionIdentityNestedHandoffIdentityNestedCheckpointIdentityNestedCompactionIdentityOuterRestoreIdentityNestedSpillIdentityOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreFoldSnapshot],
+) -> Result<Vec<BranchMergePairedCheckpointRedoFoldSpillNestedRewindIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedRewindIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedCompactionIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCompactionIdentityNestedHandoffIdentityNestedCheckpointIdentityNestedCompactionIdentityOuterRestoreIdentityNestedSpillIdentityOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreFoldStreamSnapshot>, BranchMergePairedCheckpointRedoFoldSpillNestedRewindIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedRewindIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedCompactionIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCompactionIdentityNestedHandoffIdentityNestedCheckpointIdentityNestedCompactionIdentityOuterRestoreIdentityNestedSpillIdentityOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreError> {
+    let inner_folds = restore_folds
+        .iter()
+        .map(|fold| fold.restore_fold.clone())
+        .collect::<Vec<_>>();
+    let restored = restore_paired_checkpoint_redo_sparse_spill_nested_handoff_identity_nested_rewind_identity_nested_checkpoint_identity_nested_handoff_identity_nested_rewind_identity_nested_checkpoint_identity_nested_rewind_identity_nested_handoff_identity_nested_rewind_identity_nested_checkpoint_identity_nested_handoff_identity_nested_compaction_identity_nested_checkpoint_identity_nested_handoff_identity_nested_rewind_identity_nested_compaction_identity_nested_handoff_identity_nested_checkpoint_identity_nested_compaction_identity_outer_restore_identity_nested_spill_identity_outer_checkpoint_identity_restore_identity_outer_spill_identity_restore_checkpoint_identity_restore_folds_preserving_pin_identity(&inner_folds).map_err(|source| {
+        let restore_fold_ordinal = match &source {
+            BranchMergePairedCheckpointRedoFoldSpillNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedRewindIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedCompactionIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCompactionIdentityNestedHandoffIdentityNestedCheckpointIdentityNestedCompactionIdentityOuterRestoreIdentityNestedSpillIdentityOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreError::RestoreFold {
+                restore_fold_ordinal,
+                ..
+            } => *restore_fold_ordinal,
+        };
+        BranchMergePairedCheckpointRedoFoldSpillNestedRewindIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedRewindIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedCompactionIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCompactionIdentityNestedHandoffIdentityNestedCheckpointIdentityNestedCompactionIdentityOuterRestoreIdentityNestedSpillIdentityOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreError::RestoreFold {
+            restore_fold_ordinal,
+            nested_rewind_identity: restore_folds[restore_fold_ordinal]
+                .nested_rewind_identity
+                .clone(),
+            source,
+        }
+    })?;
+
+    Ok(restored
+        .into_iter()
+        .map(|stream| {
+            let nested_rewind_identity = restore_folds[stream.restore_fold_ordinal]
+                .nested_rewind_identity
+                .clone();
+            let slots = stream
+                .slots
+                .into_iter()
+                .map(|restored_slot| BranchMergePairedCheckpointRedoFoldSpillNestedRewindIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedRewindIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedCompactionIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCompactionIdentityNestedHandoffIdentityNestedCheckpointIdentityNestedCompactionIdentityOuterRestoreIdentityNestedSpillIdentityOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreFoldSlotSnapshot {
+                    nested_rewind_identity: nested_rewind_identity.clone(),
+                    restored_slot,
+                })
+                .collect();
+            BranchMergePairedCheckpointRedoFoldSpillNestedRewindIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedRewindIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedCompactionIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCompactionIdentityNestedHandoffIdentityNestedCheckpointIdentityNestedCompactionIdentityOuterRestoreIdentityNestedSpillIdentityOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreFoldStreamSnapshot {
+                restore_fold_ordinal: stream.restore_fold_ordinal,
+                nested_rewind_identity,
+                nested_handoff_identity: stream.nested_handoff_identity,
+                checkpoint_chain_nested_rewind_identity: stream.nested_rewind_identity,
+                nested_checkpoint_identity: stream.nested_checkpoint_identity,
+                checkpoint_handoff_chain_nested_rewind_identity: stream.checkpoint_handoff_chain_nested_rewind_identity,
+                rewind_checkpoint_nested_handoff_identity: stream.rewind_checkpoint_nested_handoff_identity,
                 handoff_rewind_chain_nested_checkpoint_identity: stream.handoff_rewind_chain_nested_checkpoint_identity,
                 rewind_handoff_chain_nested_rewind_identity: stream.rewind_handoff_chain_nested_rewind_identity,
                 handoff_chain_nested_rewind_identity: stream.handoff_chain_nested_rewind_identity,
