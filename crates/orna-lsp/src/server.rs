@@ -20,8 +20,9 @@ use lsp_types::{
     ReferenceParams, RelatedFullDocumentDiagnosticReport, RenameParams, SemanticTokens,
     SemanticTokensFullOptions, SemanticTokensLegend, SemanticTokensOptions, SemanticTokensParams,
     SemanticTokensRangeParams, SemanticTokensServerCapabilities, ServerCapabilities,
-    SignatureHelpOptions, TextDocumentSyncCapability, TextDocumentSyncKind,
-    TextDocumentSyncOptions, TextDocumentSyncSaveOptions, TextEdit, Uri, WorkspaceEdit,
+    SignatureHelpOptions, TextDocumentContentChangeEvent, TextDocumentSyncCapability,
+    TextDocumentSyncKind, TextDocumentSyncOptions, TextDocumentSyncSaveOptions, TextEdit, Uri,
+    WorkspaceEdit,
 };
 
 /// Transport threads for the server's standard input and output streams.
@@ -202,7 +203,7 @@ fn server_capabilities() -> ServerCapabilities {
         text_document_sync: Some(TextDocumentSyncCapability::Options(
             TextDocumentSyncOptions {
                 open_close: Some(true),
-                change: Some(TextDocumentSyncKind::FULL),
+                change: Some(TextDocumentSyncKind::INCREMENTAL),
                 will_save: None,
                 will_save_wait_until: None,
                 save: Some(TextDocumentSyncSaveOptions::Supported(true)),
@@ -314,14 +315,19 @@ fn handle_notification(
             ) else {
                 return false;
             };
-            if let Some(change) = params.content_changes.last() {
-                let uri = params.text_document.uri.clone();
-                if let Some(document) = state.documents.get_mut(&uri) {
-                    document.text = change.text.clone();
-                    document.version = params.text_document.version;
-                }
-                publish_diagnostics(state, connection, &uri);
+            let uri = params.text_document.uri.clone();
+            let Some(document) = state.documents.get_mut(&uri) else {
+                return false;
+            };
+            if params.text_document.version <= document.version {
+                return false;
             }
+            let Some(text) = apply_content_changes(&document.text, &params.content_changes) else {
+                return false;
+            };
+            document.text = text;
+            document.version = params.text_document.version;
+            publish_diagnostics(state, connection, &uri);
             false
         }
         "textDocument/didSave" => {
@@ -352,6 +358,30 @@ fn handle_notification(
         }
         _ => false,
     }
+}
+
+/// Applies one ordered `didChange` batch to a candidate copy of the current
+/// source. Ranged changes use UTF-16 positions against the text produced by
+/// all preceding changes in the batch, as required by LSP.
+fn apply_content_changes(
+    source: &str,
+    changes: &[TextDocumentContentChangeEvent],
+) -> Option<String> {
+    let mut candidate = source.to_owned();
+    for change in changes {
+        let Some(range) = change.range else {
+            candidate = change.text.clone();
+            continue;
+        };
+        let mapper = PositionMapper::new(&candidate);
+        let start = mapper.byte_offset(range.start);
+        let end = mapper.byte_offset(range.end);
+        if start > end || !candidate.is_char_boundary(start) || !candidate.is_char_boundary(end) {
+            return None;
+        }
+        candidate.replace_range(start..end, &change.text);
+    }
+    Some(candidate)
 }
 
 /// Recomputes and publishes the diagnostics for one document.
@@ -686,10 +716,19 @@ fn persistent_declaration_ranges(
     text: &str,
     mapper: &PositionMapper<'_>,
 ) -> Vec<(Range, Range)> {
-    analysis::declaration_symbols(parse, text)
+    let mut declarations = analysis::declaration_symbols(parse, text)
         .into_iter()
         .map(|symbol| (mapper.range(&symbol.full), mapper.range(&symbol.selection)))
-        .collect()
+        .collect::<Vec<_>>();
+    declarations.extend(
+        analysis::local_declaration_spans(parse)
+            .into_iter()
+            .map(|span| {
+                let selection = mapper.range(&span);
+                (selection.clone(), selection)
+            }),
+    );
+    declarations
 }
 
 fn valid_rename_identifier(new_name: &str) -> bool {
@@ -727,6 +766,19 @@ fn rename_preserves_unique_resolution(
         .any(|pair| pair[0].1 > pair[1].0 || pair[0].0 == pair[1].0)
     {
         return false;
+    }
+
+    let mut expected_ranges = Vec::with_capacity(byte_edits.len());
+    let mut prior_shift = 0i128;
+    for (start, end) in &byte_edits {
+        let Ok(updated_start) = usize::try_from(*start as i128 + prior_shift) else {
+            return false;
+        };
+        let Some(updated_end) = updated_start.checked_add(new_name.len()) else {
+            return false;
+        };
+        expected_ranges.push((updated_start, updated_end));
+        prior_shift += new_name.len() as i128 - (end - start) as i128;
     }
 
     let target_start = mapper.byte_offset(target_name_range.start);
@@ -773,6 +825,19 @@ fn rename_preserves_unique_resolution(
         &updated_mapper,
         true,
     );
+    let mut resolved_ranges = Vec::with_capacity(updated_references.len());
+    for reference in &updated_references {
+        let start = updated_mapper.byte_offset(reference.range.start);
+        let end = updated_mapper.byte_offset(reference.range.end);
+        if start >= end || end > updated_document.text.len() {
+            return false;
+        }
+        resolved_ranges.push((start, end));
+    }
+    resolved_ranges.sort_unstable();
+    if resolved_ranges != expected_ranges {
+        return false;
+    }
     updated_references
         .iter()
         .filter(|reference| {
