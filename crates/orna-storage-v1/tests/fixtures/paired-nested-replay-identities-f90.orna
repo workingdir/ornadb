@@ -1,0 +1,7 @@
+{ id: "f90/replay/pair-0", name: "f90/left/replay-main", city: "f90/right/replay-alpha", }
+
+{ id: "f90/replay/pair-1", name: "f90/left/replay-retry", city: "f90/right/replay-beta", }
+
+{ id: "f90/replay/pair-2", name: "f90/left/replay-late", city: "f90/right/replay-gamma", }
+
+{ id: "f90/replay/pair-3", name: "f90/left/replay-malformed", city: "f90/right/replay-delta", }
