@@ -184,7 +184,7 @@ try {
   if (checkOnly) {
     if (stale.length || changed.length) {
       for (const rowPath of stale) console.error(`Stale playground DB row: ${rowPath}`);
-      for (const [rowPath] of changed) console.error(`Missing or stale playground Asset row: ${rowPath}`);
+      for (const [rowPath] of changed) console.error(`Missing or stale playground DB row: ${rowPath}`);
       process.exitCode = 1;
     } else {
       console.log(`Verified ${counts.Asset} Asset, ${counts.Entry} Entry, and ${counts.Route} Route rows (${totalContentBytes} asset bytes).`);
