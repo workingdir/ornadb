@@ -7167,17 +7167,19 @@ fn explain_query_core_with_wal_rotation_chains(
                     &spill_restore_chain_fold,
                 );
             }
-            if let Some(spill_window_chain_fold) =
-                query_paired_bounded_window_spill_window_chain_fold(
-                    &bounded_spill_fold,
-                    window_cost_restoration_fold,
-                )
-            {
-                add_paired_bounded_window_spill_window_chain_fold_details(
-                    &mut details,
-                    &spill_window_chain_fold,
-                );
-            }
+        }
+        if let Some(spill_window_chain_fold) =
+            query_paired_bounded_window_spill_window_chain_fold(
+                &query.source,
+                join_pair_identities,
+                window_aggregates,
+                window_spills,
+            )
+        {
+            add_paired_bounded_window_spill_window_chain_fold_details(
+                &mut details,
+                &spill_window_chain_fold,
+            );
         }
         current = push_unary(
             &mut operators,
@@ -11380,30 +11382,154 @@ fn add_paired_bounded_window_spill_restore_chain_fold_details(
     }
 }
 
-/// Binds the finite-frame spill component to the exact cumulative paired
-/// window-chain fold. Restore-chain changes remain in their own component;
-/// sparse joins carry the same window fold until another paired window arrives.
+/// Binds finite-frame spills to exact paired window chains, independently of
+/// the optional cost-restoration chains. Sparse inputs do not advance either
+/// cumulative component.
 fn query_paired_bounded_window_spill_window_chain_fold(
-    spill_restore_fold: &QueryPairedBoundedWindowSpillRestoreFold,
-    window_cost_restoration_fold: &QueryPairedWindowCostRestorationFold,
+    anchor: &ObjectRef,
+    pairs: &[QueryJoinPairIdentityDescription],
+    window_aggregates: &[QueryWindowAggregatePushdownDescription],
+    window_spills: &[QueryWindowSpillDescription],
 ) -> Option<QueryPairedBoundedWindowSpillWindowChainFold> {
-    if window_cost_restoration_fold.window_pair_count == 0 {
+    let mut window_chain_identities = BTreeMap::new();
+    let mut spill_pair_identities = BTreeMap::new();
+    let mut totals = QueryAggregateSpillTotals {
+        stage_count: 0,
+        unknown_working_set_count: 0,
+        estimated_bytes: Some(0),
+        estimated_io_blocks: Some(0),
+        estimated_io_work: Some(0),
+        overflowed: false,
+    };
+    for pair in pairs {
+        if pair.left_source != *anchor {
+            continue;
+        }
+        let Some(window_chain_identity) =
+            query_window_pushdown_chain_identity(&pair.right_source, window_aggregates)
+        else {
+            continue;
+        };
+        window_chain_identities.insert(pair.identity.as_str().to_owned(), window_chain_identity);
+
+        let bounded_aggregates = window_aggregates
+            .iter()
+            .filter(|aggregate| {
+                aggregate.source == pair.right_source
+                    && !matches!(
+                        aggregate.frame_start,
+                        PlanWindowFrameBound::UnboundedPreceding
+                            | PlanWindowFrameBound::UnboundedFollowing
+                    )
+                    && !matches!(
+                        aggregate.frame_end,
+                        PlanWindowFrameBound::UnboundedPreceding
+                            | PlanWindowFrameBound::UnboundedFollowing
+                    )
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        if bounded_aggregates.is_empty() {
+            continue;
+        }
+        let Some(pair_totals) = query_aggregate_spill_totals(
+            pair,
+            &pair.right_source,
+            &bounded_aggregates,
+            window_spills,
+        ) else {
+            continue;
+        };
+        let Some(spill_chain_identity) = query_window_spill_chain_identity(
+            pair,
+            &pair.right_source,
+            &bounded_aggregates,
+            window_spills,
+        ) else {
+            continue;
+        };
+        spill_pair_identities.insert(pair.identity.as_str().to_owned(), spill_chain_identity);
+        totals.stage_count = totals
+            .stage_count
+            .checked_add(pair_totals.stage_count)
+            .unwrap_or_else(|| {
+                totals.overflowed = true;
+                u64::MAX
+            });
+        totals.unknown_working_set_count = totals
+            .unknown_working_set_count
+            .checked_add(pair_totals.unknown_working_set_count)
+            .unwrap_or_else(|| {
+                totals.overflowed = true;
+                u64::MAX
+            });
+        query_accumulate_spill_estimate(
+            &mut totals.estimated_bytes,
+            pair_totals.estimated_bytes,
+            &mut totals.overflowed,
+        );
+        query_accumulate_spill_estimate(
+            &mut totals.estimated_io_blocks,
+            pair_totals.estimated_io_blocks,
+            &mut totals.overflowed,
+        );
+        query_accumulate_spill_estimate(
+            &mut totals.estimated_io_work,
+            pair_totals.estimated_io_work,
+            &mut totals.overflowed,
+        );
+        totals.overflowed |= pair_totals.overflowed;
+    }
+    if window_chain_identities.is_empty() || spill_pair_identities.is_empty() {
         return None;
     }
-    let window_fold_identity = window_cost_restoration_fold
-        .window_fold_identity
-        .as_deref()?;
-    let window_identity_count = window_cost_restoration_fold.window_identities.len() as u64;
-    let overflowed = spill_restore_fold.overflowed || window_cost_restoration_fold.overflowed;
+
+    let mut count_overflowed = false;
+    let spill_pair_count = u64::try_from(spill_pair_identities.len()).unwrap_or_else(|_| {
+        count_overflowed = true;
+        u64::MAX
+    });
+    let window_pair_count = u64::try_from(window_chain_identities.len()).unwrap_or_else(|_| {
+        count_overflowed = true;
+        u64::MAX
+    });
+    let window_identity_count = window_pair_count;
+    let overflowed = totals.overflowed || count_overflowed;
+
+    let mut spill_hash = Sha256::new();
+    spill_hash.update(b"orna.sys.query-paired-bounded-window-spill-fold.v1\0");
+    spill_hash.update(spill_pair_count.to_be_bytes());
+    for (pair_identity, spill_chain_identity) in &spill_pair_identities {
+        hash_part(&mut spill_hash, pair_identity.as_bytes());
+        hash_part(&mut spill_hash, spill_chain_identity.as_bytes());
+    }
+    hash_query_aggregate_spill_totals(&mut spill_hash, totals);
+    let spill_fold_identity = format!(
+        "paired-bounded-window-spill-fold:{}",
+        hex(&spill_hash.finalize())
+    );
+
+    let mut window_hash = Sha256::new();
+    window_hash.update(b"orna.sys.query-paired-window-chain-fold.v1\0");
+    window_hash.update(window_pair_count.to_be_bytes());
+    for (pair_identity, window_chain_identity) in &window_chain_identities {
+        hash_part(&mut window_hash, pair_identity.as_bytes());
+        hash_part(&mut window_hash, window_chain_identity.as_bytes());
+    }
+    let window_fold_identity = format!(
+        "paired-window-chain-fold:{}",
+        hex(&window_hash.finalize())
+    );
+
     let mut hash = Sha256::new();
     hash.update(b"orna.sys.query-paired-bounded-window-spill-window-chain.v1\0");
-    hash_part(&mut hash, spill_restore_fold.spill_fold_identity.as_bytes());
+    hash_part(&mut hash, spill_fold_identity.as_bytes());
     hash_part(&mut hash, window_fold_identity.as_bytes());
-    hash.update(spill_restore_fold.spill_pair_count.to_be_bytes());
-    hash.update(spill_restore_fold.spill_stage_count.to_be_bytes());
-    hash.update(window_cost_restoration_fold.window_pair_count.to_be_bytes());
+    hash.update(spill_pair_count.to_be_bytes());
+    hash.update(totals.stage_count.to_be_bytes());
+    hash.update(window_pair_count.to_be_bytes());
     hash.update(window_identity_count.to_be_bytes());
-    hash_query_aggregate_spill_totals(&mut hash, spill_restore_fold.totals);
+    hash_query_aggregate_spill_totals(&mut hash, totals);
     hash.update([u8::from(overflowed)]);
 
     Some(QueryPairedBoundedWindowSpillWindowChainFold {
@@ -11411,13 +11537,13 @@ fn query_paired_bounded_window_spill_window_chain_fold(
             "paired-bounded-window-spill-window-chain:{}",
             hex(&hash.finalize())
         ),
-        spill_fold_identity: spill_restore_fold.spill_fold_identity.clone(),
-        window_fold_identity: window_fold_identity.to_owned(),
-        spill_pair_count: spill_restore_fold.spill_pair_count,
-        spill_stage_count: spill_restore_fold.spill_stage_count,
-        window_pair_count: window_cost_restoration_fold.window_pair_count,
+        spill_fold_identity,
+        window_fold_identity,
+        spill_pair_count,
+        spill_stage_count: totals.stage_count,
+        window_pair_count,
         window_identity_count,
-        totals: spill_restore_fold.totals,
+        totals,
         overflowed,
     })
 }
