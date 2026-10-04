@@ -1,0 +1,1 @@
+{ id: "asset-6173736574732f73657276652d686f6d652e6d6a73", path: "assets/serve-home.mjs", media_type: "text/javascript; charset=utf-8", content: "globalThis.ornaHomeReady = true;" }
