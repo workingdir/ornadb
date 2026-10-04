@@ -7111,6 +7111,20 @@ fn explain_query_core_with_wal_rotation_chains(
         if current_cardinality.rows.is_some() && work.is_none() {
             record_work_overflow(&mut details);
         }
+        if let Some(spill_restoration_fold) = paired_aggregate_spill_restoration_fold.as_ref() {
+            let projection_fold = query_paired_bounded_projection_spill_restoration_fold(
+                &query.projections,
+                current_cardinality.rows,
+                query.limit,
+                work,
+                current_cardinality.rows.is_some() && work.is_none(),
+                spill_restoration_fold,
+            );
+            add_paired_bounded_projection_spill_restoration_fold_details(
+                &mut details,
+                &projection_fold,
+            );
+        }
         current = push_unary(
             &mut operators,
             current,
@@ -9010,6 +9024,22 @@ struct QueryPairedAggregateSpillRestorationFold {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+struct QueryPairedBoundedProjectionSpillRestorationFold {
+    identity: String,
+    projection_identity: String,
+    spill_restoration_fold_identity: String,
+    projection_count: u64,
+    input_rows: Option<u64>,
+    result_row_upper_bound: Option<u64>,
+    estimated_projection_work: Option<u64>,
+    aggregate_pair_count: u64,
+    aggregate_stage_count: u64,
+    spill_pair_count: u64,
+    spill_stage_count: u64,
+    overflowed: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 struct QueryPairedWindowCompactionSpillFold {
     identity: String,
     window_pair_count: u64,
@@ -10474,6 +10504,147 @@ fn add_paired_aggregate_spill_restoration_fold_details(
         } else {
             details.remove(key);
         }
+    }
+}
+
+/// Binds the ordered projection list to the cumulative paired spill-restore
+/// history. The final limit caps returned rows, but projection work is still
+/// charged against the pre-limit cardinality because Project precedes Limit.
+fn query_paired_bounded_projection_spill_restoration_fold(
+    projections: &[ExpressionRef],
+    input_rows: Option<u64>,
+    result_limit: Option<u64>,
+    estimated_projection_work: Option<u64>,
+    projection_work_overflowed: bool,
+    spill_restoration_fold: &QueryPairedAggregateSpillRestorationFold,
+) -> QueryPairedBoundedProjectionSpillRestorationFold {
+    let mut projection_hash = Sha256::new();
+    projection_hash.update(b"orna.sys.query-projection-chain.v1\0");
+    projection_hash.update((projections.len() as u64).to_be_bytes());
+    for projection in projections {
+        hash_part(&mut projection_hash, projection.as_str().as_bytes());
+    }
+    let projection_identity = format!("projection-chain:{}", hex(&projection_hash.finalize()));
+    let result_row_upper_bound = match (input_rows, result_limit) {
+        (Some(rows), Some(limit)) => Some(rows.min(limit)),
+        (Some(rows), None) => Some(rows),
+        (None, Some(limit)) => Some(limit),
+        (None, None) => None,
+    };
+    let overflowed = projection_work_overflowed || spill_restoration_fold.overflowed;
+
+    let mut hash = Sha256::new();
+    hash.update(b"orna.sys.query-paired-bounded-projection-spill-restoration.v1\0");
+    hash_part(&mut hash, projection_identity.as_bytes());
+    hash_part(&mut hash, spill_restoration_fold.identity.as_bytes());
+    hash.update((projections.len() as u64).to_be_bytes());
+    hash_optional_u64(&mut hash, input_rows);
+    hash_optional_u64(&mut hash, result_limit);
+    hash_optional_u64(&mut hash, result_row_upper_bound);
+    hash_optional_u64(&mut hash, estimated_projection_work);
+    hash.update(spill_restoration_fold.aggregate_pair_count.to_be_bytes());
+    hash.update(spill_restoration_fold.aggregate_stage_count.to_be_bytes());
+    hash.update(spill_restoration_fold.spill_pair_count.to_be_bytes());
+    hash.update(
+        spill_restoration_fold
+            .spill_totals
+            .map_or(0, |totals| totals.stage_count)
+            .to_be_bytes(),
+    );
+    hash.update([u8::from(overflowed)]);
+
+    QueryPairedBoundedProjectionSpillRestorationFold {
+        identity: format!(
+            "paired-bounded-projection-spill-restoration:{}",
+            hex(&hash.finalize())
+        ),
+        projection_identity,
+        spill_restoration_fold_identity: spill_restoration_fold.identity.clone(),
+        projection_count: projections.len() as u64,
+        input_rows,
+        result_row_upper_bound,
+        estimated_projection_work,
+        aggregate_pair_count: spill_restoration_fold.aggregate_pair_count,
+        aggregate_stage_count: spill_restoration_fold.aggregate_stage_count,
+        spill_pair_count: spill_restoration_fold.spill_pair_count,
+        spill_stage_count: spill_restoration_fold
+            .spill_totals
+            .map_or(0, |totals| totals.stage_count),
+        overflowed,
+    }
+}
+
+fn add_paired_bounded_projection_spill_restoration_fold_details(
+    details: &mut BTreeMap<String, PlanDetail>,
+    fold: &QueryPairedBoundedProjectionSpillRestorationFold,
+) {
+    for (key, value) in [
+        (
+            "paired_bounded_projection_spill_restoration_fold_identity",
+            fold.identity.as_str(),
+        ),
+        (
+            "paired_bounded_projection_spill_restoration_projection_identity",
+            fold.projection_identity.as_str(),
+        ),
+        (
+            "paired_bounded_projection_spill_restoration_spill_fold_identity",
+            fold.spill_restoration_fold_identity.as_str(),
+        ),
+    ] {
+        details.insert(key.to_owned(), PlanDetail::Text(value.to_owned()));
+    }
+    details.insert(
+        "paired_bounded_projection_spill_restoration_pairing".to_owned(),
+        PlanDetail::Text(
+            "ordered_projection_chain_with_cumulative_paired_spill_restoration".to_owned(),
+        ),
+    );
+    for (key, value) in [
+        (
+            "paired_bounded_projection_spill_restoration_projection_count",
+            fold.projection_count,
+        ),
+        (
+            "paired_bounded_projection_spill_restoration_aggregate_pair_count",
+            fold.aggregate_pair_count,
+        ),
+        (
+            "paired_bounded_projection_spill_restoration_aggregate_stage_count",
+            fold.aggregate_stage_count,
+        ),
+        (
+            "paired_bounded_projection_spill_restoration_spill_pair_count",
+            fold.spill_pair_count,
+        ),
+        (
+            "paired_bounded_projection_spill_restoration_spill_stage_count",
+            fold.spill_stage_count,
+        ),
+    ] {
+        details.insert(key.to_owned(), PlanDetail::Integer(value));
+    }
+    details.insert(
+        "paired_bounded_projection_spill_restoration_overflowed".to_owned(),
+        PlanDetail::Boolean(fold.overflowed),
+    );
+    if let Some(rows) = fold.input_rows {
+        details.insert(
+            "paired_bounded_projection_spill_restoration_input_rows".to_owned(),
+            PlanDetail::Integer(rows),
+        );
+    }
+    if let Some(rows) = fold.result_row_upper_bound {
+        details.insert(
+            "paired_bounded_projection_spill_restoration_result_row_upper_bound".to_owned(),
+            PlanDetail::Integer(rows),
+        );
+    }
+    if let Some(work) = fold.estimated_projection_work {
+        details.insert(
+            "paired_bounded_projection_spill_restoration_estimated_projection_work".to_owned(),
+            PlanDetail::Integer(work),
+        );
     }
 }
 
