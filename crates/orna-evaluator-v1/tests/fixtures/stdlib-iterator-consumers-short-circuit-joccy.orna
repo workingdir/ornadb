@@ -1,0 +1,45 @@
+std.iterator.consumers.any(
+    std.iterator.from_list([1, 2, 3, 4]),
+    value => if value == 3 {
+        true
+    } else if value < 3 {
+        false
+    } else {
+        fail(error(code: "consumer.any.overread", message: "any continued after a match"))
+    }
+)
+&& std.iterator.consumers.all(
+    std.iterator.from_list([1, 2, 3, 4]),
+    value => if value == 3 {
+        false
+    } else if value < 3 {
+        true
+    } else {
+        fail(error(code: "consumer.all.overread", message: "all continued after rejection"))
+    }
+) == false
+&& std.iterator.consumers.find(
+    std.iterator.from_list([1, 2, 3, 4]),
+    value => if value == 3 {
+        true
+    } else if value < 3 {
+        false
+    } else {
+        fail(error(code: "consumer.find.overread", message: "find continued after a match"))
+    }
+) == Some(3)
+&& std.iterator.consumers.position(
+    std.iterator.from_list([1, 2, 3, 4]),
+    value => if value == 3 {
+        true
+    } else if value < 3 {
+        false
+    } else {
+        fail(error(code: "consumer.position.overread", message: "position continued after a match"))
+    }
+) == Some(2)
+&& !std.iterator.consumers.any(std.iterator.empty(), value => true)
+&& std.iterator.consumers.all(std.iterator.empty(), value => false)
+
+&& std.iterator.consumers.find(std.iterator.empty(), value => true) == null
+&& std.iterator.consumers.position(std.iterator.empty(), value => true) == null

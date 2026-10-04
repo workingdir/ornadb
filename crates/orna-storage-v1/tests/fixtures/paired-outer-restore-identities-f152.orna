@@ -1,0 +1,7 @@
+{ id: "f152/outer-restore/main", name: "f152/left/restore-main", city: "f152/right/restore-alpha", }
+
+{ id: "f152/outer-restore/retry", name: "f152/left/restore-retry", city: "f152/right/restore-beta", }
+
+{ id: "f152/outer-restore/reused", name: "f152/left/restore-main", city: "f152/right/restore-alpha", }
+
+{ id: "f152/outer-restore/malformed", name: "f152/left/restore-malformed", city: "f152/right/restore-delta", }
