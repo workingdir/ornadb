@@ -3,7 +3,8 @@ pub table Sample(id: Str) {
     source: Str,
 }
 
-pub table Asset(path: Str) {
+pub table Asset(id: Str) {
+    path: Str,
     media_type: Str,
-    bytes_base64: Str,
+    content: Str,
 }
