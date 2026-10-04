@@ -1,0 +1,17 @@
+pub protocol Clash {
+    fn conflict(self): Str;
+}
+
+pub type Remote {
+    impl Renderable {
+        fn render(self): Str = "remote";
+    }
+}
+
+pub type AmbiguousConsumer {
+    impl Clash {
+        fn conflict(self): Str = "ambiguous";
+    }
+}
+
+pub fn accept(value: Document): Document = value;

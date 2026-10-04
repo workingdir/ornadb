@@ -1,0 +1,5 @@
+{ id: "nested-handoff/base", name: "outer/handoff-left-a", city: "outer/handoff-right-a" }
+
+{ id: "nested-handoff/reused", name: "outer/handoff-left-a", city: "outer/handoff-right-a" }
+
+{ id: "nested-handoff/distinct", name: "outer/handoff-left-b", city: "outer/handoff-right-b" }

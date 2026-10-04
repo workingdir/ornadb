@@ -1,0 +1,1 @@
+{ id: "asset-6173736574732f73657276652d706c617967726f756e642e6d6a73", path: "assets/serve-playground.mjs", media_type: "text/javascript; charset=utf-8", content: "globalThis.ornaPlaygroundRun = true;" }

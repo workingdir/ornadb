@@ -1,0 +1,2 @@
+fn optional_times_ten_after_one(value: Int): Int? =
+    if value > 1 { Some(value * 10) } else { null };
