@@ -1,0 +1,7 @@
+{ id: "handoff/a", name: "left/handoff-a", city: "right/handoff-a" }
+
+{ id: "handoff/a-duplicate", name: "left/handoff-a", city: "right/handoff-a" }
+
+{ id: "handoff/b", name: "left/handoff-b", city: "right/handoff-b" }
+
+{ id: "handoff/c", name: "left/handoff-c", city: "right/handoff-c" }
