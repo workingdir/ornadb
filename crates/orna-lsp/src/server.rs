@@ -9,20 +9,20 @@ use std::thread::{self, JoinHandle};
 
 use crate::analysis::{self, EditorParse as Parse};
 use crate::documents::{Document, PositionMapper};
-use crate::semantic;
+use crate::{inlay, semantic};
 use lsp_server::{Connection, ErrorCode, Message, Notification, Request, Response, ResponseError};
 use lsp_types::{
     CompletionOptions, CompletionParams, CompletionResponse, DiagnosticOptions,
     DiagnosticServerCapabilities, DocumentDiagnosticParams, DocumentDiagnosticReport,
     DocumentSymbolParams, DocumentSymbolResponse, FullDocumentDiagnosticReport,
     GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverParams, HoverProviderCapability,
-    InitializeParams, OneOf, Position, PositionEncodingKind, PublishDiagnosticsParams, Range,
-    ReferenceParams, RelatedFullDocumentDiagnosticReport, RenameParams, SemanticTokens,
-    SemanticTokensFullOptions, SemanticTokensLegend, SemanticTokensOptions, SemanticTokensParams,
-    SemanticTokensRangeParams, SemanticTokensServerCapabilities, ServerCapabilities,
-    SignatureHelpOptions, TextDocumentContentChangeEvent, TextDocumentSyncCapability,
-    TextDocumentSyncKind, TextDocumentSyncOptions, TextDocumentSyncSaveOptions, TextEdit, Uri,
-    WorkspaceEdit,
+    InitializeParams, InlayHintOptions, InlayHintParams, InlayHintServerCapabilities, OneOf,
+    Position, PositionEncodingKind, PublishDiagnosticsParams, Range, ReferenceParams,
+    RelatedFullDocumentDiagnosticReport, RenameParams, SemanticTokens, SemanticTokensFullOptions,
+    SemanticTokensLegend, SemanticTokensOptions, SemanticTokensParams, SemanticTokensRangeParams,
+    SemanticTokensServerCapabilities, ServerCapabilities, SignatureHelpOptions,
+    TextDocumentContentChangeEvent, TextDocumentSyncCapability, TextDocumentSyncKind,
+    TextDocumentSyncOptions, TextDocumentSyncSaveOptions, TextEdit, Uri, WorkspaceEdit,
 };
 
 /// Transport threads for the server's standard input and output streams.
@@ -228,13 +228,19 @@ fn server_capabilities() -> ServerCapabilities {
             SemanticTokensOptions {
                 legend: SemanticTokensLegend {
                     token_types: semantic::legend(),
-                    token_modifiers: Vec::new(),
+                    token_modifiers: semantic::modifiers(),
                 },
                 range: Some(true),
                 full: Some(SemanticTokensFullOptions::Bool(true)),
                 work_done_progress_options: Default::default(),
             },
         )),
+        inlay_hint_provider: Some(OneOf::Right(InlayHintServerCapabilities::Options(
+            InlayHintOptions {
+                resolve_provider: Some(false),
+                ..InlayHintOptions::default()
+            },
+        ))),
         diagnostic_provider: Some(DiagnosticServerCapabilities::Options(DiagnosticOptions {
             identifier: None,
             inter_file_dependencies: false,
@@ -258,6 +264,7 @@ fn handle_request(state: &mut ServerState, connection: &Connection, request: Req
         "textDocument/documentSymbol" => request_document_symbols(state, request),
         "textDocument/semanticTokens/full" => request_semantic_tokens_full(state, request),
         "textDocument/semanticTokens/range" => request_semantic_tokens_range(state, request),
+        "textDocument/inlayHint" => request_inlay_hints(state, request),
         "textDocument/completion" => request_completion(state, request),
         "workspace/symbol" => request_workspace_symbols(state, request),
         "textDocument/diagnostic" => request_document_diagnostic(state, request),
@@ -934,6 +941,24 @@ fn request_semantic_tokens_range(
         result_id: None,
         data,
     })?)
+}
+
+fn request_inlay_hints(
+    state: &mut ServerState,
+    request: Request,
+) -> Result<serde_json::Value, Box<dyn std::error::Error + Send + Sync>> {
+    let (_, params) = request.extract::<InlayHintParams>("textDocument/inlayHint")?;
+    let Some(document) = state.document(&params.text_document.uri) else {
+        return Ok(serde_json::Value::Null);
+    };
+    let parse = analysis::parse_document(document);
+    let mapper = PositionMapper::new(&document.text);
+    Ok(serde_json::to_value(inlay::inlay_hints(
+        &parse,
+        &document.text,
+        &mapper,
+        &params.range,
+    ))?)
 }
 
 fn request_completion(
