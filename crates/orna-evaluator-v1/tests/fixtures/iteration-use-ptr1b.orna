@@ -1,5 +1,4 @@
 use std.iteration as iteration;
-use std.collection as collection;
 
 fn neighbors(node: Int): [Int] = case node {
     1: [2, 3, 2],
