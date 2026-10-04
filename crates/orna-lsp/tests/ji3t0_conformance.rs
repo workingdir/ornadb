@@ -21,6 +21,8 @@ mod hover_semantic_contract;
 mod syntax_v1_action_signature_contract;
 #[path = "support/syntax_v1_depth_contract.rs"]
 mod syntax_v1_depth_contract;
+#[path = "support/syntax_v1_folding_selection_contract.rs"]
+mod syntax_v1_folding_selection_contract;
 #[path = "support/syntax_v1_workspace_hierarchy_contract.rs"]
 mod syntax_v1_workspace_hierarchy_contract;
 
@@ -32,6 +34,7 @@ const WORKSPACE_HIERARCHY_PROVIDER_SOURCE: &str =
     include_str!("fixtures/workspace-hierarchy-provider-v1.orna");
 const WORKSPACE_HIERARCHY_CALLER_SOURCE: &str =
     include_str!("fixtures/workspace-hierarchy-caller-v1.orna");
+const FOLDING_SELECTION_SOURCE: &str = include_str!("fixtures/folding-selection-v1.orna");
 const INVALID_SOURCE: &str = include_str!("fixtures/ji3t0-invalid-v1.orna");
 
 const LEGACY_SYNTAX_WORDS: &[&str] = &[
@@ -581,6 +584,8 @@ fn neovim_loads_generated_v1_syntax_and_queries_the_lsp_server() {
         root.join("crates/orna-lsp/tests/fixtures/workspace-hierarchy-provider-v1.orna");
     let workspace_caller_fixture =
         root.join("crates/orna-lsp/tests/fixtures/workspace-hierarchy-caller-v1.orna");
+    let folding_selection_fixture =
+        root.join("crates/orna-lsp/tests/fixtures/folding-selection-v1.orna");
     assert_eq!(
         fs::read_to_string(&workspace_provider_fixture).unwrap(),
         WORKSPACE_HIERARCHY_PROVIDER_SOURCE
@@ -593,6 +598,12 @@ fn neovim_loads_generated_v1_syntax_and_queries_the_lsp_server() {
         WORKSPACE_HIERARCHY_PROVIDER_SOURCE,
         WORKSPACE_HIERARCHY_CALLER_SOURCE,
     );
+    assert_eq!(
+        fs::read_to_string(&folding_selection_fixture).unwrap(),
+        FOLDING_SELECTION_SOURCE
+    );
+    let folding_selection_requests =
+        syntax_v1_folding_selection_contract::request_data(FOLDING_SELECTION_SOURCE);
     let script = temporary_path("lua");
     let result_path = temporary_path("result");
     let completion_result_path = temporary_path("completion.json");
@@ -937,6 +948,25 @@ local call_ambiguous_reference = hierarchy_request("textDocument/prepareCallHier
   textDocument = { uri = workspace_caller_uri },
   position = workspace_hierarchy_requests.ambiguous_reference,
 }, workspace_caller_bufnr)
+
+vim.cmd("edit " .. vim.fn.fnameescape(vim.env.ORNA_FOLDING_SELECTION_FIXTURE))
+local folding_bufnr = vim.api.nvim_get_current_buf()
+assert(vim.bo[folding_bufnr].filetype == "orna", "folding/selection fixture did not select the orna filetype")
+assert(vim.wait(5000, function()
+  for _, attached in ipairs(vim.lsp.get_clients({ bufnr = folding_bufnr })) do
+    if attached.name == "orna" and attached.initialized then client = attached; return true end
+  end
+  return false
+end, 10), "folding/selection fixture did not attach to orna-lsp")
+local folding_uri = vim.uri_from_bufnr(folding_bufnr)
+local folding_ranges = hierarchy_request("textDocument/foldingRange", {
+  textDocument = { uri = folding_uri },
+}, folding_bufnr)
+local folding_selection_requests = vim.fn.json_decode(vim.env.ORNA_FOLDING_SELECTION_REQUESTS)
+local selection_ranges = hierarchy_request("textDocument/selectionRange", {
+  textDocument = { uri = folding_uri },
+  positions = folding_selection_requests.selection_positions,
+}, folding_bufnr)
 vim.fn.writefile({ vim.fn.json_encode({
   uri = uri,
   hover = hover_result,
@@ -972,6 +1002,9 @@ vim.fn.writefile({ vim.fn.json_encode({
   call_ambiguous_reference = call_ambiguous_reference,
   workspace_provider_uri = workspace_provider_uri,
   workspace_caller_uri = workspace_caller_uri,
+  folding_ranges = folding_ranges,
+  selection_ranges = selection_ranges,
+  folding_uri = folding_uri,
   references = references.result,
   references_without_declaration = references_without_declaration.result,
   rename = renamed.result,
@@ -994,6 +1027,8 @@ vim.fn.writefile({
   "LSP_CODE_ACTION=pass",
   "LSP_WORKSPACE_SYMBOL=pass",
   "LSP_CALL_HIERARCHY=pass",
+  "LSP_FOLDING_RANGE=pass",
+  "LSP_SELECTION_RANGE=pass",
 }, vim.env.ORNA_EDITOR_RESULT)
 client:stop(true)
 vim.cmd("qa!")
@@ -1024,6 +1059,7 @@ vim.cmd("qa!")
             &workspace_provider_fixture,
         )
         .env("ORNA_WORKSPACE_CALLER_FIXTURE", &workspace_caller_fixture)
+        .env("ORNA_FOLDING_SELECTION_FIXTURE", &folding_selection_fixture)
         .env(
             "ORNA_DEPTH_RANGES",
             serde_json::to_string(&depth_ranges).unwrap(),
@@ -1035,6 +1071,10 @@ vim.cmd("qa!")
         .env(
             "ORNA_WORKSPACE_HIERARCHY_REQUESTS",
             serde_json::to_string(&workspace_hierarchy_requests).unwrap(),
+        )
+        .env(
+            "ORNA_FOLDING_SELECTION_REQUESTS",
+            serde_json::to_string(&folding_selection_requests).unwrap(),
         )
         .env("ORNA_LSP_BIN", env!("CARGO_BIN_EXE_orna-lsp"))
         .env("ORNA_PROJECT_ROOT", root)
@@ -1158,6 +1198,12 @@ vim.cmd("qa!")
         &hover_semantic_result,
         "Neovim",
     );
+    syntax_v1_folding_selection_contract::assert_contract(
+        FOLDING_SELECTION_SOURCE,
+        &hover_semantic_result["folding_ranges"],
+        &hover_semantic_result["selection_ranges"],
+        "Neovim",
+    );
     let attached_uri = hover_semantic_result["uri"]
         .as_str()
         .expect("Neovim attached document URI");
@@ -1199,6 +1245,8 @@ vim.cmd("qa!")
             "LSP_CODE_ACTION=pass",
             "LSP_WORKSPACE_SYMBOL=pass",
             "LSP_CALL_HIERARCHY=pass",
+            "LSP_FOLDING_RANGE=pass",
+            "LSP_SELECTION_RANGE=pass",
         ]
     );
 }
@@ -1260,6 +1308,8 @@ fn emacs_eglot_attaches_and_proves_hover_rename_references_and_semantic_tokens()
         root.join("crates/orna-lsp/tests/fixtures/workspace-hierarchy-provider-v1.orna");
     let workspace_caller_fixture =
         root.join("crates/orna-lsp/tests/fixtures/workspace-hierarchy-caller-v1.orna");
+    let folding_selection_fixture =
+        root.join("crates/orna-lsp/tests/fixtures/folding-selection-v1.orna");
     assert_eq!(fs::read_to_string(&hover_fixture).unwrap(), SOURCE);
     assert_eq!(
         fs::read_to_string(&semantic_fixture).unwrap(),
@@ -1286,6 +1336,12 @@ fn emacs_eglot_attaches_and_proves_hover_rename_references_and_semantic_tokens()
         WORKSPACE_HIERARCHY_PROVIDER_SOURCE,
         WORKSPACE_HIERARCHY_CALLER_SOURCE,
     );
+    assert_eq!(
+        fs::read_to_string(&folding_selection_fixture).unwrap(),
+        FOLDING_SELECTION_SOURCE
+    );
+    let folding_selection_requests =
+        syntax_v1_folding_selection_contract::request_data(FOLDING_SELECTION_SOURCE);
     let script = temporary_path("el");
     let hover_semantic_result_path = temporary_path("hover-semantic.json");
     let plugin = root.join("editors/emacs/orna-eglot.el");
@@ -1364,6 +1420,13 @@ fn emacs_eglot_attaches_and_proves_hover_rename_references_and_semantic_tokens()
          (position (gethash name requests)))
     (list :line (gethash "line" position)
           :character (gethash "character" position))))
+(defun orna-test-folding-selection-positions ()
+  (let ((positions (json-parse-string (getenv "ORNA_FOLDING_SELECTION_REQUESTS")
+                                      :array-type 'list :object-type 'hash-table)))
+    (mapcar (lambda (position)
+              (list :line (gethash "line" position)
+                    :character (gethash "character" position)))
+            (gethash "selection_positions" positions))))
 (defun orna-test-location-key (location)
   (let* ((range (orna-test-get location "range"))
          (start (orna-test-get range "start")))
@@ -1376,6 +1439,7 @@ fn emacs_eglot_attaches_and_proves_hover_rename_references_and_semantic_tokens()
       (action-buffer nil)
       (workspace-provider-buffer nil)
       (workspace-caller-buffer nil)
+      (folding-selection-buffer nil)
       (hover-response nil)
       (semantic-response nil)
       (depth-semantic-response nil)
@@ -1397,6 +1461,9 @@ fn emacs_eglot_attaches_and_proves_hover_rename_references_and_semantic_tokens()
       (workspace-caller-uri nil)
       (workspace-server nil)
       (workspace-evidence (make-hash-table :test 'equal))
+      (folding-ranges nil)
+      (selection-ranges nil)
+      (folding-uri nil)
       (references-response nil)
       (references-without-declaration-response nil)
       (rename-response nil)
@@ -1697,8 +1764,27 @@ fn emacs_eglot_attaches_and_proves_hover_rename_references_and_semantic_tokens()
                   (list :textDocument (list :uri workspace-caller-uri)
                         :position (orna-test-workspace-hierarchy-position "ambiguous_reference")))
                  workspace-evidence)
+        (setq folding-selection-buffer
+              (find-file-noselect (getenv "ORNA_FOLDING_SELECTION_FIXTURE")))
+        (with-current-buffer folding-selection-buffer
+          (orna-test-wait-managed folding-selection-buffer)
+          (let* ((server (eglot-current-server))
+                 (params (eglot--TextDocumentPositionParams))
+                 (uri (orna-test-get (orna-test-get params "textDocument") "uri")))
+            (unless (stringp uri)
+              (error "Eglot did not provide a URI for folding/selection fixture: %S" params))
+            (setq folding-uri uri
+                  folding-ranges
+                  (jsonrpc-request server :textDocument/foldingRange
+                                   (list :textDocument (list :uri uri)))
+                  selection-ranges
+                  (jsonrpc-request server :textDocument/selectionRange
+                                   (list :textDocument (list :uri uri)
+                                         :positions (orna-test-folding-selection-positions))))))
         (princ "EMACS_LSP_WORKSPACE_SYMBOL=pass\n")
         (princ "EMACS_LSP_CALL_HIERARCHY=pass\n")
+        (princ "EMACS_LSP_FOLDING_RANGE=pass\n")
+        (princ "EMACS_LSP_SELECTION_RANGE=pass\n")
         (let ((evidence (make-hash-table :test 'equal)))
           (puthash "uri" attached-uri evidence)
           (puthash "hover" hover-response evidence)
@@ -1720,6 +1806,9 @@ fn emacs_eglot_attaches_and_proves_hover_rename_references_and_semantic_tokens()
           (puthash "action_uri" action-uri evidence)
           (puthash "workspace_provider_uri" workspace-provider-uri evidence)
           (puthash "workspace_caller_uri" workspace-caller-uri evidence)
+          (puthash "folding_uri" folding-uri evidence)
+          (puthash "folding_ranges" folding-ranges evidence)
+          (puthash "selection_ranges" selection-ranges evidence)
           (maphash (lambda (key value) (puthash key value evidence)) workspace-evidence)
           (puthash "references" references-response evidence)
           (puthash "references_without_declaration"
@@ -1733,7 +1822,8 @@ fn emacs_eglot_attaches_and_proves_hover_rename_references_and_semantic_tokens()
     (when (buffer-live-p signature-buffer) (kill-buffer signature-buffer))
     (when (buffer-live-p action-buffer) (kill-buffer action-buffer))
     (when (buffer-live-p workspace-provider-buffer) (kill-buffer workspace-provider-buffer))
-    (when (buffer-live-p workspace-caller-buffer) (kill-buffer workspace-caller-buffer))))
+    (when (buffer-live-p workspace-caller-buffer) (kill-buffer workspace-caller-buffer))
+    (when (buffer-live-p folding-selection-buffer) (kill-buffer folding-selection-buffer))))
 "#,
         elisp_string(&plugin.display().to_string()),
         elisp_string(env!("CARGO_BIN_EXE_orna-lsp")),
@@ -1762,9 +1852,14 @@ fn emacs_eglot_attaches_and_proves_hover_rename_references_and_semantic_tokens()
             &workspace_provider_fixture,
         )
         .env("ORNA_WORKSPACE_CALLER_FIXTURE", &workspace_caller_fixture)
+        .env("ORNA_FOLDING_SELECTION_FIXTURE", &folding_selection_fixture)
         .env(
             "ORNA_WORKSPACE_HIERARCHY_REQUESTS",
             serde_json::to_string(&workspace_hierarchy_requests).unwrap(),
+        )
+        .env(
+            "ORNA_FOLDING_SELECTION_REQUESTS",
+            serde_json::to_string(&folding_selection_requests).unwrap(),
         )
         .output()
         .unwrap_or_else(|error| panic!("start Emacs at {}: {error}", emacs.display()));
@@ -1816,6 +1911,12 @@ fn emacs_eglot_attaches_and_proves_hover_rename_references_and_semantic_tokens()
         &hover_semantic_result,
         "Emacs Eglot",
     );
+    syntax_v1_folding_selection_contract::assert_contract(
+        FOLDING_SELECTION_SOURCE,
+        &hover_semantic_result["folding_ranges"],
+        &hover_semantic_result["selection_ranges"],
+        "Emacs Eglot",
+    );
     syntax_v1_depth_contract::assert_semantic_depth_contract(
         HINTS_SOURCE,
         &hover_semantic_result["depth_semantic"],
@@ -1861,6 +1962,8 @@ fn emacs_eglot_attaches_and_proves_hover_rename_references_and_semantic_tokens()
         "EMACS_LSP_CODE_ACTION=pass",
         "EMACS_LSP_WORKSPACE_SYMBOL=pass",
         "EMACS_LSP_CALL_HIERARCHY=pass",
+        "EMACS_LSP_FOLDING_RANGE=pass",
+        "EMACS_LSP_SELECTION_RANGE=pass",
     ] {
         assert!(
             stdout.contains(evidence),
