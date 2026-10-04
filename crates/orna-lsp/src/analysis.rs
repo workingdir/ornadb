@@ -239,6 +239,15 @@ fn token_at(text: &str, byte: usize) -> Option<Token> {
     })
 }
 
+pub(crate) fn identifier_at(
+    document: &Document,
+    position: Position,
+    mapper: &PositionMapper<'_>,
+) -> Option<(String, SourceSpan)> {
+    let token = token_at(&document.text, mapper.byte_offset(position))?;
+    Some((token.text, token.span))
+}
+
 pub(crate) fn symbol_for_name<'a>(
     symbols: &'a [EditorSymbol],
     name: &str,
