@@ -4,6 +4,9 @@ use wasm_bindgen_test::wasm_bindgen_test;
 use orna_wasm::{ReplSession, run};
 
 const REPL_SOURCE: &str = include_str!("fixtures/repl-smoke.orna");
+const PLAYGROUND_ARITHMETIC: &str = include_str!("fixtures/playground-arithmetic.orna");
+const PLAYGROUND_MULTILINE: &str = include_str!("fixtures/playground-multiline.orna");
+const PLAYGROUND_VALUES: &str = include_str!("fixtures/playground-values.orna");
 
 #[wasm_bindgen_test]
 fn run_returns_the_shared_json_contract() {
@@ -13,6 +16,29 @@ fn run_returns_the_shared_json_contract() {
     assert_eq!(result["values"], serde_json::json!(["42 : Int"]));
     assert_eq!(result["stdout"], "");
     assert_eq!(result["errors"], serde_json::json!([]));
+}
+
+#[wasm_bindgen_test]
+fn browser_sample_programs_match_the_native_parity_values() {
+    let samples = [
+        (PLAYGROUND_ARITHMETIC, serde_json::json!(["42 : Int"])),
+        (
+            PLAYGROUND_MULTILINE,
+            serde_json::json!(["42 : Int", "43 : Int"]),
+        ),
+        (
+            PLAYGROUND_VALUES,
+            serde_json::json!(["true : Bool", "\"Orna\" : Str"]),
+        ),
+    ];
+
+    for (source, expected_values) in samples {
+        let result: Value = serde_json::from_str(&run(source)).expect("run JSON");
+        assert_eq!(result["ok"], true);
+        assert_eq!(result["values"], expected_values);
+        assert_eq!(result["stdout"], "");
+        assert_eq!(result["errors"], serde_json::json!([]));
+    }
 }
 
 #[wasm_bindgen_test]

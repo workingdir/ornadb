@@ -1,6 +1,9 @@
 import * as monaco from "monaco-editor";
 import EditorWorker from "monaco-editor/editor/editor.worker.js?worker";
 import initializeWasm, { ReplSession, run } from "../../orna-wasm/pkg/orna_wasm.js";
+import arithmeticSource from "../../orna-wasm/tests/fixtures/playground-arithmetic.orna?raw";
+import multilineSource from "../../orna-wasm/tests/fixtures/playground-multiline.orna?raw";
+import valuesSource from "../../orna-wasm/tests/fixtures/playground-values.orna?raw";
 import "./style.css";
 
 self.MonacoEnvironment = {
@@ -24,6 +27,12 @@ monaco.languages.setMonarchTokensProvider("orna", {
 
 await initializeWasm();
 
+const samples = {
+  arithmetic: arithmeticSource,
+  multiline: multilineSource,
+  values: valuesSource,
+};
+
 document.querySelector("#app").innerHTML = `
   <main class="playground">
     <header class="topbar">
@@ -32,7 +41,17 @@ document.querySelector("#app").innerHTML = `
     </header>
     <section class="workspace" aria-label="Orna playground">
       <section class="editor-panel" aria-label="Source editor">
-        <div class="panel-heading"><span>main.orna</span><button id="run-code" class="primary-button">Run <kbd>⌘ ↵</kbd></button></div>
+        <div class="panel-heading">
+          <label class="sample-picker" for="sample-program">
+            <span>Sample</span>
+            <select id="sample-program">
+              <option value="arithmetic">Arithmetic</option>
+              <option value="multiline">Multiline</option>
+              <option value="values">Values</option>
+            </select>
+          </label>
+          <button id="run-code" class="primary-button">Run <kbd>⌘ ↵</kbd></button>
+        </div>
         <div id="editor"></div>
       </section>
       <section class="output-panel" aria-label="Execution output">
@@ -49,7 +68,7 @@ document.querySelector("#app").innerHTML = `
 `;
 
 const editor = monaco.editor.create(document.querySelector("#editor"), {
-  value: "let answer = 40;\nanswer + 2",
+  value: samples.arithmetic,
   language: "orna",
   theme: "vs-dark",
   automaticLayout: true,
@@ -60,6 +79,13 @@ const editor = monaco.editor.create(document.querySelector("#editor"), {
 });
 const output = document.querySelector("#output");
 const repl = new ReplSession();
+
+function showEmptyOutput(message) {
+  const empty = document.createElement("p");
+  empty.className = "empty-state";
+  empty.textContent = message;
+  output.replaceChildren(empty);
+}
 
 function addOutput(kind, text) {
   const row = document.createElement("div");
@@ -76,16 +102,28 @@ function addOutput(kind, text) {
 
 document.querySelector("#run-code").addEventListener("click", () => {
   output.replaceChildren();
-  const result = JSON.parse(run(editor.getValue()));
+  let result;
+  try {
+    result = JSON.parse(run(editor.getValue()));
+  } catch (error) {
+    addOutput("error", error instanceof Error ? error.message : String(error));
+    return;
+  }
   for (const value of result.values) addOutput("value", value);
+  if (result.stdout) addOutput("stdout", result.stdout);
   for (const error of result.errors) addOutput("error", `${error.message} (line ${error.line}, col ${error.col})`);
-  if (result.values.length === 0 && result.errors.length === 0) {
-    output.innerHTML = '<p class="empty-state">Source evaluated without a value.</p>';
+  if (result.values.length === 0 && !result.stdout && result.errors.length === 0) {
+    showEmptyOutput("Source evaluated without a value.");
   }
 });
 
+document.querySelector("#sample-program").addEventListener("change", (event) => {
+  editor.setValue(samples[event.currentTarget.value]);
+  showEmptyOutput("Run your Orna source to see results here.");
+});
+
 document.querySelector("#clear-output").addEventListener("click", () => {
-  output.innerHTML = '<p class="empty-state">Run your Orna source to see results here.</p>';
+  showEmptyOutput("Run your Orna source to see results here.");
 });
 
 document.querySelector("#repl-form").addEventListener("submit", (event) => {

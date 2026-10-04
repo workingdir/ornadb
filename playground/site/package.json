@@ -8,12 +8,15 @@
   },
   "scripts": {
     "build": "vite build",
-    "smoke-test": "node ./scripts/smoke-test.mjs"
+    "smoke-test": "node ./scripts/smoke-test.mjs",
+    "e2e": "playwright test",
+    "preview": "vite preview"
   },
   "dependencies": {
     "monaco-editor": "0.57.0"
   },
   "devDependencies": {
+    "@playwright/test": "1.58.2",
     "vite": "8.3.2"
   }
 }
