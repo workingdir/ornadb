@@ -406,10 +406,10 @@ fn orna_serve_hosts_playground_with_pending_evals_and_snapshot_correct_deltas() 
         .expect("curl the playground live module");
     assert_eq!(runtime.status, 200);
     assert!(runtime.body.contains("globalThis.ornaPlaygroundRun"));
-    let presentation = curl(&format!("{base_url}/assets/presentation.mjs"), &[])
+    let presentation_runtime = curl(&format!("{base_url}/assets/presentation.mjs"), &[])
         .expect("curl the shared presentation runtime");
-    assert_eq!(presentation.status, 200);
-    assert!(presentation.body.contains("class LivePresentation"));
+    assert_eq!(presentation_runtime.status, 200);
+    assert!(presentation_runtime.body.contains("class LivePresentation"));
     let app = curl(&format!("{base_url}/playground/assets/app.js"), &[])
         .expect("curl the playground browser asset");
     assert_eq!(app.status, 200);
