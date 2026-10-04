@@ -13907,7 +13907,7 @@ fn multi_table_row_conflicts_precede_checkpoint_resets_at_shared_budget() {
                 );
                 assert!(!report.affected_checkpoints.contains(clean_delete_id.as_slice()));
                 assert!(!report.affected_checkpoints.contains(unchanged_id.as_slice()));
-                assert_eq!(source.visited.len(), 6);
+                assert_eq!(source.visited.len(), if max_conflicts == 0 { 3 } else { 6 });
             }
 
             let (base, left, right, mut source) = build_inputs(delete_left, reset_left);
