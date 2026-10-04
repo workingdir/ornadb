@@ -1,8 +1,7 @@
 //! Portable metadata for the generated native host-operation registry.
 //!
-//! The operation descriptors are needed by semantic admission and the
-//! evaluator even when filesystem, process, clock, and network providers are
-//! not compiled into a target such as wasm32-unknown-unknown.
+//! The operation descriptors are shared by semantic admission, the evaluator,
+//! and the native provider implementations.
 
 use std::collections::BTreeMap;
 
