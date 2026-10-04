@@ -1694,6 +1694,7 @@ dependencies = [
  "orna-value-v1",
  "serde",
  "serde_json",
+ "uuid",
  "wasm-bindgen",
  "wasm-bindgen-test",
 ]
