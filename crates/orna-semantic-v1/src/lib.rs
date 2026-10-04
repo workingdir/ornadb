@@ -480,6 +480,9 @@ pub struct ModuleHeader {
     pub exports: BTreeMap<String, Symbol>,
     pub symbols: BTreeMap<String, Symbol>,
     pub generic_functions: BTreeMap<String, Vec<GenericParameterMetadata>>,
+    /// Public non-generic protocol member surfaces captured from source-backed
+    /// modules so importers can validate implementations without loading files.
+    pub protocols: BTreeMap<String, Vec<ProtocolMember>>,
     pub prelude_exports: BTreeSet<String>,
     /// Attached catalogue modules may be available without a source `use`.
     /// Source modules remain explicit by default.
@@ -1332,6 +1335,7 @@ where
         exports: symbols.clone(),
         symbols,
         generic_functions: BTreeMap::new(),
+        protocols: BTreeMap::new(),
         prelude_exports: prelude_exports.into_iter().map(Into::into).collect(),
         implicit: false,
     }
@@ -1379,6 +1383,7 @@ where
         exports: symbols.clone(),
         symbols,
         generic_functions: BTreeMap::new(),
+        protocols: BTreeMap::new(),
         prelude_exports: BTreeSet::new(),
         implicit,
     }
@@ -2078,6 +2083,22 @@ fn collect_header(
                         declared_generic_parameters(item),
                     )
                 })
+            })
+            .collect(),
+        protocols: tree
+            .items
+            .iter()
+            .filter_map(|item| match &item.declaration {
+                Declaration::Protocol {
+                    name,
+                    generics,
+                    members,
+                } if generics.is_empty()
+                    && matches!(item.visibility, Visibility::Public { .. }) =>
+                {
+                    Some((name.clone(), members.clone()))
+                }
+                _ => None,
             })
             .collect(),
         implicit: false,
@@ -3130,6 +3151,41 @@ fn resolve_imports_with_dependencies(
             scope.names.insert(name, candidates[0].clone());
         } else {
             scope.ambiguous.insert(name);
+        }
+    }
+    // Import the protocol member signatures alongside named or wildcard
+    // imports so implementations are checked against captured source.
+    for item in &tree.items {
+        let Declaration::Use { path, tail } = &item.declaration else {
+            continue;
+        };
+        let target = Namespace(path.iter().map(|segment| segment.name.clone()).collect());
+        let Some(module) = modules.get(&target) else {
+            continue;
+        };
+        let names = match tail {
+            UseTail::Names(names) => names.iter().map(|name| name.name.clone()).collect(),
+            UseTail::Glob { .. } => module.protocols.keys().cloned().collect(),
+            UseTail::Alias { name, .. } if name == "_" => module
+                .prelude_exports
+                .iter()
+                .filter(|name| module.protocols.contains_key(*name))
+                .cloned()
+                .collect(),
+            UseTail::None | UseTail::Alias { .. } => Vec::new(),
+        };
+        for name in names {
+            if scope
+                .names
+                .get(&name)
+                .is_some_and(|symbol| symbol.kind == SymbolKind::Protocol)
+                && let Some(members) = module.protocols.get(&name)
+            {
+                scope
+                    .local_protocols
+                    .entry(name)
+                    .or_insert_with(|| members.clone());
+            }
         }
     }
     // Preserve dependency provenance for imported helpers without extending
@@ -4455,18 +4511,17 @@ fn nested_member_type(
     target_shape: Option<&Type>,
     structural_self: bool,
 ) -> Type {
-    if resolved_type_of(annotation, scope) == Type::Named("Self".into()) {
-        if structural_self {
-            target_shape
-                .filter(|shape| matches!(shape, Type::Record(_)))
-                .unwrap_or(target)
-                .clone()
-        } else {
-            target.clone()
-        }
+    let self_type = if structural_self {
+        target_shape
+            .filter(|shape| matches!(shape, Type::Record(_)))
+            .unwrap_or(target)
     } else {
-        resolved_type_of(annotation, scope)
-    }
+        target
+    };
+    substitute_generic_type(
+        &resolved_type_of(annotation, scope),
+        &BTreeMap::from([("Self".into(), self_type.clone())]),
+    )
 }
 
 fn validate_default_expression(
