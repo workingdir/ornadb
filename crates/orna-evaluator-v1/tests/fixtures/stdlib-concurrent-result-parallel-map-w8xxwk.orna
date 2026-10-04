@@ -1,0 +1,4 @@
+std.concurrent.result.parallel_map_partition(
+    [0, 1, 2, 3, 4],
+    index => outcomes[index]
+) == ([4, null, 9], ["first", "second"])
