@@ -7,6 +7,8 @@ use std::{
 
 use serde_json::{Value, json};
 
+#[path = "support/syntax_v1_action_signature_contract.rs"]
+mod syntax_v1_action_signature_contract;
 #[path = "support/syntax_v1_depth_contract.rs"]
 mod syntax_v1_depth_contract;
 
@@ -1077,6 +1079,13 @@ fn signature_help_tracks_nested_arguments_and_named_parameter_indices() {
         json!({"textDocument":{"uri":uri},"position":position_at(SIGNATURE_ACTIONS_SOURCE,shadow_call)}),
     );
     assert!(shadowed_signature.is_null(), "{shadowed_signature}");
+    syntax_v1_action_signature_contract::assert_signature_help_contract(
+        &nested_argument,
+        &named_argument,
+        &nested_named_argument,
+        &shadowed_signature,
+        "LSP protocol",
+    );
     client.shutdown();
 }
 
@@ -1132,18 +1141,22 @@ fn code_actions_offer_only_verified_missing_semicolon_fixes() {
 
     let mut non_quickfix_params = params.clone();
     non_quickfix_params["context"]["only"] = json!(["refactor"]);
-    assert_eq!(
-        client.request("textDocument/codeAction", non_quickfix_params),
-        json!([])
-    );
+    let non_quickfix = client.request("textDocument/codeAction", non_quickfix_params);
+    assert_eq!(non_quickfix, json!([]));
     let outside_diagnostic = json!({
         "textDocument":{"uri":uri},
         "range":range_at(MISSING_SEMICOLON_SOURCE, 0, 1),
         "context":{"diagnostics":diagnostics,"only":["quickfix"]}
     });
-    assert_eq!(
-        client.request("textDocument/codeAction", outside_diagnostic),
-        json!([])
+    let outside_range = client.request("textDocument/codeAction", outside_diagnostic);
+    assert_eq!(outside_range, json!([]));
+    syntax_v1_action_signature_contract::assert_code_action_contract(
+        MISSING_SEMICOLON_SOURCE,
+        uri,
+        &actions,
+        &non_quickfix,
+        &outside_range,
+        "LSP protocol",
     );
     client.shutdown();
 }
