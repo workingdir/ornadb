@@ -1,9 +1,15 @@
+import * as monaco from 'monaco-editor/editor/editor.api.js';
+import EditorWorker from 'monaco-editor/esm/vs/editor/editor.worker?worker';
+import '../node_modules/monaco-editor/min/vs/editor/editor.main.css';
 import { exampleIndexForKey, isExample } from './example-feed';
+import { loadOrnaEditorConfig, registerOrnaLanguage } from './language';
 import { formatRunResult, formatThrownError, type RunResult } from './results';
 import { servedRuntime } from './runtime';
-import { startStyleReload } from './style-reload';
-import './theme.css';
-import './layout.css';
+import './styles.css';
+
+(globalThis as typeof globalThis & {
+  MonacoEnvironment?: { getWorker: () => Worker };
+}).MonacoEnvironment = { getWorker: () => new EditorWorker() };
 
 function requiredElement<T extends Element>(selector: string): T {
   const element = document.querySelector<T>(selector);
@@ -13,7 +19,7 @@ function requiredElement<T extends Element>(selector: string): T {
 
 const examplesSelect = requiredElement<HTMLSelectElement>('#examples');
 const exampleStatus = requiredElement<HTMLElement>('#example-status');
-const sourceInput = requiredElement<HTMLTextAreaElement>('#source');
+const sourceEditorHost = requiredElement<HTMLDivElement>('#source-editor');
 const runButton = requiredElement<HTMLButtonElement>('#run-button');
 const editorStatus = requiredElement<HTMLElement>('#editor-status');
 const executionState = requiredElement<HTMLElement>('#execution-state');
@@ -23,12 +29,14 @@ const errorsOutput = requiredElement<HTMLElement>('#errors-output');
 const astOutput = requiredElement<HTMLElement>('#ast-output');
 const outputStatus = requiredElement<HTMLElement>('#output-status');
 const runtime = servedRuntime();
+let sourceEditor: monaco.editor.IStandaloneCodeEditor | undefined;
 let activeRun = false;
 let examplesReady = false;
+let editorReady = false;
 let liveRuntimeReady = typeof (globalThis as typeof globalThis & { ornaPlaygroundRun?: unknown }).ornaPlaygroundRun === 'function';
 
 function updateRunButton(): void {
-  runButton.disabled = activeRun || !examplesReady || !liveRuntimeReady;
+  runButton.disabled = activeRun || !editorReady || !examplesReady || !liveRuntimeReady;
 }
 
 window.addEventListener('orna:runtime-ready', () => {
@@ -51,13 +59,13 @@ function showResult(result: RunResult): void {
 }
 
 async function runSource(): Promise<void> {
-  if (activeRun || !examplesReady || !liveRuntimeReady) return;
+  if (activeRun || !editorReady || !examplesReady || !liveRuntimeReady || !sourceEditor) return;
   activeRun = true;
   updateRunButton();
   executionState.textContent = 'Running';
   outputStatus.textContent = 'Running source in the OrnaDB server runtime.';
   try {
-    showResult(await runtime.run(sourceInput.value));
+    showResult(await runtime.run(sourceEditor.getValue()));
   } catch (error) {
     const message = formatThrownError(error);
     setOutput(errorsOutput, message, 'Execution failed.');
@@ -70,18 +78,28 @@ async function runSource(): Promise<void> {
 }
 
 runButton.addEventListener('click', () => void runSource());
-sourceInput.addEventListener('keydown', (event) => {
-  if ((event.ctrlKey || event.metaKey) && event.key === 'Enter') {
-    event.preventDefault();
-    void runSource();
-  }
-});
+
+async function initializeEditor(): Promise<void> {
+  const config = await loadOrnaEditorConfig();
+  registerOrnaLanguage(monaco.languages, config);
+  sourceEditor = monaco.editor.create(sourceEditorHost, {
+    ...config.editorOptions,
+    value: '',
+    language: config.language.id,
+    ariaLabel: 'Orna source editor',
+    automaticLayout: true,
+  });
+  sourceEditor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.Enter, () => void runSource());
+  editorReady = true;
+  editorStatus.textContent = 'Orna editor configuration loaded from the database.';
+  updateRunButton();
+}
 
 function loadSelectedExample(): void {
   const option = examplesSelect.selectedOptions[0];
   const source = option?.dataset.source;
-  if (source === undefined) return;
-  sourceInput.value = source;
+  if (source === undefined || !sourceEditor) return;
+  sourceEditor.setValue(source);
   const name = option.textContent ?? 'Example';
   editorStatus.textContent = `${name} loaded. Edit the source or run it as-is.`;
   exampleStatus.textContent = `${name} loaded into the source editor.`;
@@ -178,5 +196,10 @@ requiredElement<HTMLElement>('[role="tablist"]').addEventListener('keydown', (ev
 });
 
 updateRunButton();
-void loadExamples();
-startStyleReload();
+void initializeEditor()
+  .then(loadExamples)
+  .catch((error: unknown) => {
+    editorStatus.textContent = `The editor could not load: ${formatThrownError(error)}`;
+    examplesReady = true;
+    updateRunButton();
+  });

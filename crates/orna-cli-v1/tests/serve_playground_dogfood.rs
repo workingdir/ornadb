@@ -27,10 +27,8 @@ const PLAYGROUND_SCHEMA: &str = include_str!("fixtures/playground-schema.orna");
 const ASSET_INDEX: &str = include_str!("fixtures/playground-asset-index.orna");
 const ASSET_APP: &str = include_str!("fixtures/playground-asset-app.orna");
 const ASSET_STYLE: &str = include_str!("fixtures/playground-asset-style.orna");
-const PLAYGROUND_THEME: &str = include_str!("fixtures/playground-theme.orna");
-const PLAYGROUND_THEME_UPDATED: &str = include_str!("fixtures/playground-theme-updated.orna");
-const PLAYGROUND_LAYOUT: &str = include_str!("fixtures/playground-layout.orna");
-const PLAYGROUND_LAYOUT_UPDATED: &str = include_str!("fixtures/playground-layout-updated.orna");
+const ASSET_EDITOR_CONFIG: &str = include_str!("fixtures/playground-asset-editor-config.orna");
+const ASSET_EMBED: &str = include_str!("fixtures/playground-asset-embed.orna");
 const BINARY: &str = env!("CARGO_BIN_EXE_orna-cli-v1");
 
 struct RunningServer(Child);
@@ -370,14 +368,16 @@ fn orna_serve_hosts_playground_with_pending_evals_and_snapshot_correct_deltas() 
         ASSET_STYLE,
     )
     .expect("write committed stylesheet fixture");
-    let theme = project.path().join("playground/Theme");
-    std::fs::create_dir_all(&theme).expect("create committed Theme rows directory");
-    std::fs::write(theme.join("wiki-basic.orna"), PLAYGROUND_THEME)
-        .expect("write committed Theme fixture");
-    let layout = project.path().join("playground/Layout");
-    std::fs::create_dir_all(&layout).expect("create committed Layout rows directory");
-    std::fs::write(layout.join("responsive.orna"), PLAYGROUND_LAYOUT)
-        .expect("write committed Layout fixture");
+    std::fs::write(
+        assets.join("asset-6173736574732f6f726e612d656469746f722d636f6e6669672e6a736f6e.orna"),
+        ASSET_EDITOR_CONFIG,
+    )
+    .expect("write committed editor configuration fixture");
+    std::fs::write(
+        assets.join("asset-6173736574732f656d6265642e6a73.orna"),
+        ASSET_EMBED,
+    )
+    .expect("write committed embed entry fixture");
     git(
         project.path(),
         &[
@@ -386,8 +386,6 @@ fn orna_serve_hosts_playground_with_pending_evals_and_snapshot_correct_deltas() 
             "playground.orna",
             "playground/examples/hello.orna",
             "playground/Asset",
-            "playground/Theme",
-            "playground/Layout",
         ],
     );
     git(
@@ -426,8 +424,6 @@ fn orna_serve_hosts_playground_with_pending_evals_and_snapshot_correct_deltas() 
     assert_eq!(page.status, 200);
     assert!(page.body.contains("Orna playground"));
     assert!(page.body.contains("database shell"));
-    assert!(page.body.contains("/playground/theme.css"));
-    assert!(page.body.contains("/playground/layout.css"));
     assert!(page.body.contains("id=\"live-bridge\""));
     assert!(page.body.contains("id=\"live-presentation\""));
     assert!(page.body.contains("id=\"run-events-source\""));
@@ -449,92 +445,22 @@ fn orna_serve_hosts_playground_with_pending_evals_and_snapshot_correct_deltas() 
         .expect("curl the committed database stylesheet");
     assert_eq!(stylesheet.status, 200);
     assert!(stylesheet.body.contains("#202122"));
+    let editor_config = curl(
+        &format!("{base_url}/playground/assets/orna-editor-config.json"),
+        &[],
+    )
+    .expect("curl the committed editor configuration");
+    assert_eq!(editor_config.status, 200);
+    let editor_config: JsonValue =
+        serde_json::from_str(&editor_config.body).expect("editor configuration JSON");
+    assert_eq!(editor_config["language"]["id"], "orna");
+    assert_eq!(editor_config["editorOptions"]["tabSize"], 4);
+    let embed = curl(&format!("{base_url}/playground/assets/embed.js"), &[])
+        .expect("curl the committed embeddable entry script");
+    assert_eq!(embed.status, 200);
+    assert!(embed.body.contains("new URL(\"../embed\",script.src)"));
+    assert!(embed.body.contains("document.createElement(\"iframe\")"));
     assert!(!project.path().join("playground/web-ui/dist").exists());
-    let theme_response = curl(&format!("{base_url}/playground/theme.css"), &[])
-        .expect("curl the committed Theme row");
-    assert_eq!(theme_response.status, 200);
-    assert!(theme_response.body.contains("--text: #202122"));
-    let layout_response = curl(&format!("{base_url}/playground/layout.css"), &[])
-        .expect("curl the committed Layout row");
-    assert_eq!(layout_response.status, 200);
-    assert!(layout_response.body.contains("max-width: 64rem"));
-    let revision = curl(&format!("{base_url}/api/playground/revision"), &[])
-        .expect("curl the committed database revision");
-    assert_eq!(revision.status, 200);
-    assert!(
-        revision
-            .headers
-            .to_ascii_lowercase()
-            .contains("cache-control: no-store")
-    );
-    let revision: JsonValue = serde_json::from_str(&revision.body).expect("revision JSON");
-    let first_revision = revision["revision"]
-        .as_str()
-        .expect("revision id")
-        .to_owned();
-
-    std::fs::write(theme.join("wiki-basic.orna"), PLAYGROUND_THEME_UPDATED)
-        .expect("write an updated Theme row");
-    std::fs::write(layout.join("responsive.orna"), PLAYGROUND_LAYOUT_UPDATED)
-        .expect("write an updated Layout row");
-    let before_commit = curl(&format!("{base_url}/playground/theme.css"), &[])
-        .expect("read the committed Theme before commit");
-    assert!(before_commit.body.contains("--text: #202122"));
-    let before_layout_commit = curl(&format!("{base_url}/playground/layout.css"), &[])
-        .expect("read the committed Layout before commit");
-    assert!(
-        !before_layout_commit
-            .body
-            .contains("grid-template-columns: 1fr 1fr")
-    );
-    git(project.path(), &["add", "playground/Theme/wiki-basic.orna"]);
-    git(
-        project.path(),
-        &["add", "playground/Layout/responsive.orna"],
-    );
-    git(
-        project.path(),
-        &[
-            "-c",
-            "user.name=kierandrewett",
-            "-c",
-            "user.email=kieran@drewett.dev",
-            "commit",
-            "--quiet",
-            "-m",
-            "update playground Theme row",
-        ],
-    );
-    let after_commit = curl(&format!("{base_url}/playground/theme.css"), &[])
-        .expect("read the committed Theme update without restarting orna serve");
-    assert!(after_commit.body.contains("--text: #111111"));
-    let after_layout_commit = curl(&format!("{base_url}/playground/layout.css"), &[])
-        .expect("read the committed Layout update without restarting orna serve");
-    assert!(
-        after_layout_commit
-            .body
-            .contains("grid-template-columns: 1fr 1fr")
-    );
-    let pinned_old_theme = curl(
-        &format!("{base_url}/playground/theme.css?revision={first_revision}"),
-        &[],
-    )
-    .expect("read the theme pinned to its previous database revision");
-    assert!(pinned_old_theme.body.contains("--text: #202122"));
-    let pinned_old_layout = curl(
-        &format!("{base_url}/playground/layout.css?revision={first_revision}"),
-        &[],
-    )
-    .expect("read the layout pinned to its previous database revision");
-    assert!(
-        !pinned_old_layout
-            .body
-            .contains("grid-template-columns: 1fr 1fr")
-    );
-    let revision = curl(&format!("{base_url}/api/playground/revision"), &[])
-        .expect("read the updated committed database revision");
-    let revision: JsonValue = serde_json::from_str(&revision.body).expect("updated revision JSON");
-    assert_ne!(revision["revision"].as_str(), Some(first_revision.as_str()));
 
     let examples =
         curl(&format!("{base_url}/api/examples"), &[]).expect("curl committed playground examples");
@@ -788,6 +714,14 @@ fn orna_serve_hosts_playground_with_pending_evals_and_snapshot_correct_deltas() 
     println!(
         "curl GET /playground/assets/app.js -> HTTP {} (exit 0): browser asset",
         app.status
+    );
+    println!(
+        "curl GET /playground/assets/orna-editor-config.json -> HTTP {} (exit 0): DB-resident editor configuration",
+        200
+    );
+    println!(
+        "curl GET /playground/assets/embed.js -> HTTP {} (exit 0): DB-resident iframe entry script",
+        embed.status
     );
     println!(
         "curl GET /api/examples -> HTTP {} (exit 0): committed .orna sample",
