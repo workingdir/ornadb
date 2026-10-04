@@ -1,0 +1,1 @@
+std.result.map_or(ok_value, 0, value => fail(error(code: "result.callback.failure", message: "selected callback failed")))

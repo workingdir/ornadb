@@ -1,0 +1,8 @@
+option.map_or(Some(4), 90, value => value + 1) == 5
+&& option.map_or(option.filter(Some(4), value => false), 90, value => value + 1) == 90
+&& option.map_or_else(Some(5), () => 1 / 0, value => value + 1) == 6
+&& option.map_or_else(option.filter(Some(5), value => false), () => 14, value => value + 1) == 14
+&& option.unwrap_or_else(Some(7), () => 1 / 0) == 7
+&& option.unwrap_or_else(option.filter(Some(7), value => false), () => 13) == 13
+&& option.or_else(Some(8), () => Some(1 / 0)) == Some(8)
+&& option.or_else(option.filter(Some(8), value => false), () => Some(9)) == Some(9)

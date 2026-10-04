@@ -1,15 +1,17 @@
 //! Editor analysis built exclusively on the frozen Orna 1.0 syntax tree.
 #![allow(deprecated)] // lsp-types 0.97 still requires DocumentSymbol::deprecated.
 
+use std::collections::BTreeSet;
+
 use lsp_types::{
     CompletionContext, CompletionItem, CompletionItemKind, Diagnostic,
     DiagnosticRelatedInformation, DiagnosticSeverity, DocumentSymbol, Hover, Location,
-    NumberOrString, ParameterInformation, ParameterLabel, Position, SignatureHelp,
-    SignatureInformation, SymbolKind,
+    MarkupContent, MarkupKind, NumberOrString, ParameterInformation, ParameterLabel, Position,
+    SignatureHelp, SignatureInformation, SymbolKind,
 };
 use orna_syntax_v1::{
-    Argument, Declaration, Expr, Item, Keyword, Parse, Pattern, Statement,
-    SyntaxSpan as SourceSpan, SyntaxTree, Token, TokenKind, TypeExpr, lex, parse_module_with_file,
+    Argument, Declaration, Expr, Item, Keyword, Parse, Statement, SyntaxSpan as SourceSpan,
+    SyntaxTree, Token, TokenKind, TypeExpr, lex, parse_module_with_file,
 };
 
 use crate::documents::{Document, PositionMapper};
@@ -26,7 +28,13 @@ pub fn check_document(document: &Document, mapper: &PositionMapper<'_>) -> Vec<D
             let related = diagnostic
                 .labels
                 .iter()
-                .filter(|label| !label.primary)
+                .filter(|label| {
+                    !label.primary
+                        && label
+                            .message
+                            .as_deref()
+                            .is_some_and(|message| !message.trim().is_empty())
+                })
                 .map(|label| DiagnosticRelatedInformation {
                     location: Location {
                         uri: document.uri.clone(),
@@ -41,7 +49,12 @@ pub fn check_document(document: &Document, mapper: &PositionMapper<'_>) -> Vec<D
                 code: Some(NumberOrString::String(diagnostic.code.to_owned())),
                 code_description: None,
                 source: Some("orna-syntax-v1".to_owned()),
-                message: diagnostic.message.clone(),
+                message: lsp_diagnostic_message(
+                    &diagnostic.title,
+                    &diagnostic.message,
+                    &diagnostic.help,
+                    &diagnostic.notes,
+                ),
                 related_information: (!related.is_empty()).then_some(related),
                 tags: None,
                 data: Some(serde_json::json!({
@@ -185,6 +198,23 @@ fn leading_doc_comment(text: &str, before: usize) -> Option<String> {
     }
 }
 
+fn lsp_diagnostic_message(title: &str, message: &str, help: &[String], notes: &[String]) -> String {
+    let mut value = if !title.trim().is_empty() && title != message {
+        format!("{title}: {message}")
+    } else {
+        message.to_owned()
+    };
+    for (heading, details) in [("Help", help), ("Note", notes)] {
+        for detail in details.iter().filter(|detail| !detail.trim().is_empty()) {
+            value.push_str("\n\n");
+            value.push_str(heading);
+            value.push_str(": ");
+            value.push_str(detail.trim());
+        }
+    }
+    value
+}
+
 fn source_slice<'a>(text: &'a str, span: &SourceSpan) -> &'a str {
     text.get(span.start..span.end).unwrap_or("")
 }
@@ -218,12 +248,6 @@ fn symbol_for_name<'a>(symbols: &'a [EditorSymbol], name: &str) -> Option<&'a Ed
     matches.next().is_none().then_some(found)
 }
 
-fn selected_symbol_owned(parse: &EditorParse, text: &str, byte: usize) -> Option<EditorSymbol> {
-    let token = token_at(text, byte)?;
-    let symbols = declaration_symbols(parse, text);
-    symbol_for_name(&symbols, &token.text).cloned()
-}
-
 pub fn hover(
     document: &Document,
     parse: &EditorParse,
@@ -232,9 +256,26 @@ pub fn hover(
 ) -> Option<Hover> {
     let byte = mapper.byte_offset(position);
     let token = token_at(&document.text, byte)?;
-    let Some(symbol) = selected_symbol_owned(parse, &document.text, byte) else {
-        return parameter_hover(parse, &document.text, byte);
-    };
+    if let Some(binding) = crate::locals::binding_at(&parse.value, &token.text, &token.span) {
+        let kind = match binding.kind {
+            crate::locals::LocalBindingKind::Parameter => "parameter",
+            crate::locals::LocalBindingKind::Local => "local",
+            crate::locals::LocalBindingKind::Pattern => "pattern binding",
+        };
+        let context = source_slice(&document.text, &binding.context);
+        return Some(crate::hover::declaration(
+            kind,
+            &binding.name,
+            (!context.trim().is_empty()).then_some(context),
+            &[],
+            None,
+        ));
+    }
+    let symbols = declaration_symbols(parse, &document.text);
+    let symbol = symbols
+        .iter()
+        .find(|symbol| same_span(&symbol.selection, &token.span))
+        .or_else(|| symbol_for_name(&symbols, &token.text))?;
     let kind = match symbol.kind {
         EditorSymbolKind::Function => "function",
         EditorSymbolKind::Type => "type",
@@ -243,7 +284,6 @@ pub fn hover(
         EditorSymbolKind::Protocol => "protocol",
         EditorSymbolKind::Other => "declaration",
     };
-    let _ = token;
     Some(crate::hover::declaration(
         kind,
         &symbol.name,
@@ -253,27 +293,8 @@ pub fn hover(
     ))
 }
 
-fn parameter_hover(parse: &EditorParse, text: &str, byte: usize) -> Option<Hover> {
-    for item in &parse.value.items {
-        let Declaration::Function { signature, .. } = &item.declaration else {
-            continue;
-        };
-        for parameter in &signature.parameters {
-            let Pattern::Name(name, span) = &parameter.pattern else {
-                continue;
-            };
-            if span.start <= byte && byte < span.end {
-                return Some(crate::hover::declaration(
-                    "parameter",
-                    name,
-                    Some(source_slice(text, &parameter.span)),
-                    &[],
-                    leading_doc_comment(text, parameter.span.start).as_deref(),
-                ));
-            }
-        }
-    }
-    None
+fn same_span(left: &SourceSpan, right: &SourceSpan) -> bool {
+    left.start == right.start && left.end == right.end
 }
 
 pub fn signature_help(
@@ -484,6 +505,12 @@ pub fn definition(
 ) -> Option<Location> {
     let byte = mapper.byte_offset(position);
     let token = token_at(&document.text, byte)?;
+    if let Some(binding) = crate::locals::binding_at(&parse.value, &token.text, &token.span) {
+        return Some(Location {
+            uri: document.uri.clone(),
+            range: mapper.range(&binding.selection),
+        });
+    }
     let symbols = declaration_symbols(parse, &document.text);
     let symbol = symbol_for_name(&symbols, &token.text)?;
     Some(Location {
@@ -503,14 +530,33 @@ pub fn references(
     let Some(token) = token_at(&document.text, byte) else {
         return Vec::new();
     };
+    if let Some(binding) = crate::locals::binding_at(&parse.value, &token.text, &token.span) {
+        let mut spans = crate::locals::references(&parse.value, &binding);
+        if include_declaration {
+            spans.push(binding.selection);
+        }
+        spans.sort_by_key(|span| (span.start, span.end));
+        spans.dedup_by_key(|span| (span.start, span.end));
+        return spans
+            .into_iter()
+            .map(|span| Location {
+                uri: document.uri.clone(),
+                range: mapper.range(&span),
+            })
+            .collect();
+    }
     let symbols = declaration_symbols(parse, &document.text);
     let Some(symbol) = symbol_for_name(&symbols, &token.text) else {
         return Vec::new();
     };
     let name = normalized_identifier(&symbol.name);
+    let local_references = crate::locals::resolved_reference_spans(&parse.value);
     let mut spans = reference_occurrences(&parse.value, &document.text)
         .into_iter()
-        .filter(|(occurrence, _)| normalized_identifier(occurrence) == name)
+        .filter(|(occurrence, span)| {
+            normalized_identifier(occurrence) == name
+                && !local_references.contains(&(span.start, span.end))
+        })
         .map(|(_, span)| span)
         .collect::<Vec<_>>();
     if include_declaration {
@@ -524,6 +570,13 @@ pub fn references(
             uri: document.uri.clone(),
             range: mapper.range(&span),
         })
+        .collect()
+}
+
+pub(crate) fn local_declaration_spans(parse: &EditorParse) -> Vec<SourceSpan> {
+    crate::locals::all_bindings(&parse.value)
+        .into_iter()
+        .map(|binding| binding.selection)
         .collect()
 }
 
@@ -557,20 +610,55 @@ pub fn document_symbols(
 pub fn completion_at(
     parse: &EditorParse,
     text: &str,
-    _byte: Option<usize>,
+    byte: Option<usize>,
     _context: Option<&CompletionContext>,
 ) -> Vec<CompletionItem> {
-    let mut completions = Keyword::ALL
-        .iter()
-        .map(|keyword| CompletionItem {
-            label: keyword.spelling().to_owned(),
-            kind: Some(CompletionItemKind::KEYWORD),
-            detail: Some("Orna 1.0 keyword".to_owned()),
-            sort_text: Some(format!("0-{}", keyword.spelling())),
-            ..CompletionItem::default()
-        })
-        .collect::<Vec<_>>();
+    let prefix = byte
+        .and_then(|byte| completion_prefix(text, byte))
+        .unwrap_or_default();
+    let prefix_key = normalized_identifier(&prefix).to_ascii_lowercase();
+    let mut completions = Vec::new();
+    let mut seen = BTreeSet::new();
+    let mut shadowed = BTreeSet::new();
+
+    if let Some(byte) = byte {
+        for binding in crate::locals::visible_bindings(&parse.value, byte) {
+            let key = normalized_identifier(&binding.name);
+            if !completion_matches(&key, &prefix_key) || !seen.insert(key.clone()) {
+                continue;
+            }
+            shadowed.insert(key.clone());
+            let detail = source_slice(text, &binding.context).trim();
+            let mut item = CompletionItem {
+                label: binding.name.clone(),
+                kind: Some(CompletionItemKind::VARIABLE),
+                detail: Some(match binding.kind {
+                    crate::locals::LocalBindingKind::Parameter => "Parameter".to_owned(),
+                    crate::locals::LocalBindingKind::Local => "Local variable".to_owned(),
+                    crate::locals::LocalBindingKind::Pattern => "Pattern binding".to_owned(),
+                }),
+                insert_text: Some(binding.name),
+                sort_text: Some(completion_sort_text(&prefix_key, 0, &key)),
+                ..CompletionItem::default()
+            };
+            if !detail.is_empty() {
+                item.documentation = Some(lsp_types::Documentation::MarkupContent(MarkupContent {
+                    kind: MarkupKind::Markdown,
+                    value: format!("```orna\n{detail}\n```"),
+                }));
+            }
+            completions.push(item);
+        }
+    }
+
     for symbol in declaration_symbols(parse, text) {
+        let key = normalized_identifier(&symbol.name);
+        if !completion_matches(&key, &prefix_key)
+            || shadowed.contains(&key)
+            || !seen.insert(key.clone())
+        {
+            continue;
+        }
         let kind = match symbol.kind {
             EditorSymbolKind::Function => CompletionItemKind::FUNCTION,
             EditorSymbolKind::Type => CompletionItemKind::STRUCT,
@@ -596,19 +684,60 @@ pub fn completion_at(
         } else {
             symbol.name.clone()
         };
-        let sort_text = format!("1-{}", symbol.name);
         completions.push(CompletionItem {
             label: symbol.name,
             kind: Some(kind),
             detail: symbol.detail,
-            documentation: symbol.documentation.map(lsp_types::Documentation::String),
+            documentation: symbol.documentation.map(|value| {
+                lsp_types::Documentation::MarkupContent(MarkupContent {
+                    kind: MarkupKind::Markdown,
+                    value,
+                })
+            }),
             insert_text: Some(insert_text),
             insert_text_format: Some(lsp_types::InsertTextFormat::SNIPPET),
-            sort_text: Some(sort_text),
+            sort_text: Some(completion_sort_text(&prefix_key, 1, &key)),
             ..CompletionItem::default()
         });
     }
+
+    for keyword in Keyword::ALL {
+        let name = keyword.spelling();
+        let key = normalized_identifier(name);
+        if completion_matches(&key, &prefix_key) && seen.insert(key.clone()) {
+            completions.push(CompletionItem {
+                label: name.to_owned(),
+                kind: Some(CompletionItemKind::KEYWORD),
+                detail: Some("Orna 1.0 keyword".to_owned()),
+                insert_text: Some(name.to_owned()),
+                sort_text: Some(completion_sort_text(&prefix_key, 2, &key)),
+                ..CompletionItem::default()
+            });
+        }
+    }
+    completions.sort_by(|left, right| left.sort_text.cmp(&right.sort_text));
+    if let Some(first) = completions.first_mut() {
+        first.preselect = Some(true);
+    }
     completions
+}
+
+fn completion_prefix(text: &str, byte: usize) -> Option<String> {
+    let token = lex(text).ok()?.into_iter().find(|token| {
+        matches!(token.kind, TokenKind::Identifier { .. })
+            && token.span.start <= byte
+            && byte <= token.span.end
+    })?;
+    Some(text.get(token.span.start..byte)?.to_owned())
+}
+
+fn completion_matches(candidate: &str, prefix: &str) -> bool {
+    prefix.is_empty() || candidate.to_ascii_lowercase().starts_with(prefix)
+}
+
+fn completion_sort_text(prefix: &str, group: u8, key: &str) -> String {
+    let exact = !prefix.is_empty() && key.eq_ignore_ascii_case(prefix);
+    format!("{}-{group}-{key}", if exact { 0 } else { 1 })
 }
 
 fn parameter_name(source: &str) -> Option<&str> {

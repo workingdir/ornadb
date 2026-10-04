@@ -1,0 +1,10 @@
+std.result.unwrap_or(ok_value, 99) == 4
+&& std.result.unwrap_or(err_value, 99) == 99
+&& std.result.unwrap_or_else(ok_value, error => 1 / 0) == 4
+&& std.result.unwrap_or_else(err_value, error => 12) == 12
+&& std.result.fold(ok_value, value => value + 1, error => 0) == 5
+&& std.result.fold(err_value, value => 0, error => 7) == 7
+&& std.result.map_or(ok_value, 90, value => value + 1) == 5
+&& std.result.map_or(err_value, 90, value => 1 / 0) == 90
+&& std.result.map_or_else(ok_value, error => 1 / 0, value => value + 1) == 5
+&& std.result.map_or_else(err_value, error => 13, value => value + 1) == 13

@@ -664,7 +664,7 @@ fn loads_reachable_modules_from_a_committed_snapshot_without_touching_git_state(
 #[test]
 fn loads_private_candidate_source_without_reading_human_edits_or_changing_head() {
     const CANDIDATE_SOURCE: &str =
-        include_str!("../../orna-semantic-v1/tests/fixtures/semantic_consumer_gap.orna");
+        include_str!("fixtures/semantic_consumer_gap.orna");
 
     let (directory, candidate_repository) =
         repository(&[("main.orna", include_str!("fixtures/main_from_head.orna"))]);

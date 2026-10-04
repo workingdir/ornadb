@@ -93,6 +93,9 @@ pub use introspection::{
 mod provider;
 pub use provider::*;
 
+mod host_registry;
+pub use host_registry::*;
+
 mod host_environment;
 pub use host_environment::*;
 

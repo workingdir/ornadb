@@ -1,0 +1,1 @@
+std.collection.count(std.lazy.force(std.lazy.adapters.collect(std.lazy.adapters.take(std.lazy.adapters.map(std.lazy.adapters.from_list([1]), value => if value == 1 { fail(error(code: "lazy.sequence.overread", message: "zero take pulled a value")) } else { value }), 0)))) == 0

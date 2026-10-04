@@ -110,3 +110,59 @@ test('connects to the same-origin live endpoint and requests resync on a revisio
   assert.equal(fetches[1].url, 'http://127.0.0.1:8756/orna/session/01010101-0101-0101-0101-010101010101');
   assert.equal(socket.readyState, 3);
 });
+
+test('isolates watched presentations and resolves explicit refreshes from a fresh snapshot', async () => {
+  const fetcher = async (_url, options) => options.method === 'DELETE'
+    ? { ok: true }
+    : {
+      ok: true,
+      async json() {
+        return {
+          session: DATABASE,
+          database: DATABASE,
+          resume_token: 'b'.repeat(43),
+          websocket_path: '/orna/live/01010101-0101-0101-0101-010101010101',
+        };
+      },
+    };
+  const live = new LiveSession(DATABASE, {
+    pageUrl: 'http://127.0.0.1:8756/playground/',
+    fetcher,
+    WebSocketConstructor: FakeSocket,
+  });
+  await live.connect();
+  const socket = FakeSocket.latest;
+  socket.receive(envelope(16, new Uint8Array(16).fill(1), WATCH, new Map([
+    [0n, 1n],
+    [1n, { tag: 60012n, value: ['text', null, new Map(), []] }],
+    [2n, null],
+  ])));
+
+  const watched = live.watch('run.events');
+  const request = decodeEnvelope(socket.sent[0]);
+  assert.equal(request.code, 5);
+  assert.equal(request.body.get(0n), 'run.events');
+  const eventWatch = new Uint8Array(16).fill(8);
+  socket.receive(envelope(16, request.request, eventWatch, new Map([
+    [0n, 4n],
+    [1n, { tag: 60012n, value: ['run.events', null, new Map(), []] }],
+    [2n, null],
+  ])));
+  const eventState = await watched;
+  assert.equal(eventState.presentation.current.revision, 4n);
+  assert.equal(live.presentation.current.revision, 1n);
+
+  const refreshing = live.refresh(eventState);
+  const resync = decodeEnvelope(socket.sent[1]);
+  assert.equal(resync.code, 2);
+  assert.deepEqual(resync.watch, eventWatch);
+  socket.receive(envelope(16, resync.request, eventWatch, new Map([
+    [0n, 5n],
+    [1n, { tag: 60012n, value: ['run.events', null, new Map(), []] }],
+    [2n, null],
+  ])));
+  const current = await refreshing;
+  assert.equal(current.revision, 5n);
+  assert.equal(live.presentation.current.revision, 1n);
+  live.dispose();
+});

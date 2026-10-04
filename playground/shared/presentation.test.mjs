@@ -8,6 +8,7 @@ import {
   decodeCbor,
   decodeEnvelope,
   encodeCbor,
+  runResultFromPresentation,
 } from './presentation.mjs';
 
 const WATCH = new Uint8Array(16).fill(7);
@@ -132,4 +133,27 @@ test('rejects oversized and malformed patch payloads before publishing', () => {
   assert.throws(() => applyPatches(present(), [[0n, [], present()]]), PresentationError);
   const huge = new Uint8Array(16 * 1024 * 1024 + 1);
   assert.throws(() => decodeCbor(huge), PresentationError);
+});
+
+test('extracts successful and failed run summaries from a validated presentation tree', () => {
+  const successful = present('run.events', null, new Map(), [present('run', null, new Map([
+    ['status', 'success'], ['value', 'done'], ['stdout', 'hello'],
+  ]))]);
+  assert.deepEqual(runResultFromPresentation(successful), {
+    ok: true,
+    values: ['done'],
+    stdout: 'hello',
+    errors: [],
+  });
+
+  const failed = present('run.events', null, new Map(), [present('run', null, new Map([
+    ['status', 'failure'], ['error_code', 'E2200'], ['line', 2n], ['column', 4n],
+  ]))]);
+  assert.deepEqual(runResultFromPresentation(failed), {
+    ok: false,
+    values: [],
+    stdout: '',
+    errors: [{ message: 'E2200', line: 2, col: 4 }],
+  });
+  assert.equal(runResultFromPresentation(present()), null);
 });

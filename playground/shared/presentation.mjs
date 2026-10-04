@@ -559,12 +559,13 @@ export class LivePresentation {
     return { type: 'resync', shouldSend, current: this.current };
   }
 
-  receive(frame) {
+  receive(frame, expectedSnapshotRequest = INITIAL_SUBSCRIBE_REQUEST) {
     if (frame.code !== 16 && frame.code !== 17) return { type: 'ignored', current: this.current };
     const watch = optionalBytes16(frame.watch);
     if (!watch) return this.requireResync();
     if (this.watch && !bytesEqual(this.watch, watch)) return { type: 'ignored', current: this.current };
-    if (frame.code === 16 && (!optionalBytes16(frame.request) || !this.watch && !bytesEqual(frame.request, new Uint8Array(16).fill(1)))) {
+    if (frame.code === 16 &&
+      (!optionalBytes16(frame.request) || !expectedSnapshotRequest || !bytesEqual(frame.request, expectedSnapshotRequest))) {
       return { type: 'ignored', current: this.current };
     }
     const body = frame.body;
@@ -628,10 +629,24 @@ export function resyncEnvelope(request, watch) {
   return envelope(2, request, watch, new Map());
 }
 
+function databaseContext(database) {
+  return new Map([[0n, database], [1n, null]]);
+}
+
+function presentationContext() {
+  return new Map([[0n, 'en'], [1n, null], [2n, null], [3n, 'system'], [4n, ['value', 'text', 'group', 'table']]]);
+}
+
+export function watchEnvelope(request, source, database) {
+  return envelope(5, request, null, new Map([
+    [0n, source],
+    [1n, databaseContext(database)],
+    [2n, presentationContext()],
+  ]));
+}
+
 export async function evalEnvelope(session, database, source, request) {
-  const presentation = new Map([[0n, 'en'], [1n, null], [2n, null], [3n, 'system'], [4n, ['value', 'text', 'group', 'table']]]);
-  const databaseContext = new Map([[0n, database], [1n, null]]);
-  const body = new Map([[0n, source], [1n, databaseContext], [2n, presentation]]);
+  const body = new Map([[0n, source], [1n, databaseContext(database)], [2n, presentationContext()]]);
   const fingerprintInput = encodeCbor([session, 4n, null, body]);
   const domain = utf8Encoder.encode('orna.request.v1\0');
   const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', concat([domain, fingerprintInput])));
@@ -657,12 +672,20 @@ export class LiveSession {
     this.onPresentation = options.onPresentation ?? (() => {});
     this.onResult = options.onResult ?? (() => {});
     this.presentation = new LivePresentation();
+    this.defaultWatch = {
+      presentation: this.presentation,
+      initialRequest: INITIAL_SUBSCRIBE_REQUEST,
+      watch: null,
+      resyncRequest: null,
+      onPresentation: this.onPresentation,
+      refreshWaiters: [],
+    };
+    this.watchStates = new Map();
     this.pending = new Map();
     this.socket = null;
     this.sessionBytes = null;
     this.sessionId = null;
     this.resumeToken = null;
-    this.resyncRequest = null;
     this.started = false;
     this.disposed = false;
   }
@@ -706,8 +729,10 @@ export class LiveSession {
       socket.addEventListener('message', event => this.#receive(event));
       socket.addEventListener('close', () => {
         this.#rejectPending(new PresentationError('Live connection closed.'));
-        this.presentation.awaitingSnapshot = true;
-        this.presentation.releaseResync();
+        for (const state of this.#states()) {
+          state.presentation.awaitingSnapshot = true;
+          state.presentation.releaseResync();
+        }
         this.onStatus('Live connection closed.');
       });
       socket.addEventListener('error', () => this.onStatus('Live connection failed.'));
@@ -730,6 +755,38 @@ export class LiveSession {
     return this;
   }
 
+  async watch(source, options = {}) {
+    if (!this.sessionBytes || this.socket?.readyState !== 1) {
+      throw new PresentationError('Live connection is not ready.');
+    }
+    if (typeof source !== 'string') throw new PresentationError('Watch source must be text.');
+    const request = newId();
+    const key = byteKey(request);
+    const state = {
+      presentation: new LivePresentation(),
+      initialRequest: request,
+      pendingRequest: request,
+      watch: null,
+      resyncRequest: null,
+      onPresentation: options.onPresentation ?? (() => {}),
+      refreshWaiters: [],
+    };
+    const response = new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.pending.delete(key);
+        reject(new PresentationError('Watch snapshot timed out.'));
+      }, 15_000);
+      this.pending.set(key, { kind: 'watch', state, resolve, reject, timer });
+    });
+    try {
+      this.socket.send(encodeCbor(watchEnvelope(request, source, this.databaseBytes)));
+    } catch (error) {
+      this.#removePending(key);
+      throw error;
+    }
+    return response;
+  }
+
   dispose() {
     if (this.disposed) return;
     this.disposed = true;
@@ -745,6 +802,18 @@ export class LiveSession {
     }).catch(() => {});
   }
 
+  refresh(state) {
+    if (!state || !state.watch || !this.watchStates.has(byteKey(state.watch))) {
+      return Promise.reject(new PresentationError('Presentation watch is not active.'));
+    }
+    const update = state.presentation.requireResync();
+    const refreshed = new Promise((resolve, reject) => {
+      state.refreshWaiters.push({ resolve, reject });
+    });
+    if (update.shouldSend) this.#requestResync(state);
+    return refreshed;
+  }
+
   async evaluate(source) {
     if (!this.sessionBytes || this.socket?.readyState !== 1) throw new PresentationError('Live connection is not ready.');
     const request = newId();
@@ -755,7 +824,7 @@ export class LiveSession {
         this.pending.delete(key);
         reject(new PresentationError('Evaluation timed out.'));
       }, 15_000);
-      this.pending.set(key, { resolve, reject, timer, watch: null });
+      this.pending.set(key, { kind: 'eval', resolve, reject, timer });
     });
     try {
       this.socket.send(encodeCbor(frame));
@@ -775,39 +844,56 @@ export class LiveSession {
       frame = decodeEnvelope(event.data);
     } catch (error) {
       this.onStatus(error instanceof Error ? error.message : String(error));
-      const update = this.presentation.requireResync();
-      if (update.shouldSend) this.#requestResync();
-      return;
-    }
-
-    if (frame.code === 16 || frame.code === 17) {
-      if (this.presentation.watch && (!frame.watch || !bytesEqual(frame.watch, this.presentation.watch))) return;
-      const isInitial = frame.code === 16 && bytesEqual(frame.request ?? new Uint8Array(), INITIAL_SUBSCRIBE_REQUEST);
-      const isResync = frame.code === 16 && this.resyncRequest && bytesEqual(frame.request, this.resyncRequest);
-      if (!this.presentation.watch && !isInitial) return;
-      if (frame.code === 16 && !isInitial && !isResync) return;
-      const update = this.presentation.receive(frame);
-      if (update.type === 'snapshot' || update.type === 'delta') {
-        this.resyncRequest = null;
-        this.onPresentation(update.current, update.type);
-        this.onStatus(update.type === 'snapshot' ? 'Presentation snapshot installed.' : 'Presentation delta applied.');
-      } else if (update.type === 'resync') {
-        this.onStatus('Presentation needs a fresh snapshot.');
-        if (update.shouldSend) this.#requestResync();
+      for (const state of this.#states()) {
+        if (!state.watch) continue;
+        const update = state.presentation.requireResync();
+        if (update.shouldSend) this.#requestResync(state);
       }
       return;
     }
 
-    if (frame.code === 19 && this.resyncRequest && bytesEqual(frame.request ?? new Uint8Array(), this.resyncRequest)) {
-      this.resyncRequest = null;
-      this.presentation.releaseResync();
+    if (frame.code === 16 || frame.code === 17) {
+      const state = this.#findPresentationState(frame);
+      if (!state) return;
+      const isInitial = frame.code === 16 && state.initialRequest && bytesEqual(frame.request, state.initialRequest);
+      const isResync = frame.code === 16 && state.resyncRequest && bytesEqual(frame.request, state.resyncRequest);
+      if (frame.code === 16 && !isInitial && !isResync) return;
+      if (!state.watch) {
+        state.watch = frame.watch;
+        this.watchStates.set(byteKey(frame.watch), state);
+      }
+      const expectedRequest = isResync ? state.resyncRequest : state.initialRequest;
+      const update = state.presentation.receive(frame, expectedRequest);
+      if (update.type === 'snapshot' || update.type === 'delta') {
+        if (isInitial) state.initialRequest = null;
+        if (isResync) state.resyncRequest = null;
+        state.onPresentation(update.current, update.type);
+        this.onStatus(update.type === 'snapshot' ? 'Presentation snapshot installed.' : 'Presentation delta applied.');
+        if (state.pendingRequest && (isInitial || isResync)) {
+          const pending = this.#removePending(byteKey(state.pendingRequest));
+          state.pendingRequest = null;
+          pending?.resolve(state);
+        }
+        if (isResync) this.#settleRefresh(state, update.current);
+      } else if (update.type === 'resync') {
+        this.onStatus('Presentation needs a fresh snapshot.');
+        if (update.shouldSend) this.#requestResync(state);
+      }
+      return;
+    }
+
+    const failedRefresh = this.#findResyncState(frame.request);
+    if (frame.code === 19 && failedRefresh) {
+      failedRefresh.resyncRequest = null;
+      failedRefresh.presentation.releaseResync();
+      this.#settleRefresh(failedRefresh, null, new PresentationError('The server could not refresh the presentation.'));
       this.onStatus('The server could not refresh the presentation.');
       return;
     }
     if ((frame.code === 18 || frame.code === 19) && optionalBytes16(frame.request)) {
       const key = byteKey(frame.request);
       const pending = this.pending.get(key);
-      if (!pending || frame.watch !== null) return;
+      if (!pending || pending.kind !== 'eval' || frame.watch !== null) return;
       this.#removePending(key);
       pending.resolve(frame);
       this.onResult(frame);
@@ -815,33 +901,70 @@ export class LiveSession {
     }
   }
 
-  #requestResync() {
-    if (this.resyncRequest) return;
-    if (this.socket?.readyState !== 1 || !this.presentation.watch) {
-      this.presentation.releaseResync();
+  #states() {
+    return [...new Set([this.defaultWatch, ...this.watchStates.values()])];
+  }
+
+  #findPresentationState(frame) {
+    if (frame.code === 17) {
+      return optionalBytes16(frame.watch) ? this.watchStates.get(byteKey(frame.watch)) : null;
+    }
+    if (!optionalBytes16(frame.request)) return null;
+    const requestKey = byteKey(frame.request);
+    const pending = this.pending.get(requestKey);
+    if (pending?.kind === 'watch') return pending.state;
+    return this.#states().find(state =>
+      state.initialRequest && bytesEqual(frame.request, state.initialRequest) ||
+      state.resyncRequest && bytesEqual(frame.request, state.resyncRequest)) ?? null;
+  }
+
+  #findResyncState(request) {
+    if (!optionalBytes16(request)) return null;
+    return this.#states().find(state => state.resyncRequest && bytesEqual(request, state.resyncRequest)) ?? null;
+  }
+
+  #requestResync(state) {
+    if (state.resyncRequest) return;
+    if (this.socket?.readyState !== 1 || !state.watch) {
+      state.presentation.releaseResync();
+      this.#settleRefresh(state, null, new PresentationError('Live connection is not ready.'));
       return;
     }
     const request = newId();
     try {
-      this.socket.send(encodeCbor(resyncEnvelope(request, this.presentation.watch)));
-      this.resyncRequest = request;
+      this.socket.send(encodeCbor(resyncEnvelope(request, state.watch)));
+      state.resyncRequest = request;
     } catch {
-      this.presentation.releaseResync();
+      state.presentation.releaseResync();
+      this.#settleRefresh(state, null, new PresentationError('Resync request could not be sent.'));
       this.onStatus('Resync request could not be sent.');
+    }
+  }
+
+  #settleRefresh(state, value, error) {
+    for (const waiter of state.refreshWaiters.splice(0)) {
+      if (error) waiter.reject(error);
+      else waiter.resolve(value);
     }
   }
 
   #removePending(key) {
     const pending = this.pending.get(key);
-    if (!pending) return;
+    if (!pending) return null;
     clearTimeout(pending.timer);
     this.pending.delete(key);
+    return pending;
   }
 
   #rejectPending(error) {
     for (const [key, pending] of this.pending) {
-      this.#removePending(key);
-      pending.reject(error);
+      const removed = this.#removePending(key);
+      removed?.reject(error);
+    }
+    for (const state of this.#states()) {
+      state.resyncRequest = null;
+      state.presentation.releaseResync();
+      this.#settleRefresh(state, null, error);
     }
   }
 }
@@ -856,6 +979,52 @@ export function formatCbor(value, depth = 0) {
   if (value instanceof Map) return `{${[...value].map(([key, item]) => `${formatCbor(key, depth + 1)}: ${formatCbor(item, depth + 1)}`).join(', ')}}`;
   if (value && typeof value === 'object' && typeof value.tag === 'bigint') return `tag ${value.tag} ${formatCbor(value.value, depth + 1)}`;
   return 'unknown';
+}
+
+function untagged(value) {
+  if (value && typeof value === 'object' && typeof value.tag === 'bigint' && value.tag !== 2n && value.tag !== 3n) {
+    return untagged(value.value);
+  }
+  return value;
+}
+
+function displayValue(value) {
+  if (value && typeof value === 'object' &&
+    (value.tag === 2n || value.tag === 3n) && value.value instanceof Uint8Array) {
+    let integer = 0n;
+    for (const byte of value.value) integer = (integer << 8n) | BigInt(byte);
+    return (value.tag === 2n ? integer : -1n - integer).toString();
+  }
+  const plain = untagged(value);
+  if (plain === null || plain === undefined) return '';
+  return typeof plain === 'object' ? formatCbor(plain) : String(plain);
+}
+
+export function runResultFromPresentation(node) {
+  if (!node || node.tag !== PRESENT_TAG || !Array.isArray(node.value) || node.value.length !== 4) return null;
+  const children = node.value[3];
+  if (!Array.isArray(children) || children.length === 0) return null;
+  const latest = children[children.length - 1];
+  if (!latest || latest.tag !== PRESENT_TAG || !Array.isArray(latest.value) || !(latest.value[2] instanceof Map)) return null;
+  const properties = latest.value[2];
+  const field = name => {
+    for (const [key, value] of properties) {
+      if (displayValue(key) === name) return value;
+    }
+    return undefined;
+  };
+  const succeeded = displayValue(field('status')) === 'success';
+  const value = untagged(field('value'));
+  const valueText = value && typeof value === 'object' ? formatCbor(value) : displayValue(value);
+  const errorCode = displayValue(field('error_code'));
+  const line = Number(displayValue(field('line'))) || 1;
+  const column = Number(displayValue(field('column'))) || 1;
+  return {
+    ok: succeeded,
+    values: succeeded ? [valueText] : [],
+    stdout: displayValue(field('stdout')),
+    errors: succeeded ? [] : [{ message: errorCode || 'Evaluation failed', line, col: column }],
+  };
 }
 
 export function renderPresent(node, document, parent) {

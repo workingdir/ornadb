@@ -1,0 +1,7 @@
+{ id: "f156/paired-compaction/main", name: "f156/left/compaction-main", city: "f156/right/compaction-alpha", }
+
+{ id: "f156/paired-compaction/retry", name: "f156/left/compaction-retry", city: "f156/right/compaction-beta", }
+
+{ id: "f156/paired-compaction/reused", name: "f156/left/compaction-main", city: "f156/right/compaction-alpha", }
+
+{ id: "f156/paired-compaction/malformed", name: "f156/left/compaction-malformed", city: "f156/right/compaction-delta", }
