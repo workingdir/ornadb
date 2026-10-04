@@ -684,7 +684,11 @@ pub fn signature_help(
         return None;
     }
     let symbols = declaration_symbols(parse, &document.text);
-    let function = symbol_for_name(&symbols, call.name.rsplit('.').next().unwrap_or(&call.name))?;
+    let function = symbol_for_name(&symbols, call.name.rsplit('.').next().unwrap_or(&call.name))
+        .cloned()
+        .or_else(|| {
+            standard_symbol_for_call(parse, &call.name).map(|entry| entry.symbol.clone())
+        })?;
     if function.kind != EditorSymbolKind::Function {
         return None;
     }
@@ -730,6 +734,19 @@ pub fn signature_help(
         active_signature: Some(0),
         active_parameter: Some(active_parameter),
     })
+}
+
+fn standard_symbol_for_call(parse: &EditorParse, name: &str) -> Option<&'static StandardSymbol> {
+    if let Some((qualifier, symbol_name)) = name.rsplit_once('.') {
+        let module = resolve_standard_module(parse, qualifier)?;
+        return standard_symbol(&module, symbol_name);
+    }
+
+    let mut matches = standard_imported_symbols(parse)
+        .into_iter()
+        .filter(|entry| entry.symbol.name == name);
+    let found = matches.next()?;
+    matches.next().is_none().then_some(found)
 }
 
 #[derive(Debug)]
