@@ -9116,7 +9116,6 @@ struct QueryPairedBoundedWindowSpillRestoreChainFold {
     spill_fold_identity: String,
     restore_chain_fold_identity: String,
     window_restore_chain_fold_identity: String,
-    transition: &'static str,
     spill_pair_count: u64,
     spill_stage_count: u64,
     window_pair_count: u64,
@@ -11203,9 +11202,9 @@ fn add_paired_bounded_window_spill_restore_fold_details(
     }
 }
 
-/// Composes bounded window spill identity with the exact paired window and
-/// restore-chain fold. A sparse trailing pair carries both chain identities;
-/// its transition label is descriptive and does not perturb the stable hash.
+/// Binds the finite-frame spill fold to the exact paired window and
+/// restore-chain identities. Sparse joins carry these cumulative components;
+/// the digest also includes counts, spill totals, and overflow state.
 fn query_paired_bounded_window_spill_restore_chain_fold(
     spill_restore_fold: &QueryPairedBoundedWindowSpillRestoreFold,
     window_cost_restoration_fold: &QueryPairedWindowCostRestorationFold,
@@ -11218,8 +11217,6 @@ fn query_paired_bounded_window_spill_restore_chain_fold(
     let window_restore_chain_fold_identity = window_cost_restoration_fold
         .window_restore_chain_fold_identity
         .as_deref()?;
-    let transition = window_cost_restoration_fold.window_restore_chain_transition?;
-
     let window_identity_count = window_cost_restoration_fold.window_identities.len() as u64;
     let overflowed = spill_restore_fold.overflowed || window_cost_restoration_fold.overflowed;
     let mut hash = Sha256::new();
@@ -11247,7 +11244,6 @@ fn query_paired_bounded_window_spill_restore_chain_fold(
         spill_fold_identity: spill_restore_fold.spill_fold_identity.clone(),
         restore_chain_fold_identity: restore_chain_fold_identity.to_owned(),
         window_restore_chain_fold_identity: window_restore_chain_fold_identity.to_owned(),
-        transition,
         spill_pair_count: spill_restore_fold.spill_pair_count,
         spill_stage_count: spill_restore_fold.spill_stage_count,
         window_pair_count: window_cost_restoration_fold.window_pair_count,
@@ -11288,10 +11284,6 @@ fn add_paired_bounded_window_spill_restore_chain_fold_details(
             "finite_window_spill_chains_with_exact_paired_window_restore_chain_folds"
                 .to_owned(),
         ),
-    );
-    details.insert(
-        "paired_bounded_window_spill_restore_chain_transition".to_owned(),
-        PlanDetail::Text(fold.transition.to_owned()),
     );
     for (key, value) in [
         (
