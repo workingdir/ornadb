@@ -9,7 +9,7 @@ use std::{
     sync::atomic::{AtomicU64, Ordering},
 };
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 #[path = "support/completion_contract.rs"]
 mod completion_contract;
@@ -370,10 +370,12 @@ fn protocol_conformance_uses_v1_for_every_advertised_editor_feature() {
     );
     assert_no_legacy_words(&signature, "signature-help response");
     assert_eq!(signature["activeParameter"], 1);
-    assert!(signature["signatures"][0]["label"]
-        .as_str()
-        .unwrap()
-        .contains("fn add("));
+    assert!(
+        signature["signatures"][0]["label"]
+            .as_str()
+            .unwrap()
+            .contains("fn add(")
+    );
 
     let definition = client.request(
         "textDocument/definition",
@@ -394,18 +396,12 @@ fn protocol_conformance_uses_v1_for_every_advertised_editor_feature() {
             "context":{"includeDeclaration":true}
         }),
     );
-    let reference_locations = references.as_array().unwrap();
-    assert_eq!(reference_locations.len(), 2, "{references}");
-    let declaration_position = position_of(SOURCE, "pub fn add", "pub fn ".len());
-    let call_reference_position = position_of(SOURCE, "add(value, 2)", 0);
-    for expected in [&declaration_position, &call_reference_position] {
-        assert!(
-            reference_locations.iter().any(|location| {
-                location["uri"] == uri && location["range"]["start"] == *expected
-            }),
-            "references omitted {expected}: {references}"
-        );
-    }
+    hover_semantic_contract::assert_references_contract(
+        &[(uri, SOURCE)],
+        &references,
+        true,
+        "LSP protocol",
+    );
     let references_without_declaration = client.request(
         "textDocument/references",
         json!({
@@ -414,10 +410,11 @@ fn protocol_conformance_uses_v1_for_every_advertised_editor_feature() {
             "context":{"includeDeclaration":false}
         }),
     );
-    assert_eq!(references_without_declaration.as_array().unwrap().len(), 1);
-    assert_eq!(
-        references_without_declaration[0]["range"]["start"],
-        call_reference_position
+    hover_semantic_contract::assert_references_contract(
+        &[(uri, SOURCE)],
+        &references_without_declaration,
+        false,
+        "LSP protocol without declaration",
     );
 
     let renamed = client.request(
@@ -425,9 +422,12 @@ fn protocol_conformance_uses_v1_for_every_advertised_editor_feature() {
         json!({"textDocument":{"uri":uri},"position":call_position,"newName":"sum"}),
     );
     assert_no_legacy_words(&renamed, "rename response");
-    let edits = renamed["changes"][uri].as_array().unwrap();
-    assert_eq!(edits.len(), 2, "{renamed}");
-    assert!(edits.iter().all(|edit| edit["newText"] == "sum"));
+    hover_semantic_contract::assert_rename_contract(
+        &[(uri, SOURCE)],
+        &renamed,
+        "sum",
+        "LSP protocol",
+    );
 
     let completion = client.request(
         "textDocument/completion",
@@ -547,8 +547,7 @@ fn neovim_loads_generated_v1_syntax_and_queries_the_lsp_server() {
         .ancestors()
         .nth(2)
         .expect("orna-lsp is under crates");
-    let fixture_source = format!("{SOURCE}\n{SEMANTIC_SOURCE}\nCREATE SCHEMA old_syntax;\n");
-    let semantic_source_line = SOURCE.lines().count() + 1;
+    let fixture_source = format!("{SOURCE}\nCREATE SCHEMA old_syntax;\n");
     let legacy_create_line = fixture_source
         .split_once("CREATE SCHEMA old_syntax;")
         .expect("legacy source row is in the generated fixture")
@@ -557,6 +556,7 @@ fn neovim_loads_generated_v1_syntax_and_queries_the_lsp_server() {
         .count()
         + 1;
     let fixture = temporary_fixture(&fixture_source);
+    let semantic_fixture = temporary_fixture(SEMANTIC_SOURCE);
     let script = temporary_path("lua");
     let result_path = temporary_path("result");
     let completion_result_path = temporary_path("completion.json");
@@ -664,6 +664,12 @@ for _, location in ipairs(references.result) do
   expected_reference_set[key] = nil
 end
 assert(next(expected_reference_set) == nil, "Neovim references omitted expected declaration or call sites: " .. vim.inspect(expected_reference_set))
+local references_without_declaration, references_without_declaration_error = client:request_sync("textDocument/references", {
+  textDocument = { uri = uri },
+  position = vim.fn.json_decode(vim.env.ORNA_RENAME_POSITION),
+  context = { includeDeclaration = false },
+}, 5000, bufnr)
+assert(references_without_declaration ~= nil and references_without_declaration.err == nil, "Neovim call-site references request failed: " .. vim.inspect(references_without_declaration_error or references_without_declaration))
 
 local renamed, rename_error = client:request_sync("textDocument/rename", {
   textDocument = { uri = uri },
@@ -686,9 +692,21 @@ for _, position in ipairs(expected_reference_positions) do
   assert(rename_edit_positions[key], "Neovim rename omitted expected location " .. key)
 end
 
+vim.cmd("edit " .. vim.fn.fnameescape(vim.env.ORNA_SEMANTIC_FIXTURE))
+local semantic_bufnr = vim.api.nvim_get_current_buf()
+assert(vim.bo[semantic_bufnr].filetype == "orna", "semantic fixture did not select the orna filetype")
+assert(vim.wait(5000, function()
+  for _, attached in ipairs(vim.lsp.get_clients({ bufnr = semantic_bufnr })) do
+    if attached.name == "orna" and attached.initialized then
+      client = attached
+      return true
+    end
+  end
+  return false
+end, 10), "semantic fixture did not attach to orna-lsp")
 local semantic, semantic_error = client:request_sync("textDocument/semanticTokens/full", {
-  textDocument = { uri = uri },
-}, 5000, bufnr)
+  textDocument = { uri = vim.uri_from_bufnr(semantic_bufnr) },
+}, 5000, semantic_bufnr)
 assert(semantic ~= nil and semantic.err == nil, "Neovim semantic-token request failed: " .. vim.inspect(semantic_error or semantic))
 local token_types = client.server_capabilities.semanticTokensProvider.legend.tokenTypes
 local keyword_type
@@ -701,7 +719,7 @@ local found_pub = false
 for index = 1, #semantic.result.data, 5 do
   local delta_line, delta_start = semantic.result.data[index], semantic.result.data[index + 1]
   if delta_line == 0 then character = character + delta_start else line, character = line + delta_line, delta_start end
-  if line == 1 and character == 0 and semantic.result.data[index + 3] == keyword_type then
+  if line == 3 and character == 0 and semantic.result.data[index + 3] == keyword_type then
     found_pub = true
   end
 end
@@ -714,8 +732,7 @@ local expected_classes = {
   comment = false,
   operator = false,
 }
-local source_lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
-local semantic_source_line = tonumber(vim.env.ORNA_SEMANTIC_SOURCE_LINE)
+local source_lines = vim.api.nvim_buf_get_lines(semantic_bufnr, 0, -1, false)
 line, character = 0, 0
 for index = 1, #semantic.result.data, 5 do
   local delta_line, delta_start = semantic.result.data[index], semantic.result.data[index + 1]
@@ -723,22 +740,24 @@ for index = 1, #semantic.result.data, 5 do
   local token_length = semantic.result.data[index + 2]
   local token_type = token_types[semantic.result.data[index + 3] + 1]
   local token_text = string.sub(source_lines[line + 1], character + 1, character + token_length)
-  if line >= semantic_source_line then
-    if token_type == "keyword" and token_text == "let" then expected_classes.keyword = true end
-    if token_type == "variable" and token_text == "total" then expected_classes.variable = true end
-    if token_type == "number" and token_text == "12" then expected_classes.number = true end
-    if token_type == "string" then expected_classes.string = true end
-    if token_type == "comment" and string.find(token_text, "comment", 1, true) then expected_classes.comment = true end
-    if token_type == "operator" and token_text == "+" then expected_classes.operator = true end
-  end
+  if token_type == "keyword" and token_text == "let" then expected_classes.keyword = true end
+  if token_type == "variable" and token_text == "total" then expected_classes.variable = true end
+  if token_type == "number" and token_text == "12" then expected_classes.number = true end
+  if token_type == "string" then expected_classes.string = true end
+  if token_type == "comment" and string.find(token_text, "comment", 1, true) then expected_classes.comment = true end
+  if token_type == "operator" and token_text == "+" then expected_classes.operator = true end
 end
 for token_type, found in pairs(expected_classes) do
   assert(found, "Neovim LSP semantic tokens omitted the syntax-v1 " .. token_type .. " class")
 end
 vim.fn.writefile({ vim.fn.json_encode({
+  uri = uri,
   hover = hover_result,
   semantic = semantic.result,
   legend = token_types,
+  references = references.result,
+  references_without_declaration = references_without_declaration.result,
+  rename = renamed.result,
 }) }, vim.env.ORNA_HOVER_SEMANTIC_RESULT)
 
 vim.fn.writefile({
@@ -775,6 +794,7 @@ vim.cmd("qa!")
         .env("ORNA_VIM_SYNTAX", root.join("editors/vim/syntax/orna.vim"))
         .env("ORNA_NEOVIM_RUNTIME", root.join("editors/neovim"))
         .env("ORNA_TEST_FIXTURE", &fixture)
+        .env("ORNA_SEMANTIC_FIXTURE", &semantic_fixture)
         .env("ORNA_LSP_BIN", env!("CARGO_BIN_EXE_orna-lsp"))
         .env("ORNA_PROJECT_ROOT", root)
         .env(
@@ -802,10 +822,6 @@ vim.cmd("qa!")
             "ORNA_EXPECTED_KEYWORDS",
             serde_json::to_string(&expected_keywords().into_iter().collect::<Vec<_>>()).unwrap(),
         )
-        .env(
-            "ORNA_SEMANTIC_SOURCE_LINE",
-            semantic_source_line.to_string(),
-        )
         .env("ORNA_LEGACY_CREATE_LINE", legacy_create_line.to_string())
         .env("ORNA_COMPLETION_RESULT", &completion_result_path)
         .env("ORNA_HOVER_SEMANTIC_RESULT", &hover_semantic_result_path)
@@ -817,6 +833,7 @@ vim.cmd("qa!")
     let completion_result = fs::read_to_string(&completion_result_path);
     let hover_semantic_result = fs::read_to_string(&hover_semantic_result_path);
     let _ = fs::remove_file(fixture);
+    let _ = fs::remove_file(semantic_fixture);
     let _ = fs::remove_file(script);
     let _ = fs::remove_file(result_path);
     let _ = fs::remove_file(&completion_result_path);
@@ -849,8 +866,29 @@ vim.cmd("qa!")
         "Neovim",
     );
     hover_semantic_contract::assert_semantic_token_contract(
-        &fixture_source,
+        SEMANTIC_SOURCE,
         &hover_semantic_result["semantic"],
+        "Neovim",
+    );
+    let attached_uri = hover_semantic_result["uri"]
+        .as_str()
+        .expect("Neovim attached document URI");
+    hover_semantic_contract::assert_references_contract(
+        &[(attached_uri, SOURCE)],
+        &hover_semantic_result["references"],
+        true,
+        "Neovim",
+    );
+    hover_semantic_contract::assert_references_contract(
+        &[(attached_uri, SOURCE)],
+        &hover_semantic_result["references_without_declaration"],
+        false,
+        "Neovim without declaration",
+    );
+    hover_semantic_contract::assert_rename_contract(
+        &[(attached_uri, SOURCE)],
+        &hover_semantic_result["rename"],
+        "sum",
         "Neovim",
     );
     println!("Neovim integration evidence:\n{editor_result}");
@@ -979,9 +1017,13 @@ fn emacs_eglot_attaches_and_proves_hover_rename_references_and_semantic_tokens()
     (format "%s:%s" (orna-test-get start "line") (orna-test-get start "character"))))
 
 (let ((hover-buffer (find-file-noselect {}))
-      (semantic-buffer (find-file-noselect {}))
+      (semantic-buffer nil)
       (hover-response nil)
-      (semantic-response nil))
+      (semantic-response nil)
+      (references-response nil)
+      (references-without-declaration-response nil)
+      (rename-response nil)
+      (attached-uri nil))
   (unwind-protect
       (progn
         (with-current-buffer hover-buffer
@@ -1010,11 +1052,16 @@ fn emacs_eglot_attaches_and_proves_hover_rename_references_and_semantic_tokens()
           (let* ((server (eglot-current-server))
                  (params (eglot--TextDocumentPositionParams))
                  (uri (orna-test-get (orna-test-get params "textDocument") "uri"))
+                 (raw-references
+                  (jsonrpc-request
+                   server :textDocument/references
+                   (append params (list :context (list :includeDeclaration t)))))
+                 (raw-references-without-declaration
+                  (jsonrpc-request
+                   server :textDocument/references
+                   (append params (list :context (list :includeDeclaration :json-false)))))
                  (references
-                  (orna-test-list
-                   (jsonrpc-request
-                    server :textDocument/references
-                    (append params (list :context (list :includeDeclaration t))))))
+                  (orna-test-list raw-references))
                  (expected
                   (sort
                    (mapcar #'orna-test-position-key
@@ -1026,6 +1073,10 @@ fn emacs_eglot_attaches_and_proves_hover_rename_references_and_semantic_tokens()
             (setq hover-response (jsonrpc-request server :textDocument/hover params))
             (unless (stringp uri)
               (error "Eglot did not provide a URI for the attached buffer: %S" params))
+            (setq attached-uri uri)
+            (setq references-response raw-references)
+            (setq references-without-declaration-response
+                  raw-references-without-declaration)
             (unless (= (length references) 2)
               (error "Eglot references returned %d locations: %S" (length references) references))
             (unless (equal actual expected)
@@ -1041,16 +1092,18 @@ fn emacs_eglot_attaches_and_proves_hover_rename_references_and_semantic_tokens()
                    (edits (orna-test-list (orna-test-get changes uri)))
                    (edit-positions
                     (sort (mapcar #'orna-test-location-key edits) #'string<)))
+              (setq rename-response workspace-edit)
               (unless (= (length edits) 2)
                 (error "Eglot rename returned %d edits: %S" (length edits) workspace-edit))
               (unless (cl-every (lambda (edit) (equal (orna-test-get edit "newText") "sum")) edits)
                 (error "Eglot rename returned an unexpected replacement: %S" edits))
               (unless (equal edit-positions expected)
                 (error "Eglot rename omitted declaration or call edits: %S" edits)))
-            (princ "EMACS_LSP_REFERENCES=pass\n")
-            (princ "EMACS_LSP_RENAME=pass\n"))
+          (princ "EMACS_LSP_REFERENCES=pass\n")
+          (princ "EMACS_LSP_RENAME=pass\n"))
           (princ "EMACS_LSP_ATTACHMENT=pass\n")
           (princ "EMACS_LSP_HOVER=pass\n"))
+        (setq semantic-buffer (find-file-noselect {}))
         (when (fboundp 'eglot-semantic-tokens-mode)
          (with-current-buffer semantic-buffer
           (unless (eq major-mode 'orna-mode) (error "Orna semantic fixture did not load"))
@@ -1086,8 +1139,13 @@ fn emacs_eglot_attaches_and_proves_hover_rename_references_and_semantic_tokens()
                                    :textDocument/semanticTokens/full
                                    (list :textDocument (list :uri uri))))))
         (let ((evidence (make-hash-table :test 'equal)))
+          (puthash "uri" attached-uri evidence)
           (puthash "hover" hover-response evidence)
           (puthash "semantic" semantic-response evidence)
+          (puthash "references" references-response evidence)
+          (puthash "references_without_declaration"
+                   references-without-declaration-response evidence)
+          (puthash "rename" rename-response evidence)
           (with-temp-file (getenv "ORNA_HOVER_SEMANTIC_RESULT")
             (insert (json-encode evidence)))))
     (when (buffer-live-p hover-buffer) (kill-buffer hover-buffer))
@@ -1123,6 +1181,27 @@ fn emacs_eglot_attaches_and_proves_hover_rename_references_and_semantic_tokens()
     hover_semantic_contract::assert_semantic_token_contract(
         SEMANTIC_SOURCE,
         &hover_semantic_result["semantic"],
+        "Emacs Eglot",
+    );
+    let attached_uri = hover_semantic_result["uri"]
+        .as_str()
+        .expect("Emacs Eglot attached buffer URI");
+    hover_semantic_contract::assert_references_contract(
+        &[(attached_uri, SOURCE)],
+        &hover_semantic_result["references"],
+        true,
+        "Emacs Eglot",
+    );
+    hover_semantic_contract::assert_references_contract(
+        &[(attached_uri, SOURCE)],
+        &hover_semantic_result["references_without_declaration"],
+        false,
+        "Emacs Eglot without declaration",
+    );
+    hover_semantic_contract::assert_rename_contract(
+        &[(attached_uri, SOURCE)],
+        &hover_semantic_result["rename"],
+        "sum",
         "Emacs Eglot",
     );
     for evidence in [
@@ -1200,11 +1279,13 @@ fn vscode_keywords(root: &Path, expected: &BTreeSet<String>) -> (&'static str, B
     let manifest_path = root.join("editors/vscode/package.json");
     let manifest: Value =
         serde_json::from_str(&fs::read_to_string(&manifest_path).unwrap()).unwrap();
-    assert!(manifest["contributes"]["languages"][0]["extensions"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|extension| extension == ".orna"));
+    assert!(
+        manifest["contributes"]["languages"][0]["extensions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|extension| extension == ".orna")
+    );
     assert_eq!(manifest["contributes"]["grammars"][0]["language"], "orna");
     let grammar_path = root.join("editors/vscode").join(
         manifest["contributes"]["grammars"][0]["path"]
