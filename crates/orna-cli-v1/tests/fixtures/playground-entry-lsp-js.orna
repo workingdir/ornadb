@@ -1,0 +1,1 @@
+{ id: "entry-lsp-js", asset_path: "assets/lsp-wasm/orna_lsp.js", kind: "asset" }

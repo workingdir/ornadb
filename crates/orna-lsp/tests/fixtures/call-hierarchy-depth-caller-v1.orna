@@ -1,0 +1,5 @@
+pub fn remote(value: Int): Int = caller(bridge(value));
+
+pub fn collide(value: Int): Int = value;
+
+pub fn ambiguous(value: Int): Int = collide(value);
