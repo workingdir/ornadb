@@ -1,36 +1,38 @@
 # Playground serve integration
 
-Work ADR 0116 binds the playground's ordinary Orna application architecture.
-This note records the current `orna serve` dogfood path and its process-level
-verification; it does not replace that architecture decision.
+Work ADR 0116 binds the playground as a database-hosted Orna application.
+`orna serve` is the web host; the selected database's committed Git snapshot
+is the source for the shell, assets, programs, and examples.
 
-## Served surface
+## Database records and routes
 
-The S1 Git listing remains at `/`, with committed tree and blob views at
-`/tree/<commit>/<path>` and `/blob/<commit>/<path>`. Its page links to the
-playground at `/playground/`. `orna serve` serves the built web page and assets
-from the selected clone's `playground/web-ui/dist/`; `/api/examples` returns
-only committed `.orna` examples from that same Git-backed clone.
+`playground.orna` declares `Sample` and `Asset` tables. Sample rows and the
+legacy `playground/examples/*.orna` files feed `/api/examples`. The shell,
+stylesheet, and browser client are generated as `playground.Asset` rows under
+`playground/Asset/`. Each row records a normalized relative path, media type,
+and UTF-8 content.
 
-The page obtains a same-origin session through `POST /orna/session`, then
-connects to the returned `/orna/live/<session>` WebSocket using
-`orna.present.v1`. It watches the reserved run-events presentation, sends
-explicit Eval requests, and resynchronizes that watch to receive typed
-presentation deltas. Evaluation runs in the server's Orna runtime. The browser
-does not contain a second evaluator or a language keyword inventory.
+`npm run build` creates the small browser bundle and refreshes these rows.
+Commit the generated rows along with source changes. At request time,
+`orna serve` reads the row for the requested asset from the committed `HEAD`
+using the repository listing API; it does not read `playground/web-ui/dist/`.
+The `/playground/` and `/playground/embed` routes use the same shell record,
+with the embed route hiding the marked page header and applying its framing
+policy. Static assets are returned with their checked media type and
+`X-Content-Type-Options: nosniff`.
 
-## GitHub Pages channels
+The browser sends explicit Run requests to the same clone's
+`orna.present.v1` session. Source evaluation and presentation remain in the
+server runtime. The browser does not contain a second evaluator or a
+language-keyword inventory.
 
-The Pages workflow publishes the static playground bundle from `main` at
-https://workingdir.github.io/ornadb/ and the current playground milestone
-branch at https://workingdir.github.io/ornadb/dev/. Each Pages artifact contains
-both channels. Pull requests run the checks without publishing; a push to
-`main` or a playground milestone branch publishes the updated artifact.
+## Responsive and keyboard behavior
 
-Pages serves the editor bundle and its browser analysis assets. Examples and
-source evaluation still require the same-origin `/api/examples` and `/orna/`
-endpoints provided by `orna serve`. The Pages smoke checks both channel bundles,
-their generated assets, and the published HTML and JS/CSS routes.
+The two panes share the wide layout and stack on narrower screens. The example
+selector retains native type-to-select and supports arrow keys, Home/End, and
+five-row Page Up/Down movement. Loading a row updates the text editor and a
+polite live announcement. Run is available by button or Ctrl/Command+Enter;
+result tabs support the standard arrow and Home/End keys.
 
 ## Dogfood proof
 
@@ -38,21 +40,13 @@ Run the focused process-level integration test with:
 
 ```sh
 export CARGO_BUILD_JOBS=2 RUST_TEST_THREADS=2
-cargo test -p orna-cli-v1 --test serve_playground_dogfood -- --nocapture
+cargo test --locked -p orna-cli-v1 --test serve_playground_dogfood -- --nocapture
 ```
 
 The test initializes a temporary Orna Git database, commits crate-local
-`.orna` fixtures, starts the actual `orna-cli-v1 serve` process, and uses curl
-for the Git listing, playground page and asset, committed examples, and live
-session creation. A WebSocket client then follows the same `orna.present.v1`
-watch, fingerprinted Eval, and Resync exchange used by the browser bridge.
-
-The test sends two independently fingerprinted Eval requests before reading
-either response, then checks that each response keeps its request identity and
-value (`2` and `42`). It resynchronizes the original watch, applies the
-revision `0..1` delta to the revision-zero presentation, and checks both run
-events. A third Eval produces a revision `1..2` delta; applying it yields the
-exact presentation from a fresh watch snapshot in the same served session.
-
-The test checks the HTTP and live protocol boundary end to end without relying
-on a separately running development server or a checked-in build artifact.
+`.orna` schema, sample, and asset fixtures, starts the real `orna serve`
+process without a build directory, then uses curl to check the Git listing,
+the database-resident shell and its CSS/JavaScript rows, committed examples,
+and the live session. A WebSocket client follows the existing watch,
+fingerprinted Eval, and Resync exchange to prove independent results and
+presentation deltas.
