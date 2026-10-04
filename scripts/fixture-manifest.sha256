@@ -944,6 +944,16 @@ af09f28edccfd63cc277a4df9af0bfab27570a32c119510b2fd24f749ee8a8f8  crates/orna-ev
 0cac251ea9fe709cca8775dcf168eec906f3a5c3091ce5b338ee144391415ae4  crates/orna-evaluator-v1/tests/fixtures/attachment-route-package.orna
 3ad2e337becdebc8cf2f2960d24acc241c1254aa31a35cfa10a0396c9d2b8214  crates/orna-evaluator-v1/tests/fixtures/attachment-route-primary.orna
 66ea89ffd43eab52c762ccc5c6451ff13dd1b921064188ba7bc4f494c4ebd384  crates/orna-evaluator-v1/tests/fixtures/closures.orna
+339401df65f73e627b72b9912aea5fe4032ce6d1f19df41f8aea8235d6ba46a5  crates/orna-evaluator-v1/tests/fixtures/collection-advanced-empty-ints-mod2l.orna
+1a1a9199e2bb36b28799941b6a89229a3181220a18733e0c7d156de461acf350  crates/orna-evaluator-v1/tests/fixtures/collection-advanced-empty-pairs-mod2l.orna
+277143d723d8baf9a92df191cd133e9bc86c5c8e942ada9240f0be04fdb45497  crates/orna-evaluator-v1/tests/fixtures/collection-advanced-empty-strings-mod2l.orna
+b42b01c6a7dbbbbee6b1ebe246b51d94a6785ca993477b7c83e8ec2a58009397  crates/orna-evaluator-v1/tests/fixtures/collection-advanced-filter-callback-mod2l.orna
+b11779edc1e45c9e864155f88ef76571d542d217fd91cfc043549b9553353508  crates/orna-evaluator-v1/tests/fixtures/collection-advanced-filter-map-mod2l.orna
+071883c6ebc9a64fa662ebf21b687f79084c425936daa234f1a8d4744baef8b6  crates/orna-evaluator-v1/tests/fixtures/collection-advanced-interleave-scan-mod2l.orna
+96cfaa3c3babaf280ab8a90243cfa196c8cefe8e481a242cccd2b3aa9a1bcdaa  crates/orna-evaluator-v1/tests/fixtures/collection-advanced-map-while-callback-mod2l.orna
+81a9049e04114639d8299d53dc82e4a7ab9e09e2a2efbb5b23e040a6c8c71e12  crates/orna-evaluator-v1/tests/fixtures/collection-advanced-prefix-mod2l.orna
+1854b28985f60ab8da6b0c4cd16b7dd47ddca6549be2b60cdf42a9d19b819fcb  crates/orna-evaluator-v1/tests/fixtures/collection-advanced-use-mod2l.orna
+da743a33b6a18b744b1626405aa7ad13d9088fee457b2804f8b8c49838423d72  crates/orna-evaluator-v1/tests/fixtures/collection-advanced-zip-longest-mod2l.orna
 bbe9be5eb7272bd661c1452885c9ae0e5134a15e1cd10647d1d79af3237afd80  crates/orna-evaluator-v1/tests/fixtures/collection_filter_named_callback.orna
 9ff788af0d9d2505d818e8ef5394b47d3e49a3198fab50b271ac98fdaebe201a  crates/orna-evaluator-v1/tests/fixtures/collection_flat_map_named_callback.orna
 c06943382bdcb21a33e9054129417203e28d72995af9d5069d6e5a9b21c2d349  crates/orna-evaluator-v1/tests/fixtures/collection_map_named_callback.orna
@@ -3188,6 +3198,7 @@ d8f385e0cbe0998addcdd99bc41234969c3f77cc202ba434207bf5402313d8d5  crates/orna-ls
 cc65b25177b4a62dfcef28ef1da7fe88ca7bf533e227285882d13eb032405b36  crates/orna-lsp/src/analysis/fixtures/standard-math-import.orna
 2ac7143a5dcab472864d2d6820c6236939d21476a980df28c267024f3f656171  crates/orna-lsp/src/analysis/fixtures/standard-missing-import.orna
 7448019e1215ea705ad3416bc881c489dfcc1720400162ff0b5ef39c83acfeff  crates/orna-lsp/src/browser/fixtures/browser-intelligence.orna
+9217afe5354b9d31db8467723528fc99b7ca08977dd1d0d0e82677e9853e472f  crates/orna-lsp/src/browser/fixtures/standard-completion-ranking.orna
 f4e8d5cfdb20469a0205e848d75d377e63d3b54ad383d005ce0959d27b277110  crates/orna-lsp/tests/fixtures/accepted-corpus.txt
 11b87ed71842d8acde383de01985383af202e3d0d4809866829f0f74b3d78f14  crates/orna-lsp/tests/fixtures/ambiguous-renames-caller-v1.orna
 c760f77a909070dfef8bd78019889c88aee5f22a5139ab0865ae074bd2f6da88  crates/orna-lsp/tests/fixtures/ambiguous-renames-v1.orna
@@ -3201,6 +3212,7 @@ ae26b76e75c4bf39e03664cb7cb33d461c0061fac79ddc285488509973b6d84a  crates/orna-ls
 f05abfb8b62ad2ad18e08c3d5c08fe816c7ee4d0629cec9c7c5f9258da1e13f1  crates/orna-lsp/tests/fixtures/folding-selection-v1.orna
 dfbd0534b1fd606ee56c29b65e86a53290489579eca500658c6742d425f70281  crates/orna-lsp/tests/fixtures/hover-completion-v1.orna
 1064c12be254992ed3d461b593b680f9a8e83fde3fb50af8db63c12b88b9b777  crates/orna-lsp/tests/fixtures/incremental-malformed-v1.orna
+d49a4b8de867606627946be5ce4c374f36ce18c0ae9d0d19e191d51498850da8  crates/orna-lsp/tests/fixtures/inline-value-linked-editing-v1.orna
 1d6507c277771162faf5ab37dfe673dbbe59c3184ddf06274272d00a134470d9  crates/orna-lsp/tests/fixtures/ji3t0-invalid-v1.orna
 01e3906bf653fdb21af2004278ef449a14178756ebb34f4e0bd6cc49ee4d7e21  crates/orna-lsp/tests/fixtures/ji3t0-lsp-v1-self-contained.orna
 953ba69f21a16700cc90bee0b6920e14a9af8c340a6c88def7d2b466aed1b4b6  crates/orna-lsp/tests/fixtures/ji3t0-lsp-v1.orna
