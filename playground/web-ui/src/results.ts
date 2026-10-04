@@ -16,7 +16,8 @@ export interface FormattedRunResult {
 }
 
 function jsonText(value: unknown): string {
-  if (typeof value === 'string') return JSON.stringify(value, null, 2);
+  // The WASM API already returns values in Orna's bounded display format.
+  if (typeof value === 'string') return value;
   try {
     return JSON.stringify(value, null, 2) ?? String(value);
   } catch {

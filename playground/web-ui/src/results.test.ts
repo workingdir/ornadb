@@ -36,5 +36,15 @@ describe('WASM run result presentation', () => {
     expect(result.errorsText).toBe('');
     expect(result.errorsCount).toBe('—');
   });
-});
 
+  it('renders display strings from the WASM runtime without adding JSON quotes', () => {
+    const result = formatRunResult({
+      ok: true,
+      values: ['42 : Int'],
+      stdout: '',
+      errors: [],
+    });
+
+    expect(result.valuesText).toBe('42 : Int');
+  });
+});
