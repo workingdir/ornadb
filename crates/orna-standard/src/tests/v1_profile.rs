@@ -36,6 +36,7 @@ use crate::{
     REFERENCE_STANDARD_ITERATOR_CONSUMERS_PATH_V1,
     REFERENCE_STANDARD_COLLECTION_ADAPTERS_PATH_V1,
     REFERENCE_STANDARD_LAZY_ADAPTERS_PATH_V1,
+    REFERENCE_STANDARD_STREAM_ADAPTERS_PATH_V1,
     REFERENCE_STANDARD_LAZY_PATH_V1,
     REFERENCE_STANDARD_VIEWS_PATH_V1,
     REFERENCE_STANDARD_INTROSPECTION_PATH_V1, REFERENCE_STANDARD_REFLECTION_PATH_V1,
@@ -49,7 +50,7 @@ use crate::{
 #[test]
 fn pinned_ui_presentation_helpers_are_included_as_source() {
     let sources = reference_standard_sources_v1();
-    assert_eq!(sources.len(), 64);
+    assert_eq!(sources.len(), 65);
     assert_eq!(sources[49].0, REFERENCE_STANDARD_UI_PATH_V1);
     let parsed = orna_syntax_v1::parse_module_with_file(
         &sources[49].1,
@@ -275,6 +276,47 @@ fn pinned_lazy_sequence_adapters_are_included_and_typecheck() {
     assert!(parsed.is_ok(), "{path}: {:#?}", parsed.diagnostics);
     reference_standard_catalogue_v1()
         .expect("lazy sequence adapters resolve in the captured standard catalogue");
+}
+
+#[test]
+fn pinned_stream_adapters_are_included_and_typecheck() {
+    let sources = reference_standard_sources_v1();
+    let (index, (path, source)) = sources
+        .iter()
+        .enumerate()
+        .find(|(_, (path, _))| path == REFERENCE_STANDARD_STREAM_ADAPTERS_PATH_V1)
+        .expect("the pinned source bundle includes std.stream.adapters");
+    assert_eq!(index, 64, "stream adapters append without moving old sources");
+    assert_eq!(path, REFERENCE_STANDARD_STREAM_ADAPTERS_PATH_V1);
+    for declaration in [
+        "pub fn from_iterator<T>(",
+        "pub fn from_sequence<T>(",
+        "pub fn from_iterator_batches<T>(",
+        "pub fn from_sequence_batches<T>(",
+        "pub fn buffered_batches<T>(",
+    ] {
+        assert!(source.contains(declaration), "missing stream adapter `{declaration}`");
+    }
+    for contract in [
+        "finite input",
+        "resulting list as a replayable stream source",
+        "Invoke a sequence factory once",
+        "final short batch is retained",
+        "Item order and the final short batch are preserved",
+    ] {
+        assert!(source.contains(contract), "missing stream adapter contract `{contract}`");
+    }
+    let profile = reference_standard_profile_v1();
+    profile
+        .verify_source(path, source)
+        .expect("stream adapter bytes match the captured standard profile");
+    let mut changed_source = source.clone();
+    changed_source.push_str("\n// changed after snapshot capture\n");
+    assert!(profile.verify_source(path, &changed_source).is_err());
+    let parsed = orna_syntax_v1::parse_module_with_file(source, path);
+    assert!(parsed.is_ok(), "{path}: {:#?}", parsed.diagnostics);
+    reference_standard_catalogue_v1()
+        .expect("stream adapters resolve in the captured standard catalogue");
 }
 
 #[test]
@@ -1498,7 +1540,7 @@ fn reference_standard_uses_pinned_orna_1_source_and_resolves_its_imports() {
     ] {
         assert!(sources[33].1.contains(contract), "missing std.test contract `{contract}`");
     }
-    assert_eq!(sources.len(), 64);
+    assert_eq!(sources.len(), 65);
     assert_eq!(sources[49].0, REFERENCE_STANDARD_UI_PATH_V1);
     for declaration in [
         "pub fn Field<T>(label: Str, value: T): UI",
@@ -1960,7 +2002,7 @@ fn pinned_filesystem_effect_is_visible_to_consumers_and_forbidden_in_assertions(
 #[test]
 fn pinned_filesystem_path_and_metadata_modules_are_captured_and_typecheck() {
     let sources = reference_standard_sources_v1();
-    assert_eq!(sources.len(), 64);
+    assert_eq!(sources.len(), 65);
     for (index, path) in [
         (42, REFERENCE_STANDARD_IO_PATH_MODULE_PATH_V1),
         (43, REFERENCE_STANDARD_IO_METADATA_PATH_V1),
@@ -2024,7 +2066,7 @@ fn pinned_filesystem_path_and_metadata_modules_are_captured_and_typecheck() {
 #[test]
 fn pinned_io_buffer_module_is_captured_and_resolves_stream_adapters() {
     let sources = reference_standard_sources_v1();
-    assert_eq!(sources.len(), 64);
+    assert_eq!(sources.len(), 65);
     let (path, source) = sources
         .iter()
         .find(|(path, _)| path == REFERENCE_STANDARD_IO_BUFFER_PATH_V1)
@@ -2061,7 +2103,7 @@ fn pinned_io_buffer_module_is_captured_and_resolves_stream_adapters() {
 #[test]
 fn pinned_process_and_environment_modules_are_captured_and_typecheck() {
     let sources = reference_standard_sources_v1();
-    assert_eq!(sources.len(), 64);
+    assert_eq!(sources.len(), 65);
     for (index, path) in [
         (44, REFERENCE_STANDARD_IO_PROCESS_PATH_V1),
         (45, REFERENCE_STANDARD_IO_ENVIRONMENT_PATH_V1),
