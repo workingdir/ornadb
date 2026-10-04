@@ -116,7 +116,10 @@ mod host_filesystem;
 #[cfg(feature = "native-hosts")]
 pub use host_filesystem::*;
 
-#[cfg(feature = "native-hosts")]
+#[cfg(all(feature = "native-hosts", not(target_arch = "wasm32")))]
+mod host_network;
+#[cfg(all(feature = "native-hosts", target_arch = "wasm32"))]
+#[path = "host_network_wasm.rs"]
 mod host_network;
 #[cfg(feature = "native-hosts")]
 pub use host_network::*;

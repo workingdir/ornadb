@@ -8,9 +8,11 @@ description = "Bounded deterministic evaluator for the Orna 1.0 expression subse
 publish = false
 
 [features]
-default = ["native-hosts", "project-admission", "reference-standard"]
+default = ["native-hosts", "project-repl", "reference-standard"]
 native-hosts = ["dep:getrandom", "orna-sys-v1/native-hosts"]
 project-admission = ["dep:orna-project-v1"]
+core-repl = []
+project-repl = ["core-repl", "project-admission"]
 reference-standard = ["dep:orna-standard"]
 
 [dependencies]

@@ -13,7 +13,7 @@ crate-type = ["cdylib", "rlib"]
 test-stub-run = []
 
 [dependencies]
-orna-evaluator-v1 = { path = "../../crates/orna-evaluator-v1", default-features = false }
+orna-evaluator-v1 = { path = "../../crates/orna-evaluator-v1", default-features = false, features = ["core-repl"] }
 orna-foundation-v1 = { path = "../../crates/orna-foundation-v1" }
 orna-syntax-v1 = { path = "../../crates/orna-syntax-v1" }
 orna-value-v1 = { path = "../../crates/orna-value-v1" }
@@ -23,7 +23,10 @@ wasm-bindgen = "0.2.105"
 uuid = { version = "1.18.1", features = ["js"] }
 
 [dev-dependencies]
-wasm-bindgen-test = "0.3.55"
+wasm-bindgen-test = "=0.3.79"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+uuid = { workspace = true, features = ["js"] }
 
 [lints.rust]
 unsafe_code = "forbid"

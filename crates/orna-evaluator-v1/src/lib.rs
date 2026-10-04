@@ -33,6 +33,7 @@ use serde_json::value::RawValue;
 use sha2::{Digest as _, Sha256};
 use unicode_normalization::UnicodeNormalization;
 
+#[cfg(feature = "core-repl")]
 mod admitted_repl;
 mod cancellation;
 mod relation;
@@ -42,6 +43,7 @@ mod sys_bindings;
 mod timezone;
 mod unicode_16_case_properties;
 
+#[cfg(feature = "core-repl")]
 pub use admitted_repl::{AdmittedReplSession, ReplError};
 pub use cancellation::CancellationToken;
 use relation::{
@@ -62,7 +64,7 @@ pub use timezone::{
 /// Returns the reference standard sources supplied to the bounded REPL.
 #[must_use]
 #[cfg(feature = "reference-standard")]
-pub fn reference_standard_sources() -> [(String, String); 58] {
+pub fn reference_standard_sources() -> [(String, String); 59] {
     orna_standard::reference_standard_sources_v1()
 }
 
