@@ -51,6 +51,12 @@ jobs:
           cargo test --locked -p orna-lsp
           --test ji3t0_conformance --test editor_attachment_completion
 
+      - name: Prove hash-pinned sys binding fixture behavior
+        run: >-
+          cargo test --locked -p orna-sys-v1
+          --test sys_api_generation --test system_binding_stubs
+          --test system_provider_abi
+
       - name: Audit editor source and generated artifacts
         run: cargo test --locked -p orna-syntax-v1 --test editor_artifacts
 
