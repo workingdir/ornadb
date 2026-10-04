@@ -29,7 +29,7 @@ type ModuleLoader = () => Promise<WasmModule>;
 async function loadGeneratedModule(): Promise<WasmModule> {
   const moduleUrl = new URL(
     `${import.meta.env.BASE_URL}orna-wasm/pkg/orna_wasm.js`,
-    window.location.href,
+    globalThis.location.href,
   );
   return (await import(/* @vite-ignore */ moduleUrl.href)) as WasmModule;
 }
@@ -77,7 +77,8 @@ function isRunResult(value: unknown): value is RunResult {
     value.values.every((entry) => typeof entry === 'string') &&
     typeof value.stdout === 'string' &&
     Array.isArray(value.errors) &&
-    value.errors.every(isRunError);
+    value.errors.every(isRunError) &&
+    (value.ast === undefined || typeof value.ast === 'string');
 }
 
 function isRunError(value: unknown): value is RunError {

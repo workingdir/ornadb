@@ -31,19 +31,28 @@ struct RunResponse {
     values: Vec<String>,
     stdout: String,
     errors: Vec<RunError>,
+    #[serde(default)]
+    ast: String,
 }
 
 impl RunResponse {
-    fn success(values: Vec<String>) -> Self {
+    fn success(values: Vec<String>, ast: String) -> Self {
         Self {
             ok: true,
             values,
             stdout: String::new(),
             errors: Vec::new(),
+            ast,
         }
     }
 
-    fn failure(values: Vec<String>, message: impl Into<String>, line: usize, col: usize) -> Self {
+    fn failure(
+        values: Vec<String>,
+        message: impl Into<String>,
+        line: usize,
+        col: usize,
+        ast: String,
+    ) -> Self {
         Self {
             ok: false,
             values,
@@ -53,12 +62,13 @@ impl RunResponse {
                 line,
                 col,
             }],
+            ast,
         }
     }
 
     fn to_json(&self) -> String {
         serde_json::to_string(self).unwrap_or_else(|_| {
-            "{\"ok\":false,\"values\":[],\"stdout\":\"\",\"errors\":[{\"message\":\"ORNA-WASM-JSON\",\"line\":1,\"col\":1}]}".into()
+            "{\"ok\":false,\"values\":[],\"stdout\":\"\",\"errors\":[{\"message\":\"ORNA-WASM-JSON\",\"line\":1,\"col\":1}],\"ast\":\"\"}".into()
         })
     }
 }
@@ -76,11 +86,12 @@ pub fn run(source: &str) -> String {
 fn run_internal(source: &str) -> RunResponse {
     let limits = Limits::default();
     if source.len() > limits.max_source_bytes {
-        return RunResponse::failure(Vec::new(), "ORNA-EVAL-LIMIT", 1, 1);
+        return RunResponse::failure(Vec::new(), "ORNA-EVAL-LIMIT", 1, 1, String::new());
     }
 
     let mut session = AdmittedReplSession::new(limits);
     let mut values = Vec::new();
+    let mut ast = Vec::new();
     let mut pending = String::new();
     let mut pending_line = 1;
     let mut next_line = 1;
@@ -102,6 +113,7 @@ fn run_internal(source: &str) -> RunResponse {
         }
         if !parsed.is_ok() {
             let located = parse_repl_with_file(&pending, "<playground>");
+            ast.push(format!("{:#?}", located.value));
             let diagnostic = located.diagnostics.first();
             let (line, col) = diagnostic
                 .and_then(|diagnostic| diagnostic.span.start_position.as_ref())
@@ -116,8 +128,11 @@ fn run_internal(source: &str) -> RunResponse {
                 diagnostic.map_or("ORNA-PARSE-001", |diagnostic| diagnostic.message.as_str()),
                 line,
                 col,
+                ast.join("\n\n"),
             );
         }
+
+        ast.push(format!("{:#?}", parsed.value));
 
         match session.submit(&pending) {
             Ok(Some(value)) => values.push(render_value(&value)),
@@ -128,6 +143,7 @@ fn run_internal(source: &str) -> RunResponse {
                     error.code(),
                     pending_line,
                     first_column(&pending),
+                    ast.join("\n\n"),
                 );
             }
         }
@@ -142,13 +158,14 @@ fn run_internal(source: &str) -> RunResponse {
                 "ORNA-EVAL-INCOMPLETE",
                 pending_line,
                 first_column(&pending),
+                ast.join("\n\n"),
             );
         }
         // `split_inclusive` omits the empty final segment, so a non-incomplete
         // final submission has already been evaluated in the loop above.
     }
 
-    RunResponse::success(values)
+    RunResponse::success(values, ast.join("\n\n"))
 }
 
 fn line_count(line: &str) -> usize {
@@ -397,6 +414,7 @@ mod tests {
         assert_eq!(actual["values"], serde_json::json!(["42 : Int"]));
         assert_eq!(actual["stdout"], "");
         assert_eq!(actual["errors"], serde_json::json!([]));
+        assert!(actual["ast"].as_str().is_some_and(|ast| !ast.is_empty()));
     }
 
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
@@ -557,9 +575,9 @@ mod tests {
         let mut repl = ReplSession::new();
         let mut stub = |source: &str| {
             if source.contains("broken") {
-                RunResponse::failure(Vec::new(), "stub failure", 1, 1).to_json()
+                RunResponse::failure(Vec::new(), "stub failure", 1, 1, String::new()).to_json()
             } else {
-                RunResponse::success(vec!["stubbed : Int".into()]).to_json()
+                RunResponse::success(vec!["stubbed : Int".into()], "stub AST".into()).to_json()
             }
         };
         let result = repl.evaluate_using("7", &mut stub);

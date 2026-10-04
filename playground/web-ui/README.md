@@ -1,25 +1,32 @@
-# Orna Playground web UI
+# OrnaDB playground UI
 
-The web UI uses Monaco for `.orna` editing and the bounded pure evaluator compiled to WebAssembly.
+This Vite app is the browser entry served by `orna serve` at `/playground/`.
+The editor uses Monaco. Its example list comes from committed
+`playground/examples/*.orna` records through `GET /api/examples`.
 
-## Run locally
+The existing `orna-wasm` `run()` API executes in a replaceable browser worker,
+so Stop terminates that run. Diagnostics, completion, hover, and signature
+help are thin JSON adapters over the existing `orna-lsp` analysis functions,
+also built to WebAssembly and loaded in a browser worker.
 
-Install Node.js, Rust with the `wasm32-unknown-unknown` target, and `wasm-pack`. Then run:
+Build requirements are Node.js and `wasm-pack`:
 
 ```sh
 npm ci
-npm run wasm:build
-npm run dev
-```
-
-`npm run wasm:build` writes generated JavaScript and WebAssembly files to `playground/orna-wasm/pkg/`. Vite serves them during development and copies them into the production build.
-
-The browser runtime supports the pure admitted REPL subset. It returns values and redacted diagnostics; host effects are rejected.
-
-## Verify
-
-```sh
 npm test
 npm run build
-cargo test --manifest-path ../orna-wasm/Cargo.toml
 ```
+
+Then start OrnaDB from a Git worktree containing the generated build. Keep the
+generated `dist` directory beside the source checkout so `orna serve` can serve
+the built page:
+
+```sh
+cargo run -p orna-cli-v1 -- serve --port 8181
+```
+
+For local Vite development, build both WASM packages first. The examples API is
+served by OrnaDB, while the Vite dev server serves the editor assets. Its API
+proxy targets `http://127.0.0.1:8181`; set `ORNA_SERVE_URL` to override it.
+
+The page can also be embedded with `<iframe src="/playground/" title="Orna playground"></iframe>`.

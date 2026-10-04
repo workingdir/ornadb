@@ -57,6 +57,7 @@ describe('WASM run() JSON contract', () => {
       values: ['42 : Int'],
       stdout: 'before failure',
       errors: [{ message: 'ORNA-S012-UNRESOLVED', line: 4, col: 2 }],
+      ast: 'ReplInput::Expression',
     };
     const runtime = await initializeRuntime(async () => ({
       default: vi.fn(async () => undefined),

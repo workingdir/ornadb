@@ -1,175 +1,398 @@
 import * as monaco from 'monaco-editor/esm/vs/editor/editor.api.js';
 import EditorWorker from 'monaco-editor/esm/vs/editor/editor.worker.js?worker';
-import sampleSource from './sample.orna?raw';
 import { registerOrnaLanguage } from './language';
-import { formatRunResult, formatThrownError } from './results';
-import { describeRuntimeLoadFailure, initializeRuntime, type PlaygroundRuntime } from './runtime';
+import { formatRunResult, formatThrownError, type RunResult } from './results';
 import './styles.css';
 
-// Vite serves Monaco's worker as a separate module so editor work stays off
-// the main thread.
-globalThis.MonacoEnvironment = {
-  getWorker: () => new EditorWorker(),
-};
+type LspAction = 'diagnostics' | 'completions' | 'hover' | 'signature_help';
+type Position = { line: number; character: number };
+type LspReply = { id: number; value?: unknown; error?: string };
+type Example = { name: string; path: string; source: string };
 
-monaco.editor.defineTheme('orna-dark', {
-  base: 'vs-dark',
+globalThis.MonacoEnvironment = { getWorker: () => new EditorWorker() };
+registerOrnaLanguage(monaco.languages);
+const pageStyle = getComputedStyle(document.documentElement);
+monaco.editor.defineTheme('orna-basic', {
+  base: 'vs',
   inherit: true,
-  rules: [
-    { token: 'keyword.orna', foreground: '8be0a3', fontStyle: 'bold' },
-    { token: 'comment.orna', foreground: '71837a', fontStyle: 'italic' },
-    { token: 'string.orna', foreground: 'e9ba79' },
-    { token: 'number.orna', foreground: 'c2a1ff' },
-    { token: 'function.orna', foreground: '89c9ec' },
-    { token: 'operator.orna', foreground: '9aaea4' },
-    { token: 'delimiter.orna', foreground: 'a0b1a8' },
-  ],
+  rules: [],
   colors: {
-    'editor.background': '#101b17',
-    'editor.foreground': '#d8e4dc',
-    'editorLineNumber.foreground': '#56675e',
-    'editorLineNumber.activeForeground': '#acbdb2',
-    'editor.lineHighlightBackground': '#17251f',
-    'editor.selectionBackground': '#30584280',
-    'editorCursor.foreground': '#9be1ac',
-    'editorIndentGuide.background1': '#26362e',
-    'editorWidget.background': '#14221b',
+    'editor.background': pageStyle.getPropertyValue('--background').trim() || '#fff',
+    'editor.foreground': pageStyle.getPropertyValue('--text').trim() || '#202122',
   },
 });
 
-registerOrnaLanguage(monaco.languages);
-
 function requiredElement<T extends Element>(selector: string): T {
   const element = document.querySelector<T>(selector);
-  if (!element) {
-    throw new Error(`The playground page is missing ${selector}.`);
-  }
+  if (!element) throw new Error(`The playground page is missing ${selector}.`);
   return element;
 }
 
 const editorHost = requiredElement<HTMLElement>('#editor');
+const examplesSelect = requiredElement<HTMLSelectElement>('#examples');
 const runButton = requiredElement<HTMLButtonElement>('#run-button');
-const status = requiredElement<HTMLElement>('#runtime-status');
-const statusText = requiredElement<HTMLElement>('#runtime-status-text');
+const stopButton = requiredElement<HTMLButtonElement>('#stop-button');
+const editorStatus = requiredElement<HTMLElement>('#editor-status');
 const executionState = requiredElement<HTMLElement>('#execution-state');
-const cursorPosition = requiredElement<HTMLElement>('#cursor-position');
-const valuesOutput = requiredElement<HTMLElement>('#values-output');
-const valuesCount = requiredElement<HTMLElement>('#values-count');
 const stdoutOutput = requiredElement<HTMLElement>('#stdout-output');
-const stdoutCount = requiredElement<HTMLElement>('#stdout-count');
+const valuesOutput = requiredElement<HTMLElement>('#values-output');
 const errorsOutput = requiredElement<HTMLElement>('#errors-output');
-const errorsCount = requiredElement<HTMLElement>('#errors-count');
+const astOutput = requiredElement<HTMLElement>('#ast-output');
+const outputStatus = requiredElement<HTMLElement>('#output-status');
 
 const editor = monaco.editor.create(editorHost, {
-  value: sampleSource.trimEnd(),
+  value: '',
   language: 'orna',
-  theme: 'orna-dark',
+  theme: 'orna-basic',
   automaticLayout: true,
   minimap: { enabled: false },
   scrollBeyondLastLine: false,
-  fontFamily: '"JetBrains Mono", "SFMono-Regular", Consolas, monospace',
   fontSize: 14,
-  lineHeight: 24,
   tabSize: 4,
-  padding: { top: 22, bottom: 24 },
-  renderLineHighlight: 'line',
-  roundedSelection: false,
-  overviewRulerBorder: false,
   lineNumbersMinChars: 3,
-  guides: { indentation: true, bracketPairs: true },
-  bracketPairColorization: { enabled: true },
+  renderLineHighlight: 'line',
 });
 
-editor.onDidChangeCursorPosition(({ position }) => {
-  cursorPosition.textContent = `Ln ${position.lineNumber}, Col ${position.column}`;
-});
+const lspWorker = new Worker(new URL('./lsp-worker.ts', import.meta.url), { type: 'module' });
+const pendingLsp = new Map<number, { resolve: (value: unknown) => void; reject: (error: Error) => void }>();
+let nextLspId = 1;
 
-function setStatus(label: string, state: 'loading' | 'ready' | 'error'): void {
-  statusText.textContent = label;
-  status.dataset.state = state;
+type PendingRun = {
+  id: number;
+  resolve: (value: unknown) => void;
+  reject: (error: Error) => void;
+};
+let nextRunId = 1;
+let activeRun: PendingRun | undefined;
+let runtimeWorker: Worker;
+
+function createRuntimeWorker(): Worker {
+  const worker = new Worker(new URL('./runtime-worker.ts', import.meta.url), { type: 'module' });
+  worker.addEventListener('message', ({ data }: MessageEvent<{ id: number; result?: unknown; error?: string }>) => {
+    if (!activeRun || data.id !== activeRun.id) return;
+    const pending = activeRun;
+    activeRun = undefined;
+    if (data.error) pending.reject(new Error(data.error));
+    else pending.resolve(data.result);
+  });
+  worker.addEventListener('error', (event) => {
+    if (!activeRun) return;
+    const pending = activeRun;
+    activeRun = undefined;
+    pending.reject(new Error(event.message));
+  });
+  return worker;
 }
 
-function setOutput(target: HTMLElement, text: string, emptyLabel: string): void {
-  if (text.length === 0) {
-    const empty = document.createElement('span');
-    empty.className = 'empty-result';
-    empty.textContent = emptyLabel;
-    target.replaceChildren(empty);
-  } else {
-    target.textContent = text;
+runtimeWorker = createRuntimeWorker();
+
+function executeSource(source: string): Promise<unknown> {
+  const id = nextRunId++;
+  return new Promise((resolve, reject) => {
+    activeRun = { id, resolve, reject };
+    runtimeWorker.postMessage({ id, action: 'run', source });
+  });
+}
+
+lspWorker.addEventListener('message', ({ data }: MessageEvent<LspReply>) => {
+  const pending = pendingLsp.get(data.id);
+  if (!pending) return;
+  pendingLsp.delete(data.id);
+  if (data.error) pending.reject(new Error(data.error));
+  else pending.resolve(data.value);
+});
+
+lspWorker.addEventListener('error', (event) => {
+  for (const pending of pendingLsp.values()) pending.reject(new Error(event.message));
+  pendingLsp.clear();
+  editorStatus.textContent = 'Editor analysis unavailable';
+});
+
+function requestLsp(action: LspAction, source: string, position?: Position): Promise<unknown> {
+  const id = nextLspId++;
+  return new Promise((resolve, reject) => {
+    pendingLsp.set(id, { resolve, reject });
+    lspWorker.postMessage({ id, action, source, position });
+  });
+}
+
+function asRecord(value: unknown): Record<string, unknown> | undefined {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : undefined;
+}
+
+function asArray(value: unknown): unknown[] {
+  return Array.isArray(value) ? value : [];
+}
+
+function completionKind(kind: unknown): monaco.languages.CompletionItemKind | undefined {
+  if (typeof kind !== 'number' || !Number.isInteger(kind) || kind < 1 || kind > 25) return undefined;
+  return (kind - 1) as monaco.languages.CompletionItemKind;
+}
+
+monaco.languages.registerCompletionItemProvider('orna', {
+  triggerCharacters: ['.', '('],
+  async provideCompletionItems(model, position) {
+    const response = await requestLsp('completions', model.getValue(), {
+      line: position.lineNumber - 1,
+      character: position.column - 1,
+    });
+    const word = model.getWordUntilPosition(position);
+    const range = new monaco.Range(position.lineNumber, word.startColumn, position.lineNumber, word.endColumn);
+    const suggestions = asArray(response).flatMap((entry) => {
+      const item = asRecord(entry);
+      if (!item || typeof item.label !== 'string') return [];
+      const suggestion: monaco.languages.CompletionItem = {
+        label: item.label,
+        kind: completionKind(item.kind) ?? monaco.languages.CompletionItemKind.Text,
+        insertText: typeof item.insertText === 'string' ? item.insertText : item.label,
+        range,
+      };
+      if (item.detail) suggestion.detail = String(item.detail);
+      if (item.documentation) {
+        suggestion.documentation = typeof item.documentation === 'string'
+          ? item.documentation
+          : String(asRecord(item.documentation)?.value ?? '');
+      }
+      if (item.insertTextFormat === 2) {
+        suggestion.insertTextRules = monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet;
+      }
+      return [suggestion];
+    });
+    return { suggestions };
+  },
+});
+
+function markdownContents(value: unknown): string {
+  if (typeof value === 'string') return value;
+  if (Array.isArray(value)) return value.map(markdownContents).filter(Boolean).join('\n\n');
+  const record = asRecord(value);
+  if (!record) return '';
+  if (typeof record.value === 'string') {
+    if (typeof record.language === 'string') return `\`\`\`${record.language}\n${record.value}\n\`\`\``;
+    return record.value;
+  }
+  return '';
+}
+
+monaco.languages.registerHoverProvider('orna', {
+  async provideHover(model, position) {
+    const response = asRecord(await requestLsp('hover', model.getValue(), {
+      line: position.lineNumber - 1,
+      character: position.column - 1,
+    }));
+    const text = markdownContents(response?.contents);
+    return text ? { contents: [{ value: text }] } : null;
+  },
+});
+
+monaco.languages.registerSignatureHelpProvider('orna', {
+  signatureHelpTriggerCharacters: ['(', ','],
+  signatureHelpRetriggerCharacters: [','],
+  async provideSignatureHelp(model, position) {
+    const response = asRecord(await requestLsp('signature_help', model.getValue(), {
+      line: position.lineNumber - 1,
+      character: position.column - 1,
+    }));
+    if (!response) return null;
+    const signatures = asArray(response.signatures).flatMap((entry) => {
+      const signature = asRecord(entry);
+      if (!signature || typeof signature.label !== 'string') return [];
+      const parameters = asArray(signature.parameters).flatMap((parameterEntry) => {
+        const parameter = asRecord(parameterEntry);
+        if (!parameter) return [];
+        const label = parameter.label;
+        if (typeof label !== 'string' && !Array.isArray(label)) return [];
+        const mapped: monaco.languages.ParameterInformation = { label: label as string | [number, number] };
+        if (parameter.documentation) mapped.documentation = markdownContents(parameter.documentation);
+        return [mapped];
+      });
+      const mapped: monaco.languages.SignatureInformation = {
+        label: signature.label,
+        parameters,
+      };
+      if (signature.documentation) mapped.documentation = markdownContents(signature.documentation);
+      return [mapped];
+    });
+    if (signatures.length === 0) return null;
+    const activeSignature = typeof response.activeSignature === 'number' ? response.activeSignature : 0;
+    const activeParameter = typeof response.activeParameter === 'number' ? response.activeParameter : 0;
+    return {
+      value: { signatures, activeSignature, activeParameter },
+      dispose: () => undefined,
+    };
+  },
+});
+
+let diagnosticTimer: ReturnType<typeof setTimeout> | undefined;
+async function updateDiagnostics(): Promise<void> {
+  try {
+    const response = await requestLsp('diagnostics', editor.getValue());
+    const markers = asArray(response).flatMap((entry) => {
+      const item = asRecord(entry);
+      const range = asRecord(item?.range);
+      const start = asRecord(range?.start);
+      const end = asRecord(range?.end);
+      if (!item || !start || !end || typeof item.message !== 'string') return [];
+      const severity = item.severity === 2
+        ? monaco.MarkerSeverity.Warning
+        : item.severity === 3
+          ? monaco.MarkerSeverity.Info
+          : item.severity === 4
+            ? monaco.MarkerSeverity.Hint
+            : monaco.MarkerSeverity.Error;
+      return [{
+        startLineNumber: Number(start.line) + 1,
+        startColumn: Number(start.character) + 1,
+        endLineNumber: Number(end.line) + 1,
+        endColumn: Number(end.character) + 1,
+        message: item.message,
+        severity,
+        source: typeof item.source === 'string' ? item.source : 'orna-lsp',
+        code: typeof item.code === 'string' || typeof item.code === 'number' ? String(item.code) : undefined,
+      }];
+    });
+    const model = editor.getModel();
+    if (model) monaco.editor.setModelMarkers(model, 'orna-lsp', markers);
+    editorStatus.textContent = markers.length === 0
+      ? 'No syntax diagnostics'
+      : `${markers.length} syntax ${markers.length === 1 ? 'diagnostic' : 'diagnostics'}`;
+  } catch {
+    editorStatus.textContent = 'Editor analysis unavailable';
   }
 }
 
-function showRuntimeError(message: string): void {
-  setOutput(valuesOutput, '', 'Values returned by the program appear here.');
-  setOutput(stdoutOutput, '', 'Program output appears here.');
-  setOutput(errorsOutput, message, 'Diagnostics appear here.');
-  valuesCount.textContent = '—';
-  stdoutCount.textContent = '—';
-  errorsCount.textContent = '1';
-  errorsOutput.closest('.result-section')?.classList.add('has-errors');
+editor.onDidChangeModelContent(() => {
+  if (diagnosticTimer) clearTimeout(diagnosticTimer);
+  diagnosticTimer = setTimeout(() => void updateDiagnostics(), 250);
+});
+void updateDiagnostics();
+
+function setOutput(target: HTMLElement, value: string, emptyLabel: string): void {
+  target.textContent = value.length === 0 ? emptyLabel : value;
 }
 
-function showResult(result: Awaited<ReturnType<PlaygroundRuntime['run']>>): void {
+function showResult(result: RunResult): void {
   const formatted = formatRunResult(result);
-  setOutput(valuesOutput, formatted.valuesText, 'No values returned.');
-  setOutput(stdoutOutput, formatted.stdoutText, 'No stdout.');
-  setOutput(errorsOutput, formatted.errorsText, formatted.succeeded ? 'No errors.' : 'Execution failed without a diagnostic.');
-  valuesCount.textContent = formatted.valuesCount;
-  stdoutCount.textContent = formatted.stdoutCount;
-  errorsCount.textContent = formatted.errorsCount;
-  errorsOutput.closest('.result-section')?.classList.toggle('has-errors', !formatted.succeeded);
-  executionState.textContent = formatted.succeeded ? 'Completed' : 'Failed';
-  executionState.dataset.state = formatted.succeeded ? 'success' : 'error';
+  setOutput(stdoutOutput, formatted.stdoutText, 'No stdout was produced.');
+  setOutput(valuesOutput, formatted.valuesText, 'No values were returned.');
+  setOutput(errorsOutput, formatted.errorsText, result.ok ? 'No errors.' : 'Execution failed without a diagnostic.');
+  setOutput(astOutput, result.ast ?? '', 'No syntax tree was returned.');
+  executionState.textContent = result.ok ? 'Completed' : 'Failed';
+  outputStatus.textContent = result.ok ? 'Execution completed.' : 'Execution returned errors.';
 }
 
-let runtime: PlaygroundRuntime | undefined;
-let isRunning = false;
+function isRunResult(value: unknown): value is RunResult {
+  const result = asRecord(value);
+  return Boolean(result) && typeof result?.ok === 'boolean' &&
+    Array.isArray(result?.values) && result.values.every((entry) => typeof entry === 'string') &&
+    typeof result?.stdout === 'string' && Array.isArray(result?.errors) &&
+    result.errors.every((entry) => {
+      const error = asRecord(entry);
+      return Boolean(error) && typeof error?.message === 'string' &&
+        typeof error?.line === 'number' && typeof error?.col === 'number';
+    }) && (result.ast === undefined || typeof result.ast === 'string');
+}
 
 async function runSource(): Promise<void> {
-  if (!runtime || isRunning) return;
-
-  isRunning = true;
+  if (activeRun) return;
   runButton.disabled = true;
-  runButton.classList.add('is-running');
+  stopButton.disabled = false;
   executionState.textContent = 'Running';
-  executionState.dataset.state = 'running';
-  setStatus('Executing source', 'loading');
-
+  outputStatus.textContent = 'Running source in the Orna WebAssembly worker.';
   try {
-    const result = await runtime.run(editor.getValue());
-    showResult(result);
-    setStatus(result.ok ? 'Runtime ready' : 'Execution returned errors', result.ok ? 'ready' : 'error');
+    const body: unknown = await executeSource(editor.getValue());
+    if (body === undefined) return;
+    if (!isRunResult(body)) throw new Error('The runtime returned an invalid run result.');
+    showResult(body);
   } catch (error) {
     const message = formatThrownError(error);
-    showRuntimeError(message);
+    setOutput(errorsOutput, message, 'Execution failed.');
     executionState.textContent = 'Failed';
-    executionState.dataset.state = 'error';
-    setStatus('Execution failed', 'error');
+    outputStatus.textContent = 'The run failed.';
   } finally {
-    isRunning = false;
     runButton.disabled = false;
-    runButton.classList.remove('is-running');
+    stopButton.disabled = true;
   }
 }
 
 runButton.addEventListener('click', () => void runSource());
+stopButton.addEventListener('click', () => {
+  const pending = activeRun;
+  if (!pending) return;
+  activeRun = undefined;
+  runtimeWorker.terminate();
+  runtimeWorker = createRuntimeWorker();
+  pending.resolve(undefined);
+  executionState.textContent = 'Stopped';
+  outputStatus.textContent = 'Execution stopped.';
+});
 editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.Enter, () => void runSource());
 
-setStatus('Loading runtime', 'loading');
-void initializeRuntime()
-  .then((loadedRuntime) => {
-    runtime = loadedRuntime;
-    runButton.disabled = false;
-    executionState.textContent = 'Ready';
-    executionState.dataset.state = 'ready';
-    setStatus('Runtime ready', 'ready');
-  })
-  .catch((error: unknown) => {
-    showRuntimeError(describeRuntimeLoadFailure(error));
-    executionState.textContent = 'Unavailable';
-    executionState.dataset.state = 'error';
-    setStatus('Runtime unavailable', 'error');
-  });
+function isExample(value: unknown): value is Example {
+  const example = asRecord(value);
+  return Boolean(example) && typeof example?.name === 'string' &&
+    typeof example?.path === 'string' && typeof example?.source === 'string';
+}
 
-window.addEventListener('beforeunload', () => editor.dispose(), { once: true });
+async function loadExamples(): Promise<void> {
+  try {
+    const response = await fetch('/api/examples');
+    if (!response.ok) throw new Error(`Examples request failed (${response.status}).`);
+    const payload: unknown = await response.json();
+    const examples = asArray(asRecord(payload)?.examples).filter(isExample);
+    examplesSelect.replaceChildren();
+    if (examples.length === 0) {
+      const empty = document.createElement('option');
+      empty.textContent = 'No database examples';
+      examplesSelect.append(empty);
+      examplesSelect.disabled = true;
+      editorStatus.textContent = 'No committed playground examples';
+      runButton.disabled = false;
+      return;
+    }
+    for (const example of examples) {
+      const option = document.createElement('option');
+      option.value = example.path;
+      option.textContent = example.name;
+      option.dataset.source = example.source;
+      examplesSelect.append(option);
+    }
+    examplesSelect.disabled = false;
+    editor.setValue(examples[0].source);
+    runButton.disabled = false;
+  } catch (error) {
+    const option = document.createElement('option');
+    option.textContent = 'Examples unavailable';
+    examplesSelect.replaceChildren(option);
+    editorStatus.textContent = formatThrownError(error);
+    runButton.disabled = false;
+  }
+}
+
+examplesSelect.addEventListener('change', () => {
+  const source = examplesSelect.selectedOptions[0]?.dataset.source;
+  if (source !== undefined) editor.setValue(source);
+});
+
+for (const tab of document.querySelectorAll<HTMLButtonElement>('[data-output-tab]')) {
+  tab.addEventListener('click', () => {
+    const name = tab.dataset.outputTab;
+    for (const candidate of document.querySelectorAll<HTMLButtonElement>('[data-output-tab]')) {
+      candidate.setAttribute('aria-selected', String(candidate === tab));
+      candidate.tabIndex = candidate === tab ? 0 : -1;
+    }
+    for (const panel of document.querySelectorAll<HTMLElement>('[data-output-panel]')) {
+      panel.hidden = panel.dataset.outputPanel !== name;
+    }
+  });
+}
+
+runButton.disabled = false;
+void loadExamples();
+window.addEventListener('beforeunload', () => {
+  runtimeWorker.terminate();
+  editor.dispose();
+  lspWorker.terminate();
+}, { once: true });

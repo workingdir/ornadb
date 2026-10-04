@@ -28,6 +28,11 @@ fn wasm_run_sample_results_match_direct_native_evaluator_results() {
         assert_eq!(wasm_contract["values"], serde_json::json!(expected_values));
         assert_eq!(wasm_contract["stdout"], "");
         assert_eq!(wasm_contract["errors"], serde_json::json!([]));
+        assert!(
+            wasm_contract["ast"]
+                .as_str()
+                .is_some_and(|ast| !ast.is_empty())
+        );
     }
 }
 

@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { formatRunResult } from './results';
 
-describe('WASM run result presentation', () => {
+describe('OrnaDB run result presentation', () => {
   it('keeps run() values and stdout separate and adds error locations', () => {
     const result = formatRunResult({
       ok: false,
