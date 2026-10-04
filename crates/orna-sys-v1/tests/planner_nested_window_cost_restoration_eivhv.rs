@@ -502,7 +502,7 @@ fn nested_window_identities_survive_paired_cost_restore_folds_and_sparse_edges()
         ),
         "changing a window identity changes the nested restore-chain composite"
     );
-    assert_eq!(
+    assert_ne!(
         text(
             child_b,
             "paired_window_cost_restoration_restore_chain_fold_identity"
@@ -511,7 +511,7 @@ fn nested_window_identities_survive_paired_cost_restore_folds_and_sparse_edges()
             changed_joins["pair:table:ChildB"],
             "paired_window_cost_restoration_restore_chain_fold_identity"
         ),
-        "changing a window identity leaves the restore-chain component intact"
+        "changing a window identity propagates through the restore-chain component"
     );
     assert_eq!(
         text(
