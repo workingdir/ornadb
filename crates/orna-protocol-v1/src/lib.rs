@@ -901,9 +901,7 @@ impl PresentNode {
                 uuid_node(table_object_id),
                 value_node(&primary_key)?,
             ]),
-            Some(PresentIdentity::Explicit(key)) => {
-                Node::Array(vec![uint(3), value_node(&key)?])
-            }
+            Some(PresentIdentity::Explicit(key)) => Node::Array(vec![uint(3), value_node(&key)?]),
         };
         let mut properties = properties
             .into_iter()
@@ -921,10 +919,7 @@ impl PresentNode {
             .into_iter()
             .map(|(_, key, value)| (key, value))
             .collect();
-        let children = children
-            .into_iter()
-            .map(|child| child.0.0)
-            .collect();
+        let children = children.into_iter().map(|child| child.0.0).collect();
         Self::decode(&Node::Tag(
             60012,
             Box::new(Node::Array(vec![
@@ -1002,9 +997,56 @@ impl PatchList {
     fn decode(node: &Node) -> Result<Self> {
         // Patch lists are generic trace values. Sanitize their nested payloads
         // before retaining the tree because Delta serialization reuses it.
-        let node = present_value_node(&to_ovb(node)?)?;
+        // A PresentNode used as a patch payload is the typed delta boundary,
+        // so preserve that wrapper while redacting its untyped property data.
+        let node = from_ovb(&to_ovb(node)?)?;
+        validate_patches(&node)?;
+        let node = sanitize_patch_list(&node)?;
         validate_patches(&node)?;
         Ok(Self(ValueNode(node)))
+    }
+
+    /// Builds a renderer-neutral root replacement patch for one complete
+    /// Present tree. Applications use this when a small live value changes
+    /// and a full snapshot would duplicate the whole presentation payload.
+    pub fn replace_root(present: &PresentNode) -> Result<Self> {
+        Self::decode(&Node::Array(vec![Node::Array(vec![
+            uint(2),
+            Node::Array(Vec::new()),
+            present.0.0.clone(),
+        ])]))
+    }
+}
+
+fn sanitize_patch_list(node: &Node) -> Result<Node> {
+    let operations = array(node).ok_or(Error::InvalidValue)?;
+    let operations = operations
+        .iter()
+        .map(|operation| {
+            let fields = array(operation).ok_or(Error::InvalidValue)?;
+            let opcode = u64_value(fields.first().ok_or(Error::InvalidValue)?)?;
+            let fields = fields
+                .iter()
+                .enumerate()
+                .map(|(index, field)| {
+                    if matches!(opcode, 0 | 2) && index == 2 {
+                        sanitize_patch_payload(field)
+                    } else {
+                        present_value_node(&to_ovb(field)?)
+                    }
+                })
+                .collect::<Result<Vec<_>>>()?;
+            Ok(Node::Array(fields))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    Ok(Node::Array(operations))
+}
+
+fn sanitize_patch_payload(node: &Node) -> Result<Node> {
+    if matches!(node, Node::Tag(60012, _)) {
+        redact_present_values(node)
+    } else {
+        present_value_node(&to_ovb(node)?)
     }
 }
 
@@ -1405,9 +1447,7 @@ impl Diagnostic {
         // The wire protocol carries no disclosure authorization. Redact every
         // diagnostic at ingress so standalone, Result, and status responses
         // share the same fail-closed boundary, including recursive causes.
-        let safe_bytes = diagnostic
-            .encode_ovb()
-            .map_err(|_| Error::InvalidValue)?;
+        let safe_bytes = diagnostic.encode_ovb().map_err(|_| Error::InvalidValue)?;
         let safe = CanonicalValue::decode(&safe_bytes).map_err(|_| Error::InvalidValue)?;
         Ok(Self(ValueNode(from_ovb(safe.raw())?)))
     }
@@ -1555,9 +1595,7 @@ fn validate_diagnostic(node: &Node) -> Result<()> {
 
 fn canonical_value(node: &Node) -> Result<CanonicalValue> {
     let value = CanonicalValue::new(to_ovb(node)?).map_err(|_| Error::InvalidValue)?;
-    value
-        .redacted_for_trace()
-        .map_err(|_| Error::InvalidValue)
+    value.redacted_for_trace().map_err(|_| Error::InvalidValue)
 }
 fn redacted_value_node(node: &Node) -> Result<Node> {
     // Result bodies are typed envelopes. Preserve Diagnostic/Present wrappers
@@ -1636,17 +1674,11 @@ fn present_value_node(value: &OvbRaw) -> Result<Node> {
             entries.sort_by(|(left, _), (right, _)| {
                 encode_node(left)
                     .expect("validated presentation keys remain encodable")
-                    .cmp(
-                        &encode_node(right)
-                            .expect("validated presentation keys remain encodable"),
-                    )
+                    .cmp(&encode_node(right).expect("validated presentation keys remain encodable"))
             });
             Ok(Node::Map(entries))
         }
-        OvbRaw::Tag(tag, value) => Ok(Node::Tag(
-            *tag,
-            Box::new(present_value_node(value)?),
-        )),
+        OvbRaw::Tag(tag, value) => Ok(Node::Tag(*tag, Box::new(present_value_node(value)?))),
         value => from_ovb(value),
     }
 }
@@ -1694,10 +1726,9 @@ fn redact_present_values(node: &Node) -> Result<Node> {
                 table.clone(),
                 present_value_node(&to_ovb(key)?)?,
             ]),
-            [kind, key] if u64_value(kind).ok() == Some(3) => Node::Array(vec![
-                kind.clone(),
-                present_value_node(&to_ovb(key)?)?,
-            ]),
+            [kind, key] if u64_value(kind).ok() == Some(3) => {
+                Node::Array(vec![kind.clone(), present_value_node(&to_ovb(key)?)?])
+            }
             _ => fields[1].clone(),
         }
     } else {
@@ -2205,17 +2236,19 @@ mod tests {
                 (uint(2), Node::Array(vec![])),
                 (
                     uint(3),
-                    Node::Map(vec![(Node::Text("credential".into()), Node::Text(fixture.into()))]),
+                    Node::Map(vec![(
+                        Node::Text("credential".into()),
+                        Node::Text(fixture.into()),
+                    )]),
                 ),
             ])),
         );
-        let child = present_node(
-            Node::Null,
-            vec![],
-        );
+        let child = present_node(Node::Null, vec![]);
         let child = match child {
             Node::Tag(60012, body) => {
-                let Node::Array(mut fields) = *body else { unreachable!() };
+                let Node::Array(mut fields) = *body else {
+                    unreachable!()
+                };
                 fields[2] = Node::Map(vec![(Node::Text("error".into()), error)]);
                 Node::Tag(60012, Box::new(Node::Array(fields)))
             }
@@ -2240,9 +2273,11 @@ mod tests {
 
         let decoded = PresentNode::decode(&incoming).unwrap();
         let encoded = encode_node(&decoded.0.0).unwrap();
-        assert!(!encoded
-            .windows(fixture.len())
-            .any(|part| part == fixture.as_bytes()));
+        assert!(
+            !encoded
+                .windows(fixture.len())
+                .any(|part| part == fixture.as_bytes())
+        );
         let Node::Tag(60012, root_body) = &decoded.0.0 else {
             panic!("typed Present shape was discarded")
         };
@@ -2254,13 +2289,14 @@ mod tests {
 
     #[test]
     fn present_builder_distinguishes_stable_child_identities_from_positions() {
-        let text_value = |value: &str| {
-            CanonicalValue::new(OvbRaw::Text(value.to_owned())).unwrap()
-        };
+        let text_value = |value: &str| CanonicalValue::new(OvbRaw::Text(value.to_owned())).unwrap();
         let record = PresentNode::new(
             PresentKind::Name("record".into()),
             Some(PresentIdentity::RecordField("customer".into())),
-            [(PresentPropertyKey::Name("label".into()), text_value("record"))],
+            [(
+                PresentPropertyKey::Name("label".into()),
+                text_value("record"),
+            )],
             [],
         )
         .unwrap();
@@ -2309,7 +2345,10 @@ mod tests {
             extensions: BTreeMap::new(),
         };
         let bytes = envelope.encode(Limits::default()).unwrap();
-        assert_eq!(Envelope::decode(&bytes, Limits::default()).unwrap(), envelope);
+        assert_eq!(
+            Envelope::decode(&bytes, Limits::default()).unwrap(),
+            envelope
+        );
     }
 
     #[test]
@@ -2331,6 +2370,63 @@ mod tests {
                 [child(), child()],
             ),
             Err(Error::InvalidValue)
+        );
+    }
+
+    #[test]
+    fn root_replacement_delta_preserves_typed_present_nodes_on_wire() {
+        let initial = PresentNode::new(
+            PresentKind::Name("run.events".into()),
+            None,
+            [(
+                PresentPropertyKey::Name("count".into()),
+                CanonicalValue::new(OvbRaw::Int(0.into())).unwrap(),
+            )],
+            [],
+        )
+        .unwrap();
+        let run = PresentNode::new(
+            PresentKind::Name("run".into()),
+            Some(PresentIdentity::Explicit(
+                CanonicalValue::new(OvbRaw::Int(1.into())).unwrap(),
+            )),
+            [(
+                PresentPropertyKey::Name("value".into()),
+                CanonicalValue::new(OvbRaw::Int(42.into())).unwrap(),
+            )],
+            [],
+        )
+        .unwrap();
+        let expected = PresentNode::new(
+            PresentKind::Name("run.events".into()),
+            None,
+            [(
+                PresentPropertyKey::Name("count".into()),
+                CanonicalValue::new(OvbRaw::Int(1.into())).unwrap(),
+            )],
+            [run],
+        )
+        .unwrap();
+        let patches = PatchList::replace_root(&expected).unwrap();
+        let envelope = Envelope {
+            request: None,
+            watch: Some(id(2)),
+            message: Message::Delta {
+                base_revision: 0,
+                new_revision: 1,
+                patches,
+                snapshot: snapshot(),
+            },
+            extensions: BTreeMap::new(),
+        };
+        let bytes = envelope.encode(Limits::default()).unwrap();
+        let decoded = Envelope::decode(&bytes, Limits::default()).unwrap();
+        let Message::Delta { patches, .. } = decoded.message else {
+            panic!("root replacement remains a typed presentation delta");
+        };
+        assert_eq!(
+            initial.apply_patches(&patches, Limits::default()).unwrap(),
+            expected
         );
     }
 
@@ -2554,13 +2650,11 @@ mod tests {
     }
     #[test]
     fn duplicate_structural_map_keys_are_rejected_before_admission() {
-        let nested = Node::Map(vec![
-            (uint(0), Node::Map(vec![(uint(1), uint(2)), (uint(1), uint(3))])),
-        ]);
-        assert_eq!(
-            reject_duplicate_map_keys(&nested),
-            Err(Error::NonCanonical)
-        );
+        let nested = Node::Map(vec![(
+            uint(0),
+            Node::Map(vec![(uint(1), uint(2)), (uint(1), uint(3))]),
+        )]);
+        assert_eq!(reject_duplicate_map_keys(&nested), Err(Error::NonCanonical));
     }
     fn wire(code: u64, request: Option<[u8; 16]>, watch: Option<[u8; 16]>, body: Node) -> Vec<u8> {
         encode_node(&Node::Map(vec![
@@ -3441,8 +3535,15 @@ mod tests {
             let decoded = Envelope::decode(&incoming, Limits::default()).unwrap();
             assert!(!format!("{decoded:?}").contains(fixture));
             let outgoing = decoded.encode(Limits::default()).unwrap();
-            assert!(!outgoing.windows(fixture.len()).any(|part| part == fixture.as_bytes()));
-            assert_eq!(Envelope::decode(&outgoing, Limits::default()).unwrap(), decoded);
+            assert!(
+                !outgoing
+                    .windows(fixture.len())
+                    .any(|part| part == fixture.as_bytes())
+            );
+            assert_eq!(
+                Envelope::decode(&outgoing, Limits::default()).unwrap(),
+                decoded
+            );
         }
     }
 
@@ -3488,9 +3589,11 @@ mod tests {
         let decoded = Envelope::decode(&raw_incoming, Limits::default()).unwrap();
         assert!(!format!("{decoded:?}").contains(fixture));
         let redacted_wire = decoded.encode(Limits::default()).unwrap();
-        assert!(!redacted_wire
-            .windows(fixture.len())
-            .any(|part| part == fixture.as_bytes()));
+        assert!(
+            !redacted_wire
+                .windows(fixture.len())
+                .any(|part| part == fixture.as_bytes())
+        );
         assert_eq!(
             Envelope::decode(&redacted_wire, Limits::default()).unwrap(),
             decoded
@@ -3511,9 +3614,11 @@ mod tests {
         let extension = Envelope::decode(&extension_incoming, Limits::default()).unwrap();
         assert!(!format!("{extension:?}").contains(fixture));
         let extension_wire = extension.encode(Limits::default()).unwrap();
-        assert!(!extension_wire
-            .windows(fixture.len())
-            .any(|part| part == fixture.as_bytes()));
+        assert!(
+            !extension_wire
+                .windows(fixture.len())
+                .any(|part| part == fixture.as_bytes())
+        );
         assert_eq!(
             Envelope::decode(&extension_wire, Limits::default()).unwrap(),
             extension
@@ -3540,9 +3645,11 @@ mod tests {
         let patch = Envelope::decode(&patch_incoming, Limits::default()).unwrap();
         assert!(!format!("{patch:?}").contains(fixture));
         let patch_wire = patch.encode(Limits::default()).unwrap();
-        assert!(!patch_wire
-            .windows(fixture.len())
-            .any(|part| part == fixture.as_bytes()));
+        assert!(
+            !patch_wire
+                .windows(fixture.len())
+                .any(|part| part == fixture.as_bytes())
+        );
 
         let status = Envelope {
             request: Some(id(4)),
@@ -3556,9 +3663,11 @@ mod tests {
             extensions: BTreeMap::new(),
         };
         let status_wire = status.encode(Limits::default()).unwrap();
-        assert!(!status_wire
-            .windows(fixture.len())
-            .any(|part| part == fixture.as_bytes()));
+        assert!(
+            !status_wire
+                .windows(fixture.len())
+                .any(|part| part == fixture.as_bytes())
+        );
         let decoded_status = Envelope::decode(&status_wire, Limits::default()).unwrap();
         assert!(!format!("{decoded_status:?}").contains(fixture));
 
@@ -3581,9 +3690,11 @@ mod tests {
             extensions: BTreeMap::new(),
         };
         let present_wire = present_envelope.encode(Limits::default()).unwrap();
-        assert!(!present_wire
-            .windows(fixture.len())
-            .any(|part| part == fixture.as_bytes()));
+        assert!(
+            !present_wire
+                .windows(fixture.len())
+                .any(|part| part == fixture.as_bytes())
+        );
         let decoded_present = Envelope::decode(&present_wire, Limits::default()).unwrap();
         assert!(!format!("{decoded_present:?}").contains(fixture));
     }
@@ -3619,9 +3730,11 @@ mod tests {
         let decoded = Envelope::decode(&incoming, Limits::default()).unwrap();
         assert!(!format!("{decoded:?}").contains(fixture));
         let outgoing = decoded.encode(Limits::default()).unwrap();
-        assert!(!outgoing
-            .windows(fixture.len())
-            .any(|part| part == fixture.as_bytes()));
+        assert!(
+            !outgoing
+                .windows(fixture.len())
+                .any(|part| part == fixture.as_bytes())
+        );
         assert_eq!(
             Envelope::decode(&outgoing, Limits::default()).unwrap(),
             decoded
