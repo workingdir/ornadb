@@ -29,7 +29,7 @@ fn type_error(result: &orna_semantic_v1::Analysis) -> bool {
 fn money_001_exact_decimal_constructor_keeps_nominal_currency_type() {
     let result = analyzed(
         "exact-money.orna",
-        include_str!("../../orna-semantic-v1/tests/fixtures/traceability-money-exact-decimal.orna"),
+        include_str!("fixtures/semantic/traceability-money-exact-decimal.orna"),
     );
     assert!(result.is_ok(), "{:?}", result.diagnostics);
     let amount = &result.modules.values().next().unwrap().exports["amount"];
@@ -49,7 +49,7 @@ fn money_001_exact_decimal_constructor_keeps_nominal_currency_type() {
 fn money_002_cross_currency_addition_is_rejected() {
     let result = analyzed(
         "cross-currency.orna",
-        include_str!("../../orna-semantic-v1/tests/fixtures/traceability-money-cross-currency-add.orna"),
+        include_str!("fixtures/semantic/traceability-money-cross-currency-add.orna"),
     );
     assert!(result.diagnostics.iter().any(|diagnostic| {
         diagnostic.code() == DIAG_TYPE
@@ -63,13 +63,13 @@ fn money_002_cross_currency_addition_is_rejected() {
 fn money_003_exact_rate_algebra_admits_decimal_and_rejects_float() {
     let exact = analyzed(
         "exact-energy-rate.orna",
-        include_str!("../../orna-semantic-v1/tests/fixtures/traceability-money-exact-energy-rate.orna"),
+        include_str!("fixtures/semantic/traceability-money-exact-energy-rate.orna"),
     );
     assert!(exact.is_ok(), "{:?}", exact.diagnostics);
 
     let inexact = analyzed(
         "float-energy-rate.orna",
-        include_str!("../../orna-semantic-v1/tests/fixtures/traceability-money-float-energy-rate.orna"),
+        include_str!("fixtures/semantic/traceability-money-float-energy-rate.orna"),
     );
     assert!(inexact.diagnostics.iter().any(|diagnostic| {
         diagnostic.code() == DIAG_TYPE
@@ -83,13 +83,13 @@ fn money_003_exact_rate_algebra_admits_decimal_and_rejects_float() {
 fn money_004_currency_protocol_requires_static_properties() {
     let complete = analyzed(
         "currency-complete.orna",
-        include_str!("../../orna-semantic-v1/tests/fixtures/traceability-money-currency-protocol-valid.orna"),
+        include_str!("fixtures/semantic/traceability-money-currency-protocol-valid.orna"),
     );
     assert!(complete.is_ok(), "{:?}", complete.diagnostics);
 
     let incomplete = analyzed(
         "currency-incomplete.orna",
-        include_str!("../../orna-semantic-v1/tests/fixtures/traceability-money-currency-protocol-incomplete.orna"),
+        include_str!("fixtures/semantic/traceability-money-currency-protocol-incomplete.orna"),
     );
     assert!(type_error(&incomplete), "{:?}", incomplete.diagnostics);
     passed("ORNA-MONEY-004", "currency-protocol-shape-typecheck");
@@ -100,7 +100,7 @@ fn money_004_currency_protocol_requires_static_properties() {
 fn convert_001_explicit_target_from_selects_nested_implementation() {
     let result = analyzed(
         "explicit-from.orna",
-        include_str!("../../orna-semantic-v1/tests/fixtures/traceability-convert-explicit-from.orna"),
+        include_str!("fixtures/semantic/traceability-convert-explicit-from.orna"),
     );
     assert!(result.is_ok(), "{:?}", result.diagnostics);
     let parse_email = &result.modules.values().next().unwrap().exports["parse_email"];
@@ -117,7 +117,7 @@ fn convert_001_explicit_target_from_selects_nested_implementation() {
 fn convert_006_from_is_not_applied_implicitly() {
     let result = analyzed(
         "implicit-from.orna",
-        include_str!("../../orna-semantic-v1/tests/fixtures/traceability-convert-no-implicit.orna"),
+        include_str!("fixtures/semantic/traceability-convert-no-implicit.orna"),
     );
     assert!(type_error(&result), "{:?}", result.diagnostics);
     passed("ORNA-CONVERT-006", "implicit-from-type-error");
@@ -128,7 +128,7 @@ fn convert_006_from_is_not_applied_implicitly() {
 fn field_006_computed_field_cannot_be_supplied_to_insert() {
     let result = analyzed(
         "computed-insert.orna",
-        include_str!("../../orna-semantic-v1/tests/fixtures/traceability-field-computed-insert.orna"),
+        include_str!("fixtures/semantic/traceability-field-computed-insert.orna"),
     );
     assert!(type_error(&result), "{:?}", result.diagnostics);
     assert!(result.diagnostics.iter().any(|diagnostic| {
@@ -143,7 +143,7 @@ fn field_008_computed_field_rejects_io_effect() {
     let result = analyze_with_catalogue(
         &[ModuleInput::new(
             "computed-effect.orna",
-            include_str!("../../orna-semantic-v1/tests/fixtures/traceability-field-computed-effect.orna"),
+            include_str!("fixtures/semantic/traceability-field-computed-effect.orna"),
         )],
         &Catalogue::authoritative_core(),
     );
