@@ -2270,6 +2270,7 @@ mod tests {
         const PLAYGROUND_SAMPLE: &str = include_str!("../tests/fixtures/playground-sample.orna");
         const PLAYGROUND_SCHEMA: &str = include_str!("../tests/fixtures/playground-schema.orna");
         const LEGACY_EXAMPLE: &str = include_str!("../tests/fixtures/playground-example.orna");
+        const EMBED_ENTRY: &str = include_str!("../tests/fixtures/playground-embed-entry.js");
         let directory = tempfile::tempdir().expect("temporary database");
         git_succeeds(
             directory.path(),
@@ -2294,6 +2295,7 @@ mod tests {
         .expect("write built page");
         std::fs::write(dist.join("assets/app.js"), "console.log('ready')")
             .expect("write built script");
+        std::fs::write(dist.join("embed.js"), EMBED_ENTRY).expect("write embed entry script");
         git_succeeds(
             directory.path(),
             &[
@@ -2385,6 +2387,10 @@ mod tests {
         );
         assert_eq!(script.content_type, "text/javascript; charset=utf-8");
         assert_eq!(script.body, b"console.log('ready')");
+        let embed_entry = playground_asset(directory.path(), identity, "/playground/embed.js");
+        assert_eq!(embed_entry.status, 200);
+        assert_eq!(embed_entry.content_type, "text/javascript; charset=utf-8");
+        assert_eq!(embed_entry.body, EMBED_ENTRY.as_bytes());
 
         let traversal =
             playground_asset(directory.path(), identity, "/playground/%2e%2e/README.txt");

@@ -65,7 +65,7 @@ function lspPackageAssets(): Plugin {
 
 export default defineConfig({
   base: '/playground/',
-  publicDir: false,
+  publicDir: 'static',
   resolve: {
     alias: [{ find: 'monaco-editor/esm', replacement: monacoEsmDirectory }],
   },
