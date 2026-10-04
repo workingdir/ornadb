@@ -34,11 +34,11 @@ use orna_protocol_v1::{
     TargetKind, canonical_request_fingerprint,
 };
 use orna_runtime_v1::{
-    admin_invocation_id, with_terminal_admin_effect, Component, ConsumerIdentity, FaultInjector,
-    RecoveryDisposition, RequestIdentity, RequestOwner, RequestState as DurableRequestState,
-    RequestStatus as DurableRequestStatus, RunObservationRegistration,
-    RuntimeActivationContext, RuntimeError, RuntimeState, StagedTableActivation, TableMutation,
-    TerminalOutcome, WriterLease,
+    Component, ConsumerIdentity, FaultInjector, RecoveryDisposition, RequestIdentity, RequestOwner,
+    RequestState as DurableRequestState, RequestStatus as DurableRequestStatus,
+    RunObservationRegistration, RuntimeActivationContext, RuntimeError, RuntimeState,
+    StagedTableActivation, TableMutation, TerminalOutcome, WriterLease, admin_invocation_id,
+    with_terminal_admin_effect,
 };
 use orna_security_v1::{
     AttachOutcome, AttachmentId, BoundaryError, CredentialIssuer, OpaqueCredential, Origin,
@@ -1209,7 +1209,8 @@ pub trait LiveAdminEffectDispatcher: Send + Sync {
         &'a self,
         _stream: CanonicalValue,
         _context: &'a RuntimeActivationContext,
-    ) -> Pin<Box<dyn Future<Output = std::result::Result<CanonicalValue, String>> + Send + 'a>> {
+    ) -> Pin<Box<dyn Future<Output = std::result::Result<CanonicalValue, String>> + Send + 'a>>
+    {
         Box::pin(async { Err("sys.admin.unavailable".to_owned()) })
     }
 
@@ -1219,7 +1220,8 @@ pub trait LiveAdminEffectDispatcher: Send + Sync {
         _reason: Option<String>,
         _resume: bool,
         _context: &'a RuntimeActivationContext,
-    ) -> Pin<Box<dyn Future<Output = std::result::Result<CanonicalValue, String>> + Send + 'a>> {
+    ) -> Pin<Box<dyn Future<Output = std::result::Result<CanonicalValue, String>> + Send + 'a>>
+    {
         Box::pin(async { Err("sys.admin.busy".to_owned()) })
     }
 }
@@ -1273,11 +1275,11 @@ impl LiveAdminEffectDispatcher for RuntimeAdminEffectDispatcher {
                     )
                     .await
             })
-                .await
-                .map_err(|error| match error {
-                    RuntimeError::AdminBusy => "sys.admin.busy".to_owned(),
-                    _ => "sys.admin.unavailable".to_owned(),
-                })?;
+            .await
+            .map_err(|error| match error {
+                RuntimeError::AdminBusy => "sys.admin.busy".to_owned(),
+                _ => "sys.admin.unavailable".to_owned(),
+            })?;
             let changed = matches!(
                 outcome,
                 orna_runtime_v1::StreamAdministrationOutcome::Paused { changed: true }
@@ -1291,7 +1293,8 @@ impl LiveAdminEffectDispatcher for RuntimeAdminEffectDispatcher {
         &'a self,
         stream: CanonicalValue,
         context: &'a RuntimeActivationContext,
-    ) -> Pin<Box<dyn Future<Output = std::result::Result<CanonicalValue, String>> + Send + 'a>> {
+    ) -> Pin<Box<dyn Future<Output = std::result::Result<CanonicalValue, String>> + Send + 'a>>
+    {
         Box::pin(async move {
             let invocation_id = admin_invocation_id(self.request);
             let outcome = with_terminal_admin_effect(&self.runtime, self.lease, || async {
@@ -1323,7 +1326,8 @@ impl LiveAdminEffectDispatcher for RuntimeAdminEffectDispatcher {
         reason: Option<String>,
         resume: bool,
         _context: &'a RuntimeActivationContext,
-    ) -> Pin<Box<dyn Future<Output = std::result::Result<CanonicalValue, String>> + Send + 'a>> {
+    ) -> Pin<Box<dyn Future<Output = std::result::Result<CanonicalValue, String>> + Send + 'a>>
+    {
         Box::pin(async move {
             let function = if resume {
                 "sys.admin.resume_stream"
@@ -1460,11 +1464,11 @@ impl LiveApplicationTicket {
                 let work = &mut self.work;
                 let effects = self.admin_effects.as_deref();
                 let execute = move || async move {
-                application
+                    application
                         .dispatch_eval_with_effects(
                             session, request, message, context, work, effects,
-                    )
-                    .await
+                        )
+                        .await
                 };
                 if let (Some(runtime), Some(lease)) =
                     (self.activation_runtime.as_ref(), self.activation_lease)
@@ -1883,7 +1887,8 @@ impl LiveHost {
         request: CreateRequest<'_>,
         issuer: &mut impl LiveCredentialIssuer,
     ) -> Result<SessionCredential> {
-        self.create_with_runtime_context(request, None, issuer).await
+        self.create_with_runtime_context(request, None, issuer)
+            .await
     }
 
     async fn create_with_runtime_context(
@@ -2546,9 +2551,9 @@ impl LiveHost {
         {
             if record.fingerprint != fingerprint {
                 if matches!(envelope.message, Message::RequestStatus { .. }) {
-                    return Ok(ApplicationPreparation::Completed(
-                        request_mismatch_outcome(request)?,
-                    ));
+                    return Ok(ApplicationPreparation::Completed(request_mismatch_outcome(
+                        request,
+                    )?));
                 }
                 return Err(Error::RequestMismatch);
             }
@@ -2806,12 +2811,8 @@ impl LiveHost {
                     // Retain mapped rejections at the host boundary so a
                     // retry on a resumed attachment replays the same
                     // correlated diagnostic instead of a generic failure.
-                    if let Some(outcome) = self.operational_error_outcome(
-                        Some(session),
-                        &envelope,
-                        error,
-                        true,
-                    )?
+                    if let Some(outcome) =
+                        self.operational_error_outcome(Some(session), &envelope, error, true)?
                     {
                         return self.complete(session, request, &envelope, outcome).await;
                     }
@@ -2966,11 +2967,7 @@ impl LiveHost {
         );
         if !cancelled_winner {
             if let Some(watch) = watch {
-                self.commit_watch_snapshot_replacement(
-                    session,
-                    watch,
-                    watch_snapshot_replacement,
-                );
+                self.commit_watch_snapshot_replacement(session, watch, watch_snapshot_replacement);
             }
             if let Some(watch) = open_watch {
                 self.open_watch(session, watch, &outcome)?;
@@ -3034,19 +3031,18 @@ impl LiveHost {
         let Some(request) = envelope.request else {
             return Ok(None);
         };
-        let known_watch = if admitted_application_work
-            && matches!(envelope.message, Message::Event { .. })
-        {
-            // Admission already proved this ID belongs to the originating
-            // session; a later unsubscribe must not erase rejection context.
-            envelope.watch
-        } else {
-            session.and_then(|session| {
-                envelope
-                    .watch
-                    .filter(|watch| self.watches.contains(&(session, *watch)))
-            })
-        };
+        let known_watch =
+            if admitted_application_work && matches!(envelope.message, Message::Event { .. }) {
+                // Admission already proved this ID belongs to the originating
+                // session; a later unsubscribe must not erase rejection context.
+                envelope.watch
+            } else {
+                session.and_then(|session| {
+                    envelope
+                        .watch
+                        .filter(|watch| self.watches.contains(&(session, *watch)))
+                })
+            };
         // Event diagnostics stay scoped to their source watch for every
         // portable rejection code. Admitted work can rely on its ticket after
         // closure; admission failures can correlate only a currently owned
@@ -3073,7 +3069,10 @@ impl LiveHost {
                 ("wire.unknown_handle", None)
             }
             Error::Denied
-                if matches!(envelope.message, Message::Eval { .. } | Message::Watch { .. }) =>
+                if matches!(
+                    envelope.message,
+                    Message::Eval { .. } | Message::Watch { .. }
+                ) =>
             {
                 // DatabaseContext is client supplied; keep the session's
                 // trusted database/runtime selection authoritative.
@@ -3352,19 +3351,19 @@ impl LiveHost {
                                 .response
                                 .as_ref()
                                 .ok_or(Error::ApplicationRejected)?;
-                            let replacement = self.prepare_watch_snapshot_replacement(
-                                session, watch, response,
-                            )?;
-                            let completed = self.complete(
-                                session,
-                                request,
-                                &envelope,
-                                DispatchOutcome {
-                                    outcome: FrameOutcome::Resync { revisions },
-                                    response: outcome.response,
-                                },
-                            )
-                            .await?;
+                            let replacement =
+                                self.prepare_watch_snapshot_replacement(session, watch, response)?;
+                            let completed = self
+                                .complete(
+                                    session,
+                                    request,
+                                    &envelope,
+                                    DispatchOutcome {
+                                        outcome: FrameOutcome::Resync { revisions },
+                                        response: outcome.response,
+                                    },
+                                )
+                                .await?;
                             self.commit_watch_snapshot_replacement(session, watch, replacement);
                             Ok(completed)
                         }
@@ -3555,12 +3554,9 @@ impl LiveHost {
                         // before returning it to the transport, so a retry does
                         // not replace its event/watch context with a generic
                         // failure result.
-                        if let Some(outcome) = self.operational_error_outcome(
-                            Some(session),
-                            &envelope,
-                            error,
-                            true,
-                        )? {
+                        if let Some(outcome) =
+                            self.operational_error_outcome(Some(session), &envelope, error, true)?
+                        {
                             self.complete(session, request, &envelope, outcome).await
                         } else {
                             self.retain_failure(session, request, fingerprint).await?;
@@ -3623,11 +3619,11 @@ impl LiveHost {
                 .dispatch_eval_with_effects(
                     session_id,
                     request_id,
-                message,
+                    message,
                     context_ref,
                     work_ref,
                     effects_ref,
-            )
+                )
                 .await
         };
         let result = match (&activation_runtime, activation_lease) {
@@ -4229,16 +4225,14 @@ impl LiveHost {
                 self.limits.protocol,
             )
             .is_ok(),
-            Message::Event { .. } | Message::Eval { .. } => {
-                validate_application_result_response(
-                    request,
-                    fingerprint,
-                    envelope.watch,
-                    response.clone(),
-                    self.limits.protocol,
-                )
-                .is_ok()
-            }
+            Message::Event { .. } | Message::Eval { .. } => validate_application_result_response(
+                request,
+                fingerprint,
+                envelope.watch,
+                response.clone(),
+                self.limits.protocol,
+            )
+            .is_ok(),
             Message::RequestStatus { target, .. } => {
                 validate_status_response(request, *target, response, self.limits.protocol).is_ok()
                     || validate_request_mismatch_response(request, response, self.limits.protocol)
@@ -4331,7 +4325,7 @@ impl LiveHost {
         })?;
         let staged =
             StagedTableActivation::from_source(context.clone(), mutations, next_digest, faults)
-        .map_err(|error| map_runtime(&error))?;
+                .map_err(|error| map_runtime(&error))?;
         let committed = runtime
             .commit_staged_table_request_activation(lease, identity, fingerprint, &staged, terminal)
             .await
@@ -4349,8 +4343,8 @@ impl LiveHost {
             .await?;
         let response =
             validate_result_response(request, fingerprint, response, self.limits.protocol)?
-            .response
-            .ok_or(Error::ApplicationRejected)?;
+                .response
+                .ok_or(Error::ApplicationRejected)?;
         if mutating {
             if let Some(watch) = watch {
                 self.close_watch(session, watch)?;
@@ -4671,13 +4665,42 @@ impl LiveHost {
         watch: [u8; 16],
         response: &Envelope,
     ) -> Result<Option<AcceptedWatchSnapshot>> {
-        let Some(candidate) = AcceptedWatchSnapshot::from_response(response)? else {
-            return Ok(None);
-        };
         let current = self
             .watch_snapshots
             .get(&(session, watch))
             .ok_or(Error::ApplicationRejected)?;
+        let candidate = match &response.message {
+            Message::Snapshot { .. } | Message::Diagnostic { .. } => {
+                let Some(candidate) = AcceptedWatchSnapshot::from_response(response)? else {
+                    return Ok(None);
+                };
+                candidate
+            }
+            Message::Delta {
+                base_revision,
+                new_revision,
+                patches,
+                snapshot,
+            } => {
+                if response.request.is_some()
+                    || response.watch != Some(watch)
+                    || *base_revision != current.revision
+                    || *new_revision <= *base_revision
+                {
+                    return Err(Error::ApplicationRejected);
+                }
+                let present = current
+                    .present
+                    .apply_patches(patches, self.limits.protocol)
+                    .map_err(|_| Error::ApplicationRejected)?;
+                AcceptedWatchSnapshot {
+                    revision: *new_revision,
+                    present,
+                    snapshot: snapshot.clone(),
+                }
+            }
+            _ => return Err(Error::ApplicationRejected),
+        };
         if candidate.revision < current.revision
             || candidate.revision == current.revision && candidate != *current
         {
@@ -4707,11 +4730,7 @@ impl LiveHost {
         })
     }
 
-    fn validate_session_runtime_context(
-        &self,
-        session: [u8; 16],
-        message: &Message,
-    ) -> Result<()> {
+    fn validate_session_runtime_context(&self, session: [u8; 16], message: &Message) -> Result<()> {
         let database_context = match message {
             Message::Eval { database, .. } | Message::Watch { database, .. } => database,
             _ => return Ok(()),
@@ -5013,7 +5032,9 @@ fn validate_application_result_response(
         .encode(limits)
         .map_err(|_| Error::ApplicationRejected)?;
     if response.request != Some(request)
-        || response.watch.is_some_and(|watch| Some(watch) != request_watch)
+        || response
+            .watch
+            .is_some_and(|watch| Some(watch) != request_watch)
         || !matches!(response.message, Message::Diagnostic { .. })
     {
         return Err(Error::ApplicationRejected);
@@ -5061,14 +5082,15 @@ fn validate_watch_response(
     response
         .encode(limits)
         .map_err(|_| Error::ApplicationRejected)?;
-    if response.request != Some(request) {
-        return Err(Error::ApplicationRejected);
-    }
     match &response.message {
         Message::Snapshot { .. }
-            if response.watch.is_some()
+            if response.request == Some(request)
+                && response.watch.is_some()
                 && watch.is_none_or(|expected| response.watch == Some(expected)) => {}
-        Message::Diagnostic { .. } if response.watch == watch => {}
+        Message::Delta { .. }
+            if watch.is_some() && response.request.is_none() && response.watch == watch => {}
+        Message::Diagnostic { .. }
+            if response.request == Some(request) && response.watch == watch => {}
         _ => return Err(Error::ApplicationRejected),
     }
     Ok(DispatchOutcome {
@@ -7695,13 +7717,12 @@ impl LiveTransport {
                     }
                     Err(error) => {
                         if let Some(envelope) = decoded.as_ref()
-                            && let Some(outcome) =
-                                self.host.operational_error_outcome(
-                                    self.host.attachments.get(&socket.attachment).copied(),
-                                    envelope,
-                                    error,
-                                    false,
-                                )?
+                            && let Some(outcome) = self.host.operational_error_outcome(
+                                self.host.attachments.get(&socket.attachment).copied(),
+                                envelope,
+                                error,
+                                false,
+                            )?
                         {
                             return Ok(Some(self.websocket_output(outcome)?));
                         }
@@ -8909,6 +8930,52 @@ mod tests {
         subscribed_host_with_credential(runtime).0
     }
 
+    #[test]
+    fn resync_delta_advances_the_accepted_watch_tree() {
+        let mut host = subscribed_host(None);
+        let session = [91; 16];
+        let watch = [92; 16];
+        let snapshot = CanonicalSnapshot::cwd([1; 16], [2; 16], 0.into()).unwrap();
+        let previous = orna_protocol_v1::PresentNode::from_value(
+            CanonicalValue::new(OvbRaw::Int(1.into())).unwrap(),
+        )
+        .unwrap();
+        let next = orna_protocol_v1::PresentNode::from_value(
+            CanonicalValue::new(OvbRaw::Int(2.into())).unwrap(),
+        )
+        .unwrap();
+        host.watch_snapshots.insert(
+            (session, watch),
+            AcceptedWatchSnapshot {
+                revision: 0,
+                present: previous,
+                snapshot: snapshot.clone(),
+            },
+        );
+        let patches = orna_protocol_v1::PatchList::replace_root(&next).unwrap();
+        let response = Envelope {
+            request: None,
+            watch: Some(watch),
+            message: Message::Delta {
+                base_revision: 0,
+                new_revision: 1,
+                patches,
+                snapshot: snapshot.clone(),
+            },
+            extensions: BTreeMap::new(),
+        };
+        let accepted =
+            validate_watch_response([93; 16], Some(watch), response, ProtocolLimits::default())
+                .expect("a correlated watch delta is accepted by its watch identity");
+        let candidate = host
+            .prepare_watch_snapshot_replacement(session, watch, accepted.response.as_ref().unwrap())
+            .expect("the accepted delta advances its base revision")
+            .unwrap();
+        assert_eq!(candidate.revision, 1);
+        assert_eq!(candidate.present, next);
+        assert_eq!(candidate.snapshot, snapshot);
+    }
+
     fn subscribed_host_with_credential(
         runtime: Option<RuntimeState>,
     ) -> (LiveHost, Origin, SessionCredential) {
@@ -9427,12 +9494,15 @@ mod tests {
             fixture_ticket.message(),
             Message::Eval { source, .. } if source == FIXTURE
         ));
-        let fixture_first = futures::executor::block_on(host.complete_application(
-            fixture_ticket.reject(Error::UnsupportedOperation),
-        ))
+        let fixture_first = futures::executor::block_on(
+            host.complete_application(fixture_ticket.reject(Error::UnsupportedOperation)),
+        )
         .unwrap();
         assert!(matches!(
-            fixture_first.response.as_ref().map(|response| &response.message),
+            fixture_first
+                .response
+                .as_ref()
+                .map(|response| &response.message),
             Some(Message::Diagnostic { .. })
         ));
 
@@ -9518,9 +9588,7 @@ mod tests {
                 .unwrap(),
             Some(DispatchOutcome {
                 outcome: FrameOutcome::Accepted,
-                response: Some(
-                    portable_diagnostic([42; 16], None, "wire.unknown_handle").unwrap()
-                ),
+                response: Some(portable_diagnostic([42; 16], None, "wire.unknown_handle").unwrap()),
             })
         );
         assert_eq!(
@@ -9533,9 +9601,7 @@ mod tests {
             .unwrap(),
             Some(DispatchOutcome {
                 outcome: FrameOutcome::Accepted,
-                response: Some(
-                    portable_diagnostic([42; 16], None, "wire.unsupported").unwrap()
-                ),
+                response: Some(portable_diagnostic([42; 16], None, "wire.unsupported").unwrap()),
             })
         );
     }
@@ -9770,7 +9836,9 @@ mod tests {
         let attachment = [4; 16];
         let reserved_target = [40; 16];
         let reserved_fingerprint = [41; 32];
-        host.serving.reserve_request(session, reserved_target).unwrap();
+        host.serving
+            .reserve_request(session, reserved_target)
+            .unwrap();
         host.requests.insert(
             (session, reserved_target),
             RequestRecord {
@@ -9805,9 +9873,7 @@ mod tests {
 
         let reserved_query = request_status_frame([43; 16], reserved_target, reserved_fingerprint);
         let running_query = request_status_frame([44; 16], running_target, target_fingerprint);
-        let snapshot = |host: &mut LiveHost,
-                        query: Vec<u8>,
-                        expected: ([u8; 16], RequestState)| {
+        let snapshot = |host: &mut LiveHost, query: Vec<u8>, expected: ([u8; 16], RequestState)| {
             let preparation = futures::executor::block_on(host.prepare_application_frame(
                 attachment,
                 3,
@@ -10604,13 +10670,8 @@ mod tests {
             let mut host = subscribed_host(Some(runtime));
             let committed = Arc::new(std::sync::atomic::AtomicBool::new(false));
             let row = b"actual computed row".to_vec();
-            let mutation = TableMutation::new(
-                [23; 16],
-                "Identity",
-                row.clone(),
-                Some(row),
-            )
-            .unwrap();
+            let mutation =
+                TableMutation::new([23; 16], "Identity", row.clone(), Some(row)).unwrap();
             let response = Envelope {
                 request: Some(identity.request_id),
                 watch: None,
