@@ -39895,7 +39895,7 @@ fn paired_restore_identity_survives_nested_spill_checkpoint_folds_f88() {
         .split("\n\n")
         .map(parse_checkpoint_fixture)
         .collect::<Vec<_>>();
-    assert_eq!(restore_rows.len(), 3);
+    assert_eq!(restore_rows.len(), 4);
     assert_eq!(spill_rows.len(), 4);
     assert_eq!(checkpoint_rows.len(), 3);
 
@@ -40873,7 +40873,7 @@ fn paired_spill_identity_survives_nested_restore_checkpoint_replay_folds_f91() {
     let malformed = outer_fold(
         3,
         restore_fold(
-            1,
+            3,
             1,
             vec![result_checkpoint.clone()],
             vec![vec![nested_spill(3, 3, 20, (true, false), false)]],
