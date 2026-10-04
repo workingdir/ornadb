@@ -45,23 +45,3 @@ pub fn assert_lsp_completion_contract(completion: &Value, editor: &str) {
     assert_eq!(add["insertText"], "add(${1:left}, ${2:right})");
     assert_eq!(add["insertTextFormat"], 2);
 }
-
-pub fn assert_vim_completion_projection(items: &Value) {
-    let items = items
-        .as_array()
-        .expect("vim-lsp completion projection list");
-    let actual_keywords = items
-        .iter()
-        .filter(|item| item["kind"] == "keyword")
-        .map(|item| item["abbr"].as_str().unwrap().to_owned())
-        .collect::<BTreeSet<_>>();
-    assert_eq!(
-        actual_keywords,
-        expected_keywords(),
-        "Vim omni completion inventory"
-    );
-    assert!(
-        items.iter().any(|item| item["abbr"] == "add~"),
-        "Vim completion adapter omitted the add snippet candidate"
-    );
-}
