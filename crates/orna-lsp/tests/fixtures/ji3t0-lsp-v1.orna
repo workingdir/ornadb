@@ -1,2 +1,5 @@
-/// Calls a function supplied by another open editor document.
+/// Add two integer values.
+pub fn add(left: Int, right: Int): Int = left + right;
+
+/// Calls the documented function.
 pub fn caller(value: Int): Int = add(value, 2);
