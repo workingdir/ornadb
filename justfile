@@ -9,6 +9,7 @@ fixture-audit:
     python3 -m unittest scripts.test_fixture_manifest
     python3 scripts/check_fixture_manifest.py --check
     cargo test --locked -p orna-syntax-v1 --test fixture_audit
+    cargo test --locked -p orna-lsp --test ji3t0_conformance --test editor_attachment_completion
 
 # Regenerate every editor package artifact from orna-syntax-v1.
 editor-artifacts:
