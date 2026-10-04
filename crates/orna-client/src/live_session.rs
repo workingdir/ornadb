@@ -540,6 +540,16 @@ mod tests {
         request: Option<[u8; 16]>,
         body: Vec<u8>,
     ) -> Vec<u8> {
+        frame_with_request_and_limits(code, watch, request, body, Limits::default())
+    }
+
+    fn frame_with_request_and_limits(
+        code: u8,
+        watch: [u8; 16],
+        request: Option<[u8; 16]>,
+        body: Vec<u8>,
+        limits: Limits,
+    ) -> Vec<u8> {
         let mut bytes = vec![0xa5, 0x00, 0x01, 0x01, code, 0x02];
         match request {
             Some(request) => {
@@ -552,9 +562,9 @@ mod tests {
         bytes.extend(watch);
         bytes.extend([0x04]);
         bytes.extend(body);
-        Envelope::decode(&bytes, Limits::default())
+        Envelope::decode(&bytes, limits)
             .expect("test frame is canonical")
-            .encode(Limits::default())
+            .encode(limits)
             .expect("test frame re-encodes canonically")
     }
     fn frame_without_watch(code: u8, request: Option<[u8; 16]>, body: Vec<u8>) -> Vec<u8> {
@@ -1650,6 +1660,288 @@ mod tests {
         );
         assert_eq!(
             second.renderer.trees[3],
+            snapshot_present(&followup_snapshot)
+        );
+    }
+
+    #[test]
+    fn moved_subtree_depth_overflow_recovers_only_after_bounded_snapshot_across_live_sessions() {
+        let first_limits = Limits {
+            max_depth: 64,
+            ..Limits::default()
+        };
+        let second_limits = Limits {
+            max_depth: 66,
+            ..Limits::default()
+        };
+        let initial_children = vec![nested_present_child(18), nested_present_child(1)];
+        let first_initial = snapshot_with_children(0, "before-move", initial_children.clone());
+        let second_initial = snapshot_with_children(0, "before-move", initial_children.clone());
+        assert!(Envelope::decode(&first_initial, first_limits).is_ok());
+
+        let mut first_io = MemoryIo::default();
+        first_io.incoming.push_back(first_initial.clone());
+        let mut second_io = MemoryIo::default();
+        second_io.incoming.push_back(second_initial);
+        let mut first = LiveSessionDriver::new(
+            first_io,
+            [7; 16],
+            first_limits,
+            Renderer::default(),
+            Allocator::default(),
+        )
+        .unwrap();
+        let mut second = LiveSessionDriver::new(
+            second_io,
+            [7; 16],
+            second_limits,
+            Renderer::default(),
+            Allocator::default(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            block_on(first.receive_once()).unwrap(),
+            LiveSessionEvent::SnapshotPublished { revision: 0 }
+        );
+        assert_eq!(
+            block_on(second.receive_once()).unwrap(),
+            LiveSessionEvent::SnapshotPublished { revision: 0 }
+        );
+
+        let deep_child = nested_child_path(19, 0);
+        let move_beyond_first_bound = delta_with_operations(
+            0,
+            1,
+            vec![move_between_paths_operation(
+                nested_child_path(0, 1),
+                deep_child.clone(),
+            )],
+        );
+        assert!(move_beyond_first_bound.len() < first_limits.max_message_bytes);
+        assert!(Envelope::decode(&move_beyond_first_bound, first_limits).is_ok());
+        let first_before_deep_move = first.presentation().published().cloned().unwrap();
+        first.io.incoming.push_back(move_beyond_first_bound.clone());
+        assert!(matches!(
+            block_on(first.receive_once()),
+            Ok(LiveSessionEvent::ResyncSent { .. })
+        ));
+        assert_resync_frame(&first.io.sent[0]);
+        assert_eq!(
+            first.presentation().published(),
+            Some(&first_before_deep_move)
+        );
+        assert_eq!(first.renderer.trees, vec![snapshot_present(&first_initial)]);
+
+        second.io.incoming.push_back(move_beyond_first_bound);
+        assert_eq!(
+            block_on(second.receive_once()).unwrap(),
+            LiveSessionEvent::DeltaPublished { revision: 1 }
+        );
+        let mut moved_deepest =
+            present_node_with_children("deepest", vec![nested_present_child(1)]);
+        for _ in 0..18 {
+            moved_deepest = present_node_with_children("nested", vec![moved_deepest]);
+        }
+        let expected_limits = Limits {
+            max_depth: 80,
+            ..second_limits
+        };
+        let moved_snapshot = frame_with_request_and_limits(
+            16,
+            [7; 16],
+            None,
+            snapshot_body_with_children(1, "before-move", vec![moved_deepest]),
+            expected_limits,
+        );
+        let Message::Snapshot { present, .. } = Envelope::decode(&moved_snapshot, expected_limits)
+            .unwrap()
+            .message
+        else {
+            panic!("moved-tree expectation is a complete snapshot");
+        };
+        assert_eq!(second.renderer.trees[1], present);
+        assert_eq!(first.presentation().published().unwrap().revision(), 0);
+
+        let move_back_within_bound = delta_with_operations(
+            1,
+            2,
+            vec![move_between_paths_operation(
+                deep_child,
+                nested_child_path(0, 1),
+            )],
+        );
+        assert!(Envelope::decode(&move_back_within_bound, first_limits).is_ok());
+        first.io.incoming.push_back(move_back_within_bound.clone());
+        assert!(matches!(
+            block_on(first.receive_once()),
+            Ok(LiveSessionEvent::ResyncAwaitingSnapshot { .. })
+        ));
+        assert_eq!(first.io.sent.len(), 1);
+        assert_eq!(
+            first.presentation().published(),
+            Some(&first_before_deep_move)
+        );
+        second.io.incoming.push_back(move_back_within_bound);
+        assert_eq!(
+            block_on(second.receive_once()).unwrap(),
+            LiveSessionEvent::DeltaPublished { revision: 2 }
+        );
+        assert_eq!(
+            second.presentation().published().unwrap().present(),
+            first_before_deep_move.present()
+        );
+
+        let request = Envelope::decode(&first.io.sent[0], first_limits)
+            .unwrap()
+            .request
+            .expect("bounded-snapshot recovery request is correlated");
+        first.io.incoming.push_back(frame_with_request(
+            16,
+            [7; 16],
+            Some(request),
+            snapshot_body_with_children(2, "before-move", initial_children.clone()),
+        ));
+        assert_eq!(
+            block_on(first.receive_once()).unwrap(),
+            LiveSessionEvent::SnapshotPublished { revision: 2 }
+        );
+        assert_eq!(
+            first.presentation().published().unwrap().present(),
+            second.presentation().published().unwrap().present()
+        );
+
+        let followup_label = "after-depth-resync";
+        let followup_delta = delta(2, 3, followup_label);
+        first.io.incoming.push_back(followup_delta.clone());
+        second.io.incoming.push_back(followup_delta);
+        assert_eq!(
+            block_on(first.receive_once()).unwrap(),
+            LiveSessionEvent::DeltaPublished { revision: 3 }
+        );
+        assert_eq!(
+            block_on(second.receive_once()).unwrap(),
+            LiveSessionEvent::DeltaPublished { revision: 3 }
+        );
+        assert_eq!(
+            first.presentation().published().unwrap().present(),
+            second.presentation().published().unwrap().present()
+        );
+        let followup_snapshot = snapshot_with_children(3, followup_label, initial_children);
+        assert_eq!(
+            first.renderer.trees[2],
+            snapshot_present(&followup_snapshot)
+        );
+        assert_eq!(
+            second.renderer.trees[3],
+            snapshot_present(&followup_snapshot)
+        );
+    }
+
+    #[test]
+    fn over_depth_moved_delta_keeps_recovery_fenced_until_bounded_snapshot() {
+        let limits = Limits::default();
+        let initial_children = vec![nested_present_child(18), nested_present_child(1)];
+        let initial = snapshot_with_children(0, "before-move", initial_children.clone());
+        assert!(Envelope::decode(&initial, limits).is_ok());
+
+        let mut io = MemoryIo::default();
+        io.incoming.push_back(initial.clone());
+        let mut driver = LiveSessionDriver::new(
+            io,
+            [7; 16],
+            limits,
+            Renderer::default(),
+            Allocator::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            block_on(driver.receive_once()).unwrap(),
+            LiveSessionEvent::SnapshotPublished { revision: 0 }
+        );
+
+        let move_beyond_bound = delta_with_operations(
+            0,
+            1,
+            vec![move_between_paths_operation(
+                nested_child_path(0, 1),
+                nested_child_path(19, 0),
+            )],
+        );
+        assert!(move_beyond_bound.len() < limits.max_message_bytes);
+        assert!(Envelope::decode(&move_beyond_bound, limits).is_ok());
+        let original = driver.presentation().published().cloned().unwrap();
+        driver.io.incoming.push_back(move_beyond_bound);
+        assert!(matches!(
+            block_on(driver.receive_once()),
+            Ok(LiveSessionEvent::ResyncSent { .. })
+        ));
+        assert_resync_frame(&driver.io.sent[0]);
+        assert_eq!(driver.presentation().published(), Some(&original));
+        assert_eq!(driver.renderer.trees, vec![snapshot_present(&initial)]);
+
+        let request_id = Envelope::decode(&driver.io.sent[0], limits)
+            .unwrap()
+            .request
+            .expect("moved-tree recovery request is correlated");
+        let mut moved_deepest =
+            present_node_with_children("deepest", vec![nested_present_child(1)]);
+        for _ in 0..18 {
+            moved_deepest = present_node_with_children("nested", vec![moved_deepest]);
+        }
+        let expected_frame_limits = Limits {
+            max_depth: 80,
+            ..limits
+        };
+        let over_depth_recovery = frame_with_request_and_limits(
+            16,
+            [7; 16],
+            Some(request_id),
+            snapshot_body_with_children(1, "before-move", vec![moved_deepest]),
+            expected_frame_limits,
+        );
+        driver.io.incoming.push_back(over_depth_recovery);
+        assert_eq!(
+            block_on(driver.receive_once()).unwrap(),
+            LiveSessionEvent::ResyncAwaitingSnapshot {
+                request: request_id
+            }
+        );
+        assert_eq!(driver.io.sent.len(), 1);
+        assert_eq!(driver.presentation().published(), Some(&original));
+        assert_eq!(driver.renderer.trees, vec![snapshot_present(&initial)]);
+
+        let recovery_label = "bounded-recovery";
+        driver.io.incoming.push_back(frame_with_request(
+            16,
+            [7; 16],
+            Some(request_id),
+            snapshot_body_with_children(1, recovery_label, initial_children.clone()),
+        ));
+        assert_eq!(
+            block_on(driver.receive_once()).unwrap(),
+            LiveSessionEvent::SnapshotPublished { revision: 1 }
+        );
+        let recovered_snapshot =
+            snapshot_with_children(1, recovery_label, initial_children.clone());
+        assert_eq!(
+            driver.renderer.trees[1],
+            snapshot_present(&recovered_snapshot)
+        );
+
+        let followup_label = "after-bounded-recovery";
+        driver.io.incoming.push_back(delta(1, 2, followup_label));
+        assert_eq!(
+            block_on(driver.receive_once()).unwrap(),
+            LiveSessionEvent::DeltaPublished { revision: 2 }
+        );
+        let followup_snapshot = snapshot_with_children(2, followup_label, initial_children);
+        assert_eq!(
+            driver.presentation().published().unwrap().present(),
+            &snapshot_present(&followup_snapshot)
+        );
+        assert_eq!(
+            driver.renderer.trees[2],
             snapshot_present(&followup_snapshot)
         );
     }
