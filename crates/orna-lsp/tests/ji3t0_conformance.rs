@@ -1089,7 +1089,7 @@ fn emacs_eglot_attaches_and_proves_hover_rename_references_and_semantic_tokens()
           (puthash "hover" hover-response evidence)
           (puthash "semantic" semantic-response evidence)
           (with-temp-file (getenv "ORNA_HOVER_SEMANTIC_RESULT")
-            (insert (json-encode evidence))))
+            (insert (json-encode evidence)))))
     (when (buffer-live-p hover-buffer) (kill-buffer hover-buffer))
     (when (buffer-live-p semantic-buffer) (kill-buffer semantic-buffer))))
 "#,
