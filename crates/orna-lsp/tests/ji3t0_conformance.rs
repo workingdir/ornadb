@@ -11,6 +11,8 @@ use std::{
 
 use serde_json::{Value, json};
 
+const SOURCE: &str = include_str!("fixtures/ji3t0-lsp-v1-self-contained.orna");
+
 #[path = "support/completion_contract.rs"]
 mod completion_contract;
 #[path = "support/hover_semantic_contract.rs"]
@@ -18,7 +20,6 @@ mod hover_semantic_contract;
 #[path = "support/syntax_v1_depth_contract.rs"]
 mod syntax_v1_depth_contract;
 
-const SOURCE: &str = include_str!("fixtures/expressions-v1.orna");
 const SEMANTIC_SOURCE: &str = include_str!("fixtures/editor-semantic-tokens.orna");
 const HINTS_SOURCE: &str = include_str!("fixtures/editor-lsp-hints.orna");
 const INVALID_SOURCE: &str = include_str!("fixtures/ji3t0-invalid-v1.orna");
@@ -1027,7 +1028,8 @@ fn emacs_eglot_attaches_and_proves_hover_rename_references_and_semantic_tokens()
         .ancestors()
         .nth(2)
         .expect("orna-lsp is under crates");
-    let hover_fixture = root.join("crates/orna-lsp/tests/fixtures/expressions-v1.orna");
+    let hover_fixture =
+        root.join("crates/orna-lsp/tests/fixtures/ji3t0-lsp-v1-self-contained.orna");
     let semantic_fixture = root.join("crates/orna-lsp/tests/fixtures/editor-semantic-tokens.orna");
     let hints_fixture = root.join("crates/orna-lsp/tests/fixtures/editor-lsp-hints.orna");
     assert_eq!(fs::read_to_string(&hover_fixture).unwrap(), SOURCE);
