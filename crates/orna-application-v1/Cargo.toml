@@ -15,6 +15,7 @@ orna-semantic-v1 = { path = "../orna-semantic-v1" }
 orna-syntax-v1 = { path = "../orna-syntax-v1" }
 orna-live-v1 = { path = "../orna-live-v1" }
 orna-protocol-v1 = { path = "../orna-protocol-v1" }
+orna-project-v1 = { path = "../orna-project-v1" }
 num-bigint = "0.4.6"
 sha2 = "0.10.9"
 getrandom = "0.3.4"

@@ -1,12 +1,7 @@
 import type * as monaco from 'monaco-editor';
+import { ORNA_KEYWORDS } from './generated-keywords';
 
-/** The reserved words in ORNA-LEX-007, mirrored from Keyword::ALL. */
-export const ORNA_KEYWORDS = [
-  'as', 'assert', 'base', 'break', 'case', 'continue', 'dim', 'else', 'enum',
-  'false', 'fn', 'for', 'if', 'impl', 'in', 'let', 'loop', 'null', 'offset',
-  'affine', 'protocol', 'pub', 'return', 'self', 'static', 'table', 'true',
-  'type', 'unit', 'use', 'while',
-] as const;
+export { ORNA_KEYWORDS } from './generated-keywords';
 
 const operators = [
   '..=', '=>', '==', '!=', '<=', '>=', '??', '|?', '&&', '||', '+=', '-=',

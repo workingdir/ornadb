@@ -1,0 +1,7 @@
+{ id: "f150/outer-checkpoint/main", name: "f150/left/checkpoint-main", city: "f150/right/checkpoint-alpha", }
+
+{ id: "f150/outer-checkpoint/retry", name: "f150/left/checkpoint-retry", city: "f150/right/checkpoint-beta", }
+
+{ id: "f150/outer-checkpoint/reused", name: "f150/left/checkpoint-main", city: "f150/right/checkpoint-alpha", }
+
+{ id: "f150/outer-checkpoint/malformed", name: "f150/left/checkpoint-malformed", city: "f150/right/checkpoint-delta", }

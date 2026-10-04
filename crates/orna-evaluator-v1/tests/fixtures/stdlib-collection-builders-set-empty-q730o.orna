@@ -1,0 +1,4 @@
+fn set_empty_builder(): [Int] {
+    let empty: [Int] = [];
+    set.from_list(empty)
+}
