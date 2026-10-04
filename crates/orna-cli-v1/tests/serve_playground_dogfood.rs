@@ -693,8 +693,17 @@ fn orna_serve_hosts_playground_with_pending_evals_and_snapshot_correct_deltas() 
         before_route_commit.status, after_route_commit.status
     );
 
+    let examples_started = Instant::now();
     let examples =
-        curl(&format!("{base_url}/api/examples"), &[]).expect("curl committed playground examples");
+        curl(&format!("{base_url}/api/examples"), &["--max-time", "15"]).unwrap_or_else(|error| {
+            let server_status = server.0.try_wait().expect("probe orna serve process");
+            panic!("curl committed playground examples: {error}; server status {server_status:?}");
+        });
+    println!(
+        "curl GET /api/examples -> HTTP {} (exit 0, {:?})",
+        examples.status,
+        examples_started.elapsed()
+    );
     assert_eq!(examples.status, 200);
     let examples: JsonValue = serde_json::from_str(&examples.body).expect("example response JSON");
     assert_eq!(examples["examples"][0]["source"], SAMPLE);
