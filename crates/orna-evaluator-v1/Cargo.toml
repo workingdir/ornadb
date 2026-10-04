@@ -7,19 +7,27 @@ license = "Apache-2.0"
 description = "Bounded deterministic evaluator for the Orna 1.0 expression subset"
 publish = false
 
+[features]
+default = ["native-hosts", "project-repl", "reference-standard"]
+native-hosts = ["dep:getrandom", "orna-sys-v1/native-hosts"]
+project-admission = ["dep:orna-project-v1"]
+core-repl = []
+project-repl = ["core-repl", "project-admission"]
+reference-standard = ["dep:orna-standard"]
+
 [dependencies]
 base64 = "0.22.1"
 num-bigint = "0.4.6"
 num-integer = "0.1.47"
 num-traits = "0.2.19"
-getrandom = "0.3.4"
+getrandom = { version = "0.3.4", optional = true }
 serde = "1.0"
 serde_json = { version = "1.0.151", features = ["arbitrary_precision", "raw_value"] }
 orna-foundation-v1 = { path = "../orna-foundation-v1" }
-orna-project-v1 = { path = "../orna-project-v1" }
-orna-standard = { path = "../orna-standard" }
+orna-project-v1 = { path = "../orna-project-v1", optional = true }
+orna-standard = { path = "../orna-standard", optional = true }
 orna-semantic-v1 = { path = "../orna-semantic-v1" }
-orna-sys-v1 = { path = "../orna-sys-v1" }
+orna-sys-v1 = { path = "../orna-sys-v1", default-features = false }
 orna-syntax-v1 = { path = "../orna-syntax-v1" }
 orna-value-v1 = { path = "../orna-value-v1" }
 sha2 = "0.10.9"
