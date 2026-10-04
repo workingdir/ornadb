@@ -1,0 +1,5 @@
+{ id: "nested-rewind/a", name: "rewind/left-a", city: "rewind/right-a" }
+
+{ id: "nested-rewind/a-reused", name: "rewind/left-a", city: "rewind/right-a" }
+
+{ id: "nested-rewind/b", name: "rewind/left-b", city: "rewind/right-c" }
