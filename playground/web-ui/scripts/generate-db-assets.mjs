@@ -33,8 +33,12 @@ async function collectFiles(directory, prefix = '') {
   const children = await readdir(join(distribution, directory), { withFileTypes: true });
   const files = [];
   for (const child of children.sort((left, right) => left.name.localeCompare(right.name))) {
+    if (child.name.startsWith('.')) continue;
+    if (child.name.endsWith('.d.ts')) continue;
     const path = join(directory, child.name);
-    const relativePath = prefix ? prefix + '/' + child.name : child.name;
+    const relativePath = prefix ? `${prefix}/${child.name}` : child.name;
+    // This ignored local build output is not part of the database-served UI.
+    if (child.isDirectory() && relativePath === 'lsp-wasm') continue;
     if (child.isDirectory()) files.push(...await collectFiles(path, relativePath));
     else if (child.isFile()) files.push(relativePath);
     else throw new Error('Unsupported playground build entry: ' + relativePath);

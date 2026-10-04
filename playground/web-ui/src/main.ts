@@ -1,6 +1,7 @@
 import * as monaco from 'monaco-editor/esm/vs/editor/editor.api.js';
 import EditorWorker from 'monaco-editor/esm/vs/editor/editor.worker.js?worker';
-import { registerOrnaLanguage } from './language';
+import '../node_modules/monaco-editor/min/vs/editor/editor.main.css';
+import { loadOrnaEditorConfig, registerOrnaLanguage } from './language';
 import { exampleIndexForKey, isExample } from './example-feed';
 import { formatRunResult, formatThrownError, type RunResult } from './results';
 import { servedRuntime } from './runtime';
@@ -11,7 +12,6 @@ type Position = { line: number; character: number };
 type LspReply = { id: number; value?: unknown; error?: string };
 
 globalThis.MonacoEnvironment = { getWorker: () => new EditorWorker() };
-registerOrnaLanguage(monaco.languages);
 const pageStyle = getComputedStyle(document.documentElement);
 monaco.editor.defineTheme('orna-basic', {
   base: 'vs',
@@ -29,7 +29,7 @@ function requiredElement<T extends Element>(selector: string): T {
   return element;
 }
 
-const editorHost = requiredElement<HTMLElement>('#editor');
+const editorHost = requiredElement<HTMLElement>('#source-editor');
 const examplesSelect = requiredElement<HTMLSelectElement>('#examples');
 const exampleStatus = requiredElement<HTMLElement>('#example-status');
 const runButton = requiredElement<HTMLButtonElement>('#run-button');
@@ -41,18 +41,8 @@ const errorsOutput = requiredElement<HTMLElement>('#errors-output');
 const astOutput = requiredElement<HTMLElement>('#ast-output');
 const outputStatus = requiredElement<HTMLElement>('#output-status');
 
-const editor = monaco.editor.create(editorHost, {
-  value: '',
-  language: 'orna',
-  theme: 'orna-basic',
-  automaticLayout: true,
-  minimap: { enabled: false },
-  scrollBeyondLastLine: false,
-  fontSize: 14,
-  tabSize: 4,
-  lineNumbersMinChars: 3,
-  renderLineHighlight: 'line',
-});
+let editor: monaco.editor.IStandaloneCodeEditor | undefined;
+let editorReady = false;
 
 const lspWorker = new Worker(new URL('./lsp-worker.ts', import.meta.url), { type: 'module' });
 const pendingLsp = new Map<number, { resolve: (value: unknown) => void; reject: (error: Error) => void }>();
@@ -64,7 +54,7 @@ let liveRuntimeReady = typeof (globalThis as typeof globalThis & { ornaPlaygroun
 const runtime = servedRuntime();
 
 function updateRunButton(): void {
-  runButton.disabled = activeRun || !examplesReady || !liveRuntimeReady;
+  runButton.disabled = activeRun || !editorReady || !examplesReady || !liveRuntimeReady;
 }
 
 window.addEventListener('orna:runtime-ready', () => {
@@ -209,8 +199,10 @@ monaco.languages.registerSignatureHelpProvider('orna', {
 
 let diagnosticTimer: ReturnType<typeof setTimeout> | undefined;
 async function updateDiagnostics(): Promise<void> {
+  const activeEditor = editor;
+  if (!activeEditor) return;
   try {
-    const response = await requestLsp('diagnostics', editor.getValue());
+    const response = await requestLsp('diagnostics', activeEditor.getValue());
     const markers = asArray(response).flatMap((entry) => {
       const item = asRecord(entry);
       const range = asRecord(item?.range);
@@ -235,7 +227,7 @@ async function updateDiagnostics(): Promise<void> {
         code: typeof item.code === 'string' || typeof item.code === 'number' ? String(item.code) : undefined,
       }];
     });
-    const model = editor.getModel();
+    const model = activeEditor.getModel();
     if (model) monaco.editor.setModelMarkers(model, 'orna-lsp', markers);
     editorStatus.textContent = markers.length === 0
       ? 'No syntax diagnostics'
@@ -244,12 +236,6 @@ async function updateDiagnostics(): Promise<void> {
     editorStatus.textContent = 'Editor analysis unavailable';
   }
 }
-
-editor.onDidChangeModelContent(() => {
-  if (diagnosticTimer) clearTimeout(diagnosticTimer);
-  diagnosticTimer = setTimeout(() => void updateDiagnostics(), 250);
-});
-void updateDiagnostics();
 
 function setOutput(target: HTMLElement, value: string, emptyLabel: string): void {
   target.textContent = value.length === 0 ? emptyLabel : value;
@@ -266,13 +252,14 @@ function showResult(result: RunResult): void {
 }
 
 async function runSource(): Promise<void> {
-  if (activeRun || !examplesReady || !liveRuntimeReady) return;
+  const activeEditor = editor;
+  if (activeRun || !editorReady || !examplesReady || !liveRuntimeReady || !activeEditor) return;
   activeRun = true;
   updateRunButton();
   executionState.textContent = 'Running';
   outputStatus.textContent = 'Running source in the OrnaDB server runtime.';
   try {
-    const result = await executeSource(editor.getValue());
+    const result = await executeSource(activeEditor.getValue());
     showResult(result);
   } catch (error) {
     const message = formatThrownError(error);
@@ -286,13 +273,40 @@ async function runSource(): Promise<void> {
 }
 
 runButton.addEventListener('click', () => void runSource());
-editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.Enter, () => void runSource());
+
+async function initializeEditor(): Promise<void> {
+  const config = await loadOrnaEditorConfig();
+  registerOrnaLanguage(monaco.languages, config);
+  editor = monaco.editor.create(editorHost, {
+    ...config.editorOptions,
+    value: '',
+    language: config.language.id,
+    theme: 'orna-basic',
+    ariaLabel: 'Orna source editor',
+    automaticLayout: true,
+    minimap: { enabled: false },
+    scrollBeyondLastLine: false,
+    fontSize: 14,
+    lineNumbersMinChars: 3,
+    renderLineHighlight: 'line',
+  });
+  editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.Enter, () => void runSource());
+  editor.onDidChangeModelContent(() => {
+    if (diagnosticTimer) clearTimeout(diagnosticTimer);
+    diagnosticTimer = setTimeout(() => void updateDiagnostics(), 250);
+  });
+  editorReady = true;
+  editorStatus.textContent = 'Orna editor configuration loaded from the database.';
+  updateRunButton();
+  void updateDiagnostics();
+}
 
 function loadSelectedExample(): void {
   const option = examplesSelect.selectedOptions[0];
   const source = option?.dataset.source;
-  if (source === undefined) return;
-  editor.setValue(source);
+  const activeEditor = editor;
+  if (source === undefined || !activeEditor) return;
+  activeEditor.setValue(source);
   const name = option.textContent ?? 'Example';
   editorStatus.textContent = `${name} loaded. Edit the source or run it as-is.`;
   exampleStatus.textContent = `${name} loaded into the source editor.`;
@@ -385,8 +399,14 @@ requiredElement<HTMLElement>('[role="tablist"]').addEventListener('keydown', (ev
 });
 
 updateRunButton();
-void loadExamples();
+void initializeEditor()
+  .then(loadExamples)
+  .catch((error: unknown) => {
+    editorStatus.textContent = `The editor could not load: ${formatThrownError(error)}`;
+    examplesReady = true;
+    updateRunButton();
+  });
 window.addEventListener('beforeunload', () => {
-  editor.dispose();
+  editor?.dispose();
   lspWorker.terminate();
 }, { once: true });

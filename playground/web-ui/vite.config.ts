@@ -1,8 +1,10 @@
 import { readFile, readdir } from 'node:fs/promises';
-import { extname } from 'node:path';
+import { extname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { Plugin } from 'vite';
 import { defineConfig } from 'vite';
+
+const webUi = fileURLToPath(new URL('.', import.meta.url));
 
 const lspPackageDirectory = fileURLToPath(new URL('./public/lsp-wasm/', import.meta.url));
 const monacoEsmDirectory = fileURLToPath(
@@ -65,9 +67,28 @@ function lspPackageAssets(): Plugin {
 
 export default defineConfig({
   base: '/playground/',
-  publicDir: false,
+  publicDir: 'public',
   resolve: {
     alias: [{ find: 'monaco-editor/esm', replacement: monacoEsmDirectory }],
+  },
+  build: {
+    rollupOptions: {
+      input: {
+        index: resolve(webUi, 'index.html'),
+        embed: resolve(webUi, 'src/embed.ts'),
+      },
+      output: {
+        manualChunks(id) {
+          const modulePath = id.replaceAll('\\', '/');
+          if (modulePath.includes('/monaco-editor/esm/vs/base/')) return 'monaco-base';
+          if (modulePath.includes('/monaco-editor/esm/vs/editor/')) return 'monaco-editor';
+          return undefined;
+        },
+        entryFileNames: 'assets/[name].js',
+        chunkFileNames: 'assets/[name].js',
+        assetFileNames: 'assets/[name][extname]',
+      },
+    },
   },
   plugins: [lspPackageAssets()],
   server: {
