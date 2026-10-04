@@ -29,9 +29,9 @@ pub use uuid::Uuid;
 
 mod compact;
 mod init;
-mod transport;
 #[cfg(test)]
 pub(crate) mod test_support;
+mod transport;
 
 pub use compact::{
     COMPACT_MANIFEST_SHARD_LIMIT, COMPACT_MAX_UNCOMPRESSED_PAGE_BYTES, CompactCommittedRow,
@@ -103,6 +103,23 @@ impl CommittedLogEntry {
     /// The first line of the commit message.
     pub fn subject(&self) -> &str {
         &self.subject
+    }
+}
+
+/// One local Git branch and the commit currently named by its ref.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CommittedBranch {
+    name: String,
+    commit: GitCommitRef,
+}
+
+impl CommittedBranch {
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn commit(&self) -> &GitCommitRef {
+        &self.commit
     }
 }
 
@@ -532,8 +549,7 @@ impl PublicationJournal {
             if !paths.insert(path.clone()) {
                 return Err(RepositoryError::InvalidPublicationJournal);
             }
-            let phase =
-                PublicationMaterializationPhase::from_code(take_byte(bytes, &mut cursor)?)?;
+            let phase = PublicationMaterializationPhase::from_code(take_byte(bytes, &mut cursor)?)?;
             let quarantine = take_optional_string(bytes, &mut cursor)?;
             if (phase == PublicationMaterializationPhase::Clean) == quarantine.is_some()
                 || phase != PublicationMaterializationPhase::Clean && quarantine.is_none()
@@ -1531,7 +1547,9 @@ impl Repository {
             let _ = child.wait();
             return Err(RepositoryError::GitOperationFailed);
         }
-        let status = child.wait().map_err(|_| RepositoryError::GitOperationFailed)?;
+        let status = child
+            .wait()
+            .map_err(|_| RepositoryError::GitOperationFailed)?;
         if !status.success() {
             return Err(RepositoryError::GitOperationFailed);
         }
@@ -1563,6 +1581,78 @@ impl Repository {
             return Err(RepositoryError::GitOperationFailed);
         }
         Ok(entries)
+    }
+
+    /// Lists local branches in Git's ref order, bounded by `max_branches`.
+    pub fn local_branches(
+        &self,
+        max_branches: usize,
+    ) -> Result<Vec<CommittedBranch>, RepositoryError> {
+        const MAX_OUTPUT_BYTES: usize = 4 * 1024 * 1024;
+
+        if max_branches == 0 {
+            return Ok(Vec::new());
+        }
+
+        let mut command = self.command();
+        command
+            .env("GIT_NO_LAZY_FETCH", "1")
+            .args(["for-each-ref", "--count"])
+            .arg(max_branches.to_string())
+            .arg("--format=%(refname:strip=2)%00%(objectname)")
+            .arg("refs/heads")
+            .stdout(Stdio::piped());
+        let mut child = command
+            .spawn()
+            .map_err(|_| RepositoryError::GitUnavailable)?;
+        let mut output = Vec::new();
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or(RepositoryError::GitOperationFailed)?;
+        let read_result = stdout
+            .take((MAX_OUTPUT_BYTES + 1) as u64)
+            .read_to_end(&mut output);
+        if read_result.is_err() || output.len() > MAX_OUTPUT_BYTES {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(RepositoryError::GitOperationFailed);
+        }
+        let status = child
+            .wait()
+            .map_err(|_| RepositoryError::GitOperationFailed)?;
+        if !status.success() {
+            return Err(RepositoryError::GitOperationFailed);
+        }
+
+        let object_id_length = self.native_object_id_length()?;
+        let mut branches = Vec::new();
+        for record in output
+            .split(|byte| *byte == b'\n')
+            .filter(|record| !record.is_empty())
+        {
+            let separator = record
+                .iter()
+                .position(|byte| *byte == 0)
+                .ok_or(RepositoryError::GitOperationFailed)?;
+            let (name, object_id_with_separator) = record.split_at(separator);
+            let object_id = &object_id_with_separator[1..];
+            let name = String::from_utf8(name.to_vec())
+                .map_err(|_| RepositoryError::GitOperationFailed)?;
+            if !valid_branch_name(&name) {
+                return Err(RepositoryError::GitOperationFailed);
+            }
+            let object_id = String::from_utf8(object_id.to_vec())
+                .map_err(|_| RepositoryError::GitOperationFailed)?;
+            branches.push(CommittedBranch {
+                name,
+                commit: GitCommitRef::from_verified_commit(object_id, object_id_length)?,
+            });
+        }
+        if branches.len() > max_branches {
+            return Err(RepositoryError::GitOperationFailed);
+        }
+        Ok(branches)
     }
 
     /// Builds a real Git tree and commit from `expected_head` plus the supplied
@@ -2854,8 +2944,6 @@ impl Repository {
         0
     }
 
-
-
     fn worktree_content_digest(
         &self,
         extra_paths: &[ManagedPath],
@@ -3741,10 +3829,11 @@ impl Repository {
             .args(["ls-tree", "-z", "--full-tree", treeish, "--"])
             .arg(path.as_path());
         let output = self.run(command)?;
-        let mut entries = output.stdout.split(|byte| *byte == 0).filter(|entry| !entry.is_empty());
-        let entry = entries
-            .next()
-            .ok_or(RepositoryError::GitOperationFailed)?;
+        let mut entries = output
+            .stdout
+            .split(|byte| *byte == 0)
+            .filter(|entry| !entry.is_empty());
+        let entry = entries.next().ok_or(RepositoryError::GitOperationFailed)?;
         if entries.next().is_some() {
             return Err(RepositoryError::GitOperationFailed);
         }
@@ -3890,10 +3979,7 @@ impl Repository {
         self.list_tree_entries(candidate.tree.as_str(), max_entries)
     }
 
-    fn verify_private_candidate(
-        &self,
-        candidate: &PrivateCommit,
-    ) -> Result<(), RepositoryError> {
+    fn verify_private_candidate(&self, candidate: &PrivateCommit) -> Result<(), RepositoryError> {
         let commit_expression = format!("{}^{{commit}}", candidate.commit.as_str());
         let resolved = self
             .commit_optional(&commit_expression)?
