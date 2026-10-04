@@ -10596,6 +10596,7 @@ pub fn restore_paired_checkpoint_redo_sparse_spill_nested_checkpoint_identity_ne
                 nested_checkpoint_identity,
                 nested_rewind_identity: stream.nested_rewind_identity,
                 nested_handoff_identity: stream.nested_handoff_identity,
+                rewind_chain_nested_checkpoint_identity: stream.nested_checkpoint_identity,
                 checkpoint_chain_nested_rewind_identity: stream.checkpoint_chain_nested_rewind_identity,
                 checkpoint_handoff_chain_nested_rewind_identity: stream.checkpoint_handoff_chain_nested_rewind_identity,
                 rewind_checkpoint_nested_handoff_identity: stream.rewind_checkpoint_nested_handoff_identity,
