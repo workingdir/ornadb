@@ -27,6 +27,29 @@ const SHARED_PROVIDER_FAILURES: [&str; 3] = [
     "sys.abi.provider_failed",
 ];
 
+fn bind_type_parameter(ty: &AbiType, parameter: &str, witness: &AbiType) -> AbiType {
+    match ty {
+        AbiType::Named(name) if name == parameter => witness.clone(),
+        AbiType::Named(name) => AbiType::Named(name.clone()),
+        AbiType::Applied {
+            constructor,
+            arguments,
+        } => AbiType::Applied {
+            constructor: constructor.clone(),
+            arguments: arguments
+                .iter()
+                .map(|argument| bind_type_parameter(argument, parameter, witness))
+                .collect(),
+        },
+        AbiType::List(element) => {
+            AbiType::List(Box::new(bind_type_parameter(element, parameter, witness)))
+        }
+        AbiType::Optional(inner) => {
+            AbiType::Optional(Box::new(bind_type_parameter(inner, parameter, witness)))
+        }
+    }
+}
+
 struct InvokeValueProvider {
     offer: ProviderOffer,
     operation: OperationId,
@@ -4110,6 +4133,267 @@ fn provider_generic_object_returns_preserve_witness_types_on_both_routes() {
             + registry_routes
             + direct_result_mismatches
             + registry_result_mismatches
+    );
+}
+
+#[test]
+fn provider_promise_callback_preserves_handle_and_terminal_result_edges() {
+    const START_OPERATION: &str = "sys.start<T>";
+    const AWAIT_OPERATION: &str = "sys.await";
+    const WITNESS: &str = "sys.Value";
+    const START_PRECONDITIONS: [&str; 2] = [
+        "promise callback: capture invocation handle",
+        "promise callback: retain result witness",
+    ];
+    const AWAIT_PRECONDITIONS: [&str; 1] = ["promise callback: deliver terminal result"];
+
+    let generated_schema = build_provider::generate_provider_registry_schema()
+        .expect("provider promise schema regenerates from its typed source generator");
+    assert_eq!(generated_schema, system_provider_abi_schema_json());
+    build_host::validate_json_against_schema(system_provider_abi_json(), &generated_schema)
+        .expect("embedded promise contracts conform to the regenerated provider schema");
+
+    let mut callback_registry_json: Value =
+        serde_json::from_str(system_provider_abi_json()).expect("embedded provider registry");
+    let raw_operations = callback_registry_json["operations"]
+        .as_array_mut()
+        .expect("generated provider registry has operation rows");
+    for (operation_name, preconditions) in [
+        (START_OPERATION, START_PRECONDITIONS.as_slice()),
+        (AWAIT_OPERATION, AWAIT_PRECONDITIONS.as_slice()),
+    ] {
+        let row = raw_operations
+            .iter_mut()
+            .find(|row| row["name"] == operation_name)
+            .expect("generated registry contains both sides of the promise edge");
+        row["preconditions"] = serde_json::json!(preconditions);
+    }
+    let callback_registry_source = callback_registry_json.to_string();
+    build_host::validate_json_against_schema(&callback_registry_source, &generated_schema)
+        .expect("callback-bearing promise rows conform to the generated schema");
+    let table = SystemProviderAbi::from_json(&callback_registry_source)
+        .expect("schema-validated promise rows parse into typed provider contracts");
+    let registry = ProviderRoleRegistry::from_baked_abi(&table)
+        .expect("start and await promise callback roles resolve");
+
+    let start_contract = table
+        .operation(START_OPERATION)
+        .expect("generic start promise producer exists");
+    let await_contract = table
+        .operation(AWAIT_OPERATION)
+        .expect("generic await promise consumer exists");
+    for (operation_name, contract) in [
+        (START_OPERATION, start_contract),
+        (AWAIT_OPERATION, await_contract),
+    ] {
+        let generated = system_function_descriptor(operation_name)
+            .expect("promise edge has a macro-generated binding");
+        assert_eq!(generated.signature, contract.signature.source);
+        assert_eq!(contract.effects.iter().next(), Some(generated.effect));
+    }
+    let witness = AbiType::Named(WITNESS.to_owned());
+    let handle_type = bind_type_parameter(&start_contract.signature.result, "T", &witness);
+    let await_input_type =
+        bind_type_parameter(&await_contract.signature.parameters[0].ty, "T", &witness);
+    let terminal_result_type = bind_type_parameter(&await_contract.signature.result, "T", &witness);
+    assert_eq!(handle_type, await_input_type);
+    assert_eq!(handle_type.canonical(), "sys.InvocationHandle<sys.Value>");
+    assert_eq!(
+        terminal_result_type.canonical(),
+        "sys.InvocationResult<sys.Value>"
+    );
+
+    let expected_arguments = |contract: &orna_sys_v1::OperationContract| {
+        contract
+            .signature
+            .parameters
+            .iter()
+            .map(|parameter| bind_type_parameter(&parameter.ty, "T", &witness).canonical())
+            .collect::<Vec<_>>()
+    };
+    let arguments_for = |contract: &orna_sys_v1::OperationContract,
+                         promise_handle: Option<&TypedValue>| {
+        contract
+            .signature
+            .parameters
+            .iter()
+            .map(|parameter| {
+                if parameter.name == "invocation" {
+                    return promise_handle
+                        .expect("await callback consumes the produced handle")
+                        .clone();
+                }
+                let ty = bind_type_parameter(&parameter.ty, "T", &witness).canonical();
+                let payload = if parameter.name == "arguments" {
+                    b"{}".to_vec()
+                } else if parameter.name == "as" {
+                    b"sys.Value witness".to_vec()
+                } else {
+                    parameter
+                        .default
+                        .as_deref()
+                        .unwrap_or(&parameter.name)
+                        .as_bytes()
+                        .to_vec()
+                };
+                TypedValue::public(TypeId::new(ty), payload)
+            })
+            .collect::<Vec<_>>()
+    };
+    let provider_for = |contract: &orna_sys_v1::OperationContract, response: TypedValue| {
+        let role = contract
+            .role
+            .as_ref()
+            .expect("promise provider operation carries a role");
+        let offer = registry
+            .resolve(role.as_str())
+            .expect("promise provider role has a selected offer")
+            .clone();
+        InvokeValueProvider {
+            offer,
+            operation: contract.id.clone(),
+            argument_types: expected_arguments(contract),
+            response: Ok(response),
+            calls: AtomicUsize::new(0),
+        }
+    };
+
+    let mut direct_edges = 0;
+    let mut selected_provider_edges = 0;
+    let mut callback_visits = 0;
+    let mut terminal_result_mismatches = 0;
+    for selected_route in [false, true] {
+        let mut callback_trace = Vec::new();
+        let handle = TypedValue::public(
+            TypeId::new(handle_type.canonical()),
+            b"promise-handle:sys.Value:42".to_vec(),
+        );
+        let start_arguments = arguments_for(start_contract, None);
+        let start_provider = provider_for(start_contract, handle.clone());
+        let start_result = if selected_route {
+            registry.dispatch_to_provider(
+                &table,
+                START_OPERATION,
+                &start_provider,
+                &start_arguments,
+                |precondition| {
+                    callback_trace.push(precondition.declaration.clone());
+                    Ok(())
+                },
+            )
+        } else {
+            table.dispatch_to_provider(
+                START_OPERATION,
+                &start_provider,
+                &start_arguments,
+                |precondition| {
+                    callback_trace.push(precondition.declaration.clone());
+                    Ok(())
+                },
+            )
+        }
+        .expect("start provider returns its typed promise handle");
+        assert_eq!(
+            start_result,
+            orna_sys_v1::SystemDispatchResult::Returned(handle.clone())
+        );
+        assert_eq!(start_provider.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(callback_trace, START_PRECONDITIONS);
+
+        let await_arguments = arguments_for(await_contract, Some(&handle));
+        let terminal_result = TypedValue::public(
+            TypeId::new(terminal_result_type.canonical()),
+            b"invocation-result:succeeded:42".to_vec(),
+        );
+        let await_provider = provider_for(await_contract, terminal_result.clone());
+        let await_result = if selected_route {
+            registry.dispatch_to_provider(
+                &table,
+                AWAIT_OPERATION,
+                &await_provider,
+                &await_arguments,
+                |precondition| {
+                    callback_trace.push(precondition.declaration.clone());
+                    Ok(())
+                },
+            )
+        } else {
+            table.dispatch_to_provider(
+                AWAIT_OPERATION,
+                &await_provider,
+                &await_arguments,
+                |precondition| {
+                    callback_trace.push(precondition.declaration.clone());
+                    Ok(())
+                },
+            )
+        }
+        .expect("await callback receives the matching invocation handle");
+        assert_eq!(
+            await_result,
+            orna_sys_v1::SystemDispatchResult::Returned(terminal_result)
+        );
+        assert_eq!(await_provider.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            callback_trace,
+            [
+                START_PRECONDITIONS.as_slice(),
+                AWAIT_PRECONDITIONS.as_slice()
+            ]
+            .concat()
+        );
+        callback_visits += callback_trace.len();
+
+        let wrong_terminal_type = AbiType::Applied {
+            constructor: "sys.InvocationResult".to_owned(),
+            arguments: vec![AbiType::Named("sys.FunctionRef".to_owned())],
+        };
+        let wrong_terminal_result = TypedValue::public(
+            TypeId::new(wrong_terminal_type.canonical()),
+            b"invocation-result:succeeded:wrong-witness".to_vec(),
+        );
+        let wrong_await_provider = provider_for(await_contract, wrong_terminal_result);
+        let mismatch = if selected_route {
+            registry.dispatch_to_provider(
+                &table,
+                AWAIT_OPERATION,
+                &wrong_await_provider,
+                &await_arguments,
+                |_| Ok(()),
+            )
+        } else {
+            table.dispatch_to_provider(
+                AWAIT_OPERATION,
+                &wrong_await_provider,
+                &await_arguments,
+                |_| Ok(()),
+            )
+        }
+        .expect_err("await provider cannot replace the promise's result witness");
+        assert_eq!(
+            mismatch,
+            ProviderDiagnostic::ResultTypeMismatch {
+                operation: await_contract.id.clone(),
+                expected: await_contract.signature.result.canonical(),
+                actual: wrong_terminal_type.canonical(),
+            }
+        );
+        assert_eq!(wrong_await_provider.calls.load(Ordering::SeqCst), 1);
+        terminal_result_mismatches += 1;
+
+        if selected_route {
+            selected_provider_edges += 2;
+        } else {
+            direct_edges += 2;
+        }
+    }
+    assert_eq!(callback_visits, 6);
+    assert_eq!(direct_edges, 2);
+    assert_eq!(selected_provider_edges, 2);
+    assert_eq!(terminal_result_mismatches, 2);
+    println!(
+        "provider_promise_callback_parity start={START_OPERATION} await={AWAIT_OPERATION} schema_validations=2 generated_bindings=2 handle_result_pairs=1 direct_edges={direct_edges} selected_provider_edges={selected_provider_edges} callback_visits={callback_visits} terminal_result_mismatches={terminal_result_mismatches} total_cases={}",
+        2 + direct_edges + selected_provider_edges + terminal_result_mismatches + callback_visits
     );
 }
 
