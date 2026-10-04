@@ -20,6 +20,18 @@ fn empty_array() -> CanonicalValue {
     CanonicalValue::new(Raw::Array(Vec::new())).expect("empty array is canonical")
 }
 
+fn import_builders(session: &mut AdmittedReplSession) {
+    for source in [
+        include_str!("fixtures/stdlib-collection-builders-use-list-q730o.orna"),
+        include_str!("fixtures/stdlib-collection-builders-use-map-q730o.orna"),
+        include_str!("fixtures/stdlib-collection-builders-use-set-q730o.orna"),
+    ] {
+        session
+            .submit(source)
+            .unwrap_or_else(|error| panic!("builder module import failed: {}", error.code()));
+    }
+}
+
 fn builders_session() -> AdmittedReplSession {
     let sources = reference_standard_sources()
         .into_iter()
@@ -49,12 +61,7 @@ fn builders_session() -> AdmittedReplSession {
 #[test]
 fn pinned_list_map_and_set_builders_preserve_their_collection_contracts() {
     let mut session = builders_session();
-    assert_eq!(
-        session.submit(include_str!(
-            "fixtures/stdlib-collection-builders-use-q730o.orna"
-        )),
-        Ok(None)
-    );
+    import_builders(&mut session);
 
     for source in [
         include_str!("fixtures/stdlib-collection-builders-list-q730o.orna"),
@@ -102,12 +109,7 @@ fn pinned_builder_sources_match_the_profile_and_reject_invalid_counts() {
     }
 
     let mut session = builders_session();
-    assert_eq!(
-        session.submit(include_str!(
-            "fixtures/stdlib-collection-builders-use-q730o.orna"
-        )),
-        Ok(None)
-    );
+    import_builders(&mut session);
     for source in [
         include_str!("fixtures/stdlib-collection-builders-list-negative-take-q730o.orna"),
         include_str!("fixtures/stdlib-collection-builders-list-negative-drop-q730o.orna"),
@@ -122,7 +124,7 @@ fn pinned_builder_sources_match_the_profile_and_reject_invalid_counts() {
     let mut core = AdmittedReplSession::new(Limits::default());
     assert_eq!(
         core.submit(include_str!(
-            "fixtures/stdlib-collection-builders-no-snapshot-q730o.orna"
+            "fixtures/stdlib-collection-builders-use-list-q730o.orna"
         ))
         .unwrap_err()
         .code(),
