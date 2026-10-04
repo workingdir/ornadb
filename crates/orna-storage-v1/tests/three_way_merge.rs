@@ -53173,7 +53173,7 @@ fn nested_rewind_identity_survives_paired_checkpoint_fold_chain_handoffs_f171() 
     assert_ne!(main.nested_rewind_identity, main.rewind_handoff_chain_nested_rewind_identity);
     assert_eq!(main.nested_checkpoint_identity, outer_checkpoint_pair(0));
     assert_eq!(main.slots[0].restored_slot.nested_checkpoint_identity, outer_checkpoint_pair(0));
-    assert_eq!(main.slots[0].restored_slot.nested_rewind_identity, outer_rewind_pair(0));
+    assert_eq!(main.slots[0].restored_slot.restored_slot.nested_rewind_identity, outer_rewind_pair(0));
     assert_eq!(main.rewind_handoff_chain_nested_rewind_identity, outer_rewind_pair(0));
     assert_eq!(
         main.handoff_chain_nested_rewind_identity,
