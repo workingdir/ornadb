@@ -357,12 +357,18 @@ fn nested_window_identities_survive_paired_cost_restore_folds_and_sparse_edges()
         "the sparse edge carries both paired window identities"
     );
     assert_eq!(
-        text(tail, "paired_window_cost_restoration_window_identity_pairing"),
+        text(
+            tail,
+            "paired_window_cost_restoration_window_identity_pairing"
+        ),
         "exact_pair_window_identities_bound_across_nested_cost_restore_folds"
     );
     assert_eq!(
         text(tail, "paired_window_cost_restoration_window_fold_identity"),
-        text(child_b, "paired_window_cost_restoration_window_fold_identity"),
+        text(
+            child_b,
+            "paired_window_cost_restoration_window_fold_identity"
+        ),
         "a sparse edge carries the last paired window identity fold"
     );
     assert_ne!(
@@ -418,6 +424,72 @@ fn nested_window_identities_survive_paired_cost_restore_folds_and_sparse_edges()
         "the sparse edge contributes its exact left/right cost ancestry"
     );
     assert_eq!(
+        integer(
+            child_a,
+            "paired_window_cost_restoration_pair_envelope_count"
+        ),
+        1
+    );
+    assert_eq!(
+        integer(
+            child_b,
+            "paired_window_cost_restoration_pair_envelope_count"
+        ),
+        2
+    );
+    assert_eq!(
+        integer(tail, "paired_window_cost_restoration_pair_envelope_count"),
+        3,
+        "the sparse edge gets an envelope around the carried nested chain"
+    );
+    assert_eq!(
+        text(tail, "paired_window_cost_restoration_pair_envelope_pairing"),
+        "cumulative_window_restore_chain_identity_bound_to_each_exact_pair_envelope"
+    );
+    assert_ne!(
+        text(
+            child_a,
+            "paired_window_cost_restoration_pair_envelope_identity"
+        ),
+        text(
+            child_b,
+            "paired_window_cost_restoration_pair_envelope_identity"
+        ),
+        "each exact pair envelope binds its own cumulative nested chain"
+    );
+    assert_ne!(
+        text(
+            child_b,
+            "paired_window_cost_restoration_pair_envelope_identity"
+        ),
+        text(
+            tail,
+            "paired_window_cost_restoration_pair_envelope_identity"
+        ),
+        "a sparse edge has a distinct envelope while carrying the nested chain"
+    );
+    assert_ne!(
+        text(
+            child_a,
+            "paired_window_cost_restoration_pair_envelope_fold_identity"
+        ),
+        text(
+            child_b,
+            "paired_window_cost_restoration_pair_envelope_fold_identity"
+        )
+    );
+    assert_ne!(
+        text(
+            child_b,
+            "paired_window_cost_restoration_pair_envelope_fold_identity"
+        ),
+        text(
+            tail,
+            "paired_window_cost_restoration_pair_envelope_fold_identity"
+        ),
+        "the cumulative envelope fold includes the sparse pair"
+    );
+    assert_eq!(
         text(tail, "paired_window_cost_restoration_cost_pairing"),
         "exact_left_and_right_cost_ancestors_bound_to_each_window_restore_pair"
     );
@@ -459,6 +531,28 @@ fn nested_window_identities_survive_paired_cost_restore_folds_and_sparse_edges()
                 "paired_window_cost_restoration_window_restore_chain_fold_identity"
             ),
             "descriptor reordering preserves the nested window and restore-chain fold"
+        );
+        assert_eq!(
+            text(
+                joins[pair_id],
+                "paired_window_cost_restoration_pair_envelope_identity"
+            ),
+            text(
+                reordered_joins[pair_id],
+                "paired_window_cost_restoration_pair_envelope_identity"
+            ),
+            "descriptor reordering preserves each nested chain envelope"
+        );
+        assert_eq!(
+            text(
+                joins[pair_id],
+                "paired_window_cost_restoration_pair_envelope_fold_identity"
+            ),
+            text(
+                reordered_joins[pair_id],
+                "paired_window_cost_restoration_pair_envelope_fold_identity"
+            ),
+            "descriptor reordering preserves the cumulative envelope fold"
         );
     }
     assert_ne!(
@@ -539,6 +633,50 @@ fn nested_window_identities_survive_paired_cost_restore_folds_and_sparse_edges()
             "join_cost_fold_identity"
         )
     );
+    assert_ne!(
+        text(
+            child_b,
+            "paired_window_cost_restoration_pair_envelope_identity"
+        ),
+        text(
+            changed_joins["pair:table:ChildB"],
+            "paired_window_cost_restoration_pair_envelope_identity"
+        ),
+        "the changed window is bound into its exact pair envelope"
+    );
+    assert_ne!(
+        text(
+            child_b,
+            "paired_window_cost_restoration_pair_envelope_fold_identity"
+        ),
+        text(
+            changed_joins["pair:table:ChildB"],
+            "paired_window_cost_restoration_pair_envelope_fold_identity"
+        ),
+        "the changed nested chain advances the cumulative envelope fold"
+    );
+    assert_ne!(
+        text(
+            tail,
+            "paired_window_cost_restoration_pair_envelope_identity"
+        ),
+        text(
+            changed_joins["pair:table:Tail"],
+            "paired_window_cost_restoration_pair_envelope_identity"
+        ),
+        "the sparse envelope carries the changed nested chain"
+    );
+    assert_ne!(
+        text(
+            tail,
+            "paired_window_cost_restoration_pair_envelope_fold_identity"
+        ),
+        text(
+            changed_joins["pair:table:Tail"],
+            "paired_window_cost_restoration_pair_envelope_fold_identity"
+        ),
+        "the sparse envelope fold retains the changed nested chain"
+    );
     assert_eq!(
         text(child_b, "paired_window_cost_restoration_pairing"),
         "exact_window_chains_across_paired_cost_restore_folds"
@@ -597,6 +735,50 @@ fn nested_window_identities_survive_paired_cost_restore_folds_and_sparse_edges()
                 "paired_window_cost_restoration_window_restore_chain_fold_identity"
             ),
             "cost and restore changes advance the nested composite fold"
+        );
+        assert_ne!(
+            text(
+                child_b,
+                "paired_window_cost_restoration_pair_envelope_identity"
+            ),
+            text(
+                changed["pair:table:ChildB"],
+                "paired_window_cost_restoration_pair_envelope_identity"
+            ),
+            "cost and restore changes advance the exact nested chain envelope"
+        );
+        assert_ne!(
+            text(
+                child_b,
+                "paired_window_cost_restoration_pair_envelope_fold_identity"
+            ),
+            text(
+                changed["pair:table:ChildB"],
+                "paired_window_cost_restoration_pair_envelope_fold_identity"
+            ),
+            "cost and restore changes advance the cumulative envelope fold"
+        );
+        assert_ne!(
+            text(
+                tail,
+                "paired_window_cost_restoration_pair_envelope_identity"
+            ),
+            text(
+                changed["pair:table:Tail"],
+                "paired_window_cost_restoration_pair_envelope_identity"
+            ),
+            "a sparse envelope retains each changed nested chain identity"
+        );
+        assert_ne!(
+            text(
+                tail,
+                "paired_window_cost_restoration_pair_envelope_fold_identity"
+            ),
+            text(
+                changed["pair:table:Tail"],
+                "paired_window_cost_restoration_pair_envelope_fold_identity"
+            ),
+            "the sparse envelope fold retains each changed nested chain identity"
         );
         assert_eq!(
             text(
