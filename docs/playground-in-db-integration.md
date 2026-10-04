@@ -1,36 +1,45 @@
-# Playground in-DB integration points
+# Playground serve integration
 
-The standalone `playground/` WebAssembly and GitHub Pages iteration has been
-removed. The `orna serve` Git listing from S1 remains the starting point. No S2
-layout architecture record was present in `docs/decisions/` at this checkout;
-this note records integration boundaries without choosing an explorer layout.
+Work ADR 0116 binds the playground's ordinary Orna application architecture.
+This note records the current `orna serve` dogfood path and its process-level
+verification; it does not replace that architecture decision.
 
-## Existing serve surface
+## Served surface
 
-`orna serve` keeps the Git transport and the server-rendered Git pages at `/`,
-`/tree/<commit>/<path>`, and `/blob/<commit>/<path>`. Its query endpoint is
-`POST /api/query`. The authenticated `orna.present.v1` WebSocket presentation
-delta transport also remains available. These are the integration seams for
-the ordinary Orna application and live presentation described by
-ORNA-SERVE-001; Git transport remains usable without an optional frontend.
+The S1 Git listing remains at `/`, with committed tree and blob views at
+`/tree/<commit>/<path>` and `/blob/<commit>/<path>`. Its page links to the
+playground at `/playground/`. `orna serve` serves the built web page and assets
+from the selected clone's `playground/web-ui/dist/`; `/api/examples` returns
+only committed `.orna` examples from that same Git-backed clone.
 
-## Future in-DB application
+The page obtains a same-origin session through `POST /orna/session`, then
+connects to the returned `/orna/live/<session>` WebSocket using
+`orna.present.v1`. It watches the reserved run-events presentation, sends
+explicit Eval requests, and resynchronizes that watch to receive typed
+presentation deltas. Evaluation runs in the server's Orna runtime. The browser
+does not contain a second evaluator or a language keyword inventory.
 
-ORNA-SERVE-008 recommends an ordinary Orna application, preferably
-`std.devtools`, as the default frontend. ORNA-SERVE-009 says it should lead
-with database tables and expose files, commits, branches, functions,
-dependencies, storage, and runtime state. Build those views from introspected
-state and renderer-neutral presentation trees. A generic renderer must retain
-Inspect-compatible fallback behavior, including redaction and bounded
-structural inspection, as described by ORNA-PRES-002, ORNA-PRES-006,
-ORNA-PRES-009, and ORNA-PRES-010.
+## Dogfood proof
 
-Keep the first presentation content-first: readable plain type, blue links,
-minimal CSS, and themeable CSS variables. Add no navigation model or custom
-interaction until the S2 application contract calls for it. JavaScript belongs
-only at the live presentation boundary needed to consume WebSocket deltas.
+Run the focused process-level integration test with:
 
-Work ADR 0103 records that these generic presentation rules do not specify a
-Studio runtime ABI, host adapter, explorer layout, or navigation model. An
-accepted S2 architecture record should define any such application-specific
-contract before implementation expands beyond these seams.
+```sh
+export CARGO_BUILD_JOBS=2 RUST_TEST_THREADS=2
+cargo test -p orna-cli-v1 --test serve_playground_dogfood -- --nocapture
+```
+
+The test initializes a temporary Orna Git database, commits crate-local
+`.orna` fixtures, starts the actual `orna-cli-v1 serve` process, and uses curl
+for the Git listing, playground page and asset, committed examples, and live
+session creation. A WebSocket client then follows the same `orna.present.v1`
+watch, fingerprinted Eval, and Resync exchange used by the browser bridge.
+
+The test sends two independently fingerprinted Eval requests before reading
+either response, then checks that each response keeps its request identity and
+value (`2` and `42`). It resynchronizes the original watch, applies the
+revision `0..1` delta to the revision-zero presentation, and checks both run
+events. A third Eval produces a revision `1..2` delta; applying it yields the
+exact presentation from a fresh watch snapshot in the same served session.
+
+The test checks the HTTP and live protocol boundary end to end without relying
+on a separately running development server or a checked-in build artifact.

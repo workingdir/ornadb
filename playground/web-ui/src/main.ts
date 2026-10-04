@@ -302,7 +302,7 @@ async function loadExamples(): Promise<void> {
       empty.textContent = 'No database examples';
       examplesSelect.append(empty);
       examplesSelect.disabled = true;
-      editorStatus.textContent = 'No sample records available';
+      editorStatus.textContent = 'No database examples available';
       runButton.disabled = false;
       return;
     }

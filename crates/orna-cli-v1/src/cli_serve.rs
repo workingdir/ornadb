@@ -14,7 +14,9 @@ use orna_repository_v1::{
     CommittedBranch, CommittedLogEntry, CommittedTreeEntryKind, GitCommitRef, ManagedPath,
     Repository, RuntimeGeneration,
 };
-use orna_security_v1::{Origin, OriginPolicy, SessionBoundary, SessionDeletionAdapter};
+use orna_security_v1::{
+    MAX_SESSION_LEASE, Origin, OriginPolicy, SessionBoundary, SessionDeletionAdapter,
+};
 use orna_serving_v1::Serving;
 use orna_syntax_v1::{Declaration, Expr, LiteralKind, Pattern, TypeExpr, parse_module, parse_row};
 use std::{
@@ -28,7 +30,7 @@ use std::{
 const MAX_HEADER_BYTES: usize = 16 * 1024;
 const MAX_REQUEST_BODY_BYTES: usize = 16 * 1024 * 1024;
 const MAX_GIT_REQUEST_BODY_BYTES: usize = 512 * 1024 * 1024;
-const SESSION_LEASE_MS: u64 = 60 * 60 * 1000;
+const SESSION_LEASE_MS: u64 = MAX_SESSION_LEASE;
 
 struct ServeState {
     root: PathBuf,
@@ -412,7 +414,9 @@ fn commit_log_page(root: &Path, identity: RuntimeIdentity) -> Response {
 }
 
 const MAX_PLAYGROUND_ASSET_BYTES: u64 = 8 * 1024 * 1024;
-const MAX_PLAYGROUND_EXAMPLE_BYTES: usize = 64 * 1024;
+const MAX_PLAYGROUND_EXAMPLE_BYTES: usize = 2 * 1024 * 1024;
+const MAX_PLAYGROUND_SAMPLE_BYTES: usize = 64 * 1024;
+const MAX_PLAYGROUND_FILE_EXAMPLES: usize = 100;
 const MAX_PLAYGROUND_SAMPLE_ROWS: usize = 100;
 const MAX_PLAYGROUND_EXAMPLES_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
 fn playground_route(root: &Path, identity: RuntimeIdentity, request: &Request) -> Option<Response> {
@@ -557,19 +561,15 @@ fn playground_examples(root: &Path) -> Response {
     let Ok(Some(commit)) = repository.head() else {
         return unavailable_response();
     };
-    let Ok(schema) = repository.read_committed_file(
-        &commit,
-        Path::new("playground.orna"),
-        MAX_PLAYGROUND_EXAMPLE_BYTES,
-    ) else {
-        return Response::new(200, "application/json", br#"{"examples":[]}"#.to_vec());
-    };
-    let Ok(schema) = String::from_utf8(schema) else {
-        return unavailable_response();
-    };
-    if !has_playground_sample_table(&schema) {
-        return Response::new(200, "application/json", br#"{"examples":[]}"#.to_vec());
-    }
+    let sample_table_available = repository
+        .read_committed_file(
+            &commit,
+            Path::new("playground.orna"),
+            MAX_PLAYGROUND_SAMPLE_BYTES,
+        )
+        .ok()
+        .and_then(|schema| String::from_utf8(schema).ok())
+        .is_some_and(|schema| has_playground_sample_table(&schema));
     let Ok(entries) = repository.list_committed_tree(&commit, MAX_LISTING_TREE_ENTRIES) else {
         return unavailable_response();
     };
@@ -577,32 +577,57 @@ fn playground_examples(root: &Path) -> Response {
     entries.sort_by(|left, right| left.path().as_path().cmp(right.path().as_path()));
     let mut examples = Vec::new();
     let mut examples_bytes = 0usize;
-    let mut scanned_rows = 0usize;
+    let mut scanned_file_examples = 0usize;
+    let mut scanned_sample_rows = 0usize;
     for entry in entries {
         let path = entry.path().as_path();
         if !matches!(entry.kind(), CommittedTreeEntryKind::File { .. })
-            || path.parent() != Some(Path::new("playground/Sample"))
             || path.extension().and_then(std::ffi::OsStr::to_str) != Some("orna")
         {
             continue;
         }
-        if scanned_rows >= MAX_PLAYGROUND_SAMPLE_ROWS {
-            break;
+        let sample_row =
+            sample_table_available && path.parent() == Some(Path::new("playground/Sample"));
+        let file_example = path.starts_with("playground/examples");
+        if sample_row {
+            if scanned_sample_rows >= MAX_PLAYGROUND_SAMPLE_ROWS {
+                continue;
+            }
+            scanned_sample_rows += 1;
+        } else if file_example {
+            if scanned_file_examples >= MAX_PLAYGROUND_FILE_EXAMPLES {
+                continue;
+            }
+            scanned_file_examples += 1;
+        } else {
+            continue;
         }
-        scanned_rows += 1;
-        let Ok(source) =
-            repository.read_committed_file(&commit, path, MAX_PLAYGROUND_EXAMPLE_BYTES)
-        else {
+        let read_limit = if sample_row {
+            MAX_PLAYGROUND_SAMPLE_BYTES
+        } else {
+            MAX_PLAYGROUND_EXAMPLE_BYTES
+        };
+        let Ok(source) = repository.read_committed_file(&commit, path, read_limit) else {
             continue;
         };
         let Ok(source) = String::from_utf8(source) else {
             continue;
         };
-        let Some(id) = path.file_stem().and_then(std::ffi::OsStr::to_str) else {
-            continue;
-        };
-        let Some((name, source)) = decode_playground_sample(&source, id) else {
-            continue;
+        let (name, source) = if sample_row {
+            let Some(id) = path.file_stem().and_then(std::ffi::OsStr::to_str) else {
+                continue;
+            };
+            let Some((name, source)) = decode_playground_sample(&source, id) else {
+                continue;
+            };
+            (name, source)
+        } else {
+            let name = path
+                .file_stem()
+                .and_then(std::ffi::OsStr::to_str)
+                .unwrap_or("example")
+                .to_owned();
+            (name, source)
         };
         let example = serde_json::json!({
             "name": name,
@@ -621,6 +646,7 @@ fn playground_examples(root: &Path) -> Response {
         examples_bytes = next_bytes;
         examples.push(example);
     }
+    examples.sort_by(|left, right| left["path"].as_str().cmp(&right["path"].as_str()));
     match serde_json::to_vec(&serde_json::json!({ "examples": examples })) {
         Ok(body) => Response::new(200, "application/json", body),
         Err(_) => unavailable_response(),
@@ -2243,6 +2269,7 @@ mod tests {
     fn playground_loads_committed_sample_rows_and_built_assets() {
         const PLAYGROUND_SAMPLE: &str = include_str!("../tests/fixtures/playground-sample.orna");
         const PLAYGROUND_SCHEMA: &str = include_str!("../tests/fixtures/playground-schema.orna");
+        const LEGACY_EXAMPLE: &str = include_str!("../tests/fixtures/playground-example.orna");
         let directory = tempfile::tempdir().expect("temporary database");
         git_succeeds(
             directory.path(),
@@ -2254,6 +2281,10 @@ mod tests {
         std::fs::create_dir_all(sample_path.parent().expect("sample table directory"))
             .expect("create Sample rows directory");
         std::fs::write(&sample_path, PLAYGROUND_SAMPLE).expect("write Sample row");
+        let legacy_path = directory.path().join("playground/examples/legacy.orna");
+        std::fs::create_dir_all(legacy_path.parent().expect("example directory"))
+            .expect("create examples directory");
+        std::fs::write(&legacy_path, LEGACY_EXAMPLE).expect("write committed file example");
         let dist = directory.path().join("playground/web-ui/dist");
         std::fs::create_dir_all(dist.join("assets")).expect("create built assets");
         std::fs::write(
@@ -2265,7 +2296,12 @@ mod tests {
             .expect("write built script");
         git_succeeds(
             directory.path(),
-            &["add", "playground.orna", "playground/Sample/hello.orna"],
+            &[
+                "add",
+                "playground.orna",
+                "playground/Sample/hello.orna",
+                "playground/examples/legacy.orna",
+            ],
         );
         git_succeeds(
             directory.path(),
@@ -2285,21 +2321,35 @@ mod tests {
             PLAYGROUND_SAMPLE,
         )
         .expect("write uncommitted Sample row");
+        std::fs::write(
+            directory
+                .path()
+                .join("playground/examples/uncommitted.orna"),
+            "99 + 1",
+        )
+        .expect("write uncommitted file example");
 
         let examples = listing_page(directory.path(), "/api/examples");
         assert_eq!(examples.status, 200);
         let examples: serde_json::Value =
             serde_json::from_slice(&examples.body).expect("example records JSON");
-        assert_eq!(examples["examples"].as_array().map(Vec::len), Some(1));
+        assert_eq!(examples["examples"].as_array().map(Vec::len), Some(2));
+        let examples = examples["examples"].as_array().expect("example list");
+        let sample = examples
+            .iter()
+            .find(|example| example["path"] == "playground/Sample/hello.orna")
+            .expect("database record example");
+        assert_eq!(sample["name"], "Hello, Orna");
         assert_eq!(
-            examples["examples"][0]["path"],
-            "playground/Sample/hello.orna"
-        );
-        assert_eq!(examples["examples"][0]["name"], "Hello, Orna");
-        assert_eq!(
-            examples["examples"][0]["source"],
+            sample["source"],
             "pub fn double(value: Int): Int = value + value;\ndouble(21)"
         );
+        let legacy = examples
+            .iter()
+            .find(|example| example["path"] == "playground/examples/legacy.orna")
+            .expect("committed file example");
+        assert_eq!(legacy["name"], "legacy");
+        assert_eq!(legacy["source"], LEGACY_EXAMPLE);
 
         let identity = RuntimeIdentity {
             database_id: [1; 16],

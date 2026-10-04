@@ -1,8 +1,9 @@
 # Orna playground web UI
 
 The Vite page is served by the selected orna serve clone at /playground/.
-It loads committed `playground.Sample` records from /api/examples, runs source through the
-clone's authenticated orna.present.v1 session, and renders the server's
+It loads committed files from `playground/examples` and rows from
+`playground.Sample` through `/api/examples`, runs source through the clone's
+authenticated orna.present.v1 session, and renders the server's
 run-event presentation in the result tabs. Orna evaluation stays in the
 server runtime. The browser worker for editor intelligence loads
 orna-lsp's shared analysis core.
@@ -24,4 +25,4 @@ Embed the editor in another page with an iframe pointed at
     <iframe src="https://your-orna-host/playground/embed" title="Orna playground"></iframe>
 
 That entry hides the database link and allows framing by another origin. It
-uses the same records, editor, and OrnaDB runtime as `/playground/`.
+uses the same examples, editor, and OrnaDB runtime as `/playground/`.

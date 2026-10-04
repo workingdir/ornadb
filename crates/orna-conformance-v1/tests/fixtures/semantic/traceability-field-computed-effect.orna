@@ -1,0 +1,4 @@
+pub table Contact(id: Str) {
+    name: Str,
+    remote: Str => std.net.http.get("https://example.com"),
+}

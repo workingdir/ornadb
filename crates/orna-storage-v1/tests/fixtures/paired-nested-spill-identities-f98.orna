@@ -1,0 +1,7 @@
+{ id: "f98/nested-spill/main", name: "f98/left/nested-main", city: "f98/right/nested-alpha", }
+
+{ id: "f98/nested-spill/retry", name: "f98/left/nested-retry", city: "f98/right/nested-beta", }
+
+{ id: "f98/nested-spill/reused", name: "f98/left/nested-main", city: "f98/right/nested-alpha", }
+
+{ id: "f98/nested-spill/malformed", name: "f98/left/nested-malformed", city: "f98/right/nested-delta", }
