@@ -61,7 +61,7 @@ fn primitive_format_and_parse_helpers_compute_canonical_text_values() {
 #[test]
 fn format_and_parse_modules_are_captured_by_the_selected_std_snapshot() {
     let sources = captured_sources();
-    assert_eq!(orna_evaluator_v1::reference_standard_sources().len(), 54);
+    assert_eq!(orna_evaluator_v1::reference_standard_sources().len(), 56);
     for (path, source) in &sources {
         let parsed = orna_syntax_v1::parse_module_with_file(source, path);
         assert!(parsed.is_ok(), "{path}: {:#?}", parsed.diagnostics);
