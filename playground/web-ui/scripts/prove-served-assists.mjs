@@ -67,6 +67,7 @@ const signature = JSON.parse(lsp.signature_help(
 assert.equal(signature.activeSignature, 0);
 assert.equal(signature.activeParameter, 2);
 assert.match(signature.signatures[0].label, /fn clamp\(value: Int, lower: Int, upper: Int\): Int/);
+assert.match(JSON.stringify(signature.signatures[0].documentation), /inclusive interval/);
 assert.deepEqual(signature.signatures[0].parameters.map(({ label }) => label), [
   'value: Int',
   'lower: Int',
