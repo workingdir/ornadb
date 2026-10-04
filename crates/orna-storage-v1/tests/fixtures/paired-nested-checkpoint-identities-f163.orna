@@ -1,0 +1,7 @@
+{ id: "f163/nested-checkpoint/main", name: "f163/left/checkpoint-main", city: "f163/right/checkpoint-main", }
+
+{ id: "f163/nested-checkpoint/retry", name: "f163/left/checkpoint-retry", city: "f163/right/checkpoint-retry", }
+
+{ id: "f163/nested-checkpoint/reused", name: "f163/left/checkpoint-main", city: "f163/right/checkpoint-main", }
+
+{ id: "f163/nested-checkpoint/malformed", name: "f163/left/checkpoint-malformed", city: "f163/right/checkpoint-malformed", }
