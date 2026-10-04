@@ -1,0 +1,4 @@
+pub table Sample(id: Str) {
+    name: Str,
+    source: Str,
+}
