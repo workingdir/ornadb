@@ -167,7 +167,7 @@ test('isolates watched presentations and resolves explicit refreshes from a fres
   live.dispose();
 });
 
-test('reconciles typed deltas and resync independently across live sessions', async () => {
+test('reconciles typed deltas across presentation watches and live sessions', async () => {
   const sessionIds = [
     '02020202-0202-0202-0202-020202020202',
     '03030303-0303-0303-0303-030303030303',
@@ -199,17 +199,23 @@ test('reconciles typed deltas and resync independently across live sessions', as
   await second.connect();
   const secondSocket = FakeSocket.latest;
 
-  const firstPending = first.watch('customer');
-  const firstWatchRequest = decodeEnvelope(firstSocket.sent[0]);
-  const secondPending = second.watch('customer');
-  const secondWatchRequest = decodeEnvelope(secondSocket.sent[0]);
-  const firstWatch = new Uint8Array(16).fill(7);
-  const secondWatch = new Uint8Array(16).fill(8);
-  const typedTree = value => ({
+  const firstCustomerPending = first.watch('customer');
+  const firstCustomerRequest = decodeEnvelope(firstSocket.sent[0]);
+  const firstRunsPending = first.watch('run.events');
+  const firstRunsRequest = decodeEnvelope(firstSocket.sent[1]);
+  const secondCustomerPending = second.watch('customer');
+  const secondCustomerRequest = decodeEnvelope(secondSocket.sent[0]);
+  const secondRunsPending = second.watch('run.events');
+  const secondRunsRequest = decodeEnvelope(secondSocket.sent[1]);
+  const firstCustomerWatch = new Uint8Array(16).fill(7);
+  const firstRunsWatch = new Uint8Array(16).fill(9);
+  const secondCustomerWatch = new Uint8Array(16).fill(8);
+  const secondRunsWatch = new Uint8Array(16).fill(10);
+  const typedTree = (key, value) => ({
     tag: 60012n,
     value: ['group', null, new Map(), [{
       tag: 60012n,
-      value: ['text', [0n, 'customer'], new Map([['name', value]]), []],
+      value: ['text', [0n, key], new Map([['name', value]]), []],
     }]],
   });
   const install = (socket, request, watch, present) => socket.receive(envelope(
@@ -218,49 +224,76 @@ test('reconciles typed deltas and resync independently across live sessions', as
     watch,
     new Map([[0n, 0n], [1n, present], [2n, null]]),
   ));
-  const patchName = (socket, watch, base, revision, value) => socket.receive(envelope(
+  const patchName = (socket, watch, key, base, revision, value) => socket.receive(envelope(
     17,
     null,
     watch,
     new Map([
       [0n, BigInt(base)],
       [1n, BigInt(revision)],
-      [2n, [[2n, [[0n, 'customer'], [0n, 'name']], value]]],
+      [2n, [[2n, [[0n, key], [0n, 'name']], value]]],
       [3n, null],
     ]),
   ));
 
-  install(firstSocket, firstWatchRequest.request, firstWatch, typedTree('first-before'));
-  install(secondSocket, secondWatchRequest.request, secondWatch, typedTree('second-before'));
-  const firstState = await firstPending;
-  const secondState = await secondPending;
+  install(firstSocket, firstCustomerRequest.request, firstCustomerWatch, typedTree('customer', 'a-customer-before'));
+  install(firstSocket, firstRunsRequest.request, firstRunsWatch, typedTree('run.events', 'a-runs-before'));
+  install(secondSocket, secondCustomerRequest.request, secondCustomerWatch, typedTree('customer', 'b-customer-before'));
+  install(secondSocket, secondRunsRequest.request, secondRunsWatch, typedTree('run.events', 'b-runs-before'));
+  const firstCustomer = await firstCustomerPending;
+  const firstRuns = await firstRunsPending;
+  const secondCustomer = await secondCustomerPending;
+  const secondRuns = await secondRunsPending;
+  const revisionOf = state => state.presentation.current.revision;
+  const nameOf = state => state.presentation.current.present.value[3][0].value[2].get('name');
 
-  patchName(firstSocket, firstWatch, 0, 1, 'first-after');
-  assert.equal(firstState.presentation.current.revision, 1n);
-  assert.equal(firstState.presentation.current.present.value[3][0].value[2].get('name'), 'first-after');
-  assert.equal(secondState.presentation.current.revision, 0n);
-  assert.equal(secondState.presentation.current.present.value[3][0].value[2].get('name'), 'second-before');
+  patchName(firstSocket, firstCustomerWatch, 'customer', 0, 1, 'a-customer-after');
+  assert.equal(revisionOf(firstCustomer), 1n);
+  assert.equal(nameOf(firstCustomer), 'a-customer-after');
+  assert.equal(revisionOf(firstRuns), 0n);
+  assert.equal(nameOf(firstRuns), 'a-runs-before');
+  assert.equal(revisionOf(secondCustomer), 0n);
+  assert.equal(revisionOf(secondRuns), 0n);
 
-  patchName(secondSocket, secondWatch, 0, 1, 'second-after');
-  assert.equal(secondState.presentation.current.revision, 1n);
-  assert.equal(secondState.presentation.current.present.value[3][0].value[2].get('name'), 'second-after');
-  assert.equal(firstState.presentation.current.present.value[3][0].value[2].get('name'), 'first-after');
+  patchName(firstSocket, firstRunsWatch, 'run.events', 0, 1, 'a-runs-after');
+  patchName(secondSocket, secondRunsWatch, 'run.events', 0, 1, 'b-runs-after');
+  patchName(secondSocket, secondCustomerWatch, 'customer', 0, 1, 'b-customer-after');
+  assert.equal(revisionOf(firstRuns), 1n);
+  assert.equal(nameOf(firstRuns), 'a-runs-after');
+  assert.equal(revisionOf(firstCustomer), 1n);
+  assert.equal(nameOf(firstCustomer), 'a-customer-after');
+  assert.equal(revisionOf(secondRuns), 1n);
+  assert.equal(nameOf(secondRuns), 'b-runs-after');
+  assert.equal(revisionOf(secondCustomer), 1n);
+  assert.equal(nameOf(secondCustomer), 'b-customer-after');
 
-  patchName(firstSocket, firstWatch, 0, 2, 'stale-gap');
-  assert.equal(firstState.presentation.current.revision, 1n);
-  assert.equal(firstState.presentation.current.present.value[3][0].value[2].get('name'), 'first-after');
-  const resync = decodeEnvelope(firstSocket.sent[1]);
+  patchName(firstSocket, firstRunsWatch, 'run.events', 0, 2, 'stale-gap');
+  assert.equal(revisionOf(firstRuns), 1n);
+  assert.equal(nameOf(firstRuns), 'a-runs-after');
+  assert.equal(revisionOf(firstCustomer), 1n);
+  assert.equal(revisionOf(secondRuns), 1n);
+  assert.equal(revisionOf(secondCustomer), 1n);
+  const resync = decodeEnvelope(firstSocket.sent[2]);
   assert.equal(resync.code, 2);
-  assert.deepEqual(resync.watch, firstWatch);
-  assert.equal(secondSocket.sent.length, 1);
+  assert.deepEqual(resync.watch, firstRunsWatch);
+  assert.equal(firstSocket.sent.length, 3);
+  assert.equal(secondSocket.sent.length, 2);
 
-  firstSocket.receive(envelope(16, resync.request, firstWatch, new Map([
-    [0n, 3n], [1n, typedTree('first-recovered')], [2n, null],
+  firstSocket.receive(envelope(16, resync.request, firstRunsWatch, new Map([
+    [0n, 3n], [1n, typedTree('run.events', 'a-runs-recovered')], [2n, null],
   ])));
-  assert.equal(firstState.presentation.current.revision, 3n);
-  assert.equal(firstState.presentation.current.present.value[3][0].value[2].get('name'), 'first-recovered');
-  assert.equal(secondState.presentation.current.revision, 1n);
-  assert.equal(secondState.presentation.current.present.value[3][0].value[2].get('name'), 'second-after');
+  assert.equal(revisionOf(firstRuns), 3n);
+  assert.equal(nameOf(firstRuns), 'a-runs-recovered');
+  assert.equal(revisionOf(firstCustomer), 1n);
+  assert.equal(nameOf(firstCustomer), 'a-customer-after');
+  assert.equal(revisionOf(secondRuns), 1n);
+  assert.equal(nameOf(secondRuns), 'b-runs-after');
+  assert.equal(revisionOf(secondCustomer), 1n);
+  assert.equal(nameOf(secondCustomer), 'b-customer-after');
+
+  patchName(firstSocket, firstRunsWatch, 'run.events', 3, 4, 'a-runs-after-recovery');
+  assert.equal(revisionOf(firstRuns), 4n);
+  assert.equal(nameOf(firstRuns), 'a-runs-after-recovery');
 
   first.dispose();
   second.dispose();
