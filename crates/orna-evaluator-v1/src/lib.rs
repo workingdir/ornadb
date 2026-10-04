@@ -32,6 +32,7 @@ use serde_json::value::RawValue;
 use sha2::{Digest as _, Sha256};
 use unicode_normalization::UnicodeNormalization;
 
+#[cfg(feature = "project-repl")]
 mod admitted_repl;
 mod cancellation;
 mod relation;
@@ -40,6 +41,7 @@ mod sys_bindings;
 mod timezone;
 mod unicode_16_case_properties;
 
+#[cfg(feature = "project-repl")]
 pub use admitted_repl::{AdmittedReplSession, ReplError};
 pub use cancellation::CancellationToken;
 use relation::{

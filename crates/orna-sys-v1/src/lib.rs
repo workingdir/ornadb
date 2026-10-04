@@ -105,6 +105,10 @@ pub use host_clock::*;
 mod host_filesystem;
 pub use host_filesystem::*;
 
+#[cfg(not(target_arch = "wasm32"))]
+mod host_network;
+#[cfg(target_arch = "wasm32")]
+#[path = "host_network_wasm.rs"]
 mod host_network;
 pub use host_network::*;
 
