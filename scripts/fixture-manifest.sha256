@@ -2046,6 +2046,7 @@ e673538da3c2f957418e55b38e1f21f4c080691be303ce5625ed122a3f4b9e94  crates/orna-ev
 82064386e4f2a3c8bf3cfb297f51a83b151ba518252a0b8ce3bffed154ea8d28  crates/orna-evaluator-v1/tests/fixtures/stdlib-bits-operations-2213.orna
 39c085cc34f093895550c0f81e02a22de555630af2a7651f722ca55b43e42629  crates/orna-evaluator-v1/tests/fixtures/stdlib-bits-signed-ymou.orna
 bab629e2c9d3b4b009eb004d68567fe231e90bd5aafd4a21105c1ed2efbfff5f  crates/orna-evaluator-v1/tests/fixtures/stdlib-bits-without-snapshot-2213.orna
+55f8831494ad0d4a53ce816c4957d4f6dc791dbc96e6c174b96d46336f1c8abd  crates/orna-evaluator-v1/tests/fixtures/stdlib-bytes-utilities-n9hdj.orna
 3988990167ff4c7f8fc470dc22b738cd83c8054478d7f7140aeb46f34c80585b  crates/orna-evaluator-v1/tests/fixtures/stdlib-calendar-day-arithmetic-contract-b8tgd.orna
 7836f4d9e7342ce8533ee2b07274193d821c507a2117175ddb3475e9256fa90b  crates/orna-evaluator-v1/tests/fixtures/stdlib-calendar-invalid-boundary-l1fla.orna
 b5449e0f0dabb1bd6f2b041951b26e510d109c5530b8b94ae56ab389ce666e15  crates/orna-evaluator-v1/tests/fixtures/stdlib-calendar-month-arithmetic-contract-b8tgd.orna
@@ -4795,6 +4796,7 @@ cbc3e4a2ee90ec8a4a3b2797e600b53e838f67c4a08468e112c6631a9e453b02  crates/orna-st
 98da357c4ae2b6de358c939cdf0a679281ad1b6d87f7099a4d6e9bc3a6c7e513  crates/orna-storage-v1/tests/fixtures/paired-nested-rewind-identities-f161.orna
 fbff2a38574187040f0ac730ce582455ef0836e415dba62a995cac1073622545  crates/orna-storage-v1/tests/fixtures/paired-nested-rewind-identities-f167.orna
 d9acc7d2541330e393c6034623b30d0eba48f8b4b5b63b2cbcc74cb2c7196973  crates/orna-storage-v1/tests/fixtures/paired-nested-rewind-identities-f169.orna
+14ae7a788741c298312d17ab4ff5c480d9b0004905b59876833cb7282ffa95a9  crates/orna-storage-v1/tests/fixtures/paired-nested-rewind-identities-f171.orna
 2fd1be7d41edb12e0f066a8e5e9a34084f1c86603ba5349396e4240e7c20457b  crates/orna-storage-v1/tests/fixtures/paired-nested-rewind-identities-k4gg1.orna
 2e3e1ae19f4ac162cf54a91701f648dae2cb53739b30cf57ca61aec99f3c802b  crates/orna-storage-v1/tests/fixtures/paired-nested-segment-compactions-9spl2.orna
 81d3866fa0647dcaf88cefc427156eed370b2eca97f7b1d34370e7e7b7b49a8b  crates/orna-storage-v1/tests/fixtures/paired-nested-spill-identities-f151.orna
