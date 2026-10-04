@@ -24,6 +24,11 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v7
 
+      - name: Reject checkout and sibling reference trees
+        run: |
+          test ! -e reference || { echo "remove the checkout reference tree" >&2; exit 1; }
+          test ! -e ../reference || { echo "remove the sibling reference tree" >&2; exit 1; }
+
       - name: Install Rust
         uses: dtolnay/rust-toolchain@1.95.0
 
