@@ -1,8 +1,9 @@
 # Orna playground web UI
 
 This directory holds the source for the small browser shell. `npm run build`
-bundles the shell and writes each HTML, CSS, and JavaScript asset as a
-`playground.Asset` row. Commit those generated rows with the source changes.
+bundles the shell and writes each HTML, CSS, JavaScript, and WebAssembly asset
+as a `playground.Asset` row, including the shared live modules and browser LSP
+package. Commit those generated rows with the source changes.
 `orna serve` reads the rows from the selected database's committed Git snapshot
 and serves them at `/playground/`; it does not serve `dist/` from the
 filesystem.
@@ -19,6 +20,6 @@ Build and test from this directory with:
     npm run build
     npm test -- --reporter=dot
 
-The shell stays plain and responsive. It shows source in a text area and uses
-the generated Orna syntax artifacts only in tooling; the page does not carry a
-second language vocabulary or evaluator.
+The shell stays responsive. Monaco requests syntax diagnostics, signature
+help, standard-library completion, and hover details from the in-process Orna
+LSP worker. The page does not carry a second language vocabulary or evaluator.

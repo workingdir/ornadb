@@ -6,7 +6,7 @@ const webUi = fileURLToPath(new URL('../', import.meta.url));
 const repository = fileURLToPath(new URL('../../../', import.meta.url));
 const distribution = join(webUi, 'dist');
 const assetRows = join(repository, 'playground', 'Asset');
-const maxAssetBytes = 2 * 1024 * 1024;
+const maxAssetBytes = 8 * 1024 * 1024;
 const mediaTypes = new Map([
   ['.html', 'text/html; charset=utf-8'],
   ['.js', 'text/javascript; charset=utf-8'],
@@ -21,6 +21,7 @@ const mediaTypes = new Map([
   ['.ttf', 'font/ttf'],
   ['.otf', 'font/otf'],
   ['.eot', 'application/vnd.ms-fontobject'],
+  ['.wasm', 'application/wasm'],
 ]);
 
 async function collectFiles(directory, prefix = '') {
@@ -45,16 +46,30 @@ if (!files.includes('index.html')) throw new Error('The Vite output has no index
 
 const writtenRows = new Set();
 let totalContentBytes = 0;
-for (const path of files) {
-  const content = await readFile(join(distribution, path));
+const extraAssets = [
+  ['assets/presentation.mjs', join(repository, 'playground/shared/presentation.mjs')],
+  ['assets/serve-home.mjs', join(repository, 'crates/orna-cli-v1/src/serve_home.mjs')],
+  ['assets/serve-playground.mjs', join(repository, 'crates/orna-cli-v1/src/serve_playground.mjs')],
+];
+const sources = [
+  ...files.map((path) => [path, join(distribution, path)]),
+  ...extraAssets,
+];
+for (const [path, sourcePath] of sources) {
+  const content = await readFile(sourcePath);
   if (content.byteLength > maxAssetBytes) {
     throw new Error(`Playground DB asset exceeds ${maxAssetBytes} bytes: ${path}`);
   }
   const mediaType = mediaTypes.get(extname(path).toLowerCase());
   if (!mediaType) throw new Error(`Unsupported playground DB asset type: ${path}`);
-  const contentText = content.toString('utf8');
-  if (!Buffer.from(contentText, 'utf8').equals(content)) {
-    throw new Error(`Playground DB assets must be UTF-8 text: ${path}`);
+  let contentText;
+  if (mediaType === 'application/wasm') {
+    contentText = content.toString('base64');
+  } else {
+    contentText = content.toString('utf8');
+    if (!Buffer.from(contentText, 'utf8').equals(content)) {
+      throw new Error(`Playground DB assets must be UTF-8 text: ${path}`);
+    }
   }
 
   const id = `asset-${Buffer.from(path).toString('hex')}`;

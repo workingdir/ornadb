@@ -1,3 +1,0 @@
-(function(){let e=globalThis,t;function n(){return t??=(async()=>{let e=await import(
-/* @vite-ignore */
-new URL(`/playground/lsp-wasm/orna_lsp.js`,self.location.href).href);return await e.default(),e})(),t}e.addEventListener(`message`,async({data:t})=>{try{let r=await n(),i=t.position?.line??0,a=t.position?.character??0,o=t.action===`diagnostics`?r.diagnostics(t.source):t.action===`completions`?r.completions(t.source,i,a):t.action===`hover`?r.hover(t.source,i,a):r.signature_help(t.source,i,a);e.postMessage({id:t.id,value:JSON.parse(o)})}catch(n){e.postMessage({id:t.id,error:n instanceof Error?n.message:String(n)})}})})();

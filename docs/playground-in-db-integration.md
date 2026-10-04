@@ -8,20 +8,24 @@ is the source for the shell, assets, programs, and examples.
 
 `playground.orna` declares `Sample` and `Asset` tables. Sample rows and the
 legacy `playground/examples/*.orna` files feed `/api/examples`. The shell,
-stylesheet, and browser client are generated as `playground.Asset` rows under
-`playground/Asset/`. Each row records a normalized relative path, media type,
-and UTF-8 content.
+stylesheet, browser client, live bridge modules, and Orna LSP WebAssembly
+package are generated as `playground.Asset` rows under `playground/Asset/`.
+Each row records a normalized relative path, media type, and text content;
+WebAssembly bytes use base64 in the row and are decoded when served.
 
 `npm run build` creates the small browser bundle and refreshes these rows.
 Commit the generated rows along with source changes. At request time,
 `orna serve` reads the row for the requested asset from the committed `HEAD`
-using the repository listing API; it does not read `playground/web-ui/dist/`.
+using the Git listing handler; it does not read `playground/web-ui/dist/` or
+compile the browser helpers into the server binary.
 The `/playground/` and `/playground/embed` routes use the same shell record,
 with the embed route hiding the marked page header and applying its framing
 policy. Static assets are returned with their checked media type and
 `X-Content-Type-Options: nosniff`.
 
-The browser sends explicit Run requests to the same clone's
+Monaco uses the database-served shell assets to run the Orna LSP worker. The
+worker supplies standard-library completion and hover alongside signature
+help and diagnostics. The browser sends explicit Run requests to the same clone's
 `orna.present.v1` session. Source evaluation and presentation remain in the
 server runtime. The browser does not contain a second evaluator or a
 language-keyword inventory.
@@ -30,7 +34,7 @@ language-keyword inventory.
 
 The two panes share the wide layout and stack on narrower screens. The example
 selector retains native type-to-select and supports arrow keys, Home/End, and
-five-row Page Up/Down movement. Loading a row updates the text editor and a
+five-row Page Up/Down movement. Loading a row updates Monaco and a
 polite live announcement. Run is available by button or Ctrl/Command+Enter;
 result tabs support the standard arrow and Home/End keys.
 
