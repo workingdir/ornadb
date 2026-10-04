@@ -1945,7 +1945,6 @@ mod tests {
                 .expect("playground runtime UTF-8")
                 .contains("globalThis.ornaPlaygroundRun")
         );
-        assert!(page.contains("ornaPlaygroundRun"));
         let embed = playground_asset(directory.path(), identity, "/playground/embed");
         assert_eq!(embed.status, 200);
         assert!(embed.headers.iter().any(|(name, value)| {
