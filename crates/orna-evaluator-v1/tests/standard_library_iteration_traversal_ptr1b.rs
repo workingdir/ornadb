@@ -21,22 +21,34 @@ fn functions() -> Functions {
     ] {
         add_module_functions(&mut functions, "iteration_proof.orna", source);
     }
+    for name in [
+        "std.collection.count",
+        "std.iteration.fold",
+        "std.iteration.depth_first",
+        "iteration_proof.neighbors",
+        "iteration_proof.target_edges",
+    ] {
+        assert!(
+            functions.contains_key(name),
+            "missing proof function {name}"
+        );
+    }
     functions
 }
 
 fn add_module_functions(functions: &mut Functions, path: &str, source: &str) {
     let parsed = parse_module(source);
     assert!(parsed.is_ok(), "{path}: {:#?}", parsed.diagnostics);
-    let module = path
+    let module = if let Some(module) = path
         .strip_prefix("std/")
         .and_then(|path| path.strip_suffix(".orna"))
-        .map(str::to_owned)
-        .unwrap_or_else(|| {
-            path.strip_suffix(".orna")
-                .expect("proof module path has an .orna suffix")
-                .to_owned()
-        })
-        .replace('/', ".");
+    {
+        format!("std.{}", module.replace('/', "."))
+    } else {
+        path.strip_suffix(".orna")
+            .expect("proof module path has an .orna suffix")
+            .to_owned()
+    };
     for item in parsed.value.items {
         if let Declaration::Function { signature, body } = item.declaration {
             let name = format!("{module}.{}", signature.name);
