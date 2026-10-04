@@ -308,7 +308,10 @@ fn host_route(root: &Path, identity: RuntimeIdentity, request: &Request) -> Resp
     if let Some(response) = git_transport_route(root, request) {
         return response;
     }
-    if let Some(response) = git_listing_route(root, request) {
+    if let Some(response) = frontend_asset_route(identity, request) {
+        return response;
+    }
+    if let Some(response) = git_listing_route(root, request, identity) {
         return response;
     }
     match (request.method.as_str(), request.path.as_str()) {
@@ -346,6 +349,10 @@ const MAX_LISTING_COMMITS: usize = 100;
 const MAX_LISTING_TREE_ENTRIES: usize = 10_000;
 const MAX_LISTING_FILE_BYTES: usize = 2 * 1024 * 1024;
 const LISTING_STYLE: &str = "<style>:root{color-scheme:light;--page-width:72ch;--text:#202122;--background:#fff;--link:#0645ad;--visited:#0b0080;--code-font:ui-monospace,monospace}body{max-width:var(--page-width);margin:1.5rem auto;padding:0 1rem;color:var(--text);background:var(--background);font:1rem/1.5 Georgia,'Times New Roman',serif}a{color:var(--link)}a:visited{color:var(--visited)}pre{overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;font-family:var(--code-font)}</style>";
+const PRESENTATION_MODULE: &str = include_str!("../../../playground/shared/presentation.mjs");
+const HOME_MODULE: &str = include_str!("serve_home.mjs");
+const PLAYGROUND_MODULE: &str = include_str!("serve_playground.mjs");
+const PLAYGROUND_HTML: &str = include_str!("serve_playground.html");
 
 /// Renderer-neutral data used by the simple Inspect-compatible HTML fallback.
 enum InspectionNode {
@@ -362,19 +369,58 @@ struct Breadcrumb {
     href: String,
 }
 
-fn git_listing_route(root: &Path, request: &Request) -> Option<Response> {
+fn frontend_asset_route(identity: RuntimeIdentity, request: &Request) -> Option<Response> {
     if request.method != "GET" {
         return None;
     }
     match request.path.as_str() {
-        "/" => Some(commit_log_page(root)),
+        "/playground" | "/playground/" => {
+            let database = format_uuid(identity.database_id);
+            let page = PLAYGROUND_HTML
+                .replace("<!-- style -->", LISTING_STYLE)
+                .replace("__DATABASE_ID__", &html_escape(&database));
+            Some(Response::new(
+                200,
+                "text/html; charset=utf-8",
+                page.into_bytes(),
+            ))
+        }
+        "/assets/presentation.mjs" => Some(Response::new(
+            200,
+            "text/javascript; charset=utf-8",
+            PRESENTATION_MODULE.as_bytes().to_vec(),
+        )),
+        "/assets/serve-home.mjs" => Some(Response::new(
+            200,
+            "text/javascript; charset=utf-8",
+            HOME_MODULE.as_bytes().to_vec(),
+        )),
+        "/assets/serve-playground.mjs" => Some(Response::new(
+            200,
+            "text/javascript; charset=utf-8",
+            PLAYGROUND_MODULE.as_bytes().to_vec(),
+        )),
+        _ => None,
+    }
+}
+
+fn git_listing_route(
+    root: &Path,
+    request: &Request,
+    identity: RuntimeIdentity,
+) -> Option<Response> {
+    if request.method != "GET" {
+        return None;
+    }
+    match request.path.as_str() {
+        "/" => Some(commit_log_page(root, identity)),
         path if path.starts_with("/tree/") => Some(tree_page(root, &path[6..])),
         path if path.starts_with("/blob/") => Some(blob_page(root, &path[6..])),
         _ => None,
     }
 }
 
-fn commit_log_page(root: &Path) -> Response {
+fn commit_log_page(root: &Path, identity: RuntimeIdentity) -> Response {
     let Ok(repository) = Repository::discover(root) else {
         return unavailable_response();
     };
@@ -400,7 +446,21 @@ fn commit_log_page(root: &Path) -> Response {
         ("Recent commits".into(), commits),
         ("Branches".into(), branches),
     ]);
-    render_inspection_document("Commits", &[], &content)
+    render_home_document(identity, &content)
+}
+
+fn render_home_document(identity: RuntimeIdentity, content: &InspectionNode) -> Response {
+    let database = format_uuid(identity.database_id);
+    let mut page = String::from(
+        "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width\"><title>Orna database</title>",
+    );
+    page.push_str(LISTING_STYLE);
+    page.push_str("</head><body><nav aria-label=\"Primary\"><a href=\"/\">Commits</a> · <a href=\"/playground/\">Playground</a></nav><main data-database=\"");
+    page.push_str(&html_escape(&database));
+    page.push_str("\"><h1>Orna database</h1>");
+    render_inspection_node(content, &mut page);
+    page.push_str("<section aria-labelledby=\"live-title\"><h2 id=\"live-title\">Live presentation</h2><p id=\"live-status\" role=\"status\" aria-live=\"polite\">Connecting to the database…</p><div id=\"live-presentation\"></div></section></main><script type=\"module\" src=\"/assets/serve-home.mjs\"></script></body></html>");
+    Response::new(200, "text/html; charset=utf-8", page.into_bytes())
 }
 
 const MAX_LISTING_BRANCHES: usize = 100;
@@ -1394,7 +1454,9 @@ mod tests {
         assert_eq!(home.status, 200);
         let home = String::from_utf8(home.body).expect("commit listing HTML");
         assert!(home.contains("No commits in this repository."));
-        assert!(!home.contains("<script"));
+        assert!(home.contains("<script type=\"module\" src=\"/assets/serve-home.mjs\">"));
+        assert!(home.contains("data-database=\"01010101-0101-0101-0101-010101010101\""));
+        assert!(home.contains("href=\"/playground/\">Playground</a>"));
         let query = host_route(
             directory.path(),
             identity,
@@ -1408,6 +1470,36 @@ mod tests {
         );
         assert_eq!(query.status, 200);
         assert_eq!(query.body, b"Value(Int(2))");
+    }
+
+    #[test]
+    fn playground_and_shared_runtime_assets_are_same_origin_and_self_contained() {
+        let directory = tempfile::tempdir().expect("temporary root");
+        let playground = listing_page(directory.path(), "/playground/");
+        assert_eq!(playground.status, 200);
+        assert_eq!(playground.content_type, "text/html; charset=utf-8");
+        let playground = String::from_utf8(playground.body).expect("playground page HTML");
+        assert!(playground.contains("Orna playground"));
+        assert!(playground.contains("data-database=\"01010101-0101-0101-0101-010101010101\""));
+        assert!(playground.contains("src=\"/assets/serve-playground.mjs\""));
+        assert!(playground.contains("<textarea id=\"playground-source\""));
+
+        for path in [
+            "/assets/presentation.mjs",
+            "/assets/serve-home.mjs",
+            "/assets/serve-playground.mjs",
+        ] {
+            let asset = listing_page(directory.path(), path);
+            assert_eq!(asset.status, 200, "{path}");
+            assert_eq!(asset.content_type, "text/javascript; charset=utf-8");
+            assert!(!asset.body.is_empty(), "{path}");
+        }
+
+        let runtime = listing_page(directory.path(), "/assets/presentation.mjs");
+        let runtime = String::from_utf8(runtime.body).expect("shared runtime source");
+        assert!(runtime.contains("base !== this.current.revision"));
+        assert!(runtime.contains("this.resyncPending = true"));
+        assert!(runtime.contains("candidate = applyOne(candidate, patch)"));
     }
 
     #[test]
@@ -1464,7 +1556,9 @@ mod tests {
         assert!(log.contains("listing"));
         assert!(log.contains("kierandrewett"));
         assert!(!log.contains("uncommitted.txt"));
-        assert!(!log.contains("<script"));
+        assert_eq!(log.matches("<script").count(), 1);
+        assert!(log.contains("<script type=\"module\" src=\"/assets/serve-home.mjs\">"));
+        assert!(!log.contains("<script>"));
         assert!(!log.contains("<header"));
 
         let tree = listing_page(directory.path(), &format!("/tree/{commit_id}/"));
