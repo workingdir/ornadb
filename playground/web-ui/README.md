@@ -1,37 +1,24 @@
 # Orna playground web UI
 
-The Vite page is served by the selected `orna serve` clone at `/playground/`.
-It loads committed files from `playground/examples` and rows from
-`playground.Sample` through `/api/examples`, runs source through the clone's
-authenticated `orna.present.v1` session, and renders the server's run-event
-presentation in the result tabs. Orna evaluation stays in the server runtime.
-The browser worker for editor intelligence loads orna-lsp's shared analysis
-core.
+This directory holds the source for the small browser shell. `npm run build`
+bundles the shell and writes each HTML, CSS, and JavaScript asset as a
+`playground.Asset` row. Commit those generated rows with the source changes.
+`orna serve` reads the rows from the selected database's committed Git snapshot
+and serves them at `/playground/`; it does not serve `dist/` from the
+filesystem.
 
-Build the page and editor worker artifacts with:
+The page loads committed files from `playground/examples` and rows from
+`playground.Sample` through `/api/examples`. Use the example selector's arrow,
+Home/End, Page Up/Down, or type-to-select behavior to move through the feed.
+Run requests go to the same clone's authenticated `orna.present.v1` session,
+where the server's Orna runtime evaluates the source.
+
+Build and test from this directory with:
 
     npm ci
     npm run build
+    npm test -- --reporter=dot
 
-Then run `orna serve` from the clone and open
-http://127.0.0.1:8181/playground/. The Monaco tokenizer and its keyword
-metadata are generated from orna-syntax-v1; check drift with:
-
-    cargo run --locked -p orna-syntax-v1 --example generate_editor_artifacts -- --check
-
-Embed the editor in another page with an iframe pointed at
-`/playground/embed` on the same served clone:
-
-    <iframe src="https://your-orna-host/playground/embed" title="Orna playground"></iframe>
-
-That entry hides the database link and allows framing by another origin. It
-uses the same examples, editor, and OrnaDB runtime as `/playground/`.
-
-## GitHub Pages channels
-
-The Pages workflow publishes the stable channel from `main` at
-https://workingdir.github.io/ornadb/ and the development channel from the
-playground milestone branch at https://workingdir.github.io/ornadb/dev/.
-Pull requests run the build checks without publishing. The Pages smoke checks
-each channel's HTML, built assets, and editor WebAssembly modules. Examples and
-source evaluation still use the `orna serve` API described above.
+The shell stays plain and responsive. It shows source in a text area and uses
+the generated Orna syntax artifacts only in tooling; the page does not carry a
+second language vocabulary or evaluator.

@@ -12,18 +12,20 @@ use crate::documents::{Document, PositionMapper};
 use crate::{inlay, semantic};
 use lsp_server::{Connection, ErrorCode, Message, Notification, Request, Response, ResponseError};
 use lsp_types::{
-    CompletionOptions, CompletionParams, CompletionResponse, DiagnosticOptions,
-    DiagnosticServerCapabilities, DocumentDiagnosticParams, DocumentDiagnosticReport,
-    DocumentSymbolParams, DocumentSymbolResponse, FullDocumentDiagnosticReport,
-    GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverParams, HoverProviderCapability,
-    InitializeParams, InlayHintOptions, InlayHintParams, InlayHintServerCapabilities, OneOf,
-    Position, PositionEncodingKind, PrepareRenameResponse, PublishDiagnosticsParams, Range,
-    ReferenceParams, RelatedFullDocumentDiagnosticReport, RenameOptions, RenameParams,
-    SemanticTokens, SemanticTokensFullOptions, SemanticTokensLegend, SemanticTokensOptions,
-    SemanticTokensParams, SemanticTokensRangeParams, SemanticTokensServerCapabilities,
-    ServerCapabilities, SignatureHelpOptions, TextDocumentContentChangeEvent,
-    TextDocumentSyncCapability, TextDocumentSyncKind, TextDocumentSyncOptions,
-    TextDocumentSyncSaveOptions, TextEdit, Uri, WorkspaceEdit,
+    CodeAction, CodeActionKind, CodeActionOptions, CodeActionOrCommand, CodeActionParams,
+    CodeActionProviderCapability, CompletionOptions, CompletionParams, CompletionResponse,
+    Diagnostic, DiagnosticOptions, DiagnosticServerCapabilities, DocumentDiagnosticParams,
+    DocumentDiagnosticReport, DocumentSymbolParams, DocumentSymbolResponse,
+    FullDocumentDiagnosticReport, GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverParams,
+    HoverProviderCapability, InitializeParams, InlayHintOptions, InlayHintParams,
+    InlayHintServerCapabilities, NumberOrString, OneOf, Position, PositionEncodingKind,
+    PrepareRenameResponse, PublishDiagnosticsParams, Range, ReferenceParams,
+    RelatedFullDocumentDiagnosticReport, RenameOptions, RenameParams, SemanticTokens,
+    SemanticTokensFullOptions, SemanticTokensLegend, SemanticTokensOptions, SemanticTokensParams,
+    SemanticTokensRangeParams, SemanticTokensServerCapabilities, ServerCapabilities,
+    SignatureHelpOptions, TextDocumentContentChangeEvent, TextDocumentSyncCapability,
+    TextDocumentSyncKind, TextDocumentSyncOptions, TextDocumentSyncSaveOptions, TextEdit, Uri,
+    WorkspaceEdit,
 };
 
 /// Transport threads for the server's standard input and output streams.
@@ -216,6 +218,11 @@ fn server_capabilities() -> ServerCapabilities {
             retrigger_characters: Some(vec![",".to_owned()]),
             work_done_progress_options: Default::default(),
         }),
+        code_action_provider: Some(CodeActionProviderCapability::Options(CodeActionOptions {
+            code_action_kinds: Some(vec![CodeActionKind::QUICKFIX]),
+            resolve_provider: Some(false),
+            ..CodeActionOptions::default()
+        })),
         definition_provider: Some(OneOf::Left(true)),
         references_provider: Some(OneOf::Left(true)),
         rename_provider: Some(OneOf::Right(RenameOptions {
@@ -262,6 +269,7 @@ fn handle_request(state: &mut ServerState, connection: &Connection, request: Req
     let result = match method.as_str() {
         "textDocument/hover" => request_hover(state, request),
         "textDocument/signatureHelp" => request_signature_help(state, request),
+        "textDocument/codeAction" => request_code_actions(state, request),
         "textDocument/definition" => request_definition(state, request),
         "textDocument/references" => request_references(state, request),
         "textDocument/prepareRename" => request_prepare_rename(state, request),
@@ -460,6 +468,139 @@ fn request_signature_help(
     };
     let help = analysis::signature_help(&document, &parse, position, &mapper);
     Ok(serde_json::to_value(help)?)
+}
+
+fn request_code_actions(
+    state: &mut ServerState,
+    request: Request,
+) -> Result<serde_json::Value, Box<dyn std::error::Error + Send + Sync>> {
+    let (_, params) = request.extract::<CodeActionParams>("textDocument/codeAction")?;
+    let uri = params.text_document.uri;
+    if !uri.as_str().ends_with(".orna") || !requests_quickfix(params.context.only.as_deref()) {
+        return Ok(serde_json::to_value(Vec::<CodeActionOrCommand>::new())?);
+    }
+    let Some(document) = state.document(&uri) else {
+        return Ok(serde_json::to_value(Vec::<CodeActionOrCommand>::new())?);
+    };
+    let mapper = PositionMapper::new(&document.text);
+    let parse = analysis::parse_document(document);
+    let diagnostics = analysis::check_document(document, &mapper);
+    let request_start = mapper.byte_offset(params.range.start);
+    let request_end = mapper.byte_offset(params.range.end);
+    let mut actions = Vec::new();
+    for diagnostic in diagnostics {
+        let start = mapper.byte_offset(diagnostic.range.start);
+        let end = mapper.byte_offset(diagnostic.range.end);
+        if start > request_end
+            || request_start > end
+            || !matches_missing_semicolon_diagnostic(&diagnostic)
+            || (!params.context.diagnostics.is_empty()
+                && !params.context.diagnostics.iter().any(|requested| {
+                    requested.range == diagnostic.range
+                        && requested.code == diagnostic.code
+                        && requested.message == diagnostic.message
+                }))
+        {
+            continue;
+        }
+        let Some(edit_position) =
+            missing_semicolon_position(document, &parse, &diagnostic, &mapper)
+        else {
+            continue;
+        };
+        actions.push(CodeActionOrCommand::CodeAction(CodeAction {
+            title: "Insert missing `;`".to_owned(),
+            kind: Some(CodeActionKind::QUICKFIX),
+            diagnostics: Some(vec![diagnostic]),
+            edit: Some(WorkspaceEdit {
+                changes: Some(HashMap::from([(
+                    uri.clone(),
+                    vec![TextEdit {
+                        range: Range::new(edit_position, edit_position),
+                        new_text: ";".to_owned(),
+                    }],
+                )])),
+                document_changes: None,
+                change_annotations: None,
+            }),
+            command: None,
+            is_preferred: Some(true),
+            disabled: None,
+            data: None,
+        }));
+    }
+    Ok(serde_json::to_value(actions)?)
+}
+
+fn requests_quickfix(only: Option<&[CodeActionKind]>) -> bool {
+    only.map_or(true, |kinds| {
+        kinds
+            .iter()
+            .any(|kind| kind.as_str() == CodeActionKind::QUICKFIX.as_str())
+    })
+}
+
+fn matches_missing_semicolon_diagnostic(diagnostic: &Diagnostic) -> bool {
+    let is_parse_002 = matches!(
+        diagnostic.code.as_ref(),
+        Some(NumberOrString::String(code)) if code == "ORNA-PARSE-002"
+    );
+    is_parse_002
+        && matches!(
+            diagnostic.message.as_str(),
+            "dimension declarations require `;`"
+                | "unit declarations require `;`"
+                | "assertion statements require `;`"
+                | "let statements require `;`"
+                | "use declarations require `;`"
+                | "expected `;` after function expression"
+                | "implementation static properties require `;`"
+                | "expected `;` after let statement"
+                | "expected `;` after control statement"
+                | "expected `;` after expression statement"
+                | "expected `;` after table assertion"
+                | "expected `;` after static property"
+                | "protocol functions require `;`"
+                | "expected `;` after type assertion"
+        )
+}
+
+fn missing_semicolon_position(
+    document: &Document,
+    parse: &Parse,
+    diagnostic: &Diagnostic,
+    mapper: &PositionMapper<'_>,
+) -> Option<Position> {
+    let diagnostic_byte = mapper.byte_offset(diagnostic.range.start);
+    let previous = orna_syntax_v1::lex(&document.text)
+        .ok()?
+        .into_iter()
+        .filter(|token| {
+            !matches!(&token.kind, orna_syntax_v1::TokenKind::Eof)
+                && token.span.end <= diagnostic_byte
+        })
+        .max_by_key(|token| token.span.end)?;
+    if matches!(&previous.kind, orna_syntax_v1::TokenKind::Punct(";")) {
+        return None;
+    }
+
+    let mut repaired_source = document.text.clone();
+    repaired_source.insert_str(previous.span.end, ";");
+    let repaired_document = Document::new(document.uri.clone(), repaired_source, document.version);
+    let repaired_parse = analysis::parse_document(&repaired_document);
+    let diagnostic_count = |parse: &Parse| {
+        parse
+            .diagnostics
+            .iter()
+            .filter(|item| item.code == "ORNA-PARSE-002" && item.message == diagnostic.message)
+            .count()
+    };
+    if repaired_parse.diagnostics.len() >= parse.diagnostics.len()
+        || diagnostic_count(&repaired_parse) >= diagnostic_count(parse)
+    {
+        return None;
+    }
+    Some(mapper.position(previous.span.end))
 }
 
 fn request_definition(
