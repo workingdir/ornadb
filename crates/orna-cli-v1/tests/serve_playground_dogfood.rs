@@ -19,7 +19,7 @@ use tungstenite::{
     stream::MaybeTlsStream,
 };
 
-const MAIN: &str = include_str!("fixtures/project-core-main.orna");
+const PLAYGROUND_MAIN: &str = include_str!("fixtures/playground-project-main.orna");
 const SAMPLE: &str = include_str!("fixtures/playground-example.orna");
 const SECOND_SAMPLE: &str = include_str!("fixtures/playground-concurrent-eval.orna");
 const FOLLOWUP_SAMPLE: &str = include_str!("fixtures/playground-followup-eval.orna");
@@ -344,7 +344,8 @@ fn orna_serve_hosts_playground_with_pending_evals_and_snapshot_correct_deltas() 
         String::from_utf8_lossy(&initialized.stderr),
     );
 
-    std::fs::write(project.path().join("main.orna"), MAIN).expect("write crate-local main fixture");
+    std::fs::write(project.path().join("main.orna"), PLAYGROUND_MAIN)
+        .expect("write crate-local playground main fixture");
     std::fs::write(project.path().join("playground.orna"), PLAYGROUND_SCHEMA)
         .expect("write crate-local playground schema");
     let example = project.path().join("playground/examples/hello.orna");
@@ -387,7 +388,7 @@ fn orna_serve_hosts_playground_with_pending_evals_and_snapshot_correct_deltas() 
         .args(["serve", "--port", &port.to_string()])
         .current_dir(project.path())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stderr(Stdio::inherit())
         .spawn()
         .expect("start orna serve");
     let mut server = RunningServer(child);
