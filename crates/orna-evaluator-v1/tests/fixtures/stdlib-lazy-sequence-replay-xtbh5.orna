@@ -1,0 +1,8 @@
+fn repeated_force(): Bool {
+    let sequence = std.lazy.adapters.map(
+        std.lazy.adapters.from_list([1, 2, 3]),
+        value => value * 2,
+    );
+    std.lazy.force(std.lazy.adapters.collect(sequence)) == [2, 4, 6]
+        && std.lazy.force(std.lazy.adapters.collect(sequence)) == [2, 4, 6]
+}
