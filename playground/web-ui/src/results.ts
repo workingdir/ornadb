@@ -1,8 +1,14 @@
 export interface RunResult {
   ok: boolean;
-  values: unknown;
+  values: string[];
   stdout: string;
-  errors: unknown;
+  errors: RunError[];
+}
+
+export interface RunError {
+  message: string;
+  line: number;
+  col: number;
 }
 
 export interface FormattedRunResult {
@@ -15,40 +21,21 @@ export interface FormattedRunResult {
   errorsCount: string;
 }
 
-function jsonText(value: unknown): string {
-  // The WASM API already returns values in Orna's bounded display format.
-  if (typeof value === 'string') return value;
-  try {
-    return JSON.stringify(value, null, 2) ?? String(value);
-  } catch {
-    return String(value);
-  }
-}
-
-function errorItems(errors: unknown): unknown[] {
-  if (errors === undefined || errors === null || errors === '') return [];
-  return Array.isArray(errors) ? errors : [errors];
+function formatError(error: RunError): string {
+  return `${error.message} (line ${error.line}, col ${error.col})`;
 }
 
 export function formatRunResult(result: RunResult): FormattedRunResult {
-  const hasValues = result.values !== undefined && result.values !== null;
-  const values = Array.isArray(result.values)
-    ? result.values
-    : hasValues
-      ? [result.values]
-      : [];
-  const stdoutText = typeof result.stdout === 'string' ? result.stdout : jsonText(result.stdout);
-  const stdoutLines = stdoutText.length === 0 ? 0 : stdoutText.split('\n').length;
-  const errors = errorItems(result.errors);
+  const stdoutLines = result.stdout.length === 0 ? 0 : result.stdout.split('\n').length;
 
   return {
     succeeded: result.ok,
-    valuesText: values.length === 0 ? '' : values.map(jsonText).join('\n\n'),
-    valuesCount: values.length === 0 ? '—' : String(values.length),
-    stdoutText,
+    valuesText: result.values.join('\n\n'),
+    valuesCount: result.values.length === 0 ? '—' : String(result.values.length),
+    stdoutText: result.stdout,
     stdoutCount: stdoutLines === 0 ? '—' : `${stdoutLines} ${stdoutLines === 1 ? 'line' : 'lines'}`,
-    errorsText: errors.map(jsonText).join('\n'),
-    errorsCount: errors.length === 0 ? '—' : String(errors.length),
+    errorsText: result.errors.map(formatError).join('\n'),
+    errorsCount: result.errors.length === 0 ? '—' : String(result.errors.length),
   };
 }
 

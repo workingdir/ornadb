@@ -58,7 +58,7 @@ closed boundaries; later ADRs supersede only the named deferred portion.
 | 0110 | Source-document and object-description contracts as specified by Orna 1.0.0 | A separate bounded function-declaration metadata value and `sys.source.function` API remain gated on a canonical contract; this ADR does not add identities or runtime behavior. |
 | 0111 | Design for `sys` as a baked typed module ABI with one provider protocol for built-ins and extensions. | Typed provider dispatch, semantic-role linkage, capability negotiation, Wasm loading, and adapters are phased follow-on slices; 1.0.0 `sys` semantics and `api/sys.json` remain frozen. |
 | 0112 | Phase 1 typed `sys` provider protocol implementation and 1.0 compatibility choices. | Build-time typed registry and role linkage are consumed by semantic/runtime crates; Wasm/WIT loading remains deferred. |
-| 0115 | Generate TextMate, VS Code language metadata, and the semantic-token mapping from `orna-syntax` presentation metadata. | TextMate remains a lexical fallback; parser-contextual token roles require semantic-token support. Exact editor scopes and package conventions are pragmatic because the frozen reference does not define them. |
+| 0115 | Superseded: editor artifacts now come from `orna-syntax-v1` metadata. | TextMate remains a lexical fallback; diagnostics and semantic tokens come from the v1 LSP. |
 | 0101 | OrnaDB 1.0 CLIENT VM trust boundary | Host-side remote source evaluation remains normative; production CLIENT bytecode VM, artifact trust, and CLIENT sandbox contracts are deferred. |
 
 ## Current work ADRs

@@ -49,3 +49,45 @@ describe('WASM runtime adapter', () => {
     await expect(runtime.run('1')).rejects.toThrow();
   });
 });
+
+describe('WASM run() JSON contract', () => {
+  it('decodes the shared values, stdout, and located error fields', async () => {
+    const response = {
+      ok: false,
+      values: ['42 : Int'],
+      stdout: 'before failure',
+      errors: [{ message: 'ORNA-S012-UNRESOLVED', line: 4, col: 2 }],
+    };
+    const runtime = await initializeRuntime(async () => ({
+      default: vi.fn(async () => undefined),
+      run: vi.fn(() => JSON.stringify(response)),
+    }));
+
+    await expect(runtime.run('answer')).resolves.toEqual(response);
+  });
+
+  it('rejects values and diagnostics that do not match the shared API contract', async () => {
+    const invalidResponses = [
+      {
+        ok: false,
+        values: [42],
+        stdout: '',
+        errors: [],
+      },
+      {
+        ok: false,
+        values: [],
+        stdout: '',
+        errors: [{ message: 'bad', line: 1, col: 'two' }],
+      },
+    ];
+
+    for (const response of invalidResponses) {
+      const runtime = await initializeRuntime(async () => ({
+        default: vi.fn(async () => undefined),
+        run: vi.fn(() => JSON.stringify(response)),
+      }));
+      await expect(runtime.run('')).rejects.toThrow('invalid run result');
+    }
+  });
+});
