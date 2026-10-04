@@ -21,8 +21,10 @@ fn attachment_input_matches_its_crate_local_fixture() {
         fs::read_to_string(&fixture).expect("read editor attachment fixture"),
         SOURCE
     );
-    assert!(SOURCE.contains("/// Add two integer values."));
-    assert!(SOURCE.contains("pub fn add(left: Int, right: Int): Int"));
+    assert!(SOURCE.contains("pub fn caller(value: Int): Int = add(value, 2);"));
+    assert!(!SOURCE.contains("pub fn add("));
+    assert!(PROVIDER_SOURCE.contains("/// Add two integer values."));
+    assert!(PROVIDER_SOURCE.contains("pub fn add(left: Int, right: Int): Int"));
 }
 
 #[test]
