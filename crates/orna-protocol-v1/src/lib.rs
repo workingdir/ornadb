@@ -1594,9 +1594,30 @@ fn validate_diagnostic(node: &Node) -> Result<()> {
 }
 
 fn canonical_value(node: &Node) -> Result<CanonicalValue> {
+    if contains_protected_value(node) {
+        return Err(Error::InvalidValue);
+    }
     let value = CanonicalValue::new(to_ovb(node)?).map_err(|_| Error::InvalidValue)?;
     value.redacted_for_trace().map_err(|_| Error::InvalidValue)
 }
+
+fn contains_protected_value(node: &Node) -> bool {
+    match node {
+        Node::Tag(0, _) => true,
+        Node::Array(values) => values.iter().any(contains_protected_value),
+        Node::Map(entries) => entries
+            .iter()
+            .any(|(key, value)| contains_protected_value(key) || contains_protected_value(value)),
+        Node::Tag(_, value) => contains_protected_value(value),
+        Node::Null
+        | Node::Bool(_)
+        | Node::Int(_)
+        | Node::Float(_)
+        | Node::Bytes(_)
+        | Node::Text(_) => false,
+    }
+}
+
 fn redacted_value_node(node: &Node) -> Result<Node> {
     // Result bodies are typed envelopes. Preserve Diagnostic/Present wrappers
     // until their owning decoders apply field-aware redaction, while still
