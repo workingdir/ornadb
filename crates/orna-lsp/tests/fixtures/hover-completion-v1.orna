@@ -1,0 +1,11 @@
+/// Describes the global input function.
+pub fn input(): Int = 42;
+
+/// Uses a parameter that shadows the global function.
+pub fn shadow(input: Int): Int = input + 1;
+
+pub fn complete(seed: Int): Int =
+    if seed > 0 {
+        let nearby: Int = seed;
+        ne
+    } else { seed };
