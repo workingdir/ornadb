@@ -2046,6 +2046,7 @@ e673538da3c2f957418e55b38e1f21f4c080691be303ce5625ed122a3f4b9e94  crates/orna-ev
 82064386e4f2a3c8bf3cfb297f51a83b151ba518252a0b8ce3bffed154ea8d28  crates/orna-evaluator-v1/tests/fixtures/stdlib-bits-operations-2213.orna
 39c085cc34f093895550c0f81e02a22de555630af2a7651f722ca55b43e42629  crates/orna-evaluator-v1/tests/fixtures/stdlib-bits-signed-ymou.orna
 bab629e2c9d3b4b009eb004d68567fe231e90bd5aafd4a21105c1ed2efbfff5f  crates/orna-evaluator-v1/tests/fixtures/stdlib-bits-without-snapshot-2213.orna
+55f8831494ad0d4a53ce816c4957d4f6dc791dbc96e6c174b96d46336f1c8abd  crates/orna-evaluator-v1/tests/fixtures/stdlib-bytes-utilities-n9hdj.orna
 3988990167ff4c7f8fc470dc22b738cd83c8054478d7f7140aeb46f34c80585b  crates/orna-evaluator-v1/tests/fixtures/stdlib-calendar-day-arithmetic-contract-b8tgd.orna
 7836f4d9e7342ce8533ee2b07274193d821c507a2117175ddb3475e9256fa90b  crates/orna-evaluator-v1/tests/fixtures/stdlib-calendar-invalid-boundary-l1fla.orna
 b5449e0f0dabb1bd6f2b041951b26e510d109c5530b8b94ae56ab389ce666e15  crates/orna-evaluator-v1/tests/fixtures/stdlib-calendar-month-arithmetic-contract-b8tgd.orna
