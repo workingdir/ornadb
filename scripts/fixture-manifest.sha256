@@ -3161,7 +3161,7 @@ e93403528dbf82b2ee2d1d6de8490b8b15a3526e55d41435efc62bc1d9b1ca95  crates/orna-ls
 36b51d4933bb9530ed36d0fb343b7c288c50abf265d76efbaf1740c57a49a238  crates/orna-lsp/tests/fixtures/editor-lsp-hints.orna
 ae26b76e75c4bf39e03664cb7cb33d461c0061fac79ddc285488509973b6d84a  crates/orna-lsp/tests/fixtures/editor-semantic-tokens.orna
 70823fa811930bdc19ac1942ce478d0dd912d6070d993f197ec760b0049ba3f6  crates/orna-lsp/tests/fixtures/expressions-v1.orna
-0d202fbe30ea2c191d4050d2110d3208c3a42ea67b7ee04482acacdd87b8ced7  crates/orna-lsp/tests/fixtures/folding-selection-v1.orna
+f05abfb8b62ad2ad18e08c3d5c08fe816c7ee4d0629cec9c7c5f9258da1e13f1  crates/orna-lsp/tests/fixtures/folding-selection-v1.orna
 dfbd0534b1fd606ee56c29b65e86a53290489579eca500658c6742d425f70281  crates/orna-lsp/tests/fixtures/hover-completion-v1.orna
 1064c12be254992ed3d461b593b680f9a8e83fde3fb50af8db63c12b88b9b777  crates/orna-lsp/tests/fixtures/incremental-malformed-v1.orna
 1d6507c277771162faf5ab37dfe673dbbe59c3184ddf06274272d00a134470d9  crates/orna-lsp/tests/fixtures/ji3t0-invalid-v1.orna
