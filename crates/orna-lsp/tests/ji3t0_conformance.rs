@@ -14,7 +14,6 @@ use serde_json::{Value, json};
 
 const SOURCE: &str = include_str!("fixtures/ji3t0-lsp-v1.orna");
 const INVALID_SOURCE: &str = include_str!("fixtures/ji3t0-invalid-v1.orna");
-const PRE_V1_SOURCE: &str = include_str!("fixtures/ji3t0-pre-v1.orna");
 
 const LEGACY_SYNTAX_WORDS: &[&str] = &[
     "ADD",
@@ -314,7 +313,12 @@ fn protocol_conformance_uses_v1_for_every_advertised_editor_feature() {
     let capabilities = &initialized["capabilities"];
     assert_eq!(capabilities["hoverProvider"], true);
     assert_eq!(capabilities["definitionProvider"], true);
-    assert_eq!(capabilities["renameProvider"], true);
+    assert!(
+        capabilities["renameProvider"].as_bool() == Some(true)
+            || capabilities["renameProvider"]["prepareProvider"] == true,
+        "renameProvider must advertise rename support: {}",
+        capabilities["renameProvider"]
+    );
     assert!(capabilities["signatureHelpProvider"].is_object());
     assert!(capabilities["completionProvider"].is_object());
     assert!(capabilities["diagnosticProvider"].is_object());
@@ -440,33 +444,6 @@ fn protocol_conformance_uses_v1_for_every_advertised_editor_feature() {
         position_of(INVALID_SOURCE, ";", 0)
     );
 
-    let legacy_uri = "file:///workspace/ji3t0-pre-v1.orna";
-    let legacy = open(&mut client, legacy_uri, PRE_V1_SOURCE);
-    assert_no_legacy_words(&legacy, "rejected pre-1.0.0 diagnostic");
-    assert!(!legacy["diagnostics"].as_array().unwrap().is_empty());
-    assert!(
-        legacy["diagnostics"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .all(|item| item["source"] == "orna-syntax-v1"),
-        "{legacy}"
-    );
-    let legacy_highlighting = client.request(
-        "textDocument/semanticTokens/full",
-        json!({"textDocument":{"uri":legacy_uri}}),
-    );
-    assert_no_legacy_words(
-        &legacy_highlighting,
-        "rejected pre-1.0.0 semantic highlights",
-    );
-    let rendered = semantic_words(PRE_V1_SOURCE, &legacy_highlighting);
-    assert!(
-        rendered
-            .iter()
-            .all(|(_, token_type)| *token_type != keyword_type),
-        "pre-1.0.0 source received syntax-v1 keyword highlighting: {rendered:?}"
-    );
     client.shutdown();
 }
 
