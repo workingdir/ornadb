@@ -105,11 +105,22 @@ pub(crate) fn references(tree: &SyntaxTree, binding: &LocalBinding) -> Vec<Synta
 }
 
 pub(crate) fn resolved_reference_spans(tree: &SyntaxTree) -> BTreeSet<(usize, usize)> {
+    resolved_references(tree)
+        .into_iter()
+        .map(|(span, _)| (span.start, span.end))
+        .collect()
+}
+
+/// Returns each resolved local use with the binding category that gives it
+/// meaning in the current lexical scope.
+pub(crate) fn resolved_references(tree: &SyntaxTree) -> Vec<(SyntaxSpan, LocalBindingKind)> {
     let bindings = bindings(tree);
     occurrences(tree)
         .into_iter()
-        .filter(|occurrence| resolve(&bindings, &occurrence.key, occurrence.span.start).is_some())
-        .map(|occurrence| (occurrence.span.start, occurrence.span.end))
+        .filter_map(|occurrence| {
+            resolve(&bindings, &occurrence.key, occurrence.span.start)
+                .map(|binding| (occurrence.span, binding.kind))
+        })
         .collect()
 }
 
