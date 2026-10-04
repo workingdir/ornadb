@@ -645,8 +645,10 @@ export class LiveSession {
   constructor(databaseId, options = {}) {
     this.databaseId = databaseId;
     this.databaseBytes = uuidBytes(databaseId);
-    this.origin = new URL(options.origin ?? globalThis.location.origin, globalThis.location.href);
-    if (this.origin.origin !== globalThis.location.origin) {
+    const pageUrl = options.pageUrl ?? globalThis.location.href;
+    const pageOrigin = new URL(pageUrl).origin;
+    this.origin = new URL(options.origin ?? pageOrigin, pageUrl);
+    if (this.origin.origin !== pageOrigin) {
       throw new PresentationError('Live connections must use the page origin.');
     }
     this.fetcher = options.fetcher ?? globalThis.fetch.bind(globalThis);
