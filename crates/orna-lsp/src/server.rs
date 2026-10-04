@@ -15,21 +15,23 @@ use lsp_server::{Connection, ErrorCode, Message, Notification, Request, Response
 use lsp_types::{
     CallHierarchyItem, CallHierarchyOptions, CallHierarchyServerCapability, CodeAction,
     CodeActionKind, CodeActionOptions, CodeActionOrCommand, CodeActionParams,
-    CodeActionProviderCapability, CompletionOptions, CompletionParams, CompletionResponse,
-    Diagnostic, DiagnosticOptions, DiagnosticServerCapabilities, DocumentDiagnosticParams,
-    DocumentDiagnosticReport, DocumentLink, DocumentLinkOptions, DocumentLinkParams,
-    DocumentSymbolParams, DocumentSymbolResponse, FoldingRange, FoldingRangeParams,
-    FoldingRangeProviderCapability, FullDocumentDiagnosticReport, GotoDefinitionParams,
-    GotoDefinitionResponse, Hover, HoverParams, HoverProviderCapability, InitializeParams,
-    InlayHintOptions, InlayHintParams, InlayHintServerCapabilities, NumberOrString, OneOf,
-    Position, PositionEncodingKind, PrepareRenameResponse, PublishDiagnosticsParams, Range,
-    ReferenceParams, RelatedFullDocumentDiagnosticReport, RelatedUnchangedDocumentDiagnosticReport,
-    RenameOptions, RenameParams, SelectionRangeParams, SelectionRangeProviderCapability,
-    SemanticTokens, SemanticTokensFullOptions, SemanticTokensLegend, SemanticTokensOptions,
-    SemanticTokensParams, SemanticTokensRangeParams, SemanticTokensServerCapabilities,
-    ServerCapabilities, SignatureHelpOptions, TextDocumentContentChangeEvent,
-    TextDocumentSyncCapability, TextDocumentSyncKind, TextDocumentSyncOptions,
-    TextDocumentSyncSaveOptions, TextEdit, UnchangedDocumentDiagnosticReport, Uri, WorkspaceEdit,
+    CodeActionProviderCapability, CodeLens, CodeLensOptions, CodeLensParams, Command,
+    CompletionOptions, CompletionParams, CompletionResponse, Diagnostic, DiagnosticOptions,
+    DiagnosticServerCapabilities, DocumentDiagnosticParams, DocumentDiagnosticReport,
+    DocumentHighlight, DocumentHighlightKind, DocumentHighlightParams, DocumentLink,
+    DocumentLinkOptions, DocumentLinkParams, DocumentSymbolParams, DocumentSymbolResponse,
+    FoldingRange, FoldingRangeParams, FoldingRangeProviderCapability, FullDocumentDiagnosticReport,
+    GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverParams, HoverProviderCapability,
+    InitializeParams, InlayHintOptions, InlayHintParams, InlayHintServerCapabilities,
+    NumberOrString, OneOf, Position, PositionEncodingKind, PrepareRenameResponse,
+    PublishDiagnosticsParams, Range, ReferenceParams, RelatedFullDocumentDiagnosticReport,
+    RelatedUnchangedDocumentDiagnosticReport, RenameOptions, RenameParams, SelectionRangeParams,
+    SelectionRangeProviderCapability, SemanticTokens, SemanticTokensFullOptions,
+    SemanticTokensLegend, SemanticTokensOptions, SemanticTokensParams, SemanticTokensRangeParams,
+    SemanticTokensServerCapabilities, ServerCapabilities, SignatureHelpOptions,
+    TextDocumentContentChangeEvent, TextDocumentSyncCapability, TextDocumentSyncKind,
+    TextDocumentSyncOptions, TextDocumentSyncSaveOptions, TextEdit,
+    UnchangedDocumentDiagnosticReport, Uri, WorkspaceEdit,
 };
 
 /// Transport threads for the server's standard input and output streams.
@@ -217,6 +219,7 @@ fn server_capabilities() -> ServerCapabilities {
             },
         )),
         hover_provider: Some(HoverProviderCapability::Simple(true)),
+        document_highlight_provider: Some(OneOf::Left(true)),
         signature_help_provider: Some(SignatureHelpOptions {
             trigger_characters: Some(vec!["(".to_owned(), ",".to_owned()]),
             retrigger_characters: Some(vec![",".to_owned()]),
@@ -239,6 +242,9 @@ fn server_capabilities() -> ServerCapabilities {
             ..CompletionOptions::default()
         }),
         workspace_symbol_provider: Some(OneOf::Left(true)),
+        code_lens_provider: Some(CodeLensOptions {
+            resolve_provider: Some(false),
+        }),
         semantic_tokens_provider: Some(SemanticTokensServerCapabilities::SemanticTokensOptions(
             SemanticTokensOptions {
                 legend: SemanticTokensLegend {
@@ -285,6 +291,7 @@ fn handle_request(state: &mut ServerState, connection: &Connection, request: Req
         "textDocument/codeAction" => request_code_actions(state, request),
         "textDocument/definition" => request_definition(state, request),
         "textDocument/references" => request_references(state, request),
+        "textDocument/documentHighlight" => request_document_highlights(state, request),
         "textDocument/prepareRename" => request_prepare_rename(state, request),
         "textDocument/rename" => request_rename(state, request),
         "textDocument/documentSymbol" => request_document_symbols(state, request),
@@ -296,6 +303,7 @@ fn handle_request(state: &mut ServerState, connection: &Connection, request: Req
         "textDocument/selectionRange" => request_selection_ranges(state, request),
         "textDocument/completion" => request_completion(state, request),
         "workspace/symbol" => request_workspace_symbols(state, request),
+        "textDocument/codeLens" => request_code_lenses(state, request),
         "textDocument/prepareCallHierarchy" => request_prepare_call_hierarchy(state, request),
         "callHierarchy/incomingCalls" => request_incoming_calls(state, request),
         "callHierarchy/outgoingCalls" => request_outgoing_calls(state, request),
@@ -673,6 +681,56 @@ fn request_references(
     .filter_map(|location| project_location(location, &mapper, &segments))
     .collect::<Vec<_>>();
     Ok(serde_json::to_value(locations)?)
+}
+
+fn request_document_highlights(
+    state: &mut ServerState,
+    request: Request,
+) -> Result<serde_json::Value, Box<dyn std::error::Error + Send + Sync>> {
+    let (_, params) =
+        request.extract::<DocumentHighlightParams>("textDocument/documentHighlight")?;
+    let uri = params.text_document_position_params.text_document.uri;
+    let position = params.text_document_position_params.position;
+    let Some((document, segments, selected_start)) = combined_workspace(&state.documents, &uri)
+    else {
+        return Ok(serde_json::Value::Null);
+    };
+    let (parse, mapper) = parse_document(&document);
+    let Some(position) =
+        workspace_position(&document, selected_start, position, &state.documents, &uri)
+    else {
+        return Ok(serde_json::Value::Null);
+    };
+
+    let mut write_ranges = analysis::local_declaration_spans(&parse);
+    write_ranges.extend(crate::locals::write_spans(&parse.value));
+    write_ranges.extend(
+        analysis::declaration_symbols(&parse, &document.text)
+            .into_iter()
+            .map(|symbol| symbol.selection),
+    );
+    let write_ranges = write_ranges
+        .iter()
+        .map(|span| mapper.range(span))
+        .collect::<Vec<_>>();
+
+    let highlights = analysis::references(&document, &parse, position, &mapper, true)
+        .into_iter()
+        .filter_map(|location| {
+            let kind = if write_ranges.contains(&location.range) {
+                DocumentHighlightKind::WRITE
+            } else {
+                DocumentHighlightKind::READ
+            };
+            project_location(location, &mapper, &segments)
+                .filter(|projected| projected.uri == uri)
+                .map(|projected| DocumentHighlight {
+                    kind: Some(kind),
+                    range: projected.range,
+                })
+        })
+        .collect::<Vec<_>>();
+    Ok(serde_json::to_value(highlights)?)
 }
 
 fn request_rename(
@@ -1400,6 +1458,67 @@ fn request_outgoing_calls(
         })
         .collect::<Vec<_>>();
     Ok(serde_json::to_value(outgoing)?)
+}
+
+fn request_code_lenses(
+    state: &mut ServerState,
+    request: Request,
+) -> Result<serde_json::Value, Box<dyn std::error::Error + Send + Sync>> {
+    let (_, params) = request.extract::<CodeLensParams>("textDocument/codeLens")?;
+    let uri = params.text_document.uri;
+    if state.document(&uri).is_none() {
+        return Ok(serde_json::Value::Null);
+    }
+    let functions = workspace_functions(state);
+    let mut references_by_target = (0..functions.len())
+        .map(|_| Vec::new())
+        .collect::<Vec<Vec<lsp_types::Location>>>();
+    for caller in &functions {
+        let mapper = PositionMapper::new(&caller.document.text);
+        for call in &caller.definition.calls {
+            if let Some(target_index) = uniquely_resolved_function(&functions, &call.name) {
+                references_by_target[target_index].push(lsp_types::Location {
+                    uri: caller.document.uri.clone(),
+                    range: mapper.range(&call.selection),
+                });
+            }
+        }
+    }
+
+    let mut lenses = Vec::new();
+    for (target_index, target) in functions
+        .iter()
+        .enumerate()
+        .filter(|(_, function)| function.document.uri == uri)
+    {
+        let references = &mut references_by_target[target_index];
+        references.sort_by(|left, right| {
+            left.uri
+                .as_str()
+                .cmp(right.uri.as_str())
+                .then_with(|| left.range.start.line.cmp(&right.range.start.line))
+                .then_with(|| left.range.start.character.cmp(&right.range.start.character))
+        });
+        let mapper = PositionMapper::new(&target.document.text);
+        let selection = &target.definition.selection;
+        let lens_position = mapper.position(selection.start);
+        let reference_count = references.len();
+        let arguments = Some(vec![
+            serde_json::to_value(&target.document.uri)?,
+            serde_json::to_value(lens_position)?,
+            serde_json::to_value(&*references)?,
+        ]);
+        lenses.push(CodeLens {
+            range: mapper.range(selection),
+            command: Some(Command {
+                title: format!("{reference_count} incoming calls"),
+                command: "editor.action.showReferences".to_owned(),
+                arguments,
+            }),
+            data: None,
+        });
+    }
+    Ok(serde_json::to_value(lenses)?)
 }
 
 fn request_semantic_tokens_full(
