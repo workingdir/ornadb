@@ -17,8 +17,11 @@ const SOURCE: &str = include_str!("fixtures/ji3t0-lsp-v1-self-contained.orna");
 mod completion_contract;
 #[path = "support/hover_semantic_contract.rs"]
 mod hover_semantic_contract;
+#[path = "support/syntax_v1_depth_contract.rs"]
+mod syntax_v1_depth_contract;
 
 const SEMANTIC_SOURCE: &str = include_str!("fixtures/editor-semantic-tokens.orna");
+const HINTS_SOURCE: &str = include_str!("fixtures/editor-lsp-hints.orna");
 const INVALID_SOURCE: &str = include_str!("fixtures/ji3t0-invalid-v1.orna");
 
 const LEGACY_SYNTAX_WORDS: &[&str] = &[
@@ -558,6 +561,8 @@ fn neovim_loads_generated_v1_syntax_and_queries_the_lsp_server() {
         + 1;
     let fixture = temporary_fixture(&fixture_source);
     let semantic_fixture = temporary_fixture(SEMANTIC_SOURCE);
+    let hints_fixture = temporary_fixture(HINTS_SOURCE);
+    let depth_ranges = syntax_v1_depth_contract::request_ranges(HINTS_SOURCE);
     let script = temporary_path("lua");
     let result_path = temporary_path("result");
     let completion_result_path = temporary_path("completion.json");
@@ -751,11 +756,55 @@ end
 for token_type, found in pairs(expected_classes) do
   assert(found, "Neovim LSP semantic tokens omitted the syntax-v1 " .. token_type .. " class")
 end
+
+vim.cmd("edit " .. vim.fn.fnameescape(vim.env.ORNA_HINTS_FIXTURE))
+local hints_bufnr = vim.api.nvim_get_current_buf()
+assert(vim.bo[hints_bufnr].filetype == "orna", "hint fixture did not select the orna filetype")
+assert(vim.wait(5000, function()
+  for _, attached in ipairs(vim.lsp.get_clients({ bufnr = hints_bufnr })) do
+    if attached.name == "orna" and attached.initialized then
+      client = attached
+      return true
+    end
+  end
+  return false
+end, 10), "hint fixture did not attach to orna-lsp")
+local hints_uri = vim.uri_from_bufnr(hints_bufnr)
+local depth_ranges = vim.fn.json_decode(vim.env.ORNA_DEPTH_RANGES)
+local depth_semantic, depth_semantic_error = client:request_sync("textDocument/semanticTokens/full", {
+  textDocument = { uri = hints_uri },
+}, 5000, hints_bufnr)
+assert(depth_semantic ~= nil and depth_semantic.err == nil, "Neovim depth semantic-token request failed: " .. vim.inspect(depth_semantic_error or depth_semantic))
+local depth_semantic_range, depth_semantic_range_error = client:request_sync("textDocument/semanticTokens/range", {
+  textDocument = { uri = hints_uri },
+  range = depth_ranges.semantic,
+}, 5000, hints_bufnr)
+assert(depth_semantic_range ~= nil and depth_semantic_range.err == nil, "Neovim ranged semantic-token request failed: " .. vim.inspect(depth_semantic_range_error or depth_semantic_range))
+local function request_hints(range_name)
+  local response, request_error = client:request_sync("textDocument/inlayHint", {
+    textDocument = { uri = hints_uri },
+    range = depth_ranges[range_name],
+  }, 5000, hints_bufnr)
+  assert(response ~= nil and response.err == nil, "Neovim " .. range_name .. " inlay request failed: " .. vim.inspect(request_error or response))
+  return response.result
+end
+local depth_hints_full = request_hints("hints_full")
+local depth_hints_call = request_hints("hints_call")
+local depth_hints_inferred = request_hints("hints_inferred")
+local depth_hints_annotated = request_hints("hints_annotated")
+local depth_hints_shadowed = request_hints("hints_shadowed")
 vim.fn.writefile({ vim.fn.json_encode({
   uri = uri,
   hover = hover_result,
   semantic = semantic.result,
   legend = token_types,
+  depth_semantic = depth_semantic.result,
+  depth_semantic_range = depth_semantic_range.result,
+  depth_hints_full = depth_hints_full,
+  depth_hints_call = depth_hints_call,
+  depth_hints_inferred = depth_hints_inferred,
+  depth_hints_annotated = depth_hints_annotated,
+  depth_hints_shadowed = depth_hints_shadowed,
   references = references.result,
   references_without_declaration = references_without_declaration.result,
   rename = renamed.result,
@@ -796,6 +845,11 @@ vim.cmd("qa!")
         .env("ORNA_NEOVIM_RUNTIME", root.join("editors/neovim"))
         .env("ORNA_TEST_FIXTURE", &fixture)
         .env("ORNA_SEMANTIC_FIXTURE", &semantic_fixture)
+        .env("ORNA_HINTS_FIXTURE", &hints_fixture)
+        .env(
+            "ORNA_DEPTH_RANGES",
+            serde_json::to_string(&depth_ranges).unwrap(),
+        )
         .env("ORNA_LSP_BIN", env!("CARGO_BIN_EXE_orna-lsp"))
         .env("ORNA_PROJECT_ROOT", root)
         .env(
@@ -835,6 +889,7 @@ vim.cmd("qa!")
     let hover_semantic_result = fs::read_to_string(&hover_semantic_result_path);
     let _ = fs::remove_file(fixture);
     let _ = fs::remove_file(semantic_fixture);
+    let _ = fs::remove_file(hints_fixture);
     let _ = fs::remove_file(script);
     let _ = fs::remove_file(result_path);
     let _ = fs::remove_file(&completion_result_path);
@@ -869,6 +924,21 @@ vim.cmd("qa!")
     hover_semantic_contract::assert_semantic_token_contract(
         SEMANTIC_SOURCE,
         &hover_semantic_result["semantic"],
+        "Neovim",
+    );
+    syntax_v1_depth_contract::assert_semantic_depth_contract(
+        HINTS_SOURCE,
+        &hover_semantic_result["depth_semantic"],
+        &hover_semantic_result["depth_semantic_range"],
+        "Neovim",
+    );
+    syntax_v1_depth_contract::assert_inlay_hint_depth_contract(
+        HINTS_SOURCE,
+        &hover_semantic_result["depth_hints_full"],
+        &hover_semantic_result["depth_hints_call"],
+        &hover_semantic_result["depth_hints_inferred"],
+        &hover_semantic_result["depth_hints_annotated"],
+        &hover_semantic_result["depth_hints_shadowed"],
         "Neovim",
     );
     let attached_uri = hover_semantic_result["uri"]
@@ -961,11 +1031,14 @@ fn emacs_eglot_attaches_and_proves_hover_rename_references_and_semantic_tokens()
     let hover_fixture =
         root.join("crates/orna-lsp/tests/fixtures/ji3t0-lsp-v1-self-contained.orna");
     let semantic_fixture = root.join("crates/orna-lsp/tests/fixtures/editor-semantic-tokens.orna");
+    let hints_fixture = root.join("crates/orna-lsp/tests/fixtures/editor-lsp-hints.orna");
     assert_eq!(fs::read_to_string(&hover_fixture).unwrap(), SOURCE);
     assert_eq!(
         fs::read_to_string(&semantic_fixture).unwrap(),
         SEMANTIC_SOURCE
     );
+    assert_eq!(fs::read_to_string(&hints_fixture).unwrap(), HINTS_SOURCE);
+    let depth_ranges = syntax_v1_depth_contract::request_ranges(HINTS_SOURCE);
     let script = temporary_path("el");
     let hover_semantic_result_path = temporary_path("hover-semantic.json");
     let plugin = root.join("editors/emacs/orna-eglot.el");
@@ -1013,6 +1086,15 @@ fn emacs_eglot_attaches_and_proves_hover_rename_references_and_semantic_tokens()
   (list (1- (line-number-at-pos)) (current-column)))
 (defun orna-test-position-key (position)
   (format "%s:%s" (car position) (cadr position)))
+(defun orna-test-depth-range (name)
+  (let* ((ranges (json-parse-string (getenv "ORNA_DEPTH_RANGES") :object-type 'hash-table))
+         (range (gethash name ranges))
+         (start (gethash "start" range))
+         (end (gethash "end" range)))
+    (list :start (list :line (gethash "line" start)
+                       :character (gethash "character" start))
+          :end (list :line (gethash "line" end)
+                     :character (gethash "character" end)))))
 (defun orna-test-location-key (location)
   (let* ((range (orna-test-get location "range"))
          (start (orna-test-get range "start")))
@@ -1020,8 +1102,16 @@ fn emacs_eglot_attaches_and_proves_hover_rename_references_and_semantic_tokens()
 
 (let ((hover-buffer (find-file-noselect {}))
       (semantic-buffer nil)
+      (depth-buffer nil)
       (hover-response nil)
       (semantic-response nil)
+      (depth-semantic-response nil)
+      (depth-semantic-range-response nil)
+      (depth-hints-full nil)
+      (depth-hints-call nil)
+      (depth-hints-inferred nil)
+      (depth-hints-annotated nil)
+      (depth-hints-shadowed nil)
       (references-response nil)
       (references-without-declaration-response nil)
       (rename-response nil)
@@ -1140,10 +1230,52 @@ fn emacs_eglot_attaches_and_proves_hover_rename_references_and_semantic_tokens()
                   (jsonrpc-request (eglot-current-server)
                                    :textDocument/semanticTokens/full
                                    (list :textDocument (list :uri uri))))))
+        (setq depth-buffer (find-file-noselect {}))
+        (with-current-buffer depth-buffer
+          (orna-test-wait-managed depth-buffer)
+          (let* ((server (eglot-current-server))
+                 (params (eglot--TextDocumentPositionParams))
+                 (uri (orna-test-get (orna-test-get params "textDocument") "uri")))
+            (setq depth-semantic-response
+                  (jsonrpc-request server :textDocument/semanticTokens/full
+                                   (list :textDocument (list :uri uri))))
+            (setq depth-semantic-range-response
+                  (jsonrpc-request server :textDocument/semanticTokens/range
+                                   (list :textDocument (list :uri uri)
+                                         :range (orna-test-depth-range "semantic"))))
+            (setq depth-hints-full
+                  (jsonrpc-request server :textDocument/inlayHint
+                                   (list :textDocument (list :uri uri)
+                                         :range (orna-test-depth-range "hints_full"))))
+            (setq depth-hints-call
+                  (jsonrpc-request server :textDocument/inlayHint
+                                   (list :textDocument (list :uri uri)
+                                         :range (orna-test-depth-range "hints_call"))))
+            (setq depth-hints-inferred
+                  (jsonrpc-request server :textDocument/inlayHint
+                                   (list :textDocument (list :uri uri)
+                                         :range (orna-test-depth-range "hints_inferred"))))
+            (setq depth-hints-annotated
+                  (jsonrpc-request server :textDocument/inlayHint
+                                   (list :textDocument (list :uri uri)
+                                         :range (orna-test-depth-range "hints_annotated"))))
+            (setq depth-hints-shadowed
+                  (jsonrpc-request server :textDocument/inlayHint
+                                   (list :textDocument (list :uri uri)
+                                         :range (orna-test-depth-range "hints_shadowed"))))
+            (unless (stringp uri)
+              (error "Eglot did not provide a URI for the depth fixture: %S" params))))
         (let ((evidence (make-hash-table :test 'equal)))
           (puthash "uri" attached-uri evidence)
           (puthash "hover" hover-response evidence)
           (puthash "semantic" semantic-response evidence)
+          (puthash "depth_semantic" depth-semantic-response evidence)
+          (puthash "depth_semantic_range" depth-semantic-range-response evidence)
+          (puthash "depth_hints_full" depth-hints-full evidence)
+          (puthash "depth_hints_call" depth-hints-call evidence)
+          (puthash "depth_hints_inferred" depth-hints-inferred evidence)
+          (puthash "depth_hints_annotated" depth-hints-annotated evidence)
+          (puthash "depth_hints_shadowed" depth-hints-shadowed evidence)
           (puthash "references" references-response evidence)
           (puthash "references_without_declaration"
                    references-without-declaration-response evidence)
@@ -1151,12 +1283,14 @@ fn emacs_eglot_attaches_and_proves_hover_rename_references_and_semantic_tokens()
           (with-temp-file (getenv "ORNA_HOVER_SEMANTIC_RESULT")
             (insert (json-encode evidence)))))
     (when (buffer-live-p hover-buffer) (kill-buffer hover-buffer))
-    (when (buffer-live-p semantic-buffer) (kill-buffer semantic-buffer))))
+    (when (buffer-live-p semantic-buffer) (kill-buffer semantic-buffer))
+    (when (buffer-live-p depth-buffer) (kill-buffer depth-buffer))))
 "#,
         elisp_string(&plugin.display().to_string()),
         elisp_string(env!("CARGO_BIN_EXE_orna-lsp")),
         elisp_string(&hover_fixture.display().to_string()),
         elisp_string(&semantic_fixture.display().to_string()),
+        elisp_string(&hints_fixture.display().to_string()),
     );
     fs::write(&script, elisp).expect("write Emacs Eglot hover/token probe");
     let output = Command::new(&emacs)
@@ -1164,6 +1298,10 @@ fn emacs_eglot_attaches_and_proves_hover_rename_references_and_semantic_tokens()
         .arg(&script)
         .current_dir(root)
         .env("ORNA_HOVER_SEMANTIC_RESULT", &hover_semantic_result_path)
+        .env(
+            "ORNA_DEPTH_RANGES",
+            serde_json::to_string(&depth_ranges).unwrap(),
+        )
         .output()
         .unwrap_or_else(|error| panic!("start Emacs at {}: {error}", emacs.display()));
     let _ = fs::remove_file(script);
@@ -1183,6 +1321,21 @@ fn emacs_eglot_attaches_and_proves_hover_rename_references_and_semantic_tokens()
     hover_semantic_contract::assert_semantic_token_contract(
         SEMANTIC_SOURCE,
         &hover_semantic_result["semantic"],
+        "Emacs Eglot",
+    );
+    syntax_v1_depth_contract::assert_semantic_depth_contract(
+        HINTS_SOURCE,
+        &hover_semantic_result["depth_semantic"],
+        &hover_semantic_result["depth_semantic_range"],
+        "Emacs Eglot",
+    );
+    syntax_v1_depth_contract::assert_inlay_hint_depth_contract(
+        HINTS_SOURCE,
+        &hover_semantic_result["depth_hints_full"],
+        &hover_semantic_result["depth_hints_call"],
+        &hover_semantic_result["depth_hints_inferred"],
+        &hover_semantic_result["depth_hints_annotated"],
+        &hover_semantic_result["depth_hints_shadowed"],
         "Emacs Eglot",
     );
     let attached_uri = hover_semantic_result["uri"]
