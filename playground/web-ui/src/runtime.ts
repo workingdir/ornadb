@@ -34,9 +34,11 @@ function isRunResult(value: unknown): value is RunResult {
 }
 
 export function servedRuntime(): PlaygroundRuntime {
-  const bridge = (globalThis as typeof globalThis & { ornaPlaygroundRun?: ServedRun }).ornaPlaygroundRun;
-  if (typeof bridge !== 'function') {
-    throw new Error('The Orna live runtime is not available. Open this page from orna serve.');
-  }
-  return createServedRuntime(bridge);
+  return createServedRuntime(source => {
+    const bridge = (globalThis as typeof globalThis & { ornaPlaygroundRun?: ServedRun }).ornaPlaygroundRun;
+    if (typeof bridge !== 'function') {
+      throw new Error('The Orna live runtime is not available. Open this page from orna serve.');
+    }
+    return bridge(source);
+  });
 }
