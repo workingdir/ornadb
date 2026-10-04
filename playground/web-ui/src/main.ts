@@ -174,7 +174,7 @@ monaco.languages.registerSignatureHelpProvider('orna', {
         label: signature.label,
         parameters,
       };
-      if (signature.documentation) mapped.documentation = markdownContents(signature.documentation);
+      if (signature.documentation) mapped.documentation = hoverMarkdown(signature.documentation);
       return [mapped];
     });
     if (signatures.length === 0) return null;

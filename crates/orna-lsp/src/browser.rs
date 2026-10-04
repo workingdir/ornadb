@@ -225,12 +225,9 @@ mod tests {
             + "increment".len()
             - 1;
         let (line, character) = position(RANKED_STANDARD_SOURCE, hover_offset);
-        let hover: serde_json::Value = serde_json::from_str(&hover(
-            RANKED_STANDARD_SOURCE.to_owned(),
-            line,
-            character,
-        ))
-        .expect("standard hover JSON");
+        let hover: serde_json::Value =
+            serde_json::from_str(&hover(RANKED_STANDARD_SOURCE.to_owned(), line, character))
+                .expect("standard hover JSON");
         assert!(hover.to_string().contains("fn increment(value: Int): Int"));
         assert!(hover.to_string().contains("exact successor"));
     }
