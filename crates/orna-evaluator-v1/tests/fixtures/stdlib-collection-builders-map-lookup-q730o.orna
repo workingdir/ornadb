@@ -1,0 +1,9 @@
+map.keys([("oak", 1), ("elm", 2)]) == ["oak", "elm"]
+&& map.values([("oak", 1), ("elm", 2)]) == [1, 2]
+&& map.contains_key([("oak", 1), ("elm", 2)], "elm")
+&& !map.contains_key([("oak", 1), ("elm", 2)], "missing")
+&& case map.get([("oak", 1), ("elm", 2)], "elm") {
+    Some(value): value == 2,
+    null: false,
+}
+&& map.remove([("oak", 1), ("elm", 2)], "oak") == [("elm", 2)]
