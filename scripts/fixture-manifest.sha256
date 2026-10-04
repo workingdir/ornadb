@@ -3244,6 +3244,7 @@ e8255da14cded3d550315c1b02df1cec0d77918fcb9c8702ffb114a1b23e8898  crates/orna-ls
 e26462d689c55d2035f4ee535f113c543d433ab4e627569bb0bada85ae1c690a  crates/orna-lsp/tests/fixtures/missing-semicolon-code-action-v1.orna
 034f96a2b28e9117c1edf56db04aebae41c0e67466ef3c8e84ff2aeb0e4e7f1b  crates/orna-lsp/tests/fixtures/rename-caller-v1.orna
 7477e338729cc2d0e79d3b8b240b43ab9b5712bc78dcb44076f1efc3573448b6  crates/orna-lsp/tests/fixtures/rename-provider-v1.orna
+53d7a8fd34196932558e28a0b214c772b8740c970c8bf8cf876d5d8dbf7f7910  crates/orna-lsp/tests/fixtures/semantic-token-multiline-modifiers-v1.orna
 267fa641bc6c9b614d903de2f3ec55fc3ac208160ed88f210d2a11376d961294  crates/orna-lsp/tests/fixtures/signature-actions-v1.orna
 9a14af6c57d9551e81d375f0eb4ea06008bf18026ebd0a960cb4d1b2e57dafc6  crates/orna-lsp/tests/fixtures/tree-sitter-corpus/accepted_actions_inspector.txt
 c505dd602eed8bd3ebbfa839e703182657981081fa9b5444382085b2212f2a8e  crates/orna-lsp/tests/fixtures/tree-sitter-corpus/accepted_client_fixture.txt
