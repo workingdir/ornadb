@@ -27,18 +27,27 @@ fn session() -> AdmittedReplSession {
             .verify_source(path, source)
             .expect("executed iteration source matches its pinned profile");
     }
-    let setup = include_str!("fixtures/iteration-use-ptr1b.orna");
-    let parsed = orna_syntax_v1::parse_module_with_file(setup, "iteration-use-ptr1b.orna");
-    assert!(parsed.is_ok(), "{:#?}", parsed.diagnostics);
-    let parsed_repl = orna_syntax_v1::parse_repl(setup);
-    assert!(
-        parsed_repl.is_ok(),
-        "REPL setup parse: {:#?}",
-        parsed_repl.diagnostics
-    );
-    session.submit(setup).unwrap_or_else(|error| {
-        panic!("iteration helper fixture failed to load: {}", error.code())
-    });
+    for (index, setup) in [
+        include_str!("fixtures/iteration-use-ptr1b.orna"),
+        include_str!("fixtures/iteration-neighbors-ptr1b.orna"),
+        include_str!("fixtures/iteration-target-edges-ptr1b.orna"),
+        include_str!("fixtures/iteration-forbidden-edges-ptr1b.orna"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let parsed = orna_syntax_v1::parse_module_with_file(setup, "iteration-setup-ptr1b.orna");
+        assert!(parsed.is_ok(), "setup {index}: {:#?}", parsed.diagnostics);
+        let parsed_repl = orna_syntax_v1::parse_repl(setup);
+        assert!(
+            parsed_repl.is_ok(),
+            "setup {index} REPL parse: {:#?}",
+            parsed_repl.diagnostics
+        );
+        session.submit(setup).unwrap_or_else(|error| {
+            panic!("iteration helper setup {index} failed: {}", error.code())
+        });
+    }
     session
 }
 
