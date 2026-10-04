@@ -1,0 +1,4 @@
+std.ui.Button(
+    "Run",
+    std.ui.action("restart", as: Bool, debug_kind: ""),
+)
