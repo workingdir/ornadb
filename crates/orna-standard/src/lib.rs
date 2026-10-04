@@ -43,6 +43,7 @@ pub const REFERENCE_STANDARD_COLLECTION_PATH_V1: &str = "std/collection.orna";
 pub const REFERENCE_STANDARD_ALGORITHM_PATH_V1: &str = "std/algorithm.orna";
 pub const REFERENCE_STANDARD_QUERY_PATH_V1: &str = "std/query.orna";
 pub const REFERENCE_STANDARD_TEXT_PATH_V1: &str = "std/text.orna";
+pub const REFERENCE_STANDARD_TEXT_BUILDER_PATH_V1: &str = "std/text/builder.orna";
 pub const REFERENCE_STANDARD_BITS_PATH_V1: &str = "std/bits.orna";
 pub const REFERENCE_STANDARD_STATS_PATH_V1: &str = "std/stats.orna";
 pub const REFERENCE_STANDARD_MONEY_PATH_V1: &str = "std/money.orna";
@@ -117,6 +118,8 @@ const REFERENCE_STANDARD_ALGORITHM_SOURCE_V1: &str =
     include_str!("../../../stdlib/std/algorithm.orna");
 const REFERENCE_STANDARD_QUERY_SOURCE_V1: &str = include_str!("../../../stdlib/std/query.orna");
 const REFERENCE_STANDARD_TEXT_SOURCE_V1: &str = include_str!("../../../stdlib/std/text.orna");
+const REFERENCE_STANDARD_TEXT_BUILDER_SOURCE_V1: &str =
+    include_str!("../../../stdlib/std/text/builder.orna");
 const REFERENCE_STANDARD_BITS_SOURCE_V1: &str = include_str!("../../../stdlib/std/bits.orna");
 const REFERENCE_STANDARD_STATS_SOURCE_V1: &str = include_str!("../../../stdlib/std/stats.orna");
 const REFERENCE_STANDARD_MONEY_SOURCE_V1: &str = include_str!("../../../stdlib/std/money.orna");
@@ -210,8 +213,8 @@ const REFERENCE_STANDARD_PRELUDE_SOURCE_V1: &str =
 /// This is the current source-backed standard boundary. The retained `orna.std/1`–
 /// `orna.std/11` APIs below model older, explicitly versioned snapshots.
 #[must_use]
-pub fn reference_standard_sources_v1() -> [(String, String); 60] {
-    let mut sources: [(String, String); 60] = [
+pub fn reference_standard_sources_v1() -> [(String, String); 61] {
+    let mut sources: [(String, String); 61] = [
         (
             REFERENCE_STANDARD_MATH_PATH_V1.into(),
             REFERENCE_STANDARD_MATH_SOURCE_V1.into(),
@@ -451,6 +454,10 @@ pub fn reference_standard_sources_v1() -> [(String, String); 60] {
         (
             REFERENCE_STANDARD_NUMERIC_PATH_V1.into(),
             REFERENCE_STANDARD_NUMERIC_SOURCE_V1.into(),
+        ),
+        (
+            REFERENCE_STANDARD_TEXT_BUILDER_PATH_V1.into(),
+            REFERENCE_STANDARD_TEXT_BUILDER_SOURCE_V1.into(),
         ),
     ];
     sources[2]
