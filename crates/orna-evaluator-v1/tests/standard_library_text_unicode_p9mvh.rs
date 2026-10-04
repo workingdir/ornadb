@@ -29,6 +29,15 @@ fn pinned_text_exports_obey_the_unicode_16_contract() {
             "text contract failed: {assertion}"
         );
     }
+
+    assert_eq!(
+        session.submit(include_str!("fixtures/stdlib-text-empty-split-p9mvh.orna")),
+        Ok(Some(CanonicalValue::new(Raw::Array(Vec::new())).unwrap()))
+    );
+    assert_eq!(
+        session.submit(include_str!("fixtures/stdlib-text-empty-join-p9mvh.orna")),
+        Ok(Some(CanonicalValue::new(Raw::Text(String::new())).unwrap()))
+    );
 }
 
 #[test]

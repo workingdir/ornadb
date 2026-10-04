@@ -1,9 +1,7 @@
 text.unicode_version() == "16.0.0"
 && text.trim("\u{00A0}\u{2007} A\u{2003}B \u{202F}") == "A\u{2003}B"
 && text.split("🙂a🙂", "") == ["🙂", "a", "🙂"]
-&& text.split("", "") == []
 && text.split(",a,,β,", ",") == ["", "a", "", "β", ""]
-&& text.join([], ":") == ""
 && text.join(["a", "β", ""], ":") == "a:β:"
 && text.starts_with("βeta", "β")
 && text.ends_with("βeta", "ta")
