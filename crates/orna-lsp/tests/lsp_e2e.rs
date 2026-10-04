@@ -11,6 +11,8 @@ use serde_json::{Value, json};
 mod syntax_v1_action_signature_contract;
 #[path = "support/syntax_v1_depth_contract.rs"]
 mod syntax_v1_depth_contract;
+#[path = "support/syntax_v1_workspace_hierarchy_contract.rs"]
+mod syntax_v1_workspace_hierarchy_contract;
 
 const SOURCE: &str = include_str!("fixtures/expressions-v1.orna");
 const CALL_SOURCE: &str = include_str!("fixtures/call-v1.orna");
@@ -1653,6 +1655,10 @@ fn workspace_symbols_rank_stably_and_call_hierarchy_tracks_resolved_calls() {
             .is_empty(),
         "{caller_diagnostics}"
     );
+    let hierarchy_positions = syntax_v1_workspace_hierarchy_contract::request_data(
+        WORKSPACE_HIERARCHY_PROVIDER_SOURCE,
+        WORKSPACE_HIERARCHY_CALLER_SOURCE,
+    );
 
     let ranked = client.request("workspace/symbol", json!({"query":"mid"}));
     let ranked_names = ranked
@@ -1663,9 +1669,9 @@ fn workspace_symbols_rank_stably_and_call_hierarchy_tracks_resolved_calls() {
         .collect::<Vec<_>>();
     assert_eq!(ranked_names, ["mid", "remote_mid"], "{ranked}");
     assert_eq!(ranked[0]["containerName"], Value::Null);
+    let ranked_repeat = client.request("workspace/symbol", json!({"query":"mid"}));
     assert_eq!(
-        client.request("workspace/symbol", json!({"query":"mid"})),
-        ranked,
+        ranked_repeat, ranked,
         "workspace symbol order changed between identical requests"
     );
 
@@ -1701,7 +1707,7 @@ fn workspace_symbols_rank_stably_and_call_hierarchy_tracks_resolved_calls() {
         "textDocument/prepareCallHierarchy",
         json!({
             "textDocument":{"uri":provider_uri},
-            "position":position_at(WORKSPACE_HIERARCHY_PROVIDER_SOURCE, root_cursor)
+            "position":hierarchy_positions["root_definition"]
         }),
     );
     assert_eq!(root_item.as_array().unwrap().len(), 1, "{root_item}");
@@ -1773,15 +1779,11 @@ fn workspace_symbols_rank_stably_and_call_hierarchy_tracks_resolved_calls() {
         )
     );
 
-    let seed_cursor = WORKSPACE_HIERARCHY_PROVIDER_SOURCE
-        .find("pub fn seed")
-        .map(|offset| offset + "pub fn ".len())
-        .unwrap();
     let seed_item = client.request(
         "textDocument/prepareCallHierarchy",
         json!({
             "textDocument":{"uri":provider_uri},
-            "position":position_at(WORKSPACE_HIERARCHY_PROVIDER_SOURCE, seed_cursor)
+            "position":hierarchy_positions["seed_definition"]
         }),
     );
     let seed_incoming = client.request("callHierarchy/incomingCalls", json!({"item":seed_item[0]}));
@@ -1794,79 +1796,81 @@ fn workspace_symbols_rank_stably_and_call_hierarchy_tracks_resolved_calls() {
     assert_eq!(seed_incoming[1]["from"]["name"], "root");
     assert_eq!(seed_incoming[1]["fromRanges"].as_array().unwrap().len(), 2);
 
-    let shadow_cursor = WORKSPACE_HIERARCHY_PROVIDER_SOURCE
-        .find("pub fn shadowed")
-        .map(|offset| offset + "pub fn shadowed".len())
-        .unwrap();
     let shadow_item = client.request(
         "textDocument/prepareCallHierarchy",
         json!({
             "textDocument":{"uri":provider_uri},
-            "position":position_at(WORKSPACE_HIERARCHY_PROVIDER_SOURCE, shadow_cursor)
+            "position":hierarchy_positions["shadowed_definition"]
         }),
     );
     assert_eq!(shadow_item[0]["name"], "shadowed");
+    let shadowed_outgoing = client.request(
+        "callHierarchy/outgoingCalls",
+        json!({"item":shadow_item[0]}),
+    );
     assert!(
-        client
-            .request(
-                "callHierarchy/outgoingCalls",
-                json!({"item":shadow_item[0]}),
-            )
-            .as_array()
-            .unwrap()
-            .is_empty(),
+        shadowed_outgoing.as_array().unwrap().is_empty(),
         "local parameter call was resolved as a workspace function"
     );
 
-    let unresolved_cursor = WORKSPACE_HIERARCHY_PROVIDER_SOURCE
-        .find("pub fn unresolved")
-        .map(|offset| offset + "pub fn unresolved".len())
-        .unwrap();
     let unresolved_item = client.request(
         "textDocument/prepareCallHierarchy",
         json!({
             "textDocument":{"uri":provider_uri},
-            "position":position_at(WORKSPACE_HIERARCHY_PROVIDER_SOURCE, unresolved_cursor)
+            "position":hierarchy_positions["unresolved_definition"]
         }),
     );
+    let unresolved_outgoing = client.request(
+        "callHierarchy/outgoingCalls",
+        json!({"item":unresolved_item[0]}),
+    );
     assert!(
-        client
-            .request(
-                "callHierarchy/outgoingCalls",
-                json!({"item":unresolved_item[0]}),
-            )
-            .as_array()
-            .unwrap()
-            .is_empty(),
+        unresolved_outgoing.as_array().unwrap().is_empty(),
         "unresolved call was emitted in the hierarchy"
     );
 
-    let reference_cursor = WORKSPACE_HIERARCHY_CALLER_SOURCE
-        .find("root(value)")
-        .unwrap();
     let prepared_reference = client.request(
         "textDocument/prepareCallHierarchy",
         json!({
             "textDocument":{"uri":caller_uri},
-            "position":position_at(WORKSPACE_HIERARCHY_CALLER_SOURCE, reference_cursor)
+            "position":hierarchy_positions["root_reference"]
         }),
     );
     assert_eq!(prepared_reference[0]["name"], "root");
     assert_eq!(prepared_reference[0]["uri"], provider_uri);
 
-    let ambiguous_cursor = WORKSPACE_HIERARCHY_CALLER_SOURCE
-        .find("collide(value)")
-        .unwrap();
     let ambiguous_reference = client.request(
         "textDocument/prepareCallHierarchy",
         json!({
             "textDocument":{"uri":caller_uri},
-            "position":position_at(WORKSPACE_HIERARCHY_CALLER_SOURCE, ambiguous_cursor)
+            "position":hierarchy_positions["ambiguous_reference"]
         }),
     );
     assert!(
         ambiguous_reference.is_null(),
         "ambiguous function reference unexpectedly resolved: {ambiguous_reference}"
+    );
+    syntax_v1_workspace_hierarchy_contract::assert_contract(
+        WORKSPACE_HIERARCHY_PROVIDER_SOURCE,
+        WORKSPACE_HIERARCHY_CALLER_SOURCE,
+        provider_uri,
+        caller_uri,
+        &json!({
+            "workspace_mid": ranked,
+            "workspace_mid_repeat": ranked_repeat,
+            "workspace_rem": prefix_ranked,
+            "workspace_remi": fuzzy,
+            "call_root_item": root_item,
+            "call_root_outgoing": outgoing,
+            "call_root_incoming": incoming,
+            "call_seed_item": seed_item,
+            "call_seed_incoming": seed_incoming,
+            "call_shadowed_outgoing": shadowed_outgoing,
+            "call_unresolved_outgoing": unresolved_outgoing,
+            "call_root_reference": prepared_reference,
+            "call_ambiguous_reference": ambiguous_reference,
+        }),
+        "LSP protocol",
     );
     client.shutdown();
 }
