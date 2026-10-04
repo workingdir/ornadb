@@ -380,6 +380,64 @@ fn identifier_chain_at_span(text: &str, span: &SourceSpan) -> Option<Vec<String>
     )
 }
 
+/// A top-level function and the calls in its body, with source spans kept in
+/// syntax byte offsets until the server maps them to LSP coordinates.
+#[derive(Debug, Clone)]
+pub(crate) struct FunctionDefinition {
+    pub name: String,
+    pub selection: SourceSpan,
+    pub full: SourceSpan,
+    pub detail: Option<String>,
+    pub calls: Vec<FunctionCall>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct FunctionCall {
+    pub name: String,
+    pub selection: SourceSpan,
+}
+
+/// Returns top-level function declarations and syntactic calls that are not
+/// shadowed by a local binding. The caller decides whether declarations from
+/// different open documents resolve uniquely.
+pub(crate) fn function_definitions(parse: &EditorParse, text: &str) -> Vec<FunctionDefinition> {
+    let symbols = declaration_symbols(parse, text);
+    let mut definitions = Vec::new();
+    for item in &parse.value.items {
+        let Declaration::Function { signature, body } = &item.declaration else {
+            continue;
+        };
+        let Some(symbol) = symbols.iter().find(|symbol| {
+            symbol.kind == EditorSymbolKind::Function
+                && same_span(&symbol.full, &item.span)
+                && symbol.name == signature.name
+        }) else {
+            continue;
+        };
+        let mut call_sites = Vec::new();
+        collect_calls(body, &mut call_sites);
+        let calls = call_sites
+            .into_iter()
+            .filter(|call| !callee_resolves_to_local(&parse.value, &call.callee))
+            .filter_map(|call| {
+                Some(FunctionCall {
+                    name: call.name.rsplit('.').next()?.to_owned(),
+                    selection: expression_name_span(&call.callee)?,
+                })
+            })
+            .collect();
+        definitions.push(FunctionDefinition {
+            name: symbol.name.clone(),
+            selection: symbol.selection.clone(),
+            full: symbol.full.clone(),
+            detail: symbol.detail.clone(),
+            calls,
+        });
+    }
+    definitions.sort_by_key(|definition| definition.selection.start);
+    definitions
+}
+
 pub(crate) fn declaration_symbols(parse: &EditorParse, text: &str) -> Vec<EditorSymbol> {
     let Ok(tokens) = lex(text) else {
         return Vec::new();
@@ -849,6 +907,17 @@ fn expression_name(expression: &Expr) -> Option<String> {
     match expression {
         Expr::Name { text, .. } => Some(text.clone()),
         Expr::Field { base, name, .. } => Some(format!("{}.{}", expression_name(base)?, name)),
+        _ => None,
+    }
+}
+
+fn expression_name_span(expression: &Expr) -> Option<SourceSpan> {
+    match expression {
+        Expr::Name { span, .. } => Some(span.clone()),
+        Expr::Field { name, span, .. } => {
+            Some(SourceSpan::new(span.end.checked_sub(name.len())?, span.end))
+        }
+        Expr::Group { inner, .. } => expression_name_span(inner),
         _ => None,
     }
 }
