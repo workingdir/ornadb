@@ -2496,10 +2496,7 @@ mod tests {
                 .any(|(name, value)| name == "X-Content-Type-Options" && value == "nosniff")
         );
         assert_eq!(script.content_type, "text/javascript; charset=utf-8");
-        assert_eq!(
-            script.body,
-            b"globalThis.ornaPlaygroundReady = { ready: true };"
-        );
+        assert_eq!(script.body, b"globalThis.ornaPlaygroundReady = true;");
         let stylesheet =
             playground_asset(directory.path(), identity, "/playground/assets/style.css");
         assert_eq!(stylesheet.status, 200);
@@ -2590,7 +2587,7 @@ mod tests {
             Some((
                 "assets/app.js".into(),
                 "text/javascript; charset=utf-8".into(),
-                "globalThis.ornaPlaygroundReady = { ready: true };".into(),
+                "globalThis.ornaPlaygroundReady = true;".into(),
             ))
         );
         assert_eq!(
