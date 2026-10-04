@@ -254,7 +254,7 @@ mod tests {
         let standard_signature = &signature["signatures"][0];
         assert_eq!(
             standard_signature["label"],
-            "fn clamp(value: Int, lower: Int, upper: Int): Int"
+            "pub fn clamp(value: Int, lower: Int, upper: Int): Int"
         );
         assert!(
             standard_signature["documentation"]
