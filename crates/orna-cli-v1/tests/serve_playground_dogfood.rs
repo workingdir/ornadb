@@ -687,7 +687,7 @@ fn orna_serve_hosts_playground_with_pending_evals_and_snapshot_correct_deltas() 
     let catalog_style = curl(&format!("{base_url}/playground/assets/examples.css"), &[])
         .expect("curl the database-served catalog stylesheet");
     assert_eq!(catalog_style.status, 200);
-    assert!(catalog_style.body.contains(".catalog-list"));
+    assert!(catalog_style.body.contains("body { color: #202122; }"));
     let runtime = curl(
         &format!("{base_url}/playground/assets/serve-playground.mjs"),
         &[],
