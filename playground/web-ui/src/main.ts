@@ -2,7 +2,7 @@ import * as monaco from 'monaco-editor/esm/vs/editor/editor.api.js';
 import EditorWorker from 'monaco-editor/esm/vs/editor/editor.worker.js?worker';
 import '../node_modules/monaco-editor/min/vs/editor/editor.main.css';
 import { loadOrnaEditorConfig, registerOrnaLanguage } from './language';
-import { completionRankingFields, hoverMarkdown } from './assist-adapter';
+import { completionRankingFields, hoverMarkdown, signatureHelpFields } from './assist-adapter';
 import { exampleIndexForKey, isExample } from './example-feed';
 import { formatRunResult, formatThrownError, type RunResult } from './results';
 import { servedRuntime } from './runtime';
@@ -153,35 +153,13 @@ monaco.languages.registerSignatureHelpProvider('orna', {
   signatureHelpTriggerCharacters: ['(', ','],
   signatureHelpRetriggerCharacters: [','],
   async provideSignatureHelp(model, position) {
-    const response = asRecord(await requestLsp('signature_help', model.getValue(), {
+    const response = signatureHelpFields(await requestLsp('signature_help', model.getValue(), {
       line: position.lineNumber - 1,
       character: position.column - 1,
     }));
     if (!response) return null;
-    const signatures = asArray(response.signatures).flatMap((entry) => {
-      const signature = asRecord(entry);
-      if (!signature || typeof signature.label !== 'string') return [];
-      const parameters = asArray(signature.parameters).flatMap((parameterEntry) => {
-        const parameter = asRecord(parameterEntry);
-        if (!parameter) return [];
-        const label = parameter.label;
-        if (typeof label !== 'string' && !Array.isArray(label)) return [];
-        const mapped: monaco.languages.ParameterInformation = { label: label as string | [number, number] };
-        if (parameter.documentation) mapped.documentation = hoverMarkdown(parameter.documentation);
-        return [mapped];
-      });
-      const mapped: monaco.languages.SignatureInformation = {
-        label: signature.label,
-        parameters,
-      };
-      if (signature.documentation) mapped.documentation = hoverMarkdown(signature.documentation);
-      return [mapped];
-    });
-    if (signatures.length === 0) return null;
-    const activeSignature = typeof response.activeSignature === 'number' ? response.activeSignature : 0;
-    const activeParameter = typeof response.activeParameter === 'number' ? response.activeParameter : 0;
     return {
-      value: { signatures, activeSignature, activeParameter },
+      value: response,
       dispose: () => undefined,
     };
   },
