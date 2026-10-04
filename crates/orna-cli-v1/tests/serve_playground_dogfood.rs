@@ -5,7 +5,6 @@ use std::{
     time::{Duration, Instant},
 };
 
-use orna_application_v1::LIVE_RUN_EVENTS_WATCH_SOURCE;
 use orna_foundation_v1::{CanonicalValue, OvbRaw};
 use orna_protocol_v1::{
     DatabaseContext, Envelope, Limits, Message, PresentKind, PresentNode, PresentPropertyKey,
@@ -23,6 +22,10 @@ const MAIN: &str = include_str!("fixtures/project-core-main.orna");
 const SAMPLE: &str = include_str!("fixtures/playground-example.orna");
 const SECOND_SAMPLE: &str = include_str!("fixtures/playground-concurrent-eval.orna");
 const FOLLOWUP_SAMPLE: &str = include_str!("fixtures/playground-followup-eval.orna");
+const PLAYGROUND_SCHEMA: &str = include_str!("fixtures/playground-schema.orna");
+const ASSET_INDEX: &str = include_str!("fixtures/playground-asset-index.orna");
+const ASSET_APP: &str = include_str!("fixtures/playground-asset-app.orna");
+const ASSET_STYLE: &str = include_str!("fixtures/playground-asset-style.orna");
 const BINARY: &str = env!("CARGO_BIN_EXE_orna-cli-v1");
 
 struct RunningServer(Child);
@@ -342,25 +345,35 @@ fn orna_serve_hosts_playground_with_pending_evals_and_snapshot_correct_deltas() 
     );
 
     std::fs::write(project.path().join("main.orna"), MAIN).expect("write crate-local main fixture");
+    std::fs::write(project.path().join("playground.orna"), PLAYGROUND_SCHEMA)
+        .expect("write crate-local playground schema");
     let example = project.path().join("playground/examples/hello.orna");
     std::fs::create_dir_all(example.parent().expect("example parent"))
         .expect("create committed example directory");
     std::fs::write(&example, SAMPLE).expect("write crate-local sample fixture");
-    let dist = project.path().join("playground/web-ui/dist");
-    std::fs::create_dir_all(dist.join("assets")).expect("create built UI asset directory");
+    let assets = project.path().join("playground/Asset");
+    std::fs::create_dir_all(&assets).expect("create committed asset directory");
+    std::fs::write(assets.join("asset-696e6465782e68746d6c.orna"), ASSET_INDEX)
+        .expect("write committed browser shell fixture");
     std::fs::write(
-        dist.join("index.html"),
-        "<!doctype html><html><body><main id=\"app\">Orna playground</main><script type=\"module\" src=\"/playground/assets/app.js\"></script></body></html>",
+        assets.join("asset-6173736574732f6170702e6a73.orna"),
+        ASSET_APP,
     )
-    .expect("write browser entry page fixture");
+    .expect("write committed browser client fixture");
     std::fs::write(
-        dist.join("assets/app.js"),
-        "globalThis.ornaPlaygroundReady = true;",
+        assets.join("asset-6173736574732f7374796c652e637373.orna"),
+        ASSET_STYLE,
     )
-    .expect("write browser entry script fixture");
+    .expect("write committed stylesheet fixture");
     git(
         project.path(),
-        &["add", "main.orna", "playground/examples/hello.orna"],
+        &[
+            "add",
+            "main.orna",
+            "playground.orna",
+            "playground/examples/hello.orna",
+            "playground/Asset",
+        ],
     );
     git(
         project.path(),
@@ -397,6 +410,7 @@ fn orna_serve_hosts_playground_with_pending_evals_and_snapshot_correct_deltas() 
     let page = curl(&format!("{base_url}/playground/"), &[]).expect("curl the playground page");
     assert_eq!(page.status, 200);
     assert!(page.body.contains("Orna playground"));
+    assert!(page.body.contains("database shell"));
     assert!(page.body.contains("id=\"live-bridge\""));
     assert!(page.body.contains("id=\"live-presentation\""));
     assert!(page.body.contains("id=\"run-events-source\""));
@@ -414,6 +428,11 @@ fn orna_serve_hosts_playground_with_pending_evals_and_snapshot_correct_deltas() 
         .expect("curl the playground browser asset");
     assert_eq!(app.status, 200);
     assert!(app.body.contains("ornaPlaygroundReady"));
+    let stylesheet = curl(&format!("{base_url}/playground/assets/style.css"), &[])
+        .expect("curl the committed database stylesheet");
+    assert_eq!(stylesheet.status, 200);
+    assert!(stylesheet.body.contains("#202122"));
+    assert!(!project.path().join("playground/web-ui/dist").exists());
 
     let examples =
         curl(&format!("{base_url}/api/examples"), &[]).expect("curl committed playground examples");
