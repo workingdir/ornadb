@@ -1,0 +1,4 @@
+fn map_empty_builder(): [(Str, Int)] {
+    let empty: [(Str, Int)] = [];
+    map.from_entries(empty)
+}

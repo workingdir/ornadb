@@ -1,0 +1,2 @@
+map.insert([("oak", 1), ("elm", 2)], "elm", 7) == [("oak", 1), ("elm", 7)]
+&& map.insert([("oak", 1), ("elm", 2)], "birch", 4) == [("oak", 1), ("elm", 2), ("birch", 4)]
