@@ -17,3 +17,12 @@ http://127.0.0.1:8181/playground/. The Monaco tokenizer and its keyword
 metadata are generated from orna-syntax-v1; check drift with:
 
     cargo run --locked -p orna-syntax-v1 --example generate_editor_artifacts -- --check
+
+## GitHub Pages channels
+
+The Pages workflow publishes the stable channel from `main` at
+https://workingdir.github.io/ornadb/ and the development channel from the
+playground milestone branch at https://workingdir.github.io/ornadb/dev/.
+Pull requests run the build checks without publishing. The Pages smoke checks
+each channel's HTML, built assets, and editor WebAssembly modules. Examples and
+source evaluation still use the `orna serve` API described above.
