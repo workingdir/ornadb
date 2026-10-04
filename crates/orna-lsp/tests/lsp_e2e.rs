@@ -28,6 +28,8 @@ const WORKSPACE_HIERARCHY_PROVIDER_SOURCE: &str =
 const WORKSPACE_HIERARCHY_CALLER_SOURCE: &str =
     include_str!("fixtures/workspace-hierarchy-caller-v1.orna");
 const FOLDING_SELECTION_SOURCE: &str = include_str!("fixtures/folding-selection-v1.orna");
+const DOCUMENT_HIGHLIGHT_CODE_LENS_SOURCE: &str =
+    include_str!("fixtures/document-highlight-code-lens-v1.orna");
 
 struct Client {
     child: Child,
@@ -127,6 +129,15 @@ fn initialize(client: &mut Client) {
     assert_eq!(result["capabilities"]["textDocumentSync"]["change"], 2);
     assert_eq!(result["capabilities"]["hoverProvider"], true);
     assert_eq!(
+        result["capabilities"]["documentHighlightProvider"],
+        true,
+        "initialize capabilities: {result}"
+    );
+    assert_eq!(
+        result["capabilities"]["codeLensProvider"]["resolveProvider"],
+        false
+    );
+    assert_eq!(
         result["capabilities"]["renameProvider"]["prepareProvider"], true,
         "initialize capabilities: {result}"
     );
@@ -181,6 +192,218 @@ fn initialize(client: &mut Client) {
         "call hierarchy capability was not enabled: {result}"
     );
     client.notify("initialized", json!({}));
+}
+
+#[test]
+fn document_highlights_classify_reads_writes_and_respect_shadowing() {
+    let uri = "file:///workspace/document-highlight-code-lens-v1.orna";
+    let mut client = Client::spawn();
+    initialize(&mut client);
+    let diagnostics = open(&mut client, uri, DOCUMENT_HIGHLIGHT_CODE_LENS_SOURCE);
+    assert!(
+        diagnostics["diagnostics"].as_array().unwrap().is_empty(),
+        "{diagnostics}"
+    );
+
+    let count_cursor = position_of(DOCUMENT_HIGHLIGHT_CODE_LENS_SOURCE, "count =", 1);
+    let count_highlights = client.request(
+        "textDocument/documentHighlight",
+        json!({
+            "textDocument":{"uri":uri},
+            "position":count_cursor
+        }),
+    );
+    let count_highlights = count_highlights.as_array().unwrap();
+    assert_eq!(
+        count_highlights.len(),
+        5,
+        "count highlights: {count_highlights:?}"
+    );
+    assert_eq!(
+        count_highlights
+            .iter()
+            .filter(|highlight| highlight["kind"] == 3)
+            .count(),
+        2,
+        "declaration and assignment target are writes: {count_highlights:?}"
+    );
+    assert_eq!(
+        count_highlights
+            .iter()
+            .filter(|highlight| highlight["kind"] == 2)
+            .count(),
+        3,
+        "value reads: {count_highlights:?}"
+    );
+    let count_ranges = DOCUMENT_HIGHLIGHT_CODE_LENS_SOURCE
+        .match_indices("count")
+        .map(|(start, name)| {
+            range_at(
+                DOCUMENT_HIGHLIGHT_CODE_LENS_SOURCE,
+                start,
+                start + name.len(),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        count_highlights
+            .iter()
+            .map(|highlight| highlight["range"].clone())
+            .collect::<Vec<_>>(),
+        count_ranges
+    );
+
+    let first_item = DOCUMENT_HIGHLIGHT_CODE_LENS_SOURCE
+        .find("let item")
+        .unwrap()
+        + "let ".len();
+    let first_item_highlights = client.request(
+        "textDocument/documentHighlight",
+        json!({
+            "textDocument":{"uri":uri},
+            "position":position_at(DOCUMENT_HIGHLIGHT_CODE_LENS_SOURCE, first_item + 1)
+        }),
+    );
+    assert_eq!(
+        first_item_highlights.as_array().unwrap().len(),
+        2,
+        "the first branch binding must not capture the second branch: {first_item_highlights:?}"
+    );
+    let first_item_reference = DOCUMENT_HIGHLIGHT_CODE_LENS_SOURCE[first_item + "item".len()..]
+        .find("item")
+        .map(|offset| first_item + "item".len() + offset)
+        .unwrap();
+    assert_eq!(
+        first_item_highlights
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|highlight| highlight["range"].clone())
+            .collect::<Vec<_>>(),
+        vec![
+            range_at(
+                DOCUMENT_HIGHLIGHT_CODE_LENS_SOURCE,
+                first_item,
+                first_item + "item".len()
+            ),
+            range_at(
+                DOCUMENT_HIGHLIGHT_CODE_LENS_SOURCE,
+                first_item_reference,
+                first_item_reference + "item".len()
+            ),
+        ]
+    );
+
+    let twice_declaration = DOCUMENT_HIGHLIGHT_CODE_LENS_SOURCE.find("twice").unwrap();
+    let twice_highlights = client.request(
+        "textDocument/documentHighlight",
+        json!({
+            "textDocument":{"uri":uri},
+            "position":position_at(DOCUMENT_HIGHLIGHT_CODE_LENS_SOURCE, twice_declaration + 1)
+        }),
+    );
+    assert_eq!(twice_highlights.as_array().unwrap().len(), 3);
+    assert_eq!(
+        twice_highlights
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|highlight| highlight["kind"] == 3)
+            .count(),
+        1,
+        "function declaration is a write: {twice_highlights:?}"
+    );
+    client.shutdown();
+}
+
+#[test]
+fn code_lenses_count_only_uniquely_resolved_workspace_calls() {
+    let provider_uri = "file:///workspace/workspace-hierarchy-provider-v1.orna";
+    let caller_uri = "file:///workspace/workspace-hierarchy-caller-v1.orna";
+    let mut client = Client::spawn();
+    initialize(&mut client);
+    open(&mut client, caller_uri, WORKSPACE_HIERARCHY_CALLER_SOURCE);
+    open(
+        &mut client,
+        provider_uri,
+        WORKSPACE_HIERARCHY_PROVIDER_SOURCE,
+    );
+
+    let lenses = client.request(
+        "textDocument/codeLens",
+        json!({"textDocument":{"uri":provider_uri}}),
+    );
+    let lenses = lenses.as_array().unwrap();
+    let lens_for = |name: &str| {
+        let start = WORKSPACE_HIERARCHY_PROVIDER_SOURCE.find(name).unwrap();
+        lenses
+            .iter()
+            .find(|lens| {
+                lens["range"]
+                    == range_at(
+                        WORKSPACE_HIERARCHY_PROVIDER_SOURCE,
+                        start,
+                        start + name.len(),
+                    )
+            })
+            .unwrap_or_else(|| panic!("missing code lens for {name}: {lenses:?}"))
+    };
+
+    let seed = lens_for("seed");
+    assert_eq!(seed["command"]["title"], "3 incoming calls");
+    assert_eq!(seed["command"]["command"], "editor.action.showReferences");
+    assert_eq!(seed["command"]["arguments"][0], provider_uri);
+    assert_eq!(seed["command"]["arguments"][2].as_array().unwrap().len(), 3);
+    assert!(
+        seed["command"]["arguments"][2]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|location| location["uri"] == provider_uri)
+    );
+
+    assert_eq!(lens_for("mid")["command"]["title"], "2 incoming calls");
+    let root = lens_for("root");
+    assert_eq!(root["command"]["title"], "2 incoming calls");
+    assert!(
+        root["command"]["arguments"][2]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|location| location["uri"] == caller_uri)
+    );
+    assert_eq!(lens_for("shadowed")["command"]["title"], "0 incoming calls");
+    assert_eq!(lens_for("isolated")["command"]["title"], "0 incoming calls");
+    assert_eq!(
+        lens_for("unresolved")["command"]["title"],
+        "0 incoming calls"
+    );
+    assert_eq!(lens_for("collide")["command"]["title"], "0 incoming calls");
+
+    let caller_lenses = client.request(
+        "textDocument/codeLens",
+        json!({"textDocument":{"uri":caller_uri}}),
+    );
+    let ambiguous = caller_lenses
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|lens| {
+            lens["range"]
+                == range_at(
+                    WORKSPACE_HIERARCHY_CALLER_SOURCE,
+                    WORKSPACE_HIERARCHY_CALLER_SOURCE
+                        .find("ambiguous_call")
+                        .unwrap(),
+                    WORKSPACE_HIERARCHY_CALLER_SOURCE
+                        .find("ambiguous_call")
+                        .unwrap()
+                        + "ambiguous_call".len(),
+                )
+        })
+        .unwrap();
+    assert_eq!(ambiguous["command"]["title"], "0 incoming calls");
+    client.shutdown();
 }
 
 fn open(client: &mut Client, uri: &str, source: &str) -> Value {
