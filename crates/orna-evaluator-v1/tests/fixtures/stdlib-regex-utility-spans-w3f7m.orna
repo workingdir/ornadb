@@ -1,0 +1,6 @@
+std.regex.utilities.span(nonempty) == (1, 3)
+    && std.regex.utilities.span_length(nonempty) == 2
+    && !std.regex.utilities.is_zero_width(nonempty)
+    && std.regex.utilities.span(empty) == (3, 3)
+    && std.regex.utilities.span_length(empty) == 0
+    && std.regex.utilities.is_zero_width(empty)
