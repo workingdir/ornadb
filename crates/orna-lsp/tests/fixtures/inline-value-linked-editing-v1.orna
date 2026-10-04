@@ -1,0 +1,15 @@
+// Unicode prefix for UTF-16 range proofs: café 🧭.
+pub fn shadow(input: Int): Int =
+    if input > 0 {
+        let copied: Int = input;
+        copied
+    } else {
+        let input: Int = input + 1;
+        input
+    };
+
+pub fn total(seed: Int): Int {
+    let result = seed + 1;
+    result = result + seed;
+    result
+}
