@@ -97,6 +97,12 @@ call assert_true(lsp#capabilities#has_completion_provider('orna'), 'consumer did
 let s:consumer_buffer = bufnr('%')
 execute 'edit ' . fnameescape($ORNA_TEST_PROVIDER)
 call assert_equal('orna', &filetype)
+let s:deadline = reltimefloat(reltime()) + 10.0
+while !lsp#capabilities#has_completion_provider('orna') && reltimefloat(reltime()) < s:deadline
+    sleep 10m
+endwhile
+call assert_true(lsp#capabilities#has_completion_provider('orna'), 'provider did not attach to orna-lsp')
+let s:provider_document = lsp#get_text_document_identifier()
 execute 'buffer ' . s:consumer_buffer
 call cursor(line('$'), 1)
 
@@ -115,6 +121,12 @@ function! OrnaCaptureHover(data) abort
 endfunction
 function! OrnaCaptureSemanticTokens(data) abort
     let g:orna_semantic_response = a:data['response']
+endfunction
+function! OrnaCaptureReferences(data) abort
+    let g:orna_references_response = a:data['response']
+endfunction
+function! OrnaCaptureRename(data) abort
+    let g:orna_rename_response = a:data['response']
 endfunction
 call lsp#send_request('orna', {{
     \ 'method': 'textDocument/completion',
@@ -156,6 +168,37 @@ while !exists('g:orna_hover_response') && reltimefloat(reltime()) < s:deadline
 endwhile
 call assert_true(exists('g:orna_hover_response'), 'vim-lsp hover request timed out')
 let s:hover = g:orna_hover_response['result']
+let s:consumer_document = lsp#get_text_document_identifier()
+call lsp#send_request('orna', {{
+    \ 'method': 'textDocument/references',
+    \ 'params': {{
+    \     'textDocument': s:consumer_document,
+    \     'position': lsp#get_position(),
+    \     'context': {{ 'includeDeclaration': v:true }},
+    \ }},
+    \ 'on_notification': function('OrnaCaptureReferences'),
+\ }})
+let s:deadline = reltimefloat(reltime()) + 10.0
+while !exists('g:orna_references_response') && reltimefloat(reltime()) < s:deadline
+    sleep 10m
+endwhile
+call assert_true(exists('g:orna_references_response'), 'vim-lsp references request timed out')
+let s:references = g:orna_references_response['result']
+call lsp#send_request('orna', {{
+    \ 'method': 'textDocument/rename',
+    \ 'params': {{
+    \     'textDocument': s:consumer_document,
+    \     'position': lsp#get_position(),
+    \     'newName': 'sum',
+    \ }},
+    \ 'on_notification': function('OrnaCaptureRename'),
+\ }})
+let s:deadline = reltimefloat(reltime()) + 10.0
+while !exists('g:orna_rename_response') && reltimefloat(reltime()) < s:deadline
+    sleep 10m
+endwhile
+call assert_true(exists('g:orna_rename_response'), 'vim-lsp rename request timed out')
+let s:rename = g:orna_rename_response['result']
 
 execute 'edit ' . fnameescape($ORNA_TEST_SEMANTIC_FIXTURE)
 call assert_equal('orna', &filetype)
@@ -181,6 +224,10 @@ call writefile([json_encode({{
     \ 'adapted': s:adapted['items'],
     \ 'hover': s:hover,
     \ 'semantic': s:semantic,
+    \ 'consumer_uri': s:consumer_document['uri'],
+    \ 'provider_uri': s:provider_document['uri'],
+    \ 'references': s:references,
+    \ 'rename': s:rename,
 \ }})], $ORNA_EDITOR_RESULT)
 if !empty(v:errors)
     call writefile(v:errors, $ORNA_EDITOR_RESULT . '.errors')
@@ -239,7 +286,28 @@ qa!
         &evidence["semantic"],
         "Vim vim-lsp",
     );
-    println!("Vim integration evidence: ATTACHED=pass DEPENDENCY_ORDER=consumer-before-provider OMNIFUNC=pass COMPLETION=pass HOVER=pass SEMANTIC_TOKENS=pass");
+    let consumer_uri = evidence["consumer_uri"]
+        .as_str()
+        .expect("Vim consumer document URI");
+    let provider_uri = evidence["provider_uri"]
+        .as_str()
+        .expect("Vim provider document URI");
+    let symbol_sources = [(consumer_uri, SOURCE), (provider_uri, PROVIDER_SOURCE)];
+    hover_semantic_contract::assert_references_contract(
+        &symbol_sources,
+        &evidence["references"],
+        true,
+        "Vim vim-lsp",
+    );
+    hover_semantic_contract::assert_rename_contract(
+        &symbol_sources,
+        &evidence["rename"],
+        "sum",
+        "Vim vim-lsp",
+    );
+    println!(
+        "Vim integration evidence: ATTACHED=pass DEPENDENCY_ORDER=consumer-before-provider OMNIFUNC=pass COMPLETION=pass HOVER=pass REFERENCES=pass RENAME=pass SEMANTIC_TOKENS=pass"
+    );
 }
 
 #[test]
