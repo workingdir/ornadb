@@ -19,6 +19,8 @@ mod hover_semantic_contract;
 mod syntax_v1_action_signature_contract;
 #[path = "support/syntax_v1_depth_contract.rs"]
 mod syntax_v1_depth_contract;
+#[path = "support/syntax_v1_folding_selection_contract.rs"]
+mod syntax_v1_folding_selection_contract;
 #[path = "support/syntax_v1_workspace_hierarchy_contract.rs"]
 mod syntax_v1_workspace_hierarchy_contract;
 
@@ -32,6 +34,7 @@ const WORKSPACE_HIERARCHY_PROVIDER_SOURCE: &str =
     include_str!("fixtures/workspace-hierarchy-provider-v1.orna");
 const WORKSPACE_HIERARCHY_CALLER_SOURCE: &str =
     include_str!("fixtures/workspace-hierarchy-caller-v1.orna");
+const FOLDING_SELECTION_SOURCE: &str = include_str!("fixtures/folding-selection-v1.orna");
 
 #[test]
 fn attachment_input_matches_its_crate_local_fixture() {
@@ -114,6 +117,14 @@ fn vim_lsp_attaches_and_exposes_hover_semantic_tokens_and_completion() {
         fs::read_to_string(&workspace_caller).unwrap(),
         WORKSPACE_HIERARCHY_CALLER_SOURCE
     );
+    let folding_selection_fixture =
+        root.join("crates/orna-lsp/tests/fixtures/folding-selection-v1.orna");
+    assert_eq!(
+        fs::read_to_string(&folding_selection_fixture).unwrap(),
+        FOLDING_SELECTION_SOURCE
+    );
+    let folding_selection_requests =
+        syntax_v1_folding_selection_contract::request_data(FOLDING_SELECTION_SOURCE);
     let lsp_binary = env!("CARGO_BIN_EXE_orna-lsp");
     let vim_script = format!(
         r#"
@@ -465,6 +476,35 @@ while len(g:orna_workspace_hierarchy_responses) < 15 && reltimefloat(reltime()) 
     sleep 10m
 endwhile
 call assert_equal(15, len(g:orna_workspace_hierarchy_responses), 'vim-lsp workspace-symbol/call-hierarchy requests timed out')
+
+function! OrnaCaptureFoldingSelection(name, data) abort
+    let g:orna_folding_selection_responses[a:name] = a:data['response']['result']
+endfunction
+execute 'edit ' . fnameescape($ORNA_FOLDING_SELECTION_FIXTURE)
+call assert_equal('orna', &filetype)
+let s:deadline = reltimefloat(reltime()) + 10.0
+while !lsp#capabilities#has_completion_provider('orna') && reltimefloat(reltime()) < s:deadline
+    sleep 10m
+endwhile
+call assert_true(lsp#capabilities#has_completion_provider('orna'), 'folding/selection fixture did not attach')
+let s:folding_selection_document = lsp#get_text_document_identifier()
+let s:folding_selection_requests = json_decode($ORNA_FOLDING_SELECTION_REQUESTS)
+let g:orna_folding_selection_responses = {{}}
+call lsp#send_request('orna', {{
+    \ 'method': 'textDocument/foldingRange',
+    \ 'params': {{ 'textDocument': s:folding_selection_document }},
+    \ 'on_notification': function('OrnaCaptureFoldingSelection', ['folding_ranges']),
+\ }})
+call lsp#send_request('orna', {{
+    \ 'method': 'textDocument/selectionRange',
+    \ 'params': {{ 'textDocument': s:folding_selection_document, 'positions': s:folding_selection_requests.selection_positions }},
+    \ 'on_notification': function('OrnaCaptureFoldingSelection', ['selection_ranges']),
+\ }})
+let s:deadline = reltimefloat(reltime()) + 10.0
+while len(g:orna_folding_selection_responses) < 2 && reltimefloat(reltime()) < s:deadline
+    sleep 10m
+endwhile
+call assert_equal(2, len(g:orna_folding_selection_responses), 'vim-lsp folding/selection requests timed out')
 call writefile([json_encode({{
     \ 'omnifunc': &l:omnifunc,
     \ 'completion': s:response['result'],
@@ -501,6 +541,9 @@ call writefile([json_encode({{
     \ 'call_ambiguous_reference': g:orna_workspace_hierarchy_responses.call_ambiguous_reference,
     \ 'workspace_provider_uri': s:workspace_provider_document['uri'],
     \ 'workspace_caller_uri': s:workspace_caller_document['uri'],
+    \ 'folding_ranges': g:orna_folding_selection_responses.folding_ranges,
+    \ 'selection_ranges': g:orna_folding_selection_responses.selection_ranges,
+    \ 'folding_selection_uri': s:folding_selection_document['uri'],
     \ 'consumer_uri': s:consumer_document['uri'],
     \ 'provider_uri': s:provider_document['uri'],
     \ 'references': s:references,
@@ -531,6 +574,7 @@ qa!
         .env("ORNA_TEST_ACTION_FIXTURE", &action_fixture)
         .env("ORNA_WORKSPACE_PROVIDER_FIXTURE", &workspace_provider)
         .env("ORNA_WORKSPACE_CALLER_FIXTURE", &workspace_caller)
+        .env("ORNA_FOLDING_SELECTION_FIXTURE", &folding_selection_fixture)
         .env(
             "ORNA_DEPTH_RANGES",
             serde_json::to_string(&depth_ranges).unwrap(),
@@ -542,6 +586,10 @@ qa!
         .env(
             "ORNA_WORKSPACE_HIERARCHY_REQUESTS",
             serde_json::to_string(&workspace_hierarchy_requests).unwrap(),
+        )
+        .env(
+            "ORNA_FOLDING_SELECTION_REQUESTS",
+            serde_json::to_string(&folding_selection_requests).unwrap(),
         )
         .env("ORNA_EDITOR_RESULT", &result_path)
         .output()
@@ -625,6 +673,12 @@ qa!
         &evidence,
         "Vim vim-lsp",
     );
+    syntax_v1_folding_selection_contract::assert_contract(
+        FOLDING_SELECTION_SOURCE,
+        &evidence["folding_ranges"],
+        &evidence["selection_ranges"],
+        "Vim vim-lsp",
+    );
     let consumer_uri = evidence["consumer_uri"]
         .as_str()
         .expect("Vim consumer document URI");
@@ -651,7 +705,7 @@ qa!
         "Vim vim-lsp",
     );
     println!(
-        "Vim integration evidence: ATTACHED=pass DEPENDENCY_ORDER=consumer-before-provider OMNIFUNC=pass COMPLETION=pass HOVER=pass REFERENCES=pass RENAME=pass SEMANTIC_TOKENS=pass SEMANTIC_DEPTH=pass RANGED_TOKENS=pass INLAY_HINT_DEPTH=pass SIGNATURE_HELP=pass CODE_ACTION=pass WORKSPACE_SYMBOL=pass CALL_HIERARCHY=pass"
+        "Vim integration evidence: ATTACHED=pass DEPENDENCY_ORDER=consumer-before-provider OMNIFUNC=pass COMPLETION=pass HOVER=pass REFERENCES=pass RENAME=pass SEMANTIC_TOKENS=pass SEMANTIC_DEPTH=pass RANGED_TOKENS=pass INLAY_HINT_DEPTH=pass SIGNATURE_HELP=pass CODE_ACTION=pass WORKSPACE_SYMBOL=pass CALL_HIERARCHY=pass FOLDING_RANGE=pass SELECTION_RANGE=pass"
     );
 }
 

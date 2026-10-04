@@ -83,6 +83,8 @@ mod tests {
     const STANDARD_SOURCE: &str = include_str!("analysis/fixtures/standard-math-import.orna");
     const RANKED_STANDARD_SOURCE: &str =
         include_str!("browser/fixtures/standard-completion-ranking.orna");
+    const STANDARD_SIGNATURE_SOURCE: &str =
+        include_str!("browser/fixtures/standard-signature-help.orna");
 
     fn position(source: &str, byte: usize) -> (u32, u32) {
         let prefix = &source[..byte];
@@ -230,5 +232,41 @@ mod tests {
                 .expect("standard hover JSON");
         assert!(hover.to_string().contains("fn increment(value: Int): Int"));
         assert!(hover.to_string().contains("exact successor"));
+    }
+
+    #[test]
+    fn browser_standard_signature_help_exposes_parameter_hints_and_active_argument() {
+        let call_offset = STANDARD_SIGNATURE_SOURCE
+            .find("clamp(value, lower, upper)")
+            .expect("standard clamp call");
+        let active_argument_offset = call_offset + "clamp(value, lower, ".len();
+        let (line, character) = position(STANDARD_SIGNATURE_SOURCE, active_argument_offset);
+        let signature: serde_json::Value = serde_json::from_str(&signature_help(
+            STANDARD_SIGNATURE_SOURCE.to_owned(),
+            line,
+            character,
+        ))
+        .expect("standard signature help JSON");
+
+        assert_eq!(signature["activeSignature"], 0);
+        assert_eq!(signature["activeParameter"], 2);
+        assert_eq!(signature["signatures"].as_array().map(Vec::len), Some(1));
+        let standard_signature = &signature["signatures"][0];
+        assert_eq!(
+            standard_signature["label"],
+            "pub fn clamp(value: Int, lower: Int, upper: Int): Int"
+        );
+        assert!(
+            standard_signature["documentation"]
+                .to_string()
+                .contains("inclusive interval")
+        );
+        let parameters = standard_signature["parameters"]
+            .as_array()
+            .expect("parameter hints");
+        assert_eq!(parameters.len(), 3);
+        assert_eq!(parameters[0]["label"], "value: Int");
+        assert_eq!(parameters[1]["label"], "lower: Int");
+        assert_eq!(parameters[2]["label"], "upper: Int");
     }
 }
