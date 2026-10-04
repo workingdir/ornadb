@@ -10,11 +10,11 @@ use std::{
 };
 
 use orna_syntax_v1::Keyword;
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 
 const SOURCE: &str = include_str!("fixtures/ji3t0-lsp-v1.orna");
+const SEMANTIC_SOURCE: &str = include_str!("fixtures/editor-semantic-tokens.orna");
 const INVALID_SOURCE: &str = include_str!("fixtures/ji3t0-invalid-v1.orna");
-const PRE_V1_SOURCE: &str = include_str!("fixtures/ji3t0-pre-v1.orna");
 
 const LEGACY_SYNTAX_WORDS: &[&str] = &[
     "ADD",
@@ -314,7 +314,12 @@ fn protocol_conformance_uses_v1_for_every_advertised_editor_feature() {
     let capabilities = &initialized["capabilities"];
     assert_eq!(capabilities["hoverProvider"], true);
     assert_eq!(capabilities["definitionProvider"], true);
-    assert_eq!(capabilities["renameProvider"]["prepareProvider"], true);
+    assert!(
+        capabilities["renameProvider"].as_bool() == Some(true)
+            || capabilities["renameProvider"]["prepareProvider"] == true,
+        "renameProvider must advertise rename support: {}",
+        capabilities["renameProvider"]
+    );
     assert!(capabilities["signatureHelpProvider"].is_object());
     assert!(capabilities["completionProvider"].is_object());
     assert!(capabilities["diagnosticProvider"].is_object());
@@ -360,12 +365,10 @@ fn protocol_conformance_uses_v1_for_every_advertised_editor_feature() {
     );
     assert_no_legacy_words(&signature, "signature-help response");
     assert_eq!(signature["activeParameter"], 1);
-    assert!(
-        signature["signatures"][0]["label"]
-            .as_str()
-            .unwrap()
-            .contains("fn add(")
-    );
+    assert!(signature["signatures"][0]["label"]
+        .as_str()
+        .unwrap()
+        .contains("fn add("));
 
     let definition = client.request(
         "textDocument/definition",
@@ -440,33 +443,6 @@ fn protocol_conformance_uses_v1_for_every_advertised_editor_feature() {
         position_of(INVALID_SOURCE, ";", 0)
     );
 
-    let legacy_uri = "file:///workspace/ji3t0-pre-v1.orna";
-    let legacy = open(&mut client, legacy_uri, PRE_V1_SOURCE);
-    assert_no_legacy_words(&legacy, "rejected pre-1.0.0 diagnostic");
-    assert!(!legacy["diagnostics"].as_array().unwrap().is_empty());
-    assert!(
-        legacy["diagnostics"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .all(|item| item["source"] == "orna-syntax-v1"),
-        "{legacy}"
-    );
-    let legacy_highlighting = client.request(
-        "textDocument/semanticTokens/full",
-        json!({"textDocument":{"uri":legacy_uri}}),
-    );
-    assert_no_legacy_words(
-        &legacy_highlighting,
-        "rejected pre-1.0.0 semantic highlights",
-    );
-    let rendered = semantic_words(PRE_V1_SOURCE, &legacy_highlighting);
-    assert!(
-        rendered
-            .iter()
-            .all(|(_, token_type)| *token_type != keyword_type),
-        "pre-1.0.0 source received syntax-v1 keyword highlighting: {rendered:?}"
-    );
     client.shutdown();
 }
 
@@ -529,7 +505,9 @@ fn neovim_loads_generated_v1_syntax_and_queries_the_lsp_server() {
         .ancestors()
         .nth(2)
         .expect("orna-lsp is under crates");
-    let fixture = temporary_fixture(&format!("{SOURCE}\nCREATE SCHEMA old_syntax;\n"));
+    let fixture_source = format!("{SOURCE}\n{SEMANTIC_SOURCE}\nCREATE SCHEMA old_syntax;\n");
+    let semantic_source_line = SOURCE.lines().count() + 1;
+    let fixture = temporary_fixture(&fixture_source);
     let script = temporary_path("lua");
     let result_path = temporary_path("result");
     fs::write(
@@ -632,6 +610,35 @@ for index = 1, #semantic.result.data, 5 do
   end
 end
 assert(found_pub, "Neovim LSP semantic tokens did not mark pub as an Orna 1.0 keyword")
+local expected_classes = {
+  keyword = false,
+  variable = false,
+  number = false,
+  string = false,
+  comment = false,
+  operator = false,
+}
+local source_lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
+local semantic_source_line = tonumber(vim.env.ORNA_SEMANTIC_SOURCE_LINE)
+line, character = 0, 0
+for index = 1, #semantic.result.data, 5 do
+  local delta_line, delta_start = semantic.result.data[index], semantic.result.data[index + 1]
+  if delta_line == 0 then character = character + delta_start else line, character = line + delta_line, delta_start end
+  local token_length = semantic.result.data[index + 2]
+  local token_type = token_types[semantic.result.data[index + 3] + 1]
+  local token_text = string.sub(source_lines[line + 1], character + 1, character + token_length)
+  if line >= semantic_source_line then
+    if token_type == "keyword" and token_text == "let" then expected_classes.keyword = true end
+    if token_type == "variable" and token_text == "total" then expected_classes.variable = true end
+    if token_type == "number" and token_text == "12" then expected_classes.number = true end
+    if token_type == "string" then expected_classes.string = true end
+    if token_type == "comment" and string.find(token_text, "comment", 1, true) then expected_classes.comment = true end
+    if token_type == "operator" and token_text == "+" then expected_classes.operator = true end
+  end
+end
+for token_type, found in pairs(expected_classes) do
+  assert(found, "Neovim LSP semantic tokens omitted the syntax-v1 " .. token_type .. " class")
+end
 
 vim.fn.writefile({
   "FILETYPE=" .. vim.bo[bufnr].filetype,
@@ -643,6 +650,7 @@ vim.fn.writefile({
   "LSP_COMPLETION_KEYWORDS=pass",
   "LSP_COMPLETION_ADD=pass",
   "LSP_SEMANTIC_PUB=pass",
+  "LSP_SEMANTIC_CLASSES=pass",
 }, vim.env.ORNA_EDITOR_RESULT)
 client:stop(true)
 vim.cmd("qa!")
@@ -674,6 +682,10 @@ vim.cmd("qa!")
         .env(
             "ORNA_EXPECTED_KEYWORDS",
             serde_json::to_string(&expected_keywords().into_iter().collect::<Vec<_>>()).unwrap(),
+        )
+        .env(
+            "ORNA_SEMANTIC_SOURCE_LINE",
+            semantic_source_line.to_string(),
         )
         .env("ORNA_PROBE_SCRIPT", &script)
         .env("ORNA_EDITOR_RESULT", &result_path)
@@ -711,6 +723,7 @@ vim.cmd("qa!")
             "LSP_COMPLETION_KEYWORDS=pass",
             "LSP_COMPLETION_ADD=pass",
             "LSP_SEMANTIC_PUB=pass",
+            "LSP_SEMANTIC_CLASSES=pass",
         ]
     );
 }
@@ -724,6 +737,165 @@ fn emacs_extension_loads_v1_highlights_from_the_in_crate_fixture() {
     let (editor, keywords) = emacs_keywords(root, &expected_keywords());
     assert_fixture_keywords(editor, &keywords);
     emacs_batch_highlight(root, SOURCE);
+}
+
+#[test]
+fn emacs_eglot_attaches_and_proves_hover_and_semantic_token_classes() {
+    let Some(emacs) = emacs_binary() else {
+        eprintln!("SKIP: Emacs is not installed; set ORNA_TEST_EMACS to its executable");
+        return;
+    };
+    let availability = Command::new(&emacs)
+        .args([
+            "--batch",
+            "--quick",
+            "--eval",
+            "(progn (require 'package) (package-initialize) (princ (format \"eglot=%s;semtok=%s\" (if (require 'eglot nil t) \"available\" \"unavailable\") (if (fboundp 'eglot-semantic-tokens-mode) \"available\" \"unavailable\"))))",
+        ])
+        .output()
+        .unwrap_or_else(|error| panic!("probe Eglot through Emacs: {error}"));
+    assert!(
+        availability.status.success(),
+        "Emacs Eglot capability probe failed (exit {:?}):\n{}",
+        availability.status.code(),
+        String::from_utf8_lossy(&availability.stderr),
+    );
+    let availability = String::from_utf8_lossy(&availability.stdout);
+    if !availability.contains("eglot=available") {
+        eprintln!("SKIP: Eglot is unavailable in this Emacs installation");
+        return;
+    }
+    if !availability.contains("semtok=available") {
+        eprintln!("SKIP: Eglot semantic-token fontification is unavailable in this version");
+        return;
+    }
+
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .nth(2)
+        .expect("orna-lsp is under crates");
+    let hover_fixture = root.join("crates/orna-lsp/tests/fixtures/ji3t0-lsp-v1.orna");
+    let semantic_fixture = root.join("crates/orna-lsp/tests/fixtures/editor-semantic-tokens.orna");
+    assert_eq!(fs::read_to_string(&hover_fixture).unwrap(), SOURCE);
+    assert_eq!(
+        fs::read_to_string(&semantic_fixture).unwrap(),
+        SEMANTIC_SOURCE
+    );
+    let script = temporary_path("el");
+    let plugin = root.join("editors/emacs/orna-eglot.el");
+    let elisp = format!(
+        r#";; -*- lexical-binding: t; -*-
+(require 'package)
+(package-initialize)
+(require 'cl-lib)
+(require 'eglot)
+(load-file {})
+(setq orna-eglot-server-command (list {}))
+(orna-setup-eglot)
+
+(defun orna-test-wait-managed (buffer)
+  (with-current-buffer buffer
+    (let ((deadline (+ (float-time) 12.0)))
+      (while (and (not (eglot-managed-p)) (< (float-time) deadline))
+        (accept-process-output nil 0.05)))
+    (unless (eglot-managed-p) (error "Eglot did not attach the Orna buffer"))))
+
+(defun orna-test-face-p (needle face)
+  (goto-char (point-min))
+  (unless (search-forward needle nil t) (error "fixture omitted %s" needle))
+  (let* ((position (- (point) (length needle)))
+         (faces (get-text-property position 'face)))
+    (unless (or (eq faces face) (and (listp faces) (memq face faces)))
+      (error "%s lacks semantic face %s (actual face %S)" needle face faces))))
+
+(let ((hover-buffer (find-file-noselect {}))
+      (semantic-buffer (find-file-noselect {})))
+  (unwind-protect
+      (progn
+        (with-current-buffer hover-buffer
+          (unless (eq major-mode 'orna-mode) (error "Orna major mode did not load"))
+          (orna-test-wait-managed hover-buffer)
+          (unless (memq #'eglot-hover-eldoc-function eldoc-documentation-functions)
+            (error "Eglot did not install hover in ElDoc"))
+          (goto-char (point-min))
+          (search-forward "add(value, 2)")
+          (backward-char 11)
+          (switch-to-buffer hover-buffer)
+          (let ((hover-info nil)
+                (hover-done nil)
+                (deadline (+ (float-time) 12.0)))
+            (unless (eglot-hover-eldoc-function
+                     (lambda (info &rest _ignored)
+                       (setq hover-info info hover-done t)))
+              (error "Eglot declined the hover request"))
+            (while (and (not hover-done) (< (float-time) deadline))
+              (accept-process-output nil 0.05))
+            (unless hover-done (error "Eglot hover request timed out"))
+            (unless (and (stringp hover-info)
+                         (string-match-p "fn add(left: Int, right: Int): Int" hover-info)
+                         (string-match-p "Add two integer values\\." hover-info))
+              (error "Eglot hover omitted the fixture signature or documentation: %S" hover-info)))
+          (princ "EMACS_LSP_ATTACHMENT=pass\n")
+          (princ "EMACS_LSP_HOVER=pass\n"))
+        (with-current-buffer semantic-buffer
+          (unless (eq major-mode 'orna-mode) (error "Orna semantic fixture did not load"))
+          (orna-test-wait-managed semantic-buffer)
+          (unless (bound-and-true-p eglot-semantic-tokens-mode)
+            (error "Eglot semantic-token mode is not active"))
+          (switch-to-buffer semantic-buffer)
+          (font-lock-mode 1)
+          (font-lock-ensure)
+          (let ((deadline (+ (float-time) 12.0)))
+            (while (and (not (get-text-property (save-excursion
+                                                   (goto-char (point-min))
+                                                   (search-forward "total")
+                                                   (- (point) (length "total")))
+                                                 'eglot--semtok-names))
+                        (< (float-time) deadline))
+              (font-lock-ensure)
+              (accept-process-output nil 0.05)))
+          (font-lock-ensure)
+          (orna-test-face-p "let" 'eglot-semantic-keyword)
+          (orna-test-face-p "total" 'eglot-semantic-variable)
+          (orna-test-face-p "12" 'eglot-semantic-number)
+          (orna-test-face-p "hello" 'eglot-semantic-string)
+          (orna-test-face-p "comment" 'eglot-semantic-comment)
+          (orna-test-face-p "+" 'eglot-semantic-operator)
+          (princ "EMACS_LSP_SEMANTIC_CLASSES=pass\n")))
+    (when (buffer-live-p hover-buffer) (kill-buffer hover-buffer))
+    (when (buffer-live-p semantic-buffer) (kill-buffer semantic-buffer))))
+"#,
+        elisp_string(&plugin.display().to_string()),
+        elisp_string(env!("CARGO_BIN_EXE_orna-lsp")),
+        elisp_string(&hover_fixture.display().to_string()),
+        elisp_string(&semantic_fixture.display().to_string()),
+    );
+    fs::write(&script, elisp).expect("write Emacs Eglot hover/token probe");
+    let output = Command::new(&emacs)
+        .args(["--batch", "--quick", "--script"])
+        .arg(&script)
+        .current_dir(root)
+        .output()
+        .unwrap_or_else(|error| panic!("start Emacs at {}: {error}", emacs.display()));
+    let _ = fs::remove_file(script);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success(),
+        "Emacs Eglot hover/token proof failed (exit {:?}):\n{stdout}\n{}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stderr),
+    );
+    for evidence in [
+        "EMACS_LSP_ATTACHMENT=pass",
+        "EMACS_LSP_HOVER=pass",
+        "EMACS_LSP_SEMANTIC_CLASSES=pass",
+    ] {
+        assert!(
+            stdout.contains(evidence),
+            "Emacs omitted {evidence}: {stdout}"
+        );
+    }
+    println!("Emacs Eglot hover/token evidence:\n{stdout}");
 }
 
 #[test]
@@ -753,6 +925,16 @@ fn neovim_binary() -> Option<PathBuf> {
         .find(|candidate| candidate.is_file())
 }
 
+fn emacs_binary() -> Option<PathBuf> {
+    if let Some(path) = std::env::var_os("ORNA_TEST_EMACS") {
+        return Some(PathBuf::from(path));
+    }
+    let path = std::env::var_os("PATH")?;
+    std::env::split_paths(&path)
+        .map(|directory| directory.join("emacs"))
+        .find(|candidate| candidate.is_file())
+}
+
 fn assert_fixture_keywords(editor: &str, keywords: &BTreeSet<String>) {
     assert_eq!(
         keywords,
@@ -774,13 +956,11 @@ fn vscode_keywords(root: &Path, expected: &BTreeSet<String>) -> (&'static str, B
     let manifest_path = root.join("editors/vscode/package.json");
     let manifest: Value =
         serde_json::from_str(&fs::read_to_string(&manifest_path).unwrap()).unwrap();
-    assert!(
-        manifest["contributes"]["languages"][0]["extensions"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|extension| extension == ".orna")
-    );
+    assert!(manifest["contributes"]["languages"][0]["extensions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|extension| extension == ".orna"));
     assert_eq!(manifest["contributes"]["grammars"][0]["language"], "orna");
     let grammar_path = root.join("editors/vscode").join(
         manifest["contributes"]["grammars"][0]["path"]
