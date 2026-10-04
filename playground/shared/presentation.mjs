@@ -688,35 +688,45 @@ export class LiveSession {
     }
     this.sessionId = metadata.session;
     this.resumeToken = metadata.resume_token;
+    if (metadata.database !== this.databaseId) {
+      this.dispose();
+      throw new PresentationError('Live session selected a different database.');
+    }
     const endpoint = new URL(metadata.websocket_path, this.origin);
     if (endpoint.origin !== this.origin.origin || !endpoint.pathname.startsWith('/orna/live/')) {
+      this.dispose();
       throw new PresentationError('Live session returned an invalid WebSocket path.');
     }
     endpoint.protocol = this.origin.protocol === 'https:' ? 'wss:' : 'ws:';
     this.onStatus('Connecting to live data…');
-    const socket = new this.WebSocketConstructor(endpoint, 'orna.present.v1');
-    socket.binaryType = 'arraybuffer';
-    this.socket = socket;
-    socket.addEventListener('message', event => this.#receive(event));
-    socket.addEventListener('close', () => {
-      this.#rejectPending(new PresentationError('Live connection closed.'));
-      this.presentation.awaitingSnapshot = true;
-      this.presentation.releaseResync();
-      this.onStatus('Live connection closed.');
-    });
-    socket.addEventListener('error', () => this.onStatus('Live connection failed.'));
-    await new Promise((resolve, reject) => {
-      const timer = setTimeout(() => reject(new PresentationError('Live connection timed out.')), 10_000);
-      socket.addEventListener('open', () => {
-        clearTimeout(timer);
-        this.onStatus('Waiting for the first presentation…');
-        resolve();
-      }, { once: true });
-      socket.addEventListener('error', () => {
-        clearTimeout(timer);
-        reject(new PresentationError('Live connection failed.'));
-      }, { once: true });
-    });
+    try {
+      const socket = new this.WebSocketConstructor(endpoint, 'orna.present.v1');
+      socket.binaryType = 'arraybuffer';
+      this.socket = socket;
+      socket.addEventListener('message', event => this.#receive(event));
+      socket.addEventListener('close', () => {
+        this.#rejectPending(new PresentationError('Live connection closed.'));
+        this.presentation.awaitingSnapshot = true;
+        this.presentation.releaseResync();
+        this.onStatus('Live connection closed.');
+      });
+      socket.addEventListener('error', () => this.onStatus('Live connection failed.'));
+      await new Promise((resolve, reject) => {
+        const timer = setTimeout(() => reject(new PresentationError('Live connection timed out.')), 10_000);
+        socket.addEventListener('open', () => {
+          clearTimeout(timer);
+          this.onStatus('Waiting for the first presentation…');
+          resolve();
+        }, { once: true });
+        socket.addEventListener('error', () => {
+          clearTimeout(timer);
+          reject(new PresentationError('Live connection failed.'));
+        }, { once: true });
+      });
+    } catch (error) {
+      this.dispose();
+      throw error;
+    }
     return this;
   }
 

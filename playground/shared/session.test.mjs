@@ -67,6 +67,7 @@ test('connects to the same-origin live endpoint and requests resync on a revisio
       async json() {
         return {
           session: DATABASE,
+          database: DATABASE,
           resume_token: 'a'.repeat(43),
           websocket_path: '/orna/live/01010101-0101-0101-0101-010101010101',
         };
