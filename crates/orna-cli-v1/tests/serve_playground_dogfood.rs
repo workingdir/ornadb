@@ -34,6 +34,32 @@ const ASSET_LSP_JS: &str = include_str!("fixtures/playground-asset-lsp-js.orna")
 const ASSET_LSP_WASM: &str = include_str!("fixtures/playground-asset-lsp-wasm.orna");
 const ASSET_EDITOR_CONFIG: &str = include_str!("fixtures/playground-asset-editor-config.orna");
 const ASSET_EMBED: &str = include_str!("fixtures/playground-asset-embed.orna");
+const ROUTE_PAGE: &str = include_str!("fixtures/playground-route-page.orna");
+const ROUTE_EMBED: &str = include_str!("fixtures/playground-route-embed.orna");
+const ROUTE_APP: &str = include_str!("fixtures/playground-route-app.orna");
+const ROUTE_STYLE: &str = include_str!("fixtures/playground-route-style.orna");
+const ROUTE_CONFIG: &str = include_str!("fixtures/playground-route-config.orna");
+const ROUTE_EMBED_SCRIPT: &str = include_str!("fixtures/playground-route-embed-script.orna");
+const ROUTE_LIVE: &str = include_str!("fixtures/playground-route-live.orna");
+const ENTRY_PAGE: &str = include_str!("fixtures/playground-entry-page.orna");
+const ENTRY_EMBED: &str = include_str!("fixtures/playground-entry-embed.orna");
+const ENTRY_APP: &str = include_str!("fixtures/playground-entry-app.orna");
+const ENTRY_STYLE: &str = include_str!("fixtures/playground-entry-style.orna");
+const ENTRY_CONFIG: &str = include_str!("fixtures/playground-entry-config.orna");
+const ENTRY_EMBED_SCRIPT: &str = include_str!("fixtures/playground-entry-embed-script.orna");
+const ENTRY_LIVE: &str = include_str!("fixtures/playground-entry-live.orna");
+const ROUTE_PRESENTATION: &str = include_str!("fixtures/playground-route-presentation.orna");
+const ROUTE_HOME_RUNTIME: &str = include_str!("fixtures/playground-route-home-runtime.orna");
+const ROUTE_PLAYGROUND_RUNTIME: &str =
+    include_str!("fixtures/playground-route-playground-runtime.orna");
+const ROUTE_LSP_JS: &str = include_str!("fixtures/playground-route-lsp-js.orna");
+const ROUTE_LSP_WASM: &str = include_str!("fixtures/playground-route-lsp-wasm.orna");
+const ENTRY_PRESENTATION: &str = include_str!("fixtures/playground-entry-presentation.orna");
+const ENTRY_HOME_RUNTIME: &str = include_str!("fixtures/playground-entry-home-runtime.orna");
+const ENTRY_PLAYGROUND_RUNTIME: &str =
+    include_str!("fixtures/playground-entry-playground-runtime.orna");
+const ENTRY_LSP_JS: &str = include_str!("fixtures/playground-entry-lsp-js.orna");
+const ENTRY_LSP_WASM: &str = include_str!("fixtures/playground-entry-lsp-wasm.orna");
 const BINARY: &str = env!("CARGO_BIN_EXE_orna-cli-v1");
 
 struct RunningServer(Child);
@@ -69,6 +95,15 @@ fn git(project: &std::path::Path, arguments: &[&str]) {
     let mut command = Command::new("git");
     command.args(arguments).current_dir(project);
     let _ = run(&mut command, "Git fixture setup");
+}
+
+fn write_fixture_rows(project: &std::path::Path, table: &str, rows: &[(&str, &str)]) {
+    let directory = project.join("playground").join(table);
+    std::fs::create_dir_all(&directory).expect("create playground row directory");
+    for (id, source) in rows {
+        std::fs::write(directory.join(format!("{id}.orna")), source)
+            .expect("write crate-local playground row fixture");
+    }
 }
 
 fn curl(url: &str, arguments: &[&str]) -> Result<HttpResponse, String> {
@@ -374,6 +409,59 @@ fn send_and_read_request(
 
 #[test]
 fn orna_serve_hosts_playground_with_pending_evals_and_snapshot_correct_deltas() {
+    const ROUTES: [(&str, &str); 11] = [
+        ("route-2f706c617967726f756e642f", ROUTE_PAGE),
+        ("route-2f706c617967726f756e642f656d626564", ROUTE_EMBED),
+        (
+            "route-2f706c617967726f756e642f6173736574732f6170702e6a73",
+            ROUTE_APP,
+        ),
+        (
+            "route-2f706c617967726f756e642f6173736574732f7374796c652e637373",
+            ROUTE_STYLE,
+        ),
+        (
+            "route-2f706c617967726f756e642f6173736574732f6f726e612d656469746f722d636f6e6669672e6a736f6e",
+            ROUTE_CONFIG,
+        ),
+        (
+            "route-2f706c617967726f756e642f6173736574732f656d6265642e6a73",
+            ROUTE_EMBED_SCRIPT,
+        ),
+        (
+            "route-2f706c617967726f756e642f6173736574732f70726573656e746174696f6e2e6d6a73",
+            ROUTE_PRESENTATION,
+        ),
+        (
+            "route-2f706c617967726f756e642f6173736574732f73657276652d686f6d652e6d6a73",
+            ROUTE_HOME_RUNTIME,
+        ),
+        (
+            "route-2f706c617967726f756e642f6173736574732f73657276652d706c617967726f756e642e6d6a73",
+            ROUTE_PLAYGROUND_RUNTIME,
+        ),
+        (
+            "route-2f706c617967726f756e642f6173736574732f6c73702d7761736d2f6f726e615f6c73702e6a73",
+            ROUTE_LSP_JS,
+        ),
+        (
+            "route-2f706c617967726f756e642f6173736574732f6c73702d7761736d2f6f726e615f6c73705f62672e7761736d",
+            ROUTE_LSP_WASM,
+        ),
+    ];
+    const ENTRIES: [(&str, &str); 11] = [
+        ("entry-page", ENTRY_PAGE),
+        ("entry-embed", ENTRY_EMBED),
+        ("entry-app", ENTRY_APP),
+        ("entry-style", ENTRY_STYLE),
+        ("entry-config", ENTRY_CONFIG),
+        ("entry-embed-script", ENTRY_EMBED_SCRIPT),
+        ("entry-presentation", ENTRY_PRESENTATION),
+        ("entry-home-runtime", ENTRY_HOME_RUNTIME),
+        ("entry-playground-runtime", ENTRY_PLAYGROUND_RUNTIME),
+        ("entry-lsp-js", ENTRY_LSP_JS),
+        ("entry-lsp-wasm", ENTRY_LSP_WASM),
+    ];
     let project = tempfile::tempdir().expect("temporary Orna database");
     let initialized = Command::new(BINARY)
         .arg("init")
@@ -408,6 +496,18 @@ fn orna_serve_hosts_playground_with_pending_evals_and_snapshot_correct_deltas() 
         ASSET_STYLE,
     )
     .expect("write committed stylesheet fixture");
+    std::fs::write(
+        assets.join("asset-6173736574732f6f726e612d656469746f722d636f6e6669672e6a736f6e.orna"),
+        ASSET_EDITOR_CONFIG,
+    )
+    .expect("write committed editor configuration fixture");
+    std::fs::write(
+        assets.join("asset-6173736574732f656d6265642e6a73.orna"),
+        ASSET_EMBED,
+    )
+    .expect("write committed embed entry fixture");
+    write_fixture_rows(project.path(), "Route", &ROUTES);
+    write_fixture_rows(project.path(), "Entry", &ENTRIES);
     for (id, source) in [
         (
             "6173736574732f70726573656e746174696f6e2e6d6a73",
@@ -443,6 +543,8 @@ fn orna_serve_hosts_playground_with_pending_evals_and_snapshot_correct_deltas() 
             "playground.orna",
             "playground/examples/hello.orna",
             "playground/Asset",
+            "playground/Route",
+            "playground/Entry",
         ],
     );
     git(
@@ -546,8 +648,62 @@ fn orna_serve_hosts_playground_with_pending_evals_and_snapshot_correct_deltas() 
     assert!(embed.body.contains("document.createElement(\"iframe\")"));
     assert!(!project.path().join("playground/web-ui/dist").exists());
 
+    let live_route_path = format!("{base_url}/playground/live/");
+    let before_route_commit = curl(&live_route_path, &[]).expect("curl missing live route");
+    assert_eq!(before_route_commit.status, 404);
+    write_fixture_rows(
+        project.path(),
+        "Route",
+        &[("route-2f706c617967726f756e642f6c6976652f", ROUTE_LIVE)],
+    );
+    write_fixture_rows(project.path(), "Entry", &[("entry-live", ENTRY_LIVE)]);
+    git(
+        project.path(),
+        &[
+            "add",
+            "playground/Route/route-2f706c617967726f756e642f6c6976652f.orna",
+            "playground/Entry/entry-live.orna",
+        ],
+    );
+    git(
+        project.path(),
+        &[
+            "-c",
+            "user.name=kierandrewett",
+            "-c",
+            "user.email=kieran@drewett.dev",
+            "commit",
+            "--quiet",
+            "-m",
+            "add live playground route records",
+        ],
+    );
+    assert!(
+        server
+            .0
+            .try_wait()
+            .expect("probe orna serve process")
+            .is_none()
+    );
+    let after_route_commit = curl(&live_route_path, &[]).expect("curl newly committed live route");
+    assert_eq!(after_route_commit.status, 200);
+    assert!(after_route_commit.body.contains("database shell"));
+    println!(
+        "live DB route reload: GET /playground/live/ before commit -> HTTP {} and after commit -> HTTP {} without restarting orna serve (exit 0)",
+        before_route_commit.status, after_route_commit.status
+    );
+
+    let examples_started = Instant::now();
     let examples =
-        curl(&format!("{base_url}/api/examples"), &[]).expect("curl committed playground examples");
+        curl(&format!("{base_url}/api/examples"), &["--max-time", "15"]).unwrap_or_else(|error| {
+            let server_status = server.0.try_wait().expect("probe orna serve process");
+            panic!("curl committed playground examples: {error}; server status {server_status:?}");
+        });
+    println!(
+        "curl GET /api/examples -> HTTP {} (exit 0, {:?})",
+        examples.status,
+        examples_started.elapsed()
+    );
     assert_eq!(examples.status, 200);
     let examples: JsonValue = serde_json::from_str(&examples.body).expect("example response JSON");
     assert_eq!(examples["examples"][0]["source"], SAMPLE);
