@@ -1,70 +1,81 @@
 import type * as monaco from 'monaco-editor';
-import { ORNA_KEYWORDS } from './generated-keywords';
 
-export { ORNA_KEYWORDS } from './generated-keywords';
+interface EncodedPattern {
+  pattern: string;
+  flags?: string;
+}
 
-const operators = [
-  '..=', '=>', '==', '!=', '<=', '>=', '??', '|?', '&&', '||', '+=', '-=',
-  '*=', '/=', '..', '|', '!', '=', '<', '>', '+', '-', '*', '/', '%', '^', '?',
-];
+interface EncodedMonarchLanguage extends Record<string, unknown> {
+  tokenizer: Record<string, Array<[string | EncodedPattern, ...unknown[]]>>;
+}
 
-export const ORNA_LANGUAGE_ID = 'orna';
+export interface OrnaEditorConfig {
+  language: monaco.languages.ILanguageExtensionPoint;
+  languageConfiguration: monaco.languages.LanguageConfiguration;
+  monarchLanguage: monaco.languages.IMonarchLanguage;
+  editorOptions: monaco.editor.IStandaloneEditorConstructionOptions;
+}
 
-export const ornaLanguageConfiguration: monaco.languages.LanguageConfiguration = {
-  comments: { lineComment: '//', blockComment: ['/*', '*/'] },
-  brackets: [
-    ['{', '}'],
-    ['[', ']'],
-    ['(', ')'],
-  ],
-  autoClosingPairs: [
-    { open: '{', close: '}' },
-    { open: '[', close: ']' },
-    { open: '(', close: ')' },
-    { open: '"', close: '"' },
-  ],
-  surroundingPairs: [
-    { open: '{', close: '}' },
-    { open: '[', close: ']' },
-    { open: '(', close: ')' },
-    { open: '"', close: '"' },
-  ],
-};
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
 
-export const ornaMonarchLanguage: monaco.languages.IMonarchLanguage = {
-  defaultToken: '',
-  tokenPostfix: '.orna',
-  keywords: [...ORNA_KEYWORDS],
-  operators,
-  symbols: /[=><!~?:&|+\-*\/%^]+/,
-  tokenizer: {
-    root: [
-      [/\s+/, 'white'],
-      [/\/\/.*$/, 'comment'],
-      [/\/\*/, { token: 'comment', next: '@comment' }],
-      [/"/, { token: 'string.quote', next: '@string' }],
-      [new RegExp(`\\b(?:${ORNA_KEYWORDS.join('|')})\\b`), 'keyword'],
-      [/[0-9][0-9_]*(?:\.[0-9_]+)?(?:[eE][+-]?[0-9_]*)?f?/, 'number'],
-      [/[\p{L}_$][\p{L}\p{N}_$]*(?=\s*\()/u, 'function'],
-      [/[\p{L}_$][\p{L}\p{N}_$]*/u, 'identifier'],
-      [/\.\.=?|=>|==|!=|<=|>=|\?\?|\|\?|&&|\|\||\+=|-=|\*=|\/=|\.\.|[|!=<>+\-*\/%^?]/, 'operator'],
-      [/[{}()[\],;:.]/, 'delimiter'],
-    ],
-    comment: [
-      [/[^*/]+/, 'comment'],
-      [/\*\//, { token: 'comment', next: '@pop' }],
-      [/\*/, 'comment'],
-    ],
-    string: [
-      [/[^\\"]+/, 'string'],
-      [/\\./, 'string.escape'],
-      [/"/, { token: 'string.quote', next: '@pop' }],
-    ],
-  },
-};
+function isEditorConfig(value: unknown): value is {
+  language: Record<string, unknown>;
+  languageConfiguration: Record<string, unknown>;
+  monarchLanguage: EncodedMonarchLanguage;
+  editorOptions: Record<string, unknown>;
+} {
+  if (!isRecord(value)) return false;
+  const { language, languageConfiguration, monarchLanguage, editorOptions } = value;
+  return isRecord(language)
+    && language.id === 'orna'
+    && Array.isArray(language.extensions)
+    && language.extensions.every((extension) => typeof extension === 'string')
+    && isRecord(languageConfiguration)
+    && isRecord(monarchLanguage)
+    && isRecord(monarchLanguage.tokenizer)
+    && Object.values(monarchLanguage.tokenizer).every((rules) => Array.isArray(rules))
+    && isRecord(editorOptions)
+    && typeof editorOptions.tabSize === 'number'
+    && Number.isInteger(editorOptions.tabSize);
+}
 
-export function registerOrnaLanguage(languages: typeof monaco.languages): void {
-  languages.register({ id: ORNA_LANGUAGE_ID, extensions: ['.orna'], aliases: ['Orna', 'orna'] });
-  languages.setLanguageConfiguration(ORNA_LANGUAGE_ID, ornaLanguageConfiguration);
-  languages.setMonarchTokensProvider(ORNA_LANGUAGE_ID, ornaMonarchLanguage);
+function compileMonarchLanguage(encoded: EncodedMonarchLanguage): monaco.languages.IMonarchLanguage {
+  const tokenizer = Object.fromEntries(
+    Object.entries(encoded.tokenizer).map(([state, rules]) => [
+      state,
+      rules.map(([pattern, ...action]) => [
+        typeof pattern === 'string' ? pattern : new RegExp(pattern.pattern, pattern.flags),
+        ...action,
+      ]),
+    ]),
+  );
+  return { ...encoded, tokenizer } as unknown as monaco.languages.IMonarchLanguage;
+}
+
+export async function loadOrnaEditorConfig(): Promise<OrnaEditorConfig> {
+  const response = await fetch('/playground/assets/orna-editor-config.json');
+  if (!response.ok) {
+    throw new Error(`Orna editor configuration request failed (${response.status}).`);
+  }
+  const value: unknown = await response.json();
+  if (!isEditorConfig(value)) {
+    throw new Error('The database returned an invalid Orna editor configuration.');
+  }
+  return {
+    language: value.language as unknown as monaco.languages.ILanguageExtensionPoint,
+    languageConfiguration: value.languageConfiguration as unknown as monaco.languages.LanguageConfiguration,
+    monarchLanguage: compileMonarchLanguage(value.monarchLanguage),
+    editorOptions: value.editorOptions as monaco.editor.IStandaloneEditorConstructionOptions,
+  };
+}
+
+export function registerOrnaLanguage(
+  languages: typeof monaco.languages,
+  config: OrnaEditorConfig,
+): void {
+  languages.register(config.language);
+  languages.setLanguageConfiguration(config.language.id, config.languageConfiguration);
+  languages.setMonarchTokensProvider(config.language.id, config.monarchLanguage);
 }
