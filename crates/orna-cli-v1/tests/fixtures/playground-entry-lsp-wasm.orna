@@ -1,0 +1,1 @@
+{ id: "entry-lsp-wasm", asset_path: "assets/lsp-wasm/orna_lsp_bg.wasm", kind: "asset" }
