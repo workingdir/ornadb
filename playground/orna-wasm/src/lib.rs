@@ -7,8 +7,9 @@
 
 use std::fmt::Write as _;
 
-use orna_evaluator_v1::{AdmittedReplSession, Limits};
+use orna_evaluator_v1::{Limits, ReplSession as EvaluatorReplSession};
 use orna_foundation_v1::CanonicalValue;
+use orna_semantic_v1::ReplContext;
 use orna_syntax_v1::{ReplInput, parse_repl, parse_repl_with_file};
 use orna_value_v1::Raw;
 use serde::{Deserialize, Serialize};
@@ -79,7 +80,7 @@ fn run_internal(source: &str) -> RunResponse {
         return RunResponse::failure(Vec::new(), "ORNA-EVAL-LIMIT", 1, 1);
     }
 
-    let mut session = AdmittedReplSession::new(limits);
+    let mut session = TypedSession::new(limits);
     let mut values = Vec::new();
     let mut pending = String::new();
     let mut pending_line = 1;
@@ -119,16 +120,11 @@ fn run_internal(source: &str) -> RunResponse {
             );
         }
 
-        match session.submit(&pending) {
+        match session.submit(&parsed.value) {
             Ok(Some(value)) => values.push(render_value(&value)),
             Ok(None) => {}
             Err(error) => {
-                return RunResponse::failure(
-                    values,
-                    error.code(),
-                    pending_line,
-                    first_column(&pending),
-                );
+                return RunResponse::failure(values, error, pending_line, first_column(&pending));
             }
         }
         pending.clear();
@@ -149,6 +145,50 @@ fn run_internal(source: &str) -> RunResponse {
     }
 
     RunResponse::success(values)
+}
+
+/// Core-only typed REPL state for wasm builds.
+///
+/// The project-backed evaluator adapter also includes native repository
+/// loading and file-locking dependencies, so the wasm bridge pairs the same
+/// semantic admission and runtime transition directly without enabling that
+/// optional project feature.
+struct TypedSession {
+    semantic: ReplContext,
+    runtime: EvaluatorReplSession,
+}
+
+impl TypedSession {
+    fn new(limits: Limits) -> Self {
+        Self {
+            semantic: ReplContext::empty(),
+            runtime: EvaluatorReplSession::new(limits),
+        }
+    }
+
+    fn submit(&mut self, input: &ReplInput) -> Result<Option<CanonicalValue>, String> {
+        let admission = self.semantic.stage(input).map_err(|diagnostics| {
+            diagnostics.first().map_or_else(
+                || "ORNA-REPL-ADMISSION".to_owned(),
+                |diagnostic| diagnostic.code().to_owned(),
+            )
+        })?;
+        if !admission.effects.effects.is_empty() {
+            return Err("ORNA-REPL-EFFECT".into());
+        }
+
+        let mut runtime = self.runtime.clone();
+        let value = runtime
+            .submit_admitted(input)
+            .map_err(|error| error.code().to_owned())?;
+        let mut semantic = self.semantic.clone();
+        semantic
+            .commit(admission)
+            .map_err(|_| "ORNA-REPL-COMMIT".to_owned())?;
+        self.runtime = runtime;
+        self.semantic = semantic;
+        Ok(value)
+    }
 }
 
 fn line_count(line: &str) -> usize {
