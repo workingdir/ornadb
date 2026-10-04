@@ -1542,6 +1542,10 @@ fn request_prepare_call_hierarchy(
     let Some(document) = state.document(&uri) else {
         return Ok(serde_json::Value::Null);
     };
+    let parse = analysis::parse_document(document);
+    if !parse.diagnostics.is_empty() {
+        return Ok(serde_json::Value::Null);
+    }
     let mapper = PositionMapper::new(&document.text);
     let byte = mapper.byte_offset(params.text_document_position_params.position);
     if let Some(function) = functions.iter().find(|function| {
@@ -1552,7 +1556,6 @@ fn request_prepare_call_hierarchy(
         return Ok(serde_json::to_value(vec![call_hierarchy_item(function)])?);
     }
 
-    let parse = analysis::parse_document(document);
     let target_name = analysis::function_definitions(&parse, &document.text)
         .into_iter()
         .flat_map(|function| {
