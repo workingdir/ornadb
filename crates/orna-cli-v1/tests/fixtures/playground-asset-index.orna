@@ -1,0 +1,5 @@
+{
+  path: "index.html",
+  media_type: "text/html; charset=utf-8",
+  bytes_base64: "PCFkb2N0eXBlIGh0bWw+PGh0bWw+PGJvZHk+PGhlYWRlciBkYXRhLXBhZ2UtaGVhZGVyPk9ybmEgcGxheWdyb3VuZDwvaGVhZGVyPjxtYWluPnBsYXlncm91bmQ8L21haW4+PHNjcmlwdCB0eXBlPSJtb2R1bGUiIHNyYz0iL3BsYXlncm91bmQvYXNzZXRzL2FwcC5qcyI+PC9zY3JpcHQ+PC9ib2R5PjwvaHRtbD4=",
+}

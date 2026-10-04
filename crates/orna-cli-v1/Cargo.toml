@@ -19,6 +19,7 @@ module_name_repetitions = "allow"
 missing_errors_doc = "allow"
 
 [dependencies]
+base64 = "0.22.1"
 orna-application-v1 = { path = "../orna-application-v1" }
 orna-client = { path = "../orna-client" }
 orna-conformance-v1 = { path = "../orna-conformance-v1" }

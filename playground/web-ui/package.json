@@ -8,6 +8,8 @@
     "build": "npm run lsp:build && tsc --noEmit && vite build",
     "preview": "vite preview",
     "test": "vitest run",
+    "db-assets:sync": "node scripts/db-assets.mjs",
+    "db-assets:check": "node scripts/db-assets.mjs --check",
     "lsp:build": "cd ../../crates/orna-lsp && wasm-pack build --target web --out-dir ../../playground/web-ui/public/lsp-wasm --out-name orna_lsp --release"
   },
   "dependencies": {

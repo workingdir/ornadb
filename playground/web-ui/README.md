@@ -1,56 +1,35 @@
 # Orna playground web UI
 
-The Vite page is served by the selected `orna serve` clone at `/playground/`.
-It loads committed files from `playground/examples` and rows from
-`playground.Sample` through `/api/examples`, runs source through the clone's
-authenticated `orna.present.v1` session, and renders the server's run-event
-presentation in the result tabs. Orna evaluation stays in the server runtime.
-The browser worker for editor intelligence loads orna-lsp's shared analysis
-core.
+`orna serve` reads the playground page and every browser asset from committed
+`playground.Asset` rows in the selected database. The row key is the URL path
+relative to `/playground/`; each row stores its media type and standard padded
+Base64 bytes. The server reads rows from the selected Git commit, so edits in
+the worktree appear after they are committed.
 
-Build the page and editor worker artifacts with:
+Examples come from the committed `playground.Sample` rows and legacy `.orna`
+example files through `/api/examples`. Source runs use the selected clone's
+authenticated `orna.present.v1` session. Orna evaluation stays in the server
+runtime. The browser worker for editor intelligence loads orna-lsp's shared
+analysis core, and editor language metadata comes from generated syntax-v1
+artifacts.
+
+Build the browser bundle and refresh its database asset rows with:
 
     npm ci
     npm run build
+    npm run db-assets:sync
 
-Then run `orna serve` from the clone and open
-http://127.0.0.1:8181/playground/. The Monaco tokenizer and its keyword
-metadata are generated from orna-syntax-v1; check drift with:
+`npm run db-assets:check` verifies that the committed rows exactly match the
+current build. Commit the resulting files under `playground/Asset/` with the
+web UI source changes. The generator rejects oversized files and unsupported
+paths.
+
+Run `orna serve` from the clone and open
+http://127.0.0.1:8181/playground/. A page can also use
+`/playground/embed` on that same server; it reads the same database rows,
+examples, and runtime as the regular entry.
+
+The Monaco tokenizer and its keyword metadata are generated from
+orna-syntax-v1; check drift with:
 
     cargo run --locked -p orna-syntax-v1 --example generate_editor_artifacts -- --check
-
-Embed the editor in another page with an iframe pointed at
-`/playground/embed` on the same served clone:
-
-    <iframe src="https://your-orna-host/playground/embed" title="Orna playground"></iframe>
-
-That entry hides the database link and allows framing by another origin. It
-uses the same examples, editor, and OrnaDB runtime as `/playground/`.
-
-For pages that need a script entry, the stable and development channels publish
-`embed.js` at `/ornadb/embed.js` and `/ornadb/dev/embed.js`. Point `data-src` at
-the `/playground/embed` route on an `orna serve` clone; the Pages host serves the
-loader and editor assets, while the clone still supplies examples and evaluation.
-
-```html
-<div id="orna-playground"></div>
-<script
-  defer
-  src="https://workingdir.github.io/ornadb/embed.js"
-  data-target="#orna-playground"
-  data-src="https://your-orna-host/playground/embed"
-></script>
-```
-
-Use `https://workingdir.github.io/ornadb/dev/embed.js` to load the development
-channel's entry script. The loader creates a lazy, full-width iframe in the
-selected target; `data-src` must point to a running `orna serve` playground.
-
-## GitHub Pages channels
-
-The Pages workflow publishes the stable channel from `main` at
-https://workingdir.github.io/ornadb/ and the development channel from the
-playground milestone branch at https://workingdir.github.io/ornadb/dev/.
-Pull requests run the build checks without publishing. The Pages smoke checks
-each channel's HTML, built assets, and editor WebAssembly modules. Examples and
-source evaluation still use the `orna serve` API described above.

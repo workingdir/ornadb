@@ -23,6 +23,9 @@ const MAIN: &str = include_str!("fixtures/project-core-main.orna");
 const SAMPLE: &str = include_str!("fixtures/playground-example.orna");
 const SECOND_SAMPLE: &str = include_str!("fixtures/playground-concurrent-eval.orna");
 const FOLLOWUP_SAMPLE: &str = include_str!("fixtures/playground-followup-eval.orna");
+const PLAYGROUND_SCHEMA: &str = include_str!("fixtures/playground-schema.orna");
+const PLAYGROUND_INDEX_ASSET: &str = include_str!("fixtures/playground-asset-index.orna");
+const PLAYGROUND_SCRIPT_ASSET: &str = include_str!("fixtures/playground-asset-script.orna");
 const BINARY: &str = env!("CARGO_BIN_EXE_orna-cli-v1");
 
 struct RunningServer(Child);
@@ -342,25 +345,28 @@ fn orna_serve_hosts_playground_with_pending_evals_and_snapshot_correct_deltas() 
     );
 
     std::fs::write(project.path().join("main.orna"), MAIN).expect("write crate-local main fixture");
+    std::fs::write(project.path().join("playground.orna"), PLAYGROUND_SCHEMA)
+        .expect("write crate-local playground schema");
     let example = project.path().join("playground/examples/hello.orna");
     std::fs::create_dir_all(example.parent().expect("example parent"))
         .expect("create committed example directory");
     std::fs::write(&example, SAMPLE).expect("write crate-local sample fixture");
-    let dist = project.path().join("playground/web-ui/dist");
-    std::fs::create_dir_all(dist.join("assets")).expect("create built UI asset directory");
-    std::fs::write(
-        dist.join("index.html"),
-        "<!doctype html><html><body><main id=\"app\">Orna playground</main><script type=\"module\" src=\"/playground/assets/app.js\"></script></body></html>",
-    )
-    .expect("write browser entry page fixture");
-    std::fs::write(
-        dist.join("assets/app.js"),
-        "globalThis.ornaPlaygroundReady = true;",
-    )
-    .expect("write browser entry script fixture");
+    let assets = project.path().join("playground/Asset");
+    std::fs::create_dir_all(&assets).expect("create committed Asset rows");
+    std::fs::write(assets.join("index.html.orna"), PLAYGROUND_INDEX_ASSET)
+        .expect("write crate-local browser shell record");
+    std::fs::write(assets.join("assets~2fapp.js.orna"), PLAYGROUND_SCRIPT_ASSET)
+        .expect("write crate-local browser asset record");
     git(
         project.path(),
-        &["add", "main.orna", "playground/examples/hello.orna"],
+        &[
+            "add",
+            "main.orna",
+            "playground.orna",
+            "playground/examples/hello.orna",
+            "playground/Asset/index.html.orna",
+            "playground/Asset/assets~2fapp.js.orna",
+        ],
     );
     git(
         project.path(),
@@ -653,11 +659,11 @@ fn orna_serve_hosts_playground_with_pending_evals_and_snapshot_correct_deltas() 
         listing.status
     );
     println!(
-        "curl GET /playground/ -> HTTP {} (exit 0): served browser page + runtime bridge",
+        "curl GET /playground/ -> HTTP {} (exit 0): DB-resident browser page + runtime bridge",
         page.status
     );
     println!(
-        "curl GET /playground/assets/app.js -> HTTP {} (exit 0): browser asset",
+        "curl GET /playground/assets/app.js -> HTTP {} (exit 0): DB-resident browser asset",
         app.status
     );
     println!(

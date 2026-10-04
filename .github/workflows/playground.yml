@@ -52,10 +52,10 @@ jobs:
 
       - name: Test and build Monaco web UI
         working-directory: playground/web-ui
-        run: npm test && npm run build
+        run: npm test && npm run build && npm run db-assets:check
 
       - name: Test browser LSP exports through the shared analysis core
         run: cargo test --locked -p orna-lsp browser_
 
       - name: Test the in-database playground serve routes
-        run: cargo test --locked -p orna-cli-v1 cli_serve::tests
+        run: cargo test --locked -p orna-cli-v1 -- --nocapture
