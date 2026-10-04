@@ -7199,6 +7199,12 @@ fn explain_query_core_with_wal_rotation_chains(
                     query_paired_bounded_window_spill_chain_window_restore_chain_fold(
                         &spill_chain_window_fold,
                         window_cost_restoration_fold,
+                        checkpoint_compaction_chains,
+                        segment_rotation_chains,
+                        stream_compaction_chains,
+                        spill_restore_chains,
+                        stream_rotation_chains,
+                        wal_rotation_chains,
                     )
             {
                 add_paired_bounded_window_spill_chain_window_restore_chain_fold_details(
@@ -11973,15 +11979,37 @@ fn add_paired_bounded_window_spill_chain_window_fold_details(
 fn query_paired_bounded_window_spill_chain_window_restore_chain_fold(
     chain_window_fold: &QueryPairedBoundedWindowSpillChainWindowFold,
     window_cost_restoration_fold: &QueryPairedWindowCostRestorationFold,
+    checkpoint_compaction_chains: &[QueryPairedCheckpointSegmentCompactionChainDescription],
+    segment_rotation_chains: &[QueryPairedSegmentRotationChainDescription],
+    stream_compaction_chains: &[QueryPairedStreamCompactionChainDescription],
+    spill_restore_chains: &[QueryPairedCheckpointSpillRestoreChainDescription],
+    stream_rotation_chains: &[QueryPairedStreamRotationChainDescription],
+    wal_rotation_chains: &[QueryPairedWalRotationChainDescription],
 ) -> Option<QueryPairedBoundedWindowSpillChainWindowRestoreChainFold> {
     if window_cost_restoration_fold.cost_restore_fold_count == 0 {
         return None;
     }
-    let restore_chain_fold_identity =
-        window_cost_restoration_fold.restore_chain_fold_identity.as_deref()?;
-    let window_restore_chain_fold_identity = window_cost_restoration_fold
-        .window_restore_chain_fold_identity
-        .as_deref()?;
+    let (restore_chain_fold_identity, restore_chain_count) =
+        query_paired_window_restore_chain_descriptor_fold_identity(
+            checkpoint_compaction_chains,
+            segment_rotation_chains,
+            stream_compaction_chains,
+            spill_restore_chains,
+            stream_rotation_chains,
+            wal_rotation_chains,
+        )?;
+    let window_fold_identity = window_cost_restoration_fold.window_fold_identity.as_deref()?;
+    let mut window_restore_hash = Sha256::new();
+    window_restore_hash
+        .update(b"orna.sys.query-paired-window-restore-chain-descriptor-window-fold.v1\0");
+    hash_part(&mut window_restore_hash, window_fold_identity.as_bytes());
+    hash_part(&mut window_restore_hash, restore_chain_fold_identity.as_bytes());
+    window_restore_hash.update(window_cost_restoration_fold.window_pair_count.to_be_bytes());
+    window_restore_hash.update(restore_chain_count.to_be_bytes());
+    let window_restore_chain_fold_identity = format!(
+        "paired-window-restore-chain-descriptor-window-fold:{}",
+        hex(&window_restore_hash.finalize())
+    );
     let mut count_overflowed = false;
     let window_identity_count =
         u64::try_from(window_cost_restoration_fold.window_identities.len()).unwrap_or_else(|_| {
@@ -12019,8 +12047,8 @@ fn query_paired_bounded_window_spill_chain_window_restore_chain_fold(
         chain_window_fold_identity: chain_window_fold.identity.clone(),
         chain_fold_identity: chain_window_fold.chain_fold_identity.clone(),
         spill_window_fold_identity: chain_window_fold.spill_window_fold_identity.clone(),
-        restore_chain_fold_identity: restore_chain_fold_identity.to_owned(),
-        window_restore_chain_fold_identity: window_restore_chain_fold_identity.to_owned(),
+        restore_chain_fold_identity,
+        window_restore_chain_fold_identity,
         chain_pair_count: chain_window_fold.pair_count,
         spill_window_count: chain_window_fold.spill_window_count,
         restore_pair_count: window_cost_restoration_fold.window_pair_count,
@@ -12029,6 +12057,98 @@ fn query_paired_bounded_window_spill_chain_window_restore_chain_fold(
         totals: chain_window_fold.totals,
         overflowed,
     })
+}
+
+/// Folds exact restore descriptors without their cost ancestry. Cost fold
+/// identities can inherit spill-dependent join ancestry, so direct digests
+/// keep restore identity independent from spill budgets and estimates.
+fn query_paired_window_restore_chain_descriptor_fold_identity(
+    checkpoint_compaction_chains: &[QueryPairedCheckpointSegmentCompactionChainDescription],
+    segment_rotation_chains: &[QueryPairedSegmentRotationChainDescription],
+    stream_compaction_chains: &[QueryPairedStreamCompactionChainDescription],
+    spill_restore_chains: &[QueryPairedCheckpointSpillRestoreChainDescription],
+    stream_rotation_chains: &[QueryPairedStreamRotationChainDescription],
+    wal_rotation_chains: &[QueryPairedWalRotationChainDescription],
+) -> Option<(String, u64)> {
+    let mut identities = BTreeMap::<(String, String), Vec<String>>::new();
+    for chain in checkpoint_compaction_chains {
+        identities
+            .entry((
+                "checkpoint_segment_compaction".to_owned(),
+                chain.join_pair_identity.as_str().to_owned(),
+            ))
+            .or_default()
+            .push(query_paired_checkpoint_segment_compaction_chain_identity(chain));
+    }
+    for chain in segment_rotation_chains {
+        identities
+            .entry((
+                "segment_rotation".to_owned(),
+                chain.join_pair_identity.as_str().to_owned(),
+            ))
+            .or_default()
+            .push(query_paired_segment_rotation_chain_identity(chain));
+    }
+    for chain in stream_compaction_chains {
+        identities
+            .entry((
+                "stream_compaction".to_owned(),
+                chain.join_pair_identity.as_str().to_owned(),
+            ))
+            .or_default()
+            .push(query_paired_stream_compaction_chain_identity(chain));
+    }
+    for chain in spill_restore_chains {
+        identities
+            .entry((
+                "checkpoint_spill_restore".to_owned(),
+                chain.join_pair_identity.as_str().to_owned(),
+            ))
+            .or_default()
+            .push(query_paired_checkpoint_spill_restore_chain_identity(chain));
+    }
+    for chain in stream_rotation_chains {
+        identities
+            .entry((
+                "stream_rotation".to_owned(),
+                chain.join_pair_identity.as_str().to_owned(),
+            ))
+            .or_default()
+            .push(query_paired_stream_rotation_chain_identity(chain));
+    }
+    for chain in wal_rotation_chains {
+        identities
+            .entry((
+                "wal_rotation".to_owned(),
+                chain.join_pair_identity.as_str().to_owned(),
+            ))
+            .or_default()
+            .push(query_paired_wal_rotation_chain_identity(chain));
+    }
+    if identities.is_empty() {
+        return None;
+    }
+
+    let restore_chain_count = u64::try_from(identities.values().map(Vec::len).sum::<usize>())
+        .unwrap_or(u64::MAX);
+    let mut hash = Sha256::new();
+    hash.update(b"orna.sys.query-paired-window-restore-chain-descriptor-fold.v1\0");
+    hash.update(restore_chain_count.to_be_bytes());
+    for ((kind, pair_identity), chain_identities) in identities {
+        hash_part(&mut hash, kind.as_bytes());
+        hash_part(&mut hash, pair_identity.as_bytes());
+        hash.update((chain_identities.len() as u64).to_be_bytes());
+        for identity in chain_identities {
+            hash_part(&mut hash, identity.as_bytes());
+        }
+    }
+    Some((
+        format!(
+            "paired-window-restore-chain-descriptor-fold:{}",
+            hex(&hash.finalize())
+        ),
+        restore_chain_count,
+    ))
 }
 
 fn add_paired_bounded_window_spill_chain_window_restore_chain_fold_details(
