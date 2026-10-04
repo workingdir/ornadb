@@ -1,0 +1,7 @@
+pub fn remote_root(value: Int): Int = root(value);
+
+pub fn remote_mid(value: Int): Int = mid(root(value));
+
+pub fn collide(value: Int): Int = value;
+
+pub fn ambiguous_call(value: Int): Int = collide(value);
