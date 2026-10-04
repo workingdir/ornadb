@@ -1868,7 +1868,7 @@ fn reference_standard_uses_pinned_orna_1_source_and_resolves_its_imports() {
     }
     assert_eq!(sources[37].0, REFERENCE_STANDARD_ITERATOR_PATH_V1);
     for declaration in [
-        "pub enum Iterator<T>",
+        "pub type Iterator<T>",
         "pub fn empty<T>(): Iterator<T>",
         "pub fn next<T>(iterator: Iterator<T>): (T?, Iterator<T>)",
         "pub fn from_list<T>(values: [T]): Iterator<T>",
@@ -1886,7 +1886,7 @@ fn reference_standard_uses_pinned_orna_1_source_and_resolves_its_imports() {
     for contract in [
         "Creating or composing one does",
         "replays its computation",
-        "pure callbacks when repeatable observations are required",
+        "callbacks when repeatable observations are required",
         "Use `take` before `collect` on an infinite source",
         "Terminal operation. Finite iterators are required",
         "iterator count must be nonnegative",
