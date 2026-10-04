@@ -35505,7 +35505,7 @@ fn nested_handoff_identity_survives_paired_rewind_compaction_chains_q0rmw() {
                     identity_indices,
                 )],
             )],
-        )]]]
+        )]]
     };
     assert_eq!(
         orna_storage_v1::restore_paired_checkpoint_redo_sparse_nested_compaction_handoff_chains_preserving_undo_compaction_and_handoff_identity(
