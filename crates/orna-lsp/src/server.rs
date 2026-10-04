@@ -4,6 +4,7 @@
 //! document are fast, so no worker pool is needed for the first version.
 
 use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
 use std::io::{self, BufReader};
 use std::thread::{self, JoinHandle};
 
@@ -15,17 +16,18 @@ use lsp_types::{
     CodeAction, CodeActionKind, CodeActionOptions, CodeActionOrCommand, CodeActionParams,
     CodeActionProviderCapability, CompletionOptions, CompletionParams, CompletionResponse,
     Diagnostic, DiagnosticOptions, DiagnosticServerCapabilities, DocumentDiagnosticParams,
-    DocumentDiagnosticReport, DocumentSymbolParams, DocumentSymbolResponse,
-    FullDocumentDiagnosticReport, GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverParams,
-    HoverProviderCapability, InitializeParams, InlayHintOptions, InlayHintParams,
-    InlayHintServerCapabilities, NumberOrString, OneOf, Position, PositionEncodingKind,
-    PrepareRenameResponse, PublishDiagnosticsParams, Range, ReferenceParams,
-    RelatedFullDocumentDiagnosticReport, RenameOptions, RenameParams, SemanticTokens,
+    DocumentDiagnosticReport, DocumentLink, DocumentLinkOptions, DocumentLinkParams,
+    DocumentSymbolParams, DocumentSymbolResponse, FullDocumentDiagnosticReport,
+    GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverParams, HoverProviderCapability,
+    InitializeParams, InlayHintOptions, InlayHintParams, InlayHintServerCapabilities,
+    NumberOrString, OneOf, Position, PositionEncodingKind, PrepareRenameResponse,
+    PublishDiagnosticsParams, Range, ReferenceParams, RelatedFullDocumentDiagnosticReport,
+    RelatedUnchangedDocumentDiagnosticReport, RenameOptions, RenameParams, SemanticTokens,
     SemanticTokensFullOptions, SemanticTokensLegend, SemanticTokensOptions, SemanticTokensParams,
     SemanticTokensRangeParams, SemanticTokensServerCapabilities, ServerCapabilities,
     SignatureHelpOptions, TextDocumentContentChangeEvent, TextDocumentSyncCapability,
-    TextDocumentSyncKind, TextDocumentSyncOptions, TextDocumentSyncSaveOptions, TextEdit, Uri,
-    WorkspaceEdit,
+    TextDocumentSyncKind, TextDocumentSyncOptions, TextDocumentSyncSaveOptions, TextEdit,
+    UnchangedDocumentDiagnosticReport, Uri, WorkspaceEdit,
 };
 
 /// Transport threads for the server's standard input and output streams.
@@ -253,11 +255,15 @@ fn server_capabilities() -> ServerCapabilities {
             },
         ))),
         diagnostic_provider: Some(DiagnosticServerCapabilities::Options(DiagnosticOptions {
-            identifier: None,
+            identifier: Some("orna-syntax-v1".to_owned()),
             inter_file_dependencies: false,
             workspace_diagnostics: false,
             work_done_progress_options: Default::default(),
         })),
+        document_link_provider: Some(DocumentLinkOptions {
+            resolve_provider: Some(false),
+            work_done_progress_options: Default::default(),
+        }),
         ..ServerCapabilities::default()
     }
 }
@@ -278,6 +284,7 @@ fn handle_request(state: &mut ServerState, connection: &Connection, request: Req
         "textDocument/semanticTokens/full" => request_semantic_tokens_full(state, request),
         "textDocument/semanticTokens/range" => request_semantic_tokens_range(state, request),
         "textDocument/inlayHint" => request_inlay_hints(state, request),
+        "textDocument/documentLink" => request_document_links(state, request),
         "textDocument/completion" => request_completion(state, request),
         "workspace/symbol" => request_workspace_symbols(state, request),
         "textDocument/diagnostic" => request_document_diagnostic(state, request),
@@ -1198,28 +1205,55 @@ fn request_document_diagnostic(
 ) -> Result<serde_json::Value, Box<dyn std::error::Error + Send + Sync>> {
     let (_, params) = request.extract::<DocumentDiagnosticParams>("textDocument/diagnostic")?;
     let uri = params.text_document.uri;
-    let Some(document) = state.document(&uri) else {
-        let report = empty_diagnostic_report();
-        return Ok(serde_json::to_value(report)?);
+    let (version, diagnostics) = if let Some(document) = state.document(&uri) {
+        let mapper = PositionMapper::new(&document.text);
+        (
+            Some(document.version),
+            analysis::check_document(document, &mapper),
+        )
+    } else {
+        (None, Vec::new())
     };
-    let mapper = PositionMapper::new(&document.text);
-    let diagnostics = analysis::check_document(document, &mapper);
-    let report = DocumentDiagnosticReport::Full(RelatedFullDocumentDiagnosticReport {
-        related_documents: None,
-        full_document_diagnostic_report: FullDocumentDiagnosticReport {
-            result_id: None,
-            items: diagnostics,
-        },
-    });
+    let result_id = diagnostic_result_id(&uri, version, &diagnostics);
+    let report = if params.previous_result_id.as_deref() == Some(result_id.as_str()) {
+        DocumentDiagnosticReport::Unchanged(RelatedUnchangedDocumentDiagnosticReport {
+            related_documents: None,
+            unchanged_document_diagnostic_report: UnchangedDocumentDiagnosticReport { result_id },
+        })
+    } else {
+        DocumentDiagnosticReport::Full(RelatedFullDocumentDiagnosticReport {
+            related_documents: None,
+            full_document_diagnostic_report: FullDocumentDiagnosticReport {
+                result_id: Some(result_id),
+                items: diagnostics,
+            },
+        })
+    };
     Ok(serde_json::to_value(report)?)
 }
 
-fn empty_diagnostic_report() -> DocumentDiagnosticReport {
-    DocumentDiagnosticReport::Full(RelatedFullDocumentDiagnosticReport {
-        related_documents: None,
-        full_document_diagnostic_report: FullDocumentDiagnosticReport {
-            result_id: None,
-            items: Vec::new(),
-        },
-    })
+fn diagnostic_result_id(uri: &Uri, version: Option<i32>, diagnostics: &[Diagnostic]) -> String {
+    // Result IDs are opaque to clients and are only compared within this
+    // server session. Include the document version as well as the report so
+    // same-version edits cannot accidentally retain a stale pull result.
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    "orna-syntax-v1-diagnostics".hash(&mut hasher);
+    uri.as_str().hash(&mut hasher);
+    version.hash(&mut hasher);
+    serde_json::to_vec(diagnostics)
+        .expect("serialisable syntax diagnostics")
+        .hash(&mut hasher);
+    format!("orna-syntax-v1-{:016x}", hasher.finish())
+}
+
+fn request_document_links(
+    state: &mut ServerState,
+    request: Request,
+) -> Result<serde_json::Value, Box<dyn std::error::Error + Send + Sync>> {
+    let (_, params) = request.extract::<DocumentLinkParams>("textDocument/documentLink")?;
+    let links: Vec<DocumentLink> = state
+        .document(&params.text_document.uri)
+        .map(|document| analysis::document_links(document, &state.documents))
+        .unwrap_or_default();
+    Ok(serde_json::to_value(links)?)
 }
