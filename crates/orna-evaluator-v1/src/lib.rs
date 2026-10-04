@@ -74,7 +74,7 @@ pub fn reference_standard_profile() -> StandardDependencyProfile {
 const DEFAULT_SOURCE_BYTES: usize = 65_536;
 const DEFAULT_STEPS: u64 = 10_000;
 const DEFAULT_DEPTH: usize = 64;
-const DEFAULT_ITEMS: usize = 1_024;
+const DEFAULT_ITEMS: usize = 2_048;
 const DEFAULT_STRING_BYTES: usize = 16_384;
 const DEFAULT_INTEGER_DIGITS: usize = 1_024;
 
