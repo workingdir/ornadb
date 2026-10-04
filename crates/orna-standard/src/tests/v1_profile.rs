@@ -84,7 +84,7 @@ fn pinned_algorithm_module_is_part_of_the_captured_std_snapshot() {
 }
 
 #[test]
-fn pinned_numeric_traits_are_in_the_source_database_and_typecheck() {
+fn pinned_numeric_protocols_and_integer_algorithms_typecheck() {
     let sources = reference_standard_sources_v1();
     assert_eq!(sources.len(), 60);
     let (path, source) = sources
@@ -105,6 +105,8 @@ fn pinned_numeric_traits_are_in_the_source_database_and_typecheck() {
         "pub protocol Integer",
         "pub protocol Compare",
         "pub fn div_rem<T impl Integer>",
+        "pub fn gcd<T impl Integer + Zero + Signed>",
+        "pub fn lcm<T impl Integer + Zero + Signed + Div + Mul>",
         "pub fn clamp<T impl Compare>",
     ] {
         assert!(source.contains(declaration), "missing {declaration}");
@@ -114,7 +116,7 @@ fn pinned_numeric_traits_are_in_the_source_database_and_typecheck() {
         .expect("numeric trait source bytes are recorded by the captured std profile");
     let catalogue = reference_standard_catalogue_v1()
         .expect("numeric protocols typecheck in the pinned catalogue");
-    let consumer = include_str!("fixtures/v1_numeric_traits_consumer_9l27r.orna");
+    let consumer = include_str!("fixtures/v1_numeric_algorithms_consumer_t770s.orna");
     let parsed = orna_syntax_v1::parse_module_with_file(consumer, "numeric_traits_consumer.orna");
     assert!(parsed.is_ok(), "{:#?}", parsed.diagnostics);
     let analysis = analyze_with_catalogue(

@@ -95,4 +95,13 @@ pub fn behavior_proof(): Bool =
     && numeric.max(ExactInt { value: 7 }, ExactInt { value: 3 }).value == 7
     && numeric.clamp(ExactInt { value: -2 }, ExactInt { value: 0 }, ExactInt { value: 10 }).value == 0
     && numeric.clamp(ExactInt { value: 12 }, ExactInt { value: 0 }, ExactInt { value: 10 }).value == 10
-    && numeric.clamp(ExactInt { value: 7 }, ExactInt { value: 0 }, ExactInt { value: 10 }).value == 7;
+    && numeric.clamp(ExactInt { value: 7 }, ExactInt { value: 0 }, ExactInt { value: 10 }).value == 7
+    && numeric.gcd(ExactInt { value: -18 }, ExactInt { value: 12 }).value == 6
+    && numeric.gcd(ExactInt { value: -18 }, ExactInt { value: -12 }).value == 6
+    && numeric.gcd(ExactInt { value: 0 }, ExactInt { value: 0 }).value == 0
+    && numeric.gcd(ExactInt { value: 0 }, ExactInt { value: -7 }).value == 7
+    && numeric.gcd(ExactInt { value: 35 }, ExactInt { value: 12 }).value == 1
+    && numeric.lcm(ExactInt { value: -6 }, ExactInt { value: 8 }).value == 24
+    && numeric.lcm(ExactInt { value: 0 }, ExactInt { value: 9 }).value == 0
+    && numeric.lcm(ExactInt { value: 3 }, ExactInt { value: 7 }).value == 21
+    && numeric.lcm(ExactInt { value: 12 }, ExactInt { value: 18 }).value == 36;
