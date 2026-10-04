@@ -6,7 +6,8 @@ use crate::{
     REFERENCE_STANDARD_COLLECTION_PATH_V1, REFERENCE_STANDARD_MATH_PATH_V1,
     REFERENCE_STANDARD_MONEY_PATH_V1,
     REFERENCE_STANDARD_BITS_PATH_V1, REFERENCE_STANDARD_QUERY_PATH_V1,
-    REFERENCE_STANDARD_TEXT_PATH_V1, REFERENCE_STANDARD_STATS_PATH_V1,
+    REFERENCE_STANDARD_TEXT_PATH_V1, REFERENCE_STANDARD_TEXT_BUILDER_PATH_V1,
+    REFERENCE_STANDARD_STATS_PATH_V1,
     REFERENCE_STANDARD_TIME_PATH_V1,
     REFERENCE_STANDARD_TIME_CALENDAR_PATH_V1,
     REFERENCE_STANDARD_STREAM_PATH_V1,
@@ -210,6 +211,48 @@ fn pinned_numeric_conversions_are_included_in_the_captured_snapshot() {
     assert!(parsed.is_ok(), "{:#?}", parsed.diagnostics);
     reference_standard_catalogue_v1()
         .expect("the numeric conversion module resolves against the captured std snapshot");
+}
+
+#[test]
+fn pinned_text_builder_is_included_in_the_captured_snapshot() {
+    let sources = reference_standard_sources_v1();
+    let (index, (path, source)) = sources
+        .iter()
+        .enumerate()
+        .find(|(_, (path, _))| path == REFERENCE_STANDARD_TEXT_BUILDER_PATH_V1)
+        .expect("the pinned source bundle includes std.text.builder");
+    assert_eq!(index, 60, "the text builder appends without moving old source entries");
+    assert_eq!(path, REFERENCE_STANDARD_TEXT_BUILDER_PATH_V1);
+    for declaration in [
+        "pub fn new(): [Str]",
+        "pub fn from_text(value: Str): [Str]",
+        "pub fn append(builder: [Str], value: Str): [Str]",
+        "pub fn append_all(builder: [Str], values: [Str]): [Str]",
+        "pub fn append_line(builder: [Str], value: Str): [Str]",
+        "pub fn build(builder: [Str]): Str",
+        "pub fn is_empty(builder: [Str]): Bool",
+    ] {
+        assert!(source.contains(declaration), "missing {declaration}");
+    }
+    for contract in [
+        "ordered [Str] chunks until build joins them",
+        "leaves the original reusable",
+        "Adds one line followed by LF",
+        "Emptiness describes the built text",
+    ] {
+        assert!(source.contains(contract), "missing string builder contract `{contract}`");
+    }
+    let profile = reference_standard_profile_v1();
+    profile
+        .verify_source(path, source)
+        .expect("text builder source bytes are recorded by the captured std profile");
+    let mut changed_source = source.clone();
+    changed_source.push_str("\n// changed after profile capture\n");
+    assert!(profile.verify_source(path, &changed_source).is_err());
+    let parsed = orna_syntax_v1::parse_module_with_file(source, path);
+    assert!(parsed.is_ok(), "{:#?}", parsed.diagnostics);
+    reference_standard_catalogue_v1()
+        .expect("the text builder resolves against the captured standard snapshot");
 }
 
 #[test]
