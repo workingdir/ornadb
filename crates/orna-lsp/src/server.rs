@@ -22,9 +22,11 @@ use lsp_types::{
     DocumentLinkOptions, DocumentLinkParams, DocumentSymbolParams, DocumentSymbolResponse,
     FoldingRange, FoldingRangeParams, FoldingRangeProviderCapability, FullDocumentDiagnosticReport,
     GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverParams, HoverProviderCapability,
-    InitializeParams, InlayHintOptions, InlayHintParams, InlayHintServerCapabilities, Moniker,
-    MonikerKind, MonikerParams, NumberOrString, OneOf, Position, PositionEncodingKind,
-    PrepareRenameResponse, PublishDiagnosticsParams, Range, ReferenceParams,
+    InitializeParams, InlayHintOptions, InlayHintParams, InlayHintServerCapabilities, InlineValue,
+    InlineValueOptions, InlineValueParams, InlineValueServerCapabilities,
+    InlineValueVariableLookup, LinkedEditingRangeParams, LinkedEditingRangeServerCapabilities,
+    LinkedEditingRanges, Moniker, MonikerKind, MonikerParams, NumberOrString, OneOf, Position,
+    PositionEncodingKind, PrepareRenameResponse, PublishDiagnosticsParams, Range, ReferenceParams,
     RelatedFullDocumentDiagnosticReport, RelatedUnchangedDocumentDiagnosticReport, RenameOptions,
     RenameParams, SelectionRangeParams, SelectionRangeProviderCapability, SemanticTokens,
     SemanticTokensFullOptions, SemanticTokensLegend, SemanticTokensOptions, SemanticTokensParams,
@@ -278,6 +280,10 @@ fn server_capabilities() -> serde_json::Value {
             CallHierarchyOptions::default(),
         )),
         moniker_provider: Some(OneOf::Left(true)),
+        inline_value_provider: Some(OneOf::Right(InlineValueServerCapabilities::Options(
+            InlineValueOptions::default(),
+        ))),
+        linked_editing_range_provider: Some(LinkedEditingRangeServerCapabilities::Simple(true)),
         folding_range_provider: Some(FoldingRangeProviderCapability::Simple(true)),
         selection_range_provider: Some(SelectionRangeProviderCapability::Simple(true)),
         ..ServerCapabilities::default()
@@ -307,6 +313,8 @@ fn handle_request(state: &mut ServerState, connection: &Connection, request: Req
         "textDocument/semanticTokens/full" => request_semantic_tokens_full(state, request),
         "textDocument/semanticTokens/range" => request_semantic_tokens_range(state, request),
         "textDocument/inlayHint" => request_inlay_hints(state, request),
+        "textDocument/inlineValue" => request_inline_values(state, request),
+        "textDocument/linkedEditingRange" => request_linked_editing_range(state, request),
         "textDocument/documentLink" => request_document_links(state, request),
         "textDocument/foldingRange" => request_folding_ranges(state, request),
         "textDocument/selectionRange" => request_selection_ranges(state, request),
@@ -2005,6 +2013,115 @@ fn request_inlay_hints(
         &mapper,
         &params.range,
     ))?)
+}
+
+fn request_inline_values(
+    state: &mut ServerState,
+    request: Request,
+) -> Result<serde_json::Value, Box<dyn std::error::Error + Send + Sync>> {
+    let (_, params) = request.extract::<InlineValueParams>("textDocument/inlineValue")?;
+    let Some(document) = state.document(&params.text_document.uri) else {
+        return Ok(serde_json::Value::Null);
+    };
+    let parse = analysis::parse_document(document);
+    if !parse.diagnostics.is_empty() {
+        return Ok(serde_json::to_value(Vec::<InlineValue>::new())?);
+    }
+
+    let mapper = PositionMapper::new(&document.text);
+    let requested_start = mapper.byte_offset(params.range.start);
+    let requested_end = mapper.byte_offset(params.range.end);
+    let stopped_at = mapper.byte_offset(params.context.stopped_location.end);
+    if requested_start > requested_end || stopped_at < requested_start || stopped_at > requested_end
+    {
+        return Ok(serde_json::to_value(Vec::<InlineValue>::new())?);
+    }
+
+    let mut values = crate::locals::visible_bindings(&parse.value, stopped_at)
+        .into_iter()
+        .filter_map(|binding| {
+            let mut occurrences = crate::locals::references(&parse.value, &binding);
+            occurrences.push(binding.selection);
+            occurrences
+                .into_iter()
+                .filter(|span| {
+                    span.start >= requested_start
+                        && span.end <= requested_end
+                        && span.end <= stopped_at
+                })
+                .max_by_key(|span| span.start)
+                .map(|span| {
+                    (
+                        span.start,
+                        InlineValue::VariableLookup(InlineValueVariableLookup {
+                            range: mapper.range(&span),
+                            variable_name: Some(binding.name),
+                            case_sensitive_lookup: false,
+                        }),
+                    )
+                })
+        })
+        .collect::<Vec<_>>();
+    values.sort_by_key(|(start, _)| *start);
+    Ok(serde_json::to_value(
+        values
+            .into_iter()
+            .map(|(_, value)| value)
+            .collect::<Vec<_>>(),
+    )?)
+}
+
+fn request_linked_editing_range(
+    state: &mut ServerState,
+    request: Request,
+) -> Result<serde_json::Value, Box<dyn std::error::Error + Send + Sync>> {
+    let (_, params) =
+        request.extract::<LinkedEditingRangeParams>("textDocument/linkedEditingRange")?;
+    let uri = params.text_document_position_params.text_document.uri;
+    let Some((document, segments, selected_start)) = combined_workspace(&state.documents, &uri)
+    else {
+        return Ok(serde_json::Value::Null);
+    };
+    let (parse, mapper) = parse_document(&document);
+    if !parse.diagnostics.is_empty() {
+        return Ok(serde_json::Value::Null);
+    }
+    let Some(position) = workspace_position(
+        &document,
+        selected_start,
+        params.text_document_position_params.position,
+        &state.documents,
+        &uri,
+    ) else {
+        return Ok(serde_json::Value::Null);
+    };
+    let Some((name, _)) = analysis::identifier_at(&document, position, &mapper) else {
+        return Ok(serde_json::Value::Null);
+    };
+    let Some(selected_document) = state.document(&uri) else {
+        return Ok(serde_json::Value::Null);
+    };
+    let selected_mapper = PositionMapper::new(&selected_document.text);
+    let mut ranges = analysis::references(&document, &parse, position, &mapper, true)
+        .into_iter()
+        .filter_map(|location| project_location(location, &mapper, &segments))
+        .filter(|location| location.uri == uri)
+        .filter_map(|location| {
+            let start = selected_mapper.byte_offset(location.range.start);
+            let end = selected_mapper.byte_offset(location.range.end);
+            (selected_document.text.get(start..end) == Some(name.as_str()))
+                .then_some((start, location.range))
+        })
+        .collect::<Vec<_>>();
+    ranges.sort_by_key(|(start, _)| *start);
+    ranges.dedup_by_key(|(start, range)| (*start, range.end));
+    if ranges.len() < 2 {
+        return Ok(serde_json::Value::Null);
+    }
+    Ok(serde_json::to_value(LinkedEditingRanges {
+        ranges: ranges.into_iter().map(|(_, range)| range).collect(),
+        word_pattern: None,
+    })?)
 }
 
 fn request_completion(
