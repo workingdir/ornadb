@@ -28,8 +28,10 @@ jobs:
         with:
           submodules: recursive
 
-      - name: Install Rust
+      - name: Install Rust and the WebAssembly target
         uses: dtolnay/rust-toolchain@1.95.0
+        with:
+          targets: wasm32-unknown-unknown
 
       - name: Install Node.js
         uses: actions/setup-node@v7
@@ -37,6 +39,9 @@ jobs:
           node-version: 22.21.1
           cache: npm
           cache-dependency-path: playground/web-ui/package-lock.json
+
+      - name: Install wasm-pack
+        run: cargo install wasm-pack --locked --version 0.15.0
 
       - name: Check generated editor and Monarch artifacts
         run: cargo run --locked -p orna-syntax-v1 --example generate_editor_artifacts -- --check
