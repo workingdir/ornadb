@@ -10,7 +10,7 @@ use std::thread::{self, JoinHandle};
 
 use crate::analysis::{self, EditorParse as Parse};
 use crate::documents::{Document, PositionMapper};
-use crate::{inlay, semantic};
+use crate::{editor_ranges, inlay, semantic};
 use lsp_server::{Connection, ErrorCode, Message, Notification, Request, Response, ResponseError};
 use lsp_types::{
     CallHierarchyItem, CallHierarchyOptions, CallHierarchyServerCapability, CodeAction,
@@ -18,17 +18,18 @@ use lsp_types::{
     CodeActionProviderCapability, CompletionOptions, CompletionParams, CompletionResponse,
     Diagnostic, DiagnosticOptions, DiagnosticServerCapabilities, DocumentDiagnosticParams,
     DocumentDiagnosticReport, DocumentLink, DocumentLinkOptions, DocumentLinkParams,
-    DocumentSymbolParams, DocumentSymbolResponse, FullDocumentDiagnosticReport,
-    GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverParams, HoverProviderCapability,
-    InitializeParams, InlayHintOptions, InlayHintParams, InlayHintServerCapabilities,
-    NumberOrString, OneOf, Position, PositionEncodingKind, PrepareRenameResponse,
-    PublishDiagnosticsParams, Range, ReferenceParams, RelatedFullDocumentDiagnosticReport,
-    RelatedUnchangedDocumentDiagnosticReport, RenameOptions, RenameParams, SemanticTokens,
-    SemanticTokensFullOptions, SemanticTokensLegend, SemanticTokensOptions, SemanticTokensParams,
-    SemanticTokensRangeParams, SemanticTokensServerCapabilities, ServerCapabilities,
-    SignatureHelpOptions, TextDocumentContentChangeEvent, TextDocumentSyncCapability,
-    TextDocumentSyncKind, TextDocumentSyncOptions, TextDocumentSyncSaveOptions, TextEdit,
-    UnchangedDocumentDiagnosticReport, Uri, WorkspaceEdit,
+    DocumentSymbolParams, DocumentSymbolResponse, FoldingRange, FoldingRangeParams,
+    FoldingRangeProviderCapability, FullDocumentDiagnosticReport, GotoDefinitionParams,
+    GotoDefinitionResponse, Hover, HoverParams, HoverProviderCapability, InitializeParams,
+    InlayHintOptions, InlayHintParams, InlayHintServerCapabilities, NumberOrString, OneOf,
+    Position, PositionEncodingKind, PrepareRenameResponse, PublishDiagnosticsParams, Range,
+    ReferenceParams, RelatedFullDocumentDiagnosticReport, RelatedUnchangedDocumentDiagnosticReport,
+    RenameOptions, RenameParams, SelectionRangeParams, SelectionRangeProviderCapability,
+    SemanticTokens, SemanticTokensFullOptions, SemanticTokensLegend, SemanticTokensOptions,
+    SemanticTokensParams, SemanticTokensRangeParams, SemanticTokensServerCapabilities,
+    ServerCapabilities, SignatureHelpOptions, TextDocumentContentChangeEvent,
+    TextDocumentSyncCapability, TextDocumentSyncKind, TextDocumentSyncOptions,
+    TextDocumentSyncSaveOptions, TextEdit, UnchangedDocumentDiagnosticReport, Uri, WorkspaceEdit,
 };
 
 /// Transport threads for the server's standard input and output streams.
@@ -268,6 +269,8 @@ fn server_capabilities() -> ServerCapabilities {
         call_hierarchy_provider: Some(CallHierarchyServerCapability::Options(
             CallHierarchyOptions::default(),
         )),
+        folding_range_provider: Some(FoldingRangeProviderCapability::Simple(true)),
+        selection_range_provider: Some(SelectionRangeProviderCapability::Simple(true)),
         ..ServerCapabilities::default()
     }
 }
@@ -289,6 +292,8 @@ fn handle_request(state: &mut ServerState, connection: &Connection, request: Req
         "textDocument/semanticTokens/range" => request_semantic_tokens_range(state, request),
         "textDocument/inlayHint" => request_inlay_hints(state, request),
         "textDocument/documentLink" => request_document_links(state, request),
+        "textDocument/foldingRange" => request_folding_ranges(state, request),
+        "textDocument/selectionRange" => request_selection_ranges(state, request),
         "textDocument/completion" => request_completion(state, request),
         "workspace/symbol" => request_workspace_symbols(state, request),
         "textDocument/prepareCallHierarchy" => request_prepare_call_hierarchy(state, request),
@@ -1531,4 +1536,34 @@ fn request_document_links(
         .map(|document| analysis::document_links(document, &state.documents))
         .unwrap_or_default();
     Ok(serde_json::to_value(links)?)
+}
+
+fn request_folding_ranges(
+    state: &mut ServerState,
+    request: Request,
+) -> Result<serde_json::Value, Box<dyn std::error::Error + Send + Sync>> {
+    let (_, params) = request.extract::<FoldingRangeParams>("textDocument/foldingRange")?;
+    let Some(document) = state.document(&params.text_document.uri) else {
+        return Ok(serde_json::Value::Null);
+    };
+    let parse = analysis::parse_document(document);
+    let mapper = PositionMapper::new(&document.text);
+    let ranges: Vec<FoldingRange> =
+        editor_ranges::folding_ranges(&parse.value, &document.text, &mapper);
+    Ok(serde_json::to_value(ranges)?)
+}
+
+fn request_selection_ranges(
+    state: &mut ServerState,
+    request: Request,
+) -> Result<serde_json::Value, Box<dyn std::error::Error + Send + Sync>> {
+    let (_, params) = request.extract::<SelectionRangeParams>("textDocument/selectionRange")?;
+    let Some(document) = state.document(&params.text_document.uri) else {
+        return Ok(serde_json::Value::Null);
+    };
+    let parse = analysis::parse_document(document);
+    let mapper = PositionMapper::new(&document.text);
+    let ranges =
+        editor_ranges::selection_ranges(&parse.value, &document.text, &params.positions, &mapper);
+    Ok(serde_json::to_value(ranges)?)
 }

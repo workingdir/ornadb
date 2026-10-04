@@ -27,6 +27,7 @@ const WORKSPACE_HIERARCHY_PROVIDER_SOURCE: &str =
     include_str!("fixtures/workspace-hierarchy-provider-v1.orna");
 const WORKSPACE_HIERARCHY_CALLER_SOURCE: &str =
     include_str!("fixtures/workspace-hierarchy-caller-v1.orna");
+const FOLDING_SELECTION_SOURCE: &str = include_str!("fixtures/folding-selection-v1.orna");
 
 struct Client {
     child: Child,
@@ -172,6 +173,8 @@ fn initialize(client: &mut Client) {
         result["capabilities"]["documentLinkProvider"]["resolveProvider"],
         false
     );
+    assert_eq!(result["capabilities"]["foldingRangeProvider"], true);
+    assert_eq!(result["capabilities"]["selectionRangeProvider"], true);
     let call_hierarchy = &result["capabilities"]["callHierarchyProvider"];
     assert!(
         call_hierarchy.as_bool() == Some(true) || call_hierarchy.is_object(),
@@ -1357,6 +1360,242 @@ fn workspace_symbols_rank_stably_and_call_hierarchy_tracks_resolved_calls() {
     assert!(
         ambiguous_reference.is_null(),
         "ambiguous function reference unexpectedly resolved: {ambiguous_reference}"
+    );
+    client.shutdown();
+}
+
+fn selection_chain(selection: &Value) -> Vec<Value> {
+    let mut chain = Vec::new();
+    let mut current = selection;
+    loop {
+        chain.push(current.clone());
+        let Some(parent) = current.get("parent") else {
+            break;
+        };
+        current = parent;
+    }
+    chain
+}
+
+fn folding_range_at(source: &str, start: usize, end: usize, kind: &str) -> Value {
+    let start = position_at(source, start);
+    let end = position_at(source, end);
+    json!({
+        "startLine": start["line"],
+        "startCharacter": start["character"],
+        "endLine": end["line"],
+        "endCharacter": end["character"],
+        "kind": kind,
+    })
+}
+
+#[test]
+fn folding_and_selection_ranges_follow_syntax_and_preserve_utf16_positions() {
+    let uri = "file:///workspace/folding-selection.orna";
+    let mut client = Client::spawn();
+    initialize(&mut client);
+    let diagnostics = open(&mut client, uri, FOLDING_SELECTION_SOURCE);
+    assert!(
+        diagnostics["diagnostics"].as_array().unwrap().is_empty(),
+        "{diagnostics}"
+    );
+
+    let folds = client.request(
+        "textDocument/foldingRange",
+        json!({"textDocument":{"uri":uri}}),
+    );
+    let folds = folds.as_array().unwrap();
+    assert!(!folds.is_empty(), "no folding ranges were returned");
+    let mut previous = None;
+    let mut unique = std::collections::BTreeSet::new();
+    for fold in folds {
+        let key = (
+            fold["startLine"].as_u64().unwrap(),
+            fold["startCharacter"].as_u64().unwrap(),
+            fold["endLine"].as_u64().unwrap(),
+            fold["endCharacter"].as_u64().unwrap(),
+        );
+        assert!(key.0 < key.2, "single-line fold: {fold}");
+        assert!(
+            previous.is_none_or(|previous| previous <= key),
+            "unsorted folds: {folds:?}"
+        );
+        assert!(unique.insert(key), "duplicate folding coordinates: {fold}");
+        previous = Some(key);
+    }
+    let comment_start = FOLDING_SELECTION_SOURCE.find("/* range docs").unwrap();
+    let comment_end = FOLDING_SELECTION_SOURCE.find("*/").unwrap() + 2;
+    let comment_fold = folds
+        .iter()
+        .find(|fold| fold["kind"] == "comment")
+        .expect("multi-line comment folding range");
+    assert_eq!(
+        comment_fold,
+        &folding_range_at(
+            FOLDING_SELECTION_SOURCE,
+            comment_start,
+            comment_end,
+            "comment"
+        )
+    );
+    let import_start = FOLDING_SELECTION_SOURCE.find("use std.math.{abs}").unwrap();
+    let import_end =
+        FOLDING_SELECTION_SOURCE.find("use std.math.{min}").unwrap() + "use std.math.{min};".len();
+    let import_fold = folds
+        .iter()
+        .find(|fold| fold["kind"] == "imports")
+        .expect("contiguous import folding range");
+    assert_eq!(
+        import_fold,
+        &folding_range_at(
+            FOLDING_SELECTION_SOURCE,
+            import_start,
+            import_end,
+            "imports"
+        )
+    );
+    let line_comment_start = FOLDING_SELECTION_SOURCE.find("// fold together").unwrap();
+    let line_comment_end = FOLDING_SELECTION_SOURCE
+        .find("// contiguous comments")
+        .unwrap()
+        + "// contiguous comments".len();
+    let line_comment_fold = folds
+        .iter()
+        .find(|fold| {
+            fold["kind"] == "comment"
+                && fold["startLine"]
+                    == position_at(FOLDING_SELECTION_SOURCE, line_comment_start)["line"]
+        })
+        .expect("contiguous line-comment folding range");
+    assert_eq!(
+        line_comment_fold,
+        &folding_range_at(
+            FOLDING_SELECTION_SOURCE,
+            line_comment_start,
+            line_comment_end,
+            "comment",
+        )
+    );
+    let control_start = FOLDING_SELECTION_SOURCE.find("if total > 0").unwrap();
+    assert!(
+        folds.iter().any(|fold| {
+            fold["startLine"] == position_at(FOLDING_SELECTION_SOURCE, control_start)["line"]
+                && fold["endLine"]
+                    == position_at(
+                        FOLDING_SELECTION_SOURCE,
+                        FOLDING_SELECTION_SOURCE
+                            .find("\n    }\n}\n\npub enum")
+                            .unwrap()
+                            + 6,
+                    )["line"]
+        }),
+        "control body folding range missing: {folds:?}"
+    );
+    let outer_start = FOLDING_SELECTION_SOURCE.find("pub fn outer").unwrap();
+    let outer_end = FOLDING_SELECTION_SOURCE
+        .find("\n}\n\npub enum Outcome")
+        .unwrap()
+        + 2;
+    assert!(
+        folds.iter().any(|fold| {
+            fold["startLine"] == position_at(FOLDING_SELECTION_SOURCE, outer_start)["line"]
+                && fold["startCharacter"]
+                    == position_at(FOLDING_SELECTION_SOURCE, outer_start)["character"]
+                && fold["endLine"] == position_at(FOLDING_SELECTION_SOURCE, outer_end)["line"]
+        }),
+        "top-level function folding range missing: {folds:?}"
+    );
+    let enum_start = FOLDING_SELECTION_SOURCE.find("pub enum Outcome").unwrap();
+    let enum_end = FOLDING_SELECTION_SOURCE
+        .find("failed { reason: Str },")
+        .unwrap()
+        + "failed { reason: Str },\n}".len();
+    assert!(
+        folds.iter().any(|fold| {
+            fold["startLine"] == position_at(FOLDING_SELECTION_SOURCE, enum_start)["line"]
+                && fold["startCharacter"]
+                    == position_at(FOLDING_SELECTION_SOURCE, enum_start)["character"]
+                && fold["endLine"] == position_at(FOLDING_SELECTION_SOURCE, enum_end)["line"]
+        }),
+        "enum folding range missing: {folds:?}"
+    );
+
+    let value_start = FOLDING_SELECTION_SOURCE.find("abs(value)").unwrap() + "abs(".len();
+    let value_end = value_start + "value".len();
+    let compass_start = FOLDING_SELECTION_SOURCE.find("\"🧭\"").unwrap();
+    let compass_end = compass_start + "\"🧭\"".len();
+    let marker_start = FOLDING_SELECTION_SOURCE
+        .find("\"/* string content, never a comment */\"")
+        .unwrap();
+    let marker_end = marker_start + "\"/* string content, never a comment */\"".len();
+    let blank_line = FOLDING_SELECTION_SOURCE.find("\n\npub fn compass").unwrap() + 1;
+    let selections = client.request(
+        "textDocument/selectionRange",
+        json!({
+            "textDocument":{"uri":uri},
+            "positions":[
+                position_at(FOLDING_SELECTION_SOURCE, value_start + 2),
+                position_at(FOLDING_SELECTION_SOURCE, compass_end - 1),
+                position_of(FOLDING_SELECTION_SOURCE, "compass 🧭 remains", "compass ".len()),
+                position_of(FOLDING_SELECTION_SOURCE, "string content", "string ".len()),
+                position_at(FOLDING_SELECTION_SOURCE, blank_line),
+            ]
+        }),
+    );
+    let selections = selections.as_array().unwrap();
+    assert_eq!(selections.len(), 5, "{selections:?}");
+    let value_chain = selection_chain(&selections[0]);
+    assert_eq!(
+        value_chain[0]["range"],
+        range_at(FOLDING_SELECTION_SOURCE, value_start, value_end)
+    );
+    let call_start = FOLDING_SELECTION_SOURCE.find("abs(value)").unwrap();
+    let call_end = call_start + "abs(value)".len();
+    assert_eq!(
+        value_chain[1]["range"],
+        range_at(FOLDING_SELECTION_SOURCE, call_start, call_end)
+    );
+    let statement_start = FOLDING_SELECTION_SOURCE.find("let total =").unwrap();
+    let statement_end = statement_start + "let total = abs(value)".len();
+    assert_eq!(
+        value_chain[2]["range"],
+        range_at(FOLDING_SELECTION_SOURCE, statement_start, statement_end)
+    );
+    assert!(
+        value_chain.len() >= 5,
+        "selection ancestry must include syntax parents through the document: {value_chain:?}"
+    );
+    assert_eq!(
+        value_chain.last().unwrap()["range"],
+        range_at(FOLDING_SELECTION_SOURCE, 0, FOLDING_SELECTION_SOURCE.len())
+    );
+
+    let compass_chain = selection_chain(&selections[1]);
+    assert_eq!(
+        compass_chain[0]["range"],
+        range_at(FOLDING_SELECTION_SOURCE, compass_start, compass_end),
+        "UTF-16 cursor after supplementary character should select the string token"
+    );
+    let comment_chain = selection_chain(&selections[2]);
+    assert_eq!(
+        comment_chain[0]["range"],
+        range_at(FOLDING_SELECTION_SOURCE, comment_start, comment_end)
+    );
+    let string_chain = selection_chain(&selections[3]);
+    assert_eq!(
+        string_chain[0]["range"],
+        range_at(FOLDING_SELECTION_SOURCE, marker_start, marker_end),
+        "comment delimiters inside strings must remain string selection text"
+    );
+    let blank_chain = selection_chain(&selections[4]);
+    assert_eq!(
+        blank_chain[0]["range"],
+        range_at(FOLDING_SELECTION_SOURCE, blank_line, blank_line),
+        "blank-line cursors should select their line before the document"
+    );
+    assert_eq!(
+        blank_chain[1]["range"],
+        range_at(FOLDING_SELECTION_SOURCE, 0, FOLDING_SELECTION_SOURCE.len())
     );
     client.shutdown();
 }
