@@ -1,0 +1,5 @@
+std.stream.adapters.from_sequence_batches(
+    () => std.iterator.take(std.iterator.iterate(1, value => value + 1), 0),
+    "empty-batch-proof",
+    2
+)
