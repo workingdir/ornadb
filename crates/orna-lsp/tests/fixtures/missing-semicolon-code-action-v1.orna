@@ -1,0 +1,4 @@
+pub fn missing(value: Int): Int {
+    let intermediate: Int = value
+    intermediate + 1
+}
