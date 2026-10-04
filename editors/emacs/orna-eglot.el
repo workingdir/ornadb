@@ -1,6 +1,8 @@
 ;;; orna-eglot.el --- Orna 1.0.0 lexical highlighting -*- lexical-binding: t; -*-
 ;; Generated from orna-syntax-v1.
 (require 'eglot)
+(defvar orna-eglot-server-command '("orna-lsp")
+  "Command used by Eglot to start the Orna language server.")
 (defvar orna-font-lock-keywords
   `(
     (,(regexp-opt '("as" "assert" "base" "break" "case" "continue" "dim" "else" "enum" "false" "fn" "for" "if" "impl" "in" "let" "loop" "null" "offset" "affine" "protocol" "pub" "return" "self" "static" "table" "true" "type" "unit" "use" "while") 'words) . font-lock-keyword-face)
@@ -20,6 +22,8 @@
   (setq-local font-lock-defaults '(orna-font-lock-keywords nil nil)))
 (add-to-list 'auto-mode-alist '("\\.orna\\'" . orna-mode))
 (defun orna-setup-eglot ()
-  "Register Orna buffers with the orna-lsp language server."
-  (add-to-list 'eglot-server-programs (cons '(orna-mode) '("orna-lsp"))))
+  "Attach Orna buffers to the configured language server with Eglot."
+  (add-to-list 'eglot-server-programs
+               (cons '(orna-mode) orna-eglot-server-command))
+  (add-hook 'orna-mode-hook #'eglot-ensure))
 (provide 'orna-eglot)
