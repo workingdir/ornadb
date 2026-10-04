@@ -32,6 +32,22 @@ source evaluation still require the same-origin `/api/examples` and `/orna/`
 endpoints provided by `orna serve`. The Pages smoke checks both channel bundles,
 their generated assets, and the published HTML and JS/CSS routes.
 
+Both channels also publish an `embed.js` entry (`/ornadb/embed.js` for stable,
+`/ornadb/dev/embed.js` for development). Include it with a target selector and
+the URL of the served clone's `/playground/embed` route:
+
+```html
+<div id="orna-playground"></div>
+<script defer src="https://workingdir.github.io/ornadb/embed.js"
+        data-target="#orna-playground"
+        data-src="https://your-orna-host/playground/embed"></script>
+```
+
+The entry creates an iframe; `/playground/embed` hides the database header and
+permits framing. Pages provides the loader file, and `orna serve` continues to
+provide the runtime API. The Pages smoke checks verify `embed.js` in both local
+build artifacts and both published channels.
+
 ## Dogfood proof
 
 Run the focused process-level integration test with:

@@ -30,10 +30,18 @@ function assertPlaygroundPage(html, channelName) {
   return assets;
 }
 
+function assertEmbedEntry(source, channelName) {
+  assert.match(source, /orna-playground-embed-loader\/v1/, `${channelName} has the embed entry marker`);
+  assert.match(source, /data-target/, `${channelName} embed entry accepts a target element`);
+  assert.match(source, /data-src/, `${channelName} embed entry accepts a served playground URL`);
+}
+
 async function checkLocalChannel(channel) {
   const channelDirectory = join(siteDirectory, channel.directory);
   const html = await readFile(join(channelDirectory, 'index.html'), 'utf8');
+  const embedEntry = await readFile(join(channelDirectory, 'embed.js'), 'utf8');
   const assets = assertPlaygroundPage(html, channel.name);
+  assertEmbedEntry(embedEntry, channel.name);
 
   for (const reference of assets) {
     const assetUrl = new URL(reference, 'https://pages-smoke.invalid');
@@ -49,7 +57,7 @@ async function checkLocalChannel(channel) {
   const lspFiles = await readdir(join(channelDirectory, 'lsp-wasm'));
   assert(lspFiles.some((file) => file.endsWith('.js')), `${channel.name} contains the LSP JavaScript module`);
   assert(lspFiles.some((file) => file.endsWith('.wasm')), `${channel.name} contains the LSP WebAssembly module`);
-  process.stdout.write(`[pages-smoke] ${channel.name}: local index, referenced assets, and LSP modules are present\n`);
+  process.stdout.write(`[pages-smoke] ${channel.name}: local index, referenced assets, LSP modules, and embed.js are present\n`);
 }
 
 async function fetchPublished(url) {
@@ -67,6 +75,8 @@ async function checkPublishedChannel(channel) {
   const channelUrl = new URL(channel.url, pageRoot);
   const response = await fetchPublished(channelUrl);
   const assets = assertPlaygroundPage(await response.text(), channel.name);
+  const embedResponse = await fetchPublished(new URL('embed.js', channelUrl));
+  assertEmbedEntry(await embedResponse.text(), channel.name);
   let jsCount = 0;
   let cssCount = 0;
 
@@ -80,7 +90,7 @@ async function checkPublishedChannel(channel) {
 
   assert(jsCount > 0, `${channel.name} published JavaScript assets`);
   assert(cssCount > 0, `${channel.name} published CSS assets`);
-  process.stdout.write(`[pages-smoke] ${channel.name}: page and ${jsCount} JavaScript/${cssCount} CSS assets returned HTTP 200\n`);
+  process.stdout.write(`[pages-smoke] ${channel.name}: page, embed.js, and ${jsCount} JavaScript/${cssCount} CSS assets returned HTTP 200\n`);
 }
 
 for (const channel of channels) {
