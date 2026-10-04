@@ -7,11 +7,11 @@
 use std::ops::Range;
 
 use crate::{
-    Keyword, TokenKind,
     lexer::{
-        BLOCK_COMMENT_END, BLOCK_COMMENT_START, LINE_COMMENT_START, NUMBER_PATTERN, OPERATORS,
-        PUNCTUATION, STRING_DELIMITER, lex_recovering,
+        lex_recovering, BLOCK_COMMENT_END, BLOCK_COMMENT_START, LINE_COMMENT_START, NUMBER_PATTERN,
+        OPERATORS, PUNCTUATION, STRING_DELIMITER,
     },
+    Keyword, TokenKind,
 };
 
 pub const BRACKET_PAIRS: &[(&str, &str)] = &[("(", ")"), ("[", "]"), ("{", "}")];
@@ -26,7 +26,9 @@ pub const EDITOR_EMITTERS: &[&str] = &[
     "Tree-sitter grammar and package metadata",
     "VSCode language configuration",
     "Vim syntax and filetype detection",
-    "Emacs major mode",
+    "Vim LSP registration and omnifunc completion",
+    "Neovim native LSP attachment",
+    "Emacs major mode and Eglot attachment",
     "Sublime syntax",
     "Semantic-token legend",
     "Monaco Monarch keyword inventory",
@@ -244,6 +246,8 @@ pub fn generated_artifacts() -> Vec<GeneratedArtifact> {
         ),
         artifact("editors/vim/syntax/orna.vim", render_vim()),
         artifact("editors/vim/ftdetect/orna.vim", render_vim_filetype()),
+        artifact("editors/vim/plugin/orna-lsp.vim", render_vim_lsp()),
+        artifact("editors/neovim/lua/orna/init.lua", render_neovim_lsp()),
         artifact("editors/emacs/orna-eglot.el", render_emacs()),
         artifact("editors/sublime/Orna.sublime-syntax", render_sublime()),
         artifact("editors/vscode/package.json", render_vscode_package()),
@@ -649,6 +653,63 @@ fn render_vim_filetype() -> String {
     )
 }
 
+fn render_vim_lsp() -> String {
+    format!(
+        r#"" Generated from orna-syntax-v1 language metadata.
+if !exists('g:orna_lsp_command')
+    let g:orna_lsp_command = ['orna-lsp']
+endif
+function! s:on_lsp_buffer_enabled() abort
+    if &l:filetype ==# '{LANGUAGE_ID}'
+        setlocal omnifunc=lsp#complete
+    endif
+endfunction
+augroup orna_lsp
+    au!
+    au User lsp_setup call lsp#register_server({{
+        \ 'name': '{LANGUAGE_ID}',
+        \ 'cmd': {{server_info -> copy(g:orna_lsp_command)}},
+        \ 'allowlist': ['{LANGUAGE_ID}'],
+        \ }})
+    au User lsp_buffer_enabled call <SID>on_lsp_buffer_enabled()
+augroup END
+"#
+    )
+}
+
+fn render_neovim_lsp() -> String {
+    format!(
+        r#"-- Generated from orna-syntax-v1 language metadata.
+local M = {{}}
+
+function M.setup(options)
+  options = options or {{}}
+  local command = options.cmd or {{ "orna-lsp" }}
+  vim.filetype.add({{ extension = {{ orna = "orna" }} }})
+  local group = vim.api.nvim_create_augroup("orna_lsp", {{ clear = true }})
+
+  vim.api.nvim_create_autocmd("FileType", {{
+    group = group,
+    pattern = "{LANGUAGE_ID}",
+    callback = function(event)
+      local root_dir = options.root_dir
+      if type(root_dir) == "function" then
+        root_dir = root_dir(event.buf)
+      end
+      vim.lsp.start({{
+        name = "{LANGUAGE_ID}",
+        cmd = command,
+        root_dir = root_dir or vim.fn.getcwd(),
+      }}, {{ bufnr = event.buf }})
+    end,
+  }})
+end
+
+return M
+"#
+    )
+}
+
 fn vim_regex(pattern: &str) -> String {
     pattern.replace("(?:", "\\%(")
 }
@@ -743,6 +804,8 @@ fn render_emacs() -> String {
         r#";;; orna-eglot.el --- Orna {LANGUAGE_VERSION} lexical highlighting -*- lexical-binding: t; -*-
 ;; Generated from orna-syntax-v1.
 (require 'eglot)
+(defvar orna-eglot-server-command '("orna-lsp")
+  "Command used by Eglot to start the Orna language server.")
 (defvar orna-font-lock-keywords
   `(
     {rules}
@@ -755,8 +818,10 @@ fn render_emacs() -> String {
   (setq-local font-lock-defaults '(orna-font-lock-keywords nil nil)))
 (add-to-list 'auto-mode-alist '({extension_pattern} . orna-mode))
 (defun orna-setup-eglot ()
-  "Register Orna buffers with the orna-lsp language server."
-  (add-to-list 'eglot-server-programs (cons '(orna-mode) '("orna-lsp"))))
+  "Attach Orna buffers to the configured language server with Eglot."
+  (add-to-list 'eglot-server-programs
+               (cons '(orna-mode) orna-eglot-server-command))
+  (add-hook 'orna-mode-hook #'eglot-ensure))
 (provide 'orna-eglot)
 "#,
         rules = rules,
