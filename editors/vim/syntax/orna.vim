@@ -5,9 +5,9 @@ syntax keyword ornaKeyword as assert base break case continue dim else enum fals
 syntax region ornaString start=+"+ skip=+\\.+ end=+"+ contains=ornaInterpolation
 syntax region ornaInterpolation start=+\\{+ end=+}+ contained
 syntax match ornaComment +//.*$+
-syntax region ornaComment start=+/*+ end=+*/+ contains=ornaComment
+syntax region ornaComment start=+/\*+ end=+\*/+ contains=ornaComment
 syntax match ornaNumber /\v\%([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\%(\.[0-9]*)?\%(Z|[+-][0-9]{2}:[0-9]{2})|[0-9]{4}-[0-9]{2}-[0-9]{2}|0x[0-9A-Fa-f_]*|0b[01_]*|[0-9][0-9_]*\%(\.[0-9_]+)?\%([eE][+-]?[0-9_]*)?f?)/
-syntax match ornaOperator +\(\.\.=\|=>\|==\|!=\|<=\|>=\|??\||?\|&&\|||\|+=\|-=\|\*=\|/=\|\.\.\||\|!\|=\|<\|>\|+\|-\|\*\|/\|%\|\^\|?\)+
+syntax match ornaOperator @\(\.\.=\|=>\|==\|!=\|<=\|>=\|??\||?\|&&\|||\|+=\|-=\|\*=\|/=\|\.\.\||\|!\|=\|<\|>\|+\|-\|\*\|/\|%\|\^\|?\)@
 syntax match ornaPunctuation +\({\|}\|(\|)\|\[\|\]\|,\|;\|:\|\.\)+
 syntax match ornaIdentifier +[_[:alpha:]][_[:alnum:]]*+
 hi def link ornaKeyword Statement

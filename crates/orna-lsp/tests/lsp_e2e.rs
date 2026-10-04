@@ -9,6 +9,8 @@ use serde_json::{Value, json};
 
 const SOURCE: &str = include_str!("fixtures/expressions-v1.orna");
 const CALL_SOURCE: &str = include_str!("fixtures/call-v1.orna");
+const INCREMENTAL_SOURCE: &str = include_str!("fixtures/incremental-malformed-v1.orna");
+const LOCAL_SCOPES_SOURCE: &str = include_str!("fixtures/local-scopes-v1.orna");
 
 struct Client {
     child: Child,
@@ -95,12 +97,17 @@ fn position_of(source: &str, needle: &str, offset: usize) -> Value {
     position_at(source, source.find(needle).unwrap() + offset)
 }
 
+fn range_at(source: &str, start: usize, end: usize) -> Value {
+    json!({"start":position_at(source, start),"end":position_at(source, end)})
+}
+
 fn initialize(client: &mut Client) {
     let result = client.request(
         "initialize",
         json!({"processId":null,"rootUri":null,"capabilities":{}}),
     );
     assert_eq!(result["capabilities"]["positionEncoding"], "utf-16");
+    assert_eq!(result["capabilities"]["textDocumentSync"]["change"], 2);
     assert_eq!(result["capabilities"]["hoverProvider"], true);
     client.notify("initialized", json!({}));
 }
@@ -253,6 +260,120 @@ fn legacy_sql_is_rejected_and_parser_diagnostic_range_is_precise() {
             .unwrap()
             .iter()
             .all(|diagnostic| diagnostic["source"] == "orna-syntax-v1")
+    );
+    client.shutdown();
+}
+
+#[test]
+fn incremental_changes_apply_in_order_with_utf16_positions_and_ignore_stale_versions() {
+    let uri = "file:///workspace/incremental.orna";
+    let source = INCREMENTAL_SOURCE;
+    let semicolon = source.find(';').unwrap();
+    let mut intermediate = source.to_owned();
+    intermediate.replace_range(semicolon..semicolon + 1, "10;");
+    let mut expected = intermediate.clone();
+    expected.replace_range(semicolon + 1..semicolon + 2, "2");
+    assert!(
+        orna_syntax_v1::parse_module(&expected)
+            .diagnostics
+            .is_empty(),
+        "expected source: {expected:?}"
+    );
+
+    let mut client = Client::spawn();
+    initialize(&mut client);
+    let initial = open(&mut client, uri, source);
+    assert!(!initial["diagnostics"].as_array().unwrap().is_empty());
+
+    client.notify(
+        "textDocument/didChange",
+        json!({
+            "textDocument":{"uri":uri,"version":2},
+            "contentChanges":[
+                {"range":range_at(source, semicolon, semicolon + 1),"text":"10;"},
+                {"range":range_at(&intermediate, semicolon + 1, semicolon + 2),"text":"2"}
+            ]
+        }),
+    );
+    let updated = client.notification("textDocument/publishDiagnostics");
+    assert_eq!(updated["version"], 2);
+    assert!(
+        updated["diagnostics"].as_array().unwrap().is_empty(),
+        "{updated}"
+    );
+
+    client.notify(
+        "textDocument/didChange",
+        json!({
+            "textDocument":{"uri":uri,"version":1},
+            "contentChanges":[{"range":range_at(&expected, semicolon, semicolon + 2),"text":";"}]
+        }),
+    );
+    client.notify("textDocument/didSave", json!({"textDocument":{"uri":uri}}));
+    let after_stale_change = client.notification("textDocument/publishDiagnostics");
+    assert_eq!(after_stale_change["version"], 2);
+    assert!(
+        after_stale_change["diagnostics"]
+            .as_array()
+            .unwrap()
+            .is_empty(),
+        "stale didChange corrupted the open document: {after_stale_change}"
+    );
+    client.shutdown();
+}
+
+#[test]
+fn local_navigation_and_rename_follow_shadowed_bindings() {
+    let uri = "file:///workspace/local-scopes.orna";
+    let mut client = Client::spawn();
+    initialize(&mut client);
+    let diagnostics = open(&mut client, uri, LOCAL_SCOPES_SOURCE);
+    assert!(diagnostics["diagnostics"].as_array().unwrap().is_empty());
+
+    let inner_use = LOCAL_SCOPES_SOURCE.rfind("input\n").unwrap() + 1;
+    let inner_position = position_at(LOCAL_SCOPES_SOURCE, inner_use);
+    let definition = client.request(
+        "textDocument/definition",
+        json!({"textDocument":{"uri":uri},"position":inner_position}),
+    );
+    assert_eq!(definition["uri"], uri);
+    assert_eq!(
+        definition["range"]["start"],
+        position_of(LOCAL_SCOPES_SOURCE, "let input", "let ".len())
+    );
+    let references = client.request(
+        "textDocument/references",
+        json!({
+            "textDocument":{"uri":uri},
+            "position":inner_position,
+            "context":{"includeDeclaration":true}
+        }),
+    );
+    assert_eq!(references.as_array().unwrap().len(), 2);
+
+    let local_rename = client.request(
+        "textDocument/rename",
+        json!({"textDocument":{"uri":uri},"position":inner_position,"newName":"inner_value"}),
+    );
+    let local_edits = local_rename["changes"][uri].as_array().unwrap();
+    assert_eq!(local_edits.len(), 2);
+    assert!(
+        local_edits
+            .iter()
+            .all(|edit| edit["newText"] == "inner_value")
+    );
+
+    let parameter = position_of(LOCAL_SCOPES_SOURCE, "shadow(input", "shadow(".len());
+    let parameter_rename = client.request(
+        "textDocument/rename",
+        json!({"textDocument":{"uri":uri},"position":parameter,"newName":"renamed_input"}),
+    );
+    let parameter_edits = parameter_rename["changes"][uri].as_array().unwrap();
+    assert_eq!(parameter_edits.len(), 4);
+    assert!(
+        parameter_edits
+            .iter()
+            .all(|edit| edit["newText"] == "renamed_input")
     );
     client.shutdown();
 }
