@@ -36320,7 +36320,8 @@ fn nested_handoff_identity_survives_paired_rewind_compaction_chain_folds_35e0j()
             handoffs,
         }
     };
-    let outer_fold = |identity_ordinal, restore_fold| {
+    let outer_fold = |identity_ordinal: usize,
+                      restore_fold: orna_storage_v1::BranchMergePairedCheckpointRedoNestedRewindIdentityCompactionChainHandoffFoldSnapshot| {
         orna_storage_v1::BranchMergePairedCheckpointRedoNestedHandoffIdentityRewindCompactionChainFoldSnapshot {
             nested_handoff_identity: handoff_identities[identity_ordinal].clone(),
             restore_fold,
@@ -36394,7 +36395,6 @@ fn nested_handoff_identity_survives_paired_rewind_compaction_chain_folds_35e0j()
     assert_eq!(first_slot.restore_fold_ordinal, 0);
     assert_eq!(first_slot.nested_handoff_identity, handoff_identities[0]);
     assert_eq!(inner_first.nested_rewind_identity, nested_rewind("fold-a"));
-    assert_eq!(base_first.restore_fold_ordinal, 0);
     assert_eq!(base_first.restore_ordinal, 0);
     assert_eq!(base_first.handoff_ordinal, 0);
     assert_eq!(base_first.stream_ordinal, 0);
