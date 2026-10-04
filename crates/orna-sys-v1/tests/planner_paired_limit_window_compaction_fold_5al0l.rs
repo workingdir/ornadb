@@ -20,6 +20,8 @@ const BOUNDED_LIMIT_WINDOW_SPILL_FIXTURE: &str =
     include_str!("fixtures/planner_paired_bounded_limit_window_spill_cr8qd.orna");
 const BOUNDED_PROJECTION_SPILL_RESTORE_FIXTURE: &str =
     include_str!("fixtures/planner_bounded_projection_spill_restore_qf5tz.orna");
+const BOUNDED_WINDOW_RESTORE_PROJECTION_FIXTURE: &str =
+    include_str!("fixtures/planner_bounded_window_restore_projection_ohyuk.orna");
 
 fn object(reference: &str) -> ObjectRef {
     ObjectRef::descriptive(reference)
@@ -1585,4 +1587,217 @@ fn bounded_projection_identity_tracks_paired_spill_restore_folds() {
     assert_eq!(text(changed_restore_node, projection_key), text(project, projection_key));
     assert_ne!(text(changed_restore_node, restore_key), text(project, restore_key));
     assert_ne!(text(changed_restore_node, fold_key), text(project, fold_key));
+}
+
+#[test]
+fn bounded_window_identity_tracks_paired_restore_projection_folds() {
+    assert!(BOUNDED_WINDOW_RESTORE_PROJECTION_FIXTURE.contains("bounded_window_restore_projection"));
+
+    let declared = ["table:First", "table:Gap", "table:Compact", "table:Restore"];
+    let pair_descriptors = pairs("table:Anchor", &declared);
+    let first = aggregate(
+        "window:first-bounded",
+        "table:First",
+        "frame:first-bounded",
+        PlanWindowFrameBound::Preceding(2),
+    );
+    let compact = aggregate(
+        "window:compact-bounded",
+        "table:Compact",
+        "frame:compact-bounded",
+        PlanWindowFrameBound::CurrentRow,
+    );
+    let mut restore = aggregate(
+        "window:restore-bounded",
+        "table:Restore",
+        "frame:restore-bounded",
+        PlanWindowFrameBound::Preceding(4),
+    );
+    restore.frame_end = PlanWindowFrameBound::Following(2);
+    let aggregate_descriptors = vec![first, compact, restore];
+    let spill_descriptors = vec![
+        spill(
+            "first-bounded",
+            "table:First",
+            "window:first-bounded",
+            Some(9_000),
+            5_000,
+        ),
+        spill(
+            "compact-bounded",
+            "table:Compact",
+            "window:compact-bounded",
+            Some(8_193),
+            8_192,
+        ),
+        spill(
+            "restore-bounded",
+            "table:Restore",
+            "window:restore-bounded",
+            Some(16_000),
+            8_000,
+        ),
+    ];
+    let mut bounded_query = query("table:Anchor", &declared);
+    bounded_query.projections = vec![
+        expression("expr:window-key"),
+        expression("expr:window-value"),
+    ];
+    bounded_query.limit = Some(8);
+
+    let explain = |query: &QueryPlanDescription,
+                   aggregates: &[QueryWindowAggregatePushdownDescription],
+                   spills: &[QueryWindowSpillDescription]| {
+        explain_query_with_join_pair_identities_limit_window_aggregate_and_spill_pushdowns(
+            query,
+            &pair_descriptors,
+            &[],
+            aggregates,
+            spills,
+        )
+        .expect("bounded windows can be paired with restored projections")
+    };
+    let original = explain(&bounded_query, &aggregate_descriptors, &spill_descriptors);
+    let project = original
+        .nodes()
+        .iter()
+        .find(|node| node.kind() == PlanNodeKind::Project)
+        .expect("the ordered output expressions create a projection node");
+    let restore_join = joins_by_source(&original)["table:Restore"];
+    let fold_key = "paired_bounded_window_projection_spill_restoration_fold_identity";
+    let window_key = "paired_bounded_window_projection_spill_restoration_window_identity";
+    let projection_fold_key =
+        "paired_bounded_window_projection_spill_restoration_projection_fold_identity";
+    let spill_fold_key = "paired_bounded_window_projection_spill_restoration_spill_fold_identity";
+
+    assert!(text(project, fold_key).starts_with("paired-bounded-window-projection-spill-restoration:"));
+    assert!(text(project, window_key).starts_with("bounded-window-chain:"));
+    assert_eq!(
+        text(project, projection_fold_key),
+        text(project, "paired_bounded_projection_spill_restoration_fold_identity")
+    );
+    assert_eq!(
+        text(project, spill_fold_key),
+        text(restore_join, "paired_aggregate_spill_restoration_fold_identity")
+    );
+    assert_eq!(
+        integer(
+            project,
+            "paired_bounded_window_projection_spill_restoration_bounded_window_count"
+        ),
+        3
+    );
+    assert_eq!(
+        integer(
+            project,
+            "paired_bounded_window_projection_spill_restoration_frame_rows_upper_bound"
+        ),
+        7
+    );
+    assert_eq!(
+        integer(
+            project,
+            "paired_bounded_window_projection_spill_restoration_projection_count"
+        ),
+        2
+    );
+    assert_eq!(
+        integer(
+            project,
+            "paired_bounded_window_projection_spill_restoration_result_row_upper_bound"
+        ),
+        8
+    );
+    assert_eq!(
+        integer(
+            project,
+            "paired_bounded_window_projection_spill_restoration_aggregate_pair_count"
+        ),
+        3
+    );
+    assert_eq!(
+        integer(
+            project,
+            "paired_bounded_window_projection_spill_restoration_spill_pair_count"
+        ),
+        3
+    );
+
+    let mut changed_window = aggregate_descriptors.clone();
+    changed_window[2].frame_start = PlanWindowFrameBound::Preceding(3);
+    let changed_window_plan = explain(&bounded_query, &changed_window, &spill_descriptors);
+    let changed_window_project = changed_window_plan
+        .nodes()
+        .iter()
+        .find(|node| node.kind() == PlanNodeKind::Project)
+        .expect("the changed finite frame retains Project");
+    assert_ne!(text(changed_window_project, window_key), text(project, window_key));
+    assert_ne!(text(changed_window_project, fold_key), text(project, fold_key));
+
+    let mut changed_projection_query = bounded_query.clone();
+    changed_projection_query.projections[1] = expression("expr:replacement-window-value");
+    let changed_projection = explain(
+        &changed_projection_query,
+        &aggregate_descriptors,
+        &spill_descriptors,
+    );
+    let changed_projection_project = changed_projection
+        .nodes()
+        .iter()
+        .find(|node| node.kind() == PlanNodeKind::Project)
+        .expect("the changed output expression retains Project");
+    assert_eq!(text(changed_projection_project, window_key), text(project, window_key));
+    assert_ne!(
+        text(changed_projection_project, projection_fold_key),
+        text(project, projection_fold_key)
+    );
+    assert_ne!(text(changed_projection_project, fold_key), text(project, fold_key));
+
+    let mut changed_spills = spill_descriptors.clone();
+    changed_spills[0].memory_budget_bytes += 1;
+    let changed_restore = explain(&bounded_query, &aggregate_descriptors, &changed_spills);
+    let changed_restore_project = changed_restore
+        .nodes()
+        .iter()
+        .find(|node| node.kind() == PlanNodeKind::Project)
+        .expect("the changed spill still restores a projection fold");
+    let changed_restore_join = joins_by_source(&changed_restore)["table:Restore"];
+    assert_eq!(text(changed_restore_project, window_key), text(project, window_key));
+    assert_eq!(
+        text(changed_restore_project, spill_fold_key),
+        text(changed_restore_join, "paired_aggregate_spill_restoration_fold_identity")
+    );
+    assert_ne!(text(changed_restore_project, spill_fold_key), text(project, spill_fold_key));
+    assert_ne!(text(changed_restore_project, fold_key), text(project, fold_key));
+
+    let unbounded_aggregates = aggregate_descriptors
+        .iter()
+        .cloned()
+        .map(|mut aggregate| {
+            aggregate.frame_start = PlanWindowFrameBound::UnboundedPreceding;
+            aggregate.frame_end = PlanWindowFrameBound::CurrentRow;
+            aggregate
+        })
+        .collect::<Vec<_>>();
+    let unbounded = explain(&bounded_query, &unbounded_aggregates, &spill_descriptors);
+    let unbounded_project = unbounded
+        .nodes()
+        .iter()
+        .find(|node| node.kind() == PlanNodeKind::Project)
+        .expect("unbounded windows still project output columns");
+    assert!(
+        !unbounded_project.details().contains_key(fold_key),
+        "unbounded frames do not produce a bounded-window identity"
+    );
+
+    let no_restore = explain(&bounded_query, &aggregate_descriptors, &[]);
+    let no_restore_project = no_restore
+        .nodes()
+        .iter()
+        .find(|node| node.kind() == PlanNodeKind::Project)
+        .expect("bounded windows still project without spill restores");
+    assert!(
+        !no_restore_project.details().contains_key(fold_key),
+        "the composite requires paired spill-restoration history"
+    );
 }
