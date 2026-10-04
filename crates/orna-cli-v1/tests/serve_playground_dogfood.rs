@@ -483,7 +483,7 @@ fn orna_serve_hosts_playground_with_pending_evals_and_snapshot_correct_deltas() 
         .args(["serve", "--port", &port.to_string()])
         .current_dir(project.path())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stderr(Stdio::inherit())
         .spawn()
         .expect("start orna serve");
     let mut server = RunningServer(child);
