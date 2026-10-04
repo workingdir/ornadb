@@ -12,6 +12,15 @@ export function isExample(value: unknown): value is Example {
     typeof example.source === 'string';
 }
 
+export function exampleIndexForPath(
+  examples: readonly Pick<Example, 'path'>[],
+  requestedPath: string | null,
+): number {
+  if (requestedPath === null) return 0;
+  const requestedIndex = examples.findIndex((example) => example.path === requestedPath);
+  return requestedIndex >= 0 ? requestedIndex : 0;
+}
+
 export function exampleIndexForKey(
   key: string,
   currentIndex: number,

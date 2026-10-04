@@ -22,7 +22,7 @@ const workerScope = globalThis as unknown as {
 let modulePromise: Promise<OrnaLspModule> | undefined;
 function loadLsp(): Promise<OrnaLspModule> {
   modulePromise ??= (async () => {
-    const packageUrl = new URL(`${import.meta.env.BASE_URL}lsp-wasm/orna_lsp.js`, self.location.href);
+    const packageUrl = new URL(`${import.meta.env.BASE_URL}assets/lsp-wasm/orna_lsp.js`, self.location.href);
     const module = await import(/* @vite-ignore */ packageUrl.href) as OrnaLspModule;
     await module.default();
     return module;

@@ -1,0 +1,7 @@
+{ id: "f176/nested-rewind/main", name: "f176/left/rewind-main", city: "f176/right/rewind-main", }
+
+{ id: "f176/nested-rewind/retry", name: "f176/left/rewind-retry", city: "f176/right/rewind-retry", }
+
+{ id: "f176/nested-rewind/reused", name: "f176/left/rewind-main", city: "f176/right/rewind-main", }
+
+{ id: "f176/nested-rewind/malformed", name: "f176/left/rewind-malformed", city: "f176/right/rewind-malformed", }

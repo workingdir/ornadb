@@ -24,6 +24,7 @@ members = [
     "crates/orna-semantic-v1",
     "crates/orna-sys-macros",
     "crates/orna-standard",
+    "crates/orna-standard-sources",
     "crates/orna-storage-v1",
     "crates/orna-stream-v1",
     "crates/orna-syntax-v1",
@@ -40,4 +41,5 @@ rust-version = "1.95"
 license = "Apache-2.0"
 
 [workspace.dependencies]
+base64 = "0.22.1"
 uuid = { version = "1.18.1", features = ["v4"] }
