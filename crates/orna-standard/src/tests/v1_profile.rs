@@ -1762,7 +1762,7 @@ fn reference_standard_uses_pinned_orna_1_source_and_resolves_its_imports() {
         "original value and its runtime type",
         "Inspect fallback",
         "never execute action descriptors",
-        "server checks that a present value agrees with the event handle",
+        "a present value agrees with the event handle",
     ] {
         assert!(sources[49].1.contains(contract), "missing std.ui contract `{contract}`");
     }

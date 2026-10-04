@@ -9,7 +9,6 @@ use std::{
     sync::atomic::{AtomicU64, Ordering},
 };
 
-use orna_syntax_v1::Keyword;
 use serde_json::{json, Value};
 
 const SOURCE: &str = include_str!("fixtures/ji3t0-lsp-v1-self-contained.orna");
