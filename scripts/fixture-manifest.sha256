@@ -123,11 +123,11 @@ a5bd70ee1eea9dfc78fbfa325391ee6d97f50e0929a59ee50ede86105829d69d  crates/orna-cl
 28610044143a3ce9456de09ddcdbede353ffd807ebeb6eae6afec1e93f9e0f55  crates/orna-cli-v1/tests/fixtures/playground-asset-home.orna
 50b895aa1d8529eb8c39715ab7dbe46b78562756f29f0e4bd59ceee44af89f06  crates/orna-cli-v1/tests/fixtures/playground-asset-index-stale.orna
 eb926ef50a40a4d0a68ad4a5cdba749392f817fb79876dba05186d2be01406f8  crates/orna-cli-v1/tests/fixtures/playground-asset-index.orna
-d253cd05f66ddcb81dcd509ac9a5d7ddc95be86263286e39d5fa4fc859195129  crates/orna-cli-v1/tests/fixtures/playground-asset-lsp-js.orna
+09582ce4e6e98e259f6255c2de3d3dab61efed3b89856037a1c2273f51c51269  crates/orna-cli-v1/tests/fixtures/playground-asset-lsp-js.orna
 08fb7b1f271028d079a65e7665291bd7bc966760597b97440cbf6c9a4b6fee62  crates/orna-cli-v1/tests/fixtures/playground-asset-lsp-wasm.orna
 c22a16912c68e317a9dfa8f8921b06cfdda0ab4e4bb1f86cf1df32b1b0ecce44  crates/orna-cli-v1/tests/fixtures/playground-asset-playground.orna
-8362bbb93b5528f88faaeb0db6e22f25b5049319b7f811f04601d409189df1b6  crates/orna-cli-v1/tests/fixtures/playground-asset-presentation.orna
-5f24f07d011ca2a3942995a958c99c539ca0feec6a0d6822ad287769a53fb1f7  crates/orna-cli-v1/tests/fixtures/playground-asset-style.orna
+24a0fdae669b059fbc363db64e3659a47e6906c79cf817ed00425a31f3458544  crates/orna-cli-v1/tests/fixtures/playground-asset-presentation.orna
+08340eb547b0ba967e52209fddebe95a7961fb2411a9e0eea843fdde239b9ad9  crates/orna-cli-v1/tests/fixtures/playground-asset-style.orna
 359e1c130ca5f5bff9b7cda734fcef0d434ff9233736c8635297b0c3cd78e378  crates/orna-cli-v1/tests/fixtures/playground-asset-uncommitted.orna
 8127ff458e7054b2fb18990706880fdc3941b4db8b85c5a22ab6fca196130eab  crates/orna-cli-v1/tests/fixtures/playground-browser-asset.js
 02d7f17af4876ca4d1de4a9c5805bfcfd5b97c27251e3ca7e9bda10ded88cc45  crates/orna-cli-v1/tests/fixtures/playground-concurrent-eval.orna

@@ -2189,6 +2189,12 @@ mod tests {
             include_str!("../tests/fixtures/playground-asset-presentation.orna");
 
         assert!(has_playground_asset_table(PLAYGROUND_SCHEMA));
+        let parsed_presentation = parse_row(ASSET_PRESENTATION);
+        assert!(
+            parsed_presentation.is_ok(),
+            "presentation asset row parse: {:#?}",
+            parsed_presentation.diagnostics
+        );
         assert_eq!(
             decode_playground_asset(ASSET_APP, "asset-6173736574732f6170702e6a73"),
             Some((

@@ -37,7 +37,9 @@ async function collectFiles(directory, prefix = '') {
 }
 
 function rowString(value) {
-  return JSON.stringify(value);
+  return JSON.stringify(value)
+    .replaceAll('{', '\\u{7b}')
+    .replaceAll('}', '\\u{7d}');
 }
 
 await mkdir(assetRows, { recursive: true });
