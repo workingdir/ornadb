@@ -1,0 +1,6 @@
+fn forbidden_edges(node: Int): [Int] =
+    if node == 2 {
+        fail(error(code: "fixture.unexpected_expansion", message: "matching root must stop immediately"))
+    } else {
+        []
+    };
