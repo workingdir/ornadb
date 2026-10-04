@@ -80,6 +80,19 @@ mod tests {
     use super::{completions, diagnostics, hover, signature_help};
 
     const SOURCE: &str = include_str!("browser/fixtures/browser-intelligence.orna");
+    const STANDARD_SOURCE: &str = include_str!("analysis/fixtures/standard-math-import.orna");
+
+    fn position(source: &str, byte: usize) -> (u32, u32) {
+        let prefix = &source[..byte];
+        let line = prefix.bytes().filter(|byte| *byte == b'\n').count() as u32;
+        let character = prefix
+            .rsplit('\n')
+            .next()
+            .expect("current line")
+            .chars()
+            .count() as u32;
+        (line, character)
+    }
 
     #[test]
     fn browser_exports_reuse_the_lsp_diagnostics_completion_hover_and_signature_core() {
@@ -128,5 +141,56 @@ mod tests {
         .expect("diagnostics JSON");
         assert_eq!(diagnostics[0]["source"], "orna-syntax-v1");
         assert_eq!(diagnostics[0]["severity"], 1);
+    }
+
+    #[test]
+    fn browser_exports_offer_standard_library_completions_and_hover_documentation() {
+        let import_offset = STANDARD_SOURCE.find("increment};").expect("math import") + 3;
+        let (line, character) = position(STANDARD_SOURCE, import_offset);
+        let completion_items: serde_json::Value =
+            serde_json::from_str(&completions(STANDARD_SOURCE.to_owned(), line, character))
+                .expect("standard completion JSON");
+        let increment = completion_items
+            .as_array()
+            .expect("completion list")
+            .iter()
+            .find(|item| item["label"] == "increment")
+            .expect("standard-library completion");
+        assert_eq!(increment["insertText"], "increment");
+        assert!(
+            increment["documentation"]
+                .to_string()
+                .contains("exact successor")
+        );
+
+        let qualified_offset = STANDARD_SOURCE
+            .find("std.math.increment(value)")
+            .expect("qualified standard call")
+            + "std.math.inc".len();
+        let (line, character) = position(STANDARD_SOURCE, qualified_offset);
+        let qualified_completions: serde_json::Value =
+            serde_json::from_str(&completions(STANDARD_SOURCE.to_owned(), line, character))
+                .expect("qualified standard completion JSON");
+        assert!(
+            qualified_completions
+                .as_array()
+                .expect("completion list")
+                .iter()
+                .any(|item| {
+                    item["label"] == "increment" && item["insertText"] == "increment(${1:value})"
+                })
+        );
+
+        let hover_offset = STANDARD_SOURCE
+            .find("std.math.increment(value)")
+            .expect("qualified standard call")
+            + "std.math.increment".len()
+            - 1;
+        let (line, character) = position(STANDARD_SOURCE, hover_offset);
+        let hover: serde_json::Value =
+            serde_json::from_str(&hover(STANDARD_SOURCE.to_owned(), line, character))
+                .expect("standard hover JSON");
+        assert!(hover.to_string().contains("fn increment(value: Int): Int"));
+        assert!(hover.to_string().contains("exact successor"));
     }
 }
