@@ -35,6 +35,9 @@ const WORKSPACE_HIERARCHY_CALLER_SOURCE: &str =
 const FOLDING_SELECTION_SOURCE: &str = include_str!("fixtures/folding-selection-v1.orna");
 const DOCUMENT_HIGHLIGHT_CODE_LENS_SOURCE: &str =
     include_str!("fixtures/document-highlight-code-lens-v1.orna");
+const TYPE_HIERARCHY_PROVIDER_SOURCE: &str =
+    include_str!("fixtures/type-hierarchy-provider-v1.orna");
+const TYPE_HIERARCHY_CALLER_SOURCE: &str = include_str!("fixtures/type-hierarchy-caller-v1.orna");
 
 struct Client {
     child: Child,
@@ -141,6 +144,8 @@ fn initialize(client: &mut Client) {
         result["capabilities"]["codeLensProvider"]["resolveProvider"],
         false
     );
+    assert!(result["capabilities"]["typeHierarchyProvider"].is_object());
+    assert_eq!(result["capabilities"]["monikerProvider"], true);
     assert_eq!(
         result["capabilities"]["renameProvider"]["prepareProvider"], true,
         "initialize capabilities: {result}"
@@ -407,6 +412,251 @@ fn code_lenses_count_only_uniquely_resolved_workspace_calls() {
         })
         .unwrap();
     assert_eq!(ambiguous["command"]["title"], "0 incoming calls");
+    client.shutdown();
+}
+
+#[test]
+fn type_hierarchy_and_monikers_resolve_workspace_declarations_and_fail_closed() {
+    let caller_uri = "file:///workspace/type-hierarchy-caller-v1.orna";
+    let provider_uri = "file:///workspace/type-hierarchy-provider-v1.orna";
+    let mut client = Client::spawn();
+    initialize(&mut client);
+    let caller_diagnostics = open(&mut client, caller_uri, TYPE_HIERARCHY_CALLER_SOURCE);
+    assert!(
+        caller_diagnostics["diagnostics"]
+            .as_array()
+            .unwrap()
+            .is_empty(),
+        "{caller_diagnostics}"
+    );
+    let provider_diagnostics = open(&mut client, provider_uri, TYPE_HIERARCHY_PROVIDER_SOURCE);
+    assert!(
+        provider_diagnostics["diagnostics"]
+            .as_array()
+            .unwrap()
+            .is_empty(),
+        "{provider_diagnostics}"
+    );
+
+    let document_position = position_of(TYPE_HIERARCHY_PROVIDER_SOURCE, "Document", 1);
+    let document_prepared = client.request(
+        "textDocument/prepareTypeHierarchy",
+        json!({
+            "textDocument":{"uri":provider_uri},
+            "position":document_position
+        }),
+    );
+    let document_item = document_prepared.as_array().unwrap()[0].clone();
+    let document_start = TYPE_HIERARCHY_PROVIDER_SOURCE.find("Document").unwrap();
+    assert_eq!(document_item["name"], "Document");
+    assert_eq!(document_item["uri"], provider_uri);
+    assert_eq!(
+        document_item["selectionRange"],
+        range_at(
+            TYPE_HIERARCHY_PROVIDER_SOURCE,
+            document_start,
+            document_start + "Document".len()
+        )
+    );
+    let referenced_document = client.request(
+        "textDocument/prepareTypeHierarchy",
+        json!({
+            "textDocument":{"uri":caller_uri},
+            "position":position_of(TYPE_HIERARCHY_CALLER_SOURCE, "value: Document", "value: ".len())
+        }),
+    );
+    assert_eq!(referenced_document[0]["uri"], provider_uri);
+    assert_eq!(referenced_document[0]["name"], "Document");
+    let document_supers = client.request("typeHierarchy/supertypes", json!({"item":document_item}));
+    assert_eq!(
+        document_supers
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|item| item["name"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["Renderable"]
+    );
+
+    let renderable_prepared = client.request(
+        "textDocument/prepareTypeHierarchy",
+        json!({
+            "textDocument":{"uri":provider_uri},
+            "position":position_of(TYPE_HIERARCHY_PROVIDER_SOURCE, "Renderable", 1)
+        }),
+    );
+    let renderable_item = renderable_prepared.as_array().unwrap()[0].clone();
+    let renderable_subtypes =
+        client.request("typeHierarchy/subtypes", json!({"item":renderable_item}));
+    let subtype_names = renderable_subtypes
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|item| item["name"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(subtype_names, ["Remote", "Document", "Invoice"]);
+    assert_eq!(renderable_subtypes[0]["uri"], caller_uri);
+    assert!(
+        renderable_subtypes
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|item| item["selectionRange"].is_object())
+    );
+
+    let orphan_prepared = client.request(
+        "textDocument/prepareTypeHierarchy",
+        json!({
+            "textDocument":{"uri":provider_uri},
+            "position":position_of(TYPE_HIERARCHY_PROVIDER_SOURCE, "Orphan", 1)
+        }),
+    );
+    assert_eq!(
+        client.request(
+            "typeHierarchy/supertypes",
+            json!({"item":orphan_prepared[0]}),
+        ),
+        json!([]),
+        "unresolved protocol implementations must not invent edges"
+    );
+    let consumer_prepared = client.request(
+        "textDocument/prepareTypeHierarchy",
+        json!({
+            "textDocument":{"uri":caller_uri},
+            "position":position_of(TYPE_HIERARCHY_CALLER_SOURCE, "AmbiguousConsumer", 1)
+        }),
+    );
+    assert_eq!(
+        client.request(
+            "typeHierarchy/supertypes",
+            json!({"item":consumer_prepared[0]}),
+        ),
+        json!([]),
+        "ambiguous protocol names must not create hierarchy edges"
+    );
+    let ambiguous_protocol = client.request(
+        "textDocument/prepareTypeHierarchy",
+        json!({
+            "textDocument":{"uri":provider_uri},
+            "position":position_of(TYPE_HIERARCHY_PROVIDER_SOURCE, "Clash", 1)
+        }),
+    );
+    assert_eq!(
+        client.request(
+            "typeHierarchy/subtypes",
+            json!({"item":ambiguous_protocol[0]}),
+        ),
+        json!([]),
+        "duplicate protocol declarations must not claim ambiguous subtypes"
+    );
+
+    let provider_clash_moniker = client.request(
+        "textDocument/moniker",
+        json!({
+            "textDocument":{"uri":provider_uri},
+            "position":position_of(TYPE_HIERARCHY_PROVIDER_SOURCE, "Clash", 1)
+        }),
+    );
+    let caller_clash_moniker = client.request(
+        "textDocument/moniker",
+        json!({
+            "textDocument":{"uri":caller_uri},
+            "position":position_of(TYPE_HIERARCHY_CALLER_SOURCE, "Clash", 1)
+        }),
+    );
+    assert_eq!(provider_clash_moniker[0]["kind"], "export");
+    assert_eq!(caller_clash_moniker[0]["kind"], "export");
+    assert_ne!(
+        provider_clash_moniker[0]["identifier"], caller_clash_moniker[0]["identifier"],
+        "separate declarations keep distinct project monikers despite a shared name"
+    );
+
+    let declaration_moniker = client.request(
+        "textDocument/moniker",
+        json!({
+            "textDocument":{"uri":provider_uri},
+            "position":document_position
+        }),
+    );
+    let declaration_moniker = &declaration_moniker.as_array().unwrap()[0];
+    assert_eq!(declaration_moniker["scheme"], "orna-syntax-v1");
+    assert_eq!(declaration_moniker["unique"], "project");
+    assert_eq!(declaration_moniker["kind"], "export");
+
+    let imported_moniker = client.request(
+        "textDocument/moniker",
+        json!({
+            "textDocument":{"uri":caller_uri},
+            "position":position_of(TYPE_HIERARCHY_CALLER_SOURCE, "Document", 1)
+        }),
+    );
+    let imported_moniker = &imported_moniker.as_array().unwrap()[0];
+    assert_eq!(
+        imported_moniker["identifier"],
+        declaration_moniker["identifier"]
+    );
+    assert_eq!(imported_moniker["kind"], "import");
+
+    let same_file_moniker = client.request(
+        "textDocument/moniker",
+        json!({
+            "textDocument":{"uri":provider_uri},
+            "position":position_of(
+                TYPE_HIERARCHY_PROVIDER_SOURCE,
+                "DocumentAlias = Document",
+                "DocumentAlias = ".len()
+            )
+        }),
+    );
+    assert_eq!(
+        same_file_moniker[0]["identifier"],
+        declaration_moniker["identifier"]
+    );
+    assert_eq!(
+        same_file_moniker[0]["kind"], "local",
+        "a same-project use of an exported declaration is not an import"
+    );
+
+    let local_moniker = client.request(
+        "textDocument/moniker",
+        json!({
+            "textDocument":{"uri":caller_uri},
+            "position":position_of(TYPE_HIERARCHY_CALLER_SOURCE, "value: Document", 1)
+        }),
+    );
+    let local_moniker = &local_moniker.as_array().unwrap()[0];
+    assert_eq!(local_moniker["kind"], "local");
+    assert_eq!(local_moniker["unique"], "document");
+    assert!(
+        local_moniker["identifier"]
+            .as_str()
+            .unwrap()
+            .contains("#local:")
+    );
+    let local_use_moniker = client.request(
+        "textDocument/moniker",
+        json!({
+            "textDocument":{"uri":caller_uri},
+            "position":position_of(TYPE_HIERARCHY_CALLER_SOURCE, "= value", "= ".len())
+        }),
+    );
+    assert_eq!(
+        local_use_moniker[0]["identifier"], local_moniker["identifier"],
+        "a local binding and its resolved use share one document moniker"
+    );
+    assert_eq!(local_use_moniker[0]["unique"], "document");
+
+    assert_eq!(
+        client.request(
+            "textDocument/moniker",
+            json!({
+                "textDocument":{"uri":caller_uri},
+                "position":position_of(TYPE_HIERARCHY_CALLER_SOURCE, "impl Clash", "impl ".len())
+            }),
+        ),
+        Value::Null,
+        "ambiguous protocol references have no moniker"
+    );
     client.shutdown();
 }
 
