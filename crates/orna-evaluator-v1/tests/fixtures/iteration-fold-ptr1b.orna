@@ -1,4 +1,4 @@
-iteration.fold([1, 2, 3], [], (items, value) => collection.union(items, [value])) == [1, 2, 3]
+iteration.fold([1, 2, 3], [], (items, value) => std.collection.union(items, [value])) == [1, 2, 3]
 && iteration.fold([], 7, (total, value) => total + value) == 7
-&& iteration.fold_while([2, 4, 7, 100], [], (items, value) => (collection.union(items, [value]), value < 7)) == [2, 4, 7]
-&& iteration.fold_while([], [9], (items, value) => (collection.union(items, [value]), true)) == [9]
+&& iteration.fold_while([2, 4, 7, 100], [], (items, value) => (std.collection.union(items, [value]), value < 7)) == [2, 4, 7]
+&& iteration.fold_while([], [9], (items, value) => (std.collection.union(items, [value]), true)) == [9]
