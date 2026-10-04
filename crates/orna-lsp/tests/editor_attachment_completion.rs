@@ -12,6 +12,20 @@ use orna_syntax_v1::Keyword;
 use serde_json::Value;
 
 const SOURCE: &str = include_str!("fixtures/ji3t0-lsp-v1.orna");
+const PROVIDER_SOURCE: &str = include_str!("fixtures/expressions-v1.orna");
+
+#[test]
+fn attachment_input_matches_its_crate_local_fixture() {
+    let fixture = repo_root().join("crates/orna-lsp/tests/fixtures/ji3t0-lsp-v1.orna");
+    assert_eq!(
+        fs::read_to_string(&fixture).expect("read editor attachment fixture"),
+        SOURCE
+    );
+    assert!(SOURCE.contains("pub fn caller(value: Int): Int = add(value, 2);"));
+    assert!(!SOURCE.contains("pub fn add("));
+    assert!(PROVIDER_SOURCE.contains("/// Add two integer values."));
+    assert!(PROVIDER_SOURCE.contains("pub fn add(left: Int, right: Int): Int"));
+}
 
 #[test]
 fn vim_lsp_attaches_and_exposes_syntax_v1_completion() {
@@ -39,6 +53,12 @@ fn vim_lsp_attaches_and_exposes_syntax_v1_completion() {
     let root = repo_root();
     let fixture = root.join("crates/orna-lsp/tests/fixtures/ji3t0-lsp-v1.orna");
     assert_eq!(fs::read_to_string(&fixture).unwrap(), SOURCE);
+    let provider = root.join("crates/orna-lsp/tests/fixtures/expressions-v1.orna");
+    assert_eq!(fs::read_to_string(&provider).unwrap(), PROVIDER_SOURCE);
+    assert!(
+        provider < fixture,
+        "provider URI must sort before consumer URI"
+    );
     let script = temporary_path("vim");
     let result_path = temporary_path("json");
     let lsp_binary = env!("CARGO_BIN_EXE_orna-lsp");
@@ -59,6 +79,16 @@ execute 'edit ' . fnameescape($ORNA_TEST_FIXTURE)
 call append(line('$'), '')
 call cursor(line('$'), 1)
 call assert_equal('orna', &filetype)
+let s:deadline = reltimefloat(reltime()) + 10.0
+while !lsp#capabilities#has_completion_provider('orna') && reltimefloat(reltime()) < s:deadline
+    sleep 10m
+endwhile
+call assert_true(lsp#capabilities#has_completion_provider('orna'), 'consumer did not attach to orna-lsp')
+let s:consumer_buffer = bufnr('%')
+execute 'edit ' . fnameescape($ORNA_TEST_PROVIDER)
+call assert_equal('orna', &filetype)
+execute 'buffer ' . s:consumer_buffer
+call cursor(line('$'), 1)
 
 let s:deadline = reltimefloat(reltime()) + 10.0
 while !lsp#capabilities#has_completion_provider('orna') && reltimefloat(reltime()) < s:deadline
@@ -112,6 +142,7 @@ qa!
         .env("ORNA_VIM_LSP_RUNTIME", vim_lsp)
         .env("ORNA_VIM_RUNTIME", root.join("editors/vim"))
         .env("ORNA_TEST_FIXTURE", &fixture)
+        .env("ORNA_TEST_PROVIDER", &provider)
         .env("ORNA_EDITOR_RESULT", &result_path)
         .output()
         .unwrap_or_else(|error| panic!("start Vim at {}: {error}", vim.display()));
@@ -144,7 +175,7 @@ qa!
     assert_eq!(evidence["omnifunc"], "lsp#complete");
     assert_completion_contract(&evidence["completion"], "Vim vim-lsp");
     assert_vim_completion_projection(&evidence["adapted"]);
-    println!("Vim integration evidence: ATTACHED=pass OMNIFUNC=pass COMPLETION=pass");
+    println!("Vim integration evidence: ATTACHED=pass DEPENDENCY_ORDER=consumer-before-provider OMNIFUNC=pass COMPLETION=pass");
 }
 
 #[test]
@@ -173,6 +204,12 @@ fn emacs_eglot_attaches_and_exposes_syntax_v1_completion_at_point() {
     let root = repo_root();
     let fixture = root.join("crates/orna-lsp/tests/fixtures/ji3t0-lsp-v1.orna");
     assert_eq!(fs::read_to_string(&fixture).unwrap(), SOURCE);
+    let provider = root.join("crates/orna-lsp/tests/fixtures/expressions-v1.orna");
+    assert_eq!(fs::read_to_string(&provider).unwrap(), PROVIDER_SOURCE);
+    assert!(
+        provider < fixture,
+        "provider URI must sort before consumer URI"
+    );
     let script = temporary_path("el");
     let plugin = root.join("editors/emacs/orna-eglot.el");
     let expected = expected_keywords()
@@ -203,7 +240,8 @@ fn emacs_eglot_attaches_and_exposes_syntax_v1_completion_at_point() {
         ((listp value) value)
         (t nil)))
 
-(let ((buffer (find-file-noselect {})))
+(let ((buffer (find-file-noselect {}))
+      provider-buffer)
   (unwind-protect
       (with-current-buffer buffer
         (unless (eq major-mode 'orna-mode) (error "Orna major mode did not load"))
@@ -211,6 +249,15 @@ fn emacs_eglot_attaches_and_exposes_syntax_v1_completion_at_point() {
           (while (and (not (eglot-managed-p)) (< (float-time) deadline))
             (accept-process-output nil 0.05)))
         (unless (eglot-managed-p) (error "Eglot did not attach orna-lsp"))
+        (let ((consumer-server (eglot-current-server)))
+          (setq provider-buffer (find-file-noselect {}))
+          (with-current-buffer provider-buffer
+            (let ((deadline (+ (float-time) 12.0)))
+              (while (and (not (eglot-managed-p)) (< (float-time) deadline))
+                (accept-process-output nil 0.05)))
+            (unless (eglot-managed-p) (error "Eglot did not attach provider buffer"))
+            (unless (eq (eglot-current-server) consumer-server)
+              (error "consumer and provider attached to different Orna servers"))))
         (unless (memq 'eglot-completion-at-point completion-at-point-functions)
           (error "Eglot did not install completion-at-point"))
         (goto-char (point-max))
@@ -247,14 +294,17 @@ fn emacs_eglot_attaches_and_exposes_syntax_v1_completion_at_point() {
             (unless (member "add" (mapcar #'substring-no-properties candidates))
               (error "completion-at-point omitted add: %S" candidates)))
           (princ "EMACS_LSP_ATTACHMENT=pass\n")
+          (princ "EMACS_DEPENDENCY_ORDER=consumer-before-provider\n")
           (princ "EMACS_COMPLETION_KEYWORDS=pass\n")
           (princ "EMACS_COMPLETION_ADD=pass\n")
-          (princ "EMACS_COMPLETION_AT_POINT=pass\n"))
-    (kill-buffer buffer)))
+          (princ "EMACS_COMPLETION_AT_POINT=pass\n")))
+    (kill-buffer buffer)
+    (when (buffer-live-p provider-buffer) (kill-buffer provider-buffer))))
 "#,
         elisp_string(&plugin.display().to_string()),
         elisp_string(env!("CARGO_BIN_EXE_orna-lsp")),
         elisp_string(&fixture.display().to_string()),
+        elisp_string(&provider.display().to_string()),
         expected,
     );
     fs::write(&script, elisp).expect("write Emacs Eglot integration script");
@@ -274,6 +324,7 @@ fn emacs_eglot_attaches_and_exposes_syntax_v1_completion_at_point() {
     );
     for evidence in [
         "EMACS_LSP_ATTACHMENT=pass",
+        "EMACS_DEPENDENCY_ORDER=consumer-before-provider",
         "EMACS_COMPLETION_KEYWORDS=pass",
         "EMACS_COMPLETION_ADD=pass",
         "EMACS_COMPLETION_AT_POINT=pass",
@@ -315,12 +366,14 @@ fn assert_completion_contract(completion: &Value, editor: &str) {
 }
 
 fn assert_v1_attachment_fixture() {
-    let parsed = orna_syntax_v1::parse_module(SOURCE);
-    assert!(
-        parsed.is_ok(),
-        "the editor attachment fixture must contain only syntax-v1 source: {:?}",
-        parsed.diagnostics
-    );
+    for (name, source) in [("consumer", SOURCE), ("provider", PROVIDER_SOURCE)] {
+        let parsed = orna_syntax_v1::parse_module(source);
+        assert!(
+            parsed.is_ok(),
+            "the editor attachment {name} fixture must contain only syntax-v1 source: {:?}",
+            parsed.diagnostics
+        );
+    }
 }
 
 fn assert_vim_completion_projection(items: &Value) {

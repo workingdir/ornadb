@@ -1,0 +1,8 @@
+pub fn add(left: Int, right: Int, extra: Int): Int = left + right + extra;
+
+pub fn wrap(pair: (Int, Int), middle: Int, last: Int): Int = middle + last;
+
+pub fn exercise(value: Int): Int =
+    wrap(last: 3, pair: (1, 2), middle: add(extra: value, left: 1, right: 2));
+
+pub fn shadowed(add: Int): Int = add(1);

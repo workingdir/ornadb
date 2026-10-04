@@ -18,6 +18,9 @@ const RENAME_CALLER_SOURCE: &str = include_str!("fixtures/rename-caller-v1.orna"
 const AMBIGUOUS_RENAME_SOURCE: &str = include_str!("fixtures/ambiguous-renames-v1.orna");
 const AMBIGUOUS_RENAME_CALLER_SOURCE: &str =
     include_str!("fixtures/ambiguous-renames-caller-v1.orna");
+const SIGNATURE_ACTIONS_SOURCE: &str = include_str!("fixtures/signature-actions-v1.orna");
+const MISSING_SEMICOLON_SOURCE: &str =
+    include_str!("fixtures/missing-semicolon-code-action-v1.orna");
 
 struct Client {
     child: Child,
@@ -117,9 +120,23 @@ fn initialize(client: &mut Client) {
     assert_eq!(result["capabilities"]["textDocumentSync"]["change"], 2);
     assert_eq!(result["capabilities"]["hoverProvider"], true);
     assert_eq!(
-        result["capabilities"]["renameProvider"]["prepareProvider"],
-        true
+        result["capabilities"]["renameProvider"]["prepareProvider"], true,
+        "initialize capabilities: {result}"
     );
+    assert_ne!(
+        result["capabilities"]["codeActionProvider"]["resolveProvider"], true,
+        "server must not advertise code-action resolution: {result}"
+    );
+    assert_eq!(
+        result["capabilities"]["codeActionProvider"]["codeActionKinds"],
+        json!(["quickfix"]),
+        "initialize capabilities: {result}"
+    );
+    let signature_triggers = result["capabilities"]["signatureHelpProvider"]["triggerCharacters"]
+        .as_array()
+        .unwrap();
+    assert!(signature_triggers.iter().any(|trigger| trigger == "("));
+    assert!(signature_triggers.iter().any(|trigger| trigger == ","));
     let token_types = result["capabilities"]["semanticTokensProvider"]["legend"]["tokenTypes"]
         .as_array()
         .unwrap();
@@ -181,14 +198,12 @@ fn decoded_semantic_tokens(source: &str, response: &Value) -> Vec<(String, u64, 
 #[test]
 fn v1_workspace_model_powers_editor_features_across_open_files() {
     let uri = "file:///workspace/expressions-v1.orna";
-    let caller_uri = "file:///workspace/call-v1.orna";
+    let caller_uri = "file:///workspace/ji3t0-call-v1.orna";
+    assert!(uri < caller_uri, "provider URI must sort before caller URI");
     let mut client = Client::spawn();
     initialize(&mut client);
-    let diagnostics = open(&mut client, uri, SOURCE);
-    assert!(
-        diagnostics["diagnostics"].as_array().unwrap().is_empty(),
-        "{diagnostics}"
-    );
+    // The caller attaches before its provider. Workspace analysis must follow
+    // the syntax-v1 source dependency order, not didOpen arrival order.
     let caller_diagnostics = open(&mut client, caller_uri, CALL_SOURCE);
     assert!(
         caller_diagnostics["diagnostics"]
@@ -196,6 +211,11 @@ fn v1_workspace_model_powers_editor_features_across_open_files() {
             .unwrap()
             .is_empty(),
         "{caller_diagnostics}"
+    );
+    let diagnostics = open(&mut client, uri, SOURCE);
+    assert!(
+        diagnostics["diagnostics"].as_array().unwrap().is_empty(),
+        "{diagnostics}"
     );
 
     let call_offset = CALL_SOURCE.find("add(value, 2)").unwrap();
@@ -622,6 +642,133 @@ fn ambiguous_global_names_fail_closed_for_definition_references_and_rename() {
         json!({"textDocument":{"uri":first_uri},"position":position,"newName":"unique"}),
     );
     assert!(renamed.is_null(), "{renamed}");
+    client.shutdown();
+}
+
+#[test]
+fn signature_help_tracks_nested_arguments_and_named_parameter_indices() {
+    let uri = "file:///workspace/signature-actions.orna";
+    let mut client = Client::spawn();
+    initialize(&mut client);
+    let diagnostics = open(&mut client, uri, SIGNATURE_ACTIONS_SOURCE);
+    assert!(diagnostics["diagnostics"].as_array().unwrap().is_empty());
+
+    let tuple_value = SIGNATURE_ACTIONS_SOURCE.find("(1, 2)").unwrap() + "(1, ".len();
+    let nested_argument = client.request(
+        "textDocument/signatureHelp",
+        json!({"textDocument":{"uri":uri},"position":position_at(SIGNATURE_ACTIONS_SOURCE,tuple_value)}),
+    );
+    assert!(
+        nested_argument["signatures"][0]["label"]
+            .as_str()
+            .unwrap()
+            .contains("fn wrap(")
+    );
+    assert_eq!(nested_argument["activeParameter"], 0, "{nested_argument}");
+
+    let last_value = SIGNATURE_ACTIONS_SOURCE.find("last: 3").unwrap() + "last: ".len();
+    let named_argument = client.request(
+        "textDocument/signatureHelp",
+        json!({"textDocument":{"uri":uri},"position":position_at(SIGNATURE_ACTIONS_SOURCE,last_value)}),
+    );
+    assert!(
+        named_argument["signatures"][0]["label"]
+            .as_str()
+            .unwrap()
+            .contains("fn wrap(")
+    );
+    assert_eq!(named_argument["activeParameter"], 2, "{named_argument}");
+
+    let extra_value = SIGNATURE_ACTIONS_SOURCE.find("extra: value").unwrap() + "extra: ".len();
+    let nested_named_argument = client.request(
+        "textDocument/signatureHelp",
+        json!({"textDocument":{"uri":uri},"position":position_at(SIGNATURE_ACTIONS_SOURCE,extra_value)}),
+    );
+    assert!(
+        nested_named_argument["signatures"][0]["label"]
+            .as_str()
+            .unwrap()
+            .contains("fn add(")
+    );
+    assert_eq!(
+        nested_named_argument["activeParameter"], 2,
+        "{nested_named_argument}"
+    );
+
+    let shadow_call = SIGNATURE_ACTIONS_SOURCE.find("add(1)").unwrap() + 1;
+    let shadowed_signature = client.request(
+        "textDocument/signatureHelp",
+        json!({"textDocument":{"uri":uri},"position":position_at(SIGNATURE_ACTIONS_SOURCE,shadow_call)}),
+    );
+    assert!(shadowed_signature.is_null(), "{shadowed_signature}");
+    client.shutdown();
+}
+
+#[test]
+fn code_actions_offer_only_verified_missing_semicolon_fixes() {
+    let uri = "file:///workspace/missing-semicolon.orna";
+    let mut client = Client::spawn();
+    initialize(&mut client);
+    let published = open(&mut client, uri, MISSING_SEMICOLON_SOURCE);
+    let diagnostics = published["diagnostics"].as_array().unwrap();
+    assert_eq!(
+        diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic["code"] == "ORNA-PARSE-002")
+            .count(),
+        1,
+        "{published}"
+    );
+
+    let params = json!({
+        "textDocument":{"uri":uri},
+        "range":range_at(MISSING_SEMICOLON_SOURCE, 0, MISSING_SEMICOLON_SOURCE.len()),
+        "context":{"diagnostics":diagnostics,"only":["quickfix"]}
+    });
+    let actions = client.request("textDocument/codeAction", params.clone());
+    assert_eq!(actions.as_array().unwrap().len(), 1, "{actions}");
+    let action = &actions[0];
+    assert_eq!(action["title"], "Insert missing `;`");
+    assert_eq!(action["kind"], "quickfix");
+    assert_eq!(action["isPreferred"], true);
+    assert_eq!(action["diagnostics"][0]["code"], "ORNA-PARSE-002");
+    let edit = &action["edit"]["changes"][uri][0];
+    assert_eq!(edit["newText"], ";");
+
+    let insertion = MISSING_SEMICOLON_SOURCE
+        .find("value\n    intermediate")
+        .unwrap()
+        + "value".len();
+    assert_eq!(
+        edit["range"],
+        range_at(MISSING_SEMICOLON_SOURCE, insertion, insertion)
+    );
+    let repaired = format!(
+        "{};{}",
+        &MISSING_SEMICOLON_SOURCE[..insertion],
+        &MISSING_SEMICOLON_SOURCE[insertion..]
+    );
+    assert!(
+        orna_syntax_v1::parse_module(&repaired)
+            .diagnostics
+            .is_empty()
+    );
+
+    let mut non_quickfix_params = params.clone();
+    non_quickfix_params["context"]["only"] = json!(["refactor"]);
+    assert_eq!(
+        client.request("textDocument/codeAction", non_quickfix_params),
+        json!([])
+    );
+    let outside_diagnostic = json!({
+        "textDocument":{"uri":uri},
+        "range":range_at(MISSING_SEMICOLON_SOURCE, 0, 1),
+        "context":{"diagnostics":diagnostics,"only":["quickfix"]}
+    });
+    assert_eq!(
+        client.request("textDocument/codeAction", outside_diagnostic),
+        json!([])
+    );
     client.shutdown();
 }
 
