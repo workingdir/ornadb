@@ -14336,9 +14336,6 @@ fn query_paired_window_cost_restoration_fold(
 
     let mut hash = Sha256::new();
     hash.update(b"orna.sys.query-paired-window-cost-restoration-fold.v6\0");
-    let parent_identity = previous.map(|fold| fold.identity.clone());
-
-    let mut hash = Sha256::new();
     hash.update(b"orna.sys.query-paired-window-cost-restoration-fold.v5\0");
     hash.update(b"orna.sys.query-paired-window-cost-restoration-fold.v4\0");
     hash_optional_text(&mut hash, parent_identity.as_deref());
