@@ -173,7 +173,18 @@ fn walk_rust_files(directory: &Path, files: &mut Vec<PathBuf>) {
         let path = entry.path();
         let kind = entry.file_type().expect("read Rust source entry type");
         if kind.is_dir() {
-            walk_rust_files(&path, files);
+            let generated_or_metadata = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| {
+                    matches!(
+                        name,
+                        ".git" | ".beads" | ".scratch" | "node_modules" | "target"
+                    )
+                });
+            if !generated_or_metadata {
+                walk_rust_files(&path, files);
+            }
         } else if kind.is_file() && path.extension().is_some_and(|extension| extension == "rs") {
             files.push(path);
         }
@@ -411,10 +422,20 @@ fn cross_crate_fixture_includes_are_rejected() {
 }
 
 #[test]
+#[should_panic(expected = "compile-time fixture path does not exist")]
+fn missing_crate_fixture_includes_are_rejected() {
+    let source_text = r#"include_str!("fixtures/missing-audit-fixture.orna")"#;
+    let source = scan_rust_source(source_text);
+    let root = workspace_root();
+    let source_path = root.join("crates/orna-syntax-v1/tests/synthetic.rs");
+    assert_include_paths_stay_in_checkout(&source_path, &root, &source);
+}
+
+#[test]
 fn workspace_rust_sources_keep_test_inputs_inside_the_checkout() {
     let root = workspace_root();
     let mut files = Vec::new();
-    walk_rust_files(&root.join("crates"), &mut files);
+    walk_rust_files(&root, &mut files);
     files.sort();
 
     let mut violations = Vec::new();
@@ -441,11 +462,20 @@ fn workspace_rust_sources_keep_test_inputs_inside_the_checkout() {
 }
 
 #[test]
-fn checkout_has_no_top_level_reference_tree() {
-    let reference_tree = workspace_root().join("reference");
-    assert!(
-        !reference_tree.exists(),
-        "the repository checkout must not depend on a top-level reference tree: {}",
-        reference_tree.display()
-    );
+fn checkout_has_no_checkout_or_sibling_reference_tree() {
+    let root = workspace_root();
+    let sibling_reference_tree = root
+        .parent()
+        .expect("workspace root parent")
+        .join("reference");
+    for (scope, reference_tree) in [
+        ("checkout", root.join("reference")),
+        ("sibling", sibling_reference_tree),
+    ] {
+        assert!(
+            !reference_tree.exists(),
+            "the fresh checkout must not depend on a {scope} reference tree: {}",
+            reference_tree.display()
+        );
+    }
 }
