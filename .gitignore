@@ -5,12 +5,6 @@
 /playground/web-ui/node_modules/
 /playground/web-ui/dist/
 /playground/web-ui/public/lsp-wasm/
-/playground/site/node_modules/
-/playground/site/dist/
-/playground/site/test-results/
-/playground/site/playwright-report/
-/playground/orna-wasm/pkg/
-/playground/orna-wasm/target/
 
 # Beads / Dolt files (added by bd init)
 .dolt/

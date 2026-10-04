@@ -1,0 +1,5 @@
+std.result.ok(std.result.and(ok_value, second_ok)) == Some(6)
+&& std.result.ok(std.result.or(err_value, second_ok)) == Some(6)
+&& std.result.ok(std.result.and_then(ok_value, value => second_ok)) == Some(6)
+&& std.result.ok(std.result.or_else(err_value, error => second_ok)) == Some(6)
+&& std.result.ok(std.result.flatten(nested_ok)) == Some(4)

@@ -2,6 +2,7 @@ import * as monaco from 'monaco-editor/esm/vs/editor/editor.api.js';
 import EditorWorker from 'monaco-editor/esm/vs/editor/editor.worker.js?worker';
 import { registerOrnaLanguage } from './language';
 import { formatRunResult, formatThrownError, type RunResult } from './results';
+import { servedRuntime } from './runtime';
 import './styles.css';
 
 type LspAction = 'diagnostics' | 'completions' | 'hover' | 'signature_help';
@@ -57,41 +58,11 @@ const lspWorker = new Worker(new URL('./lsp-worker.ts', import.meta.url), { type
 const pendingLsp = new Map<number, { resolve: (value: unknown) => void; reject: (error: Error) => void }>();
 let nextLspId = 1;
 
-type PendingRun = {
-  id: number;
-  resolve: (value: unknown) => void;
-  reject: (error: Error) => void;
-};
-let nextRunId = 1;
-let activeRun: PendingRun | undefined;
-let runtimeWorker: Worker;
+let activeRun = false;
+const runtime = servedRuntime();
 
-function createRuntimeWorker(): Worker {
-  const worker = new Worker(new URL('./runtime-worker.ts', import.meta.url), { type: 'module' });
-  worker.addEventListener('message', ({ data }: MessageEvent<{ id: number; result?: unknown; error?: string }>) => {
-    if (!activeRun || data.id !== activeRun.id) return;
-    const pending = activeRun;
-    activeRun = undefined;
-    if (data.error) pending.reject(new Error(data.error));
-    else pending.resolve(data.result);
-  });
-  worker.addEventListener('error', (event) => {
-    if (!activeRun) return;
-    const pending = activeRun;
-    activeRun = undefined;
-    pending.reject(new Error(event.message));
-  });
-  return worker;
-}
-
-runtimeWorker = createRuntimeWorker();
-
-function executeSource(source: string): Promise<unknown> {
-  const id = nextRunId++;
-  return new Promise((resolve, reject) => {
-    activeRun = { id, resolve, reject };
-    runtimeWorker.postMessage({ id, action: 'run', source });
-  });
+async function executeSource(source: string): Promise<RunResult> {
+  return runtime.run(source);
 }
 
 lspWorker.addEventListener('message', ({ data }: MessageEvent<LspReply>) => {
@@ -283,35 +254,23 @@ function showResult(result: RunResult): void {
   outputStatus.textContent = result.ok ? 'Execution completed.' : 'Execution returned errors.';
 }
 
-function isRunResult(value: unknown): value is RunResult {
-  const result = asRecord(value);
-  return Boolean(result) && typeof result?.ok === 'boolean' &&
-    Array.isArray(result?.values) && result.values.every((entry) => typeof entry === 'string') &&
-    typeof result?.stdout === 'string' && Array.isArray(result?.errors) &&
-    result.errors.every((entry) => {
-      const error = asRecord(entry);
-      return Boolean(error) && typeof error?.message === 'string' &&
-        typeof error?.line === 'number' && typeof error?.col === 'number';
-    }) && (result.ast === undefined || typeof result.ast === 'string');
-}
-
 async function runSource(): Promise<void> {
   if (activeRun) return;
+  activeRun = true;
   runButton.disabled = true;
   stopButton.disabled = false;
   executionState.textContent = 'Running';
-  outputStatus.textContent = 'Running source in the Orna WebAssembly worker.';
+  outputStatus.textContent = 'Running source in the OrnaDB server runtime.';
   try {
-    const body: unknown = await executeSource(editor.getValue());
-    if (body === undefined) return;
-    if (!isRunResult(body)) throw new Error('The runtime returned an invalid run result.');
-    showResult(body);
+    const result = await executeSource(editor.getValue());
+    showResult(result);
   } catch (error) {
     const message = formatThrownError(error);
     setOutput(errorsOutput, message, 'Execution failed.');
     executionState.textContent = 'Failed';
     outputStatus.textContent = 'The run failed.';
   } finally {
+    activeRun = false;
     runButton.disabled = false;
     stopButton.disabled = true;
   }
@@ -319,14 +278,9 @@ async function runSource(): Promise<void> {
 
 runButton.addEventListener('click', () => void runSource());
 stopButton.addEventListener('click', () => {
-  const pending = activeRun;
-  if (!pending) return;
-  activeRun = undefined;
-  runtimeWorker.terminate();
-  runtimeWorker = createRuntimeWorker();
-  pending.resolve(undefined);
-  executionState.textContent = 'Stopped';
-  outputStatus.textContent = 'Execution stopped.';
+  if (!activeRun) return;
+  executionState.textContent = 'Stop requested';
+  outputStatus.textContent = 'The live API does not yet cancel server-side execution.';
 });
 editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.Enter, () => void runSource());
 
@@ -392,7 +346,6 @@ for (const tab of document.querySelectorAll<HTMLButtonElement>('[data-output-tab
 runButton.disabled = false;
 void loadExamples();
 window.addEventListener('beforeunload', () => {
-  runtimeWorker.terminate();
   editor.dispose();
   lspWorker.terminate();
 }, { once: true });
