@@ -12,6 +12,7 @@ const CALL_SOURCE: &str = include_str!("fixtures/call-v1.orna");
 const INCREMENTAL_SOURCE: &str = include_str!("fixtures/incremental-malformed-v1.orna");
 const LOCAL_SCOPES_SOURCE: &str = include_str!("fixtures/local-scopes-v1.orna");
 const HOVER_COMPLETION_SOURCE: &str = include_str!("fixtures/hover-completion-v1.orna");
+const EDITOR_HINTS_SOURCE: &str = include_str!("fixtures/editor-lsp-hints.orna");
 
 struct Client {
     child: Child,
@@ -110,6 +111,27 @@ fn initialize(client: &mut Client) {
     assert_eq!(result["capabilities"]["positionEncoding"], "utf-16");
     assert_eq!(result["capabilities"]["textDocumentSync"]["change"], 2);
     assert_eq!(result["capabilities"]["hoverProvider"], true);
+    let token_types = result["capabilities"]["semanticTokensProvider"]["legend"]["tokenTypes"]
+        .as_array()
+        .unwrap();
+    assert!(
+        token_types
+            .iter()
+            .any(|token_type| token_type == "parameter")
+    );
+    assert!(
+        token_types
+            .iter()
+            .any(|token_type| token_type == "function")
+    );
+    let modifiers = result["capabilities"]["semanticTokensProvider"]["legend"]["tokenModifiers"]
+        .as_array()
+        .unwrap();
+    assert!(modifiers.iter().any(|modifier| modifier == "declaration"));
+    assert_eq!(
+        result["capabilities"]["inlayHintProvider"]["resolveProvider"],
+        false
+    );
     client.notify("initialized", json!({}));
 }
 
@@ -119,6 +141,32 @@ fn open(client: &mut Client, uri: &str, source: &str) -> Value {
         json!({"textDocument":{"uri":uri,"languageId":"orna","version":1,"text":source}}),
     );
     client.notification("textDocument/publishDiagnostics")
+}
+
+fn decoded_semantic_tokens(source: &str, response: &Value) -> Vec<(String, u64, u64)> {
+    let data = response["data"].as_array().unwrap();
+    assert_eq!(data.len() % 5, 0, "semantic token data: {response}");
+    let mut line = 0usize;
+    let mut character = 0usize;
+    data.chunks_exact(5)
+        .map(|token| {
+            let delta_line = token[0].as_u64().unwrap() as usize;
+            let delta_start = token[1].as_u64().unwrap() as usize;
+            if delta_line == 0 {
+                character += delta_start;
+            } else {
+                line += delta_line;
+                character = delta_start;
+            }
+            let length = token[2].as_u64().unwrap() as usize;
+            let line_text = source.lines().nth(line).unwrap();
+            (
+                line_text[character..character + length].to_owned(),
+                token[3].as_u64().unwrap(),
+                token[4].as_u64().unwrap(),
+            )
+        })
+        .collect()
 }
 
 #[test]
@@ -443,6 +491,134 @@ fn hover_resolves_shadowed_bindings_and_completion_ranks_visible_locals() {
             .as_str()
             .unwrap()
             .contains("let nearby: Int")
+    );
+    client.shutdown();
+}
+
+#[test]
+fn syntax_v1_semantic_tokens_and_inlay_hints_follow_scope_and_requested_range() {
+    let uri = "file:///workspace/editor-lsp-hints.orna";
+    let mut client = Client::spawn();
+    initialize(&mut client);
+    let diagnostics = open(&mut client, uri, EDITOR_HINTS_SOURCE);
+    assert!(
+        diagnostics["diagnostics"].as_array().unwrap().is_empty(),
+        "{diagnostics}"
+    );
+
+    let full = client.request(
+        "textDocument/semanticTokens/full",
+        json!({"textDocument":{"uri":uri}}),
+    );
+    let tokens = decoded_semantic_tokens(EDITOR_HINTS_SOURCE, &full);
+    assert!(tokens.contains(&("User".to_owned(), 6, 3)), "{tokens:?}");
+    assert!(tokens.contains(&("add".to_owned(), 9, 3)), "{tokens:?}");
+    assert!(tokens.contains(&("add".to_owned(), 9, 2)), "{tokens:?}");
+    assert!(tokens.contains(&("left".to_owned(), 10, 1)), "{tokens:?}");
+    assert!(tokens.contains(&("add".to_owned(), 10, 0)), "{tokens:?}");
+    assert!(
+        tokens.contains(&("inferred".to_owned(), 1, 1)),
+        "{tokens:?}"
+    );
+
+    let function_start = EDITOR_HINTS_SOURCE.find("pub fn add").unwrap();
+    let function_end = EDITOR_HINTS_SOURCE.find("pub fn caller").unwrap();
+    let ranged = client.request(
+        "textDocument/semanticTokens/range",
+        json!({
+            "textDocument":{"uri":uri},
+            "range":range_at(EDITOR_HINTS_SOURCE, function_start, function_end)
+        }),
+    );
+    let ranged_tokens = decoded_semantic_tokens(EDITOR_HINTS_SOURCE, &ranged);
+    assert!(
+        ranged_tokens.contains(&("add".to_owned(), 9, 3)),
+        "{ranged_tokens:?}"
+    );
+    assert!(!ranged_tokens.iter().any(|(word, _, _)| word == "User"));
+
+    let full_hints = client.request(
+        "textDocument/inlayHint",
+        json!({
+            "textDocument":{"uri":uri},
+            "range":range_at(EDITOR_HINTS_SOURCE, 0, EDITOR_HINTS_SOURCE.len())
+        }),
+    );
+    let hints = full_hints.as_array().unwrap();
+    let labels = hints
+        .iter()
+        .map(|hint| hint["label"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert!(labels.contains(&": Int"), "{full_hints}");
+    assert!(labels.contains(&"left: "), "{full_hints}");
+    assert!(labels.contains(&"right: "), "{full_hints}");
+
+    let call_start = EDITOR_HINTS_SOURCE.find("add(inferred").unwrap();
+    let call_end = EDITOR_HINTS_SOURCE[call_start..]
+        .find(';')
+        .map(|offset| call_start + offset + 1)
+        .unwrap();
+    let call_hints = client.request(
+        "textDocument/inlayHint",
+        json!({
+            "textDocument":{"uri":uri},
+            "range":range_at(EDITOR_HINTS_SOURCE, call_start, call_end)
+        }),
+    );
+    assert_eq!(
+        call_hints
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|hint| hint["label"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["left: ", "right: "]
+    );
+
+    let local_start = EDITOR_HINTS_SOURCE.find("let inferred").unwrap();
+    let local_end = EDITOR_HINTS_SOURCE[local_start..]
+        .find(';')
+        .map(|offset| local_start + offset + 1)
+        .unwrap();
+    let local_hints = client.request(
+        "textDocument/inlayHint",
+        json!({
+            "textDocument":{"uri":uri},
+            "range":range_at(EDITOR_HINTS_SOURCE, local_start, local_end)
+        }),
+    );
+    assert_eq!(local_hints.as_array().unwrap().len(), 1, "{local_hints}");
+    assert_eq!(local_hints[0]["label"], ": Int");
+
+    let annotated_start = EDITOR_HINTS_SOURCE.find("let annotated").unwrap();
+    let annotated_end = EDITOR_HINTS_SOURCE[annotated_start..]
+        .find(';')
+        .map(|offset| annotated_start + offset + 1)
+        .unwrap();
+    let annotated_hints = client.request(
+        "textDocument/inlayHint",
+        json!({
+            "textDocument":{"uri":uri},
+            "range":range_at(EDITOR_HINTS_SOURCE, annotated_start, annotated_end)
+        }),
+    );
+    assert!(
+        annotated_hints.as_array().unwrap().is_empty(),
+        "{annotated_hints}"
+    );
+
+    let shadow_call_start = EDITOR_HINTS_SOURCE.find("add(1)").unwrap();
+    let shadow_call_end = shadow_call_start + "add(1)".len();
+    let shadow_hints = client.request(
+        "textDocument/inlayHint",
+        json!({
+            "textDocument":{"uri":uri},
+            "range":range_at(EDITOR_HINTS_SOURCE, shadow_call_start, shadow_call_end)
+        }),
+    );
+    assert!(
+        shadow_hints.as_array().unwrap().is_empty(),
+        "{shadow_hints}"
     );
     client.shutdown();
 }
