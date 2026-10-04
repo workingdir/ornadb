@@ -1,0 +1,4 @@
+use std.math.{increment};
+
+pub fn incremental(value: Int): Int = value + 2;
+pub fn exercise(value: Int): Int = increment(value);
