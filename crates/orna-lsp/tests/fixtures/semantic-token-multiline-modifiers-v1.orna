@@ -1,0 +1,12 @@
+pub type User { id: Int, }
+
+pub fn choose(value: User): User {
+    /* alpha café 🧭
+     * beta 🐟
+     * gamma */
+    let cached: User = value;
+    cached = cached;
+    cached
+}
+
+pub fn caller(value: User): User = choose(value);

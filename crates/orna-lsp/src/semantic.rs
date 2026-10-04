@@ -21,7 +21,7 @@ const TOKEN_TYPES: &[&str] = &[
     "parameter",
 ];
 
-const TOKEN_MODIFIERS: &[&str] = &["declaration", "readonly"];
+const TOKEN_MODIFIERS: &[&str] = &["declaration", "readonly", "modification"];
 const TOKEN_VARIABLE: u32 = 1;
 const TOKEN_TYPE: u32 = 6;
 const TOKEN_ENUM: u32 = 7;
@@ -30,6 +30,7 @@ const TOKEN_FUNCTION: u32 = 9;
 const TOKEN_PARAMETER: u32 = 10;
 const DECLARATION: u32 = 1 << 0;
 const READONLY: u32 = 1 << 1;
+const MODIFICATION: u32 = 1 << 2;
 
 /// LSP token legend supported by this server.
 pub fn legend() -> Vec<SemanticTokenType> {
@@ -142,6 +143,10 @@ fn contextual_tokens(
     }
 
     let local_references = locals::resolved_references(tree);
+    let local_writes = locals::write_spans(tree)
+        .into_iter()
+        .map(|span| (span.start, span.end))
+        .collect::<std::collections::HashSet<_>>();
     for (span, kind) in &local_references {
         insert(
             &mut tokens,
@@ -152,7 +157,11 @@ fn contextual_tokens(
                     TOKEN_VARIABLE
                 }
             },
-            0,
+            if local_writes.contains(&(span.start, span.end)) {
+                MODIFICATION
+            } else {
+                0
+            },
         );
     }
 

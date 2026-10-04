@@ -29,6 +29,7 @@ pub(crate) enum LocalBindingKind {
 struct LocalOccurrence {
     key: String,
     span: SyntaxSpan,
+    write: bool,
 }
 
 pub(crate) fn bindings(tree: &SyntaxTree) -> Vec<LocalBinding> {
@@ -108,6 +109,19 @@ pub(crate) fn resolved_reference_spans(tree: &SyntaxTree) -> BTreeSet<(usize, us
     resolved_references(tree)
         .into_iter()
         .map(|(span, _)| (span.start, span.end))
+        .collect()
+}
+
+/// Returns assignment-target name occurrences that resolve to local bindings.
+/// Declaration occurrences are handled by the caller as writes.
+pub(crate) fn write_spans(tree: &SyntaxTree) -> Vec<SyntaxSpan> {
+    let bindings = bindings(tree);
+    occurrences(tree)
+        .into_iter()
+        .filter(|occurrence| {
+            occurrence.write && resolve(&bindings, &occurrence.key, occurrence.span.start).is_some()
+        })
+        .map(|occurrence| occurrence.span)
         .collect()
 }
 
@@ -447,6 +461,7 @@ fn collect_expr_occurrences(expression: &Expr, output: &mut Vec<LocalOccurrence>
         Expr::Name { text, span } => output.push(LocalOccurrence {
             key: normalize(text),
             span: span.clone(),
+            write: false,
         }),
         Expr::Literal { .. } | Expr::ReplBinding { .. } => {}
         Expr::InterpolatedString { segments, .. } => {
@@ -565,6 +580,7 @@ fn collect_assignment_target_occurrences(
             output.push(LocalOccurrence {
                 key: normalize(name),
                 span: span.clone(),
+                write: true,
             });
         }
         orna_syntax_v1::AssignmentTarget::Field { base, .. } => {
