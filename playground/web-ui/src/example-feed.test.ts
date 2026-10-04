@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { exampleIndexForKey, isExample } from './example-feed';
+import { exampleIndexForKey, exampleIndexForPath, isExample } from './example-feed';
 
 describe('database example feed', () => {
   it('accepts only records with the name, path, and source fields used by the feed', () => {
@@ -15,6 +15,16 @@ describe('database example feed', () => {
     expect(exampleIndexForKey('PageDown', 1, 8)).toBe(6);
     expect(exampleIndexForKey('PageUp', 6, 8)).toBe(1);
     expect(exampleIndexForKey('ArrowDown', 7, 8)).toBe(7);
+  });
+
+  it('selects a requested database path and defaults when it is missing', () => {
+    const examples = [
+      { path: 'playground/Sample/hello.orna' },
+      { path: 'playground/Sample/arithmetic.orna' },
+    ];
+    expect(exampleIndexForPath(examples, 'playground/Sample/arithmetic.orna')).toBe(1);
+    expect(exampleIndexForPath(examples, 'playground/Sample/unknown.orna')).toBe(0);
+    expect(exampleIndexForPath(examples, null)).toBe(0);
   });
 
   it('jumps to the first or last example and ignores other keys or an empty feed', () => {
