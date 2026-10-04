@@ -32,6 +32,7 @@ async function collectFiles(directory, prefix = '') {
   const children = await readdir(join(distribution, directory), { withFileTypes: true });
   const files = [];
   for (const child of children.sort((left, right) => left.name.localeCompare(right.name))) {
+    if (child.name.startsWith('.')) continue;
     const path = join(directory, child.name);
     const relativePath = prefix ? `${prefix}/${child.name}` : child.name;
     if (child.isDirectory()) files.push(...await collectFiles(path, relativePath));

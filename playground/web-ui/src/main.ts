@@ -1,6 +1,6 @@
-import * as monaco from 'monaco-editor';
+import * as monaco from 'monaco-editor/editor/editor.api.js';
 import EditorWorker from 'monaco-editor/esm/vs/editor/editor.worker?worker';
-import 'monaco-editor/min/vs/editor/editor.main.css';
+import '../node_modules/monaco-editor/min/vs/editor/editor.main.css';
 import { exampleIndexForKey, isExample } from './example-feed';
 import { loadOrnaEditorConfig, registerOrnaLanguage } from './language';
 import { formatRunResult, formatThrownError, type RunResult } from './results';
