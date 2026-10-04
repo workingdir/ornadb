@@ -181,14 +181,12 @@ fn decoded_semantic_tokens(source: &str, response: &Value) -> Vec<(String, u64, 
 #[test]
 fn v1_workspace_model_powers_editor_features_across_open_files() {
     let uri = "file:///workspace/expressions-v1.orna";
-    let caller_uri = "file:///workspace/call-v1.orna";
+    let caller_uri = "file:///workspace/ji3t0-call-v1.orna";
+    assert!(uri < caller_uri, "provider URI must sort before caller URI");
     let mut client = Client::spawn();
     initialize(&mut client);
-    let diagnostics = open(&mut client, uri, SOURCE);
-    assert!(
-        diagnostics["diagnostics"].as_array().unwrap().is_empty(),
-        "{diagnostics}"
-    );
+    // The caller attaches before its provider. Workspace analysis must follow
+    // the syntax-v1 source dependency order, not didOpen arrival order.
     let caller_diagnostics = open(&mut client, caller_uri, CALL_SOURCE);
     assert!(
         caller_diagnostics["diagnostics"]
@@ -196,6 +194,11 @@ fn v1_workspace_model_powers_editor_features_across_open_files() {
             .unwrap()
             .is_empty(),
         "{caller_diagnostics}"
+    );
+    let diagnostics = open(&mut client, uri, SOURCE);
+    assert!(
+        diagnostics["diagnostics"].as_array().unwrap().is_empty(),
+        "{diagnostics}"
     );
 
     let call_offset = CALL_SOURCE.find("add(value, 2)").unwrap();
