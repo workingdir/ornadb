@@ -147,6 +147,7 @@ fn initialize(client: &mut Client) {
         false
     );
     assert!(result["capabilities"]["inlineValueProvider"].is_object());
+    assert_eq!(result["capabilities"]["linkedEditingRangeProvider"], true);
     assert!(result["capabilities"]["typeHierarchyProvider"].is_object());
     assert_eq!(result["capabilities"]["monikerProvider"], true);
     assert_eq!(
@@ -1732,6 +1733,93 @@ fn inline_values_follow_stopped_scope_and_requested_ranges() {
         }),
     );
     assert_eq!(empty, json!([]));
+    client.shutdown();
+}
+
+#[test]
+fn linked_editing_tracks_exact_local_bindings_and_excludes_shadowed_names() {
+    let uri = "file:///workspace/inline-value-linked-editing-v1.orna";
+    let mut client = Client::spawn();
+    initialize(&mut client);
+    let diagnostics = open(&mut client, uri, INLINE_VALUE_LINKED_EDITING_SOURCE);
+    assert!(
+        diagnostics["diagnostics"].as_array().unwrap().is_empty(),
+        "{diagnostics}"
+    );
+
+    let inner_declaration = INLINE_VALUE_LINKED_EDITING_SOURCE
+        .find("let input")
+        .unwrap()
+        + "let ".len();
+    let inner_use = INLINE_VALUE_LINKED_EDITING_SOURCE.rfind("input").unwrap();
+    let inner = client.request(
+        "textDocument/linkedEditingRange",
+        json!({
+            "textDocument":{"uri":uri},
+            "position":position_at(INLINE_VALUE_LINKED_EDITING_SOURCE, inner_declaration)
+        }),
+    );
+    assert_eq!(
+        inner["ranges"],
+        json!([
+            range_at(
+                INLINE_VALUE_LINKED_EDITING_SOURCE,
+                inner_declaration,
+                inner_declaration + "input".len()
+            ),
+            range_at(
+                INLINE_VALUE_LINKED_EDITING_SOURCE,
+                inner_use,
+                inner_use + "input".len()
+            )
+        ])
+    );
+    assert!(inner["wordPattern"].is_null());
+
+    let outer_declaration = INLINE_VALUE_LINKED_EDITING_SOURCE
+        .find("shadow(input")
+        .unwrap()
+        + "shadow(".len();
+    let outer = client.request(
+        "textDocument/linkedEditingRange",
+        json!({
+            "textDocument":{"uri":uri},
+            "position":position_at(INLINE_VALUE_LINKED_EDITING_SOURCE, outer_declaration)
+        }),
+    );
+    let outer_ranges = outer["ranges"].as_array().unwrap();
+    let expected_outer_ranges = [
+        outer_declaration,
+        INLINE_VALUE_LINKED_EDITING_SOURCE.find("if input").unwrap() + "if ".len(),
+        INLINE_VALUE_LINKED_EDITING_SOURCE
+            .find("let copied: Int = input")
+            .unwrap()
+            + "let copied: Int = ".len(),
+        INLINE_VALUE_LINKED_EDITING_SOURCE
+            .find("let input: Int = input")
+            .unwrap()
+            + "let input: Int = ".len(),
+    ];
+    assert_eq!(outer_ranges.len(), expected_outer_ranges.len(), "{outer}");
+    for (range, start) in outer_ranges.iter().zip(expected_outer_ranges) {
+        assert_eq!(
+            range,
+            &range_at(
+                INLINE_VALUE_LINKED_EDITING_SOURCE,
+                start,
+                start + "input".len()
+            )
+        );
+    }
+
+    let lone_declaration = client.request(
+        "textDocument/linkedEditingRange",
+        json!({
+            "textDocument":{"uri":uri},
+            "position":position_of(INLINE_VALUE_LINKED_EDITING_SOURCE, "total", 1)
+        }),
+    );
+    assert_eq!(lone_declaration, Value::Null);
     client.shutdown();
 }
 
