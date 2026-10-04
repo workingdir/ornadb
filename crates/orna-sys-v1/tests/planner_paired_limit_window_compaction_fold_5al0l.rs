@@ -18,6 +18,8 @@ const SCOPED_LIMIT_WINDOW_FIXTURE: &str =
     include_str!("fixtures/planner_paired_scoped_limit_window_restoration_9p4e2.orna");
 const BOUNDED_LIMIT_WINDOW_SPILL_FIXTURE: &str =
     include_str!("fixtures/planner_paired_bounded_limit_window_spill_cr8qd.orna");
+const BOUNDED_PROJECTION_SPILL_RESTORE_FIXTURE: &str =
+    include_str!("fixtures/planner_bounded_projection_spill_restore_qf5tz.orna");
 
 fn object(reference: &str) -> ObjectRef {
     ObjectRef::descriptive(reference)
@@ -1454,4 +1456,133 @@ fn bounded_limit_identity_tracks_paired_window_spill_folds() {
         !no_spills.root().details().contains_key(key),
         "the composite requires an actual paired window spill fold"
     );
+}
+
+#[test]
+fn bounded_projection_identity_tracks_paired_spill_restore_folds() {
+    assert!(BOUNDED_PROJECTION_SPILL_RESTORE_FIXTURE.contains("bounded_projection_spill_restore"));
+
+    let declared = ["table:First", "table:Gap", "table:Compact", "table:Restore"];
+    let pair_descriptors = pairs("table:Anchor", &declared);
+    let limit_descriptors = limits()
+        .into_iter()
+        .filter(|limit| limit.source.as_str() != "table:Unknown")
+        .collect::<Vec<_>>();
+    let aggregate_descriptors = aggregates()
+        .into_iter()
+        .filter(|aggregate| aggregate.source.as_str() != "table:Unknown")
+        .collect::<Vec<_>>();
+    let spill_descriptors = spills()
+        .into_iter()
+        .filter(|spill| spill.source.as_str() != "table:Unknown")
+        .collect::<Vec<_>>();
+    let mut projected_query = query("table:Anchor", &declared);
+    projected_query.projections = vec![
+        expression("expr:projection-key"),
+        expression("expr:projection-value"),
+    ];
+    projected_query.limit = Some(6);
+
+    let explain = |query: &QueryPlanDescription,
+                   projection_pairs: &[QueryJoinPairIdentityDescription],
+                   projection_spills: &[QueryWindowSpillDescription]| {
+        explain_query_with_join_pair_identities_limit_window_aggregate_and_spill_pushdowns(
+            query,
+            projection_pairs,
+            &limit_descriptors,
+            &aggregate_descriptors,
+            projection_spills,
+        )
+        .expect("bounded projections can be folded over paired sparse spill restores")
+    };
+    let original = explain(&projected_query, &pair_descriptors, &spill_descriptors);
+    let project = original
+        .nodes()
+        .iter()
+        .find(|node| node.kind() == PlanNodeKind::Project)
+        .expect("the selected expressions create a projection node");
+    let restore_join = joins_by_source(&original)["table:Restore"];
+    let fold_key = "paired_bounded_projection_spill_restoration_fold_identity";
+    let projection_key = "paired_bounded_projection_spill_restoration_projection_identity";
+    let restore_key = "paired_bounded_projection_spill_restoration_spill_fold_identity";
+
+    assert_eq!(integer(project, "paired_bounded_projection_spill_restoration_projection_count"), 2);
+    assert_eq!(integer(project, "paired_bounded_projection_spill_restoration_input_rows"), 399);
+    assert_eq!(
+        integer(
+            project,
+            "paired_bounded_projection_spill_restoration_result_row_upper_bound"
+        ),
+        6
+    );
+    assert_eq!(
+        integer(
+            project,
+            "paired_bounded_projection_spill_restoration_estimated_projection_work"
+        ),
+        798,
+        "the final limit does not refund work already done by Project"
+    );
+    assert_eq!(project.estimated_rows(), Some(399));
+    assert_eq!(project.estimated_work(), Some(798));
+    assert_eq!(
+        integer(project, "paired_bounded_projection_spill_restoration_aggregate_pair_count"),
+        3
+    );
+    assert_eq!(
+        integer(project, "paired_bounded_projection_spill_restoration_aggregate_stage_count"),
+        5
+    );
+    assert_eq!(
+        integer(project, "paired_bounded_projection_spill_restoration_spill_pair_count"),
+        3
+    );
+    assert_eq!(
+        integer(project, "paired_bounded_projection_spill_restoration_spill_stage_count"),
+        3
+    );
+    assert_eq!(
+        text(project, restore_key),
+        text(restore_join, "paired_aggregate_spill_restoration_fold_identity")
+    );
+    assert!(text(project, projection_key).starts_with("projection-chain:"));
+    assert!(text(project, fold_key).starts_with("paired-bounded-projection-spill-restoration:"));
+
+    let mut reduced_limit_query = projected_query.clone();
+    reduced_limit_query.limit = Some(3);
+    let reduced_limit = explain(&reduced_limit_query, &pair_descriptors, &spill_descriptors);
+    let reduced_project = reduced_limit
+        .nodes()
+        .iter()
+        .find(|node| node.kind() == PlanNodeKind::Project)
+        .expect("the reduced-limit plan retains Project");
+    assert_eq!(integer(reduced_project, "paired_bounded_projection_spill_restoration_result_row_upper_bound"), 3);
+    assert_eq!(integer(reduced_project, "paired_bounded_projection_spill_restoration_estimated_projection_work"), 798);
+    assert_eq!(text(reduced_project, projection_key), text(project, projection_key));
+    assert_eq!(text(reduced_project, restore_key), text(project, restore_key));
+    assert_ne!(text(reduced_project, fold_key), text(project, fold_key));
+
+    let mut changed_projection_query = projected_query.clone();
+    changed_projection_query.projections[1] = expression("expr:replacement-value");
+    let changed_projection = explain(&changed_projection_query, &pair_descriptors, &spill_descriptors);
+    let changed_projection_node = changed_projection
+        .nodes()
+        .iter()
+        .find(|node| node.kind() == PlanNodeKind::Project)
+        .expect("the changed expression still creates Project");
+    assert_ne!(text(changed_projection_node, projection_key), text(project, projection_key));
+    assert_ne!(text(changed_projection_node, fold_key), text(project, fold_key));
+    assert_eq!(text(changed_projection_node, restore_key), text(project, restore_key));
+
+    let mut changed_spills = spill_descriptors.clone();
+    changed_spills[0].memory_budget_bytes += 1;
+    let changed_restore = explain(&projected_query, &pair_descriptors, &changed_spills);
+    let changed_restore_node = changed_restore
+        .nodes()
+        .iter()
+        .find(|node| node.kind() == PlanNodeKind::Project)
+        .expect("the changed spill still creates Project");
+    assert_eq!(text(changed_restore_node, projection_key), text(project, projection_key));
+    assert_ne!(text(changed_restore_node, restore_key), text(project, restore_key));
+    assert_ne!(text(changed_restore_node, fold_key), text(project, fold_key));
 }
