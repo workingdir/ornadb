@@ -12,12 +12,16 @@ use serde_json::Value;
 
 #[path = "support/completion_contract.rs"]
 mod completion_contract;
+#[allow(dead_code)]
 #[path = "support/hover_semantic_contract.rs"]
 mod hover_semantic_contract;
+#[path = "support/syntax_v1_depth_contract.rs"]
+mod syntax_v1_depth_contract;
 
 const SOURCE: &str = include_str!("fixtures/ji3t0-lsp-v1.orna");
 const PROVIDER_SOURCE: &str = include_str!("fixtures/expressions-v1.orna");
 const SEMANTIC_SOURCE: &str = include_str!("fixtures/editor-semantic-tokens.orna");
+const HINTS_SOURCE: &str = include_str!("fixtures/editor-lsp-hints.orna");
 
 #[test]
 fn attachment_input_matches_its_crate_local_fixture() {
@@ -71,6 +75,9 @@ fn vim_lsp_attaches_and_exposes_hover_semantic_tokens_and_completion() {
         fs::read_to_string(&semantic_fixture).unwrap(),
         SEMANTIC_SOURCE
     );
+    let depth_fixture = root.join("crates/orna-lsp/tests/fixtures/editor-lsp-hints.orna");
+    assert_eq!(fs::read_to_string(&depth_fixture).unwrap(), HINTS_SOURCE);
+    let depth_ranges = syntax_v1_depth_contract::request_ranges(HINTS_SOURCE);
     let lsp_binary = env!("CARGO_BIN_EXE_orna-lsp");
     let vim_script = format!(
         r#"
@@ -130,6 +137,9 @@ function! OrnaCaptureReferencesWithoutDeclaration(data) abort
 endfunction
 function! OrnaCaptureRename(data) abort
     let g:orna_rename_response = a:data['response']
+endfunction
+function! OrnaCaptureDepth(name, data) abort
+    let g:orna_depth_responses[a:name] = a:data['response']['result']
 endfunction
 call lsp#send_request('orna', {{
     \ 'method': 'textDocument/completion',
@@ -236,12 +246,58 @@ while !exists('g:orna_semantic_response') && reltimefloat(reltime()) < s:deadlin
 endwhile
 call assert_true(exists('g:orna_semantic_response'), 'vim-lsp semantic token request timed out')
 let s:semantic = g:orna_semantic_response['result']
+
+execute 'edit ' . fnameescape($ORNA_TEST_DEPTH_FIXTURE)
+call assert_equal('orna', &filetype)
+let s:deadline = reltimefloat(reltime()) + 10.0
+while !lsp#capabilities#has_completion_provider('orna') && reltimefloat(reltime()) < s:deadline
+    sleep 10m
+endwhile
+call assert_true(lsp#capabilities#has_completion_provider('orna'), 'depth fixture did not attach to orna-lsp')
+let s:depth_document = lsp#get_text_document_identifier()
+let s:depth_ranges = json_decode($ORNA_DEPTH_RANGES)
+let g:orna_depth_responses = {{}}
+call lsp#send_request('orna', {{
+    \ 'method': 'textDocument/semanticTokens/full',
+    \ 'params': {{ 'textDocument': s:depth_document }},
+    \ 'on_notification': function('OrnaCaptureDepth', ['semantic']),
+\ }})
+call lsp#send_request('orna', {{
+    \ 'method': 'textDocument/semanticTokens/range',
+    \ 'params': {{ 'textDocument': s:depth_document, 'range': s:depth_ranges.semantic }},
+    \ 'on_notification': function('OrnaCaptureDepth', ['semantic_range']),
+\ }})
+for [s:name, s:range_key] in items({{
+    \ 'hints_full': 'hints_full',
+    \ 'hints_call': 'hints_call',
+    \ 'hints_inferred': 'hints_inferred',
+    \ 'hints_annotated': 'hints_annotated',
+    \ 'hints_shadowed': 'hints_shadowed',
+\ }})
+    call lsp#send_request('orna', {{
+        \ 'method': 'textDocument/inlayHint',
+        \ 'params': {{ 'textDocument': s:depth_document, 'range': s:depth_ranges[s:range_key] }},
+        \ 'on_notification': function('OrnaCaptureDepth', [s:name]),
+    \ }})
+endfor
+let s:deadline = reltimefloat(reltime()) + 10.0
+while len(g:orna_depth_responses) < 7 && reltimefloat(reltime()) < s:deadline
+    sleep 10m
+endwhile
+call assert_equal(7, len(g:orna_depth_responses), 'vim-lsp semantic/inlay depth requests timed out')
 call writefile([json_encode({{
     \ 'omnifunc': &l:omnifunc,
     \ 'completion': s:response['result'],
     \ 'adapted': s:adapted['items'],
     \ 'hover': s:hover,
     \ 'semantic': s:semantic,
+    \ 'depth_semantic': g:orna_depth_responses.semantic,
+    \ 'depth_semantic_range': g:orna_depth_responses.semantic_range,
+    \ 'depth_hints_full': g:orna_depth_responses.hints_full,
+    \ 'depth_hints_call': g:orna_depth_responses.hints_call,
+    \ 'depth_hints_inferred': g:orna_depth_responses.hints_inferred,
+    \ 'depth_hints_annotated': g:orna_depth_responses.hints_annotated,
+    \ 'depth_hints_shadowed': g:orna_depth_responses.hints_shadowed,
     \ 'consumer_uri': s:consumer_document['uri'],
     \ 'provider_uri': s:provider_document['uri'],
     \ 'references': s:references,
@@ -267,6 +323,11 @@ qa!
         .env("ORNA_TEST_FIXTURE", &fixture)
         .env("ORNA_TEST_PROVIDER", &provider)
         .env("ORNA_TEST_SEMANTIC_FIXTURE", &semantic_fixture)
+        .env("ORNA_TEST_DEPTH_FIXTURE", &depth_fixture)
+        .env(
+            "ORNA_DEPTH_RANGES",
+            serde_json::to_string(&depth_ranges).unwrap(),
+        )
         .env("ORNA_EDITOR_RESULT", &result_path)
         .output()
         .unwrap_or_else(|error| panic!("start Vim at {}: {error}", vim.display()));
@@ -305,6 +366,21 @@ qa!
         &evidence["semantic"],
         "Vim vim-lsp",
     );
+    syntax_v1_depth_contract::assert_semantic_depth_contract(
+        HINTS_SOURCE,
+        &evidence["depth_semantic"],
+        &evidence["depth_semantic_range"],
+        "Vim vim-lsp",
+    );
+    syntax_v1_depth_contract::assert_inlay_hint_depth_contract(
+        HINTS_SOURCE,
+        &evidence["depth_hints_full"],
+        &evidence["depth_hints_call"],
+        &evidence["depth_hints_inferred"],
+        &evidence["depth_hints_annotated"],
+        &evidence["depth_hints_shadowed"],
+        "Vim vim-lsp",
+    );
     let consumer_uri = evidence["consumer_uri"]
         .as_str()
         .expect("Vim consumer document URI");
@@ -331,7 +407,7 @@ qa!
         "Vim vim-lsp",
     );
     println!(
-        "Vim integration evidence: ATTACHED=pass DEPENDENCY_ORDER=consumer-before-provider OMNIFUNC=pass COMPLETION=pass HOVER=pass REFERENCES=pass RENAME=pass SEMANTIC_TOKENS=pass"
+        "Vim integration evidence: ATTACHED=pass DEPENDENCY_ORDER=consumer-before-provider OMNIFUNC=pass COMPLETION=pass HOVER=pass REFERENCES=pass RENAME=pass SEMANTIC_TOKENS=pass SEMANTIC_DEPTH=pass RANGED_TOKENS=pass INLAY_HINT_DEPTH=pass"
     );
 }
 
