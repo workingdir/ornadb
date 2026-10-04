@@ -1,0 +1,13 @@
+option.and(Some(1), Some("right")) == Some("right")
+&& option.and(option.filter(Some(1), value => false), Some(3)) == null
+&& option.or(Some(1), Some(2)) == Some(1)
+&& option.or(option.filter(Some(1), value => false), Some(2)) == Some(2)
+&& option.xor(Some(1), option.filter(Some(1), value => false)) == Some(1)
+&& option.xor(option.filter(Some(2), value => false), Some(2)) == Some(2)
+&& option.xor(Some(1), Some(2)) == null
+&& option.xor(option.filter(Some(1), value => false), option.filter(Some(2), value => false)) == null
+&& option.zip(Some(3), Some("value")) == Some((3, "value"))
+&& option.zip(option.filter(Some(1), value => false), Some("value")) == null
+&& option.zip(Some(3), option.filter(Some("value"), value => false)) == null
+&& option.zip_with(Some(3), Some(4), (left, right) => left * right) == Some(12)
+&& option.zip_with(option.filter(Some(3), value => false), Some(4), (left, right) => left * right) == null

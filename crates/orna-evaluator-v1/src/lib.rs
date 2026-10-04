@@ -64,7 +64,7 @@ pub use timezone::{
 /// Returns the reference standard sources supplied to the bounded REPL.
 #[must_use]
 #[cfg(feature = "reference-standard")]
-pub fn reference_standard_sources() -> [(String, String); 59] {
+pub fn reference_standard_sources() -> [(String, String); 61] {
     orna_standard::reference_standard_sources_v1()
 }
 

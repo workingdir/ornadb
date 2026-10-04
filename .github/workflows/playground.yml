@@ -36,7 +36,9 @@ jobs:
         with:
           node-version: 22.21.1
           cache: npm
-          cache-dependency-path: playground/site/package-lock.json
+          cache-dependency-path: |
+            playground/site/package-lock.json
+            playground/web-ui/package-lock.json
 
       - name: Install wasm-pack
         run: cargo install wasm-pack --locked --version 0.15.0
@@ -47,15 +49,30 @@ jobs:
       - name: Build the wasm package
         run: wasm-pack build playground/orna-wasm --target web --out-dir pkg --release --locked
 
+      - name: Check generated editor artifacts
+        run: cargo run --locked -p orna-syntax-v1 --example generate_editor_artifacts -- --check
+
+      - name: Install Monaco web UI dependencies
+        working-directory: playground/web-ui
+        run: npm ci
+
+      - name: Test and build Monaco web UI
+        working-directory: playground/web-ui
+        run: npm test && npm run build
+
       - name: Install playground dependencies
         working-directory: playground/site
         run: npm ci
+
+      - name: Install Chromium for browser integration proof
+        working-directory: playground/site
+        run: npx playwright install --with-deps --no-shell chromium
 
       - name: Build and smoke-test the Pages site
         working-directory: playground/site
         env:
           VITE_BASE_PATH: /${{ github.event.repository.name }}/
-        run: npm run build && npm run smoke-test
+        run: npm run build && npm run smoke-test && npm run e2e
 
       - name: Upload Pages artifact
         if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
