@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 from pathlib import Path
+import re
 from tempfile import TemporaryDirectory
 import unittest
 
@@ -86,6 +87,40 @@ class FixtureManifestTests(unittest.TestCase):
             pinned_line,
             (workspace / "scripts/fixture-manifest.sha256").read_text(encoding="utf-8"),
         )
+
+    def test_sys_binding_parity_fixtures_are_local_and_hash_pinned(self) -> None:
+        workspace = Path(__file__).resolve().parents[1]
+        manifest = (workspace / "scripts/fixture-manifest.sha256").read_text(
+            encoding="utf-8"
+        )
+        include_pattern = re.compile(r'include_str!\(\s*"fixtures/([^"\n]+)"\s*\)')
+        parity_suites = (
+            "sys_api_generation.rs",
+            "system_binding_stubs.rs",
+            "system_provider_abi.rs",
+        )
+        fixture_count = 0
+
+        for suite in parity_suites:
+            test_path = f"crates/orna-sys-v1/tests/{suite}"
+            source = (workspace / test_path).read_text(encoding="utf-8")
+            fixture_names = include_pattern.findall(source)
+            self.assertTrue(fixture_names, f"{test_path} includes crate-local fixtures")
+
+            for fixture_name in fixture_names:
+                fixture_count += 1
+                self.assertNotIn("..", Path(fixture_name).parts)
+                fixture_path = f"crates/orna-sys-v1/tests/fixtures/{fixture_name}"
+                fixture = workspace / fixture_path
+                self.assertTrue(fixture.is_file(), f"missing crate-local fixture: {fixture_path}")
+                digest = hashlib.sha256(fixture.read_bytes()).hexdigest()
+                self.assertIn(
+                    f"{digest}  {fixture_path}\n",
+                    manifest,
+                    f"sys binding fixture hash is pinned: {fixture_path}",
+                )
+
+        self.assertEqual(fixture_count, 16, "all parity fixture includes are hash-pinned")
 
 
 if __name__ == "__main__":
