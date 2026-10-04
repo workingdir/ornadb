@@ -152,6 +152,13 @@ fn semantic_legend_and_editor_grammars_have_only_v1_lexical_classes() {
             "Tree-sitter is missing {keyword}"
         );
     }
+    let monarch = content(editor::MONACO_KEYWORDS_PATH);
+    for keyword in ORNA_LEX_007 {
+        assert!(
+            monarch.contains(&format!("  \"{keyword}\"")),
+            "Monarch is missing ORNA-LEX-007 keyword {keyword}"
+        );
+    }
 
     let manifest =
         serde_json::from_str::<serde_json::Value>(content(editor::ARTIFACT_MANIFEST_PATH))
@@ -190,6 +197,7 @@ fn generated_editor_bytes_are_stable_and_cover_the_complete_editor_tree() {
     collect_editor_files(&root.join("editors"), root, &mut actual);
     let expected = first
         .iter()
+        .filter(|artifact| artifact.path.starts_with("editors/"))
         .map(|artifact| artifact.path.to_owned())
         .collect::<BTreeSet<_>>();
     assert_eq!(actual, expected, "every editor file must be generated");

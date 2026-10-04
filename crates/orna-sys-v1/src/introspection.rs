@@ -7124,6 +7124,19 @@ fn explain_query_core_with_wal_rotation_chains(
                 &mut details,
                 &projection_fold,
             );
+            if let Some(window_fold) =
+                query_paired_bounded_window_projection_spill_restoration_fold(
+                    window_aggregates,
+                    window_spills,
+                    &projection_fold,
+                    spill_restoration_fold,
+                )
+            {
+                add_paired_bounded_window_projection_spill_restoration_fold_details(
+                    &mut details,
+                    &window_fold,
+                );
+            }
         }
         current = push_unary(
             &mut operators,
@@ -9040,6 +9053,23 @@ struct QueryPairedBoundedProjectionSpillRestorationFold {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+struct QueryPairedBoundedWindowProjectionSpillRestorationFold {
+    identity: String,
+    window_identity: String,
+    projection_fold_identity: String,
+    spill_restoration_fold_identity: String,
+    bounded_window_count: u64,
+    frame_rows_upper_bound: Option<u64>,
+    projection_count: u64,
+    result_row_upper_bound: Option<u64>,
+    aggregate_pair_count: u64,
+    aggregate_stage_count: u64,
+    spill_pair_count: u64,
+    spill_stage_count: u64,
+    overflowed: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 struct QueryPairedWindowCompactionSpillFold {
     identity: String,
     window_pair_count: u64,
@@ -10644,6 +10674,192 @@ fn add_paired_bounded_projection_spill_restoration_fold_details(
         details.insert(
             "paired_bounded_projection_spill_restoration_estimated_projection_work".to_owned(),
             PlanDetail::Integer(work),
+        );
+    }
+}
+
+/// Binds finite window frames to the final bounded projection and the
+/// cumulative paired spill-restoration history. The composite belongs to the
+/// Project node because it describes the window values as observed by the
+/// ordered output projection.
+fn query_paired_bounded_window_projection_spill_restoration_fold(
+    window_aggregates: &[QueryWindowAggregatePushdownDescription],
+    window_spills: &[QueryWindowSpillDescription],
+    projection_fold: &QueryPairedBoundedProjectionSpillRestorationFold,
+    spill_restoration_fold: &QueryPairedAggregateSpillRestorationFold,
+) -> Option<QueryPairedBoundedWindowProjectionSpillRestorationFold> {
+    let bounded_aggregates = window_aggregates
+        .iter()
+        .filter(|aggregate| {
+            !matches!(
+                aggregate.frame_start,
+                PlanWindowFrameBound::UnboundedPreceding | PlanWindowFrameBound::UnboundedFollowing
+            ) && !matches!(
+                aggregate.frame_end,
+                PlanWindowFrameBound::UnboundedPreceding | PlanWindowFrameBound::UnboundedFollowing
+            )
+                && window_spills.iter().any(|spill| {
+                    spill.source == aggregate.source
+                        && spill.window_aggregate_identity == aggregate.identity
+                })
+        })
+        .collect::<Vec<_>>();
+    if bounded_aggregates.is_empty() {
+        return None;
+    }
+
+    let mut window_hash = Sha256::new();
+    window_hash.update(b"orna.sys.query-bounded-window-chain.v1\0");
+    let mut bounded_window_count = 0u64;
+    let mut frame_rows_upper_bound = Some(0u64);
+    let mut overflowed = projection_fold.overflowed || spill_restoration_fold.overflowed;
+    for aggregate in &bounded_aggregates {
+        bounded_window_count = bounded_window_count.checked_add(1).unwrap_or_else(|| {
+            overflowed = true;
+            u64::MAX
+        });
+        let frame_rows = u64::try_from(
+            aggregate.frame_end.ordinal() - aggregate.frame_start.ordinal() + 1,
+        )
+        .ok();
+        if let Some(frame_rows) = frame_rows {
+            frame_rows_upper_bound = frame_rows_upper_bound
+                .map(|current| current.max(frame_rows));
+        } else {
+            frame_rows_upper_bound = None;
+            overflowed = true;
+        }
+        hash_part(&mut window_hash, aggregate.identity.as_str().as_bytes());
+        hash_part(&mut window_hash, aggregate.source.as_str().as_bytes());
+        hash_part(&mut window_hash, aggregate.aggregate.as_str().as_bytes());
+        hash_part(&mut window_hash, aggregate.frame_identity.as_str().as_bytes());
+        hash_part(
+            &mut window_hash,
+            aggregate.frame_start.as_detail().as_bytes(),
+        );
+        hash_part(
+            &mut window_hash,
+            aggregate.frame_end.as_detail().as_bytes(),
+        );
+        hash_optional_u64(&mut window_hash, frame_rows);
+    }
+    window_hash.update(bounded_window_count.to_be_bytes());
+    hash_optional_u64(&mut window_hash, frame_rows_upper_bound);
+    let window_identity = format!("bounded-window-chain:{}", hex(&window_hash.finalize()));
+
+    let spill_stage_count = spill_restoration_fold
+        .spill_totals
+        .map_or(0, |totals| totals.stage_count);
+    let mut hash = Sha256::new();
+    hash.update(b"orna.sys.query-paired-bounded-window-projection-spill-restoration.v1\0");
+    hash_part(&mut hash, window_identity.as_bytes());
+    hash_part(&mut hash, projection_fold.identity.as_bytes());
+    hash_part(&mut hash, spill_restoration_fold.identity.as_bytes());
+    hash.update(bounded_window_count.to_be_bytes());
+    hash_optional_u64(&mut hash, frame_rows_upper_bound);
+    hash.update(projection_fold.projection_count.to_be_bytes());
+    hash_optional_u64(&mut hash, projection_fold.result_row_upper_bound);
+    hash.update(spill_restoration_fold.aggregate_pair_count.to_be_bytes());
+    hash.update(spill_restoration_fold.aggregate_stage_count.to_be_bytes());
+    hash.update(spill_restoration_fold.spill_pair_count.to_be_bytes());
+    hash.update(spill_stage_count.to_be_bytes());
+    hash.update([u8::from(overflowed)]);
+
+    Some(QueryPairedBoundedWindowProjectionSpillRestorationFold {
+        identity: format!(
+            "paired-bounded-window-projection-spill-restoration:{}",
+            hex(&hash.finalize())
+        ),
+        window_identity,
+        projection_fold_identity: projection_fold.identity.clone(),
+        spill_restoration_fold_identity: spill_restoration_fold.identity.clone(),
+        bounded_window_count,
+        frame_rows_upper_bound,
+        projection_count: projection_fold.projection_count,
+        result_row_upper_bound: projection_fold.result_row_upper_bound,
+        aggregate_pair_count: spill_restoration_fold.aggregate_pair_count,
+        aggregate_stage_count: spill_restoration_fold.aggregate_stage_count,
+        spill_pair_count: spill_restoration_fold.spill_pair_count,
+        spill_stage_count,
+        overflowed,
+    })
+}
+
+fn add_paired_bounded_window_projection_spill_restoration_fold_details(
+    details: &mut BTreeMap<String, PlanDetail>,
+    fold: &QueryPairedBoundedWindowProjectionSpillRestorationFold,
+) {
+    for (key, value) in [
+        (
+            "paired_bounded_window_projection_spill_restoration_fold_identity",
+            fold.identity.as_str(),
+        ),
+        (
+            "paired_bounded_window_projection_spill_restoration_window_identity",
+            fold.window_identity.as_str(),
+        ),
+        (
+            "paired_bounded_window_projection_spill_restoration_projection_fold_identity",
+            fold.projection_fold_identity.as_str(),
+        ),
+        (
+            "paired_bounded_window_projection_spill_restoration_spill_fold_identity",
+            fold.spill_restoration_fold_identity.as_str(),
+        ),
+    ] {
+        details.insert(key.to_owned(), PlanDetail::Text(value.to_owned()));
+    }
+    details.insert(
+        "paired_bounded_window_projection_spill_restoration_pairing".to_owned(),
+        PlanDetail::Text(
+            "bounded_window_frames_with_bounded_projection_and_paired_spill_restoration"
+                .to_owned(),
+        ),
+    );
+    for (key, value) in [
+        (
+            "paired_bounded_window_projection_spill_restoration_bounded_window_count",
+            fold.bounded_window_count,
+        ),
+        (
+            "paired_bounded_window_projection_spill_restoration_projection_count",
+            fold.projection_count,
+        ),
+        (
+            "paired_bounded_window_projection_spill_restoration_aggregate_pair_count",
+            fold.aggregate_pair_count,
+        ),
+        (
+            "paired_bounded_window_projection_spill_restoration_aggregate_stage_count",
+            fold.aggregate_stage_count,
+        ),
+        (
+            "paired_bounded_window_projection_spill_restoration_spill_pair_count",
+            fold.spill_pair_count,
+        ),
+        (
+            "paired_bounded_window_projection_spill_restoration_spill_stage_count",
+            fold.spill_stage_count,
+        ),
+    ] {
+        details.insert(key.to_owned(), PlanDetail::Integer(value));
+    }
+    details.insert(
+        "paired_bounded_window_projection_spill_restoration_overflowed".to_owned(),
+        PlanDetail::Boolean(fold.overflowed),
+    );
+    if let Some(rows) = fold.frame_rows_upper_bound {
+        details.insert(
+            "paired_bounded_window_projection_spill_restoration_frame_rows_upper_bound"
+                .to_owned(),
+            PlanDetail::Integer(rows),
+        );
+    }
+    if let Some(rows) = fold.result_row_upper_bound {
+        details.insert(
+            "paired_bounded_window_projection_spill_restoration_result_row_upper_bound"
+                .to_owned(),
+            PlanDetail::Integer(rows),
         );
     }
 }

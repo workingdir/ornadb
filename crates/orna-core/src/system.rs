@@ -1353,8 +1353,8 @@ mod tests {
         // and std.terminal.present_table (...0x12); the block now lives in
         // the documented ...0x40-...0x4b range below.
         let sealed = SYSTEM_FUNCTIONS.iter().map(|function| function.id());
-        // The retained standard library pins these FunctionIds in
-        // `orna-compiler` (which cannot be imported from `orna-core`):
+        // The standard crate pins these FunctionIds independently from the
+        // system registry:
         // std.invoke.echo = ...0x10, std.json.encode = ...0x11,
         // std.terminal.present_table = ...0x12.
         let standard = [

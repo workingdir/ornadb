@@ -1,5 +1,0 @@
-CREATE SCHEMA ui;
-CREATE CLIENT FUNCTION ui.run() RETURNS std.Action AS std.action.call(
-    target => tasks.run,
-    arguments => std.call.args(p_high => 8, p_low => 7)
-);
