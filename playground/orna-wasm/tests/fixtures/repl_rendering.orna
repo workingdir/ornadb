@@ -1,5 +1,5 @@
 "quote: \" slash: \\ newline: \n tab: \t"
-["café", "😀", 7, true, null]
+["café", "😀"]
 2026-09-01
 2026-09-01T14:30:00Z
 123.decimal

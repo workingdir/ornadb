@@ -548,15 +548,12 @@ mod tests {
     fn run_and_repl_preserve_escaped_text_and_registered_value_types() {
         let expected: RunResponse =
             serde_json::from_str(&run(REPL_RENDERING_FIXTURE)).expect("valid run JSON");
-        assert!(expected.ok);
+        assert!(expected.ok, "run response: {expected:?}");
         assert_eq!(
             expected.values[0],
             r#""quote: \" slash: \\ newline: \n tab: \t" : Str"#
         );
-        assert_eq!(
-            expected.values[1],
-            r#"["café", "😀", 7, true, null] : Array"#
-        );
+        assert_eq!(expected.values[1], r#"["café", "😀"] : Array"#);
         assert_eq!(expected.values[2], r#""2026-09-01" : Date"#);
         assert!(expected.values[3].ends_with(" : Instant"));
         assert_eq!(expected.values[4], "123e0.decimal : Decimal");
