@@ -11,6 +11,8 @@ use serde_json::{Value, json};
 mod syntax_v1_action_signature_contract;
 #[path = "support/syntax_v1_depth_contract.rs"]
 mod syntax_v1_depth_contract;
+#[path = "support/syntax_v1_folding_selection_contract.rs"]
+mod syntax_v1_folding_selection_contract;
 #[path = "support/syntax_v1_workspace_hierarchy_contract.rs"]
 mod syntax_v1_workspace_hierarchy_contract;
 
@@ -2428,12 +2430,14 @@ fn folding_and_selection_ranges_follow_syntax_and_preserve_utf16_positions() {
         diagnostics["diagnostics"].as_array().unwrap().is_empty(),
         "{diagnostics}"
     );
+    let folding_selection_requests =
+        syntax_v1_folding_selection_contract::request_data(FOLDING_SELECTION_SOURCE);
 
-    let folds = client.request(
+    let folds_response = client.request(
         "textDocument/foldingRange",
         json!({"textDocument":{"uri":uri}}),
     );
-    let folds = folds.as_array().unwrap();
+    let folds = folds_response.as_array().unwrap();
     assert!(!folds.is_empty(), "no folding ranges were returned");
     let mut previous = None;
     let mut unique = std::collections::BTreeSet::new();
@@ -2558,20 +2562,14 @@ fn folding_and_selection_ranges_follow_syntax_and_preserve_utf16_positions() {
         .unwrap();
     let marker_end = marker_start + "\"/* string content, never a comment */\"".len();
     let blank_line = FOLDING_SELECTION_SOURCE.find("\n\npub fn compass").unwrap() + 1;
-    let selections = client.request(
+    let selections_response = client.request(
         "textDocument/selectionRange",
         json!({
             "textDocument":{"uri":uri},
-            "positions":[
-                position_at(FOLDING_SELECTION_SOURCE, value_start + 2),
-                position_at(FOLDING_SELECTION_SOURCE, compass_end - 1),
-                position_of(FOLDING_SELECTION_SOURCE, "compass 🧭 remains", "compass ".len()),
-                position_of(FOLDING_SELECTION_SOURCE, "string content", "string ".len()),
-                position_at(FOLDING_SELECTION_SOURCE, blank_line),
-            ]
+            "positions":folding_selection_requests["selection_positions"].clone()
         }),
     );
-    let selections = selections.as_array().unwrap();
+    let selections = selections_response.as_array().unwrap();
     assert_eq!(selections.len(), 5, "{selections:?}");
     let value_chain = selection_chain(&selections[0]);
     assert_eq!(
@@ -2625,6 +2623,12 @@ fn folding_and_selection_ranges_follow_syntax_and_preserve_utf16_positions() {
     assert_eq!(
         blank_chain[1]["range"],
         range_at(FOLDING_SELECTION_SOURCE, 0, FOLDING_SELECTION_SOURCE.len())
+    );
+    syntax_v1_folding_selection_contract::assert_contract(
+        FOLDING_SELECTION_SOURCE,
+        &folds_response,
+        &selections_response,
+        "LSP protocol",
     );
     client.shutdown();
 }
