@@ -8,15 +8,13 @@
     "Vim syntax and filetype detection",
     "Emacs major mode",
     "Sublime syntax",
-    "Semantic-token legend",
-    "Monaco Monarch keyword inventory"
+    "Semantic-token legend"
   ],
   "generatedFiles": [
     "editors/textmate/orna.tmLanguage.json",
     "editors/vscode/syntaxes/orna.tmLanguage.json",
     "editors/semantic-token-legend.json",
     "editors/vscode/language-configuration.json",
-    "playground/web-ui/src/generated-keywords.ts",
     "editors/tree-sitter-orna/grammar.js",
     "editors/tree-sitter-orna/queries/highlights.scm",
     "editors/vim/syntax/orna.vim",
