@@ -3154,7 +3154,6 @@ dfbd0534b1fd606ee56c29b65e86a53290489579eca500658c6742d425f70281  crates/orna-ls
 1064c12be254992ed3d461b593b680f9a8e83fde3fb50af8db63c12b88b9b777  crates/orna-lsp/tests/fixtures/incremental-malformed-v1.orna
 1d6507c277771162faf5ab37dfe673dbbe59c3184ddf06274272d00a134470d9  crates/orna-lsp/tests/fixtures/ji3t0-invalid-v1.orna
 01e3906bf653fdb21af2004278ef449a14178756ebb34f4e0bd6cc49ee4d7e21  crates/orna-lsp/tests/fixtures/ji3t0-lsp-v1.orna
-5805f10334db383690c81c0fb836673c44c43779372a24665de13afe3d57bb90  crates/orna-lsp/tests/fixtures/ji3t0-pre-v1.orna
 3db450900296cabab55c405651bc2dc28ca73db8f2ae207768c3d2c21fa6c322  crates/orna-lsp/tests/fixtures/lexical-v1.orna
 a9a9eb8942f328826459766a2cd8c25b7269f139e831f4287f5ae0c8328482fd  crates/orna-lsp/tests/fixtures/local-scopes-v1.orna
 eb358502e3d0ac468625954ad7c30c16cd6968c5b25325c5ae489b44b0e6e100  crates/orna-lsp/tests/fixtures/lsp-e2e-001-module-valid-source.orna

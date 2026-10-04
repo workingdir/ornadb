@@ -46,6 +46,11 @@ jobs:
           cargo test --locked -p orna-syntax-v1 --lib
           parser::tests::classifies_complete_incomplete_and_malformed_repl_inputs
 
+      - name: Prove hash-pinned editor attachment fixture behavior
+        run: >-
+          cargo test --locked -p orna-lsp
+          --test ji3t0_conformance --test editor_attachment_completion
+
       - name: Audit editor source and generated artifacts
         run: cargo test --locked -p orna-syntax-v1 --test editor_artifacts
 
