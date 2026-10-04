@@ -107,10 +107,10 @@ pub(crate) fn document_links(
                 .join(".");
             let target = matching_open_module(document, path, open_documents)?;
             Some(DocumentLink {
-                range: mapper.range(&SourceSpan {
-                    start: first.span.start,
-                    end: last.span.end,
-                }),
+                range: lsp_types::Range::new(
+                    mapper.position(first.span.start),
+                    mapper.position(last.span.end),
+                ),
                 target: Some(target),
                 tooltip: Some(format!("Open module `{module}`")),
                 data: None,
