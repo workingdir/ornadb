@@ -1,0 +1,5 @@
+std.regex.utilities.capture_column(matches, 1) == [Some("r"), null, null]
+    && std.regex.utilities.capture_column(matches, 0) == [
+        Some("red"), Some("blue"), Some("green"),
+    ]
+    && std.regex.utilities.capture_column(matches, -1) == [null, null, null]
