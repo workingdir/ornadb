@@ -153,15 +153,16 @@ fn is_external_reference_path(value: &str) -> bool {
         return false;
     }
 
-    let Some(reference) = components.iter().position(|component| *component == "reference")
+    let Some(reference) = components
+        .iter()
+        .position(|component| *component == "reference")
     else {
         return false;
     };
-    let absolute = normalized.starts_with('/')
-        || normalized.as_bytes().get(1) == Some(&b':');
+    let absolute = normalized.starts_with('/') || normalized.as_bytes().get(1) == Some(&b':');
     let traverses_out = components[..reference].contains(&"..");
-    let repository_root_reference = reference == 0
-        && components.get(reference + 1) == Some(&"Orna-1.0.0");
+    let repository_root_reference =
+        reference == 0 && components.get(reference + 1) == Some(&"Orna-1.0.0");
 
     absolute || traverses_out || repository_root_reference
 }
@@ -200,7 +201,11 @@ fn include_argument_fragments(source: &RustSource, open_paren: usize) -> Vec<Str
     let mut nested_parens = 0usize;
 
     while cursor < code.len() {
-        if let Some(literal) = source.strings.iter().find(|literal| literal.start == cursor) {
+        if let Some(literal) = source
+            .strings
+            .iter()
+            .find(|literal| literal.start == cursor)
+        {
             fragments.push(literal.value.clone());
             cursor = literal.end;
             continue;
@@ -216,11 +221,7 @@ fn include_argument_fragments(source: &RustSource, open_paren: usize) -> Vec<Str
     fragments
 }
 
-fn assert_include_paths_stay_in_checkout(
-    source_path: &Path,
-    root: &Path,
-    source: &RustSource,
-) {
+fn assert_include_paths_stay_in_checkout(source_path: &Path, root: &Path, source: &RustSource) {
     let code = &source.code_without_comments;
     for macro_name in [b"include_str!".as_slice(), b"include_bytes!", b"include!"] {
         let mut search_from = 0;
@@ -305,9 +306,10 @@ fn split_compile_time_path_fragments_are_rejected() {
         b"Orna-1.0.0/source/01.md\"))",
     ]
     .concat();
-    let source = scan_rust_source(std::str::from_utf8(&source_text).expect("synthetic Rust source"));
+    let source =
+        scan_rust_source(std::str::from_utf8(&source_text).expect("synthetic Rust source"));
     let root = workspace_root();
-    let source_path = root.join("crates/orna-syntax/tests/synthetic.rs");
+    let source_path = root.join("crates/orna-syntax-v1/tests/synthetic.rs");
     assert_include_paths_stay_in_checkout(&source_path, &root, &source);
 }
 
