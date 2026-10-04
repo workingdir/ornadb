@@ -396,6 +396,12 @@ pub use branch_merge::{
     compress_paired_checkpoint_redo_sparse_chains_preserving_chain_and_log_segment_identity,
     compress_paired_checkpoint_redo_sparse_chains_preserving_compaction_identity,
     merge_three_way_snapshots,
+    BranchMergePairedCheckpointRedoUndoSegmentRotationNestedCompactionHandoffRunSnapshot,
+    BranchMergePairedCheckpointRedoUndoSegmentRotationNestedCompactionHandoffStreamSnapshot,
+    BranchMergePairedCheckpointRedoUndoSegmentRotationNestedCompactionHandoffRestorePinSlotSnapshot,
+    BranchMergePairedCheckpointRedoUndoSegmentRotationNestedCompactionHandoffRestorePinStreamSnapshot,
+    BranchMergePairedCheckpointRedoUndoSegmentRotationNestedCompactionHandoffRestoreError,
+    restore_paired_checkpoint_redo_sparse_nested_compaction_handoff_chains_preserving_undo_and_segment_rotation_identity,
 };
 
 pub use compact::{
