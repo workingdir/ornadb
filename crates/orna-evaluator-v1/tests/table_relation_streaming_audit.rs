@@ -7,11 +7,11 @@
 use std::collections::{BTreeMap, VecDeque};
 
 use orna_evaluator_v1::{
-    invoke_named_with_effects, EffectHandler, Environment, EvaluationError, Functions, Limits,
-    PureFunction, RelationPage, RelationReadScope, StepBudget,
+    EffectHandler, Environment, EvaluationError, Functions, Limits, PureFunction, RelationPage,
+    RelationReadScope, StepBudget, invoke_named_with_effects,
 };
 use orna_foundation_v1::CanonicalValue;
-use orna_syntax_v1::{parse_module, Argument, Expr, LiteralKind, SyntaxSpan};
+use orna_syntax_v1::{Argument, Expr, LiteralKind, SyntaxSpan, parse_module};
 use orna_value_v1::Raw;
 
 fn fixture_functions() -> Functions {
@@ -38,7 +38,9 @@ fn fixture_functions() -> Functions {
 }
 
 fn nested_window_aggregate_functions() -> Functions {
-    let parsed = parse_module(include_str!("fixtures/table_relation_nested_window_aggregate_bg57u.orna"));
+    let parsed = parse_module(include_str!(
+        "fixtures/table_relation_nested_window_aggregate_bg57u.orna"
+    ));
     assert!(parsed.is_ok(), "{:?}", parsed.diagnostics);
     parsed
         .value
@@ -235,8 +237,35 @@ fn paired_pagination_nested_spill_functions() -> Functions {
         .collect()
 }
 
+fn paired_shared_cursor_nested_spill_functions() -> Functions {
+    let parsed = parse_module(include_str!(
+        "fixtures/table_relation_paired_shared_cursor_nested_spill_zf4n4.orna"
+    ));
+    assert!(parsed.is_ok(), "{:?}", parsed.diagnostics);
+    parsed
+        .value
+        .items
+        .into_iter()
+        .map(|item| {
+            let orna_syntax_v1::Declaration::Function { signature, body } = item.declaration else {
+                panic!("fixture function expected")
+            };
+            (
+                signature.name,
+                PureFunction {
+                    parameters: signature.parameters,
+                    body,
+                    environment: Environment::new(),
+                },
+            )
+        })
+        .collect()
+}
+
 fn sparse_window_fold_functions() -> Functions {
-    let parsed = parse_module(include_str!("fixtures/table_relation_sparse_window_fold_d4441.orna"));
+    let parsed = parse_module(include_str!(
+        "fixtures/table_relation_sparse_window_fold_d4441.orna"
+    ));
     assert!(parsed.is_ok(), "{:?}", parsed.diagnostics);
     parsed
         .value
@@ -490,7 +519,10 @@ fn integer(value: i64) -> CanonicalValue {
 fn integer_pair(left: i64, right: i64) -> CanonicalValue {
     CanonicalValue::new(Raw::Tag(
         60015,
-        Box::new(Raw::Array(vec![Raw::Int(left.into()), Raw::Int(right.into())])),
+        Box::new(Raw::Array(vec![
+            Raw::Int(left.into()),
+            Raw::Int(right.into()),
+        ])),
     ))
     .unwrap()
 }
@@ -503,7 +535,11 @@ fn optional(value: CanonicalValue) -> CanonicalValue {
 
 fn integer_list(values: &[i64]) -> CanonicalValue {
     CanonicalValue::new(Raw::Array(
-        values.iter().copied().map(|value| Raw::Int(value.into())).collect(),
+        values
+            .iter()
+            .copied()
+            .map(|value| Raw::Int(value.into()))
+            .collect(),
     ))
     .unwrap()
 }
@@ -513,19 +549,30 @@ fn span() -> SyntaxSpan {
 }
 
 fn argument(value: Expr, span: &SyntaxSpan) -> Argument {
-    Argument { name: None, value, span: span.clone() }
+    Argument {
+        name: None,
+        value,
+        span: span.clone(),
+    }
 }
 
 fn relation_source(name: &str) -> Expr {
     let span = span();
     Expr::Call {
         callee: Box::new(Expr::Field {
-            base: Box::new(Expr::ReplBinding { text: "$__orna_relation".into(), span: span.clone() }),
+            base: Box::new(Expr::ReplBinding {
+                text: "$__orna_relation".into(),
+                span: span.clone(),
+            }),
             name: "source".into(),
             span: span.clone(),
         }),
         arguments: vec![argument(
-            Expr::Literal { text: format!("{name:?}"), kind: LiteralKind::String, span: span.clone() },
+            Expr::Literal {
+                text: format!("{name:?}"),
+                kind: LiteralKind::String,
+                span: span.clone(),
+            },
             &span,
         )],
         span,
@@ -538,8 +585,14 @@ fn relation_stage(input: Expr, operation: &str, parameters: Vec<Expr>) -> Expr {
         lhs: Box::new(input),
         op: "|".into(),
         rhs: Box::new(Expr::Call {
-            callee: Box::new(Expr::Name { text: operation.into(), span: span.clone() }),
-            arguments: parameters.into_iter().map(|value| argument(value, &span)).collect(),
+            callee: Box::new(Expr::Name {
+                text: operation.into(),
+                span: span.clone(),
+            }),
+            arguments: parameters
+                .into_iter()
+                .map(|value| argument(value, &span))
+                .collect(),
             span: span.clone(),
         }),
         span,
@@ -548,12 +601,19 @@ fn relation_stage(input: Expr, operation: &str, parameters: Vec<Expr>) -> Expr {
 
 fn named_function(name: &str) -> Expr {
     let span = span();
-    Expr::Name { text: name.into(), span }
+    Expr::Name {
+        text: name.into(),
+        span,
+    }
 }
 
 fn integer_literal(value: i64) -> Expr {
     let span = span();
-    Expr::Literal { text: value.to_string(), kind: LiteralKind::Integer, span }
+    Expr::Literal {
+        text: value.to_string(),
+        kind: LiteralKind::Integer,
+        span,
+    }
 }
 
 fn terminal(input: Expr, name: &str) -> Expr {
@@ -568,12 +628,20 @@ struct PagedSource {
 
 impl PagedSource {
     fn new(pages: Vec<RelationPage>) -> Self {
-        Self { pages: pages.into(), cursors: Vec::new(), requested_limits: Vec::new() }
+        Self {
+            pages: pages.into(),
+            cursors: Vec::new(),
+            requested_limits: Vec::new(),
+        }
     }
 }
 
 impl EffectHandler for PagedSource {
-    fn handle(&mut self, _: &Expr, _: &[orna_value_v1::Value]) -> Result<Option<orna_value_v1::Value>, EvaluationError> {
+    fn handle(
+        &mut self,
+        _: &Expr,
+        _: &[orna_value_v1::Value],
+    ) -> Result<Option<orna_value_v1::Value>, EvaluationError> {
         Ok(None)
     }
 
@@ -587,7 +655,10 @@ impl EffectHandler for PagedSource {
         budget.debit(1)?;
         self.cursors.push(after.map(ToOwned::to_owned));
         self.requested_limits.push(limit);
-        Ok(Some(self.pages.pop_front().unwrap_or(RelationPage { rows: Vec::new(), next: None })))
+        Ok(Some(self.pages.pop_front().unwrap_or(RelationPage {
+            rows: Vec::new(),
+            next: None,
+        })))
     }
 }
 
@@ -615,7 +686,10 @@ impl PairedCursorRestoreSource {
     fn new(restores: impl IntoIterator<Item = (&'static str, CursorRestore)>) -> Self {
         let mut pending = BTreeMap::<String, VecDeque<CursorRestore>>::new();
         for (source, restore) in restores {
-            pending.entry(source.to_owned()).or_default().push_back(restore);
+            pending
+                .entry(source.to_owned())
+                .or_default()
+                .push_back(restore);
         }
         Self {
             pending,
@@ -626,9 +700,7 @@ impl PairedCursorRestoreSource {
 }
 
 impl PairedViewRefreshSource {
-    fn new(
-        subscriptions: impl IntoIterator<Item = (&'static str, Vec<RelationPage>)>,
-    ) -> Self {
+    fn new(subscriptions: impl IntoIterator<Item = (&'static str, Vec<RelationPage>)>) -> Self {
         let mut pending = BTreeMap::<String, VecDeque<VecDeque<RelationPage>>>::new();
         for (source, pages) in subscriptions {
             pending
@@ -676,7 +748,11 @@ impl PairedSubscriptionSource {
 }
 
 impl EffectHandler for PairedSubscriptionSource {
-    fn handle(&mut self, _: &Expr, _: &[orna_value_v1::Value]) -> Result<Option<orna_value_v1::Value>, EvaluationError> {
+    fn handle(
+        &mut self,
+        _: &Expr,
+        _: &[orna_value_v1::Value],
+    ) -> Result<Option<orna_value_v1::Value>, EvaluationError> {
         Ok(None)
     }
 
@@ -698,7 +774,11 @@ impl EffectHandler for PairedSubscriptionSource {
             }));
         }
         budget.debit(1)?;
-        let lane = match self.lanes.iter().position(|(existing, _)| *existing == scope) {
+        let lane = match self
+            .lanes
+            .iter()
+            .position(|(existing, _)| *existing == scope)
+        {
             Some(lane) => lane,
             None => {
                 let pages = self
@@ -710,10 +790,12 @@ impl EffectHandler for PairedSubscriptionSource {
             }
         };
         self.cursors.push((scope, after.map(ToOwned::to_owned)));
-        Ok(Some(self.lanes[lane].1.pop_front().unwrap_or(RelationPage {
-            rows: Vec::new(),
-            next: None,
-        })))
+        Ok(Some(self.lanes[lane].1.pop_front().unwrap_or(
+            RelationPage {
+                rows: Vec::new(),
+                next: None,
+            },
+        )))
     }
 }
 
@@ -761,10 +843,12 @@ impl EffectHandler for PairedViewRefreshSource {
         };
         self.cursors
             .push((source.to_owned(), scope, after.map(ToOwned::to_owned)));
-        Ok(Some(self.lanes[lane].2.pop_front().unwrap_or(RelationPage {
-            rows: Vec::new(),
-            next: None,
-        })))
+        Ok(Some(self.lanes[lane].2.pop_front().unwrap_or(
+            RelationPage {
+                rows: Vec::new(),
+                next: None,
+            },
+        )))
     }
 }
 
@@ -811,13 +895,18 @@ impl EffectHandler for PairedCursorRestoreSource {
             }
         };
         let cursor = after.map(ToOwned::to_owned);
-        self.cursors.push((source.to_owned(), scope, cursor.clone()));
+        self.cursors
+            .push((source.to_owned(), scope, cursor.clone()));
         Ok(self.lanes[lane].2.get(&cursor).cloned())
     }
 }
 
 impl EffectHandler for ScopedPagedSource {
-    fn handle(&mut self, _: &Expr, _: &[orna_value_v1::Value]) -> Result<Option<orna_value_v1::Value>, EvaluationError> {
+    fn handle(
+        &mut self,
+        _: &Expr,
+        _: &[orna_value_v1::Value],
+    ) -> Result<Option<orna_value_v1::Value>, EvaluationError> {
         Ok(None)
     }
 
@@ -837,9 +926,13 @@ impl EffectHandler for ScopedPagedSource {
         }
         budget.debit(1)?;
         if let Some(previous) = self.scopes.insert(source.to_owned(), scope) {
-            assert_eq!(previous, scope, "each page keeps its relation source identity");
+            assert_eq!(
+                previous, scope,
+                "each page keeps its relation source identity"
+            );
         }
-        self.cursors.push((source.to_owned(), scope, after.map(ToOwned::to_owned)));
+        self.cursors
+            .push((source.to_owned(), scope, after.map(ToOwned::to_owned)));
         let Some(pages) = self.pages.get_mut(source) else {
             return Ok(None);
         };
@@ -851,24 +944,49 @@ impl EffectHandler for ScopedPagedSource {
 }
 
 fn page(values: &[i64], next: Option<Vec<u8>>) -> RelationPage {
-    RelationPage { rows: values.iter().copied().map(integer).collect(), next }
+    RelationPage {
+        rows: values.iter().copied().map(integer).collect(),
+        next,
+    }
 }
 
 fn run(body: Expr, effects: &mut PagedSource) -> Result<CanonicalValue, EvaluationError> {
-    invoke_named_with_effects("run", &Functions::from([(
-        "run".into(),
-        PureFunction { parameters: Vec::new(), body, environment: Environment::new() },
-    )]), &Environment::new(), Limits::default(), effects)
+    invoke_named_with_effects(
+        "run",
+        &Functions::from([(
+            "run".into(),
+            PureFunction {
+                parameters: Vec::new(),
+                body,
+                environment: Environment::new(),
+            },
+        )]),
+        &Environment::new(),
+        Limits::default(),
+        effects,
+    )
 }
 
-fn run_with_fixture_functions(body: Expr, effects: &mut dyn EffectHandler) -> Result<CanonicalValue, EvaluationError> {
+fn run_with_fixture_functions(
+    body: Expr,
+    effects: &mut dyn EffectHandler,
+) -> Result<CanonicalValue, EvaluationError> {
     let mut functions = fixture_functions();
-    functions.insert("run".into(), PureFunction {
-        parameters: Vec::new(),
-        body,
-        environment: Environment::new(),
-    });
-    invoke_named_with_effects("run", &functions, &Environment::new(), Limits::default(), effects)
+    functions.insert(
+        "run".into(),
+        PureFunction {
+            parameters: Vec::new(),
+            body,
+            environment: Environment::new(),
+        },
+    );
+    invoke_named_with_effects(
+        "run",
+        &functions,
+        &Environment::new(),
+        Limits::default(),
+        effects,
+    )
 }
 
 #[test]
@@ -897,7 +1015,11 @@ fn relation_page_rejects_empty_nonterminal_pages() {
 #[test]
 fn flat_map_preserves_page_then_inner_order_from_fixture_functions() {
     // ORNA-ORDER-002: input page order precedes each callback's emitted order.
-    let flattened = relation_stage(relation_source("Rows"), "flat_map", vec![named_function("expand")]);
+    let flattened = relation_stage(
+        relation_source("Rows"),
+        "flat_map",
+        vec![named_function("expand")],
+    );
     let window = relation_stage(flattened, "window", vec![integer_literal(4)]);
     let first = terminal(window, "first");
     let mut effects = PagedSource::new(vec![
@@ -916,7 +1038,11 @@ fn flat_map_preserves_page_then_inner_order_from_fixture_functions() {
 #[test]
 fn stable_sort_keeps_equal_keys_in_source_order_across_pages() {
     // ORNA-ORDER-003: sort_by is stable even when equal keys cross a page edge.
-    let sorted = relation_stage(relation_source("Rows"), "sort_by", vec![named_function("parity")]);
+    let sorted = relation_stage(
+        relation_source("Rows"),
+        "sort_by",
+        vec![named_function("parity")],
+    );
     let first_two = relation_stage(sorted, "take", vec![integer_literal(2)]);
     let last = terminal(first_two, "last");
     let mut effects = PagedSource::new(vec![page(&[3, 1], Some(vec![1])), page(&[2, 4], None)]);
@@ -932,11 +1058,19 @@ fn stable_sort_keeps_equal_keys_in_source_order_across_pages() {
 fn filtered_mapped_take_stops_after_the_requested_prefix() {
     // ORNA-REL-001/002 and ORNA-ORDER-002: compose stages lazily and do not
     // request an additional source page after the bounded prefix is satisfied.
-    let filtered = relation_stage(relation_source("Rows"), "filter", vec![named_function("is_positive")]);
+    let filtered = relation_stage(
+        relation_source("Rows"),
+        "filter",
+        vec![named_function("is_positive")],
+    );
     let mapped = relation_stage(filtered, "map", vec![named_function("add_one")]);
     let taken = relation_stage(mapped, "take", vec![integer_literal(2)]);
     let last = terminal(taken, "last");
-    let mut effects = PagedSource::new(vec![page(&[1, -1], Some(vec![1])), page(&[2, 3], Some(vec![2])), page(&[4], None)]);
+    let mut effects = PagedSource::new(vec![
+        page(&[1, -1], Some(vec![1])),
+        page(&[2, 3], Some(vec![2])),
+        page(&[4], None),
+    ]);
 
     assert_eq!(
         run_with_fixture_functions(last, &mut effects).unwrap(),
@@ -966,11 +1100,7 @@ fn incremental_scoped_view_body() -> Expr {
         vec![named_function("below_eight")],
     );
     let combined = relation_stage(left, "union", vec![right]);
-    let refreshed = relation_stage(
-        combined,
-        "filter",
-        vec![named_function("is_positive")],
-    );
+    let refreshed = relation_stage(combined, "filter", vec![named_function("is_positive")]);
     let mapped = relation_stage(refreshed, "map", vec![named_function("add_one")]);
     terminal(mapped, "sum")
 }
@@ -998,11 +1128,7 @@ fn paired_scoped_view_refresh_body() -> Expr {
         vec![subscription("View.Right", "is_even", "below_eight")],
     );
     let paired = relation_stage(left, "union", vec![right]);
-    let positive = relation_stage(
-        paired,
-        "filter",
-        vec![named_function("is_positive")],
-    );
+    let positive = relation_stage(paired, "filter", vec![named_function("is_positive")]);
     let mapped = relation_stage(positive, "map", vec![named_function("add_one")]);
     terminal(mapped, "sum")
 }
@@ -1028,15 +1154,26 @@ fn incremental_view_refresh_keeps_values_scoped_across_read_batches() {
         first_refresh.cursors,
         vec![
             ("View.Left".into(), first_refresh.scopes["View.Left"], None),
-            ("View.Left".into(), first_refresh.scopes["View.Left"], Some(vec![1])),
-            ("View.Right".into(), first_refresh.scopes["View.Right"], None),
-            ("View.Right".into(), first_refresh.scopes["View.Right"], Some(vec![1])),
+            (
+                "View.Left".into(),
+                first_refresh.scopes["View.Left"],
+                Some(vec![1])
+            ),
+            (
+                "View.Right".into(),
+                first_refresh.scopes["View.Right"],
+                None
+            ),
+            (
+                "View.Right".into(),
+                first_refresh.scopes["View.Right"],
+                Some(vec![1])
+            ),
         ],
         "each scoped source resumes with its own cursor and then advances independently"
     );
     assert_ne!(
-        first_refresh.scopes["View.Left"],
-        first_refresh.scopes["View.Right"],
+        first_refresh.scopes["View.Left"], first_refresh.scopes["View.Right"],
         "sibling view sources have independent identities"
     );
 
@@ -1059,14 +1196,25 @@ fn incremental_view_refresh_keeps_values_scoped_across_read_batches() {
         second_refresh.cursors,
         vec![
             ("View.Left".into(), second_refresh.scopes["View.Left"], None),
-            ("View.Left".into(), second_refresh.scopes["View.Left"], Some(vec![2])),
-            ("View.Right".into(), second_refresh.scopes["View.Right"], None),
-            ("View.Right".into(), second_refresh.scopes["View.Right"], Some(vec![2])),
+            (
+                "View.Left".into(),
+                second_refresh.scopes["View.Left"],
+                Some(vec![2])
+            ),
+            (
+                "View.Right".into(),
+                second_refresh.scopes["View.Right"],
+                None
+            ),
+            (
+                "View.Right".into(),
+                second_refresh.scopes["View.Right"],
+                Some(vec![2])
+            ),
         ]
     );
     assert_ne!(
-        first_refresh.scopes["View.Left"],
-        second_refresh.scopes["View.Left"],
+        first_refresh.scopes["View.Left"], second_refresh.scopes["View.Left"],
         "a later refresh receives a fresh scope for newly computed batches"
     );
 }
@@ -1292,9 +1440,16 @@ fn paired_view_handoffs_rebind_old_cursor_tokens_to_fresh_scopes() {
         let right = &source.lanes[generation * 2 + 1];
         assert_eq!(left.0, "View.Left");
         assert_eq!(right.0, "View.Right");
-        assert_ne!(left.1, right.1, "generation {generation} keeps sibling view scopes distinct");
+        assert_ne!(
+            left.1, right.1,
+            "generation {generation} keeps sibling view scopes distinct"
+        );
     }
-    let scopes = source.lanes.iter().map(|(_, scope, _)| *scope).collect::<Vec<_>>();
+    let scopes = source
+        .lanes
+        .iter()
+        .map(|(_, scope, _)| *scope)
+        .collect::<Vec<_>>();
     for (index, scope) in scopes.iter().enumerate() {
         assert!(
             !scopes[..index].contains(scope),
@@ -1332,28 +1487,73 @@ fn paired_view_subscriptions_keep_cursor_identity_across_refresh_handoffs() {
     // Each scoped view has two sibling subscriptions. Reusing the same opaque
     // cursor after refresh must bind every subscription to its new page stream.
     let mut source = PairedViewRefreshSource::new([
-        ("View.Left", vec![page(&[1], Some(vec![11])), page(&[3], None)]),
-        ("View.Left", vec![page(&[2], Some(vec![11])), page(&[4], None)]),
-        ("View.Right", vec![page(&[-1], Some(vec![11])), page(&[5], None)]),
-        ("View.Right", vec![page(&[6], Some(vec![11])), page(&[8], None)]),
-        ("View.Left", vec![page(&[7], Some(vec![11])), page(&[9], None)]),
-        ("View.Left", vec![page(&[8], Some(vec![11])), page(&[10], None)]),
-        ("View.Right", vec![page(&[5], Some(vec![11])), page(&[7], None)]),
-        ("View.Right", vec![page(&[2], Some(vec![11])), page(&[8], None)]),
-        ("View.Left", vec![page(&[-1], Some(vec![11])), page(&[3], None)]),
-        ("View.Left", vec![page(&[2], Some(vec![11])), page(&[4], None)]),
-        ("View.Right", vec![page(&[1], Some(vec![11])), page(&[5], None)]),
-        ("View.Right", vec![page(&[2], Some(vec![11])), page(&[4], None)]),
+        (
+            "View.Left",
+            vec![page(&[1], Some(vec![11])), page(&[3], None)],
+        ),
+        (
+            "View.Left",
+            vec![page(&[2], Some(vec![11])), page(&[4], None)],
+        ),
+        (
+            "View.Right",
+            vec![page(&[-1], Some(vec![11])), page(&[5], None)],
+        ),
+        (
+            "View.Right",
+            vec![page(&[6], Some(vec![11])), page(&[8], None)],
+        ),
+        (
+            "View.Left",
+            vec![page(&[7], Some(vec![11])), page(&[9], None)],
+        ),
+        (
+            "View.Left",
+            vec![page(&[8], Some(vec![11])), page(&[10], None)],
+        ),
+        (
+            "View.Right",
+            vec![page(&[5], Some(vec![11])), page(&[7], None)],
+        ),
+        (
+            "View.Right",
+            vec![page(&[2], Some(vec![11])), page(&[8], None)],
+        ),
+        (
+            "View.Left",
+            vec![page(&[-1], Some(vec![11])), page(&[3], None)],
+        ),
+        (
+            "View.Left",
+            vec![page(&[2], Some(vec![11])), page(&[4], None)],
+        ),
+        (
+            "View.Right",
+            vec![page(&[1], Some(vec![11])), page(&[5], None)],
+        ),
+        (
+            "View.Right",
+            vec![page(&[2], Some(vec![11])), page(&[4], None)],
+        ),
     ]);
 
     let first = run_with_fixture_functions(paired_scoped_view_refresh_body(), &mut source).unwrap();
     assert_eq!(first, integer(21));
-    let second = run_with_fixture_functions(paired_scoped_view_refresh_body(), &mut source).unwrap();
+    let second =
+        run_with_fixture_functions(paired_scoped_view_refresh_body(), &mut source).unwrap();
     assert_eq!(second, integer(3));
     let third = run_with_fixture_functions(paired_scoped_view_refresh_body(), &mut source).unwrap();
     assert_eq!(third, integer(22));
-    assert_eq!(first, integer(21), "the initial paired-view fold remains captured across refreshes");
-    assert_eq!(second, integer(3), "the second paired-view fold remains captured after the third");
+    assert_eq!(
+        first,
+        integer(21),
+        "the initial paired-view fold remains captured across refreshes"
+    );
+    assert_eq!(
+        second,
+        integer(3),
+        "the second paired-view fold remains captured after the third"
+    );
 
     assert_eq!(source.lanes.len(), 12);
     for generation in 0..3 {
@@ -1372,31 +1572,128 @@ fn paired_view_refresh_cursor_chains_keep_identity_across_handoffs() {
     // Each refresh folds two paired views through three-page cursor chains.
     // The first and last refresh deliberately reuse cursor bytes.
     let subscriptions = [
-        ("View.Left", vec![page(&[1], Some(vec![11])), page(&[3], Some(vec![33])), page(&[5], None)]),
-        ("View.Left", vec![page(&[2], Some(vec![11])), page(&[4], Some(vec![44])), page(&[6], None)]),
-        ("View.Right", vec![page(&[-1], Some(vec![11])), page(&[1], Some(vec![55])), page(&[5], None)]),
-        ("View.Right", vec![page(&[2], Some(vec![11])), page(&[4], Some(vec![66])), page(&[8], None)]),
-        ("View.Left", vec![page(&[7], Some(vec![71])), page(&[9], Some(vec![73])), page(&[11], None)]),
-        ("View.Left", vec![page(&[8], Some(vec![81])), page(&[10], Some(vec![83])), page(&[12], None)]),
-        ("View.Right", vec![page(&[-3], Some(vec![91])), page(&[3], Some(vec![93])), page(&[7], None)]),
-        ("View.Right", vec![page(&[6], Some(vec![101])), page(&[8], Some(vec![103])), page(&[10], None)]),
-        ("View.Left", vec![page(&[-1], Some(vec![11])), page(&[3], Some(vec![33])), page(&[5], None)]),
-        ("View.Left", vec![page(&[2], Some(vec![11])), page(&[4], Some(vec![44])), page(&[8], None)]),
-        ("View.Right", vec![page(&[1], Some(vec![11])), page(&[3], Some(vec![55])), page(&[5], None)]),
-        ("View.Right", vec![page(&[2], Some(vec![11])), page(&[4], Some(vec![66])), page(&[8], None)]),
+        (
+            "View.Left",
+            vec![
+                page(&[1], Some(vec![11])),
+                page(&[3], Some(vec![33])),
+                page(&[5], None),
+            ],
+        ),
+        (
+            "View.Left",
+            vec![
+                page(&[2], Some(vec![11])),
+                page(&[4], Some(vec![44])),
+                page(&[6], None),
+            ],
+        ),
+        (
+            "View.Right",
+            vec![
+                page(&[-1], Some(vec![11])),
+                page(&[1], Some(vec![55])),
+                page(&[5], None),
+            ],
+        ),
+        (
+            "View.Right",
+            vec![
+                page(&[2], Some(vec![11])),
+                page(&[4], Some(vec![66])),
+                page(&[8], None),
+            ],
+        ),
+        (
+            "View.Left",
+            vec![
+                page(&[7], Some(vec![71])),
+                page(&[9], Some(vec![73])),
+                page(&[11], None),
+            ],
+        ),
+        (
+            "View.Left",
+            vec![
+                page(&[8], Some(vec![81])),
+                page(&[10], Some(vec![83])),
+                page(&[12], None),
+            ],
+        ),
+        (
+            "View.Right",
+            vec![
+                page(&[-3], Some(vec![91])),
+                page(&[3], Some(vec![93])),
+                page(&[7], None),
+            ],
+        ),
+        (
+            "View.Right",
+            vec![
+                page(&[6], Some(vec![101])),
+                page(&[8], Some(vec![103])),
+                page(&[10], None),
+            ],
+        ),
+        (
+            "View.Left",
+            vec![
+                page(&[-1], Some(vec![11])),
+                page(&[3], Some(vec![33])),
+                page(&[5], None),
+            ],
+        ),
+        (
+            "View.Left",
+            vec![
+                page(&[2], Some(vec![11])),
+                page(&[4], Some(vec![44])),
+                page(&[8], None),
+            ],
+        ),
+        (
+            "View.Right",
+            vec![
+                page(&[1], Some(vec![11])),
+                page(&[3], Some(vec![55])),
+                page(&[5], None),
+            ],
+        ),
+        (
+            "View.Right",
+            vec![
+                page(&[2], Some(vec![11])),
+                page(&[4], Some(vec![66])),
+                page(&[8], None),
+            ],
+        ),
     ];
     let mut source = PairedViewRefreshSource::new(subscriptions);
 
     let first = run_with_fixture_functions(paired_scoped_view_refresh_body(), &mut source).unwrap();
     assert_eq!(first, integer(31));
-    let second = run_with_fixture_functions(paired_scoped_view_refresh_body(), &mut source).unwrap();
+    let second =
+        run_with_fixture_functions(paired_scoped_view_refresh_body(), &mut source).unwrap();
     assert_eq!(second, integer(11));
     let third = run_with_fixture_functions(paired_scoped_view_refresh_body(), &mut source).unwrap();
     assert_eq!(third, integer(26));
-    assert_eq!(first, integer(31), "the first refresh result remains captured");
-    assert_eq!(second, integer(11), "the intermediate refresh result remains captured");
+    assert_eq!(
+        first,
+        integer(31),
+        "the first refresh result remains captured"
+    );
+    assert_eq!(
+        second,
+        integer(11),
+        "the intermediate refresh result remains captured"
+    );
 
-    assert_eq!(source.lanes.len(), 12, "four scoped subscriptions bind on each refresh");
+    assert_eq!(
+        source.lanes.len(),
+        12,
+        "four scoped subscriptions bind on each refresh"
+    );
     for generation in 0..3 {
         let start = generation * 4;
         assert_eq!(source.lanes[start].0, "View.Left");
@@ -1404,7 +1701,11 @@ fn paired_view_refresh_cursor_chains_keep_identity_across_handoffs() {
         assert_eq!(source.lanes[start + 2].0, "View.Right");
         assert_eq!(source.lanes[start + 3].0, "View.Right");
     }
-    let scopes = source.lanes.iter().map(|(_, scope, _)| *scope).collect::<Vec<_>>();
+    let scopes = source
+        .lanes
+        .iter()
+        .map(|(_, scope, _)| *scope)
+        .collect::<Vec<_>>();
     for (index, scope) in scopes.iter().enumerate() {
         assert!(
             !scopes[..index].contains(scope),
@@ -1412,7 +1713,11 @@ fn paired_view_refresh_cursor_chains_keep_identity_across_handoffs() {
         );
     }
 
-    assert_eq!(source.cursors.len(), 36, "each subscription consumes its three-page chain");
+    assert_eq!(
+        source.cursors.len(),
+        36,
+        "each subscription consumes its three-page chain"
+    );
     let chains: [(&str, &[u8], &[u8]); 12] = [
         ("View.Left", &[11], &[33]),
         ("View.Left", &[11], &[44]),
@@ -1437,8 +1742,7 @@ fn paired_view_refresh_cursor_chains_keep_identity_across_handoffs() {
         ]);
     }
     assert_eq!(
-        source.cursors,
-        expected_cursors,
+        source.cursors, expected_cursors,
         "replayed cursor bytes advance only their own subscription scope across refresh chains"
     );
 }
@@ -1483,14 +1787,27 @@ fn paired_view_refresh_cursor_omissions_keep_handoff_identity() {
 
     let first = run_with_fixture_functions(paired_scoped_view_refresh_body(), &mut source).unwrap();
     assert_eq!(first, integer(21));
-    let second = run_with_fixture_functions(paired_scoped_view_refresh_body(), &mut source).unwrap();
+    let second =
+        run_with_fixture_functions(paired_scoped_view_refresh_body(), &mut source).unwrap();
     assert_eq!(second, integer(17));
     let third = run_with_fixture_functions(paired_scoped_view_refresh_body(), &mut source).unwrap();
     assert_eq!(third, integer(14));
-    assert_eq!(first, integer(21), "the first omission pattern remains captured");
-    assert_eq!(second, integer(17), "the intermediate omission pattern remains captured");
+    assert_eq!(
+        first,
+        integer(21),
+        "the first omission pattern remains captured"
+    );
+    assert_eq!(
+        second,
+        integer(17),
+        "the intermediate omission pattern remains captured"
+    );
 
-    assert_eq!(source.lanes.len(), 12, "four subscriptions receive fresh scopes per refresh");
+    assert_eq!(
+        source.lanes.len(),
+        12,
+        "four subscriptions receive fresh scopes per refresh"
+    );
     for generation in 0..3 {
         let start = generation * 4;
         assert_eq!(source.lanes[start].0, "View.Left");
@@ -1498,14 +1815,22 @@ fn paired_view_refresh_cursor_omissions_keep_handoff_identity() {
         assert_eq!(source.lanes[start + 2].0, "View.Right");
         assert_eq!(source.lanes[start + 3].0, "View.Right");
     }
-    let scopes = source.lanes.iter().map(|(_, scope, _)| *scope).collect::<Vec<_>>();
+    let scopes = source
+        .lanes
+        .iter()
+        .map(|(_, scope, _)| *scope)
+        .collect::<Vec<_>>();
     for (index, scope) in scopes.iter().enumerate() {
         assert!(
             !scopes[..index].contains(scope),
             "omitted continuations and cursor reuse do not merge handoff scopes: {scope:?}"
         );
     }
-    assert_eq!(source.cursors.len(), 18, "omitted continuations do not issue another page read");
+    assert_eq!(
+        source.cursors.len(),
+        18,
+        "omitted continuations do not issue another page read"
+    );
     assert_eq!(
         source.cursors,
         vec![
@@ -1584,14 +1909,27 @@ fn paired_view_refresh_filtered_page_omissions_keep_scoped_pagination() {
 
     let first = run_with_fixture_functions(paired_scoped_view_refresh_body(), &mut source).unwrap();
     assert_eq!(first, integer(21));
-    let second = run_with_fixture_functions(paired_scoped_view_refresh_body(), &mut source).unwrap();
+    let second =
+        run_with_fixture_functions(paired_scoped_view_refresh_body(), &mut source).unwrap();
     assert_eq!(second, integer(9));
     let third = run_with_fixture_functions(paired_scoped_view_refresh_body(), &mut source).unwrap();
     assert_eq!(third, integer(21));
-    assert_eq!(first, integer(21), "the first refresh retains rows after filtered pages");
-    assert_eq!(second, integer(9), "the middle refresh keeps its own omission result");
+    assert_eq!(
+        first,
+        integer(21),
+        "the first refresh retains rows after filtered pages"
+    );
+    assert_eq!(
+        second,
+        integer(9),
+        "the middle refresh keeps its own omission result"
+    );
 
-    assert_eq!(source.lanes.len(), 12, "each paired refresh binds four scoped reads");
+    assert_eq!(
+        source.lanes.len(),
+        12,
+        "each paired refresh binds four scoped reads"
+    );
     for generation in 0..3 {
         let start = generation * 4;
         assert_eq!(source.lanes[start].0, "View.Left");
@@ -1599,14 +1937,22 @@ fn paired_view_refresh_filtered_page_omissions_keep_scoped_pagination() {
         assert_eq!(source.lanes[start + 2].0, "View.Right");
         assert_eq!(source.lanes[start + 3].0, "View.Right");
     }
-    let scopes = source.lanes.iter().map(|(_, scope, _)| *scope).collect::<Vec<_>>();
+    let scopes = source
+        .lanes
+        .iter()
+        .map(|(_, scope, _)| *scope)
+        .collect::<Vec<_>>();
     for (index, scope) in scopes.iter().enumerate() {
         assert!(
             !scopes[..index].contains(scope),
             "filtered page continuations remain isolated by handoff scope: {scope:?}"
         );
     }
-    assert_eq!(source.cursors.len(), 22, "each nonterminal page follows its own continuation");
+    assert_eq!(
+        source.cursors.len(),
+        22,
+        "each nonterminal page follows its own continuation"
+    );
     assert_eq!(
         source.cursors,
         vec![
@@ -1703,14 +2049,27 @@ fn paired_view_variable_depth_pagination_keeps_scope_through_refresh_folds() {
 
     let first = run_with_fixture_functions(paired_scoped_view_refresh_body(), &mut source).unwrap();
     assert_eq!(first, integer(21));
-    let second = run_with_fixture_functions(paired_scoped_view_refresh_body(), &mut source).unwrap();
+    let second =
+        run_with_fixture_functions(paired_scoped_view_refresh_body(), &mut source).unwrap();
     assert_eq!(second, integer(37));
     let third = run_with_fixture_functions(paired_scoped_view_refresh_body(), &mut source).unwrap();
     assert_eq!(third, integer(21));
-    assert_eq!(first, integer(21), "the shallow first refresh result remains captured");
-    assert_eq!(second, integer(37), "the deeper middle refresh result remains captured");
+    assert_eq!(
+        first,
+        integer(21),
+        "the shallow first refresh result remains captured"
+    );
+    assert_eq!(
+        second,
+        integer(37),
+        "the deeper middle refresh result remains captured"
+    );
 
-    assert_eq!(source.lanes.len(), 12, "four scoped subscriptions bind per refresh");
+    assert_eq!(
+        source.lanes.len(),
+        12,
+        "four scoped subscriptions bind per refresh"
+    );
     for generation in 0..3 {
         let start = generation * 4;
         assert_eq!(source.lanes[start].0, "View.Left");
@@ -1718,14 +2077,22 @@ fn paired_view_variable_depth_pagination_keeps_scope_through_refresh_folds() {
         assert_eq!(source.lanes[start + 2].0, "View.Right");
         assert_eq!(source.lanes[start + 3].0, "View.Right");
     }
-    let scopes = source.lanes.iter().map(|(_, scope, _)| *scope).collect::<Vec<_>>();
+    let scopes = source
+        .lanes
+        .iter()
+        .map(|(_, scope, _)| *scope)
+        .collect::<Vec<_>>();
     for (index, scope) in scopes.iter().enumerate() {
         assert!(
             !scopes[..index].contains(scope),
             "pagination depth and repeated cursor bytes do not merge scopes: {scope:?}"
         );
     }
-    assert_eq!(source.cursors.len(), 26, "all variable-depth page chains are consumed");
+    assert_eq!(
+        source.cursors.len(),
+        26,
+        "all variable-depth page chains are consumed"
+    );
     assert_eq!(
         source.cursors,
         vec![
@@ -1779,11 +2146,21 @@ fn paired_view_long_cursor_spill_chains_keep_refresh_identity() {
         ),
         (
             "View.Left",
-            vec![page(&[2], Some(cursor(1))), page(&[4], Some(cursor(2))), page(&[6], None)],
+            vec![
+                page(&[2], Some(cursor(1))),
+                page(&[4], Some(cursor(2))),
+                page(&[6], None),
+            ],
         ),
-        ("View.Right", vec![page(&[-1], Some(cursor(1))), page(&[1], None)]),
+        (
+            "View.Right",
+            vec![page(&[-1], Some(cursor(1))), page(&[1], None)],
+        ),
         ("View.Right", vec![page(&[2], None)]),
-        ("View.Left", vec![page(&[3], Some(cursor(1))), page(&[5], None)]),
+        (
+            "View.Left",
+            vec![page(&[3], Some(cursor(1))), page(&[5], None)],
+        ),
         (
             "View.Left",
             vec![
@@ -1795,11 +2172,21 @@ fn paired_view_long_cursor_spill_chains_keep_refresh_identity() {
         ),
         (
             "View.Right",
-            vec![page(&[1], Some(cursor(1))), page(&[3], Some(cursor(2))), page(&[5], None)],
+            vec![
+                page(&[1], Some(cursor(1))),
+                page(&[3], Some(cursor(2))),
+                page(&[5], None),
+            ],
         ),
-        ("View.Right", vec![page(&[4], Some(cursor(1))), page(&[6], None)]),
+        (
+            "View.Right",
+            vec![page(&[4], Some(cursor(1))), page(&[6], None)],
+        ),
         ("View.Left", vec![page(&[1], None)]),
-        ("View.Left", vec![page(&[2], Some(cursor(1))), page(&[4], None)]),
+        (
+            "View.Left",
+            vec![page(&[2], Some(cursor(1))), page(&[4], None)],
+        ),
         (
             "View.Right",
             vec![
@@ -1811,21 +2198,38 @@ fn paired_view_long_cursor_spill_chains_keep_refresh_identity() {
         ),
         (
             "View.Right",
-            vec![page(&[2], Some(cursor(1))), page(&[4], Some(cursor(2))), page(&[6], None)],
+            vec![
+                page(&[2], Some(cursor(1))),
+                page(&[4], Some(cursor(2))),
+                page(&[6], None),
+            ],
         ),
     ];
     let mut source = PairedViewRefreshSource::new(subscriptions);
 
     let first = run_with_fixture_functions(paired_scoped_view_refresh_body(), &mut source).unwrap();
     assert_eq!(first, integer(26));
-    let second = run_with_fixture_functions(paired_scoped_view_refresh_body(), &mut source).unwrap();
+    let second =
+        run_with_fixture_functions(paired_scoped_view_refresh_body(), &mut source).unwrap();
     assert_eq!(second, integer(37));
     let third = run_with_fixture_functions(paired_scoped_view_refresh_body(), &mut source).unwrap();
     assert_eq!(third, integer(31));
-    assert_eq!(first, integer(26), "the first spilled cursor fold remains captured");
-    assert_eq!(second, integer(37), "the middle spilled cursor fold remains captured");
+    assert_eq!(
+        first,
+        integer(26),
+        "the first spilled cursor fold remains captured"
+    );
+    assert_eq!(
+        second,
+        integer(37),
+        "the middle spilled cursor fold remains captured"
+    );
 
-    assert_eq!(source.lanes.len(), 12, "four scoped subscriptions bind per refresh");
+    assert_eq!(
+        source.lanes.len(),
+        12,
+        "four scoped subscriptions bind per refresh"
+    );
     for generation in 0..3 {
         let start = generation * 4;
         assert_eq!(source.lanes[start].0, "View.Left");
@@ -1833,14 +2237,22 @@ fn paired_view_long_cursor_spill_chains_keep_refresh_identity() {
         assert_eq!(source.lanes[start + 2].0, "View.Right");
         assert_eq!(source.lanes[start + 3].0, "View.Right");
     }
-    let scopes = source.lanes.iter().map(|(_, scope, _)| *scope).collect::<Vec<_>>();
+    let scopes = source
+        .lanes
+        .iter()
+        .map(|(_, scope, _)| *scope)
+        .collect::<Vec<_>>();
     for (index, scope) in scopes.iter().enumerate() {
         assert!(
             !scopes[..index].contains(scope),
             "long cursor payloads remain isolated to their paired refresh scope: {scope:?}"
         );
     }
-    assert_eq!(source.cursors.len(), 31, "all one-to-four-page chains are consumed");
+    assert_eq!(
+        source.cursors.len(),
+        31,
+        "all one-to-four-page chains are consumed"
+    );
     let depths = [4, 3, 2, 1, 2, 4, 3, 2, 1, 2, 4, 3];
     let mut expected_cursors = Vec::new();
     for (lane, depth) in depths.into_iter().enumerate() {
@@ -1851,8 +2263,7 @@ fn paired_view_long_cursor_spill_chains_keep_refresh_identity() {
         }
     }
     assert_eq!(
-        source.cursors,
-        expected_cursors,
+        source.cursors, expected_cursors,
         "128-byte shared cursor prefixes retain their exact payload and scope through each spill chain"
     );
 }
@@ -1932,14 +2343,27 @@ fn paired_view_prefix_spill_cursors_keep_scope_across_handoffs() {
 
     let first = run_with_fixture_functions(paired_scoped_view_refresh_body(), &mut source).unwrap();
     assert_eq!(first, integer(24));
-    let second = run_with_fixture_functions(paired_scoped_view_refresh_body(), &mut source).unwrap();
+    let second =
+        run_with_fixture_functions(paired_scoped_view_refresh_body(), &mut source).unwrap();
     assert_eq!(second, integer(27));
     let third = run_with_fixture_functions(paired_scoped_view_refresh_body(), &mut source).unwrap();
     assert_eq!(third, integer(33));
-    assert_eq!(first, integer(24), "the first prefix-spill fold remains captured");
-    assert_eq!(second, integer(27), "the middle prefix-spill fold remains captured");
+    assert_eq!(
+        first,
+        integer(24),
+        "the first prefix-spill fold remains captured"
+    );
+    assert_eq!(
+        second,
+        integer(27),
+        "the middle prefix-spill fold remains captured"
+    );
 
-    assert_eq!(source.lanes.len(), 12, "four pagination scopes bind per refresh");
+    assert_eq!(
+        source.lanes.len(),
+        12,
+        "four pagination scopes bind per refresh"
+    );
     for generation in 0..3 {
         let start = generation * 4;
         assert_eq!(source.lanes[start].0, "View.Left");
@@ -1947,14 +2371,22 @@ fn paired_view_prefix_spill_cursors_keep_scope_across_handoffs() {
         assert_eq!(source.lanes[start + 2].0, "View.Right");
         assert_eq!(source.lanes[start + 3].0, "View.Right");
     }
-    let scopes = source.lanes.iter().map(|(_, scope, _)| *scope).collect::<Vec<_>>();
+    let scopes = source
+        .lanes
+        .iter()
+        .map(|(_, scope, _)| *scope)
+        .collect::<Vec<_>>();
     for (index, scope) in scopes.iter().enumerate() {
         assert!(
             !scopes[..index].contains(scope),
             "nested-prefix cursor payloads remain bound to distinct scopes: {scope:?}"
         );
     }
-    assert_eq!(source.cursors.len(), 28, "all prefix-spill page chains are consumed");
+    assert_eq!(
+        source.cursors.len(),
+        28,
+        "all prefix-spill page chains are consumed"
+    );
     let continuations = [cursor_prefix, cursor_one, cursor_two];
     let depths = [2, 1, 3, 2, 1, 4, 2, 2, 2, 2, 4, 3];
     let mut expected_cursors = Vec::new();
@@ -1966,8 +2398,7 @@ fn paired_view_prefix_spill_cursors_keep_scope_across_handoffs() {
         }
     }
     assert_eq!(
-        source.cursors,
-        expected_cursors,
+        source.cursors, expected_cursors,
         "prefix-related cursor byte strings stay exact and scope-local through paired handoffs"
     );
 }
@@ -1982,7 +2413,12 @@ fn paired_view_refresh_spill_folds_keep_cursor_identity() {
     let mut cursor_512 = cursor_511.clone();
     cursor_512.push(0xff);
     assert_eq!(
-        [cursor_255.len(), cursor_256.len(), cursor_511.len(), cursor_512.len()],
+        [
+            cursor_255.len(),
+            cursor_256.len(),
+            cursor_511.len(),
+            cursor_512.len()
+        ],
         [255, 256, 511, 512]
     );
     assert!(cursor_255.as_slice() < cursor_256.as_slice());
@@ -2002,8 +2438,7 @@ fn paired_view_refresh_spill_folds_keep_cursor_identity() {
             let depth = lane_depths[lane];
             let pages = (0..depth)
                 .map(|page_index| {
-                    let next = (page_index + 1 < depth)
-                        .then(|| continuations[page_index].clone());
+                    let next = (page_index + 1 < depth).then(|| continuations[page_index].clone());
                     let value = if page_index == 0 {
                         values[lane]
                     } else {
@@ -2018,15 +2453,40 @@ fn paired_view_refresh_spill_folds_keep_cursor_identity() {
     let mut source = PairedViewRefreshSource::new(subscriptions);
 
     let first = run_with_fixture_functions(paired_scoped_view_refresh_body(), &mut source).unwrap();
-    assert_eq!(first, integer(14), "the initial scoped fold filters rows before mapping and summing");
-    let second = run_with_fixture_functions(paired_scoped_view_refresh_body(), &mut source).unwrap();
-    assert_eq!(second, integer(18), "the next refresh observes its own four source values");
+    assert_eq!(
+        first,
+        integer(14),
+        "the initial scoped fold filters rows before mapping and summing"
+    );
+    let second =
+        run_with_fixture_functions(paired_scoped_view_refresh_body(), &mut source).unwrap();
+    assert_eq!(
+        second,
+        integer(18),
+        "the next refresh observes its own four source values"
+    );
     let third = run_with_fixture_functions(paired_scoped_view_refresh_body(), &mut source).unwrap();
-    assert_eq!(third, integer(16), "the final refresh keeps its own scoped snapshot values");
-    assert_eq!(first, integer(14), "later spill folds do not rewrite the first result");
-    assert_eq!(second, integer(18), "later spill folds do not rewrite the middle result");
+    assert_eq!(
+        third,
+        integer(16),
+        "the final refresh keeps its own scoped snapshot values"
+    );
+    assert_eq!(
+        first,
+        integer(14),
+        "later spill folds do not rewrite the first result"
+    );
+    assert_eq!(
+        second,
+        integer(18),
+        "later spill folds do not rewrite the middle result"
+    );
 
-    assert_eq!(source.lanes.len(), 12, "three refreshes bind four independent scopes each");
+    assert_eq!(
+        source.lanes.len(),
+        12,
+        "three refreshes bind four independent scopes each"
+    );
     for generation in 0..3 {
         let start = generation * 4;
         assert_eq!(source.lanes[start].0, "View.Left");
@@ -2034,7 +2494,11 @@ fn paired_view_refresh_spill_folds_keep_cursor_identity() {
         assert_eq!(source.lanes[start + 2].0, "View.Right");
         assert_eq!(source.lanes[start + 3].0, "View.Right");
     }
-    let scopes = source.lanes.iter().map(|(_, scope, _)| *scope).collect::<Vec<_>>();
+    let scopes = source
+        .lanes
+        .iter()
+        .map(|(_, scope, _)| *scope)
+        .collect::<Vec<_>>();
     for (index, scope) in scopes.iter().enumerate() {
         assert!(
             !scopes[..index].contains(scope),
@@ -2056,8 +2520,7 @@ fn paired_view_refresh_spill_folds_keep_cursor_identity() {
         }
     }
     assert_eq!(
-        source.cursors,
-        expected_cursors,
+        source.cursors, expected_cursors,
         "255/256/511/512-byte cursor tokens retain every byte and paired scope across refresh folds"
     );
 }
@@ -2086,16 +2549,43 @@ fn paired_cursor_restore_chains_retain_scope_and_snapshot_values() {
         ("View.Paired", restore([2, 4, 8])),
     ]);
 
-    let first = run_with_fixture_functions(paired_subscription_cascade_body(), &mut source).unwrap();
-    assert_eq!(first, integer(21), "first restore pair folds its filtered source pages");
-    let second = run_with_fixture_functions(paired_subscription_cascade_body(), &mut source).unwrap();
-    assert_eq!(second, integer(3), "second restore pair ignores rows outside its filters");
-    let third = run_with_fixture_functions(paired_subscription_cascade_body(), &mut source).unwrap();
-    assert_eq!(third, integer(12), "third restore pair computes from its own restored pages");
-    assert_eq!(first, integer(21), "later restores leave the first snapshot value captured");
-    assert_eq!(second, integer(3), "later restores leave the second snapshot value captured");
+    let first =
+        run_with_fixture_functions(paired_subscription_cascade_body(), &mut source).unwrap();
+    assert_eq!(
+        first,
+        integer(21),
+        "first restore pair folds its filtered source pages"
+    );
+    let second =
+        run_with_fixture_functions(paired_subscription_cascade_body(), &mut source).unwrap();
+    assert_eq!(
+        second,
+        integer(3),
+        "second restore pair ignores rows outside its filters"
+    );
+    let third =
+        run_with_fixture_functions(paired_subscription_cascade_body(), &mut source).unwrap();
+    assert_eq!(
+        third,
+        integer(12),
+        "third restore pair computes from its own restored pages"
+    );
+    assert_eq!(
+        first,
+        integer(21),
+        "later restores leave the first snapshot value captured"
+    );
+    assert_eq!(
+        second,
+        integer(3),
+        "later restores leave the second snapshot value captured"
+    );
 
-    assert_eq!(source.lanes.len(), 6, "three handoffs bind two paired restore scopes each");
+    assert_eq!(
+        source.lanes.len(),
+        6,
+        "three handoffs bind two paired restore scopes each"
+    );
     let scopes = source
         .lanes
         .iter()
@@ -2119,11 +2609,13 @@ fn paired_cursor_restore_chains_retain_scope_and_snapshot_values() {
         ]);
     }
     assert_eq!(
-        source.cursors,
-        expected_cursors,
+        source.cursors, expected_cursors,
         "each restored chain resolves the exact repeated cursor bytes inside its own scope"
     );
-    assert!(source.pending["View.Paired"].is_empty(), "all six restored page maps are consumed");
+    assert!(
+        source.pending["View.Paired"].is_empty(),
+        "all six restored page maps are consumed"
+    );
 }
 
 fn nested_window_aggregate(source: &str) -> Expr {
@@ -2132,21 +2624,13 @@ fn nested_window_aggregate(source: &str) -> Expr {
         "window",
         vec![integer_literal(2), integer_literal(1)],
     );
-    let inner_totals = relation_stage(
-        inner_frames,
-        "map",
-        vec![named_function("sum_frame")],
-    );
+    let inner_totals = relation_stage(inner_frames, "map", vec![named_function("sum_frame")]);
     let outer_frames = relation_stage(
         inner_totals,
         "window",
         vec![integer_literal(2), integer_literal(1)],
     );
-    relation_stage(
-        outer_frames,
-        "map",
-        vec![named_function("sum_frame")],
-    )
+    relation_stage(outer_frames, "map", vec![named_function("sum_frame")])
 }
 
 fn paired_nested_window_aggregate_body() -> Expr {
@@ -2201,11 +2685,7 @@ fn paired_nested_spill_aggregate_body() -> Expr {
 }
 
 fn nested_pagination_compaction(source: &str) -> Expr {
-    let prefix = relation_stage(
-        relation_source(source),
-        "take",
-        vec![integer_literal(10)],
-    );
+    let prefix = relation_stage(relation_source(source), "take", vec![integer_literal(10)]);
     let adjacent_totals = relation_stage(
         relation_stage(
             prefix,
@@ -2238,11 +2718,7 @@ fn paired_nested_pagination_compaction_body() -> Expr {
 }
 
 fn nested_pagination_compaction_escalation(source: &str, depth: usize) -> Expr {
-    let prefix = relation_stage(
-        relation_source(source),
-        "take",
-        vec![integer_literal(10)],
-    );
+    let prefix = relation_stage(relation_source(source), "take", vec![integer_literal(10)]);
     let adjacent_totals = relation_stage(
         relation_stage(
             prefix,
@@ -2283,11 +2759,7 @@ fn paired_pagination_compaction_escalation_body(depth: usize) -> Expr {
 }
 
 fn nested_pagination_spill(source: &str, depth: usize) -> Expr {
-    let mut folded = relation_stage(
-        relation_source(source),
-        "take",
-        vec![integer_literal(10)],
-    );
+    let mut folded = relation_stage(relation_source(source), "take", vec![integer_literal(10)]);
     for _ in 0..3 + depth {
         let frames = relation_stage(
             folded,
@@ -2310,11 +2782,7 @@ fn paired_pagination_nested_spill_body(depth: usize) -> Expr {
 }
 
 fn nested_paginated_escalation(source: &str, depth: usize) -> Expr {
-    let prefix = relation_stage(
-        relation_source(source),
-        "take",
-        vec![integer_literal(6)],
-    );
+    let prefix = relation_stage(relation_source(source), "take", vec![integer_literal(6)]);
     let folded = (0..depth).fold(prefix, |input, _| {
         let frames = relation_stage(
             input,
@@ -2347,21 +2815,13 @@ fn sparse_window_fold(source: &str, predicate: &str) -> Expr {
         "window",
         vec![integer_literal(2), integer_literal(1)],
     );
-    let inner_totals = relation_stage(
-        inner_frames,
-        "map",
-        vec![named_function("sum_frame")],
-    );
+    let inner_totals = relation_stage(inner_frames, "map", vec![named_function("sum_frame")]);
     let outer_frames = relation_stage(
         inner_totals,
         "window",
         vec![integer_literal(2), integer_literal(1)],
     );
-    relation_stage(
-        outer_frames,
-        "map",
-        vec![named_function("sum_frame")],
-    )
+    relation_stage(outer_frames, "map", vec![named_function("sum_frame")])
 }
 
 fn paired_sparse_window_fold_body() -> Expr {
@@ -2415,10 +2875,7 @@ fn paired_sparse_window_checkpoint_body() -> Expr {
         terminal(frame_totals, "sum")
     };
     Expr::Tuple {
-        elements: vec![
-            fold("View.Left", "is_odd"),
-            fold("View.Right", "is_even"),
-        ],
+        elements: vec![fold("View.Left", "is_odd"), fold("View.Right", "is_even")],
         span: span(),
     }
 }
@@ -2439,10 +2896,7 @@ fn paired_refresh_sparse_rotation_body() -> Expr {
         terminal(totals, "sum")
     };
     Expr::Tuple {
-        elements: vec![
-            fold("View.Left", "is_odd"),
-            fold("View.Right", "is_even"),
-        ],
+        elements: vec![fold("View.Left", "is_odd"), fold("View.Right", "is_even")],
         span: span(),
     }
 }
@@ -2465,10 +2919,7 @@ fn paired_snapshot_sparse_escalation_body(depth: usize) -> Expr {
         terminal(folded, "sum")
     };
     Expr::Tuple {
-        elements: vec![
-            fold("View.Left", "is_odd"),
-            fold("View.Right", "is_even"),
-        ],
+        elements: vec![fold("View.Left", "is_odd"), fold("View.Right", "is_even")],
         span: span(),
     }
 }
@@ -2485,11 +2936,7 @@ fn paired_sparse_checkpoint_rotation_body() -> Expr {
 
 fn paired_limit_refresh_compaction_body() -> Expr {
     let limited_sum = |source: &str| {
-        let first_limit = relation_stage(
-            relation_source(source),
-            "take",
-            vec![integer_literal(4)],
-        );
+        let first_limit = relation_stage(relation_source(source), "take", vec![integer_literal(4)]);
         let tightened_limit = relation_stage(first_limit, "take", vec![integer_literal(3)]);
         let scaled = relation_stage(tightened_limit, "map", vec![named_function("scale_row")]);
         terminal(scaled, "sum")
@@ -2567,21 +3014,49 @@ fn paired_aggregate_restores_keep_refresh_scope_identity_and_values() {
     };
 
     let first = run_pair(&mut source);
-    assert_eq!(first, integer_pair(4, 6), "odd left rows sum to 4 and even right rows sum to 6");
+    assert_eq!(
+        first,
+        integer_pair(4, 6),
+        "odd left rows sum to 4 and even right rows sum to 6"
+    );
     let second = run_pair(&mut source);
-    assert_eq!(second, integer_pair(12, 14), "the second paired restore sums its own rows");
+    assert_eq!(
+        second,
+        integer_pair(12, 14),
+        "the second paired restore sums its own rows"
+    );
     let third = run_pair(&mut source);
-    assert_eq!(third, integer_pair(9, 10), "the third paired restore sums its own rows");
-    assert_eq!(first, integer_pair(4, 6), "later refreshes retain the first aggregate pair");
-    assert_eq!(second, integer_pair(12, 14), "later refreshes retain the second aggregate pair");
+    assert_eq!(
+        third,
+        integer_pair(9, 10),
+        "the third paired restore sums its own rows"
+    );
+    assert_eq!(
+        first,
+        integer_pair(4, 6),
+        "later refreshes retain the first aggregate pair"
+    );
+    assert_eq!(
+        second,
+        integer_pair(12, 14),
+        "later refreshes retain the second aggregate pair"
+    );
 
-    assert_eq!(source.lanes.len(), 6, "three refreshes bind independent left and right scopes");
+    assert_eq!(
+        source.lanes.len(),
+        6,
+        "three refreshes bind independent left and right scopes"
+    );
     for generation in 0..3 {
         let start = generation * 2;
         assert_eq!(source.lanes[start].0, "View.Left");
         assert_eq!(source.lanes[start + 1].0, "View.Right");
     }
-    let scopes = source.lanes.iter().map(|(_, scope, _)| *scope).collect::<Vec<_>>();
+    let scopes = source
+        .lanes
+        .iter()
+        .map(|(_, scope, _)| *scope)
+        .collect::<Vec<_>>();
     for (index, scope) in scopes.iter().enumerate() {
         assert!(
             !scopes[..index].contains(scope),
@@ -2597,8 +3072,7 @@ fn paired_aggregate_restores_keep_refresh_scope_identity_and_values() {
         ]);
     }
     assert_eq!(
-        source.cursors,
-        expected_cursors,
+        source.cursors, expected_cursors,
         "reused compact cursor bytes resume only within each refresh's source scope"
     );
     assert!(source.pending["View.Left"].is_empty());
@@ -2650,15 +3124,39 @@ fn nested_window_aggregates_recompute_real_values_for_paired_restore_chains() {
     };
 
     let first = run_paired(&mut source);
-    assert_eq!(first, integer(88), "[1,2,3] and [10,20,30] fold to nested totals 8 and 80");
+    assert_eq!(
+        first,
+        integer(88),
+        "[1,2,3] and [10,20,30] fold to nested totals 8 and 80"
+    );
     let second = run_paired(&mut source);
-    assert_eq!(second, integer(36), "[4,5,6] and [2,4,6] fold to nested totals 20 and 16");
+    assert_eq!(
+        second,
+        integer(36),
+        "[4,5,6] and [2,4,6] fold to nested totals 20 and 16"
+    );
     let third = run_paired(&mut source);
-    assert_eq!(third, integer(28), "[-1,3,5] and [2,4,8] fold to nested totals 10 and 18");
-    assert_eq!(first, integer(88), "later restored snapshots do not mutate the first aggregate");
-    assert_eq!(second, integer(36), "later restored snapshots do not mutate the second aggregate");
+    assert_eq!(
+        third,
+        integer(28),
+        "[-1,3,5] and [2,4,8] fold to nested totals 10 and 18"
+    );
+    assert_eq!(
+        first,
+        integer(88),
+        "later restored snapshots do not mutate the first aggregate"
+    );
+    assert_eq!(
+        second,
+        integer(36),
+        "later restored snapshots do not mutate the second aggregate"
+    );
 
-    assert_eq!(source.lanes.len(), 6, "three restore generations each bind a paired source");
+    assert_eq!(
+        source.lanes.len(),
+        6,
+        "three restore generations each bind a paired source"
+    );
     let scopes = source
         .lanes
         .iter()
@@ -2685,12 +3183,13 @@ fn nested_window_aggregates_recompute_real_values_for_paired_restore_chains() {
         })
         .collect::<Vec<_>>();
     assert_eq!(
-        source.cursors,
-        expected_cursors,
+        source.cursors, expected_cursors,
         "each nested window chain restores all cursor pages within only its own paired scope"
     );
-    assert!(source.pending["View.Paired"].is_empty(), "all six restored snapshots are consumed");
-
+    assert!(
+        source.pending["View.Paired"].is_empty(),
+        "all six restored snapshots are consumed"
+    );
 }
 
 #[test]
@@ -2704,37 +3203,21 @@ fn nested_aggregates_keep_values_across_paired_refresh_restore_chains() {
             .iter()
             .enumerate()
             .map(|(index, values)| {
-                let after = index.checked_sub(1).map(|previous| tokens[previous].clone());
+                let after = index
+                    .checked_sub(1)
+                    .map(|previous| tokens[previous].clone());
                 let next = tokens.get(index).cloned();
                 (after, page(values, next))
             })
             .collect::<CursorRestore>()
     };
     let mut source = PairedCursorRestoreSource::new([
-        (
-            "View.Left",
-            restore(&[&[1], &[2], &[3]], &cursors[..2]),
-        ),
-        (
-            "View.Right",
-            restore(&[&[10, 20], &[30]], &cursors[..1]),
-        ),
-        (
-            "View.Left",
-            restore(&[&[4, 5], &[6]], &cursors[..1]),
-        ),
-        (
-            "View.Right",
-            restore(&[&[2], &[4], &[6]], &cursors[..2]),
-        ),
-        (
-            "View.Left",
-            restore(&[&[-1], &[3, 5]], &cursors[..1]),
-        ),
-        (
-            "View.Right",
-            restore(&[&[2, 4], &[8]], &cursors[..1]),
-        ),
+        ("View.Left", restore(&[&[1], &[2], &[3]], &cursors[..2])),
+        ("View.Right", restore(&[&[10, 20], &[30]], &cursors[..1])),
+        ("View.Left", restore(&[&[4, 5], &[6]], &cursors[..1])),
+        ("View.Right", restore(&[&[2], &[4], &[6]], &cursors[..2])),
+        ("View.Left", restore(&[&[-1], &[3, 5]], &cursors[..1])),
+        ("View.Right", restore(&[&[2, 4], &[8]], &cursors[..1])),
     ]);
     let mut functions = nested_aggregate_refresh_functions();
     functions.insert(
@@ -2757,13 +3240,33 @@ fn nested_aggregates_keep_values_across_paired_refresh_restore_chains() {
     };
 
     let first = run_refresh(&mut source);
-    assert_eq!(first, integer_pair(8, 80), "nested window folds compute the first paired snapshot");
+    assert_eq!(
+        first,
+        integer_pair(8, 80),
+        "nested window folds compute the first paired snapshot"
+    );
     let second = run_refresh(&mut source);
-    assert_eq!(second, integer_pair(20, 16), "the next restore chain computes its own nested totals");
+    assert_eq!(
+        second,
+        integer_pair(20, 16),
+        "the next restore chain computes its own nested totals"
+    );
     let third = run_refresh(&mut source);
-    assert_eq!(third, integer_pair(10, 18), "the final restore chain retains both nested totals");
-    assert_eq!(first, integer_pair(8, 80), "later paired restores leave the first value snapshot intact");
-    assert_eq!(second, integer_pair(20, 16), "later paired restores leave the second value snapshot intact");
+    assert_eq!(
+        third,
+        integer_pair(10, 18),
+        "the final restore chain retains both nested totals"
+    );
+    assert_eq!(
+        first,
+        integer_pair(8, 80),
+        "later paired restores leave the first value snapshot intact"
+    );
+    assert_eq!(
+        second,
+        integer_pair(20, 16),
+        "later paired restores leave the second value snapshot intact"
+    );
 
     let lane_names = [
         "View.Left",
@@ -2787,7 +3290,10 @@ fn nested_aggregates_keep_values_across_paired_refresh_restore_chains() {
         .iter()
         .zip(lane_names)
         .map(|((source_name, scope, _), expected_name)| {
-            assert_eq!(source_name, expected_name, "each refresh restores left then right");
+            assert_eq!(
+                source_name, expected_name,
+                "each refresh restores left then right"
+            );
             *scope
         })
         .collect::<Vec<_>>();
@@ -2806,8 +3312,7 @@ fn nested_aggregates_keep_values_across_paired_refresh_restore_chains() {
         );
     }
     assert_eq!(
-        source.cursors,
-        expected_cursors,
+        source.cursors, expected_cursors,
         "repeated opaque cursors resume only their own nested aggregate restore chain"
     );
     assert!(source.pending["View.Left"].is_empty());
@@ -2861,15 +3366,39 @@ fn paired_sparse_window_folds_keep_identity_across_compacted_cursor_chains() {
     };
 
     let first = run_paired(&mut source);
-    assert_eq!(first, integer(28), "sparse odd/even pages fold to 12 and 16");
+    assert_eq!(
+        first,
+        integer(28),
+        "sparse odd/even pages fold to 12 and 16"
+    );
     let second = run_paired(&mut source);
-    assert_eq!(second, integer(42), "the second paired compact chain folds to 18 and 24");
+    assert_eq!(
+        second,
+        integer(42),
+        "the second paired compact chain folds to 18 and 24"
+    );
     let third = run_paired(&mut source);
-    assert_eq!(third, integer(54), "the third paired compact chain folds to 26 and 28");
-    assert_eq!(first, integer(28), "later cursor restores preserve the first paired fold");
-    assert_eq!(second, integer(42), "later cursor restores preserve the second paired fold");
+    assert_eq!(
+        third,
+        integer(54),
+        "the third paired compact chain folds to 26 and 28"
+    );
+    assert_eq!(
+        first,
+        integer(28),
+        "later cursor restores preserve the first paired fold"
+    );
+    assert_eq!(
+        second,
+        integer(42),
+        "later cursor restores preserve the second paired fold"
+    );
 
-    assert_eq!(source.lanes.len(), 6, "three restores bind two independent source scopes each");
+    assert_eq!(
+        source.lanes.len(),
+        6,
+        "three restores bind two independent source scopes each"
+    );
     let scopes = source
         .lanes
         .iter()
@@ -2897,11 +3426,13 @@ fn paired_sparse_window_folds_keep_identity_across_compacted_cursor_chains() {
         })
         .collect::<Vec<_>>();
     assert_eq!(
-        source.cursors,
-        expected_cursors,
+        source.cursors, expected_cursors,
         "each sparse window fold follows the same compacted page sequence in its own scope"
     );
-    assert!(source.pending["View.Paired"].is_empty(), "all six sparse page chains are consumed");
+    assert!(
+        source.pending["View.Paired"].is_empty(),
+        "all six sparse page chains are consumed"
+    );
 }
 
 #[test]
@@ -2916,7 +3447,9 @@ fn paired_window_folds_keep_values_across_sparse_refresh_compaction_chains() {
             .iter()
             .enumerate()
             .map(|(index, values)| {
-                let after = index.checked_sub(1).map(|previous| tokens[previous].clone());
+                let after = index
+                    .checked_sub(1)
+                    .map(|previous| tokens[previous].clone());
                 let next = tokens.get(index).cloned();
                 (after, page(values, next))
             })
@@ -2927,14 +3460,8 @@ fn paired_window_folds_keep_values_across_sparse_refresh_compaction_chains() {
             "View.Left",
             restore(&[&[1, 2], &[3], &[4, 5]], &cursors[..2]),
         ),
-        (
-            "View.Right",
-            restore(&[&[2, 3], &[4, 5, 6]], &cursors[..1]),
-        ),
-        (
-            "View.Left",
-            restore(&[&[1], &[4, 5], &[2], &[7]], &cursors),
-        ),
+        ("View.Right", restore(&[&[2, 3], &[4, 5, 6]], &cursors[..1])),
+        ("View.Left", restore(&[&[1], &[4, 5], &[2], &[7]], &cursors)),
         (
             "View.Right",
             restore(&[&[4, 1], &[6], &[3, 8]], &cursors[..2]),
@@ -2969,13 +3496,33 @@ fn paired_window_folds_keep_values_across_sparse_refresh_compaction_chains() {
     };
 
     let first = run_refresh(&mut source);
-    assert_eq!(first, integer_pair(12, 16), "sparse odd/even windows fold to (12, 16)");
+    assert_eq!(
+        first,
+        integer_pair(12, 16),
+        "sparse odd/even windows fold to (12, 16)"
+    );
     let second = run_refresh(&mut source);
-    assert_eq!(second, integer_pair(18, 24), "the compacted refresh folds its own rows to (18, 24)");
+    assert_eq!(
+        second,
+        integer_pair(18, 24),
+        "the compacted refresh folds its own rows to (18, 24)"
+    );
     let third = run_refresh(&mut source);
-    assert_eq!(third, integer_pair(26, 28), "the next refresh folds its own rows to (26, 28)");
-    assert_eq!(first, integer_pair(12, 16), "later refreshes do not mutate the first snapshot result");
-    assert_eq!(second, integer_pair(18, 24), "later refreshes do not mutate the second snapshot result");
+    assert_eq!(
+        third,
+        integer_pair(26, 28),
+        "the next refresh folds its own rows to (26, 28)"
+    );
+    assert_eq!(
+        first,
+        integer_pair(12, 16),
+        "later refreshes do not mutate the first snapshot result"
+    );
+    assert_eq!(
+        second,
+        integer_pair(18, 24),
+        "later refreshes do not mutate the second snapshot result"
+    );
 
     let lane_names = [
         "View.Left",
@@ -3004,7 +3551,10 @@ fn paired_window_folds_keep_values_across_sparse_refresh_compaction_chains() {
         .iter()
         .zip(lane_names)
         .map(|((source_name, scope, _), expected_name)| {
-            assert_eq!(source_name, expected_name, "each refresh reads left then right");
+            assert_eq!(
+                source_name, expected_name,
+                "each refresh reads left then right"
+            );
             *scope
         })
         .collect::<Vec<_>>();
@@ -3023,8 +3573,7 @@ fn paired_window_folds_keep_values_across_sparse_refresh_compaction_chains() {
         );
     }
     assert_eq!(
-        source.cursors,
-        expected_cursors,
+        source.cursors, expected_cursors,
         "reused compact cursor bytes advance only within each sparse refresh source scope"
     );
     assert!(source.pending["View.Left"].is_empty());
@@ -3063,8 +3612,9 @@ fn paired_limit_compaction_refreshes_keep_scoped_prefix_values() {
     let mut lane_names = Vec::new();
     let mut long_cursors_by_lane = Vec::new();
     for (generation, (left, right)) in generations.into_iter().enumerate() {
-        for (lane, (source_name, values)) in
-            [("View.Left", left), ("View.Right", right)].into_iter().enumerate()
+        for (lane, (source_name, values)) in [("View.Left", left), ("View.Right", right)]
+            .into_iter()
+            .enumerate()
         {
             let tag = 0x20 + (generation * 2 + lane) as u8;
             let long_cursor = vec![tag; 128];
@@ -3095,13 +3645,33 @@ fn paired_limit_compaction_refreshes_keep_scoped_prefix_values() {
     };
 
     let first = run_refresh(&mut source);
-    assert_eq!(first, integer_pair(60, 600), "the first paired prefix scales and sums its first three rows");
+    assert_eq!(
+        first,
+        integer_pair(60, 600),
+        "the first paired prefix scales and sums its first three rows"
+    );
     let second = run_refresh(&mut source);
-    assert_eq!(second, integer_pair(150, 120), "the next compacted pair computes from its own prefixes");
+    assert_eq!(
+        second,
+        integer_pair(150, 120),
+        "the next compacted pair computes from its own prefixes"
+    );
     let third = run_refresh(&mut source);
-    assert_eq!(third, integer_pair(190, 190), "the final pair keeps each refreshed limit prefix separate");
-    assert_eq!(first, integer_pair(60, 600), "later restores leave the first limited result intact");
-    assert_eq!(second, integer_pair(150, 120), "later restores leave the second limited result intact");
+    assert_eq!(
+        third,
+        integer_pair(190, 190),
+        "the final pair keeps each refreshed limit prefix separate"
+    );
+    assert_eq!(
+        first,
+        integer_pair(60, 600),
+        "later restores leave the first limited result intact"
+    );
+    assert_eq!(
+        second,
+        integer_pair(150, 120),
+        "later restores leave the second limited result intact"
+    );
 
     assert_eq!(source.lanes.len(), lane_names.len());
     let scopes = source
@@ -3109,7 +3679,10 @@ fn paired_limit_compaction_refreshes_keep_scoped_prefix_values() {
         .iter()
         .zip(lane_names.iter().copied())
         .map(|((source_name, scope, _), expected_name)| {
-            assert_eq!(source_name, expected_name, "each refresh reads left then right");
+            assert_eq!(
+                source_name, expected_name,
+                "each refresh reads left then right"
+            );
             *scope
         })
         .collect::<Vec<_>>();
@@ -3129,16 +3702,11 @@ fn paired_limit_compaction_refreshes_keep_scoped_prefix_values() {
                 scopes[index],
                 Some(long_cursors_by_lane[index].clone()),
             ),
-            (
-                source_name,
-                scopes[index],
-                Some(compacted_cursor.clone()),
-            ),
+            (source_name, scopes[index], Some(compacted_cursor.clone())),
         ]);
     }
     assert_eq!(
-        source.cursors,
-        expected_cursors,
+        source.cursors, expected_cursors,
         "each limited prefix follows only its scoped cursor chain through compaction"
     );
     assert!(
@@ -3163,7 +3731,9 @@ fn paired_sparse_window_folds_keep_identity_across_checkpoint_rotation_chains() 
             .iter()
             .enumerate()
             .map(|(index, values)| {
-                let after = index.checked_sub(1).map(|previous| tokens[previous].clone());
+                let after = index
+                    .checked_sub(1)
+                    .map(|previous| tokens[previous].clone());
                 let next = tokens.get(index).cloned();
                 (after, page(values, next))
             })
@@ -3180,12 +3750,36 @@ fn paired_sparse_window_folds_keep_identity_across_checkpoint_rotation_chains() 
         lane_names.push(source_name);
         rotated_chains.push(tokens);
     };
-    add_restore("View.Left", &[&[1, 2], &[3, 4], &[5, 6], &[7, 8], &[9, 10]], 0);
-    add_restore("View.Right", &[&[2, 1], &[4, 3], &[6, 5], &[8, 7], &[10, 9]], 1);
-    add_restore("View.Left", &[&[3, 2], &[5, 4], &[7, 6], &[9, 8], &[11, 10]], 2);
-    add_restore("View.Right", &[&[2, 1], &[6, 3], &[8, 5], &[10, 7], &[12, 9]], 3);
-    add_restore("View.Left", &[&[1, 2], &[5, 4], &[7, 6], &[11, 8], &[13, 10]], 1);
-    add_restore("View.Right", &[&[4, 3], &[8, 5], &[10, 7], &[12, 9], &[14, 11]], 0);
+    add_restore(
+        "View.Left",
+        &[&[1, 2], &[3, 4], &[5, 6], &[7, 8], &[9, 10]],
+        0,
+    );
+    add_restore(
+        "View.Right",
+        &[&[2, 1], &[4, 3], &[6, 5], &[8, 7], &[10, 9]],
+        1,
+    );
+    add_restore(
+        "View.Left",
+        &[&[3, 2], &[5, 4], &[7, 6], &[9, 8], &[11, 10]],
+        2,
+    );
+    add_restore(
+        "View.Right",
+        &[&[2, 1], &[6, 3], &[8, 5], &[10, 7], &[12, 9]],
+        3,
+    );
+    add_restore(
+        "View.Left",
+        &[&[1, 2], &[5, 4], &[7, 6], &[11, 8], &[13, 10]],
+        1,
+    );
+    add_restore(
+        "View.Right",
+        &[&[4, 3], &[8, 5], &[10, 7], &[12, 9], &[14, 11]],
+        0,
+    );
     drop(add_restore);
 
     let mut source = PairedCursorRestoreSource::new(restores);
@@ -3210,13 +3804,33 @@ fn paired_sparse_window_folds_keep_identity_across_checkpoint_rotation_chains() 
     };
 
     let first = run_refresh(&mut source);
-    assert_eq!(first, integer_pair(60, 72), "the first sparse paired windows fold to their nested totals");
+    assert_eq!(
+        first,
+        integer_pair(60, 72),
+        "the first sparse paired windows fold to their nested totals"
+    );
     let second = run_refresh(&mut source);
-    assert_eq!(second, integer_pair(84, 94), "the rotated checkpoint pair computes its own sparse folds");
+    assert_eq!(
+        second,
+        integer_pair(84, 94),
+        "the rotated checkpoint pair computes its own sparse folds"
+    );
     let third = run_refresh(&mut source);
-    assert_eq!(third, integer_pair(90, 118), "the next rotation retains independent left/right window folds");
-    assert_eq!(first, integer_pair(60, 72), "later rotations leave the first fold snapshot unchanged");
-    assert_eq!(second, integer_pair(84, 94), "later rotations leave the middle fold snapshot unchanged");
+    assert_eq!(
+        third,
+        integer_pair(90, 118),
+        "the next rotation retains independent left/right window folds"
+    );
+    assert_eq!(
+        first,
+        integer_pair(60, 72),
+        "later rotations leave the first fold snapshot unchanged"
+    );
+    assert_eq!(
+        second,
+        integer_pair(84, 94),
+        "later rotations leave the middle fold snapshot unchanged"
+    );
 
     assert_eq!(source.lanes.len(), lane_names.len());
     assert_eq!(
@@ -3240,7 +3854,10 @@ fn paired_sparse_window_folds_keep_identity_across_checkpoint_rotation_chains() 
         .iter()
         .zip(lane_names.iter().copied())
         .map(|((source_name, scope, _), expected_name)| {
-            assert_eq!(source_name, expected_name, "each refresh folds left then right");
+            assert_eq!(
+                source_name, expected_name,
+                "each refresh folds left then right"
+            );
             *scope
         })
         .collect::<Vec<_>>();
@@ -3254,13 +3871,15 @@ fn paired_sparse_window_folds_keep_identity_across_checkpoint_rotation_chains() 
     for (index, chain) in rotated_chains.iter().enumerate() {
         let source_name = lane_names[index].to_owned();
         expected_cursors.push((source_name.clone(), scopes[index], None));
-        expected_cursors.extend(chain.iter().cloned().map(|cursor| {
-            (source_name.clone(), scopes[index], Some(cursor))
-        }));
+        expected_cursors.extend(
+            chain
+                .iter()
+                .cloned()
+                .map(|cursor| (source_name.clone(), scopes[index], Some(cursor))),
+        );
     }
     assert_eq!(
-        source.cursors,
-        expected_cursors,
+        source.cursors, expected_cursors,
         "each sparse window fold restores all pages only through its scoped rotation chain"
     );
     assert!(source.pending["View.Left"].is_empty());
@@ -3284,10 +3903,8 @@ fn paired_refresh_cursor_restores_preserve_source_scope_identity() {
             let depth = depths[lane];
             let restored_pages = (0..depth)
                 .map(|page_index| {
-                    let after = (page_index > 0)
-                        .then(|| continuations[page_index - 1].clone());
-                    let next = (page_index + 1 < depth)
-                        .then(|| continuations[page_index].clone());
+                    let after = (page_index > 0).then(|| continuations[page_index - 1].clone());
+                    let next = (page_index + 1 < depth).then(|| continuations[page_index].clone());
                     let value = if page_index == 0 {
                         values[lane]
                     } else {
@@ -3302,15 +3919,40 @@ fn paired_refresh_cursor_restores_preserve_source_scope_identity() {
     let mut source = PairedCursorRestoreSource::new(restores);
 
     let first = run_with_fixture_functions(paired_scoped_view_refresh_body(), &mut source).unwrap();
-    assert_eq!(first, integer(14), "first paired refresh folds the restored left and right pages");
-    let second = run_with_fixture_functions(paired_scoped_view_refresh_body(), &mut source).unwrap();
-    assert_eq!(second, integer(18), "second refresh uses its own cursor-keyed source snapshots");
+    assert_eq!(
+        first,
+        integer(14),
+        "first paired refresh folds the restored left and right pages"
+    );
+    let second =
+        run_with_fixture_functions(paired_scoped_view_refresh_body(), &mut source).unwrap();
+    assert_eq!(
+        second,
+        integer(18),
+        "second refresh uses its own cursor-keyed source snapshots"
+    );
     let third = run_with_fixture_functions(paired_scoped_view_refresh_body(), &mut source).unwrap();
-    assert_eq!(third, integer(16), "third refresh restores its own paired page chains");
-    assert_eq!(first, integer(14), "later restores leave the first fold result captured");
-    assert_eq!(second, integer(18), "later restores leave the second fold result captured");
+    assert_eq!(
+        third,
+        integer(16),
+        "third refresh restores its own paired page chains"
+    );
+    assert_eq!(
+        first,
+        integer(14),
+        "later restores leave the first fold result captured"
+    );
+    assert_eq!(
+        second,
+        integer(18),
+        "later restores leave the second fold result captured"
+    );
 
-    assert_eq!(source.lanes.len(), 12, "three refreshes bind four source scopes apiece");
+    assert_eq!(
+        source.lanes.len(),
+        12,
+        "three refreshes bind four source scopes apiece"
+    );
     for generation in 0..3 {
         let start = generation * 4;
         assert_eq!(source.lanes[start].0, "View.Left");
@@ -3318,7 +3960,11 @@ fn paired_refresh_cursor_restores_preserve_source_scope_identity() {
         assert_eq!(source.lanes[start + 2].0, "View.Right");
         assert_eq!(source.lanes[start + 3].0, "View.Right");
     }
-    let scopes = source.lanes.iter().map(|(_, scope, _)| *scope).collect::<Vec<_>>();
+    let scopes = source
+        .lanes
+        .iter()
+        .map(|(_, scope, _)| *scope)
+        .collect::<Vec<_>>();
     for (index, scope) in scopes.iter().enumerate() {
         assert!(
             !scopes[..index].contains(scope),
@@ -3339,8 +3985,7 @@ fn paired_refresh_cursor_restores_preserve_source_scope_identity() {
         }
     }
     assert_eq!(
-        source.cursors,
-        expected_cursors,
+        source.cursors, expected_cursors,
         "reused restoration cursors resolve only within their source and fresh read scope"
     );
     assert!(source.pending["View.Left"].is_empty());
@@ -3358,18 +4003,12 @@ fn nested_aggregate_folds_keep_identity_across_paired_refresh_compaction_chains(
     let restore = |groups: &[&[i64]]| {
         assert_eq!(groups.len(), 3, "each checkpoint chain has three pages");
         BTreeMap::from([
-            (
-                None,
-                page(groups[0], Some(long_checkpoint_cursor.clone())),
-            ),
+            (None, page(groups[0], Some(long_checkpoint_cursor.clone()))),
             (
                 Some(long_checkpoint_cursor.clone()),
                 page(groups[1], Some(compacted_cursor.clone())),
             ),
-            (
-                Some(compacted_cursor.clone()),
-                page(groups[2], None),
-            ),
+            (Some(compacted_cursor.clone()), page(groups[2], None)),
         ])
     };
     let mut source = PairedCursorRestoreSource::new([
@@ -3401,13 +4040,33 @@ fn nested_aggregate_folds_keep_identity_across_paired_refresh_compaction_chains(
     };
 
     let first = run_refresh(&mut source);
-    assert_eq!(first, integer_pair(20, 200), "nested folds compute the first paired snapshot");
+    assert_eq!(
+        first,
+        integer_pair(20, 200),
+        "nested folds compute the first paired snapshot"
+    );
     let second = run_refresh(&mut source);
-    assert_eq!(second, integer_pair(44, 40), "the next compacted pair computes its own nested totals");
+    assert_eq!(
+        second,
+        integer_pair(44, 40),
+        "the next compacted pair computes its own nested totals"
+    );
     let third = run_refresh(&mut source);
-    assert_eq!(third, integer_pair(30, 60), "the final pair folds its own pages after compaction");
-    assert_eq!(first, integer_pair(20, 200), "later refreshes retain the first paired value snapshot");
-    assert_eq!(second, integer_pair(44, 40), "later refreshes retain the second paired value snapshot");
+    assert_eq!(
+        third,
+        integer_pair(30, 60),
+        "the final pair folds its own pages after compaction"
+    );
+    assert_eq!(
+        first,
+        integer_pair(20, 200),
+        "later refreshes retain the first paired value snapshot"
+    );
+    assert_eq!(
+        second,
+        integer_pair(44, 40),
+        "later refreshes retain the second paired value snapshot"
+    );
 
     let lane_names = [
         "View.Left",
@@ -3423,7 +4082,10 @@ fn nested_aggregate_folds_keep_identity_across_paired_refresh_compaction_chains(
         .iter()
         .zip(lane_names)
         .map(|((source_name, scope, _), expected_name)| {
-            assert_eq!(source_name, expected_name, "each generation restores left then right");
+            assert_eq!(
+                source_name, expected_name,
+                "each generation restores left then right"
+            );
             *scope
         })
         .collect::<Vec<_>>();
@@ -3450,8 +4112,7 @@ fn nested_aggregate_folds_keep_identity_across_paired_refresh_compaction_chains(
         ]);
     }
     assert_eq!(
-        source.cursors,
-        expected_cursors,
+        source.cursors, expected_cursors,
         "the shared compact token resumes only inside its paired refresh and source scope"
     );
     assert!(source.pending["View.Left"].is_empty());
@@ -3505,15 +4166,40 @@ fn paired_pagination_restores_keep_forked_cursor_chains_scoped() {
     let mut source = PairedCursorRestoreSource::new(restores);
 
     let first = run_with_fixture_functions(paired_scoped_view_refresh_body(), &mut source).unwrap();
-    assert_eq!(first, integer(14), "first paired fold restores its branch-specific cursor tails");
-    let second = run_with_fixture_functions(paired_scoped_view_refresh_body(), &mut source).unwrap();
-    assert_eq!(second, integer(18), "second fold restores values from its own paired lanes");
+    assert_eq!(
+        first,
+        integer(14),
+        "first paired fold restores its branch-specific cursor tails"
+    );
+    let second =
+        run_with_fixture_functions(paired_scoped_view_refresh_body(), &mut source).unwrap();
+    assert_eq!(
+        second,
+        integer(18),
+        "second fold restores values from its own paired lanes"
+    );
     let third = run_with_fixture_functions(paired_scoped_view_refresh_body(), &mut source).unwrap();
-    assert_eq!(third, integer(16), "third fold restores values after a second handoff");
-    assert_eq!(first, integer(14), "later restore chains preserve the first folded value");
-    assert_eq!(second, integer(18), "later restore chains preserve the second folded value");
+    assert_eq!(
+        third,
+        integer(16),
+        "third fold restores values after a second handoff"
+    );
+    assert_eq!(
+        first,
+        integer(14),
+        "later restore chains preserve the first folded value"
+    );
+    assert_eq!(
+        second,
+        integer(18),
+        "later restore chains preserve the second folded value"
+    );
 
-    assert_eq!(source.lanes.len(), 12, "three refreshes bind four independent scopes each");
+    assert_eq!(
+        source.lanes.len(),
+        12,
+        "three refreshes bind four independent scopes each"
+    );
     for generation in 0..3 {
         let start = generation * 4;
         assert_eq!(source.lanes[start].0, "View.Left");
@@ -3521,7 +4207,11 @@ fn paired_pagination_restores_keep_forked_cursor_chains_scoped() {
         assert_eq!(source.lanes[start + 2].0, "View.Right");
         assert_eq!(source.lanes[start + 3].0, "View.Right");
     }
-    let scopes = source.lanes.iter().map(|(_, scope, _)| *scope).collect::<Vec<_>>();
+    let scopes = source
+        .lanes
+        .iter()
+        .map(|(_, scope, _)| *scope)
+        .collect::<Vec<_>>();
     for (index, scope) in scopes.iter().enumerate() {
         assert!(
             !scopes[..index].contains(scope),
@@ -3542,8 +4232,7 @@ fn paired_pagination_restores_keep_forked_cursor_chains_scoped() {
         }
     }
     assert_eq!(
-        source.cursors,
-        expected_cursors,
+        source.cursors, expected_cursors,
         "paired restore requests preserve the shared checkpoint and each scope-specific cursor tail"
     );
     assert!(source.pending["View.Left"].is_empty());
@@ -3574,10 +4263,8 @@ fn paired_compacted_cursor_restores_keep_scope_identity() {
             let depth = depths[lane];
             let restored_pages = (0..depth)
                 .map(|page_index| {
-                    let after = (page_index > 0)
-                        .then(|| continuations[page_index - 1].clone());
-                    let next = (page_index + 1 < depth)
-                        .then(|| continuations[page_index].clone());
+                    let after = (page_index > 0).then(|| continuations[page_index - 1].clone());
+                    let next = (page_index + 1 < depth).then(|| continuations[page_index].clone());
                     let value = if page_index == 0 {
                         values[lane]
                     } else {
@@ -3592,15 +4279,40 @@ fn paired_compacted_cursor_restores_keep_scope_identity() {
     let mut source = PairedCursorRestoreSource::new(restores);
 
     let first = run_with_fixture_functions(paired_scoped_view_refresh_body(), &mut source).unwrap();
-    assert_eq!(first, integer(14), "first fold restores its compacting paired page chains");
-    let second = run_with_fixture_functions(paired_scoped_view_refresh_body(), &mut source).unwrap();
-    assert_eq!(second, integer(18), "second fold observes its own refreshed values");
+    assert_eq!(
+        first,
+        integer(14),
+        "first fold restores its compacting paired page chains"
+    );
+    let second =
+        run_with_fixture_functions(paired_scoped_view_refresh_body(), &mut source).unwrap();
+    assert_eq!(
+        second,
+        integer(18),
+        "second fold observes its own refreshed values"
+    );
     let third = run_with_fixture_functions(paired_scoped_view_refresh_body(), &mut source).unwrap();
-    assert_eq!(third, integer(16), "third fold observes values after another compacting restore");
-    assert_eq!(first, integer(14), "later compacted restores preserve the first fold value");
-    assert_eq!(second, integer(18), "later compacted restores preserve the second fold value");
+    assert_eq!(
+        third,
+        integer(16),
+        "third fold observes values after another compacting restore"
+    );
+    assert_eq!(
+        first,
+        integer(14),
+        "later compacted restores preserve the first fold value"
+    );
+    assert_eq!(
+        second,
+        integer(18),
+        "later compacted restores preserve the second fold value"
+    );
 
-    assert_eq!(source.lanes.len(), 12, "three refreshes bind four independent scopes each");
+    assert_eq!(
+        source.lanes.len(),
+        12,
+        "three refreshes bind four independent scopes each"
+    );
     for generation in 0..3 {
         let start = generation * 4;
         assert_eq!(source.lanes[start].0, "View.Left");
@@ -3608,7 +4320,11 @@ fn paired_compacted_cursor_restores_keep_scope_identity() {
         assert_eq!(source.lanes[start + 2].0, "View.Right");
         assert_eq!(source.lanes[start + 3].0, "View.Right");
     }
-    let scopes = source.lanes.iter().map(|(_, scope, _)| *scope).collect::<Vec<_>>();
+    let scopes = source
+        .lanes
+        .iter()
+        .map(|(_, scope, _)| *scope)
+        .collect::<Vec<_>>();
     for (index, scope) in scopes.iter().enumerate() {
         assert!(
             !scopes[..index].contains(scope),
@@ -3629,8 +4345,7 @@ fn paired_compacted_cursor_restores_keep_scope_identity() {
         }
     }
     assert_eq!(
-        source.cursors,
-        expected_cursors,
+        source.cursors, expected_cursors,
         "each long or compacted cursor restores only inside its paired read scope"
     );
     assert!(source.pending["View.Left"].is_empty());
@@ -3677,19 +4392,48 @@ fn paired_refresh_compaction_collisions_remain_scope_local() {
             continuations_by_lane.push(chain);
         }
     }
-    assert_eq!(compacted.len(), 1, "distinct long checkpoints compact to one shared cursor");
+    assert_eq!(
+        compacted.len(),
+        1,
+        "distinct long checkpoints compact to one shared cursor"
+    );
     let mut source = PairedCursorRestoreSource::new(restores);
 
     let first = run_with_fixture_functions(paired_scoped_view_refresh_body(), &mut source).unwrap();
-    assert_eq!(first, integer(14), "first paired refresh restores its values after compaction");
-    let second = run_with_fixture_functions(paired_scoped_view_refresh_body(), &mut source).unwrap();
-    assert_eq!(second, integer(18), "second refresh keeps compacted cursors in its own scopes");
+    assert_eq!(
+        first,
+        integer(14),
+        "first paired refresh restores its values after compaction"
+    );
+    let second =
+        run_with_fixture_functions(paired_scoped_view_refresh_body(), &mut source).unwrap();
+    assert_eq!(
+        second,
+        integer(18),
+        "second refresh keeps compacted cursors in its own scopes"
+    );
     let third = run_with_fixture_functions(paired_scoped_view_refresh_body(), &mut source).unwrap();
-    assert_eq!(third, integer(16), "third refresh restores from the converged cursor independently");
-    assert_eq!(first, integer(14), "later compacted refreshes preserve the initial value");
-    assert_eq!(second, integer(18), "later compacted refreshes preserve the middle value");
+    assert_eq!(
+        third,
+        integer(16),
+        "third refresh restores from the converged cursor independently"
+    );
+    assert_eq!(
+        first,
+        integer(14),
+        "later compacted refreshes preserve the initial value"
+    );
+    assert_eq!(
+        second,
+        integer(18),
+        "later compacted refreshes preserve the middle value"
+    );
 
-    assert_eq!(source.lanes.len(), 12, "three refreshes bind four independently compacted scopes");
+    assert_eq!(
+        source.lanes.len(),
+        12,
+        "three refreshes bind four independently compacted scopes"
+    );
     for generation in 0..3 {
         let start = generation * 4;
         assert_eq!(source.lanes[start].0, "View.Left");
@@ -3697,7 +4441,11 @@ fn paired_refresh_compaction_collisions_remain_scope_local() {
         assert_eq!(source.lanes[start + 2].0, "View.Right");
         assert_eq!(source.lanes[start + 3].0, "View.Right");
     }
-    let scopes = source.lanes.iter().map(|(_, scope, _)| *scope).collect::<Vec<_>>();
+    let scopes = source
+        .lanes
+        .iter()
+        .map(|(_, scope, _)| *scope)
+        .collect::<Vec<_>>();
     for (index, scope) in scopes.iter().enumerate() {
         assert!(
             !scopes[..index].contains(scope),
@@ -3718,8 +4466,7 @@ fn paired_refresh_compaction_collisions_remain_scope_local() {
         }
     }
     assert_eq!(
-        source.cursors,
-        expected_cursors,
+        source.cursors, expected_cursors,
         "divergent long checkpoints converge on the compact cursor without crossing scopes"
     );
     assert!(source.pending["View.Left"].is_empty());
@@ -3789,7 +4536,8 @@ fn paired_subscriptions_rebind_independent_scopes_through_refresh_cascades() {
         vec![page(&[2, 8], Some(vec![42])), page(&[10, 12], None)],
     ]);
     assert_eq!(
-        run_with_fixture_functions(paired_subscription_cascade_body(), &mut second_refresh).unwrap(),
+        run_with_fixture_functions(paired_subscription_cascade_body(), &mut second_refresh)
+            .unwrap(),
         integer(3),
         "the rebound pair computes from only its new source pages"
     );
@@ -4006,9 +4754,16 @@ fn paired_subscription_handoffs_rebind_reused_batch_cursors_to_fresh_scopes() {
     for generation in 0..3 {
         let left = source.lanes[generation * 2].0;
         let right = source.lanes[generation * 2 + 1].0;
-        assert_ne!(left, right, "generation {generation} keeps sibling subscriptions distinct");
+        assert_ne!(
+            left, right,
+            "generation {generation} keeps sibling subscriptions distinct"
+        );
     }
-    let scopes = source.lanes.iter().map(|(scope, _)| *scope).collect::<Vec<_>>();
+    let scopes = source
+        .lanes
+        .iter()
+        .map(|(scope, _)| *scope)
+        .collect::<Vec<_>>();
     for (index, scope) in scopes.iter().enumerate() {
         assert!(
             !scopes[..index].contains(scope),
@@ -4063,15 +4818,26 @@ fn paired_subscription_refresh_chain_retains_values_across_variable_page_handoff
         vec![page(&[2], Some(vec![11])), page(&[4], None)],
     ]);
 
-    let first_fold = run_with_fixture_functions(paired_subscription_cascade_body(), &mut source).unwrap();
+    let first_fold =
+        run_with_fixture_functions(paired_subscription_cascade_body(), &mut source).unwrap();
     assert_eq!(first_fold, integer(14));
-    let second_fold = run_with_fixture_functions(paired_subscription_cascade_body(), &mut source).unwrap();
+    let second_fold =
+        run_with_fixture_functions(paired_subscription_cascade_body(), &mut source).unwrap();
     assert_eq!(second_fold, integer(7));
-    let third_fold = run_with_fixture_functions(paired_subscription_cascade_body(), &mut source).unwrap();
+    let third_fold =
+        run_with_fixture_functions(paired_subscription_cascade_body(), &mut source).unwrap();
     assert_eq!(third_fold, integer(10));
 
-    assert_eq!(first_fold, integer(14), "the first fold remains pinned after two refresh handoffs");
-    assert_eq!(second_fold, integer(7), "the second fold remains pinned after the third fold");
+    assert_eq!(
+        first_fold,
+        integer(14),
+        "the first fold remains pinned after two refresh handoffs"
+    );
+    assert_eq!(
+        second_fold,
+        integer(7),
+        "the second fold remains pinned after the third fold"
+    );
     assert_eq!(source.lanes.len(), 6);
     for generation in 0..3 {
         assert_ne!(
@@ -4080,7 +4846,11 @@ fn paired_subscription_refresh_chain_retains_values_across_variable_page_handoff
             "refresh generation {generation} owns distinct paired subscription scopes"
         );
     }
-    let scopes = source.lanes.iter().map(|(scope, _)| *scope).collect::<Vec<_>>();
+    let scopes = source
+        .lanes
+        .iter()
+        .map(|(scope, _)| *scope)
+        .collect::<Vec<_>>();
     for (index, scope) in scopes.iter().enumerate() {
         assert!(
             !scopes[..index].contains(scope),
@@ -4152,15 +4922,26 @@ fn paired_subscription_read_batches_preserve_four_page_cursor_fold_chains() {
         ],
     ]);
 
-    let first_fold = run_with_fixture_functions(paired_subscription_cascade_body(), &mut source).unwrap();
+    let first_fold =
+        run_with_fixture_functions(paired_subscription_cascade_body(), &mut source).unwrap();
     assert_eq!(first_fold, integer(21));
-    let second_fold = run_with_fixture_functions(paired_subscription_cascade_body(), &mut source).unwrap();
+    let second_fold =
+        run_with_fixture_functions(paired_subscription_cascade_body(), &mut source).unwrap();
     assert_eq!(second_fold, integer(3));
-    let third_fold = run_with_fixture_functions(paired_subscription_cascade_body(), &mut source).unwrap();
+    let third_fold =
+        run_with_fixture_functions(paired_subscription_cascade_body(), &mut source).unwrap();
     assert_eq!(third_fold, integer(12));
 
-    assert_eq!(first_fold, integer(21), "the first folded result survives both later handoffs");
-    assert_eq!(second_fold, integer(3), "the second folded result survives the third handoff");
+    assert_eq!(
+        first_fold,
+        integer(21),
+        "the first folded result survives both later handoffs"
+    );
+    assert_eq!(
+        second_fold,
+        integer(3),
+        "the second folded result survives the third handoff"
+    );
     assert_eq!(source.lanes.len(), 6);
     for generation in 0..3 {
         assert_ne!(
@@ -4169,7 +4950,11 @@ fn paired_subscription_read_batches_preserve_four_page_cursor_fold_chains() {
             "generation {generation} keeps its left and right read scopes independent"
         );
     }
-    let scopes = source.lanes.iter().map(|(scope, _)| *scope).collect::<Vec<_>>();
+    let scopes = source
+        .lanes
+        .iter()
+        .map(|(scope, _)| *scope)
+        .collect::<Vec<_>>();
     for (index, scope) in scopes.iter().enumerate() {
         assert!(
             !scopes[..index].contains(scope),
@@ -4255,13 +5040,33 @@ fn paired_refresh_windows_keep_scope_identity_across_compaction_chains() {
     };
 
     let first = run_refresh(&mut source);
-    assert_eq!(first, integer_pair(18, 36), "the first complete windows sum to (18, 36)");
+    assert_eq!(
+        first,
+        integer_pair(18, 36),
+        "the first complete windows sum to (18, 36)"
+    );
     let second = run_refresh(&mut source);
-    assert_eq!(second, integer_pair(28, 54), "the next compacted pair sums to (28, 54)");
+    assert_eq!(
+        second,
+        integer_pair(28, 54),
+        "the next compacted pair sums to (28, 54)"
+    );
     let third = run_refresh(&mut source);
-    assert_eq!(third, integer_pair(24, 41), "the final pair sums complete restored windows");
-    assert_eq!(first, integer_pair(18, 36), "later refreshes keep the first window snapshot intact");
-    assert_eq!(second, integer_pair(28, 54), "later refreshes keep the second window snapshot intact");
+    assert_eq!(
+        third,
+        integer_pair(24, 41),
+        "the final pair sums complete restored windows"
+    );
+    assert_eq!(
+        first,
+        integer_pair(18, 36),
+        "later refreshes keep the first window snapshot intact"
+    );
+    assert_eq!(
+        second,
+        integer_pair(28, 54),
+        "later refreshes keep the second window snapshot intact"
+    );
 
     let lane_names = [
         "View.Left",
@@ -4277,7 +5082,10 @@ fn paired_refresh_windows_keep_scope_identity_across_compaction_chains() {
         .iter()
         .zip(lane_names)
         .map(|((source_name, scope, _), expected_name)| {
-            assert_eq!(source_name, expected_name, "each refresh binds left then right");
+            assert_eq!(
+                source_name, expected_name,
+                "each refresh binds left then right"
+            );
             *scope
         })
         .collect::<Vec<_>>();
@@ -4304,8 +5112,7 @@ fn paired_refresh_windows_keep_scope_identity_across_compaction_chains() {
         ]);
     }
     assert_eq!(
-        source.cursors,
-        expected_cursors,
+        source.cursors, expected_cursors,
         "shared opaque cursors resume only within each paired refresh scope"
     );
     assert!(source.pending["View.Left"].is_empty());
@@ -4321,19 +5128,39 @@ fn paired_window_folds_keep_values_across_sparse_checkpoint_restore_chains() {
             .iter()
             .enumerate()
             .map(|(index, values)| {
-                let after = index.checked_sub(1).map(|previous| cursors[previous].clone());
+                let after = index
+                    .checked_sub(1)
+                    .map(|previous| cursors[previous].clone());
                 let next = cursors.get(index).cloned();
                 (after, page(values, next))
             })
             .collect::<CursorRestore>()
     };
     let mut source = PairedCursorRestoreSource::new([
-        ("View.Left", restore(&[&[1, 3], &[2, 4, 5], &[6, 7, 8], &[9, 10]])),
-        ("View.Right", restore(&[&[1, 3], &[2, 4, 5], &[6, 7, 8], &[9, 10]])),
-        ("View.Left", restore(&[&[11, 13], &[12, 14, 15], &[16, 17, 18], &[19, 20]])),
-        ("View.Right", restore(&[&[11, 13], &[12, 14, 15], &[16, 17, 18], &[19, 20]])),
-        ("View.Left", restore(&[&[-9, -7], &[-8, -6, -5], &[-4, -3, -2], &[-1, 0]])),
-        ("View.Right", restore(&[&[-10, -8], &[-9, -7, -6], &[-5, -4, -3], &[-2, -1]])),
+        (
+            "View.Left",
+            restore(&[&[1, 3], &[2, 4, 5], &[6, 7, 8], &[9, 10]]),
+        ),
+        (
+            "View.Right",
+            restore(&[&[1, 3], &[2, 4, 5], &[6, 7, 8], &[9, 10]]),
+        ),
+        (
+            "View.Left",
+            restore(&[&[11, 13], &[12, 14, 15], &[16, 17, 18], &[19, 20]]),
+        ),
+        (
+            "View.Right",
+            restore(&[&[11, 13], &[12, 14, 15], &[16, 17, 18], &[19, 20]]),
+        ),
+        (
+            "View.Left",
+            restore(&[&[-9, -7], &[-8, -6, -5], &[-4, -3, -2], &[-1, 0]]),
+        ),
+        (
+            "View.Right",
+            restore(&[&[-10, -8], &[-9, -7, -6], &[-5, -4, -3], &[-2, -1]]),
+        ),
     ]);
     let mut functions = paired_sparse_window_checkpoint_functions();
     functions.insert(
@@ -4356,13 +5183,33 @@ fn paired_window_folds_keep_values_across_sparse_checkpoint_restore_chains() {
     };
 
     let first = run_refresh(&mut source);
-    assert_eq!(first, integer_pair(30, 36), "the initial sparse windows fold to (30, 36)");
+    assert_eq!(
+        first,
+        integer_pair(30, 36),
+        "the initial sparse windows fold to (30, 36)"
+    );
     let second = run_refresh(&mut source);
-    assert_eq!(second, integer_pair(90, 96), "the second checkpoint pair folds to (90, 96)");
+    assert_eq!(
+        second,
+        integer_pair(90, 96),
+        "the second checkpoint pair folds to (90, 96)"
+    );
     let third = run_refresh(&mut source);
-    assert_eq!(third, integer_pair(-30, -36), "the final checkpoint pair folds to (-30, -36)");
-    assert_eq!(first, integer_pair(30, 36), "later restores leave the first sparse fold unchanged");
-    assert_eq!(second, integer_pair(90, 96), "later restores leave the second sparse fold unchanged");
+    assert_eq!(
+        third,
+        integer_pair(-30, -36),
+        "the final checkpoint pair folds to (-30, -36)"
+    );
+    assert_eq!(
+        first,
+        integer_pair(30, 36),
+        "later restores leave the first sparse fold unchanged"
+    );
+    assert_eq!(
+        second,
+        integer_pair(90, 96),
+        "later restores leave the second sparse fold unchanged"
+    );
     let lane_names = [
         "View.Left",
         "View.Right",
@@ -4377,7 +5224,10 @@ fn paired_window_folds_keep_values_across_sparse_checkpoint_restore_chains() {
         .iter()
         .zip(lane_names)
         .map(|((source_name, scope, _), expected_name)| {
-            assert_eq!(source_name, expected_name, "each restored pair reads left then right");
+            assert_eq!(
+                source_name, expected_name,
+                "each restored pair reads left then right"
+            );
             *scope
         })
         .collect::<Vec<_>>();
@@ -4391,15 +5241,15 @@ fn paired_window_folds_keep_values_across_sparse_checkpoint_restore_chains() {
     for (index, scope) in scopes.iter().copied().enumerate() {
         expected_cursors.extend(
             std::iter::once((lane_names[index].to_owned(), scope, None)).chain(
-                cursors.iter().cloned().map(|cursor| {
-                    (lane_names[index].to_owned(), scope, Some(cursor))
-                }),
+                cursors
+                    .iter()
+                    .cloned()
+                    .map(|cursor| (lane_names[index].to_owned(), scope, Some(cursor))),
             ),
         );
     }
     assert_eq!(
-        source.cursors,
-        expected_cursors,
+        source.cursors, expected_cursors,
         "the same sparse checkpoint sequence advances independently in each source scope"
     );
     assert!(source.pending["View.Left"].is_empty());
@@ -4418,7 +5268,9 @@ fn nested_aggregates_keep_values_across_paired_pagination_compaction_chains() {
             .iter()
             .enumerate()
             .map(|(index, values)| {
-                let after = index.checked_sub(1).map(|previous| cursors[previous].clone());
+                let after = index
+                    .checked_sub(1)
+                    .map(|previous| cursors[previous].clone());
                 let next = cursors.get(index).cloned();
                 (after, page(values, next))
             })
@@ -4453,13 +5305,33 @@ fn nested_aggregates_keep_values_across_paired_pagination_compaction_chains() {
     };
 
     let first = run_refresh(&mut source);
-    assert_eq!(first, integer_pair(56, 560), "the first nested page folds compute (56, 560)");
+    assert_eq!(
+        first,
+        integer_pair(56, 560),
+        "the first nested page folds compute (56, 560)"
+    );
     let second = run_refresh(&mut source);
-    assert_eq!(second, integer_pair(104, 112), "the compacted second pair computes (104, 112)");
+    assert_eq!(
+        second,
+        integer_pair(104, 112),
+        "the compacted second pair computes (104, 112)"
+    );
     let third = run_refresh(&mut source);
-    assert_eq!(third, integer_pair(94, 168), "the final page pair computes (94, 168)");
-    assert_eq!(first, integer_pair(56, 560), "later refreshes preserve the first nested aggregate pair");
-    assert_eq!(second, integer_pair(104, 112), "later refreshes preserve the second nested aggregate pair");
+    assert_eq!(
+        third,
+        integer_pair(94, 168),
+        "the final page pair computes (94, 168)"
+    );
+    assert_eq!(
+        first,
+        integer_pair(56, 560),
+        "later refreshes preserve the first nested aggregate pair"
+    );
+    assert_eq!(
+        second,
+        integer_pair(104, 112),
+        "later refreshes preserve the second nested aggregate pair"
+    );
     let lane_names = [
         "View.Left",
         "View.Right",
@@ -4474,7 +5346,10 @@ fn nested_aggregates_keep_values_across_paired_pagination_compaction_chains() {
         .iter()
         .zip(lane_names)
         .map(|((source_name, scope, _), expected_name)| {
-            assert_eq!(source_name, expected_name, "nested refreshes read left then right");
+            assert_eq!(
+                source_name, expected_name,
+                "nested refreshes read left then right"
+            );
             *scope
         })
         .collect::<Vec<_>>();
@@ -4488,15 +5363,15 @@ fn nested_aggregates_keep_values_across_paired_pagination_compaction_chains() {
     for (index, scope) in scopes.iter().copied().enumerate() {
         expected_cursors.extend(
             std::iter::once((lane_names[index].to_owned(), scope, None)).chain(
-                cursors.iter().cloned().map(|cursor| {
-                    (lane_names[index].to_owned(), scope, Some(cursor))
-                }),
+                cursors
+                    .iter()
+                    .cloned()
+                    .map(|cursor| (lane_names[index].to_owned(), scope, Some(cursor))),
             ),
         );
     }
     assert_eq!(
-        source.cursors,
-        expected_cursors,
+        source.cursors, expected_cursors,
         "reused compact pagination cursors restore only the corresponding nested source snapshot"
     );
     assert!(source.pending["View.Left"].is_empty());
@@ -4531,7 +5406,9 @@ fn paired_refreshes_keep_values_across_sparse_checkpoint_rotation_chains() {
             .iter()
             .enumerate()
             .map(|(index, values)| {
-                let after = index.checked_sub(1).map(|previous| tokens[previous].clone());
+                let after = index
+                    .checked_sub(1)
+                    .map(|previous| tokens[previous].clone());
                 let next = tokens.get(index).cloned();
                 (after, page(values, next))
             })
@@ -4546,14 +5423,42 @@ fn paired_refreshes_keep_values_across_sparse_checkpoint_rotation_chains() {
         lane_names.push(source_name);
         rotated_chains.push(tokens);
     };
-    add_restore("View.Left", &[&[1, 2], &[4, 3, 6], &[5, 8], &[7, 9], &[10]], 0);
+    add_restore(
+        "View.Left",
+        &[&[1, 2], &[4, 3, 6], &[5, 8], &[7, 9], &[10]],
+        0,
+    );
     add_restore("View.Right", &[&[2, 1, 4], &[6, 3], &[8, 5, 10], &[7]], 1);
-    add_restore("View.Left", &[&[11, 12, 13], &[14, 15], &[16, 17, 18], &[19, 20]], 2);
-    add_restore("View.Right", &[&[21, 22, 23, 24], &[25, 26, 27, 28], &[29, 30]], 0);
-    add_restore("View.Left", &[&[-9, -8, -7], &[-6, -5], &[-4, -3, -2], &[-1, 0]], 1);
-    add_restore("View.Right", &[&[-10, -8], &[-9, -7, -6], &[-5, -4], &[-3, -2]], 2);
-    add_restore("View.Left", &[&[101, 102, 103], &[104, 105, 106, 107], &[108, 109, 110]], 0);
-    add_restore("View.Right", &[&[101, 102], &[103, 104, 105], &[106, 107, 108], &[109, 110]], 1);
+    add_restore(
+        "View.Left",
+        &[&[11, 12, 13], &[14, 15], &[16, 17, 18], &[19, 20]],
+        2,
+    );
+    add_restore(
+        "View.Right",
+        &[&[21, 22, 23, 24], &[25, 26, 27, 28], &[29, 30]],
+        0,
+    );
+    add_restore(
+        "View.Left",
+        &[&[-9, -8, -7], &[-6, -5], &[-4, -3, -2], &[-1, 0]],
+        1,
+    );
+    add_restore(
+        "View.Right",
+        &[&[-10, -8], &[-9, -7, -6], &[-5, -4], &[-3, -2]],
+        2,
+    );
+    add_restore(
+        "View.Left",
+        &[&[101, 102, 103], &[104, 105, 106, 107], &[108, 109, 110]],
+        0,
+    );
+    add_restore(
+        "View.Right",
+        &[&[101, 102], &[103, 104, 105], &[106, 107, 108], &[109, 110]],
+        1,
+    );
     drop(add_restore);
 
     let mut source = PairedCursorRestoreSource::new(restores);
@@ -4578,23 +5483,54 @@ fn paired_refreshes_keep_values_across_sparse_checkpoint_rotation_chains() {
     };
 
     let first = run_refresh(&mut source);
-    assert_eq!(first, integer_pair(30, 36), "the first sparse pair computes (30, 36)");
+    assert_eq!(
+        first,
+        integer_pair(30, 36),
+        "the first sparse pair computes (30, 36)"
+    );
     let second = run_refresh(&mut source);
-    assert_eq!(second, integer_pair(90, 156), "the second rotated pair computes (90, 156)");
+    assert_eq!(
+        second,
+        integer_pair(90, 156),
+        "the second rotated pair computes (90, 156)"
+    );
     let third = run_refresh(&mut source);
-    assert_eq!(third, integer_pair(-30, -36), "the third rotated pair computes (-30, -36)");
+    assert_eq!(
+        third,
+        integer_pair(-30, -36),
+        "the third rotated pair computes (-30, -36)"
+    );
     let fourth = run_refresh(&mut source);
-    assert_eq!(fourth, integer_pair(630, 636), "the fourth rotated pair computes (630, 636)");
-    assert_eq!(first, integer_pair(30, 36), "later refreshes preserve the first result");
-    assert_eq!(second, integer_pair(90, 156), "later refreshes preserve the second result");
-    assert_eq!(third, integer_pair(-30, -36), "later refreshes preserve the third result");
+    assert_eq!(
+        fourth,
+        integer_pair(630, 636),
+        "the fourth rotated pair computes (630, 636)"
+    );
+    assert_eq!(
+        first,
+        integer_pair(30, 36),
+        "later refreshes preserve the first result"
+    );
+    assert_eq!(
+        second,
+        integer_pair(90, 156),
+        "later refreshes preserve the second result"
+    );
+    assert_eq!(
+        third,
+        integer_pair(-30, -36),
+        "later refreshes preserve the third result"
+    );
     assert_eq!(source.lanes.len(), lane_names.len());
     let scopes = source
         .lanes
         .iter()
         .zip(lane_names.iter().copied())
         .map(|((source_name, scope, _), expected_name)| {
-            assert_eq!(source_name, expected_name, "each refresh reads left then right");
+            assert_eq!(
+                source_name, expected_name,
+                "each refresh reads left then right"
+            );
             *scope
         })
         .collect::<Vec<_>>();
@@ -4621,13 +5557,15 @@ fn paired_refreshes_keep_values_across_sparse_checkpoint_rotation_chains() {
     for (index, chain) in rotated_chains.iter().enumerate() {
         let source_name = lane_names[index].to_owned();
         expected_cursors.push((source_name.clone(), scopes[index], None));
-        expected_cursors.extend(chain.iter().cloned().map(|cursor| {
-            (source_name.clone(), scopes[index], Some(cursor))
-        }));
+        expected_cursors.extend(
+            chain
+                .iter()
+                .cloned()
+                .map(|cursor| (source_name.clone(), scopes[index], Some(cursor))),
+        );
     }
     assert_eq!(
-        source.cursors,
-        expected_cursors,
+        source.cursors, expected_cursors,
         "rotated sparse checkpoints resume only their paired source scope"
     );
     assert!(source.pending["View.Left"].is_empty());
@@ -4664,7 +5602,9 @@ fn paired_snapshots_keep_values_across_sparse_escalation_fold_chains() {
             .iter()
             .enumerate()
             .map(|(index, values)| {
-                let after = index.checked_sub(1).map(|previous| tokens[previous].clone());
+                let after = index
+                    .checked_sub(1)
+                    .map(|previous| tokens[previous].clone());
                 let next = tokens.get(index).cloned();
                 (after, page(values, next))
             })
@@ -4680,13 +5620,47 @@ fn paired_snapshots_keep_values_across_sparse_escalation_fold_chains() {
         rotated_chains.push(tokens);
     };
     add_restore("View.Left", &[&[1, 2, 3], &[4, 5], &[6, 7, 8], &[9, 10]], 0);
-    add_restore("View.Right", &[&[1, 2], &[3, 4], &[5, 6], &[7, 8], &[9, 10]], 1);
-    add_restore("View.Left", &[&[11, 12, 13], &[14, 15, 16, 17], &[18, 19, 20]], 2);
-    add_restore("View.Right", &[&[11, 12, 13, 14], &[15], &[16, 17], &[18, 19, 20]], 0);
-    add_restore("View.Left", &[&[-9, -8], &[-7, -6], &[-5, -4], &[-3, -2], &[-1, 0]], 1);
-    add_restore("View.Right", &[&[-9, -8, -7], &[-6, -5, -4, -3], &[-2, -1, 0]], 2);
-    add_restore("View.Left", &[&[101, 102, 103, 104], &[105], &[106, 107, 108], &[109, 110]], 0);
-    add_restore("View.Right", &[&[101, 102], &[103, 104], &[105, 106], &[107, 108], &[109, 110]], 1);
+    add_restore(
+        "View.Right",
+        &[&[1, 2], &[3, 4], &[5, 6], &[7, 8], &[9, 10]],
+        1,
+    );
+    add_restore(
+        "View.Left",
+        &[&[11, 12, 13], &[14, 15, 16, 17], &[18, 19, 20]],
+        2,
+    );
+    add_restore(
+        "View.Right",
+        &[&[11, 12, 13, 14], &[15], &[16, 17], &[18, 19, 20]],
+        0,
+    );
+    add_restore(
+        "View.Left",
+        &[&[-9, -8], &[-7, -6], &[-5, -4], &[-3, -2], &[-1, 0]],
+        1,
+    );
+    add_restore(
+        "View.Right",
+        &[&[-9, -8, -7], &[-6, -5, -4, -3], &[-2, -1, 0]],
+        2,
+    );
+    add_restore(
+        "View.Left",
+        &[&[101, 102, 103, 104], &[105], &[106, 107, 108], &[109, 110]],
+        0,
+    );
+    add_restore(
+        "View.Right",
+        &[
+            &[101, 102],
+            &[103, 104],
+            &[105, 106],
+            &[107, 108],
+            &[109, 110],
+        ],
+        1,
+    );
     drop(add_restore);
 
     let mut source = PairedCursorRestoreSource::new(restores);
@@ -4713,17 +5687,36 @@ fn paired_snapshots_keep_values_across_sparse_escalation_fold_chains() {
         );
         assert_eq!(snapshots.last(), Some(&integer_pair(left, right)));
     }
-    assert_eq!(snapshots[0], integer_pair(40, 48), "one fold stage computes (40, 48)");
-    assert_eq!(snapshots[1], integer_pair(180, 192), "two fold stages compute (180, 192)");
-    assert_eq!(snapshots[2], integer_pair(-80, -64), "three fold stages compute (-80, -64)");
-    assert_eq!(snapshots[3], integer_pair(1680, 1696), "four fold stages compute (1680, 1696)");
+    assert_eq!(
+        snapshots[0],
+        integer_pair(40, 48),
+        "one fold stage computes (40, 48)"
+    );
+    assert_eq!(
+        snapshots[1],
+        integer_pair(180, 192),
+        "two fold stages compute (180, 192)"
+    );
+    assert_eq!(
+        snapshots[2],
+        integer_pair(-80, -64),
+        "three fold stages compute (-80, -64)"
+    );
+    assert_eq!(
+        snapshots[3],
+        integer_pair(1680, 1696),
+        "four fold stages compute (1680, 1696)"
+    );
     assert_eq!(source.lanes.len(), lane_names.len());
     let scopes = source
         .lanes
         .iter()
         .zip(lane_names.iter().copied())
         .map(|((source_name, scope, _), expected_name)| {
-            assert_eq!(source_name, expected_name, "each escalation reads left then right");
+            assert_eq!(
+                source_name, expected_name,
+                "each escalation reads left then right"
+            );
             *scope
         })
         .collect::<Vec<_>>();
@@ -4750,13 +5743,15 @@ fn paired_snapshots_keep_values_across_sparse_escalation_fold_chains() {
     for (index, chain) in rotated_chains.iter().enumerate() {
         let source_name = lane_names[index].to_owned();
         expected_cursors.push((source_name.clone(), scopes[index], None));
-        expected_cursors.extend(chain.iter().cloned().map(|cursor| {
-            (source_name.clone(), scopes[index], Some(cursor))
-        }));
+        expected_cursors.extend(
+            chain
+                .iter()
+                .cloned()
+                .map(|cursor| (source_name.clone(), scopes[index], Some(cursor))),
+        );
     }
     assert_eq!(
-        source.cursors,
-        expected_cursors,
+        source.cursors, expected_cursors,
         "each fold depth consumes only the sparse cursors belonging to its captured source snapshot"
     );
     assert!(source.pending["View.Left"].is_empty());
@@ -4787,18 +5782,12 @@ fn paired_nested_aggregates_keep_values_across_compaction_spill_folds() {
     let restore = |groups: &[&[i64]], long_cursor: &[u8]| {
         assert_eq!(groups.len(), 3, "each spill chain has three ordered pages");
         BTreeMap::from([
-            (
-                None,
-                page(groups[0], Some(long_cursor.to_vec())),
-            ),
+            (None, page(groups[0], Some(long_cursor.to_vec()))),
             (
                 Some(long_cursor.to_vec()),
                 page(groups[1], Some(compacted_cursor.clone())),
             ),
-            (
-                Some(compacted_cursor.clone()),
-                page(groups[2], None),
-            ),
+            (Some(compacted_cursor.clone()), page(groups[2], None)),
         ])
     };
     let mut restores = Vec::new();
@@ -4842,23 +5831,54 @@ fn paired_nested_aggregates_keep_values_across_compaction_spill_folds() {
     };
 
     let first = run_refresh(&mut source);
-    assert_eq!(first, integer_pair(84, 840), "the first triple fold computes (84, 840)");
+    assert_eq!(
+        first,
+        integer_pair(84, 840),
+        "the first triple fold computes (84, 840)"
+    );
     let second = run_refresh(&mut source);
-    assert_eq!(second, integer_pair(228, 168), "the next spilled pair computes (228, 168)");
+    assert_eq!(
+        second,
+        integer_pair(228, 168),
+        "the next spilled pair computes (228, 168)"
+    );
     let third = run_refresh(&mut source);
-    assert_eq!(third, integer_pair(-84, 252), "the third nested pair computes (-84, 252)");
+    assert_eq!(
+        third,
+        integer_pair(-84, 252),
+        "the third nested pair computes (-84, 252)"
+    );
     let fourth = run_refresh(&mut source);
-    assert_eq!(fourth, integer_pair(1800, 420), "the final nested pair computes (1800, 420)");
-    assert_eq!(first, integer_pair(84, 840), "later spills retain the first aggregate snapshot");
-    assert_eq!(second, integer_pair(228, 168), "later spills retain the second aggregate snapshot");
-    assert_eq!(third, integer_pair(-84, 252), "later spills retain the third aggregate snapshot");
+    assert_eq!(
+        fourth,
+        integer_pair(1800, 420),
+        "the final nested pair computes (1800, 420)"
+    );
+    assert_eq!(
+        first,
+        integer_pair(84, 840),
+        "later spills retain the first aggregate snapshot"
+    );
+    assert_eq!(
+        second,
+        integer_pair(228, 168),
+        "later spills retain the second aggregate snapshot"
+    );
+    assert_eq!(
+        third,
+        integer_pair(-84, 252),
+        "later spills retain the third aggregate snapshot"
+    );
     assert_eq!(source.lanes.len(), lane_names.len());
     let scopes = source
         .lanes
         .iter()
         .zip(lane_names.iter().copied())
         .map(|((source_name, scope, _), expected_name)| {
-            assert_eq!(source_name, expected_name, "each paired fold reads left then right");
+            assert_eq!(
+                source_name, expected_name,
+                "each paired fold reads left then right"
+            );
             *scope
         })
         .collect::<Vec<_>>();
@@ -4884,8 +5904,7 @@ fn paired_nested_aggregates_keep_values_across_compaction_spill_folds() {
         ]);
     }
     assert_eq!(
-        source.cursors,
-        expected_cursors,
+        source.cursors, expected_cursors,
         "long checkpoints compact and resume only inside their source snapshot scope"
     );
     assert!(source.pending["View.Left"].is_empty());
@@ -4912,12 +5931,13 @@ fn paired_pagination_keeps_identity_across_nested_escalation_spill_folds() {
         "each long checkpoint advances to the compact token"
     );
     let restore = |groups: &[&[i64]], long_cursor: &[u8]| {
-        assert_eq!(groups.len(), 4, "each spill chain includes one out-of-prefix page");
+        assert_eq!(
+            groups.len(),
+            4,
+            "each spill chain includes one out-of-prefix page"
+        );
         BTreeMap::from([
-            (
-                None,
-                page(groups[0], Some(long_cursor.to_vec())),
-            ),
+            (None, page(groups[0], Some(long_cursor.to_vec()))),
             (
                 Some(long_cursor.to_vec()),
                 page(groups[1], Some(compacted_cursor.clone())),
@@ -4926,10 +5946,7 @@ fn paired_pagination_keeps_identity_across_nested_escalation_spill_folds() {
                 Some(compacted_cursor.clone()),
                 page(groups[2], Some(after_compaction_cursor.clone())),
             ),
-            (
-                Some(after_compaction_cursor.clone()),
-                page(groups[3], None),
-            ),
+            (Some(after_compaction_cursor.clone()), page(groups[3], None)),
         ])
     };
     let mut restores = Vec::new();
@@ -4942,13 +5959,41 @@ fn paired_pagination_keeps_identity_across_nested_escalation_spill_folds() {
         cursor_chains.push(long_cursor);
     };
     add_restore("View.Left", &[&[1], &[2, 3], &[4, 5, 6], &[1000, 1001]], 0);
-    add_restore("View.Right", &[&[10, 20], &[30], &[40, 50, 60], &[2000, 2001]], 1);
-    add_restore("View.Left", &[&[7, 8, 9], &[10], &[11, 12], &[1100, 1101]], 2);
-    add_restore("View.Right", &[&[2], &[4, 6, 8], &[10, 12], &[2200, 2201]], 3);
-    add_restore("View.Left", &[&[-1, -2], &[-3, -4], &[-5, -6], &[-3000, -3001]], 1);
-    add_restore("View.Right", &[&[3, 6], &[9], &[12, 15, 18], &[3000, 3001]], 0);
-    add_restore("View.Left", &[&[100], &[90, 80], &[70, 60, 50], &[4000, 4001]], 3);
-    add_restore("View.Right", &[&[5, 10], &[15], &[20, 25, 30], &[5000, 5001]], 2);
+    add_restore(
+        "View.Right",
+        &[&[10, 20], &[30], &[40, 50, 60], &[2000, 2001]],
+        1,
+    );
+    add_restore(
+        "View.Left",
+        &[&[7, 8, 9], &[10], &[11, 12], &[1100, 1101]],
+        2,
+    );
+    add_restore(
+        "View.Right",
+        &[&[2], &[4, 6, 8], &[10, 12], &[2200, 2201]],
+        3,
+    );
+    add_restore(
+        "View.Left",
+        &[&[-1, -2], &[-3, -4], &[-5, -6], &[-3000, -3001]],
+        1,
+    );
+    add_restore(
+        "View.Right",
+        &[&[3, 6], &[9], &[12, 15, 18], &[3000, 3001]],
+        0,
+    );
+    add_restore(
+        "View.Left",
+        &[&[100], &[90, 80], &[70, 60, 50], &[4000, 4001]],
+        3,
+    );
+    add_restore(
+        "View.Right",
+        &[&[5, 10], &[15], &[20, 25, 30], &[5000, 5001]],
+        2,
+    );
     drop(add_restore);
 
     let mut source = PairedCursorRestoreSource::new(restores);
@@ -4975,17 +6020,36 @@ fn paired_pagination_keeps_identity_across_nested_escalation_spill_folds() {
         );
         assert_eq!(snapshots.last(), Some(&integer_pair(left, right)));
     }
-    assert_eq!(snapshots[0], integer_pair(35, 350), "one nested stage computes (35, 350)");
-    assert_eq!(snapshots[1], integer_pair(152, 112), "two nested stages compute (152, 112)");
-    assert_eq!(snapshots[2], integer_pair(-84, 252), "three nested stages compute (-84, 252)");
-    assert_eq!(snapshots[3], integer_pair(2400, 560), "four nested stages compute (2400, 560)");
+    assert_eq!(
+        snapshots[0],
+        integer_pair(35, 350),
+        "one nested stage computes (35, 350)"
+    );
+    assert_eq!(
+        snapshots[1],
+        integer_pair(152, 112),
+        "two nested stages compute (152, 112)"
+    );
+    assert_eq!(
+        snapshots[2],
+        integer_pair(-84, 252),
+        "three nested stages compute (-84, 252)"
+    );
+    assert_eq!(
+        snapshots[3],
+        integer_pair(2400, 560),
+        "four nested stages compute (2400, 560)"
+    );
     assert_eq!(source.lanes.len(), lane_names.len());
     let scopes = source
         .lanes
         .iter()
         .zip(lane_names.iter().copied())
         .map(|((source_name, scope, _), expected_name)| {
-            assert_eq!(source_name, expected_name, "each paginated pair reads left then right");
+            assert_eq!(
+                source_name, expected_name,
+                "each paginated pair reads left then right"
+            );
             *scope
         })
         .collect::<Vec<_>>();
@@ -5011,8 +6075,7 @@ fn paired_pagination_keeps_identity_across_nested_escalation_spill_folds() {
         ]);
     }
     assert_eq!(
-        source.cursors,
-        expected_cursors,
+        source.cursors, expected_cursors,
         "each nested fold requests only its own prefix through the compacted cursor"
     );
     assert!(
@@ -5047,26 +6110,14 @@ fn paired_pagination_nested_compaction_keeps_snapshot_values() {
         let rows = values.chunks(2).collect::<Vec<_>>();
         BTreeMap::from([
             (None, page(rows[0], Some(a.to_vec()))),
-            (
-                Some(a.to_vec()),
-                page(rows[1], Some(compact_a.clone())),
-            ),
-            (
-                Some(compact_a.clone()),
-                page(rows[2], Some(b.to_vec())),
-            ),
-            (
-                Some(b.to_vec()),
-                page(rows[3], Some(compact_b.clone())),
-            ),
+            (Some(a.to_vec()), page(rows[1], Some(compact_a.clone()))),
+            (Some(compact_a.clone()), page(rows[2], Some(b.to_vec()))),
+            (Some(b.to_vec()), page(rows[3], Some(compact_b.clone()))),
             (
                 Some(compact_b.clone()),
                 page(rows[4], Some(after_compaction.clone())),
             ),
-            (
-                Some(after_compaction.clone()),
-                page(&[999_999], None),
-            ),
+            (Some(after_compaction.clone()), page(&[999_999], None)),
         ])
     };
     let snapshots = [
@@ -5181,8 +6232,7 @@ fn paired_pagination_nested_compaction_keeps_snapshot_values() {
         ]);
     }
     assert_eq!(
-        source.cursors,
-        expected_cursors,
+        source.cursors, expected_cursors,
         "each snapshot resumes through both compacted cursor transitions"
     );
     assert!(
@@ -5218,10 +6268,7 @@ fn paired_pagination_compaction_keeps_identity_through_escalating_folds() {
         BTreeMap::from([
             (None, page(rows[0], Some(a.to_vec()))),
             (Some(a.to_vec()), page(rows[1], Some(compact_a.clone()))),
-            (
-                Some(compact_a.clone()),
-                page(rows[2], Some(b.to_vec())),
-            ),
+            (Some(compact_a.clone()), page(rows[2], Some(b.to_vec()))),
             (Some(b.to_vec()), page(rows[3], Some(compact_b.clone()))),
             (
                 Some(compact_b.clone()),
@@ -5275,7 +6322,12 @@ fn paired_pagination_compaction_keeps_identity_through_escalating_folds() {
     let mut source = PairedCursorRestoreSource::new(restores);
     let mut functions = paired_pagination_compaction_escalation_functions();
     let mut outputs = Vec::new();
-    for (depth, left, right) in [(0, 132, 1320), (1, 558, 396), (2, -264, 792), (3, 2640, 1320)] {
+    for (depth, left, right) in [
+        (0, 132, 1320),
+        (1, 558, 396),
+        (2, -264, 792),
+        (3, 2640, 1320),
+    ] {
         functions.insert(
             "run".into(),
             PureFunction {
@@ -5351,8 +6403,7 @@ fn paired_pagination_compaction_keeps_identity_through_escalating_folds() {
         ]);
     }
     assert_eq!(
-        source.cursors,
-        expected_cursors,
+        source.cursors, expected_cursors,
         "escalation reuses each paired snapshot scope through both compactions"
     );
     assert!(
@@ -5396,26 +6447,14 @@ fn paired_compaction_cursor_collisions_keep_escalation_scope_identity() {
         let (long_a, compact_a, long_b, compact_b, after_compaction) = chain;
         BTreeMap::from([
             (None, page(rows[0], Some(long_a.clone()))),
-            (
-                Some(long_a.clone()),
-                page(rows[1], Some(compact_a.clone())),
-            ),
-            (
-                Some(compact_a.clone()),
-                page(rows[2], Some(long_b.clone())),
-            ),
-            (
-                Some(long_b.clone()),
-                page(rows[3], Some(compact_b.clone())),
-            ),
+            (Some(long_a.clone()), page(rows[1], Some(compact_a.clone()))),
+            (Some(compact_a.clone()), page(rows[2], Some(long_b.clone()))),
+            (Some(long_b.clone()), page(rows[3], Some(compact_b.clone()))),
             (
                 Some(compact_b.clone()),
                 page(rows[4], Some(after_compaction.clone())),
             ),
-            (
-                Some(after_compaction.clone()),
-                page(&[999_999], None),
-            ),
+            (Some(after_compaction.clone()), page(&[999_999], None)),
         ])
     };
     let snapshots = [
@@ -5451,7 +6490,12 @@ fn paired_compaction_cursor_collisions_keep_escalation_scope_identity() {
     let mut source = PairedCursorRestoreSource::new(restores);
     let mut functions = paired_pagination_compaction_escalation_functions();
     let mut outputs = Vec::new();
-    for (depth, left, right) in [(0, 132, 1320), (1, 558, 396), (2, -264, 792), (3, 2640, 1320)] {
+    for (depth, left, right) in [
+        (0, 132, 1320),
+        (1, 558, 396),
+        (2, -264, 792),
+        (3, 2640, 1320),
+    ] {
         functions.insert(
             "run".into(),
             PureFunction {
@@ -5535,9 +6579,7 @@ fn paired_compaction_cursor_collisions_keep_escalation_scope_identity() {
         assert!(compact_b.as_slice() < after_compaction.as_slice());
     }
     let mut expected_cursors = Vec::new();
-    for (index, (long_a, compact_a, long_b, compact_b, _)) in
-        cursor_chains.iter().enumerate()
-    {
+    for (index, (long_a, compact_a, long_b, compact_b, _)) in cursor_chains.iter().enumerate() {
         let (source_name, scope, _) = &source.lanes[index];
         expected_cursors.extend([
             (source_name.clone(), *scope, None),
@@ -5548,8 +6590,7 @@ fn paired_compaction_cursor_collisions_keep_escalation_scope_identity() {
         ]);
     }
     assert_eq!(
-        source.cursors,
-        expected_cursors,
+        source.cursors, expected_cursors,
         "each escalation refresh follows its own collision-safe cursor chain"
     );
     for (index, chain) in cursor_chains.iter().enumerate() {
@@ -5597,26 +6638,14 @@ fn paired_pagination_keeps_nested_spill_identity_across_compactions() {
         let (long_a, compact_a, long_b, compact_b, after_compaction) = chain;
         BTreeMap::from([
             (None, page(rows[0], Some(long_a.clone()))),
-            (
-                Some(long_a.clone()),
-                page(rows[1], Some(compact_a.clone())),
-            ),
-            (
-                Some(compact_a.clone()),
-                page(rows[2], Some(long_b.clone())),
-            ),
-            (
-                Some(long_b.clone()),
-                page(rows[3], Some(compact_b.clone())),
-            ),
+            (Some(long_a.clone()), page(rows[1], Some(compact_a.clone()))),
+            (Some(compact_a.clone()), page(rows[2], Some(long_b.clone()))),
+            (Some(long_b.clone()), page(rows[3], Some(compact_b.clone()))),
             (
                 Some(compact_b.clone()),
                 page(rows[4], Some(after_compaction.clone())),
             ),
-            (
-                Some(after_compaction.clone()),
-                page(&[999_999], None),
-            ),
+            (Some(after_compaction.clone()), page(&[999_999], None)),
         ])
     };
     let snapshots = [
@@ -5737,9 +6766,7 @@ fn paired_pagination_keeps_nested_spill_identity_across_compactions() {
         assert!(compact_b.as_slice() < after_compaction.as_slice());
     }
     let mut expected_cursors = Vec::new();
-    for (index, (long_a, compact_a, long_b, compact_b, _)) in
-        cursor_chains.iter().enumerate()
-    {
+    for (index, (long_a, compact_a, long_b, compact_b, _)) in cursor_chains.iter().enumerate() {
         let (source_name, scope, _) = &source.lanes[index];
         expected_cursors.extend([
             (source_name.clone(), *scope, None),
@@ -5750,8 +6777,7 @@ fn paired_pagination_keeps_nested_spill_identity_across_compactions() {
         ]);
     }
     assert_eq!(
-        source.cursors,
-        expected_cursors,
+        source.cursors, expected_cursors,
         "the three nested folds preserve the active page cursor for each paired scope"
     );
     for (index, chain) in cursor_chains.iter().enumerate() {
@@ -5765,6 +6791,243 @@ fn paired_pagination_keeps_nested_spill_identity_across_compactions() {
             "the take prefix does not request the sentinel page in scope {scope:?}"
         );
     }
+    assert!(source.pending["View.Left"].is_empty());
+    assert!(source.pending["View.Right"].is_empty());
+}
+
+#[test]
+fn paired_nested_spill_restores_isolate_identical_cursor_chains() {
+    // Every lane and refresh uses byte-identical cursors. Only its read scope
+    // can distinguish which captured page chain supplies the nested folds.
+    let long_a = vec![0x60; 256];
+    let compact_a = vec![0x61];
+    let long_b = vec![0x61; 512];
+    let compact_b = vec![0x62];
+    let after_compaction = vec![0x63];
+    assert!(long_a.as_slice() < compact_a.as_slice());
+    assert!(compact_a.as_slice() < long_b.as_slice());
+    assert!(long_b.as_slice() < compact_b.as_slice());
+    assert!(compact_b.as_slice() < after_compaction.as_slice());
+
+    let restore = |values: &[i64]| {
+        assert_eq!(values.len(), 10);
+        let rows = values.chunks(2).collect::<Vec<_>>();
+        BTreeMap::from([
+            (None, page(rows[0], Some(long_a.clone()))),
+            (Some(long_a.clone()), page(rows[1], Some(compact_a.clone()))),
+            (Some(compact_a.clone()), page(rows[2], Some(long_b.clone()))),
+            (Some(long_b.clone()), page(rows[3], Some(compact_b.clone()))),
+            (
+                Some(compact_b.clone()),
+                page(rows[4], Some(after_compaction.clone())),
+            ),
+            (Some(after_compaction.clone()), page(&[999_999], None)),
+        ])
+    };
+    let snapshots = [
+        (
+            [1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
+            [10, 20, 30, 40, 50, 60, 70, 80, 90, 100],
+        ),
+        (
+            [11, 12, 13, 14, 15, 16, 17, 18, 19, 20],
+            [2, 4, 6, 8, 10, 12, 14, 16, 18, 20],
+        ),
+        (
+            [-1, -2, -3, -4, -5, -6, -7, -8, -9, -10],
+            [3, 6, 9, 12, 15, 18, 21, 24, 27, 30],
+        ),
+        (
+            [100, 90, 80, 70, 60, 50, 40, 30, 20, 10],
+            [5, 10, 15, 20, 25, 30, 35, 40, 45, 50],
+        ),
+    ];
+    let mut restores = Vec::new();
+    for (left, right) in &snapshots {
+        restores.extend([("View.Left", restore(left)), ("View.Right", restore(right))]);
+    }
+
+    let mut source = PairedCursorRestoreSource::new(restores);
+    let mut functions = paired_shared_cursor_nested_spill_functions();
+    let mut outputs = Vec::new();
+    for (depth, left, right) in [
+        (0, 308, 3080),
+        (1, 1488, 1056),
+        (2, -880, 2640),
+        (3, 14080, 7040),
+    ] {
+        functions.insert(
+            "run".into(),
+            PureFunction {
+                parameters: Vec::new(),
+                body: paired_pagination_nested_spill_body(depth),
+                environment: Environment::new(),
+            },
+        );
+        outputs.push(
+            invoke_named_with_effects(
+                "run",
+                &functions,
+                &Environment::new(),
+                Limits::default(),
+                &mut source,
+            )
+            .unwrap(),
+        );
+        assert_eq!(outputs.last(), Some(&integer_pair(left, right)));
+    }
+    assert_eq!(
+        outputs,
+        vec![
+            integer_pair(308, 3080),
+            integer_pair(1488, 1056),
+            integer_pair(-880, 2640),
+            integer_pair(14080, 7040),
+        ],
+        "identical cursor bytes still restore the right paired snapshot values"
+    );
+
+    let scopes = source
+        .lanes
+        .iter()
+        .map(|(_, scope, _)| *scope)
+        .collect::<Vec<_>>();
+    assert_eq!(scopes.len(), 8);
+    for (index, scope) in scopes.iter().enumerate() {
+        assert!(
+            !scopes[..index].contains(scope),
+            "byte-identical cursor chains remain isolated by scope {scope:?}"
+        );
+    }
+    let expected_chain = [
+        None,
+        Some(long_a.clone()),
+        Some(compact_a.clone()),
+        Some(long_b.clone()),
+        Some(compact_b.clone()),
+    ];
+    let expected_cursors = source
+        .lanes
+        .iter()
+        .flat_map(|(source_name, scope, _)| {
+            expected_chain
+                .iter()
+                .cloned()
+                .map(|cursor| (source_name.clone(), *scope, cursor))
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        source.cursors, expected_cursors,
+        "each scope follows the same five exact pagination reads"
+    );
+    assert!(
+        source
+            .cursors
+            .iter()
+            .all(|(_, _, cursor)| cursor.as_ref() != Some(&after_compaction))
+    );
+    assert!(source.pending["View.Left"].is_empty());
+    assert!(source.pending["View.Right"].is_empty());
+}
+
+#[test]
+fn paired_nested_spill_shared_cursors_follow_reverse_lane_order() {
+    let long_a = vec![0x70; 255];
+    let compact_a = vec![0x71];
+    let long_b = vec![0x71; 511];
+    let compact_b = vec![0x72];
+    let after_compaction = vec![0x73];
+    let left = [11, 12, 13, 14, 15, 16, 17, 18, 19, 20];
+    let right = [2, 4, 6, 8, 10, 12, 14, 16, 18, 20];
+    let restore = |values: &[i64]| {
+        let rows = values.chunks(2).collect::<Vec<_>>();
+        BTreeMap::from([
+            (None, page(rows[0], Some(long_a.clone()))),
+            (
+                Some(long_a.clone()),
+                page(rows[1], Some(compact_a.clone())),
+            ),
+            (
+                Some(compact_a.clone()),
+                page(rows[2], Some(long_b.clone())),
+            ),
+            (
+                Some(long_b.clone()),
+                page(rows[3], Some(compact_b.clone())),
+            ),
+            (
+                Some(compact_b.clone()),
+                page(rows[4], Some(after_compaction.clone())),
+            ),
+            (
+                Some(after_compaction.clone()),
+                page(&[999_999], None),
+            ),
+        ])
+    };
+    let mut source = PairedCursorRestoreSource::new([
+        ("View.Left", restore(&left)),
+        ("View.Right", restore(&right)),
+    ]);
+    let mut functions = paired_shared_cursor_nested_spill_functions();
+    functions.insert(
+        "run".into(),
+        PureFunction {
+            parameters: Vec::new(),
+            body: Expr::Tuple {
+                elements: vec![
+                    nested_pagination_spill("View.Right", 1),
+                    nested_pagination_spill("View.Left", 1),
+                ],
+                span: span(),
+            },
+            environment: Environment::new(),
+        },
+    );
+    assert_eq!(
+        invoke_named_with_effects(
+            "run",
+            &functions,
+            &Environment::new(),
+            Limits::default(),
+            &mut source,
+        )
+        .unwrap(),
+        integer_pair(1056, 1488),
+        "reversing paired evaluation preserves each source's captured values"
+    );
+
+    assert_eq!(
+        source
+            .lanes
+            .iter()
+            .map(|(source_name, _, _)| source_name.as_str())
+            .collect::<Vec<_>>(),
+        ["View.Right", "View.Left"]
+    );
+    assert_ne!(source.lanes[0].1, source.lanes[1].1);
+    let expected_chain = [
+        None,
+        Some(long_a),
+        Some(compact_a),
+        Some(long_b),
+        Some(compact_b),
+    ];
+    let expected_cursors = source
+        .lanes
+        .iter()
+        .flat_map(|(source_name, scope, _)| {
+            expected_chain
+                .iter()
+                .cloned()
+                .map(|cursor| (source_name.clone(), *scope, cursor))
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(source.cursors, expected_cursors);
+    assert!(source
+        .cursors
+        .iter()
+        .all(|(_, _, cursor)| cursor.as_ref() != Some(&after_compaction)));
     assert!(source.pending["View.Left"].is_empty());
     assert!(source.pending["View.Right"].is_empty());
 }

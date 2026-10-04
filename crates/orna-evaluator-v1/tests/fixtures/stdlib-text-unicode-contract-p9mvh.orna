@@ -1,0 +1,16 @@
+text.unicode_version() == "16.0.0"
+&& text.trim("\u{00A0}\u{2007} A\u{2003}B \u{202F}") == "A\u{2003}B"
+&& text.split("🙂a🙂", "") == ["🙂", "a", "🙂"]
+&& text.split(",a,,β,", ",") == ["", "a", "", "β", ""]
+&& text.join(["a", "β", ""], ":") == "a:β:"
+&& text.starts_with("βeta", "β")
+&& text.ends_with("βeta", "ta")
+&& text.contains("aβa", "β")
+&& text.replace("aaaa", "aa", "x") == "xx"
+&& text.lower("ΟΣ") == "ος"
+&& text.lower("Ο\u{0301}Σ") == "ο\u{0301}ς"
+&& text.upper("ßﬃ") == "SSFFI"
+&& text.normalise("A\u{030A}", "NFC") == "Å"
+&& text.normalise("Å", "NFD") == "A\u{030A}"
+&& text.lower("\u{1C89}") == "\u{1C8A}"
+&& text.upper("\u{1C8A}") == "\u{1C89}"
