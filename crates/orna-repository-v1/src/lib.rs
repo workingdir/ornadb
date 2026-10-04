@@ -75,6 +75,37 @@ impl fmt::Display for GitCommitRef {
     }
 }
 
+/// One record discovered from the reachable Git commit history.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CommittedLogEntry {
+    commit: GitCommitRef,
+    committed_at: String,
+    author: String,
+    subject: String,
+}
+
+impl CommittedLogEntry {
+    /// The immutable Git commit represented by this history row.
+    pub fn commit(&self) -> &GitCommitRef {
+        &self.commit
+    }
+
+    /// The commit timestamp in Git's ISO 8601 spelling.
+    pub fn committed_at(&self) -> &str {
+        &self.committed_at
+    }
+
+    /// The author recorded in the Git commit.
+    pub fn author(&self) -> &str {
+        &self.author
+    }
+
+    /// The first line of the commit message.
+    pub fn subject(&self) -> &str {
+        &self.subject
+    }
+}
+
 /// One recursively listed entry in an immutable committed Git tree.
 ///
 /// This deliberately retains only the repository-relative path and Git entry
@@ -1460,6 +1491,78 @@ impl Repository {
     /// unborn `HEAD`; it never substitutes CWD/runtime state.
     pub fn head(&self) -> Result<Option<GitCommitRef>, RepositoryError> {
         self.commit_optional("HEAD^{commit}")
+    }
+
+    /// Lists the newest commits reachable from `HEAD`, newest first.
+    ///
+    /// The count and output size are bounded before Git output is accumulated.
+    /// An unborn `HEAD` produces an empty history.
+    pub fn committed_history(
+        &self,
+        max_commits: usize,
+    ) -> Result<Vec<CommittedLogEntry>, RepositoryError> {
+        const MAX_OUTPUT_BYTES: usize = 4 * 1024 * 1024;
+
+        if max_commits == 0 || self.head()?.is_none() {
+            return Ok(Vec::new());
+        }
+
+        let mut command = self.command();
+        command
+            .env("GIT_NO_LAZY_FETCH", "1")
+            .args(["log", "-z"])
+            .arg(format!("--max-count={max_commits}"))
+            .arg("--format=format:%H%x00%cI%x00%an%x00%s%x00")
+            .arg("HEAD")
+            .stdout(Stdio::piped());
+        let mut child = command
+            .spawn()
+            .map_err(|_| RepositoryError::GitUnavailable)?;
+        let mut output = Vec::new();
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or(RepositoryError::GitOperationFailed)?;
+        let read_result = stdout
+            .take((MAX_OUTPUT_BYTES + 1) as u64)
+            .read_to_end(&mut output);
+        if read_result.is_err() || output.len() > MAX_OUTPUT_BYTES {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(RepositoryError::GitOperationFailed);
+        }
+        let status = child.wait().map_err(|_| RepositoryError::GitOperationFailed)?;
+        if !status.success() {
+            return Err(RepositoryError::GitOperationFailed);
+        }
+
+        let object_id_length = self.native_object_id_length()?;
+        let mut fields = output.split(|byte| *byte == 0);
+        let mut entries = Vec::new();
+        loop {
+            let Some(object_id) = fields.next() else {
+                break;
+            };
+            let committed_at = fields.next().ok_or(RepositoryError::GitOperationFailed)?;
+            let author = fields.next().ok_or(RepositoryError::GitOperationFailed)?;
+            let subject = fields.next().ok_or(RepositoryError::GitOperationFailed)?;
+            let record_end = fields.next().ok_or(RepositoryError::GitOperationFailed)?;
+            if !record_end.is_empty() {
+                return Err(RepositoryError::GitOperationFailed);
+            }
+            let object_id = String::from_utf8(object_id.to_vec())
+                .map_err(|_| RepositoryError::GitOperationFailed)?;
+            entries.push(CommittedLogEntry {
+                commit: GitCommitRef::from_verified_commit(object_id, object_id_length)?,
+                committed_at: String::from_utf8_lossy(committed_at).into_owned(),
+                author: String::from_utf8_lossy(author).into_owned(),
+                subject: String::from_utf8_lossy(subject).into_owned(),
+            });
+        }
+        if fields.any(|field| !field.is_empty()) || entries.len() > max_commits {
+            return Err(RepositoryError::GitOperationFailed);
+        }
+        Ok(entries)
     }
 
     /// Builds a real Git tree and commit from `expected_head` plus the supplied
