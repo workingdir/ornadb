@@ -33,6 +33,7 @@ use crate::{
     REFERENCE_STANDARD_GENERICS_PATH_V1, REFERENCE_STANDARD_TYPE_UTILS_PATH_V1,
     REFERENCE_STANDARD_PATTERN_PATH_V1, REFERENCE_STANDARD_REGEX_PATH_V1,
     REFERENCE_STANDARD_REGEX_UTILITIES_PATH_V1,
+    REFERENCE_STANDARD_TIME_UTILITIES_PATH_V1,
     REFERENCE_STANDARD_ITERATOR_PATH_V1, REFERENCE_STANDARD_ITERATOR_ADAPTERS_PATH_V1,
     REFERENCE_STANDARD_ITERATOR_CONSUMERS_PATH_V1,
     REFERENCE_STANDARD_COLLECTION_ADAPTERS_PATH_V1,
@@ -52,7 +53,7 @@ use crate::{
 #[test]
 fn pinned_ui_presentation_helpers_are_included_as_source() {
     let sources = reference_standard_sources_v1();
-    assert_eq!(sources.len(), 67);
+    assert_eq!(sources.len(), 68);
     assert_eq!(sources[49].0, REFERENCE_STANDARD_UI_PATH_V1);
     let parsed = orna_syntax_v1::parse_module_with_file(
         &sources[49].1,
@@ -716,6 +717,48 @@ fn pinned_regex_utilities_are_included_and_typecheck() {
     assert!(parsed.is_ok(), "{path}: {:#?}", parsed.diagnostics);
     reference_standard_catalogue_v1()
         .expect("regex utilities resolve in the captured standard catalogue");
+}
+
+#[test]
+fn pinned_time_utilities_are_included_and_typecheck() {
+    let sources = reference_standard_sources_v1();
+    let (index, (path, source)) = sources
+        .iter()
+        .enumerate()
+        .find(|(_, (path, _))| path == REFERENCE_STANDARD_TIME_UTILITIES_PATH_V1)
+        .expect("the pinned source bundle includes std.time.utilities");
+    assert_eq!(index, 67, "time utilities append without moving old sources");
+    assert_eq!(path, REFERENCE_STANDARD_TIME_UTILITIES_PATH_V1);
+    for declaration in [
+        "pub fn is_weekend(year: Int, month: Int, day: Int): Bool?",
+        "pub fn is_business_day(year: Int, month: Int, day: Int): Bool?",
+        "pub fn week_start(year: Int, month: Int, day: Int): (Int, Int, Int)?",
+        "pub fn week_end(year: Int, month: Int, day: Int): (Int, Int, Int)?",
+        "pub fn quarter_of(year: Int, month: Int): Int?",
+        "pub fn quarter_start(year: Int, month: Int): (Int, Int, Int)?",
+        "pub fn quarter_end(year: Int, month: Int): (Int, Int, Int)?",
+        "pub fn instant_in_closed_range(value: Instant, left: Instant, right: Instant): Bool",
+        "pub fn instant_distance(left: Instant, right: Instant): Duration",
+    ] {
+        assert!(source.contains(declaration), "missing time utility `{declaration}`");
+    }
+    for contract in [
+        "Weekdays use ISO numbering",
+        "Return the Monday and Sunday",
+        "Quarters are numbered 1 through 4",
+        "Test membership in a closed instant interval",
+        "nonnegative, exact elapsed distance",
+    ] {
+        assert!(source.contains(contract), "missing time utility contract `{contract}`");
+    }
+    let profile = reference_standard_profile_v1();
+    profile
+        .verify_source(path, source)
+        .expect("time utility bytes match the captured standard profile");
+    let parsed = orna_syntax_v1::parse_module_with_file(source, path);
+    assert!(parsed.is_ok(), "{path}: {:#?}", parsed.diagnostics);
+    reference_standard_catalogue_v1()
+        .expect("time utilities resolve in the captured standard catalogue");
 }
 
 #[test]
@@ -1621,7 +1664,7 @@ fn reference_standard_uses_pinned_orna_1_source_and_resolves_its_imports() {
     ] {
         assert!(sources[33].1.contains(contract), "missing std.test contract `{contract}`");
     }
-    assert_eq!(sources.len(), 67);
+    assert_eq!(sources.len(), 68);
     assert_eq!(sources[49].0, REFERENCE_STANDARD_UI_PATH_V1);
     for declaration in [
         "pub fn Field<T>(label: Str, value: T): UI",
@@ -2083,7 +2126,7 @@ fn pinned_filesystem_effect_is_visible_to_consumers_and_forbidden_in_assertions(
 #[test]
 fn pinned_filesystem_path_and_metadata_modules_are_captured_and_typecheck() {
     let sources = reference_standard_sources_v1();
-    assert_eq!(sources.len(), 67);
+    assert_eq!(sources.len(), 68);
     for (index, path) in [
         (42, REFERENCE_STANDARD_IO_PATH_MODULE_PATH_V1),
         (43, REFERENCE_STANDARD_IO_METADATA_PATH_V1),
@@ -2147,7 +2190,7 @@ fn pinned_filesystem_path_and_metadata_modules_are_captured_and_typecheck() {
 #[test]
 fn pinned_io_buffer_module_is_captured_and_resolves_stream_adapters() {
     let sources = reference_standard_sources_v1();
-    assert_eq!(sources.len(), 67);
+    assert_eq!(sources.len(), 68);
     let (path, source) = sources
         .iter()
         .find(|(path, _)| path == REFERENCE_STANDARD_IO_BUFFER_PATH_V1)
@@ -2184,7 +2227,7 @@ fn pinned_io_buffer_module_is_captured_and_resolves_stream_adapters() {
 #[test]
 fn pinned_process_and_environment_modules_are_captured_and_typecheck() {
     let sources = reference_standard_sources_v1();
-    assert_eq!(sources.len(), 67);
+    assert_eq!(sources.len(), 68);
     for (index, path) in [
         (44, REFERENCE_STANDARD_IO_PROCESS_PATH_V1),
         (45, REFERENCE_STANDARD_IO_ENVIRONMENT_PATH_V1),
