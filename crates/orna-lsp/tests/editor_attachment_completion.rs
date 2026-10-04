@@ -12,9 +12,12 @@ use serde_json::Value;
 
 #[path = "support/completion_contract.rs"]
 mod completion_contract;
+#[path = "support/hover_semantic_contract.rs"]
+mod hover_semantic_contract;
 
 const SOURCE: &str = include_str!("fixtures/ji3t0-lsp-v1.orna");
 const PROVIDER_SOURCE: &str = include_str!("fixtures/expressions-v1.orna");
+const SEMANTIC_SOURCE: &str = include_str!("fixtures/editor-semantic-tokens.orna");
 
 #[test]
 fn attachment_input_matches_its_crate_local_fixture() {
@@ -30,7 +33,7 @@ fn attachment_input_matches_its_crate_local_fixture() {
 }
 
 #[test]
-fn vim_lsp_attaches_and_exposes_syntax_v1_completion() {
+fn vim_lsp_attaches_and_exposes_hover_semantic_tokens_and_completion() {
     assert_v1_attachment_fixture();
     let Some(vim) = executable("ORNA_TEST_VIM", "vim") else {
         eprintln!("SKIP: Vim is not installed; set ORNA_TEST_VIM to its executable");
@@ -63,6 +66,11 @@ fn vim_lsp_attaches_and_exposes_syntax_v1_completion() {
     );
     let script = temporary_path("vim");
     let result_path = temporary_path("json");
+    let semantic_fixture = root.join("crates/orna-lsp/tests/fixtures/editor-semantic-tokens.orna");
+    assert_eq!(
+        fs::read_to_string(&semantic_fixture).unwrap(),
+        SEMANTIC_SOURCE
+    );
     let lsp_binary = env!("CARGO_BIN_EXE_orna-lsp");
     let vim_script = format!(
         r#"
@@ -102,6 +110,12 @@ call assert_true(lsp#capabilities#has_completion_provider('orna'), 'orna-lsp did
 function! OrnaCaptureCompletion(data) abort
     let g:orna_completion_response = a:data['response']
 endfunction
+function! OrnaCaptureHover(data) abort
+    let g:orna_hover_response = a:data['response']
+endfunction
+function! OrnaCaptureSemanticTokens(data) abort
+    let g:orna_semantic_response = a:data['response']
+endfunction
 call lsp#send_request('orna', {{
     \ 'method': 'textDocument/completion',
     \ 'params': {{
@@ -122,10 +136,51 @@ let s:adapted = lsp#omni#get_vim_completion_items({{
     \ 'position': lsp#get_position(),
     \ 'response': s:response,
 \ }})
+call cursor(1, 1)
+let s:call_line = search('add(value, 2', 'W')
+call assert_true(s:call_line > 0, 'consumer fixture omitted the add call')
+let s:call_column = stridx(getline(s:call_line), 'add(value, 2') + 1
+call assert_true(s:call_column > 0, 'consumer add call has no column')
+call cursor(s:call_line, s:call_column)
+call lsp#send_request('orna', {{
+    \ 'method': 'textDocument/hover',
+    \ 'params': {{
+    \     'textDocument': lsp#get_text_document_identifier(),
+    \     'position': lsp#get_position(),
+    \ }},
+    \ 'on_notification': function('OrnaCaptureHover'),
+\ }})
+let s:deadline = reltimefloat(reltime()) + 10.0
+while !exists('g:orna_hover_response') && reltimefloat(reltime()) < s:deadline
+    sleep 10m
+endwhile
+call assert_true(exists('g:orna_hover_response'), 'vim-lsp hover request timed out')
+let s:hover = g:orna_hover_response['result']
+
+execute 'edit ' . fnameescape($ORNA_TEST_SEMANTIC_FIXTURE)
+call assert_equal('orna', &filetype)
+let s:deadline = reltimefloat(reltime()) + 10.0
+while !lsp#capabilities#has_completion_provider('orna') && reltimefloat(reltime()) < s:deadline
+    sleep 10m
+endwhile
+call assert_true(lsp#capabilities#has_completion_provider('orna'), 'semantic fixture did not attach to orna-lsp')
+call lsp#send_request('orna', {{
+    \ 'method': 'textDocument/semanticTokens/full',
+    \ 'params': {{ 'textDocument': lsp#get_text_document_identifier() }},
+    \ 'on_notification': function('OrnaCaptureSemanticTokens'),
+\ }})
+let s:deadline = reltimefloat(reltime()) + 10.0
+while !exists('g:orna_semantic_response') && reltimefloat(reltime()) < s:deadline
+    sleep 10m
+endwhile
+call assert_true(exists('g:orna_semantic_response'), 'vim-lsp semantic token request timed out')
+let s:semantic = g:orna_semantic_response['result']
 call writefile([json_encode({{
     \ 'omnifunc': &l:omnifunc,
     \ 'completion': s:response['result'],
     \ 'adapted': s:adapted['items'],
+    \ 'hover': s:hover,
+    \ 'semantic': s:semantic,
 \ }})], $ORNA_EDITOR_RESULT)
 if !empty(v:errors)
     call writefile(v:errors, $ORNA_EDITOR_RESULT . '.errors')
@@ -145,6 +200,7 @@ qa!
         .env("ORNA_VIM_RUNTIME", root.join("editors/vim"))
         .env("ORNA_TEST_FIXTURE", &fixture)
         .env("ORNA_TEST_PROVIDER", &provider)
+        .env("ORNA_TEST_SEMANTIC_FIXTURE", &semantic_fixture)
         .env("ORNA_EDITOR_RESULT", &result_path)
         .output()
         .unwrap_or_else(|error| panic!("start Vim at {}: {error}", vim.display()));
@@ -177,7 +233,13 @@ qa!
     assert_eq!(evidence["omnifunc"], "lsp#complete");
     completion_contract::assert_lsp_completion_contract(&evidence["completion"], "Vim vim-lsp");
     assert_vim_completion_projection(&evidence["adapted"]);
-    println!("Vim integration evidence: ATTACHED=pass DEPENDENCY_ORDER=consumer-before-provider OMNIFUNC=pass COMPLETION=pass");
+    hover_semantic_contract::assert_hover_contract(&evidence["hover"], "Vim vim-lsp");
+    hover_semantic_contract::assert_semantic_token_contract(
+        SEMANTIC_SOURCE,
+        &evidence["semantic"],
+        "Vim vim-lsp",
+    );
+    println!("Vim integration evidence: ATTACHED=pass DEPENDENCY_ORDER=consumer-before-provider OMNIFUNC=pass COMPLETION=pass HOVER=pass SEMANTIC_TOKENS=pass");
 }
 
 #[test]
