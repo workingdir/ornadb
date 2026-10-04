@@ -194,6 +194,29 @@ fn normalize_path(path: &Path) -> PathBuf {
     normalized
 }
 
+fn crate_root_for_path(path: &Path, root: &Path) -> Option<PathBuf> {
+    let relative = path.strip_prefix(root).ok()?;
+    let mut components = relative.components();
+    if components.next()?.as_os_str() != "crates" {
+        return None;
+    }
+    Some(root.join("crates").join(components.next()?.as_os_str()))
+}
+
+fn is_crate_fixture_path(path: &Path, root: &Path) -> bool {
+    let Ok(relative) = path.strip_prefix(root) else {
+        return false;
+    };
+    let components = relative
+        .components()
+        .map(|component| component.as_os_str().to_string_lossy())
+        .collect::<Vec<_>>();
+    components
+        .first()
+        .is_some_and(|component| component == "crates")
+        && components.iter().any(|component| component == "fixtures")
+}
+
 fn include_argument_fragments(source: &RustSource, open_paren: usize) -> Vec<String> {
     let code = &source.code_without_comments;
     let mut fragments = Vec::new();
@@ -219,6 +242,48 @@ fn include_argument_fragments(source: &RustSource, open_paren: usize) -> Vec<Str
         cursor += 1;
     }
     fragments
+}
+
+fn include_argument_is_static_path(source: &RustSource, open_paren: usize) -> bool {
+    let code = &source.code_without_comments;
+    let mut cursor = open_paren + 1;
+    let mut nested_parens = 0usize;
+
+    while cursor < code.len() {
+        if let Some(literal) = source
+            .strings
+            .iter()
+            .find(|literal| literal.start == cursor)
+        {
+            cursor = literal.end;
+            continue;
+        }
+
+        match code[cursor] {
+            b'(' => nested_parens += 1,
+            b')' if nested_parens == 0 => return true,
+            b')' => nested_parens -= 1,
+            b'a'..=b'z' | b'A'..=b'Z' | b'_' => {
+                let start = cursor;
+                cursor += 1;
+                while code
+                    .get(cursor)
+                    .is_some_and(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
+                {
+                    cursor += 1;
+                }
+                if &code[start..cursor] != b"concat" {
+                    return false;
+                }
+                continue;
+            }
+            byte if byte.is_ascii_whitespace() || matches!(byte, b'!' | b',') => {}
+            _ => return false,
+        }
+        cursor += 1;
+    }
+
+    false
 }
 
 fn assert_include_paths_stay_in_checkout(source_path: &Path, root: &Path, source: &RustSource) {
@@ -247,6 +312,7 @@ fn assert_include_paths_stay_in_checkout(source_path: &Path, root: &Path, source
                 continue;
             }
             let fragments = include_argument_fragments(source, argument);
+            let static_path = include_argument_is_static_path(source, argument);
             assert!(
                 !fragments.is_empty(),
                 "compile-time include path must contain a statically inspectable string: {}",
@@ -266,12 +332,33 @@ fn assert_include_paths_stay_in_checkout(source_path: &Path, root: &Path, source
                 normalize_path(&source_path.parent().expect("source parent").join(include))
             };
             let resolved = resolved.canonicalize().unwrap_or(resolved);
+            if static_path {
+                assert!(
+                    resolved.is_file(),
+                    "compile-time include path does not exist: {} -> {}",
+                    source_path.display(),
+                    include_value
+                );
+            }
             assert!(
                 resolved.starts_with(root),
                 "compile-time include escapes the repository: {} -> {}",
                 source_path.display(),
                 include_value
             );
+            if is_crate_fixture_path(&resolved, root) {
+                let source_crate = crate_root_for_path(source_path, root);
+                let fixture_crate = crate_root_for_path(&resolved, root);
+                if let (Some(source_crate), Some(fixture_crate)) = (source_crate, fixture_crate) {
+                    assert_eq!(
+                        source_crate,
+                        fixture_crate,
+                        "test fixtures must live in their consuming crate: {} -> {}",
+                        source_path.display(),
+                        include_value
+                    );
+                }
+            }
         }
     }
 }
@@ -308,6 +395,16 @@ fn split_compile_time_path_fragments_are_rejected() {
     .concat();
     let source =
         scan_rust_source(std::str::from_utf8(&source_text).expect("synthetic Rust source"));
+    let root = workspace_root();
+    let source_path = root.join("crates/orna-syntax-v1/tests/synthetic.rs");
+    assert_include_paths_stay_in_checkout(&source_path, &root, &source);
+}
+
+#[test]
+#[should_panic(expected = "test fixtures must live in their consuming crate")]
+fn cross_crate_fixture_includes_are_rejected() {
+    let source_text = r#"include_str!("../../orna-semantic-v1/tests/fixtures/traceability-money-exact-decimal.orna")"#;
+    let source = scan_rust_source(source_text);
     let root = workspace_root();
     let source_path = root.join("crates/orna-syntax-v1/tests/synthetic.rs");
     assert_include_paths_stay_in_checkout(&source_path, &root, &source);
