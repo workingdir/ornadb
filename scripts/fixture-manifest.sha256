@@ -119,7 +119,7 @@ b42f8ed673740c142be33126aa268fbc57999745475d31c06ec9578a64dc1052  crates/orna-cl
 e279a7bfc9c04cf067704ccc6adfdda5b4bf8a958d7f9f1db63065377a7c18ce  crates/orna-cli-v1/tests/fixtures/init/version-1.orna
 79a0a004fac1dbbab00c544a883c81f7e8f66b77c5dd2d0e96d204cb2c2a15ae  crates/orna-cli-v1/tests/fixtures/init/version-2.orna
 6ec32696932b34a8d30ebe7bdcda8885e2c07ec8f67fb52655d7ab80aa29d1f7  crates/orna-cli-v1/tests/fixtures/lib002-core-only.orna
-655ddd8f47fe381b40a2c6e74f27c6dbac4e122874593af9ae0f6bc2f65585d2  crates/orna-cli-v1/tests/fixtures/playground-asset-app.orna
+a5bd70ee1eea9dfc78fbfa325391ee6d97f50e0929a59ee50ede86105829d69d  crates/orna-cli-v1/tests/fixtures/playground-asset-app.orna
 76aa5947900e831014431f8ff29b4e28286608cfdf81aa8ef26a772960b56a59  crates/orna-cli-v1/tests/fixtures/playground-asset-editor-config.orna
 965eab0d2975e7d2604b1a159775bf918fd5a9a57e4d18142dada860ea7dd5f4  crates/orna-cli-v1/tests/fixtures/playground-asset-embed.orna
 852497db7df5c6bfce4efe603616360bf2cc527cc666da0c7a3af239f5bffb6f  crates/orna-cli-v1/tests/fixtures/playground-asset-example-catalog-script.orna
