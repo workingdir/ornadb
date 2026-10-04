@@ -1,0 +1,7 @@
+numeric.integer_from_text("0") == Some(0)
+&& numeric.integer_from_text("-42") == Some(-42)
+&& numeric.integer_from_text("9007199254740993") == Some(9007199254740993)
+&& numeric.integer_from_text(numeric.integer_to_text(9007199254740993)) == Some(9007199254740993)
+&& numeric.integer_to_text(0) == "0"
+&& numeric.integer_to_text(-42) == "-42"
+&& numeric.integer_to_text(9007199254740993) == "9007199254740993"
