@@ -1,0 +1,3 @@
+std.regex.utilities.matched_texts(matches) == ["a", "", "a"]
+    && std.regex.utilities.spans(matches) == [(0, 1), (1, 1), (2, 3)]
+    && std.regex.utilities.zero_width_count(matches) == 1
