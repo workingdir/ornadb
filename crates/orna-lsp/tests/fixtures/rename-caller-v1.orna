@@ -1,0 +1,1 @@
+pub fn remote(value: Int): (Str, Int) = ("🧭", target(value));
