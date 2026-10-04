@@ -22,6 +22,8 @@ const INCREMENTAL_SOURCE: &str = include_str!("fixtures/incremental-malformed-v1
 const LOCAL_SCOPES_SOURCE: &str = include_str!("fixtures/local-scopes-v1.orna");
 const HOVER_COMPLETION_SOURCE: &str = include_str!("fixtures/hover-completion-v1.orna");
 const EDITOR_HINTS_SOURCE: &str = include_str!("fixtures/editor-lsp-hints.orna");
+const SEMANTIC_TOKEN_DEPTH_SOURCE: &str =
+    include_str!("fixtures/semantic-token-multiline-modifiers-v1.orna");
 const RENAME_PROVIDER_SOURCE: &str = include_str!("fixtures/rename-provider-v1.orna");
 const RENAME_CALLER_SOURCE: &str = include_str!("fixtures/rename-caller-v1.orna");
 const AMBIGUOUS_RENAME_SOURCE: &str = include_str!("fixtures/ambiguous-renames-v1.orna");
@@ -194,7 +196,13 @@ fn initialize(client: &mut Client) {
     let modifiers = result["capabilities"]["semanticTokensProvider"]["legend"]["tokenModifiers"]
         .as_array()
         .unwrap();
-    assert!(modifiers.iter().any(|modifier| modifier == "declaration"));
+    assert_eq!(
+        modifiers
+            .iter()
+            .map(|modifier| modifier.as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["declaration", "readonly", "modification"]
+    );
     assert_eq!(
         result["capabilities"]["inlayHintProvider"]["resolveProvider"],
         false
@@ -706,6 +714,69 @@ fn decoded_semantic_tokens(source: &str, response: &Value) -> Vec<(String, u64, 
             )
         })
         .collect()
+}
+
+type DecodedSemanticToken = (usize, usize, usize, String, u64, u64);
+
+fn utf16_boundary_byte(line: &str, utf16_offset: usize) -> usize {
+    let mut current_utf16 = 0;
+    for (byte, character) in line.char_indices() {
+        if current_utf16 == utf16_offset {
+            return byte;
+        }
+        current_utf16 += character.len_utf16();
+        assert!(
+            current_utf16 <= utf16_offset,
+            "semantic token boundary splits a UTF-16 surrogate pair at {utf16_offset} in {line:?}"
+        );
+    }
+    assert_eq!(current_utf16, utf16_offset, "UTF-16 column exceeds line");
+    line.len()
+}
+
+fn decoded_semantic_token_details(source: &str, response: &Value) -> Vec<DecodedSemanticToken> {
+    let data = response["data"].as_array().unwrap();
+    assert_eq!(data.len() % 5, 0, "semantic token data: {response}");
+    let mut line = 0usize;
+    let mut character = 0usize;
+    data.chunks_exact(5)
+        .map(|token| {
+            let delta_line = token[0].as_u64().unwrap() as usize;
+            let delta_start = token[1].as_u64().unwrap() as usize;
+            if delta_line == 0 {
+                character += delta_start;
+            } else {
+                line += delta_line;
+                character = delta_start;
+            }
+            let length = token[2].as_u64().unwrap() as usize;
+            let line_text = source.lines().nth(line).unwrap();
+            let start_byte = utf16_boundary_byte(line_text, character);
+            let end_byte = utf16_boundary_byte(line_text, character + length);
+            (
+                line,
+                character,
+                length,
+                line_text[start_byte..end_byte].to_owned(),
+                token[3].as_u64().unwrap(),
+                token[4].as_u64().unwrap(),
+            )
+        })
+        .collect()
+}
+
+fn semantic_token_at<'a>(
+    source: &str,
+    tokens: &'a [DecodedSemanticToken],
+    byte: usize,
+) -> &'a DecodedSemanticToken {
+    let position = position_at(source, byte);
+    let line = position["line"].as_u64().unwrap() as usize;
+    let character = position["character"].as_u64().unwrap() as usize;
+    tokens
+        .iter()
+        .find(|token| token.0 == line && token.1 == character)
+        .unwrap_or_else(|| panic!("no semantic token at {line}:{character}: {tokens:?}"))
 }
 
 #[test]
@@ -1637,6 +1708,197 @@ fn syntax_v1_semantic_tokens_and_inlay_hints_follow_scope_and_requested_range() 
         &shadow_hints,
         "LSP protocol",
     );
+    client.shutdown();
+}
+
+#[test]
+fn semantic_tokens_split_multiline_comments_and_mark_local_modifications() {
+    let uri = "file:///workspace/semantic-token-multiline-modifiers-v1.orna";
+    let mut client = Client::spawn();
+    initialize(&mut client);
+    let diagnostics = open(&mut client, uri, SEMANTIC_TOKEN_DEPTH_SOURCE);
+    assert!(
+        diagnostics["diagnostics"].as_array().unwrap().is_empty(),
+        "{diagnostics}"
+    );
+
+    let full = client.request(
+        "textDocument/semanticTokens/full",
+        json!({"textDocument":{"uri":uri}}),
+    );
+    let tokens = decoded_semantic_token_details(SEMANTIC_TOKEN_DEPTH_SOURCE, &full);
+    let comments = tokens
+        .iter()
+        .filter(|token| token.4 == 4)
+        .cloned()
+        .collect::<Vec<_>>();
+    let expected_comments = [
+        (3, 4, "/* alpha café 🧭"),
+        (4, 0, "     * beta 🐟"),
+        (5, 0, "     * gamma */"),
+    ];
+    assert_eq!(comments.len(), expected_comments.len(), "{comments:?}");
+    for (token, (line, character, text)) in comments.iter().zip(expected_comments) {
+        assert_eq!(
+            (
+                token.0,
+                token.1,
+                token.2,
+                token.3.as_str(),
+                token.4,
+                token.5
+            ),
+            (line, character, text.encode_utf16().count(), text, 4, 0),
+            "multiline comment segment: {token:?}"
+        );
+    }
+
+    let beta_start = SEMANTIC_TOKEN_DEPTH_SOURCE.find("beta").unwrap();
+    let ranged = client.request(
+        "textDocument/semanticTokens/range",
+        json!({
+            "textDocument":{"uri":uri},
+            "range":range_at(
+                SEMANTIC_TOKEN_DEPTH_SOURCE,
+                beta_start,
+                beta_start + "beta".len()
+            )
+        }),
+    );
+    assert_eq!(
+        decoded_semantic_token_details(SEMANTIC_TOKEN_DEPTH_SOURCE, &ranged),
+        vec![comments[1].clone()],
+        "a range inside a multiline comment returns its complete line segment"
+    );
+
+    let user_declaration = semantic_token_at(
+        SEMANTIC_TOKEN_DEPTH_SOURCE,
+        &tokens,
+        SEMANTIC_TOKEN_DEPTH_SOURCE.find("pub type User").unwrap() + "pub type ".len(),
+    );
+    assert_eq!(
+        (
+            user_declaration.3.as_str(),
+            user_declaration.4,
+            user_declaration.5
+        ),
+        ("User", 6, 3),
+        "declaration + readonly modifier bits"
+    );
+    let type_reference_start =
+        SEMANTIC_TOKEN_DEPTH_SOURCE.find("value: User").unwrap() + "value: ".len();
+    let type_reference =
+        semantic_token_at(SEMANTIC_TOKEN_DEPTH_SOURCE, &tokens, type_reference_start);
+    assert_eq!(
+        (
+            type_reference.3.as_str(),
+            type_reference.4,
+            type_reference.5
+        ),
+        ("User", 6, 2),
+        "resolved type reference readonly modifier bit"
+    );
+
+    let function_declaration_start =
+        SEMANTIC_TOKEN_DEPTH_SOURCE.find("pub fn choose").unwrap() + "pub fn ".len();
+    let function_declaration = semantic_token_at(
+        SEMANTIC_TOKEN_DEPTH_SOURCE,
+        &tokens,
+        function_declaration_start,
+    );
+    assert_eq!(
+        (
+            function_declaration.3.as_str(),
+            function_declaration.4,
+            function_declaration.5
+        ),
+        ("choose", 9, 3),
+        "function declaration + readonly modifier bits"
+    );
+    let function_reference_start =
+        SEMANTIC_TOKEN_DEPTH_SOURCE.find("= choose").unwrap() + "= ".len();
+    let function_reference = semantic_token_at(
+        SEMANTIC_TOKEN_DEPTH_SOURCE,
+        &tokens,
+        function_reference_start,
+    );
+    assert_eq!(
+        (
+            function_reference.3.as_str(),
+            function_reference.4,
+            function_reference.5
+        ),
+        ("choose", 9, 2),
+        "resolved function reference readonly modifier bit"
+    );
+
+    let parameter_declaration_start = SEMANTIC_TOKEN_DEPTH_SOURCE
+        .find("pub fn choose(value")
+        .unwrap()
+        + "pub fn choose(".len();
+    let parameter_declaration = semantic_token_at(
+        SEMANTIC_TOKEN_DEPTH_SOURCE,
+        &tokens,
+        parameter_declaration_start,
+    );
+    assert_eq!(
+        (
+            parameter_declaration.3.as_str(),
+            parameter_declaration.4,
+            parameter_declaration.5
+        ),
+        ("value", 10, 1),
+        "parameter declaration modifier bit"
+    );
+    let parameter_reference_start =
+        SEMANTIC_TOKEN_DEPTH_SOURCE.find("= value").unwrap() + "= ".len();
+    let parameter_reference = semantic_token_at(
+        SEMANTIC_TOKEN_DEPTH_SOURCE,
+        &tokens,
+        parameter_reference_start,
+    );
+    assert_eq!(
+        (
+            parameter_reference.3.as_str(),
+            parameter_reference.4,
+            parameter_reference.5
+        ),
+        ("value", 10, 0),
+        "parameter read must not inherit declaration or write modifiers"
+    );
+
+    let local_declaration_start =
+        SEMANTIC_TOKEN_DEPTH_SOURCE.find("let cached").unwrap() + "let ".len();
+    let local_declaration = semantic_token_at(
+        SEMANTIC_TOKEN_DEPTH_SOURCE,
+        &tokens,
+        local_declaration_start,
+    );
+    assert_eq!(
+        (
+            local_declaration.3.as_str(),
+            local_declaration.4,
+            local_declaration.5
+        ),
+        ("cached", 1, 1),
+        "local declaration modifier bit"
+    );
+    let local_write_start = SEMANTIC_TOKEN_DEPTH_SOURCE.find("cached =").unwrap();
+    let local_write = semantic_token_at(SEMANTIC_TOKEN_DEPTH_SOURCE, &tokens, local_write_start);
+    assert_eq!(
+        (local_write.3.as_str(), local_write.4, local_write.5),
+        ("cached", 1, 4),
+        "resolved assignment target modification bit"
+    );
+    let local_read_start =
+        SEMANTIC_TOKEN_DEPTH_SOURCE.find("cached = cached").unwrap() + "cached = ".len();
+    let local_read = semantic_token_at(SEMANTIC_TOKEN_DEPTH_SOURCE, &tokens, local_read_start);
+    assert_eq!(
+        (local_read.3.as_str(), local_read.4, local_read.5),
+        ("cached", 1, 0),
+        "assignment value reads must not receive the modification modifier"
+    );
+
     client.shutdown();
 }
 
