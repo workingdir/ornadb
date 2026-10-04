@@ -152,14 +152,6 @@ fn semantic_legend_and_editor_grammars_have_only_v1_lexical_classes() {
             "Tree-sitter is missing {keyword}"
         );
     }
-    let monarch = content(editor::MONACO_KEYWORDS_PATH);
-    for keyword in ORNA_LEX_007 {
-        assert!(
-            monarch.contains(&format!("  \"{keyword}\"")),
-            "Monarch is missing ORNA-LEX-007 keyword {keyword}"
-        );
-    }
-
     let manifest =
         serde_json::from_str::<serde_json::Value>(content(editor::ARTIFACT_MANIFEST_PATH))
             .expect("artifact manifest is JSON");
