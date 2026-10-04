@@ -1,0 +1,12 @@
+std.error.combinators.contains_any_code(
+    std.error.caused_by(
+        "outer.failure",
+        "outer context",
+        std.error.caused_by(
+            "root.failure",
+            "root context",
+            std.error.make("leaf.failure", "leaf detail"),
+        ),
+    ),
+    ["missing.failure", "leaf.failure"],
+)

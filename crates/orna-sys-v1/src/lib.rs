@@ -66,6 +66,8 @@ pub use introspection::{
     explain_query_with_partial_indexes_and_decorrelated_subqueries_and_join_pair_identities,
     explain_query_with_partial_indexes_and_join_pair_identities,
     explain_query_with_partial_indexes_and_paired_checkpoint_segment_compaction_chains,
+    explain_query_with_paired_cost_restoration_and_window_pushdowns,
+    explain_query_with_paired_cost_restoration_and_window_spill_pushdowns,
     explain_query_with_partial_indexes_and_paired_checkpoint_compaction_and_segment_rotation_chains,
     explain_query_with_partial_indexes_and_paired_checkpoint_rotation_and_stream_compaction_chains,
     explain_query_with_partial_indexes_and_paired_checkpoint_rotation_stream_and_spill_restore_chains,
@@ -91,19 +93,35 @@ pub use introspection::{
 mod provider;
 pub use provider::*;
 
+mod host_registry;
+pub use host_registry::*;
+
+#[cfg(feature = "native-hosts")]
 mod host_environment;
+#[cfg(feature = "native-hosts")]
 pub use host_environment::*;
 
+#[cfg(feature = "native-hosts")]
 mod host_process;
+#[cfg(feature = "native-hosts")]
 pub use host_process::*;
 
+#[cfg(feature = "native-hosts")]
 mod host_clock;
+#[cfg(feature = "native-hosts")]
 pub use host_clock::*;
 
+#[cfg(feature = "native-hosts")]
 mod host_filesystem;
+#[cfg(feature = "native-hosts")]
 pub use host_filesystem::*;
 
+#[cfg(all(feature = "native-hosts", not(target_arch = "wasm32")))]
 mod host_network;
+#[cfg(all(feature = "native-hosts", target_arch = "wasm32"))]
+#[path = "host_network_wasm.rs"]
+mod host_network;
+#[cfg(feature = "native-hosts")]
 pub use host_network::*;
 
 pub const CANONICAL_VALUE_CODEC_V1: &str = "OVB-1";

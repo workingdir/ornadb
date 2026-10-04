@@ -589,16 +589,18 @@ fn render_vim() -> String {
         keywords().join(" ")
     ));
     let string_delimiter = STRING_DELIMITER.to_string();
+    let block_comment_start = vim_regex_literal(BLOCK_COMMENT_START);
+    let block_comment_end = vim_regex_literal(BLOCK_COMMENT_END);
     out.push_str(&format!(
-        "syntax region ornaString start=+{string_delimiter}+ skip=+\\\\.+ end=+{string_delimiter}+ contains=ornaInterpolation\nsyntax region ornaInterpolation start=+\\\\{{+ end=+}}+ contained\nsyntax match ornaComment +{}.*$+\nsyntax region ornaComment start=+{}+ end=+{}+ contains=ornaComment\n",
-        LINE_COMMENT_START, BLOCK_COMMENT_START, BLOCK_COMMENT_END
+        "syntax region ornaString start=+{string_delimiter}+ skip=+\\\\.+ end=+{string_delimiter}+ contains=ornaInterpolation\nsyntax region ornaInterpolation start=+\\\\{{+ end=+}}+ contained\nsyntax match ornaComment +{}.*$+\nsyntax region ornaComment start=+{block_comment_start}+ end=+{block_comment_end}+ contains=ornaComment\n",
+        LINE_COMMENT_START
     ));
     out.push_str(&format!(
         "syntax match ornaNumber /\\v{}/\n",
         vim_regex(NUMBER_PATTERN)
     ));
     out.push_str(&format!(
-        "syntax match ornaOperator +\\({}\\)+\n",
+        "syntax match ornaOperator @\\({}\\)@\n",
         vim_alternation(OPERATORS)
     ));
     out.push_str(&format!(
@@ -632,6 +634,19 @@ fn render_vim_filetype() -> String {
 
 fn vim_regex(pattern: &str) -> String {
     pattern.replace("(?:", "\\%(")
+}
+
+fn vim_regex_literal(value: &str) -> String {
+    value
+        .chars()
+        .map(|character| {
+            if r#"\\.^$~[]*"#.contains(character) {
+                format!("\\{character}")
+            } else {
+                character.to_string()
+            }
+        })
+        .collect()
 }
 
 fn vim_alternation(values: &[&str]) -> String {
@@ -720,7 +735,7 @@ fn render_emacs() -> String {
   "Major mode for Orna source files."
   (setq-local comment-start {comment_start})
   (setq-local comment-end "")
-  (setq-local font-lock-defaults '(orna-font-lock-keywords nil t)))
+  (setq-local font-lock-defaults '(orna-font-lock-keywords nil nil)))
 (add-to-list 'auto-mode-alist '({extension_pattern} . orna-mode))
 (defun orna-setup-eglot ()
   "Register Orna buffers with the orna-lsp language server."
