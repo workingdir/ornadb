@@ -5784,6 +5784,7 @@ fn explain_query_core_with_wal_rotation_chains(
                     &mut operators[index].details,
                     fold,
                     pair_identity,
+                    join_pair_identity.map_or(join.source.as_str(), |pair| pair.identity.as_str()),
                     paired_aggregate_spill_fold
                         .as_ref()
                         .map(|(identity, _)| identity.as_str()),
@@ -6173,6 +6174,7 @@ fn explain_query_core_with_wal_rotation_chains(
                 &mut details,
                 fold,
                 pair_identity,
+                join_pair_identity.map_or(join.source.as_str(), |pair| pair.identity.as_str()),
                 paired_aggregate_spill_fold
                     .as_ref()
                     .map(|(identity, _)| identity.as_str()),
@@ -9213,8 +9215,10 @@ struct QueryPairedWindowCostRestorationFold {
     window_pair_count: u64,
     cost_restore_fold_count: u64,
     window_identities: BTreeMap<String, String>,
+    pair_envelope_identities: BTreeMap<String, String>,
     spill_pair_identities: BTreeMap<String, QueryPairedWindowCostRestorationSpillPair>,
     spill_fold_identity: Option<String>,
+    pair_envelope_fold_identity: Option<String>,
     window_fold_identity: Option<String>,
     restore_chain_fold_identity: Option<String>,
     window_restore_chain_fold_identity: Option<String>,
@@ -14062,8 +14066,10 @@ fn query_paired_window_cost_restoration_seed(
         window_pair_count: 1,
         cost_restore_fold_count: 0,
         window_identities,
+        pair_envelope_identities: BTreeMap::new(),
         spill_pair_identities: BTreeMap::new(),
         spill_fold_identity: None,
+        pair_envelope_fold_identity: None,
         window_fold_identity: None,
         restore_chain_fold_identity: None,
         window_restore_chain_fold_identity: None,
@@ -14100,8 +14106,12 @@ fn query_paired_window_cost_restoration_pair_identity(
     }
 
     let mut hash = Sha256::new();
-    hash.update(b"orna.sys.query-paired-window-cost-restoration-pair.v1\0");
+    hash.update(b"orna.sys.query-paired-window-cost-restoration-pair.v2\0");
     hash_optional_text(&mut hash, previous.map(|fold| fold.identity.as_str()));
+    hash_optional_text(
+        &mut hash,
+        previous.and_then(|fold| fold.window_restore_chain_fold_identity.as_deref()),
+    );
     hash_part(&mut hash, left_cost_identity.as_bytes());
     hash_part(&mut hash, right_cost_identity.as_bytes());
     if let Some(pair) = pair {
@@ -14141,6 +14151,8 @@ fn query_paired_window_cost_restoration_fold(
     let mut overflowed = previous.is_some_and(|fold| fold.overflowed);
     let mut window_identities =
         previous.map_or_else(BTreeMap::new, |fold| fold.window_identities.clone());
+    let mut pair_envelope_identities = previous
+        .map_or_else(BTreeMap::new, |fold| fold.pair_envelope_identities.clone());
     let mut spill_pair_identities = previous
         .map_or_else(BTreeMap::new, |fold| fold.spill_pair_identities.clone());
     let mut cost_restore_fold_identities = previous
@@ -14289,9 +14301,41 @@ fn query_paired_window_cost_restoration_fold(
             (false, false) => "carried_across_sparse_input",
         }
     });
+    if let Some(window_restore_chain_identity) = window_restore_chain_fold_identity.as_deref() {
+        let mut envelope_hash = Sha256::new();
+        envelope_hash.update(b"orna.sys.query-paired-window-cost-restoration-pair-envelope.v1\0");
+        hash_part(&mut envelope_hash, pair_key.as_bytes());
+        hash_part(&mut envelope_hash, pair_identity.as_bytes());
+        hash_part(&mut envelope_hash, window_restore_chain_identity.as_bytes());
+        pair_envelope_identities.insert(
+            pair_key.to_owned(),
+            format!(
+                "paired-window-cost-restoration-pair-envelope:{}",
+                hex(&envelope_hash.finalize())
+            ),
+        );
+    }
+    let pair_envelope_fold_identity = if pair_envelope_identities.is_empty() {
+        None
+    } else {
+        let mut envelope_fold_hash = Sha256::new();
+        envelope_fold_hash.update(
+            b"orna.sys.query-paired-window-cost-restoration-pair-envelope-fold.v1\0",
+        );
+        envelope_fold_hash.update((pair_envelope_identities.len() as u64).to_be_bytes());
+        for (pair, envelope_identity) in &pair_envelope_identities {
+            hash_part(&mut envelope_fold_hash, pair.as_bytes());
+            hash_part(&mut envelope_fold_hash, envelope_identity.as_bytes());
+        }
+        Some(format!(
+            "paired-window-cost-restoration-pair-envelope-fold:{}",
+            hex(&envelope_fold_hash.finalize())
+        ))
+    };
     let parent_identity = previous.map(|fold| fold.identity.clone());
 
     let mut hash = Sha256::new();
+    hash.update(b"orna.sys.query-paired-window-cost-restoration-fold.v6\0");
     hash.update(b"orna.sys.query-paired-window-cost-restoration-fold.v5\0");
     hash.update(b"orna.sys.query-paired-window-cost-restoration-fold.v4\0");
     hash_optional_text(&mut hash, parent_identity.as_deref());
@@ -14313,6 +14357,7 @@ fn query_paired_window_cost_restoration_fold(
     hash_optional_text(&mut hash, window_fold_identity.as_deref());
     hash_optional_text(&mut hash, restore_chain_fold_identity.as_deref());
     hash_optional_text(&mut hash, window_restore_chain_fold_identity.as_deref());
+    hash_optional_text(&mut hash, pair_envelope_fold_identity.as_deref());
     hash.update((cost_restore_fold_identities.len() as u64).to_be_bytes());
     for (kind, identity) in &cost_restore_fold_identities {
         hash_part(&mut hash, kind.as_bytes());
@@ -14328,8 +14373,10 @@ fn query_paired_window_cost_restoration_fold(
         window_pair_count,
         cost_restore_fold_count: cost_restore_fold_identities.len() as u64,
         window_identities,
+        pair_envelope_identities,
         spill_pair_identities,
         spill_fold_identity,
+        pair_envelope_fold_identity,
         window_fold_identity,
         restore_chain_fold_identity,
         window_restore_chain_fold_identity,
@@ -14345,6 +14392,7 @@ fn add_paired_window_cost_restoration_fold_details(
     details: &mut BTreeMap<String, PlanDetail>,
     fold: &QueryPairedWindowCostRestorationFold,
     pair_identity: &str,
+    pair_key: &str,
     spill_pair_identity: Option<&str>,
     transition: &str,
 ) {
@@ -14356,6 +14404,34 @@ fn add_paired_window_cost_restoration_fold_details(
         "paired_window_cost_restoration_pair_identity".to_owned(),
         PlanDetail::Text(pair_identity.to_owned()),
     );
+    if let Some(pair_envelope_identity) = fold.pair_envelope_identities.get(pair_key) {
+        details.insert(
+            "paired_window_cost_restoration_pair_envelope_identity".to_owned(),
+            PlanDetail::Text(pair_envelope_identity.clone()),
+        );
+    } else {
+        details.remove("paired_window_cost_restoration_pair_envelope_identity");
+    }
+    details.insert(
+        "paired_window_cost_restoration_pair_envelope_count".to_owned(),
+        PlanDetail::Integer(fold.pair_envelope_identities.len() as u64),
+    );
+    if let Some(pair_envelope_fold_identity) = fold.pair_envelope_fold_identity.as_ref() {
+        details.insert(
+            "paired_window_cost_restoration_pair_envelope_fold_identity".to_owned(),
+            PlanDetail::Text(pair_envelope_fold_identity.clone()),
+        );
+        details.insert(
+            "paired_window_cost_restoration_pair_envelope_pairing".to_owned(),
+            PlanDetail::Text(
+                "cumulative_window_restore_chain_identity_bound_to_each_exact_pair_envelope"
+                    .to_owned(),
+            ),
+        );
+    } else {
+        details.remove("paired_window_cost_restoration_pair_envelope_fold_identity");
+        details.remove("paired_window_cost_restoration_pair_envelope_pairing");
+    }
     if let Some(parent_identity) = fold.parent_identity.as_ref() {
         details.insert(
             "paired_window_cost_restoration_parent_identity".to_owned(),
