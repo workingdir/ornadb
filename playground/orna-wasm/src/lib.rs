@@ -286,19 +286,76 @@ fn inspect_raw(raw: &Raw, depth: usize) -> (String, &'static str) {
         Raw::Int(value) => (truncate(&value.to_string()), "Int"),
         Raw::Float(bits) => (format_float(*bits), "Float"),
         Raw::Bytes(bytes) => (inspect_bytes(bytes), "Bytes"),
-        Raw::Text(value) => (
-            format!("\"{}\"", truncate(&value.escape_default().to_string())),
-            "Str",
-        ),
+        Raw::Text(value) => (inspect_text(value), "Str"),
         Raw::Array(values) => (inspect_sequence(values, depth), "Array"),
         Raw::Map(entries) => (inspect_map(entries, depth), "Map"),
         Raw::Tag(0 | 60011 | 60012 | 60016 | 60026, _) => ("<redacted>".into(), "Secret"),
         Raw::Tag(37, value) => inspect_uuid(value),
+        Raw::Tag(60000, value) => inspect_decimal(value),
+        Raw::Tag(60001, value) => inspect_typed_text(value, "Date"),
+        Raw::Tag(60002, value) => inspect_typed_payload(value, depth, "Instant"),
+        Raw::Tag(60003, value) => inspect_typed_text(value, "LocalDateTime"),
+        Raw::Tag(60004, value) => inspect_typed_text(value, "TimeZone"),
+        Raw::Tag(60005, value) => inspect_typed_payload(value, depth, "Duration"),
+        Raw::Tag(60006, value) => inspect_typed_payload(value, depth, "Quantity"),
+        Raw::Tag(60007, value) => inspect_typed_payload(value, depth, "Money"),
+        Raw::Tag(60008, value) => inspect_typed_payload(value, depth, "ZonedDateTime"),
+        Raw::Tag(60017, value) => inspect_typed_payload(value, depth, "TimeOfDay"),
+        Raw::Tag(60018, value) => inspect_typed_payload(value, depth, "ZonedDateTime"),
+        Raw::Tag(60019, value) => inspect_typed_payload(value, depth, "Range"),
         Raw::Tag(tag, value) => {
             let (text, _) = inspect_raw(value, depth + 1);
             (format!("Tag<{tag}>({text})"), "Tagged")
         }
     }
+}
+
+fn inspect_text(value: &str) -> String {
+    let mut escaped = String::new();
+    for scalar in value.chars() {
+        let start = escaped.len();
+        match scalar {
+            '"' => escaped.push_str("\\\""),
+            '\\' => escaped.push_str("\\\\"),
+            '\n' => escaped.push_str("\\n"),
+            '\r' => escaped.push_str("\\r"),
+            '\t' => escaped.push_str("\\t"),
+            '\0' => escaped.push_str("\\0"),
+            scalar if scalar.is_control() => {
+                write!(&mut escaped, "\\u{{{:x}}}", scalar as u32)
+                    .expect("writing to String is infallible");
+            }
+            scalar => escaped.push(scalar),
+        }
+        if escaped.len() > MAX_RENDER_TEXT {
+            escaped.truncate(start);
+            escaped.push('…');
+            break;
+        }
+    }
+    format!("\"{escaped}\"")
+}
+
+fn inspect_decimal(value: &Raw) -> (String, &'static str) {
+    let Raw::Array(fields) = value else {
+        return ("<invalid>".into(), "Decimal");
+    };
+    let [Raw::Int(coefficient), Raw::Int(exponent)] = fields.as_slice() else {
+        return ("<invalid>".into(), "Decimal");
+    };
+    (format!("{coefficient}e{exponent}.decimal"), "Decimal")
+}
+
+fn inspect_typed_text(value: &Raw, ty: &'static str) -> (String, &'static str) {
+    match value {
+        Raw::Text(text) => (inspect_text(text), ty),
+        _ => ("<invalid>".into(), ty),
+    }
+}
+
+fn inspect_typed_payload(value: &Raw, depth: usize, ty: &'static str) -> (String, &'static str) {
+    let (text, _) = inspect_raw(value, depth + 1);
+    (format!("{ty}({text})"), ty)
 }
 
 fn inspect_uuid(value: &Raw) -> (String, &'static str) {
@@ -384,10 +441,15 @@ mod tests {
 
     const REPL_FIXTURE: &str = include_str!("../tests/fixtures/repl_incremental.orna");
     const REPL_MULTILINE_FIXTURE: &str = include_str!("../tests/fixtures/repl_multiline.orna");
+    const REPL_RENDERING_FIXTURE: &str = include_str!("../tests/fixtures/repl_rendering.orna");
+    const REPL_UNICODE_PARSE_ERROR_FIXTURE: &str =
+        include_str!("../tests/fixtures/repl_unicode_parse_error.orna");
     const REPL_MULTILINE_PARSE_ERROR_FIXTURE: &str =
         include_str!("../tests/fixtures/repl_multiline_parse_error.orna");
     const REPL_RUNTIME_ERROR_FIXTURE: &str =
         include_str!("../tests/fixtures/repl_runtime_error.orna");
+    const REPL_LOCATED_RUNTIME_ERROR_FIXTURE: &str =
+        include_str!("../tests/fixtures/repl_located_runtime_error.orna");
 
     #[test]
     fn run_returns_values_in_stable_json_shape() {
@@ -483,10 +545,62 @@ mod tests {
     }
 
     #[test]
+    fn run_and_repl_preserve_escaped_text_and_registered_value_types() {
+        let expected: RunResponse =
+            serde_json::from_str(&run(REPL_RENDERING_FIXTURE)).expect("valid run JSON");
+        assert!(expected.ok);
+        assert_eq!(
+            expected.values[0],
+            r#""quote: \" slash: \\ newline: \n tab: \t" : Str"#
+        );
+        assert_eq!(
+            expected.values[1],
+            r#"["café", "😀", 7, true, null] : Array"#
+        );
+        assert_eq!(expected.values[2], r#""2026-09-01" : Date"#);
+        assert!(expected.values[3].ends_with(" : Instant"));
+        assert_eq!(expected.values[4], "123e0.decimal : Decimal");
+        assert!(expected.values[5].ends_with(" : Range"));
+
+        let mut repl = ReplSession::new();
+        let actual = REPL_RENDERING_FIXTURE
+            .lines()
+            .map(|line| json(&repl.evaluate(line)))
+            .filter(|response| response["kind"] == "value")
+            .map(|response| response["text"].as_str().unwrap().to_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(actual, expected.values);
+    }
+
+    #[test]
+    fn text_rendering_escapes_whole_scalars_before_truncating() {
+        assert_eq!(
+            inspect_text("quote\" slash\\ newline\n tab\t nul\0 '"),
+            "\"quote\\\" slash\\\\ newline\\n tab\\t nul\\0 '\""
+        );
+        assert_eq!(
+            inspect_text(&"\n".repeat(129)),
+            format!("\"{}…\"", "\\n".repeat(128))
+        );
+    }
+
+    #[test]
+    fn protected_tag_payloads_stay_redacted_in_nested_values() {
+        for tag in [0, 60011, 60012, 60016, 60026] {
+            let value = Raw::Array(vec![Raw::Tag(tag, Box::new(Raw::Text("sensitive".into())))]);
+            let (text, ty) = inspect_raw(&value, 0);
+            assert_eq!(text, "[<redacted>]");
+            assert_eq!(ty, "Array");
+            assert!(!text.contains("sensitive"));
+        }
+    }
+
+    #[test]
     fn repl_multiline_parse_errors_match_run_locations_and_recover() {
         let expected: RunResponse =
             serde_json::from_str(&run(REPL_MULTILINE_PARSE_ERROR_FIXTURE)).expect("valid run JSON");
         assert!(!expected.ok);
+        assert_eq!((expected.errors[0].line, expected.errors[0].col), (4, 1));
         let expected_error = run_error_text(&expected);
 
         let mut repl = ReplSession::new();
@@ -501,6 +615,58 @@ mod tests {
         assert_eq!(json(&repl.evaluate(lines[2]))["kind"], "echo");
         assert_eq!(
             json(&repl.evaluate(lines[3])),
+            serde_json::json!({"kind":"error","text":expected_error})
+        );
+        assert_eq!(
+            json(&repl.evaluate("answer + 2")),
+            serde_json::json!({"kind":"value","text":"42 : Int"})
+        );
+    }
+
+    #[test]
+    fn repl_unicode_parse_error_columns_match_run_and_recover() {
+        let expected: RunResponse =
+            serde_json::from_str(&run(REPL_UNICODE_PARSE_ERROR_FIXTURE)).expect("valid run JSON");
+        assert!(!expected.ok);
+        assert_eq!((expected.errors[0].line, expected.errors[0].col), (3, 9));
+        let expected_error = run_error_text(&expected);
+
+        let mut repl = ReplSession::new();
+        let lines = REPL_UNICODE_PARSE_ERROR_FIXTURE.lines().collect::<Vec<_>>();
+        assert_eq!(json(&repl.evaluate(lines[0]))["kind"], "echo");
+        assert_eq!(
+            json(&repl.evaluate(lines[1])),
+            serde_json::json!({"kind":"echo","text":""})
+        );
+        assert_eq!(
+            json(&repl.evaluate(lines[2])),
+            serde_json::json!({"kind":"error","text":expected_error})
+        );
+        assert_eq!(
+            json(&repl.evaluate("answer + 2")),
+            serde_json::json!({"kind":"value","text":"42 : Int"})
+        );
+    }
+
+    #[test]
+    fn repl_runtime_error_columns_match_run_after_blank_lines() {
+        let expected: RunResponse =
+            serde_json::from_str(&run(REPL_LOCATED_RUNTIME_ERROR_FIXTURE)).expect("valid run JSON");
+        assert!(!expected.ok);
+        assert_eq!((expected.errors[0].line, expected.errors[0].col), (3, 4));
+        let expected_error = run_error_text(&expected);
+
+        let mut repl = ReplSession::new();
+        let lines = REPL_LOCATED_RUNTIME_ERROR_FIXTURE
+            .lines()
+            .collect::<Vec<_>>();
+        assert_eq!(json(&repl.evaluate(lines[0]))["kind"], "echo");
+        assert_eq!(
+            json(&repl.evaluate(lines[1])),
+            serde_json::json!({"kind":"echo","text":""})
+        );
+        assert_eq!(
+            json(&repl.evaluate(lines[2])),
             serde_json::json!({"kind":"error","text":expected_error})
         );
         assert_eq!(
