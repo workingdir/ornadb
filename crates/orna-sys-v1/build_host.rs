@@ -183,6 +183,12 @@ fn validate_schema_value(
         validate_schema_value(value, target, root_schema, path)?;
     }
 
+    if let Some(expected) = schema.get("const")
+        && value != expected
+    {
+        return Err(format!("{path}: value does not match the schema constant"));
+    }
+
     if let Some(allowed) = schema.get("enum").and_then(Value::as_array)
         && !allowed.contains(value)
     {
@@ -201,6 +207,33 @@ fn validate_schema_value(
         Some(_) => return Err(format!("{path}: schema `type` must be a string or array")),
         None => None,
     };
+    if let Some(string) = value.as_str() {
+        if let Some(minimum) = schema.get("minLength").and_then(Value::as_u64)
+            && string.chars().count() < minimum as usize
+        {
+            return Err(format!(
+                "{path}: string is shorter than {minimum} characters"
+            ));
+        }
+        if let Some(pattern) = schema.get("pattern").and_then(Value::as_str) {
+            let matches = match pattern {
+                "^sys\\." => Some(string.starts_with("sys.")),
+                "^sys\\.[a-z0-9_]+(\\.[a-z0-9_]+)*$" => Some(valid_sys_failure_code(string)),
+                QUALIFIED_ID_PATTERN => Some(valid_qualified_id(string)),
+                ROLE_ANNOTATION_PATTERN => Some(valid_role_annotation_id(string)),
+                PROVIDER_ROLE_ANNOTATION_PATTERN => Some(valid_provider_role_annotation_id(string)),
+                _ => None,
+            };
+            if matches == Some(false) {
+                let description = if pattern == "^sys\\.[a-z0-9_]+(\\.[a-z0-9_]+)*$" {
+                    format!("invalid sys failure code `{string}`")
+                } else {
+                    format!("value `{string}` does not match its identifier pattern")
+                };
+                return Err(format!("{path}: {description}"));
+            }
+        }
+    }
     match schema_type {
         Some("object") => {
             let object = value
@@ -213,22 +246,42 @@ fn validate_schema_value(
                     }
                 }
             }
-            let properties = schema
-                .get("properties")
-                .and_then(Value::as_object)
-                .ok_or_else(|| format!("{path}: object schema has no properties"))?;
+            if let Some(name_schema) = schema.get("propertyNames") {
+                for field in object.keys() {
+                    validate_schema_value(
+                        &Value::String(field.clone()),
+                        name_schema,
+                        root_schema,
+                        &format!("{path} property name `{field}`"),
+                    )?;
+                }
+            }
+            let properties = match schema.get("properties") {
+                Some(properties) => Some(properties.as_object().ok_or_else(|| {
+                    format!("{path}: object schema properties must be an object")
+                })?),
+                None => None,
+            };
             for (field, child) in object {
-                match properties.get(field) {
+                match properties.and_then(|properties| properties.get(field)) {
                     Some(child_schema) => validate_schema_value(
                         child,
                         child_schema,
                         root_schema,
                         &format!("{path}.{field}"),
                     )?,
-                    None if schema.get("additionalProperties") == Some(&Value::Bool(false)) => {
-                        return Err(format!("{path}: unexpected field `{field}`"));
-                    }
-                    None => {}
+                    None => match schema.get("additionalProperties") {
+                        Some(Value::Bool(false)) => {
+                            return Err(format!("{path}: unexpected field `{field}`"));
+                        }
+                        Some(Value::Bool(true)) | None => {}
+                        Some(additional_schema) => validate_schema_value(
+                            child,
+                            additional_schema,
+                            root_schema,
+                            &format!("{path}.{field}"),
+                        )?,
+                    },
                 }
             }
         }
@@ -256,35 +309,9 @@ fn validate_schema_value(
             }
         }
         Some("string") => {
-            let string = value
+            value
                 .as_str()
                 .ok_or_else(|| format!("{path}: expected string"))?;
-            if let Some(minimum) = schema.get("minLength").and_then(Value::as_u64)
-                && string.chars().count() < minimum as usize
-            {
-                return Err(format!(
-                    "{path}: string is shorter than {minimum} characters"
-                ));
-            }
-            if let Some(pattern) = schema.get("pattern").and_then(Value::as_str) {
-                let matches = match pattern {
-                    "^sys\\.[a-z0-9_]+(\\.[a-z0-9_]+)*$" => Some(valid_sys_failure_code(string)),
-                    QUALIFIED_ID_PATTERN => Some(valid_qualified_id(string)),
-                    ROLE_ANNOTATION_PATTERN => Some(valid_role_annotation_id(string)),
-                    PROVIDER_ROLE_ANNOTATION_PATTERN => {
-                        Some(valid_provider_role_annotation_id(string))
-                    }
-                    _ => None,
-                };
-                if matches == Some(false) {
-                    let description = if pattern == "^sys\\.[a-z0-9_]+(\\.[a-z0-9_]+)*$" {
-                        format!("invalid sys failure code `{string}`")
-                    } else {
-                        format!("value `{string}` does not match its identifier pattern")
-                    };
-                    return Err(format!("{path}: {description}"));
-                }
-            }
         }
         Some("integer") => {
             let integer = value

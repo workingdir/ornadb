@@ -120,11 +120,19 @@ fn spill(identity: &str, source: &str, aggregate_identity: &str) -> QueryWindowS
     }
 }
 
-fn plan(changed_restore: bool, reverse_descriptors: bool) -> orna_sys_v1::ExplainedPlan {
+fn plan(
+    changed_restore: bool,
+    reverse_descriptors: bool,
+    changed_root_cost: bool,
+) -> orna_sys_v1::ExplainedPlan {
     let query = QueryPlanDescription {
         snapshot: SnapshotRef::descriptive("snapshot:paired-restore-window-spill-cu9gb"),
         source: object("table:Anchor"),
-        source_statistics: Some(statistics(100, 40_000, Some(branch("branch:anchor", 3)))),
+        source_statistics: Some(statistics(
+            if changed_root_cost { 101 } else { 100 },
+            if changed_root_cost { 41_000 } else { 40_000 },
+            Some(branch("branch:anchor", 3)),
+        )),
         joins: vec![
             QueryJoinDescription {
                 source: object("table:ChildB"),
@@ -220,12 +228,14 @@ fn nested_spill_cost_fold_retains_exact_paired_restore_identities() {
     assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
     assert_eq!(parsed.value.items.len(), 2);
 
-    let baseline = plan(false, false);
-    let reordered = plan(false, true);
-    let changed_restore = plan(true, false);
+    let baseline = plan(false, false, false);
+    let reordered = plan(false, true, false);
+    let changed_restore = plan(true, false, false);
+    let changed_root_cost = plan(false, false, true);
     let joins = joins_by_pair(&baseline);
     let reordered_joins = joins_by_pair(&reordered);
     let changed_joins = joins_by_pair(&changed_restore);
+    let changed_cost_joins = joins_by_pair(&changed_root_cost);
     let child_a = joins["pair:table:ChildA"];
     let child_b = joins["pair:table:ChildB"];
     let tail = joins["pair:table:Tail"];
@@ -236,6 +246,14 @@ fn nested_spill_cost_fold_retains_exact_paired_restore_identities() {
     assert_eq!(
         integer(changed_b, "aggregate_spill_estimated_bytes"),
         10_000
+    );
+    assert_eq!(
+        integer(
+            changed_cost_joins["pair:table:ChildB"],
+            "aggregate_spill_estimated_bytes"
+        ),
+        10_000,
+        "changing the upstream cost input leaves the child's spill estimate intact"
     );
     assert_eq!(
         integer(child_a, "paired_window_spill_rule_cost_restore_pair_count"),
@@ -262,6 +280,13 @@ fn nested_spill_cost_fold_retains_exact_paired_restore_identities() {
     assert_eq!(
         text(child_b, "paired_window_spill_rule_cost_restore_pairing"),
         "exact_restore_pair_identity_bound_into_spill_cost_history"
+    );
+    assert_eq!(
+        text(
+            child_b,
+            "paired_window_spill_rule_cost_restore_cost_pairing"
+        ),
+        "nested_rule_costs_bind_left_right_cost_ancestry_and_exact_restore_pair"
     );
     assert_ne!(
         text(
@@ -312,6 +337,28 @@ fn nested_spill_cost_fold_retains_exact_paired_restore_identities() {
     assert_ne!(
         text(
             child_b,
+            "paired_window_spill_rule_cost_restore_cost_fold_identity"
+        ),
+        text(
+            changed_b,
+            "paired_window_spill_rule_cost_restore_cost_fold_identity"
+        ),
+        "changing the exact restore pair changes the nested rule cost restore fold"
+    );
+    assert_ne!(
+        text(
+            child_b,
+            "paired_window_spill_rule_cost_restore_cost_fold_identity"
+        ),
+        text(
+            changed_cost_joins["pair:table:ChildB"],
+            "paired_window_spill_rule_cost_restore_cost_fold_identity"
+        ),
+        "changing the upstream join cost ancestry changes the nested rule restore fold"
+    );
+    assert_ne!(
+        text(
+            child_b,
             "paired_window_spill_rule_cost_restore_pair_identity"
         ),
         text(
@@ -326,5 +373,27 @@ fn nested_spill_cost_fold_retains_exact_paired_restore_identities() {
             "paired_window_spill_rule_cost_restore_fold_identity"
         ),
         "the sparse tail retains the changed upstream restore identity"
+    );
+    assert_eq!(
+        text(
+            tail,
+            "paired_window_spill_rule_cost_restore_cost_fold_identity"
+        ),
+        text(
+            child_b,
+            "paired_window_spill_rule_cost_restore_cost_fold_identity"
+        ),
+        "a sparse tail carries the accumulated nested rule cost restore identity"
+    );
+    assert_ne!(
+        text(
+            tail,
+            "paired_window_spill_rule_cost_restore_cost_fold_identity"
+        ),
+        text(
+            joins_by_pair(&changed_restore)["pair:table:Tail"],
+            "paired_window_spill_rule_cost_restore_cost_fold_identity"
+        ),
+        "the sparse tail carries a changed upstream restore through nested rule costs"
     );
 }
