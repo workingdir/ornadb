@@ -279,6 +279,13 @@ fn nested_window_identities_survive_paired_cost_restore_folds_and_sparse_edges()
         1
     );
     assert_eq!(
+        integer(
+            child_a,
+            "paired_window_cost_restoration_window_identity_pair_count"
+        ),
+        1
+    );
+    assert_eq!(
         integer(child_a, "paired_window_cost_restoration_restore_fold_count"),
         2
     );
@@ -304,6 +311,13 @@ fn nested_window_identities_survive_paired_cost_restore_folds_and_sparse_edges()
     );
     assert_eq!(
         integer(child_b, "paired_window_cost_restoration_window_count"),
+        2
+    );
+    assert_eq!(
+        integer(
+            child_b,
+            "paired_window_cost_restoration_window_identity_pair_count"
+        ),
         2
     );
     assert_eq!(
@@ -335,6 +349,23 @@ fn nested_window_identities_survive_paired_cost_restore_folds_and_sparse_edges()
         2
     );
     assert_eq!(
+        integer(
+            tail,
+            "paired_window_cost_restoration_window_identity_pair_count"
+        ),
+        2,
+        "the sparse edge carries both paired window identities"
+    );
+    assert_eq!(
+        text(tail, "paired_window_cost_restoration_window_identity_pairing"),
+        "exact_pair_window_identities_bound_across_nested_cost_restore_folds"
+    );
+    assert_eq!(
+        text(tail, "paired_window_cost_restoration_window_fold_identity"),
+        text(child_b, "paired_window_cost_restoration_window_fold_identity"),
+        "a sparse edge carries the last paired window identity fold"
+    );
+    assert_eq!(
         integer(tail, "paired_window_cost_restoration_restore_fold_count"),
         2
     );
@@ -364,6 +395,17 @@ fn nested_window_identities_survive_paired_cost_restore_folds_and_sparse_edges()
             ),
             "resolving descriptors in a different order retains identical nested window values"
         );
+        assert_eq!(
+            text(
+                joins[pair_id],
+                "paired_window_cost_restoration_window_fold_identity"
+            ),
+            text(
+                reordered_joins[pair_id],
+                "paired_window_cost_restoration_window_fold_identity"
+            ),
+            "descriptor reordering preserves the exact paired window fold"
+        );
     }
     assert_ne!(
         text(child_b, "paired_window_cost_restoration_fold_identity"),
@@ -372,6 +414,28 @@ fn nested_window_identities_survive_paired_cost_restore_folds_and_sparse_edges()
             "paired_window_cost_restoration_fold_identity"
         ),
         "changing the real aggregate operation changes the nested restoration identity"
+    );
+    assert_ne!(
+        text(
+            child_b,
+            "paired_window_cost_restoration_window_fold_identity"
+        ),
+        text(
+            changed_joins["pair:table:ChildB"],
+            "paired_window_cost_restoration_window_fold_identity"
+        ),
+        "the paired window fold binds the changed aggregate operation"
+    );
+    assert_eq!(
+        text(
+            changed_joins["pair:table:Tail"],
+            "paired_window_cost_restoration_window_fold_identity"
+        ),
+        text(
+            changed_joins["pair:table:ChildB"],
+            "paired_window_cost_restoration_window_fold_identity"
+        ),
+        "the sparse edge carries the changed paired window identity fold"
     );
     assert_ne!(
         text(child_b, "paired_window_cost_restoration_cost_fold_identity"),
@@ -405,6 +469,26 @@ fn nested_window_identities_survive_paired_cost_restore_folds_and_sparse_edges()
             ),
             "descriptor reordering preserves exact nested cost ancestry"
         );
+    }
+    for changed in [
+        &changed_root_cost_joins,
+        &changed_left_pair_cost_joins,
+        &changed_right_pair_cost_joins,
+        &changed_restore_joins,
+    ] {
+        for pair_id in ["pair:table:ChildA", "pair:table:ChildB", "pair:table:Tail"] {
+            assert_eq!(
+                text(
+                    joins[pair_id],
+                    "paired_window_cost_restoration_window_fold_identity"
+                ),
+                text(
+                    changed[pair_id],
+                    "paired_window_cost_restoration_window_fold_identity"
+                ),
+                "cost and restore changes leave the exact window identity fold unchanged"
+            );
+        }
     }
     assert_ne!(
         text(child_b, "paired_window_cost_restoration_cost_fold_identity"),
