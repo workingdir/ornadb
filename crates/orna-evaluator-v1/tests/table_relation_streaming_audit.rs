@@ -7143,3 +7143,124 @@ fn paired_nested_folds_keep_identity_across_same_source_restore_chains() {
         .all(|(_, _, cursor)| cursor.as_ref() != Some(&chain[4])));
     assert!(source.pending["View.Paired"].is_empty());
 }
+
+#[test]
+fn paired_nested_fold_restores_keep_scopes_as_fold_depths_change() {
+    let chain = nested_pagination_cursor_chain();
+    let cases = [
+        (
+            0,
+            1,
+            [1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
+            [10, 20, 30, 40, 50, 60, 70, 80, 90, 100],
+            308,
+            5280,
+        ),
+        (
+            2,
+            1,
+            [3, 6, 9, 12, 15, 18, 21, 24, 27, 30],
+            [11, 12, 13, 14, 15, 16, 17, 18, 19, 20],
+            2640,
+            1488,
+        ),
+        (
+            2,
+            3,
+            [-1, -2, -3, -4, -5, -6, -7, -8, -9, -10],
+            [100, 90, 80, 70, 60, 50, 40, 30, 20, 10],
+            -880,
+            14080,
+        ),
+    ];
+    let restores = cases
+        .iter()
+        .flat_map(|(_, _, first, second, _, _)| {
+            [
+                (
+                    "View.Paired",
+                    nested_pagination_restore(first, &chain),
+                ),
+                (
+                    "View.Paired",
+                    nested_pagination_restore(second, &chain),
+                ),
+            ]
+        })
+        .collect::<Vec<_>>();
+    let mut source = PairedCursorRestoreSource::new(restores);
+    let mut functions = paired_shared_cursor_nested_spill_functions();
+    let mut outputs = Vec::new();
+    for (first_depth, second_depth, _, _, expected_first, expected_second) in cases {
+        functions.insert(
+            "run".into(),
+            PureFunction {
+                parameters: Vec::new(),
+                body: paired_same_source_nested_spill_body(first_depth, second_depth),
+                environment: Environment::new(),
+            },
+        );
+        let output = invoke_named_with_effects(
+            "run",
+            &functions,
+            &Environment::new(),
+            Limits::default(),
+            &mut source,
+        )
+        .unwrap();
+        assert_eq!(
+            output,
+            integer_pair(expected_first, expected_second),
+            "fold depths {first_depth}/{second_depth} keep the paired restored values"
+        );
+        outputs.push(output);
+    }
+    assert_eq!(
+        outputs,
+        vec![
+            integer_pair(308, 5280),
+            integer_pair(2640, 1488),
+            integer_pair(-880, 14080),
+        ],
+        "later nested folds preserve each earlier restore snapshot"
+    );
+
+    assert_eq!(source.lanes.len(), 6);
+    let scopes = source
+        .lanes
+        .iter()
+        .map(|(source_name, scope, _)| {
+            assert_eq!(source_name, "View.Paired");
+            *scope
+        })
+        .collect::<Vec<_>>();
+    for (index, scope) in scopes.iter().enumerate() {
+        assert!(
+            !scopes[..index].contains(scope),
+            "each nested fold restore has a fresh same-source scope: {scope:?}"
+        );
+    }
+    let expected_chain = [
+        None,
+        Some(chain[0].clone()),
+        Some(chain[1].clone()),
+        Some(chain[2].clone()),
+        Some(chain[3].clone()),
+    ];
+    let expected_cursors = source
+        .lanes
+        .iter()
+        .flat_map(|(source_name, scope, _)| {
+            expected_chain
+                .iter()
+                .cloned()
+                .map(|cursor| (source_name.clone(), *scope, cursor))
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(source.cursors, expected_cursors);
+    assert!(source
+        .cursors
+        .iter()
+        .all(|(_, _, cursor)| cursor.as_ref() != Some(&chain[4])));
+    assert!(source.pending["View.Paired"].is_empty());
+}
