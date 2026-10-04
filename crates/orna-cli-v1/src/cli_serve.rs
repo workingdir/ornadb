@@ -334,7 +334,7 @@ fn serve_shared_connection(
     write_response(&mut stream, host_route(root, identity, &request))
 }
 
-fn serve_websocket_connection(mut stream: TcpStream, state: &mut ServeState) -> io::Result<()> {
+fn serve_websocket_connection(stream: TcpStream, state: &mut ServeState) -> io::Result<()> {
     stream.set_read_timeout(None)?;
     let mut attachment = [0; 16];
     getrandom::fill(&mut attachment)
