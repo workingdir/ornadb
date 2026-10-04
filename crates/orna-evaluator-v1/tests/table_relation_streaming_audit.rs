@@ -6929,3 +6929,105 @@ fn paired_nested_spill_restores_isolate_identical_cursor_chains() {
     assert!(source.pending["View.Left"].is_empty());
     assert!(source.pending["View.Right"].is_empty());
 }
+
+#[test]
+fn paired_nested_spill_shared_cursors_follow_reverse_lane_order() {
+    let long_a = vec![0x70; 255];
+    let compact_a = vec![0x71];
+    let long_b = vec![0x71; 511];
+    let compact_b = vec![0x72];
+    let after_compaction = vec![0x73];
+    let left = [11, 12, 13, 14, 15, 16, 17, 18, 19, 20];
+    let right = [2, 4, 6, 8, 10, 12, 14, 16, 18, 20];
+    let restore = |values: &[i64]| {
+        let rows = values.chunks(2).collect::<Vec<_>>();
+        BTreeMap::from([
+            (None, page(rows[0], Some(long_a.clone()))),
+            (
+                Some(long_a.clone()),
+                page(rows[1], Some(compact_a.clone())),
+            ),
+            (
+                Some(compact_a.clone()),
+                page(rows[2], Some(long_b.clone())),
+            ),
+            (
+                Some(long_b.clone()),
+                page(rows[3], Some(compact_b.clone())),
+            ),
+            (
+                Some(compact_b.clone()),
+                page(rows[4], Some(after_compaction.clone())),
+            ),
+            (
+                Some(after_compaction.clone()),
+                page(&[999_999], None),
+            ),
+        ])
+    };
+    let mut source = PairedCursorRestoreSource::new([
+        ("View.Left", restore(&left)),
+        ("View.Right", restore(&right)),
+    ]);
+    let mut functions = paired_shared_cursor_nested_spill_functions();
+    functions.insert(
+        "run".into(),
+        PureFunction {
+            parameters: Vec::new(),
+            body: Expr::Tuple {
+                elements: vec![
+                    nested_pagination_spill("View.Right", 1),
+                    nested_pagination_spill("View.Left", 1),
+                ],
+                span: span(),
+            },
+            environment: Environment::new(),
+        },
+    );
+    assert_eq!(
+        invoke_named_with_effects(
+            "run",
+            &functions,
+            &Environment::new(),
+            Limits::default(),
+            &mut source,
+        )
+        .unwrap(),
+        integer_pair(1056, 1488),
+        "reversing paired evaluation preserves each source's captured values"
+    );
+
+    assert_eq!(
+        source
+            .lanes
+            .iter()
+            .map(|(source_name, _, _)| source_name.as_str())
+            .collect::<Vec<_>>(),
+        ["View.Right", "View.Left"]
+    );
+    assert_ne!(source.lanes[0].1, source.lanes[1].1);
+    let expected_chain = [
+        None,
+        Some(long_a),
+        Some(compact_a),
+        Some(long_b),
+        Some(compact_b),
+    ];
+    let expected_cursors = source
+        .lanes
+        .iter()
+        .flat_map(|(source_name, scope, _)| {
+            expected_chain
+                .iter()
+                .cloned()
+                .map(|cursor| (source_name.clone(), *scope, cursor))
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(source.cursors, expected_cursors);
+    assert!(source
+        .cursors
+        .iter()
+        .all(|(_, _, cursor)| cursor.as_ref() != Some(&after_compaction)));
+    assert!(source.pending["View.Left"].is_empty());
+    assert!(source.pending["View.Right"].is_empty());
+}
