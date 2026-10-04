@@ -295,10 +295,6 @@ fn standard_imported_symbols_in_tree(tree: &SyntaxTree) -> Vec<&'static Standard
     imported.into_values().collect()
 }
 
-fn standard_module_aliases(parse: &EditorParse) -> BTreeMap<String, String> {
-    standard_module_aliases_in_tree(&parse.value)
-}
-
 fn standard_module_aliases_in_tree(tree: &SyntaxTree) -> BTreeMap<String, String> {
     let mut aliases = BTreeMap::new();
     for item in &tree.items {
