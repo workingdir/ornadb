@@ -6,7 +6,7 @@ const webUi = fileURLToPath(new URL('../', import.meta.url));
 const repository = fileURLToPath(new URL('../../../', import.meta.url));
 const distribution = join(webUi, 'dist');
 const assetRows = join(repository, 'playground', 'Asset');
-const maxAssetBytes = 2 * 1024 * 1024;
+const maxAssetBytes = 8 * 1024 * 1024;
 const arguments_ = process.argv.slice(2);
 if (arguments_.length > 1 || arguments_.some((argument) => argument !== '--check')) {
   throw new Error('Usage: node scripts/generate-db-assets.mjs [--check]');
@@ -41,7 +41,7 @@ async function collectFiles(directory, prefix = '') {
     if (child.isDirectory() && relativePath === 'lsp-wasm') continue;
     if (child.isDirectory()) files.push(...await collectFiles(path, relativePath));
     else if (child.isFile()) files.push(relativePath);
-    else throw new Error(`Unsupported playground build entry: ${relativePath}`);
+    else throw new Error('Unsupported playground build entry: ' + relativePath);
   }
   return files;
 }
@@ -57,16 +57,22 @@ function ornaString(value) {
     else if (character === '\t') encoded += '\\t';
     else if (character === '\0') encoded += '\\0';
     else if (character === '{' || character === '}' || codePoint < 0x20 || codePoint === 0x7f) {
-      encoded += `\\u{${codePoint.toString(16)}}`;
+      encoded += '\\u{' + codePoint.toString(16) + '}';
     } else encoded += character;
   }
-  return `${encoded}"`;
+  return encoded + '"';
 }
 
 function assetRow(id, path, mediaType, content) {
-  return `{ id: ${ornaString(id)}, path: ${ornaString(path)}, `
-    + `media_type: ${ornaString(mediaType)}, content: ${ornaString(content)} }\n`;
+  return '{ id: ' + ornaString(id) + ', path: ' + ornaString(path) + ', '
+    + 'media_type: ' + ornaString(mediaType) + ', content: ' + ornaString(content) + ' }\n';
 }
+
+const extraAssets = [
+  ['assets/presentation.mjs', join(repository, 'playground/shared/presentation.mjs')],
+  ['assets/serve-home.mjs', join(repository, 'crates/orna-cli-v1/src/serve_home.mjs')],
+  ['assets/serve-playground.mjs', join(repository, 'crates/orna-cli-v1/src/serve_playground.mjs')],
+];
 
 async function expectedRows() {
   const files = await collectFiles('');
@@ -74,21 +80,30 @@ async function expectedRows() {
 
   const rows = new Map();
   let totalContentBytes = 0;
-  for (const path of files) {
-    const content = await readFile(join(distribution, path));
+  const sources = [
+    ...files.map((path) => [path, join(distribution, path)]),
+    ...extraAssets,
+  ];
+  for (const [path, sourcePath] of sources) {
+    const content = await readFile(sourcePath);
     if (content.byteLength > maxAssetBytes) {
-      throw new Error(`Playground DB asset exceeds ${maxAssetBytes} bytes: ${path}`);
+      throw new Error('Playground DB asset exceeds ' + maxAssetBytes + ' bytes: ' + path);
     }
     const mediaType = mediaTypes.get(extname(path).toLowerCase());
-    if (!mediaType) throw new Error(`Unsupported playground DB asset type: ${path}`);
-    const contentText = content.toString('utf8');
-    if (!Buffer.from(contentText, 'utf8').equals(content)) {
-      throw new Error(`Playground DB assets must be UTF-8 text: ${path}`);
+    if (!mediaType) throw new Error('Unsupported playground DB asset type: ' + path);
+    let contentText;
+    if (mediaType === 'application/wasm') {
+      contentText = content.toString('base64');
+    } else {
+      contentText = content.toString('utf8');
+      if (!Buffer.from(contentText, 'utf8').equals(content)) {
+        throw new Error('Playground DB assets must be UTF-8 text: ' + path);
+      }
     }
 
     const normalizedPath = path.split(sep).join('/');
-    const id = `asset-${Buffer.from(normalizedPath).toString('hex')}`;
-    const rowPath = join(assetRows, `${id}.orna`);
+    const id = 'asset-' + Buffer.from(normalizedPath).toString('hex');
+    const rowPath = join(assetRows, id + '.orna');
     rows.set(rowPath, assetRow(id, normalizedPath, mediaType, contentText));
     totalContentBytes += content.byteLength;
   }
@@ -121,16 +136,16 @@ try {
 
   if (checkOnly) {
     if (stale.length || changed.length) {
-      for (const rowPath of stale) console.error(`Stale playground Asset row: ${rowPath}`);
-      for (const [rowPath] of changed) console.error(`Missing or stale playground Asset row: ${rowPath}`);
+      for (const rowPath of stale) console.error('Stale playground Asset row: ' + rowPath);
+      for (const [rowPath] of changed) console.error('Missing or stale playground Asset row: ' + rowPath);
       process.exitCode = 1;
     } else {
-      console.log(`Verified ${rows.size} committed playground Asset rows (${totalContentBytes} content bytes).`);
+      console.log('Verified ' + rows.size + ' committed playground Asset rows (' + totalContentBytes + ' content bytes).');
     }
   } else {
     for (const [rowPath, content] of changed) await writeFile(rowPath, content, 'utf8');
     for (const rowPath of stale) await rm(rowPath);
-    console.log(`Wrote ${rows.size} committed playground Asset rows (${totalContentBytes} content bytes).`);
+    console.log('Wrote ' + rows.size + ' committed playground Asset rows (' + totalContentBytes + ' content bytes).');
   }
 } catch (error) {
   console.error(error.message);

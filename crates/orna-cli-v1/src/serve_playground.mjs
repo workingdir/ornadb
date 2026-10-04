@@ -3,7 +3,7 @@ import {
   formatCbor,
   renderPresent,
   runResultFromPresentation,
-} from '/assets/presentation.mjs';
+} from '/playground/assets/presentation.mjs';
 
 const page = document.querySelector('#live-bridge');
 const status = document.querySelector('#live-status');
