@@ -1,0 +1,11 @@
+std.result.is_ok(ok_value)
+&& std.result.is_err(err_value)
+&& std.result.ok(ok_value) == Some(4)
+&& std.result.err(ok_value) == null
+&& std.result.err(err_value) == Some("failure")
+&& std.result.contains(ok_value, 4)
+&& !std.result.contains(ok_value, 5)
+&& !std.result.contains(err_value, 4)
+&& std.result.contains_error(err_value, "failure")
+&& !std.result.contains_error(err_value, "later")
+&& !std.result.contains_error(ok_value, "failure")

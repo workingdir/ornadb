@@ -103,6 +103,7 @@ impl ReplSession {
         })
     }
 
+    #[cfg(feature = "project-repl")]
     pub(crate) fn with_module_aliases(
         mut self,
         aliases: BTreeMap<String, String>,
@@ -183,6 +184,7 @@ impl ReplSession {
 
     /// Publishes the typed REPL's redacted execution status. This is kept
     /// separate from ordinary bindings so module source cannot capture it.
+    #[cfg(feature = "project-repl")]
     pub(crate) fn set_last_status(&mut self, status: CanonicalValue) {
         self.last_status = Some(status);
     }

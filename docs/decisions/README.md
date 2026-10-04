@@ -58,7 +58,8 @@ closed boundaries; later ADRs supersede only the named deferred portion.
 | 0110 | Source-document and object-description contracts as specified by Orna 1.0.0 | A separate bounded function-declaration metadata value and `sys.source.function` API remain gated on a canonical contract; this ADR does not add identities or runtime behavior. |
 | 0111 | Design for `sys` as a baked typed module ABI with one provider protocol for built-ins and extensions. | Typed provider dispatch, semantic-role linkage, capability negotiation, Wasm loading, and adapters are phased follow-on slices; 1.0.0 `sys` semantics and `api/sys.json` remain frozen. |
 | 0112 | Phase 1 typed `sys` provider protocol implementation and 1.0 compatibility choices. | Build-time typed registry and role linkage are consumed by semantic/runtime crates; Wasm/WIT loading remains deferred. |
-| 0115 | Generate TextMate, VS Code language metadata, and the semantic-token mapping from `orna-syntax` presentation metadata. | TextMate remains a lexical fallback; parser-contextual token roles require semantic-token support. Exact editor scopes and package conventions are pragmatic because the frozen reference does not define them. |
+| 0115 | Superseded: editor artifacts now come from `orna-syntax-v1` metadata. | TextMate remains a lexical fallback; diagnostics and semantic tokens come from the v1 LSP. |
+| 0116 | Binding architecture: the playground is a Git-backed `std.devtools` application with server-side execution and generic introspected presentation. | S4 execution sessions and S5 renderer integration remain implementation slices; the WASM evaluator is retired from the production browser path. |
 | 0101 | OrnaDB 1.0 CLIENT VM trust boundary | Host-side remote source evaluation remains normative; production CLIENT bytecode VM, artifact trust, and CLIENT sandbox contracts are deferred. |
 
 ## Current work ADRs
@@ -270,6 +271,8 @@ closed boundaries; later ADRs supersede only the named deferred portion.
   [`sys` Baked Module ABI and Extensible Provider Protocol](0111-sys-baked-module-abi.md)
 * **work ADR 0115:**
   [Single-source editor syntax artifacts](0115-single-source-editor-syntax-artifacts.md)
+* **work ADR 0116:**
+  [Playground as a Database-Hosted Application](0116-playground-in-db-application.md)
 
 ## External reference records
 

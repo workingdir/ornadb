@@ -33,6 +33,8 @@ const GENERIC_OPERATION_STUB_FIXTURE: &str =
     include_str!("fixtures/sys-generic-operation-stubs.orna");
 const STREAM_CONTROL_EDGE_STUB_FIXTURE: &str =
     include_str!("fixtures/sys-provider-stream-control-edges.orna");
+const PROMISE_CALLBACK_STUB_FIXTURE: &str =
+    include_str!("fixtures/sys-provider-promise-callback.orna");
 
 fn resolve_type(ty: &TypeExpr) -> Result<AbiType, String> {
     match ty {
@@ -1442,6 +1444,241 @@ fn generated_provider_callback_binding_matches_schema_and_idl() {
         "generated_provider_callback_binding_parity schema_validated=1 typed_contracts=1 macro_bindings=1 idl_parameters={} idl_results=1 provider_role=1 total_cases={}",
         signature.parameters.len(),
         5 + signature.parameters.len()
+    );
+}
+
+#[test]
+fn generated_provider_promise_callback_binding_matches_schema_and_idl() {
+    const OPERATIONS: [&str; 2] = ["sys.await", "sys.start<T>"];
+
+    let generated_schema = build_provider::generate_provider_registry_schema()
+        .expect("provider promise schema regenerates from its typed source");
+    assert_eq!(generated_schema, system_provider_abi_schema_json());
+    build_host::validate_json_against_schema(system_provider_abi_json(), &generated_schema)
+        .expect("embedded promise operations conform to the regenerated provider schema");
+
+    let registry_json: Value =
+        serde_json::from_str(system_provider_abi_json()).expect("embedded provider registry");
+    let raw_operations = registry_json["operations"]
+        .as_array()
+        .expect("generated provider registry has operation rows");
+    let registry = orna_sys_v1::SystemProviderAbi::from_json(system_provider_abi_json())
+        .expect("schema-validated promise registry parses into typed contracts");
+    let fixture = PROMISE_CALLBACK_STUB_FIXTURE.trim_end();
+    let parsed = parse_module(fixture);
+    assert!(
+        parsed.is_ok(),
+        "generated promise callback fixture parses: {:?}",
+        parsed.diagnostics
+    );
+    assert_eq!(parsed.value.items.len(), 3);
+    let markers = fixture
+        .lines()
+        .filter_map(|line| line.strip_prefix("// sys-op: "))
+        .collect::<Vec<_>>();
+    assert_eq!(markers, OPERATIONS);
+    let generated_source = system_binding_stubs();
+    let generated_parsed = parse_module(generated_source);
+    assert!(
+        generated_parsed.is_ok(),
+        "complete generated promise binding bundle parses: {:?}",
+        generated_parsed.diagnostics
+    );
+    let generated_markers = generated_source
+        .lines()
+        .filter_map(|line| line.strip_prefix("// sys-op: "))
+        .collect::<Vec<_>>();
+
+    let mut schema_rows = 0;
+    let mut typed_contracts = 0;
+    let mut macro_bindings = 0;
+    let mut idl_operations = 0;
+    for (index, operation_name) in OPERATIONS.iter().enumerate() {
+        let contract = registry
+            .operation(operation_name)
+            .expect("promise callback operation exists in the typed provider registry");
+        let row = raw_operations
+            .iter()
+            .find(|row| row["name"] == *operation_name)
+            .expect("generated schema input contains the promise callback operation");
+        assert_eq!(
+            row["signature"].as_str(),
+            Some(contract.signature.source.as_str()),
+            "schema row and typed promise contract agree for {operation_name}"
+        );
+        schema_rows += 1;
+        typed_contracts += 1;
+
+        let generated = system_function_descriptor(operation_name)
+            .expect("promise operation has a macro-generated binding descriptor");
+        assert_eq!(generated.signature, contract.signature.source);
+        assert_eq!(contract.effects.iter().next(), Some(generated.effect));
+        assert!(contract.role.is_some());
+        macro_bindings += 1;
+
+        let Declaration::Function { signature, .. } = &parsed.value.items[index].declaration else {
+            panic!("generated promise binding {operation_name} is not a function")
+        };
+        let generated_index = generated_markers
+            .iter()
+            .position(|marker| *marker == *operation_name)
+            .expect("generated binding bundle has the promise operation marker");
+        let Declaration::Function {
+            signature: generated_signature,
+            ..
+        } = &generated_parsed.value.items[generated_index].declaration
+        else {
+            panic!("generated bundle entry {operation_name} is not a function")
+        };
+        assert_eq!(
+            signature
+                .generics
+                .iter()
+                .map(|generic| generic.name.as_str())
+                .collect::<Vec<_>>(),
+            contract
+                .signature
+                .type_parameters
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            generated_signature
+                .generics
+                .iter()
+                .map(|generic| generic.name.as_str())
+                .collect::<Vec<_>>(),
+            contract
+                .signature
+                .type_parameters
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            signature.parameters.len(),
+            contract.signature.parameters.len()
+        );
+        assert_eq!(
+            generated_signature.parameters.len(),
+            contract.signature.parameters.len()
+        );
+        for (idl_parameter, registry_parameter) in signature
+            .parameters
+            .iter()
+            .zip(&contract.signature.parameters)
+        {
+            assert_eq!(
+                resolve_type(
+                    idl_parameter
+                        .annotation
+                        .as_ref()
+                        .expect("generated promise IDL parameter is typed")
+                )
+                .expect("generated promise IDL parameter type resolves"),
+                registry_parameter.ty
+            );
+        }
+        for (idl_parameter, registry_parameter) in generated_signature
+            .parameters
+            .iter()
+            .zip(&contract.signature.parameters)
+        {
+            assert_eq!(
+                resolve_type(
+                    idl_parameter
+                        .annotation
+                        .as_ref()
+                        .expect("generated binding parameter is typed")
+                )
+                .expect("generated binding parameter type resolves"),
+                registry_parameter.ty
+            );
+        }
+        assert_eq!(
+            resolve_type(
+                signature
+                    .result
+                    .as_ref()
+                    .expect("generated promise IDL result is typed")
+            )
+            .expect("generated promise IDL result type resolves"),
+            contract.signature.result
+        );
+        assert_eq!(
+            resolve_type(
+                generated_signature
+                    .result
+                    .as_ref()
+                    .expect("generated binding result is typed")
+            )
+            .expect("generated binding result type resolves"),
+            contract.signature.result
+        );
+        idl_operations += 1;
+    }
+
+    let await_contract = registry
+        .operation("sys.await")
+        .expect("await callback contract exists");
+    let start_contract = registry
+        .operation("sys.start<T>")
+        .expect("promise producer contract exists");
+    assert_eq!(
+        start_contract.signature.result, await_contract.signature.parameters[0].ty,
+        "start handle flows directly into await's invocation parameter"
+    );
+    assert_eq!(
+        start_contract.signature.result,
+        AbiType::Applied {
+            constructor: "sys.InvocationHandle".to_owned(),
+            arguments: vec![AbiType::Named("T".to_owned())],
+        }
+    );
+    assert_eq!(
+        await_contract.signature.result,
+        AbiType::Applied {
+            constructor: "sys.InvocationResult".to_owned(),
+            arguments: vec![AbiType::Named("T".to_owned())],
+        }
+    );
+
+    let Declaration::Function {
+        signature: callback_signature,
+        ..
+    } = &parsed.value.items[2].declaration
+    else {
+        panic!("promise completion callback fixture is not a function")
+    };
+    assert_eq!(callback_signature.name, "promise_callback");
+    assert_eq!(callback_signature.generics[0].name, "T");
+    assert_eq!(
+        resolve_type(
+            callback_signature.parameters[0]
+                .annotation
+                .as_ref()
+                .expect("completion callback accepts an invocation handle")
+        )
+        .expect("completion callback input type resolves"),
+        start_contract.signature.result
+    );
+    assert_eq!(
+        resolve_type(
+            callback_signature
+                .result
+                .as_ref()
+                .expect("completion callback returns the await result")
+        )
+        .expect("completion callback result type resolves"),
+        await_contract.signature.result
+    );
+    assert!(fixture.ends_with("= sys.await(invocation);"));
+
+    println!(
+        "generated_provider_promise_callback_binding_parity operations={} schema_validated=1 schema_rows={schema_rows} typed_contracts={typed_contracts} macro_bindings={macro_bindings} idl_operations={idl_operations} handle_result_pairs=1 completion_callback=1 total_cases={}",
+        OPERATIONS.len(),
+        1 + schema_rows + typed_contracts + macro_bindings + idl_operations + 3
     );
 }
 
