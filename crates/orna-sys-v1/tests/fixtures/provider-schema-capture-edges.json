@@ -1,0 +1,42 @@
+{
+  "operation": "sys.invoke(Value)",
+  "dynamic_provider": "schema.capture.edge-provider",
+  "cases": [
+    {
+      "name": "operation-role-explicit-null",
+      "field": "operation.role",
+      "omit": false,
+      "value": null,
+      "schema_accepts": true,
+      "typed_parse_accepts": true,
+      "dispatch": "provider_not_executable"
+    },
+    {
+      "name": "operation-role-omitted",
+      "field": "operation.role",
+      "omit": true,
+      "schema_accepts": false,
+      "typed_parse_accepts": false,
+      "dispatch": "schema_rejects"
+    },
+    {
+      "name": "builtin-provider-explicit-null",
+      "field": "role.builtin_provider",
+      "omit": false,
+      "value": null,
+      "required": false,
+      "schema_accepts": true,
+      "typed_parse_accepts": true,
+      "dispatch": "direct_unavailable_selected_success"
+    },
+    {
+      "name": "builtin-provider-omitted",
+      "field": "role.builtin_provider",
+      "omit": true,
+      "required": false,
+      "schema_accepts": false,
+      "typed_parse_accepts": false,
+      "dispatch": "schema_rejects"
+    }
+  ]
+}
