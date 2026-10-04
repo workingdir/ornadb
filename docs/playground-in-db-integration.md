@@ -24,17 +24,22 @@ does not contain a second evaluator or a language keyword inventory.
 Run the focused process-level integration test with:
 
 ```sh
-CARGO_BUILD_JOBS=2 RUST_TEST_THREADS=1 cargo test -p orna-cli-v1 --test serve_playground_dogfood -- --nocapture
+export CARGO_BUILD_JOBS=2 RUST_TEST_THREADS=2
+cargo test -p orna-cli-v1 --test serve_playground_dogfood -- --nocapture
 ```
 
 The test initializes a temporary Orna Git database, commits crate-local
 `.orna` fixtures, starts the actual `orna-cli-v1 serve` process, and uses curl
 for the Git listing, playground page and asset, committed examples, and live
 session creation. A WebSocket client then follows the same `orna.present.v1`
-watch, fingerprinted Eval, and Resync exchange used by the browser bridge. It
-checks a successful `1 + 1` result and applies the resulting revision `0..1`
-delta to the initial presentation snapshot, including the recorded success
-value `2`.
+watch, fingerprinted Eval, and Resync exchange used by the browser bridge.
+
+The test sends two independently fingerprinted Eval requests before reading
+either response, then checks that each response keeps its request identity and
+value (`2` and `42`). It resynchronizes the original watch, applies the
+revision `0..1` delta to the revision-zero presentation, and checks both run
+events. A third Eval produces a revision `1..2` delta; applying it yields the
+exact presentation from a fresh watch snapshot in the same served session.
 
 The test checks the HTTP and live protocol boundary end to end without relying
 on a separately running development server or a checked-in build artifact.
