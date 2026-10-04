@@ -29,6 +29,10 @@ with the embed entry hiding the marked page header and applying its framing
 policy. Static assets are returned with their checked media type and
 `X-Content-Type-Options: nosniff`. A commit that changes a Route, Entry, or
 Asset row is visible on the next request without restarting `orna serve`.
+Accepted connections run independently. Mutable live protocol state remains
+serialized, while Git listings, database assets, and the example feed keep
+serving during an open presentation WebSocket. Each asset or example response
+resolves its rows from one committed `HEAD`.
 
 Monaco uses the database-served shell assets to run the Orna LSP worker. The
 worker supplies standard-library completion and hover alongside signature
@@ -68,4 +72,7 @@ CSS/JavaScript and WebAssembly rows, committed examples, and live session. It
 commits a new Route and Entry after startup and proves the new URL changes
 from 404 to 200 without restarting the server. A WebSocket client follows the
 existing watch, fingerprinted Eval, and Resync exchange to prove independent
-results and presentation deltas.
+results and presentation deltas. While that WebSocket remains open, the test
+commits a new Route, Entry, Asset, and Sample snapshot and concurrently fetches
+the asset and example feed to prove the database pages serve the new committed
+rows during live presentation deltas.

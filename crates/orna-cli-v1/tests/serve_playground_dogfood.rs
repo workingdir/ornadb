@@ -1,6 +1,8 @@
 use std::{
+    collections::BTreeMap,
     net::{TcpListener, TcpStream},
     process::{Child, Command, Output, Stdio},
+    sync::{Arc, Barrier},
     thread,
     time::{Duration, Instant},
 };
@@ -118,6 +120,15 @@ fn git(project: &std::path::Path, arguments: &[&str]) {
     let mut command = Command::new("git");
     command.args(arguments).current_dir(project);
     let _ = run(&mut command, "Git fixture setup");
+}
+
+fn git_stdout(project: &std::path::Path, arguments: &[&str]) -> String {
+    let mut command = Command::new("git");
+    command.args(arguments).current_dir(project);
+    String::from_utf8(run(&mut command, "Git fixture query").stdout)
+        .expect("Git output is UTF-8")
+        .trim()
+        .to_owned()
 }
 
 fn write_fixture_rows(project: &std::path::Path, table: &str, rows: &[(&str, &str)]) {
@@ -808,6 +819,7 @@ fn orna_serve_hosts_playground_with_pending_evals_and_snapshot_correct_deltas() 
         .expect("committed API revision");
     assert_eq!(revision.len(), 40);
     assert!(revision.bytes().all(|byte| byte.is_ascii_hexdigit()));
+    let initial_examples_revision = revision.to_owned();
     let examples = examples["examples"]
         .as_array()
         .expect("committed example catalog");
@@ -839,6 +851,10 @@ fn orna_serve_hosts_playground_with_pending_evals_and_snapshot_correct_deltas() 
         hello["source"],
         "pub fn double(value: Int): Int = value + value;\ndouble(21)"
     );
+    let initial_sample_source = hello["source"]
+        .as_str()
+        .expect("initial sample source")
+        .to_owned();
     let record_page = curl(
         &format!("{base_url}/blob/{revision}/playground/Sample/arithmetic.orna"),
         &[],
@@ -943,6 +959,121 @@ fn orna_serve_hosts_playground_with_pending_evals_and_snapshot_correct_deltas() 
     };
     assert_eq!(initial_present, expected_run_events(&[]));
 
+    let start = Arc::new(Barrier::new(6));
+    let mut readers = Vec::new();
+    for _ in 0..4 {
+        let start = Arc::clone(&start);
+        let base_url = base_url.clone();
+        readers.push(thread::spawn(move || {
+            start.wait();
+            let mut responses = Vec::new();
+            for _ in 0..8 {
+                let asset = curl(&format!("{base_url}/playground/assets/app.js"), &[])
+                    .expect("curl a DB asset during concurrent commits");
+                let examples = curl(&format!("{base_url}/api/examples"), &[])
+                    .expect("curl DB examples during concurrent commits");
+                responses.push((asset, examples));
+            }
+            responses
+        }));
+    }
+    let writer_root = project.path().to_path_buf();
+    let writer_start = Arc::clone(&start);
+    let writer = thread::spawn(move || {
+        writer_start.wait();
+        let mut snapshots = BTreeMap::new();
+        for generation in 1..=4 {
+            let entry_id = format!("entry-live-snapshot-{generation}");
+            let asset_path = format!("assets/app-live-snapshot-{generation}.js");
+            let asset_id = format!(
+                "asset-{}",
+                asset_path
+                    .bytes()
+                    .map(|byte| format!("{byte:02x}"))
+                    .collect::<String>()
+            );
+            let previous_entry_id = if generation == 1 {
+                "entry-app".to_owned()
+            } else {
+                format!("entry-live-snapshot-{}", generation - 1)
+            };
+            let previous_asset_id = if generation == 1 {
+                "asset-6173736574732f6170702e6a73".to_owned()
+            } else {
+                let previous_path = format!("assets/app-live-snapshot-{}.js", generation - 1);
+                format!(
+                    "asset-{}",
+                    previous_path
+                        .bytes()
+                        .map(|byte| format!("{byte:02x}"))
+                        .collect::<String>()
+                )
+            };
+            let route = ROUTE_APP.replace("\"entry-app\"", &format!("\"{entry_id}\""));
+            let entry =
+                format!("{{ id: \"{entry_id}\", asset_path: \"{asset_path}\", kind: \"asset\" }}");
+            let asset = format!(
+                "{{ id: \"{asset_id}\", path: \"{asset_path}\", media_type: \"text/javascript; charset=utf-8\", content: \"globalThis.ornaPlaygroundSnapshot = {generation};\" }}"
+            );
+            let sample = format!(
+                "{{ id: \"hello\", name: \"Live snapshot {generation}\", source: \"snapshot-{generation}\" }}"
+            );
+            write_fixture_rows(
+                &writer_root,
+                "Route",
+                &[(
+                    "route-2f706c617967726f756e642f6173736574732f6170702e6a73",
+                    &route,
+                )],
+            );
+            std::fs::remove_file(
+                writer_root
+                    .join("playground/Entry")
+                    .join(format!("{previous_entry_id}.orna")),
+            )
+            .expect("remove prior entry from the new commit");
+            write_fixture_rows(&writer_root, "Entry", &[(&entry_id, &entry)]);
+            std::fs::remove_file(
+                writer_root
+                    .join("playground/Asset")
+                    .join(format!("{previous_asset_id}.orna")),
+            )
+            .expect("remove prior asset from the new commit");
+            write_fixture_rows(&writer_root, "Asset", &[(&asset_id, &asset)]);
+            write_fixture_rows(&writer_root, "Sample", &[("hello", &sample)]);
+            git(
+                &writer_root,
+                &[
+                    "add",
+                    "-A",
+                    "playground/Route",
+                    "playground/Entry",
+                    "playground/Asset",
+                    "playground/Sample/hello.orna",
+                ],
+            );
+            let message = format!("advance playground snapshot {generation}");
+            git(
+                &writer_root,
+                &[
+                    "-c",
+                    "user.name=kierandrewett",
+                    "-c",
+                    "user.email=kieran@drewett.dev",
+                    "commit",
+                    "--quiet",
+                    "-m",
+                    &message,
+                ],
+            );
+            let revision = git_stdout(&writer_root, &["rev-parse", "HEAD"]);
+            snapshots.insert(revision, format!("snapshot-{generation}"));
+            thread::sleep(Duration::from_millis(10));
+        }
+        snapshots
+    });
+    start.wait();
+
     let first_eval_request = [0x32; 16];
     let second_eval_request = [0x34; 16];
     // Keep both request IDs outstanding from the client perspective; neither
@@ -1013,6 +1144,57 @@ fn orna_serve_hosts_playground_with_pending_evals_and_snapshot_correct_deltas() 
         first_updated_present == first_completion_order
             || first_updated_present == second_completion_order,
         "the first delta should contain exactly both successful runs: {first_updated_present:?}"
+    );
+
+    let mut snapshots = writer.join().expect("join live DB snapshot writer");
+    snapshots.insert(initial_examples_revision, initial_sample_source);
+    let mut asset_responses = 0;
+    let mut example_responses = 0;
+    for reader in readers {
+        for (asset, examples) in reader.join().expect("join concurrent DB reader") {
+            assert_eq!(asset.status, 200);
+            assert!(
+                asset
+                    .body
+                    .contains("globalThis.ornaPlaygroundReady = true;")
+                    || (1..=4).any(|generation| {
+                        asset.body.contains(&format!(
+                            "globalThis.ornaPlaygroundSnapshot = {generation};"
+                        ))
+                    }),
+                "asset response must come from a committed snapshot: {}",
+                asset.body
+            );
+            asset_responses += 1;
+
+            assert_eq!(examples.status, 200);
+            let examples: JsonValue =
+                serde_json::from_str(&examples.body).expect("live examples response JSON");
+            let revision = examples["revision"]
+                .as_str()
+                .expect("live examples revision");
+            let source = examples["examples"]
+                .as_array()
+                .and_then(|examples| {
+                    examples
+                        .iter()
+                        .find(|example| example["path"] == "playground/Sample/hello.orna")
+                })
+                .and_then(|example| example["source"].as_str())
+                .expect("live hello sample");
+            assert_eq!(
+                snapshots.get(revision).map(String::as_str),
+                Some(source),
+                "the example body must match its committed revision"
+            );
+            example_responses += 1;
+        }
+    }
+    println!(
+        "concurrent GET /playground/assets/app.js x{asset_responses} (HTTP 200, exit 0): Route, Entry, and Asset rows stay snapshot-correct across live commits"
+    );
+    println!(
+        "concurrent GET /api/examples x{example_responses} (HTTP 200, exit 0): each Sample body matches its response revision during live deltas"
     );
 
     let third_eval_request = [0x36; 16];
