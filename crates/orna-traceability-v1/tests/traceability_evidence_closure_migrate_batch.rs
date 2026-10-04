@@ -4,7 +4,7 @@ use std::path::PathBuf;
 // This real source fixture is parsed by the companion conformance test. Its
 // presence here does not turn the frozen report into execution evidence.
 const SOURCE_FIXTURE: &str =
-    include_str!("../../orna-conformance-v1/tests/fixtures/traceability-evidence-closure-migrate.orna");
+    include_str!("fixtures/traceability-evidence-closure-migrate.orna");
 
 const REQUIREMENTS: [&str; 10] = [
     "ORNA-TEST-004",
