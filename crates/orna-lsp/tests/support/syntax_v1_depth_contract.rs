@@ -90,6 +90,14 @@ pub fn assert_semantic_depth_contract(source: &str, full: &Value, ranged: &Value
             >= 2,
         "{editor} semantic tokens did not classify both the add declaration and call as functions: {full_tokens:?}"
     );
+    assert!(
+        full_tokens
+            .iter()
+            .filter(|(_, _, token, kind)| token == "add" && kind == "parameter")
+            .count()
+            >= 2,
+        "{editor} semantic tokens did not classify the shadowing add parameter and its use as a parameter: {full_tokens:?}"
+    );
 
     let range = request_ranges(source)["semantic"].clone();
     let start_line = range["start"]["line"].as_u64().unwrap() as usize;
