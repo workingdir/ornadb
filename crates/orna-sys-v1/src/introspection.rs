@@ -7170,7 +7170,7 @@ fn explain_query_core_with_wal_rotation_chains(
         }
         if let Some(spill_window_chain_fold) =
             query_paired_bounded_window_spill_window_chain_fold(
-                &query.source,
+                query,
                 join_pair_identities,
                 window_aggregates,
                 window_spills,
@@ -11390,7 +11390,7 @@ fn add_paired_bounded_window_spill_restore_chain_fold_details(
 /// the optional cost-restoration chains. Sparse inputs do not advance either
 /// cumulative component.
 fn query_paired_bounded_window_spill_window_chain_fold(
-    anchor: &ObjectRef,
+    query: &QueryPlanDescription,
     pairs: &[QueryJoinPairIdentityDescription],
     window_aggregates: &[QueryWindowAggregatePushdownDescription],
     window_spills: &[QueryWindowSpillDescription],
@@ -11405,8 +11405,11 @@ fn query_paired_bounded_window_spill_window_chain_fold(
         estimated_io_work: Some(0),
         overflowed: false,
     };
-    for pair in pairs {
-        if pair.left_source != *anchor {
+    for (_, join) in planned_query_join_order(&query.joins) {
+        let Some(pair) = join_pair_identity_for_join(join, pairs) else {
+            continue;
+        };
+        if pair.left_source != query.source {
             continue;
         }
         let Some(window_chain_identity) =
