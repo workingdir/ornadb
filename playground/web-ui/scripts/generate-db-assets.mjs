@@ -41,9 +41,26 @@ async function collectFiles(directory, prefix = '') {
   return files;
 }
 
+function ornaString(value) {
+  let encoded = '"';
+  for (const character of value) {
+    const codePoint = character.codePointAt(0);
+    if (character === '"') encoded += '\\"';
+    else if (character === '\\') encoded += '\\\\';
+    else if (character === '\n') encoded += '\\n';
+    else if (character === '\r') encoded += '\\r';
+    else if (character === '\t') encoded += '\\t';
+    else if (character === '\0') encoded += '\\0';
+    else if (character === '{' || character === '}' || codePoint < 0x20 || codePoint === 0x7f) {
+      encoded += `\\u{${codePoint.toString(16)}}`;
+    } else encoded += character;
+  }
+  return `${encoded}"`;
+}
+
 function assetRow(id, path, mediaType, content) {
-  return `{ id: ${JSON.stringify(id)}, path: ${JSON.stringify(path)}, `
-    + `media_type: ${JSON.stringify(mediaType)}, content: ${JSON.stringify(content)} }\n`;
+  return `{ id: ${ornaString(id)}, path: ${ornaString(path)}, `
+    + `media_type: ${ornaString(mediaType)}, content: ${ornaString(content)} }\n`;
 }
 
 async function expectedRows() {
