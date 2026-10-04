@@ -1,0 +1,1 @@
+let empty_int_string_pairs: [(Int?, Str?)] = [];
