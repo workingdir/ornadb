@@ -567,6 +567,16 @@ fn bounded_spill_identity_binds_paired_window_chains_and_carries_across_sparse_t
         false,
         "window:middle-unbounded",
     );
+    let reordered = plan(
+        5_000,
+        "checkpoint:restore-v1",
+        true,
+        false,
+        false,
+        true,
+        true,
+        "window:middle-unbounded",
+    );
     let changed_spill = plan(
         4_999,
         "checkpoint:restore-v1",
