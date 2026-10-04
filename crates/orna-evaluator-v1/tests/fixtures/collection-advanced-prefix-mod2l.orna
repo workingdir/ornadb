@@ -1,0 +1,6 @@
+advanced.take_while([1, 2, 3, 2], value => value < 3) == [1, 2]
+&& advanced.take_while([1, 2], _ => true) == [1, 2]
+&& advanced.take_while(empty_ints, _ => true) == empty_ints
+&& advanced.drop_while([1, 2, 3, 2], value => value < 3) == [3, 2]
+&& advanced.drop_while([1, 2], _ => true) == empty_ints
+&& advanced.drop_while(empty_ints, _ => true) == empty_ints
