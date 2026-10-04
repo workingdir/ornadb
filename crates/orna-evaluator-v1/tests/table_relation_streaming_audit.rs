@@ -262,6 +262,31 @@ fn paired_shared_cursor_nested_spill_functions() -> Functions {
         .collect()
 }
 
+fn paired_nested_restore_fold_functions() -> Functions {
+    let parsed = parse_module(include_str!(
+        "fixtures/table_relation_paired_nested_restore_fold_jg2o0.orna"
+    ));
+    assert!(parsed.is_ok(), "{:?}", parsed.diagnostics);
+    parsed
+        .value
+        .items
+        .into_iter()
+        .map(|item| {
+            let orna_syntax_v1::Declaration::Function { signature, body } = item.declaration else {
+                panic!("fixture function expected")
+            };
+            (
+                signature.name,
+                PureFunction {
+                    parameters: signature.parameters,
+                    body,
+                    environment: Environment::new(),
+                },
+            )
+        })
+        .collect()
+}
+
 fn sparse_window_fold_functions() -> Functions {
     let parsed = parse_module(include_str!(
         "fixtures/table_relation_sparse_window_fold_d4441.orna"
@@ -948,6 +973,45 @@ fn page(values: &[i64], next: Option<Vec<u8>>) -> RelationPage {
         rows: values.iter().copied().map(integer).collect(),
         next,
     }
+}
+
+fn nested_pagination_cursor_chain() -> [Vec<u8>; 5] {
+    let chain = [
+        vec![0x60; 255],
+        vec![0x61],
+        vec![0x61; 511],
+        vec![0x62],
+        vec![0x63],
+    ];
+    for pair in chain.windows(2) {
+        assert!(pair[0].as_slice() < pair[1].as_slice());
+    }
+    chain
+}
+
+fn nested_pagination_restore(values: &[i64], chain: &[Vec<u8>; 5]) -> CursorRestore {
+    assert_eq!(values.len(), 10);
+    let rows = values.chunks(2).collect::<Vec<_>>();
+    BTreeMap::from([
+        (None, page(rows[0], Some(chain[0].clone()))),
+        (
+            Some(chain[0].clone()),
+            page(rows[1], Some(chain[1].clone())),
+        ),
+        (
+            Some(chain[1].clone()),
+            page(rows[2], Some(chain[2].clone())),
+        ),
+        (
+            Some(chain[2].clone()),
+            page(rows[3], Some(chain[3].clone())),
+        ),
+        (
+            Some(chain[3].clone()),
+            page(rows[4], Some(chain[4].clone())),
+        ),
+        (Some(chain[4].clone()), page(&[999_999], None)),
+    ])
 }
 
 fn run(body: Expr, effects: &mut PagedSource) -> Result<CanonicalValue, EvaluationError> {
@@ -2777,6 +2841,23 @@ fn paired_pagination_nested_spill_body(depth: usize) -> Expr {
             nested_pagination_spill("View.Left", depth),
             nested_pagination_spill("View.Right", depth),
         ],
+        span: span(),
+    }
+}
+
+fn paired_same_source_nested_spill_body(
+    first_depth: usize,
+    second_depth: usize,
+    reverse_order: bool,
+) -> Expr {
+    let first = nested_pagination_spill("View.Paired", first_depth);
+    let second = nested_pagination_spill("View.Paired", second_depth);
+    Expr::Tuple {
+        elements: if reverse_order {
+            vec![second, first]
+        } else {
+            vec![first, second]
+        },
         span: span(),
     }
 }
@@ -7030,4 +7111,206 @@ fn paired_nested_spill_shared_cursors_follow_reverse_lane_order() {
         .all(|(_, _, cursor)| cursor.as_ref() != Some(&after_compaction)));
     assert!(source.pending["View.Left"].is_empty());
     assert!(source.pending["View.Right"].is_empty());
+}
+
+#[test]
+fn paired_nested_folds_keep_identity_across_same_source_restore_chains() {
+    let chain = nested_pagination_cursor_chain();
+    let first = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+    let second = [10, 20, 30, 40, 50, 60, 70, 80, 90, 100];
+    let mut source = PairedCursorRestoreSource::new([
+        ("View.Paired", nested_pagination_restore(&first, &chain)),
+        ("View.Paired", nested_pagination_restore(&second, &chain)),
+    ]);
+    let mut functions = paired_nested_restore_fold_functions();
+    functions.insert(
+        "run".into(),
+        PureFunction {
+            parameters: Vec::new(),
+            body: paired_same_source_nested_spill_body(0, 1, false),
+            environment: Environment::new(),
+        },
+    );
+
+    assert_eq!(
+        invoke_named_with_effects(
+            "run",
+            &functions,
+            &Environment::new(),
+            Limits::default(),
+            &mut source,
+        )
+        .unwrap(),
+        integer_pair(308, 5280),
+        "paired folds restore their own values for one source and identical cursors"
+    );
+
+    assert_eq!(source.lanes.len(), 2);
+    assert!(source
+        .lanes
+        .iter()
+        .all(|(source_name, _, _)| source_name == "View.Paired"));
+    assert_ne!(source.lanes[0].1, source.lanes[1].1);
+    let expected_chain = [
+        None,
+        Some(chain[0].clone()),
+        Some(chain[1].clone()),
+        Some(chain[2].clone()),
+        Some(chain[3].clone()),
+    ];
+    let expected_cursors = source
+        .lanes
+        .iter()
+        .flat_map(|(source_name, scope, _)| {
+            expected_chain
+                .iter()
+                .cloned()
+                .map(|cursor| (source_name.clone(), *scope, cursor))
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(source.cursors, expected_cursors);
+    assert!(source
+        .cursors
+        .iter()
+        .all(|(_, _, cursor)| cursor.as_ref() != Some(&chain[4])));
+    assert!(source.pending["View.Paired"].is_empty());
+}
+
+#[test]
+fn paired_nested_fold_restores_keep_scopes_as_fold_depths_change() {
+    let chain = nested_pagination_cursor_chain();
+    let cases = [
+        (
+            0,
+            1,
+            false,
+            [1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
+            [10, 20, 30, 40, 50, 60, 70, 80, 90, 100],
+            308,
+            5280,
+        ),
+        (
+            1,
+            2,
+            true,
+            [11, 12, 13, 14, 15, 16, 17, 18, 19, 20],
+            [3, 6, 9, 12, 15, 18, 21, 24, 27, 30],
+            1488,
+            2640,
+        ),
+        (
+            2,
+            3,
+            false,
+            [-1, -2, -3, -4, -5, -6, -7, -8, -9, -10],
+            [100, 90, 80, 70, 60, 50, 40, 30, 20, 10],
+            -880,
+            14080,
+        ),
+    ];
+    let restores = cases
+        .iter()
+        .flat_map(|(_, _, reverse_order, first, second, _, _)| {
+            let first = nested_pagination_restore(first, &chain);
+            let second = nested_pagination_restore(second, &chain);
+            if *reverse_order {
+                [("View.Paired", second), ("View.Paired", first)]
+            } else {
+                [("View.Paired", first), ("View.Paired", second)]
+            }
+        })
+        .collect::<Vec<_>>();
+    let mut source = PairedCursorRestoreSource::new(restores);
+    let mut functions = paired_nested_restore_fold_functions();
+    let mut outputs = Vec::new();
+    for (
+        first_depth,
+        second_depth,
+        reverse_order,
+        _,
+        _,
+        expected_first,
+        expected_second,
+    ) in cases
+    {
+        functions.insert(
+            "run".into(),
+            PureFunction {
+                parameters: Vec::new(),
+                body: paired_same_source_nested_spill_body(
+                    first_depth,
+                    second_depth,
+                    reverse_order,
+                ),
+                environment: Environment::new(),
+            },
+        );
+        let output = invoke_named_with_effects(
+            "run",
+            &functions,
+            &Environment::new(),
+            Limits::default(),
+            &mut source,
+        )
+        .unwrap();
+        let expected = if reverse_order {
+            integer_pair(expected_second, expected_first)
+        } else {
+            integer_pair(expected_first, expected_second)
+        };
+        assert_eq!(
+            output,
+            expected,
+            "fold depths {first_depth}/{second_depth} keep the paired restored values"
+        );
+        outputs.push(output);
+    }
+    assert_eq!(
+        outputs,
+        vec![
+            integer_pair(308, 5280),
+            integer_pair(2640, 1488),
+            integer_pair(-880, 14080),
+        ],
+        "later nested folds preserve each earlier restore snapshot"
+    );
+
+    assert_eq!(source.lanes.len(), 6);
+    let scopes = source
+        .lanes
+        .iter()
+        .map(|(source_name, scope, _)| {
+            assert_eq!(source_name, "View.Paired");
+            *scope
+        })
+        .collect::<Vec<_>>();
+    for (index, scope) in scopes.iter().enumerate() {
+        assert!(
+            !scopes[..index].contains(scope),
+            "each nested fold restore has a fresh same-source scope: {scope:?}"
+        );
+    }
+    let expected_chain = [
+        None,
+        Some(chain[0].clone()),
+        Some(chain[1].clone()),
+        Some(chain[2].clone()),
+        Some(chain[3].clone()),
+    ];
+    let expected_cursors = source
+        .lanes
+        .iter()
+        .flat_map(|(source_name, scope, _)| {
+            expected_chain
+                .iter()
+                .cloned()
+                .map(|cursor| (source_name.clone(), *scope, cursor))
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(source.cursors, expected_cursors);
+    assert!(source
+        .cursors
+        .iter()
+        .all(|(_, _, cursor)| cursor.as_ref() != Some(&chain[4])));
+    assert!(source.pending["View.Paired"].is_empty());
 }
