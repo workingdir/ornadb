@@ -21,6 +21,8 @@ use tungstenite::{
 
 const MAIN: &str = include_str!("fixtures/project-core-main.orna");
 const SAMPLE: &str = include_str!("fixtures/playground-example.orna");
+const SECOND_SAMPLE: &str = include_str!("fixtures/playground-concurrent-eval.orna");
+const FOLLOWUP_SAMPLE: &str = include_str!("fixtures/playground-followup-eval.orna");
 const BINARY: &str = env!("CARGO_BIN_EXE_orna-cli-v1");
 
 struct RunningServer(Child);
@@ -525,7 +527,7 @@ fn orna_serve_hosts_playground_with_pending_evals_and_snapshot_correct_deltas() 
             session_bytes,
             uuid_bytes(database_id),
             second_eval_request,
-            "40 + 2",
+            SECOND_SAMPLE.trim(),
         ),
     );
     let results =
@@ -585,7 +587,7 @@ fn orna_serve_hosts_playground_with_pending_evals_and_snapshot_correct_deltas() 
             session_bytes,
             uuid_bytes(database_id),
             third_eval_request,
-            "7 * 7",
+            FOLLOWUP_SAMPLE.trim(),
         ),
         third_eval_request,
     );
