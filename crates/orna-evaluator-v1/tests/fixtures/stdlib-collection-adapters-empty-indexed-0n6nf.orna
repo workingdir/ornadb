@@ -1,0 +1,1 @@
+let empty_indexed_ints: [(Int, Int)] = [];

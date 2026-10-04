@@ -104,14 +104,14 @@ fn repository() -> TempDir {
     temp
 }
 
-fn repository_with_checked_in_orna_fixture() -> TempDir {
+fn repository_with_v1_module_fixture() -> TempDir {
     let temp = TempDir::new().unwrap();
     git(temp.path(), &["init", "-b", "main"]);
     test_support::configure_fixture_git_identity(temp.path());
     git(temp.path(), &["config", "commit.gpgsign", "false"]);
     fs::write(
         temp.path().join("main.orna"),
-        include_bytes!("../../orna-syntax/testdata/accepted-client.orna"),
+        include_str!("fixtures/git-repository-main.orna").as_bytes(),
     )
     .unwrap();
     fs::write(temp.path().join("ordinary.txt"), "base\n").unwrap();
@@ -1929,7 +1929,6 @@ fn checkout_force_revalidation_rejects_executable_bit_drift() {
     ));
     assert_eq!(git_state(&repo, root.path()), before);
 }
-
 
 #[test]
 fn checkout_preflight_revalidation_rejects_index_head_and_branch_tip_drift() {
@@ -5583,7 +5582,7 @@ fn publication_pauses_for_an_existing_git_index_lock_before_ref_change() {
 #[test]
 fn publication_pauses_during_unfinished_merge_and_rebase() {
     for operation in ["merge", "rebase"] {
-        let root = repository_with_checked_in_orna_fixture();
+        let root = repository_with_v1_module_fixture();
         let repo = Repository::discover(root.path()).unwrap();
         let head = repo.head().unwrap().unwrap();
         let index_before = repo.index_generation().unwrap();
@@ -5704,7 +5703,7 @@ fn publication_pauses_during_unfinished_merge_and_rebase() {
 
 #[test]
 fn publication_uses_worktree_scoped_git_operation_markers() {
-    let root = repository_with_checked_in_orna_fixture();
+    let root = repository_with_v1_module_fixture();
     let sibling_repo = Repository::discover(root.path()).unwrap();
     let linked_container = TempDir::new().unwrap();
     let linked_root = linked_container.path().join("linked");
@@ -5790,7 +5789,6 @@ fn publication_uses_worktree_scoped_git_operation_markers() {
     assert!(!git_admin_path(root.path(), "index.lock").exists());
     assert_eq!(git(root.path(), &["status", "--porcelain"]), "");
 }
-
 
 #[test]
 fn publication_rejects_a_known_managed_edit_before_ref_advance() {

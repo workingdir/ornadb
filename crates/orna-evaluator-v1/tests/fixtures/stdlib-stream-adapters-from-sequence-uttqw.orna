@@ -1,0 +1,4 @@
+std.stream.adapters.from_sequence(
+    () => std.iterator.from_list([4, 1, 6]),
+    "sequence-adapter-proof"
+)

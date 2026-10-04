@@ -1,0 +1,1 @@
+numeric.decimal_from_text("42") == Some(42.decimal)

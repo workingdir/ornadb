@@ -1,0 +1,4 @@
+std.error.combinators.contains_all_codes(
+    std.error.make("root.failure", "root detail"),
+    [],
+)
