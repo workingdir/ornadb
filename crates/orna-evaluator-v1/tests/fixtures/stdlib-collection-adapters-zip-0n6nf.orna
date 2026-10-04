@@ -1,0 +1,1 @@
+adapters.zip_with([1, 2, 3], ["a", "b"], (number, letter) => (number, letter)) == [(1, "a"), (2, "b")] && adapters.zip_with([1], [2, 3], (left, right) => left + right) == [3] && adapters.zip_with(empty_ints, [2], (left, right) => left + right) == empty_ints && adapters.zip_with([1, 2, 3], ["a"], (number, _) => number) == [1]
