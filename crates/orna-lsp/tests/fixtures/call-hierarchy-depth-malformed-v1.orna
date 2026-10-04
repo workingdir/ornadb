@@ -1,0 +1,3 @@
+pub fn partial(value: Int): Int = leaf(value);
+
+pub fn broken(value: Int): Int = value + ;
