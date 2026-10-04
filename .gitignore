@@ -1,6 +1,11 @@
 /target/
 /crates/*-v1/target
 
+# JavaScript dependencies and generated browser runtime assets.
+/playground/web-ui/node_modules/
+/playground/web-ui/dist/
+/playground/web-ui/public/lsp-wasm/
+
 # Beads / Dolt files (added by bd init)
 .dolt/
 *.db

@@ -1,0 +1,14 @@
+pub fn shadow(input: Int): Int =
+    if input > 0 {
+        let copied: Int = input;
+        copied
+    } else {
+        let input: Int = input + 1;
+        input
+    };
+
+pub fn case_scope(value: Int) = case value { result: result };
+
+pub fn for_scope(value: Int) = for item in value { item };
+
+pub fn lambda_scope(value: Int) = value => value + value;

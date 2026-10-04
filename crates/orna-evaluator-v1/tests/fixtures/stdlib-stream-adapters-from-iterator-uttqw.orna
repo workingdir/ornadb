@@ -1,0 +1,7 @@
+std.stream.adapters.from_iterator(
+    std.iterator.filter(
+        std.iterator.map(std.iterator.from_list([1, 2, 3, 4]), value => value * 3),
+        value => value % 2 == 0
+    ),
+    "iterator-adapter-proof"
+)
