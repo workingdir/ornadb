@@ -9161,6 +9161,12 @@ struct QueryPairedWalRotationCostRestorationFold {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+struct QueryPairedWindowCostRestorationSpillPair {
+    spill_identity: String,
+    cost_window_pair_identity: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 struct QueryPairedWindowCostRestorationFold {
     identity: String,
     parent_identity: Option<String>,
@@ -9168,7 +9174,7 @@ struct QueryPairedWindowCostRestorationFold {
     window_pair_count: u64,
     cost_restore_fold_count: u64,
     window_identities: BTreeMap<String, String>,
-    spill_pair_identities: BTreeMap<String, String>,
+    spill_pair_identities: BTreeMap<String, QueryPairedWindowCostRestorationSpillPair>,
     spill_fold_identity: Option<String>,
     cost_restore_fold_identities: BTreeMap<String, String>,
     overflowed: bool,
@@ -13904,17 +13910,27 @@ fn query_paired_window_cost_restoration_fold(
         window_identities.insert(pair_key.to_owned(), window_identity.to_owned());
     }
     if let Some(spill_pair_identity) = spill_pair_identity {
-        spill_pair_identities.insert(pair_key.to_owned(), spill_pair_identity.to_owned());
+        spill_pair_identities.insert(
+            pair_key.to_owned(),
+            QueryPairedWindowCostRestorationSpillPair {
+                spill_identity: spill_pair_identity.to_owned(),
+                cost_window_pair_identity: pair_identity.to_owned(),
+            },
+        );
     }
     let spill_fold_identity = if spill_pair_identities.is_empty() {
         None
     } else {
         let mut spill_hash = Sha256::new();
-        spill_hash.update(b"orna.sys.query-paired-window-cost-restoration-spill-fold.v1\0");
+        spill_hash.update(b"orna.sys.query-paired-window-cost-restoration-spill-fold.v2\0");
         spill_hash.update((spill_pair_identities.len() as u64).to_be_bytes());
-        for (pair, spill_identity) in &spill_pair_identities {
+        for (pair, spill) in &spill_pair_identities {
             hash_part(&mut spill_hash, pair.as_bytes());
-            hash_part(&mut spill_hash, spill_identity.as_bytes());
+            hash_part(&mut spill_hash, spill.spill_identity.as_bytes());
+            hash_part(
+                &mut spill_hash,
+                spill.cost_window_pair_identity.as_bytes(),
+            );
         }
         Some(format!(
             "paired-window-cost-restoration-spill-fold:{}",
@@ -13943,7 +13959,7 @@ fn query_paired_window_cost_restoration_fold(
     let parent_identity = previous.map(|fold| fold.identity.clone());
 
     let mut hash = Sha256::new();
-    hash.update(b"orna.sys.query-paired-window-cost-restoration-fold.v1\0");
+    hash.update(b"orna.sys.query-paired-window-cost-restoration-fold.v2\0");
     hash_optional_text(&mut hash, parent_identity.as_deref());
     hash_part(&mut hash, pair_identity.as_bytes());
     hash.update(pair_count.to_be_bytes());
@@ -13954,9 +13970,10 @@ fn query_paired_window_cost_restoration_fold(
         hash_part(&mut hash, window.as_bytes());
     }
     hash.update((spill_pair_identities.len() as u64).to_be_bytes());
-    for (pair, spill_identity) in &spill_pair_identities {
+    for (pair, spill) in &spill_pair_identities {
         hash_part(&mut hash, pair.as_bytes());
-        hash_part(&mut hash, spill_identity.as_bytes());
+        hash_part(&mut hash, spill.spill_identity.as_bytes());
+        hash_part(&mut hash, spill.cost_window_pair_identity.as_bytes());
     }
     hash_optional_text(&mut hash, spill_fold_identity.as_deref());
     hash.update((cost_restore_fold_identities.len() as u64).to_be_bytes());
