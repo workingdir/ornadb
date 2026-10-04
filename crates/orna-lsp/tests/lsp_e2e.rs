@@ -7,6 +7,9 @@ use std::{
 
 use serde_json::{Value, json};
 
+#[path = "support/syntax_v1_depth_contract.rs"]
+mod syntax_v1_depth_contract;
+
 const SOURCE: &str = include_str!("fixtures/expressions-v1.orna");
 const CALL_SOURCE: &str = include_str!("fixtures/call-v1.orna");
 const INCREMENTAL_SOURCE: &str = include_str!("fixtures/incremental-malformed-v1.orna");
@@ -129,8 +132,7 @@ fn initialize(client: &mut Client) {
     assert_eq!(result["capabilities"]["textDocumentSync"]["change"], 2);
     assert_eq!(result["capabilities"]["hoverProvider"], true);
     assert_eq!(
-        result["capabilities"]["documentHighlightProvider"],
-        true,
+        result["capabilities"]["documentHighlightProvider"], true,
         "initialize capabilities: {result}"
     );
     assert_eq!(
@@ -1338,6 +1340,21 @@ fn syntax_v1_semantic_tokens_and_inlay_hints_follow_scope_and_requested_range() 
     assert!(
         shadow_hints.as_array().unwrap().is_empty(),
         "{shadow_hints}"
+    );
+    syntax_v1_depth_contract::assert_semantic_depth_contract(
+        EDITOR_HINTS_SOURCE,
+        &full,
+        &ranged,
+        "LSP protocol",
+    );
+    syntax_v1_depth_contract::assert_inlay_hint_depth_contract(
+        EDITOR_HINTS_SOURCE,
+        &full_hints,
+        &call_hints,
+        &local_hints,
+        &annotated_hints,
+        &shadow_hints,
+        "LSP protocol",
     );
     client.shutdown();
 }

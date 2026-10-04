@@ -661,9 +661,17 @@ mod tests {
     }
 
     fn add_child_delta(base: u8, next: u8, index: u8, label: &str) -> Vec<u8> {
+        delta_with_operations(base, next, vec![add_child_operation(index, label)])
+    }
+
+    fn add_child_operation(index: u8, label: &str) -> Vec<u8> {
         let path = array(vec![array(vec![vec![0x02], vec![index]])]);
-        let operation = array(vec![vec![0x00], path, present_child(label)]);
-        delta_with_operations(base, next, vec![operation])
+        array(vec![vec![0x00], path, present_child(label)])
+    }
+
+    fn remove_child_operation(index: u8) -> Vec<u8> {
+        let path = array(vec![array(vec![vec![0x02], vec![index]])]);
+        array(vec![vec![0x01], path])
     }
 
     fn delta_with_operations(base: u8, next: u8, operations: Vec<Vec<u8>>) -> Vec<u8> {
@@ -1090,6 +1098,126 @@ mod tests {
                 2,
                 "second-after-recovery",
                 second_children
+            ))
+        );
+    }
+
+    #[test]
+    fn transient_typed_tree_bound_failure_is_atomic_across_live_sessions() {
+        let first_limits = Limits {
+            max_collection_items: 5,
+            ..Limits::default()
+        };
+        let second_limits = Limits {
+            max_collection_items: 6,
+            ..Limits::default()
+        };
+        let initial_children = ["one", "two", "three", "four", "five"]
+            .into_iter()
+            .map(present_child)
+            .collect::<Vec<_>>();
+        let first_initial = snapshot_with_children(0, "first-before", initial_children.clone());
+        let second_initial = snapshot_with_children(0, "second-before", initial_children.clone());
+        let mut first_io = MemoryIo::default();
+        first_io.incoming.push_back(first_initial.clone());
+        let mut second_io = MemoryIo::default();
+        second_io.incoming.push_back(second_initial.clone());
+        let mut first = LiveSessionDriver::new(
+            first_io,
+            [7; 16],
+            first_limits,
+            Renderer::default(),
+            Allocator::default(),
+        )
+        .unwrap();
+        let mut second = LiveSessionDriver::new(
+            second_io,
+            [7; 16],
+            second_limits,
+            Renderer::default(),
+            Allocator::default(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            block_on(first.receive_once()).unwrap(),
+            LiveSessionEvent::SnapshotPublished { revision: 0 }
+        );
+        assert_eq!(
+            block_on(second.receive_once()).unwrap(),
+            LiveSessionEvent::SnapshotPublished { revision: 0 }
+        );
+
+        let transient_delta = delta_with_operations(
+            0,
+            1,
+            vec![
+                add_child_operation(5, "transient"),
+                remove_child_operation(5),
+            ],
+        );
+        assert!(transient_delta.len() < first_limits.max_message_bytes);
+        assert!(Envelope::decode(&transient_delta, first_limits).is_ok());
+        let first_before_transient = first.presentation().published().cloned().unwrap();
+        first.io.incoming.push_back(transient_delta.clone());
+        assert!(matches!(
+            block_on(first.receive_once()),
+            Ok(LiveSessionEvent::ResyncSent { .. })
+        ));
+        assert_resync_frame(&first.io.sent[0]);
+        assert_eq!(
+            first.presentation().published(),
+            Some(&first_before_transient)
+        );
+        assert_eq!(first.renderer.trees, vec![snapshot_present(&first_initial)]);
+
+        second.io.incoming.push_back(transient_delta);
+        assert_eq!(
+            block_on(second.receive_once()).unwrap(),
+            LiveSessionEvent::DeltaPublished { revision: 1 }
+        );
+        assert_eq!(second.presentation().published().unwrap().revision(), 1);
+        assert_eq!(second.renderer.trees[1], snapshot_present(&second_initial));
+        assert_eq!(first.presentation().published().unwrap().revision(), 0);
+
+        let request = Envelope::decode(&first.io.sent[0], first_limits)
+            .unwrap()
+            .request
+            .expect("transient typed-tree recovery request is correlated");
+        first.io.incoming.push_back(frame_with_request(
+            16,
+            [7; 16],
+            Some(request),
+            snapshot_body_with_children(2, "first-recovered", initial_children.clone()),
+        ));
+        assert_eq!(
+            block_on(first.receive_once()).unwrap(),
+            LiveSessionEvent::SnapshotPublished { revision: 2 }
+        );
+        assert_eq!(
+            first.renderer.trees[1],
+            snapshot_present(&snapshot_with_children(
+                2,
+                "first-recovered",
+                initial_children.clone()
+            ))
+        );
+
+        second
+            .io
+            .incoming
+            .push_back(delta(1, 2, "second-after-transient"));
+        assert_eq!(
+            block_on(second.receive_once()).unwrap(),
+            LiveSessionEvent::DeltaPublished { revision: 2 }
+        );
+        assert_eq!(first.presentation().published().unwrap().revision(), 2);
+        assert_eq!(
+            second.renderer.trees[2],
+            snapshot_present(&snapshot_with_children(
+                2,
+                "second-after-transient",
+                initial_children
             ))
         );
     }
