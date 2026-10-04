@@ -6,9 +6,9 @@ use std::{
 };
 
 use orna_sys_v1::{
-    AbiType, EffectSet, OperationContract, SystemEffect, system_binding_modules_json,
-    system_binding_stubs, system_function_descriptor, system_provider_abi,
-    system_provider_abi_json, system_provider_abi_schema_json,
+    AbiType, EffectSet, OperationContract, SystemEffect, system_api_json, system_api_schema_json,
+    system_binding_modules_json, system_binding_stubs, system_function_descriptor,
+    system_provider_abi, system_provider_abi_json, system_provider_abi_schema_json,
 };
 use serde_json::Value;
 
@@ -31,6 +31,8 @@ const GENERIC_INVOKE_KEYWORD_OVERLOAD_FIXTURE: &str =
     include_str!("fixtures/sys-invoke-generic-keyword-overloads.orna");
 const GENERIC_OPERATION_STUB_FIXTURE: &str =
     include_str!("fixtures/sys-generic-operation-stubs.orna");
+const STREAM_CONTROL_EDGE_STUB_FIXTURE: &str =
+    include_str!("fixtures/sys-provider-stream-control-edges.orna");
 
 fn resolve_type(ty: &TypeExpr) -> Result<AbiType, String> {
     match ty {
@@ -452,6 +454,117 @@ fn generated_sys_stubs_parse_resolve_to_registry_types_and_dispatch_one_to_one()
     assert_eq!(validated_stub_bodies, operation_count);
     println!(
         "generated_stub_validation operations={operation_count} canonical_placeholder_bodies={validated_stub_bodies}"
+    );
+}
+
+#[test]
+fn generated_stream_control_edges_match_bindings_and_schema_contracts() {
+    const EXPECTED_OPERATIONS: [&str; 2] = ["sys.admin.pause_stream", "sys.admin.resume_stream"];
+
+    let api_json = system_api_json();
+    let api_schema_json = system_api_schema_json();
+    let provider_json = system_provider_abi_json();
+    let provider_schema_json = system_provider_abi_schema_json();
+    build_host::validate_json_against_schema(&api_json, api_schema_json)
+        .expect("generated sys API validates against its published schema");
+    build_host::validate_json_against_schema(provider_json, provider_schema_json)
+        .expect("generated provider contracts validate against their schema");
+
+    let api: Value = serde_json::from_str(&api_json).expect("generated sys API JSON");
+    let api_functions = api["functions"]
+        .as_array()
+        .expect("generated sys API function inventory");
+    let stream_reference = api["reference_aliases"]
+        .as_array()
+        .expect("generated reference aliases")
+        .iter()
+        .find(|alias| alias["name"] == "sys.StreamRef")
+        .expect("stream observation reference alias");
+    assert_eq!(stream_reference["target"], "sys.Stream");
+    assert_eq!(stream_reference["definition"], "sys.RowRef<sys.Stream>");
+    let stream_relation = api["relations"]
+        .as_array()
+        .expect("generated sys relations")
+        .iter()
+        .find(|relation| relation["name"] == "sys.Stream")
+        .expect("stream observation relation");
+    assert_eq!(stream_relation["reference_type"], "sys.StreamRef");
+
+    let abi = system_provider_abi();
+    let dispatch: Value = serde_json::from_str(provider_json).expect("provider JSON");
+    let stream_edges = abi
+        .operations()
+        .filter(|operation| {
+            operation
+                .signature
+                .parameters
+                .iter()
+                .any(|parameter| parameter.ty == AbiType::Named("sys.StreamRef".to_owned()))
+        })
+        .map(|operation| operation.id.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(stream_edges, EXPECTED_OPERATIONS);
+
+    let fixture = STREAM_CONTROL_EDGE_STUB_FIXTURE.trim_end();
+    let fixture_module = parse_module(fixture);
+    assert!(
+        fixture_module.is_ok(),
+        "stream edge fixture parses as generated Orna bindings: {:?}",
+        fixture_module.diagnostics
+    );
+    assert_eq!(fixture_module.value.items.len(), EXPECTED_OPERATIONS.len());
+
+    let generated_bindings = system_binding_stubs();
+    let mut operation_cases = 0;
+    for stub in fixture.split("\n\n") {
+        let operation_id = stub
+            .lines()
+            .find_map(|line| line.strip_prefix("// sys-op: "))
+            .expect("stream edge fixture has a dispatch marker");
+        assert!(EXPECTED_OPERATIONS.contains(&operation_id));
+        let operation = abi
+            .operation(operation_id)
+            .expect("stream edge resolves in provider registry");
+        validate_stub_contract(stub, operation)
+            .unwrap_or_else(|error| panic!("{operation_id} fixture parity: {error}"));
+
+        let declaration = stub
+            .lines()
+            .find(|line| line.starts_with("pub fn "))
+            .expect("stream edge fixture has a declaration");
+        assert!(
+            generated_bindings.lines().any(|line| line == declaration),
+            "generated binding bundle emits the pinned declaration for {operation_id}"
+        );
+
+        let function = api_functions
+            .iter()
+            .find(|function| function["name"] == operation_id)
+            .unwrap_or_else(|| panic!("API schema omits {operation_id}"));
+        assert_eq!(function["effect"], "admin");
+        assert_eq!(function["signature"], operation.signature.source);
+        assert_eq!(
+            operation.signature.parameters[0].ty,
+            AbiType::Named("sys.StreamRef".to_owned())
+        );
+        assert_eq!(
+            operation.signature.result,
+            AbiType::Named("Bool".to_owned())
+        );
+
+        let dispatch_row = dispatch["operations"]
+            .as_array()
+            .expect("provider operation inventory")
+            .iter()
+            .find(|row| row["name"] == operation_id)
+            .expect("stream edge has generated provider metadata");
+        assert_eq!(dispatch_row["signature"], operation.signature.source);
+        operation_cases += 1;
+    }
+    assert_eq!(operation_cases, EXPECTED_OPERATIONS.len());
+    println!(
+        "stream_control_binding_edges operations={operation_cases} stream_reference=linked api_schema=valid provider_schema=valid total_cases={}",
+        operation_cases + 2
     );
 }
 
