@@ -1,0 +1,4 @@
+pub table Asset(path: Str) {
+    media_type: Str,
+    bytes_base64: Str,
+}

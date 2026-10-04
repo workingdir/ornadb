@@ -1,0 +1,12 @@
+std.encoding.utilities.unicode_scalars("Aé🧭") == ["A", "é", "🧭"]
+&& std.encoding.utilities.unicode_scalar_length("é") == 2
+&& std.encoding.utilities.unicode_reverse("Aé🧭") == "🧭éA"
+&& std.encoding.utilities.unicode_slice("Aé🧭", 1, 3) == "é🧭"
+&& std.encoding.utilities.unicode_slice("Aé🧭", 2, 99) == "🧭"
+&& std.encoding.utilities.unicode_slice("Aé🧭", -1, 2) == ""
+&& std.encoding.utilities.unicode_slice("Aé🧭", 2, 1) == ""
+&& std.encoding.utilities.base64url_encode(std.encoding.base64.decode("aGVsbG8=")) == "aGVsbG8"
+&& std.encoding.utilities.base64url_decode("aGVsbG8") == std.encoding.base64.decode("aGVsbG8=")
+&& std.encoding.utilities.base64url_encode(std.encoding.base64.decode("++//")) == "--__"
+&& std.encoding.utilities.base64url_decode("--__") == std.encoding.base64.decode("++//")
+&& std.encoding.utilities.base64url_encode(std.encoding.base64.decode("")) == ""

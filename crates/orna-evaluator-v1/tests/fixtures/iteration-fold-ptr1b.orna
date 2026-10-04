@@ -1,0 +1,4 @@
+std.iteration.fold([1, 2, 3], 0, (state, value) => state * 10 + value) == 123
+&& std.iteration.fold([], 7, (total, value) => total + value) == 7
+&& std.iteration.fold_while([2, 4, 7, 100], 0, (state, value) => (state * 10 + value, value < 7)) == 247
+&& std.iteration.fold_while([], 9, (state, value) => (state + value, true)) == 9

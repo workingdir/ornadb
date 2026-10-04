@@ -7181,6 +7181,19 @@ fn explain_query_core_with_wal_rotation_chains(
                 &spill_window_chain_fold,
             );
         }
+        if let Some(spill_chain_window_fold) =
+            query_paired_bounded_window_spill_chain_window_fold(
+                query,
+                join_pair_identities,
+                window_aggregates,
+                window_spills,
+            )
+        {
+            add_paired_bounded_window_spill_chain_window_fold_details(
+                &mut details,
+                &spill_chain_window_fold,
+            );
+        }
         current = push_unary(
             &mut operators,
             current,
@@ -9149,6 +9162,17 @@ struct QueryPairedBoundedWindowSpillWindowChainFold {
     spill_stage_count: u64,
     window_pair_count: u64,
     window_identity_count: u64,
+    totals: QueryAggregateSpillTotals,
+    overflowed: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct QueryPairedBoundedWindowSpillChainWindowFold {
+    identity: String,
+    chain_fold_identity: String,
+    spill_window_fold_identity: String,
+    spill_window_count: u64,
+    pair_count: u64,
     totals: QueryAggregateSpillTotals,
     overflowed: bool,
 }
@@ -11557,6 +11581,197 @@ fn query_paired_bounded_window_spill_window_chain_fold(
     })
 }
 
+/// Binds every bounded spill to the exact window member of its paired chain.
+/// The chain component retains spill-free paired windows, while the spill
+/// component records only exact bounded pair/window matches.
+fn query_paired_bounded_window_spill_chain_window_fold(
+    query: &QueryPlanDescription,
+    pairs: &[QueryJoinPairIdentityDescription],
+    window_aggregates: &[QueryWindowAggregatePushdownDescription],
+    window_spills: &[QueryWindowSpillDescription],
+) -> Option<QueryPairedBoundedWindowSpillChainWindowFold> {
+    let mut chain_identities = BTreeMap::new();
+    let mut spill_window_identities = BTreeMap::new();
+    let mut totals = QueryAggregateSpillTotals {
+        stage_count: 0,
+        unknown_working_set_count: 0,
+        estimated_bytes: Some(0),
+        estimated_io_blocks: Some(0),
+        estimated_io_work: Some(0),
+        overflowed: false,
+    };
+
+    for (_, join) in planned_query_join_order(&query.joins) {
+        let Some(pair) = join_pair_identity_for_join(join, pairs) else {
+            continue;
+        };
+        if pair.left_source != query.source {
+            continue;
+        }
+        let Some(chain_identity) =
+            query_window_pushdown_chain_identity(&pair.right_source, window_aggregates)
+        else {
+            continue;
+        };
+        chain_identities.insert(pair.identity.as_str().to_owned(), chain_identity.clone());
+
+        for aggregate in window_aggregates.iter().filter(|aggregate| {
+            aggregate.source == pair.right_source
+                && !matches!(
+                    aggregate.frame_start,
+                    PlanWindowFrameBound::UnboundedPreceding
+                        | PlanWindowFrameBound::UnboundedFollowing
+                )
+                && !matches!(
+                    aggregate.frame_end,
+                    PlanWindowFrameBound::UnboundedPreceding
+                        | PlanWindowFrameBound::UnboundedFollowing
+                )
+        }) {
+            let entry_key = (
+                pair.identity.as_str().to_owned(),
+                aggregate.identity.as_str().to_owned(),
+            );
+            if spill_window_identities.contains_key(&entry_key) {
+                continue;
+            }
+            let Some(spill) = window_spills.iter().find(|spill| {
+                spill.join_pair_identity == pair.identity
+                    && spill.source == pair.right_source
+                    && spill.window_aggregate_identity == aggregate.identity
+            }) else {
+                continue;
+            };
+
+            let (spilled_bytes, io_blocks, io_work) = query_window_spill_estimate(spill);
+            let mut window_hash = Sha256::new();
+            window_hash.update(b"orna.sys.query-paired-bounded-window-spill-chain-window.v1\0");
+            hash_part(&mut window_hash, pair.identity.as_str().as_bytes());
+            hash_part(&mut window_hash, pair.right_source.as_str().as_bytes());
+            hash_part(&mut window_hash, aggregate.identity.as_str().as_bytes());
+            hash_part(&mut window_hash, aggregate.aggregate.as_str().as_bytes());
+            hash_part(&mut window_hash, aggregate.frame_identity.as_str().as_bytes());
+            hash_part(&mut window_hash, aggregate.frame_start.as_detail().as_bytes());
+            hash_part(&mut window_hash, aggregate.frame_end.as_detail().as_bytes());
+            hash_part(&mut window_hash, spill.identity.as_str().as_bytes());
+            hash_optional_u64(&mut window_hash, spill.estimated_working_set_bytes);
+            window_hash.update(spill.memory_budget_bytes.to_be_bytes());
+            hash_optional_u64(&mut window_hash, spilled_bytes);
+            hash_optional_u64(&mut window_hash, io_blocks);
+            hash_optional_u64(&mut window_hash, io_work);
+            spill_window_identities.insert(
+                entry_key,
+                format!(
+                    "paired-bounded-window-spill-chain-window:{}",
+                    hex(&window_hash.finalize())
+                ),
+            );
+
+            let window_totals = QueryAggregateSpillTotals {
+                stage_count: 1,
+                unknown_working_set_count: u64::from(spill.estimated_working_set_bytes.is_none()),
+                estimated_bytes: spilled_bytes,
+                estimated_io_blocks: io_blocks,
+                estimated_io_work: io_work,
+                overflowed: spill.estimated_working_set_bytes.is_some() && io_work.is_none(),
+            };
+            totals.stage_count = totals
+                .stage_count
+                .checked_add(window_totals.stage_count)
+                .unwrap_or_else(|| {
+                    totals.overflowed = true;
+                    u64::MAX
+                });
+            totals.unknown_working_set_count = totals
+                .unknown_working_set_count
+                .checked_add(window_totals.unknown_working_set_count)
+                .unwrap_or_else(|| {
+                    totals.overflowed = true;
+                    u64::MAX
+                });
+            query_accumulate_spill_estimate(
+                &mut totals.estimated_bytes,
+                window_totals.estimated_bytes,
+                &mut totals.overflowed,
+            );
+            query_accumulate_spill_estimate(
+                &mut totals.estimated_io_blocks,
+                window_totals.estimated_io_blocks,
+                &mut totals.overflowed,
+            );
+            query_accumulate_spill_estimate(
+                &mut totals.estimated_io_work,
+                window_totals.estimated_io_work,
+                &mut totals.overflowed,
+            );
+            totals.overflowed |= window_totals.overflowed;
+        }
+    }
+
+    if chain_identities.is_empty() || spill_window_identities.is_empty() {
+        return None;
+    }
+
+    let mut count_overflowed = false;
+    let pair_count = u64::try_from(chain_identities.len()).unwrap_or_else(|_| {
+        count_overflowed = true;
+        u64::MAX
+    });
+    let spill_window_count = u64::try_from(spill_window_identities.len()).unwrap_or_else(|_| {
+        count_overflowed = true;
+        u64::MAX
+    });
+
+    let mut chain_hash = Sha256::new();
+    chain_hash.update(b"orna.sys.query-paired-window-chain-fold.v1\0");
+    chain_hash.update(pair_count.to_be_bytes());
+    for (pair_identity, identity) in &chain_identities {
+        hash_part(&mut chain_hash, pair_identity.as_bytes());
+        hash_part(&mut chain_hash, identity.as_bytes());
+    }
+    let chain_fold_identity = format!(
+        "paired-window-chain-fold:{}",
+        hex(&chain_hash.finalize())
+    );
+
+    let mut spill_hash = Sha256::new();
+    spill_hash.update(b"orna.sys.query-paired-bounded-window-spill-chain-window-fold.v1\0");
+    spill_hash.update(spill_window_count.to_be_bytes());
+    for ((pair_identity, aggregate_identity), identity) in &spill_window_identities {
+        hash_part(&mut spill_hash, pair_identity.as_bytes());
+        hash_part(&mut spill_hash, aggregate_identity.as_bytes());
+        hash_part(&mut spill_hash, identity.as_bytes());
+    }
+    hash_query_aggregate_spill_totals(&mut spill_hash, totals);
+    let spill_window_fold_identity = format!(
+        "paired-bounded-window-spill-chain-window-fold:{}",
+        hex(&spill_hash.finalize())
+    );
+
+    let overflowed = totals.overflowed || count_overflowed;
+    let mut hash = Sha256::new();
+    hash.update(b"orna.sys.query-paired-bounded-window-spill-chain-fold-window.v1\0");
+    hash_part(&mut hash, chain_fold_identity.as_bytes());
+    hash_part(&mut hash, spill_window_fold_identity.as_bytes());
+    hash.update(pair_count.to_be_bytes());
+    hash.update(spill_window_count.to_be_bytes());
+    hash_query_aggregate_spill_totals(&mut hash, totals);
+    hash.update([u8::from(overflowed)]);
+
+    Some(QueryPairedBoundedWindowSpillChainWindowFold {
+        identity: format!(
+            "paired-bounded-window-spill-chain-fold-window:{}",
+            hex(&hash.finalize())
+        ),
+        chain_fold_identity,
+        spill_window_fold_identity,
+        spill_window_count,
+        pair_count,
+        totals,
+        overflowed,
+    })
+}
+
 fn add_paired_bounded_window_spill_window_chain_fold_details(
     details: &mut BTreeMap<String, PlanDetail>,
     fold: &QueryPairedBoundedWindowSpillWindowChainFold,
@@ -11633,6 +11848,83 @@ fn add_paired_bounded_window_spill_window_chain_fold_details(
         ),
         (
             "paired_bounded_window_spill_window_chain_estimated_io_work",
+            fold.totals.estimated_io_work,
+        ),
+    ] {
+        if let Some(value) = value {
+            details.insert(key.to_owned(), PlanDetail::Integer(value));
+        } else {
+            details.remove(key);
+        }
+    }
+}
+
+fn add_paired_bounded_window_spill_chain_window_fold_details(
+    details: &mut BTreeMap<String, PlanDetail>,
+    fold: &QueryPairedBoundedWindowSpillChainWindowFold,
+) {
+    details.insert(
+        "paired_bounded_window_spill_chain_fold_window_identity".to_owned(),
+        PlanDetail::Text(fold.identity.clone()),
+    );
+    details.insert(
+        "paired_bounded_window_spill_chain_fold_window_chain_fold_identity".to_owned(),
+        PlanDetail::Text(fold.chain_fold_identity.clone()),
+    );
+    details.insert(
+        "paired_bounded_window_spill_chain_fold_window_spill_fold_identity".to_owned(),
+        PlanDetail::Text(fold.spill_window_fold_identity.clone()),
+    );
+    details.insert(
+        "paired_bounded_window_spill_chain_fold_window_pairing".to_owned(),
+        PlanDetail::Text("exact_pair_window_chain_member_with_bounded_spill".to_owned()),
+    );
+    for (key, value) in [
+        (
+            "paired_bounded_window_spill_chain_fold_window_pair_count",
+            fold.pair_count,
+        ),
+        (
+            "paired_bounded_window_spill_chain_fold_window_spill_window_count",
+            fold.spill_window_count,
+        ),
+        (
+            "paired_bounded_window_spill_chain_fold_window_spill_stage_count",
+            fold.totals.stage_count,
+        ),
+        (
+            "paired_bounded_window_spill_chain_fold_window_unknown_working_set_count",
+            fold.totals.unknown_working_set_count,
+        ),
+    ] {
+        details.insert(key.to_owned(), PlanDetail::Integer(value));
+    }
+    details.insert(
+        "paired_bounded_window_spill_chain_fold_window_overflowed".to_owned(),
+        PlanDetail::Boolean(fold.overflowed),
+    );
+    let estimate_status = if fold.overflowed {
+        "overflow"
+    } else if fold.totals.unknown_working_set_count > 0 {
+        "unknown_working_set"
+    } else {
+        "computed"
+    };
+    details.insert(
+        "paired_bounded_window_spill_chain_fold_window_estimate_status".to_owned(),
+        PlanDetail::Text(estimate_status.to_owned()),
+    );
+    for (key, value) in [
+        (
+            "paired_bounded_window_spill_chain_fold_window_estimated_bytes",
+            fold.totals.estimated_bytes,
+        ),
+        (
+            "paired_bounded_window_spill_chain_fold_window_estimated_io_blocks",
+            fold.totals.estimated_io_blocks,
+        ),
+        (
+            "paired_bounded_window_spill_chain_fold_window_estimated_io_work",
             fold.totals.estimated_io_work,
         ),
     ] {
