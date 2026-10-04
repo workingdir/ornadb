@@ -9,6 +9,8 @@ use orna_sys_v1::{
 
 const FIXTURE: &str =
     include_str!("fixtures/planner_bounded_spill_window_restore_chain_wrf7y.orna");
+const WINDOW_CHAIN_FIXTURE: &str =
+    include_str!("fixtures/planner_bounded_spill_window_chain_v0x8t.orna");
 
 fn object(value: &str) -> ObjectRef {
     ObjectRef::descriptive(value)
@@ -103,6 +105,8 @@ fn plan(
     unknown_restore_working_set: bool,
     unbound_all_frames: bool,
     include_restore: bool,
+    include_sparse_tail: bool,
+    middle_window_identity: &str,
 ) -> orna_sys_v1::ExplainedPlan {
     let mut joins = vec![
         QueryJoinDescription {
@@ -126,11 +130,13 @@ fn plan(
             predicate: Some(expression("expr:join-Restore")),
         },
     ];
-    joins.push(QueryJoinDescription {
-        source: object("table:Tail"),
-        statistics: Some(statistics(200, 200_000, None)),
-        predicate: Some(expression("expr:join-Tail")),
-    });
+    if include_sparse_tail {
+        joins.push(QueryJoinDescription {
+            source: object("table:Tail"),
+            statistics: Some(statistics(200, 200_000, None)),
+            predicate: Some(expression("expr:join-Tail")),
+        });
+    }
     let query = QueryPlanDescription {
         snapshot: SnapshotRef::descriptive("snapshot:bounded-spill-window-restore-chain-wrf7y"),
         source: object("table:Anchor"),
@@ -144,10 +150,11 @@ fn plan(
         mutations: Vec::new(),
         materialize_into: None,
     };
-    let mut pairs = ["First", "Gap", "Middle", "Restore", "Tail"]
-        .into_iter()
-        .map(pair)
-        .collect::<Vec<_>>();
+    let mut pair_names = vec!["First", "Gap", "Middle", "Restore"];
+    if include_sparse_tail {
+        pair_names.push("Tail");
+    }
+    let mut pairs = pair_names.into_iter().map(pair).collect::<Vec<_>>();
     let mut aggregates = vec![
         aggregate(
             "window:first-bounded",
@@ -156,7 +163,7 @@ fn plan(
             PlanWindowFrameBound::CurrentRow,
         ),
         aggregate(
-            "window:middle-unbounded",
+            middle_window_identity,
             "table:Middle",
             PlanWindowFrameBound::UnboundedPreceding,
             PlanWindowFrameBound::CurrentRow,
@@ -187,7 +194,7 @@ fn plan(
             "spill:middle-unbounded",
             "pair:Middle",
             "table:Middle",
-            "window:middle-unbounded",
+            middle_window_identity,
             Some(80_000),
             1_000,
         ),
@@ -264,10 +271,46 @@ fn bounded_spill_identity_binds_paired_window_restore_chains_and_carries_across_
     assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
     assert_eq!(parsed.value.items.len(), 2);
 
-    let baseline = plan(5_000, "checkpoint:restore-v1", false, false, false, true);
-    let reordered = plan(5_000, "checkpoint:restore-v1", true, false, false, true);
-    let changed_spill = plan(4_999, "checkpoint:restore-v1", false, false, false, true);
-    let changed_restore = plan(5_000, "checkpoint:restore-v2", false, false, false, true);
+    let baseline = plan(
+        5_000,
+        "checkpoint:restore-v1",
+        false,
+        false,
+        false,
+        true,
+        true,
+        "window:middle-unbounded",
+    );
+    let reordered = plan(
+        5_000,
+        "checkpoint:restore-v1",
+        true,
+        false,
+        false,
+        true,
+        true,
+        "window:middle-unbounded",
+    );
+    let changed_spill = plan(
+        4_999,
+        "checkpoint:restore-v1",
+        false,
+        false,
+        false,
+        true,
+        true,
+        "window:middle-unbounded",
+    );
+    let changed_restore = plan(
+        5_000,
+        "checkpoint:restore-v2",
+        false,
+        false,
+        false,
+        true,
+        true,
+        "window:middle-unbounded",
+    );
     let project_node = project(&baseline);
     let restore = join_by_pair(&baseline, "pair:Restore");
     let tail = join_by_pair(&baseline, "pair:Tail");
@@ -394,7 +437,16 @@ fn bounded_spill_identity_binds_paired_window_restore_chains_and_carries_across_
 
 #[test]
 fn bounded_spill_restore_chain_fold_preserves_unknown_estimates_and_requires_bounded_spills() {
-    let unknown_plan = plan(5_000, "checkpoint:restore-v1", false, true, false, true);
+    let unknown_plan = plan(
+        5_000,
+        "checkpoint:restore-v1",
+        false,
+        true,
+        false,
+        true,
+        true,
+        "window:middle-unbounded",
+    );
     let unknown = project(&unknown_plan);
     assert_eq!(
         integer(
@@ -415,19 +467,267 @@ fn bounded_spill_restore_chain_fold_preserves_unknown_estimates_and_requires_bou
             .details()
             .contains_key("paired_bounded_window_spill_restore_chain_estimated_bytes")
     );
+    assert_eq!(
+        integer(
+            unknown,
+            "paired_bounded_window_spill_window_chain_unknown_working_set_count"
+        ),
+        1
+    );
+    assert_eq!(
+        text(
+            unknown,
+            "paired_bounded_window_spill_window_chain_estimate_status"
+        ),
+        "unknown_working_set"
+    );
+    assert!(
+        !unknown
+            .details()
+            .contains_key("paired_bounded_window_spill_window_chain_estimated_bytes")
+    );
 
-    let unbounded_plan = plan(5_000, "checkpoint:restore-v1", false, false, true, true);
+    let unbounded_plan = plan(
+        5_000,
+        "checkpoint:restore-v1",
+        false,
+        false,
+        true,
+        true,
+        true,
+        "window:middle-unbounded",
+    );
     let unbounded = project(&unbounded_plan);
     assert!(
         !unbounded
             .details()
             .contains_key("paired_bounded_window_spill_restore_chain_fold_identity")
     );
-    let no_restore_plan = plan(5_000, "checkpoint:restore-v1", false, false, false, false);
+    assert!(
+        !unbounded
+            .details()
+            .contains_key("paired_bounded_window_spill_window_chain_fold_identity")
+    );
+    let no_restore_plan = plan(
+        5_000,
+        "checkpoint:restore-v1",
+        false,
+        false,
+        false,
+        false,
+        true,
+        "window:middle-unbounded",
+    );
     let no_restore = project(&no_restore_plan);
     assert!(
         !no_restore
             .details()
             .contains_key("paired_bounded_window_spill_restore_chain_fold_identity")
+    );
+    assert!(
+        text(
+            no_restore,
+            "paired_bounded_window_spill_window_chain_fold_identity"
+        )
+        .starts_with("paired-bounded-window-spill-window-chain:")
+    );
+    assert_eq!(
+        integer(
+            no_restore,
+            "paired_bounded_window_spill_window_chain_window_pair_count"
+        ),
+        3,
+        "paired window chains produce this fold without a restore descriptor"
+    );
+}
+
+#[test]
+fn bounded_spill_identity_binds_paired_window_chains_and_carries_across_sparse_tail_v0x8t() {
+    let parsed = orna_syntax_v1::parse_module(WINDOW_CHAIN_FIXTURE);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+    assert_eq!(parsed.value.items.len(), 2);
+
+    let baseline = plan(
+        5_000,
+        "checkpoint:restore-v1",
+        false,
+        false,
+        false,
+        true,
+        true,
+        "window:middle-unbounded",
+    );
+    let without_sparse_tail = plan(
+        5_000,
+        "checkpoint:restore-v1",
+        false,
+        false,
+        false,
+        true,
+        false,
+        "window:middle-unbounded",
+    );
+    let reordered = plan(
+        5_000,
+        "checkpoint:restore-v1",
+        true,
+        false,
+        false,
+        true,
+        true,
+        "window:middle-unbounded",
+    );
+    let changed_spill = plan(
+        4_999,
+        "checkpoint:restore-v1",
+        false,
+        false,
+        false,
+        true,
+        true,
+        "window:middle-unbounded",
+    );
+    let changed_window = plan(
+        5_000,
+        "checkpoint:restore-v1",
+        false,
+        false,
+        false,
+        true,
+        true,
+        "window:middle-unbounded-v2",
+    );
+    let changed_restore = plan(
+        5_000,
+        "checkpoint:restore-v2",
+        false,
+        false,
+        false,
+        true,
+        true,
+        "window:middle-unbounded",
+    );
+
+    let baseline_project = project(&baseline);
+    let baseline_restore = join_by_pair(&baseline, "pair:Restore");
+    let baseline_tail = join_by_pair(&baseline, "pair:Tail");
+    let fold_key = "paired_bounded_window_spill_window_chain_fold_identity";
+    let spill_component_key = "paired_bounded_window_spill_window_chain_spill_fold_identity";
+    let window_component_key = "paired_bounded_window_spill_window_chain_window_fold_identity";
+
+    assert!(
+        text(baseline_project, fold_key).starts_with("paired-bounded-window-spill-window-chain:")
+    );
+    assert_eq!(
+        text(baseline_project, spill_component_key),
+        text(
+            baseline_project,
+            "paired_bounded_window_spill_restore_spill_fold_identity"
+        )
+    );
+    assert!(text(baseline_project, window_component_key).starts_with("paired-window-chain-fold:"));
+    assert_eq!(
+        integer(
+            baseline_project,
+            "paired_bounded_window_spill_window_chain_spill_pair_count"
+        ),
+        2
+    );
+    assert_eq!(
+        integer(
+            baseline_project,
+            "paired_bounded_window_spill_window_chain_spill_stage_count"
+        ),
+        2,
+        "the unbounded middle window does not enter the bounded spill fold"
+    );
+    assert_eq!(
+        integer(
+            baseline_project,
+            "paired_bounded_window_spill_window_chain_window_pair_count"
+        ),
+        3
+    );
+    assert_eq!(
+        integer(
+            baseline_project,
+            "paired_bounded_window_spill_window_chain_window_identity_count"
+        ),
+        3
+    );
+
+    assert_eq!(
+        text(
+            baseline_restore,
+            "paired_window_cost_restoration_window_fold_identity"
+        ),
+        text(
+            baseline_tail,
+            "paired_window_cost_restoration_window_fold_identity"
+        ),
+        "the sparse tail carries the exact paired window fold"
+    );
+    assert_eq!(
+        text(
+            baseline_tail,
+            "paired_window_cost_restoration_window_restore_chain_transition"
+        ),
+        "carried_across_sparse_input"
+    );
+    assert_eq!(
+        text(baseline_project, fold_key),
+        text(project(&without_sparse_tail), fold_key),
+        "a sparse tail does not advance the bounded spill/window-chain identity"
+    );
+    assert_eq!(
+        text(baseline_project, fold_key),
+        text(project(&reordered), fold_key),
+        "descriptor ordering does not change the paired window-chain identity"
+    );
+
+    let changed_spill_project = project(&changed_spill);
+    assert_ne!(
+        text(baseline_project, fold_key),
+        text(changed_spill_project, fold_key)
+    );
+    assert_ne!(
+        text(baseline_project, spill_component_key),
+        text(changed_spill_project, spill_component_key)
+    );
+    assert_eq!(
+        text(baseline_project, window_component_key),
+        text(changed_spill_project, window_component_key)
+    );
+
+    let changed_window_project = project(&changed_window);
+    assert_ne!(
+        text(baseline_project, fold_key),
+        text(changed_window_project, fold_key)
+    );
+    assert_eq!(
+        text(baseline_project, spill_component_key),
+        text(changed_window_project, spill_component_key),
+        "changing an unbounded window identity leaves bounded spill history unchanged"
+    );
+    assert_ne!(
+        text(baseline_project, window_component_key),
+        text(changed_window_project, window_component_key)
+    );
+
+    let changed_restore_project = project(&changed_restore);
+    assert_eq!(
+        text(baseline_project, fold_key),
+        text(changed_restore_project, fold_key),
+        "the paired window-chain digest is independent of restore-chain identity"
+    );
+    assert_ne!(
+        text(
+            baseline_project,
+            "paired_bounded_window_spill_restore_chain_fold_identity"
+        ),
+        text(
+            changed_restore_project,
+            "paired_bounded_window_spill_restore_chain_fold_identity"
+        )
     );
 }
