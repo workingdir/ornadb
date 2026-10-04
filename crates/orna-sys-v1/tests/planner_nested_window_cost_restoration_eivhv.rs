@@ -444,8 +444,18 @@ fn nested_window_identities_survive_paired_cost_restore_folds_and_sparse_edges()
     );
     assert_eq!(
         text(tail, "paired_window_cost_restoration_pair_envelope_pairing"),
-        "cumulative_window_restore_chain_identity_bound_to_each_exact_pair_envelope"
+        "cumulative_cost_fold_and_window_restore_chain_identity_bound_to_each_exact_pair_envelope"
     );
+    for node in [child_a, child_b, tail] {
+        assert_eq!(
+            text(
+                node,
+                "paired_window_cost_restoration_pair_envelope_cost_fold_identity"
+            ),
+            text(node, "paired_window_cost_restoration_cost_fold_identity"),
+            "each exact envelope exposes the cumulative cost fold it binds"
+        );
+    }
     assert_ne!(
         text(
             child_a,
@@ -712,6 +722,17 @@ fn nested_window_identities_survive_paired_cost_restore_folds_and_sparse_edges()
                     "paired_window_cost_restoration_window_fold_identity"
                 ),
                 "cost and restore changes leave the exact window identity fold unchanged"
+            );
+            assert_eq!(
+                text(
+                    changed[pair_id],
+                    "paired_window_cost_restoration_pair_envelope_cost_fold_identity"
+                ),
+                text(
+                    changed[pair_id],
+                    "paired_window_cost_restoration_cost_fold_identity"
+                ),
+                "each changed envelope binds its cumulative nested cost fold"
             );
         }
         assert_ne!(
