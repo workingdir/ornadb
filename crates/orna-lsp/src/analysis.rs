@@ -28,7 +28,13 @@ pub fn check_document(document: &Document, mapper: &PositionMapper<'_>) -> Vec<D
             let related = diagnostic
                 .labels
                 .iter()
-                .filter(|label| !label.primary)
+                .filter(|label| {
+                    !label.primary
+                        && label
+                            .message
+                            .as_deref()
+                            .is_some_and(|message| !message.trim().is_empty())
+                })
                 .map(|label| DiagnosticRelatedInformation {
                     location: Location {
                         uri: document.uri.clone(),
@@ -43,7 +49,12 @@ pub fn check_document(document: &Document, mapper: &PositionMapper<'_>) -> Vec<D
                 code: Some(NumberOrString::String(diagnostic.code.to_owned())),
                 code_description: None,
                 source: Some("orna-syntax-v1".to_owned()),
-                message: diagnostic.message.clone(),
+                message: lsp_diagnostic_message(
+                    &diagnostic.title,
+                    &diagnostic.message,
+                    &diagnostic.help,
+                    &diagnostic.notes,
+                ),
                 related_information: (!related.is_empty()).then_some(related),
                 tags: None,
                 data: Some(serde_json::json!({
@@ -185,6 +196,23 @@ fn leading_doc_comment(text: &str, before: usize) -> Option<String> {
         lines.reverse();
         Some(lines.join("\n"))
     }
+}
+
+fn lsp_diagnostic_message(title: &str, message: &str, help: &[String], notes: &[String]) -> String {
+    let mut value = if !title.trim().is_empty() && title != message {
+        format!("{title}: {message}")
+    } else {
+        message.to_owned()
+    };
+    for (heading, details) in [("Help", help), ("Note", notes)] {
+        for detail in details.iter().filter(|detail| !detail.trim().is_empty()) {
+            value.push_str("\n\n");
+            value.push_str(heading);
+            value.push_str(": ");
+            value.push_str(detail.trim());
+        }
+    }
+    value
 }
 
 fn source_slice<'a>(text: &'a str, span: &SourceSpan) -> &'a str {
