@@ -541,6 +541,50 @@ fn pinned_option_combinators_are_in_the_captured_snapshot() {
 }
 
 #[test]
+fn pinned_result_combinators_are_in_the_captured_snapshot() {
+    let sources = reference_standard_sources_v1();
+    let (index, (path, source)) = sources
+        .iter()
+        .enumerate()
+        .find(|(_, (path, _))| path == REFERENCE_STANDARD_RESULT_PATH_V1)
+        .expect("the pinned source bundle includes std.result");
+    assert_eq!(index, 12, "the result module retains its source index");
+    for declaration in [
+        "pub fn and<T, U, E>(",
+        "pub fn or<T, E, F>(",
+        "pub fn contains<T, E>(",
+        "pub fn contains_error<T, E>(",
+        "pub fn zip<T, U, E>(",
+        "pub fn transpose<T, E>(result: Result<T?, E>): Result<T, E>?",
+    ] {
+        assert!(source.contains(declaration), "missing `{declaration}`");
+    }
+    for contract in [
+        "language failure raised by a callback",
+        "use `and_then` to construct `next` conditionally",
+        "computed only for the Err branch",
+        "first Err from left to right",
+        "empty option, or the error payload",
+    ] {
+        assert!(
+            source.contains(contract),
+            "missing result combinator contract `{contract}`"
+        );
+    }
+    let profile = reference_standard_profile_v1();
+    profile
+        .verify_source(path, source)
+        .expect("result combinator bytes match the captured standard profile");
+    let mut changed_source = source.clone();
+    changed_source.push_str("\n// changed after profile capture\n");
+    assert!(profile.verify_source(path, &changed_source).is_err());
+    let parsed = orna_syntax_v1::parse_module_with_file(source, path);
+    assert!(parsed.is_ok(), "{:#?}", parsed.diagnostics);
+    reference_standard_catalogue_v1()
+        .expect("result combinators resolve in the captured standard catalogue");
+}
+
+#[test]
 fn pinned_bits_source_includes_bit_and_unsigned_byte_contracts() {
     let sources = reference_standard_sources_v1();
     let (index, (path, source)) = sources
