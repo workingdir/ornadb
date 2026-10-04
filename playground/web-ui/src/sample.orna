@@ -1,3 +1,0 @@
-// A value computed by the Orna runtime.
-let answer: Int = 40 + 2;
-answer
