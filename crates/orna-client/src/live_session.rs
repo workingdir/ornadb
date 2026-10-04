@@ -1839,6 +1839,114 @@ mod tests {
     }
 
     #[test]
+    fn over_depth_moved_delta_keeps_recovery_fenced_until_bounded_snapshot() {
+        let limits = Limits::default();
+        let initial_children = vec![nested_present_child(18), nested_present_child(1)];
+        let initial = snapshot_with_children(0, "before-move", initial_children.clone());
+        assert!(Envelope::decode(&initial, limits).is_ok());
+
+        let mut io = MemoryIo::default();
+        io.incoming.push_back(initial.clone());
+        let mut driver = LiveSessionDriver::new(
+            io,
+            [7; 16],
+            limits,
+            Renderer::default(),
+            Allocator::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            block_on(driver.receive_once()).unwrap(),
+            LiveSessionEvent::SnapshotPublished { revision: 0 }
+        );
+
+        let move_beyond_bound = delta_with_operations(
+            0,
+            1,
+            vec![move_between_paths_operation(
+                nested_child_path(0, 1),
+                nested_child_path(19, 0),
+            )],
+        );
+        assert!(move_beyond_bound.len() < limits.max_message_bytes);
+        assert!(Envelope::decode(&move_beyond_bound, limits).is_ok());
+        let original = driver.presentation().published().cloned().unwrap();
+        driver.io.incoming.push_back(move_beyond_bound);
+        assert!(matches!(
+            block_on(driver.receive_once()),
+            Ok(LiveSessionEvent::ResyncSent { .. })
+        ));
+        assert_resync_frame(&driver.io.sent[0]);
+        assert_eq!(driver.presentation().published(), Some(&original));
+        assert_eq!(driver.renderer.trees, vec![snapshot_present(&initial)]);
+
+        let request_id = Envelope::decode(&driver.io.sent[0], limits)
+            .unwrap()
+            .request
+            .expect("moved-tree recovery request is correlated");
+        let mut moved_deepest =
+            present_node_with_children("deepest", vec![nested_present_child(1)]);
+        for _ in 0..18 {
+            moved_deepest = present_node_with_children("nested", vec![moved_deepest]);
+        }
+        let expected_frame_limits = Limits {
+            max_depth: 80,
+            ..limits
+        };
+        let over_depth_recovery = frame_with_request_and_limits(
+            16,
+            [7; 16],
+            Some(request_id),
+            snapshot_body_with_children(1, "before-move", vec![moved_deepest]),
+            expected_frame_limits,
+        );
+        driver.io.incoming.push_back(over_depth_recovery);
+        assert_eq!(
+            block_on(driver.receive_once()).unwrap(),
+            LiveSessionEvent::ResyncAwaitingSnapshot {
+                request: request_id
+            }
+        );
+        assert_eq!(driver.io.sent.len(), 1);
+        assert_eq!(driver.presentation().published(), Some(&original));
+        assert_eq!(driver.renderer.trees, vec![snapshot_present(&initial)]);
+
+        let recovery_label = "bounded-recovery";
+        driver.io.incoming.push_back(frame_with_request(
+            16,
+            [7; 16],
+            Some(request_id),
+            snapshot_body_with_children(1, recovery_label, initial_children.clone()),
+        ));
+        assert_eq!(
+            block_on(driver.receive_once()).unwrap(),
+            LiveSessionEvent::SnapshotPublished { revision: 1 }
+        );
+        let recovered_snapshot =
+            snapshot_with_children(1, recovery_label, initial_children.clone());
+        assert_eq!(
+            driver.renderer.trees[1],
+            snapshot_present(&recovered_snapshot)
+        );
+
+        let followup_label = "after-bounded-recovery";
+        driver.io.incoming.push_back(delta(1, 2, followup_label));
+        assert_eq!(
+            block_on(driver.receive_once()).unwrap(),
+            LiveSessionEvent::DeltaPublished { revision: 2 }
+        );
+        let followup_snapshot = snapshot_with_children(2, followup_label, initial_children);
+        assert_eq!(
+            driver.presentation().published().unwrap().present(),
+            &snapshot_present(&followup_snapshot)
+        );
+        assert_eq!(
+            driver.renderer.trees[2],
+            snapshot_present(&followup_snapshot)
+        );
+    }
+
+    #[test]
     fn bad_base_and_mid_patch_failure_send_resync_without_changing_tree() {
         let mut io = MemoryIo::default();
         io.incoming.push_back(snapshot(0));
