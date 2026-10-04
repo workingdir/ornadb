@@ -2855,6 +2855,7 @@ fn historical_nested_callable_catalogue_with_other(include_other: bool) -> Catal
         exports: symbols.clone(),
         symbols,
         generic_functions: BTreeMap::new(),
+        protocols: BTreeMap::new(),
         prelude_exports: BTreeSet::new(),
         implicit: true,
     }])
@@ -4386,6 +4387,7 @@ fn paired_shadowed_callback_parameter_contracts_keep_depth_pin_scope() {
         exports: symbols.clone(),
         symbols,
         generic_functions: BTreeMap::new(),
+        protocols: BTreeMap::new(),
         prelude_exports: BTreeSet::new(),
         implicit: true,
     }]);
@@ -14847,6 +14849,7 @@ fn historical_effect_catalogue(effect: &str) -> Catalogue {
         exports: symbols.clone(),
         symbols,
         generic_functions: std::collections::BTreeMap::new(),
+        protocols: std::collections::BTreeMap::new(),
         prelude_exports: std::collections::BTreeSet::new(),
         implicit: true,
     }])
