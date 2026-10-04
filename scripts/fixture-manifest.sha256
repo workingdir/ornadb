@@ -3178,6 +3178,9 @@ cc65b25177b4a62dfcef28ef1da7fe88ca7bf533e227285882d13eb032405b36  crates/orna-ls
 f4e8d5cfdb20469a0205e848d75d377e63d3b54ad383d005ce0959d27b277110  crates/orna-lsp/tests/fixtures/accepted-corpus.txt
 11b87ed71842d8acde383de01985383af202e3d0d4809866829f0f74b3d78f14  crates/orna-lsp/tests/fixtures/ambiguous-renames-caller-v1.orna
 c760f77a909070dfef8bd78019889c88aee5f22a5139ab0865ae074bd2f6da88  crates/orna-lsp/tests/fixtures/ambiguous-renames-v1.orna
+4c7b9607040e40c30e3cdd2913cb440f7fff148145d57b71054e4e33996ddf13  crates/orna-lsp/tests/fixtures/call-hierarchy-depth-caller-v1.orna
+cd04e763ea6bd21a7201fc468207f68dd3de91ad4ce1e1841288aab86c0d0fe9  crates/orna-lsp/tests/fixtures/call-hierarchy-depth-malformed-v1.orna
+1d2303e0fa156558894a9ef7821e053c9e4658428b32c80df2c6c2fabfbce76c  crates/orna-lsp/tests/fixtures/call-hierarchy-depth-provider-v1.orna
 c75bbee709cc649cc9025108885f1ffae279b05b13edfd66647c6f56003b77d3  crates/orna-lsp/tests/fixtures/call-v1.orna
 415bdfd6d8187cea64dccd750f93055025db74f13f49919190ce0ae830014460  crates/orna-lsp/tests/fixtures/document-highlight-code-lens-v1.orna
 e93403528dbf82b2ee2d1d6de8490b8b15a3526e55d41435efc62bc1d9b1ca95  crates/orna-lsp/tests/fixtures/document-link-target-v1.orna
