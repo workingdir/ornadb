@@ -19,6 +19,19 @@ explicit Eval requests, and resynchronizes that watch to receive typed
 presentation deltas. Evaluation runs in the server's Orna runtime. The browser
 does not contain a second evaluator or a language keyword inventory.
 
+## GitHub Pages channels
+
+The Pages workflow publishes the static playground bundle from `main` at
+https://workingdir.github.io/ornadb/ and the current playground milestone
+branch at https://workingdir.github.io/ornadb/dev/. Each Pages artifact contains
+both channels. Pull requests run the checks without publishing; a push to
+`main` or a playground milestone branch publishes the updated artifact.
+
+Pages serves the editor bundle and its browser analysis assets. Examples and
+source evaluation still require the same-origin `/api/examples` and `/orna/`
+endpoints provided by `orna serve`. The Pages smoke checks both channel bundles,
+their generated assets, and the published HTML and JS/CSS routes.
+
 ## Dogfood proof
 
 Run the focused process-level integration test with:
