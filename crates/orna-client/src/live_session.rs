@@ -703,7 +703,6 @@ mod tests {
     fn move_between_paths_operation(from: Vec<u8>, to: Vec<u8>) -> Vec<u8> {
         array(vec![vec![0x03], from, to])
     }
-
     fn delta_with_operations(base: u8, next: u8, operations: Vec<Vec<u8>>) -> Vec<u8> {
         let mut body = vec![0xa4, 0x00, base, 0x01, next, 0x02];
         body.extend(array(operations));
