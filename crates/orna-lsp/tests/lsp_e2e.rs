@@ -38,6 +38,8 @@ const DOCUMENT_HIGHLIGHT_CODE_LENS_SOURCE: &str =
 const TYPE_HIERARCHY_PROVIDER_SOURCE: &str =
     include_str!("fixtures/type-hierarchy-provider-v1.orna");
 const TYPE_HIERARCHY_CALLER_SOURCE: &str = include_str!("fixtures/type-hierarchy-caller-v1.orna");
+const INLINE_VALUE_LINKED_EDITING_SOURCE: &str =
+    include_str!("fixtures/inline-value-linked-editing-v1.orna");
 
 struct Client {
     child: Child,
@@ -144,6 +146,7 @@ fn initialize(client: &mut Client) {
         result["capabilities"]["codeLensProvider"]["resolveProvider"],
         false
     );
+    assert!(result["capabilities"]["inlineValueProvider"].is_object());
     assert!(result["capabilities"]["typeHierarchyProvider"].is_object());
     assert_eq!(result["capabilities"]["monikerProvider"], true);
     assert_eq!(
@@ -1623,6 +1626,112 @@ fn syntax_v1_semantic_tokens_and_inlay_hints_follow_scope_and_requested_range() 
         &shadow_hints,
         "LSP protocol",
     );
+    client.shutdown();
+}
+
+#[test]
+fn inline_values_follow_stopped_scope_and_requested_ranges() {
+    let uri = "file:///workspace/inline-value-linked-editing-v1.orna";
+    let mut client = Client::spawn();
+    initialize(&mut client);
+    let diagnostics = open(&mut client, uri, INLINE_VALUE_LINKED_EDITING_SOURCE);
+    assert!(
+        diagnostics["diagnostics"].as_array().unwrap().is_empty(),
+        "{diagnostics}"
+    );
+
+    let copied_use = INLINE_VALUE_LINKED_EDITING_SOURCE
+        .find("copied\n    }")
+        .unwrap();
+    let stopped = range_at(
+        INLINE_VALUE_LINKED_EDITING_SOURCE,
+        copied_use,
+        copied_use + "copied".len(),
+    );
+    let all = client.request(
+        "textDocument/inlineValue",
+        json!({
+            "textDocument":{"uri":uri},
+            "range":range_at(INLINE_VALUE_LINKED_EDITING_SOURCE, 0, INLINE_VALUE_LINKED_EDITING_SOURCE.len()),
+            "context":{"frameId":7,"stoppedLocation":stopped}
+        }),
+    );
+    let all = all.as_array().unwrap();
+    assert_eq!(
+        all.iter()
+            .map(|value| value["variableName"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["input", "copied"]
+    );
+    let copied_initializer = INLINE_VALUE_LINKED_EDITING_SOURCE
+        .find("let copied: Int = input")
+        .unwrap()
+        + "let copied: Int = ".len();
+    assert_eq!(
+        all[0]["range"],
+        range_at(
+            INLINE_VALUE_LINKED_EDITING_SOURCE,
+            copied_initializer,
+            copied_initializer + "input".len()
+        )
+    );
+    assert_eq!(all[0]["caseSensitiveLookup"], false);
+    assert_eq!(
+        all[1]["range"],
+        range_at(
+            INLINE_VALUE_LINKED_EDITING_SOURCE,
+            copied_use,
+            copied_use + "copied".len()
+        )
+    );
+
+    let clipped = client.request(
+        "textDocument/inlineValue",
+        json!({
+            "textDocument":{"uri":uri},
+            "range":stopped,
+            "context":{"frameId":7,"stoppedLocation":stopped}
+        }),
+    );
+    assert_eq!(
+        clipped
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|value| value["variableName"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["copied"]
+    );
+
+    let shadow_use = INLINE_VALUE_LINKED_EDITING_SOURCE.rfind("input").unwrap();
+    let shadow_stop = range_at(
+        INLINE_VALUE_LINKED_EDITING_SOURCE,
+        shadow_use,
+        shadow_use + "input".len(),
+    );
+    let shadow = client.request(
+        "textDocument/inlineValue",
+        json!({
+            "textDocument":{"uri":uri},
+            "range":range_at(INLINE_VALUE_LINKED_EDITING_SOURCE, 0, INLINE_VALUE_LINKED_EDITING_SOURCE.len()),
+            "context":{"frameId":7,"stoppedLocation":shadow_stop}
+        }),
+    );
+    assert_eq!(shadow.as_array().unwrap().len(), 1, "{shadow}");
+    assert_eq!(shadow[0]["variableName"], "input");
+    assert_eq!(shadow[0]["range"], shadow_stop);
+
+    let comment_end = INLINE_VALUE_LINKED_EDITING_SOURCE.find('\n').unwrap();
+    let comment_range = range_at(INLINE_VALUE_LINKED_EDITING_SOURCE, 0, comment_end);
+    let empty = client.request(
+        "textDocument/inlineValue",
+        json!({
+            "textDocument":{"uri":uri},
+            "range":comment_range,
+            "context":{"frameId":7,"stoppedLocation":comment_range}
+        }),
+    );
+    assert_eq!(empty, json!([]));
     client.shutdown();
 }
 
