@@ -22,18 +22,19 @@ use lsp_types::{
     DocumentLinkOptions, DocumentLinkParams, DocumentSymbolParams, DocumentSymbolResponse,
     FoldingRange, FoldingRangeParams, FoldingRangeProviderCapability, FullDocumentDiagnosticReport,
     GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverParams, HoverProviderCapability,
-    InitializeParams, InlayHintOptions, InlayHintParams, InlayHintServerCapabilities, Moniker,
-    MonikerKind, MonikerParams, NumberOrString, OneOf, Position, PositionEncodingKind,
-    PrepareRenameResponse, PublishDiagnosticsParams, Range, ReferenceParams,
-    RelatedFullDocumentDiagnosticReport, RelatedUnchangedDocumentDiagnosticReport, RenameOptions,
-    RenameParams, SelectionRangeParams, SelectionRangeProviderCapability, SemanticTokens,
-    SemanticTokensFullOptions, SemanticTokensLegend, SemanticTokensOptions, SemanticTokensParams,
-    SemanticTokensRangeParams, SemanticTokensServerCapabilities, ServerCapabilities,
-    SignatureHelpOptions, TextDocumentContentChangeEvent, TextDocumentSyncCapability,
-    TextDocumentSyncKind, TextDocumentSyncOptions, TextDocumentSyncSaveOptions, TextEdit,
-    TypeHierarchyItem, TypeHierarchyPrepareParams, TypeHierarchySubtypesParams,
-    TypeHierarchySupertypesParams, UnchangedDocumentDiagnosticReport, UniquenessLevel, Uri,
-    WorkspaceEdit,
+    InitializeParams, InlayHintOptions, InlayHintParams, InlayHintServerCapabilities, InlineValue,
+    InlineValueOptions, InlineValueParams, InlineValueServerCapabilities,
+    InlineValueVariableLookup, Moniker, MonikerKind, MonikerParams, NumberOrString, OneOf,
+    Position, PositionEncodingKind, PrepareRenameResponse, PublishDiagnosticsParams, Range,
+    ReferenceParams, RelatedFullDocumentDiagnosticReport, RelatedUnchangedDocumentDiagnosticReport,
+    RenameOptions, RenameParams, SelectionRangeParams, SelectionRangeProviderCapability,
+    SemanticTokens, SemanticTokensFullOptions, SemanticTokensLegend, SemanticTokensOptions,
+    SemanticTokensParams, SemanticTokensRangeParams, SemanticTokensServerCapabilities,
+    ServerCapabilities, SignatureHelpOptions, TextDocumentContentChangeEvent,
+    TextDocumentSyncCapability, TextDocumentSyncKind, TextDocumentSyncOptions,
+    TextDocumentSyncSaveOptions, TextEdit, TypeHierarchyItem, TypeHierarchyPrepareParams,
+    TypeHierarchySubtypesParams, TypeHierarchySupertypesParams, UnchangedDocumentDiagnosticReport,
+    UniquenessLevel, Uri, WorkspaceEdit,
 };
 
 /// Transport threads for the server's standard input and output streams.
@@ -278,6 +279,9 @@ fn server_capabilities() -> serde_json::Value {
             CallHierarchyOptions::default(),
         )),
         moniker_provider: Some(OneOf::Left(true)),
+        inline_value_provider: Some(OneOf::Right(InlineValueServerCapabilities::Options(
+            InlineValueOptions::default(),
+        ))),
         folding_range_provider: Some(FoldingRangeProviderCapability::Simple(true)),
         selection_range_provider: Some(SelectionRangeProviderCapability::Simple(true)),
         ..ServerCapabilities::default()
@@ -307,6 +311,7 @@ fn handle_request(state: &mut ServerState, connection: &Connection, request: Req
         "textDocument/semanticTokens/full" => request_semantic_tokens_full(state, request),
         "textDocument/semanticTokens/range" => request_semantic_tokens_range(state, request),
         "textDocument/inlayHint" => request_inlay_hints(state, request),
+        "textDocument/inlineValue" => request_inline_values(state, request),
         "textDocument/documentLink" => request_document_links(state, request),
         "textDocument/foldingRange" => request_folding_ranges(state, request),
         "textDocument/selectionRange" => request_selection_ranges(state, request),
@@ -2005,6 +2010,62 @@ fn request_inlay_hints(
         &mapper,
         &params.range,
     ))?)
+}
+
+fn request_inline_values(
+    state: &mut ServerState,
+    request: Request,
+) -> Result<serde_json::Value, Box<dyn std::error::Error + Send + Sync>> {
+    let (_, params) = request.extract::<InlineValueParams>("textDocument/inlineValue")?;
+    let Some(document) = state.document(&params.text_document.uri) else {
+        return Ok(serde_json::Value::Null);
+    };
+    let parse = analysis::parse_document(document);
+    if !parse.diagnostics.is_empty() {
+        return Ok(serde_json::to_value(Vec::<InlineValue>::new())?);
+    }
+
+    let mapper = PositionMapper::new(&document.text);
+    let requested_start = mapper.byte_offset(params.range.start);
+    let requested_end = mapper.byte_offset(params.range.end);
+    let stopped_at = mapper.byte_offset(params.context.stopped_location.end);
+    if requested_start > requested_end || stopped_at < requested_start || stopped_at > requested_end
+    {
+        return Ok(serde_json::to_value(Vec::<InlineValue>::new())?);
+    }
+
+    let mut values = crate::locals::visible_bindings(&parse.value, stopped_at)
+        .into_iter()
+        .filter_map(|binding| {
+            let mut occurrences = crate::locals::references(&parse.value, &binding);
+            occurrences.push(binding.selection);
+            occurrences
+                .into_iter()
+                .filter(|span| {
+                    span.start >= requested_start
+                        && span.end <= requested_end
+                        && span.end <= stopped_at
+                })
+                .max_by_key(|span| span.start)
+                .map(|span| {
+                    (
+                        span.start,
+                        InlineValue::VariableLookup(InlineValueVariableLookup {
+                            range: mapper.range(&span),
+                            variable_name: Some(binding.name),
+                            case_sensitive_lookup: false,
+                        }),
+                    )
+                })
+        })
+        .collect::<Vec<_>>();
+    values.sort_by_key(|(start, _)| *start);
+    Ok(serde_json::to_value(
+        values
+            .into_iter()
+            .map(|(_, value)| value)
+            .collect::<Vec<_>>(),
+    )?)
 }
 
 fn request_completion(
