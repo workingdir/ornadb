@@ -2,7 +2,6 @@ use orna_evaluator_v1::{
     AdmittedReplSession, Limits, reference_standard_profile, reference_standard_sources,
 };
 use orna_foundation_v1::CanonicalValue;
-use orna_semantic_v1::{Catalogue, StandardDependencyProfile};
 use orna_value_v1::Raw;
 
 const BUILDER_MODULES: [&str; 4] = [
@@ -33,28 +32,7 @@ fn import_builders(session: &mut AdmittedReplSession) {
 }
 
 fn builders_session() -> AdmittedReplSession {
-    let sources = reference_standard_sources()
-        .into_iter()
-        .filter(|(path, _)| {
-            BUILDER_MODULES.contains(&path.as_str()) || path.starts_with("std/encoding/")
-        })
-        .collect::<Vec<_>>();
-    for module in BUILDER_MODULES {
-        assert!(
-            sources.iter().any(|(path, _)| path == module),
-            "the reference profile includes {module}"
-        );
-    }
-
-    let profile = StandardDependencyProfile::from_sources(
-        "orna.std/q730o-collection-builders",
-        sources.clone(),
-    )
-    .expect("the builder source subset forms a profile");
-    let catalogue = Catalogue::authoritative_core()
-        .with_standard_sources(&profile, sources.clone())
-        .expect("the builder modules resolve against core and their captured dependencies");
-    AdmittedReplSession::from_catalogue(&[], catalogue, sources, Limits::default())
+    AdmittedReplSession::with_reference_standard(Limits::default())
         .unwrap_or_else(|error| panic!("collection builders failed to load: {}", error.code()))
 }
 
