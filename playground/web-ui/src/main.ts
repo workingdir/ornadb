@@ -59,7 +59,18 @@ const pendingLsp = new Map<number, { resolve: (value: unknown) => void; reject: 
 let nextLspId = 1;
 
 let activeRun = false;
+let examplesReady = false;
+let liveRuntimeReady = typeof (globalThis as typeof globalThis & { ornaPlaygroundRun?: unknown }).ornaPlaygroundRun === 'function';
 const runtime = servedRuntime();
+
+function updateRunButton(): void {
+  runButton.disabled = activeRun || !examplesReady || !liveRuntimeReady;
+}
+
+window.addEventListener('orna:runtime-ready', () => {
+  liveRuntimeReady = true;
+  updateRunButton();
+}, { once: true });
 
 async function executeSource(source: string): Promise<RunResult> {
   return runtime.run(source);
@@ -255,9 +266,9 @@ function showResult(result: RunResult): void {
 }
 
 async function runSource(): Promise<void> {
-  if (activeRun) return;
+  if (activeRun || !examplesReady || !liveRuntimeReady) return;
   activeRun = true;
-  runButton.disabled = true;
+  updateRunButton();
   stopButton.disabled = false;
   executionState.textContent = 'Running';
   outputStatus.textContent = 'Running source in the OrnaDB server runtime.';
@@ -271,7 +282,7 @@ async function runSource(): Promise<void> {
     outputStatus.textContent = 'The run failed.';
   } finally {
     activeRun = false;
-    runButton.disabled = false;
+    updateRunButton();
     stopButton.disabled = true;
   }
 }
@@ -302,8 +313,9 @@ async function loadExamples(): Promise<void> {
       empty.textContent = 'No database examples';
       examplesSelect.append(empty);
       examplesSelect.disabled = true;
-      editorStatus.textContent = 'No database examples available';
-      runButton.disabled = false;
+      editorStatus.textContent = 'No committed playground examples';
+      examplesReady = true;
+      updateRunButton();
       return;
     }
     for (const example of examples) {
@@ -315,13 +327,15 @@ async function loadExamples(): Promise<void> {
     }
     examplesSelect.disabled = false;
     editor.setValue(examples[0].source);
-    runButton.disabled = false;
+    examplesReady = true;
+    updateRunButton();
   } catch (error) {
     const option = document.createElement('option');
     option.textContent = 'Examples unavailable';
     examplesSelect.replaceChildren(option);
     editorStatus.textContent = formatThrownError(error);
-    runButton.disabled = false;
+    examplesReady = true;
+    updateRunButton();
   }
 }
 
@@ -343,7 +357,7 @@ for (const tab of document.querySelectorAll<HTMLButtonElement>('[data-output-tab
   });
 }
 
-runButton.disabled = false;
+updateRunButton();
 void loadExamples();
 window.addEventListener('beforeunload', () => {
   editor.dispose();
