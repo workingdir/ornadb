@@ -15,6 +15,7 @@ const SOURCE: &str = include_str!("fixtures/ji3t0-lsp-v1.orna");
 
 #[test]
 fn vim_lsp_attaches_and_exposes_syntax_v1_completion() {
+    assert_v1_attachment_fixture();
     let Some(vim) = executable("ORNA_TEST_VIM", "vim") else {
         eprintln!("SKIP: Vim is not installed; set ORNA_TEST_VIM to its executable");
         return;
@@ -148,6 +149,7 @@ qa!
 
 #[test]
 fn emacs_eglot_attaches_and_exposes_syntax_v1_completion_at_point() {
+    assert_v1_attachment_fixture();
     let Some(emacs) = executable("ORNA_TEST_EMACS", "emacs") else {
         eprintln!("SKIP: Emacs is not installed; set ORNA_TEST_EMACS to its executable");
         return;
@@ -310,6 +312,15 @@ fn assert_completion_contract(completion: &Value, editor: &str) {
     assert_eq!(add["documentation"], "Add two integer values.");
     assert_eq!(add["insertText"], "add(${1:left}, ${2:right})");
     assert_eq!(add["insertTextFormat"], 2);
+}
+
+fn assert_v1_attachment_fixture() {
+    let parsed = orna_syntax_v1::parse_module(SOURCE);
+    assert!(
+        parsed.is_ok(),
+        "the editor attachment fixture must contain only syntax-v1 source: {:?}",
+        parsed.diagnostics
+    );
 }
 
 fn assert_vim_completion_projection(items: &Value) {
