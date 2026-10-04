@@ -14594,9 +14594,10 @@ fn query_paired_window_cost_restoration_fold(
     });
     if let Some(window_restore_chain_identity) = window_restore_chain_fold_identity.as_deref() {
         let mut envelope_hash = Sha256::new();
-        envelope_hash.update(b"orna.sys.query-paired-window-cost-restoration-pair-envelope.v1\0");
+        envelope_hash.update(b"orna.sys.query-paired-window-cost-restoration-pair-envelope.v2\0");
         hash_part(&mut envelope_hash, pair_key.as_bytes());
         hash_part(&mut envelope_hash, pair_identity.as_bytes());
+        hash_optional_text(&mut envelope_hash, cost_fold_identity.as_deref());
         hash_part(&mut envelope_hash, window_restore_chain_identity.as_bytes());
         pair_envelope_identities.insert(
             pair_key.to_owned(),
@@ -14626,6 +14627,7 @@ fn query_paired_window_cost_restoration_fold(
     let parent_identity = previous.map(|fold| fold.identity.clone());
 
     let mut hash = Sha256::new();
+    hash.update(b"orna.sys.query-paired-window-cost-restoration-fold.v7\0");
     hash.update(b"orna.sys.query-paired-window-cost-restoration-fold.v6\0");
     hash.update(b"orna.sys.query-paired-window-cost-restoration-fold.v5\0");
     hash.update(b"orna.sys.query-paired-window-cost-restoration-fold.v4\0");
@@ -14700,8 +14702,17 @@ fn add_paired_window_cost_restoration_fold_details(
             "paired_window_cost_restoration_pair_envelope_identity".to_owned(),
             PlanDetail::Text(pair_envelope_identity.clone()),
         );
+        if let Some(cost_fold_identity) = fold.cost_fold_identity.as_ref() {
+            details.insert(
+                "paired_window_cost_restoration_pair_envelope_cost_fold_identity".to_owned(),
+                PlanDetail::Text(cost_fold_identity.clone()),
+            );
+        } else {
+            details.remove("paired_window_cost_restoration_pair_envelope_cost_fold_identity");
+        }
     } else {
         details.remove("paired_window_cost_restoration_pair_envelope_identity");
+        details.remove("paired_window_cost_restoration_pair_envelope_cost_fold_identity");
     }
     details.insert(
         "paired_window_cost_restoration_pair_envelope_count".to_owned(),
@@ -14715,7 +14726,7 @@ fn add_paired_window_cost_restoration_fold_details(
         details.insert(
             "paired_window_cost_restoration_pair_envelope_pairing".to_owned(),
             PlanDetail::Text(
-                "cumulative_window_restore_chain_identity_bound_to_each_exact_pair_envelope"
+                "cumulative_cost_fold_and_window_restore_chain_identity_bound_to_each_exact_pair_envelope"
                     .to_owned(),
             ),
         );
