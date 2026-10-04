@@ -298,7 +298,7 @@ fn pinned_stream_adapters_are_included_and_typecheck() {
         assert!(source.contains(declaration), "missing stream adapter `{declaration}`");
     }
     for contract in [
-        "finite input",
+        "These helpers require finite",
         "resulting list as a replayable stream source",
         "Invoke a sequence factory once",
         "final short batch is retained",
