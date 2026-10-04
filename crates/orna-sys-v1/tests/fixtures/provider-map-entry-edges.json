@@ -1,0 +1,25 @@
+{
+  "cases": [
+    {
+      "name": "empty",
+      "entries": []
+    },
+    {
+      "name": "empty-key",
+      "entries": [
+        { "name": "", "type": "Str", "canonical": "empty-name" }
+      ]
+    },
+    {
+      "name": "unicode-control-heterogeneous-protected",
+      "entries": [
+        { "name": "z", "type": "Str", "canonical": "tail" },
+        { "name": "é", "type": "Bool", "canonical": "true" },
+        { "name": "é", "type": "Int", "canonical": "7" },
+        { "name": "", "type": "Bytes", "canonical": "\u0000\u001f" },
+        { "name": "secret", "type": "SecretRef", "canonical": "map-entry-secret-sentinel", "protected": true },
+        { "name": "a,[]", "type": "Duration", "canonical": "PT1S" }
+      ]
+    }
+  ]
+}
