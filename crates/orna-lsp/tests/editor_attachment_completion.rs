@@ -8,8 +8,10 @@ use std::{
     sync::atomic::{AtomicU64, Ordering},
 };
 
-use orna_syntax_v1::Keyword;
 use serde_json::Value;
+
+#[path = "support/completion_contract.rs"]
+mod completion_contract;
 
 const SOURCE: &str = include_str!("fixtures/ji3t0-lsp-v1.orna");
 const PROVIDER_SOURCE: &str = include_str!("fixtures/expressions-v1.orna");
@@ -173,7 +175,7 @@ qa!
     );
     let evidence: Value = serde_json::from_str(&result).expect("Vim completion evidence JSON");
     assert_eq!(evidence["omnifunc"], "lsp#complete");
-    assert_completion_contract(&evidence["completion"], "Vim vim-lsp");
+    completion_contract::assert_lsp_completion_contract(&evidence["completion"], "Vim vim-lsp");
     assert_vim_completion_projection(&evidence["adapted"]);
     println!("Vim integration evidence: ATTACHED=pass DEPENDENCY_ORDER=consumer-before-provider OMNIFUNC=pass COMPLETION=pass");
 }
@@ -211,8 +213,9 @@ fn emacs_eglot_attaches_and_exposes_syntax_v1_completion_at_point() {
         "provider URI must sort before consumer URI"
     );
     let script = temporary_path("el");
+    let completion_result_path = temporary_path("json");
     let plugin = root.join("editors/emacs/orna-eglot.el");
-    let expected = expected_keywords()
+    let expected = completion_contract::expected_keywords()
         .iter()
         .map(|keyword| elisp_string(keyword))
         .collect::<Vec<_>>()
@@ -223,6 +226,7 @@ fn emacs_eglot_attaches_and_exposes_syntax_v1_completion_at_point() {
 (package-initialize)
 (require 'cl-lib)
 (require 'jsonrpc)
+(require 'json)
 (load-file {})
 (setq orna-eglot-server-command (list {}))
 (orna-setup-eglot)
@@ -273,13 +277,17 @@ fn emacs_eglot_attaches_and_exposes_syntax_v1_completion_at_point() {
                           items))
                  #'string<))
                (expected '({})))
+          (with-temp-file (getenv "ORNA_COMPLETION_RESULT")
+            (insert (json-encode response)))
           (unless (equal keywords expected)
             (error "syntax-v1 completion keywords differ: %S" keywords))
           (let ((add (cl-find-if (lambda (item) (equal (orna-test-get item "label") "add")) items)))
             (unless add (error "completion omitted fixture function add"))
-            (unless (equal (orna-test-get add "detail") "fn add(left: Int, right: Int): Int")
+            (unless (equal (orna-test-get add "detail") "pub fn add(left: Int, right: Int): Int")
               (error "unexpected add completion detail: %S" add))
-            (unless (equal (orna-test-get add "documentation") "Add two integer values.")
+            (unless (equal (orna-test-get (orna-test-get add "documentation") "kind") "markdown")
+              (error "add completion documentation is not Markdown: %S" add))
+            (unless (equal (orna-test-get (orna-test-get add "documentation") "value") "Add two integer values.")
               (error "add completion lost fixture documentation: %S" add))
             (unless (equal (orna-test-get add "insertText") "add(${{1:left}}, ${{2:right}})")
               (error "unexpected add completion snippet: %S" add))
@@ -312,6 +320,7 @@ fn emacs_eglot_attaches_and_exposes_syntax_v1_completion_at_point() {
         .args(["--batch", "--quick", "--script"])
         .arg(&script)
         .current_dir(&root)
+        .env("ORNA_COMPLETION_RESULT", &completion_result_path)
         .output()
         .unwrap_or_else(|error| panic!("start Emacs at {}: {error}", emacs.display()));
     let _ = fs::remove_file(script);
@@ -322,6 +331,12 @@ fn emacs_eglot_attaches_and_exposes_syntax_v1_completion_at_point() {
         output.status.code(),
         String::from_utf8_lossy(&output.stderr),
     );
+    let completion_result =
+        fs::read_to_string(&completion_result_path).expect("Emacs Eglot completion evidence JSON");
+    let _ = fs::remove_file(&completion_result_path);
+    let completion_result: Value =
+        serde_json::from_str(&completion_result).expect("decode Emacs Eglot completion evidence");
+    completion_contract::assert_lsp_completion_contract(&completion_result, "Emacs Eglot");
     for evidence in [
         "EMACS_LSP_ATTACHMENT=pass",
         "EMACS_DEPENDENCY_ORDER=consumer-before-provider",
@@ -335,34 +350,6 @@ fn emacs_eglot_attaches_and_exposes_syntax_v1_completion_at_point() {
         );
     }
     println!("Emacs integration evidence:\n{stdout}");
-}
-
-fn assert_completion_contract(completion: &Value, editor: &str) {
-    let items = completion
-        .as_array()
-        .or_else(|| completion["items"].as_array())
-        .unwrap_or_else(|| panic!("{editor} completion result is neither an array nor a list"));
-    let keyword_kind = serde_json::to_value(lsp_types::CompletionItemKind::KEYWORD).unwrap();
-    let actual_keywords = items
-        .iter()
-        .filter(|item| item["kind"] == keyword_kind)
-        .map(|item| item["label"].as_str().unwrap().to_owned())
-        .collect::<BTreeSet<_>>();
-    assert_eq!(
-        actual_keywords,
-        expected_keywords(),
-        "{editor} keyword inventory"
-    );
-    assert!(!completion.to_string().contains("\"CREATE\""));
-    assert!(!completion.to_string().contains("\"SELECT\""));
-    let add = items
-        .iter()
-        .find(|item| item["label"] == "add")
-        .unwrap_or_else(|| panic!("{editor} completion omitted fixture function add"));
-    assert_eq!(add["detail"], "fn add(left: Int, right: Int): Int");
-    assert_eq!(add["documentation"], "Add two integer values.");
-    assert_eq!(add["insertText"], "add(${1:left}, ${2:right})");
-    assert_eq!(add["insertTextFormat"], 2);
 }
 
 fn assert_v1_attachment_fixture() {
@@ -387,20 +374,13 @@ fn assert_vim_completion_projection(items: &Value) {
         .collect::<BTreeSet<_>>();
     assert_eq!(
         actual_keywords,
-        expected_keywords(),
+        completion_contract::expected_keywords(),
         "Vim omni completion inventory"
     );
     assert!(
         items.iter().any(|item| item["abbr"] == "add~"),
         "Vim completion adapter omitted the add snippet candidate"
     );
-}
-
-fn expected_keywords() -> BTreeSet<String> {
-    Keyword::ALL
-        .iter()
-        .map(|keyword| keyword.spelling().to_owned())
-        .collect()
 }
 
 fn repo_root() -> PathBuf {
