@@ -10,25 +10,32 @@ use std::thread::{self, JoinHandle};
 
 use crate::analysis::{self, EditorParse as Parse};
 use crate::documents::{Document, PositionMapper};
-use crate::{inlay, semantic};
+use crate::{editor_ranges, inlay, semantic};
 use lsp_server::{Connection, ErrorCode, Message, Notification, Request, Response, ResponseError};
 use lsp_types::{
     CallHierarchyItem, CallHierarchyOptions, CallHierarchyServerCapability, CodeAction,
     CodeActionKind, CodeActionOptions, CodeActionOrCommand, CodeActionParams,
-    CodeActionProviderCapability, CompletionOptions, CompletionParams, CompletionResponse,
-    Diagnostic, DiagnosticOptions, DiagnosticServerCapabilities, DocumentDiagnosticParams,
-    DocumentDiagnosticReport, DocumentLink, DocumentLinkOptions, DocumentLinkParams,
-    DocumentSymbolParams, DocumentSymbolResponse, FullDocumentDiagnosticReport,
+    CodeActionProviderCapability, CodeLens, CodeLensOptions, CodeLensParams, Command,
+    CompletionOptions, CompletionParams, CompletionResponse, Diagnostic, DiagnosticOptions,
+    DiagnosticServerCapabilities, DocumentDiagnosticParams, DocumentDiagnosticReport,
+    DocumentHighlight, DocumentHighlightKind, DocumentHighlightParams, DocumentLink,
+    DocumentLinkOptions, DocumentLinkParams, DocumentSymbolParams, DocumentSymbolResponse,
+    FoldingRange, FoldingRangeParams, FoldingRangeProviderCapability, FullDocumentDiagnosticReport,
     GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverParams, HoverProviderCapability,
-    InitializeParams, InlayHintOptions, InlayHintParams, InlayHintServerCapabilities,
-    NumberOrString, OneOf, Position, PositionEncodingKind, PrepareRenameResponse,
-    PublishDiagnosticsParams, Range, ReferenceParams, RelatedFullDocumentDiagnosticReport,
-    RelatedUnchangedDocumentDiagnosticReport, RenameOptions, RenameParams, SemanticTokens,
+    InitializeParams, InlayHintOptions, InlayHintParams, InlayHintServerCapabilities, InlineValue,
+    InlineValueOptions, InlineValueParams, InlineValueServerCapabilities,
+    InlineValueVariableLookup, LinkedEditingRangeParams, LinkedEditingRangeServerCapabilities,
+    LinkedEditingRanges, Moniker, MonikerKind, MonikerParams, NumberOrString, OneOf, Position,
+    PositionEncodingKind, PrepareRenameResponse, PublishDiagnosticsParams, Range, ReferenceParams,
+    RelatedFullDocumentDiagnosticReport, RelatedUnchangedDocumentDiagnosticReport, RenameOptions,
+    RenameParams, SelectionRangeParams, SelectionRangeProviderCapability, SemanticTokens,
     SemanticTokensFullOptions, SemanticTokensLegend, SemanticTokensOptions, SemanticTokensParams,
     SemanticTokensRangeParams, SemanticTokensServerCapabilities, ServerCapabilities,
     SignatureHelpOptions, TextDocumentContentChangeEvent, TextDocumentSyncCapability,
     TextDocumentSyncKind, TextDocumentSyncOptions, TextDocumentSyncSaveOptions, TextEdit,
-    UnchangedDocumentDiagnosticReport, Uri, WorkspaceEdit,
+    TypeHierarchyItem, TypeHierarchyPrepareParams, TypeHierarchySubtypesParams,
+    TypeHierarchySupertypesParams, UnchangedDocumentDiagnosticReport, UniquenessLevel, Uri,
+    WorkspaceEdit,
 };
 
 /// Transport threads for the server's standard input and output streams.
@@ -164,7 +171,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 /// list that excludes UTF-16 cannot be silently accepted.
 fn initialize(
     connection: &Connection,
-    capabilities: ServerCapabilities,
+    capabilities: serde_json::Value,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let (request_id, raw_params) = connection.initialize_start()?;
     let params: InitializeParams = serde_json::from_value(raw_params)?;
@@ -203,8 +210,8 @@ fn initialize(
 }
 
 /// Returns the capabilities advertised during initialization.
-fn server_capabilities() -> ServerCapabilities {
-    ServerCapabilities {
+fn server_capabilities() -> serde_json::Value {
+    let mut capabilities = serde_json::to_value(ServerCapabilities {
         position_encoding: Some(PositionEncodingKind::UTF16),
         text_document_sync: Some(TextDocumentSyncCapability::Options(
             TextDocumentSyncOptions {
@@ -216,6 +223,7 @@ fn server_capabilities() -> ServerCapabilities {
             },
         )),
         hover_provider: Some(HoverProviderCapability::Simple(true)),
+        document_highlight_provider: Some(OneOf::Left(true)),
         signature_help_provider: Some(SignatureHelpOptions {
             trigger_characters: Some(vec!["(".to_owned(), ",".to_owned()]),
             retrigger_characters: Some(vec![",".to_owned()]),
@@ -238,6 +246,9 @@ fn server_capabilities() -> ServerCapabilities {
             ..CompletionOptions::default()
         }),
         workspace_symbol_provider: Some(OneOf::Left(true)),
+        code_lens_provider: Some(CodeLensOptions {
+            resolve_provider: Some(false),
+        }),
         semantic_tokens_provider: Some(SemanticTokensServerCapabilities::SemanticTokensOptions(
             SemanticTokensOptions {
                 legend: SemanticTokensLegend {
@@ -268,8 +279,21 @@ fn server_capabilities() -> ServerCapabilities {
         call_hierarchy_provider: Some(CallHierarchyServerCapability::Options(
             CallHierarchyOptions::default(),
         )),
+        moniker_provider: Some(OneOf::Left(true)),
+        inline_value_provider: Some(OneOf::Right(InlineValueServerCapabilities::Options(
+            InlineValueOptions::default(),
+        ))),
+        linked_editing_range_provider: Some(LinkedEditingRangeServerCapabilities::Simple(true)),
+        folding_range_provider: Some(FoldingRangeProviderCapability::Simple(true)),
+        selection_range_provider: Some(SelectionRangeProviderCapability::Simple(true)),
         ..ServerCapabilities::default()
-    }
+    })
+    .expect("serializable LSP server capabilities");
+    capabilities
+        .as_object_mut()
+        .expect("server capabilities serialize as an object")
+        .insert("typeHierarchyProvider".to_owned(), serde_json::json!({}));
+    capabilities
 }
 
 /// Handles one client request and sends its response.
@@ -282,18 +306,28 @@ fn handle_request(state: &mut ServerState, connection: &Connection, request: Req
         "textDocument/codeAction" => request_code_actions(state, request),
         "textDocument/definition" => request_definition(state, request),
         "textDocument/references" => request_references(state, request),
+        "textDocument/documentHighlight" => request_document_highlights(state, request),
         "textDocument/prepareRename" => request_prepare_rename(state, request),
         "textDocument/rename" => request_rename(state, request),
         "textDocument/documentSymbol" => request_document_symbols(state, request),
         "textDocument/semanticTokens/full" => request_semantic_tokens_full(state, request),
         "textDocument/semanticTokens/range" => request_semantic_tokens_range(state, request),
         "textDocument/inlayHint" => request_inlay_hints(state, request),
+        "textDocument/inlineValue" => request_inline_values(state, request),
+        "textDocument/linkedEditingRange" => request_linked_editing_range(state, request),
         "textDocument/documentLink" => request_document_links(state, request),
+        "textDocument/foldingRange" => request_folding_ranges(state, request),
+        "textDocument/selectionRange" => request_selection_ranges(state, request),
         "textDocument/completion" => request_completion(state, request),
         "workspace/symbol" => request_workspace_symbols(state, request),
+        "textDocument/codeLens" => request_code_lenses(state, request),
         "textDocument/prepareCallHierarchy" => request_prepare_call_hierarchy(state, request),
         "callHierarchy/incomingCalls" => request_incoming_calls(state, request),
         "callHierarchy/outgoingCalls" => request_outgoing_calls(state, request),
+        "textDocument/prepareTypeHierarchy" => request_prepare_type_hierarchy(state, request),
+        "typeHierarchy/supertypes" => request_type_hierarchy_supertypes(state, request),
+        "typeHierarchy/subtypes" => request_type_hierarchy_subtypes(state, request),
+        "textDocument/moniker" => request_moniker(state, request),
         "textDocument/diagnostic" => request_document_diagnostic(state, request),
         _ => {
             let _ = connection.sender.send(Message::Response(Response {
@@ -668,6 +702,56 @@ fn request_references(
     .filter_map(|location| project_location(location, &mapper, &segments))
     .collect::<Vec<_>>();
     Ok(serde_json::to_value(locations)?)
+}
+
+fn request_document_highlights(
+    state: &mut ServerState,
+    request: Request,
+) -> Result<serde_json::Value, Box<dyn std::error::Error + Send + Sync>> {
+    let (_, params) =
+        request.extract::<DocumentHighlightParams>("textDocument/documentHighlight")?;
+    let uri = params.text_document_position_params.text_document.uri;
+    let position = params.text_document_position_params.position;
+    let Some((document, segments, selected_start)) = combined_workspace(&state.documents, &uri)
+    else {
+        return Ok(serde_json::Value::Null);
+    };
+    let (parse, mapper) = parse_document(&document);
+    let Some(position) =
+        workspace_position(&document, selected_start, position, &state.documents, &uri)
+    else {
+        return Ok(serde_json::Value::Null);
+    };
+
+    let mut write_ranges = analysis::local_declaration_spans(&parse);
+    write_ranges.extend(crate::locals::write_spans(&parse.value));
+    write_ranges.extend(
+        analysis::declaration_symbols(&parse, &document.text)
+            .into_iter()
+            .map(|symbol| symbol.selection),
+    );
+    let write_ranges = write_ranges
+        .iter()
+        .map(|span| mapper.range(span))
+        .collect::<Vec<_>>();
+
+    let highlights = analysis::references(&document, &parse, position, &mapper, true)
+        .into_iter()
+        .filter_map(|location| {
+            let kind = if write_ranges.contains(&location.range) {
+                DocumentHighlightKind::WRITE
+            } else {
+                DocumentHighlightKind::READ
+            };
+            project_location(location, &mapper, &segments)
+                .filter(|projected| projected.uri == uri)
+                .map(|projected| DocumentHighlight {
+                    kind: Some(kind),
+                    range: projected.range,
+                })
+        })
+        .collect::<Vec<_>>();
+    Ok(serde_json::to_value(highlights)?)
 }
 
 fn request_rename(
@@ -1205,6 +1289,182 @@ struct WorkspaceFunction {
     definition: analysis::FunctionDefinition,
 }
 
+#[derive(Debug, Clone)]
+struct WorkspaceDeclaration {
+    document: Document,
+    symbol: analysis::EditorSymbol,
+    public: bool,
+    protocols: Vec<String>,
+}
+
+fn workspace_declarations(state: &ServerState) -> Vec<WorkspaceDeclaration> {
+    let mut documents = state
+        .documents
+        .values()
+        .filter(|document| document.uri.as_str().ends_with(".orna"))
+        .collect::<Vec<_>>();
+    documents.sort_by(|left, right| left.uri.as_str().cmp(right.uri.as_str()));
+
+    let mut declarations = Vec::new();
+    for document in documents {
+        let parse = analysis::parse_document(document);
+        if !parse.diagnostics.is_empty() {
+            continue;
+        }
+        for symbol in analysis::declaration_symbols(&parse, &document.text) {
+            let Some(item) = parse.value.items.iter().find(|item| {
+                item.span.start == symbol.full.start && item.span.end == symbol.full.end
+            }) else {
+                continue;
+            };
+            let public = matches!(&item.visibility, orna_syntax_v1::Visibility::Public { .. });
+            let protocols = implementation_protocols(&item.declaration);
+            declarations.push(WorkspaceDeclaration {
+                document: document.clone(),
+                symbol,
+                public,
+                protocols,
+            });
+        }
+    }
+    declarations.sort_by(|left, right| {
+        left.document
+            .uri
+            .as_str()
+            .cmp(right.document.uri.as_str())
+            .then_with(|| {
+                left.symbol
+                    .selection
+                    .start
+                    .cmp(&right.symbol.selection.start)
+            })
+    });
+    declarations
+}
+
+fn implementation_protocols(declaration: &orna_syntax_v1::Declaration) -> Vec<String> {
+    let mut protocols = Vec::new();
+    let mut add = |implementation: &orna_syntax_v1::Implementation| {
+        if let orna_syntax_v1::TypeExpr::Name { path, .. } = &implementation.protocol
+            && let Some(name) = path.last()
+        {
+            protocols.push(name.clone());
+        }
+    };
+    match declaration {
+        orna_syntax_v1::Declaration::Table { members, .. } => {
+            for member in members {
+                if let orna_syntax_v1::TableMember::Implementation { implementation, .. } = member {
+                    add(implementation);
+                }
+            }
+        }
+        orna_syntax_v1::Declaration::Type {
+            representation:
+                orna_syntax_v1::TypeRepresentation::Alias { refinements, .. }
+                | orna_syntax_v1::TypeRepresentation::Nominal {
+                    members: refinements,
+                },
+            ..
+        } => {
+            for member in refinements {
+                if let orna_syntax_v1::TypeMember::Implementation { implementation, .. } = member {
+                    add(implementation);
+                }
+            }
+        }
+        _ => {}
+    }
+    protocols.sort_by_key(|name| analysis::normalized_identifier(name));
+    protocols.dedup_by(|left, right| {
+        analysis::normalized_identifier(left) == analysis::normalized_identifier(right)
+    });
+    protocols
+}
+
+fn is_hierarchy_declaration(declaration: &WorkspaceDeclaration) -> bool {
+    matches!(
+        declaration.symbol.kind,
+        analysis::EditorSymbolKind::Type
+            | analysis::EditorSymbolKind::Table
+            | analysis::EditorSymbolKind::Protocol
+    )
+}
+
+fn hierarchy_symbol_kind(kind: analysis::EditorSymbolKind) -> Option<lsp_types::SymbolKind> {
+    match kind {
+        analysis::EditorSymbolKind::Type => Some(lsp_types::SymbolKind::STRUCT),
+        analysis::EditorSymbolKind::Table => Some(lsp_types::SymbolKind::CLASS),
+        analysis::EditorSymbolKind::Protocol => Some(lsp_types::SymbolKind::INTERFACE),
+        _ => None,
+    }
+}
+
+fn type_hierarchy_item(declaration: &WorkspaceDeclaration) -> Option<TypeHierarchyItem> {
+    let mapper = PositionMapper::new(&declaration.document.text);
+    Some(TypeHierarchyItem {
+        name: declaration.symbol.name.clone(),
+        kind: hierarchy_symbol_kind(declaration.symbol.kind)?,
+        tags: None,
+        detail: declaration.symbol.detail.clone(),
+        uri: declaration.document.uri.clone(),
+        range: mapper.range(&declaration.symbol.full),
+        selection_range: mapper.range(&declaration.symbol.selection),
+        data: Some(serde_json::json!({
+            "scheme": "orna-syntax-v1",
+            "uri": declaration.document.uri.as_str(),
+            "name": analysis::normalized_identifier(&declaration.symbol.name),
+            "start": declaration.symbol.selection.start,
+            "end": declaration.symbol.selection.end,
+        })),
+    })
+}
+
+fn same_type_hierarchy_declaration(
+    item: &TypeHierarchyItem,
+    declaration: &WorkspaceDeclaration,
+) -> bool {
+    hierarchy_symbol_kind(declaration.symbol.kind).is_some_and(|kind| {
+        let mapper = PositionMapper::new(&declaration.document.text);
+        item.uri == declaration.document.uri
+            && item.name == declaration.symbol.name
+            && item.kind == kind
+            && item.selection_range == mapper.range(&declaration.symbol.selection)
+    })
+}
+
+fn uniquely_resolved_protocol(declarations: &[WorkspaceDeclaration], name: &str) -> Option<usize> {
+    let key = analysis::normalized_identifier(name);
+    let mut matches = declarations.iter().enumerate().filter(|(_, declaration)| {
+        declaration.symbol.kind == analysis::EditorSymbolKind::Protocol
+            && analysis::normalized_identifier(&declaration.symbol.name) == key
+    });
+    let found = matches.next()?.0;
+    matches.next().is_none().then_some(found)
+}
+
+fn workspace_declaration_at<'a>(
+    declarations: &'a [WorkspaceDeclaration],
+    document: &Document,
+    selection: &orna_syntax_v1::SyntaxSpan,
+    mapper: &PositionMapper<'_>,
+    segments: &[SourceSegment<'_>],
+) -> Option<&'a WorkspaceDeclaration> {
+    let selected = project_location(
+        lsp_types::Location {
+            uri: document.uri.clone(),
+            range: mapper.range(selection),
+        },
+        mapper,
+        segments,
+    )?;
+    declarations.iter().find(|declaration| {
+        declaration.document.uri == selected.uri
+            && PositionMapper::new(&declaration.document.text).range(&declaration.symbol.selection)
+                == selected.range
+    })
+}
+
 fn workspace_functions(state: &ServerState) -> Vec<WorkspaceFunction> {
     let mut documents = state
         .documents
@@ -1282,6 +1542,10 @@ fn request_prepare_call_hierarchy(
     let Some(document) = state.document(&uri) else {
         return Ok(serde_json::Value::Null);
     };
+    let parse = analysis::parse_document(document);
+    if !parse.diagnostics.is_empty() {
+        return Ok(serde_json::Value::Null);
+    }
     let mapper = PositionMapper::new(&document.text);
     let byte = mapper.byte_offset(params.text_document_position_params.position);
     if let Some(function) = functions.iter().find(|function| {
@@ -1292,7 +1556,6 @@ fn request_prepare_call_hierarchy(
         return Ok(serde_json::to_value(vec![call_hierarchy_item(function)])?);
     }
 
-    let parse = analysis::parse_document(document);
     let target_name = analysis::function_definitions(&parse, &document.text)
         .into_iter()
         .flat_map(|function| {
@@ -1397,6 +1660,310 @@ fn request_outgoing_calls(
     Ok(serde_json::to_value(outgoing)?)
 }
 
+fn request_prepare_type_hierarchy(
+    state: &mut ServerState,
+    request: Request,
+) -> Result<serde_json::Value, Box<dyn std::error::Error + Send + Sync>> {
+    let (_, params) =
+        request.extract::<TypeHierarchyPrepareParams>("textDocument/prepareTypeHierarchy")?;
+    let uri = params.text_document_position_params.text_document.uri;
+    let Some((document, segments, selected_start)) = combined_workspace(&state.documents, &uri)
+    else {
+        return Ok(serde_json::Value::Null);
+    };
+    let (parse, mapper) = parse_document(&document);
+    let Some(position) = workspace_position(
+        &document,
+        selected_start,
+        params.text_document_position_params.position,
+        &state.documents,
+        &uri,
+    ) else {
+        return Ok(serde_json::Value::Null);
+    };
+    let declarations = workspace_declarations(state);
+    if let Some((_, selection)) = analysis::identifier_at(&document, position, &mapper)
+        && let Some(declaration) =
+            workspace_declaration_at(&declarations, &document, &selection, &mapper, &segments)
+        && is_hierarchy_declaration(declaration)
+    {
+        let Some(item) = type_hierarchy_item(declaration) else {
+            return Ok(serde_json::Value::Null);
+        };
+        return Ok(serde_json::to_value(vec![item])?);
+    }
+    let Some(definition) = analysis::definition(&document, &parse, position, &mapper) else {
+        return Ok(serde_json::Value::Null);
+    };
+    let Some(definition) = project_location(definition, &mapper, &segments) else {
+        return Ok(serde_json::Value::Null);
+    };
+    let Some(declaration) = declarations.iter().find(|declaration| {
+        is_hierarchy_declaration(declaration)
+            && declaration.document.uri == definition.uri
+            && PositionMapper::new(&declaration.document.text).range(&declaration.symbol.selection)
+                == definition.range
+    }) else {
+        return Ok(serde_json::Value::Null);
+    };
+    let Some(item) = type_hierarchy_item(declaration) else {
+        return Ok(serde_json::Value::Null);
+    };
+    Ok(serde_json::to_value(vec![item])?)
+}
+
+fn request_type_hierarchy_supertypes(
+    state: &mut ServerState,
+    request: Request,
+) -> Result<serde_json::Value, Box<dyn std::error::Error + Send + Sync>> {
+    let (_, params) =
+        request.extract::<TypeHierarchySupertypesParams>("typeHierarchy/supertypes")?;
+    let declarations = workspace_declarations(state);
+    let Some(target) = declarations.iter().find(|declaration| {
+        is_hierarchy_declaration(declaration)
+            && same_type_hierarchy_declaration(&params.item, declaration)
+    }) else {
+        return Ok(serde_json::to_value(Vec::<TypeHierarchyItem>::new())?);
+    };
+
+    let mut supertypes = target
+        .protocols
+        .iter()
+        .filter_map(|name| uniquely_resolved_protocol(&declarations, name))
+        .filter_map(|index| type_hierarchy_item(&declarations[index]))
+        .collect::<Vec<_>>();
+    sort_type_hierarchy_items(&mut supertypes);
+    Ok(serde_json::to_value(supertypes)?)
+}
+
+fn request_type_hierarchy_subtypes(
+    state: &mut ServerState,
+    request: Request,
+) -> Result<serde_json::Value, Box<dyn std::error::Error + Send + Sync>> {
+    let (_, params) = request.extract::<TypeHierarchySubtypesParams>("typeHierarchy/subtypes")?;
+    let declarations = workspace_declarations(state);
+    let Some((target_index, target)) = declarations.iter().enumerate().find(|(_, declaration)| {
+        is_hierarchy_declaration(declaration)
+            && same_type_hierarchy_declaration(&params.item, declaration)
+    }) else {
+        return Ok(serde_json::to_value(Vec::<TypeHierarchyItem>::new())?);
+    };
+
+    if target.symbol.kind != analysis::EditorSymbolKind::Protocol
+        || uniquely_resolved_protocol(&declarations, &target.symbol.name) != Some(target_index)
+    {
+        return Ok(serde_json::to_value(Vec::<TypeHierarchyItem>::new())?);
+    }
+    let mut subtypes = declarations
+        .iter()
+        .filter(|declaration| {
+            matches!(
+                declaration.symbol.kind,
+                analysis::EditorSymbolKind::Type | analysis::EditorSymbolKind::Table
+            ) && declaration
+                .protocols
+                .iter()
+                .any(|name| uniquely_resolved_protocol(&declarations, name) == Some(target_index))
+        })
+        .filter_map(type_hierarchy_item)
+        .collect::<Vec<_>>();
+    sort_type_hierarchy_items(&mut subtypes);
+    Ok(serde_json::to_value(subtypes)?)
+}
+
+fn sort_type_hierarchy_items(items: &mut [TypeHierarchyItem]) {
+    items.sort_by(|left, right| {
+        left.uri
+            .as_str()
+            .cmp(right.uri.as_str())
+            .then_with(|| {
+                left.selection_range
+                    .start
+                    .line
+                    .cmp(&right.selection_range.start.line)
+            })
+            .then_with(|| {
+                left.selection_range
+                    .start
+                    .character
+                    .cmp(&right.selection_range.start.character)
+            })
+            .then_with(|| left.name.cmp(&right.name))
+    });
+}
+
+fn request_moniker(
+    state: &mut ServerState,
+    request: Request,
+) -> Result<serde_json::Value, Box<dyn std::error::Error + Send + Sync>> {
+    let (_, params) = request.extract::<MonikerParams>("textDocument/moniker")?;
+    let uri = params.text_document_position_params.text_document.uri;
+    let position = params.text_document_position_params.position;
+    let Some((document, segments, selected_start)) = combined_workspace(&state.documents, &uri)
+    else {
+        return Ok(serde_json::Value::Null);
+    };
+    let (parse, mapper) = parse_document(&document);
+    let Some(position) =
+        workspace_position(&document, selected_start, position, &state.documents, &uri)
+    else {
+        return Ok(serde_json::Value::Null);
+    };
+    let Some((name, selection)) = analysis::identifier_at(&document, position, &mapper) else {
+        return Ok(serde_json::Value::Null);
+    };
+
+    if let Some(binding) = crate::locals::binding_at(&parse.value, &name, &selection) {
+        let binding_location = project_location(
+            lsp_types::Location {
+                uri: document.uri.clone(),
+                range: mapper.range(&binding.selection),
+            },
+            &mapper,
+            &segments,
+        );
+        let Some(binding_location) = binding_location else {
+            return Ok(serde_json::Value::Null);
+        };
+        let Some(binding_document) = state.document(&binding_location.uri) else {
+            return Ok(serde_json::Value::Null);
+        };
+        let binding_mapper = PositionMapper::new(&binding_document.text);
+        let byte = binding_mapper.byte_offset(binding_location.range.start);
+        return Ok(serde_json::to_value(vec![Moniker {
+            scheme: "orna-syntax-v1".to_owned(),
+            identifier: format!(
+                "{}#local:{}:{}",
+                binding_location.uri.as_str(),
+                byte,
+                analysis::normalized_identifier(&binding.name)
+            ),
+            unique: UniquenessLevel::Document,
+            kind: Some(MonikerKind::Local),
+        }])?);
+    }
+
+    let declarations = workspace_declarations(state);
+    let clicked = project_location(
+        lsp_types::Location {
+            uri: document.uri.clone(),
+            range: mapper.range(&selection),
+        },
+        &mapper,
+        &segments,
+    );
+    let direct_declaration =
+        workspace_declaration_at(&declarations, &document, &selection, &mapper, &segments);
+    let resolved_declaration = analysis::definition(&document, &parse, position, &mapper)
+        .and_then(|definition| project_location(definition, &mapper, &segments))
+        .and_then(|definition| {
+            declarations.iter().find(|declaration| {
+                declaration.document.uri == definition.uri
+                    && PositionMapper::new(&declaration.document.text)
+                        .range(&declaration.symbol.selection)
+                        == definition.range
+            })
+        });
+    let Some(declaration) = direct_declaration.or(resolved_declaration) else {
+        return Ok(serde_json::Value::Null);
+    };
+    let at_declaration = clicked.is_some_and(|clicked| {
+        clicked.uri == declaration.document.uri
+            && clicked.range
+                == PositionMapper::new(&declaration.document.text)
+                    .range(&declaration.symbol.selection)
+    });
+    let kind = if !declaration.public {
+        MonikerKind::Local
+    } else if at_declaration {
+        MonikerKind::Export
+    } else if declaration.document.uri != uri {
+        MonikerKind::Import
+    } else {
+        MonikerKind::Local
+    };
+    let moniker_kind = match declaration.symbol.kind {
+        analysis::EditorSymbolKind::Function => "function",
+        analysis::EditorSymbolKind::Type => "type",
+        analysis::EditorSymbolKind::Enum => "enum",
+        analysis::EditorSymbolKind::Table => "table",
+        analysis::EditorSymbolKind::Protocol => "protocol",
+        analysis::EditorSymbolKind::Other => "symbol",
+    };
+    Ok(serde_json::to_value(vec![Moniker {
+        scheme: "orna-syntax-v1".to_owned(),
+        identifier: format!(
+            "{}#{}:{}",
+            declaration.document.uri.as_str(),
+            moniker_kind,
+            analysis::normalized_identifier(&declaration.symbol.name)
+        ),
+        unique: UniquenessLevel::Project,
+        kind: Some(kind),
+    }])?)
+}
+
+fn request_code_lenses(
+    state: &mut ServerState,
+    request: Request,
+) -> Result<serde_json::Value, Box<dyn std::error::Error + Send + Sync>> {
+    let (_, params) = request.extract::<CodeLensParams>("textDocument/codeLens")?;
+    let uri = params.text_document.uri;
+    if state.document(&uri).is_none() {
+        return Ok(serde_json::Value::Null);
+    }
+    let functions = workspace_functions(state);
+    let mut references_by_target = (0..functions.len())
+        .map(|_| Vec::new())
+        .collect::<Vec<Vec<lsp_types::Location>>>();
+    for caller in &functions {
+        let mapper = PositionMapper::new(&caller.document.text);
+        for call in &caller.definition.calls {
+            if let Some(target_index) = uniquely_resolved_function(&functions, &call.name) {
+                references_by_target[target_index].push(lsp_types::Location {
+                    uri: caller.document.uri.clone(),
+                    range: mapper.range(&call.selection),
+                });
+            }
+        }
+    }
+
+    let mut lenses = Vec::new();
+    for (target_index, target) in functions
+        .iter()
+        .enumerate()
+        .filter(|(_, function)| function.document.uri == uri)
+    {
+        let references = &mut references_by_target[target_index];
+        references.sort_by(|left, right| {
+            left.uri
+                .as_str()
+                .cmp(right.uri.as_str())
+                .then_with(|| left.range.start.line.cmp(&right.range.start.line))
+                .then_with(|| left.range.start.character.cmp(&right.range.start.character))
+        });
+        let mapper = PositionMapper::new(&target.document.text);
+        let selection = &target.definition.selection;
+        let lens_position = mapper.position(selection.start);
+        let reference_count = references.len();
+        let arguments = Some(vec![
+            serde_json::to_value(&target.document.uri)?,
+            serde_json::to_value(lens_position)?,
+            serde_json::to_value(&*references)?,
+        ]);
+        lenses.push(CodeLens {
+            range: mapper.range(selection),
+            command: Some(Command {
+                title: format!("{reference_count} incoming calls"),
+                command: "editor.action.showReferences".to_owned(),
+                arguments,
+            }),
+            data: None,
+        });
+    }
+    Ok(serde_json::to_value(lenses)?)
+}
+
 fn request_semantic_tokens_full(
     state: &mut ServerState,
     request: Request,
@@ -1449,6 +2016,115 @@ fn request_inlay_hints(
         &mapper,
         &params.range,
     ))?)
+}
+
+fn request_inline_values(
+    state: &mut ServerState,
+    request: Request,
+) -> Result<serde_json::Value, Box<dyn std::error::Error + Send + Sync>> {
+    let (_, params) = request.extract::<InlineValueParams>("textDocument/inlineValue")?;
+    let Some(document) = state.document(&params.text_document.uri) else {
+        return Ok(serde_json::Value::Null);
+    };
+    let parse = analysis::parse_document(document);
+    if !parse.diagnostics.is_empty() {
+        return Ok(serde_json::to_value(Vec::<InlineValue>::new())?);
+    }
+
+    let mapper = PositionMapper::new(&document.text);
+    let requested_start = mapper.byte_offset(params.range.start);
+    let requested_end = mapper.byte_offset(params.range.end);
+    let stopped_at = mapper.byte_offset(params.context.stopped_location.end);
+    if requested_start > requested_end || stopped_at < requested_start || stopped_at > requested_end
+    {
+        return Ok(serde_json::to_value(Vec::<InlineValue>::new())?);
+    }
+
+    let mut values = crate::locals::visible_bindings(&parse.value, stopped_at)
+        .into_iter()
+        .filter_map(|binding| {
+            let mut occurrences = crate::locals::references(&parse.value, &binding);
+            occurrences.push(binding.selection);
+            occurrences
+                .into_iter()
+                .filter(|span| {
+                    span.start >= requested_start
+                        && span.end <= requested_end
+                        && span.end <= stopped_at
+                })
+                .max_by_key(|span| span.start)
+                .map(|span| {
+                    (
+                        span.start,
+                        InlineValue::VariableLookup(InlineValueVariableLookup {
+                            range: mapper.range(&span),
+                            variable_name: Some(binding.name),
+                            case_sensitive_lookup: false,
+                        }),
+                    )
+                })
+        })
+        .collect::<Vec<_>>();
+    values.sort_by_key(|(start, _)| *start);
+    Ok(serde_json::to_value(
+        values
+            .into_iter()
+            .map(|(_, value)| value)
+            .collect::<Vec<_>>(),
+    )?)
+}
+
+fn request_linked_editing_range(
+    state: &mut ServerState,
+    request: Request,
+) -> Result<serde_json::Value, Box<dyn std::error::Error + Send + Sync>> {
+    let (_, params) =
+        request.extract::<LinkedEditingRangeParams>("textDocument/linkedEditingRange")?;
+    let uri = params.text_document_position_params.text_document.uri;
+    let Some((document, segments, selected_start)) = combined_workspace(&state.documents, &uri)
+    else {
+        return Ok(serde_json::Value::Null);
+    };
+    let (parse, mapper) = parse_document(&document);
+    if !parse.diagnostics.is_empty() {
+        return Ok(serde_json::Value::Null);
+    }
+    let Some(position) = workspace_position(
+        &document,
+        selected_start,
+        params.text_document_position_params.position,
+        &state.documents,
+        &uri,
+    ) else {
+        return Ok(serde_json::Value::Null);
+    };
+    let Some((name, _)) = analysis::identifier_at(&document, position, &mapper) else {
+        return Ok(serde_json::Value::Null);
+    };
+    let Some(selected_document) = state.document(&uri) else {
+        return Ok(serde_json::Value::Null);
+    };
+    let selected_mapper = PositionMapper::new(&selected_document.text);
+    let mut ranges = analysis::references(&document, &parse, position, &mapper, true)
+        .into_iter()
+        .filter_map(|location| project_location(location, &mapper, &segments))
+        .filter(|location| location.uri == uri)
+        .filter_map(|location| {
+            let start = selected_mapper.byte_offset(location.range.start);
+            let end = selected_mapper.byte_offset(location.range.end);
+            (selected_document.text.get(start..end) == Some(name.as_str()))
+                .then_some((start, location.range))
+        })
+        .collect::<Vec<_>>();
+    ranges.sort_by_key(|(start, _)| *start);
+    ranges.dedup_by_key(|(start, range)| (*start, range.end));
+    if ranges.len() < 2 {
+        return Ok(serde_json::Value::Null);
+    }
+    Ok(serde_json::to_value(LinkedEditingRanges {
+        ranges: ranges.into_iter().map(|(_, range)| range).collect(),
+        word_pattern: None,
+    })?)
 }
 
 fn request_completion(
@@ -1531,4 +2207,34 @@ fn request_document_links(
         .map(|document| analysis::document_links(document, &state.documents))
         .unwrap_or_default();
     Ok(serde_json::to_value(links)?)
+}
+
+fn request_folding_ranges(
+    state: &mut ServerState,
+    request: Request,
+) -> Result<serde_json::Value, Box<dyn std::error::Error + Send + Sync>> {
+    let (_, params) = request.extract::<FoldingRangeParams>("textDocument/foldingRange")?;
+    let Some(document) = state.document(&params.text_document.uri) else {
+        return Ok(serde_json::Value::Null);
+    };
+    let parse = analysis::parse_document(document);
+    let mapper = PositionMapper::new(&document.text);
+    let ranges: Vec<FoldingRange> =
+        editor_ranges::folding_ranges(&parse.value, &document.text, &mapper);
+    Ok(serde_json::to_value(ranges)?)
+}
+
+fn request_selection_ranges(
+    state: &mut ServerState,
+    request: Request,
+) -> Result<serde_json::Value, Box<dyn std::error::Error + Send + Sync>> {
+    let (_, params) = request.extract::<SelectionRangeParams>("textDocument/selectionRange")?;
+    let Some(document) = state.document(&params.text_document.uri) else {
+        return Ok(serde_json::Value::Null);
+    };
+    let parse = analysis::parse_document(document);
+    let mapper = PositionMapper::new(&document.text);
+    let ranges =
+        editor_ranges::selection_ranges(&parse.value, &document.text, &params.positions, &mapper);
+    Ok(serde_json::to_value(ranges)?)
 }

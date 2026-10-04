@@ -20,6 +20,7 @@ The checked-in editor files are generated from this metadata:
 | `editors/vim/` | Vim syntax, filetype detection, and optional `vim-lsp` completion |
 | `editors/emacs/orna-eglot.el` | Emacs font-lock mode and Eglot attachment |
 | `editors/sublime/Orna.sublime-syntax` | Sublime Text lexical scopes |
+| `playground/web-ui/public/assets/orna-editor-config.json` | DB-served Monaco language configuration generated from the v1 lexer |
 
 Regenerate the files after changing syntax metadata, and check for drift with:
 
@@ -39,6 +40,11 @@ but do not have parser context for distinguishing declared types, functions,
 properties, namespaces, and variables. Configure `orna-lsp` separately to
 receive diagnostics, navigation, completion, and semantic tokens. Static
 editor grammars do not claim parser-equivalent context.
+
+The playground fetches the generated Monaco configuration from
+`/playground/assets/orna-editor-config.json`. `orna-syntax-v1` generates its
+keywords, operators, brackets, and lexical rules from the same lexer used by
+the language server; the browser does not carry a second Orna vocabulary.
 
 ## Attach the language server
 
