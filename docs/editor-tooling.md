@@ -16,8 +16,9 @@ The checked-in editor files are generated from this metadata:
 | `editors/tree-sitter-orna/grammar.js` | Generated Tree-sitter grammar |
 | `editors/tree-sitter-orna/queries/highlights.scm` | Generated Tree-sitter token captures |
 | `editors/tree-sitter-orna/{tree-sitter.json,package.json}` | Tree-sitter package registration and release metadata |
-| `editors/vim/` | Vim syntax groups and `.orna` file detection |
-| `editors/emacs/orna-eglot.el` | Emacs font-lock mode and Eglot setup |
+| `editors/neovim/lua/orna/init.lua` | Native `.orna` LSP attachment |
+| `editors/vim/` | Vim syntax, filetype detection, and optional `vim-lsp` completion |
+| `editors/emacs/orna-eglot.el` | Emacs font-lock mode and Eglot attachment |
 | `editors/sublime/Orna.sublime-syntax` | Sublime Text lexical scopes |
 
 Regenerate the files after changing syntax metadata, and check for drift with:
@@ -39,6 +40,32 @@ properties, namespaces, and variables. Configure `orna-lsp` separately to
 receive diagnostics, navigation, completion, and semantic tokens. Static
 editor grammars do not claim parser-equivalent context.
 
-Focused checks do not launch editor hosts. Tree-sitter generation is
-structurally checked by Node, and the grammar/query package is drift-checked as
-generated text.
+## Attach the language server
+
+Neovim uses its native LSP client. Add `editors/neovim` to `runtimepath` and
+call `require("orna").setup()`; pass `cmd = { "/path/to/orna-lsp" }` when the
+server is not on `PATH`. The setup registers `.orna` filetype detection and
+attaches those buffers to `orna-lsp`. A completion plugin can use the attached
+client's LSP completion provider.
+
+Vim uses the optional [`vim-lsp`](https://github.com/prabirshrestha/vim-lsp)
+client. Add `editors/vim` and the `vim-lsp` plugin to `runtimepath`; the Orna
+plugin registers `orna-lsp` for the `orna` filetype and sets
+`omnifunc=lsp#complete`. Vim's omni completion (`Ctrl-X Ctrl-O` in insert mode)
+then requests completion items from the attached server. Set
+`g:orna_lsp_command` to a command list to use a non-default server path.
+
+Emacs uses Eglot. Load `editors/emacs/orna-eglot.el` and call
+`(orna-setup-eglot)` once; Orna buffers then attach through `eglot-ensure` and
+use Emacs's `completion-at-point` interface. Set `orna-eglot-server-command`
+to a command list before calling the setup function when `orna-lsp` is not on
+`PATH`.
+
+The `orna-lsp` integration suite exercises Neovim's native client and has
+optional Vim/`vim-lsp` and Emacs/Eglot host probes. It reports `SKIP` when a
+host executable or the Vim client runtime is unavailable.
+
+Generated artifact checks do not launch editor hosts. Tree-sitter generation
+is structurally checked by Node, and the grammar/query package is drift-checked
+as generated text. The `orna-lsp` integration tests separately launch supported
+editor hosts when their client dependencies are available.

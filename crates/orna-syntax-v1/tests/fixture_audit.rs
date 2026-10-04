@@ -1,4 +1,7 @@
-use std::path::{Path, PathBuf};
+use std::{
+    collections::HashSet,
+    path::{Path, PathBuf},
+};
 
 #[derive(Debug)]
 struct StringLiteral {
@@ -189,6 +192,56 @@ fn walk_rust_files(directory: &Path, files: &mut Vec<PathBuf>) {
             files.push(path);
         }
     }
+}
+
+fn walk_fixture_files(directory: &Path, files: &mut Vec<PathBuf>) {
+    if !directory.is_dir() {
+        return;
+    }
+    for entry in std::fs::read_dir(directory).expect("read fixture directory") {
+        let entry = entry.expect("read fixture entry");
+        let path = entry.path();
+        let kind = entry.file_type().expect("read fixture entry type");
+        if kind.is_dir() {
+            walk_fixture_files(&path, files);
+        } else if kind.is_file()
+            && path
+                .extension()
+                .is_some_and(|extension| extension == "orna")
+        {
+            files.push(path);
+        }
+    }
+}
+
+fn collect_fixture_filenames(source: &RustSource, filenames: &mut HashSet<String>) {
+    let code = String::from_utf8_lossy(&source.code_without_comments);
+    for component in code.split(|character: char| {
+        !(character.is_ascii_alphanumeric() || matches!(character, '_' | '-' | '.'))
+    }) {
+        if Path::new(component)
+            .extension()
+            .is_some_and(|extension| extension == "orna")
+        {
+            filenames.insert(component.to_owned());
+        }
+    }
+}
+
+fn orphan_fixture_paths(
+    fixtures: &[PathBuf],
+    referenced_filenames: &HashSet<String>,
+) -> Vec<PathBuf> {
+    fixtures
+        .iter()
+        .filter(|fixture| {
+            fixture
+                .file_name()
+                .and_then(|filename| filename.to_str())
+                .is_none_or(|filename| !referenced_filenames.contains(filename))
+        })
+        .cloned()
+        .collect()
 }
 
 fn normalize_path(path: &Path) -> PathBuf {
@@ -458,6 +511,60 @@ fn workspace_rust_sources_keep_test_inputs_inside_the_checkout() {
         violations.is_empty(),
         "external reference paths must be vendored under crate tests/fixtures:\n{}",
         violations.join("\n")
+    );
+}
+
+#[test]
+fn direct_source_fixture_lint_detects_orphans_and_accepts_behavior_inputs() {
+    let fixture = PathBuf::from("crates/example/tests/fixtures/proof.orna");
+    let fixtures = [fixture.clone()];
+    let empty_source = scan_rust_source("");
+    let mut referenced_filenames = HashSet::new();
+    collect_fixture_filenames(&empty_source, &mut referenced_filenames);
+    assert_eq!(
+        orphan_fixture_paths(&fixtures, &referenced_filenames),
+        fixtures
+    );
+
+    let behavior_source = scan_rust_source(r#"include_str!("fixtures/proof.orna")"#);
+    collect_fixture_filenames(&behavior_source, &mut referenced_filenames);
+    assert!(orphan_fixture_paths(&fixtures, &referenced_filenames).is_empty());
+}
+
+#[test]
+fn evaluator_sys_and_table_fixture_trees_have_rust_behavior_references() {
+    let root = workspace_root();
+    let mut orphans = Vec::new();
+
+    for crate_name in ["orna-evaluator-v1", "orna-sys-v1", "orna-table-v1"] {
+        let crate_root = root.join("crates").join(crate_name);
+        let mut source_files = Vec::new();
+        walk_rust_files(&crate_root, &mut source_files);
+        let mut referenced_filenames = HashSet::new();
+        for source_path in source_files {
+            let source_text =
+                std::fs::read_to_string(&source_path).expect("read crate Rust source");
+            collect_fixture_filenames(&scan_rust_source(&source_text), &mut referenced_filenames);
+        }
+
+        let mut fixture_files = Vec::new();
+        walk_fixture_files(&crate_root.join("tests/fixtures"), &mut fixture_files);
+        orphans.extend(orphan_fixture_paths(&fixture_files, &referenced_filenames));
+    }
+    orphans.sort();
+
+    assert!(
+        orphans.is_empty(),
+        "direct source fixtures need an in-crate Rust behavior reference; remove orphan fixtures or restore their tests:\n{}",
+        orphans
+            .iter()
+            .map(|path| path
+                .strip_prefix(&root)
+                .unwrap_or(path)
+                .display()
+                .to_string())
+            .collect::<Vec<_>>()
+            .join("\n")
     );
 }
 
