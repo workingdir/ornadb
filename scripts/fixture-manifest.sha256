@@ -3238,6 +3238,8 @@ d49a4b8de867606627946be5ce4c374f36ce18c0ae9d0d19e191d51498850da8  crates/orna-ls
 01e3906bf653fdb21af2004278ef449a14178756ebb34f4e0bd6cc49ee4d7e21  crates/orna-lsp/tests/fixtures/ji3t0-lsp-v1-self-contained.orna
 953ba69f21a16700cc90bee0b6920e14a9af8c340a6c88def7d2b466aed1b4b6  crates/orna-lsp/tests/fixtures/ji3t0-lsp-v1.orna
 3db450900296cabab55c405651bc2dc28ca73db8f2ae207768c3d2c21fa6c322  crates/orna-lsp/tests/fixtures/lexical-v1.orna
+e93403528dbf82b2ee2d1d6de8490b8b15a3526e55d41435efc62bc1d9b1ca95  crates/orna-lsp/tests/fixtures/library/math.orna
+e93403528dbf82b2ee2d1d6de8490b8b15a3526e55d41435efc62bc1d9b1ca95  crates/orna-lsp/tests/fixtures/library/math/main.orna
 a9a9eb8942f328826459766a2cd8c25b7269f139e831f4287f5ae0c8328482fd  crates/orna-lsp/tests/fixtures/local-scopes-v1.orna
 eb358502e3d0ac468625954ad7c30c16cd6968c5b25325c5ae489b44b0e6e100  crates/orna-lsp/tests/fixtures/lsp-e2e-001-module-valid-source.orna
 b26679075834294e42db2b308563c804602dc84a03d280f9e8e7fc747698d2b9  crates/orna-lsp/tests/fixtures/lsp-e2e-002-module-mutation-source.orna
