@@ -40,6 +40,7 @@ use crate::{
     REFERENCE_STANDARD_ENCODING_UTILITIES_PATH_V1,
     REFERENCE_STANDARD_BYTES_PATH_V1,
     REFERENCE_STANDARD_COLLECTION_ADVANCED_PATH_V1,
+    REFERENCE_STANDARD_ITERATION_PATH_V1,
     REFERENCE_STANDARD_ITERATOR_PATH_V1, REFERENCE_STANDARD_ITERATOR_ADAPTERS_PATH_V1,
     REFERENCE_STANDARD_ITERATOR_CONSUMERS_PATH_V1,
     REFERENCE_STANDARD_COLLECTION_ADAPTERS_PATH_V1,
@@ -59,7 +60,7 @@ use crate::{
 #[test]
 fn pinned_ui_presentation_helpers_are_included_as_source() {
     let sources = reference_standard_sources_v1();
-    assert_eq!(sources.len(), 74);
+    assert_eq!(sources.len(), 75);
     assert_eq!(sources[49].0, REFERENCE_STANDARD_UI_PATH_V1);
     let parsed = orna_syntax_v1::parse_module_with_file(
         &sources[49].1,
@@ -285,6 +286,47 @@ fn pinned_collection_advanced_adapters_are_included_and_typecheck() {
     assert!(parsed.is_ok(), "{path}: {:#?}", parsed.diagnostics);
     reference_standard_catalogue_v1()
         .expect("advanced collection adapters resolve in the captured standard catalogue");
+}
+
+#[test]
+fn pinned_iteration_and_traversal_utilities_are_included_and_typecheck() {
+    let sources = reference_standard_sources_v1();
+    let (index, (path, source)) = sources
+        .iter()
+        .enumerate()
+        .find(|(_, (path, _))| path == REFERENCE_STANDARD_ITERATION_PATH_V1)
+        .expect("the pinned source bundle includes std.iteration");
+    assert_eq!(index, 74, "iteration utilities append without moving old sources");
+    assert_eq!(path, REFERENCE_STANDARD_ITERATION_PATH_V1);
+    for declaration in [
+        "pub fn fold<T, U>(values: [T], initial: U, combine: fn(U, T): U): U",
+        "pub fn fold_while<T, U>(",
+        "pub fn depth_first<T>(root: T, neighbors: fn(T): [T]): [T]",
+        "pub fn breadth_first<T>(root: T, neighbors: fn(T): [T]): [T]",
+        "pub fn reachable<T>(root: T, target: T, neighbors: fn(T): [T]): Bool",
+    ] {
+        assert!(source.contains(declaration), "missing iteration utility `{declaration}`");
+    }
+    for contract in [
+        "from left to right",
+        "the stopping item's state is kept",
+        "each reachable node once",
+        "stable neighbor order",
+        "stopping as soon as it is found",
+    ] {
+        assert!(source.contains(contract), "missing iteration contract `{contract}`");
+    }
+    let profile = reference_standard_profile_v1();
+    profile
+        .verify_source(path, source)
+        .expect("iteration source bytes match the captured standard profile");
+    let mut changed_source = source.clone();
+    changed_source.push_str("\n// changed after profile capture\n");
+    assert!(profile.verify_source(path, &changed_source).is_err());
+    let parsed = orna_syntax_v1::parse_module_with_file(source, path);
+    assert!(parsed.is_ok(), "{path}: {:#?}", parsed.diagnostics);
+    reference_standard_catalogue_v1()
+        .expect("iteration utilities resolve in the captured standard catalogue");
 }
 
 #[test]
@@ -1913,7 +1955,7 @@ fn reference_standard_uses_pinned_orna_1_source_and_resolves_its_imports() {
     ] {
         assert!(sources[33].1.contains(contract), "missing std.test contract `{contract}`");
     }
-    assert_eq!(sources.len(), 74);
+    assert_eq!(sources.len(), 75);
     assert_eq!(sources[49].0, REFERENCE_STANDARD_UI_PATH_V1);
     for declaration in [
         "pub fn Field<T>(label: Str, value: T): UI",
@@ -2375,7 +2417,7 @@ fn pinned_filesystem_effect_is_visible_to_consumers_and_forbidden_in_assertions(
 #[test]
 fn pinned_filesystem_path_and_metadata_modules_are_captured_and_typecheck() {
     let sources = reference_standard_sources_v1();
-    assert_eq!(sources.len(), 74);
+    assert_eq!(sources.len(), 75);
     for (index, path) in [
         (42, REFERENCE_STANDARD_IO_PATH_MODULE_PATH_V1),
         (43, REFERENCE_STANDARD_IO_METADATA_PATH_V1),
@@ -2439,7 +2481,7 @@ fn pinned_filesystem_path_and_metadata_modules_are_captured_and_typecheck() {
 #[test]
 fn pinned_io_buffer_module_is_captured_and_resolves_stream_adapters() {
     let sources = reference_standard_sources_v1();
-    assert_eq!(sources.len(), 74);
+    assert_eq!(sources.len(), 75);
     let (path, source) = sources
         .iter()
         .find(|(path, _)| path == REFERENCE_STANDARD_IO_BUFFER_PATH_V1)
@@ -2476,7 +2518,7 @@ fn pinned_io_buffer_module_is_captured_and_resolves_stream_adapters() {
 #[test]
 fn pinned_process_and_environment_modules_are_captured_and_typecheck() {
     let sources = reference_standard_sources_v1();
-    assert_eq!(sources.len(), 74);
+    assert_eq!(sources.len(), 75);
     for (index, path) in [
         (44, REFERENCE_STANDARD_IO_PROCESS_PATH_V1),
         (45, REFERENCE_STANDARD_IO_ENVIRONMENT_PATH_V1),
