@@ -22,16 +22,18 @@ use lsp_types::{
     DocumentLinkOptions, DocumentLinkParams, DocumentSymbolParams, DocumentSymbolResponse,
     FoldingRange, FoldingRangeParams, FoldingRangeProviderCapability, FullDocumentDiagnosticReport,
     GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverParams, HoverProviderCapability,
-    InitializeParams, InlayHintOptions, InlayHintParams, InlayHintServerCapabilities,
-    NumberOrString, OneOf, Position, PositionEncodingKind, PrepareRenameResponse,
-    PublishDiagnosticsParams, Range, ReferenceParams, RelatedFullDocumentDiagnosticReport,
-    RelatedUnchangedDocumentDiagnosticReport, RenameOptions, RenameParams, SelectionRangeParams,
-    SelectionRangeProviderCapability, SemanticTokens, SemanticTokensFullOptions,
-    SemanticTokensLegend, SemanticTokensOptions, SemanticTokensParams, SemanticTokensRangeParams,
-    SemanticTokensServerCapabilities, ServerCapabilities, SignatureHelpOptions,
-    TextDocumentContentChangeEvent, TextDocumentSyncCapability, TextDocumentSyncKind,
-    TextDocumentSyncOptions, TextDocumentSyncSaveOptions, TextEdit,
-    UnchangedDocumentDiagnosticReport, Uri, WorkspaceEdit,
+    InitializeParams, InlayHintOptions, InlayHintParams, InlayHintServerCapabilities, Moniker,
+    MonikerKind, MonikerParams, NumberOrString, OneOf, Position, PositionEncodingKind,
+    PrepareRenameResponse, PublishDiagnosticsParams, Range, ReferenceParams,
+    RelatedFullDocumentDiagnosticReport, RelatedUnchangedDocumentDiagnosticReport, RenameOptions,
+    RenameParams, SelectionRangeParams, SelectionRangeProviderCapability, SemanticTokens,
+    SemanticTokensFullOptions, SemanticTokensLegend, SemanticTokensOptions, SemanticTokensParams,
+    SemanticTokensRangeParams, SemanticTokensServerCapabilities, ServerCapabilities,
+    SignatureHelpOptions, TextDocumentContentChangeEvent, TextDocumentSyncCapability,
+    TextDocumentSyncKind, TextDocumentSyncOptions, TextDocumentSyncSaveOptions, TextEdit,
+    TypeHierarchyItem, TypeHierarchyPrepareParams, TypeHierarchySubtypesParams,
+    TypeHierarchySupertypesParams, UnchangedDocumentDiagnosticReport, UniquenessLevel, Uri,
+    WorkspaceEdit,
 };
 
 /// Transport threads for the server's standard input and output streams.
@@ -167,7 +169,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 /// list that excludes UTF-16 cannot be silently accepted.
 fn initialize(
     connection: &Connection,
-    capabilities: ServerCapabilities,
+    capabilities: serde_json::Value,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let (request_id, raw_params) = connection.initialize_start()?;
     let params: InitializeParams = serde_json::from_value(raw_params)?;
@@ -206,8 +208,8 @@ fn initialize(
 }
 
 /// Returns the capabilities advertised during initialization.
-fn server_capabilities() -> ServerCapabilities {
-    ServerCapabilities {
+fn server_capabilities() -> serde_json::Value {
+    let mut capabilities = serde_json::to_value(ServerCapabilities {
         position_encoding: Some(PositionEncodingKind::UTF16),
         text_document_sync: Some(TextDocumentSyncCapability::Options(
             TextDocumentSyncOptions {
@@ -275,10 +277,17 @@ fn server_capabilities() -> ServerCapabilities {
         call_hierarchy_provider: Some(CallHierarchyServerCapability::Options(
             CallHierarchyOptions::default(),
         )),
+        moniker_provider: Some(OneOf::Left(true)),
         folding_range_provider: Some(FoldingRangeProviderCapability::Simple(true)),
         selection_range_provider: Some(SelectionRangeProviderCapability::Simple(true)),
         ..ServerCapabilities::default()
-    }
+    })
+    .expect("serializable LSP server capabilities");
+    capabilities
+        .as_object_mut()
+        .expect("server capabilities serialize as an object")
+        .insert("typeHierarchyProvider".to_owned(), serde_json::json!({}));
+    capabilities
 }
 
 /// Handles one client request and sends its response.
@@ -307,6 +316,10 @@ fn handle_request(state: &mut ServerState, connection: &Connection, request: Req
         "textDocument/prepareCallHierarchy" => request_prepare_call_hierarchy(state, request),
         "callHierarchy/incomingCalls" => request_incoming_calls(state, request),
         "callHierarchy/outgoingCalls" => request_outgoing_calls(state, request),
+        "textDocument/prepareTypeHierarchy" => request_prepare_type_hierarchy(state, request),
+        "typeHierarchy/supertypes" => request_type_hierarchy_supertypes(state, request),
+        "typeHierarchy/subtypes" => request_type_hierarchy_subtypes(state, request),
+        "textDocument/moniker" => request_moniker(state, request),
         "textDocument/diagnostic" => request_document_diagnostic(state, request),
         _ => {
             let _ = connection.sender.send(Message::Response(Response {
@@ -1268,6 +1281,182 @@ struct WorkspaceFunction {
     definition: analysis::FunctionDefinition,
 }
 
+#[derive(Debug, Clone)]
+struct WorkspaceDeclaration {
+    document: Document,
+    symbol: analysis::EditorSymbol,
+    public: bool,
+    protocols: Vec<String>,
+}
+
+fn workspace_declarations(state: &ServerState) -> Vec<WorkspaceDeclaration> {
+    let mut documents = state
+        .documents
+        .values()
+        .filter(|document| document.uri.as_str().ends_with(".orna"))
+        .collect::<Vec<_>>();
+    documents.sort_by(|left, right| left.uri.as_str().cmp(right.uri.as_str()));
+
+    let mut declarations = Vec::new();
+    for document in documents {
+        let parse = analysis::parse_document(document);
+        if !parse.diagnostics.is_empty() {
+            continue;
+        }
+        for symbol in analysis::declaration_symbols(&parse, &document.text) {
+            let Some(item) = parse.value.items.iter().find(|item| {
+                item.span.start == symbol.full.start && item.span.end == symbol.full.end
+            }) else {
+                continue;
+            };
+            let public = matches!(&item.visibility, orna_syntax_v1::Visibility::Public { .. });
+            let protocols = implementation_protocols(&item.declaration);
+            declarations.push(WorkspaceDeclaration {
+                document: document.clone(),
+                symbol,
+                public,
+                protocols,
+            });
+        }
+    }
+    declarations.sort_by(|left, right| {
+        left.document
+            .uri
+            .as_str()
+            .cmp(right.document.uri.as_str())
+            .then_with(|| {
+                left.symbol
+                    .selection
+                    .start
+                    .cmp(&right.symbol.selection.start)
+            })
+    });
+    declarations
+}
+
+fn implementation_protocols(declaration: &orna_syntax_v1::Declaration) -> Vec<String> {
+    let mut protocols = Vec::new();
+    let mut add = |implementation: &orna_syntax_v1::Implementation| {
+        if let orna_syntax_v1::TypeExpr::Name { path, .. } = &implementation.protocol
+            && let Some(name) = path.last()
+        {
+            protocols.push(name.clone());
+        }
+    };
+    match declaration {
+        orna_syntax_v1::Declaration::Table { members, .. } => {
+            for member in members {
+                if let orna_syntax_v1::TableMember::Implementation { implementation, .. } = member {
+                    add(implementation);
+                }
+            }
+        }
+        orna_syntax_v1::Declaration::Type {
+            representation:
+                orna_syntax_v1::TypeRepresentation::Alias { refinements, .. }
+                | orna_syntax_v1::TypeRepresentation::Nominal {
+                    members: refinements,
+                },
+            ..
+        } => {
+            for member in refinements {
+                if let orna_syntax_v1::TypeMember::Implementation { implementation, .. } = member {
+                    add(implementation);
+                }
+            }
+        }
+        _ => {}
+    }
+    protocols.sort_by_key(|name| analysis::normalized_identifier(name));
+    protocols.dedup_by(|left, right| {
+        analysis::normalized_identifier(left) == analysis::normalized_identifier(right)
+    });
+    protocols
+}
+
+fn is_hierarchy_declaration(declaration: &WorkspaceDeclaration) -> bool {
+    matches!(
+        declaration.symbol.kind,
+        analysis::EditorSymbolKind::Type
+            | analysis::EditorSymbolKind::Table
+            | analysis::EditorSymbolKind::Protocol
+    )
+}
+
+fn hierarchy_symbol_kind(kind: analysis::EditorSymbolKind) -> Option<lsp_types::SymbolKind> {
+    match kind {
+        analysis::EditorSymbolKind::Type => Some(lsp_types::SymbolKind::STRUCT),
+        analysis::EditorSymbolKind::Table => Some(lsp_types::SymbolKind::CLASS),
+        analysis::EditorSymbolKind::Protocol => Some(lsp_types::SymbolKind::INTERFACE),
+        _ => None,
+    }
+}
+
+fn type_hierarchy_item(declaration: &WorkspaceDeclaration) -> Option<TypeHierarchyItem> {
+    let mapper = PositionMapper::new(&declaration.document.text);
+    Some(TypeHierarchyItem {
+        name: declaration.symbol.name.clone(),
+        kind: hierarchy_symbol_kind(declaration.symbol.kind)?,
+        tags: None,
+        detail: declaration.symbol.detail.clone(),
+        uri: declaration.document.uri.clone(),
+        range: mapper.range(&declaration.symbol.full),
+        selection_range: mapper.range(&declaration.symbol.selection),
+        data: Some(serde_json::json!({
+            "scheme": "orna-syntax-v1",
+            "uri": declaration.document.uri.as_str(),
+            "name": analysis::normalized_identifier(&declaration.symbol.name),
+            "start": declaration.symbol.selection.start,
+            "end": declaration.symbol.selection.end,
+        })),
+    })
+}
+
+fn same_type_hierarchy_declaration(
+    item: &TypeHierarchyItem,
+    declaration: &WorkspaceDeclaration,
+) -> bool {
+    hierarchy_symbol_kind(declaration.symbol.kind).is_some_and(|kind| {
+        let mapper = PositionMapper::new(&declaration.document.text);
+        item.uri == declaration.document.uri
+            && item.name == declaration.symbol.name
+            && item.kind == kind
+            && item.selection_range == mapper.range(&declaration.symbol.selection)
+    })
+}
+
+fn uniquely_resolved_protocol(declarations: &[WorkspaceDeclaration], name: &str) -> Option<usize> {
+    let key = analysis::normalized_identifier(name);
+    let mut matches = declarations.iter().enumerate().filter(|(_, declaration)| {
+        declaration.symbol.kind == analysis::EditorSymbolKind::Protocol
+            && analysis::normalized_identifier(&declaration.symbol.name) == key
+    });
+    let found = matches.next()?.0;
+    matches.next().is_none().then_some(found)
+}
+
+fn workspace_declaration_at<'a>(
+    declarations: &'a [WorkspaceDeclaration],
+    document: &Document,
+    selection: &orna_syntax_v1::SyntaxSpan,
+    mapper: &PositionMapper<'_>,
+    segments: &[SourceSegment<'_>],
+) -> Option<&'a WorkspaceDeclaration> {
+    let selected = project_location(
+        lsp_types::Location {
+            uri: document.uri.clone(),
+            range: mapper.range(selection),
+        },
+        mapper,
+        segments,
+    )?;
+    declarations.iter().find(|declaration| {
+        declaration.document.uri == selected.uri
+            && PositionMapper::new(&declaration.document.text).range(&declaration.symbol.selection)
+                == selected.range
+    })
+}
+
 fn workspace_functions(state: &ServerState) -> Vec<WorkspaceFunction> {
     let mut documents = state
         .documents
@@ -1458,6 +1647,249 @@ fn request_outgoing_calls(
         })
         .collect::<Vec<_>>();
     Ok(serde_json::to_value(outgoing)?)
+}
+
+fn request_prepare_type_hierarchy(
+    state: &mut ServerState,
+    request: Request,
+) -> Result<serde_json::Value, Box<dyn std::error::Error + Send + Sync>> {
+    let (_, params) =
+        request.extract::<TypeHierarchyPrepareParams>("textDocument/prepareTypeHierarchy")?;
+    let uri = params.text_document_position_params.text_document.uri;
+    let Some((document, segments, selected_start)) = combined_workspace(&state.documents, &uri)
+    else {
+        return Ok(serde_json::Value::Null);
+    };
+    let (parse, mapper) = parse_document(&document);
+    let Some(position) = workspace_position(
+        &document,
+        selected_start,
+        params.text_document_position_params.position,
+        &state.documents,
+        &uri,
+    ) else {
+        return Ok(serde_json::Value::Null);
+    };
+    let declarations = workspace_declarations(state);
+    if let Some((_, selection)) = analysis::identifier_at(&document, position, &mapper)
+        && let Some(declaration) =
+            workspace_declaration_at(&declarations, &document, &selection, &mapper, &segments)
+        && is_hierarchy_declaration(declaration)
+    {
+        let Some(item) = type_hierarchy_item(declaration) else {
+            return Ok(serde_json::Value::Null);
+        };
+        return Ok(serde_json::to_value(vec![item])?);
+    }
+    let Some(definition) = analysis::definition(&document, &parse, position, &mapper) else {
+        return Ok(serde_json::Value::Null);
+    };
+    let Some(definition) = project_location(definition, &mapper, &segments) else {
+        return Ok(serde_json::Value::Null);
+    };
+    let Some(declaration) = declarations.iter().find(|declaration| {
+        is_hierarchy_declaration(declaration)
+            && declaration.document.uri == definition.uri
+            && PositionMapper::new(&declaration.document.text).range(&declaration.symbol.selection)
+                == definition.range
+    }) else {
+        return Ok(serde_json::Value::Null);
+    };
+    let Some(item) = type_hierarchy_item(declaration) else {
+        return Ok(serde_json::Value::Null);
+    };
+    Ok(serde_json::to_value(vec![item])?)
+}
+
+fn request_type_hierarchy_supertypes(
+    state: &mut ServerState,
+    request: Request,
+) -> Result<serde_json::Value, Box<dyn std::error::Error + Send + Sync>> {
+    let (_, params) =
+        request.extract::<TypeHierarchySupertypesParams>("typeHierarchy/supertypes")?;
+    let declarations = workspace_declarations(state);
+    let Some(target) = declarations.iter().find(|declaration| {
+        is_hierarchy_declaration(declaration)
+            && same_type_hierarchy_declaration(&params.item, declaration)
+    }) else {
+        return Ok(serde_json::to_value(Vec::<TypeHierarchyItem>::new())?);
+    };
+
+    let mut supertypes = target
+        .protocols
+        .iter()
+        .filter_map(|name| uniquely_resolved_protocol(&declarations, name))
+        .filter_map(|index| type_hierarchy_item(&declarations[index]))
+        .collect::<Vec<_>>();
+    sort_type_hierarchy_items(&mut supertypes);
+    Ok(serde_json::to_value(supertypes)?)
+}
+
+fn request_type_hierarchy_subtypes(
+    state: &mut ServerState,
+    request: Request,
+) -> Result<serde_json::Value, Box<dyn std::error::Error + Send + Sync>> {
+    let (_, params) = request.extract::<TypeHierarchySubtypesParams>("typeHierarchy/subtypes")?;
+    let declarations = workspace_declarations(state);
+    let Some((target_index, target)) = declarations.iter().enumerate().find(|(_, declaration)| {
+        is_hierarchy_declaration(declaration)
+            && same_type_hierarchy_declaration(&params.item, declaration)
+    }) else {
+        return Ok(serde_json::to_value(Vec::<TypeHierarchyItem>::new())?);
+    };
+
+    if target.symbol.kind != analysis::EditorSymbolKind::Protocol
+        || uniquely_resolved_protocol(&declarations, &target.symbol.name) != Some(target_index)
+    {
+        return Ok(serde_json::to_value(Vec::<TypeHierarchyItem>::new())?);
+    }
+    let mut subtypes = declarations
+        .iter()
+        .filter(|declaration| {
+            matches!(
+                declaration.symbol.kind,
+                analysis::EditorSymbolKind::Type | analysis::EditorSymbolKind::Table
+            ) && declaration
+                .protocols
+                .iter()
+                .any(|name| uniquely_resolved_protocol(&declarations, name) == Some(target_index))
+        })
+        .filter_map(type_hierarchy_item)
+        .collect::<Vec<_>>();
+    sort_type_hierarchy_items(&mut subtypes);
+    Ok(serde_json::to_value(subtypes)?)
+}
+
+fn sort_type_hierarchy_items(items: &mut [TypeHierarchyItem]) {
+    items.sort_by(|left, right| {
+        left.uri
+            .as_str()
+            .cmp(right.uri.as_str())
+            .then_with(|| {
+                left.selection_range
+                    .start
+                    .line
+                    .cmp(&right.selection_range.start.line)
+            })
+            .then_with(|| {
+                left.selection_range
+                    .start
+                    .character
+                    .cmp(&right.selection_range.start.character)
+            })
+            .then_with(|| left.name.cmp(&right.name))
+    });
+}
+
+fn request_moniker(
+    state: &mut ServerState,
+    request: Request,
+) -> Result<serde_json::Value, Box<dyn std::error::Error + Send + Sync>> {
+    let (_, params) = request.extract::<MonikerParams>("textDocument/moniker")?;
+    let uri = params.text_document_position_params.text_document.uri;
+    let position = params.text_document_position_params.position;
+    let Some((document, segments, selected_start)) = combined_workspace(&state.documents, &uri)
+    else {
+        return Ok(serde_json::Value::Null);
+    };
+    let (parse, mapper) = parse_document(&document);
+    let Some(position) =
+        workspace_position(&document, selected_start, position, &state.documents, &uri)
+    else {
+        return Ok(serde_json::Value::Null);
+    };
+    let Some((name, selection)) = analysis::identifier_at(&document, position, &mapper) else {
+        return Ok(serde_json::Value::Null);
+    };
+
+    if let Some(binding) = crate::locals::binding_at(&parse.value, &name, &selection) {
+        let binding_location = project_location(
+            lsp_types::Location {
+                uri: document.uri.clone(),
+                range: mapper.range(&binding.selection),
+            },
+            &mapper,
+            &segments,
+        );
+        let Some(binding_location) = binding_location else {
+            return Ok(serde_json::Value::Null);
+        };
+        let Some(binding_document) = state.document(&binding_location.uri) else {
+            return Ok(serde_json::Value::Null);
+        };
+        let binding_mapper = PositionMapper::new(&binding_document.text);
+        let byte = binding_mapper.byte_offset(binding_location.range.start);
+        return Ok(serde_json::to_value(vec![Moniker {
+            scheme: "orna-syntax-v1".to_owned(),
+            identifier: format!(
+                "{}#local:{}:{}",
+                binding_location.uri.as_str(),
+                byte,
+                analysis::normalized_identifier(&binding.name)
+            ),
+            unique: UniquenessLevel::Document,
+            kind: Some(MonikerKind::Local),
+        }])?);
+    }
+
+    let declarations = workspace_declarations(state);
+    let clicked = project_location(
+        lsp_types::Location {
+            uri: document.uri.clone(),
+            range: mapper.range(&selection),
+        },
+        &mapper,
+        &segments,
+    );
+    let direct_declaration =
+        workspace_declaration_at(&declarations, &document, &selection, &mapper, &segments);
+    let resolved_declaration = analysis::definition(&document, &parse, position, &mapper)
+        .and_then(|definition| project_location(definition, &mapper, &segments))
+        .and_then(|definition| {
+            declarations.iter().find(|declaration| {
+                declaration.document.uri == definition.uri
+                    && PositionMapper::new(&declaration.document.text)
+                        .range(&declaration.symbol.selection)
+                        == definition.range
+            })
+        });
+    let Some(declaration) = direct_declaration.or(resolved_declaration) else {
+        return Ok(serde_json::Value::Null);
+    };
+    let at_declaration = clicked.is_some_and(|clicked| {
+        clicked.uri == declaration.document.uri
+            && clicked.range
+                == PositionMapper::new(&declaration.document.text)
+                    .range(&declaration.symbol.selection)
+    });
+    let kind = if !declaration.public {
+        MonikerKind::Local
+    } else if at_declaration {
+        MonikerKind::Export
+    } else if declaration.document.uri != uri {
+        MonikerKind::Import
+    } else {
+        MonikerKind::Local
+    };
+    let moniker_kind = match declaration.symbol.kind {
+        analysis::EditorSymbolKind::Function => "function",
+        analysis::EditorSymbolKind::Type => "type",
+        analysis::EditorSymbolKind::Enum => "enum",
+        analysis::EditorSymbolKind::Table => "table",
+        analysis::EditorSymbolKind::Protocol => "protocol",
+        analysis::EditorSymbolKind::Other => "symbol",
+    };
+    Ok(serde_json::to_value(vec![Moniker {
+        scheme: "orna-syntax-v1".to_owned(),
+        identifier: format!(
+            "{}#{}:{}",
+            declaration.document.uri.as_str(),
+            moniker_kind,
+            analysis::normalized_identifier(&declaration.symbol.name)
+        ),
+        unique: UniquenessLevel::Project,
+        kind: Some(kind),
+    }])?)
 }
 
 fn request_code_lenses(
