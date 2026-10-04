@@ -1,2 +1,0 @@
-pub fn double(value: Int): Int = value + value;
-double(21)
