@@ -1,0 +1,2 @@
+pub fn shared(value: Int): Int = value;
+pub fn caller(value: Int): Int = shared(value);

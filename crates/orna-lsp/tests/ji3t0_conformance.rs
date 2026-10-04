@@ -315,7 +315,7 @@ fn protocol_conformance_uses_v1_for_every_advertised_editor_feature() {
     let capabilities = &initialized["capabilities"];
     assert_eq!(capabilities["hoverProvider"], true);
     assert_eq!(capabilities["definitionProvider"], true);
-    assert_eq!(capabilities["renameProvider"], true);
+    assert_eq!(capabilities["renameProvider"]["prepareProvider"], true);
     assert!(capabilities["signatureHelpProvider"].is_object());
     assert!(capabilities["completionProvider"].is_object());
     assert!(capabilities["diagnosticProvider"].is_object());
