@@ -488,10 +488,14 @@ impl SystemProviderAbi {
             let role = role_annotation
                 .map(|(name, _)| SemanticRoleId::new(name))
                 .transpose()?;
+            let signature = parse_signature(&raw_operation.signature)?;
+            if !operation_label_matches_signature(&id, &signature) {
+                return Err(ProviderAbiError::InvalidSignature);
+            }
             let contract = OperationContract {
                 id: id.clone(),
                 version: raw_operation.version,
-                signature: parse_signature(&raw_operation.signature)?,
+                signature,
                 effects: EffectSet::one(effect),
                 preconditions: raw_operation
                     .preconditions
@@ -1049,10 +1053,22 @@ fn parse_signature(source: &str) -> Result<FunctionSignature, ProviderAbiError> 
         if !header.ends_with('>') {
             return Err(ProviderAbiError::InvalidSignature);
         }
-        let parameters = split_top_level(&header[generic_open + 1..header.len() - 1], ',')?
+        let parameter_source = &header[generic_open + 1..header.len() - 1];
+        let parameters = split_top_level(parameter_source, ',')?
             .into_iter()
-            .map(str::to_owned)
-            .collect();
+            .map(str::trim)
+            .collect::<Vec<_>>();
+        let unique_parameters = parameters.iter().copied().collect::<BTreeSet<_>>();
+        if parameters.is_empty()
+            || parameter_source.trim_end().ends_with(',')
+            || unique_parameters.len() != parameters.len()
+            || parameters
+                .iter()
+                .any(|parameter| !valid_type_parameter_name(parameter))
+        {
+            return Err(ProviderAbiError::InvalidSignature);
+        }
+        let parameters = parameters.into_iter().map(str::to_owned).collect();
         (header[..generic_open].to_owned(), parameters)
     } else {
         (header.to_owned(), Vec::new())
@@ -1098,6 +1114,74 @@ fn parse_signature(source: &str) -> Result<FunctionSignature, ProviderAbiError> 
         result: parse_type(result_source)?,
         source: source.to_owned(),
     })
+}
+
+/// Keep the typed runtime registry parser aligned with the compile-time
+/// collector's operation-label checks. A schema-valid operation name must
+/// still identify the callable and the generic/overload signature it claims.
+fn operation_label_matches_signature(
+    operation: &OperationId,
+    signature: &FunctionSignature,
+) -> bool {
+    let Some(suffix) = operation.as_str().strip_prefix(&signature.callable) else {
+        return false;
+    };
+    if suffix.is_empty() {
+        return true;
+    }
+    if let Some(parameters) = suffix
+        .strip_prefix('<')
+        .and_then(|parameters| parameters.strip_suffix('>'))
+    {
+        let parameters = parameters
+            .split(',')
+            .map(str::trim)
+            .collect::<BTreeSet<_>>();
+        return !parameters.is_empty()
+            && parameters.len() == signature.type_parameters.len()
+            && parameters.iter().all(|parameter| {
+                valid_type_parameter_name(parameter)
+                    && signature
+                        .type_parameters
+                        .iter()
+                        .any(|declared| declared == parameter)
+            });
+    }
+    let Some(labelled_type) = suffix
+        .strip_prefix('(')
+        .and_then(|parameters| parameters.strip_suffix(')'))
+        .map(str::trim)
+    else {
+        return false;
+    };
+    if labelled_type.is_empty() || labelled_type.contains(',') {
+        return false;
+    }
+    let is_erased_generic_input = matches!(signature.callable.as_str(), "sys.invoke" | "sys.start")
+        && labelled_type == "Value";
+    is_erased_generic_input
+        || signature
+            .parameters
+            .iter()
+            .any(|parameter| abi_type_label(&parameter.ty) == labelled_type)
+}
+
+fn valid_type_parameter_name(name: &str) -> bool {
+    let mut bytes = name.bytes();
+    bytes
+        .next()
+        .is_some_and(|byte| byte.is_ascii_alphabetic() || byte == b'_')
+        && bytes.all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+}
+
+fn abi_type_label(ty: &AbiType) -> &str {
+    match ty {
+        AbiType::Named(name) => name.rsplit('.').next().unwrap_or(name),
+        AbiType::Applied { constructor, .. } => {
+            constructor.rsplit('.').next().unwrap_or(constructor)
+        }
+        AbiType::List(element) | AbiType::Optional(element) => abi_type_label(element),
+    }
 }
 
 fn parse_type(source: &str) -> Result<AbiType, ProviderAbiError> {
@@ -1192,4 +1276,93 @@ fn matching(source: &str, start: usize, open: char, close: char) -> Option<usize
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{GENERATED_PROVIDER_ABI, ProviderAbiError, SystemProviderAbi};
+
+    #[test]
+    fn provider_registry_rejects_operation_signature_label_mismatches() {
+        SystemProviderAbi::from_json(GENERATED_PROVIDER_ABI)
+            .expect("compile-time generated provider registry satisfies runtime identity checks");
+
+        let embedded: serde_json::Value =
+            serde_json::from_str(GENERATED_PROVIDER_ABI).expect("embedded provider registry JSON");
+        let operations = embedded["operations"]
+            .as_array()
+            .expect("embedded registry contains operation rows");
+        let generic_index = operations
+            .iter()
+            .position(|operation| {
+                operation["name"]
+                    .as_str()
+                    .is_some_and(|name| name.contains('<'))
+            })
+            .expect("embedded registry contains a generic operation");
+        let generic_name = operations[generic_index]["name"]
+            .as_str()
+            .expect("generic operation has a name");
+        let generic_callable = generic_name
+            .split_once('<')
+            .expect("generic operation label has a type parameter")
+            .0;
+        let overload_index = operations
+            .iter()
+            .position(|operation| {
+                operation["name"]
+                    .as_str()
+                    .is_some_and(|name| name.contains('('))
+            })
+            .expect("embedded registry contains an overloaded operation");
+        let overload_name = operations[overload_index]["name"]
+            .as_str()
+            .expect("overloaded operation has a name");
+        let overload_callable = overload_name
+            .split_once('(')
+            .expect("overload label has a parameter type")
+            .0;
+
+        let mismatches = [
+            (0, "sys.wrong_callable".to_owned()),
+            (generic_index, format!("{generic_callable}<UnknownWitness>")),
+            (
+                overload_index,
+                format!("{overload_callable}(UnknownWitness)"),
+            ),
+        ];
+        for (operation_index, invalid_name) in mismatches {
+            let mut registry = embedded.clone();
+            registry["operations"][operation_index]["name"] =
+                serde_json::Value::String(invalid_name);
+            let error = SystemProviderAbi::from_json(&registry.to_string())
+                .expect_err("typed registry rejects a mismatched callable or label");
+            assert_eq!(error, ProviderAbiError::InvalidSignature);
+        }
+        println!(
+            "provider_registry_signature_identity embedded_registry=valid callable_mismatches=1 generic_label_mismatches=1 overload_label_mismatches=1"
+        );
+    }
+
+    #[test]
+    fn provider_registry_rejects_duplicate_generic_signature_parameters() {
+        let source = r#"{
+            "abi_version": {"major": 1, "minor": 0},
+            "operations": [{
+                "name": "sys.test",
+                "version": {"major": 1, "minor": 0},
+                "signature": "fn sys.test<T, T>(): T",
+                "effect": "invoke",
+                "preconditions": [],
+                "failures": [],
+                "role": null
+            }],
+            "roles": []
+        }"#;
+
+        assert_eq!(
+            SystemProviderAbi::from_json(source).expect_err("duplicate type variables are invalid"),
+            ProviderAbiError::InvalidSignature
+        );
+    }
 }

@@ -33,6 +33,10 @@ use crate::{
     REFERENCE_STANDARD_GENERICS_PATH_V1, REFERENCE_STANDARD_TYPE_UTILS_PATH_V1,
     REFERENCE_STANDARD_PATTERN_PATH_V1, REFERENCE_STANDARD_REGEX_PATH_V1,
     REFERENCE_STANDARD_ITERATOR_PATH_V1, REFERENCE_STANDARD_ITERATOR_ADAPTERS_PATH_V1,
+    REFERENCE_STANDARD_ITERATOR_CONSUMERS_PATH_V1,
+    REFERENCE_STANDARD_COLLECTION_ADAPTERS_PATH_V1,
+    REFERENCE_STANDARD_LAZY_ADAPTERS_PATH_V1,
+    REFERENCE_STANDARD_STREAM_ADAPTERS_PATH_V1,
     REFERENCE_STANDARD_LAZY_PATH_V1,
     REFERENCE_STANDARD_VIEWS_PATH_V1,
     REFERENCE_STANDARD_INTROSPECTION_PATH_V1, REFERENCE_STANDARD_REFLECTION_PATH_V1,
@@ -46,7 +50,7 @@ use crate::{
 #[test]
 fn pinned_ui_presentation_helpers_are_included_as_source() {
     let sources = reference_standard_sources_v1();
-    assert_eq!(sources.len(), 60);
+    assert_eq!(sources.len(), 65);
     assert_eq!(sources[49].0, REFERENCE_STANDARD_UI_PATH_V1);
     let parsed = orna_syntax_v1::parse_module_with_file(
         &sources[49].1,
@@ -140,6 +144,179 @@ fn pinned_iterator_adapters_are_included_in_the_captured_snapshot() {
         .expect("adapter source bytes are recorded by the pinned std profile");
     reference_standard_catalogue_v1()
         .expect("the iterator adapter module resolves against the pinned dependencies");
+}
+
+#[test]
+fn pinned_iterator_consumers_are_included_in_the_captured_snapshot() {
+    let sources = reference_standard_sources_v1();
+    let (index, (path, source)) = sources
+        .iter()
+        .enumerate()
+        .find(|(_, (path, _))| path == REFERENCE_STANDARD_ITERATOR_CONSUMERS_PATH_V1)
+        .expect("the pinned source bundle includes std.iterator.consumers");
+    assert_eq!(index, 61, "iterator consumers append without moving old sources");
+    assert_eq!(path, REFERENCE_STANDARD_ITERATOR_CONSUMERS_PATH_V1);
+    for declaration in [
+        "pub fn any<T>(",
+        "pub fn all<T>(",
+        "pub fn find<T>(",
+        "pub fn find_map<T, U>(",
+        "pub fn position<T>(",
+        "pub fn count<T>(",
+        "pub fn count_by<T>(",
+        "pub fn partition<T>(",
+        "pub fn reduce<T>(",
+    ] {
+        assert!(source.contains(declaration), "missing iterator consumer `{declaration}`");
+    }
+    for contract in [
+        "Stops at the first item accepted by `predicate`",
+        "stops at the first rejected item",
+        "Returns the first matching item",
+        "Skips null transform results",
+        "zero-based position",
+        "Counts a finite cursor",
+        "stable accepted and rejected lists",
+        "Reduces a nonempty finite cursor from left to right",
+    ] {
+        assert!(source.contains(contract), "missing iterator consumer contract `{contract}`");
+    }
+    let profile = reference_standard_profile_v1();
+    profile
+        .verify_source(path, source)
+        .expect("iterator consumer bytes match the captured standard profile");
+    let mut changed_source = source.clone();
+    changed_source.push_str("\n// changed after profile capture\n");
+    assert!(profile.verify_source(path, &changed_source).is_err());
+    let parsed = orna_syntax_v1::parse_module_with_file(source, path);
+    assert!(parsed.is_ok(), "{:#?}", parsed.diagnostics);
+    reference_standard_catalogue_v1()
+        .expect("iterator consumers resolve in the captured standard catalogue");
+}
+
+#[test]
+fn pinned_collection_adapters_are_included_and_typecheck() {
+    let sources = reference_standard_sources_v1();
+    let (index, (path, source)) = sources
+        .iter()
+        .enumerate()
+        .find(|(_, (path, _))| path == REFERENCE_STANDARD_COLLECTION_ADAPTERS_PATH_V1)
+        .expect("the pinned source bundle includes std.collection.adapters");
+    assert_eq!(index, 62, "collection adapters append without moving old sources");
+    assert_eq!(path, REFERENCE_STANDARD_COLLECTION_ADAPTERS_PATH_V1);
+    for declaration in [
+        "pub fn enumerate<T>(values: [T]): [(Int, T)]",
+        "pub fn map_indexed<T, U>(values: [T], transform: fn(Int, T): U): [U]",
+        "pub fn zip_with<T, U, V>(left: [T], right: [U], combine: fn(T, U): V): [V]",
+        "pub fn unzip<T, U>(pairs: [(T, U)]): ([T], [U])",
+    ] {
+        assert!(source.contains(declaration), "missing collection adapter `{declaration}`");
+    }
+    for contract in [
+        "zero-based source position",
+        "from left to right",
+        "stops at the shorter input",
+        "Splits pairs into parallel lists",
+    ] {
+        assert!(source.contains(contract), "missing collection adapter contract `{contract}`");
+    }
+    let profile = reference_standard_profile_v1();
+    profile
+        .verify_source(path, source)
+        .expect("collection adapter bytes match the captured standard profile");
+    let mut changed_source = source.clone();
+    changed_source.push_str("\n// changed after profile capture\n");
+    assert!(profile.verify_source(path, &changed_source).is_err());
+    let parsed = orna_syntax_v1::parse_module_with_file(source, path);
+    assert!(parsed.is_ok(), "{path}: {:#?}", parsed.diagnostics);
+    reference_standard_catalogue_v1()
+        .expect("collection adapters resolve in the captured standard catalogue");
+}
+
+#[test]
+fn pinned_lazy_sequence_adapters_are_included_and_typecheck() {
+    let sources = reference_standard_sources_v1();
+    let (index, (path, source)) = sources
+        .iter()
+        .enumerate()
+        .find(|(_, (path, _))| path == REFERENCE_STANDARD_LAZY_ADAPTERS_PATH_V1)
+        .expect("the pinned source bundle includes std.lazy.adapters");
+    assert_eq!(index, 63, "lazy adapters append without moving old sources");
+    assert_eq!(path, REFERENCE_STANDARD_LAZY_ADAPTERS_PATH_V1);
+    for declaration in [
+        "pub fn from_iterator<T>(source: std.iterator.Iterator<T>): fn(): std.iterator.Iterator<T>",
+        "pub fn from_list<T>(values: [T]): fn(): std.iterator.Iterator<T>",
+        "pub fn map<T, U>(",
+        "pub fn filter<T>(",
+        "pub fn flat_map<T, U>(",
+        "pub fn chain<T>(",
+        "pub fn zip_with<T, U, V>(",
+        "pub fn take<T>(",
+        "pub fn drop<T>(",
+        "pub fn collect<T>(source: fn(): std.iterator.Iterator<T>): fn(): [T]",
+    ] {
+        assert!(source.contains(declaration), "missing lazy sequence adapter `{declaration}`");
+    }
+    for contract in [
+        "Building a pipeline does not call its source thunk",
+        "cursor adapters run only when pulled",
+        "requires a finite cursor",
+        "infinite sources, bound with `take`",
+    ] {
+        assert!(source.contains(contract), "missing lazy sequence adapter contract `{contract}`");
+    }
+    let profile = reference_standard_profile_v1();
+    profile
+        .verify_source(path, source)
+        .expect("lazy adapter bytes match the captured standard profile");
+    let mut changed_source = source.clone();
+    changed_source.push_str("\n// changed after profile capture\n");
+    assert!(profile.verify_source(path, &changed_source).is_err());
+    let parsed = orna_syntax_v1::parse_module_with_file(source, path);
+    assert!(parsed.is_ok(), "{path}: {:#?}", parsed.diagnostics);
+    reference_standard_catalogue_v1()
+        .expect("lazy sequence adapters resolve in the captured standard catalogue");
+}
+
+#[test]
+fn pinned_stream_adapters_are_included_and_typecheck() {
+    let sources = reference_standard_sources_v1();
+    let (index, (path, source)) = sources
+        .iter()
+        .enumerate()
+        .find(|(_, (path, _))| path == REFERENCE_STANDARD_STREAM_ADAPTERS_PATH_V1)
+        .expect("the pinned source bundle includes std.stream.adapters");
+    assert_eq!(index, 64, "stream adapters append without moving old sources");
+    assert_eq!(path, REFERENCE_STANDARD_STREAM_ADAPTERS_PATH_V1);
+    for declaration in [
+        "pub fn from_iterator<T>(",
+        "pub fn from_sequence<T>(",
+        "pub fn from_iterator_batches<T>(",
+        "pub fn from_sequence_batches<T>(",
+        "pub fn buffered_batches<T>(",
+    ] {
+        assert!(source.contains(declaration), "missing stream adapter `{declaration}`");
+    }
+    for contract in [
+        "These helpers require finite",
+        "resulting list as a replayable stream source",
+        "Invoke a sequence factory once",
+        "final short batch is retained",
+        "Item order and the final short batch are preserved",
+    ] {
+        assert!(source.contains(contract), "missing stream adapter contract `{contract}`");
+    }
+    let profile = reference_standard_profile_v1();
+    profile
+        .verify_source(path, source)
+        .expect("stream adapter bytes match the captured standard profile");
+    let mut changed_source = source.clone();
+    changed_source.push_str("\n// changed after snapshot capture\n");
+    assert!(profile.verify_source(path, &changed_source).is_err());
+    let parsed = orna_syntax_v1::parse_module_with_file(source, path);
+    assert!(parsed.is_ok(), "{path}: {:#?}", parsed.diagnostics);
+    reference_standard_catalogue_v1()
+        .expect("stream adapters resolve in the captured standard catalogue");
 }
 
 #[test]
@@ -538,6 +715,50 @@ fn pinned_option_combinators_are_in_the_captured_snapshot() {
         .expect("option combinator source bytes are captured by the std profile");
     reference_standard_catalogue_v1()
         .expect("option combinators resolve in the captured standard catalogue");
+}
+
+#[test]
+fn pinned_result_combinators_are_in_the_captured_snapshot() {
+    let sources = reference_standard_sources_v1();
+    let (index, (path, source)) = sources
+        .iter()
+        .enumerate()
+        .find(|(_, (path, _))| path == REFERENCE_STANDARD_RESULT_PATH_V1)
+        .expect("the pinned source bundle includes std.result");
+    assert_eq!(index, 12, "the result module retains its source index");
+    for declaration in [
+        "pub fn and<T, U, E>(",
+        "pub fn or<T, E, F>(",
+        "pub fn contains<T, E>(",
+        "pub fn contains_error<T, E>(",
+        "pub fn zip<T, U, E>(",
+        "pub fn transpose<T, E>(result: Result<T?, E>): Result<T, E>?",
+    ] {
+        assert!(source.contains(declaration), "missing `{declaration}`");
+    }
+    for contract in [
+        "language failure raised by a callback",
+        "use `and_then` to construct `next` conditionally",
+        "computed only for the Err branch",
+        "first Err from left to right",
+        "empty option, or the error payload",
+    ] {
+        assert!(
+            source.contains(contract),
+            "missing result combinator contract `{contract}`"
+        );
+    }
+    let profile = reference_standard_profile_v1();
+    profile
+        .verify_source(path, source)
+        .expect("result combinator bytes match the captured standard profile");
+    let mut changed_source = source.clone();
+    changed_source.push_str("\n// changed after profile capture\n");
+    assert!(profile.verify_source(path, &changed_source).is_err());
+    let parsed = orna_syntax_v1::parse_module_with_file(source, path);
+    assert!(parsed.is_ok(), "{:#?}", parsed.diagnostics);
+    reference_standard_catalogue_v1()
+        .expect("result combinators resolve in the captured standard catalogue");
 }
 
 #[test]
@@ -1319,7 +1540,7 @@ fn reference_standard_uses_pinned_orna_1_source_and_resolves_its_imports() {
     ] {
         assert!(sources[33].1.contains(contract), "missing std.test contract `{contract}`");
     }
-    assert_eq!(sources.len(), 60);
+    assert_eq!(sources.len(), 65);
     assert_eq!(sources[49].0, REFERENCE_STANDARD_UI_PATH_V1);
     for declaration in [
         "pub fn Field<T>(label: Str, value: T): UI",
@@ -1781,7 +2002,7 @@ fn pinned_filesystem_effect_is_visible_to_consumers_and_forbidden_in_assertions(
 #[test]
 fn pinned_filesystem_path_and_metadata_modules_are_captured_and_typecheck() {
     let sources = reference_standard_sources_v1();
-    assert_eq!(sources.len(), 60);
+    assert_eq!(sources.len(), 65);
     for (index, path) in [
         (42, REFERENCE_STANDARD_IO_PATH_MODULE_PATH_V1),
         (43, REFERENCE_STANDARD_IO_METADATA_PATH_V1),
@@ -1845,7 +2066,7 @@ fn pinned_filesystem_path_and_metadata_modules_are_captured_and_typecheck() {
 #[test]
 fn pinned_io_buffer_module_is_captured_and_resolves_stream_adapters() {
     let sources = reference_standard_sources_v1();
-    assert_eq!(sources.len(), 60);
+    assert_eq!(sources.len(), 65);
     let (path, source) = sources
         .iter()
         .find(|(path, _)| path == REFERENCE_STANDARD_IO_BUFFER_PATH_V1)
@@ -1882,7 +2103,7 @@ fn pinned_io_buffer_module_is_captured_and_resolves_stream_adapters() {
 #[test]
 fn pinned_process_and_environment_modules_are_captured_and_typecheck() {
     let sources = reference_standard_sources_v1();
-    assert_eq!(sources.len(), 60);
+    assert_eq!(sources.len(), 65);
     for (index, path) in [
         (44, REFERENCE_STANDARD_IO_PROCESS_PATH_V1),
         (45, REFERENCE_STANDARD_IO_ENVIRONMENT_PATH_V1),
