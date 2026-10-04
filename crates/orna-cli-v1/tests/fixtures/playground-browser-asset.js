@@ -1,0 +1,1 @@
+globalThis.ornaPlaygroundReady = true;

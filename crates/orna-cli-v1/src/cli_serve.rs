@@ -4,6 +4,7 @@
 //! runtime evaluation through the live presentation transport.
 
 use super::*;
+use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 use orna_application_v1::{ApplicationLiveAdapter, LIVE_RUN_EVENTS_WATCH_SOURCE};
 use orna_live_v1::{
     HttpConnection, LiveHost, LiveSessionAuthority, LiveTransport, SessionMetadata,
@@ -325,9 +326,6 @@ fn host_route(root: &Path, identity: RuntimeIdentity, request: &Request) -> Resp
     if let Some(response) = git_transport_route(root, request) {
         return response;
     }
-    if let Some(response) = frontend_asset_route(request) {
-        return response;
-    }
     if let Some(response) = git_listing_route(root, identity, request) {
         return response;
     }
@@ -345,27 +343,6 @@ const MAX_LISTING_COMMITS: usize = 100;
 const MAX_LISTING_TREE_ENTRIES: usize = 10_000;
 const MAX_LISTING_FILE_BYTES: usize = 2 * 1024 * 1024;
 const LISTING_STYLE: &str = "<style>:root{--page-width:72ch;--text:#202122;--background:#fff;--link:#0645ad;--visited:#0b0080;--rule:#a2a9b1;--body-font:Georgia,'Times New Roman',serif;--code-font:ui-monospace,monospace}body{max-width:var(--page-width);margin:1.5rem auto;padding:0 1rem;color:var(--text);background:var(--background);font:1rem/1.5 var(--body-font)}a{color:var(--link)}a:visited{color:var(--visited)}pre,textarea{overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;font-family:var(--code-font)}textarea{box-sizing:border-box;width:100%}button{font:inherit}table{border-collapse:collapse}th,td{border:1px solid var(--rule);padding:.2rem .45rem;text-align:left;vertical-align:top}</style>";
-const PRESENTATION_MODULE: &str = include_str!("../../../playground/shared/presentation.mjs");
-const HOME_MODULE: &str = include_str!("serve_home.mjs");
-const PLAYGROUND_MODULE: &str = include_str!("serve_playground.mjs");
-
-fn frontend_asset_route(request: &Request) -> Option<Response> {
-    if request.method != "GET" {
-        return None;
-    }
-    let (content_type, content) = match request.path.as_str() {
-        "/assets/presentation.mjs" => ("text/javascript; charset=utf-8", PRESENTATION_MODULE),
-        "/assets/serve-home.mjs" => ("text/javascript; charset=utf-8", HOME_MODULE),
-        "/assets/serve-playground.mjs" => ("text/javascript; charset=utf-8", PLAYGROUND_MODULE),
-        _ => return None,
-    };
-    Some(Response::new(
-        200,
-        content_type,
-        content.as_bytes().to_vec(),
-    ))
-}
-
 /// Renderer-neutral data used by the simple Inspect-compatible HTML fallback.
 enum InspectionNode {
     Text(String),
@@ -437,8 +414,8 @@ fn commit_log_page(root: &Path, identity: RuntimeIdentity) -> Response {
     render_home_document(identity, &content)
 }
 
-const MAX_PLAYGROUND_ASSET_BYTES: usize = 2 * 1024 * 1024;
-const MAX_PLAYGROUND_ASSET_ROW_BYTES: usize = 4 * 1024 * 1024;
+const MAX_PLAYGROUND_ASSET_BYTES: usize = 8 * 1024 * 1024;
+const MAX_PLAYGROUND_ASSET_ROW_BYTES: usize = 16 * 1024 * 1024;
 const MAX_PLAYGROUND_EXAMPLE_BYTES: usize = 2 * 1024 * 1024;
 const MAX_PLAYGROUND_SAMPLE_BYTES: usize = 64 * 1024;
 const MAX_PLAYGROUND_FILE_EXAMPLES: usize = 100;
@@ -470,13 +447,15 @@ fn playground_asset(root: &Path, identity: RuntimeIdentity, request_path: &str) 
         Err(()) => return unavailable_response(),
     };
     if asset == "index.html" {
-        let mut page = content;
+        let Ok(mut page) = String::from_utf8(content) else {
+            return unavailable_response();
+        };
         if embed && !hide_embedded_page_header(&mut page) {
             return unavailable_response();
         }
         let database = format_uuid(identity.database_id);
         let bridge = format!(
-            "<section id=\"live-bridge\" data-database=\"{}\" hidden></section><section aria-labelledby=\"live-title\"><h2 id=\"live-title\">Live presentation</h2><p id=\"live-status\" role=\"status\" aria-live=\"polite\">Connecting to the database…</p><div id=\"live-presentation\"></div></section><script type=\"application/json\" id=\"run-events-source\">{}</script><script type=\"module\" src=\"/assets/serve-playground.mjs\"></script>",
+            "<section id=\"live-bridge\" data-database=\"{}\" hidden></section><section aria-labelledby=\"live-title\"><h2 id=\"live-title\">Live presentation</h2><p id=\"live-status\" role=\"status\" aria-live=\"polite\">Connecting to the database…</p><div id=\"live-presentation\"></div></section><script type=\"application/json\" id=\"run-events-source\">{}</script><script type=\"module\" src=\"/playground/assets/serve-playground.mjs\"></script>",
             html_escape(&database),
             json_string(LIVE_RUN_EVENTS_WATCH_SOURCE),
         );
@@ -496,7 +475,7 @@ fn playground_asset(root: &Path, identity: RuntimeIdentity, request_path: &str) 
         }
         return response;
     }
-    let mut response = Response::new(200, media_type, content.into_bytes());
+    let mut response = Response::new(200, media_type, content);
     response
         .headers
         .push(("X-Content-Type-Options".into(), "nosniff".into()));
@@ -531,7 +510,7 @@ fn read_playground_asset(
     requested_path: &str,
     record_path: &ManagedPath,
     expected_id: &str,
-) -> Result<Option<(&'static str, String)>, ()> {
+) -> Result<Option<(&'static str, Vec<u8>)>, ()> {
     let repository = Repository::discover(root).map_err(|_| ())?;
     let Some(commit) = repository.head().map_err(|_| ())? else {
         return Err(());
@@ -564,8 +543,15 @@ fn read_playground_asset(
         || !matches!(path.as_str(), "index.html") && !path.starts_with("assets/")
         || media_type != expected_media_type
         || media_type == "application/octet-stream"
-        || content.len() > MAX_PLAYGROUND_ASSET_BYTES
     {
+        return Err(());
+    }
+    let content = if media_type == "application/wasm" {
+        BASE64.decode(content.as_bytes()).map_err(|_| ())?
+    } else {
+        content.into_bytes()
+    };
+    if content.len() > MAX_PLAYGROUND_ASSET_BYTES {
         return Err(());
     }
     Ok(Some((expected_media_type, content)))
@@ -1255,7 +1241,7 @@ fn render_home_document(identity: RuntimeIdentity, content: &InspectionNode) -> 
         html_escape(&database)
     ));
     page.push_str(&format!(
-        "</main><script type=\"application/json\" id=\"run-events-source\">{}</script><script type=\"module\" src=\"/assets/serve-home.mjs\"></script></body></html>",
+        "</main><script type=\"application/json\" id=\"run-events-source\">{}</script><script type=\"module\" src=\"/playground/assets/serve-home.mjs\"></script></body></html>",
         json_string(LIVE_RUN_EVENTS_WATCH_SOURCE)
     ));
     Response::new(200, "text/html; charset=utf-8", page.into_bytes())
@@ -1911,19 +1897,11 @@ mod tests {
         assert!(home.contains("id=\"repl-source\""));
         assert!(home.contains("id=\"live-presentation\""));
         assert!(home.contains("id=\"run-events-source\""));
-        assert!(home.contains("src=\"/assets/serve-home.mjs\""));
+        assert!(home.contains("src=\"/playground/assets/serve-home.mjs\""));
         assert!(home.contains("orna/serve/run-events/v1"));
         assert!(!home.contains("new WebSocket(endpoint"));
         assert!(!home.contains("/api/query"));
         assert!(!home.contains("wasm"));
-        let runtime = listing_page(directory.path(), "/assets/presentation.mjs");
-        assert_eq!(runtime.status, 200);
-        assert_eq!(runtime.content_type, "text/javascript; charset=utf-8");
-        assert!(
-            String::from_utf8(runtime.body)
-                .expect("runtime module UTF-8")
-                .contains("class LivePresentation")
-        );
         let query = host_route(
             directory.path(),
             identity,
@@ -1946,6 +1924,14 @@ mod tests {
         const ASSET_INDEX: &str = include_str!("../tests/fixtures/playground-asset-index.orna");
         const ASSET_APP: &str = include_str!("../tests/fixtures/playground-asset-app.orna");
         const ASSET_STYLE: &str = include_str!("../tests/fixtures/playground-asset-style.orna");
+        const ASSET_PRESENTATION: &str =
+            include_str!("../tests/fixtures/playground-asset-presentation.orna");
+        const ASSET_HOME: &str = include_str!("../tests/fixtures/playground-asset-home.orna");
+        const ASSET_PLAYGROUND: &str =
+            include_str!("../tests/fixtures/playground-asset-playground.orna");
+        const ASSET_LSP_JS: &str = include_str!("../tests/fixtures/playground-asset-lsp-js.orna");
+        const ASSET_LSP_WASM: &str =
+            include_str!("../tests/fixtures/playground-asset-lsp-wasm.orna");
         const ASSET_UNCOMMITTED: &str =
             include_str!("../tests/fixtures/playground-asset-uncommitted.orna");
         const ASSET_STALE_INDEX: &str =
@@ -1982,6 +1968,28 @@ mod tests {
             ASSET_STYLE,
         )
         .expect("write database stylesheet asset");
+        for (id, source) in [
+            (
+                "6173736574732f70726573656e746174696f6e2e6d6a73",
+                ASSET_PRESENTATION,
+            ),
+            ("6173736574732f73657276652d686f6d652e6d6a73", ASSET_HOME),
+            (
+                "6173736574732f73657276652d706c617967726f756e642e6d6a73",
+                ASSET_PLAYGROUND,
+            ),
+            (
+                "6173736574732f6c73702d7761736d2f6f726e615f6c73702e6a73",
+                ASSET_LSP_JS,
+            ),
+            (
+                "6173736574732f6c73702d7761736d2f6f726e615f6c73705f62672e7761736d",
+                ASSET_LSP_WASM,
+            ),
+        ] {
+            std::fs::write(asset_directory.join(format!("asset-{id}.orna")), source)
+                .expect("write committed browser support asset");
+        }
         git_succeeds(
             directory.path(),
             &[
@@ -2061,15 +2069,32 @@ mod tests {
         assert!(page.contains("id=\"live-bridge\""));
         assert!(page.contains("id=\"live-presentation\""));
         assert!(page.contains("id=\"run-events-source\""));
-        assert!(page.contains("src=\"/assets/serve-playground.mjs\""));
+        assert!(page.contains("src=\"/playground/assets/serve-playground.mjs\""));
         assert!(page.contains("\\u0000orna/serve/run-events/v1"));
-        let runtime = listing_page(directory.path(), "/assets/serve-playground.mjs");
+        let runtime = listing_page(directory.path(), "/playground/assets/serve-playground.mjs");
         assert_eq!(runtime.status, 200);
         assert!(
             String::from_utf8(runtime.body)
                 .expect("playground runtime UTF-8")
                 .contains("globalThis.ornaPlaygroundRun")
         );
+        let presentation = listing_page(directory.path(), "/playground/assets/presentation.mjs");
+        assert_eq!(presentation.status, 200);
+        assert!(
+            String::from_utf8(presentation.body)
+                .unwrap()
+                .contains("LivePresentation")
+        );
+        let lsp_binding = listing_page(directory.path(), "/playground/assets/lsp-wasm/orna_lsp.js");
+        assert_eq!(lsp_binding.status, 200);
+        assert_eq!(lsp_binding.body, b"export default async function init() {}");
+        let lsp_wasm = listing_page(
+            directory.path(),
+            "/playground/assets/lsp-wasm/orna_lsp_bg.wasm",
+        );
+        assert_eq!(lsp_wasm.status, 200);
+        assert_eq!(lsp_wasm.content_type, "application/wasm");
+        assert_eq!(lsp_wasm.body, b"\0asm\x01\0\0\0");
         let embed = playground_asset(directory.path(), identity, "/playground/embed");
         assert_eq!(embed.status, 200);
         assert!(embed.headers.iter().any(|(name, value)| {
@@ -2160,15 +2185,34 @@ mod tests {
     fn playground_asset_records_match_the_declared_table_and_path_key() {
         const PLAYGROUND_SCHEMA: &str = include_str!("../tests/fixtures/playground-schema.orna");
         const ASSET_APP: &str = include_str!("../tests/fixtures/playground-asset-app.orna");
+        const ASSET_PRESENTATION: &str =
+            include_str!("../tests/fixtures/playground-asset-presentation.orna");
         const ASSET_STYLE: &str = include_str!("../tests/fixtures/playground-asset-style.orna");
 
         assert!(has_playground_asset_table(PLAYGROUND_SCHEMA));
+        let parsed_presentation = parse_row(ASSET_PRESENTATION);
+        assert!(
+            parsed_presentation.is_ok(),
+            "presentation asset row parse: {:#?}",
+            parsed_presentation.diagnostics
+        );
         assert_eq!(
             decode_playground_asset(ASSET_APP, "asset-6173736574732f6170702e6a73"),
             Some((
                 "assets/app.js".into(),
                 "text/javascript; charset=utf-8".into(),
                 "globalThis.ornaPlaygroundReady = true;".into(),
+            ))
+        );
+        assert_eq!(
+            decode_playground_asset(
+                ASSET_PRESENTATION,
+                "asset-6173736574732f70726573656e746174696f6e2e6d6a73"
+            ),
+            Some((
+                "assets/presentation.mjs".into(),
+                "text/javascript; charset=utf-8".into(),
+                "export class LivePresentation {}".into(),
             ))
         );
         assert_eq!(decode_playground_asset(ASSET_APP, "different-id"), None);
