@@ -144,6 +144,10 @@ const BASE: &str = include_str!("fixtures/merge-contact-base.orna");
 const LEFT: &str = include_str!("fixtures/merge-contact-left.orna");
 const RIGHT: &str = include_str!("fixtures/merge-contact-right.orna");
 const CONFLICT: &str = include_str!("fixtures/merge-contact-conflict.orna");
+const MULTI_TABLE_BASE_ONE: &str = include_str!("fixtures/merge-budget-table-one-base.orna");
+const MULTI_TABLE_EDIT_ONE: &str = include_str!("fixtures/merge-budget-table-one-edit.orna");
+const MULTI_TABLE_BASE_TWO: &str = include_str!("fixtures/merge-budget-table-two-base.orna");
+const MULTI_TABLE_EDIT_TWO: &str = include_str!("fixtures/merge-budget-table-two-edit.orna");
 const CHECKPOINT_POSITIONLESS: &str = include_str!("fixtures/merge-checkpoint-positionless.orna");
 const CHECKPOINT_POSITIONLESS_EDITED: &str = include_str!("fixtures/merge-checkpoint-positionless-edited.orna");
 const CHECKPOINT_BASE: &str = include_str!("fixtures/merge-checkpoint-base.orna");
@@ -13739,6 +13743,200 @@ fn row_delete_edit_reset_delete_update_tail_closes_at_shared_budgets() {
                 assert!(!report.affected_checkpoints.contains(trailing_id.as_slice()));
                 assert_eq!(source.visited.len(), 3);
             }
+        }
+    }
+}
+
+#[test]
+fn multi_table_row_conflicts_precede_checkpoint_resets_at_shared_budget() {
+    let reset_id = b"consumer/z-reset-versus-advance".to_vec();
+    let clean_delete_id = b"consumer/a-clean-delete".to_vec();
+    let unchanged_id = b"consumer/m-unchanged".to_vec();
+
+    let build_inputs = |delete_left: [bool; 2], reset_left: bool| {
+        let mut merge_schema = schema(true, FieldType::Str);
+        let mut second_table = merge_schema.tables[0].clone();
+        second_table.id = id(2);
+        second_table.name = "ContactArchive".into();
+        merge_schema.tables.push(second_table);
+
+        let mut base = ThreeWaySnapshot {
+            schema: merge_schema.clone(),
+            tables: BTreeMap::new(),
+            checkpoints: BTreeMap::new(),
+        };
+        let mut left = ThreeWaySnapshot {
+            schema: merge_schema.clone(),
+            tables: BTreeMap::new(),
+            checkpoints: BTreeMap::new(),
+        };
+        let mut right = ThreeWaySnapshot {
+            schema: merge_schema,
+            tables: BTreeMap::new(),
+            checkpoints: BTreeMap::new(),
+        };
+        let mut source = FixtureRows::default();
+
+        for (index, (table_number, base_source, edit_source)) in [
+            (1, MULTI_TABLE_BASE_ONE, MULTI_TABLE_EDIT_ONE),
+            (2, MULTI_TABLE_BASE_TWO, MULTI_TABLE_EDIT_TWO),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let table_id = id(table_number);
+            let mut base_row = parse_fixture(base_source, RowKeyKind::Explicit);
+            base_row.table = table_id.clone();
+            let mut edited_row = parse_fixture(edit_source, RowKeyKind::Explicit);
+            edited_row.table = table_id.clone();
+
+            let base_locator = format!("multi-budget-base-{table_number}");
+            let left_locator = format!("multi-budget-left-{table_number}");
+            let right_locator = format!("multi-budget-right-{table_number}");
+            base.tables.insert(
+                table_id.clone(),
+                manifest(10 + index as u8, 20 + index as u8, base_locator.as_bytes()),
+            );
+            left.tables.insert(
+                table_id.clone(),
+                manifest(30 + index as u8, 40 + index as u8, left_locator.as_bytes()),
+            );
+            right.tables.insert(
+                table_id,
+                manifest(50 + index as u8, 60 + index as u8, right_locator.as_bytes()),
+            );
+
+            source.add(MergeSide::Base, base_locator.as_bytes(), vec![base_row]);
+            source.add(
+                MergeSide::Left,
+                left_locator.as_bytes(),
+                if delete_left[index] { Vec::new() } else { vec![edited_row.clone()] },
+            );
+            source.add(
+                MergeSide::Right,
+                right_locator.as_bytes(),
+                if delete_left[index] { vec![edited_row] } else { Vec::new() },
+            );
+        }
+
+        base.checkpoints.insert(
+            clean_delete_id.clone(),
+            parse_checkpoint_fixture(CHECKPOINT_BASE),
+        );
+        right.checkpoints.insert(
+            clean_delete_id.clone(),
+            parse_checkpoint_fixture(CHECKPOINT_BASE),
+        );
+        base.checkpoints.insert(
+            unchanged_id.clone(),
+            parse_checkpoint_fixture(CHECKPOINT_POSITIONLESS),
+        );
+        left.checkpoints.insert(
+            unchanged_id.clone(),
+            parse_checkpoint_fixture(CHECKPOINT_POSITIONLESS),
+        );
+        right.checkpoints.insert(
+            unchanged_id.clone(),
+            parse_checkpoint_fixture(CHECKPOINT_POSITIONLESS),
+        );
+        base.checkpoints.insert(
+            reset_id.clone(),
+            parse_checkpoint_fixture(CHECKPOINT_POSITIONLESS),
+        );
+        if reset_left {
+            left.checkpoints.insert(reset_id.clone(), parse_checkpoint_fixture(CHECKPOINT_RESET));
+            right.checkpoints.insert(
+                reset_id.clone(),
+                parse_checkpoint_fixture(CHECKPOINT_POSITIONLESS_EDITED),
+            );
+        } else {
+            left.checkpoints.insert(
+                reset_id.clone(),
+                parse_checkpoint_fixture(CHECKPOINT_POSITIONLESS_EDITED),
+            );
+            right.checkpoints.insert(reset_id.clone(), parse_checkpoint_fixture(CHECKPOINT_RESET));
+        }
+        (base, left, right, source)
+    };
+
+    let expected_row = |table_number, key| BranchMergeConflict::Row {
+        range: KeyRange::all(),
+        conflict: RowMergeConflict::DeleteAndEdit { table: id(table_number), key: integer(key) },
+    };
+    let expected_reset = |reset_left| BranchMergeConflict::CheckpointConflict {
+        id: reset_id.clone(),
+        conflict: orna_evolution_v1::CheckpointMergeConflict {
+            base: Some(parse_checkpoint_fixture(CHECKPOINT_POSITIONLESS)),
+            left: Some(if reset_left {
+                parse_checkpoint_fixture(CHECKPOINT_RESET)
+            } else {
+                parse_checkpoint_fixture(CHECKPOINT_POSITIONLESS_EDITED)
+            }),
+            right: Some(if reset_left {
+                parse_checkpoint_fixture(CHECKPOINT_POSITIONLESS_EDITED)
+            } else {
+                parse_checkpoint_fixture(CHECKPOINT_RESET)
+            }),
+        },
+    };
+
+    for delete_left in [[true, true], [true, false], [false, true], [false, false]] {
+        for reset_left in [true, false] {
+            for max_conflicts in 0..=2 {
+                let (base, left, right, mut source) = build_inputs(delete_left, reset_left);
+                let error = merge_three_way_snapshots(
+                    &base,
+                    &left,
+                    &right,
+                    &mut source,
+                    BranchMergeBudget { max_rows_examined: 100, max_conflicts },
+                )
+                .unwrap_err();
+                let BranchMergeError::BudgetExceeded { report } = error else {
+                    panic!("the next row or checkpoint conflict crosses this detail budget")
+                };
+                assert_eq!(report.conflicts_lower_bound, max_conflicts + 1);
+                for table_number in 1..=2 {
+                    assert_eq!(
+                        report.affected_ranges.contains(&(id(table_number), KeyRange::all())),
+                        (table_number as usize) <= max_conflicts + 1,
+                        "budget {max_conflicts} must include table {table_number} in row order",
+                    );
+                }
+                assert_eq!(
+                    report.affected_checkpoints.contains(reset_id.as_slice()),
+                    max_conflicts == 2,
+                );
+                assert!(!report.affected_checkpoints.contains(clean_delete_id.as_slice()));
+                assert!(!report.affected_checkpoints.contains(unchanged_id.as_slice()));
+                assert_eq!(source.visited.len(), if max_conflicts == 0 { 3 } else { 6 });
+            }
+
+            let (base, left, right, mut source) = build_inputs(delete_left, reset_left);
+            let error = merge_three_way_snapshots(
+                &base,
+                &left,
+                &right,
+                &mut source,
+                BranchMergeBudget { max_rows_examined: 100, max_conflicts: 3 },
+            )
+            .unwrap_err();
+            let BranchMergeError::Conflicts { conflicts, report } = error else {
+                panic!("the exact budget closes over two table conflicts and one reset conflict")
+            };
+            assert_eq!(
+                conflicts,
+                vec![expected_row(1, 1), expected_row(2, 2), expected_reset(reset_left)],
+                "row conflicts follow table order before byte-sorted checkpoint IDs",
+            );
+            assert_eq!(report.conflicts_lower_bound, 3);
+            assert!(report.affected_ranges.contains(&(id(1), KeyRange::all())));
+            assert!(report.affected_ranges.contains(&(id(2), KeyRange::all())));
+            assert_eq!(report.affected_checkpoints.len(), 1);
+            assert!(report.affected_checkpoints.contains(reset_id.as_slice()));
+            assert!(!report.affected_checkpoints.contains(clean_delete_id.as_slice()));
+            assert!(!report.affected_checkpoints.contains(unchanged_id.as_slice()));
+            assert_eq!(source.visited.len(), 6);
         }
     }
 }
