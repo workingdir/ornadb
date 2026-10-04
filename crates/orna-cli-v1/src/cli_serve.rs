@@ -894,7 +894,10 @@ fn playground_examples(root: &Path) -> Response {
         examples.push(example);
     }
     examples.sort_by(|left, right| left["path"].as_str().cmp(&right["path"].as_str()));
-    match serde_json::to_vec(&serde_json::json!({ "examples": examples })) {
+    match serde_json::to_vec(&serde_json::json!({
+        "revision": commit.as_str(),
+        "examples": examples,
+    })) {
         Ok(body) => Response::new(200, "application/json", body),
         Err(_) => unavailable_response(),
     }
@@ -2409,6 +2412,9 @@ mod tests {
         assert_eq!(examples.status, 200);
         let examples: serde_json::Value =
             serde_json::from_slice(&examples.body).expect("example records JSON");
+        let revision = examples["revision"].as_str().expect("committed revision");
+        assert_eq!(revision.len(), 40);
+        assert!(revision.bytes().all(|byte| byte.is_ascii_hexdigit()));
         assert_eq!(examples["examples"].as_array().map(Vec::len), Some(2));
         let examples = examples["examples"].as_array().expect("example list");
         let sample = examples
@@ -2667,6 +2673,44 @@ mod tests {
             "pub table Theme(id: Int) { name: Str, css: Str }",
             "Theme"
         ));
+    }
+
+    #[test]
+    fn playground_example_catalog_rows_decode_for_asset_namespace() {
+        const ROUTE: &str =
+            include_str!("../tests/fixtures/playground-route-example-catalog-style.orna");
+        const ENTRY: &str =
+            include_str!("../tests/fixtures/playground-entry-example-catalog-style.orna");
+        const ASSET: &str =
+            include_str!("../tests/fixtures/playground-asset-example-catalog-style.orna");
+
+        let entry_id = "entry-asset-6173736574732f6578616d706c65732e637373";
+        let asset_id = "asset-6173736574732f6578616d706c65732e637373";
+        assert_eq!(
+            decode_playground_route(
+                ROUTE,
+                "route-2f706c617967726f756e642f6173736574732f6578616d706c65732e637373",
+            ),
+            Some(("/playground/assets/examples.css".into(), entry_id.into()))
+        );
+        assert_eq!(
+            decode_playground_entry(ENTRY, entry_id),
+            Some(("assets/examples.css".into(), PlaygroundEntryKind::Asset))
+        );
+        let parsed_asset = parse_row(ASSET);
+        assert!(
+            parsed_asset.is_ok(),
+            "catalog stylesheet row parse: {:#?}",
+            parsed_asset.diagnostics
+        );
+        assert_eq!(
+            decode_playground_asset(ASSET, asset_id),
+            Some((
+                "assets/examples.css".into(),
+                "text/css; charset=utf-8".into(),
+                "body { color: #202122; }".into(),
+            ))
+        );
     }
 
     #[test]

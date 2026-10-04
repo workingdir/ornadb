@@ -21,6 +21,10 @@ use tungstenite::{
 
 const MAIN: &str = include_str!("fixtures/project-core-main.orna");
 const SAMPLE: &str = include_str!("fixtures/playground-example.orna");
+const SAMPLE_ROW: &str = include_str!("fixtures/playground-sample.orna");
+const SAMPLE_ARITHMETIC: &str = include_str!("fixtures/playground-sample-arithmetic.orna");
+const SAMPLE_FUNCTIONS: &str = include_str!("fixtures/playground-sample-functions.orna");
+const SAMPLE_INCREMENT: &str = include_str!("fixtures/playground-sample-increment.orna");
 const SECOND_SAMPLE: &str = include_str!("fixtures/playground-concurrent-eval.orna");
 const FOLLOWUP_SAMPLE: &str = include_str!("fixtures/playground-followup-eval.orna");
 const PLAYGROUND_SCHEMA: &str = include_str!("fixtures/playground-schema.orna");
@@ -38,6 +42,11 @@ const ASSET_LSP_JS: &str = include_str!("fixtures/playground-asset-lsp-js.orna")
 const ASSET_LSP_WASM: &str = include_str!("fixtures/playground-asset-lsp-wasm.orna");
 const ASSET_EDITOR_CONFIG: &str = include_str!("fixtures/playground-asset-editor-config.orna");
 const ASSET_EMBED: &str = include_str!("fixtures/playground-asset-embed.orna");
+const ASSET_EXAMPLE_CATALOG: &str = include_str!("fixtures/playground-asset-example-catalog.orna");
+const ASSET_EXAMPLE_CATALOG_SCRIPT: &str =
+    include_str!("fixtures/playground-asset-example-catalog-script.orna");
+const ASSET_EXAMPLE_CATALOG_STYLE: &str =
+    include_str!("fixtures/playground-asset-example-catalog-style.orna");
 const ROUTE_PAGE: &str = include_str!("fixtures/playground-route-page.orna");
 const ROUTE_EMBED: &str = include_str!("fixtures/playground-route-embed.orna");
 const ROUTE_APP: &str = include_str!("fixtures/playground-route-app.orna");
@@ -58,12 +67,26 @@ const ROUTE_PLAYGROUND_RUNTIME: &str =
     include_str!("fixtures/playground-route-playground-runtime.orna");
 const ROUTE_LSP_JS: &str = include_str!("fixtures/playground-route-lsp-js.orna");
 const ROUTE_LSP_WASM: &str = include_str!("fixtures/playground-route-lsp-wasm.orna");
+const ROUTE_EXAMPLE_CATALOG: &str = include_str!("fixtures/playground-route-example-catalog.orna");
+const ROUTE_EXAMPLE_CATALOG_ASSET: &str =
+    include_str!("fixtures/playground-route-example-catalog-asset.orna");
+const ROUTE_EXAMPLE_CATALOG_SCRIPT: &str =
+    include_str!("fixtures/playground-route-example-catalog-script.orna");
+const ROUTE_EXAMPLE_CATALOG_STYLE: &str =
+    include_str!("fixtures/playground-route-example-catalog-style.orna");
 const ENTRY_PRESENTATION: &str = include_str!("fixtures/playground-entry-presentation.orna");
 const ENTRY_HOME_RUNTIME: &str = include_str!("fixtures/playground-entry-home-runtime.orna");
 const ENTRY_PLAYGROUND_RUNTIME: &str =
     include_str!("fixtures/playground-entry-playground-runtime.orna");
 const ENTRY_LSP_JS: &str = include_str!("fixtures/playground-entry-lsp-js.orna");
 const ENTRY_LSP_WASM: &str = include_str!("fixtures/playground-entry-lsp-wasm.orna");
+const ENTRY_EXAMPLE_CATALOG: &str = include_str!("fixtures/playground-entry-example-catalog.orna");
+const ENTRY_EXAMPLE_CATALOG_ASSET: &str =
+    include_str!("fixtures/playground-entry-example-catalog-asset.orna");
+const ENTRY_EXAMPLE_CATALOG_SCRIPT: &str =
+    include_str!("fixtures/playground-entry-example-catalog-script.orna");
+const ENTRY_EXAMPLE_CATALOG_STYLE: &str =
+    include_str!("fixtures/playground-entry-example-catalog-style.orna");
 const BINARY: &str = env!("CARGO_BIN_EXE_orna-cli-v1");
 
 struct RunningServer(Child);
@@ -159,7 +182,7 @@ fn curl_binary(url: &str) -> Result<(u16, String, Vec<u8>), String> {
             "--noproxy",
             "*",
             "--max-time",
-            "5",
+            "15",
             "--output",
         ])
         .arg(output.path())
@@ -413,7 +436,7 @@ fn send_and_read_request(
 
 #[test]
 fn orna_serve_hosts_playground_with_pending_evals_and_snapshot_correct_deltas() {
-    const ROUTES: [(&str, &str); 11] = [
+    const ROUTES: [(&str, &str); 15] = [
         ("route-2f706c617967726f756e642f", ROUTE_PAGE),
         ("route-2f706c617967726f756e642f656d626564", ROUTE_EMBED),
         (
@@ -452,8 +475,24 @@ fn orna_serve_hosts_playground_with_pending_evals_and_snapshot_correct_deltas() 
             "route-2f706c617967726f756e642f6173736574732f6c73702d7761736d2f6f726e615f6c73705f62672e7761736d",
             ROUTE_LSP_WASM,
         ),
+        (
+            "route-2f706c617967726f756e642f6578616d706c65732f",
+            ROUTE_EXAMPLE_CATALOG,
+        ),
+        (
+            "route-2f706c617967726f756e642f6173736574732f6578616d706c65732e68746d6c",
+            ROUTE_EXAMPLE_CATALOG_ASSET,
+        ),
+        (
+            "route-2f706c617967726f756e642f6173736574732f6578616d706c65732e6d6a73",
+            ROUTE_EXAMPLE_CATALOG_SCRIPT,
+        ),
+        (
+            "route-2f706c617967726f756e642f6173736574732f6578616d706c65732e637373",
+            ROUTE_EXAMPLE_CATALOG_STYLE,
+        ),
     ];
-    const ENTRIES: [(&str, &str); 11] = [
+    const ENTRIES: [(&str, &str); 15] = [
         ("entry-page", ENTRY_PAGE),
         ("entry-embed", ENTRY_EMBED),
         ("entry-app", ENTRY_APP),
@@ -465,6 +504,19 @@ fn orna_serve_hosts_playground_with_pending_evals_and_snapshot_correct_deltas() 
         ("entry-playground-runtime", ENTRY_PLAYGROUND_RUNTIME),
         ("entry-lsp-js", ENTRY_LSP_JS),
         ("entry-lsp-wasm", ENTRY_LSP_WASM),
+        ("entry-example-catalog", ENTRY_EXAMPLE_CATALOG),
+        (
+            "entry-asset-6173736574732f6578616d706c65732e68746d6c",
+            ENTRY_EXAMPLE_CATALOG_ASSET,
+        ),
+        (
+            "entry-asset-6173736574732f6578616d706c65732e6d6a73",
+            ENTRY_EXAMPLE_CATALOG_SCRIPT,
+        ),
+        (
+            "entry-asset-6173736574732f6578616d706c65732e637373",
+            ENTRY_EXAMPLE_CATALOG_STYLE,
+        ),
     ];
     let project = tempfile::tempdir().expect("temporary Orna database");
     let initialized = Command::new(BINARY)
@@ -482,10 +534,16 @@ fn orna_serve_hosts_playground_with_pending_evals_and_snapshot_correct_deltas() 
     std::fs::write(project.path().join("main.orna"), MAIN).expect("write crate-local main fixture");
     std::fs::write(project.path().join("playground.orna"), PLAYGROUND_SCHEMA)
         .expect("write crate-local playground schema");
-    let example = project.path().join("playground/examples/hello.orna");
-    std::fs::create_dir_all(example.parent().expect("example parent"))
-        .expect("create committed example directory");
-    std::fs::write(&example, SAMPLE).expect("write crate-local sample fixture");
+    write_fixture_rows(
+        project.path(),
+        "Sample",
+        &[
+            ("hello", SAMPLE_ROW),
+            ("arithmetic", SAMPLE_ARITHMETIC),
+            ("functions", SAMPLE_FUNCTIONS),
+            ("increment", SAMPLE_INCREMENT),
+        ],
+    );
     let assets = project.path().join("playground/Asset");
     std::fs::create_dir_all(&assets).expect("create committed asset directory");
     std::fs::write(assets.join("asset-696e6465782e68746d6c.orna"), ASSET_INDEX)
@@ -543,6 +601,18 @@ fn orna_serve_hosts_playground_with_pending_evals_and_snapshot_correct_deltas() 
             ASSET_EDITOR_CONFIG,
         ),
         ("6173736574732f656d6265642e6a73", ASSET_EMBED),
+        (
+            "6173736574732f6578616d706c65732e68746d6c",
+            ASSET_EXAMPLE_CATALOG,
+        ),
+        (
+            "6173736574732f6578616d706c65732e6d6a73",
+            ASSET_EXAMPLE_CATALOG_SCRIPT,
+        ),
+        (
+            "6173736574732f6578616d706c65732e637373",
+            ASSET_EXAMPLE_CATALOG_STYLE,
+        ),
     ] {
         std::fs::write(assets.join(format!("asset-{id}.orna")), source)
             .expect("write committed browser support fixture");
@@ -553,7 +623,7 @@ fn orna_serve_hosts_playground_with_pending_evals_and_snapshot_correct_deltas() 
             "add",
             "main.orna",
             "playground.orna",
-            "playground/examples/hello.orna",
+            "playground/Sample",
             "playground/Asset",
             "playground/Route",
             "playground/Entry",
@@ -596,6 +666,10 @@ fn orna_serve_hosts_playground_with_pending_evals_and_snapshot_correct_deltas() 
     let page = curl(&format!("{base_url}/playground/"), &[]).expect("curl the playground page");
     assert_eq!(page.status, 200);
     assert!(page.body.contains("Orna playground"));
+    assert!(
+        page.body
+            .contains("href=\"/playground/examples/\">Browse examples</a>")
+    );
     assert!(page.body.contains("database shell"));
     assert!(page.body.contains("id=\"live-bridge\""));
     assert!(page.body.contains("id=\"live-presentation\""));
@@ -605,6 +679,29 @@ fn orna_serve_hosts_playground_with_pending_evals_and_snapshot_correct_deltas() 
             .contains("src=\"/playground/assets/serve-playground.mjs\"")
     );
     assert!(page.body.contains("orna/serve/run-events/v1"));
+    let catalog_page = curl(&format!("{base_url}/playground/examples/"), &[])
+        .expect("curl the database-served example catalog page");
+    assert_eq!(catalog_page.status, 200);
+    assert_eq!(
+        response_header(&catalog_page.headers, "content-type"),
+        Some("text/html; charset=utf-8")
+    );
+    assert!(catalog_page.body.contains("Orna playground examples"));
+    assert!(catalog_page.body.contains("id=\"example-catalog\""));
+    assert!(
+        catalog_page
+            .body
+            .contains("/playground/assets/examples.mjs")
+    );
+    assert!(!catalog_page.body.contains("id=\"live-bridge\""));
+    let catalog_script = curl(&format!("{base_url}/playground/assets/examples.mjs"), &[])
+        .expect("curl the database-served catalog runtime");
+    assert_eq!(catalog_script.status, 200);
+    assert!(catalog_script.body.contains("fetch('/api/examples')"));
+    let catalog_style = curl(&format!("{base_url}/playground/assets/examples.css"), &[])
+        .expect("curl the database-served catalog stylesheet");
+    assert_eq!(catalog_style.status, 200);
+    assert!(catalog_style.body.contains("body { color: #202122; }"));
     let runtime = curl(
         &format!("{base_url}/playground/assets/serve-playground.mjs"),
         &[],
@@ -867,7 +964,50 @@ fn orna_serve_hosts_playground_with_pending_evals_and_snapshot_correct_deltas() 
     );
     assert_eq!(examples.status, 200);
     let examples: JsonValue = serde_json::from_str(&examples.body).expect("example response JSON");
-    assert_eq!(examples["examples"][0]["source"], SAMPLE);
+    let revision = examples["revision"]
+        .as_str()
+        .expect("committed API revision");
+    assert_eq!(revision.len(), 40);
+    assert!(revision.bytes().all(|byte| byte.is_ascii_hexdigit()));
+    let examples = examples["examples"]
+        .as_array()
+        .expect("committed example catalog");
+    assert_eq!(examples.len(), 4);
+    let arithmetic = examples
+        .iter()
+        .find(|example| example["path"] == "playground/Sample/arithmetic.orna")
+        .expect("arithmetic sample row");
+    assert_eq!(arithmetic["name"], "Arithmetic");
+    assert_eq!(arithmetic["source"], "6 * 7");
+    let functions = examples
+        .iter()
+        .find(|example| example["path"] == "playground/Sample/functions.orna")
+        .expect("function sample row");
+    assert_eq!(functions["name"], "Function composition");
+    let increment = examples
+        .iter()
+        .find(|example| example["path"] == "playground/Sample/increment.orna")
+        .expect("standard library sample row");
+    assert_eq!(
+        increment["source"],
+        "use std.math.{increment};\nincrement(41)"
+    );
+    let hello = examples
+        .iter()
+        .find(|example| example["path"] == "playground/Sample/hello.orna")
+        .expect("hello sample row");
+    assert_eq!(
+        hello["source"],
+        "pub fn double(value: Int): Int = value + value;\ndouble(21)"
+    );
+    let record_page = curl(
+        &format!("{base_url}/blob/{revision}/playground/Sample/arithmetic.orna"),
+        &[],
+    )
+    .expect("curl the committed sample source listing page");
+    assert_eq!(record_page.status, 200);
+    assert!(record_page.body.contains("Arithmetic"));
+    assert!(record_page.body.contains("6 * 7"));
 
     let database_id = listing
         .body

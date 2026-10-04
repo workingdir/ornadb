@@ -6,11 +6,12 @@ script, copies the generated language configuration, and writes the built
 HTML, CSS, JavaScript, worker, WebAssembly, and JSON files as
 `playground.Asset` rows. The shared live modules are also stored as Asset
 rows. It generates `playground.Entry` records and exact `playground.Route`
-records for the shell, embed page, and each asset. Commit those generated rows
-with the source changes. `orna serve` resolves requests through the selected
-database's committed Route, Entry, and Asset rows; it does not serve `dist/`
-from the filesystem. Each request uses one committed snapshot, so route,
-entry, and asset changes are visible without restarting `orna serve`.
+records for the shell, embed page, example catalog, and each asset. Commit
+those generated rows with the source changes. `orna serve` resolves requests
+through the selected database's committed Route, Entry, and Asset rows; it
+does not serve `dist/` from the filesystem. Each request uses one committed
+snapshot, so route, entry, and asset changes are visible without restarting
+`orna serve`.
 
 The wiki-basic theme and responsive layout live in separate `playground.Theme`
 and `playground.Layout` records. `npm run build` writes those rows along with
@@ -24,8 +25,10 @@ The editor loads its Monaco language configuration from
 `orna-syntax-v1` from the same lexer used by the server. Monaco's worker uses
 the database-served Orna LSP WebAssembly package for standard-library
 completion and hover, signature help, and diagnostics. The page loads committed
-files from `playground/examples` and rows from `playground.Sample` through
-`/api/examples`. Use the example selector's arrow, Home/End, Page Up/Down, or
+rows from `playground.Sample` through `/api/examples`. Browse them at
+`/playground/examples/`; the database-served catalog shows each source and
+links to its committed record page. “Open in editor” selects that record in
+the shell. Use the example selector's arrow, Home/End, Page Up/Down, or
 type-to-select behavior to move through the feed. Run requests go to the same
 clone's authenticated `orna.present.v1` session, where the server's Orna
 runtime evaluates the source.

@@ -3,7 +3,7 @@ import EditorWorker from 'monaco-editor/esm/vs/editor/editor.worker.js?worker';
 import '../node_modules/monaco-editor/min/vs/editor/editor.main.css';
 import { loadOrnaEditorConfig, registerOrnaLanguage } from './language';
 import { completionRankingFields, hoverMarkdown, signatureHelpFields } from './assist-adapter';
-import { exampleIndexForKey, isExample } from './example-feed';
+import { exampleIndexForKey, exampleIndexForPath, isExample } from './example-feed';
 import { formatRunResult, formatThrownError, type RunResult } from './results';
 import { servedRuntime } from './runtime';
 import { startStyleReload } from './style-reload';
@@ -324,7 +324,8 @@ async function loadExamples(): Promise<void> {
       examplesSelect.append(option);
     }
     examplesSelect.disabled = false;
-    examplesSelect.selectedIndex = 0;
+    const requestedExample = new URLSearchParams(window.location.search).get('example');
+    examplesSelect.selectedIndex = exampleIndexForPath(examples, requestedExample);
     loadSelectedExample();
     editorStatus.textContent = `${examples.length} committed ${examples.length === 1 ? 'example' : 'examples'} loaded.`;
     examplesReady = true;
