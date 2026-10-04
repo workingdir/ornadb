@@ -703,7 +703,7 @@ async fn binary_run_reads_both_publication_relations_from_runtime_state() {
     let directory = tempfile::tempdir().expect("project directory");
     std::fs::write(
         directory.path().join("main.orna"),
-        include_str!("../../orna-runtime-v1/tests/fixtures/publication_metadata.orna"),
+        include_str!("fixtures/publication_metadata.orna"),
     )
         .expect("publication metadata fixture");
     initialize_project(directory.path());
