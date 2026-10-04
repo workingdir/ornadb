@@ -38,6 +38,8 @@ const DOCUMENT_HIGHLIGHT_CODE_LENS_SOURCE: &str =
 const TYPE_HIERARCHY_PROVIDER_SOURCE: &str =
     include_str!("fixtures/type-hierarchy-provider-v1.orna");
 const TYPE_HIERARCHY_CALLER_SOURCE: &str = include_str!("fixtures/type-hierarchy-caller-v1.orna");
+const INLINE_VALUE_LINKED_EDITING_SOURCE: &str =
+    include_str!("fixtures/inline-value-linked-editing-v1.orna");
 
 struct Client {
     child: Child,
@@ -144,6 +146,8 @@ fn initialize(client: &mut Client) {
         result["capabilities"]["codeLensProvider"]["resolveProvider"],
         false
     );
+    assert!(result["capabilities"]["inlineValueProvider"].is_object());
+    assert_eq!(result["capabilities"]["linkedEditingRangeProvider"], true);
     assert!(result["capabilities"]["typeHierarchyProvider"].is_object());
     assert_eq!(result["capabilities"]["monikerProvider"], true);
     assert_eq!(
@@ -1623,6 +1627,199 @@ fn syntax_v1_semantic_tokens_and_inlay_hints_follow_scope_and_requested_range() 
         &shadow_hints,
         "LSP protocol",
     );
+    client.shutdown();
+}
+
+#[test]
+fn inline_values_follow_stopped_scope_and_requested_ranges() {
+    let uri = "file:///workspace/inline-value-linked-editing-v1.orna";
+    let mut client = Client::spawn();
+    initialize(&mut client);
+    let diagnostics = open(&mut client, uri, INLINE_VALUE_LINKED_EDITING_SOURCE);
+    assert!(
+        diagnostics["diagnostics"].as_array().unwrap().is_empty(),
+        "{diagnostics}"
+    );
+
+    let copied_use = INLINE_VALUE_LINKED_EDITING_SOURCE
+        .find("copied\n    }")
+        .unwrap();
+    let stopped = range_at(
+        INLINE_VALUE_LINKED_EDITING_SOURCE,
+        copied_use,
+        copied_use + "copied".len(),
+    );
+    let all = client.request(
+        "textDocument/inlineValue",
+        json!({
+            "textDocument":{"uri":uri},
+            "range":range_at(INLINE_VALUE_LINKED_EDITING_SOURCE, 0, INLINE_VALUE_LINKED_EDITING_SOURCE.len()),
+            "context":{"frameId":7,"stoppedLocation":stopped}
+        }),
+    );
+    let all = all.as_array().unwrap();
+    assert_eq!(
+        all.iter()
+            .map(|value| value["variableName"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["input", "copied"]
+    );
+    let copied_initializer = INLINE_VALUE_LINKED_EDITING_SOURCE
+        .find("let copied: Int = input")
+        .unwrap()
+        + "let copied: Int = ".len();
+    assert_eq!(
+        all[0]["range"],
+        range_at(
+            INLINE_VALUE_LINKED_EDITING_SOURCE,
+            copied_initializer,
+            copied_initializer + "input".len()
+        )
+    );
+    assert_eq!(all[0]["caseSensitiveLookup"], false);
+    assert_eq!(
+        all[1]["range"],
+        range_at(
+            INLINE_VALUE_LINKED_EDITING_SOURCE,
+            copied_use,
+            copied_use + "copied".len()
+        )
+    );
+
+    let clipped = client.request(
+        "textDocument/inlineValue",
+        json!({
+            "textDocument":{"uri":uri},
+            "range":stopped,
+            "context":{"frameId":7,"stoppedLocation":stopped}
+        }),
+    );
+    assert_eq!(
+        clipped
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|value| value["variableName"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["copied"]
+    );
+
+    let shadow_use = INLINE_VALUE_LINKED_EDITING_SOURCE.rfind("input").unwrap();
+    let shadow_stop = range_at(
+        INLINE_VALUE_LINKED_EDITING_SOURCE,
+        shadow_use,
+        shadow_use + "input".len(),
+    );
+    let shadow = client.request(
+        "textDocument/inlineValue",
+        json!({
+            "textDocument":{"uri":uri},
+            "range":range_at(INLINE_VALUE_LINKED_EDITING_SOURCE, 0, INLINE_VALUE_LINKED_EDITING_SOURCE.len()),
+            "context":{"frameId":7,"stoppedLocation":shadow_stop}
+        }),
+    );
+    assert_eq!(shadow.as_array().unwrap().len(), 1, "{shadow}");
+    assert_eq!(shadow[0]["variableName"], "input");
+    assert_eq!(shadow[0]["range"], shadow_stop);
+
+    let comment_end = INLINE_VALUE_LINKED_EDITING_SOURCE.find('\n').unwrap();
+    let comment_range = range_at(INLINE_VALUE_LINKED_EDITING_SOURCE, 0, comment_end);
+    let empty = client.request(
+        "textDocument/inlineValue",
+        json!({
+            "textDocument":{"uri":uri},
+            "range":comment_range,
+            "context":{"frameId":7,"stoppedLocation":comment_range}
+        }),
+    );
+    assert_eq!(empty, json!([]));
+    client.shutdown();
+}
+
+#[test]
+fn linked_editing_tracks_exact_local_bindings_and_excludes_shadowed_names() {
+    let uri = "file:///workspace/inline-value-linked-editing-v1.orna";
+    let mut client = Client::spawn();
+    initialize(&mut client);
+    let diagnostics = open(&mut client, uri, INLINE_VALUE_LINKED_EDITING_SOURCE);
+    assert!(
+        diagnostics["diagnostics"].as_array().unwrap().is_empty(),
+        "{diagnostics}"
+    );
+
+    let inner_declaration = INLINE_VALUE_LINKED_EDITING_SOURCE
+        .find("let input")
+        .unwrap()
+        + "let ".len();
+    let inner_use = INLINE_VALUE_LINKED_EDITING_SOURCE.rfind("input").unwrap();
+    let inner = client.request(
+        "textDocument/linkedEditingRange",
+        json!({
+            "textDocument":{"uri":uri},
+            "position":position_at(INLINE_VALUE_LINKED_EDITING_SOURCE, inner_declaration)
+        }),
+    );
+    assert_eq!(
+        inner["ranges"],
+        json!([
+            range_at(
+                INLINE_VALUE_LINKED_EDITING_SOURCE,
+                inner_declaration,
+                inner_declaration + "input".len()
+            ),
+            range_at(
+                INLINE_VALUE_LINKED_EDITING_SOURCE,
+                inner_use,
+                inner_use + "input".len()
+            )
+        ])
+    );
+    assert!(inner["wordPattern"].is_null());
+
+    let outer_declaration = INLINE_VALUE_LINKED_EDITING_SOURCE
+        .find("shadow(input")
+        .unwrap()
+        + "shadow(".len();
+    let outer = client.request(
+        "textDocument/linkedEditingRange",
+        json!({
+            "textDocument":{"uri":uri},
+            "position":position_at(INLINE_VALUE_LINKED_EDITING_SOURCE, outer_declaration)
+        }),
+    );
+    let outer_ranges = outer["ranges"].as_array().unwrap();
+    let expected_outer_ranges = [
+        outer_declaration,
+        INLINE_VALUE_LINKED_EDITING_SOURCE.find("if input").unwrap() + "if ".len(),
+        INLINE_VALUE_LINKED_EDITING_SOURCE
+            .find("let copied: Int = input")
+            .unwrap()
+            + "let copied: Int = ".len(),
+        INLINE_VALUE_LINKED_EDITING_SOURCE
+            .find("let input: Int = input")
+            .unwrap()
+            + "let input: Int = ".len(),
+    ];
+    assert_eq!(outer_ranges.len(), expected_outer_ranges.len(), "{outer}");
+    for (range, start) in outer_ranges.iter().zip(expected_outer_ranges) {
+        assert_eq!(
+            range,
+            &range_at(
+                INLINE_VALUE_LINKED_EDITING_SOURCE,
+                start,
+                start + "input".len()
+            )
+        );
+    }
+
+    let lone_declaration = client.request(
+        "textDocument/linkedEditingRange",
+        json!({
+            "textDocument":{"uri":uri},
+            "position":position_of(INLINE_VALUE_LINKED_EDITING_SOURCE, "total", 1)
+        }),
+    );
+    assert_eq!(lone_declaration, Value::Null);
     client.shutdown();
 }
 
