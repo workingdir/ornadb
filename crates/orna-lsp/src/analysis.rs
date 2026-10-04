@@ -1,17 +1,17 @@
 //! Editor analysis built exclusively on the frozen Orna 1.0 syntax tree.
 #![allow(deprecated)] // lsp-types 0.97 still requires DocumentSymbol::deprecated.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 
 use lsp_types::{
     CompletionContext, CompletionItem, CompletionItemKind, Diagnostic,
-    DiagnosticRelatedInformation, DiagnosticSeverity, DocumentSymbol, Hover, Location,
-    MarkupContent, MarkupKind, NumberOrString, ParameterInformation, ParameterLabel, Position,
-    SignatureHelp, SignatureInformation, SymbolKind,
+    DiagnosticRelatedInformation, DiagnosticSeverity, DocumentLink, DocumentSymbol, Hover,
+    Location, MarkupContent, MarkupKind, NumberOrString, ParameterInformation, ParameterLabel,
+    Position, SignatureHelp, SignatureInformation, SymbolKind, Uri,
 };
 use orna_syntax_v1::{
-    Argument, Declaration, Expr, Item, Keyword, Parse, Statement, SyntaxSpan as SourceSpan,
-    SyntaxTree, Token, TokenKind, TypeExpr, lex, parse_module_with_file,
+    Argument, Declaration, Expr, ImportSegment, Item, Keyword, Parse, Statement,
+    SyntaxSpan as SourceSpan, SyntaxTree, Token, TokenKind, TypeExpr, lex, parse_module_with_file,
 };
 
 use crate::documents::{Document, PositionMapper};
@@ -65,6 +65,88 @@ pub fn check_document(document: &Document, mapper: &PositionMapper<'_>) -> Vec<D
             }
         })
         .collect()
+}
+
+/// Links explicit imports to a single matching open module document.
+///
+/// The parser supplies exact byte spans for the import path. Resolution is
+/// intentionally limited to open `.orna` documents: a missing or ambiguous
+/// target is left unlinked instead of guessing between the loader's flat-file
+/// and directory-module layouts.
+pub(crate) fn document_links(
+    document: &Document,
+    open_documents: &HashMap<Uri, Document>,
+) -> Vec<DocumentLink> {
+    if !document.uri.as_str().ends_with(".orna") {
+        return Vec::new();
+    }
+
+    let parse = parse_document(document);
+    if !parse.diagnostics.is_empty() {
+        return Vec::new();
+    }
+
+    let mapper = PositionMapper::new(&document.text);
+    parse
+        .value
+        .items
+        .iter()
+        .filter_map(|item| {
+            let Declaration::Use { path, .. } = &item.declaration else {
+                return None;
+            };
+            let first = path.first()?;
+            if matches!(first.name.as_str(), "std" | "sys") {
+                return None;
+            }
+            let last = path.last()?;
+            let module = path
+                .iter()
+                .map(|segment| segment.name.as_str())
+                .collect::<Vec<_>>()
+                .join(".");
+            let target = matching_open_module(document, path, open_documents)?;
+            Some(DocumentLink {
+                range: mapper.range(&SourceSpan {
+                    start: first.span.start,
+                    end: last.span.end,
+                }),
+                target: Some(target),
+                tooltip: Some(format!("Open module `{module}`")),
+                data: None,
+            })
+        })
+        .collect()
+}
+
+fn matching_open_module(
+    source: &Document,
+    path: &[ImportSegment],
+    open_documents: &HashMap<Uri, Document>,
+) -> Option<Uri> {
+    let module_path = path
+        .iter()
+        .map(|segment| segment.name.as_str())
+        .collect::<Vec<_>>()
+        .join("/");
+    let flat_suffix = format!("/{module_path}.orna");
+    let directory_suffix = format!("/{module_path}/main.orna");
+    let mut matching_target = None;
+
+    for uri in open_documents.keys() {
+        if uri == &source.uri {
+            continue;
+        }
+        let uri_path = uri.as_str().split(['?', '#']).next().unwrap_or_default();
+        if uri_path.ends_with(&flat_suffix) || uri_path.ends_with(&directory_suffix) {
+            if matching_target.is_some() {
+                return None;
+            }
+            matching_target = Some(uri.clone());
+        }
+    }
+
+    matching_target
 }
 
 pub fn parse_document(document: &Document) -> EditorParse {
