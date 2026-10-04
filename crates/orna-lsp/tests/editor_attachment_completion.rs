@@ -15,6 +15,17 @@ const SOURCE: &str = include_str!("fixtures/ji3t0-lsp-v1.orna");
 const PROVIDER_SOURCE: &str = include_str!("fixtures/expressions-v1.orna");
 
 #[test]
+fn attachment_input_matches_its_crate_local_fixture() {
+    let fixture = repo_root().join("crates/orna-lsp/tests/fixtures/ji3t0-lsp-v1.orna");
+    assert_eq!(
+        fs::read_to_string(&fixture).expect("read editor attachment fixture"),
+        SOURCE
+    );
+    assert!(SOURCE.contains("/// Add two integer values."));
+    assert!(SOURCE.contains("pub fn add(left: Int, right: Int): Int"));
+}
+
+#[test]
 fn vim_lsp_attaches_and_exposes_syntax_v1_completion() {
     assert_v1_attachment_fixture();
     let Some(vim) = executable("ORNA_TEST_VIM", "vim") else {
