@@ -166,3 +166,102 @@ test('isolates watched presentations and resolves explicit refreshes from a fres
   assert.equal(live.presentation.current.revision, 1n);
   live.dispose();
 });
+
+test('reconciles typed deltas and resync independently across live sessions', async () => {
+  const sessionIds = [
+    '02020202-0202-0202-0202-020202020202',
+    '03030303-0303-0303-0303-030303030303',
+  ];
+  const fetcher = async (_url, options) => {
+    if (options.method === 'DELETE') return { ok: true };
+    const session = sessionIds.shift();
+    return {
+      ok: true,
+      async json() {
+        return {
+          session,
+          database: DATABASE,
+          resume_token: 'c'.repeat(43),
+          websocket_path: `/orna/live/${session}`,
+        };
+      },
+    };
+  };
+  const makeSession = () => new LiveSession(DATABASE, {
+    pageUrl: 'http://127.0.0.1:8756/playground/',
+    fetcher,
+    WebSocketConstructor: FakeSocket,
+  });
+  const first = makeSession();
+  await first.connect();
+  const firstSocket = FakeSocket.latest;
+  const second = makeSession();
+  await second.connect();
+  const secondSocket = FakeSocket.latest;
+
+  const firstPending = first.watch('customer');
+  const firstWatchRequest = decodeEnvelope(firstSocket.sent[0]);
+  const secondPending = second.watch('customer');
+  const secondWatchRequest = decodeEnvelope(secondSocket.sent[0]);
+  const firstWatch = new Uint8Array(16).fill(7);
+  const secondWatch = new Uint8Array(16).fill(8);
+  const typedTree = value => ({
+    tag: 60012n,
+    value: ['group', null, new Map(), [{
+      tag: 60012n,
+      value: ['text', [0n, 'customer'], new Map([['name', value]]), []],
+    }]],
+  });
+  const install = (socket, request, watch, present) => socket.receive(envelope(
+    16,
+    request,
+    watch,
+    new Map([[0n, 0n], [1n, present], [2n, null]]),
+  ));
+  const patchName = (socket, watch, base, revision, value) => socket.receive(envelope(
+    17,
+    null,
+    watch,
+    new Map([
+      [0n, BigInt(base)],
+      [1n, BigInt(revision)],
+      [2n, [[2n, [[0n, 'customer'], [0n, 'name']], value]]],
+      [3n, null],
+    ]),
+  ));
+
+  install(firstSocket, firstWatchRequest.request, firstWatch, typedTree('first-before'));
+  install(secondSocket, secondWatchRequest.request, secondWatch, typedTree('second-before'));
+  const firstState = await firstPending;
+  const secondState = await secondPending;
+
+  patchName(firstSocket, firstWatch, 0, 1, 'first-after');
+  assert.equal(firstState.presentation.current.revision, 1n);
+  assert.equal(firstState.presentation.current.present.value[3][0].value[2].get('name'), 'first-after');
+  assert.equal(secondState.presentation.current.revision, 0n);
+  assert.equal(secondState.presentation.current.present.value[3][0].value[2].get('name'), 'second-before');
+
+  patchName(secondSocket, secondWatch, 0, 1, 'second-after');
+  assert.equal(secondState.presentation.current.revision, 1n);
+  assert.equal(secondState.presentation.current.present.value[3][0].value[2].get('name'), 'second-after');
+  assert.equal(firstState.presentation.current.present.value[3][0].value[2].get('name'), 'first-after');
+
+  patchName(firstSocket, firstWatch, 0, 2, 'stale-gap');
+  assert.equal(firstState.presentation.current.revision, 1n);
+  assert.equal(firstState.presentation.current.present.value[3][0].value[2].get('name'), 'first-after');
+  const resync = decodeEnvelope(firstSocket.sent[1]);
+  assert.equal(resync.code, 2);
+  assert.deepEqual(resync.watch, firstWatch);
+  assert.equal(secondSocket.sent.length, 1);
+
+  firstSocket.receive(envelope(16, resync.request, firstWatch, new Map([
+    [0n, 3n], [1n, typedTree('first-recovered')], [2n, null],
+  ])));
+  assert.equal(firstState.presentation.current.revision, 3n);
+  assert.equal(firstState.presentation.current.present.value[3][0].value[2].get('name'), 'first-recovered');
+  assert.equal(secondState.presentation.current.revision, 1n);
+  assert.equal(secondState.presentation.current.present.value[3][0].value[2].get('name'), 'second-after');
+
+  first.dispose();
+  second.dispose();
+});

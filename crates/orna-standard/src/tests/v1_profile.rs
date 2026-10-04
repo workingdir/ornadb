@@ -34,6 +34,7 @@ use crate::{
     REFERENCE_STANDARD_PATTERN_PATH_V1, REFERENCE_STANDARD_REGEX_PATH_V1,
     REFERENCE_STANDARD_REGEX_UTILITIES_PATH_V1,
     REFERENCE_STANDARD_TIME_UTILITIES_PATH_V1,
+    REFERENCE_STANDARD_SORTING_PATH_V1,
     REFERENCE_STANDARD_ITERATOR_PATH_V1, REFERENCE_STANDARD_ITERATOR_ADAPTERS_PATH_V1,
     REFERENCE_STANDARD_ITERATOR_CONSUMERS_PATH_V1,
     REFERENCE_STANDARD_COLLECTION_ADAPTERS_PATH_V1,
@@ -53,7 +54,7 @@ use crate::{
 #[test]
 fn pinned_ui_presentation_helpers_are_included_as_source() {
     let sources = reference_standard_sources_v1();
-    assert_eq!(sources.len(), 68);
+    assert_eq!(sources.len(), 69);
     assert_eq!(sources[49].0, REFERENCE_STANDARD_UI_PATH_V1);
     let parsed = orna_syntax_v1::parse_module_with_file(
         &sources[49].1,
@@ -759,6 +760,48 @@ fn pinned_time_utilities_are_included_and_typecheck() {
     assert!(parsed.is_ok(), "{path}: {:#?}", parsed.diagnostics);
     reference_standard_catalogue_v1()
         .expect("time utilities resolve in the captured standard catalogue");
+}
+
+#[test]
+fn pinned_sorting_utilities_are_included_and_typecheck() {
+    let sources = reference_standard_sources_v1();
+    let (index, (path, source)) = sources
+        .iter()
+        .enumerate()
+        .find(|(_, (path, _))| path == REFERENCE_STANDARD_SORTING_PATH_V1)
+        .expect("the pinned source bundle includes std.sorting");
+    assert_eq!(index, 68, "sorting utilities append without moving old sources");
+    assert_eq!(path, REFERENCE_STANDARD_SORTING_PATH_V1);
+    for declaration in [
+        "pub fn compare<K>",
+        "pub fn sort_by<T, K>",
+        "pub fn sort_by_descending<T, K>",
+        "pub fn sort<T>",
+        "pub fn sort_descending<T>",
+        "pub fn is_sorted_by<T, K>",
+        "pub fn is_sorted_by_descending<T, K>",
+        "pub fn min_by<T, K>",
+        "pub fn max_by<T, K>",
+    ] {
+        assert!(source.contains(declaration), "missing sorting utility `{declaration}`");
+    }
+    for contract in [
+        "Sort operations evaluate the key once for each input value.",
+        "preserving the source order of equal keys",
+        "equal adjacent keys are allowed",
+        "Return the first value with the minimum key",
+        "Return the first value with the maximum key",
+    ] {
+        assert!(source.contains(contract), "missing sorting utility contract `{contract}`");
+    }
+    let profile = reference_standard_profile_v1();
+    profile
+        .verify_source(path, source)
+        .expect("sorting utility bytes match the captured standard profile");
+    let parsed = orna_syntax_v1::parse_module_with_file(source, path);
+    assert!(parsed.is_ok(), "{path}: {:#?}", parsed.diagnostics);
+    reference_standard_catalogue_v1()
+        .expect("sorting utilities resolve in the captured standard catalogue");
 }
 
 #[test]
@@ -1664,7 +1707,7 @@ fn reference_standard_uses_pinned_orna_1_source_and_resolves_its_imports() {
     ] {
         assert!(sources[33].1.contains(contract), "missing std.test contract `{contract}`");
     }
-    assert_eq!(sources.len(), 68);
+    assert_eq!(sources.len(), 69);
     assert_eq!(sources[49].0, REFERENCE_STANDARD_UI_PATH_V1);
     for declaration in [
         "pub fn Field<T>(label: Str, value: T): UI",
@@ -2126,7 +2169,7 @@ fn pinned_filesystem_effect_is_visible_to_consumers_and_forbidden_in_assertions(
 #[test]
 fn pinned_filesystem_path_and_metadata_modules_are_captured_and_typecheck() {
     let sources = reference_standard_sources_v1();
-    assert_eq!(sources.len(), 68);
+    assert_eq!(sources.len(), 69);
     for (index, path) in [
         (42, REFERENCE_STANDARD_IO_PATH_MODULE_PATH_V1),
         (43, REFERENCE_STANDARD_IO_METADATA_PATH_V1),
@@ -2190,7 +2233,7 @@ fn pinned_filesystem_path_and_metadata_modules_are_captured_and_typecheck() {
 #[test]
 fn pinned_io_buffer_module_is_captured_and_resolves_stream_adapters() {
     let sources = reference_standard_sources_v1();
-    assert_eq!(sources.len(), 68);
+    assert_eq!(sources.len(), 69);
     let (path, source) = sources
         .iter()
         .find(|(path, _)| path == REFERENCE_STANDARD_IO_BUFFER_PATH_V1)
@@ -2227,7 +2270,7 @@ fn pinned_io_buffer_module_is_captured_and_resolves_stream_adapters() {
 #[test]
 fn pinned_process_and_environment_modules_are_captured_and_typecheck() {
     let sources = reference_standard_sources_v1();
-    assert_eq!(sources.len(), 68);
+    assert_eq!(sources.len(), 69);
     for (index, path) in [
         (44, REFERENCE_STANDARD_IO_PROCESS_PATH_V1),
         (45, REFERENCE_STANDARD_IO_ENVIRONMENT_PATH_V1),
