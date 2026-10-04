@@ -2972,6 +2972,7 @@ ca3dc7bbdc69a27aef773b9d7f7c46abd59378be9e135d10a718897290e10527  crates/orna-ev
 cc38d12814d79e02be9bed2eb9418641379628e842390c0fbb46cc6aa0082536  crates/orna-evaluator-v1/tests/fixtures/stdlib-timezone-gap-reject-1dciz.orna
 0a7c21ccd48c95ee530e52e4c0e40e6161bd202ec3213c0ddacea06a09e35f52  crates/orna-evaluator-v1/tests/fixtures/stdlib-timezone-overlap-reject-b8tgd.orna
 df5e2e26b186336330038ec1ae2fd67a5f68d8c5a3c69651cb74bfdd604b8e13  crates/orna-evaluator-v1/tests/fixtures/stdlib-ui-action-host-bf7ef.orna
+f37a49635d5bfa074d868c1ebdef53a9fe98b682204bacdc37b8d21b6beaf863  crates/orna-evaluator-v1/tests/fixtures/stdlib-unicode-encoding-utilities-s9md3.orna
 63ff95b9b1d56aadac7129693212c7f54fccabd0094c9418320bda0a133e8e4e  crates/orna-evaluator-v1/tests/fixtures/stdlib-use-algorithm-oo3k6.orna
 a0bb3edefa079fdbd1cebf5d61121d44d82f3678f1093c913616c9541df27173  crates/orna-evaluator-v1/tests/fixtures/stdlib-use-bits-2213.orna
 1a05f567ba1a0751544496a81877cef32892e58538aa5aded2d610f7a066e457  crates/orna-evaluator-v1/tests/fixtures/stdlib-use-bits-pis78.orna
