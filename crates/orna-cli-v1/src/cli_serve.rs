@@ -311,11 +311,15 @@ fn host_route(root: &Path, identity: RuntimeIdentity, request: &Request) -> Resp
     if let Some(response) = git_listing_route(root, request) {
         return response;
     }
+    if let Some(response) = playground_route(root, request) {
+        return response;
+    }
     match (request.method.as_str(), request.path.as_str()) {
         ("GET", "/api/clone") => match clone_report(root, identity) {
             Ok(report) => Response::new(200, "application/json", report),
             Err(_) => unavailable_response(),
         },
+        ("GET", "/api/examples") => playground_examples(root),
         ("POST", "/api/query") => match std::str::from_utf8(&request.body) {
             Ok(source) => {
                 orna_evaluator_v1::evaluate_repl(source, &Environment::new(), Limits::default())
@@ -345,6 +349,8 @@ fn host_route(root: &Path, identity: RuntimeIdentity, request: &Request) -> Resp
 const MAX_LISTING_COMMITS: usize = 100;
 const MAX_LISTING_TREE_ENTRIES: usize = 10_000;
 const MAX_LISTING_FILE_BYTES: usize = 2 * 1024 * 1024;
+const MAX_PLAYGROUND_ASSET_BYTES: u64 = 8 * 1024 * 1024;
+const MAX_PLAYGROUND_EXAMPLE_BYTES: usize = 2 * 1024 * 1024;
 const LISTING_STYLE: &str = "<style>:root{color-scheme:light;--page-width:72ch;--text:#202122;--background:#fff;--link:#0645ad;--visited:#0b0080;--code-font:ui-monospace,monospace}body{max-width:var(--page-width);margin:1.5rem auto;padding:0 1rem;color:var(--text);background:var(--background);font:1rem/1.5 Georgia,'Times New Roman',serif}a{color:var(--link)}a:visited{color:var(--visited)}pre{overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;font-family:var(--code-font)}</style>";
 
 /// Renderer-neutral data used by the simple Inspect-compatible HTML fallback.
@@ -397,10 +403,121 @@ fn commit_log_page(root: &Path) -> Response {
         InspectionNode::List(branch_rows)
     };
     let content = InspectionNode::Record(vec![
+        (
+            "Playground".into(),
+            InspectionNode::Link {
+                label: "Open the Orna playground".into(),
+                href: "/playground/".into(),
+            },
+        ),
         ("Recent commits".into(), commits),
         ("Branches".into(), branches),
     ]);
     render_inspection_document("Commits", &[], &content)
+}
+
+fn playground_route(root: &Path, request: &Request) -> Option<Response> {
+    if request.method != "GET"
+        || !(request.path == "/playground" || request.path.starts_with("/playground/"))
+    {
+        return None;
+    }
+    Some(playground_asset(root, &request.path))
+}
+
+fn playground_asset(root: &Path, request_path: &str) -> Response {
+    let relative = request_path
+        .strip_prefix("/playground")
+        .unwrap_or_default()
+        .trim_start_matches('/');
+    let relative = if relative.is_empty() {
+        "index.html"
+    } else {
+        relative
+    };
+    let Ok(decoded) = percent_decode(relative) else {
+        return bad_request_response();
+    };
+    if decoded.contains('\\') || decoded.contains('\0') {
+        return bad_request_response();
+    }
+    let Ok(managed) = ManagedPath::new(Path::new("playground/web-ui/dist").join(decoded)) else {
+        return bad_request_response();
+    };
+    let dist = root.join("playground/web-ui/dist");
+    let Ok(dist) = std::fs::canonicalize(dist) else {
+        return unavailable_response();
+    };
+    let Ok(path) = std::fs::canonicalize(root.join(managed.as_path())) else {
+        return not_found_response();
+    };
+    if !path.starts_with(&dist) {
+        return bad_request_response();
+    }
+    let Ok(metadata) = std::fs::metadata(&path) else {
+        return not_found_response();
+    };
+    if !metadata.is_file() || metadata.len() > MAX_PLAYGROUND_ASSET_BYTES {
+        return not_found_response();
+    }
+    let Ok(bytes) = std::fs::read(&path) else {
+        return unavailable_response();
+    };
+    Response::new(200, playground_content_type(&path), bytes)
+}
+
+fn playground_content_type(path: &Path) -> &'static str {
+    match path.extension().and_then(std::ffi::OsStr::to_str) {
+        Some("html") => "text/html; charset=utf-8",
+        Some("js" | "mjs") => "text/javascript; charset=utf-8",
+        Some("css") => "text/css; charset=utf-8",
+        Some("json") => "application/json; charset=utf-8",
+        Some("wasm") => "application/wasm",
+        Some("svg") => "image/svg+xml",
+        Some("png") => "image/png",
+        Some("ico") => "image/x-icon",
+        _ => "application/octet-stream",
+    }
+}
+
+fn playground_examples(root: &Path) -> Response {
+    let Ok(repository) = Repository::discover(root) else {
+        return unavailable_response();
+    };
+    let Ok(Some(commit)) = repository.head() else {
+        return unavailable_response();
+    };
+    let Ok(entries) = repository.list_committed_tree(&commit, MAX_LISTING_TREE_ENTRIES) else {
+        return unavailable_response();
+    };
+    let mut examples = Vec::new();
+    for entry in entries {
+        let path = entry.path().as_path();
+        if !matches!(entry.kind(), CommittedTreeEntryKind::File { .. })
+            || !path.starts_with("playground/examples")
+            || path.extension().and_then(std::ffi::OsStr::to_str) != Some("orna")
+        {
+            continue;
+        }
+        let Ok(source) =
+            repository.read_committed_file(&commit, path, MAX_PLAYGROUND_EXAMPLE_BYTES)
+        else {
+            continue;
+        };
+        let Ok(source) = String::from_utf8(source) else {
+            continue;
+        };
+        examples.push(serde_json::json!({
+            "name": path.file_stem().and_then(std::ffi::OsStr::to_str).unwrap_or("example"),
+            "path": path.to_string_lossy(),
+            "source": source,
+        }));
+    }
+    examples.sort_by(|left, right| left["path"].as_str().cmp(&right["path"].as_str()));
+    match serde_json::to_vec(&serde_json::json!({ "examples": examples })) {
+        Ok(body) => Response::new(200, "application/json", body),
+        Err(_) => unavailable_response(),
+    }
 }
 
 const MAX_LISTING_BRANCHES: usize = 100;
@@ -1394,6 +1511,7 @@ mod tests {
         assert_eq!(home.status, 200);
         let home = String::from_utf8(home.body).expect("commit listing HTML");
         assert!(home.contains("No commits in this repository."));
+        assert!(home.contains("href=\"/playground/\""));
         assert!(!home.contains("<script"));
         let query = host_route(
             directory.path(),
@@ -1408,6 +1526,68 @@ mod tests {
         );
         assert_eq!(query.status, 200);
         assert_eq!(query.body, b"Value(Int(2))");
+    }
+
+    #[test]
+    fn playground_loads_committed_examples_and_built_assets() {
+        const PLAYGROUND_EXAMPLE: &str = include_str!("../tests/fixtures/playground-example.orna");
+        let directory = tempfile::tempdir().expect("temporary database");
+        git_succeeds(
+            directory.path(),
+            &["init", "--quiet", "--initial-branch=playground"],
+        );
+        let example_path = directory.path().join("playground/examples/hello.orna");
+        std::fs::create_dir_all(example_path.parent().expect("example parent"))
+            .expect("create examples directory");
+        std::fs::write(&example_path, PLAYGROUND_EXAMPLE).expect("write example");
+        let dist = directory.path().join("playground/web-ui/dist");
+        std::fs::create_dir_all(dist.join("assets")).expect("create built assets");
+        std::fs::write(dist.join("index.html"), "<main>playground</main>")
+            .expect("write built page");
+        std::fs::write(dist.join("assets/app.js"), "console.log('ready')")
+            .expect("write built script");
+        git_succeeds(directory.path(), &["add", "playground/examples/hello.orna"]);
+        git_succeeds(
+            directory.path(),
+            &[
+                "-c",
+                "user.name=kierandrewett",
+                "-c",
+                "user.email=kieran@drewett.dev",
+                "commit",
+                "--quiet",
+                "-m",
+                "add playground example",
+            ],
+        );
+        std::fs::write(
+            directory.path().join("playground/examples/uncommitted.orna"),
+            "99 + 1",
+        )
+        .expect("write uncommitted example");
+
+        let examples = listing_page(directory.path(), "/api/examples");
+        assert_eq!(examples.status, 200);
+        let examples: serde_json::Value =
+            serde_json::from_slice(&examples.body).expect("example records JSON");
+        assert_eq!(examples["examples"].as_array().map(Vec::len), Some(1));
+        assert_eq!(
+            examples["examples"][0]["path"],
+            "playground/examples/hello.orna"
+        );
+        assert_eq!(examples["examples"][0]["source"], PLAYGROUND_EXAMPLE);
+
+        let page = listing_page(directory.path(), "/playground/");
+        assert_eq!(page.status, 200);
+        assert_eq!(page.content_type, "text/html; charset=utf-8");
+        assert_eq!(page.body, b"<main>playground</main>");
+        let script = listing_page(directory.path(), "/playground/assets/app.js");
+        assert_eq!(script.status, 200);
+        assert_eq!(script.content_type, "text/javascript; charset=utf-8");
+        assert_eq!(script.body, b"console.log('ready')");
+
+        let traversal = listing_page(directory.path(), "/playground/%2e%2e/README.txt");
+        assert_eq!(traversal.status, 400);
     }
 
     #[test]
