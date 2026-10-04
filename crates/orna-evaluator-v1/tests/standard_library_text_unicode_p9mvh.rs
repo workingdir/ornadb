@@ -4,14 +4,16 @@ use orna_evaluator_v1::{
 use orna_foundation_v1::CanonicalValue;
 use orna_value_v1::Raw;
 
+#[path = "support/pinned_time_text_std.rs"]
+mod pinned_time_text_std;
+
 fn bool_value(value: bool) -> CanonicalValue {
     CanonicalValue::new(Raw::Bool(value)).expect("boolean is canonical")
 }
 
 #[test]
 fn pinned_text_exports_obey_the_unicode_16_contract() {
-    let mut session = AdmittedReplSession::with_reference_standard(Limits::default())
-        .expect("the pinned reference standard loads");
+    let mut session = pinned_time_text_std::text_math_session();
     assert_eq!(
         session.submit(include_str!("fixtures/stdlib-text-use-p9mvh.orna")),
         Ok(None)
@@ -31,8 +33,7 @@ fn pinned_text_exports_obey_the_unicode_16_contract() {
 
 #[test]
 fn invalid_normalisation_form_is_rejected_and_text_requires_the_snapshot() {
-    let mut with_std = AdmittedReplSession::with_reference_standard(Limits::default())
-        .expect("the pinned reference standard loads");
+    let mut with_std = pinned_time_text_std::text_math_session();
     with_std
         .submit(include_str!("fixtures/stdlib-text-use-p9mvh.orna"))
         .expect("text import succeeds");
