@@ -1,0 +1,1 @@
+fn sum_frame(values: [Int]) = sum(values);

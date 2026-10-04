@@ -10,7 +10,7 @@ fn run_returns_the_shared_json_contract() {
     let result: Value = serde_json::from_str(&run(REPL_SOURCE)).expect("run JSON");
 
     assert_eq!(result["ok"], true);
-    assert_eq!(result["values"], serde_json::json!(["42"]));
+    assert_eq!(result["values"], serde_json::json!(["42 : Int"]));
     assert_eq!(result["stdout"], "");
     assert_eq!(result["errors"], serde_json::json!([]));
 }
@@ -26,7 +26,7 @@ fn repl_retains_bindings_and_serializes_each_result_kind() {
         .expect("error JSON");
 
     assert_eq!(echo, serde_json::json!({"kind": "echo", "text": "let answer = 40;"}));
-    assert_eq!(value, serde_json::json!({"kind": "value", "text": "42"}));
+    assert_eq!(value, serde_json::json!({"kind": "value", "text": "42 : Int"}));
     assert_eq!(error["kind"], "error");
     assert!(error["text"].as_str().is_some_and(|text| !text.is_empty()));
 }
