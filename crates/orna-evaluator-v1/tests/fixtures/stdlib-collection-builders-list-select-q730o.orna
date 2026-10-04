@@ -1,0 +1,10 @@
+case list.first([9, 8]) {
+    Some(value): value == 9,
+    null: false,
+}
+&& case list.last([9, 8]) {
+    Some(value): value == 8,
+    null: false,
+}
+&& list.contains([1, 2, 3], 2)
+&& !list.contains([1, 2, 3], 9)
