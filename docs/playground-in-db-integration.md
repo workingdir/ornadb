@@ -6,28 +6,35 @@ is the source for the shell, assets, programs, and examples.
 
 ## Database records and routes
 
-`playground.orna` declares `Sample` and `Asset` tables. Sample rows and the
-legacy `playground/examples/*.orna` files feed `/api/examples`. The shell,
-stylesheet, browser client, Monaco worker, generated editor configuration, and
-embeddable entry script are generated as `playground.Asset` rows under
-`playground/Asset/`. Each row records a normalized relative path, media type,
-and UTF-8 content. `orna-syntax-v1` generates the editor configuration from
-the language lexer; the browser loads it from
-`/playground/assets/orna-editor-config.json`.
+`playground.orna` declares `Sample`, `Asset`, `Theme`, and `Layout` tables.
+Sample rows and legacy `playground/examples/*.orna` files feed `/api/examples`.
+The shell, browser client, Monaco worker and editor-support CSS, generated
+editor configuration, and embeddable entry script are generated as
+`playground.Asset` rows under `playground/Asset/`. Each row stores a normalized
+relative path, media type, and UTF-8 content. `orna-syntax-v1` generates editor
+configuration from the language lexer; the browser loads it from
+`/playground/assets/orna-editor-config.json`. Theme and responsive layout CSS
+are separate named rows under `playground/Theme/` and `playground/Layout/`.
 
-`npm run build` creates the small browser bundle and refreshes these rows.
-Commit the generated rows along with source changes. At request time,
-`orna serve` reads the row for the requested asset from the committed `HEAD`
-using the repository listing API; it does not read `playground/web-ui/dist/`.
-The `/playground/` and `/playground/embed` routes use the same shell record,
-with the embed route hiding the marked page header and applying its framing
-policy. Static assets are returned with their checked media type and
-`X-Content-Type-Options: nosniff`.
+`npm run build` creates the browser bundle and refreshes the Asset, Theme, and
+Layout rows. Commit generated rows along with source changes. At request time,
+`orna serve` reads each row from committed `HEAD` using the repository listing
+API; it does not read `playground/web-ui/dist/`.
 
-The `/playground/assets/embed.js` classic script creates an iframe pointed at
-the same database's `/playground/embed` route. Set `data-target` to append the
-iframe to a container, and optionally set `data-height`, `data-title`, or
-`data-loading`. The entry script itself is a committed Asset row.
+The `/playground/` and `/playground/embed` routes use the same shell record.
+The embed route hides the marked page header and applies its framing policy.
+Static assets use their checked media type and `X-Content-Type-Options:
+nosniff`. The `/playground/assets/embed.js` classic script creates an iframe
+pointed at `/playground/embed`. Set `data-target` to append the iframe to a
+container, and optionally set `data-height`, `data-title`, or `data-loading`.
+The entry script itself is a committed Asset row.
+
+`/api/playground/revision` reports the current committed Git object ID with
+`Cache-Control: no-store`. The browser checks it every two seconds. If `HEAD`
+changes, it loads both version-pinned stylesheet rows before replacing the
+active theme and layout links. This updates committed CSS without restarting
+`orna serve` or reloading the page. Uncommitted style edits remain invisible
+until committed.
 
 The browser sends explicit Run requests to the same clone's
 `orna.present.v1` session. Source evaluation and presentation remain in the
@@ -52,9 +59,11 @@ cargo test --locked -p orna-cli-v1 --test serve_playground_dogfood -- --nocaptur
 ```
 
 The test initializes a temporary Orna Git database, commits crate-local
-`.orna` schema, sample, and asset fixtures, starts the real `orna serve`
-process without a build directory, then uses curl to check the Git listing,
-the database-resident shell, editor configuration, embeddable script, and
-CSS/JavaScript rows, committed examples, and the live session. A WebSocket client follows the existing watch,
-fingerprinted Eval, and Resync exchange to prove independent results and
+`.orna` schema, sample, Asset, Theme, and Layout fixtures, starts the real
+`orna serve` process without a build directory, and uses curl to check the Git
+listing, database-resident shell, editor configuration, embeddable script,
+JavaScript and stylesheet routes, committed examples, and live session. It
+commits Theme and Layout updates and proves the style routes and revision
+change without restarting the server. A WebSocket client follows the existing
+watch, fingerprinted Eval, and Resync exchange to prove independent results and
 presentation deltas.

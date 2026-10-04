@@ -5,7 +5,9 @@ import { exampleIndexForKey, isExample } from './example-feed';
 import { loadOrnaEditorConfig, registerOrnaLanguage } from './language';
 import { formatRunResult, formatThrownError, type RunResult } from './results';
 import { servedRuntime } from './runtime';
-import './styles.css';
+import { startStyleReload } from './style-reload';
+import './theme.css';
+import './layout.css';
 
 (globalThis as typeof globalThis & {
   MonacoEnvironment?: { getWorker: () => Worker };
@@ -203,3 +205,4 @@ void initializeEditor()
     examplesReady = true;
     updateRunButton();
   });
+startStyleReload();
