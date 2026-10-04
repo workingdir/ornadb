@@ -27,6 +27,8 @@ const PLAYGROUND_SCHEMA: &str = include_str!("fixtures/playground-schema.orna");
 const ASSET_INDEX: &str = include_str!("fixtures/playground-asset-index.orna");
 const ASSET_APP: &str = include_str!("fixtures/playground-asset-app.orna");
 const ASSET_STYLE: &str = include_str!("fixtures/playground-asset-style.orna");
+const ASSET_EDITOR_CONFIG: &str = include_str!("fixtures/playground-asset-editor-config.orna");
+const ASSET_EMBED: &str = include_str!("fixtures/playground-asset-embed.orna");
 const BINARY: &str = env!("CARGO_BIN_EXE_orna-cli-v1");
 
 struct RunningServer(Child);
@@ -366,6 +368,16 @@ fn orna_serve_hosts_playground_with_pending_evals_and_snapshot_correct_deltas() 
         ASSET_STYLE,
     )
     .expect("write committed stylesheet fixture");
+    std::fs::write(
+        assets.join("asset-6173736574732f6f726e612d656469746f722d636f6e6669672e6a736f6e.orna"),
+        ASSET_EDITOR_CONFIG,
+    )
+    .expect("write committed editor configuration fixture");
+    std::fs::write(
+        assets.join("asset-6173736574732f656d6265642e6a73.orna"),
+        ASSET_EMBED,
+    )
+    .expect("write committed embed entry fixture");
     git(
         project.path(),
         &[
@@ -433,6 +445,21 @@ fn orna_serve_hosts_playground_with_pending_evals_and_snapshot_correct_deltas() 
         .expect("curl the committed database stylesheet");
     assert_eq!(stylesheet.status, 200);
     assert!(stylesheet.body.contains("#202122"));
+    let editor_config = curl(
+        &format!("{base_url}/playground/assets/orna-editor-config.json"),
+        &[],
+    )
+    .expect("curl the committed editor configuration");
+    assert_eq!(editor_config.status, 200);
+    let editor_config: JsonValue =
+        serde_json::from_str(&editor_config.body).expect("editor configuration JSON");
+    assert_eq!(editor_config["language"]["id"], "orna");
+    assert_eq!(editor_config["editorOptions"]["tabSize"], 4);
+    let embed = curl(&format!("{base_url}/playground/assets/embed.js"), &[])
+        .expect("curl the committed embeddable entry script");
+    assert_eq!(embed.status, 200);
+    assert!(embed.body.contains("new URL(\"../embed\",script.src)"));
+    assert!(embed.body.contains("document.createElement(\"iframe\")"));
     assert!(!project.path().join("playground/web-ui/dist").exists());
 
     let examples =
@@ -687,6 +714,14 @@ fn orna_serve_hosts_playground_with_pending_evals_and_snapshot_correct_deltas() 
     println!(
         "curl GET /playground/assets/app.js -> HTTP {} (exit 0): browser asset",
         app.status
+    );
+    println!(
+        "curl GET /playground/assets/orna-editor-config.json -> HTTP {} (exit 0): DB-resident editor configuration",
+        200
+    );
+    println!(
+        "curl GET /playground/assets/embed.js -> HTTP {} (exit 0): DB-resident iframe entry script",
+        embed.status
     );
     println!(
         "curl GET /api/examples -> HTTP {} (exit 0): committed .orna sample",
