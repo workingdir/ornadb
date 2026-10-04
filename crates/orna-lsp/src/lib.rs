@@ -8,6 +8,7 @@
 mod analysis;
 mod documents;
 mod hover;
+mod locals;
 mod semantic;
 mod server;
 
