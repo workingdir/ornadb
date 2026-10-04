@@ -1,0 +1,5 @@
+{ id: "outer-handoff/a", name: "outer/left-a", city: "outer/right-a" }
+
+{ id: "outer-handoff/a-reused", name: "outer/left-a", city: "outer/right-a" }
+
+{ id: "outer-handoff/b", name: "outer/left-b", city: "outer/right-b" }
