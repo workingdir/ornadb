@@ -2474,6 +2474,7 @@ c952d9eb7bb38efab0120e600e1c8741ae9ec9bc1fc98e08c61add9e92c4d8fc  crates/orna-ev
 23b81a7b751f8b921444c0ee4e21a142232c07ac6134e26f2dacbd4e916b1807  crates/orna-evaluator-v1/tests/fixtures/stdlib-set-order-roundtrip-o3yue.orna
 1ce54165c550b3a13cd62d2dacb2d3d088f940dc85712766246a6f86afa2343d  crates/orna-evaluator-v1/tests/fixtures/stdlib-set-order-value-o3yue.orna
 c90984ad98252ad6541ad01b599bcb7fc97a3af1472b28dc3806b0f5fd94e06a  crates/orna-evaluator-v1/tests/fixtures/stdlib-set-signed-zero-ovb-o3yue.orna
+339734fb8ad3dfda4cbf7612afac21f1684ed1d892c7a7dd0f6ea48ee9814998  crates/orna-evaluator-v1/tests/fixtures/stdlib-sorting-utilities-mk858.orna
 a8504dd88bbc86c9858a0a69bd1fac8e363c8ccfd1925b0b95f27eb84102ded6  crates/orna-evaluator-v1/tests/fixtures/stdlib-stats-complete-behavior-yn4vz.orna
 a6e199dc5cce5d9a7a5d9a972438821e0a43fb2bfbedf939cefb7a966aa94ea2  crates/orna-evaluator-v1/tests/fixtures/stdlib-stats-empty-list-ymou.orna
 252498362ecbf9b1161254735ca3c787da2d10f9f4edd7b6c6e87fc386b701b8  crates/orna-evaluator-v1/tests/fixtures/stdlib-stats-empty-ymou.orna
@@ -3152,6 +3153,8 @@ f4e8d5cfdb20469a0205e848d75d377e63d3b54ad383d005ce0959d27b277110  crates/orna-ls
 11b87ed71842d8acde383de01985383af202e3d0d4809866829f0f74b3d78f14  crates/orna-lsp/tests/fixtures/ambiguous-renames-caller-v1.orna
 c760f77a909070dfef8bd78019889c88aee5f22a5139ab0865ae074bd2f6da88  crates/orna-lsp/tests/fixtures/ambiguous-renames-v1.orna
 c75bbee709cc649cc9025108885f1ffae279b05b13edfd66647c6f56003b77d3  crates/orna-lsp/tests/fixtures/call-v1.orna
+e93403528dbf82b2ee2d1d6de8490b8b15a3526e55d41435efc62bc1d9b1ca95  crates/orna-lsp/tests/fixtures/document-link-target-v1.orna
+06ab71790499bbcd5b856ec721ae09b10eaeb511923b0882d3bdbc45c838cca7  crates/orna-lsp/tests/fixtures/document-links-v1.orna
 36b51d4933bb9530ed36d0fb343b7c288c50abf265d76efbaf1740c57a49a238  crates/orna-lsp/tests/fixtures/editor-lsp-hints.orna
 ae26b76e75c4bf39e03664cb7cb33d461c0061fac79ddc285488509973b6d84a  crates/orna-lsp/tests/fixtures/editor-semantic-tokens.orna
 70823fa811930bdc19ac1942ce478d0dd912d6070d993f197ec760b0049ba3f6  crates/orna-lsp/tests/fixtures/expressions-v1.orna
@@ -4763,6 +4766,7 @@ b52da35c06919ab4d099a39d1ba2bfce9ab9e877060d932f73133c51f80f6a19  crates/orna-st
 9edb03d0b3ff0cfcfdc256011dfdf7f39fce9e314a60213c8a167fd812b09df4  crates/orna-storage-v1/tests/fixtures/paired-nested-handoff-identities-35e0j.orna
 0725d77c19c1f1200c9b1e8939d09bd3db72ce151f7ab26b77bdd28cec866de8  crates/orna-storage-v1/tests/fixtures/paired-nested-handoff-identities-f159.orna
 14d5c48b7635eec5fb565eace0373b06f6a5f271e7fabaa2c623af865e6fdf0b  crates/orna-storage-v1/tests/fixtures/paired-nested-handoff-identities-f162.orna
+ac4b5bd45f85752bb533edb822535e86c367ca279b15777b97efa8a1d9bc07bc  crates/orna-storage-v1/tests/fixtures/paired-nested-handoff-identities-f165.orna
 86c408396e12b18f51adbb5a8322c9b4c4d9b363f60643bc708f9d2bf3183cdc  crates/orna-storage-v1/tests/fixtures/paired-nested-handoff-identities-q0rmw.orna
 ec14b6d4fb56a1d52768d3471ca0cd4980ccce1e1c0aa8603e2ffbec16064520  crates/orna-storage-v1/tests/fixtures/paired-nested-replay-identities-f84.orna
 b4be81cc6d1f15b08da83aa2c510f3cd0c2dca9af1e1896d2de721d8e5f36f4b  crates/orna-storage-v1/tests/fixtures/paired-nested-replay-identities-f90.orna
