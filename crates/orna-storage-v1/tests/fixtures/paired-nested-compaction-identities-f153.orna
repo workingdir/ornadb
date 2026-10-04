@@ -1,0 +1,7 @@
+{ id: "f153/nested-compaction/main", name: "f153/left/compaction-main", city: "f153/right/compaction-alpha", }
+
+{ id: "f153/nested-compaction/retry", name: "f153/left/compaction-retry", city: "f153/right/compaction-beta", }
+
+{ id: "f153/nested-compaction/reused", name: "f153/left/compaction-main", city: "f153/right/compaction-alpha", }
+
+{ id: "f153/nested-compaction/malformed", name: "f153/left/compaction-malformed", city: "f153/right/compaction-delta", }

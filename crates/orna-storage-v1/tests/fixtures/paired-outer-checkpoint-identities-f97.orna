@@ -1,0 +1,7 @@
+{ id: "f97/outer-checkpoint/reused", name: "f97/left/outer-main", city: "f97/right/outer-alpha", }
+
+{ id: "f97/outer-checkpoint/retry", name: "f97/left/outer-retry", city: "f97/right/outer-beta", }
+
+{ id: "f97/outer-checkpoint/reused", name: "f97/left/outer-main", city: "f97/right/outer-alpha", }
+
+{ id: "f97/outer-checkpoint/malformed", name: "f97/left/outer-malformed", city: "f97/right/outer-delta", }

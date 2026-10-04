@@ -3,6 +3,7 @@ export interface RunResult {
   values: string[];
   stdout: string;
   errors: RunError[];
+  ast?: string;
 }
 
 export interface RunError {
