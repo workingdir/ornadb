@@ -8,7 +8,7 @@
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
     "test": "vitest run",
-    "wasm:build": "wasm-pack build ../orna-wasm --target web --out-dir pkg --out-name orna_wasm"
+    "wasm:build": "cd ../orna-wasm && wasm-pack build --target web --out-dir pkg --out-name orna_wasm"
   },
   "dependencies": {
     "monaco-editor": "0.57.0"

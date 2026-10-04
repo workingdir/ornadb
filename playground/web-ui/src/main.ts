@@ -1,19 +1,13 @@
-import * as monaco from 'monaco-editor';
-import EditorWorker from 'monaco-editor/esm/vs/editor/editor.worker?worker';
+import * as monaco from 'monaco-editor/esm/vs/editor/editor.api.js';
+import EditorWorker from 'monaco-editor/esm/vs/editor/editor.worker.js?worker';
 import sampleSource from './sample.orna?raw';
 import { registerOrnaLanguage } from './language';
 import { formatRunResult, formatThrownError } from './results';
 import { describeRuntimeLoadFailure, initializeRuntime, type PlaygroundRuntime } from './runtime';
 import './styles.css';
 
-declare global {
-  // Vite serves Monaco's worker as a separate module so editor work stays off
-  // the main thread.
-  var MonacoEnvironment: {
-    getWorker: () => Worker;
-  } | undefined;
-}
-
+// Vite serves Monaco's worker as a separate module so editor work stays off
+// the main thread.
 globalThis.MonacoEnvironment = {
   getWorker: () => new EditorWorker(),
 };
@@ -45,26 +39,26 @@ monaco.editor.defineTheme('orna-dark', {
 
 registerOrnaLanguage(monaco.languages);
 
-const editorHost = document.querySelector<HTMLElement>('#editor');
-const runButton = document.querySelector<HTMLButtonElement>('#run-button');
-const status = document.querySelector<HTMLElement>('#runtime-status');
-const statusText = document.querySelector<HTMLElement>('#runtime-status-text');
-const executionState = document.querySelector<HTMLElement>('#execution-state');
-const cursorPosition = document.querySelector<HTMLElement>('#cursor-position');
-const valuesOutput = document.querySelector<HTMLElement>('#values-output');
-const valuesCount = document.querySelector<HTMLElement>('#values-count');
-const stdoutOutput = document.querySelector<HTMLElement>('#stdout-output');
-const stdoutCount = document.querySelector<HTMLElement>('#stdout-count');
-const errorsOutput = document.querySelector<HTMLElement>('#errors-output');
-const errorsCount = document.querySelector<HTMLElement>('#errors-count');
-
-if (
-  !editorHost || !runButton || !status || !statusText || !executionState ||
-  !cursorPosition || !valuesOutput || !valuesCount || !stdoutOutput ||
-  !stdoutCount || !errorsOutput || !errorsCount
-) {
-  throw new Error('The playground page is missing a required UI element.');
+function requiredElement<T extends Element>(selector: string): T {
+  const element = document.querySelector<T>(selector);
+  if (!element) {
+    throw new Error(`The playground page is missing ${selector}.`);
+  }
+  return element;
 }
+
+const editorHost = requiredElement<HTMLElement>('#editor');
+const runButton = requiredElement<HTMLButtonElement>('#run-button');
+const status = requiredElement<HTMLElement>('#runtime-status');
+const statusText = requiredElement<HTMLElement>('#runtime-status-text');
+const executionState = requiredElement<HTMLElement>('#execution-state');
+const cursorPosition = requiredElement<HTMLElement>('#cursor-position');
+const valuesOutput = requiredElement<HTMLElement>('#values-output');
+const valuesCount = requiredElement<HTMLElement>('#values-count');
+const stdoutOutput = requiredElement<HTMLElement>('#stdout-output');
+const stdoutCount = requiredElement<HTMLElement>('#stdout-count');
+const errorsOutput = requiredElement<HTMLElement>('#errors-output');
+const errorsCount = requiredElement<HTMLElement>('#errors-count');
 
 const editor = monaco.editor.create(editorHost, {
   value: sampleSource.trimEnd(),

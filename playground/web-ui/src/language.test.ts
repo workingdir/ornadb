@@ -17,6 +17,6 @@ describe('Orna Monarch language definition', () => {
     expect(ornaMonarchLanguage.keywords).toEqual([...ORNA_KEYWORDS]);
     expect(rootTokens).toContainEqual([/\/\/.*$/, 'comment']);
     expect(rootTokens).toContainEqual([/"/, { token: 'string.quote', next: '@string' }]);
-    expect(rootTokens.some(([rule, token]) => rule instanceof RegExp && token === 'operator')).toBe(true);
+    expect(rootTokens.some((rule) => Array.isArray(rule) && rule[1] === 'operator')).toBe(true);
   });
 });

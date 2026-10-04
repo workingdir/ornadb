@@ -5,6 +5,9 @@ import type { Plugin } from 'vite';
 import { defineConfig } from 'vite';
 
 const wasmPackageDirectory = fileURLToPath(new URL('../orna-wasm/pkg/', import.meta.url));
+const monacoEsmDirectory = fileURLToPath(
+  new URL('./node_modules/monaco-editor/esm', import.meta.url),
+);
 
 function wasmPackageAssets(): Plugin {
   return {
@@ -57,6 +60,9 @@ function wasmPackageAssets(): Plugin {
 export default defineConfig({
   base: './',
   publicDir: false,
+  resolve: {
+    alias: [{ find: 'monaco-editor/esm', replacement: monacoEsmDirectory }],
+  },
   plugins: [wasmPackageAssets()],
   server: { host: '0.0.0.0' },
 });
