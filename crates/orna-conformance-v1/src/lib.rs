@@ -29,17 +29,12 @@ const NORMATIVE_PAYLOAD_COUNT: usize = 46;
 const EXPECTED_DIAGNOSTIC_STATUS: &str = "expected-not-executed";
 
 mod admitted_repl;
-pub mod catalogue_projection;
 pub mod row_admission;
 mod semantic_adapter;
 mod syntax_adapter;
 #[cfg(test)]
 mod test_support;
 pub use admitted_repl::{AdmittedReplSession, ReplError};
-pub use catalogue_projection::{
-    CatalogueProjectionError, SourceCatalogueActivationError,
-    commit_resolved_source_catalogue_activation, project_source_catalogue,
-};
 pub use semantic_adapter::{
     BoundedEvaluator, DurableTransactionalEvaluator, RunningTableRequestDisposition,
     RuntimeAdapter, RuntimeEvaluator, RuntimeTarget, SemanticAdapter, TransactionalEvaluator,
@@ -274,12 +269,12 @@ pub struct Scenario {
     pub evidence_level: String,
 }
 
-/// Integration seam for `orna-syntax`, compiler semantic analysis and runtime.
+/// Integration seam for v1 syntax, semantic analysis and runtime.
 /// Each method is deliberately separate so evidence preserves the first actual
-/// failing stage instead of collapsing compiler errors into a generic failure.
+/// failing stage instead of collapsing stage diagnostics into a generic failure.
 pub trait ConformanceAdapter {
-    /// The shared compiler's native type (including spans and payload) flows
-    /// through this associated type without a competing harness model.
+    /// The stage's native diagnostic type flows through without a competing
+    /// harness model.
     type Diagnostic: Serialize;
     fn diagnostic_code(&self, diagnostic: &Self::Diagnostic) -> String;
     fn diagnostic_message(&self, diagnostic: &Self::Diagnostic) -> String;
@@ -2781,7 +2776,6 @@ fn validate_requirement_evidence_test(
         .map(|_| ())
         .map_err(|message| CorpusError(message.into()))
 }
-
 
 /// Reports expose only the diagnostic identity.  Adapter diagnostics may have
 /// spans, labels or native payloads containing source observations; preserving

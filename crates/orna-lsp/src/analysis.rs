@@ -484,6 +484,12 @@ pub fn definition(
 ) -> Option<Location> {
     let byte = mapper.byte_offset(position);
     let token = token_at(&document.text, byte)?;
+    if let Some(binding) = crate::locals::binding_at(&parse.value, &token.text, &token.span) {
+        return Some(Location {
+            uri: document.uri.clone(),
+            range: mapper.range(&binding.selection),
+        });
+    }
     let symbols = declaration_symbols(parse, &document.text);
     let symbol = symbol_for_name(&symbols, &token.text)?;
     Some(Location {
@@ -503,14 +509,33 @@ pub fn references(
     let Some(token) = token_at(&document.text, byte) else {
         return Vec::new();
     };
+    if let Some(binding) = crate::locals::binding_at(&parse.value, &token.text, &token.span) {
+        let mut spans = crate::locals::references(&parse.value, &binding);
+        if include_declaration {
+            spans.push(binding.selection);
+        }
+        spans.sort_by_key(|span| (span.start, span.end));
+        spans.dedup_by_key(|span| (span.start, span.end));
+        return spans
+            .into_iter()
+            .map(|span| Location {
+                uri: document.uri.clone(),
+                range: mapper.range(&span),
+            })
+            .collect();
+    }
     let symbols = declaration_symbols(parse, &document.text);
     let Some(symbol) = symbol_for_name(&symbols, &token.text) else {
         return Vec::new();
     };
     let name = normalized_identifier(&symbol.name);
+    let local_references = crate::locals::resolved_reference_spans(&parse.value);
     let mut spans = reference_occurrences(&parse.value, &document.text)
         .into_iter()
-        .filter(|(occurrence, _)| normalized_identifier(occurrence) == name)
+        .filter(|(occurrence, span)| {
+            normalized_identifier(occurrence) == name
+                && !local_references.contains(&(span.start, span.end))
+        })
         .map(|(_, span)| span)
         .collect::<Vec<_>>();
     if include_declaration {
@@ -524,6 +549,13 @@ pub fn references(
             uri: document.uri.clone(),
             range: mapper.range(&span),
         })
+        .collect()
+}
+
+pub(crate) fn local_declaration_spans(parse: &EditorParse) -> Vec<SourceSpan> {
+    crate::locals::all_bindings(&parse.value)
+        .into_iter()
+        .map(|binding| binding.selection)
         .collect()
 }
 
