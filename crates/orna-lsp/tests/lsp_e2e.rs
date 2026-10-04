@@ -7,6 +7,8 @@ use std::{
 
 use serde_json::{Value, json};
 
+#[path = "support/syntax_v1_action_signature_contract.rs"]
+mod syntax_v1_action_signature_contract;
 #[path = "support/syntax_v1_depth_contract.rs"]
 mod syntax_v1_depth_contract;
 
@@ -1278,11 +1280,14 @@ fn signature_help_tracks_nested_arguments_and_named_parameter_indices() {
     initialize(&mut client);
     let diagnostics = open(&mut client, uri, SIGNATURE_ACTIONS_SOURCE);
     assert!(diagnostics["diagnostics"].as_array().unwrap().is_empty());
+    let requests = syntax_v1_action_signature_contract::request_data(
+        SIGNATURE_ACTIONS_SOURCE,
+        MISSING_SEMICOLON_SOURCE,
+    );
 
-    let tuple_value = SIGNATURE_ACTIONS_SOURCE.find("(1, 2)").unwrap() + "(1, ".len();
     let nested_argument = client.request(
         "textDocument/signatureHelp",
-        json!({"textDocument":{"uri":uri},"position":position_at(SIGNATURE_ACTIONS_SOURCE,tuple_value)}),
+        json!({"textDocument":{"uri":uri},"position":requests["signature_nested_tuple"]}),
     );
     assert!(
         nested_argument["signatures"][0]["label"]
@@ -1292,10 +1297,9 @@ fn signature_help_tracks_nested_arguments_and_named_parameter_indices() {
     );
     assert_eq!(nested_argument["activeParameter"], 0, "{nested_argument}");
 
-    let last_value = SIGNATURE_ACTIONS_SOURCE.find("last: 3").unwrap() + "last: ".len();
     let named_argument = client.request(
         "textDocument/signatureHelp",
-        json!({"textDocument":{"uri":uri},"position":position_at(SIGNATURE_ACTIONS_SOURCE,last_value)}),
+        json!({"textDocument":{"uri":uri},"position":requests["signature_named_argument"]}),
     );
     assert!(
         named_argument["signatures"][0]["label"]
@@ -1305,10 +1309,9 @@ fn signature_help_tracks_nested_arguments_and_named_parameter_indices() {
     );
     assert_eq!(named_argument["activeParameter"], 2, "{named_argument}");
 
-    let extra_value = SIGNATURE_ACTIONS_SOURCE.find("extra: value").unwrap() + "extra: ".len();
     let nested_named_argument = client.request(
         "textDocument/signatureHelp",
-        json!({"textDocument":{"uri":uri},"position":position_at(SIGNATURE_ACTIONS_SOURCE,extra_value)}),
+        json!({"textDocument":{"uri":uri},"position":requests["signature_nested_named_argument"]}),
     );
     assert!(
         nested_named_argument["signatures"][0]["label"]
@@ -1321,12 +1324,18 @@ fn signature_help_tracks_nested_arguments_and_named_parameter_indices() {
         "{nested_named_argument}"
     );
 
-    let shadow_call = SIGNATURE_ACTIONS_SOURCE.find("add(1)").unwrap() + 1;
     let shadowed_signature = client.request(
         "textDocument/signatureHelp",
-        json!({"textDocument":{"uri":uri},"position":position_at(SIGNATURE_ACTIONS_SOURCE,shadow_call)}),
+        json!({"textDocument":{"uri":uri},"position":requests["signature_shadowed_call"]}),
     );
     assert!(shadowed_signature.is_null(), "{shadowed_signature}");
+    syntax_v1_action_signature_contract::assert_signature_help_contract(
+        &nested_argument,
+        &named_argument,
+        &nested_named_argument,
+        &shadowed_signature,
+        "LSP protocol",
+    );
     client.shutdown();
 }
 
@@ -1337,6 +1346,10 @@ fn code_actions_offer_only_verified_missing_semicolon_fixes() {
     initialize(&mut client);
     let published = open(&mut client, uri, MISSING_SEMICOLON_SOURCE);
     let diagnostics = published["diagnostics"].as_array().unwrap();
+    let requests = syntax_v1_action_signature_contract::request_data(
+        SIGNATURE_ACTIONS_SOURCE,
+        MISSING_SEMICOLON_SOURCE,
+    );
     assert_eq!(
         diagnostics
             .iter()
@@ -1348,7 +1361,7 @@ fn code_actions_offer_only_verified_missing_semicolon_fixes() {
 
     let params = json!({
         "textDocument":{"uri":uri},
-        "range":range_at(MISSING_SEMICOLON_SOURCE, 0, MISSING_SEMICOLON_SOURCE.len()),
+        "range":requests["code_action_full_range"],
         "context":{"diagnostics":diagnostics,"only":["quickfix"]}
     });
     let actions = client.request("textDocument/codeAction", params.clone());
@@ -1382,18 +1395,22 @@ fn code_actions_offer_only_verified_missing_semicolon_fixes() {
 
     let mut non_quickfix_params = params.clone();
     non_quickfix_params["context"]["only"] = json!(["refactor"]);
-    assert_eq!(
-        client.request("textDocument/codeAction", non_quickfix_params),
-        json!([])
-    );
+    let non_quickfix = client.request("textDocument/codeAction", non_quickfix_params);
+    assert_eq!(non_quickfix, json!([]));
     let outside_diagnostic = json!({
         "textDocument":{"uri":uri},
-        "range":range_at(MISSING_SEMICOLON_SOURCE, 0, 1),
+        "range":requests["code_action_outside_range"],
         "context":{"diagnostics":diagnostics,"only":["quickfix"]}
     });
-    assert_eq!(
-        client.request("textDocument/codeAction", outside_diagnostic),
-        json!([])
+    let outside_range = client.request("textDocument/codeAction", outside_diagnostic);
+    assert_eq!(outside_range, json!([]));
+    syntax_v1_action_signature_contract::assert_code_action_contract(
+        MISSING_SEMICOLON_SOURCE,
+        uri,
+        &actions,
+        &non_quickfix,
+        &outside_range,
+        "LSP protocol",
     );
     client.shutdown();
 }
