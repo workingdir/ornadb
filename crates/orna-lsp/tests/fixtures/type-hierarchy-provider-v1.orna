@@ -1,0 +1,28 @@
+// Unicode range prefix: café 🧭.
+pub protocol Renderable {
+    fn render(self): Str;
+}
+
+pub protocol Clash {
+    fn conflict(self): Str;
+}
+
+pub type Document {
+    impl Renderable {
+        fn render(self): Str = "document";
+    }
+}
+
+pub table Invoice(id: Int) {
+    impl Renderable {
+        fn render(self): Str = "invoice";
+    }
+}
+
+pub type Orphan {
+    impl Missing {
+        fn missing(self): Str = "orphan";
+    }
+}
+
+pub type DocumentAlias = Document;
