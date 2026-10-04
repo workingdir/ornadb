@@ -1039,7 +1039,7 @@ fn nested_window_identities_survive_paired_cost_restore_folds_and_sparse_edges()
                 changed["pair:table:ChildB"],
                 "paired_window_cost_restoration_window_envelope_restore_chain_transition"
             ),
-            "advanced_envelope_restore_chain"
+            "advanced_window_and_envelope_restore_chain"
         );
         assert_eq!(
             text(
