@@ -50,6 +50,7 @@ const ROUTE_STYLE: &str = include_str!("fixtures/playground-route-style.orna");
 const ROUTE_CONFIG: &str = include_str!("fixtures/playground-route-config.orna");
 const ROUTE_EMBED_SCRIPT: &str = include_str!("fixtures/playground-route-embed-script.orna");
 const ROUTE_LIVE: &str = include_str!("fixtures/playground-route-live.orna");
+const ROUTE_LIVE_ASSET: &str = include_str!("fixtures/playground-route-live-asset.orna");
 const ENTRY_PAGE: &str = include_str!("fixtures/playground-entry-page.orna");
 const ENTRY_EMBED: &str = include_str!("fixtures/playground-entry-embed.orna");
 const ENTRY_APP: &str = include_str!("fixtures/playground-entry-app.orna");
@@ -57,6 +58,7 @@ const ENTRY_STYLE: &str = include_str!("fixtures/playground-entry-style.orna");
 const ENTRY_CONFIG: &str = include_str!("fixtures/playground-entry-config.orna");
 const ENTRY_EMBED_SCRIPT: &str = include_str!("fixtures/playground-entry-embed-script.orna");
 const ENTRY_LIVE: &str = include_str!("fixtures/playground-entry-live.orna");
+const ENTRY_LIVE_ASSET: &str = include_str!("fixtures/playground-entry-live-asset.orna");
 const ROUTE_PRESENTATION: &str = include_str!("fixtures/playground-route-presentation.orna");
 const ROUTE_HOME_RUNTIME: &str = include_str!("fixtures/playground-route-home-runtime.orna");
 const ROUTE_PLAYGROUND_RUNTIME: &str =
@@ -784,10 +786,68 @@ fn orna_serve_hosts_playground_with_pending_evals_and_snapshot_correct_deltas() 
     );
     let after_route_commit = curl(&live_route_path, &[]).expect("curl newly committed live route");
     assert_eq!(after_route_commit.status, 200);
+    assert_eq!(
+        response_header(&after_route_commit.headers, "content-type"),
+        Some("text/html; charset=utf-8")
+    );
     assert!(after_route_commit.body.contains("database shell"));
+
+    write_fixture_rows(
+        project.path(),
+        "Route",
+        &[("route-2f706c617967726f756e642f6c6976652f", ROUTE_LIVE_ASSET)],
+    );
+    write_fixture_rows(
+        project.path(),
+        "Entry",
+        &[("entry-live-asset", ENTRY_LIVE_ASSET)],
+    );
+    git(
+        project.path(),
+        &[
+            "add",
+            "playground/Route/route-2f706c617967726f756e642f6c6976652f.orna",
+            "playground/Entry/entry-live-asset.orna",
+        ],
+    );
+    git(
+        project.path(),
+        &[
+            "-c",
+            "user.name=kierandrewett",
+            "-c",
+            "user.email=kieran@drewett.dev",
+            "commit",
+            "--quiet",
+            "-m",
+            "rebind live playground route to an asset entry",
+        ],
+    );
+    assert!(
+        server
+            .0
+            .try_wait()
+            .expect("probe orna serve process after route rebinding")
+            .is_none()
+    );
+    let after_entry_rebind =
+        curl(&live_route_path, &[]).expect("curl live route after entry rebinding");
+    assert_eq!(after_entry_rebind.status, 200);
+    assert_eq!(
+        response_header(&after_entry_rebind.headers, "content-type"),
+        Some("text/javascript; charset=utf-8")
+    );
+    assert_eq!(
+        after_entry_rebind.body,
+        "globalThis.ornaPlaygroundReady = true;"
+    );
     println!(
-        "live DB route reload: GET /playground/live/ before commit -> HTTP {} and after commit -> HTTP {} without restarting orna serve (exit 0)",
-        before_route_commit.status, after_route_commit.status
+        "live DB route and entry reload: GET /playground/live/ before route commit -> HTTP {}, after page binding -> HTTP {} ({}) and after asset rebind -> HTTP {} ({}) without restarting orna serve (exit 0)",
+        before_route_commit.status,
+        after_route_commit.status,
+        response_header(&after_route_commit.headers, "content-type").unwrap_or("missing"),
+        after_entry_rebind.status,
+        response_header(&after_entry_rebind.headers, "content-type").unwrap_or("missing"),
     );
 
     let examples_started = Instant::now();

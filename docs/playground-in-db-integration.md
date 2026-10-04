@@ -66,6 +66,8 @@ The test initializes a temporary Orna Git database, commits crate-local
 Git listing, database-resident shell, editor configuration, embeddable script,
 CSS/JavaScript and WebAssembly rows, committed examples, and live session. It
 commits a new Route and Entry after startup and proves the new URL changes
-from 404 to 200 without restarting the server. A WebSocket client follows the
-existing watch, fingerprinted Eval, and Resync exchange to prove independent
-results and presentation deltas.
+from 404 to an HTML page. It then commits a new route binding to a static-asset
+Entry and proves the same URL returns JavaScript with the checked media type,
+without restarting the server. A WebSocket client follows the existing watch,
+fingerprinted Eval, and Resync exchange to prove independent results and
+presentation deltas.
