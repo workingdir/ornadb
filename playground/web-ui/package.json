@@ -1,0 +1,22 @@
+{
+  "name": "orna-playground-web-ui",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "npm run lsp:build && tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "test": "vitest run",
+    "lsp:build": "cd ../../crates/orna-lsp && wasm-pack build --target web --out-dir ../../playground/web-ui/public/lsp-wasm --out-name orna_lsp --release"
+  },
+  "dependencies": {
+    "monaco-editor": "0.57.0"
+  },
+  "devDependencies": {
+    "@types/node": "24.10.0",
+    "typescript": "5.9.3",
+    "vite": "8.3.2",
+    "vitest": "4.0.14"
+  }
+}
