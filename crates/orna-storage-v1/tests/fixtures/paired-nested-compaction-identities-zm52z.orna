@@ -1,0 +1,5 @@
+{ id: "nested-compaction/base", name: "outer/compaction-left-a", city: "outer/compaction-right-a" }
+
+{ id: "nested-compaction/reused", name: "outer/compaction-left-a", city: "outer/compaction-right-a" }
+
+{ id: "nested-compaction/distinct", name: "outer/compaction-left-b", city: "outer/compaction-right-b" }
