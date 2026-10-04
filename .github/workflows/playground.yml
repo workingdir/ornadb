@@ -66,7 +66,6 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      pages: read
     steps:
       - name: Check out the stable source
         uses: actions/checkout@v7
@@ -98,9 +97,6 @@ jobs:
 
       - name: Install wasm-pack
         run: cargo install wasm-pack --locked --version 0.15.0
-
-      - name: Set up GitHub Pages
-        uses: actions/configure-pages@v5
 
       - name: Build the stable Pages channel
         working-directory: stable-source/playground/web-ui
@@ -134,28 +130,3 @@ jobs:
         uses: actions/upload-pages-artifact@v4
         with:
           path: ${{ runner.temp }}/playground-pages/site
-
-  pages-deploy:
-    if: github.event_name != 'pull_request'
-    needs: pages-build
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      pages: write
-      id-token: write
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
-    steps:
-      - name: Check out the development source for smoke checks
-        uses: actions/checkout@v7
-        with:
-          ref: ${{ github.sha }}
-
-      - name: Deploy to GitHub Pages
-        id: deployment
-        uses: actions/deploy-pages@v4
-
-      - name: Smoke check the published stable and development channels
-        working-directory: playground/web-ui
-        run: node scripts/pages-smoke.mjs "" "${GITHUB_REPOSITORY#*/}" "${{ steps.deployment.outputs.page_url }}"
