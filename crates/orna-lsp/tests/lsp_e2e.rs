@@ -11,6 +11,7 @@ const SOURCE: &str = include_str!("fixtures/expressions-v1.orna");
 const CALL_SOURCE: &str = include_str!("fixtures/call-v1.orna");
 const INCREMENTAL_SOURCE: &str = include_str!("fixtures/incremental-malformed-v1.orna");
 const LOCAL_SCOPES_SOURCE: &str = include_str!("fixtures/local-scopes-v1.orna");
+const HOVER_COMPLETION_SOURCE: &str = include_str!("fixtures/hover-completion-v1.orna");
 
 struct Client {
     child: Child,
@@ -374,6 +375,74 @@ fn local_navigation_and_rename_follow_shadowed_bindings() {
         parameter_edits
             .iter()
             .all(|edit| edit["newText"] == "renamed_input")
+    );
+    client.shutdown();
+}
+
+#[test]
+fn hover_resolves_shadowed_bindings_and_completion_ranks_visible_locals() {
+    let uri = "file:///workspace/hover-completion.orna";
+    let mut client = Client::spawn();
+    initialize(&mut client);
+    let diagnostics = open(&mut client, uri, HOVER_COMPLETION_SOURCE);
+    assert!(
+        diagnostics["diagnostics"].as_array().unwrap().is_empty(),
+        "{diagnostics}"
+    );
+
+    let shadowed_use = HOVER_COMPLETION_SOURCE.find("input + 1").unwrap() + 1;
+    let hover = client.request(
+        "textDocument/hover",
+        json!({
+            "textDocument":{"uri":uri},
+            "position":position_at(HOVER_COMPLETION_SOURCE, shadowed_use)
+        }),
+    );
+    let hover_text = hover["contents"]["value"].as_str().unwrap();
+    assert!(hover_text.contains("**parameter** `input`"), "{hover_text}");
+    assert!(hover_text.contains("input: Int"), "{hover_text}");
+    assert!(!hover_text.contains("Describes the global input function."));
+
+    let global_declaration =
+        HOVER_COMPLETION_SOURCE.find("pub fn input").unwrap() + "pub fn ".len();
+    let global_hover = client.request(
+        "textDocument/hover",
+        json!({
+            "textDocument":{"uri":uri},
+            "position":position_at(HOVER_COMPLETION_SOURCE, global_declaration)
+        }),
+    );
+    assert!(
+        global_hover["contents"]["value"]
+            .as_str()
+            .unwrap()
+            .contains("Describes the global input function.")
+    );
+
+    let prefix = HOVER_COMPLETION_SOURCE.rfind("ne\n").unwrap();
+    let completion = client.request(
+        "textDocument/completion",
+        json!({
+            "textDocument":{"uri":uri},
+            "position":position_at(HOVER_COMPLETION_SOURCE, prefix + 2)
+        }),
+    );
+    let items = completion.as_array().unwrap();
+    assert!(!items.is_empty(), "{completion}");
+    assert_eq!(items[0]["label"], "nearby");
+    assert_eq!(items[0]["kind"], 6);
+    assert_eq!(items[0]["preselect"], true);
+    assert!(
+        items
+            .iter()
+            .all(|item| item["label"].as_str().unwrap().starts_with("ne")),
+        "prefix filtering returned unrelated items: {completion}"
+    );
+    assert!(
+        items[0]["documentation"]["value"]
+            .as_str()
+            .unwrap()
+            .contains("let nearby: Int")
     );
     client.shutdown();
 }
