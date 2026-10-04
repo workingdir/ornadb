@@ -348,6 +348,10 @@ fn orna_serve_hosts_git_listing_and_playground_with_live_run_deltas() {
         HeaderName::from_static("sec-websocket-protocol"),
         HeaderValue::from_static("orna.present.v1"),
     );
+    request.headers_mut().insert(
+        HeaderName::from_static("sec-websocket-key"),
+        HeaderValue::from_static("+/v7+/v7+/v7+/v7+/v7+w=="),
+    );
     let request_debug = format!("{request:?}");
     let (mut socket, upgrade) = tungstenite::connect(request).unwrap_or_else(|error| {
         panic!("open authenticated Orna presentation WebSocket: {error}; request {request_debug}");
