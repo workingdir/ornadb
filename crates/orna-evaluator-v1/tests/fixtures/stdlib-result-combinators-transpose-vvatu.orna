@@ -1,1 +1,1 @@
-std.result.transpose(ok_none) == null\n
+std.result.transpose(ok_none) == null
