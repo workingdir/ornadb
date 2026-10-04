@@ -6,7 +6,10 @@ const webUi = fileURLToPath(new URL('../', import.meta.url));
 const repository = fileURLToPath(new URL('../../../', import.meta.url));
 const distribution = join(webUi, 'dist');
 const assetRows = join(repository, 'playground', 'Asset');
+const themeRows = join(repository, 'playground', 'Theme');
+const layoutRows = join(repository, 'playground', 'Layout');
 const maxAssetBytes = 2 * 1024 * 1024;
+const maxStyleBytes = 256 * 1024;
 const mediaTypes = new Map([
   ['.html', 'text/html; charset=utf-8'],
   ['.js', 'text/javascript; charset=utf-8'],
@@ -39,22 +42,46 @@ function rowString(value) {
   return JSON.stringify(value);
 }
 
-await mkdir(assetRows, { recursive: true });
+async function writeRecord(directory, filename, record) {
+  await mkdir(directory, { recursive: true });
+  const fields = Object.entries(record)
+    .map(([name, value]) => `${name}: ${rowString(value)}`)
+    .join(', ');
+  await writeFile(join(directory, filename), `{ ${fields} }\n`, 'utf8');
+}
+
+await Promise.all([
+  mkdir(assetRows, { recursive: true }),
+  mkdir(themeRows, { recursive: true }),
+  mkdir(layoutRows, { recursive: true }),
+]);
 const files = await collectFiles('');
 if (!files.includes('index.html')) throw new Error('The Vite output has no index.html shell.');
 
 const writtenRows = new Set();
 let totalContentBytes = 0;
 for (const path of files) {
+  if (extname(path).toLowerCase() === '.css') continue;
   const content = await readFile(join(distribution, path));
   if (content.byteLength > maxAssetBytes) {
     throw new Error(`Playground DB asset exceeds ${maxAssetBytes} bytes: ${path}`);
   }
   const mediaType = mediaTypes.get(extname(path).toLowerCase());
   if (!mediaType) throw new Error(`Unsupported playground DB asset type: ${path}`);
-  const contentText = content.toString('utf8');
+  let contentText = content.toString('utf8');
   if (!Buffer.from(contentText, 'utf8').equals(content)) {
     throw new Error(`Playground DB assets must be UTF-8 text: ${path}`);
+  }
+  if (path === 'index.html') {
+    const stylesheetLinks = contentText.match(/<link\b[^>]*\brel="stylesheet"[^>]*>/g) ?? [];
+    if (stylesheetLinks.length !== 1) {
+      throw new Error(`Expected one bundled stylesheet link in the generated shell, found ${stylesheetLinks.length}.`);
+    }
+    contentText = contentText.replace(
+      stylesheetLinks[0],
+      '<link id="playground-theme" rel="stylesheet" href="/playground/theme.css">' +
+      '<link id="playground-layout" rel="stylesheet" href="/playground/layout.css">',
+    );
   }
 
   const id = `asset-${Buffer.from(path).toString('hex')}`;
@@ -75,4 +102,22 @@ for (const name of await readdir(assetRows)) {
   }
 }
 
-console.log(`Wrote ${writtenRows.size} committed playground Asset rows (${totalContentBytes} content bytes).`);
+for (const [directory, filename, id, name, sourcePath] of [
+  [themeRows, 'wiki-basic.orna', 'wiki-basic', 'Wiki basic', 'theme.css'],
+  [layoutRows, 'responsive.orna', 'responsive', 'Responsive layout', 'layout.css'],
+]) {
+  const css = await readFile(join(webUi, 'src', sourcePath));
+  if (css.byteLength > maxStyleBytes) {
+    throw new Error(`Playground ${sourcePath} exceeds ${maxStyleBytes} bytes.`);
+  }
+  const cssText = css.toString('utf8');
+  if (!Buffer.from(cssText, 'utf8').equals(css)) {
+    throw new Error(`Playground ${sourcePath} must be UTF-8 text.`);
+  }
+  await writeRecord(directory, filename, { id, name, css: cssText });
+}
+
+console.log(
+  `Wrote ${writtenRows.size} committed playground Asset rows (${totalContentBytes} content bytes), ` +
+  'one Theme row, and one Layout row.',
+);

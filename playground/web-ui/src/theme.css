@@ -1,0 +1,30 @@
+:root {
+  color-scheme: light;
+  --page-width: 120rem;
+  --text: #202122;
+  --background: #fff;
+  --surface: #f8f9fa;
+  --border: #a2a9b1;
+  --muted: #54595d;
+  --link: #0645ad;
+  --visited: #0b0080;
+  --code-font: ui-monospace, SFMono-Regular, Consolas, monospace;
+  color: var(--text);
+  background: var(--background);
+  font: 1rem/1.5 Georgia, "Times New Roman", serif;
+}
+
+* { box-sizing: border-box; }
+body { margin: 0; color: var(--text); background: var(--background); }
+a { color: var(--link); }
+a:visited { color: var(--visited); }
+button, select, textarea { color: inherit; font: inherit; }
+button { cursor: pointer; }
+button:disabled, select:disabled { cursor: default; }
+.page-header { border-bottom: 1px solid var(--border); }
+.page-header h1 { margin: 0; font-size: 1.6rem; font-weight: 400; }
+.page-header p { margin: .25rem 0 .75rem; }
+.panels { background: var(--surface); }
+.tabs button[aria-selected="true"] { border-bottom-color: var(--link); color: var(--link); }
+.visually-hidden { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
+[hidden] { display: none !important; }
