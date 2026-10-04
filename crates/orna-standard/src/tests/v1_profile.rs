@@ -459,6 +459,42 @@ fn pinned_collection_views_and_slices_typecheck_as_an_ordinary_std_module() {
 }
 
 #[test]
+fn pinned_bits_source_includes_bit_and_unsigned_byte_contracts() {
+    let sources = reference_standard_sources_v1();
+    let (index, (path, source)) = sources
+        .iter()
+        .enumerate()
+        .find(|(_, (path, _))| path == REFERENCE_STANDARD_BITS_PATH_V1)
+        .expect("the pinned source bundle includes std.bits");
+    assert_eq!(index, 4, "the existing bits module keeps its source index");
+    for declaration in [
+        "pub fn test_bit(value: Int, index: Int): Bool?",
+        "pub fn set_bit(value: Int, index: Int): Int?",
+        "pub fn clear_bit(value: Int, index: Int): Int?",
+        "pub fn toggle_bit(value: Int, index: Int): Int?",
+        "pub fn is_byte(value: Int): Bool",
+        "pub fn unsigned_to_bytes(value: Int, width: Int, order: Str): [Int]?",
+        "pub fn unsigned_from_bytes(bytes: [Int], order: Str): Int?",
+    ] {
+        assert!(source.contains(declaration), "missing {declaration}");
+    }
+    for contract in [
+        "infinite sign extension",
+        "exactly `width` bytes",
+        "Little endian places the least-significant byte first",
+        "most-significant byte first",
+        "Leading zero bytes are accepted",
+    ] {
+        assert!(source.contains(contract), "missing bit/byte contract `{contract}`");
+    }
+    reference_standard_profile_v1()
+        .verify_source(path, source)
+        .expect("bit and byte helper source bytes are captured by the std profile");
+    reference_standard_catalogue_v1()
+        .expect("bit and byte helper imports resolve in the captured catalogue");
+}
+
+#[test]
 fn pinned_collection_overloads_preserve_relation_result_kinds() {
     let catalogue = reference_standard_catalogue_v1().expect("the pinned std profile checks");
     let analysis = analyze_with_catalogue(
