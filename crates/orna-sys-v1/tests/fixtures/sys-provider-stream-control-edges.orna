@@ -1,0 +1,7 @@
+// sys-module: sys.admin
+// sys-op: sys.admin.pause_stream
+pub fn pause_stream(stream: sys.StreamRef, reason: Str? = null): Bool = error(code: "sys.binding.stub", message: "generated declaration stub");
+
+// sys-module: sys.admin
+// sys-op: sys.admin.resume_stream
+pub fn resume_stream(stream: sys.StreamRef): Bool = error(code: "sys.binding.stub", message: "generated declaration stub");
