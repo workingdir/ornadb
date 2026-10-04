@@ -31,12 +31,13 @@ policy. Static assets are returned with their checked media type and
 Asset row is visible on the next request without restarting `orna serve`.
 
 Monaco uses the database-served shell assets to run the Orna LSP worker. The
-worker supplies standard-library completion and hover alongside signature
-help and diagnostics. The `/playground/assets/embed.js` classic script creates
-an iframe pointed at the same database's `/playground/embed` route. Set
-`data-target` to append the iframe to a container, and optionally set
-`data-height`, `data-title`, or `data-loading`. The entry script itself is a
-committed Asset row.
+worker supplies standard-library completion, hover, signature help, and
+parameter and inferred type hints alongside diagnostics. Standard call hints
+use the same pinned source catalogue as hover and signature help. The
+`/playground/assets/embed.js` classic script creates an iframe pointed at the
+same database's `/playground/embed` route. Set `data-target` to append the
+iframe to a container, and optionally set `data-height`, `data-title`, or
+`data-loading`. The entry script itself is a committed Asset row.
 
 The browser sends explicit Run requests to the same clone's
 `orna.present.v1` session. Source evaluation and presentation remain in the
@@ -69,3 +70,13 @@ commits a new Route and Entry after startup and proves the new URL changes
 from 404 to 200 without restarting the server. A WebSocket client follows the
 existing watch, fingerprinted Eval, and Resync exchange to prove independent
 results and presentation deltas.
+
+The browser assist proof loads the LSP JavaScript and WebAssembly from an
+active `orna serve` database:
+
+```sh
+npm run prove:served-assists -- http://127.0.0.1:18087
+```
+
+It verifies completion ranking, standard-library hover and signature help, and
+imported and qualified standard-library inlay hints from the served module.
