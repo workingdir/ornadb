@@ -47,7 +47,8 @@ call `require("orna").setup()`; pass `cmd = { "/path/to/orna-lsp" }` when the
 server is not on `PATH`. The setup registers `.orna` filetype detection and
 attaches those buffers to `orna-lsp`. A completion plugin can use the attached
 client's LSP completion provider. The native client also exposes server hover
-through `vim.lsp.buf.hover()` and requests syntax-v1 semantic tokens.
+through `vim.lsp.buf.hover()`, rename through `vim.lsp.buf.rename()`, references
+through `vim.lsp.buf.references()`, and syntax-v1 semantic tokens.
 
 Vim uses the optional [`vim-lsp`](https://github.com/prabirshrestha/vim-lsp)
 client. Add `editors/vim` and the `vim-lsp` plugin to `runtimepath`; the Orna
@@ -62,12 +63,15 @@ use Emacs's `completion-at-point` interface. Set `orna-eglot-server-command`
 to a command list before calling the setup function when `orna-lsp` is not on
 `PATH`. Eglot provides hover documentation through ElDoc and applies semantic
 token faces when its `eglot-semantic-tokens-mode` support is available.
+Eglot provides rename through `eglot-rename` and references through its xref
+backend.
 
-The `orna-lsp` integration suite exercises hover and six lexical semantic
-token classes through Neovim's attached client, and hover plus semantic-token
-fontification through Emacs/Eglot. It also has optional Vim/`vim-lsp`
-completion probes. Host probes report `SKIP` when an editor, client runtime,
-or Eglot semantic-token support is unavailable.
+The `orna-lsp` integration suite exercises hover, rename, references, and six
+lexical semantic-token classes through Neovim's attached client. Emacs/Eglot
+proves hover, rename, and references through its attached server, plus
+semantic-token fontification when that Eglot feature is available. It also has
+optional Vim/`vim-lsp` completion probes. Host probes report `SKIP` when an
+editor, client runtime, or optional semantic-token support is unavailable.
 
 Generated artifact checks do not launch editor hosts. Tree-sitter generation
 is structurally checked by Node, and the grammar/query package is drift-checked
