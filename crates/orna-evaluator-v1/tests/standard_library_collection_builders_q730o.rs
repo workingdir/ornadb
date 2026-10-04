@@ -4,6 +4,7 @@ use orna_evaluator_v1::{
 use orna_foundation_v1::CanonicalValue;
 use orna_semantic_v1::{Catalogue, StandardDependencyProfile};
 use orna_value_v1::Raw;
+use std::thread;
 
 const BUILDER_MODULES: [&str; 4] = [
     "std/collection.orna",
@@ -18,6 +19,17 @@ fn bool_value(value: bool) -> CanonicalValue {
 
 fn empty_array() -> CanonicalValue {
     CanonicalValue::new(Raw::Array(Vec::new())).expect("empty array is canonical")
+}
+
+fn run_on_interpreter_stack(test: fn()) {
+    let worker = thread::Builder::new()
+        .name("collection-builder-proof".into())
+        .stack_size(16 * 1024 * 1024)
+        .spawn(test)
+        .expect("collection proof worker starts");
+    if let Err(payload) = worker.join() {
+        std::panic::resume_unwind(payload);
+    }
 }
 
 fn import_builders(session: &mut AdmittedReplSession) {
@@ -60,6 +72,10 @@ fn builders_session() -> AdmittedReplSession {
 
 #[test]
 fn pinned_list_map_and_set_builders_preserve_their_collection_contracts() {
+    run_on_interpreter_stack(prove_pinned_collection_builders);
+}
+
+fn prove_pinned_collection_builders() {
     let mut session = builders_session();
     import_builders(&mut session);
 
