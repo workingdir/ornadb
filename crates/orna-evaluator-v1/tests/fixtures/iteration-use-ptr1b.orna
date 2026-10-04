@@ -1,0 +1,22 @@
+use std.iteration as iteration;
+use std.collection as collection;
+
+fn neighbors(node: Int): [Int] = case node {
+    1: [2, 3, 2],
+    2: [4, 5],
+    3: [5, 6],
+    4: [1],
+    5: [6],
+    6: [3],
+    _: [],
+};
+
+fn target_edges(node: Int): [Int] =
+    if node == 1 {
+        [2, 3]
+    } else {
+        fail(error(code: "fixture.unexpected_expansion", message: "reachability expanded past target"))
+    };
+
+fn forbidden_edges(_: Int): [Int] =
+    fail(error(code: "fixture.unexpected_expansion", message: "matching root must stop immediately"));
