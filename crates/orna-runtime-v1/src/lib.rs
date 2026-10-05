@@ -2083,6 +2083,7 @@ pub struct RuntimeState {
     compact_receipt_signing_key: SigningKey,
     system_dispatch: &'static orna_sys_v1::SystemDispatchTable,
     system_provider_roles: orna_sys_v1::ProviderRoleRegistry,
+    vfs_repository_cache: vfs::VfsRepositoryCache,
 }
 
 enum RequestActivationTransactionError {
@@ -3955,6 +3956,7 @@ impl RuntimeState {
             compact_receipt_signing_key,
             system_dispatch,
             system_provider_roles,
+            vfs_repository_cache: vfs::VfsRepositoryCache::new(),
         };
         state.migrate_observation_projection_schema().await?;
         state.migrate_stream_observation_failure_identity().await?;
@@ -5596,6 +5598,42 @@ impl RuntimeState {
             capture: self.capture().await?,
             activation_time: SystemTime::now(),
         })
+    }
+
+    /// Returns this runtime's single repository-scoped VFS cache owner.
+    pub fn vfs_repository_cache(&self) -> &vfs::VfsRepositoryCache {
+        &self.vfs_repository_cache
+    }
+
+    /// Registers an immutable repository projection in this runtime's VFS
+    /// cache scope. All files for this runtime should be admitted here.
+    pub async fn manage_vfs_file<S>(
+        &self,
+        image: Arc<vfs::VfsFileSnapshot<S>>,
+    ) -> Result<Arc<vfs::ManagedFile<S>>, vfs::VfsRepositoryCacheError>
+    where
+        S: std::any::Any + Send + Sync + 'static,
+    {
+        self.vfs_repository_cache.managed_file(image).await
+    }
+
+    /// Routes an EDIT-1 temporary-file rename through this runtime's VFS
+    /// scope. The adapter must complete the validated durable table activation
+    /// before it returns `ActivationDecision::Accepted`.
+    pub async fn rename_vfs_temporary_over<S, F, Fut, E>(
+        &self,
+        destination: &Arc<vfs::ManagedFile<S>>,
+        scratch: &vfs::TemporarySave<S>,
+        activate: F,
+    ) -> Result<vfs::TemporaryRenameOutcome<S>, vfs::TemporaryRenameError<E>>
+    where
+        S: Send + Sync + 'static,
+        F: FnOnce(vfs::ActivationCandidate<S>) -> Fut,
+        Fut: Future<Output = Result<vfs::ActivationDecision<S>, E>>,
+    {
+        self.vfs_repository_cache
+            .rename_over(destination, scratch, activate)
+            .await
     }
 
     /// Returns a checked continuation for an already-admitted Running table
