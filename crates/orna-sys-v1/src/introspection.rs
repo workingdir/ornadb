@@ -9369,6 +9369,8 @@ struct QueryPairedWindowCostRestorationFold {
     window_restore_envelope_chain_transition: Option<&'static str>,
     cost_window_restore_envelope_chain_fold_identity: Option<String>,
     cost_window_restore_envelope_chain_transition: Option<&'static str>,
+    cost_window_restore_envelope_chain_carry_identity: Option<String>,
+    cost_window_restore_envelope_chain_carry_transition: Option<&'static str>,
     window_fold_identity: Option<String>,
     restore_chain_fold_identity: Option<String>,
     window_restore_chain_fold_identity: Option<String>,
@@ -15452,6 +15454,8 @@ fn query_paired_window_cost_restoration_seed(
         window_restore_envelope_chain_transition: None,
         cost_window_restore_envelope_chain_fold_identity: None,
         cost_window_restore_envelope_chain_transition: None,
+        cost_window_restore_envelope_chain_carry_identity: None,
+        cost_window_restore_envelope_chain_carry_transition: None,
         window_fold_identity: None,
         restore_chain_fold_identity: None,
         window_restore_chain_fold_identity: None,
@@ -15914,9 +15918,56 @@ fn query_paired_window_cost_restoration_fold(
                 (false, false, false) => "carried_across_sparse_input",
             }
         });
+    let previous_cost_window_restore_envelope_carry_identity = previous
+        .and_then(|fold| fold.cost_window_restore_envelope_chain_carry_identity.as_deref());
+    let previous_cost_window_restore_envelope_identity = previous
+        .and_then(|fold| fold.cost_window_restore_envelope_chain_fold_identity.as_deref());
+    let cost_window_restore_envelope_chain_carry_identity =
+        match cost_window_restore_envelope_chain_fold_identity.as_deref() {
+            Some(composite_identity)
+                if previous_cost_window_restore_envelope_identity
+                    == Some(composite_identity) =>
+            {
+                previous_cost_window_restore_envelope_carry_identity
+                    .map(str::to_owned)
+            }
+            Some(composite_identity) => {
+                let mut carry_hash = Sha256::new();
+                carry_hash.update(
+                    b"orna.sys.query-paired-window-cost-restoration-cost-window-restore-envelope-carry-fold.v1\0",
+                );
+                hash_optional_text(
+                    &mut carry_hash,
+                    previous_cost_window_restore_envelope_carry_identity,
+                );
+                hash_part(&mut carry_hash, composite_identity.as_bytes());
+                Some(format!(
+                    "paired-window-cost-restoration-cost-window-restore-envelope-carry-fold:{}",
+                    hex(&carry_hash.finalize())
+                ))
+            }
+            None => previous_cost_window_restore_envelope_carry_identity.map(str::to_owned),
+        };
+    let cost_window_restore_envelope_chain_carry_transition =
+        match (
+            previous_cost_window_restore_envelope_carry_identity,
+            previous_cost_window_restore_envelope_identity,
+            cost_window_restore_envelope_chain_fold_identity.as_deref(),
+        ) {
+            (None, _, Some(_)) => Some("initialized_cost_restore_envelope_carry"),
+            (Some(_), Some(previous_identity), Some(current_identity))
+                if previous_identity == current_identity =>
+            {
+                Some("carried_duplicate_or_sparse_cost_restore_envelope_input")
+            }
+            (Some(_), _, Some(_)) => Some("advanced_cost_restore_envelope_carry"),
+            (Some(_), _, None) => Some("carried_without_cost_restore_envelope_input"),
+            _ => None,
+        };
     let parent_identity = previous.map(|fold| fold.identity.clone());
 
     let mut hash = Sha256::new();
+    hash.update(b"orna.sys.query-paired-window-cost-restoration-fold.v13\0");
     hash.update(b"orna.sys.query-paired-window-cost-restoration-fold.v12\0");
     hash.update(b"orna.sys.query-paired-window-cost-restoration-fold.v11\0");
     hash.update(b"orna.sys.query-paired-window-cost-restoration-fold.v10\0");
@@ -15972,6 +16023,10 @@ fn query_paired_window_cost_restoration_fold(
         &mut hash,
         cost_window_restore_envelope_chain_fold_identity.as_deref(),
     );
+    hash_optional_text(
+        &mut hash,
+        cost_window_restore_envelope_chain_carry_identity.as_deref(),
+    );
     hash.update([u8::from(overflowed)]);
 
     QueryPairedWindowCostRestorationFold {
@@ -15995,6 +16050,8 @@ fn query_paired_window_cost_restoration_fold(
         window_restore_envelope_chain_transition,
         cost_window_restore_envelope_chain_fold_identity,
         cost_window_restore_envelope_chain_transition,
+        cost_window_restore_envelope_chain_carry_identity,
+        cost_window_restore_envelope_chain_carry_transition,
         window_fold_identity,
         restore_chain_fold_identity,
         window_restore_chain_fold_identity,
@@ -16208,6 +16265,39 @@ fn add_paired_window_cost_restoration_fold_details(
         );
         details.remove(
             "paired_window_cost_restoration_cost_window_restore_envelope_chain_transition",
+        );
+    }
+    if let Some(cost_window_restore_envelope_chain_carry_identity) =
+        fold.cost_window_restore_envelope_chain_carry_identity.as_ref()
+    {
+        details.insert(
+            "paired_window_cost_restoration_cost_window_restore_envelope_chain_carry_identity"
+                .to_owned(),
+            PlanDetail::Text(cost_window_restore_envelope_chain_carry_identity.clone()),
+        );
+        details.insert(
+            "paired_window_cost_restoration_cost_window_restore_envelope_chain_carry_policy"
+                .to_owned(),
+            PlanDetail::Text(
+                "advance_on_distinct_composite_states_and_carry_exact_repeats".to_owned(),
+            ),
+        );
+        if let Some(transition) = fold.cost_window_restore_envelope_chain_carry_transition {
+            details.insert(
+                "paired_window_cost_restoration_cost_window_restore_envelope_chain_carry_transition"
+                    .to_owned(),
+                PlanDetail::Text(transition.to_owned()),
+            );
+        }
+    } else {
+        details.remove(
+            "paired_window_cost_restoration_cost_window_restore_envelope_chain_carry_identity",
+        );
+        details.remove(
+            "paired_window_cost_restoration_cost_window_restore_envelope_chain_carry_policy",
+        );
+        details.remove(
+            "paired_window_cost_restoration_cost_window_restore_envelope_chain_carry_transition",
         );
     }
     if let Some(parent_identity) = fold.parent_identity.as_ref() {
@@ -18027,5 +18117,120 @@ mod byte_cap_handoff_route_scope_tests {
             hash.finalize()
         };
         assert_eq!(fingerprint(stale_route), fingerprint(canonical_route));
+    }
+}
+
+#[cfg(test)]
+mod paired_window_cost_restore_envelope_carry_tests {
+    use super::*;
+
+    #[test]
+    fn duplicate_sparse_fold_input_carries_composite_identity() {
+        let initial = query_paired_window_cost_restoration_fold(
+            None,
+            "pair:child-a",
+            "cost:left-a",
+            "cost:right-a",
+            "pair:child-a",
+            Some("window:child-a"),
+            None,
+            &[("checkpoint_cost_restoration", Some("restore:child-a"))],
+        );
+        assert!(
+            initial
+                .cost_window_restore_envelope_chain_fold_identity
+                .is_some()
+        );
+        assert_eq!(
+            initial.cost_window_restore_envelope_chain_carry_transition,
+            Some("initialized_cost_restore_envelope_carry")
+        );
+
+        let sparse = query_paired_window_cost_restoration_fold(
+            Some(&initial),
+            "pair:child-a",
+            "cost:left-a",
+            "cost:right-a",
+            "pair:child-a",
+            None,
+            None,
+            &[],
+        );
+        assert_ne!(
+            initial.identity, sparse.identity,
+            "the outer fold still records the repeated sparse step"
+        );
+        assert_eq!(
+            initial.cost_window_restore_envelope_chain_fold_identity,
+            sparse.cost_window_restore_envelope_chain_fold_identity
+        );
+        assert_eq!(
+            initial.cost_window_restore_envelope_chain_carry_identity,
+            sparse.cost_window_restore_envelope_chain_carry_identity
+        );
+        assert_eq!(
+            sparse.cost_window_restore_envelope_chain_carry_transition,
+            Some("carried_duplicate_or_sparse_cost_restore_envelope_input")
+        );
+
+        let repeated_sparse = query_paired_window_cost_restoration_fold(
+            Some(&sparse),
+            "pair:child-a",
+            "cost:left-a",
+            "cost:right-a",
+            "pair:child-a",
+            None,
+            None,
+            &[],
+        );
+        assert_eq!(
+            sparse.cost_window_restore_envelope_chain_carry_identity,
+            repeated_sparse.cost_window_restore_envelope_chain_carry_identity
+        );
+        assert_eq!(
+            repeated_sparse.cost_window_restore_envelope_chain_carry_transition,
+            Some("carried_duplicate_or_sparse_cost_restore_envelope_input")
+        );
+
+        let changed_cost = query_paired_window_cost_restoration_fold(
+            Some(&sparse),
+            "pair:child-a",
+            "cost:left-a-changed",
+            "cost:right-a",
+            "pair:child-a",
+            None,
+            None,
+            &[],
+        );
+        assert_ne!(
+            sparse.cost_window_restore_envelope_chain_carry_identity,
+            changed_cost.cost_window_restore_envelope_chain_carry_identity
+        );
+        assert_eq!(
+            changed_cost.cost_window_restore_envelope_chain_carry_transition,
+            Some("advanced_cost_restore_envelope_carry")
+        );
+
+        let changed_restore = query_paired_window_cost_restoration_fold(
+            Some(&sparse),
+            "pair:child-a",
+            "cost:left-a",
+            "cost:right-a",
+            "pair:child-a",
+            None,
+            None,
+            &[(
+                "checkpoint_cost_restoration",
+                Some("restore:child-a:changed"),
+            )],
+        );
+        assert_ne!(
+            sparse.cost_window_restore_envelope_chain_carry_identity,
+            changed_restore.cost_window_restore_envelope_chain_carry_identity
+        );
+        assert_eq!(
+            changed_restore.cost_window_restore_envelope_chain_carry_transition,
+            Some("advanced_cost_restore_envelope_carry")
+        );
     }
 }
