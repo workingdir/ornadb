@@ -212,6 +212,14 @@ impl AdmittedRow {
         }
     }
 
+    pub(crate) fn issue(version: &RowMapVersion, key: TypedKey, value: RowValue) -> Self {
+        Self {
+            version: version.clone(),
+            key,
+            value,
+        }
+    }
+
     pub fn version(&self) -> &RowMapVersion {
         &self.version
     }
@@ -231,7 +239,7 @@ impl AdmittedRow {
 pub struct RowMapSnapshot {
     version: RowMapVersion,
     authority: [u8; 32],
-    entries: Arc<[RowEntry]>,
+    entries: Option<Arc<[RowEntry]>>,
 }
 
 impl RowMapSnapshot {
@@ -252,7 +260,24 @@ impl RowMapSnapshot {
         Ok(Self {
             version,
             authority,
-            entries: entries.into(),
+            entries: Some(entries.into()),
+        })
+    }
+
+    /// Seals a persisted ORP map without materializing its rows. Reads are
+    /// performed through the matching repository-issued NativeGraphContext;
+    /// this snapshot carries identity only and cannot authorize arbitrary OIDs.
+    pub(crate) fn issue_lazy(
+        version: RowMapVersion,
+        authority: [u8; 32],
+    ) -> Result<Self, RowStoreError> {
+        if version.row_count.is_none() {
+            return Err(RowStoreError::RowCountMismatch);
+        }
+        Ok(Self {
+            version,
+            authority,
+            entries: None,
         })
     }
 
@@ -264,15 +289,27 @@ impl RowMapSnapshot {
         &self.authority
     }
 
-    pub fn get(&self, key: &TypedKey) -> Option<AdmittedRow> {
-        self.entries
-            .binary_search_by(|entry| entry.key.cmp(key))
-            .ok()
-            .map(|index| AdmittedRow::from_entry(&self.version, &self.entries[index]))
+    pub const fn is_materialized(&self) -> bool {
+        self.entries.is_some()
     }
 
-    pub fn range(&self, range: &KeyRange) -> Vec<AdmittedRow> {
-        self.entries
+    pub fn get(&self, key: &TypedKey) -> Result<Option<AdmittedRow>, RowStoreError> {
+        let entries = self
+            .entries
+            .as_ref()
+            .ok_or(RowStoreError::PersistedLookupRequiresGraphContext)?;
+        Ok(entries
+            .binary_search_by(|entry| entry.key.cmp(key))
+            .ok()
+            .map(|index| AdmittedRow::from_entry(&self.version, &entries[index])))
+    }
+
+    pub fn range(&self, range: &KeyRange) -> Result<Vec<AdmittedRow>, RowStoreError> {
+        let entries = self
+            .entries
+            .as_ref()
+            .ok_or(RowStoreError::PersistedLookupRequiresGraphContext)?;
+        Ok(entries
             .iter()
             .filter(|entry| {
                 range
@@ -286,7 +323,7 @@ impl RowMapSnapshot {
             })
             .take(range.limit)
             .map(|entry| AdmittedRow::from_entry(&self.version, entry))
-            .collect()
+            .collect())
     }
 }
 
@@ -454,6 +491,7 @@ impl RowDependency {
 /// graph; this object carries only bounded metadata and its graph roots.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ValueOverflowRef {
+    native_root: Option<NativeObjectId>,
     encoded_length: u64,
     semantic_digest: [u8; 32],
     byte_root: NativeObjectId,
@@ -471,11 +509,28 @@ impl ValueOverflowRef {
             return Err(RowStoreError::ValueTooLarge(encoded_length));
         }
         Ok(Self {
+            native_root: None,
             encoded_length,
             semantic_digest,
             byte_root,
             dependency_root,
         })
+    }
+
+    pub(crate) fn from_native_node(
+        native_root: NativeObjectId,
+        encoded_length: u64,
+        semantic_digest: [u8; 32],
+        byte_root: NativeObjectId,
+        dependency_root: Option<NativeObjectId>,
+    ) -> Result<Self, RowStoreError> {
+        let mut reference = Self::new(encoded_length, semantic_digest, byte_root, dependency_root)?;
+        reference.native_root = Some(native_root);
+        Ok(reference)
+    }
+
+    pub(crate) fn native_root(&self) -> Option<&NativeObjectId> {
+        self.native_root.as_ref()
     }
 
     pub const fn encoded_length(&self) -> u64 {
@@ -532,6 +587,9 @@ impl RowValue {
     }
 
     pub(crate) fn decode_canonical_fields(encoded: Vec<u8>) -> Result<Self, RowStoreError> {
+        if !matches!(decode_canonical_cbor(&encoded), Ok(CborValue::Array(_))) {
+            return Err(RowStoreError::InvalidCanonicalRowValue);
+        }
         let dependencies = row_fields_dependencies(&encoded)?
             .into_iter()
             .map(|dependency| RowDependency::new(dependency.oid().clone(), dependency.kind()))
@@ -549,6 +607,9 @@ impl RowValue {
             Self::Overflow(reference) => {
                 1 + 8
                     + 32
+                    + reference
+                        .native_root()
+                        .map_or(0, |root| root.as_bytes().len())
                     + reference.byte_root().as_bytes().len()
                     + reference
                         .dependency_root()
@@ -561,6 +622,9 @@ impl RowValue {
         match self {
             Self::Inline { dependencies, .. } => dependencies.clone(),
             Self::Overflow(reference) => {
+                if let Some(root) = reference.native_root() {
+                    return vec![RowDependency::new(root.clone(), NativeObjectKind::Tree)];
+                }
                 let mut dependencies = vec![RowDependency::new(
                     reference.byte_root.clone(),
                     NativeObjectKind::Tree,
@@ -861,6 +925,7 @@ pub enum RowStoreError {
     InvalidKeyRange,
     RowsNotStrictlyOrdered,
     RowCountMismatch,
+    PersistedLookupRequiresGraphContext,
     InvalidCanonicalKey,
     InvalidCanonicalRowValue,
     UnsupportedWriterProfile,
@@ -899,6 +964,9 @@ impl fmt::Display for RowStoreError {
                 f.write_str("admitted row keys are not strictly logically ordered")
             }
             Self::RowCountMismatch => f.write_str("row-map count does not match admitted rows"),
+            Self::PersistedLookupRequiresGraphContext => {
+                f.write_str("persisted row lookup requires its repository graph context")
+            }
             Self::InvalidCanonicalKey => {
                 f.write_str("persisted row key is not a supported canonical typed key")
             }
