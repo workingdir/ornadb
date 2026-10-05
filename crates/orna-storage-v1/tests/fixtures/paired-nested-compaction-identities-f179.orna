@@ -1,0 +1,7 @@
+{ id: "f179/nested-compaction/main", name: "f179/left/compaction-main", city: "f179/right/compaction-main", }
+
+{ id: "f179/nested-compaction/retry", name: "f179/left/compaction-retry", city: "f179/right/compaction-retry", }
+
+{ id: "f179/nested-compaction/reused", name: "f179/left/compaction-main", city: "f179/right/compaction-main", }
+
+{ id: "f179/nested-compaction/malformed", name: "f179/left/compaction-malformed", city: "f179/right/compaction-malformed", }
