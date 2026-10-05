@@ -8,6 +8,7 @@ use std::{
     cmp::Ordering,
     collections::{BTreeMap, BTreeSet},
     fmt::{self, Write as _},
+    io::Write as IoWrite,
     sync::{
         Arc,
         atomic::{AtomicBool, AtomicU8, Ordering as AtomicOrdering},
@@ -61,6 +62,7 @@ pub enum Error {
     OwnerExpired,
     Cancelled,
     QuotaExceeded,
+    SinkFailed,
 }
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -1101,6 +1103,76 @@ impl Blob {
     pub fn to_context_value(&self, format: ValueFormat) -> Result<ContextValue> {
         ContextValue::from_blob(self, format)
     }
+
+    /// Streams this annotated Blob as OVB-2, rejecting an undersized output
+    /// budget before resolving any content. The sink may contain a partial
+    /// value if a later read or write fails; callers must discard it on error.
+    pub fn encode_ovb2_to_writer<W: IoWrite>(
+        &self,
+        writer: &mut W,
+        max_encoded_bytes: u64,
+    ) -> Result<u64> {
+        let mut prefix = Vec::with_capacity(16);
+        head(&mut prefix, 6, OVB2_BLOB_TAG);
+        head(&mut prefix, 4, 3);
+        head(&mut prefix, 2, self.length());
+
+        let media_type = self.media_type().as_bytes();
+        let mut suffix = Vec::new();
+        head(
+            &mut suffix,
+            3,
+            u64::try_from(media_type.len()).map_err(|_| Error::Limit)?,
+        );
+        suffix.extend_from_slice(media_type);
+        match self.suffix() {
+            Some(value) => {
+                head(
+                    &mut suffix,
+                    3,
+                    u64::try_from(value.len()).map_err(|_| Error::Limit)?,
+                );
+                suffix.extend_from_slice(value.as_bytes());
+            }
+            None => suffix.push(0xf6),
+        }
+
+        let prefix_len = u64::try_from(prefix.len()).map_err(|_| Error::Limit)?;
+        let suffix_len = u64::try_from(suffix.len()).map_err(|_| Error::Limit)?;
+        let encoded_len = prefix_len
+            .checked_add(self.length())
+            .and_then(|length| length.checked_add(suffix_len))
+            .ok_or(Error::Limit)?;
+        if encoded_len > max_encoded_bytes {
+            return Err(Error::QuotaExceeded);
+        }
+        if matches!(&self.content, BlobContent::Commitment) && self.length() != 0 {
+            return Err(Error::ContentUnavailable);
+        }
+        if let BlobContent::Reference(reference) = &self.content {
+            reference.context.ensure_live()?;
+        }
+
+        writer.write_all(&prefix).map_err(|_| Error::SinkFailed)?;
+        let mut digest = Sha256::new();
+        let mut offset = 0_u64;
+        let chunk_limit = self.read_chunk_limit();
+        while offset < self.length() {
+            let size = (self.length() - offset).min(chunk_limit);
+            let bytes = self.read(offset, size)?;
+            if bytes.len() as u64 != size {
+                return Err(Error::ContentUnavailable);
+            }
+            writer.write_all(&bytes).map_err(|_| Error::SinkFailed)?;
+            digest.update(&bytes);
+            offset = offset.checked_add(size).ok_or(Error::Limit)?;
+        }
+        if digest.finalize()[..] != self.identity.sha256 {
+            return Err(Error::ContentDigestMismatch);
+        }
+        writer.write_all(&suffix).map_err(|_| Error::SinkFailed)?;
+        Ok(encoded_len)
+    }
 }
 
 fn same_content_source(left: &BlobContent, right: &BlobContent) -> bool {
@@ -1544,7 +1616,9 @@ pub fn decode_with_profile(bytes: &[u8], format: ValueFormat) -> Result<ContextV
 }
 
 pub fn encode_ovb2(blob: &Blob) -> Result<Vec<u8>> {
-    blob.to_context_value(ValueFormat::Ovb2)?.encode()
+    let mut encoded = Vec::new();
+    blob.encode_ovb2_to_writer(&mut encoded, u64::MAX)?;
+    Ok(encoded)
 }
 
 pub fn decode_ovb2(bytes: &[u8]) -> Result<Blob> {
