@@ -162,6 +162,28 @@ impl VfsRepositoryCache {
         Ok(self.managed_file_for_image(image))
     }
 
+    /// Routes a temporary rename through this repository view. A file created
+    /// by another cache scope cannot advance this scope's projection epoch.
+    pub async fn rename_over<S, F, Fut, E>(
+        &self,
+        target: &Arc<ManagedFile<S>>,
+        scratch: &TemporarySave<S>,
+        activate: F,
+    ) -> Result<TemporaryRenameOutcome<S>, TemporaryRenameError<E>>
+    where
+        S: Send + Sync + 'static,
+        F: FnOnce(ActivationCandidate<S>) -> Fut,
+        Fut: Future<Output = Result<ActivationDecision<S>, E>>,
+    {
+        if !Arc::ptr_eq(
+            &target.cache_epoch.generation,
+            &self.epoch.generation,
+        ) {
+            return Err(TemporaryRenameError::WrongRepositoryScope);
+        }
+        target.rename_over(scratch, activate).await
+    }
+
     async fn has_current_projection<S>(&self, image: &VfsFileSnapshot<S>) -> bool {
         match image.pin.projection() {
             Some(projection) => projection.belongs_to(&self.epoch) && projection.is_current().await,
@@ -708,6 +730,7 @@ pub enum TemporaryRenameOutcome<S> {
 #[derive(Debug, Eq, PartialEq)]
 pub enum TemporaryRenameError<E> {
     WrongDestination,
+    WrongRepositoryScope,
     GenerationExhausted,
     Activation(E),
     NoCandidate,
@@ -1306,15 +1329,40 @@ mod tests {
             SnapshotPin::capture(Arc::clone(&initial_capture)),
             Arc::<[u8]>::from(baseline.as_bytes()),
         ));
-        let repository = crate::vfs::VfsRepositoryCache::new();
-        let target = repository.managed_file(image).await.unwrap();
+        let target = runtime.manage_vfs_file(image).await.unwrap();
         let old_handle = target.open_read().await;
         let directory = SnapshotReaddirCursor::new(
-            SnapshotPin::capture(initial_capture),
+            SnapshotPin::capture(Arc::clone(&initial_capture)),
             0_u64,
         );
         assert!(old_handle.projection_is_current().await.unwrap());
         assert!(directory.projection_is_current().await.unwrap());
+
+        let unrelated_cache = VfsRepositoryCache::new();
+        let unrelated_image = Arc::new(VfsFileSnapshot::new(
+            SnapshotPin::capture(Arc::new(initial_capture.as_ref().clone())),
+            Arc::<[u8]>::from(baseline.as_bytes()),
+        ));
+        let unrelated_file = unrelated_cache.managed_file(unrelated_image).await.unwrap();
+        let unrelated_save = unrelated_file.begin_temporary_replacement(1 << 20).await;
+        unrelated_save
+            .write_at(0, accepted_bytes.as_bytes())
+            .await
+            .unwrap();
+        let callback_calls = Arc::new(AtomicUsize::new(0));
+        let callback_calls_by_route = Arc::clone(&callback_calls);
+        let foreign_route = runtime
+            .rename_vfs_temporary_over(&unrelated_file, &unrelated_save, move |_| async move {
+                callback_calls_by_route.fetch_add(1, Ordering::SeqCst);
+                Ok::<_, ()>(ActivationDecision::Rejected(rejected()))
+            })
+            .await;
+        assert!(matches!(
+            foreign_route,
+            Err(TemporaryRenameError::WrongRepositoryScope)
+        ));
+        assert_eq!(callback_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(runtime.vfs_repository_cache().generation().await, 0);
 
         let accepted_save = target.begin_temporary_replacement(1 << 20).await;
         accepted_save
@@ -1322,8 +1370,8 @@ mod tests {
             .await
             .unwrap();
         let accepted_runtime = Arc::clone(&runtime);
-        let accepted = target
-            .rename_over(&accepted_save, move |candidate| {
+        let accepted = runtime
+            .rename_vfs_temporary_over(&target, &accepted_save, move |candidate| {
                 activate_runtime_candidate(
                     accepted_runtime,
                     writer,
@@ -1339,7 +1387,7 @@ mod tests {
             panic!("validated runtime activation should accept the editor replacement");
         };
         assert_eq!(generation, 1);
-        assert_eq!(repository.generation().await, 1);
+        assert_eq!(runtime.vfs_repository_cache().generation().await, 1);
         assert!(!old_handle.projection_is_current().await.unwrap());
         assert!(!directory.projection_is_current().await.unwrap());
         assert!(handle.projection_is_current().await.unwrap());
@@ -1358,8 +1406,8 @@ mod tests {
             .await
             .unwrap();
         let rejected_runtime = Arc::clone(&runtime);
-        let rejected = target
-            .rename_over(&rejected_save, move |candidate| {
+        let rejected = runtime
+            .rename_vfs_temporary_over(&target, &rejected_save, move |candidate| {
                 activate_runtime_candidate(
                     rejected_runtime,
                     writer,
@@ -1372,7 +1420,7 @@ mod tests {
             .await
             .unwrap();
         assert!(matches!(rejected, TemporaryRenameOutcome::Rejected { .. }));
-        assert_eq!(repository.generation().await, 1);
+        assert_eq!(runtime.vfs_repository_cache().generation().await, 1);
         assert_eq!(target.open_read().await.read_at(0, accepted_bytes.len()), accepted_bytes.as_bytes());
         assert_eq!(
             rejected_save
