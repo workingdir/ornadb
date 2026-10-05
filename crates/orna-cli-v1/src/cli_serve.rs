@@ -25,6 +25,7 @@ use std::{
     net::{SocketAddr, TcpListener, TcpStream},
     path::{Path, PathBuf},
     process::{Command, Stdio},
+    sync::{Arc, Mutex},
     time::{Duration as StdDuration, SystemTime, UNIX_EPOCH},
 };
 
@@ -244,15 +245,20 @@ fn new_serve_state_with_project(
     })
 }
 
-fn serve_listener(listener: &TcpListener, mut state: ServeState) -> io::Result<()> {
+fn serve_listener(listener: &TcpListener, state: ServeState) -> io::Result<()> {
+    let root = state.root.clone();
+    let identity = state.identity;
+    let state = Arc::new(Mutex::new(state));
     for accepted in listener.incoming() {
         let stream = accepted?;
-        // The live transport's protocol state is mutable and currently
-        // exposes a synchronous connection driver, so this first executable
-        // host serializes accepted connections. Static and Git routes remain
-        // ordinary short HTTP requests; a future async listener actor can
-        // multiplex them without changing their route contract.
-        let _ = serve_connection(stream, &mut state);
+        let connection_state = Arc::clone(&state);
+        let connection_root = root.clone();
+        std::thread::Builder::new()
+            .name("orna-serve-connection".into())
+            .spawn(move || {
+                let _ =
+                    serve_shared_connection(stream, &connection_state, &connection_root, identity);
+            })?;
     }
     Ok(())
 }
@@ -260,20 +266,7 @@ fn serve_listener(listener: &TcpListener, mut state: ServeState) -> io::Result<(
 fn serve_connection(mut stream: TcpStream, state: &mut ServeState) -> io::Result<()> {
     stream.set_read_timeout(Some(StdDuration::from_secs(15)))?;
     if peek_websocket_request(&stream) {
-        stream.set_read_timeout(None)?;
-        let mut attachment = [0; 16];
-        getrandom::fill(&mut attachment)
-            .map_err(|_| io::Error::other("socket identity unavailable"))?;
-        let mut connection = HttpConnection::new(TransportLimits::default());
-        let mut clock = now_ms;
-        let _ = state.live.serve_accepted_websocket_socket(
-            stream,
-            &mut connection,
-            attachment,
-            &mut clock,
-            &mut state.application,
-        );
-        return Ok(());
+        return serve_websocket_connection(stream, state);
     }
 
     let mut reader = BufReader::new(stream);
@@ -294,30 +287,95 @@ fn serve_connection(mut stream: TcpStream, state: &mut ServeState) -> io::Result
     };
     stream = reader.into_inner();
     if request.path.starts_with("/orna/session") {
-        let wire = WireRequest {
-            method: request.method,
-            path: request.path,
-            headers: request.headers,
-            body: request.body,
-        };
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .build()
-            .map_err(|_| io::Error::other("live request executor unavailable"))?;
-        let response = runtime.block_on(state.live.handle(
-            wire,
-            now_ms(),
-            &mut state.authority,
-            &mut state.issuer,
-            &mut state.deletion,
-        ));
-        let bytes = response
-            .encode_http(TransportLimits::default())
-            .map_err(|_| io::Error::other("live response could not be encoded"))?;
-        stream.write_all(&bytes)?;
-        return Ok(());
+        return serve_session_http_request(stream, request, state);
     }
     let response = host_route(&state.root, state.identity, &request);
     write_response(&mut stream, response)
+}
+
+fn serve_shared_connection(
+    mut stream: TcpStream,
+    state: &Mutex<ServeState>,
+    root: &Path,
+    identity: RuntimeIdentity,
+) -> io::Result<()> {
+    stream.set_read_timeout(Some(StdDuration::from_secs(15)))?;
+    if peek_websocket_request(&stream) {
+        stream.set_read_timeout(None)?;
+        let mut state = state
+            .lock()
+            .map_err(|_| io::Error::other("live session state is unavailable"))?;
+        return serve_websocket_connection(stream, &mut state);
+    }
+
+    let mut reader = BufReader::new(stream);
+    let request = match read_request(&mut reader) {
+        Ok(request) => request,
+        Err(_) => {
+            let mut stream = reader.into_inner();
+            write_response(
+                &mut stream,
+                Response::new(
+                    400,
+                    "application/json",
+                    br#"{"error":"bad_request"}"#.to_vec(),
+                ),
+            )?;
+            return Ok(());
+        }
+    };
+    stream = reader.into_inner();
+    if request.path.starts_with("/orna/session") {
+        let mut state = state
+            .lock()
+            .map_err(|_| io::Error::other("live session state is unavailable"))?;
+        return serve_session_http_request(stream, request, &mut state);
+    }
+    write_response(&mut stream, host_route(root, identity, &request))
+}
+
+fn serve_websocket_connection(stream: TcpStream, state: &mut ServeState) -> io::Result<()> {
+    stream.set_read_timeout(None)?;
+    let mut attachment = [0; 16];
+    getrandom::fill(&mut attachment)
+        .map_err(|_| io::Error::other("socket identity unavailable"))?;
+    let mut connection = HttpConnection::new(TransportLimits::default());
+    let mut clock = now_ms;
+    let _ = state.live.serve_accepted_websocket_socket(
+        stream,
+        &mut connection,
+        attachment,
+        &mut clock,
+        &mut state.application,
+    );
+    Ok(())
+}
+
+fn serve_session_http_request(
+    mut stream: TcpStream,
+    request: Request,
+    state: &mut ServeState,
+) -> io::Result<()> {
+    let wire = WireRequest {
+        method: request.method,
+        path: request.path,
+        headers: request.headers,
+        body: request.body,
+    };
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .map_err(|_| io::Error::other("live request executor unavailable"))?;
+    let response = runtime.block_on(state.live.handle(
+        wire,
+        now_ms(),
+        &mut state.authority,
+        &mut state.issuer,
+        &mut state.deletion,
+    ));
+    let bytes = response
+        .encode_http(TransportLimits::default())
+        .map_err(|_| io::Error::other("live response could not be encoded"))?;
+    stream.write_all(&bytes)
 }
 
 // The project root is selected once by `orna serve`; requests never supply a
