@@ -26,7 +26,7 @@ try {
   const bindingSource = await bindingResponse.text();
   const bindingUrl = `data:text/javascript;base64,${Buffer.from(bindingSource).toString('base64')}#${encodeURIComponent(workerData.client)}`;
   const lsp = await import(bindingUrl);
-  await lsp.default(await wasmResponse.arrayBuffer());
+  await lsp.default({ module_or_path: await wasmResponse.arrayBuffer() });
   const lines = workerData.document.split(/\r?\n/);
   const lastLine = lines.at(-1) ?? '';
   const serialized = lsp.inlay_hints(
