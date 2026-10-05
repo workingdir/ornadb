@@ -4105,8 +4105,8 @@ mod tests {
         std::fs::create_dir_all(&local).expect("local directory");
         git(root.path(), &["init", "--bare", "remote.git"]);
         git(&local, &["init", "-b", "main"]);
-        git(&local, &["config", "user.email", "fetch@example.invalid"]);
-        git(&local, &["config", "user.name", "Fetch test"]);
+        git(&local, &["config", "user.email", "kieran@drewett.dev"]);
+        git(&local, &["config", "user.name", "kierandrewett"]);
         std::fs::write(local.join("tracked.txt"), "base\n").expect("base file");
         git(&local, &["add", "tracked.txt"]);
         git(&local, &["commit", "-m", "base"]);
@@ -4114,9 +4114,14 @@ mod tests {
         let remote_path = remote.to_str().expect("remote path");
         git(&local, &["remote", "add", "origin", remote_path]);
         git(&local, &["push", "origin", "HEAD:refs/heads/main"]);
+        git(
+            root.path(),
+            &["--git-dir", "remote.git", "symbolic-ref", "HEAD", "refs/heads/main"],
+        );
         git(root.path(), &["clone", remote_path, "updater"]);
-        git(&updater, &["config", "user.email", "fetch@example.invalid"]);
-        git(&updater, &["config", "user.name", "Fetch test"]);
+        assert_eq!(git(&updater, &["rev-parse", "HEAD"]), initial);
+        git(&updater, &["config", "user.email", "kieran@drewett.dev"]);
+        git(&updater, &["config", "user.name", "kierandrewett"]);
         std::fs::write(updater.join("tracked.txt"), "advanced\n").expect("advanced file");
         git(&updater, &["add", "tracked.txt"]);
         git(&updater, &["commit", "-m", "advance"]);
