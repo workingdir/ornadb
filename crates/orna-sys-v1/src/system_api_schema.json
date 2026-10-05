@@ -19,13 +19,14 @@
     "functions",
     "failure_codes",
     "counts",
-    "source_of_truth"
+    "source_of_truth",
+    "value_profiles"
   ],
   "properties": {
     "title": { "const": "Orna portable sys API" },
     "language_version": { "type": "string", "minLength": 1 },
     "sys_version": { "type": "string", "minLength": 1 },
-    "status": { "const": "specification" },
+    "status": { "const": "Final 1.1.0 specification contract; engine execution not claimed" },
     "removed_names": {
       "type": "object",
       "propertyNames": { "pattern": "^sys\\." },
@@ -68,7 +69,8 @@
       "items": { "$ref": "#/$defs/nonBlankString" }
     },
     "counts": { "$ref": "#/$defs/counts" },
-    "source_of_truth": { "$ref": "#/$defs/nonBlankString" }
+    "source_of_truth": { "$ref": "#/$defs/nonBlankString" },
+    "value_profiles": { "$ref": "#/$defs/valueProfiles" }
   },
   "$defs": {
     "nonBlankString": { "type": "string", "minLength": 1 },
@@ -96,8 +98,14 @@
       "additionalProperties": false,
       "required": ["replacement", "diagnostic"],
       "properties": {
-        "replacement": { "$ref": "#/$defs/nonBlankString" },
-        "diagnostic": { "$ref": "#/$defs/nonBlankString" }
+        "replacement": {
+          "anyOf": [
+            { "$ref": "#/$defs/nonBlankString" },
+            { "type": "null" }
+          ]
+        },
+        "diagnostic": { "$ref": "#/$defs/nonBlankString" },
+        "reason": { "$ref": "#/$defs/nonBlankString" }
       }
     },
     "referenceAlias": {
@@ -151,10 +159,22 @@
         "signature": { "$ref": "#/$defs/nonBlankString" },
         "purpose": { "$ref": "#/$defs/nonBlankString" },
         "documentation": { "$ref": "#/$defs/nonBlankString" },
+        "since": { "$ref": "#/$defs/nonBlankString" },
         "contract": { "$ref": "#/$defs/nonBlankString" },
         "preconditions": { "$ref": "#/$defs/nonBlankString" },
         "ownership": { "$ref": "#/$defs/nonBlankString" },
         "snapshot_rule": { "$ref": "#/$defs/nonBlankString" }
+      }
+    },
+    "valueProfiles": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["new", "stored", "semantic", "legacy_wire"],
+      "properties": {
+        "new": { "$ref": "#/$defs/nonBlankString" },
+        "stored": { "$ref": "#/$defs/nonBlankString" },
+        "semantic": { "$ref": "#/$defs/nonBlankString" },
+        "legacy_wire": { "$ref": "#/$defs/nonBlankString" }
       }
     },
     "counts": {

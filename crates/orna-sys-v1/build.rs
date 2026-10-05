@@ -77,6 +77,11 @@ fn main() {
     let out_dir = PathBuf::from(env::var_os("OUT_DIR").expect("build output directory"));
     fs::write(out_dir.join("api_sys.json"), artifacts.api_json)
         .expect("write generated api/sys.json");
+    fs::write(
+        out_dir.join("system_api_catalogue.json"),
+        artifacts.catalogue_json,
+    )
+    .expect("write generated native sys format catalogue");
     let typed_host_registry = build_host::generate_typed_host_registry(&source_root)
         .expect("annotated native sys host operations form a valid typed registry");
     let host_registry = build_host::serialize_host_registry(&typed_host_registry)
