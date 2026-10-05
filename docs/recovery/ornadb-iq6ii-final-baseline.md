@@ -24,10 +24,9 @@ salvage claim.
   VFS-1 / MIME-1. It retains repository formats 1 and 2 as read-only legacy
   contexts.
 - All 395 payload entries in the local `SHA256SUMS` verification passed.
-  The user-supplied publication digest
-  `fe4a35dc81c2c2994e0a18d7c7931ea0bbd298ab23248496cbe880f264c5db56` could
-  not be independently recomputed because the named archive/path is absent;
-  no substitute digest is treated as authoritative.
+- The final archive
+  `/home/pbox/dev/ornadb/Orna-1.1.0-final-20261005.zip` independently hashes
+  to `fe4a35dc81c2c2994e0a18d7c7931ea0bbd298ab23248496cbe880f264c5db56`.
 - Every repository comparison below uses only `origin/main` at
   `6a89d42879782ec63bed060b283baf50394be134`.
 
