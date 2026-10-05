@@ -816,6 +816,7 @@ fn oid_matches_algorithm(oid: &NativeOid, algorithm: GitHash) -> bool {
 enum BlobContent {
     Inline(Arc<[u8]>),
     Reference(Arc<ContentReference>),
+    Descriptor(NativeOid),
     Commitment,
 }
 
@@ -919,6 +920,24 @@ impl Blob {
         })
     }
 
+    fn from_descriptor_in_context(
+        identity: ContentIdentity,
+        context: &Format3Context,
+        descriptor_oid: NativeOid,
+        media_type: &str,
+        suffix: Option<&str>,
+    ) -> Result<Self> {
+        if !oid_matches_algorithm(&descriptor_oid, context.git_oid_algorithm()) {
+            return Err(Error::InvalidOid);
+        }
+        Ok(Self {
+            identity,
+            annotation: context.mime_registry().annotation(media_type, suffix)?,
+            content: BlobContent::Descriptor(descriptor_oid),
+            context: Some(context.clone()),
+        })
+    }
+
     pub fn from_semantic_commitment(
         identity: ContentIdentity,
         media_type: &str,
@@ -973,6 +992,7 @@ impl Blob {
     pub fn descriptor_oid(&self) -> Option<&NativeOid> {
         match &self.content {
             BlobContent::Reference(reference) => Some(reference.descriptor_oid()),
+            BlobContent::Descriptor(descriptor_oid) => Some(descriptor_oid),
             BlobContent::Inline(_) | BlobContent::Commitment => None,
         }
     }
@@ -980,7 +1000,7 @@ impl Blob {
     pub fn content_reference(&self) -> Option<ContentReference> {
         match &self.content {
             BlobContent::Reference(reference) => Some(reference.as_ref().clone()),
-            BlobContent::Inline(_) | BlobContent::Commitment => None,
+            BlobContent::Inline(_) | BlobContent::Descriptor(_) | BlobContent::Commitment => None,
         }
     }
 
@@ -1033,6 +1053,7 @@ impl Blob {
                 }
                 Ok(bytes)
             }
+            BlobContent::Descriptor(_) => Err(Error::ContentUnavailable),
             BlobContent::Commitment => Err(Error::ContentUnavailable),
         }
     }
@@ -1146,7 +1167,11 @@ impl Blob {
         if encoded_len > max_encoded_bytes {
             return Err(Error::QuotaExceeded);
         }
-        if matches!(&self.content, BlobContent::Commitment) && self.length() != 0 {
+        if matches!(
+            &self.content,
+            BlobContent::Descriptor(_) | BlobContent::Commitment
+        ) && self.length() != 0
+        {
             return Err(Error::ContentUnavailable);
         }
         if let BlobContent::Reference(reference) = &self.content {
@@ -1741,14 +1766,15 @@ fn decode_blob_raw(
             let [length, sha, Raw::Text(media_type), suffix, Raw::Bytes(descriptor)] = fields.as_slice() else {
                 return Err(Error::InvalidTag);
             };
-            let length = int_u64(length)?;
-            let sha = bytes32(sha)?;
+            let identity = ContentIdentity::new(int_u64(length)?, bytes32(sha)?)?;
             let context = context.ok_or(Error::InvalidContext)?;
-            let reference = context.reference(
-                ContentIdentity::new(length, sha)?,
+            Blob::from_descriptor_in_context(
+                identity,
+                context,
                 NativeOid::from_bytes(descriptor)?,
-            )?;
-            Blob::from_reference_with_annotation(reference, media_type, raw_suffix(suffix)?.as_deref())
+                media_type,
+                raw_suffix(suffix)?.as_deref(),
+            )
         }
         (ValueFormat::Sov3, Raw::Tag(SOV3_BLOB_TAG, payload)) => {
             let fields = array(payload)?;
