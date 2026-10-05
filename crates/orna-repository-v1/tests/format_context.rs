@@ -18,6 +18,27 @@ fn git(directory: &Path, arguments: &[&str]) {
     );
 }
 
+fn commit_database(directory: &Path, database: &str) {
+    fs::write(directory.join(".orna/database.orna"), database).expect("update database metadata");
+    git(directory, &["add", ".orna/database.orna"]);
+    git(
+        directory,
+        &["commit", "--quiet", "-m", "advance database identity"],
+    );
+}
+
+fn replace_database_with_directory(directory: &Path) {
+    let database = directory.join(".orna/database.orna");
+    fs::remove_file(&database).expect("remove database file");
+    fs::create_dir(&database).expect("replace database with directory");
+    fs::write(database.join("nested"), "not metadata").expect("write invalid database entry");
+    git(directory, &["add", "--all"]);
+    git(
+        directory,
+        &["commit", "--quiet", "-m", "replace database with directory"],
+    );
+}
+
 fn repository(database: Option<&str>, legacy_format: Option<&str>, store: bool) -> TempDir {
     let directory = TempDir::new().expect("create format context repository");
     git(
@@ -81,6 +102,39 @@ fn admits_final_format_three_metadata_and_keeps_root_seams_pinned() {
         format!("{:?}", context.snapshot_pin()),
         "RepositorySnapshotPin { .. }"
     );
+}
+
+#[test]
+fn context_binds_database_identity_to_its_committed_snapshot() {
+    const FIRST_DATABASE_ID: &str = "9f237b7e-6844-4498-bcd5-d24641c07449";
+    const SECOND_DATABASE_ID: &str = "a4a0a7d1-4f5c-4dc4-a5bf-f3f7f6a8d7e1";
+    let directory = repository(
+        Some(&format!(
+            "{{repository_format: 3, database_id: \"{FIRST_DATABASE_ID}\"}}\n"
+        )),
+        None,
+        true,
+    );
+    let repository = Repository::discover(directory.path()).expect("discover repository");
+    let first = repository
+        .open_format_context()
+        .expect("admit first committed identity");
+
+    commit_database(
+        directory.path(),
+        &format!("{{repository_format: 3, database_id: \"{SECOND_DATABASE_ID}\"}}\n"),
+    );
+    let second = repository
+        .open_format_context()
+        .expect("admit second committed identity");
+
+    assert_eq!(first.database_id().unwrap().to_string(), FIRST_DATABASE_ID);
+    assert_eq!(
+        second.database_id().unwrap().to_string(),
+        SECOND_DATABASE_ID
+    );
+    assert!(first.validate_schema_root().is_ok());
+    assert!(first.validate_store_root().is_ok());
 }
 
 #[test]
@@ -178,6 +232,31 @@ fn rejects_oversized_and_noncanonical_final_records() {
         false,
     );
     let error = Repository::discover(noncanonical.path())
+        .unwrap()
+        .open_format_context()
+        .unwrap_err();
+    assert_eq!(error.code(), "ORNA-REPO-CONTEXT-002");
+}
+
+#[test]
+fn rejects_an_unborn_snapshot_as_unavailable() {
+    let directory = TempDir::new().expect("create unborn repository");
+    git(
+        directory.path(),
+        &["init", "--quiet", "--initial-branch=main", "--template="],
+    );
+    let error = Repository::discover(directory.path())
+        .unwrap()
+        .open_format_context()
+        .unwrap_err();
+    assert_eq!(error.code(), "ORNA-REPO-CONTEXT-005");
+}
+
+#[test]
+fn does_not_downgrade_an_invalid_database_entry_to_legacy() {
+    let directory = repository(Some("not-a-record\n"), Some("format 1\n"), false);
+    replace_database_with_directory(directory.path());
+    let error = Repository::discover(directory.path())
         .unwrap()
         .open_format_context()
         .unwrap_err();
