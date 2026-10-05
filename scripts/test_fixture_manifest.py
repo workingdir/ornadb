@@ -291,6 +291,33 @@ class FixtureManifestTests(unittest.TestCase):
                 f"runtime publication fixture hash is pinned: {fixture_path}",
             )
 
+    def test_runtime_checkpoint_audit_fixture_is_local_and_hash_pinned(self) -> None:
+        workspace = Path(__file__).resolve().parents[1]
+        manifest = (workspace / "scripts/fixture-manifest.sha256").read_text(
+            encoding="utf-8"
+        )
+        test_path = "crates/orna-runtime-v1/tests/checkpoints_conformance_audit.rs"
+        source = (workspace / test_path).read_text(encoding="utf-8")
+        include_pattern = re.compile(r'include_str!\(\s*"([^"\n]+)"\s*\)')
+        include_paths = include_pattern.findall(source)
+
+        self.assertEqual(
+            include_paths,
+            ["fixtures/checkpoint-audit-replay-handler.orna"],
+            f"{test_path} keeps its replay input local to the runtime crate",
+        )
+        fixture_path = (
+            "crates/orna-runtime-v1/tests/fixtures/checkpoint-audit-replay-handler.orna"
+        )
+        fixture = workspace / fixture_path
+        self.assertTrue(fixture.is_file(), f"missing crate-local fixture: {fixture_path}")
+        digest = hashlib.sha256(fixture.read_bytes()).hexdigest()
+        self.assertIn(
+            f"{digest}  {fixture_path}\n",
+            manifest,
+            f"runtime checkpoint audit fixture hash is pinned: {fixture_path}",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
