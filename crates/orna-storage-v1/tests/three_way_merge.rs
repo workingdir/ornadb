@@ -37220,9 +37220,9 @@ fn nested_handoff_identity_survives_paired_compaction_rewind_fold_chains_p38rq()
             right_chain: row.fields[&id(3)].encode().unwrap(),
         })
         .collect::<Vec<_>>();
-    assert_eq!(handoff_identities.len(), 3);
-    assert_eq!(compaction_identities.len(), 3);
-    assert_eq!(rewind_identities.len(), 3);
+    assert_eq!(handoff_identities.len(), 4);
+    assert_eq!(compaction_identities.len(), 4);
+    assert_eq!(rewind_identities.len(), 4);
     assert_eq!(handoff_identities[0], handoff_identities[1]);
     assert_ne!(handoff_identities[1], handoff_identities[2]);
     assert_eq!(compaction_identities[0], compaction_identities[1]);
