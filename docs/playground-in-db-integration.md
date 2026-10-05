@@ -37,6 +37,10 @@ with the embed entry hiding the marked page header and applying its framing
 policy. Static assets are returned with their checked media type and
 `X-Content-Type-Options: nosniff`. A commit that changes a Route, Entry, or
 Asset row is visible on the next request without restarting `orna serve`.
+Accepted connections run independently. Mutable live protocol state remains
+serialized, while Git listings, database assets, and the example feed keep
+serving during an open presentation WebSocket. Each asset or example response
+resolves its rows from one committed `HEAD`.
 `/api/playground/revision` reports the committed Git object ID. The open page
 polls it every two seconds and swaps both stylesheet links only after both
 revision-pinned rows load, then updates Monaco's theme from the new CSS tokens.
@@ -83,7 +87,10 @@ without restarting the server. It also checks DB-resident Theme/Layout CSS,
 an uncommitted style remaining invisible, the committed revision changing both
 styles, and the old revision continuing to serve both old styles. A WebSocket
 client follows the existing watch, fingerprinted Eval, and Resync exchange to
-prove independent results and presentation deltas.
+prove independent results and presentation deltas. While that WebSocket
+remains open, the test commits a new Route, Entry, Asset, and Sample snapshot
+and concurrently fetches the asset and example feed to prove the responses use
+committed database rows during live presentation deltas.
 
 The browser assist proof loads the LSP JavaScript and WebAssembly from an
 active `orna serve` database:
