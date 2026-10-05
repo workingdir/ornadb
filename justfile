@@ -12,6 +12,7 @@ fixture-audit:
     cargo test --locked -p orna-lsp --test ji3t0_conformance --test editor_attachment_completion
     cargo test --locked -p orna-sys-v1 --test sys_api_generation --test system_binding_stubs --test system_provider_abi
     cargo test --locked -p orna-runtime-v1 --test publication_metadata --test publication_repository_conformance
+    cargo test --locked -p orna-runtime-v1 --test checkpoints_conformance_audit
     cargo test --locked -p orna-evaluator-v1 --test standard_snapshot_replay
     cargo test --locked -p orna-evaluator-v1 --test standard_library_hash_snapshot_27d5k --test standard_library_random_snapshot_27d5k
     cargo test --locked -p orna-runtime-v1 --test historical_snapshots
