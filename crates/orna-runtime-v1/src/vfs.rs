@@ -6,8 +6,10 @@
 //! row-map version without giving this module a second row authority.
 
 use std::{
+    any::Any,
+    collections::HashMap,
     future::Future,
-    sync::{Arc, OnceLock},
+    sync::{Arc, Mutex as StdMutex, OnceLock, Weak},
 };
 
 use tokio::sync::Mutex;
@@ -53,6 +55,62 @@ impl CacheProjection {
     pub async fn is_current(&self) -> bool {
         self.generation == *self.epoch.generation.lock().await
     }
+}
+
+struct SnapshotProjectionBinding {
+    snapshot: Weak<dyn Any + Send + Sync>,
+    projection: Arc<OnceLock<CacheProjection>>,
+}
+
+#[derive(Default)]
+struct SnapshotProjectionRegistry {
+    bindings: HashMap<usize, Vec<SnapshotProjectionBinding>>,
+    lookups_since_prune: usize,
+}
+
+static SNAPSHOT_PROJECTION_REGISTRY: OnceLock<StdMutex<SnapshotProjectionRegistry>> =
+    OnceLock::new();
+
+/// Returns one stable projection cell for an owner snapshot allocation. A
+/// freshly captured pin for the same Arc therefore retains the original
+/// admission stamp instead of creating a path around it.
+fn snapshot_projection_cell<S>(snapshot: &Arc<S>) -> Arc<OnceLock<CacheProjection>>
+where
+    S: Any + Send + Sync + 'static,
+{
+    let address = Arc::as_ptr(snapshot) as usize;
+    let erased_snapshot: Arc<dyn Any + Send + Sync> = snapshot.clone();
+    let identity = Arc::downgrade(&erased_snapshot);
+    let registry = SNAPSHOT_PROJECTION_REGISTRY
+        .get_or_init(|| StdMutex::new(SnapshotProjectionRegistry::default()));
+    let mut registry = registry
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+    registry.lookups_since_prune += 1;
+    if registry.lookups_since_prune >= 256 {
+        for bindings in registry.bindings.values_mut() {
+            bindings.retain(|binding| binding.snapshot.strong_count() != 0);
+        }
+        registry.bindings.retain(|_, bindings| !bindings.is_empty());
+        registry.lookups_since_prune = 0;
+    }
+
+    let bindings = registry.bindings.entry(address).or_default();
+    bindings.retain(|binding| binding.snapshot.strong_count() != 0);
+    if let Some(binding) = bindings
+        .iter()
+        .find(|binding| binding.snapshot.ptr_eq(&identity))
+    {
+        return Arc::clone(&binding.projection);
+    }
+
+    let projection = Arc::new(OnceLock::new());
+    bindings.push(SnapshotProjectionBinding {
+        snapshot: identity,
+        projection: Arc::clone(&projection),
+    });
+    projection
 }
 
 /// Repository-view owner for managed files and their shared projection epoch.
@@ -119,10 +177,13 @@ impl<S> Clone for SnapshotPin<S> {
 impl<S> SnapshotPin<S> {
     /// Retains an opaque repository snapshot. The snapshot carries its own
     /// immutable version identity and remains the only row lookup authority.
-    pub fn capture(snapshot: Arc<S>) -> Self {
+    pub fn capture(snapshot: Arc<S>) -> Self
+    where
+        S: Any + Send + Sync + 'static,
+    {
         Self {
+            projection: snapshot_projection_cell(&snapshot),
             snapshot,
-            projection: Arc::new(OnceLock::new()),
         }
     }
 
@@ -138,15 +199,6 @@ impl<S> SnapshotPin<S> {
 
     pub fn projection(&self) -> Option<&CacheProjection> {
         self.projection.get()
-    }
-
-    fn with_projection(snapshot: Arc<S>, projection: CacheProjection) -> Self {
-        let binding = OnceLock::new();
-        let _ = binding.set(projection);
-        Self {
-            snapshot,
-            projection: Arc::new(binding),
-        }
     }
 }
 
@@ -166,14 +218,11 @@ impl<S> VfsFileSnapshot<S> {
     }
 
     fn with_projection(image: &Arc<Self>, projection: CacheProjection) -> Self {
-        // If this raw image has never been admitted, bind its original pin so
-        // every alias keeps the first epoch stamp. A previously bound pin
-        // stays immutable; the accepted image receives a fresh scoped pin.
-        let pin = if image.pin.projection.set(projection.clone()).is_ok() {
-            image.pin.clone_pin()
-        } else {
-            SnapshotPin::with_projection(Arc::clone(&image.pin.snapshot), projection)
-        };
+        // The pin's cell is shared by every capture of this owner snapshot.
+        // Once stamped, later wrappers keep that first epoch instead of
+        // relabeling the same snapshot as current.
+        let pin = image.pin.clone_pin();
+        let _ = pin.projection.set(projection);
         Self {
             pin,
             bytes: Arc::clone(&image.bytes),
@@ -1003,6 +1052,7 @@ mod tests {
     async fn accepted_rename_invalidates_shared_directory_attribute_and_handle_projections() {
         let repository = VfsRepositoryCache::new();
         let raw_target_image = fixture_image();
+        let stale_snapshot = Arc::clone(&raw_target_image.pin.snapshot);
         let target = repository
             .managed_file(Arc::clone(&raw_target_image))
             .await
@@ -1082,6 +1132,24 @@ mod tests {
         assert!(!raw_projection.is_current().await);
         assert!(matches!(
             repository.managed_file(Arc::clone(&raw_target_image)).await,
+            Err(VfsRepositoryCacheError::ImageAlreadyScoped)
+        ));
+        // Re-capturing the same owner snapshot Arc must recover the original
+        // binding too; making a new VfsFileSnapshot wrapper cannot bypass it.
+        let rewrapped_stale_image = Arc::new(VfsFileSnapshot::new(
+            SnapshotPin::capture(Arc::clone(&stale_snapshot)),
+            Arc::clone(&raw_target_image.bytes),
+        ));
+        assert_eq!(rewrapped_stale_image.projection().unwrap().generation(), 0);
+        assert!(
+            !rewrapped_stale_image
+                .projection()
+                .unwrap()
+                .is_current()
+                .await
+        );
+        assert!(matches!(
+            repository.managed_file(rewrapped_stale_image).await,
             Err(VfsRepositoryCacheError::ImageAlreadyScoped)
         ));
         let fresh_handle = target.open_read().await;
