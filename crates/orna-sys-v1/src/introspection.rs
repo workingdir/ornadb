@@ -7211,6 +7211,25 @@ fn explain_query_core_with_wal_rotation_chains(
                     &mut details,
                     &spill_chain_window_restore_chain_fold,
                 );
+                if let Some(window_restore_envelope_fold) =
+                    query_paired_bounded_window_spill_chain_window_restore_envelope_fold(
+                        &spill_chain_window_fold,
+                        &spill_chain_window_restore_chain_fold,
+                        window_cost_restoration_fold,
+                        join_pair_identities,
+                        checkpoint_compaction_chains,
+                        segment_rotation_chains,
+                        stream_compaction_chains,
+                        spill_restore_chains,
+                        stream_rotation_chains,
+                        wal_rotation_chains,
+                    )
+                {
+                    add_paired_bounded_window_spill_chain_window_restore_envelope_fold_details(
+                        &mut details,
+                        &window_restore_envelope_fold,
+                    );
+                }
             }
         }
         current = push_unary(
@@ -9208,6 +9227,25 @@ struct QueryPairedBoundedWindowSpillChainWindowRestoreChainFold {
     spill_window_count: u64,
     restore_pair_count: u64,
     restore_fold_count: u64,
+    window_identity_count: u64,
+    totals: QueryAggregateSpillTotals,
+    overflowed: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct QueryPairedBoundedWindowSpillChainWindowRestoreEnvelopeFold {
+    identity: String,
+    chain_window_fold_identity: String,
+    chain_fold_identity: String,
+    spill_window_fold_identity: String,
+    restore_chain_fold_identity: String,
+    window_restore_chain_fold_identity: String,
+    restore_envelope_fold_identity: String,
+    chain_pair_count: u64,
+    spill_window_count: u64,
+    restore_pair_count: u64,
+    restore_fold_count: u64,
+    restore_envelope_pair_count: u64,
     window_identity_count: u64,
     totals: QueryAggregateSpillTotals,
     overflowed: bool,
@@ -12076,6 +12114,48 @@ fn query_paired_window_restore_chain_descriptor_fold_identity(
     stream_rotation_chains: &[QueryPairedStreamRotationChainDescription],
     wal_rotation_chains: &[QueryPairedWalRotationChainDescription],
 ) -> Option<(String, u64)> {
+    let identities = query_paired_window_restore_chain_descriptor_identities(
+        checkpoint_compaction_chains,
+        segment_rotation_chains,
+        stream_compaction_chains,
+        spill_restore_chains,
+        stream_rotation_chains,
+        wal_rotation_chains,
+    );
+    if identities.is_empty() {
+        return None;
+    }
+
+    let restore_chain_count = u64::try_from(identities.values().map(Vec::len).sum::<usize>())
+        .unwrap_or(u64::MAX);
+    let mut hash = Sha256::new();
+    hash.update(b"orna.sys.query-paired-window-restore-chain-descriptor-fold.v1\0");
+    hash.update(restore_chain_count.to_be_bytes());
+    for ((kind, pair_identity), chain_identities) in identities {
+        hash_part(&mut hash, kind.as_bytes());
+        hash_part(&mut hash, pair_identity.as_bytes());
+        hash.update((chain_identities.len() as u64).to_be_bytes());
+        for identity in chain_identities {
+            hash_part(&mut hash, identity.as_bytes());
+        }
+    }
+    Some((
+        format!(
+            "paired-window-restore-chain-descriptor-fold:{}",
+            hex(&hash.finalize())
+        ),
+        restore_chain_count,
+    ))
+}
+
+fn query_paired_window_restore_chain_descriptor_identities(
+    checkpoint_compaction_chains: &[QueryPairedCheckpointSegmentCompactionChainDescription],
+    segment_rotation_chains: &[QueryPairedSegmentRotationChainDescription],
+    stream_compaction_chains: &[QueryPairedStreamCompactionChainDescription],
+    spill_restore_chains: &[QueryPairedCheckpointSpillRestoreChainDescription],
+    stream_rotation_chains: &[QueryPairedStreamRotationChainDescription],
+    wal_rotation_chains: &[QueryPairedWalRotationChainDescription],
+) -> BTreeMap<(String, String), Vec<String>> {
     let mut identities = BTreeMap::<(String, String), Vec<String>>::new();
     for chain in checkpoint_compaction_chains {
         identities
@@ -12131,30 +12211,271 @@ fn query_paired_window_restore_chain_descriptor_fold_identity(
             .or_default()
             .push(query_paired_wal_rotation_chain_identity(chain));
     }
-    if identities.is_empty() {
+    for chain_identities in identities.values_mut() {
+        chain_identities.sort();
+    }
+    identities
+}
+
+/// Builds one exact window/restore envelope for each paired join edge that
+/// has both a window identity and restore descriptors. The envelope uses
+/// stable descriptor inputs rather than cost ancestry, so spill settings do
+/// not rewrite the restore component.
+fn query_paired_window_restore_envelope_fold_identity(
+    window_cost_restoration_fold: &QueryPairedWindowCostRestorationFold,
+    pairs: &[QueryJoinPairIdentityDescription],
+    restore_chain_identities: &BTreeMap<(String, String), Vec<String>>,
+) -> Option<(String, u64)> {
+    let mut pair_envelopes = BTreeMap::new();
+    for pair in pairs {
+        let Some(window_identity) = window_cost_restoration_fold
+            .window_identities
+            .get(pair.identity.as_str())
+        else {
+            continue;
+        };
+        let restore_chains = restore_chain_identities
+            .iter()
+            .filter(|((_, pair_identity), _)| pair_identity == pair.identity.as_str())
+            .collect::<Vec<_>>();
+        if restore_chains.is_empty() {
+            continue;
+        }
+
+        let mut envelope_hash = Sha256::new();
+        envelope_hash.update(b"orna.sys.query-paired-window-restore-envelope.v1\0");
+        hash_part(&mut envelope_hash, pair.identity.as_str().as_bytes());
+        hash_part(&mut envelope_hash, pair.left_source.as_str().as_bytes());
+        hash_part(&mut envelope_hash, pair.right_source.as_str().as_bytes());
+        hash_optional_text(
+            &mut envelope_hash,
+            pair.predicate.as_ref().map(ExpressionRef::as_str),
+        );
+        hash_part(&mut envelope_hash, window_identity.as_bytes());
+        envelope_hash.update((restore_chains.len() as u64).to_be_bytes());
+        for ((kind, _), chain_identities) in restore_chains {
+            hash_part(&mut envelope_hash, kind.as_bytes());
+            envelope_hash.update((chain_identities.len() as u64).to_be_bytes());
+            for identity in chain_identities {
+                hash_part(&mut envelope_hash, identity.as_bytes());
+            }
+        }
+        pair_envelopes.insert(
+            pair.identity.as_str().to_owned(),
+            format!(
+                "paired-window-restore-envelope:{}",
+                hex(&envelope_hash.finalize())
+            ),
+        );
+    }
+    if pair_envelopes.is_empty() {
         return None;
     }
 
-    let restore_chain_count = u64::try_from(identities.values().map(Vec::len).sum::<usize>())
-        .unwrap_or(u64::MAX);
-    let mut hash = Sha256::new();
-    hash.update(b"orna.sys.query-paired-window-restore-chain-descriptor-fold.v1\0");
-    hash.update(restore_chain_count.to_be_bytes());
-    for ((kind, pair_identity), chain_identities) in identities {
-        hash_part(&mut hash, kind.as_bytes());
-        hash_part(&mut hash, pair_identity.as_bytes());
-        hash.update((chain_identities.len() as u64).to_be_bytes());
-        for identity in chain_identities {
-            hash_part(&mut hash, identity.as_bytes());
-        }
+    let pair_count = u64::try_from(pair_envelopes.len()).unwrap_or(u64::MAX);
+    let mut fold_hash = Sha256::new();
+    fold_hash.update(b"orna.sys.query-paired-window-restore-envelope-fold.v1\0");
+    fold_hash.update(pair_count.to_be_bytes());
+    for (pair_identity, envelope_identity) in &pair_envelopes {
+        hash_part(&mut fold_hash, pair_identity.as_bytes());
+        hash_part(&mut fold_hash, envelope_identity.as_bytes());
     }
     Some((
         format!(
-            "paired-window-restore-chain-descriptor-fold:{}",
+            "paired-window-restore-envelope-fold:{}",
+            hex(&fold_hash.finalize())
+        ),
+        pair_count,
+    ))
+}
+
+fn query_paired_bounded_window_spill_chain_window_restore_envelope_fold(
+    chain_window_fold: &QueryPairedBoundedWindowSpillChainWindowFold,
+    restore_chain_fold: &QueryPairedBoundedWindowSpillChainWindowRestoreChainFold,
+    window_cost_restoration_fold: &QueryPairedWindowCostRestorationFold,
+    pairs: &[QueryJoinPairIdentityDescription],
+    checkpoint_compaction_chains: &[QueryPairedCheckpointSegmentCompactionChainDescription],
+    segment_rotation_chains: &[QueryPairedSegmentRotationChainDescription],
+    stream_compaction_chains: &[QueryPairedStreamCompactionChainDescription],
+    spill_restore_chains: &[QueryPairedCheckpointSpillRestoreChainDescription],
+    stream_rotation_chains: &[QueryPairedStreamRotationChainDescription],
+    wal_rotation_chains: &[QueryPairedWalRotationChainDescription],
+) -> Option<QueryPairedBoundedWindowSpillChainWindowRestoreEnvelopeFold> {
+    let restore_chain_identities = query_paired_window_restore_chain_descriptor_identities(
+        checkpoint_compaction_chains,
+        segment_rotation_chains,
+        stream_compaction_chains,
+        spill_restore_chains,
+        stream_rotation_chains,
+        wal_rotation_chains,
+    );
+    let (restore_envelope_fold_identity, restore_envelope_pair_count) =
+        query_paired_window_restore_envelope_fold_identity(
+            window_cost_restoration_fold,
+            pairs,
+            &restore_chain_identities,
+        )?;
+    let mut count_overflowed = false;
+    let window_identity_count =
+        u64::try_from(window_cost_restoration_fold.window_identities.len()).unwrap_or_else(|_| {
+            count_overflowed = true;
+            u64::MAX
+        });
+    let overflowed = chain_window_fold.overflowed || count_overflowed;
+
+    let mut hash = Sha256::new();
+    hash.update(b"orna.sys.query-paired-bounded-window-spill-chain-window-restore-envelope.v1\0");
+    hash_part(&mut hash, chain_window_fold.identity.as_bytes());
+    hash_part(&mut hash, chain_window_fold.chain_fold_identity.as_bytes());
+    hash_part(&mut hash, chain_window_fold.spill_window_fold_identity.as_bytes());
+    hash_part(&mut hash, restore_chain_fold.identity.as_bytes());
+    hash_part(&mut hash, restore_envelope_fold_identity.as_bytes());
+    hash.update(chain_window_fold.pair_count.to_be_bytes());
+    hash.update(chain_window_fold.spill_window_count.to_be_bytes());
+    hash.update(restore_chain_fold.restore_pair_count.to_be_bytes());
+    hash.update(restore_chain_fold.restore_fold_count.to_be_bytes());
+    hash.update(restore_envelope_pair_count.to_be_bytes());
+    hash.update(window_identity_count.to_be_bytes());
+    hash_query_aggregate_spill_totals(&mut hash, chain_window_fold.totals);
+    hash.update([u8::from(overflowed)]);
+
+    Some(QueryPairedBoundedWindowSpillChainWindowRestoreEnvelopeFold {
+        identity: format!(
+            "paired-bounded-window-spill-chain-window-restore-envelope:{}",
             hex(&hash.finalize())
         ),
-        restore_chain_count,
-    ))
+        chain_window_fold_identity: chain_window_fold.identity.clone(),
+        chain_fold_identity: chain_window_fold.chain_fold_identity.clone(),
+        spill_window_fold_identity: chain_window_fold.spill_window_fold_identity.clone(),
+        restore_chain_fold_identity: restore_chain_fold.restore_chain_fold_identity.clone(),
+        window_restore_chain_fold_identity: restore_chain_fold
+            .window_restore_chain_fold_identity
+            .clone(),
+        restore_envelope_fold_identity,
+        chain_pair_count: chain_window_fold.pair_count,
+        spill_window_count: chain_window_fold.spill_window_count,
+        restore_pair_count: restore_chain_fold.restore_pair_count,
+        restore_fold_count: restore_chain_fold.restore_fold_count,
+        restore_envelope_pair_count,
+        window_identity_count,
+        totals: chain_window_fold.totals,
+        overflowed,
+    })
+}
+
+fn add_paired_bounded_window_spill_chain_window_restore_envelope_fold_details(
+    details: &mut BTreeMap<String, PlanDetail>,
+    fold: &QueryPairedBoundedWindowSpillChainWindowRestoreEnvelopeFold,
+) {
+    for (key, value) in [
+        (
+            "paired_bounded_window_spill_chain_window_restore_envelope_fold_identity",
+            fold.identity.as_str(),
+        ),
+        (
+            "paired_bounded_window_spill_chain_window_restore_envelope_window_fold_identity",
+            fold.chain_window_fold_identity.as_str(),
+        ),
+        (
+            "paired_bounded_window_spill_chain_window_restore_envelope_chain_fold_identity",
+            fold.chain_fold_identity.as_str(),
+        ),
+        (
+            "paired_bounded_window_spill_chain_window_restore_envelope_spill_window_fold_identity",
+            fold.spill_window_fold_identity.as_str(),
+        ),
+        (
+            "paired_bounded_window_spill_chain_window_restore_envelope_restore_chain_fold_identity",
+            fold.restore_chain_fold_identity.as_str(),
+        ),
+        (
+            "paired_bounded_window_spill_chain_window_restore_envelope_window_restore_chain_fold_identity",
+            fold.window_restore_chain_fold_identity.as_str(),
+        ),
+        (
+            "paired_bounded_window_spill_chain_window_restore_envelope_restore_envelope_fold_identity",
+            fold.restore_envelope_fold_identity.as_str(),
+        ),
+    ] {
+        details.insert(key.to_owned(), PlanDetail::Text(value.to_owned()));
+    }
+    details.insert(
+        "paired_bounded_window_spill_chain_window_restore_envelope_pairing".to_owned(),
+        PlanDetail::Text(
+            "exact_bounded_chain_window_spills_with_paired_window_restore_envelopes".to_owned(),
+        ),
+    );
+    for (key, value) in [
+        (
+            "paired_bounded_window_spill_chain_window_restore_envelope_chain_pair_count",
+            fold.chain_pair_count,
+        ),
+        (
+            "paired_bounded_window_spill_chain_window_restore_envelope_spill_window_count",
+            fold.spill_window_count,
+        ),
+        (
+            "paired_bounded_window_spill_chain_window_restore_envelope_restore_pair_count",
+            fold.restore_pair_count,
+        ),
+        (
+            "paired_bounded_window_spill_chain_window_restore_envelope_restore_fold_count",
+            fold.restore_fold_count,
+        ),
+        (
+            "paired_bounded_window_spill_chain_window_restore_envelope_pair_count",
+            fold.restore_envelope_pair_count,
+        ),
+        (
+            "paired_bounded_window_spill_chain_window_restore_envelope_window_identity_count",
+            fold.window_identity_count,
+        ),
+        (
+            "paired_bounded_window_spill_chain_window_restore_envelope_spill_stage_count",
+            fold.totals.stage_count,
+        ),
+        (
+            "paired_bounded_window_spill_chain_window_restore_envelope_unknown_working_set_count",
+            fold.totals.unknown_working_set_count,
+        ),
+    ] {
+        details.insert(key.to_owned(), PlanDetail::Integer(value));
+    }
+    details.insert(
+        "paired_bounded_window_spill_chain_window_restore_envelope_overflowed".to_owned(),
+        PlanDetail::Boolean(fold.overflowed),
+    );
+    let estimate_status = if fold.overflowed {
+        "overflow"
+    } else if fold.totals.unknown_working_set_count > 0 {
+        "unknown_working_set"
+    } else {
+        "computed"
+    };
+    details.insert(
+        "paired_bounded_window_spill_chain_window_restore_envelope_estimate_status".to_owned(),
+        PlanDetail::Text(estimate_status.to_owned()),
+    );
+    for (key, value) in [
+        (
+            "paired_bounded_window_spill_chain_window_restore_envelope_estimated_bytes",
+            fold.totals.estimated_bytes,
+        ),
+        (
+            "paired_bounded_window_spill_chain_window_restore_envelope_estimated_io_blocks",
+            fold.totals.estimated_io_blocks,
+        ),
+        (
+            "paired_bounded_window_spill_chain_window_restore_envelope_estimated_io_work",
+            fold.totals.estimated_io_work,
+        ),
+    ] {
+        if let Some(value) = value {
+            details.insert(key.to_owned(), PlanDetail::Integer(value));
+        } else {
+            details.remove(key);
+        }
+    }
 }
 
 fn add_paired_bounded_window_spill_chain_window_restore_chain_fold_details(
