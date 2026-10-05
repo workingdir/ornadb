@@ -12,8 +12,7 @@
 use std::{collections::BTreeSet, sync::LazyLock};
 
 use super::{
-    SystemEffect, SystemFormatContext, SystemFunctionDescriptor, system_function_descriptor,
-    system_function_descriptor_for,
+    SystemEffect, SystemFunctionDescriptor, system_function_descriptor,
 };
 use orna_sys_macros::ornasys;
 
@@ -558,23 +557,17 @@ impl SystemApiFunctionBindings {
     #[ornasys(
         function = r###"{"contexts":["format-1","format-2"],"contract":"administrative-state-transitions","effect":"admin","name":"sys.admin.set_storage_preference","purpose":"Set future automatic placement preference without rewriting existing rows.","signature":"fn sys.admin.set_storage_preference(table: sys.TableRef, preference: sys.StoragePreference): sys.Storage"}"###
     )]
-    pub fn sys_admin_set_storage_preference(&self) -> &'static SystemFunctionDescriptor {
-        system_function_descriptor_for(
-            SystemFormatContext::FORMAT_1_ORIGINAL_1_0_0,
-            "sys.admin.set_storage_preference",
-        )
-        .expect("annotated system API function has a descriptor")
+    #[allow(dead_code)] // Historical metadata is retained; public access is dispatch-only.
+    fn sys_admin_set_storage_preference(&self) -> &'static SystemFunctionDescriptor {
+        panic!("legacy descriptor is selected through system_callable_for with an explicit historical context")
     }
 
     #[ornasys(
         function = r###"{"contexts":["format-1","format-2"],"contract":"administrative-state-transitions","effect":"admin","name":"sys.admin.rewrite_storage","purpose":"Atomically rewrite physical placement while preserving logical rows.","signature":"fn sys.admin.rewrite_storage(table: sys.TableRef, to: sys.StorageRewriteTarget): sys.StorageRewriteResult"}"###
     )]
-    pub fn sys_admin_rewrite_storage(&self) -> &'static SystemFunctionDescriptor {
-        system_function_descriptor_for(
-            SystemFormatContext::FORMAT_1_ORIGINAL_1_0_0,
-            "sys.admin.rewrite_storage",
-        )
-        .expect("annotated system API function has a descriptor")
+    #[allow(dead_code)] // Historical metadata is retained; public access is dispatch-only.
+    fn sys_admin_rewrite_storage(&self) -> &'static SystemFunctionDescriptor {
+        panic!("legacy descriptor is selected through system_callable_for with an explicit historical context")
     }
 
     #[ornasys(
