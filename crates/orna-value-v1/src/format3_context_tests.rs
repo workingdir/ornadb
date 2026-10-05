@@ -95,6 +95,33 @@ fn published_blob_vectors_use_explicit_profiles() {
 }
 
 #[test]
+fn rov3_raw_descriptor_decode_preserves_metadata_without_read_authority() {
+    let resolver = counting_resolver(b"payload");
+    let identity = ContentIdentity::from_bytes(b"payload");
+    let context = test_context(resolver.clone());
+    let descriptor_oid = NativeOid::from_bytes(&[5; 20]).unwrap();
+    let admitted = Blob::from_reference_with_annotation(
+        context.reference(identity, descriptor_oid.clone()).unwrap(),
+        "audio/mpeg",
+        None,
+    )
+    .unwrap();
+    let stored = encode_rov3(&admitted).unwrap();
+
+    let decoded = decode_rov3_in_context(&stored, &context).unwrap();
+    assert_eq!(decoded.content_identity(), identity);
+    assert_eq!(decoded.media_type(), "audio/mpeg");
+    assert_eq!(decoded.suffix(), None);
+    assert_eq!(decoded.descriptor_oid(), Some(&descriptor_oid));
+    assert_eq!(encode_rov3(&decoded).unwrap(), stored);
+    assert_eq!(decoded.read(0, 1), Err(Error::ContentUnavailable));
+    assert_eq!(resolver.reads.load(Ordering::SeqCst), 0);
+
+    assert_eq!(admitted.read(0, 1).unwrap(), b"p");
+    assert_eq!(resolver.reads.load(Ordering::SeqCst), 1);
+}
+
+#[test]
 fn ovb2_blob_encoder_preflights_sink_and_streams_public_encoding() {
     let resolver = counting_resolver(b"abc");
     let context =
