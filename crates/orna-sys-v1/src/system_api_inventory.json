@@ -6110,7 +6110,6 @@
     "sys.format.unsupported",
     "sys.codec.unsupported_value_profile"
   ],
-  "source_of_truth": "api/sys.json; normative semantics in source chapters and generated system reference",
   "value_profiles": {
     "new": "OVB-2",
     "stored": "ROV-3",

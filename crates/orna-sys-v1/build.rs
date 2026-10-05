@@ -34,10 +34,12 @@ fn main() {
     let build_support_path = manifest.join("build_support.rs");
     let build_host_path = manifest.join("build_host.rs");
     let build_provider_path = manifest.join("build_provider.rs");
+    let authority_path = manifest.join("../../api/sys.json");
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed={}", build_support_path.display());
     println!("cargo:rerun-if-changed={}", build_host_path.display());
     println!("cargo:rerun-if-changed={}", build_provider_path.display());
+    println!("cargo:rerun-if-changed={}", authority_path.display());
     // Watch the directory recursively so adding a new annotated module also
     // invalidates the collected schema, even before that file is known here.
     println!("cargo:rerun-if-changed={}", source_root.display());
