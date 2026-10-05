@@ -8,7 +8,12 @@ const distribution = join(webUi, 'dist');
 const assetRows = join(repository, 'playground', 'Asset');
 const entryRows = join(repository, 'playground', 'Entry');
 const routeRows = join(repository, 'playground', 'Route');
+const themeRows = join(repository, 'playground', 'Theme');
+const layoutRows = join(repository, 'playground', 'Layout');
 const maxAssetBytes = 8 * 1024 * 1024;
+const maxAssetRowBytes = 16 * 1024 * 1024;
+const maxStyleBytes = 256 * 1024;
+const maxStyleRowBytes = 512 * 1024;
 const arguments_ = process.argv.slice(2);
 if (arguments_.length > 1 || arguments_.some((argument) => argument !== '--check')) {
   throw new Error('Usage: node scripts/generate-db-assets.mjs [--check]');
@@ -80,6 +85,10 @@ function routeRow(id, path, entry) {
     + `entry: ${ornaString(entry)} }\n`;
 }
 
+function styleRow(id, name, css) {
+  return `{ id: ${ornaString(id)}, name: ${ornaString(name)}, css: ${ornaString(css)} }\n`;
+}
+
 const extraAssets = [
   ['assets/presentation.mjs', join(repository, 'playground/shared/presentation.mjs')],
   ['assets/serve-home.mjs', join(repository, 'crates/orna-cli-v1/src/serve_home.mjs')],
@@ -89,8 +98,10 @@ const extraAssets = [
 async function expectedRows() {
   const files = await collectFiles('');
   if (!files.includes('index.html')) throw new Error('The Vite output has no index.html shell.');
+  if (!files.includes('assets/index.css')) throw new Error('The Vite output has no combined shell stylesheet.');
 
   const rows = new Map();
+  const styles = new Map();
   const counts = { Asset: 0, Entry: 0, Route: 0 };
   let totalContentBytes = 0;
   function addRoute(path, entry) {
@@ -126,6 +137,7 @@ async function expectedRows() {
     ...extraAssets,
   ];
   for (const [path, sourcePath] of sources) {
+    if (path === 'assets/index.css') continue;
     const content = await readFile(sourcePath);
     if (content.byteLength > maxAssetBytes) {
       throw new Error('Playground DB asset exceeds ' + maxAssetBytes + ' bytes: ' + path);
@@ -143,9 +155,28 @@ async function expectedRows() {
     }
 
     const normalizedPath = path.split(sep).join('/');
+    if (normalizedPath === 'index.html') {
+      const stylesheetLinks = contentText.match(/<link\b[^>]*\brel="stylesheet"[^>]*>/g) ?? [];
+      const bundledStyleHref = '/playground/assets/index.css';
+      const bundledStylesheetLinks = stylesheetLinks.filter((link) => (
+        link.includes(`href="${bundledStyleHref}"`)
+      ));
+      if (bundledStylesheetLinks.length !== 1) {
+        throw new Error(`Expected one ${bundledStyleHref} link in the generated shell, found ${bundledStylesheetLinks.length}.`);
+      }
+      contentText = contentText.replace(
+        bundledStylesheetLinks[0],
+        '<link id="playground-theme" rel="stylesheet" href="/playground/theme.css">'
+          + '<link id="playground-layout" rel="stylesheet" href="/playground/layout.css">',
+      );
+    }
     const id = 'asset-' + Buffer.from(normalizedPath).toString('hex');
     const rowPath = join(assetRows, id + '.orna');
-    rows.set(rowPath, assetRow(id, normalizedPath, mediaType, contentText));
+    const row = assetRow(id, normalizedPath, mediaType, contentText);
+    if (Buffer.byteLength(row) > maxAssetRowBytes) {
+      throw new Error('Playground DB asset row exceeds ' + maxAssetRowBytes + ' bytes: ' + path);
+    }
+    rows.set(rowPath, row);
     counts.Asset += 1;
     totalContentBytes += content.byteLength;
 
@@ -157,11 +188,30 @@ async function expectedRows() {
       addRoute(`/playground/${normalizedPath}`, entryId);
     }
   }
-  return { rows, totalContentBytes, counts };
+
+  for (const [directory, filename, id, name, sourcePath] of [
+    [themeRows, 'wiki-basic.orna', 'wiki-basic', 'Wiki basic', 'theme.css'],
+    [layoutRows, 'responsive.orna', 'responsive', 'Responsive layout', 'layout.css'],
+  ]) {
+    const css = await readFile(join(webUi, 'src', sourcePath));
+    if (css.byteLength > maxStyleBytes) {
+      throw new Error('Playground ' + sourcePath + ' exceeds ' + maxStyleBytes + ' bytes.');
+    }
+    const cssText = css.toString('utf8');
+    if (!Buffer.from(cssText, 'utf8').equals(css)) {
+      throw new Error('Playground ' + sourcePath + ' must be UTF-8 text.');
+    }
+    const row = styleRow(id, name, cssText);
+    if (Buffer.byteLength(row) > maxStyleRowBytes) {
+      throw new Error('Playground ' + sourcePath + ' row exceeds ' + maxStyleRowBytes + ' bytes.');
+    }
+    styles.set(join(directory, filename), row);
+  }
+  return { rows, styles, totalContentBytes, counts };
 }
 
 try {
-  const { rows, totalContentBytes, counts } = await expectedRows();
+  const { rows, styles, totalContentBytes, counts } = await expectedRows();
   const directories = [
     {
       path: assetRows,
@@ -202,6 +252,22 @@ try {
       .map((entry) => join(directory.path, entry.name))
       .filter((rowPath) => !rows.has(rowPath)));
   }
+  const staleStyles = [];
+  for (const [directory, filename] of [
+    [themeRows, 'wiki-basic.orna'],
+    [layoutRows, 'responsive.orna'],
+  ]) {
+    let entries = [];
+    try {
+      entries = await readdir(directory, { withFileTypes: true });
+    } catch (error) {
+      if (error.code !== 'ENOENT') throw error;
+    }
+    staleStyles.push(...entries
+      .filter((entry) => entry.isFile() && entry.name === filename)
+      .map((entry) => join(directory, entry.name))
+      .filter((rowPath) => !styles.has(rowPath)));
+  }
   const changed = [];
   for (const [rowPath, expected] of rows) {
     let current;
@@ -212,19 +278,36 @@ try {
     }
     if (current !== expected) changed.push([rowPath, expected]);
   }
+  const changedStyles = [];
+  for (const [rowPath, expected] of styles) {
+    let current;
+    try {
+      current = await readFile(rowPath, 'utf8');
+    } catch (error) {
+      if (error.code !== 'ENOENT') throw error;
+    }
+    if (current !== expected) changedStyles.push([rowPath, expected]);
+  }
 
   if (checkOnly) {
-    if (stale.length || changed.length) {
+    if (stale.length || changed.length || staleStyles.length || changedStyles.length) {
       for (const rowPath of stale) console.error(`Stale playground DB row: ${rowPath}`);
       for (const [rowPath] of changed) console.error(`Missing or stale playground DB row: ${rowPath}`);
+      for (const rowPath of staleStyles) console.error(`Stale playground style row: ${rowPath}`);
+      for (const [rowPath] of changedStyles) console.error(`Missing or stale playground style row: ${rowPath}`);
       process.exitCode = 1;
     } else {
-      console.log(`Verified ${counts.Asset} Asset, ${counts.Entry} Entry, and ${counts.Route} Route rows (${totalContentBytes} asset bytes).`);
+      console.log(`Verified ${counts.Asset} Asset, ${counts.Entry} Entry, and ${counts.Route} Route rows (${totalContentBytes} asset bytes), one Theme row, and one Layout row.`);
     }
   } else {
+    for (const directory of [...directories, { path: themeRows }, { path: layoutRows }]) {
+      await mkdir(directory.path, { recursive: true });
+    }
     for (const [rowPath, content] of changed) await writeFile(rowPath, content, 'utf8');
     for (const rowPath of stale) await rm(rowPath);
-    console.log(`Wrote ${counts.Asset} Asset, ${counts.Entry} Entry, and ${counts.Route} Route rows (${totalContentBytes} asset bytes).`);
+    for (const [rowPath, content] of changedStyles) await writeFile(rowPath, content, 'utf8');
+    for (const rowPath of staleStyles) await rm(rowPath);
+    console.log(`Wrote ${counts.Asset} Asset, ${counts.Entry} Entry, and ${counts.Route} Route rows (${totalContentBytes} asset bytes), one Theme row, and one Layout row.`);
   }
 } catch (error) {
   console.error(error.message);
