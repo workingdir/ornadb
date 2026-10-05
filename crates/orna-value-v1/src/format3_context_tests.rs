@@ -95,6 +95,173 @@ fn published_blob_vectors_use_explicit_profiles() {
 }
 
 #[test]
+fn mime1_annotations_are_canonical_and_reject_known_suffix_mismatches() {
+    assert_eq!(
+        decode_typed::<Vec<u8>>(&hex_bytes("436a7067")).unwrap(),
+        b"jpg"
+    );
+
+    assert_eq!(
+        MediaAnnotation::new("image/*", None),
+        Err(Error::InvalidMediaType)
+    );
+    assert_eq!(
+        MediaAnnotation::new("text/plain", Some("../txt")),
+        Err(Error::InvalidSuffix)
+    );
+
+    let normalized = Blob::from_bytes_with_annotation(
+        b"module".to_vec(),
+        "Application/JavaScript;CHARSET=\"UTF-8\"",
+        Some("MJS"),
+    )
+    .unwrap();
+    assert_eq!(normalized.media_type(), "text/javascript;charset=utf-8");
+    assert_eq!(normalized.suffix(), Some("mjs"));
+    assert_eq!(normalized.annotation().selected_suffix(), "mjs");
+    assert_eq!(
+        decode_ovb2(&encode_ovb2(&normalized).unwrap()).unwrap(),
+        normalized
+    );
+
+    assert_eq!(
+        Blob::from_bytes_with_annotation(b"image".to_vec(), "image/jpeg", Some("png")),
+        Err(Error::IncompatibleSuffix)
+    );
+    let plain = Blob::from_bytes_with_annotation(b"text".to_vec(), "text/plain", None).unwrap();
+    assert_eq!(
+        plain.annotate("text/plain", Some("png")),
+        Err(Error::IncompatibleSuffix)
+    );
+    assert_eq!(
+        Blob::from_semantic_commitment(
+            ContentIdentity::from_bytes(b"abc"),
+            "image/jpeg",
+            Some("png")
+        ),
+        Err(Error::IncompatibleSuffix)
+    );
+    assert_eq!(
+        Blob::from_bytes_with_annotation(b"text".to_vec(), "text/plain", Some("TXT"))
+            .unwrap()
+            .suffix(),
+        None
+    );
+    assert_eq!(
+        Blob::from_bytes_with_annotation(b"opaque".to_vec(), "application/x-private", Some("data"))
+            .unwrap()
+            .annotation()
+            .selected_suffix(),
+        "data"
+    );
+
+    let identity = ContentIdentity::from_bytes(b"abc");
+    let context = test_context(counting_resolver(b"abc"));
+    let reference = context
+        .reference(identity, NativeOid::from_bytes(&[7; 20]).unwrap())
+        .unwrap();
+    assert_eq!(
+        Blob::from_reference_with_annotation(reference, "image/jpeg", Some("png")),
+        Err(Error::IncompatibleSuffix)
+    );
+    assert_eq!(
+        Blob::from_semantic_commitment_in_context(identity, &context, "image/jpeg", Some("png")),
+        Err(Error::IncompatibleSuffix)
+    );
+    let ovb2 = tag(
+        OVB2_BLOB_TAG,
+        Raw::Array(vec![
+            Raw::Bytes(b"abc".to_vec()),
+            Raw::Text("image/jpeg".to_owned()),
+            Raw::Text("png".to_owned()),
+        ]),
+    );
+    assert_eq!(
+        ContextValue::new(ValueFormat::Ovb2, ovb2.clone()),
+        Err(Error::IncompatibleSuffix)
+    );
+    assert_eq!(
+        encode_context_raw(&ovb2, ValueFormat::Ovb2, None, MimeRegistry::mime1()),
+        Err(Error::IncompatibleSuffix)
+    );
+    let mut encoded = Vec::new();
+    write_raw(&ovb2, &mut encoded).unwrap();
+    assert_eq!(decode_ovb2(&encoded), Err(Error::IncompatibleSuffix));
+
+    let noncanonical_ovb2 = tag(
+        OVB2_BLOB_TAG,
+        Raw::Array(vec![
+            Raw::Bytes(b"module".to_vec()),
+            Raw::Text("Application/JavaScript;CHARSET=\"UTF-8\"".to_owned()),
+            Raw::Text("MJS".to_owned()),
+        ]),
+    );
+    assert_eq!(
+        ContextValue::new(ValueFormat::Ovb2, noncanonical_ovb2),
+        Err(Error::NonCanonical)
+    );
+
+    let rov3 = tag(
+        ROV3_BLOB_TAG,
+        Raw::Array(vec![
+            Raw::Int(3.into()),
+            Raw::Bytes(identity.sha256().to_vec()),
+            Raw::Text("image/jpeg".to_owned()),
+            Raw::Text("png".to_owned()),
+            Raw::Bytes(vec![7; 20]),
+        ]),
+    );
+    assert_eq!(
+        ContextValue::new_in_context(&context, ValueFormat::Rov3, rov3.clone()),
+        Err(Error::IncompatibleSuffix)
+    );
+    assert_eq!(
+        encode_context_raw(
+            &rov3,
+            ValueFormat::Rov3,
+            Some(context.git_oid_algorithm()),
+            context.mime_registry()
+        ),
+        Err(Error::IncompatibleSuffix)
+    );
+    let mut encoded = Vec::new();
+    write_raw(&rov3, &mut encoded).unwrap();
+    assert_eq!(
+        decode_rov3_in_context(&encoded, &context),
+        Err(Error::IncompatibleSuffix)
+    );
+
+    let sov3 = tag(
+        SOV3_BLOB_TAG,
+        Raw::Array(vec![
+            Raw::Int(3.into()),
+            Raw::Bytes(identity.sha256().to_vec()),
+            Raw::Text("image/jpeg".to_owned()),
+            Raw::Text("png".to_owned()),
+        ]),
+    );
+    assert_eq!(
+        ContextValue::new_in_context(&context, ValueFormat::Sov3, sov3.clone()),
+        Err(Error::IncompatibleSuffix)
+    );
+    assert_eq!(
+        encode_context_raw(
+            &sov3,
+            ValueFormat::Sov3,
+            Some(context.git_oid_algorithm()),
+            context.mime_registry()
+        ),
+        Err(Error::IncompatibleSuffix)
+    );
+    let mut encoded = Vec::new();
+    write_raw(&sov3, &mut encoded).unwrap();
+    assert_eq!(
+        decode_sov3_in_context(&encoded, &context),
+        Err(Error::IncompatibleSuffix)
+    );
+}
+
+#[test]
 fn legacy_codec_rejects_new_tags_and_profiles_do_not_mix() {
     let raw = Raw::Tag(
         60110,
