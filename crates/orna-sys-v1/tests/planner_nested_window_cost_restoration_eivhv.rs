@@ -692,6 +692,36 @@ fn nested_window_identities_survive_paired_cost_restore_folds_and_sparse_edges()
         "reordering descriptors preserves the paired cost and restore-envelope identity"
     );
     assert_eq!(
+        integer(
+            child_a,
+            "paired_window_cost_restoration_cost_window_restore_envelope_chain_distinct_state_count"
+        ),
+        1
+    );
+    assert_eq!(
+        integer(
+            child_b,
+            "paired_window_cost_restoration_cost_window_restore_envelope_chain_distinct_state_count"
+        ),
+        2
+    );
+    assert_eq!(
+        integer(
+            tail,
+            "paired_window_cost_restoration_cost_window_restore_envelope_chain_distinct_state_count"
+        ),
+        3,
+        "the sparse edge adds its new composite state to the ancestry"
+    );
+    assert_eq!(
+        integer(
+            reordered_joins["pair:table:ChildB"],
+            "paired_window_cost_restoration_cost_window_restore_envelope_chain_distinct_state_count"
+        ),
+        2,
+        "descriptor reordering preserves the distinct composite state count"
+    );
+    assert_eq!(
         text(
             child_a,
             "paired_window_cost_restoration_cost_window_restore_envelope_chain_carry_transition"
@@ -1383,6 +1413,14 @@ fn nested_window_identities_survive_paired_cost_restore_folds_and_sparse_edges()
         changed_right_pair_cost_joins["pair:table:ChildB"],
         changed_restore_joins["pair:table:ChildB"],
     ] {
+        assert_eq!(
+            integer(
+                changed,
+                "paired_window_cost_restoration_cost_window_restore_envelope_chain_distinct_state_count"
+            ),
+            2,
+            "each changed nested component adds exactly one composite state"
+        );
         assert_ne!(
             text(
                 child_b,
