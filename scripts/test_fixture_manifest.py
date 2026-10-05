@@ -251,6 +251,46 @@ class FixtureManifestTests(unittest.TestCase):
                 f"runtime historical snapshot fixture hash is pinned: {fixture_path}",
             )
 
+    def test_runtime_publication_fixtures_are_local_and_hash_pinned(self) -> None:
+        workspace = Path(__file__).resolve().parents[1]
+        manifest = (workspace / "scripts/fixture-manifest.sha256").read_text(
+            encoding="utf-8"
+        )
+        suites = {
+            "publication_metadata.rs": "publication_metadata.orna",
+            "publication_repository_conformance.rs": "publication-repository-main.orna",
+        }
+        include_pattern = re.compile(r'include_str!\(\s*"([^"\n]+)"\s*\)')
+        fixture_paths = set()
+
+        for suite, expected_fixture in suites.items():
+            test_path = f"crates/orna-runtime-v1/tests/{suite}"
+            source = (workspace / test_path).read_text(encoding="utf-8")
+            include_paths = include_pattern.findall(source)
+            self.assertEqual(
+                include_paths,
+                [f"fixtures/{expected_fixture}"],
+                f"{test_path} retains its crate-local publication proof input",
+            )
+            for include_path in include_paths:
+                relative_path = Path(include_path)
+                self.assertNotIn("..", relative_path.parts)
+                fixture_path = (
+                    f"crates/orna-runtime-v1/tests/fixtures/{relative_path.name}"
+                )
+                fixture_paths.add(fixture_path)
+
+        self.assertEqual(len(fixture_paths), 2, "both runtime publication fixtures stay pinned")
+        for fixture_path in sorted(fixture_paths):
+            fixture = workspace / fixture_path
+            self.assertTrue(fixture.is_file(), f"missing crate-local fixture: {fixture_path}")
+            digest = hashlib.sha256(fixture.read_bytes()).hexdigest()
+            self.assertIn(
+                f"{digest}  {fixture_path}\n",
+                manifest,
+                f"runtime publication fixture hash is pinned: {fixture_path}",
+            )
+
 
 if __name__ == "__main__":
     unittest.main()
