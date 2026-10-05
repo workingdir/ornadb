@@ -28,14 +28,14 @@ use lsp_types::{
     LinkedEditingRanges, Moniker, MonikerKind, MonikerParams, NumberOrString, OneOf, Position,
     PositionEncodingKind, PrepareRenameResponse, PublishDiagnosticsParams, Range, ReferenceParams,
     RelatedFullDocumentDiagnosticReport, RelatedUnchangedDocumentDiagnosticReport, RenameOptions,
-    RenameParams, SelectionRangeParams, SelectionRangeProviderCapability, SemanticTokens,
-    SemanticTokensFullOptions, SemanticTokensLegend, SemanticTokensOptions, SemanticTokensParams,
-    SemanticTokensRangeParams, SemanticTokensServerCapabilities, ServerCapabilities,
-    SignatureHelpOptions, TextDocumentContentChangeEvent, TextDocumentSyncCapability,
-    TextDocumentSyncKind, TextDocumentSyncOptions, TextDocumentSyncSaveOptions, TextEdit,
-    TypeHierarchyItem, TypeHierarchyPrepareParams, TypeHierarchySubtypesParams,
-    TypeHierarchySupertypesParams, UnchangedDocumentDiagnosticReport, UniquenessLevel, Uri,
-    WorkspaceEdit,
+    RenameParams, SelectionRangeParams, SelectionRangeProviderCapability, SemanticToken,
+    SemanticTokens, SemanticTokensDeltaParams, SemanticTokensFullOptions, SemanticTokensLegend,
+    SemanticTokensOptions, SemanticTokensParams, SemanticTokensRangeParams,
+    SemanticTokensServerCapabilities, ServerCapabilities, SignatureHelpOptions,
+    TextDocumentContentChangeEvent, TextDocumentSyncCapability, TextDocumentSyncKind,
+    TextDocumentSyncOptions, TextDocumentSyncSaveOptions, TextEdit, TypeHierarchyItem,
+    TypeHierarchyPrepareParams, TypeHierarchySubtypesParams, TypeHierarchySupertypesParams,
+    UnchangedDocumentDiagnosticReport, UniquenessLevel, Uri, WorkspaceEdit,
 };
 
 /// Transport threads for the server's standard input and output streams.
@@ -112,17 +112,31 @@ fn stdio_connection() -> (Connection, StdioIoThreads) {
 /// Shared state across requests and notifications.
 struct ServerState {
     documents: HashMap<Uri, Document>,
+    semantic_tokens: HashMap<Uri, SemanticTokenSnapshot>,
+    next_semantic_token_result: u64,
+}
+
+struct SemanticTokenSnapshot {
+    result_id: String,
+    data: Vec<SemanticToken>,
 }
 
 impl ServerState {
     fn new() -> Self {
         Self {
             documents: HashMap::new(),
+            semantic_tokens: HashMap::new(),
+            next_semantic_token_result: 0,
         }
     }
 
     fn document(&self, uri: &Uri) -> Option<&Document> {
         self.documents.get(uri)
+    }
+
+    fn next_semantic_token_result_id(&mut self) -> String {
+        self.next_semantic_token_result += 1;
+        format!("orna-semantic-{}", self.next_semantic_token_result)
     }
 }
 
@@ -289,6 +303,7 @@ fn server_capabilities() -> serde_json::Value {
         ..ServerCapabilities::default()
     })
     .expect("serializable LSP server capabilities");
+    capabilities["semanticTokensProvider"]["full"] = serde_json::json!({ "delta": true });
     capabilities
         .as_object_mut()
         .expect("server capabilities serialize as an object")
@@ -311,6 +326,7 @@ fn handle_request(state: &mut ServerState, connection: &Connection, request: Req
         "textDocument/rename" => request_rename(state, request),
         "textDocument/documentSymbol" => request_document_symbols(state, request),
         "textDocument/semanticTokens/full" => request_semantic_tokens_full(state, request),
+        "textDocument/semanticTokens/full/delta" => request_semantic_tokens_delta(state, request),
         "textDocument/semanticTokens/range" => request_semantic_tokens_range(state, request),
         "textDocument/inlayHint" => request_inlay_hints(state, request),
         "textDocument/inlineValue" => request_inline_values(state, request),
@@ -373,6 +389,7 @@ fn handle_notification(
                 params.text_document.text,
                 params.text_document.version,
             );
+            state.semantic_tokens.remove(&uri);
             state.documents.insert(uri.clone(), document);
             publish_diagnostics(state, connection, &uri);
             false
@@ -412,6 +429,7 @@ fn handle_notification(
             {
                 let uri = params.text_document.uri;
                 state.documents.remove(&uri);
+                state.semantic_tokens.remove(&uri);
                 let _ = connection.sender.send(Message::Notification(Notification {
                     method: "textDocument/publishDiagnostics".to_owned(),
                     params: serde_json::to_value(PublishDiagnosticsParams {
@@ -1976,10 +1994,104 @@ fn request_semantic_tokens_full(
     };
     let mapper = PositionMapper::new(&document.text);
     let data = semantic::semantic_tokens(&document.text, &mapper, None);
+    let result_id = state.next_semantic_token_result_id();
+    state.semantic_tokens.insert(
+        uri,
+        SemanticTokenSnapshot {
+            result_id: result_id.clone(),
+            data: data.clone(),
+        },
+    );
     Ok(serde_json::to_value(SemanticTokens {
-        result_id: None,
+        result_id: Some(result_id),
         data,
     })?)
+}
+
+fn request_semantic_tokens_delta(
+    state: &mut ServerState,
+    request: Request,
+) -> Result<serde_json::Value, Box<dyn std::error::Error + Send + Sync>> {
+    let (_, params) =
+        request.extract::<SemanticTokensDeltaParams>("textDocument/semanticTokens/full/delta")?;
+    let uri = params.text_document.uri;
+    let Some(document) = state.document(&uri) else {
+        return Ok(serde_json::Value::Null);
+    };
+    let mapper = PositionMapper::new(&document.text);
+    let data = semantic::semantic_tokens(&document.text, &mapper, None);
+    let edits = state
+        .semantic_tokens
+        .get(&uri)
+        .filter(|snapshot| snapshot.result_id == params.previous_result_id)
+        .map(|snapshot| semantic_token_delta_edits(&snapshot.data, &data));
+    let result_id = state.next_semantic_token_result_id();
+    state.semantic_tokens.insert(
+        uri,
+        SemanticTokenSnapshot {
+            result_id: result_id.clone(),
+            data: data.clone(),
+        },
+    );
+    match edits {
+        Some(edits) => Ok(serde_json::json!({
+            "resultId": result_id,
+            "edits": edits,
+        })),
+        None => Ok(serde_json::to_value(SemanticTokens {
+            result_id: Some(result_id),
+            data,
+        })?),
+    }
+}
+
+fn semantic_token_delta_edits(
+    previous: &[SemanticToken],
+    current: &[SemanticToken],
+) -> Vec<serde_json::Value> {
+    let prefix = previous
+        .iter()
+        .zip(current)
+        .take_while(|(previous, current)| previous == current)
+        .count();
+    let suffix = previous[prefix..]
+        .iter()
+        .rev()
+        .zip(current[prefix..].iter().rev())
+        .take_while(|(previous, current)| previous == current)
+        .count();
+    let delete_count = previous.len() - prefix - suffix;
+    let inserted = current[prefix..current.len() - suffix]
+        .iter()
+        .flat_map(|token| {
+            [
+                token.delta_line,
+                token.delta_start,
+                token.length,
+                token.token_type,
+                token.token_modifiers_bitset,
+            ]
+        })
+        .collect::<Vec<_>>();
+    if delete_count == 0 && inserted.is_empty() {
+        return Vec::new();
+    }
+
+    let mut edit = serde_json::Map::new();
+    edit.insert(
+        "start".to_owned(),
+        serde_json::json!(u32::try_from(prefix * 5).expect("semantic token edit fits u32")),
+    );
+    edit.insert(
+        "deleteCount".to_owned(),
+        serde_json::json!(
+            u32::try_from(delete_count * 5).expect("semantic token deletion fits u32")
+        ),
+    );
+    if !inserted.is_empty() {
+        edit.insert("data".to_owned(), serde_json::json!(inserted));
+    }
+    vec![serde_json::Value::Object(edit)]
 }
 
 fn request_semantic_tokens_range(
