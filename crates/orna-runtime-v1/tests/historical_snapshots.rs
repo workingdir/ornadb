@@ -1131,6 +1131,12 @@ async fn case_closure_matrix_preserves_each_transition_pin() {
 
 #[tokio::test]
 async fn identical_prefix_restoration_preserves_boundary_pins() {
+    let third_recreated_tail = b"case-closure-edge-tail-fifty-nine-third-recreated";
+    assert_ne!(
+        third_recreated_tail,
+        include_str!("fixtures/case_closure_edge_tail_fifty_nine_extension.orna").as_bytes(),
+        "third tail recreation is distinct from the earlier extension fixture",
+    );
     let (_directory, repository) = repository();
     let identity = RuntimeIdentity {
         database_id: [62; 16],
@@ -7044,7 +7050,7 @@ async fn identical_prefix_restoration_preserves_boundary_pins() {
                     extension_mutation_id,
                     "records",
                     vec![5, 0],
-                    Some(b"case-closure-edge-tail-fifty-nine-third-recreated".to_vec()),
+                    Some(third_recreated_tail.to_vec()),
                 )
                 .expect("valid unchanged tail upsert after prefix deletion"),
             );
@@ -7063,7 +7069,7 @@ async fn identical_prefix_restoration_preserves_boundary_pins() {
                     extension_mutation_id,
                     "records",
                     vec![5, 0],
-                    Some(b"case-closure-edge-tail-fifty-nine-third-recreated".to_vec()),
+                    Some(third_recreated_tail.to_vec()),
                 )
                 .expect("valid third closure edge tail recreation"),
             );
@@ -10205,16 +10211,16 @@ async fn identical_prefix_restoration_preserves_boundary_pins() {
             ),
             (
                 vec![5, 0],
-                b"case-closure-edge-tail-fifty-nine-third-recreated".to_vec(),
+                third_recreated_tail.to_vec(),
             ),
         ],
         1119 => vec![(
             vec![5, 0],
-            b"case-closure-edge-tail-fifty-nine-third-recreated".to_vec(),
+            third_recreated_tail.to_vec(),
         )],
         1120 => vec![(
             vec![5, 0],
-            b"case-closure-edge-tail-fifty-nine-third-recreated".to_vec(),
+            third_recreated_tail.to_vec(),
         )],
         1121 => vec![
             (
