@@ -1133,6 +1133,12 @@ impl Blob {
         writer: &mut W,
         max_encoded_bytes: u64,
     ) -> Result<u64> {
+        let (prefix, suffix, encoded_len) = self.ovb2_parts()?;
+        self.preflight_ovb2(encoded_len, max_encoded_bytes)?;
+        self.write_ovb2_preflighted(writer, &prefix, &suffix, encoded_len)
+    }
+
+    fn ovb2_parts(&self) -> Result<(Vec<u8>, Vec<u8>, u64)> {
         let mut prefix = Vec::with_capacity(16);
         head(&mut prefix, 6, OVB2_BLOB_TAG);
         head(&mut prefix, 4, 3);
@@ -1164,6 +1170,10 @@ impl Blob {
             .checked_add(self.length())
             .and_then(|length| length.checked_add(suffix_len))
             .ok_or(Error::Limit)?;
+        Ok((prefix, suffix, encoded_len))
+    }
+
+    fn preflight_ovb2(&self, encoded_len: u64, max_encoded_bytes: u64) -> Result<()> {
         if encoded_len > max_encoded_bytes {
             return Err(Error::QuotaExceeded);
         }
@@ -1177,7 +1187,16 @@ impl Blob {
         if let BlobContent::Reference(reference) = &self.content {
             reference.context.ensure_live()?;
         }
+        Ok(())
+    }
 
+    fn write_ovb2_preflighted<W: IoWrite>(
+        &self,
+        writer: &mut W,
+        prefix: &[u8],
+        suffix: &[u8],
+        encoded_len: u64,
+    ) -> Result<u64> {
         writer.write_all(&prefix).map_err(|_| Error::SinkFailed)?;
         let mut digest = Sha256::new();
         let mut offset = 0_u64;
@@ -1198,6 +1217,19 @@ impl Blob {
         writer.write_all(&suffix).map_err(|_| Error::SinkFailed)?;
         Ok(encoded_len)
     }
+}
+
+/// Encodes an annotated Blob as OVB-2 into a Vec with a caller supplied byte
+/// ceiling. The exact output size is checked before allocation or content
+/// resolution; allocation is reserved fallibly before bytes are written.
+pub fn encode_ovb2_bounded(blob: &Blob, max_encoded_bytes: u64) -> Result<Vec<u8>> {
+    let (prefix, suffix, encoded_len) = blob.ovb2_parts()?;
+    blob.preflight_ovb2(encoded_len, max_encoded_bytes)?;
+    let capacity = usize::try_from(encoded_len).map_err(|_| Error::Limit)?;
+    let mut encoded = Vec::new();
+    encoded.try_reserve_exact(capacity).map_err(|_| Error::Limit)?;
+    blob.write_ovb2_preflighted(&mut encoded, &prefix, &suffix, encoded_len)?;
+    Ok(encoded)
 }
 
 fn same_content_source(left: &BlobContent, right: &BlobContent) -> bool {
@@ -1641,9 +1673,7 @@ pub fn decode_with_profile(bytes: &[u8], format: ValueFormat) -> Result<ContextV
 }
 
 pub fn encode_ovb2(blob: &Blob) -> Result<Vec<u8>> {
-    let mut encoded = Vec::new();
-    blob.encode_ovb2_to_writer(&mut encoded, u64::MAX)?;
-    Ok(encoded)
+    encode_ovb2_bounded(blob, u64::MAX)
 }
 
 pub fn decode_ovb2(bytes: &[u8]) -> Result<Blob> {
