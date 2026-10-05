@@ -183,6 +183,7 @@ bf1adb7f512162ede4086a7ae2244589dfb991fc7b1914c7fa49eb5d3466b489  crates/orna-cl
 4ede7d0fb864b59ec85ccff4ed4ca2a1e2ec20560ba62b635cc412320affd855  crates/orna-cli-v1/tests/fixtures/playground-sample-functions.orna
 bfc61f809a32dd0e900b039df55d02e6ee740cb3aa5cc8505fd8b78dde6b8155  crates/orna-cli-v1/tests/fixtures/playground-sample-increment.orna
 0e0ae4ceeb9672cebc7c42e81c30ecb5025c398d47a70e90cc93188fd72d366a  crates/orna-cli-v1/tests/fixtures/playground-sample-live-snapshot.orna
+8bb8f3c8b2cabb4807bb2c21eb27bec7ea96a2154aae3fca39cd567b584cc55b  crates/orna-cli-v1/tests/fixtures/playground-sample-live.orna
 91a3a34d79824d2de23ee12f80b2b6f061cd2ca3bdbc9834009e3d2c6aff3ef4  crates/orna-cli-v1/tests/fixtures/playground-sample.orna
 f412217fdd8c46eaf2f00dde64ab6847ed21e1ae6b0fcb0ac3b09e06562c09ea  crates/orna-cli-v1/tests/fixtures/playground-schema.orna
 a30d8a75586f8fa1f133d8c687cc4fc5aa57a4a91ae102d7c4e87513aa9fd07a  crates/orna-cli-v1/tests/fixtures/playground-shell.html
@@ -3310,6 +3311,7 @@ eb7eeca9a84e495c47397f3d74ca5bf760365fd258f0912691d9d12e149673b6  crates/orna-pr
 e95671d05a008d64cfc82d4bf55bed5e516b45ab665a83ed81fbdd08ae1c508c  crates/orna-project-v1/src/fixtures/attached-read-table.orna
 0cac251ea9fe709cca8775dcf168eec906f3a5c3091ce5b338ee144391415ae4  crates/orna-project-v1/tests/fixtures/attach-package.orna
 3ad2e337becdebc8cf2f2960d24acc241c1254aa31a35cfa10a0396c9d2b8214  crates/orna-project-v1/tests/fixtures/attach-primary.orna
+7125349675cb54c583f7690a181f8df7093bd8dfe6b44564433df245dfce398e  crates/orna-project-v1/tests/fixtures/attach-reload-generation.orna
 4fc5c89c54f8335bab0cea6b20aa2b6c2307690009eab4aeee7f91b0f1b781c3  crates/orna-project-v1/tests/fixtures/attach-routing-package-row-2.orna
 0c3205eae1d525b2dcb104473791c804bc94abcc8d0a3b80f98967b3043f3451  crates/orna-project-v1/tests/fixtures/attach-routing-package-row.orna
 8691c9342a3dc7ef7dbd964bc08221dfd916fe5b4cd307ea435ef866101a8ad0  crates/orna-project-v1/tests/fixtures/attach-routing-package.orna
@@ -5522,6 +5524,7 @@ ca5ba1b4b16a1caad9977d4cc336d6831b28e4bdb6af1762f02694cfdbef8f9e  crates/orna-sy
 bf25804fcf4424ee9b55351c7ae38af56efbb71967cd198dcf5e64124be81a6a  crates/orna-sys-v1/tests/fixtures/planner_window_anchor_fold_identity_wv99y.orna
 54b8a6d4e4ac5bc0f2cfe1622cbc4b653a69f676c0f71a923df797e8a7304491  crates/orna-sys-v1/tests/fixtures/planner_window_identity_cost_fold_m8bnk.orna
 e80876c0bc33af1ff9c62baa20d81a3e4a8edbc766ffb835a8e45b9a9f773302  crates/orna-sys-v1/tests/fixtures/post_unknown_remainder_scan_interplay_tail.orna
+dc5d99fbdc2ba07ae71598ecbfe4d2c132e8829d968b87e3864c30b94ef76e23  crates/orna-sys-v1/tests/fixtures/provider-cancel-edges.json
 73a19ec4c138fa0465d0b81fa9a1b305cc8cec84b279dd309208f37919bf1f76  crates/orna-sys-v1/tests/fixtures/provider-function-reference-edges.json
 c321a73977ef953584e41d70f5b0b48af2f036d0f7bdef318d198f1ac397b2bf  crates/orna-sys-v1/tests/fixtures/provider-map-entry-edges.json
 1584d20f831c3e08ff1d827220c0ae398ee7c30fda468fe80b0aba551d86e373  crates/orna-sys-v1/tests/fixtures/provider-schema-capture-edges.json

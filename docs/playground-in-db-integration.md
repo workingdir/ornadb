@@ -96,6 +96,9 @@ prove independent results and presentation deltas. While that WebSocket
 remains open, the test commits a new Route, Entry, Asset, and Sample snapshot
 and concurrently fetches the asset and example feed to prove the responses use
 committed database rows during live presentation deltas.
+Before the live session, it also commits a crate-local Sample after the server
+starts, checks that `/api/examples` adds that exact program source without a
+restart, and evaluates the fetched source through the authenticated WebSocket.
 
 The browser assist proof loads the LSP JavaScript and WebAssembly from an
 active `orna serve` database:
