@@ -1265,6 +1265,41 @@ fn orna_serve_hosts_playground_with_pending_evals_and_snapshot_correct_deltas() 
     };
     assert_eq!(initial_present, expected_run_events(&[]));
 
+    let (second_session_bytes, mut second_socket, second_session_status) =
+        open_playground_presentation_session(base_url, port, database_id);
+    assert_ne!(session_bytes, second_session_bytes);
+    let second_watch_request = [0x41; 16];
+    let second_watched = send_and_read_request(
+        &mut second_socket,
+        envelope(
+            second_watch_request,
+            None,
+            Message::Watch {
+                source: LIVE_RUN_EVENTS_WATCH_SOURCE.into(),
+                database: database_context(uuid_bytes(database_id)),
+                presentation: presentation(),
+                refresh_floor: None,
+            },
+        ),
+        second_watch_request,
+    );
+    let (second_watch_id, second_initial_present) = match second_watched.message {
+        Message::Snapshot {
+            revision: 0,
+            present,
+            ..
+        } => (
+            second_watched
+                .watch
+                .expect("second live presentation watch identity"),
+            present,
+        ),
+        response => {
+            panic!("second run-events watch should start with a snapshot, got {response:?}")
+        }
+    };
+    assert_eq!(second_initial_present, expected_run_events(&[]));
+
     let start = Arc::new(Barrier::new(4));
     let mut readers = Vec::new();
     for _ in 0..2 {
@@ -1403,6 +1438,16 @@ fn orna_serve_hosts_playground_with_pending_evals_and_snapshot_correct_deltas() 
             SECOND_SAMPLE.trim(),
         ),
     );
+    let second_session_eval_request = [0x42; 16];
+    send_envelope(
+        &mut second_socket,
+        evaluation(
+            second_session_bytes,
+            uuid_bytes(database_id),
+            second_session_eval_request,
+            FOLLOWUP_SAMPLE.trim(),
+        ),
+    );
     let results =
         read_responses_for_requests(&mut socket, &[first_eval_request, second_eval_request]);
     for result in results {
@@ -1421,6 +1466,21 @@ fn orna_serve_hosts_playground_with_pending_evals_and_snapshot_correct_deltas() 
             } if value.raw() == &OvbRaw::Int(expected_value.into())
         ));
     }
+    let second_session_results =
+        read_responses_for_requests(&mut second_socket, &[second_session_eval_request]);
+    assert!(matches!(
+        second_session_results.as_slice(),
+        [Envelope {
+            request: Some(request),
+            message: Message::Result {
+                status: ResultStatus::Success,
+                value: Some(value),
+                ..
+            },
+            ..
+        }] if *request == second_session_eval_request
+            && value.raw() == &OvbRaw::Int(49.into())
+    ));
 
     socket
         .send(WebSocketMessage::Binary(
@@ -1451,6 +1511,30 @@ fn orna_serve_hosts_playground_with_pending_evals_and_snapshot_correct_deltas() 
         first_updated_present == first_completion_order
             || first_updated_present == second_completion_order,
         "the first delta should contain exactly both successful runs: {first_updated_present:?}"
+    );
+
+    send_envelope(
+        &mut second_socket,
+        envelope([0x43; 16], Some(second_watch_id), Message::Resync),
+    );
+    let second_delta = read_delta_for_watch(&mut second_socket, second_watch_id);
+    let Message::Delta {
+        base_revision,
+        new_revision,
+        patches,
+        ..
+    } = second_delta.message
+    else {
+        panic!("second live session run should produce a presentation delta");
+    };
+    assert_eq!((base_revision, new_revision), (0, 1));
+    let second_updated_present = second_initial_present
+        .apply_patches(&patches, Limits::default())
+        .expect("second session delta applies to its own initial snapshot");
+    assert_eq!(
+        second_updated_present,
+        expected_run_events(&[(1, 49)]),
+        "second session delta contains its run and no events from the first session"
     );
 
     let mut snapshots = writer.join().expect("join live DB snapshot writer");
@@ -1619,9 +1703,16 @@ fn orna_serve_hosts_playground_with_pending_evals_and_snapshot_correct_deltas() 
         "curl POST /orna/session -> HTTP {} (exit 0): session + cookie",
         session_status
     );
+    println!(
+        "concurrent POST /orna/session x2 -> HTTP 201 + WebSocket 101 (exit 0): independent session identities; second HTTP {}",
+        second_session_status
+    );
     println!("WebSocket WATCH -> Snapshot revision 0 (exit 0)");
-    println!("WebSocket EVAL x2 outstanding -> correlated Results 2 and 42 (exit 0)");
-    println!("WebSocket RESYNC -> Delta revision 0..1 (exit 0): both pipelined run events");
+    println!(
+        "concurrent WebSocket EVAL across two sessions -> correlated Results 2, 42, and 49 (exit 0)"
+    );
+    println!("session A RESYNC -> Delta revision 0..1 (exit 0): only its two pipelined run events");
+    println!("session B RESYNC -> Delta revision 0..1 (exit 0): only its own run event");
     println!("WebSocket RESYNC -> Delta revision 1..2 (exit 0): next run event applies");
     println!("WebSocket WATCH -> fresh Snapshot revision 0 (exit 0): matches applied delta");
     println!("WebSocket EVAL exact source fetched from live /api/examples -> Result 42 (exit 0)");

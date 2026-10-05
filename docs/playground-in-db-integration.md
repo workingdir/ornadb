@@ -96,6 +96,11 @@ prove independent results and presentation deltas. While that WebSocket
 remains open, the test commits a new Route, Entry, Asset, and Sample snapshot
 and concurrently fetches the asset and example feed to prove the responses use
 committed database rows during live presentation deltas.
+It opens a second authenticated presentation session at the same time, sends
+evaluation requests over both sessions before reading either result, and
+applies each session's run-event delta to its own empty snapshot. The resulting
+histories contain only that session's runs, which checks that the served
+session cookie and WebSocket identity keep live presentation state isolated.
 Before the live session, it also commits a crate-local Sample after the server
 starts, checks that `/api/examples` adds that exact program source without a
 restart, and evaluates the fetched source through the authenticated WebSocket.
