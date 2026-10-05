@@ -157,28 +157,29 @@ pub struct StoreRootPin {
 
 /// A validated, immutable repository metadata context.
 ///
-/// The only constructors are [`Repository::open_format_context`] and
-/// [`Repository::open_format_context_at`]. The type retains the actual
-/// database identity, the selected format dispatch, and the immutable
-/// snapshot pin used to admit the metadata.
-pub struct FormatContext {
+/// The only public issuance path is [`Repository::open_format_context`]. The
+/// type retains the actual database identity, the selected format dispatch,
+/// and the immutable snapshot pin used to admit the metadata. Snapshot
+/// selection and alternate-snapshot parsing stay crate-internal so callers
+/// cannot manufacture a context from a raw selector or object ID.
+pub struct RepositoryFormatContext {
     repository: Repository,
     format: RepositoryFormat,
     database_id: Option<DatabaseId>,
     snapshot: RepositorySnapshotPin,
 }
 
-impl fmt::Debug for FormatContext {
+impl fmt::Debug for RepositoryFormatContext {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
-            .debug_struct("FormatContext")
+            .debug_struct("RepositoryFormatContext")
             .field("format", &self.format)
             .field("database_id", &self.database_id)
             .finish_non_exhaustive()
     }
 }
 
-impl FormatContext {
+impl RepositoryFormatContext {
     /// The selected repository-format dispatch.
     pub const fn repository_format(&self) -> RepositoryFormat {
         self.format
@@ -280,6 +281,12 @@ impl FormatContext {
     }
 }
 
+/// Compatibility spelling for code in this crate's transition window.
+///
+/// This alias adds no construction path; the only public issuer remains
+/// [`Repository::open_format_context`].
+pub type FormatContext = RepositoryFormatContext;
+
 impl SchemaRootPin {
     /// The snapshot pin from which this schema proof was admitted.
     pub fn snapshot_pin(&self) -> &RepositorySnapshotPin {
@@ -296,7 +303,7 @@ impl StoreRootPin {
 
 impl Repository {
     /// Pins a reachable Git selector without exposing its native object ID.
-    pub fn pin_snapshot(
+    pub(crate) fn pin_snapshot(
         &self,
         selector: &str,
     ) -> Result<RepositorySnapshotPin, FormatContextError> {
@@ -311,17 +318,17 @@ impl Repository {
 
     /// Opens and validates the format metadata at the current immutable HEAD.
     /// Worktree-only metadata is not silently treated as a committed snapshot.
-    pub fn open_format_context(&self) -> Result<FormatContext, FormatContextError> {
+    pub fn open_format_context(&self) -> Result<RepositoryFormatContext, FormatContextError> {
         let snapshot = self.pin_snapshot("HEAD")?;
         self.open_format_context_at(&snapshot)
     }
 
     /// Opens and validates metadata at a previously repository-pinned
     /// snapshot. The pin must belong to this repository instance.
-    pub fn open_format_context_at(
+    pub(crate) fn open_format_context_at(
         &self,
         snapshot: &RepositorySnapshotPin,
-    ) -> Result<FormatContext, FormatContextError> {
+    ) -> Result<RepositoryFormatContext, FormatContextError> {
         if !snapshot.belongs_to(self) {
             return Err(FormatContextError::PinMismatch);
         }
@@ -350,9 +357,27 @@ fn read_metadata_file(
         Ok(_) => Err(FormatContextError::MetadataInvalid),
         Err(RepositoryError::GitUnavailable) => Err(FormatContextError::MetadataUnavailable),
         // `read_committed_file` intentionally redacts whether a path was
-        // absent. Trying the other authority is the only safe dispatch probe;
-        // a present malformed record is classified by its bounded parser.
-        Err(_) => Ok(None),
+        // absent. Inspect the bounded committed tree before treating that
+        // error as absence; otherwise a malformed database record could be
+        // downgraded into legacy dispatch.
+        Err(_) => match repository
+            .list_committed_tree(&snapshot.commit, MAX_TREE_ENTRIES_FOR_ROOT_VALIDATION)
+            .map_err(|error| match error {
+                RepositoryError::GitUnavailable => FormatContextError::MetadataUnavailable,
+                _ => FormatContextError::MetadataInvalid,
+            })?
+            .into_iter()
+            .find(|entry| {
+                entry.path().as_path().to_str().is_some_and(|entry_path| {
+                    entry_path == path
+                        || entry_path
+                            .strip_prefix(path)
+                            .is_some_and(|suffix| suffix.starts_with('/'))
+                })
+            }) {
+            Some(_) => Err(FormatContextError::MetadataInvalid),
+            None => Ok(None),
+        },
     }
 }
 
@@ -361,7 +386,7 @@ fn parse_context(
     snapshot: RepositorySnapshotPin,
     database: Option<Vec<u8>>,
     legacy_format: Option<Vec<u8>>,
-) -> Result<FormatContext, FormatContextError> {
+) -> Result<RepositoryFormatContext, FormatContextError> {
     let legacy = legacy_format
         .as_deref()
         .map(parse_legacy_format)
@@ -369,14 +394,14 @@ fn parse_context(
 
     match (database.as_deref(), legacy) {
         (None, None) => Err(FormatContextError::MetadataUnavailable),
-        (None, Some(format)) => Ok(FormatContext {
+        (None, Some(format)) => Ok(RepositoryFormatContext {
             repository,
             format,
             database_id: None,
             snapshot,
         }),
         (Some(database), None) => match parse_database_record(database)? {
-            DatabaseRecord::Format3(database_id) => Ok(FormatContext {
+            DatabaseRecord::Format3(database_id) => Ok(RepositoryFormatContext {
                 repository,
                 format: RepositoryFormat::Format3,
                 database_id: Some(database_id),
@@ -386,7 +411,7 @@ fn parse_context(
         },
         (Some(database), Some(format)) => match parse_database_record(database)? {
             DatabaseRecord::Format3(_) => Err(FormatContextError::MixedFormats),
-            DatabaseRecord::LegacySidecar(database_id) => Ok(FormatContext {
+            DatabaseRecord::LegacySidecar(database_id) => Ok(RepositoryFormatContext {
                 repository,
                 format,
                 database_id: Some(database_id),
