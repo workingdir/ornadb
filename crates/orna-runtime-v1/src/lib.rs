@@ -34,7 +34,8 @@ use orna_foundation_v1::{
 #[cfg(test)]
 use orna_foundation_v1::{SYS_CHECKPOINT_TABLE_ID, SYS_FAILURE_TABLE_ID};
 use orna_repository_v1::{
-    CommittedTreeEntryKind, CompactPublicationPending, CompactRuntimeReceipt, GitCommitRef,
+    CommittedTreeEntryKind, CompactPublicationPending, CompactRuntimeReceipt, ContentIdentity,
+    GitCommitRef, GitHashAlgorithm, NativeOid, ProtectedContentPin, ProtectedContentTransfer,
     Repository,
 };
 use orna_stream_v1::{
@@ -627,6 +628,50 @@ pub struct Mutation {
     pub digest: [u8; 32],
 }
 
+/// Durable, opaque description of one repository-issued protected Blob pin.
+/// This record carries evidence into the runtime mutation journal; it is not
+/// itself a pin or authority to access Git objects.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProtectedContentTransferEvidence {
+    repository_id: [u8; 32],
+    database_id: [u8; 16],
+    pin_id: [u8; 16],
+    descriptor_oid: NativeOid,
+    identity: ContentIdentity,
+}
+
+impl ProtectedContentTransferEvidence {
+    fn from_transfer(transfer: &ProtectedContentTransfer) -> Self {
+        Self {
+            repository_id: *transfer.repository_id(),
+            database_id: *transfer.database_id(),
+            pin_id: *transfer.pin_id(),
+            descriptor_oid: transfer.descriptor_oid().clone(),
+            identity: transfer.content_identity(),
+        }
+    }
+
+    pub const fn repository_id(&self) -> &[u8; 32] {
+        &self.repository_id
+    }
+
+    pub const fn database_id(&self) -> &[u8; 16] {
+        &self.database_id
+    }
+
+    pub const fn pin_id(&self) -> &[u8; 16] {
+        &self.pin_id
+    }
+
+    pub fn descriptor_oid(&self) -> &NativeOid {
+        &self.descriptor_oid
+    }
+
+    pub const fn content_identity(&self) -> ContentIdentity {
+        self.identity
+    }
+}
+
 /// Effective publication policy used by the runtime's compact publisher.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RuntimePublicationPolicy {
@@ -733,6 +778,7 @@ fn publication_text_map(fields: Vec<(&str, OvbRaw)>) -> OvbRaw {
 }
 
 const MAX_TABLE_MUTATION_BYTES: usize = 16 * 1024 * 1024;
+const MAX_TABLE_CONTENT_TRANSFERS_PER_MUTATION: usize = 4_096;
 
 /// A schema-independent durable table change.
 ///
@@ -749,6 +795,8 @@ pub struct TableMutation {
     value: Option<Vec<u8>>,
     rekey_to: Option<Vec<u8>>,
     insert_only: bool,
+    protected_content: Vec<ProtectedContentTransferEvidence>,
+    protected_content_from_pins: bool,
 }
 
 impl TableMutation {
@@ -767,6 +815,8 @@ impl TableMutation {
             value,
             rekey_to: None,
             insert_only: false,
+            protected_content: Vec::new(),
+            protected_content_from_pins: false,
         })
     }
 
@@ -787,6 +837,8 @@ impl TableMutation {
             value: Some(value),
             rekey_to: None,
             insert_only: true,
+            protected_content: Vec::new(),
+            protected_content_from_pins: false,
         })
     }
 
@@ -813,6 +865,8 @@ impl TableMutation {
             value: Some(replacement),
             rekey_to: Some(new_key),
             insert_only: false,
+            protected_content: Vec::new(),
+            protected_content_from_pins: false,
         })
     }
 
@@ -842,22 +896,63 @@ impl TableMutation {
         self.insert_only
     }
 
+    /// Associates an already protected native Blob with this replacement row.
+    /// The durable transfer evidence is encoded into the same pending
+    /// mutation as the row. Only a pin issued by the repository graph can be
+    /// attached through this API.
+    pub fn with_protected_content_pin(
+        mut self,
+        pin: &ProtectedContentPin,
+    ) -> Result<Self, RuntimeError> {
+        if self.value.is_none()
+            || (!self.protected_content_from_pins && !self.protected_content.is_empty())
+            || self.protected_content.len() >= MAX_TABLE_CONTENT_TRANSFERS_PER_MUTATION
+        {
+            return Err(RuntimeError::InvalidTableMutation);
+        }
+        let transfer = ProtectedContentTransferEvidence::from_transfer(&pin.transfer_record());
+        if transfer.pin_id() == &[0; 16]
+            || self
+            .protected_content
+            .iter()
+            .any(|existing| existing.pin_id() == transfer.pin_id())
+        {
+            return Err(RuntimeError::InvalidTableMutation);
+        }
+        self.protected_content.push(transfer);
+        self.protected_content_from_pins = true;
+        Ok(self)
+    }
+
+    /// Opaque transfer evidence retained with this table mutation.
+    pub fn protected_content_transfers(&self) -> &[ProtectedContentTransferEvidence] {
+        &self.protected_content
+    }
+
     /// Decodes a mutation previously produced by this typed boundary.
     /// Generic runtime mutations are rejected unless their payload, digest,
     /// and canonical table operation all validate together.
     pub fn decode(mutation: &Mutation) -> Result<Self, RuntimeError> {
         validate_id(mutation.id)?;
+        if mutation.payload.len() > MAX_TABLE_MUTATION_BYTES {
+            return Err(RuntimeError::InvalidTableMutation);
+        }
         let digest: [u8; 32] = Sha256::digest(&mutation.payload).into();
         if digest != mutation.digest {
             return Err(RuntimeError::InvalidTableMutation);
         }
-        let (mut cursor, version_two) = if mutation
+        let (mut cursor, version) = if mutation
+            .payload
+            .starts_with(b"ORNA-TABLE-MUTATION-3\0")
+        {
+            (b"ORNA-TABLE-MUTATION-3\0".len(), 3_u8)
+        } else if mutation
             .payload
             .starts_with(b"ORNA-TABLE-MUTATION-2\0")
         {
-            (b"ORNA-TABLE-MUTATION-2\0".len(), true)
+            (b"ORNA-TABLE-MUTATION-2\0".len(), 2_u8)
         } else if mutation.payload.starts_with(b"ORNA-TABLE-MUTATION\0") {
-            (b"ORNA-TABLE-MUTATION\0".len(), false)
+            (b"ORNA-TABLE-MUTATION\0".len(), 1_u8)
         } else {
             return Err(RuntimeError::InvalidTableMutation);
         };
@@ -865,7 +960,7 @@ impl TableMutation {
             String::from_utf8(read_length_prefixed(&mutation.payload, &mut cursor)?.to_vec())
                 .map_err(|_| RuntimeError::InvalidTableMutation)?;
         let key = read_length_prefixed(&mutation.payload, &mut cursor)?.to_vec();
-        let operation = if version_two {
+        let operation = if version >= 2 {
             Some(
                 *mutation
                     .payload
@@ -875,8 +970,11 @@ impl TableMutation {
         } else {
             None
         };
-        if version_two {
+        if version >= 2 {
             cursor += 1;
+        }
+        if operation.is_some_and(|operation| operation > 2) {
+            return Err(RuntimeError::InvalidTableMutation);
         }
         let rekey_to = if operation == Some(2) {
             Some(read_length_prefixed(&mutation.payload, &mut cursor)?.to_vec())
@@ -894,10 +992,15 @@ impl TableMutation {
             }
             _ => return Err(RuntimeError::InvalidTableMutation),
         };
+        let protected_content = if version == 3 {
+            decode_protected_content_transfers(&mutation.payload, &mut cursor)?
+        } else {
+            Vec::new()
+        };
         if cursor != mutation.payload.len() {
             return Err(RuntimeError::InvalidTableMutation);
         }
-        match (operation, rekey_to) {
+        let mut decoded = match (operation, rekey_to) {
             (Some(1), None) => Self::insert(
                 mutation.id,
                 table,
@@ -911,17 +1014,68 @@ impl TableMutation {
                 new_key,
                 value.ok_or(RuntimeError::InvalidTableMutation)?,
             ),
+            (Some(0), None) => Self::new(mutation.id, table, key, value),
             (None, None) => Self::new(mutation.id, table, key, value),
             _ => Err(RuntimeError::InvalidTableMutation),
+        }?;
+        if protected_content.len() > MAX_TABLE_CONTENT_TRANSFERS_PER_MUTATION
+            || (!protected_content.is_empty() && decoded.value.is_none())
+            || protected_content.iter().enumerate().any(|(index, transfer)| {
+                protected_content[..index]
+                    .iter()
+                    .any(|previous| previous.pin_id() == transfer.pin_id())
+            })
+        {
+            return Err(RuntimeError::InvalidTableMutation);
         }
+        decoded.protected_content = protected_content;
+        // Decoding a durable record recovers its evidence for readers, but
+        // serialized bytes alone do not authorize a new transaction.
+        decoded.protected_content_from_pins = false;
+        Ok(decoded)
     }
 
     fn runtime_mutation(&self) -> Result<Mutation, RuntimeError> {
+        if !self.protected_content.is_empty() {
+            return Err(RuntimeError::InvalidTableMutation);
+        }
         let payload = if self.rekey_to.is_some() || self.insert_only {
             encode_v2_table_mutation(self)?
         } else {
             encode_table_mutation(self)?
         };
+        Ok(Mutation {
+            id: self.id,
+            digest: Sha256::digest(&payload).into(),
+            payload,
+        })
+    }
+
+    fn runtime_mutation_with_protected_content(
+        &self,
+        database_id: &[u8; 16],
+    ) -> Result<Mutation, RuntimeError> {
+        if self.protected_content.is_empty() {
+            return self.runtime_mutation();
+        }
+        if !self.protected_content_from_pins
+            || self.value.is_none()
+            || self.protected_content.len() > MAX_TABLE_CONTENT_TRANSFERS_PER_MUTATION
+            || self
+                .protected_content
+                .iter()
+                .any(|transfer| {
+                    transfer.database_id() != database_id || transfer.pin_id() == &[0; 16]
+                })
+            || self.protected_content.iter().enumerate().any(|(index, transfer)| {
+                self.protected_content[..index]
+                    .iter()
+                    .any(|previous| previous.pin_id() == transfer.pin_id())
+            })
+        {
+            return Err(RuntimeError::InvalidTableMutation);
+        }
+        let payload = encode_v3_table_mutation(self)?;
         Ok(Mutation {
             id: self.id,
             digest: Sha256::digest(&payload).into(),
@@ -5797,7 +5951,9 @@ impl RuntimeState {
         }
         let encoded = mutations
             .iter()
-            .map(TableMutation::runtime_mutation)
+            .map(|mutation| {
+                mutation.runtime_mutation_with_protected_content(&context.capture().database_id())
+            })
             .collect::<Result<Vec<_>, _>>()
             .map_err(TableActivationError::Runtime)?;
         validate_id(writer.owner_id).map_err(TableActivationError::Runtime)?;
@@ -17270,6 +17426,119 @@ fn encode_v2_table_mutation(mutation: &TableMutation) -> Result<Vec<u8>, Runtime
     Ok(payload)
 }
 
+fn encode_v3_table_mutation(mutation: &TableMutation) -> Result<Vec<u8>, RuntimeError> {
+    if mutation.value.is_none()
+        || mutation.protected_content.is_empty()
+        || mutation.protected_content.len() > MAX_TABLE_CONTENT_TRANSFERS_PER_MUTATION
+    {
+        return Err(RuntimeError::InvalidTableMutation);
+    }
+    let mut payload = Vec::new();
+    payload.extend_from_slice(b"ORNA-TABLE-MUTATION-3\0");
+    append_length_prefixed(&mut payload, mutation.table().as_bytes())?;
+    append_length_prefixed(&mut payload, mutation.key())?;
+    if let Some(new_key) = mutation.rekey_to() {
+        payload.push(2);
+        append_length_prefixed(&mut payload, new_key)?;
+    } else if mutation.is_insert() {
+        payload.push(1);
+    } else {
+        payload.push(0);
+    }
+    payload.push(1);
+    append_length_prefixed(
+        &mut payload,
+        mutation.value().ok_or(RuntimeError::InvalidTableMutation)?,
+    )?;
+    payload.extend_from_slice(
+        &u32::try_from(mutation.protected_content.len())
+            .map_err(|_| RuntimeError::InvalidTableMutation)?
+            .to_be_bytes(),
+    );
+    for transfer in &mutation.protected_content {
+        payload.extend_from_slice(transfer.repository_id());
+        payload.extend_from_slice(transfer.database_id());
+        payload.extend_from_slice(transfer.pin_id());
+        payload.push(match transfer.descriptor_oid().algorithm() {
+            GitHashAlgorithm::Sha1 => 1,
+            GitHashAlgorithm::Sha256 => 2,
+        });
+        let identity = transfer.content_identity();
+        payload.extend_from_slice(&identity.length().to_be_bytes());
+        payload.extend_from_slice(&identity.sha256());
+        payload.extend_from_slice(transfer.descriptor_oid().as_bytes());
+    }
+    if payload.len() > MAX_TABLE_MUTATION_BYTES {
+        return Err(RuntimeError::InvalidTableMutation);
+    }
+    Ok(payload)
+}
+
+fn decode_protected_content_transfers(
+    payload: &[u8],
+    cursor: &mut usize,
+) -> Result<Vec<ProtectedContentTransferEvidence>, RuntimeError> {
+    let count_bytes = take_fixed::<4>(payload, cursor)?;
+    let count = usize::try_from(u32::from_be_bytes(count_bytes))
+        .map_err(|_| RuntimeError::InvalidTableMutation)?;
+    if count == 0 || count > MAX_TABLE_CONTENT_TRANSFERS_PER_MUTATION {
+        return Err(RuntimeError::InvalidTableMutation);
+    }
+    let mut transfers = Vec::with_capacity(count);
+    for _ in 0..count {
+        let repository_id = take_fixed::<32>(payload, cursor)?;
+        let database_id = take_fixed::<16>(payload, cursor)?;
+        let pin_id = take_fixed::<16>(payload, cursor)?;
+        if pin_id == [0; 16] {
+            return Err(RuntimeError::InvalidTableMutation);
+        }
+        let algorithm = match take_fixed::<1>(payload, cursor)?[0] {
+            1 => GitHashAlgorithm::Sha1,
+            2 => GitHashAlgorithm::Sha256,
+            _ => return Err(RuntimeError::InvalidTableMutation),
+        };
+        let length = u64::from_be_bytes(take_fixed::<8>(payload, cursor)?);
+        let identity_sha256 = take_fixed::<32>(payload, cursor)?;
+        let oid_bytes = match algorithm {
+            GitHashAlgorithm::Sha1 => take_fixed::<20>(payload, cursor)?.to_vec(),
+            GitHashAlgorithm::Sha256 => take_fixed::<32>(payload, cursor)?.to_vec(),
+        };
+        let descriptor_oid = NativeOid::new(algorithm, oid_bytes)
+            .map_err(|_| RuntimeError::InvalidTableMutation)?;
+        let identity = ContentIdentity::new(length, identity_sha256)
+            .map_err(|_| RuntimeError::InvalidTableMutation)?;
+        let transfer = ProtectedContentTransferEvidence {
+            repository_id,
+            database_id,
+            pin_id,
+            descriptor_oid,
+            identity,
+        };
+        if transfers
+            .iter()
+            .any(|previous: &ProtectedContentTransferEvidence| {
+                previous.pin_id() == transfer.pin_id()
+            })
+        {
+            return Err(RuntimeError::InvalidTableMutation);
+        }
+        transfers.push(transfer);
+    }
+    Ok(transfers)
+}
+
+fn take_fixed<const N: usize>(payload: &[u8], cursor: &mut usize) -> Result<[u8; N], RuntimeError> {
+    let end = cursor
+        .checked_add(N)
+        .ok_or(RuntimeError::InvalidTableMutation)?;
+    let bytes: [u8; N] = payload
+        .get(*cursor..end)
+        .and_then(|bytes| bytes.try_into().ok())
+        .ok_or(RuntimeError::InvalidTableMutation)?;
+    *cursor = end;
+    Ok(bytes)
+}
+
 fn append_length_prefixed(target: &mut Vec<u8>, value: &[u8]) -> Result<(), RuntimeError> {
     target.extend_from_slice(
         &u32::try_from(value.len())
@@ -19740,6 +20009,92 @@ mod tests {
         let checkpoint = state.latest_checkpoint().await.unwrap().unwrap();
         assert_eq!(checkpoint.generation, 1);
         assert_eq!(checkpoint.digest, digest(6));
+        assert_eq!(state.capture().await.unwrap(), next);
+    }
+
+    #[tokio::test]
+    async fn validated_table_activation_commits_protected_blob_transfer_atomically() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let lease = state.acquire_lease(id(4)).await.unwrap();
+        let context = state.begin_activation().await.unwrap();
+        let transfer = ProtectedContentTransferEvidence {
+            repository_id: [0x41; 32],
+            database_id: context.capture().database_id(),
+            pin_id: [0x42; 16],
+            descriptor_oid: NativeOid::new(GitHashAlgorithm::Sha1, [0x43; 20]).unwrap(),
+            identity: ContentIdentity::new(3, [0x44; 32]).unwrap(),
+        };
+        let mut mutation = table_mutation(5, 1, Some(9));
+        mutation.protected_content.push(transfer.clone());
+        mutation.protected_content_from_pins = true;
+        let encoded = mutation
+            .runtime_mutation_with_protected_content(&context.capture().database_id())
+            .unwrap();
+        let decoded = TableMutation::decode(&encoded).unwrap();
+        assert_eq!(
+            decoded.protected_content_transfers(),
+            std::slice::from_ref(&transfer)
+        );
+        assert!(matches!(
+            decoded.runtime_mutation_with_protected_content(&context.capture().database_id()),
+            Err(RuntimeError::InvalidTableMutation)
+        ));
+
+        let mut validator = ObservingTableActivationValidator {
+            tables: vec!["books".into()],
+            calls: 0,
+            seen: None,
+        };
+        let rejected = state
+            .commit_validated_table_activation(ValidatedTableActivationCommit {
+                writer: lease,
+                context: &context,
+                mutations: &[decoded],
+                next_digest: digest(6),
+                validator: &mut validator,
+                faults: &NoFault,
+            })
+            .await;
+        assert!(matches!(
+            rejected,
+            Err(TableActivationError::Runtime(
+                RuntimeError::InvalidTableMutation
+            ))
+        ));
+        assert_eq!(validator.calls, 0);
+        assert!(state.pending().await.unwrap().is_empty());
+        assert_eq!(state.latest_checkpoint().await.unwrap(), None);
+
+        let next = state
+            .commit_validated_table_activation(ValidatedTableActivationCommit {
+                writer: lease,
+                context: &context,
+                mutations: &[mutation],
+                next_digest: digest(6),
+                validator: &mut validator,
+                faults: &NoFault,
+            })
+            .await
+            .unwrap();
+        assert_eq!(validator.calls, 1);
+        assert_eq!(
+            state.committed_table_row("books", &[1]).await.unwrap(),
+            Some(vec![9])
+        );
+        let pending = state.pending().await.unwrap();
+        let committed = pending.last().unwrap();
+        assert_eq!(committed.payload, encoded.payload);
+        assert_eq!(committed.digest, encoded.digest);
+        assert!(committed
+            .payload
+            .starts_with(b"ORNA-TABLE-MUTATION-3\0"));
+        assert_eq!(
+            TableMutation::decode(committed)
+                .unwrap()
+                .protected_content_transfers(),
+            std::slice::from_ref(&transfer)
+        );
         assert_eq!(state.capture().await.unwrap(), next);
     }
 
