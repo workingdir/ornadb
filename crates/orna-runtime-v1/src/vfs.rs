@@ -10,10 +10,9 @@ use std::{future::Future, sync::Arc};
 use tokio::sync::Mutex;
 
 use super::{
-    CwdCapture, RuntimeState, SafeDiagnostic, TableActivationError, ValidatedTableActivationCommit,
+    CwdCapture, DiagnosticClass, DiagnosticCode, RuntimeState, SafeDiagnostic,
+    TableActivationError, ValidatedTableActivationCommit,
 };
-#[cfg(test)]
-use super::{DiagnosticClass, DiagnosticCode};
 
 /// A retained owner-issued immutable row-map snapshot.
 pub struct SnapshotPin<S>(Arc<S>);
@@ -233,6 +232,225 @@ pub enum EditDraftError {
     FileTooLarge,
     OffsetOverflow,
     RevisionExhausted,
+    AlreadyApplied,
+}
+
+struct ManagedFileState<S> {
+    image: Arc<VfsFileSnapshot<S>>,
+    cache_generation: u64,
+}
+
+/// One already-managed destination. New opens observe its latest accepted
+/// image; open handles keep the immutable image captured when they opened.
+pub struct ManagedFile<S> {
+    state: Mutex<ManagedFileState<S>>,
+}
+
+impl<S> ManagedFile<S> {
+    pub fn new(image: Arc<VfsFileSnapshot<S>>) -> Arc<Self> {
+        Arc::new(Self {
+            state: Mutex::new(ManagedFileState {
+                image,
+                cache_generation: 0,
+            }),
+        })
+    }
+
+    pub async fn open_read(&self) -> SnapshotReadHandle<S> {
+        SnapshotReadHandle::open(Arc::clone(&self.state.lock().await.image))
+    }
+
+    /// Advances only when a replacement is durably accepted.
+    pub async fn cache_generation(&self) -> u64 {
+        self.state.lock().await.cache_generation
+    }
+
+    /// Creates a private sibling-save candidate and captures this destination's
+    /// current immutable baseline for rename-time CAS.
+    pub async fn begin_temporary_replacement(
+        self: &Arc<Self>,
+        max_file_bytes: usize,
+    ) -> TemporarySave<S> {
+        let baseline = Arc::clone(&self.state.lock().await.image);
+        let draft = EditDraft::open(Arc::clone(&baseline), max_file_bytes);
+        // A typical editor temp starts empty; its commit baseline remains the
+        // managed destination image captured above.
+        draft
+            .truncate(0)
+            .await
+            .expect("zero-length scratch is within every file quota");
+        TemporarySave {
+            target: Arc::clone(self),
+            baseline,
+            state: Mutex::new(TemporarySaveState {
+                draft,
+                synced_revision: None,
+                applied: None,
+            }),
+        }
+    }
+
+    /// Applies a sibling temporary file over this managed destination. The
+    /// temp must have been created from this exact entry; stale and rejected
+    /// candidates keep their scratch bytes and leave this image untouched.
+    pub async fn rename_over<F, Fut, E>(
+        self: &Arc<Self>,
+        scratch: &TemporarySave<S>,
+        activate: F,
+    ) -> Result<TemporaryRenameOutcome<S>, TemporaryRenameError<E>>
+    where
+        S: Send + Sync + 'static,
+        F: FnOnce(ActivationCandidate<S>) -> Fut,
+        Fut: Future<Output = Result<ActivationDecision<S>, E>>,
+    {
+        if !Arc::ptr_eq(self, &scratch.target) {
+            return Err(TemporaryRenameError::WrongDestination);
+        }
+
+        let mut destination = self.state.lock().await;
+        let mut scratch_state = scratch.state.lock().await;
+        if let Some((generation, handle)) = &scratch_state.applied {
+            return Ok(TemporaryRenameOutcome::Applied {
+                generation: *generation,
+                handle: handle.clone(),
+            });
+        }
+        if !Arc::ptr_eq(&destination.image, &scratch.baseline) {
+            let diagnostic = SafeDiagnostic {
+                code: DiagnosticCode::ExecutionRejected,
+                class: DiagnosticClass::Transient,
+            };
+            let mut draft = scratch_state.draft.state.lock().await;
+            let revision = draft.revision;
+            let replacement: Arc<[u8]> = Arc::from(
+                draft
+                    .candidate
+                    .as_deref()
+                    .unwrap_or(draft.baseline.bytes.as_ref()),
+            );
+            draft.last_rejection = Some((revision, diagnostic));
+            draft.retained_invalid = Some(RetainedInvalidDraft {
+                baseline: scratch.baseline.pin.clone(),
+                revision,
+                replacement,
+                diagnostic,
+            });
+            return Ok(TemporaryRenameOutcome::Stale { diagnostic });
+        }
+        let next_generation = destination
+            .cache_generation
+            .checked_add(1)
+            .ok_or(TemporaryRenameError::GenerationExhausted)?;
+
+        match scratch_state.draft.fsync_with(activate).await {
+            Err(error) => Err(TemporaryRenameError::Activation(error)),
+            Ok(FsyncOutcome::Rejected(diagnostic)) => {
+                Ok(TemporaryRenameOutcome::Rejected { diagnostic })
+            }
+            Ok(FsyncOutcome::Accepted(handle)) => {
+                destination.image = Arc::clone(&handle.image);
+                destination.cache_generation = next_generation;
+                scratch_state.applied = Some((next_generation, handle.clone()));
+                Ok(TemporaryRenameOutcome::Applied {
+                    generation: next_generation,
+                    handle,
+                })
+            }
+            Ok(FsyncOutcome::Unchanged(_)) => Err(TemporaryRenameError::NoCandidate),
+        }
+    }
+}
+
+struct TemporarySaveState<S> {
+    draft: EditDraft<S>,
+    synced_revision: Option<u64>,
+    applied: Option<(u64, SnapshotReadHandle<S>)>,
+}
+
+/// A temp-file save tied to the managed destination that admitted its
+/// creation. Scratch fsync is a persistence callback only; row acceptance is
+/// performed by renaming it over the destination.
+pub struct TemporarySave<S> {
+    target: Arc<ManagedFile<S>>,
+    baseline: Arc<VfsFileSnapshot<S>>,
+    state: Mutex<TemporarySaveState<S>>,
+}
+
+impl<S> TemporarySave<S> {
+    pub async fn write_at(&self, offset: u64, bytes: &[u8]) -> Result<(), EditDraftError> {
+        let state = self.state.lock().await;
+        if state.applied.is_some() {
+            return Err(EditDraftError::AlreadyApplied);
+        }
+        state.draft.write_at(offset, bytes).await
+    }
+
+    pub async fn truncate(&self, length: u64) -> Result<(), EditDraftError> {
+        let state = self.state.lock().await;
+        if state.applied.is_some() {
+            return Err(EditDraftError::AlreadyApplied);
+        }
+        state.draft.truncate(length).await
+    }
+
+    pub async fn candidate_bytes(&self) -> Arc<[u8]> {
+        self.state.lock().await.draft.candidate_bytes().await
+    }
+
+    pub async fn retained_invalid_draft(&self) -> Option<RetainedInvalidDraft<S>> {
+        self.state.lock().await.draft.retained_invalid_draft().await
+    }
+
+    /// Persists only the private scratch sequence. This callback does not call
+    /// the row activation boundary and is skipped for an already-synced seq.
+    pub async fn fsync_scratch_with<F, Fut, E>(&self, persist: F) -> Result<u64, E>
+    where
+        F: FnOnce(u64, Arc<[u8]>) -> Fut,
+        Fut: Future<Output = Result<(), E>>,
+    {
+        let mut state = self.state.lock().await;
+        if let Some((revision, _)) = &state.applied {
+            return Ok(*revision);
+        }
+        let (revision, bytes) = {
+            let draft = state.draft.state.lock().await;
+            let revision = draft.revision;
+            let bytes: Arc<[u8]> = Arc::from(
+                draft
+                    .candidate
+                    .as_deref()
+                    .unwrap_or(draft.baseline.bytes.as_ref()),
+            );
+            (revision, bytes)
+        };
+        if state.synced_revision == Some(revision) {
+            return Ok(revision);
+        }
+        persist(revision, bytes).await?;
+        state.synced_revision = Some(revision);
+        Ok(revision)
+    }
+}
+
+pub enum TemporaryRenameOutcome<S> {
+    Applied {
+        generation: u64,
+        handle: SnapshotReadHandle<S>,
+    },
+    Rejected {
+        diagnostic: SafeDiagnostic,
+    },
+    Stale {
+        diagnostic: SafeDiagnostic,
+    },
+}
+
+#[derive(Debug, Eq, PartialEq)]
+pub enum TemporaryRenameError<E> {
+    WrongDestination,
+    GenerationExhausted,
+    Activation(E),
+    NoCandidate,
 }
 
 impl<S> EditDraft<S> {
@@ -493,5 +711,97 @@ mod tests {
         draft.write_at(1, &[0x59]).await.unwrap();
         draft.release();
         assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn temp_fsync_is_scratch_only_and_rename_preserves_rejected_and_open_state() {
+        let target = ManagedFile::new(fixture_image());
+        let old_handle = target.open_read().await;
+        let old_bytes = old_handle.read_at(0, old_handle.len() as usize);
+        let scratch = target.begin_temporary_replacement(1 << 20).await;
+        scratch.write_at(0, &[0x58]).await.unwrap();
+
+        let scratch_syncs = AtomicUsize::new(0);
+        let sequence = scratch
+            .fsync_scratch_with(|revision, bytes| {
+                scratch_syncs.fetch_add(1, Ordering::SeqCst);
+                async move {
+                    assert_eq!(revision, 2);
+                    assert_eq!(bytes.as_ref(), &[0x58]);
+                    Ok::<_, ()>(())
+                }
+            })
+            .await
+            .unwrap();
+        assert_eq!(sequence, 2);
+        assert_eq!(scratch_syncs.load(Ordering::SeqCst), 1);
+        assert_eq!(target.cache_generation().await, 0);
+        assert_eq!(
+            target.open_read().await.read_at(0, old_bytes.len()),
+            old_bytes
+        );
+
+        let activations = AtomicUsize::new(0);
+        let rejected_outcome = target
+            .rename_over(&scratch, |candidate| {
+                activations.fetch_add(1, Ordering::SeqCst);
+                async move {
+                    assert_eq!(candidate.replacement_bytes(), &[0x58]);
+                    Ok::<_, ()>(ActivationDecision::Rejected(rejected()))
+                }
+            })
+            .await
+            .unwrap();
+        assert!(matches!(
+            rejected_outcome,
+            TemporaryRenameOutcome::Rejected { .. }
+        ));
+        assert_eq!(target.cache_generation().await, 0);
+        assert_eq!(old_handle.read_at(0, old_bytes.len()), old_bytes);
+        let retained = scratch.retained_invalid_draft().await.unwrap();
+        assert_eq!(retained.replacement_bytes(), &[0x58]);
+        assert_eq!(*retained.baseline().snapshot(), 7);
+
+        let repeated = target
+            .rename_over(&scratch, |_| {
+                activations.fetch_add(1, Ordering::SeqCst);
+                async {
+                    Ok::<_, ()>(ActivationDecision::Accepted(SnapshotPin::capture(
+                        Arc::new(9),
+                    )))
+                }
+            })
+            .await
+            .unwrap();
+        assert!(matches!(repeated, TemporaryRenameOutcome::Rejected { .. }));
+        assert_eq!(activations.load(Ordering::SeqCst), 1);
+
+        scratch.write_at(1, &[0x59]).await.unwrap();
+        let accepted = target
+            .rename_over(&scratch, |candidate| async move {
+                assert_eq!(candidate.replacement_bytes(), &[0x58, 0x59]);
+                Ok::<_, ()>(ActivationDecision::Accepted(SnapshotPin::capture(
+                    Arc::new(8),
+                )))
+            })
+            .await
+            .unwrap();
+        let TemporaryRenameOutcome::Applied { generation, handle } = accepted else {
+            panic!("validated rename should replace the managed target");
+        };
+        assert_eq!(generation, 1);
+        assert_eq!(target.cache_generation().await, 1);
+        assert_eq!(*old_handle.pin().snapshot(), 7);
+        assert_eq!(old_handle.read_at(0, old_bytes.len()), old_bytes);
+        assert_eq!(*target.open_read().await.pin().snapshot(), 8);
+        assert_eq!(handle.read_at(0, 2), [0x58, 0x59]);
+        assert_eq!(
+            scratch
+                .retained_invalid_draft()
+                .await
+                .unwrap()
+                .replacement_bytes(),
+            &[0x58]
+        );
     }
 }
