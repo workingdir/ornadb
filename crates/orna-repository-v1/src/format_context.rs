@@ -11,7 +11,7 @@ use std::{fmt, process::Command, str::FromStr};
 use orna_syntax_v1::{Expr, LiteralKind, RecordField, parse_row};
 use sha2::{Digest, Sha256};
 
-use crate::{CommittedTreeEntryKind, Repository, RepositoryError};
+use crate::{Repository, RepositoryError};
 use crate::{
     native_graph::{GitHashAlgorithm, NativeGraphContext, NativeOid},
     row_store::RowMapSnapshot,
@@ -28,8 +28,9 @@ pub const FORMAT_CONTEXT_MAX_METADATA_BYTES: usize = 64 * 1024;
 const DATABASE_PATH: &str = ".orna/database.orna";
 const LEGACY_FORMAT_PATH: &str = ".orna/format.orna";
 const MAIN_SOURCE_PATH: &str = "main.orna";
-const STORE_PATH_PREFIX: &str = ".orna/store/";
-const MAX_TREE_ENTRIES_FOR_ROOT_VALIDATION: usize = 65_536;
+// Used only to classify a failed metadata-path lookup. The valid format-3
+// store path never recursively enumerates this tree.
+const MAX_TREE_ENTRIES_FOR_METADATA_DIAGNOSTIC: usize = 65_536;
 const MAX_METADATA_READ_BYTES: usize = FORMAT_CONTEXT_MAX_METADATA_BYTES * 2;
 
 /// Repository-format dispatch selected from tracked metadata.
@@ -273,47 +274,11 @@ impl RepositoryFormatContext {
         })
     }
 
-    /// A non-authoritative store-root validation seam for later OGS/ORP
-    /// layers. It checks only the bounded native-tree entry shape and does not
-    /// decode or write graph nodes.
+    /// Pins the committed `.orna/store` native tree without recursively
+    /// enumerating it. OGS-1 validates reachable node envelopes; recursively
+    /// listing the complete graph here would make large row maps unopenable.
     pub fn validate_store_root(&self) -> Result<StoreRootPin, FormatContextError> {
         self.require_format3()?;
-        let entries = self
-            .repository
-            .list_committed_tree(&self.snapshot.commit, MAX_TREE_ENTRIES_FOR_ROOT_VALIDATION)
-            .map_err(|error| match error {
-                RepositoryError::GitUnavailable => FormatContextError::StoreRootUnavailable,
-                _ => FormatContextError::StoreRootInvalid,
-            })?;
-        let mut found = false;
-        for entry in entries {
-            let Some(path) = entry.path().as_path().to_str() else {
-                if entry
-                    .path()
-                    .as_path()
-                    .starts_with(std::path::Path::new(".orna"))
-                {
-                    return Err(FormatContextError::StoreRootInvalid);
-                }
-                continue;
-            };
-            if path == DATABASE_PATH {
-                continue;
-            }
-            if path.starts_with(".orna/") && !path.starts_with(STORE_PATH_PREFIX) {
-                return Err(FormatContextError::StoreRootInvalid);
-            }
-            if !path.starts_with(STORE_PATH_PREFIX) {
-                continue;
-            }
-            found = true;
-            if !matches!(entry.kind(), CommittedTreeEntryKind::File { .. }) {
-                return Err(FormatContextError::StoreRootInvalid);
-            }
-        }
-        if !found {
-            return Err(FormatContextError::StoreRootUnavailable);
-        }
         let algorithm = repository_hash_algorithm(&self.repository)?;
         let oid = committed_path_oid(
             &self.repository,
@@ -330,6 +295,33 @@ impl RepositoryFormatContext {
             snapshot: self.snapshot.clone(),
             oid,
         })
+    }
+
+    /// Resolves one stable relation ID through the committed format-3 store
+    /// root and seals its schema/root/count identity without loading table
+    /// rows. Point/range access is available only through the matching
+    /// repository-issued `NativeGraphContext`.
+    pub fn load_row_map(
+        &self,
+        relation_id: [u8; 16],
+    ) -> Result<RowMapSnapshot, FormatContextError> {
+        self.require_format3()?;
+        let database_id = self.require_database_id()?;
+        self.validate_schema_root()?;
+        let store = self.validate_store_root()?;
+        let mut snapshot_hash = Sha256::new();
+        snapshot_hash.update(b"orna.repository.graph.snapshot.v1\0");
+        snapshot_hash.update(self.snapshot.commit.as_str().as_bytes());
+        let snapshot_id: [u8; 32] = snapshot_hash.finalize().into();
+        crate::native_graph::load_format3_row_map(
+            &self.repository,
+            store.oid.algorithm(),
+            store.oid,
+            *database_id.as_bytes(),
+            snapshot_id,
+            relation_id,
+        )
+        .map_err(|_| FormatContextError::GraphContextInvalid)
     }
 
     /// Issues native Git graph authority only for a sealed row-map snapshot
@@ -549,7 +541,7 @@ fn read_metadata_file(
         // error as absence; otherwise a malformed database record could be
         // downgraded into legacy dispatch.
         Err(_) => match repository
-            .list_committed_tree(&snapshot.commit, MAX_TREE_ENTRIES_FOR_ROOT_VALIDATION)
+            .list_committed_tree(&snapshot.commit, MAX_TREE_ENTRIES_FOR_METADATA_DIAGNOSTIC)
             .map_err(|error| match error {
                 RepositoryError::GitUnavailable => FormatContextError::MetadataUnavailable,
                 _ => FormatContextError::MetadataInvalid,
@@ -748,8 +740,13 @@ mod graph_bridge_tests {
 
     use crate::{
         Repository,
-        native_graph::{ByteIndexEntry, GitHashAlgorithm, NativeOid, NodeData},
-        row_store::{RowMapSnapshot, RowMapVersion, SchemaGeneration},
+        native_graph::{
+            ByteIndexEntry, GitHashAlgorithm, MAX_RANGE_GRAPH_OBJECTS, NativeOid, NodeData,
+            OrderedBranchEntry, OrderedLeafEntry,
+        },
+        row_store::{
+            KeyRange, RowMapSnapshot, RowMapVersion, RowValue, SchemaGeneration, TypedKey,
+        },
     };
 
     use super::RepositoryFormatContext;
@@ -772,6 +769,36 @@ mod graph_bridge_tests {
             "git {arguments:?}: {}",
             String::from_utf8_lossy(&output.stderr)
         );
+    }
+
+    fn git_output(directory: &Path, arguments: &[&str], input: Option<&[u8]>) -> Vec<u8> {
+        let mut child = Command::new("git")
+            .current_dir(directory)
+            .args(arguments)
+            .stdin(if input.is_some() {
+                Stdio::piped()
+            } else {
+                Stdio::null()
+            })
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn git plumbing command");
+        if let Some(input) = input {
+            child
+                .stdin
+                .take()
+                .expect("git plumbing stdin")
+                .write_all(input)
+                .expect("write git plumbing input");
+        }
+        let output = child.wait_with_output().expect("wait for git plumbing");
+        assert!(
+            output.status.success(),
+            "git {arguments:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        output.stdout
     }
 
     fn repository() -> TempDir {
@@ -892,6 +919,97 @@ mod graph_bridge_tests {
         write_git_object(directory, algorithm, "tree", &envelope)
     }
 
+    fn cbor_head(output: &mut Vec<u8>, major: u8, value: u64) {
+        let prefix = major << 5;
+        match value {
+            0..=23 => output.push(prefix | value as u8),
+            24..=255 => output.extend_from_slice(&[prefix | 24, value as u8]),
+            256..=65_535 => {
+                output.push(prefix | 25);
+                output.extend_from_slice(&(value as u16).to_be_bytes());
+            }
+            65_536..=4_294_967_295 => {
+                output.push(prefix | 26);
+                output.extend_from_slice(&(value as u32).to_be_bytes());
+            }
+            _ => {
+                output.push(prefix | 27);
+                output.extend_from_slice(&value.to_be_bytes());
+            }
+        }
+    }
+
+    fn cbor_bytes(output: &mut Vec<u8>, value: &[u8]) {
+        cbor_head(output, 2, value.len() as u64);
+        output.extend_from_slice(value);
+    }
+
+    fn row_domain(relation_id: [u8; 16], schema_digest: [u8; 32]) -> Vec<u8> {
+        let mut domain = vec![0x83, 0x64];
+        domain.extend_from_slice(b"rows");
+        cbor_bytes(&mut domain, &relation_id);
+        cbor_bytes(&mut domain, &schema_digest);
+        domain
+    }
+
+    fn relations_domain(database_id: [u8; 16]) -> Vec<u8> {
+        let mut domain = vec![0x82, 0x69];
+        domain.extend_from_slice(b"relations");
+        cbor_bytes(&mut domain, &database_id);
+        domain
+    }
+
+    fn commit_store_root(directory: &Path, algorithm: GitHashAlgorithm, store_root: &NativeOid) {
+        let database_oid = write_git_object(directory, algorithm, "blob", DATABASE.as_bytes());
+        let main_oid = write_git_object(directory, algorithm, "blob", MAIN_SOURCE.as_bytes());
+        let orna_tree_spec = format!(
+            "100644 blob {}\tdatabase.orna\n040000 tree {}\tstore\n",
+            database_oid.to_hex(),
+            store_root.to_hex()
+        );
+        let orna_tree = git_output(directory, &["mktree"], Some(orna_tree_spec.as_bytes()));
+        let orna_tree_oid = NativeOid::from_hex(
+            algorithm,
+            std::str::from_utf8(&orna_tree)
+                .expect("mktree OID UTF-8")
+                .trim(),
+        )
+        .expect("valid .orna tree OID");
+        let root_tree_spec = format!(
+            "040000 tree {}\t.orna\n100644 blob {}\tmain.orna\n",
+            orna_tree_oid.to_hex(),
+            main_oid.to_hex()
+        );
+        let root_tree = git_output(directory, &["mktree"], Some(root_tree_spec.as_bytes()));
+        let root_tree_oid = NativeOid::from_hex(
+            algorithm,
+            std::str::from_utf8(&root_tree)
+                .expect("mktree OID UTF-8")
+                .trim(),
+        )
+        .expect("valid root tree OID");
+        let parent = git_output(directory, &["rev-parse", "HEAD"], None);
+        let parent = std::str::from_utf8(&parent)
+            .expect("parent commit UTF-8")
+            .trim();
+        let commit = git_output(
+            directory,
+            &[
+                "commit-tree",
+                &root_tree_oid.to_hex(),
+                "-p",
+                parent,
+                "-m",
+                "persist native format3 fixture",
+            ],
+            None,
+        );
+        let commit = std::str::from_utf8(&commit)
+            .expect("commit OID UTF-8")
+            .trim();
+        git(directory, &["update-ref", "refs/heads/main", commit]);
+    }
+
     fn schema_descriptor_node(
         directory: &Path,
         algorithm: GitHashAlgorithm,
@@ -941,6 +1059,152 @@ mod graph_bridge_tests {
             schema_digest,
         );
         (schema_oid, schema_digest)
+    }
+
+    fn install_overflow_row_store(
+        directory: &Path,
+        context: &RepositoryFormatContext,
+        relation_id: [u8; 16],
+        semantic_digest_override: Option<[u8; 32]>,
+    ) -> ([u8; 16], [u8; 32]) {
+        let algorithm = context
+            .validate_store_root()
+            .expect("pinned format-3 store")
+            .oid
+            .algorithm();
+        let database_id = context.require_database_id().expect("database identity");
+        let (schema_oid, schema_digest) = schema_node(directory, context);
+        let overflow_bytes = [0x81, 0x01];
+        let semantic_digest: [u8; 32] = Sha256::digest(overflow_bytes).into();
+        let stored_digest = semantic_digest_override.unwrap_or(semantic_digest);
+        let chunk_oid = write_git_object(directory, algorithm, "blob", &overflow_bytes);
+        let byte_root = write_native_node(
+            directory,
+            algorithm,
+            &NodeData::ByteIndex {
+                height: 0,
+                total_length: overflow_bytes.len() as u64,
+                entries: vec![ByteIndexEntry {
+                    span_length: overflow_bytes.len() as u64,
+                    target: chunk_oid,
+                    chunk_sha256: Some(semantic_digest),
+                }],
+            },
+        );
+        let overflow_root = write_native_node(
+            directory,
+            algorithm,
+            &NodeData::ValueOverflow {
+                encoded_length: overflow_bytes.len() as u64,
+                semantic_digest: stored_digest,
+                byte_root,
+                dependency_root: None,
+            },
+        );
+        let mut overflow_value = Vec::new();
+        cbor_head(&mut overflow_value, 6, 60113);
+        overflow_value.push(0x81);
+        cbor_bytes(&mut overflow_value, overflow_root.as_bytes());
+        let row_root = write_native_node(
+            directory,
+            algorithm,
+            &NodeData::OrderedLeaf {
+                domain: row_domain(relation_id, schema_digest),
+                entries: vec![OrderedLeafEntry {
+                    key: TypedKey::UInt(7).canonical_bytes().unwrap(),
+                    value: overflow_value,
+                }],
+            },
+        );
+
+        let mut relation_value = vec![0x84];
+        cbor_bytes(&mut relation_value, schema_oid.as_bytes());
+        cbor_bytes(&mut relation_value, row_root.as_bytes());
+        relation_value.push(0xf6);
+        relation_value.push(0x01);
+        let relation_map = write_native_node(
+            directory,
+            algorithm,
+            &NodeData::OrderedLeaf {
+                domain: relations_domain(*database_id.as_bytes()),
+                entries: vec![OrderedLeafEntry {
+                    key: TypedKey::Bytes(relation_id.to_vec())
+                        .canonical_bytes()
+                        .unwrap(),
+                    value: relation_value,
+                }],
+            },
+        );
+        let store_root =
+            write_native_node(directory, algorithm, &NodeData::StoreRoot { relation_map });
+        commit_store_root(directory, algorithm, &store_root);
+        (relation_id, semantic_digest)
+    }
+
+    fn install_branch_row_store(
+        directory: &Path,
+        context: &RepositoryFormatContext,
+        relation_id: [u8; 16],
+        rows_and_fences: &[(u64, u64)],
+    ) {
+        let algorithm = context
+            .validate_store_root()
+            .expect("pinned format-3 store")
+            .oid
+            .algorithm();
+        let database_id = context.require_database_id().expect("database identity");
+        let (schema_oid, schema_digest) = schema_node(directory, context);
+
+        let mut branch_entries = Vec::new();
+        for &(key, stored_fence) in rows_and_fences {
+            let row = write_native_node(
+                directory,
+                algorithm,
+                &NodeData::OrderedLeaf {
+                    domain: row_domain(relation_id, schema_digest),
+                    entries: vec![OrderedLeafEntry {
+                        key: TypedKey::UInt(key).canonical_bytes().unwrap(),
+                        value: vec![0x81, 0x01],
+                    }],
+                },
+            );
+            branch_entries.push(OrderedBranchEntry {
+                inclusive_max_key: TypedKey::UInt(stored_fence).canonical_bytes().unwrap(),
+                child: row,
+                row_count: 1,
+            });
+        }
+        let primary_root = write_native_node(
+            directory,
+            algorithm,
+            &NodeData::OrderedBranch {
+                domain: row_domain(relation_id, schema_digest),
+                height: 1,
+                entries: branch_entries,
+            },
+        );
+
+        let mut relation_value = vec![0x84];
+        cbor_bytes(&mut relation_value, schema_oid.as_bytes());
+        cbor_bytes(&mut relation_value, primary_root.as_bytes());
+        relation_value.push(0xf6);
+        relation_value.push(u8::try_from(rows_and_fences.len()).unwrap());
+        let relation_map = write_native_node(
+            directory,
+            algorithm,
+            &NodeData::OrderedLeaf {
+                domain: relations_domain(*database_id.as_bytes()),
+                entries: vec![OrderedLeafEntry {
+                    key: TypedKey::Bytes(relation_id.to_vec())
+                        .canonical_bytes()
+                        .unwrap(),
+                    value: relation_value,
+                }],
+            },
+        );
+        let store_root =
+            write_native_node(directory, algorithm, &NodeData::StoreRoot { relation_map });
+        commit_store_root(directory, algorithm, &store_root);
     }
 
     fn sealed_rows(
@@ -1077,5 +1341,96 @@ mod graph_bridge_tests {
             context.open_native_graph(&rows),
             Err(super::FormatContextError::GraphContextInvalid)
         ));
+    }
+
+    #[test]
+    fn pinned_orp_loader_issues_lazy_snapshot_and_reads_verified_overflow_by_point_and_range() {
+        let directory = repository();
+        let root = directory.path();
+        let initial = context(root);
+        let relation_id = [0x72; 16];
+        let (relation_id, expected_digest) =
+            install_overflow_row_store(root, &initial, relation_id, None);
+        let pinned = context(root);
+        let snapshot = pinned
+            .load_row_map(relation_id)
+            .expect("load pinned ORP identity");
+        assert!(!snapshot.is_materialized());
+        assert!(matches!(
+            snapshot.get(&TypedKey::UInt(7)),
+            Err(crate::row_store::RowStoreError::PersistedLookupRequiresGraphContext)
+        ));
+        let graph = pinned
+            .open_native_graph(&snapshot)
+            .expect("issue graph context from repository snapshot");
+        let scope = graph.open_read_scope().expect("owner read scope");
+        let row = graph
+            .lookup_row(&TypedKey::UInt(7), &scope)
+            .expect("bounded point lookup")
+            .expect("stored row");
+        let RowValue::Overflow(reference) = row.value() else {
+            panic!("verified kind-3 row should decode as overflow");
+        };
+        assert_eq!(reference.encoded_length(), 2);
+        assert_eq!(reference.semantic_digest(), &expected_digest);
+
+        let range = KeyRange::new(Some(TypedKey::UInt(7)), None, 1).unwrap();
+        let ranged = graph
+            .range_rows(&range, &scope)
+            .expect("bounded ORP range lookup");
+        assert_eq!(ranged, vec![row]);
+
+        let bad_digest = [0x99; 32];
+        install_overflow_row_store(root, &pinned, relation_id, Some(bad_digest));
+        let tampered_context = context(root);
+        let tampered_snapshot = tampered_context
+            .load_row_map(relation_id)
+            .expect("root identity is lazy until row access");
+        let tampered_graph = tampered_context
+            .open_native_graph(&tampered_snapshot)
+            .expect("schema and map root remain pinned");
+        let tampered_scope = tampered_graph.open_read_scope().unwrap();
+        assert!(matches!(
+            tampered_graph.lookup_row(&TypedKey::UInt(7), &tampered_scope),
+            Err(crate::native_graph::GraphError::ContentIdentityMismatch)
+        ));
+    }
+
+    #[test]
+    fn repository_point_lookup_checks_later_fences_after_candidate_miss() {
+        let directory = repository();
+        let root = directory.path();
+        let relation_id = [0x72; 16];
+        let initial = context(root);
+        // Key 20 falls within child 2's claimed max (30), but is absent there.
+        // The next child is an invalid overlapping range hidden behind fence
+        // 50; point lookup must continue far enough to reject it.
+        install_branch_row_store(
+            root,
+            &initial,
+            relation_id,
+            &[(10, 10), (30, 30), (20, 50), (60, 60)],
+        );
+
+        let pinned = context(root);
+        let snapshot = pinned.load_row_map(relation_id).unwrap();
+        assert!(!snapshot.is_materialized());
+        let graph = pinned.open_native_graph(&snapshot).unwrap();
+        let scope = graph.open_read_scope().unwrap();
+
+        // The final profile caps each ORP page at 256 direct refs and height
+        // at 64. This four-child graph isolates the point-lookup miss path;
+        // the production scope additionally caps one operation at 2,048
+        // native Git objects, which is measured below.
+        let before_point = scope.objects_read_for_test();
+        assert!(matches!(
+            graph.lookup_row(&TypedKey::UInt(20), &scope),
+            Err(crate::native_graph::GraphError::InvalidCount(_))
+        ));
+        let point_objects = scope.objects_read_for_test() - before_point;
+        assert!(point_objects > 0 && point_objects <= MAX_RANGE_GRAPH_OBJECTS);
+        println!(
+            "git-backed ORP point lookup object reads: {point_objects} (operation_limit={MAX_RANGE_GRAPH_OBJECTS})"
+        );
     }
 }
