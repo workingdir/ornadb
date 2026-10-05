@@ -19,7 +19,7 @@ use fs2::FileExt;
 use tempfile::TempDir;
 use uuid::{Uuid, Version};
 
-use crate::{Repository, RepositoryError, scrub_git_routing_environment, valid_branch_name};
+use crate::{scrub_git_routing_environment, valid_branch_name, Repository, RepositoryError};
 
 #[path = "format_context.rs"]
 pub(crate) mod format_context;
@@ -397,7 +397,7 @@ fn publish_staging_directory(
     repository: &Repository,
     staging: &TempDir,
 ) -> Result<(), RepositoryInitError> {
-    use rustix::fs::{RenameFlags, renameat_with};
+    use rustix::fs::{renameat_with, RenameFlags};
 
     let parent = repository.worktree();
     let parent_file = File::open(parent).map_err(|_| RepositoryInitError::LocalStateUnavailable)?;
@@ -597,8 +597,8 @@ mod tests {
     };
 
     use super::{
-        DATABASE_FILE, FORMAT_DIRECTORY, FORMAT_FILE, Repository, RepositoryInitError,
-        initialize_repository, inspect_metadata,
+        initialize_repository, inspect_metadata, Repository, RepositoryInitError, DATABASE_FILE,
+        FORMAT_DIRECTORY, FORMAT_FILE,
     };
 
     fn git(directory: &Path, arguments: &[&str]) -> String {
@@ -626,7 +626,8 @@ mod tests {
         assert_eq!(initialized.metadata().storage_profile(), "store-3");
         assert_eq!(
             fs::read_to_string(target.join(FORMAT_DIRECTORY).join(DATABASE_FILE)).unwrap(),
-            format!("{{\n    repository_format: 3,\n    database_id: \"{database_id}\",\n}}\n")
+            include_str!("../tests/fixtures/format-context/database-template.orna")
+                .replace("00000000-0000-4000-8000-000000000000", &database_id)
         );
         assert!(!target.join(FORMAT_DIRECTORY).join(FORMAT_FILE).exists());
         assert_eq!(fs::read(target.join("main.orna")).unwrap(), b"");
@@ -686,13 +687,11 @@ mod tests {
         let error = initialize_repository(target.path()).unwrap_err();
         assert_eq!(error.code(), "ORNA-REPO-INIT-005");
         assert!(matches!(error, RepositoryInitError::MetadataIncomplete));
-        assert!(
-            !target
-                .path()
-                .join(FORMAT_DIRECTORY)
-                .join(FORMAT_FILE)
-                .exists()
-        );
+        assert!(!target
+            .path()
+            .join(FORMAT_DIRECTORY)
+            .join(FORMAT_FILE)
+            .exists());
         assert!(!target.path().join("main.orna").exists());
     }
 
