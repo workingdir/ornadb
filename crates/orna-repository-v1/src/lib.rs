@@ -53,9 +53,10 @@ pub use init::{
     initialize_repository, inspect_metadata,
 };
 pub use native_graph::{
-    AdmittedBlobReference, GitHashAlgorithm, GraphError, NativeGraphContext, NativeObjectKind,
-    NativeOid, ProtectedContentPin, ProtectedContentTransfer, Pub3ReleaseReceipt,
-    RangeVerification, RepositoryReadScope, VerifiedBlobRange,
+    AdmittedBlobReference, CapturedBlobCandidate, GitHashAlgorithm, GraphError,
+    NativeGraphContext, NativeObjectKind, NativeOid, ProtectedContentPin,
+    ProtectedContentTransfer, Pub3ReleaseReceipt, RangeVerification, RepositoryReadScope,
+    VerifiedBlobRange,
 };
 pub use row_store::{AdmittedRow, RowMapSnapshot};
 pub use transport::{FetchError, FetchReport, FetchRequest, FetchedRef, PushRequest, RequestedRef};
