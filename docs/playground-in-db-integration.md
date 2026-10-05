@@ -108,3 +108,13 @@ npm run prove:served-assists -- http://127.0.0.1:18087
 
 It verifies completion ranking, standard-library hover and signature help, and
 imported and qualified standard-library inlay hints from the served module.
+
+The live example catalog refresh behavior has focused browser-module tests:
+
+```sh
+cd playground/web-ui
+npm test -- src/example-feed.test.ts src/style-reload.test.ts
+```
+
+They check committed-revision announcements, catalog validation, selection
+retention, and removed-path behavior.
