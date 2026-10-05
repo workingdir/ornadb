@@ -1,0 +1,7 @@
+{ id: "history-61/checkpoint/main", name: "history-61/left/checkpoint-c", city: "history-61/right/checkpoint-c", }
+
+{ id: "history-61/checkpoint/reused", name: "history-61/left/checkpoint-c", city: "history-61/right/checkpoint-c", }
+
+{ id: "history-61/checkpoint/distinct", name: "history-61/left/checkpoint-d", city: "history-61/right/checkpoint-d", }
+
+{ id: "history-61/checkpoint/malformed", name: "history-61/left/checkpoint-error", city: "history-61/right/checkpoint-error", }

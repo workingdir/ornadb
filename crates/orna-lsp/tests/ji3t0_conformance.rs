@@ -19,6 +19,8 @@ mod completion_contract;
 mod hover_semantic_contract;
 #[path = "support/syntax_v1_action_signature_contract.rs"]
 mod syntax_v1_action_signature_contract;
+#[path = "support/syntax_v1_definition_contract.rs"]
+mod syntax_v1_definition_contract;
 #[path = "support/syntax_v1_depth_contract.rs"]
 mod syntax_v1_depth_contract;
 #[path = "support/syntax_v1_diagnostics_document_links_contract.rs"]
@@ -27,6 +29,8 @@ mod syntax_v1_diagnostics_document_links_contract;
 mod syntax_v1_document_highlight_code_lens_contract;
 #[path = "support/syntax_v1_folding_selection_contract.rs"]
 mod syntax_v1_folding_selection_contract;
+#[path = "support/syntax_v1_type_hierarchy_moniker_contract.rs"]
+mod syntax_v1_type_hierarchy_moniker_contract;
 #[path = "support/syntax_v1_workspace_hierarchy_contract.rs"]
 mod syntax_v1_workspace_hierarchy_contract;
 
@@ -41,6 +45,9 @@ const WORKSPACE_HIERARCHY_CALLER_SOURCE: &str =
 const DOCUMENT_HIGHLIGHT_CODE_LENS_SOURCE: &str =
     include_str!("fixtures/document-highlight-code-lens-v1.orna");
 const FOLDING_SELECTION_SOURCE: &str = include_str!("fixtures/folding-selection-v1.orna");
+const TYPE_HIERARCHY_PROVIDER_SOURCE: &str =
+    include_str!("fixtures/type-hierarchy-provider-v1.orna");
+const TYPE_HIERARCHY_CALLER_SOURCE: &str = include_str!("fixtures/type-hierarchy-caller-v1.orna");
 const DIAGNOSTIC_SOURCE: &str = include_str!("fixtures/incremental-malformed-v1.orna");
 const DOCUMENT_LINKS_SOURCE: &str = include_str!("fixtures/document-links-v1.orna");
 const DOCUMENT_LINK_TARGET_SOURCE: &str = include_str!("fixtures/library/math.orna");
@@ -335,6 +342,140 @@ fn contains_word(text: &str, word: &str) -> bool {
 
 fn is_identifier_char(character: char) -> bool {
     character.is_ascii_alphanumeric() || character == '_'
+}
+
+#[test]
+fn protocol_type_hierarchy_and_monikers_match_editor_attachment_contract() {
+    let provider_uri = "file:///workspace/type-hierarchy-provider-v1.orna";
+    let caller_uri = "file:///workspace/type-hierarchy-caller-v1.orna";
+    let requests = syntax_v1_type_hierarchy_moniker_contract::request_data(
+        TYPE_HIERARCHY_PROVIDER_SOURCE,
+        TYPE_HIERARCHY_CALLER_SOURCE,
+    );
+    let mut client = Client::spawn();
+    initialize(&mut client);
+    for (uri, source) in [
+        (provider_uri, TYPE_HIERARCHY_PROVIDER_SOURCE),
+        (caller_uri, TYPE_HIERARCHY_CALLER_SOURCE),
+    ] {
+        let diagnostics = open(&mut client, uri, source);
+        assert!(
+            diagnostics["diagnostics"].as_array().unwrap().is_empty(),
+            "{diagnostics}"
+        );
+    }
+
+    let prepare = |client: &mut Client, uri: &str, request_name: &str| {
+        client.request(
+            "textDocument/prepareTypeHierarchy",
+            json!({
+                "textDocument":{"uri":uri},
+                "position":requests[request_name],
+            }),
+        )
+    };
+    let document_item = prepare(&mut client, provider_uri, "document_declaration");
+    let document_supertypes =
+        client.request("typeHierarchy/supertypes", json!({"item":document_item[0]}));
+    let document_reference = prepare(&mut client, caller_uri, "document_reference");
+    let renderable_item = prepare(&mut client, provider_uri, "renderable_declaration");
+    let renderable_subtypes =
+        client.request("typeHierarchy/subtypes", json!({"item":renderable_item[0]}));
+    let orphan_item = prepare(&mut client, provider_uri, "orphan_declaration");
+    let orphan_supertypes =
+        client.request("typeHierarchy/supertypes", json!({"item":orphan_item[0]}));
+    let ambiguous_consumer_item =
+        prepare(&mut client, caller_uri, "ambiguous_consumer_declaration");
+    let ambiguous_consumer_supertypes = client.request(
+        "typeHierarchy/supertypes",
+        json!({"item":ambiguous_consumer_item[0]}),
+    );
+    let clash_item = prepare(&mut client, provider_uri, "clash_provider_declaration");
+    let clash_subtypes = client.request("typeHierarchy/subtypes", json!({"item":clash_item[0]}));
+
+    let moniker = |client: &mut Client, uri: &str, request_name: &str| {
+        client.request(
+            "textDocument/moniker",
+            json!({
+                "textDocument":{"uri":uri},
+                "position":requests[request_name],
+            }),
+        )
+    };
+    let evidence = json!({
+        "type_document_item": document_item,
+        "type_document_reference": document_reference,
+        "type_document_supertypes": document_supertypes,
+        "type_renderable_item": renderable_item,
+        "type_renderable_subtypes": renderable_subtypes,
+        "type_orphan_supertypes": orphan_supertypes,
+        "type_ambiguous_consumer_supertypes": ambiguous_consumer_supertypes,
+        "type_clash_subtypes": clash_subtypes,
+        "type_document_moniker": moniker(&mut client, provider_uri, "document_declaration"),
+        "type_imported_moniker": moniker(&mut client, caller_uri, "document_reference"),
+        "type_same_file_moniker": moniker(&mut client, provider_uri, "document_alias_reference"),
+        "type_provider_clash_moniker": moniker(&mut client, provider_uri, "clash_provider_declaration"),
+        "type_caller_clash_moniker": moniker(&mut client, caller_uri, "clash_caller_declaration"),
+        "type_local_parameter_moniker": moniker(&mut client, caller_uri, "local_parameter_declaration"),
+        "type_local_use_moniker": moniker(&mut client, caller_uri, "local_parameter_use"),
+        "type_ambiguous_moniker": moniker(&mut client, caller_uri, "ambiguous_reference"),
+    });
+    syntax_v1_type_hierarchy_moniker_contract::assert_contract(
+        TYPE_HIERARCHY_PROVIDER_SOURCE,
+        TYPE_HIERARCHY_CALLER_SOURCE,
+        provider_uri,
+        caller_uri,
+        &evidence,
+        "protocol client",
+    );
+    client.shutdown();
+}
+
+#[test]
+fn protocol_definitions_match_editor_attachment_contract() {
+    let provider_uri = "file:///workspace/workspace-hierarchy-provider-v1.orna";
+    let caller_uri = "file:///workspace/workspace-hierarchy-caller-v1.orna";
+    let requests = syntax_v1_definition_contract::request_data(
+        WORKSPACE_HIERARCHY_PROVIDER_SOURCE,
+        WORKSPACE_HIERARCHY_CALLER_SOURCE,
+    );
+    let mut client = Client::spawn();
+    initialize(&mut client);
+    for (uri, source) in [
+        (provider_uri, WORKSPACE_HIERARCHY_PROVIDER_SOURCE),
+        (caller_uri, WORKSPACE_HIERARCHY_CALLER_SOURCE),
+    ] {
+        let diagnostics = open(&mut client, uri, source);
+        assert!(
+            diagnostics["diagnostics"].as_array().unwrap().is_empty(),
+            "{diagnostics}"
+        );
+    }
+
+    let definition = |client: &mut Client, uri: &str, request_name: &str| {
+        client.request(
+            "textDocument/definition",
+            json!({
+                "textDocument":{"uri":uri},
+                "position":requests[request_name],
+            }),
+        )
+    };
+    let evidence = json!({
+        "definition_cross_file": definition(&mut client, caller_uri, "cross_file_reference"),
+        "definition_shadowed_parameter": definition(&mut client, provider_uri, "shadowed_reference"),
+        "definition_unresolved": definition(&mut client, provider_uri, "unresolved_reference"),
+        "definition_ambiguous": definition(&mut client, caller_uri, "ambiguous_reference"),
+    });
+    syntax_v1_definition_contract::assert_contract(
+        WORKSPACE_HIERARCHY_PROVIDER_SOURCE,
+        WORKSPACE_HIERARCHY_CALLER_SOURCE,
+        provider_uri,
+        caller_uri,
+        &evidence,
+        "protocol client",
+    );
+    client.shutdown();
 }
 
 #[test]
@@ -641,6 +782,10 @@ fn neovim_loads_generated_v1_syntax_and_queries_the_lsp_server() {
         root.join("crates/orna-lsp/tests/fixtures/workspace-hierarchy-provider-v1.orna");
     let workspace_caller_fixture =
         root.join("crates/orna-lsp/tests/fixtures/workspace-hierarchy-caller-v1.orna");
+    let type_hierarchy_provider_fixture =
+        root.join("crates/orna-lsp/tests/fixtures/type-hierarchy-provider-v1.orna");
+    let type_hierarchy_caller_fixture =
+        root.join("crates/orna-lsp/tests/fixtures/type-hierarchy-caller-v1.orna");
     let document_highlight_fixture =
         root.join("crates/orna-lsp/tests/fixtures/document-highlight-code-lens-v1.orna");
     let folding_selection_fixture =
@@ -660,6 +805,22 @@ fn neovim_loads_generated_v1_syntax_and_queries_the_lsp_server() {
     let workspace_hierarchy_requests = syntax_v1_workspace_hierarchy_contract::request_data(
         WORKSPACE_HIERARCHY_PROVIDER_SOURCE,
         WORKSPACE_HIERARCHY_CALLER_SOURCE,
+    );
+    let definition_requests = syntax_v1_definition_contract::request_data(
+        WORKSPACE_HIERARCHY_PROVIDER_SOURCE,
+        WORKSPACE_HIERARCHY_CALLER_SOURCE,
+    );
+    assert_eq!(
+        fs::read_to_string(&type_hierarchy_provider_fixture).unwrap(),
+        TYPE_HIERARCHY_PROVIDER_SOURCE
+    );
+    assert_eq!(
+        fs::read_to_string(&type_hierarchy_caller_fixture).unwrap(),
+        TYPE_HIERARCHY_CALLER_SOURCE
+    );
+    let type_hierarchy_requests = syntax_v1_type_hierarchy_moniker_contract::request_data(
+        TYPE_HIERARCHY_PROVIDER_SOURCE,
+        TYPE_HIERARCHY_CALLER_SOURCE,
     );
     assert_eq!(
         fs::read_to_string(&folding_selection_fixture).unwrap(),
@@ -1010,6 +1171,23 @@ local function hierarchy_request(method, params, bufnr)
   assert(response ~= nil and response.err == nil, "Neovim " .. method .. " request failed: " .. vim.inspect(request_error or response))
   return response.result
 end
+local definition_requests = vim.fn.json_decode(vim.env.ORNA_DEFINITION_REQUESTS)
+local definition_cross_file = hierarchy_request("textDocument/definition", {
+  textDocument = { uri = workspace_caller_uri },
+  position = definition_requests.cross_file_reference,
+}, workspace_caller_bufnr)
+local definition_shadowed_parameter = hierarchy_request("textDocument/definition", {
+  textDocument = { uri = workspace_provider_uri },
+  position = definition_requests.shadowed_reference,
+}, workspace_provider_bufnr)
+local definition_unresolved = hierarchy_request("textDocument/definition", {
+  textDocument = { uri = workspace_provider_uri },
+  position = definition_requests.unresolved_reference,
+}, workspace_provider_bufnr)
+local definition_ambiguous = hierarchy_request("textDocument/definition", {
+  textDocument = { uri = workspace_caller_uri },
+  position = definition_requests.ambiguous_reference,
+}, workspace_caller_bufnr)
 local workspace_mid = hierarchy_request("workspace/symbol", { query = "mid" }, workspace_caller_bufnr)
 local workspace_mid_repeat = hierarchy_request("workspace/symbol", { query = "mid" }, workspace_caller_bufnr)
 local workspace_rem = hierarchy_request("workspace/symbol", { query = "rem" }, workspace_caller_bufnr)
@@ -1049,6 +1227,80 @@ local workspace_provider_code_lenses = hierarchy_request("textDocument/codeLens"
 local workspace_caller_code_lenses = hierarchy_request("textDocument/codeLens", {
   textDocument = { uri = workspace_caller_uri },
 }, workspace_caller_bufnr)
+
+local type_hierarchy_requests = vim.fn.json_decode(vim.env.ORNA_TYPE_HIERARCHY_REQUESTS)
+vim.cmd("edit " .. vim.fn.fnameescape(vim.env.ORNA_TYPE_HIERARCHY_PROVIDER_FIXTURE))
+local type_hierarchy_provider_bufnr = vim.api.nvim_get_current_buf()
+assert(vim.bo[type_hierarchy_provider_bufnr].filetype == "orna", "type-hierarchy provider did not select the orna filetype")
+assert(vim.wait(5000, function()
+  for _, attached in ipairs(vim.lsp.get_clients({ bufnr = type_hierarchy_provider_bufnr })) do
+    if attached.name == "orna" and attached.initialized then client = attached; return true end
+  end
+  return false
+end, 10), "type-hierarchy provider fixture did not attach to orna-lsp")
+local type_hierarchy_provider_uri = vim.uri_from_bufnr(type_hierarchy_provider_bufnr)
+vim.cmd("edit " .. vim.fn.fnameescape(vim.env.ORNA_TYPE_HIERARCHY_CALLER_FIXTURE))
+local type_hierarchy_caller_bufnr = vim.api.nvim_get_current_buf()
+assert(vim.bo[type_hierarchy_caller_bufnr].filetype == "orna", "type-hierarchy caller did not select the orna filetype")
+assert(vim.wait(5000, function()
+  for _, attached in ipairs(vim.lsp.get_clients({ bufnr = type_hierarchy_caller_bufnr })) do
+    if attached.name == "orna" and attached.initialized then client = attached; return true end
+  end
+  return false
+end, 10), "type-hierarchy caller fixture did not attach to orna-lsp")
+local type_hierarchy_caller_uri = vim.uri_from_bufnr(type_hierarchy_caller_bufnr)
+local type_document_item = hierarchy_request("textDocument/prepareTypeHierarchy", {
+  textDocument = { uri = type_hierarchy_provider_uri },
+  position = type_hierarchy_requests.document_declaration,
+}, type_hierarchy_provider_bufnr)
+local type_document_reference = hierarchy_request("textDocument/prepareTypeHierarchy", {
+  textDocument = { uri = type_hierarchy_caller_uri },
+  position = type_hierarchy_requests.document_reference,
+}, type_hierarchy_caller_bufnr)
+local type_document_supertypes = hierarchy_request("typeHierarchy/supertypes", {
+  item = type_document_item[1],
+}, type_hierarchy_provider_bufnr)
+local type_renderable_item = hierarchy_request("textDocument/prepareTypeHierarchy", {
+  textDocument = { uri = type_hierarchy_provider_uri },
+  position = type_hierarchy_requests.renderable_declaration,
+}, type_hierarchy_provider_bufnr)
+local type_renderable_subtypes = hierarchy_request("typeHierarchy/subtypes", {
+  item = type_renderable_item[1],
+}, type_hierarchy_provider_bufnr)
+local type_orphan_item = hierarchy_request("textDocument/prepareTypeHierarchy", {
+  textDocument = { uri = type_hierarchy_provider_uri },
+  position = type_hierarchy_requests.orphan_declaration,
+}, type_hierarchy_provider_bufnr)
+local type_orphan_supertypes = hierarchy_request("typeHierarchy/supertypes", {
+  item = type_orphan_item[1],
+}, type_hierarchy_provider_bufnr)
+local type_ambiguous_consumer_item = hierarchy_request("textDocument/prepareTypeHierarchy", {
+  textDocument = { uri = type_hierarchy_caller_uri },
+  position = type_hierarchy_requests.ambiguous_consumer_declaration,
+}, type_hierarchy_caller_bufnr)
+local type_ambiguous_consumer_supertypes = hierarchy_request("typeHierarchy/supertypes", {
+  item = type_ambiguous_consumer_item[1],
+}, type_hierarchy_caller_bufnr)
+local type_clash_item = hierarchy_request("textDocument/prepareTypeHierarchy", {
+  textDocument = { uri = type_hierarchy_provider_uri },
+  position = type_hierarchy_requests.clash_provider_declaration,
+}, type_hierarchy_provider_bufnr)
+local type_clash_subtypes = hierarchy_request("typeHierarchy/subtypes", {
+  item = type_clash_item[1],
+}, type_hierarchy_provider_bufnr)
+local function type_moniker(uri, position, bufnr)
+  return hierarchy_request("textDocument/moniker", {
+    textDocument = { uri = uri }, position = position,
+  }, bufnr)
+end
+local type_document_moniker = type_moniker(type_hierarchy_provider_uri, type_hierarchy_requests.document_declaration, type_hierarchy_provider_bufnr)
+local type_imported_moniker = type_moniker(type_hierarchy_caller_uri, type_hierarchy_requests.document_reference, type_hierarchy_caller_bufnr)
+local type_same_file_moniker = type_moniker(type_hierarchy_provider_uri, type_hierarchy_requests.document_alias_reference, type_hierarchy_provider_bufnr)
+local type_provider_clash_moniker = type_moniker(type_hierarchy_provider_uri, type_hierarchy_requests.clash_provider_declaration, type_hierarchy_provider_bufnr)
+local type_caller_clash_moniker = type_moniker(type_hierarchy_caller_uri, type_hierarchy_requests.clash_caller_declaration, type_hierarchy_caller_bufnr)
+local type_local_parameter_moniker = type_moniker(type_hierarchy_caller_uri, type_hierarchy_requests.local_parameter_declaration, type_hierarchy_caller_bufnr)
+local type_local_use_moniker = type_moniker(type_hierarchy_caller_uri, type_hierarchy_requests.local_parameter_use, type_hierarchy_caller_bufnr)
+local type_ambiguous_moniker = type_moniker(type_hierarchy_caller_uri, type_hierarchy_requests.ambiguous_reference, type_hierarchy_caller_bufnr)
 
 vim.cmd("edit " .. vim.fn.fnameescape(vim.env.ORNA_DOCUMENT_HIGHLIGHT_FIXTURE))
 local document_highlight_bufnr = vim.api.nvim_get_current_buf()
@@ -1179,6 +1431,28 @@ vim.fn.writefile({ vim.fn.json_encode({
   workspace_caller_uri = workspace_caller_uri,
   workspace_provider_code_lenses = workspace_provider_code_lenses,
   workspace_caller_code_lenses = workspace_caller_code_lenses,
+  definition_cross_file = definition_cross_file,
+  definition_shadowed_parameter = definition_shadowed_parameter,
+  definition_unresolved = definition_unresolved,
+  definition_ambiguous = definition_ambiguous,
+  type_hierarchy_provider_uri = type_hierarchy_provider_uri,
+  type_hierarchy_caller_uri = type_hierarchy_caller_uri,
+  type_document_item = type_document_item,
+  type_document_reference = type_document_reference,
+  type_document_supertypes = type_document_supertypes,
+  type_renderable_item = type_renderable_item,
+  type_renderable_subtypes = type_renderable_subtypes,
+  type_orphan_supertypes = type_orphan_supertypes,
+  type_ambiguous_consumer_supertypes = type_ambiguous_consumer_supertypes,
+  type_clash_subtypes = type_clash_subtypes,
+  type_document_moniker = type_document_moniker,
+  type_imported_moniker = type_imported_moniker,
+  type_same_file_moniker = type_same_file_moniker,
+  type_provider_clash_moniker = type_provider_clash_moniker,
+  type_caller_clash_moniker = type_caller_clash_moniker,
+  type_local_parameter_moniker = type_local_parameter_moniker,
+  type_local_use_moniker = type_local_use_moniker,
+  type_ambiguous_moniker = type_ambiguous_moniker,
   document_highlights = document_highlights,
   folding_ranges = folding_ranges,
   selection_ranges = selection_ranges,
@@ -1213,6 +1487,8 @@ vim.fn.writefile({
   "LSP_CODE_ACTION=pass",
   "LSP_WORKSPACE_SYMBOL=pass",
   "LSP_CALL_HIERARCHY=pass",
+  "LSP_DEFINITION_NAVIGATION=pass",
+  "LSP_TYPE_HIERARCHY_MONIKERS=pass",
   "LSP_DOCUMENT_HIGHLIGHT=pass",
   "LSP_CODE_LENS=pass",
   "LSP_FOLDING_RANGE=pass",
@@ -1250,6 +1526,14 @@ vim.cmd("qa!")
         )
         .env("ORNA_WORKSPACE_CALLER_FIXTURE", &workspace_caller_fixture)
         .env(
+            "ORNA_TYPE_HIERARCHY_PROVIDER_FIXTURE",
+            &type_hierarchy_provider_fixture,
+        )
+        .env(
+            "ORNA_TYPE_HIERARCHY_CALLER_FIXTURE",
+            &type_hierarchy_caller_fixture,
+        )
+        .env(
             "ORNA_DOCUMENT_HIGHLIGHT_FIXTURE",
             &document_highlight_fixture,
         )
@@ -1276,6 +1560,14 @@ vim.cmd("qa!")
         .env(
             "ORNA_WORKSPACE_HIERARCHY_REQUESTS",
             serde_json::to_string(&workspace_hierarchy_requests).unwrap(),
+        )
+        .env(
+            "ORNA_DEFINITION_REQUESTS",
+            serde_json::to_string(&definition_requests).unwrap(),
+        )
+        .env(
+            "ORNA_TYPE_HIERARCHY_REQUESTS",
+            serde_json::to_string(&type_hierarchy_requests).unwrap(),
         )
         .env(
             "ORNA_DOCUMENT_HIGHLIGHT_POSITION",
@@ -1409,6 +1701,30 @@ vim.cmd("qa!")
         hover_semantic_result["workspace_caller_uri"]
             .as_str()
             .expect("Neovim workspace caller URI"),
+        &hover_semantic_result,
+        "Neovim",
+    );
+    syntax_v1_definition_contract::assert_contract(
+        WORKSPACE_HIERARCHY_PROVIDER_SOURCE,
+        WORKSPACE_HIERARCHY_CALLER_SOURCE,
+        hover_semantic_result["workspace_provider_uri"]
+            .as_str()
+            .expect("Neovim definition provider URI"),
+        hover_semantic_result["workspace_caller_uri"]
+            .as_str()
+            .expect("Neovim definition caller URI"),
+        &hover_semantic_result,
+        "Neovim",
+    );
+    syntax_v1_type_hierarchy_moniker_contract::assert_contract(
+        TYPE_HIERARCHY_PROVIDER_SOURCE,
+        TYPE_HIERARCHY_CALLER_SOURCE,
+        hover_semantic_result["type_hierarchy_provider_uri"]
+            .as_str()
+            .expect("Neovim type-hierarchy provider URI"),
+        hover_semantic_result["type_hierarchy_caller_uri"]
+            .as_str()
+            .expect("Neovim type-hierarchy caller URI"),
         &hover_semantic_result,
         "Neovim",
     );
@@ -1569,6 +1885,10 @@ fn emacs_eglot_attaches_and_proves_hover_rename_references_and_semantic_tokens()
         root.join("crates/orna-lsp/tests/fixtures/workspace-hierarchy-provider-v1.orna");
     let workspace_caller_fixture =
         root.join("crates/orna-lsp/tests/fixtures/workspace-hierarchy-caller-v1.orna");
+    let type_hierarchy_provider_fixture =
+        root.join("crates/orna-lsp/tests/fixtures/type-hierarchy-provider-v1.orna");
+    let type_hierarchy_caller_fixture =
+        root.join("crates/orna-lsp/tests/fixtures/type-hierarchy-caller-v1.orna");
     let document_highlight_fixture =
         root.join("crates/orna-lsp/tests/fixtures/document-highlight-code-lens-v1.orna");
     let folding_selection_fixture =
@@ -1618,6 +1938,22 @@ fn emacs_eglot_attaches_and_proves_hover_rename_references_and_semantic_tokens()
     let workspace_hierarchy_requests = syntax_v1_workspace_hierarchy_contract::request_data(
         WORKSPACE_HIERARCHY_PROVIDER_SOURCE,
         WORKSPACE_HIERARCHY_CALLER_SOURCE,
+    );
+    let definition_requests = syntax_v1_definition_contract::request_data(
+        WORKSPACE_HIERARCHY_PROVIDER_SOURCE,
+        WORKSPACE_HIERARCHY_CALLER_SOURCE,
+    );
+    assert_eq!(
+        fs::read_to_string(&type_hierarchy_provider_fixture).unwrap(),
+        TYPE_HIERARCHY_PROVIDER_SOURCE
+    );
+    assert_eq!(
+        fs::read_to_string(&type_hierarchy_caller_fixture).unwrap(),
+        TYPE_HIERARCHY_CALLER_SOURCE
+    );
+    let type_hierarchy_requests = syntax_v1_type_hierarchy_moniker_contract::request_data(
+        TYPE_HIERARCHY_PROVIDER_SOURCE,
+        TYPE_HIERARCHY_CALLER_SOURCE,
     );
     assert_eq!(
         fs::read_to_string(&folding_selection_fixture).unwrap(),
@@ -1719,6 +2055,30 @@ fn emacs_eglot_attaches_and_proves_hover_rename_references_and_semantic_tokens()
          (position (gethash name requests)))
     (list :line (gethash "line" position)
           :character (gethash "character" position))))
+(defun orna-test-definition-position (name)
+  (let* ((requests (json-parse-string (getenv "ORNA_DEFINITION_REQUESTS")
+                                      :object-type 'hash-table))
+         (position (gethash name requests)))
+    (list :line (gethash "line" position)
+          :character (gethash "character" position))))
+(defun orna-test-type-hierarchy-position (name)
+  (let* ((requests (json-parse-string (getenv "ORNA_TYPE_HIERARCHY_REQUESTS")
+                                      :object-type 'hash-table))
+         (position (gethash name requests)))
+    (list :line (gethash "line" position)
+          :character (gethash "character" position))))
+(defun orna-test-type-hierarchy-prepare (server uri name)
+  (jsonrpc-request
+   server :textDocument/prepareTypeHierarchy
+   (list :textDocument (list :uri uri)
+         :position (orna-test-type-hierarchy-position name))))
+(defun orna-test-type-hierarchy-moniker (server uri name)
+  (jsonrpc-request
+   server :textDocument/moniker
+   (list :textDocument (list :uri uri)
+         :position (orna-test-type-hierarchy-position name))))
+(defun orna-test-type-hierarchy-edge (server method item)
+  (jsonrpc-request server method (list :item item)))
 (defun orna-test-folding-selection-positions ()
   (let ((positions (json-parse-string (getenv "ORNA_FOLDING_SELECTION_REQUESTS")
                                       :array-type 'list :object-type 'hash-table)))
@@ -1738,6 +2098,8 @@ fn emacs_eglot_attaches_and_proves_hover_rename_references_and_semantic_tokens()
       (action-buffer nil)
       (workspace-provider-buffer nil)
       (workspace-caller-buffer nil)
+      (type-hierarchy-provider-buffer nil)
+      (type-hierarchy-caller-buffer nil)
       (document-highlight-buffer nil)
       (folding-selection-buffer nil)
       (diagnostic-buffer nil)
@@ -1763,6 +2125,8 @@ fn emacs_eglot_attaches_and_proves_hover_rename_references_and_semantic_tokens()
       (action-uri nil)
       (workspace-provider-uri nil)
       (workspace-caller-uri nil)
+      (type-hierarchy-provider-uri nil)
+      (type-hierarchy-caller-uri nil)
       (workspace-server nil)
       (workspace-evidence (make-hash-table :test 'equal))
       (folding-ranges nil)
@@ -2006,6 +2370,31 @@ fn emacs_eglot_attaches_and_proves_hover_rename_references_and_semantic_tokens()
               (error "Eglot did not provide a URI for the workspace caller: %S" params))
             (setq workspace-caller-uri uri
                   workspace-server (eglot-current-server))))
+        (puthash "definition_cross_file"
+                 (jsonrpc-request
+                  workspace-server :textDocument/definition
+                  (list :textDocument (list :uri workspace-caller-uri)
+                        :position (orna-test-definition-position "cross_file_reference")))
+                 workspace-evidence)
+        (puthash "definition_shadowed_parameter"
+                 (jsonrpc-request
+                  workspace-server :textDocument/definition
+                  (list :textDocument (list :uri workspace-provider-uri)
+                        :position (orna-test-definition-position "shadowed_reference")))
+                 workspace-evidence)
+        (puthash "definition_unresolved"
+                 (jsonrpc-request
+                  workspace-server :textDocument/definition
+                  (list :textDocument (list :uri workspace-provider-uri)
+                        :position (orna-test-definition-position "unresolved_reference")))
+                 workspace-evidence)
+        (puthash "definition_ambiguous"
+                 (jsonrpc-request
+                  workspace-server :textDocument/definition
+                  (list :textDocument (list :uri workspace-caller-uri)
+                        :position (orna-test-definition-position "ambiguous_reference")))
+                 workspace-evidence)
+        (princ "EMACS_LSP_DEFINITION_NAVIGATION=pass\n")
         (puthash "workspace_provider_code_lenses"
                  (jsonrpc-request
                   workspace-server :textDocument/codeLens
@@ -2102,6 +2491,107 @@ fn emacs_eglot_attaches_and_proves_hover_rename_references_and_semantic_tokens()
                   (list :textDocument (list :uri workspace-caller-uri)
                         :position (orna-test-workspace-hierarchy-position "ambiguous_reference")))
                  workspace-evidence)
+        (setq type-hierarchy-provider-buffer
+              (find-file-noselect (getenv "ORNA_TYPE_HIERARCHY_PROVIDER_FIXTURE")))
+        (with-current-buffer type-hierarchy-provider-buffer
+          (orna-test-wait-managed type-hierarchy-provider-buffer)
+          (let* ((params (eglot--TextDocumentPositionParams))
+                 (uri (orna-test-get (orna-test-get params "textDocument") "uri")))
+            (unless (stringp uri)
+              (error "Eglot did not provide a URI for the type-hierarchy provider: %S" params))
+            (setq type-hierarchy-provider-uri uri
+                  workspace-server (eglot-current-server))))
+        (setq type-hierarchy-caller-buffer
+              (find-file-noselect (getenv "ORNA_TYPE_HIERARCHY_CALLER_FIXTURE")))
+        (with-current-buffer type-hierarchy-caller-buffer
+          (orna-test-wait-managed type-hierarchy-caller-buffer)
+          (let* ((params (eglot--TextDocumentPositionParams))
+                 (uri (orna-test-get (orna-test-get params "textDocument") "uri")))
+            (unless (stringp uri)
+              (error "Eglot did not provide a URI for the type-hierarchy caller: %S" params))
+            (setq type-hierarchy-caller-uri uri
+                  workspace-server (eglot-current-server))))
+        (puthash "type_hierarchy_provider_uri" type-hierarchy-provider-uri workspace-evidence)
+        (puthash "type_hierarchy_caller_uri" type-hierarchy-caller-uri workspace-evidence)
+        (let* ((document-item-response
+                (orna-test-type-hierarchy-prepare
+                 workspace-server type-hierarchy-provider-uri "document_declaration"))
+               (document-item (car (orna-test-list document-item-response)))
+               (document-reference
+                (orna-test-type-hierarchy-prepare
+                 workspace-server type-hierarchy-caller-uri "document_reference"))
+               (document-supers
+                (orna-test-type-hierarchy-edge
+                 workspace-server :typeHierarchy/supertypes document-item))
+               (renderable-item-response
+                (orna-test-type-hierarchy-prepare
+                 workspace-server type-hierarchy-provider-uri "renderable_declaration"))
+               (renderable-item (car (orna-test-list renderable-item-response)))
+               (renderable-subtypes
+                (orna-test-type-hierarchy-edge
+                 workspace-server :typeHierarchy/subtypes renderable-item))
+               (orphan-item-response
+                (orna-test-type-hierarchy-prepare
+                 workspace-server type-hierarchy-provider-uri "orphan_declaration"))
+               (orphan-item (car (orna-test-list orphan-item-response)))
+               (orphan-supers
+                (orna-test-type-hierarchy-edge
+                 workspace-server :typeHierarchy/supertypes orphan-item))
+               (consumer-item-response
+                (orna-test-type-hierarchy-prepare
+                 workspace-server type-hierarchy-caller-uri "ambiguous_consumer_declaration"))
+               (consumer-item (car (orna-test-list consumer-item-response)))
+               (consumer-supers
+                (orna-test-type-hierarchy-edge
+                 workspace-server :typeHierarchy/supertypes consumer-item))
+               (clash-item-response
+                (orna-test-type-hierarchy-prepare
+                 workspace-server type-hierarchy-provider-uri "clash_provider_declaration"))
+               (clash-item (car (orna-test-list clash-item-response)))
+               (clash-subtypes
+                (orna-test-type-hierarchy-edge
+                 workspace-server :typeHierarchy/subtypes clash-item)))
+          (puthash "type_document_item" document-item-response workspace-evidence)
+          (puthash "type_document_reference" document-reference workspace-evidence)
+          (puthash "type_document_supertypes" document-supers workspace-evidence)
+          (puthash "type_renderable_item" renderable-item-response workspace-evidence)
+          (puthash "type_renderable_subtypes" renderable-subtypes workspace-evidence)
+          (puthash "type_orphan_supertypes" orphan-supers workspace-evidence)
+          (puthash "type_ambiguous_consumer_supertypes" consumer-supers workspace-evidence)
+          (puthash "type_clash_subtypes" clash-subtypes workspace-evidence))
+        (puthash "type_document_moniker"
+                 (orna-test-type-hierarchy-moniker
+                  workspace-server type-hierarchy-provider-uri "document_declaration")
+                 workspace-evidence)
+        (puthash "type_imported_moniker"
+                 (orna-test-type-hierarchy-moniker
+                  workspace-server type-hierarchy-caller-uri "document_reference")
+                 workspace-evidence)
+        (puthash "type_same_file_moniker"
+                 (orna-test-type-hierarchy-moniker
+                  workspace-server type-hierarchy-provider-uri "document_alias_reference")
+                 workspace-evidence)
+        (puthash "type_provider_clash_moniker"
+                 (orna-test-type-hierarchy-moniker
+                  workspace-server type-hierarchy-provider-uri "clash_provider_declaration")
+                 workspace-evidence)
+        (puthash "type_caller_clash_moniker"
+                 (orna-test-type-hierarchy-moniker
+                  workspace-server type-hierarchy-caller-uri "clash_caller_declaration")
+                 workspace-evidence)
+        (puthash "type_local_parameter_moniker"
+                 (orna-test-type-hierarchy-moniker
+                  workspace-server type-hierarchy-caller-uri "local_parameter_declaration")
+                 workspace-evidence)
+        (puthash "type_local_use_moniker"
+                 (orna-test-type-hierarchy-moniker
+                  workspace-server type-hierarchy-caller-uri "local_parameter_use")
+                 workspace-evidence)
+        (puthash "type_ambiguous_moniker"
+                 (orna-test-type-hierarchy-moniker
+                  workspace-server type-hierarchy-caller-uri "ambiguous_reference")
+                 workspace-evidence)
+        (princ "EMACS_LSP_TYPE_HIERARCHY_MONIKERS=pass\n")
         (setq folding-selection-buffer
               (find-file-noselect (getenv "ORNA_FOLDING_SELECTION_FIXTURE")))
         (with-current-buffer folding-selection-buffer
@@ -2229,6 +2719,8 @@ fn emacs_eglot_attaches_and_proves_hover_rename_references_and_semantic_tokens()
     (when (buffer-live-p action-buffer) (kill-buffer action-buffer))
     (when (buffer-live-p workspace-provider-buffer) (kill-buffer workspace-provider-buffer))
     (when (buffer-live-p workspace-caller-buffer) (kill-buffer workspace-caller-buffer))
+    (when (buffer-live-p type-hierarchy-provider-buffer) (kill-buffer type-hierarchy-provider-buffer))
+    (when (buffer-live-p type-hierarchy-caller-buffer) (kill-buffer type-hierarchy-caller-buffer))
     (when (buffer-live-p folding-selection-buffer) (kill-buffer folding-selection-buffer))
     (when (buffer-live-p diagnostic-buffer) (kill-buffer diagnostic-buffer))
     (when (buffer-live-p document-links-buffer) (kill-buffer document-links-buffer))
@@ -2264,6 +2756,14 @@ fn emacs_eglot_attaches_and_proves_hover_rename_references_and_semantic_tokens()
         )
         .env("ORNA_WORKSPACE_CALLER_FIXTURE", &workspace_caller_fixture)
         .env(
+            "ORNA_TYPE_HIERARCHY_PROVIDER_FIXTURE",
+            &type_hierarchy_provider_fixture,
+        )
+        .env(
+            "ORNA_TYPE_HIERARCHY_CALLER_FIXTURE",
+            &type_hierarchy_caller_fixture,
+        )
+        .env(
             "ORNA_DOCUMENT_HIGHLIGHT_FIXTURE",
             &document_highlight_fixture,
         )
@@ -2282,6 +2782,14 @@ fn emacs_eglot_attaches_and_proves_hover_rename_references_and_semantic_tokens()
         .env(
             "ORNA_WORKSPACE_HIERARCHY_REQUESTS",
             serde_json::to_string(&workspace_hierarchy_requests).unwrap(),
+        )
+        .env(
+            "ORNA_DEFINITION_REQUESTS",
+            serde_json::to_string(&definition_requests).unwrap(),
+        )
+        .env(
+            "ORNA_TYPE_HIERARCHY_REQUESTS",
+            serde_json::to_string(&type_hierarchy_requests).unwrap(),
         )
         .env(
             "ORNA_FOLDING_SELECTION_REQUESTS",
@@ -2334,6 +2842,30 @@ fn emacs_eglot_attaches_and_proves_hover_rename_references_and_semantic_tokens()
         hover_semantic_result["workspace_caller_uri"]
             .as_str()
             .expect("Emacs Eglot workspace caller URI"),
+        &hover_semantic_result,
+        "Emacs Eglot",
+    );
+    syntax_v1_definition_contract::assert_contract(
+        WORKSPACE_HIERARCHY_PROVIDER_SOURCE,
+        WORKSPACE_HIERARCHY_CALLER_SOURCE,
+        hover_semantic_result["workspace_provider_uri"]
+            .as_str()
+            .expect("Emacs Eglot definition provider URI"),
+        hover_semantic_result["workspace_caller_uri"]
+            .as_str()
+            .expect("Emacs Eglot definition caller URI"),
+        &hover_semantic_result,
+        "Emacs Eglot",
+    );
+    syntax_v1_type_hierarchy_moniker_contract::assert_contract(
+        TYPE_HIERARCHY_PROVIDER_SOURCE,
+        TYPE_HIERARCHY_CALLER_SOURCE,
+        hover_semantic_result["type_hierarchy_provider_uri"]
+            .as_str()
+            .expect("Emacs Eglot type-hierarchy provider URI"),
+        hover_semantic_result["type_hierarchy_caller_uri"]
+            .as_str()
+            .expect("Emacs Eglot type-hierarchy caller URI"),
         &hover_semantic_result,
         "Emacs Eglot",
     );

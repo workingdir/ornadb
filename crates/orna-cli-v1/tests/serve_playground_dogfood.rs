@@ -24,6 +24,7 @@ use tungstenite::{
 const MAIN: &str = include_str!("fixtures/project-core-main.orna");
 const SAMPLE: &str = include_str!("fixtures/playground-example.orna");
 const SAMPLE_ROW: &str = include_str!("fixtures/playground-sample.orna");
+const LIVE_PROGRAM_ROW: &str = include_str!("fixtures/playground-sample-live.orna");
 const SAMPLE_ARITHMETIC: &str = include_str!("fixtures/playground-sample-arithmetic.orna");
 const SAMPLE_FUNCTIONS: &str = include_str!("fixtures/playground-sample-functions.orna");
 const SAMPLE_INCREMENT: &str = include_str!("fixtures/playground-sample-increment.orna");
@@ -1038,6 +1039,11 @@ fn orna_serve_hosts_playground_with_pending_evals_and_snapshot_correct_deltas() 
         .as_array()
         .expect("committed example catalog");
     assert_eq!(examples.len(), 4);
+    assert!(
+        examples
+            .iter()
+            .all(|example| { example["path"] != "playground/Sample/live-after-start.orna" })
+    );
     let arithmetic = examples
         .iter()
         .find(|example| example["path"] == "playground/Sample/arithmetic.orna")
@@ -1077,6 +1083,80 @@ fn orna_serve_hosts_playground_with_pending_evals_and_snapshot_correct_deltas() 
     assert_eq!(record_page.status, 200);
     assert!(record_page.body.contains("Arithmetic"));
     assert!(record_page.body.contains("6 * 7"));
+
+    write_fixture_rows(
+        project.path(),
+        "Sample",
+        &[("live-after-start", LIVE_PROGRAM_ROW)],
+    );
+    let uncommitted_programs = curl(&format!("{base_url}/api/examples"), &["--max-time", "15"])
+        .expect("curl the catalog while the new program row is uncommitted");
+    assert_eq!(uncommitted_programs.status, 200);
+    let uncommitted_status = uncommitted_programs.status;
+    let uncommitted_catalog: JsonValue =
+        serde_json::from_str(&uncommitted_programs.body).expect("uncommitted example catalog JSON");
+    let uncommitted_program_list = uncommitted_catalog["examples"]
+        .as_array()
+        .expect("uncommitted committed example catalog");
+    assert_eq!(uncommitted_program_list.len(), 4);
+    assert!(
+        uncommitted_program_list
+            .iter()
+            .all(|example| { example["path"] != "playground/Sample/live-after-start.orna" })
+    );
+    println!(
+        "uncommitted DB program stayed out of /api/examples (HTTP {}, {} committed rows, exit 0)",
+        uncommitted_status,
+        uncommitted_program_list.len()
+    );
+    git(
+        project.path(),
+        &["add", "playground/Sample/live-after-start.orna"],
+    );
+    git(
+        project.path(),
+        &[
+            "-c",
+            "user.name=kierandrewett",
+            "-c",
+            "user.email=kieran@drewett.dev",
+            "commit",
+            "--quiet",
+            "-m",
+            "add live playground program",
+        ],
+    );
+    let live_examples = curl(&format!("{base_url}/api/examples"), &["--max-time", "15"])
+        .expect("curl the live database program catalog");
+    assert_eq!(live_examples.status, 200);
+    let live_examples_status = live_examples.status;
+    let live_catalog: JsonValue =
+        serde_json::from_str(&live_examples.body).expect("updated example catalog JSON");
+    let live_example_list = live_catalog["examples"]
+        .as_array()
+        .expect("updated committed example catalog");
+    assert_eq!(live_example_list.len(), 5);
+    assert_ne!(
+        live_catalog["revision"].as_str(),
+        Some(initial_examples_revision.as_str())
+    );
+    let live_program = live_example_list
+        .iter()
+        .find(|example| example["path"] == "playground/Sample/live-after-start.orna")
+        .expect("program committed while orna serve was running");
+    assert_eq!(live_program["name"], "Live after startup");
+    assert_eq!(live_program["source"], "6 * 7");
+    let live_program_source = live_program["source"]
+        .as_str()
+        .expect("database-resident program source")
+        .to_owned();
+    assert_eq!(live_program_source, "6 * 7");
+    println!(
+        "live DB program catalog: /api/examples absent before commit, present afterward as {} (HTTP {}, {} committed rows, exit 0)",
+        live_program["path"],
+        live_examples_status,
+        live_example_list.len()
+    );
 
     let database_id = listing
         .body
@@ -1479,6 +1559,26 @@ fn orna_serve_hosts_playground_with_pending_evals_and_snapshot_correct_deltas() 
         } if present == updated_present
     ));
 
+    let live_program_eval_request = [0x38; 16];
+    let live_program_result = send_and_read_request(
+        &mut socket,
+        evaluation(
+            session_bytes,
+            uuid_bytes(database_id),
+            live_program_eval_request,
+            &live_program_source,
+        ),
+        live_program_eval_request,
+    );
+    assert!(matches!(
+        live_program_result.message,
+        Message::Result {
+            status: ResultStatus::Success,
+            value: Some(value),
+            ..
+        } if value.raw() == &OvbRaw::Int(42.into())
+    ));
+
     println!(
         "curl GET / -> HTTP {} (exit 0): Git listing + playground link",
         listing.status
@@ -1512,4 +1612,5 @@ fn orna_serve_hosts_playground_with_pending_evals_and_snapshot_correct_deltas() 
     println!("WebSocket RESYNC -> Delta revision 0..1 (exit 0): both pipelined run events");
     println!("WebSocket RESYNC -> Delta revision 1..2 (exit 0): next run event applies");
     println!("WebSocket WATCH -> fresh Snapshot revision 0 (exit 0): matches applied delta");
+    println!("WebSocket EVAL exact source fetched from live /api/examples -> Result 42 (exit 0)");
 }
