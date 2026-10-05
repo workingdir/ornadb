@@ -16,9 +16,10 @@ use orna_foundation_v1::{CanonicalValue, GitHash, OvbRaw, SchemaDescriptor};
 use orna_repository_v1::{
     CheckoutExecutionError, CheckoutTarget, CommittedTreeEntryKind, CompactManifest,
     CompactRuntimeReceipt, CompactSegment, CompactSegmentRole, GitDeclaredObjectSetState,
-    GitObjectKind, GitObjectState, GitRepositoryMode, IndexGeneration, ManagedPath, NativeObjectId,
-    OrnaInternalRef, RemoteContinuity, Repository, RequiredInternalRef, RuntimeGeneration,
-    WorktreeState,
+    GitObjectKind, GitObjectState, GitRepositoryMode, IndexGeneration, ManagedFileChange,
+    ManagedPath, NativeObjectId, OrnaInternalRef, PublicationJournal, PublicationJournalEntry,
+    PublicationJournalStage, RemoteContinuity, Repository, RepositoryError, RequiredInternalRef,
+    RuntimeGeneration, WorktreeState,
 };
 use parquet::{
     basic::{Compression, Encoding, PageType},
@@ -101,6 +102,24 @@ fn repository() -> TempDir {
     fs::write(temp.path().join(".orna/format.orna"), "format 1\n").unwrap();
     git(temp.path(), &["add", "."]);
     git(temp.path(), &["commit", "-m", "initial"]);
+    temp
+}
+
+fn repository_with_legacy_format(format: &str) -> TempDir {
+    let temp = TempDir::new().unwrap();
+    git(temp.path(), &["init", "-b", "main"]);
+    test_support::configure_fixture_git_identity(temp.path());
+    git(temp.path(), &["config", "commit.gpgsign", "false"]);
+    fs::write(
+        temp.path().join("main.orna"),
+        include_str!("fixtures/git-repository-main.orna"),
+    )
+    .unwrap();
+    fs::write(temp.path().join("ordinary.txt"), "base\n").unwrap();
+    fs::create_dir_all(temp.path().join(".orna")).unwrap();
+    fs::write(temp.path().join(".orna/format.orna"), format).unwrap();
+    git(temp.path(), &["add", "."]);
+    git(temp.path(), &["commit", "-m", "legacy format fixture"]);
     temp
 }
 
@@ -7431,4 +7450,198 @@ fn compact_runtime_fence_rejects_ref_drift_before_cleanup() {
             panic!("ref drift must require explicit reconciliation")
         }
     }
+}
+
+#[test]
+fn legacy_format_migration_uses_pub3_journal_and_preserves_user_state() {
+    for format in [
+        include_str!("fixtures/format-context/format-1.orna"),
+        include_str!("fixtures/format-context/format-2.orna"),
+    ] {
+        let root = repository_with_legacy_format(format);
+        let dependency_source = TempDir::new().unwrap();
+        git(dependency_source.path(), &["init", "-b", "main"]);
+        test_support::configure_fixture_git_identity(dependency_source.path());
+        git(
+            dependency_source.path(),
+            &["config", "commit.gpgsign", "false"],
+        );
+        fs::write(
+            dependency_source.path().join("dependency.txt"),
+            "base dependency\n",
+        )
+        .unwrap();
+        git(dependency_source.path(), &["add", "."]);
+        git(
+            dependency_source.path(),
+            &["commit", "-m", "dependency fixture"],
+        );
+        git(
+            root.path(),
+            &[
+                "-c",
+                "protocol.file.allow=always",
+                "submodule",
+                "add",
+                "--quiet",
+                dependency_source.path().to_str().unwrap(),
+                "deps/sample",
+            ],
+        );
+        git(root.path(), &["commit", "-m", "add dependency fixture"]);
+        let repo = Repository::discover(root.path()).unwrap();
+        let old_head = repo.head().unwrap().unwrap();
+
+        fs::write(
+            root.path().join("deps/sample/dependency.txt"),
+            "dirty dependency worktree\n",
+        )
+        .unwrap();
+        fs::write(
+            root.path().join("main.orna"),
+            include_str!("fixtures/git-repository-nested-tool.orna"),
+        )
+        .unwrap();
+        fs::write(root.path().join("ordinary.txt"), "staged user edit\n").unwrap();
+        git(root.path(), &["add", "ordinary.txt"]);
+
+        let expected_index = repo.index_generation().unwrap();
+        let database = include_str!("fixtures/format-context/database-final.orna");
+        let candidate = repo
+            .build_private_commit(
+                &old_head,
+                &[
+                    ManagedFileChange::new(
+                        ManagedPath::new(".orna/database.orna").unwrap(),
+                        Some(database.as_bytes().to_vec()),
+                    ),
+                    ManagedFileChange::new(ManagedPath::new(".orna/format.orna").unwrap(), None),
+                    ManagedFileChange::new(
+                        ManagedPath::new(".orna/store/root").unwrap(),
+                        Some(b"verified candidate store root".to_vec()),
+                    ),
+                ],
+                "explicit format 3 migration",
+            )
+            .unwrap();
+        let intent = [71; 16];
+        let mut journal = PublicationJournal::new_with_runtime_intent(
+            old_head.clone(),
+            candidate.commit().clone(),
+            expected_index.tree().unwrap().clone(),
+            intent,
+            vec![
+                PublicationJournalEntry::new(
+                    ManagedPath::new(".orna/database.orna").unwrap(),
+                    None,
+                    Some(database.as_bytes().to_vec()),
+                ),
+                PublicationJournalEntry::new(
+                    ManagedPath::new(".orna/format.orna").unwrap(),
+                    Some(format.as_bytes().to_vec()),
+                    None,
+                ),
+                PublicationJournalEntry::new(
+                    ManagedPath::new(".orna/store/root").unwrap(),
+                    None,
+                    Some(b"verified candidate store root".to_vec()),
+                ),
+            ],
+        )
+        .unwrap();
+
+        repo.publish_legacy_format_migration(&expected_index, &candidate, &mut journal)
+            .unwrap();
+
+        assert_eq!(
+            repo.open_format_context()
+                .unwrap()
+                .repository_format_number(),
+            3
+        );
+        assert_eq!(journal.stage(), PublicationJournalStage::WorktreeReconciled);
+        let persisted = repo.read_publication_journal().unwrap().unwrap();
+        assert_eq!(persisted.runtime_intent_id(), Some(intent));
+        assert_eq!(
+            persisted.stage(),
+            PublicationJournalStage::WorktreeReconciled
+        );
+        assert_eq!(
+            repo.read_committed_file(&old_head, ".orna/format.orna", 64)
+                .unwrap(),
+            format.as_bytes()
+        );
+        assert!(!root.path().join(".orna/format.orna").exists());
+        assert_eq!(
+            fs::read(root.path().join(".orna/database.orna")).unwrap(),
+            database.as_bytes()
+        );
+        let status = git(root.path(), &["status", "--short", "--untracked-files=all"]);
+        assert!(
+            status.lines().any(|line| line.ends_with("main.orna")),
+            "{status}"
+        );
+        assert!(
+            status.lines().any(|line| line.ends_with("ordinary.txt")),
+            "{status}"
+        );
+        assert!(
+            status.lines().any(|line| line.ends_with("deps/sample")),
+            "{status}"
+        );
+        assert_eq!(
+            fs::read(root.path().join("deps/sample/dependency.txt")).unwrap(),
+            b"dirty dependency worktree\n"
+        );
+    }
+}
+
+#[test]
+fn legacy_format_migration_rejects_implicit_relabel_without_publication() {
+    let format = include_str!("fixtures/format-context/format-1.orna");
+    let root = repository_with_legacy_format(format);
+    let repo = Repository::discover(root.path()).unwrap();
+    let old_head = repo.head().unwrap().unwrap();
+    let expected_index = repo.index_generation().unwrap();
+    let candidate = repo
+        .build_private_commit(
+            &old_head,
+            &[ManagedFileChange::new(
+                ManagedPath::new("main.orna").unwrap(),
+                Some(
+                    include_str!("fixtures/git-repository-nested-tool.orna")
+                        .as_bytes()
+                        .to_vec(),
+                ),
+            )],
+            "candidate that keeps legacy metadata",
+        )
+        .unwrap();
+    let mut journal = PublicationJournal::new_with_runtime_intent(
+        old_head.clone(),
+        candidate.commit().clone(),
+        expected_index.tree().unwrap().clone(),
+        [72; 16],
+        vec![PublicationJournalEntry::new(
+            ManagedPath::new("main.orna").unwrap(),
+            Some(
+                include_str!("fixtures/git-repository-main.orna")
+                    .as_bytes()
+                    .to_vec(),
+            ),
+            Some(
+                include_str!("fixtures/git-repository-nested-tool.orna")
+                    .as_bytes()
+                    .to_vec(),
+            ),
+        )],
+    )
+    .unwrap();
+
+    assert!(matches!(
+        repo.publish_legacy_format_migration(&expected_index, &candidate, &mut journal),
+        Err(RepositoryError::InvalidFormatMigration)
+    ));
+    assert_eq!(repo.head().unwrap(), Some(old_head));
+    assert!(repo.read_publication_journal().unwrap().is_none());
 }
