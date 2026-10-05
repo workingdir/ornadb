@@ -17,9 +17,10 @@ use orna_repository_v1::{
     CheckoutExecutionError, CheckoutTarget, CommittedTreeEntryKind, CompactManifest,
     CompactRuntimeReceipt, CompactSegment, CompactSegmentRole, GitDeclaredObjectSetState,
     GitObjectKind, GitObjectState, GitRepositoryMode, IndexGeneration, ManagedFileChange,
-    ManagedPath, NativeObjectId, OrnaInternalRef, PublicationJournal, PublicationJournalEntry,
-    PublicationJournalStage, RemoteContinuity, Repository, RepositoryError, RequiredInternalRef,
-    RuntimeGeneration, WorktreeState,
+    ManagedPath, MigrationContinuityRecord, NativeObjectId, OrnaInternalRef, PublicationJournal,
+    PublicationJournalEntry, PublicationJournalStage, RemoteContinuity, Repository,
+    RepositoryError, RequiredInternalRef, RuntimeGeneration, StreamCheckpointIdentityPredecessor,
+    WorktreeState,
 };
 use parquet::{
     basic::{Compression, Encoding, PageType},
@@ -2641,7 +2642,12 @@ fn admitted_force_discard_is_fenced_against_later_target_drift() {
         .unwrap();
     let token = plan.force_token();
     let discard = repo
-        .validate_checkout_discard_set(&plan, true, Some(&token), plan.git().discardable_paths())
+        .validate_checkout_discard_set(
+            &plan,
+            true,
+            Some(&token),
+            plan.git().discardable_paths(),
+        )
         .unwrap();
 
     let target = git(root.path(), &["rev-parse", "experiment"]);
@@ -5515,12 +5521,7 @@ fn cross_protocol_recovery_journals_are_mutually_exclusive() {
     let plan = repo.plan_checkout("experiment", runtime).unwrap();
     let token = plan.force_token();
     let discard = repo
-        .validate_checkout_discard_set(
-            &plan,
-            true,
-            Some(&token),
-            plan.git().discardable_paths(),
-        )
+        .validate_checkout_discard_set(&plan, true, Some(&token), plan.git().discardable_paths())
         .unwrap();
     repo.persist_validated_checkout_discard(&discard).unwrap();
     let checkout_path = repo.runtime_paths().root().join("checkout-journal.bin");
@@ -7578,29 +7579,64 @@ fn legacy_format_migration_uses_pub3_journal_and_preserves_user_state() {
             )
             .unwrap();
         let intent = [71; 16];
+        let journal_entries = vec![
+            PublicationJournalEntry::new(
+                ManagedPath::new(".orna/database.orna").unwrap(),
+                None,
+                Some(database.as_bytes().to_vec()),
+            ),
+            PublicationJournalEntry::new(
+                ManagedPath::new(".orna/format.orna").unwrap(),
+                Some(format.as_bytes().to_vec()),
+                None,
+            ),
+            PublicationJournalEntry::new(
+                ManagedPath::new(".orna/store/root").unwrap(),
+                None,
+                Some(b"verified candidate store root".to_vec()),
+            ),
+        ];
+        let missing_continuity = PublicationJournal::new_with_runtime_intent(
+            old_head.clone(),
+            candidate.commit().clone(),
+            expected_index.tree().unwrap().clone(),
+            intent,
+            journal_entries.clone(),
+        )
+        .unwrap();
+        let mut missing_continuity = missing_continuity;
+        assert!(matches!(
+            repo.publish_legacy_format_migration(
+                &expected_index,
+                &candidate,
+                &mut missing_continuity,
+            ),
+            Err(RepositoryError::InvalidFormatMigration)
+        ));
+        assert_eq!(repo.head().unwrap(), Some(old_head.clone()));
+        assert!(repo.read_publication_journal().unwrap().is_none());
+
+        let continuity = MigrationContinuityRecord::new(vec![
+            StreamCheckpointIdentityPredecessor::new(
+                [31; 32],
+                b"legacy-source".to_vec(),
+                None,
+                [32; 32],
+                b"format3-source".to_vec(),
+                None,
+            )
+            .unwrap(),
+        ])
+        .unwrap();
         let mut journal = PublicationJournal::new_with_runtime_intent(
             old_head.clone(),
             candidate.commit().clone(),
             expected_index.tree().unwrap().clone(),
             intent,
-            vec![
-                PublicationJournalEntry::new(
-                    ManagedPath::new(".orna/database.orna").unwrap(),
-                    None,
-                    Some(database.as_bytes().to_vec()),
-                ),
-                PublicationJournalEntry::new(
-                    ManagedPath::new(".orna/format.orna").unwrap(),
-                    Some(format.as_bytes().to_vec()),
-                    None,
-                ),
-                PublicationJournalEntry::new(
-                    ManagedPath::new(".orna/store/root").unwrap(),
-                    None,
-                    Some(b"verified candidate store root".to_vec()),
-                ),
-            ],
+            journal_entries,
         )
+        .unwrap()
+        .with_migration_continuity(continuity.clone())
         .unwrap();
 
         repo.publish_legacy_format_migration(&expected_index, &candidate, &mut journal)
@@ -7615,6 +7651,7 @@ fn legacy_format_migration_uses_pub3_journal_and_preserves_user_state() {
         assert_eq!(journal.stage(), PublicationJournalStage::WorktreeReconciled);
         let persisted = repo.read_publication_journal().unwrap().unwrap();
         assert_eq!(persisted.runtime_intent_id(), Some(intent));
+        assert_eq!(persisted.migration_continuity(), Some(&continuity));
         assert_eq!(
             persisted.stage(),
             PublicationJournalStage::WorktreeReconciled
