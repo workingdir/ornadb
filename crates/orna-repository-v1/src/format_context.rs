@@ -139,6 +139,7 @@ impl std::error::Error for FormatContextError {}
 pub struct RepositorySnapshotPin {
     repository: Repository,
     commit: crate::GitCommitRef,
+    private_candidate: Option<crate::PrivateCommit>,
 }
 
 impl fmt::Debug for RepositorySnapshotPin {
@@ -153,6 +154,18 @@ impl RepositorySnapshotPin {
     fn belongs_to(&self, repository: &Repository) -> bool {
         self.repository.worktree() == repository.worktree()
             && self.repository.runtime_paths().root() == repository.runtime_paths().root()
+    }
+
+    fn read_file(
+        &self,
+        repository: &Repository,
+        path: impl AsRef<std::path::Path>,
+        max_bytes: usize,
+    ) -> Result<Vec<u8>, RepositoryError> {
+        match &self.private_candidate {
+            Some(candidate) => repository.read_private_candidate_file(candidate, path, max_bytes),
+            None => repository.read_committed_file(&self.commit, path, max_bytes),
+        }
     }
 }
 
@@ -242,11 +255,10 @@ impl RepositoryFormatContext {
     /// row layers. It validates only the fixed source root in this slice.
     pub fn validate_schema_root(&self) -> Result<SchemaRootPin, FormatContextError> {
         self.require_format3()?;
-        let source = match self.repository.read_committed_file(
-            &self.snapshot.commit,
-            MAIN_SOURCE_PATH,
-            64 * 1024,
-        ) {
+        let source = match self
+            .snapshot
+            .read_file(&self.repository, MAIN_SOURCE_PATH, 64 * 1024)
+        {
             Ok(source) => source,
             Err(RepositoryError::GitUnavailable) => {
                 return Err(FormatContextError::SchemaRootUnavailable);
@@ -432,7 +444,25 @@ impl Repository {
         Ok(RepositorySnapshotPin {
             repository: self.clone(),
             commit,
+            private_candidate: None,
         })
+    }
+
+    /// Opens metadata for a private candidate while it is still unreachable.
+    /// The candidate capability is repository-issued and validation reads its
+    /// exact private tree; no public snapshot pin is created or exposed.
+    pub(crate) fn open_private_candidate_format_context(
+        &self,
+        candidate: &crate::PrivateCommit,
+    ) -> Result<RepositoryFormatContext, FormatContextError> {
+        self.verify_private_candidate(candidate)
+            .map_err(map_snapshot_error)?;
+        let snapshot = RepositorySnapshotPin {
+            repository: self.clone(),
+            commit: candidate.commit().clone(),
+            private_candidate: Some(candidate.clone()),
+        };
+        self.open_format_context_at(&snapshot)
     }
 
     /// Opens and validates the format metadata at the current immutable HEAD.
@@ -532,32 +562,43 @@ fn read_metadata_file(
     snapshot: &RepositorySnapshotPin,
     path: &str,
 ) -> Result<Option<Vec<u8>>, FormatContextError> {
-    match repository.read_committed_file(&snapshot.commit, path, MAX_METADATA_READ_BYTES) {
+    match snapshot.read_file(repository, path, MAX_METADATA_READ_BYTES) {
         Ok(bytes) if bytes.len() <= FORMAT_CONTEXT_MAX_METADATA_BYTES => Ok(Some(bytes)),
         Ok(_) => Err(FormatContextError::MetadataInvalid),
         Err(RepositoryError::GitUnavailable) => Err(FormatContextError::MetadataUnavailable),
-        // `read_committed_file` intentionally redacts whether a path was
-        // absent. Inspect the bounded committed tree before treating that
-        // error as absence; otherwise a malformed database record could be
-        // downgraded into legacy dispatch.
-        Err(_) => match repository
-            .list_committed_tree(&snapshot.commit, MAX_TREE_ENTRIES_FOR_METADATA_DIAGNOSTIC)
-            .map_err(|error| match error {
-                RepositoryError::GitUnavailable => FormatContextError::MetadataUnavailable,
-                _ => FormatContextError::MetadataInvalid,
-            })?
-            .into_iter()
-            .find(|entry| {
-                entry.path().as_path().to_str().is_some_and(|entry_path| {
-                    entry_path == path
-                        || entry_path
-                            .strip_prefix(path)
-                            .is_some_and(|suffix| suffix.starts_with('/'))
-                })
-            }) {
-            Some(_) => Err(FormatContextError::MetadataInvalid),
-            None => Ok(None),
-        },
+        // File readers redact absence. Inspect the selected tree before
+        // treating a missing metadata path as a supported layout.
+        Err(_) => {
+            let path_is_present = if let Some(candidate) = &snapshot.private_candidate {
+                let managed_path = crate::ManagedPath::new(path)
+                    .map_err(|_| FormatContextError::MetadataInvalid)?;
+                repository
+                    .candidate_tree_entry(candidate, &managed_path)
+                    .map_err(|_| FormatContextError::MetadataInvalid)?
+                    .is_some()
+            } else {
+                repository
+                    .list_committed_tree(&snapshot.commit, MAX_TREE_ENTRIES_FOR_METADATA_DIAGNOSTIC)
+                    .map_err(|error| match error {
+                        RepositoryError::GitUnavailable => FormatContextError::MetadataUnavailable,
+                        _ => FormatContextError::MetadataInvalid,
+                    })?
+                    .into_iter()
+                    .any(|entry| {
+                        entry.path().as_path().to_str().is_some_and(|entry_path| {
+                            entry_path == path
+                                || entry_path
+                                    .strip_prefix(path)
+                                    .is_some_and(|suffix| suffix.starts_with('/'))
+                        })
+                    })
+            };
+            if path_is_present {
+                Err(FormatContextError::MetadataInvalid)
+            } else {
+                Ok(None)
+            }
+        }
     }
 }
 
