@@ -2301,7 +2301,7 @@ fn generated_provider_promise_callback_binding_matches_schema_and_idl() {
 
 #[test]
 fn generated_provider_cancel_binding_matches_schema_and_idl() {
-    const OPERATION: &str = "sys.cancel<T>";
+    const OPERATION: &str = "sys.cancel";
 
     let fixture: Value = serde_json::from_str(PROVIDER_CANCEL_EDGE_FIXTURE)
         .expect("crate-local provider cancellation fixture is valid JSON");

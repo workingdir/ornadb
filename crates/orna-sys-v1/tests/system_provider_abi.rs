@@ -5516,7 +5516,7 @@ fn provider_stream_iterator_promise_edge_preserves_handle_and_terminal_result_ed
 
 #[test]
 fn provider_cancel_edges_preserve_generated_binding_and_dispatch_contracts() {
-    const OPERATION: &str = "sys.cancel<T>";
+    const OPERATION: &str = "sys.cancel";
 
     let fixture: Value = serde_json::from_str(PROVIDER_CANCEL_EDGE_FIXTURE)
         .expect("crate-local provider cancellation fixture is valid JSON");

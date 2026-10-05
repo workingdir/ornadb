@@ -1,5 +1,5 @@
 {
-  "operation": "sys.cancel<T>",
+  "operation": "sys.cancel",
   "handle_parameter": "invocation",
   "reason_parameter": "reason",
   "reason_type": "Str?",
