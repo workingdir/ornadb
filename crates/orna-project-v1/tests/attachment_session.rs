@@ -5010,6 +5010,428 @@ fn terminal_alias_storm_resolves_latest_route_after_nested_rebinds() {
 }
 
 #[test]
+fn cloned_session_alias_reload_generations_remain_branch_local() {
+    let package_source = include_str!("fixtures/attach-reload-generation.orna");
+    let (shared_dir, shared_repository, _) = repository(&[("main.orna", package_source)]);
+    let aliases = ["archive", "archive_copy", "archive_copy_archive"];
+
+    let terminal_base = write_package_snapshot(
+        shared_dir.path(),
+        package_source,
+        "410",
+        None,
+        "generation terminal base",
+    );
+    let terminal_left_selected = write_package_snapshot(
+        shared_dir.path(),
+        package_source,
+        "413",
+        None,
+        "left manifest-selected terminal generation",
+    );
+    let terminal_left_reload = write_package_snapshot(
+        shared_dir.path(),
+        package_source,
+        "416",
+        None,
+        "left generation terminal reload",
+    );
+    let terminal_left_sibling_reload = write_package_snapshot(
+        shared_dir.path(),
+        package_source,
+        "417",
+        None,
+        "left sibling generation terminal reload",
+    );
+    let terminal_right_reload = write_package_snapshot(
+        shared_dir.path(),
+        package_source,
+        "415",
+        None,
+        "right generation terminal reload",
+    );
+
+    let deep_base_manifest = format!("{} {}\n", aliases[2], terminal_base);
+    let deep_base = write_package_snapshot(
+        shared_dir.path(),
+        package_source,
+        "310",
+        Some(&deep_base_manifest),
+        "generation deep base",
+    );
+    let deep_left_manifest = format!("{} {}\n", aliases[2], terminal_base);
+    let deep_left = write_package_snapshot(
+        shared_dir.path(),
+        package_source,
+        "311",
+        Some(&deep_left_manifest),
+        "left generation deep snapshot",
+    );
+    let deep_right_manifest = format!("{} {}\n", aliases[2], terminal_base);
+    let deep_right = write_package_snapshot(
+        shared_dir.path(),
+        package_source,
+        "312",
+        Some(&deep_right_manifest),
+        "right generation deep snapshot",
+    );
+    let deep_left_reload_manifest = format!("{} {}\n", aliases[2], terminal_left_selected);
+    let deep_left_reload = write_package_snapshot(
+        shared_dir.path(),
+        package_source,
+        "321",
+        Some(&deep_left_reload_manifest),
+        "left generation deep reload",
+    );
+    let deep_right_reload_manifest = format!("{} {}\n", aliases[2], terminal_right_reload);
+    let deep_right_reload = write_package_snapshot(
+        shared_dir.path(),
+        package_source,
+        "323",
+        Some(&deep_right_reload_manifest),
+        "right generation deep reload",
+    );
+
+    let middle_base_manifest = format!("{} {}\n", aliases[1], deep_base);
+    let middle_base = write_package_snapshot(
+        shared_dir.path(),
+        package_source,
+        "210",
+        Some(&middle_base_manifest),
+        "generation middle base",
+    );
+    let middle_left_manifest = format!("{} {}\n", aliases[1], deep_left);
+    let middle_left = write_package_snapshot(
+        shared_dir.path(),
+        package_source,
+        "211",
+        Some(&middle_left_manifest),
+        "left generation middle snapshot",
+    );
+    let middle_right_manifest = format!("{} {}\n", aliases[1], deep_right);
+    let middle_right = write_package_snapshot(
+        shared_dir.path(),
+        package_source,
+        "212",
+        Some(&middle_right_manifest),
+        "right generation middle snapshot",
+    );
+
+    let root_manifest = format!("{} {}\n", aliases[0], middle_base);
+    let (_root_dir, root_repository, root_commit) = repository(&[
+        ("main.orna", include_str!("fixtures/attach-primary.orna")),
+        (PACKAGE_PIN_MANIFEST_PATH, &root_manifest),
+    ]);
+    let loader = ProjectLoader::default();
+    let resolver = PackageResolver::new(
+        aliases
+            .iter()
+            .map(|alias| ((*alias).to_owned(), shared_repository.clone())),
+        loader,
+    )
+    .unwrap();
+    let resolve_pin = |alias: &str, commit: &str| {
+        PinnedDatabase::resolve(alias.to_owned(), shared_repository.clone(), commit, loader)
+            .unwrap()
+    };
+    let assert_pin = |session: &AttachedDatabaseSession, alias: &str, commit: &str| {
+        assert_eq!(
+            session.database(alias).unwrap().pin().commit().as_str(),
+            commit,
+            "unexpected pin for alias {alias}"
+        );
+    };
+
+    let root_pin = PinnedDatabase::resolve("app", root_repository, &root_commit, loader).unwrap();
+    let root = resolver.resolve_for_parent(root_pin).unwrap();
+    let mut left_root = root.clone();
+    let mut right_root = root.clone();
+    let retained_middle_left = left_root
+        .rebind_database(resolve_pin(aliases[0], &middle_left))
+        .unwrap();
+    let retained_middle_right = right_root
+        .rebind_database(resolve_pin(aliases[0], &middle_right))
+        .unwrap();
+
+    assert_pin(&root, aliases[0], &middle_base);
+    assert_module_route(&root, "archive.orna", "= 210");
+    assert_pin(&left_root, aliases[0], &middle_left);
+    assert_pin(&right_root, aliases[0], &middle_right);
+    assert_module_route(&left_root, "archive.orna", "= 211");
+    assert_module_route(&right_root, "archive.orna", "= 212");
+
+    let left_middle = resolver
+        .resolve_nested_for_alias(&left_root, aliases[0])
+        .unwrap();
+    let right_middle = resolver
+        .resolve_nested_for_alias(&right_root, aliases[0])
+        .unwrap();
+    assert_module_route(&left_middle, "main.orna", "= 211");
+    assert_module_route(&left_middle, "archive_copy.orna", "= 311");
+    assert_module_route(&right_middle, "main.orna", "= 212");
+    assert_module_route(&right_middle, "archive_copy.orna", "= 312");
+
+    let mut left_middle_reload = left_middle.clone();
+    let mut right_middle_reload = right_middle.clone();
+    let retained_deep_left = left_middle_reload
+        .rebind_database(resolve_pin(aliases[1], &deep_left_reload))
+        .unwrap();
+    let retained_deep_right = right_middle_reload
+        .rebind_database(resolve_pin(aliases[1], &deep_right_reload))
+        .unwrap();
+    assert_pin(&left_middle, aliases[1], &deep_left);
+    assert_pin(&right_middle, aliases[1], &deep_right);
+    assert_pin(&left_middle_reload, aliases[1], &deep_left_reload);
+    assert_pin(&right_middle_reload, aliases[1], &deep_right_reload);
+
+    let left_deep = resolver
+        .resolve_nested_for_alias(&left_middle_reload, aliases[1])
+        .unwrap();
+    let right_deep = resolver
+        .resolve_nested_for_alias(&right_middle_reload, aliases[1])
+        .unwrap();
+    assert_module_route(&left_deep, "main.orna", "= 321");
+    assert_module_route(&right_deep, "main.orna", "= 323");
+    assert_pin(&left_deep, aliases[2], &terminal_left_selected);
+    assert_pin(&right_deep, aliases[2], &terminal_right_reload);
+
+    let mut left_terminal_reload = left_deep.clone();
+    let mut left_terminal_sibling_reload = left_deep.clone();
+    let retained_terminal_left = left_terminal_reload
+        .rebind_database(resolve_pin(aliases[2], &terminal_left_reload))
+        .unwrap();
+    let retained_terminal_sibling = left_terminal_sibling_reload
+        .rebind_database(resolve_pin(aliases[2], &terminal_left_sibling_reload))
+        .unwrap();
+    assert_pin(&left_deep, aliases[2], &terminal_left_selected);
+    assert_pin(&left_terminal_reload, aliases[2], &terminal_left_reload);
+    assert_pin(
+        &left_terminal_sibling_reload,
+        aliases[2],
+        &terminal_left_sibling_reload,
+    );
+
+    let terminal_left = resolver
+        .resolve_nested_for_alias(&left_terminal_reload, aliases[2])
+        .unwrap();
+    let terminal_left_sibling = resolver
+        .resolve_nested_for_alias(&left_terminal_sibling_reload, aliases[2])
+        .unwrap();
+    let terminal_right = resolver
+        .resolve_nested_for_alias(&right_deep, aliases[2])
+        .unwrap();
+    assert_module_route(&terminal_left, "main.orna", "= 416");
+    assert_module_route(&terminal_left_sibling, "main.orna", "= 417");
+    assert_module_route(&terminal_right, "main.orna", "= 415");
+
+    let old_middle = resolver.resolve_for_parent(retained_middle_left).unwrap();
+    let old_middle_sibling = resolver.resolve_for_parent(retained_middle_right).unwrap();
+    assert_module_route(&old_middle, "main.orna", "= 210");
+    assert_module_route(&old_middle, "archive_copy.orna", "= 310");
+    assert_module_route(&old_middle_sibling, "main.orna", "= 210");
+    assert_module_route(&old_middle_sibling, "archive_copy.orna", "= 310");
+
+    let old_deep_left = resolver.resolve_for_parent(retained_deep_left).unwrap();
+    let old_deep_right = resolver.resolve_for_parent(retained_deep_right).unwrap();
+    assert_module_route(&old_deep_left, "main.orna", "= 311");
+    assert_pin(&old_deep_left, aliases[2], &terminal_base);
+    assert_module_route(&old_deep_right, "main.orna", "= 312");
+    assert_pin(&old_deep_right, aliases[2], &terminal_base);
+    assert_module_route(
+        &resolver.resolve_for_parent(retained_terminal_left).unwrap(),
+        "main.orna",
+        "= 413",
+    );
+    assert_module_route(
+        &resolver
+            .resolve_for_parent(retained_terminal_sibling)
+            .unwrap(),
+        "main.orna",
+        "= 413",
+    );
+}
+
+#[test]
+fn failed_descendant_reload_keeps_cloned_alias_branches_atomic() {
+    let package_source = include_str!("fixtures/attach-package.orna");
+    let (shared_dir, shared_repository, _) = repository(&[("main.orna", package_source)]);
+    let aliases = ["archive", "archive_copy", "archive_copy_archive"];
+
+    let terminal_before = write_package_snapshot(
+        shared_dir.path(),
+        package_source,
+        "901",
+        None,
+        "atomic reload terminal before",
+    );
+    let terminal_after = write_package_snapshot(
+        shared_dir.path(),
+        package_source,
+        "902",
+        None,
+        "atomic reload valid terminal after",
+    );
+    let terminal_invalid = write_commit(
+        shared_dir.path(),
+        &[(
+            "main.orna",
+            include_str!("fixtures/attach-invalid-terminal.orna"),
+        )],
+        "atomic reload invalid terminal",
+    );
+
+    let deep_before_manifest = format!("{} {}\n", aliases[2], terminal_before);
+    let deep_before = write_package_snapshot(
+        shared_dir.path(),
+        package_source,
+        "801",
+        Some(&deep_before_manifest),
+        "atomic reload deep before",
+    );
+    let deep_valid_manifest = format!("{} {}\n", aliases[2], terminal_after);
+    let deep_valid = write_package_snapshot(
+        shared_dir.path(),
+        package_source,
+        "802",
+        Some(&deep_valid_manifest),
+        "atomic reload valid deep replacement",
+    );
+    let deep_invalid_manifest = format!("{} {}\n", aliases[2], terminal_invalid);
+    let deep_invalid = write_package_snapshot(
+        shared_dir.path(),
+        package_source,
+        "803",
+        Some(&deep_invalid_manifest),
+        "atomic reload deep replacement with invalid terminal",
+    );
+
+    let middle_before_manifest = format!("{} {}\n", aliases[1], deep_before);
+    let middle_before = write_package_snapshot(
+        shared_dir.path(),
+        package_source,
+        "701",
+        Some(&middle_before_manifest),
+        "atomic reload middle before",
+    );
+    let middle_failed_manifest = format!("{} {}\n", aliases[1], deep_before);
+    let middle_failed = write_package_snapshot(
+        shared_dir.path(),
+        package_source,
+        "711",
+        Some(&middle_failed_manifest),
+        "atomic reload middle for failing branch",
+    );
+    let middle_valid_manifest = format!("{} {}\n", aliases[1], deep_before);
+    let middle_valid = write_package_snapshot(
+        shared_dir.path(),
+        package_source,
+        "712",
+        Some(&middle_valid_manifest),
+        "atomic reload middle for valid sibling",
+    );
+
+    let root_manifest = format!("{} {}\n", aliases[0], middle_before);
+    let (_root_dir, root_repository, root_commit) = repository(&[
+        ("main.orna", include_str!("fixtures/attach-primary.orna")),
+        (PACKAGE_PIN_MANIFEST_PATH, &root_manifest),
+    ]);
+    let loader = ProjectLoader::default();
+    let resolver = PackageResolver::new(
+        aliases
+            .iter()
+            .map(|alias| ((*alias).to_owned(), shared_repository.clone())),
+        loader,
+    )
+    .unwrap();
+    let resolve_pin = |alias: &str, commit: &str| {
+        PinnedDatabase::resolve(
+            alias.to_owned(),
+            shared_repository.clone(),
+            commit,
+            loader,
+        )
+        .unwrap()
+    };
+    let assert_pin = |session: &AttachedDatabaseSession, alias: &str, commit: &str| {
+        assert_eq!(
+            session.database(alias).unwrap().pin().commit().as_str(),
+            commit,
+            "unexpected pin for alias {alias}"
+        );
+    };
+
+    let root_pin = PinnedDatabase::resolve("app", root_repository, &root_commit, loader).unwrap();
+    let root = resolver.resolve_for_parent(root_pin).unwrap();
+    let failing_branch = root.clone();
+    let valid_branch = root.clone();
+    let failing_branch_before = failing_branch.clone();
+    let valid_branch_before = valid_branch.clone();
+
+    let failed_path = resolver.resolve_nested_rebind_path(
+        &failing_branch,
+        &[
+            resolve_pin(aliases[0], &middle_failed),
+            resolve_pin(aliases[1], &deep_invalid),
+        ],
+    );
+    assert!(matches!(
+        failed_path,
+        Err(AttachmentError::PinnedPackageInvalid)
+    ));
+
+    let valid_path = resolver
+        .resolve_nested_rebind_path(
+            &valid_branch,
+            &[
+                resolve_pin(aliases[0], &middle_valid),
+                resolve_pin(aliases[1], &deep_valid),
+            ],
+        )
+        .unwrap();
+    assert_eq!(valid_path.retained_sessions().len(), 2);
+    assert_pin(
+        &valid_path.retained_sessions()[0],
+        aliases[0],
+        &middle_before,
+    );
+    assert_module_route(&valid_path.retained_sessions()[0], "archive.orna", "= 701");
+    assert_pin(
+        &valid_path.retained_sessions()[1],
+        aliases[1],
+        &deep_before,
+    );
+    assert_module_route(&valid_path.retained_sessions()[1], "main.orna", "= 712");
+    assert_pin(valid_path.final_session(), aliases[2], &terminal_after);
+    assert_module_route(valid_path.final_session(), "main.orna", "= 802");
+    assert_module_route(
+        valid_path.final_session(),
+        "archive_copy_archive.orna",
+        "= 902",
+    );
+
+    for (session, snapshot) in [
+        (&root, &middle_before),
+        (&failing_branch, &middle_before),
+        (&failing_branch_before, &middle_before),
+        (&valid_branch, &middle_before),
+        (&valid_branch_before, &middle_before),
+    ] {
+        assert_pin(session, aliases[0], snapshot);
+        assert_module_route(session, "archive.orna", "= 701");
+    }
+    let reopened_original_route = resolver
+        .resolve_nested_path(&failing_branch, &aliases[..2])
+        .unwrap();
+    assert_pin(&reopened_original_route, aliases[2], &terminal_before);
+    assert_module_route(&reopened_original_route, "main.orna", "= 801");
+    assert_module_route(
+        &reopened_original_route,
+        "archive_copy_archive.orna",
+        "= 901",
+    );
+}
+
+#[test]
 fn terminal_routes_stay_branch_local_across_chained_rebind_storms() {
     let package_source = include_str!("fixtures/attach-package.orna");
     let (shared_dir, shared_repository, _) = repository(&[("main.orna", package_source)]);
