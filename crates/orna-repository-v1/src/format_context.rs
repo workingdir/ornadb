@@ -740,7 +740,10 @@ mod graph_bridge_tests {
 
     use crate::{
         Repository,
-        native_graph::{ByteIndexEntry, GitHashAlgorithm, NativeOid, NodeData, OrderedLeafEntry},
+        native_graph::{
+            ByteIndexEntry, GitHashAlgorithm, MAX_RANGE_GRAPH_OBJECTS, NativeOid, NodeData,
+            OrderedBranchEntry, OrderedLeafEntry,
+        },
         row_store::{
             KeyRange, RowMapSnapshot, RowMapVersion, RowValue, SchemaGeneration, TypedKey,
         },
@@ -1138,6 +1141,72 @@ mod graph_bridge_tests {
         (relation_id, semantic_digest)
     }
 
+    fn install_branch_row_store(
+        directory: &Path,
+        context: &RepositoryFormatContext,
+        relation_id: [u8; 16],
+        rows_and_fences: &[(u64, u64)],
+    ) {
+        let algorithm = context
+            .validate_store_root()
+            .expect("pinned format-3 store")
+            .oid
+            .algorithm();
+        let database_id = context.require_database_id().expect("database identity");
+        let (schema_oid, schema_digest) = schema_node(directory, context);
+
+        let mut branch_entries = Vec::new();
+        for &(key, stored_fence) in rows_and_fences {
+            let row = write_native_node(
+                directory,
+                algorithm,
+                &NodeData::OrderedLeaf {
+                    domain: row_domain(relation_id, schema_digest),
+                    entries: vec![OrderedLeafEntry {
+                        key: TypedKey::UInt(key).canonical_bytes().unwrap(),
+                        value: vec![0x81, 0x01],
+                    }],
+                },
+            );
+            branch_entries.push(OrderedBranchEntry {
+                inclusive_max_key: TypedKey::UInt(stored_fence).canonical_bytes().unwrap(),
+                child: row,
+                row_count: 1,
+            });
+        }
+        let primary_root = write_native_node(
+            directory,
+            algorithm,
+            &NodeData::OrderedBranch {
+                domain: row_domain(relation_id, schema_digest),
+                height: 1,
+                entries: branch_entries,
+            },
+        );
+
+        let mut relation_value = vec![0x84];
+        cbor_bytes(&mut relation_value, schema_oid.as_bytes());
+        cbor_bytes(&mut relation_value, primary_root.as_bytes());
+        relation_value.push(0xf6);
+        relation_value.push(u8::try_from(rows_and_fences.len()).unwrap());
+        let relation_map = write_native_node(
+            directory,
+            algorithm,
+            &NodeData::OrderedLeaf {
+                domain: relations_domain(*database_id.as_bytes()),
+                entries: vec![OrderedLeafEntry {
+                    key: TypedKey::Bytes(relation_id.to_vec())
+                        .canonical_bytes()
+                        .unwrap(),
+                    value: relation_value,
+                }],
+            },
+        );
+        let store_root =
+            write_native_node(directory, algorithm, &NodeData::StoreRoot { relation_map });
+        commit_store_root(directory, algorithm, &store_root);
+    }
+
     fn sealed_rows(
         context: &RepositoryFormatContext,
         schema_oid: &NativeOid,
@@ -1325,5 +1394,43 @@ mod graph_bridge_tests {
             tampered_graph.lookup_row(&TypedKey::UInt(7), &tampered_scope),
             Err(crate::native_graph::GraphError::ContentIdentityMismatch)
         ));
+    }
+
+    #[test]
+    fn repository_point_lookup_checks_later_fences_after_candidate_miss() {
+        let directory = repository();
+        let root = directory.path();
+        let relation_id = [0x72; 16];
+        let initial = context(root);
+        // Key 20 falls within child 2's claimed max (30), but is absent there.
+        // The next child is an invalid overlapping range hidden behind fence
+        // 50; point lookup must continue far enough to reject it.
+        install_branch_row_store(
+            root,
+            &initial,
+            relation_id,
+            &[(10, 10), (30, 30), (20, 50), (60, 60)],
+        );
+
+        let pinned = context(root);
+        let snapshot = pinned.load_row_map(relation_id).unwrap();
+        assert!(!snapshot.is_materialized());
+        let graph = pinned.open_native_graph(&snapshot).unwrap();
+        let scope = graph.open_read_scope().unwrap();
+
+        // The final profile caps each ORP page at 256 direct refs and height
+        // at 64. This four-child graph isolates the point-lookup miss path;
+        // the production scope additionally caps one operation at 2,048
+        // native Git objects, which is measured below.
+        let before_point = scope.objects_read_for_test();
+        assert!(matches!(
+            graph.lookup_row(&TypedKey::UInt(20), &scope),
+            Err(crate::native_graph::GraphError::InvalidCount(_))
+        ));
+        let point_objects = scope.objects_read_for_test() - before_point;
+        assert!(point_objects > 0 && point_objects <= MAX_RANGE_GRAPH_OBJECTS);
+        println!(
+            "git-backed ORP point lookup object reads: {point_objects} (operation_limit={MAX_RANGE_GRAPH_OBJECTS})"
+        );
     }
 }
