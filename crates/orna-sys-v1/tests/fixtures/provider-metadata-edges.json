@@ -1,5 +1,5 @@
 {
-  "operation": "sys.meta<T>",
+  "operation": "sys.meta",
   "api_function": "sys.meta",
   "role": "langitem.sys.meta",
   "role_version": "1.0",
