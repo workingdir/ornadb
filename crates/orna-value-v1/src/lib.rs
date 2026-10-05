@@ -880,7 +880,7 @@ impl Blob {
         media_type: &str,
         suffix: Option<&str>,
     ) -> Result<Self> {
-        let annotation = MediaAnnotation::new(media_type, suffix)?;
+        let annotation = MimeRegistry::mime1().annotation(media_type, suffix)?;
         let identity = ContentIdentity::from_bytes(&bytes);
         Ok(Self {
             identity,
@@ -906,9 +906,9 @@ impl Blob {
         media_type: &str,
         suffix: Option<&str>,
     ) -> Result<Self> {
-        let annotation = MediaAnnotation::new(media_type, suffix)?;
         let identity = reference.identity;
         let context = reference.context();
+        let annotation = context.mime_registry().annotation(media_type, suffix)?;
         Ok(Self {
             identity,
             annotation,
@@ -924,7 +924,7 @@ impl Blob {
     ) -> Result<Self> {
         Ok(Self {
             identity,
-            annotation: MediaAnnotation::new(media_type, suffix)?,
+            annotation: MimeRegistry::mime1().annotation(media_type, suffix)?,
             content: BlobContent::Commitment,
             context: None,
         })
@@ -938,7 +938,7 @@ impl Blob {
     ) -> Result<Self> {
         Ok(Self {
             identity,
-            annotation: MediaAnnotation::new(media_type, suffix)?,
+            annotation: context.mime_registry().annotation(media_type, suffix)?,
             content: BlobContent::Commitment,
             context: Some(context.clone()),
         })
@@ -984,9 +984,14 @@ impl Blob {
 
     /// Return a new value with the same lazy content and a new annotation.
     pub fn annotate(&self, media_type: &str, suffix: Option<&str>) -> Result<Self> {
+        let mime_registry = self
+            .context
+            .as_ref()
+            .map(Format3Context::mime_registry)
+            .unwrap_or_else(MimeRegistry::mime1);
         Ok(Self {
             identity: self.identity,
-            annotation: MediaAnnotation::new(media_type, suffix)?,
+            annotation: mime_registry.annotation(media_type, suffix)?,
             content: self.content.clone(),
             context: self.context.clone(),
         })
@@ -1148,7 +1153,7 @@ impl MimeRegistry {
         if self.profile != "MIME-1" {
             return Err(Error::InvalidContext);
         }
-        MediaAnnotation::new(media_type, suffix)
+        MediaAnnotation::with_mime1(media_type, suffix)
     }
 }
 
@@ -1163,8 +1168,13 @@ impl Default for MediaAnnotation {
 
 impl MediaAnnotation {
     pub fn new(media_type: &str, suffix: Option<&str>) -> Result<Self> {
+        MimeRegistry::mime1().annotation(media_type, suffix)
+    }
+
+    fn with_mime1(media_type: &str, suffix: Option<&str>) -> Result<Self> {
         let media_type = normalize_media_type(media_type)?;
-        let (preferred, compatible) = media_suffixes(media_type.split(';').next().unwrap_or(&media_type));
+        let (preferred, compatible) =
+            media_suffixes(media_type.split(';').next().unwrap_or(&media_type));
         let suffix = suffix.map(|value| value.to_ascii_lowercase());
         if let Some(value) = &suffix {
             if value.len() > 32 || !valid_suffix(value) {
@@ -1441,10 +1451,16 @@ impl ContextValue {
             return Err(Error::InvalidContext);
         }
         let oid_algorithm = context.as_ref().map(Format3Context::git_oid_algorithm);
+        // The annotation profile travels with the same immutable context as
+        // the object-hash algorithm; codecs must not select a host MIME table.
+        let mime_registry = context
+            .as_ref()
+            .map(Format3Context::mime_registry)
+            .unwrap_or_else(MimeRegistry::mime1);
         if format == ValueFormat::Ovb1 {
             Value::new(raw.clone())?;
         } else {
-            validate_context_raw(&raw, 0, format, oid_algorithm)?;
+            validate_context_raw(&raw, 0, format, oid_algorithm, mime_registry)?;
         }
         Ok(Self {
             format,
@@ -1471,7 +1487,12 @@ impl ContextValue {
 
     pub fn encode(&self) -> Result<Vec<u8>> {
         let oid_algorithm = self.context.as_ref().map(Format3Context::git_oid_algorithm);
-        encode_context_raw(&self.raw, self.format, oid_algorithm)
+        let mime_registry = self
+            .context
+            .as_ref()
+            .map(Format3Context::mime_registry)
+            .unwrap_or_else(MimeRegistry::mime1);
+        encode_context_raw(&self.raw, self.format, oid_algorithm, mime_registry)
     }
 
     pub fn decode(bytes: &[u8], format: ValueFormat) -> Result<Self> {
@@ -1685,6 +1706,7 @@ fn validate_context_raw(
     depth: usize,
     format: ValueFormat,
     oid_algorithm: Option<GitHash>,
+    mime_registry: MimeRegistry,
 ) -> Result<()> {
     if depth > MAX_DEPTH {
         return Err(Error::Limit);
@@ -1692,15 +1714,15 @@ fn validate_context_raw(
     match value {
         Raw::Array(values) => {
             for value in values {
-                validate_context_raw(value, depth + 1, format, oid_algorithm)?;
+                validate_context_raw(value, depth + 1, format, oid_algorithm, mime_registry)?;
             }
         }
         Raw::Map(entries) => {
             let mut previous = None;
             for (key, value) in entries {
-                validate_context_raw(key, depth + 1, format, oid_algorithm)?;
-                validate_context_raw(value, depth + 1, format, oid_algorithm)?;
-                let encoded = encode_context_raw(key, format, oid_algorithm)?;
+                validate_context_raw(key, depth + 1, format, oid_algorithm, mime_registry)?;
+                validate_context_raw(value, depth + 1, format, oid_algorithm, mime_registry)?;
+                let encoded = encode_context_raw(key, format, oid_algorithm, mime_registry)?;
                 if previous.as_ref().is_some_and(|prior: &Vec<u8>| encoded <= *prior) {
                     return Err(Error::DuplicateOrUnorderedMapKey);
                 }
@@ -1710,14 +1732,14 @@ fn validate_context_raw(
         Raw::Tag(number, payload)
             if matches!(*number, OVB2_BLOB_TAG | ROV3_BLOB_TAG | SOV3_BLOB_TAG | ROV3_OVERFLOW_TAG) =>
         {
-            validate_context_tag(*number, payload, format, oid_algorithm)?;
+            validate_context_tag(*number, payload, format, oid_algorithm, mime_registry)?;
         }
         Raw::Tag(number, payload) => {
             if *number == 0 {
                 return Err(Error::ProtectedValue);
             }
             validate_tag(*number, payload)?;
-            validate_context_raw(payload, depth + 1, format, oid_algorithm)?;
+            validate_context_raw(payload, depth + 1, format, oid_algorithm, mime_registry)?;
         }
         _ => validate_raw(value, depth)?,
     }
@@ -1729,6 +1751,7 @@ fn validate_context_tag(
     payload: &Raw,
     format: ValueFormat,
     oid_algorithm: Option<GitHash>,
+    mime_registry: MimeRegistry,
 ) -> Result<()> {
     let allowed = match number {
         OVB2_BLOB_TAG => format == ValueFormat::Ovb2,
@@ -1744,7 +1767,7 @@ fn validate_context_tag(
             let [Raw::Bytes(_), Raw::Text(media_type), suffix] = array(payload)?.as_slice() else {
                 return Err(Error::InvalidTag);
             };
-            validate_annotation_fields(media_type, suffix)
+            validate_annotation_fields(media_type, suffix, mime_registry)
         }
         ROV3_BLOB_TAG => {
             let [length, sha, Raw::Text(media_type), suffix, Raw::Bytes(oid)] = array(payload)?.as_slice() else {
@@ -1753,7 +1776,7 @@ fn validate_context_tag(
             validate_length(length)?;
             bytes32(sha)?;
             validate_context_oid(oid, oid_algorithm)?;
-            validate_annotation_fields(media_type, suffix)
+            validate_annotation_fields(media_type, suffix, mime_registry)
         }
         SOV3_BLOB_TAG => {
             let [length, sha, Raw::Text(media_type), suffix] = array(payload)?.as_slice() else {
@@ -1761,7 +1784,7 @@ fn validate_context_tag(
             };
             validate_length(length)?;
             bytes32(sha)?;
-            validate_annotation_fields(media_type, suffix)
+            validate_annotation_fields(media_type, suffix, mime_registry)
         }
         ROV3_OVERFLOW_TAG => {
             let [Raw::Bytes(oid)] = array(payload)?.as_slice() else {
@@ -1791,9 +1814,13 @@ fn validate_length(raw: &Raw) -> Result<u64> {
     Ok(length)
 }
 
-fn validate_annotation_fields(media_type: &str, suffix: &Raw) -> Result<()> {
+fn validate_annotation_fields(
+    media_type: &str,
+    suffix: &Raw,
+    mime_registry: MimeRegistry,
+) -> Result<()> {
     let suffix = raw_suffix(suffix)?;
-    let annotation = MediaAnnotation::new(media_type, suffix.as_deref())?;
+    let annotation = mime_registry.annotation(media_type, suffix.as_deref())?;
     if annotation.media_type() != media_type || annotation.suffix() != suffix.as_deref() {
         return Err(Error::NonCanonical);
     }
@@ -1804,13 +1831,14 @@ fn encode_context_raw(
     value: &Raw,
     format: ValueFormat,
     oid_algorithm: Option<GitHash>,
+    mime_registry: MimeRegistry,
 ) -> Result<Vec<u8>> {
     if format == ValueFormat::Ovb1 {
         return encode_raw(value);
     }
-    validate_context_raw(value, 0, format, oid_algorithm)?;
+    validate_context_raw(value, 0, format, oid_algorithm, mime_registry)?;
     let mut output = Vec::new();
-    write_context_raw(value, format, oid_algorithm, &mut output)?;
+    write_context_raw(value, format, oid_algorithm, mime_registry, &mut output)?;
     Ok(output)
 }
 
@@ -1818,13 +1846,18 @@ fn write_context_raw(
     value: &Raw,
     format: ValueFormat,
     oid_algorithm: Option<GitHash>,
+    mime_registry: MimeRegistry,
     output: &mut Vec<u8>,
 ) -> Result<()> {
     match value {
         Raw::Map(entries) => {
             let mut encoded = Vec::with_capacity(entries.len());
             for (key, value) in entries {
-                encoded.push((encode_context_raw(key, format, oid_algorithm)?, key, value));
+                encoded.push((
+                    encode_context_raw(key, format, oid_algorithm, mime_registry)?,
+                    key,
+                    value,
+                ));
             }
             encoded.sort_by(|left, right| left.0.cmp(&right.0));
             if encoded.windows(2).any(|pair| pair[0].0 == pair[1].0) {
@@ -1833,20 +1866,20 @@ fn write_context_raw(
             head(output, 5, encoded.len() as u64);
             for (key, _, value) in encoded {
                 output.extend(key);
-                write_context_raw(value, format, oid_algorithm, output)?;
+                write_context_raw(value, format, oid_algorithm, mime_registry, output)?;
             }
             Ok(())
         }
         Raw::Array(values) => {
             head(output, 4, values.len() as u64);
             for value in values {
-                write_context_raw(value, format, oid_algorithm, output)?;
+                write_context_raw(value, format, oid_algorithm, mime_registry, output)?;
             }
             Ok(())
         }
         Raw::Tag(number, value) => {
             head(output, 6, *number);
-            write_context_raw(value, format, oid_algorithm, output)
+            write_context_raw(value, format, oid_algorithm, mime_registry, output)
         }
         _ => write_raw(value, output),
     }
