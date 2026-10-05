@@ -250,6 +250,77 @@ fn uuid_bytes(uuid: &str) -> [u8; 16] {
     output
 }
 
+type PresentationSocket = tungstenite::WebSocket<MaybeTlsStream<TcpStream>>;
+
+fn open_playground_presentation_session(
+    base_url: &str,
+    port: u16,
+    database_id: &str,
+) -> ([u8; 16], PresentationSocket, u16) {
+    let session_request = json!({"database": database_id, "protocol": "orna.present.v1"});
+    let session_body = serde_json::to_string(&session_request).expect("encode session request");
+    let session_response = curl(
+        &format!("{base_url}/orna/session"),
+        &[
+            "--request",
+            "POST",
+            "--header",
+            &format!("Origin: {base_url}"),
+            "--header",
+            "Content-Type: application/json",
+            "--data",
+            &session_body,
+        ],
+    )
+    .expect("curl authenticated runtime session creation");
+    assert_eq!(
+        session_response.status, 201,
+        "session creation response: {} headers {:?}",
+        session_response.body, session_response.headers
+    );
+    let session: JsonValue =
+        serde_json::from_str(&session_response.body).expect("session response JSON");
+    let session_bytes = uuid_bytes(session["session"].as_str().expect("session response UUID"));
+    let websocket_path = session["websocket_path"]
+        .as_str()
+        .expect("session WebSocket path");
+    let cookie = response_header(&session_response.headers, "set-cookie")
+        .and_then(|value| value.split(';').next())
+        .expect("session response cookie");
+
+    let mut request = format!("ws://127.0.0.1:{port}{websocket_path}")
+        .into_client_request()
+        .expect("WebSocket request URL");
+    request.headers_mut().insert(
+        HeaderName::from_static("origin"),
+        HeaderValue::from_bytes(base_url.as_bytes()).expect("WebSocket origin header"),
+    );
+    request.headers_mut().insert(
+        HeaderName::from_static("cookie"),
+        HeaderValue::from_bytes(cookie.as_bytes()).expect("session cookie header"),
+    );
+    request.headers_mut().insert(
+        HeaderName::from_static("sec-websocket-protocol"),
+        HeaderValue::from_static("orna.present.v1"),
+    );
+    request.headers_mut().insert(
+        HeaderName::from_static("sec-websocket-key"),
+        HeaderValue::from_static("+/v7+/v7+/v7+/v7+/v7+w=="),
+    );
+    let request_debug = format!("{request:?}");
+    let (mut socket, upgrade) = tungstenite::connect(request).unwrap_or_else(|error| {
+        panic!("open authenticated Orna presentation WebSocket: {error}; request {request_debug}");
+    });
+    assert_eq!(upgrade.status(), 101);
+    if let MaybeTlsStream::Plain(stream) = socket.get_mut() {
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .expect("bound WebSocket response wait");
+    }
+
+    (session_bytes, socket, session_response.status)
+}
+
 fn free_port() -> u16 {
     TcpListener::bind(("127.0.0.1", 0))
         .expect("reserve a local test port")
@@ -1163,67 +1234,8 @@ fn orna_serve_hosts_playground_with_pending_evals_and_snapshot_correct_deltas() 
         .split_once("data-database=\"")
         .and_then(|(_, suffix)| suffix.split_once('"').map(|(value, _)| value))
         .expect("Git listing identifies its runtime database");
-    let session_request = json!({"database": database_id, "protocol": "orna.present.v1"});
-    let session_body = serde_json::to_string(&session_request).expect("encode session request");
-    let session_response = curl(
-        &format!("{base_url}/orna/session"),
-        &[
-            "--request",
-            "POST",
-            "--header",
-            &format!("Origin: {base_url}"),
-            "--header",
-            "Content-Type: application/json",
-            "--data",
-            &session_body,
-        ],
-    )
-    .expect("curl authenticated runtime session creation");
-    assert_eq!(
-        session_response.status, 201,
-        "session creation response: {} headers {:?}",
-        session_response.body, session_response.headers
-    );
-    let session: JsonValue =
-        serde_json::from_str(&session_response.body).expect("session response JSON");
-    let session_id = session["session"].as_str().expect("session UUID");
-    let session_bytes = uuid_bytes(session_id);
-    let websocket_path = session["websocket_path"]
-        .as_str()
-        .expect("session WebSocket path");
-    let cookie = response_header(&session_response.headers, "set-cookie")
-        .and_then(|value| value.split(';').next())
-        .expect("session response cookie");
-
-    let mut request = format!("ws://127.0.0.1:{port}{websocket_path}")
-        .into_client_request()
-        .expect("WebSocket request URL");
-    request.headers_mut().insert(
-        HeaderName::from_static("origin"),
-        HeaderValue::from_bytes(base_url.as_bytes()).expect("WebSocket origin header"),
-    );
-    request.headers_mut().insert(
-        HeaderName::from_static("cookie"),
-        HeaderValue::from_bytes(cookie.as_bytes()).expect("session cookie header"),
-    );
-    request.headers_mut().insert(
-        HeaderName::from_static("sec-websocket-protocol"),
-        HeaderValue::from_static("orna.present.v1"),
-    );
-    request.headers_mut().insert(
-        HeaderName::from_static("sec-websocket-key"),
-        HeaderValue::from_static("+/v7+/v7+/v7+/v7+/v7+w=="),
-    );
-    let request_debug = format!("{request:?}");
-    let (mut socket, upgrade) = tungstenite::connect(request).unwrap_or_else(|error| {
-        panic!("open authenticated Orna presentation WebSocket: {error}; request {request_debug}");
-    });
-    assert_eq!(upgrade.status(), 101);
-    if let MaybeTlsStream::Plain(stream) = socket.get_mut() {
-        stream
-            .set_read_timeout(Some(Duration::from_secs(5)))
-            .expect("bound WebSocket response wait");
-    }
+    let (session_bytes, mut socket, session_status) =
+        open_playground_presentation_session(base_url, port, database_id);
 
     let watch_request = [0x31; 16];
     let watched = send_and_read_request(
@@ -1605,7 +1617,7 @@ fn orna_serve_hosts_playground_with_pending_evals_and_snapshot_correct_deltas() 
     );
     println!(
         "curl POST /orna/session -> HTTP {} (exit 0): session + cookie",
-        session_response.status
+        session_status
     );
     println!("WebSocket WATCH -> Snapshot revision 0 (exit 0)");
     println!("WebSocket EVAL x2 outstanding -> correlated Results 2 and 42 (exit 0)");
