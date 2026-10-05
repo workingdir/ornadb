@@ -3243,6 +3243,7 @@ c75bbee709cc649cc9025108885f1ffae279b05b13edfd66647c6f56003b77d3  crates/orna-ls
 415bdfd6d8187cea64dccd750f93055025db74f13f49919190ce0ae830014460  crates/orna-lsp/tests/fixtures/document-highlight-code-lens-v1.orna
 e93403528dbf82b2ee2d1d6de8490b8b15a3526e55d41435efc62bc1d9b1ca95  crates/orna-lsp/tests/fixtures/document-link-target-v1.orna
 06ab71790499bbcd5b856ec721ae09b10eaeb511923b0882d3bdbc45c838cca7  crates/orna-lsp/tests/fixtures/document-links-v1.orna
+53f2d49f982abd7ade14ec9c879664066e0f29caea747da100e2dbecfc01f113  crates/orna-lsp/tests/fixtures/document-symbols-v1.orna
 36b51d4933bb9530ed36d0fb343b7c288c50abf265d76efbaf1740c57a49a238  crates/orna-lsp/tests/fixtures/editor-lsp-hints.orna
 ae26b76e75c4bf39e03664cb7cb33d461c0061fac79ddc285488509973b6d84a  crates/orna-lsp/tests/fixtures/editor-semantic-tokens.orna
 70823fa811930bdc19ac1942ce478d0dd912d6070d993f197ec760b0049ba3f6  crates/orna-lsp/tests/fixtures/expressions-v1.orna
