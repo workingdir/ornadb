@@ -2145,6 +2145,73 @@ impl Repository {
         self.publish_candidate_impl(expected_index, candidate, journal, false)
     }
 
+    /// Explicitly publishes a caller-built format-3 migration from a captured
+    /// format-1/2 snapshot through the shared durable PUB-3 journal.
+    ///
+    /// This method never converts or relabels legacy data. The caller must
+    /// provide the complete private candidate and prepared publication
+    /// journal. The candidate must be a direct child of the captured legacy
+    /// commit and admit as format 3 with valid source and store roots. Until
+    /// the runtime owner completes the journal's intent, the old commit and
+    /// runtime tail remain available for recovery.
+    pub fn publish_legacy_format_migration(
+        &self,
+        expected_index: &IndexGeneration,
+        candidate: &PrivateCommit,
+        journal: &mut PublicationJournal,
+    ) -> Result<IndexGeneration, RepositoryError> {
+        let old_head = expected_index
+            .head()
+            .ok_or(RepositoryError::InvalidFormatMigration)?;
+        if journal.old_head() != old_head || journal.new_head() != candidate.commit() {
+            return Err(RepositoryError::InvalidFormatMigration);
+        }
+
+        let legacy_snapshot = self
+            .pin_snapshot(old_head.as_str())
+            .map_err(|_| RepositoryError::InvalidFormatMigration)?;
+        let legacy_context = self
+            .open_format_context_at(&legacy_snapshot)
+            .map_err(|_| RepositoryError::InvalidFormatMigration)?;
+        if !matches!(
+            legacy_context.repository_format(),
+            RepositoryFormat::Legacy1 | RepositoryFormat::Legacy2
+        ) {
+            return Err(RepositoryError::InvalidFormatMigration);
+        }
+
+        let candidate_context = self
+            .open_private_candidate_format_context(candidate)
+            .map_err(|_| RepositoryError::InvalidFormatMigration)?;
+        let candidate_format3 = candidate_context.repository_format() == RepositoryFormat::Format3;
+        let candidate_schema_valid = candidate_context.validate_schema_root().is_ok();
+        let candidate_store_valid = candidate_context.validate_store_root().is_ok();
+        if !candidate_format3 || !candidate_schema_valid || !candidate_store_valid {
+            return Err(RepositoryError::InvalidFormatMigration);
+        }
+
+        let parent = self.run({
+            let mut command = self.command();
+            command.args([
+                "rev-list",
+                "--parents",
+                "--no-walk",
+                candidate.commit().as_str(),
+            ]);
+            command
+        })?;
+        let parent_line = trim_output(&parent.stdout);
+        let parents = parent_line
+            .split_ascii_whitespace()
+            .skip(1)
+            .collect::<Vec<_>>();
+        if parents.as_slice() != [old_head.as_str()] {
+            return Err(RepositoryError::InvalidFormatMigration);
+        }
+
+        self.publish_candidate(expected_index, candidate, journal)
+    }
+
     /// The common PUB-1 ref/index/worktree machinery. Compact candidates are
     /// admitted only from the opaque compact operation, which owns the
     /// witnessed runtime-completion transition.
@@ -6916,6 +6983,7 @@ pub enum RepositoryError {
     InvalidCommitMessage,
     DetachedHead,
     InvalidPublicationJournal,
+    InvalidFormatMigration,
     InvalidCompactManifest,
     UnsafeManagedPath,
     NoManagedPaths,
@@ -6967,6 +7035,9 @@ impl fmt::Display for RepositoryError {
             Self::InvalidCommitMessage => f.write_str("invalid Git commit message"),
             Self::DetachedHead => f.write_str("publication requires a symbolic Git HEAD"),
             Self::InvalidPublicationJournal => f.write_str("invalid publication journal"),
+            Self::InvalidFormatMigration => {
+                f.write_str("invalid or unsupported repository format migration")
+            }
             Self::InvalidCompactManifest => f.write_str("invalid compact storage manifest"),
             Self::UnsafeManagedPath => f.write_str("unsafe managed path"),
             Self::NoManagedPaths => f.write_str("at least one managed path is required"),
