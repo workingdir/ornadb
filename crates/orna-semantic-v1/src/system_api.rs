@@ -114,7 +114,10 @@ pub(crate) struct ParameterDescriptor {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct RemovedName {
-    pub replacement: String,
+    /// A final authority may explicitly retire a name without naming a
+    /// replacement. Older semantic consumers treated every replacement as a
+    /// string, so keep the distinction through the compatibility parser.
+    pub replacement: Option<String>,
     pub diagnostic: String,
 }
 
@@ -523,18 +526,26 @@ impl SystemApi {
         let mut removed = BTreeMap::new();
         for (name, descriptor) in raw.removed_names {
             validate_path(&name)?;
-            validate_path(&descriptor.replacement)?;
+            if let Some(replacement) = descriptor.replacement.as_deref() {
+                validate_path(replacement)?;
+            }
+            let replacement_is_valid = descriptor
+                .replacement
+                .as_deref()
+                .is_none_or(|replacement| {
+                    portable_path_exists(
+                        replacement,
+                        &singletons,
+                        &types,
+                        &relations,
+                        &functions,
+                        &grouped_relations,
+                        &enums,
+                    )
+                });
             if !valid_diagnostic(&descriptor.diagnostic)
-                || !portable_path_exists(
-                    &descriptor.replacement,
-                    &singletons,
-                    &types,
-                    &relations,
-                    &functions,
-                    &grouped_relations,
-                    &enums,
-                )
-                || name == descriptor.replacement
+                || !replacement_is_valid
+                || descriptor.replacement.as_deref() == Some(name.as_str())
                 || singletons.contains_key(&name)
                 || functions.contains_key(&name)
                 || relations.contains_key(&name)
@@ -1178,10 +1189,11 @@ fn valid_identifier(name: &str) -> bool {
 }
 
 fn valid_diagnostic(name: &str) -> bool {
-    name.starts_with("ORNA")
+    (name.starts_with("ORNA")
         && name.chars().all(|character| {
             character.is_ascii_uppercase() || character.is_ascii_digit() || character == '-'
-        })
+        }))
+        || valid_failure_code(name)
 }
 
 fn valid_failure_code(name: &str) -> bool {
@@ -1550,7 +1562,7 @@ struct RawFunction {
 }
 
 struct RawRemovedName {
-    replacement: String,
+    replacement: Option<String>,
     diagnostic: String,
 }
 
@@ -1599,7 +1611,10 @@ fn raw_document(source: &str) -> Result<RawSystemApi, SystemApiError> {
             Ok((
                 name.clone(),
                 RawRemovedName {
-                    replacement: text(value_at(value, "replacement")?)?.to_owned(),
+                    replacement: match value_at(value, "replacement")? {
+                        value if value.is_null() => None,
+                        value => Some(text(value)?.to_owned()),
+                    },
                     diagnostic: text(value_at(value, "diagnostic")?)?.to_owned(),
                 },
             ))
@@ -2827,7 +2842,18 @@ mod tests {
         assert!(matches!(
             api.resolve(&["sys", "runtime"]),
             PathResolution::Removed(RemovedName { replacement, diagnostic })
-                if replacement == "sys.rt" && diagnostic == "ORNA100-E-SYS-RUNTIME"
+                if replacement.as_deref() == Some("sys.rt")
+                    && diagnostic == "ORNA100-E-SYS-RUNTIME"
+        ));
+    }
+
+    #[test]
+    fn embedded_final_authority_accepts_retirements_without_replacements() {
+        let api = SystemApi::embedded().expect("system_api_json final authority is consumable");
+        assert!(matches!(
+            api.resolve(&["sys", "admin", "set_storage_preference"]),
+            PathResolution::Removed(RemovedName { replacement: None, diagnostic })
+                if diagnostic == "sys.version.incompatible"
         ));
     }
 

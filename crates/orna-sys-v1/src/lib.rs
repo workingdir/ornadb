@@ -1,6 +1,6 @@
 #![recursion_limit = "512"]
 
-//! Bounded, pre-effect admission for Orna 1.0 reflective invocation.
+//! Final Orna 1.1.0 portable sys catalogue and bounded, pre-effect admission.
 //!
 //! Resolution and durable transaction ownership stay with the evaluator and
 //! runtime that own those concerns. The portable `sys` declaration schema is
