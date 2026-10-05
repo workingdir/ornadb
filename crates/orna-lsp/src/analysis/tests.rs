@@ -2,8 +2,8 @@ use lsp_types::CompletionItemKind;
 use orna_syntax_v1::Keyword;
 
 use super::{
-    check_document, completion_at, definition, document_symbols, hover, lsp_diagnostic_message,
-    parse_document, references, signature_help,
+    check_document, completion_at, declaration_symbols, definition, document_symbols, hover,
+    lsp_diagnostic_message, parse_document, references, signature_help,
 };
 use crate::documents::{Document, PositionMapper};
 
@@ -12,6 +12,7 @@ const EXPRESSIONS_SOURCE: &str = include_str!("../../tests/fixtures/expressions-
 const CALL_SOURCE: &str = include_str!("../../tests/fixtures/call-v1.orna");
 const LOCAL_SCOPES_SOURCE: &str = include_str!("../../tests/fixtures/local-scopes-v1.orna");
 const STANDARD_MATH_SOURCE: &str = include_str!("fixtures/standard-math-import.orna");
+const DOCUMENT_SYMBOLS_SOURCE: &str = include_str!("../../tests/fixtures/document-symbols-v1.orna");
 
 fn document(text: &str) -> Document {
     Document::new(
@@ -27,6 +28,39 @@ fn in_crate_fixtures_parse_with_the_frozen_1_0_frontend() {
         let parsed = orna_syntax_v1::parse_module(source);
         assert!(parsed.diagnostics.is_empty(), "{:#?}", parsed.diagnostics);
     }
+}
+
+#[test]
+fn nested_document_symbol_model_keeps_enum_variants_and_payload_fields() {
+    let document = document(DOCUMENT_SYMBOLS_SOURCE);
+    let parse = parse_document(&document);
+    assert!(parse.diagnostics.is_empty(), "{:#?}", parse.diagnostics);
+    let orna_syntax_v1::Declaration::Enum { variants, .. } = &parse.value.items[0].declaration
+    else {
+        panic!("first fixture declaration must be an enum")
+    };
+    assert_eq!(
+        variants
+            .iter()
+            .map(|variant| variant.name.as_str())
+            .collect::<Vec<_>>(),
+        ["success", "failed"],
+        "enum variants are present in syntax tree"
+    );
+    assert_eq!(variants[0].fields[0].name, "value");
+    assert_eq!(variants[1].fields[0].name, "reason");
+    let symbols = declaration_symbols(&parse, &document.text);
+    assert_eq!(symbols[0].name, "Outcome");
+    assert_eq!(
+        symbols[0]
+            .children
+            .iter()
+            .map(|variant| variant.name.as_str())
+            .collect::<Vec<_>>(),
+        ["success", "failed"],
+        "nested declaration symbols: {:#?}",
+        symbols[0]
+    );
 }
 
 #[test]
