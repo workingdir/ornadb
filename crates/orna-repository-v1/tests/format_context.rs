@@ -4,9 +4,25 @@ use orna_repository_v1::Repository;
 use tempfile::TempDir;
 
 const DATABASE_ID: &str = "9f237b7e-6844-4498-bcd5-d24641c07449";
+const CANONICAL_DATABASE: &str = include_str!("fixtures/format-context/database-final.orna");
+const DATABASE_TEMPLATE: &str = include_str!("fixtures/format-context/database-template.orna");
+const UNKNOWN_FORMAT_DATABASE: &str =
+    include_str!("fixtures/format-context/database-unknown-format.orna");
+const BAD_UUID_DATABASE: &str = include_str!("fixtures/format-context/database-bad-uuid.orna");
+const UPPERCASE_UUID_DATABASE: &str =
+    include_str!("fixtures/format-context/database-uppercase-uuid.orna");
+const SIDECAR_DATABASE: &str = include_str!("fixtures/format-context/database-sidecar.orna");
+const INVALID_DATABASE: &str = include_str!("fixtures/format-context/database-invalid.orna");
+const REORDERED_DATABASE: &str = include_str!("fixtures/format-context/database-reordered.orna");
+const COMPACT_DATABASE: &str = include_str!("fixtures/format-context/database-compact.orna");
+const INDENTED_DATABASE: &str = include_str!("fixtures/format-context/database-indented-two.orna");
+const LEGACY_FORMAT_ONE: &str = include_str!("fixtures/format-context/format-1.orna");
+const LEGACY_FORMAT_TWO: &str = include_str!("fixtures/format-context/format-2.orna");
+const LEGACY_PROFILE_ONE: &str = include_str!("fixtures/format-context/profile-1-unknown.orna");
+const LEGACY_PROFILE_TWO: &str = include_str!("fixtures/format-context/profile-2-unknown.orna");
 
 fn canonical_database(database_id: &str) -> String {
-    format!("{{\n    repository_format: 3,\n    database_id: \"{database_id}\",\n}}\n")
+    DATABASE_TEMPLATE.replace("00000000-0000-4000-8000-000000000000", database_id)
 }
 
 fn git(directory: &Path, arguments: &[&str]) {
@@ -49,16 +65,17 @@ fn repository(database: Option<&str>, legacy_format: Option<&str>, store: bool) 
         directory.path(),
         &["init", "--quiet", "--initial-branch=main", "--template="],
     );
+    git(directory.path(), &["config", "user.name", "kierandrewett"]);
     git(
         directory.path(),
-        &["config", "user.name", "format-context-test"],
-    );
-    git(
-        directory.path(),
-        &["config", "user.email", "format-context@example.invalid"],
+        &["config", "user.email", "kieran@drewett.dev"],
     );
     git(directory.path(), &["config", "commit.gpgsign", "false"]);
-    fs::write(directory.path().join("main.orna"), "").expect("write source root");
+    fs::write(
+        directory.path().join("main.orna"),
+        include_str!("fixtures/git-repository-main.orna"),
+    )
+    .expect("write source root");
     if let Some(database) = database {
         fs::create_dir_all(directory.path().join(".orna")).expect("create metadata directory");
         fs::write(directory.path().join(".orna/database.orna"), database)
@@ -84,8 +101,7 @@ fn repository(database: Option<&str>, legacy_format: Option<&str>, store: bool) 
 
 #[test]
 fn admits_final_format_three_metadata_and_keeps_root_seams_pinned() {
-    let database = canonical_database(DATABASE_ID);
-    let directory = repository(Some(&database), None, true);
+    let directory = repository(Some(CANONICAL_DATABASE), None, true);
     let repository = Repository::discover(directory.path()).expect("discover repository");
     let context = repository
         .open_format_context()
@@ -130,7 +146,7 @@ fn context_binds_database_identity_to_its_committed_snapshot() {
 
 #[test]
 fn dispatches_legacy_formats_as_explicit_read_only_inputs() {
-    let format_one = repository(None, Some("format 1\n"), false);
+    let format_one = repository(None, Some(LEGACY_FORMAT_ONE), false);
     let context_one = Repository::discover(format_one.path())
         .unwrap()
         .open_format_context()
@@ -140,11 +156,7 @@ fn dispatches_legacy_formats_as_explicit_read_only_inputs() {
     assert!(!context_one.supports_writes());
     assert!(context_one.database_id().is_none());
 
-    let format_two = repository(
-        Some(&format!("{{database_id: \"{DATABASE_ID}\"}}\n")),
-        Some("format 2\n"),
-        false,
-    );
+    let format_two = repository(Some(SIDECAR_DATABASE), Some(LEGACY_FORMAT_TWO), false);
     let context_two = Repository::discover(format_two.path())
         .unwrap()
         .open_format_context()
@@ -156,35 +168,21 @@ fn dispatches_legacy_formats_as_explicit_read_only_inputs() {
 
 #[test]
 fn fails_closed_on_unknown_mixed_malformed_and_unavailable_metadata() {
-    let unknown = repository(
-        Some(&format!(
-            "{{\n    repository_format: 99,\n    database_id: \"{DATABASE_ID}\",\n}}\n"
-        )),
-        None,
-        false,
-    );
+    let unknown = repository(Some(UNKNOWN_FORMAT_DATABASE), None, false);
     let error = Repository::discover(unknown.path())
         .unwrap()
         .open_format_context()
         .unwrap_err();
     assert_eq!(error.code(), "ORNA-REPO-CONTEXT-003");
 
-    let mixed = repository(
-        Some(&canonical_database(DATABASE_ID)),
-        Some("format 1\n"),
-        false,
-    );
+    let mixed = repository(Some(CANONICAL_DATABASE), Some(LEGACY_FORMAT_ONE), false);
     let error = Repository::discover(mixed.path())
         .unwrap()
         .open_format_context()
         .unwrap_err();
     assert_eq!(error.code(), "ORNA-REPO-CONTEXT-004");
 
-    let malformed = repository(
-        Some("{\n    repository_format: 3,\n    database_id: \"not-a-uuid\",\n}\n"),
-        None,
-        false,
-    );
+    let malformed = repository(Some(BAD_UUID_DATABASE), None, false);
     let error = Repository::discover(malformed.path())
         .unwrap()
         .open_format_context()
@@ -201,25 +199,15 @@ fn fails_closed_on_unknown_mixed_malformed_and_unavailable_metadata() {
 
 #[test]
 fn rejects_oversized_and_noncanonical_final_records() {
-    let oversized_id = "x".repeat(70_000);
-    let oversized = repository(
-        Some(&format!(
-            "{{\n    repository_format: 3,\n    database_id: \"{oversized_id}\",\n}}\n"
-        )),
-        None,
-        false,
-    );
+    let oversized_database = CANONICAL_DATABASE.repeat(800);
+    let oversized = repository(Some(&oversized_database), None, false);
     let error = Repository::discover(oversized.path())
         .unwrap()
         .open_format_context()
         .unwrap_err();
     assert_eq!(error.code(), "ORNA-REPO-CONTEXT-002");
 
-    let noncanonical = repository(
-        Some("{repository_format: 3, database_id: \"9F237B7E-6844-4498-BCD5-D24641C07449\"}\n"),
-        None,
-        false,
-    );
+    let noncanonical = repository(Some(UPPERCASE_UUID_DATABASE), None, false);
     let error = Repository::discover(noncanonical.path())
         .unwrap()
         .open_format_context()
@@ -244,9 +232,9 @@ fn rejects_an_unborn_snapshot_as_unavailable() {
 #[test]
 fn rejects_noncanonical_final_database_record_bytes() {
     for database in [
-        format!("{{\n    database_id: \"{DATABASE_ID}\",\n    repository_format: 3,\n}}\n"),
-        format!("{{repository_format: 3, database_id: \"{DATABASE_ID}\"}}\n"),
-        format!("{{\n  repository_format: 3,\n  database_id: \"{DATABASE_ID}\",\n}}\n"),
+        REORDERED_DATABASE.to_owned(),
+        COMPACT_DATABASE.to_owned(),
+        INDENTED_DATABASE.to_owned(),
     ] {
         let directory = repository(Some(&database), None, false);
         let error = Repository::discover(directory.path())
@@ -259,11 +247,7 @@ fn rejects_noncanonical_final_database_record_bytes() {
 
 #[test]
 fn rejects_unenumerated_legacy_storage_profiles() {
-    for database in [
-        "{repository_format: 1, storage_profile: \"compact-storage-v1\"}\n",
-        "{repository_format: 2, storage_profile: \"compact-storage-v2\"}\n",
-        "{repository_format: 1, storage_profile: \"future-profile\"}\n",
-    ] {
+    for database in [LEGACY_PROFILE_ONE, LEGACY_PROFILE_TWO] {
         let directory = repository(None, Some(database), false);
         let error = Repository::discover(directory.path())
             .unwrap()
@@ -275,7 +259,7 @@ fn rejects_unenumerated_legacy_storage_profiles() {
 
 #[test]
 fn does_not_downgrade_an_invalid_database_entry_to_legacy() {
-    let directory = repository(Some("not-a-record\n"), Some("format 1\n"), false);
+    let directory = repository(Some(INVALID_DATABASE), Some(LEGACY_FORMAT_ONE), false);
     replace_database_with_directory(directory.path());
     let error = Repository::discover(directory.path())
         .unwrap()

@@ -8,7 +8,7 @@
 
 use std::{fmt, str::FromStr};
 
-use orna_syntax_v1::{Expr, LiteralKind, RecordField, parse_row};
+use orna_syntax_v1::{parse_row, Expr, LiteralKind, RecordField};
 
 use crate::{CommittedTreeEntryKind, Repository, RepositoryError};
 
@@ -251,12 +251,23 @@ impl RepositoryFormatContext {
             })?;
         let mut found = false;
         for entry in entries {
-            if !entry
-                .path()
-                .as_path()
-                .to_str()
-                .is_some_and(|path| path.starts_with(STORE_PATH_PREFIX))
-            {
+            let Some(path) = entry.path().as_path().to_str() else {
+                if entry
+                    .path()
+                    .as_path()
+                    .starts_with(std::path::Path::new(".orna"))
+                {
+                    return Err(FormatContextError::StoreRootInvalid);
+                }
+                continue;
+            };
+            if path == DATABASE_PATH {
+                continue;
+            }
+            if path.starts_with(".orna/") && !path.starts_with(STORE_PATH_PREFIX) {
+                return Err(FormatContextError::StoreRootInvalid);
+            }
+            if !path.starts_with(STORE_PATH_PREFIX) {
                 continue;
             }
             found = true;
@@ -280,12 +291,6 @@ impl RepositoryFormatContext {
         }
     }
 }
-
-/// Compatibility spelling for code in this crate's transition window.
-///
-/// This alias adds no construction path; the only public issuer remains
-/// [`Repository::open_format_context`].
-pub type FormatContext = RepositoryFormatContext;
 
 impl SchemaRootPin {
     /// The snapshot pin from which this schema proof was admitted.
@@ -483,24 +488,6 @@ fn parse_legacy_format(bytes: &[u8]) -> Result<RepositoryFormat, FormatContextEr
         _ => {}
     }
 
-    let fields = parse_record(bytes).map_err(|_| FormatContextError::MetadataInvalid)?;
-    if fields.len() != 2
-        || fields
-            .iter()
-            .any(|field| field.name != "repository_format" && field.name != "storage_profile")
-        || fields
-            .iter()
-            .filter(|field| field.name == "repository_format")
-            .count()
-            != 1
-        || fields
-            .iter()
-            .filter(|field| field.name == "storage_profile")
-            .count()
-            != 1
-    {
-        return Err(FormatContextError::MetadataInvalid);
-    }
     // The final publication names legacy reader coordinates as format 1/2,
     // but does not enumerate any legacy `storage_profile` pair. Do not import
     // historical draft/current-writer profile names into final admission.
