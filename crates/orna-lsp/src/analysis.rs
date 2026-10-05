@@ -162,8 +162,12 @@ pub(crate) enum EditorSymbolKind {
     Function,
     Type,
     Enum,
+    EnumVariant,
     Table,
     Protocol,
+    Method,
+    Field,
+    Constant,
     Other,
 }
 
@@ -178,6 +182,7 @@ pub(crate) struct EditorSymbol {
     pub parameters: Vec<String>,
     pub parameter_names: Vec<Option<String>>,
     pub result_type: Option<String>,
+    pub children: Vec<EditorSymbol>,
 }
 
 #[derive(Debug, Clone)]
@@ -561,6 +566,34 @@ fn symbol_for_item(item: &Item, text: &str, tokens: &[Token]) -> Option<EditorSy
             .collect(),
         _ => Vec::new(),
     };
+    let mut symbol = symbol_from_scope(
+        name,
+        kind,
+        &item.span,
+        selection_scope,
+        detail,
+        parameters,
+        parameter_names,
+        result_type,
+        text,
+        tokens,
+    )?;
+    symbol.children = declaration_child_symbols(&item.declaration, text, tokens);
+    Some(symbol)
+}
+
+fn symbol_from_scope(
+    name: &str,
+    kind: EditorSymbolKind,
+    full: &SourceSpan,
+    selection_scope: &SourceSpan,
+    detail: Option<String>,
+    parameters: Vec<String>,
+    parameter_names: Vec<Option<String>>,
+    result_type: Option<String>,
+    text: &str,
+    tokens: &[Token],
+) -> Option<EditorSymbol> {
     let selection = tokens
         .iter()
         .find(|token| {
@@ -575,13 +608,223 @@ fn symbol_for_item(item: &Item, text: &str, tokens: &[Token]) -> Option<EditorSy
         name: name.to_owned(),
         kind,
         selection,
-        full: item.span.clone(),
+        full: full.clone(),
         detail,
-        documentation: leading_doc_comment(text, item.span.start),
+        documentation: leading_doc_comment(text, full.start),
         parameters,
         parameter_names,
         result_type,
+        children: Vec::new(),
     })
+}
+
+fn declaration_child_symbols(
+    declaration: &Declaration,
+    text: &str,
+    tokens: &[Token],
+) -> Vec<EditorSymbol> {
+    let mut children = match declaration {
+        Declaration::Table { members, .. } => members
+            .iter()
+            .flat_map(|member| match member {
+                orna_syntax_v1::TableMember::Field { name, span, .. } => symbol_from_scope(
+                    name,
+                    EditorSymbolKind::Field,
+                    span,
+                    span,
+                    None,
+                    Vec::new(),
+                    Vec::new(),
+                    None,
+                    text,
+                    tokens,
+                )
+                .into_iter()
+                .collect(),
+                orna_syntax_v1::TableMember::Implementation { implementation, .. } => {
+                    implementation_symbols(implementation, text, tokens)
+                }
+                orna_syntax_v1::TableMember::Assertion { .. } => Vec::new(),
+            })
+            .collect(),
+        Declaration::Protocol { members, .. } => members
+            .iter()
+            .filter_map(|member| match member {
+                orna_syntax_v1::ProtocolMember::Function { signature, span } => symbol_from_scope(
+                    &signature.name,
+                    EditorSymbolKind::Method,
+                    span,
+                    &signature.span,
+                    Some(source_slice(text, &signature.span).to_owned()),
+                    signature
+                        .parameters
+                        .iter()
+                        .map(|parameter| source_slice(text, &parameter.span).to_owned())
+                        .collect(),
+                    signature
+                        .parameters
+                        .iter()
+                        .map(|parameter| match &parameter.pattern {
+                            Pattern::Name(name, _) => Some(name.clone()),
+                            _ => None,
+                        })
+                        .collect(),
+                    signature
+                        .result
+                        .as_ref()
+                        .and_then(|result| source_type(text, result)),
+                    text,
+                    tokens,
+                ),
+                orna_syntax_v1::ProtocolMember::Static { name, span, .. } => symbol_from_scope(
+                    name,
+                    EditorSymbolKind::Constant,
+                    span,
+                    span,
+                    None,
+                    Vec::new(),
+                    Vec::new(),
+                    None,
+                    text,
+                    tokens,
+                ),
+            })
+            .collect(),
+        Declaration::Enum { variants, .. } => variants
+            .iter()
+            .filter_map(|variant| {
+                let mut symbol = symbol_from_scope(
+                    &variant.name,
+                    EditorSymbolKind::EnumVariant,
+                    &variant.span,
+                    &variant.span,
+                    None,
+                    Vec::new(),
+                    Vec::new(),
+                    None,
+                    text,
+                    tokens,
+                )?;
+                symbol.children = variant
+                    .fields
+                    .iter()
+                    .filter_map(|field| {
+                        symbol_from_scope(
+                            &field.name,
+                            EditorSymbolKind::Field,
+                            &field.span,
+                            &field.span,
+                            None,
+                            Vec::new(),
+                            Vec::new(),
+                            None,
+                            text,
+                            tokens,
+                        )
+                    })
+                    .collect();
+                Some(symbol)
+            })
+            .collect(),
+        Declaration::Type { representation, .. } => match representation {
+            orna_syntax_v1::TypeRepresentation::Alias { refinements, .. } => {
+                type_member_symbols(refinements, text, tokens)
+            }
+            orna_syntax_v1::TypeRepresentation::Nominal { members } => {
+                type_member_symbols(members, text, tokens)
+            }
+        },
+        _ => Vec::new(),
+    };
+    children.sort_by_key(|symbol| symbol.selection.start);
+    children
+}
+
+fn type_member_symbols(
+    members: &[orna_syntax_v1::TypeMember],
+    text: &str,
+    tokens: &[Token],
+) -> Vec<EditorSymbol> {
+    let mut children = members
+        .iter()
+        .flat_map(|member| match member {
+            orna_syntax_v1::TypeMember::Field { name, span, .. } => symbol_from_scope(
+                name,
+                EditorSymbolKind::Field,
+                span,
+                span,
+                None,
+                Vec::new(),
+                Vec::new(),
+                None,
+                text,
+                tokens,
+            )
+            .into_iter()
+            .collect(),
+            orna_syntax_v1::TypeMember::Implementation { implementation, .. } => {
+                implementation_symbols(implementation, text, tokens)
+            }
+            orna_syntax_v1::TypeMember::Assertion { .. } => Vec::new(),
+        })
+        .collect::<Vec<_>>();
+    children.sort_by_key(|symbol| symbol.selection.start);
+    children
+}
+
+fn implementation_symbols(
+    implementation: &orna_syntax_v1::Implementation,
+    text: &str,
+    tokens: &[Token],
+) -> Vec<EditorSymbol> {
+    let mut children = implementation
+        .members
+        .iter()
+        .filter_map(|member| match member {
+            orna_syntax_v1::ImplMember::Function {
+                signature, span, ..
+            } => symbol_from_scope(
+                &signature.name,
+                EditorSymbolKind::Method,
+                span,
+                &signature.span,
+                Some(source_slice(text, &signature.span).to_owned()),
+                signature
+                    .parameters
+                    .iter()
+                    .map(|parameter| source_slice(text, &parameter.span).to_owned())
+                    .collect(),
+                signature
+                    .parameters
+                    .iter()
+                    .map(|parameter| match &parameter.pattern {
+                        Pattern::Name(name, _) => Some(name.clone()),
+                        _ => None,
+                    })
+                    .collect(),
+                signature
+                    .result
+                    .as_ref()
+                    .and_then(|result| source_type(text, result)),
+                text,
+                tokens,
+            ),
+            orna_syntax_v1::ImplMember::Static { name, span, .. } => symbol_from_scope(
+                name,
+                EditorSymbolKind::Constant,
+                span,
+                span,
+                None,
+                Vec::new(),
+                Vec::new(),
+                None,
+                text,
+                tokens,
+            ),
+        })
+        .collect::<Vec<_>>();
+    children.sort_by_key(|symbol| symbol.selection.start);
+    children
 }
 
 fn source_type(text: &str, ty: &TypeExpr) -> Option<String> {
@@ -721,8 +964,12 @@ fn hover_symbol(symbol: &EditorSymbol) -> Hover {
         EditorSymbolKind::Function => "function",
         EditorSymbolKind::Type => "type",
         EditorSymbolKind::Enum => "enum",
+        EditorSymbolKind::EnumVariant => "enum variant",
         EditorSymbolKind::Table => "table",
         EditorSymbolKind::Protocol => "protocol",
+        EditorSymbolKind::Method => "method",
+        EditorSymbolKind::Field => "field",
+        EditorSymbolKind::Constant => "constant",
         EditorSymbolKind::Other => "declaration",
     };
     crate::hover::declaration(
@@ -1111,24 +1358,38 @@ pub fn document_symbols(
 ) -> Vec<DocumentSymbol> {
     declaration_symbols(parse, text)
         .into_iter()
-        .map(|symbol| DocumentSymbol {
-            name: symbol.name,
-            detail: symbol.detail,
-            kind: match symbol.kind {
-                EditorSymbolKind::Function => SymbolKind::FUNCTION,
-                EditorSymbolKind::Type => SymbolKind::STRUCT,
-                EditorSymbolKind::Enum => SymbolKind::ENUM,
-                EditorSymbolKind::Table => SymbolKind::CLASS,
-                EditorSymbolKind::Protocol => SymbolKind::INTERFACE,
-                EditorSymbolKind::Other => SymbolKind::NAMESPACE,
-            },
-            tags: None,
-            deprecated: None,
-            range: mapper.range(&symbol.full),
-            selection_range: mapper.range(&symbol.selection),
-            children: None,
-        })
+        .map(|symbol| document_symbol(symbol, mapper))
         .collect()
+}
+
+fn document_symbol(symbol: EditorSymbol, mapper: &PositionMapper<'_>) -> DocumentSymbol {
+    DocumentSymbol {
+        name: symbol.name,
+        detail: symbol.detail,
+        kind: match symbol.kind {
+            EditorSymbolKind::Function => SymbolKind::FUNCTION,
+            EditorSymbolKind::Type => SymbolKind::STRUCT,
+            EditorSymbolKind::Enum => SymbolKind::ENUM,
+            EditorSymbolKind::EnumVariant => SymbolKind::ENUM_MEMBER,
+            EditorSymbolKind::Table => SymbolKind::CLASS,
+            EditorSymbolKind::Protocol => SymbolKind::INTERFACE,
+            EditorSymbolKind::Method => SymbolKind::METHOD,
+            EditorSymbolKind::Field => SymbolKind::FIELD,
+            EditorSymbolKind::Constant => SymbolKind::CONSTANT,
+            EditorSymbolKind::Other => SymbolKind::NAMESPACE,
+        },
+        tags: None,
+        deprecated: None,
+        range: mapper.range(&symbol.full),
+        selection_range: mapper.range(&symbol.selection),
+        children: (!symbol.children.is_empty()).then(|| {
+            symbol
+                .children
+                .into_iter()
+                .map(|child| document_symbol(child, mapper))
+                .collect()
+        }),
+    }
 }
 
 pub fn completion_at(
@@ -1197,8 +1458,12 @@ pub fn completion_at(
                 EditorSymbolKind::Function => CompletionItemKind::FUNCTION,
                 EditorSymbolKind::Type => CompletionItemKind::STRUCT,
                 EditorSymbolKind::Enum => CompletionItemKind::ENUM,
+                EditorSymbolKind::EnumVariant => CompletionItemKind::ENUM_MEMBER,
                 EditorSymbolKind::Table => CompletionItemKind::CLASS,
                 EditorSymbolKind::Protocol => CompletionItemKind::INTERFACE,
+                EditorSymbolKind::Method => CompletionItemKind::METHOD,
+                EditorSymbolKind::Field => CompletionItemKind::FIELD,
+                EditorSymbolKind::Constant => CompletionItemKind::CONSTANT,
                 EditorSymbolKind::Other => CompletionItemKind::REFERENCE,
             };
             let insert_text = if symbol.kind == EditorSymbolKind::Function {
@@ -1326,8 +1591,12 @@ fn append_standard_symbols<'a>(
             EditorSymbolKind::Function => CompletionItemKind::FUNCTION,
             EditorSymbolKind::Type => CompletionItemKind::STRUCT,
             EditorSymbolKind::Enum => CompletionItemKind::ENUM,
+            EditorSymbolKind::EnumVariant => CompletionItemKind::ENUM_MEMBER,
             EditorSymbolKind::Table => CompletionItemKind::CLASS,
             EditorSymbolKind::Protocol => CompletionItemKind::INTERFACE,
+            EditorSymbolKind::Method => CompletionItemKind::METHOD,
+            EditorSymbolKind::Field => CompletionItemKind::FIELD,
+            EditorSymbolKind::Constant => CompletionItemKind::CONSTANT,
             EditorSymbolKind::Other => CompletionItemKind::REFERENCE,
         };
         let insert_text = if snippets && symbol.kind == EditorSymbolKind::Function {

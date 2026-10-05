@@ -18,11 +18,12 @@ use lsp_types::{
     CodeActionProviderCapability, CodeLens, CodeLensOptions, CodeLensParams, Command,
     CompletionOptions, CompletionParams, CompletionResponse, Diagnostic, DiagnosticOptions,
     DiagnosticServerCapabilities, DocumentDiagnosticParams, DocumentDiagnosticReport,
-    DocumentHighlight, DocumentHighlightKind, DocumentHighlightParams, DocumentLink,
-    DocumentLinkOptions, DocumentLinkParams, DocumentSymbolParams, DocumentSymbolResponse,
-    FoldingRange, FoldingRangeParams, FoldingRangeProviderCapability, FullDocumentDiagnosticReport,
-    GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverParams, HoverProviderCapability,
-    InitializeParams, InlayHintOptions, InlayHintParams, InlayHintServerCapabilities, InlineValue,
+    DocumentFormattingParams, DocumentHighlight, DocumentHighlightKind, DocumentHighlightParams,
+    DocumentLink, DocumentLinkOptions, DocumentLinkParams, DocumentRangeFormattingParams,
+    DocumentSymbolParams, DocumentSymbolResponse, FoldingRange, FoldingRangeParams,
+    FoldingRangeProviderCapability, FullDocumentDiagnosticReport, GotoDefinitionParams,
+    GotoDefinitionResponse, Hover, HoverParams, HoverProviderCapability, InitializeParams,
+    InlayHintOptions, InlayHintParams, InlayHintServerCapabilities, InlineValue,
     InlineValueOptions, InlineValueParams, InlineValueServerCapabilities,
     InlineValueVariableLookup, LinkedEditingRangeParams, LinkedEditingRangeServerCapabilities,
     LinkedEditingRanges, Moniker, MonikerKind, MonikerParams, NumberOrString, OneOf, Position,
@@ -255,6 +256,8 @@ fn server_capabilities() -> serde_json::Value {
             work_done_progress_options: Default::default(),
         })),
         document_symbol_provider: Some(OneOf::Left(true)),
+        document_formatting_provider: Some(OneOf::Left(true)),
+        document_range_formatting_provider: Some(OneOf::Left(true)),
         completion_provider: Some(CompletionOptions {
             trigger_characters: Some(vec![".".to_owned(), ":".to_owned()]),
             ..CompletionOptions::default()
@@ -325,6 +328,8 @@ fn handle_request(state: &mut ServerState, connection: &Connection, request: Req
         "textDocument/prepareRename" => request_prepare_rename(state, request),
         "textDocument/rename" => request_rename(state, request),
         "textDocument/documentSymbol" => request_document_symbols(state, request),
+        "textDocument/formatting" => request_formatting(state, request),
+        "textDocument/rangeFormatting" => request_range_formatting(state, request),
         "textDocument/semanticTokens/full" => request_semantic_tokens_full(state, request),
         "textDocument/semanticTokens/full/delta" => request_semantic_tokens_delta(state, request),
         "textDocument/semanticTokens/range" => request_semantic_tokens_range(state, request),
@@ -1904,8 +1909,12 @@ fn request_moniker(
         analysis::EditorSymbolKind::Function => "function",
         analysis::EditorSymbolKind::Type => "type",
         analysis::EditorSymbolKind::Enum => "enum",
+        analysis::EditorSymbolKind::EnumVariant => "enum-member",
         analysis::EditorSymbolKind::Table => "table",
         analysis::EditorSymbolKind::Protocol => "protocol",
+        analysis::EditorSymbolKind::Method => "method",
+        analysis::EditorSymbolKind::Field => "field",
+        analysis::EditorSymbolKind::Constant => "constant",
         analysis::EditorSymbolKind::Other => "symbol",
     };
     Ok(serde_json::to_value(vec![Moniker {
@@ -2260,6 +2269,33 @@ fn request_completion(
         analysis::completion_at(&parse, &document.text, Some(byte), params.context.as_ref());
     let response = CompletionResponse::Array(items);
     Ok(serde_json::to_value(response)?)
+}
+
+fn request_formatting(
+    state: &mut ServerState,
+    request: Request,
+) -> Result<serde_json::Value, Box<dyn std::error::Error + Send + Sync>> {
+    let (_, params) = request.extract::<DocumentFormattingParams>("textDocument/formatting")?;
+    let edits = state
+        .document(&params.text_document.uri)
+        .map_or_else(Vec::new, |document| {
+            crate::formatting::format(&document.text, None, &params.options)
+        });
+    Ok(serde_json::to_value(edits)?)
+}
+
+fn request_range_formatting(
+    state: &mut ServerState,
+    request: Request,
+) -> Result<serde_json::Value, Box<dyn std::error::Error + Send + Sync>> {
+    let (_, params) =
+        request.extract::<DocumentRangeFormattingParams>("textDocument/rangeFormatting")?;
+    let edits = state
+        .document(&params.text_document.uri)
+        .map_or_else(Vec::new, |document| {
+            crate::formatting::format(&document.text, Some(params.range), &params.options)
+        });
+    Ok(serde_json::to_value(edits)?)
 }
 
 fn request_document_diagnostic(
