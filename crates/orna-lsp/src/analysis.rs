@@ -361,7 +361,8 @@ fn standard_symbol_at(
     if chain.len() > 1 {
         let name = chain.last()?;
         let qualifier = chain[..chain.len() - 1].join(".");
-        if let Some(module) = resolve_standard_module(parse, &qualifier)
+        if token.text.as_str() == name.as_str()
+            && let Some(module) = resolve_standard_module(parse, &qualifier)
             && let Some(symbol) = standard_symbol(&module, name)
         {
             return Some(symbol);
