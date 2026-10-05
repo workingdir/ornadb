@@ -144,8 +144,135 @@ struct ContextIdentity([u8; 32]);
 /// integration.  The fields bind the local owner, database, immutable store
 /// root and schema generation; callers cannot create a context from raw OIDs.
 #[derive(Debug)]
+struct PrivateRefCleanupOwner {
+    repository: crate::Repository,
+}
+
+impl PrivateRefCleanupOwner {
+    fn git_command(&self) -> Command {
+        let mut command = Command::new("git");
+        command
+            .current_dir(self.repository.worktree())
+            .env("GIT_NO_LAZY_FETCH", "1")
+            .env("GIT_NO_REPLACE_OBJECTS", "1")
+            .env("GIT_OPTIONAL_LOCKS", "0")
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_COMMON_DIR")
+            .env_remove("GIT_OBJECT_DIRECTORY")
+            .env_remove("GIT_ALTERNATE_OBJECT_DIRECTORIES");
+        command
+    }
+
+    fn git_output(&self, args: &[&str]) -> Result<Vec<u8>, GraphError> {
+        let output = self
+            .git_command()
+            .args(args)
+            .output()
+            .map_err(|_| GraphError::GitCommandFailed)?;
+        if !output.status.success() {
+            return Err(if args.first() == Some(&"cat-file") {
+                GraphError::UnknownObjectAvailability
+            } else {
+                GraphError::GitCommandFailed
+            });
+        }
+        Ok(output.stdout)
+    }
+
+    fn delete_protected_ref(&self, reference: &str, oid: &NativeOid) -> Result<(), GraphError> {
+        self.git_output(&["update-ref", "-d", reference, &oid.to_hex()])?;
+        self.sync_ref_directories(reference)
+    }
+
+    fn sync_ref_directories(&self, reference: &str) -> Result<(), GraphError> {
+        let common_dir_output = self.git_output(&["rev-parse", "--git-common-dir"])?;
+        let common_dir = resolve_git_path(self.repository.worktree(), &common_dir_output)?;
+        let common_dir = fs::canonicalize(common_dir).map_err(|_| GraphError::DurabilityFailed)?;
+        let ref_path_output = self.git_output(&["rev-parse", "--git-path", reference])?;
+        let ref_path = resolve_git_path(self.repository.worktree(), &ref_path_output)?;
+        let mut directory = ref_path
+            .parent()
+            .ok_or(GraphError::DurabilityFailed)?
+            .to_path_buf();
+        let directory = loop {
+            match fs::canonicalize(&directory) {
+                Ok(directory) => break directory,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    if !directory.pop() {
+                        return Err(GraphError::DurabilityFailed);
+                    }
+                }
+                Err(_) => return Err(GraphError::DurabilityFailed),
+            }
+        };
+        if !directory.starts_with(&common_dir) {
+            return Err(GraphError::DurabilityFailed);
+        }
+        let mut current = directory;
+        loop {
+            sync_directory(&current)?;
+            if current == common_dir || !current.pop() {
+                break;
+            }
+        }
+        let packed_refs = common_dir.join("packed-refs");
+        match fs::symlink_metadata(&packed_refs) {
+            Ok(metadata) => {
+                if !metadata.file_type().is_file() {
+                    return Err(GraphError::DurabilityFailed);
+                }
+                File::open(&packed_refs)
+                    .and_then(|file| file.sync_all())
+                    .map_err(|_| GraphError::DurabilityFailed)?;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => return Err(GraphError::DurabilityFailed),
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug)]
+struct PendingPrivateRefCleanup {
+    owner: Arc<PrivateRefCleanupOwner>,
+    reference: String,
+    oid: NativeOid,
+    armed: bool,
+}
+
+impl PendingPrivateRefCleanup {
+    fn new(owner: Arc<PrivateRefCleanupOwner>, reference: String, oid: NativeOid) -> Self {
+        Self {
+            owner,
+            reference,
+            oid,
+            armed: true,
+        }
+    }
+
+    fn cleanup(&mut self) {
+        if self.armed {
+            let _ = self.owner.delete_protected_ref(&self.reference, &self.oid);
+            self.armed = false;
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for PendingPrivateRefCleanup {
+    fn drop(&mut self) {
+        self.cleanup();
+    }
+}
+
+#[derive(Debug)]
 pub struct NativeGraphContext {
     repository: crate::Repository,
+    private_ref_owner: Arc<PrivateRefCleanupOwner>,
     repository_id: [u8; 32],
     identity: ContextIdentity,
     database_id: [u8; 16],
@@ -192,6 +319,9 @@ impl NativeGraphContext {
             return Err(GraphError::ContextMismatch);
         }
         let context = Self {
+            private_ref_owner: Arc::new(PrivateRefCleanupOwner {
+                repository: repository.clone(),
+            }),
             repository,
             repository_id,
             identity: ContextIdentity(identity),
@@ -888,6 +1018,11 @@ impl NativeGraphContext {
             let _ = self.delete_protected_ref(&provisional_ref, &descriptor_oid);
             return Err(error);
         }
+        let cleanup = PendingPrivateRefCleanup::new(
+            Arc::clone(&self.private_ref_owner),
+            provisional_ref,
+            descriptor_oid.clone(),
+        );
         Ok(CapturedBlobCandidate {
             context: self.identity,
             repository_id: self.repository_id,
@@ -898,7 +1033,7 @@ impl NativeGraphContext {
             pin_id,
             descriptor_oid,
             identity,
-            provisional_ref,
+            cleanup,
         })
     }
 
@@ -995,11 +1130,13 @@ impl NativeGraphContext {
         let pin_hex = hex_encode(&pin_id);
         let protected_ref = format!("refs/orna/pins/{pin_hex}");
         let provisional_ref = format!("refs/orna/pins/pending/{pin_hex}");
-        if let Err(error) = self.create_protected_ref(&provisional_ref, &reference.descriptor_oid) {
-            let _ = self.delete_protected_ref(&provisional_ref, &reference.descriptor_oid);
-            return Err(error);
-        }
-        self.finish_protection(reference, pin_id, provisional_ref, protected_ref, scope)
+        let cleanup = PendingPrivateRefCleanup::new(
+            Arc::clone(&self.private_ref_owner),
+            provisional_ref,
+            reference.descriptor_oid.clone(),
+        );
+        self.create_protected_ref(&cleanup.reference, &reference.descriptor_oid)?;
+        self.finish_protection(reference, pin_id, cleanup, protected_ref, scope)
     }
 
     /// Verifies and promotes a candidate produced by this exact graph owner.
@@ -1009,70 +1146,60 @@ impl NativeGraphContext {
         candidate: CapturedBlobCandidate,
         scope: &RepositoryReadScope,
     ) -> Result<ProtectedContentPin, GraphError> {
-        if candidate.context != self.identity
-            || candidate.repository_id != self.repository_id
-            || candidate.database_id != self.database_id
-            || candidate.owner_id != self.owner_id
-            || candidate.snapshot_id != self.snapshot_id
-            || candidate.algorithm != self.algorithm
-            || candidate.provisional_ref
-                != format!("refs/orna/pins/pending/{}", hex_encode(&candidate.pin_id))
+        let CapturedBlobCandidate {
+            context,
+            repository_id,
+            database_id,
+            owner_id,
+            snapshot_id,
+            algorithm,
+            pin_id,
+            descriptor_oid,
+            identity,
+            cleanup,
+        } = candidate;
+        if context != self.identity
+            || repository_id != self.repository_id
+            || database_id != self.database_id
+            || owner_id != self.owner_id
+            || snapshot_id != self.snapshot_id
+            || algorithm != self.algorithm
+            || !Arc::ptr_eq(&cleanup.owner, &self.private_ref_owner)
+            || cleanup.reference != format!("refs/orna/pins/pending/{}", hex_encode(&pin_id))
+            || cleanup.oid != descriptor_oid
         {
             return Err(GraphError::ContextMismatch);
         }
         let reference = AdmittedBlobReference {
-            context: candidate.context,
-            database_id: candidate.database_id,
-            owner_id: candidate.owner_id,
-            snapshot_id: candidate.snapshot_id,
-            descriptor_oid: candidate.descriptor_oid,
-            identity: candidate.identity,
+            context,
+            database_id,
+            owner_id,
+            snapshot_id,
+            descriptor_oid,
+            identity,
         };
-        if let Err(error) = scope.authorize(self) {
-            let _ = self.delete_protected_ref(&candidate.provisional_ref, &reference.descriptor_oid);
-            return Err(error);
-        }
-        let protected_ref = format!("refs/orna/pins/{}", hex_encode(&candidate.pin_id));
-        self.finish_protection(
-            &reference,
-            candidate.pin_id,
-            candidate.provisional_ref,
-            protected_ref,
-            scope,
-        )
+        scope.authorize(self)?;
+        let protected_ref = format!("refs/orna/pins/{}", hex_encode(&pin_id));
+        self.finish_protection(&reference, pin_id, cleanup, protected_ref, scope)
     }
 
     fn finish_protection(
         &self,
         reference: &AdmittedBlobReference,
         pin_id: [u8; 16],
-        provisional_ref: String,
+        mut cleanup: PendingPrivateRefCleanup,
         protected_ref: String,
         scope: &RepositoryReadScope,
     ) -> Result<ProtectedContentPin, GraphError> {
-        let cleanup = || {
-            let _ = self.delete_protected_ref(&provisional_ref, &reference.descriptor_oid);
-        };
-        let objects = match self.verify_full_blob(reference, scope) {
-            Ok(objects) => objects,
-            Err(error) => {
-                cleanup();
-                return Err(error);
-            }
-        };
-        if let Err(error) = self
-            .sync_object_closure(&objects, scope)
-            .and_then(|()| scope.check_cancelled())
-        {
-            cleanup();
-            return Err(error);
-        }
-        if let Err(error) =
-            self.promote_protected_ref(&provisional_ref, &protected_ref, &reference.descriptor_oid)
-        {
-            cleanup();
-            return Err(error);
-        }
+        let objects = self.verify_full_blob(reference, scope)?;
+        self.sync_object_closure(&objects, scope)?;
+        scope.check_cancelled()?;
+        self.promote_protected_ref(
+            &cleanup.reference,
+            &protected_ref,
+            &reference.descriptor_oid,
+        )?;
+        cleanup.disarm();
         // If syncing the promoted ref fails, leave it rooted. Returning no pin
         // is safe; deleting a possibly durable root could expose objects to GC.
         self.sync_git_ref(&protected_ref)?;
@@ -1657,18 +1784,7 @@ impl NativeGraphContext {
     }
 
     fn git_command(&self) -> Command {
-        let mut command = Command::new("git");
-        command
-            .current_dir(self.repository.worktree())
-            .env("GIT_NO_LAZY_FETCH", "1")
-            .env("GIT_NO_REPLACE_OBJECTS", "1")
-            .env("GIT_OPTIONAL_LOCKS", "0")
-            .env_remove("GIT_DIR")
-            .env_remove("GIT_WORK_TREE")
-            .env_remove("GIT_COMMON_DIR")
-            .env_remove("GIT_OBJECT_DIRECTORY")
-            .env_remove("GIT_ALTERNATE_OBJECT_DIRECTORIES");
-        command
+        self.private_ref_owner.git_command()
     }
 
     fn create_protected_ref(&self, reference: &str, oid: &NativeOid) -> Result<(), GraphError> {
@@ -1713,8 +1829,8 @@ impl NativeGraphContext {
     }
 
     fn delete_protected_ref(&self, reference: &str, oid: &NativeOid) -> Result<(), GraphError> {
-        self.git_output(&["update-ref", "-d", reference, &oid.to_hex()])?;
-        self.sync_ref_directories(reference)
+        self.private_ref_owner
+            .delete_protected_ref(reference, oid)
     }
 
     fn sync_git_ref(&self, reference: &str) -> Result<(), GraphError> {
@@ -1731,50 +1847,7 @@ impl NativeGraphContext {
     }
 
     fn sync_ref_directories(&self, reference: &str) -> Result<(), GraphError> {
-        let common_dir_output = self.git_output(&["rev-parse", "--git-common-dir"])?;
-        let common_dir = resolve_git_path(self.repository.worktree(), &common_dir_output)?;
-        let common_dir = fs::canonicalize(common_dir).map_err(|_| GraphError::DurabilityFailed)?;
-        let ref_path_output = self.git_output(&["rev-parse", "--git-path", reference])?;
-        let ref_path = resolve_git_path(self.repository.worktree(), &ref_path_output)?;
-        let mut directory = ref_path
-            .parent()
-            .ok_or(GraphError::DurabilityFailed)?
-            .to_path_buf();
-        let directory = loop {
-            match fs::canonicalize(&directory) {
-                Ok(directory) => break directory,
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                    if !directory.pop() {
-                        return Err(GraphError::DurabilityFailed);
-                    }
-                }
-                Err(_) => return Err(GraphError::DurabilityFailed),
-            }
-        };
-        if !directory.starts_with(&common_dir) {
-            return Err(GraphError::DurabilityFailed);
-        }
-        let mut current = directory;
-        loop {
-            sync_directory(&current)?;
-            if current == common_dir || !current.pop() {
-                break;
-            }
-        }
-        let packed_refs = common_dir.join("packed-refs");
-        match fs::symlink_metadata(&packed_refs) {
-            Ok(metadata) => {
-                if !metadata.file_type().is_file() {
-                    return Err(GraphError::DurabilityFailed);
-                }
-                File::open(&packed_refs)
-                    .and_then(|file| file.sync_all())
-                    .map_err(|_| GraphError::DurabilityFailed)?;
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(_) => return Err(GraphError::DurabilityFailed),
-        }
-        Ok(())
+        self.private_ref_owner.sync_ref_directories(reference)
     }
 
     fn sync_object_closure(
@@ -2508,12 +2581,10 @@ impl ProtectedContentTransfer {
     }
 }
 
-/// Proof that a complete content closure was verified, flushed and rooted by
-/// a durable private Git ref.  It is non-cloneable and has no public
-/// constructor.  Dropping it does not release that Git ref.
 /// An opaque, owner-issued pre-row Blob candidate. It retains its provisional
-/// native ref until accepted through `protect_captured_blob`; raw OIDs are not
-/// exposed as capture authority.
+/// native ref until accepted through `protect_captured_blob`; dropping an
+/// unaccepted candidate removes that ref. Raw OIDs are not exposed as
+/// capture authority.
 pub struct CapturedBlobCandidate {
     context: ContextIdentity,
     repository_id: [u8; 32],
@@ -2524,7 +2595,7 @@ pub struct CapturedBlobCandidate {
     pin_id: [u8; 16],
     descriptor_oid: NativeOid,
     identity: crate::blob_store::ContentIdentity,
-    provisional_ref: String,
+    cleanup: PendingPrivateRefCleanup,
 }
 
 /// Proof that a complete content closure was verified, flushed and rooted by
@@ -4406,6 +4477,48 @@ mod persisted_orp_tests {
             graph.protect_captured_blob(candidate, &scope),
             Err(GraphError::ReadCancelled)
         ));
+        assert!(!fixture_ref_exists(directory.path(), &pending_ref));
+    }
+
+    #[test]
+    fn wrong_context_rejection_cleans_issuing_candidate_ref() {
+        let (issuing_directory, issuing_graph) = capture_test_context();
+        let (_other_directory, other_graph) = capture_test_context();
+        let issuing_scope = issuing_graph.open_read_scope().expect("issuing read scope");
+        let other_scope = other_graph.open_read_scope().expect("other read scope");
+        let payload = b"candidate belongs to issuing graph";
+        let candidate = issuing_graph
+            .capture_blob_candidate(&payload[..], payload.len() as u64, &issuing_scope)
+            .expect("capture candidate under issuing graph");
+        let pending_ref = format!(
+            "refs/orna/pins/pending/{}",
+            hex_encode(&candidate.pin_id)
+        );
+        assert!(fixture_ref_exists(issuing_directory.path(), &pending_ref));
+
+        assert!(matches!(
+            other_graph.protect_captured_blob(candidate, &other_scope),
+            Err(GraphError::ContextMismatch)
+        ));
+        assert!(!fixture_ref_exists(issuing_directory.path(), &pending_ref));
+    }
+
+    #[test]
+    fn abandoned_candidate_drops_its_provisional_ref() {
+        let (directory, graph) = capture_test_context();
+        let scope = graph.open_read_scope().expect("owner read scope");
+        let payload = b"candidate abandoned before acceptance";
+        let candidate = graph
+            .capture_blob_candidate(&payload[..], payload.len() as u64, &scope)
+            .expect("capture candidate");
+        let pending_ref = format!(
+            "refs/orna/pins/pending/{}",
+            hex_encode(&candidate.pin_id)
+        );
+        assert!(fixture_ref_exists(directory.path(), &pending_ref));
+
+        drop(candidate);
+
         assert!(!fixture_ref_exists(directory.path(), &pending_ref));
     }
 }
