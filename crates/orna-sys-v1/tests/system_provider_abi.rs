@@ -6052,7 +6052,7 @@ fn provider_metadata_edges_preserve_generic_schema_and_dispatch_contracts() {
             )
             .expect("direct metadata result payload remains valid JSON"),
             orna_sys_v1::SystemDispatchResult::Failed(code) => {
-                panic!("unexpected direct metadata failure {code}")
+                panic!("unexpected direct metadata failure {code:?}")
             }
         };
         let selected_metadata = match selected_result {
@@ -6061,7 +6061,7 @@ fn provider_metadata_edges_preserve_generic_schema_and_dispatch_contracts() {
             )
             .expect("selected metadata result payload remains valid JSON"),
             orna_sys_v1::SystemDispatchResult::Failed(code) => {
-                panic!("unexpected selected metadata failure {code}")
+                panic!("unexpected selected metadata failure {code:?}")
             }
         };
         assert_eq!(direct_metadata, expected_metadata);
