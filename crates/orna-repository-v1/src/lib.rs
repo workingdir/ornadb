@@ -27,12 +27,16 @@ use fs2::FileExt;
 use sha2::{Digest, Sha256};
 pub use uuid::Uuid;
 
+mod blob_store;
 mod compact;
 mod init;
+mod native_graph;
+mod row_store;
 #[cfg(test)]
 pub(crate) mod test_support;
 mod transport;
 
+pub use blob_store::ContentIdentity;
 pub use compact::{
     COMPACT_MANIFEST_SHARD_LIMIT, COMPACT_MAX_UNCOMPRESSED_PAGE_BYTES, CompactCommittedRow,
     CompactCommittedSegmentProjection, CompactManifest, CompactManifestEntry,
@@ -40,10 +44,20 @@ pub use compact::{
     CompactPublicationReconciliation, CompactPublicationRecovery, CompactRuntimeReceipt,
     CompactSegment, CompactSegmentRole, validate_compact_page_uncompressed_sizes,
 };
+pub use init::format_context::{
+    FormatContextError, RepositoryFormat, RepositoryFormatContext, RepositorySnapshotPin,
+    SchemaRootPin, StoreRootPin,
+};
 pub use init::{
     DatabaseId, RepositoryInitError, RepositoryInitialization, RepositoryMetadata,
     initialize_repository, inspect_metadata,
 };
+pub use native_graph::{
+    AdmittedBlobReference, GitHashAlgorithm, GraphError, NativeGraphContext, NativeObjectKind,
+    NativeOid, ProtectedContentPin, ProtectedContentTransfer, Pub3ReleaseReceipt,
+    RangeVerification, RepositoryReadScope, VerifiedBlobRange,
+};
+pub use row_store::{AdmittedRow, RowMapSnapshot};
 pub use transport::{FetchError, FetchReport, FetchRequest, FetchedRef, PushRequest, RequestedRef};
 
 /// A verified native Git commit ID. It is intentionally Git-local: the

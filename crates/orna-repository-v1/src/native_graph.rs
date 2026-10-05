@@ -15,8 +15,8 @@ use std::{
     path::{Path, PathBuf},
     process::{Command, Stdio},
     sync::{
-        atomic::{AtomicBool, AtomicU64, Ordering as AtomicOrdering},
         Arc,
+        atomic::{AtomicBool, AtomicU64, Ordering as AtomicOrdering},
     },
 };
 
@@ -141,7 +141,7 @@ struct ContextIdentity([u8; 32]);
 /// Construction is crate-private and reserved for repository-context
 /// integration.  The fields bind the local owner, database, immutable store
 /// root and schema generation; callers cannot create a context from raw OIDs.
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct NativeGraphContext {
     repository: crate::Repository,
     repository_id: [u8; 32],
@@ -152,6 +152,8 @@ pub struct NativeGraphContext {
     algorithm: GitHashAlgorithm,
     store_root: NativeOid,
     schema_digest: [u8; 32],
+    row_snapshot: crate::row_store::RowMapSnapshot,
+    cancelled: Arc<AtomicBool>,
 }
 
 impl NativeGraphContext {
@@ -166,8 +168,14 @@ impl NativeGraphContext {
         algorithm: GitHashAlgorithm,
         store_root: NativeOid,
         schema_digest: [u8; 32],
+        row_snapshot: crate::row_store::RowMapSnapshot,
     ) -> Result<Self, GraphError> {
-        if store_root.algorithm() != algorithm {
+        let version = row_snapshot.version();
+        if store_root.algorithm() != algorithm
+            || version.database_id() != &database_id
+            || version.store_root() != &store_root
+            || version.schema().schema_digest() != &schema_digest
+        {
             return Err(GraphError::InvalidOidWidth {
                 expected: algorithm.width(),
                 actual: store_root.as_bytes().len(),
@@ -183,7 +191,30 @@ impl NativeGraphContext {
             algorithm,
             store_root,
             schema_digest,
+            row_snapshot,
+            cancelled: Arc::new(AtomicBool::new(false)),
         })
+    }
+
+    /// Opens the repository owner's fixed-budget read scope. Each range is
+    /// limited to 8 MiB; object count and metadata limits are fixed here, not
+    /// selected by the consumer. The cumulative payload allowance is bounded
+    /// by the format's signed-length limit so a verified pin can stream a
+    /// complete content closure.
+    pub fn open_read_scope(&self) -> Result<RepositoryReadScope, GraphError> {
+        self.issue_read_scope(
+            self.owner_id,
+            Arc::clone(&self.cancelled),
+            MAX_SIGNED_LENGTH,
+            MAX_RANGE_READ_BYTES,
+            MAX_FULL_VERIFY_OBJECTS,
+            MAX_FULL_METADATA_BYTES,
+        )
+    }
+
+    /// Cancels every read scope opened from this repository graph context.
+    pub fn cancel_reads(&self) {
+        self.cancelled.store(true, AtomicOrdering::Release);
     }
 
     pub const fn algorithm(&self) -> GitHashAlgorithm {
@@ -258,6 +289,7 @@ impl NativeGraphContext {
             || row.version().store_root() != &self.store_root
             || row.version().schema().schema_digest() != &self.schema_digest
             || descriptor_oid.algorithm() != self.algorithm
+            || self.row_snapshot.get(row.key()).as_ref() != Some(row)
         {
             return Err(GraphError::ContextMismatch);
         }
@@ -483,6 +515,7 @@ impl NativeGraphContext {
         Ok(VerifiedBlobDescriptor {
             descriptor_oid: descriptor_oid.clone(),
             identity,
+            byte_root,
         })
     }
 
@@ -1069,6 +1102,12 @@ impl NativeGraphContext {
     }
 }
 
+impl Drop for NativeGraphContext {
+    fn drop(&mut self) {
+        self.cancel_reads();
+    }
+}
+
 /// Read authority minted by the repository owner for one graph context.
 /// Clones share cancellation and cumulative byte quota, so concurrent resolver
 /// reads cannot evade the owner's limits.
@@ -1386,6 +1425,7 @@ fn sync_all_pack_files(pack_dir: &Path) -> Result<(), GraphError> {
 pub(crate) struct VerifiedBlobDescriptor {
     descriptor_oid: NativeOid,
     identity: crate::blob_store::ContentIdentity,
+    byte_root: Option<NativeOid>,
 }
 
 /// Opaque authority to one admitted descriptor, tied to one repository owner
@@ -2205,6 +2245,7 @@ pub enum GraphError {
     InvalidReadScope,
     DescriptorNotInRow,
     ReadQuotaExceeded,
+    MetadataQuotaExceeded,
     ReadCancelled,
     ContentIdentityMismatch,
     ChunkDigestMismatch,
@@ -2266,6 +2307,7 @@ impl fmt::Display for GraphError {
                 f.write_str("Blob descriptor is not a dependency of the admitted row")
             }
             Self::ReadQuotaExceeded => f.write_str("graph read exceeds owner quota"),
+            Self::MetadataQuotaExceeded => f.write_str("graph metadata exceeds owner quota"),
             Self::ReadCancelled => f.write_str("graph read was cancelled"),
             Self::ContentIdentityMismatch => {
                 f.write_str("complete Blob length or SHA-256 does not match its descriptor")
