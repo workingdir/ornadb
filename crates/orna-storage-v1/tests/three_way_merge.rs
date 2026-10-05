@@ -14186,6 +14186,98 @@ fn multi_table_manifest_conflicts_are_ordered_before_row_reads_at_shared_budget(
 }
 
 #[test]
+fn multi_table_manifest_resolutions_reuse_expected_side_and_skip_rows() {
+    let mut merge_schema = schema(true, FieldType::Str);
+    for table_number in 2..=8 {
+        let mut table = merge_schema.tables[0].clone();
+        table.id = id(table_number);
+        table.name = format!("Table{table_number}");
+        merge_schema.tables.push(table);
+    }
+    let empty_snapshot = || ThreeWaySnapshot {
+        schema: merge_schema.clone(),
+        tables: BTreeMap::new(),
+        checkpoints: BTreeMap::new(),
+    };
+    let mut base = empty_snapshot();
+    let mut left = empty_snapshot();
+    let mut right = empty_snapshot();
+
+    // One-sided additions select the present side.
+    let one_left = manifest(10, 10, b"table-one-left");
+    left.tables.insert(id(1), one_left.clone());
+    let eight_right = manifest(80, 80, b"table-eight-right");
+    right.tables.insert(id(8), eight_right.clone());
+
+    // Equal-digest additions converge; the stable policy reuses the left side.
+    let two_left = manifest(20, 20, b"table-two-left");
+    let two_right = manifest(20, 20, b"table-two-right");
+    left.tables.insert(id(2), two_left.clone());
+    right.tables.insert(id(2), two_right);
+
+    // A deletion wins when the surviving side retains the base manifest.
+    let three_base = manifest(30, 30, b"table-three-base");
+    base.tables.insert(id(3), three_base.clone());
+    right.tables.insert(id(3), three_base);
+
+    // A one-sided update reuses the changed side when its peer retains base.
+    let four_base = manifest(40, 40, b"table-four-base");
+    let four_left = manifest(41, 41, b"table-four-left");
+    base.tables.insert(id(4), four_base.clone());
+    left.tables.insert(id(4), four_left.clone());
+    right.tables.insert(id(4), four_base);
+
+    let five_base = manifest(50, 50, b"table-five-base");
+    let five_right = manifest(51, 51, b"table-five-right");
+    base.tables.insert(id(5), five_base.clone());
+    left.tables.insert(id(5), five_base.clone());
+    right.tables.insert(id(5), five_right.clone());
+
+    // Equal changed digests also converge and select the left side.
+    let six_base = manifest(60, 60, b"table-six-base");
+    let six_left = manifest(61, 61, b"table-six-left");
+    let six_right = manifest(61, 61, b"table-six-right");
+    base.tables.insert(id(6), six_base.clone());
+    left.tables.insert(id(6), six_left.clone());
+    right.tables.insert(id(6), six_right);
+
+    // The symmetric unchanged-left/deleted-right case also resolves to delete.
+    let seven_base = manifest(70, 70, b"table-seven-base");
+    base.tables.insert(id(7), seven_base.clone());
+    left.tables.insert(id(7), seven_base);
+
+    let mut source = FixtureRows::default();
+    let plan = merge_three_way_snapshots(
+        &base,
+        &left,
+        &right,
+        &mut source,
+        BranchMergeBudget { max_rows_examined: 0, max_conflicts: 0 },
+    )
+    .expect("all non-conflicting manifest decisions complete with no row budget");
+
+    assert_eq!(
+        plan.tables.keys().copied().collect::<Vec<_>>(),
+        vec![id(1), id(2), id(4), id(5), id(6), id(8)],
+        "one-sided table deletions omit the table and additions/updates retain it",
+    );
+    for (table_id, side, expected_manifest) in [
+        (id(1), MergeSide::Left, one_left),
+        (id(2), MergeSide::Left, two_left),
+        (id(4), MergeSide::Left, four_left),
+        (id(5), MergeSide::Right, five_right),
+        (id(6), MergeSide::Left, six_left),
+        (id(8), MergeSide::Right, eight_right),
+    ] {
+        let merged = &plan.tables[&table_id];
+        assert_eq!(merged.whole_table_reuse, Some((side, expected_manifest)));
+        assert!(merged.segments.is_empty());
+    }
+    assert_eq!(plan.report.rows_examined, 0);
+    assert!(source.visited.is_empty(), "manifest-only outcomes do not decode row fixtures");
+}
+
+#[test]
 fn row_delete_edit_checkpoint_delete_reset_tail_closes_at_shared_budgets() {
     let before_id = b"consumer/a-before-tombstone".to_vec();
     let left_delete_before_id = b"consumer/b-left-delete-closure".to_vec();
