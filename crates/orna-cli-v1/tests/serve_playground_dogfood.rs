@@ -1092,9 +1092,10 @@ fn orna_serve_hosts_playground_with_pending_evals_and_snapshot_correct_deltas() 
     let uncommitted_programs = curl(&format!("{base_url}/api/examples"), &["--max-time", "15"])
         .expect("curl the catalog while the new program row is uncommitted");
     assert_eq!(uncommitted_programs.status, 200);
-    let uncommitted_programs: JsonValue =
+    let uncommitted_status = uncommitted_programs.status;
+    let uncommitted_catalog: JsonValue =
         serde_json::from_str(&uncommitted_programs.body).expect("uncommitted example catalog JSON");
-    let uncommitted_program_list = uncommitted_programs["examples"]
+    let uncommitted_program_list = uncommitted_catalog["examples"]
         .as_array()
         .expect("uncommitted committed example catalog");
     assert_eq!(uncommitted_program_list.len(), 4);
@@ -1104,8 +1105,9 @@ fn orna_serve_hosts_playground_with_pending_evals_and_snapshot_correct_deltas() 
             .all(|example| { example["path"] != "playground/Sample/live-after-start.orna" })
     );
     println!(
-        "uncommitted DB program stayed out of /api/examples (HTTP {}, 4 committed rows, exit 0)",
-        uncommitted_programs["examples"].as_array().unwrap().len()
+        "uncommitted DB program stayed out of /api/examples (HTTP {}, {} committed rows, exit 0)",
+        uncommitted_status,
+        uncommitted_program_list.len()
     );
     git(
         project.path(),
@@ -1127,14 +1129,15 @@ fn orna_serve_hosts_playground_with_pending_evals_and_snapshot_correct_deltas() 
     let live_examples = curl(&format!("{base_url}/api/examples"), &["--max-time", "15"])
         .expect("curl the live database program catalog");
     assert_eq!(live_examples.status, 200);
-    let live_examples: JsonValue =
+    let live_examples_status = live_examples.status;
+    let live_catalog: JsonValue =
         serde_json::from_str(&live_examples.body).expect("updated example catalog JSON");
-    let live_example_list = live_examples["examples"]
+    let live_example_list = live_catalog["examples"]
         .as_array()
         .expect("updated committed example catalog");
     assert_eq!(live_example_list.len(), 5);
     assert_ne!(
-        live_examples["revision"].as_str(),
+        live_catalog["revision"].as_str(),
         Some(initial_examples_revision.as_str())
     );
     let live_program = live_example_list
@@ -1149,9 +1152,10 @@ fn orna_serve_hosts_playground_with_pending_evals_and_snapshot_correct_deltas() 
         .to_owned();
     assert_eq!(live_program_source, "6 * 7");
     println!(
-        "live DB program catalog: /api/examples absent before commit, present afterward as {} (HTTP {}, exit 0)",
+        "live DB program catalog: /api/examples absent before commit, present afterward as {} (HTTP {}, {} committed rows, exit 0)",
         live_program["path"],
-        live_examples["examples"].as_array().unwrap().len()
+        live_examples_status,
+        live_example_list.len()
     );
 
     let database_id = listing
