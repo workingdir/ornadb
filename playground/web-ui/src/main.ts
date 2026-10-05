@@ -8,7 +8,12 @@ import {
   inlayHintFields,
   signatureHelpFields,
 } from './assist-adapter';
-import { exampleIndexForKey, exampleIndexForPath, isExample } from './example-feed';
+import {
+  exampleIndexForKey,
+  exampleIndexForSearch,
+  isExample,
+  pushExampleSelection,
+} from './example-feed';
 import { formatRunResult, formatThrownError, type RunResult } from './results';
 import { servedRuntime } from './runtime';
 import { startStyleReload } from './style-reload';
@@ -402,11 +407,14 @@ async function initializeEditor(): Promise<void> {
   void updateDiagnostics();
 }
 
-function loadSelectedExample(): void {
+function loadSelectedExample(updateUrl = false): void {
   const option = examplesSelect.selectedOptions[0];
   const source = option?.dataset.source;
   const activeEditor = editor;
   if (source === undefined || !activeEditor || !sourceModel) return;
+  if (updateUrl && option) {
+    pushExampleSelection(window.history, window.location.href, option.value);
+  }
   if (activeEditor.getModel() !== sourceModel) activeEditor.setModel(sourceModel);
   sourceModel.setValue(source);
   const name = option.textContent ?? 'Example';
@@ -414,7 +422,16 @@ function loadSelectedExample(): void {
   exampleStatus.textContent = `${name} loaded into the source editor.`;
 }
 
-examplesSelect.addEventListener('change', loadSelectedExample);
+function restoreExampleFromHistory(): void {
+  const examples = Array.from(examplesSelect.options, ({ value }) => ({ path: value }));
+  const selectedIndex = exampleIndexForSearch(examples, window.location.search);
+  if (selectedIndex === examplesSelect.selectedIndex) return;
+  examplesSelect.selectedIndex = selectedIndex;
+  loadSelectedExample();
+}
+
+examplesSelect.addEventListener('change', () => loadSelectedExample(true));
+window.addEventListener('popstate', restoreExampleFromHistory);
 examplesSelect.addEventListener('keydown', (event) => {
   if (event.altKey || event.ctrlKey || event.metaKey) return;
   const nextIndex = exampleIndexForKey(event.key, examplesSelect.selectedIndex, examplesSelect.options.length);
@@ -422,7 +439,7 @@ examplesSelect.addEventListener('keydown', (event) => {
   event.preventDefault();
   if (nextIndex === examplesSelect.selectedIndex) return;
   examplesSelect.selectedIndex = nextIndex;
-  loadSelectedExample();
+  loadSelectedExample(true);
 });
 
 async function loadExamples(): Promise<void> {
@@ -451,8 +468,7 @@ async function loadExamples(): Promise<void> {
       examplesSelect.append(option);
     }
     examplesSelect.disabled = false;
-    const requestedExample = new URLSearchParams(window.location.search).get('example');
-    examplesSelect.selectedIndex = exampleIndexForPath(examples, requestedExample);
+    examplesSelect.selectedIndex = exampleIndexForSearch(examples, window.location.search);
     loadSelectedExample();
     editorStatus.textContent = `${examples.length} committed ${examples.length === 1 ? 'example' : 'examples'} loaded.`;
     examplesReady = true;
