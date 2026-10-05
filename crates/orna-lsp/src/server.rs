@@ -1909,8 +1909,12 @@ fn request_moniker(
         analysis::EditorSymbolKind::Function => "function",
         analysis::EditorSymbolKind::Type => "type",
         analysis::EditorSymbolKind::Enum => "enum",
+        analysis::EditorSymbolKind::EnumVariant => "enum-member",
         analysis::EditorSymbolKind::Table => "table",
         analysis::EditorSymbolKind::Protocol => "protocol",
+        analysis::EditorSymbolKind::Method => "method",
+        analysis::EditorSymbolKind::Field => "field",
+        analysis::EditorSymbolKind::Constant => "constant",
         analysis::EditorSymbolKind::Other => "symbol",
     };
     Ok(serde_json::to_value(vec![Moniker {
