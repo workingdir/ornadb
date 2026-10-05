@@ -78,6 +78,8 @@ fn main() {
         .expect("generate deterministic native sys host-operation schema");
     build_host::validate_host_registry_json(&host_registry, &host_registry_schema)
         .expect("generated native sys host-operation registry matches its schema");
+    let host_bindings = build_host::generate_host_binding_artifacts(&host_registry)
+        .expect("typed native sys host-operation registry generates binding declarations");
     fs::write(out_dir.join("system_host_operations.json"), host_registry)
         .expect("write generated native sys host-operation registry");
     fs::write(
@@ -85,6 +87,27 @@ fn main() {
         host_registry_schema,
     )
     .expect("write generated native sys host-operation schema");
+    fs::write(
+        out_dir.join("system_host_binding_modules.json"),
+        host_bindings.modules_json,
+    )
+    .expect("write generated native sys host binding-module manifest");
+    let host_binding_root = out_dir.join("system_host_bindings");
+    if host_binding_root.exists() {
+        fs::remove_dir_all(&host_binding_root)
+            .expect("remove stale generated native host bindings");
+    }
+    for (relative_path, source) in host_bindings.modules {
+        let path = host_binding_root.join(relative_path);
+        fs::create_dir_all(path.parent().expect("generated host module has a parent"))
+            .expect("create generated native host module directory");
+        fs::write(path, source).expect("write generated native host declaration module");
+    }
+    fs::write(
+        out_dir.join("system_host_bindings.orna"),
+        host_bindings.bundle,
+    )
+    .expect("write generated native host binding declarations");
     fs::write(
         out_dir.join("system_api_schema.json"),
         artifacts.schema_json,

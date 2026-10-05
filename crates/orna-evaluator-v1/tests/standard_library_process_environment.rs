@@ -1,8 +1,13 @@
 use orna_evaluator_v1::{AdmittedReplSession, Limits, SysHostBindingRegistry};
 use orna_foundation_v1::{CanonicalValue, OvbRaw};
-use orna_sys_v1::{ClockProvider, EnvironmentProvider, ProcessProvider};
+use orna_syntax_v1::{Declaration, Pattern, TypeExpr, parse_module};
+use orna_sys_v1::{
+    ClockProvider, EnvironmentProvider, ProcessProvider, system_host_binding_modules_json,
+    system_host_operation_registry,
+};
 use orna_value_v1::Raw;
 use std::{
+    collections::BTreeMap,
     env,
     time::{Duration, Instant},
 };
@@ -98,7 +103,69 @@ fn core_remains_available_when_process_and_environment_modules_are_absent() {
 }
 
 #[test]
-fn typed_sys_environment_bindings_execute_native_allowlisted_provider() {
+fn emitted_environment_declarations_parse_typecheck_and_dispatch_to_native_provider() {
+    let modules: BTreeMap<String, String> =
+        serde_json::from_str(system_host_binding_modules_json())
+            .expect("native host binding manifest is valid JSON");
+    let module_source = modules
+        .get("std/io/environment.orna")
+        .expect("emitted environment declarations are included in the production artifact");
+    let parsed = parse_module(module_source);
+    assert!(
+        parsed.is_ok(),
+        "emitted environment module parses: {:?}",
+        parsed.diagnostics
+    );
+    assert_eq!(parsed.value.items.len(), 2);
+
+    let registry = system_host_operation_registry();
+    for (item, (local_name, return_type)) in parsed
+        .value
+        .items
+        .iter()
+        .zip([("get", "Str?"), ("require", "Str")])
+    {
+        let Declaration::Function { signature, .. } = &item.declaration else {
+            panic!("emitted environment declaration is a function");
+        };
+        assert_eq!(signature.name, local_name);
+        assert_eq!(signature.parameters.len(), 1);
+        assert!(matches!(
+            &signature.parameters[0].pattern,
+            Pattern::Name(name, _) if name == "name"
+        ));
+        assert!(matches!(
+            &signature.parameters[0].annotation,
+            Some(TypeExpr::Name { path, arguments, .. })
+                if path == &["Str"] && arguments.is_empty()
+        ));
+        match (return_type, &signature.result) {
+            ("Str?", Some(TypeExpr::Optional { inner, .. }))
+                if matches!(
+                    inner.as_ref(),
+                    TypeExpr::Name { path, arguments, .. }
+                        if path == &["Str"] && arguments.is_empty()
+                ) => {}
+            (
+                "Str",
+                Some(TypeExpr::Name {
+                    path, arguments, ..
+                }),
+            ) if path == &["Str"] && arguments.is_empty() => {}
+            _ => panic!("emitted {local_name} return type differs from {return_type}"),
+        }
+        let operation_name = format!("std.io.environment.{local_name}");
+        let operation = registry
+            .operation(&operation_name)
+            .expect("emitted declaration maps to a typed native operation");
+        assert_eq!(operation.parameters, ["name"]);
+        assert_eq!(
+            operation.signature,
+            format!("fn {operation_name}(name: Str): {return_type}"),
+            "the parsed consumer type matches the typed native registry"
+        );
+    }
+
     let mut session = AdmittedReplSession::with_reference_standard(Limits::default())
         .unwrap_or_else(|error| panic!("reference std failed to load: {}", error.code()));
     session
@@ -265,8 +332,8 @@ fn base64_binary_input_survives_real_process_stdin_and_stdout() {
     process
         .allow_command("/usr/bin/cat", env::current_dir().unwrap(), [])
         .expect("allowlisted cat executable and current directory");
-    let mut bindings = SysHostBindingRegistry::new(EnvironmentProvider::default())
-        .with_process_provider(process);
+    let mut bindings =
+        SysHostBindingRegistry::new(EnvironmentProvider::default()).with_process_provider(process);
 
     assert_eq!(
         session.submit_with_sys_host_bindings(
@@ -297,8 +364,8 @@ fn base64_binary_input_is_preserved_on_both_process_output_pipes() {
     process
         .allow_command("/usr/bin/tee", env::current_dir().unwrap(), [])
         .expect("allowlisted tee executable and current directory");
-    let mut bindings = SysHostBindingRegistry::new(EnvironmentProvider::default())
-        .with_process_provider(process);
+    let mut bindings =
+        SysHostBindingRegistry::new(EnvironmentProvider::default()).with_process_provider(process);
 
     let bytes = vec![0, 255, 0, b'A'];
     assert_eq!(
@@ -306,11 +373,7 @@ fn base64_binary_input_is_preserved_on_both_process_output_pipes() {
             include_str!("fixtures/stdlib-io-process-codec-both-pipes-bwdq0.orna"),
             &mut bindings,
         ),
-        Ok(Some(process_value(
-            Some(0),
-            bytes.clone(),
-            bytes,
-        )))
+        Ok(Some(process_value(Some(0), bytes.clone(), bytes,)))
     );
 }
 
@@ -327,8 +390,8 @@ fn process_arguments_keep_shell_metacharacters_as_literal_text() {
     process
         .allow_command("/usr/bin/printf", env::current_dir().unwrap(), [])
         .expect("allowlisted printf executable and current directory");
-    let mut bindings = SysHostBindingRegistry::new(EnvironmentProvider::default())
-        .with_process_provider(process);
+    let mut bindings =
+        SysHostBindingRegistry::new(EnvironmentProvider::default()).with_process_provider(process);
 
     assert_eq!(
         session.submit_with_sys_host_bindings(
@@ -364,8 +427,8 @@ fn process_child_environment_and_nonzero_status_are_exact_values() {
     process
         .allow_command("/usr/bin/false", &working_directory, [])
         .expect("allowlisted false executable");
-    let mut bindings = SysHostBindingRegistry::new(EnvironmentProvider::default())
-        .with_process_provider(process);
+    let mut bindings =
+        SysHostBindingRegistry::new(EnvironmentProvider::default()).with_process_provider(process);
 
     let environment_result = session.submit_with_sys_host_bindings(
         include_str!("fixtures/stdlib-io-process-explicit-environment-bwdq0.orna"),

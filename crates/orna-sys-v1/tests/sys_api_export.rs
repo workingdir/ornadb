@@ -4,7 +4,8 @@ use std::{collections::BTreeMap, fs, path::Path, process::Command};
 
 use orna_sys_v1::{
     SystemProviderAbi, system_api_json, system_api_schema_json, system_binding_modules_json,
-    system_binding_stubs, system_dispatch_table, system_host_operation_registry_json,
+    system_binding_stubs, system_dispatch_table, system_host_binding_modules_json,
+    system_host_binding_stubs, system_host_operation_registry_json,
     system_host_operation_registry_schema_json, system_provider_abi_json,
     system_provider_abi_schema_json,
 };
@@ -224,6 +225,16 @@ fn dev_exports_cover_embedded_host_registry_schema_and_binding_bundle() {
             "--binding-modules",
             system_binding_modules_json(),
         ),
+        (
+            "native host binding bundle",
+            "--host-bindings",
+            system_host_binding_stubs(),
+        ),
+        (
+            "native host binding modules manifest",
+            "--host-binding-modules",
+            system_host_binding_modules_json(),
+        ),
     ] {
         let first_path = output_dir.join(format!("first/{label}.out"));
         let second_path = output_dir.join(format!("second/{label}.out"));
@@ -271,6 +282,9 @@ fn dev_all_export_reconstructs_the_complete_embedded_artifact_tree() {
 
     let modules: BTreeMap<String, String> =
         serde_json::from_str(system_binding_modules_json()).expect("embedded module manifest");
+    let host_modules: BTreeMap<String, String> =
+        serde_json::from_str(system_host_binding_modules_json())
+            .expect("embedded host module manifest");
     let mut expected = BTreeMap::from([
         ("api_sys.json".to_owned(), system_api_json().into_bytes()),
         (
@@ -303,10 +317,24 @@ fn dev_all_export_reconstructs_the_complete_embedded_artifact_tree() {
             "system_binding_modules.json".to_owned(),
             system_binding_modules_json().as_bytes().to_vec(),
         ),
+        (
+            "system_host_bindings.orna".to_owned(),
+            system_host_binding_stubs().as_bytes().to_vec(),
+        ),
+        (
+            "system_host_binding_modules.json".to_owned(),
+            system_host_binding_modules_json().as_bytes().to_vec(),
+        ),
     ]);
     for (relative_path, source) in modules {
         expected.insert(
             format!("system_bindings/{relative_path}"),
+            source.into_bytes(),
+        );
+    }
+    for (relative_path, source) in host_modules {
+        expected.insert(
+            format!("system_host_bindings/{relative_path}"),
             source.into_bytes(),
         );
     }
@@ -334,6 +362,8 @@ fn dev_export_rejects_unknown_modes_and_extra_output_paths() {
     assert!(unknown_stderr.contains("--host-operations"));
     assert!(unknown_stderr.contains("--bindings"));
     assert!(unknown_stderr.contains("--binding-modules"));
+    assert!(unknown_stderr.contains("--host-bindings"));
+    assert!(unknown_stderr.contains("--host-binding-modules"));
     assert!(unknown_stderr.contains("--all output-directory"));
 
     let missing_all_path = Command::new(env!("CARGO_BIN_EXE_sys-api-export"))
