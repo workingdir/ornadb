@@ -2096,7 +2096,7 @@ mod tests {
     }
 
     #[test]
-    fn regressed_correlated_moved_snapshot_keeps_session_fenced() {
+    fn regressed_correlated_moved_snapshot_keeps_live_sessions_fenced_independently() {
         let limits = Limits::default();
         let initial_children = vec![nested_present_child(18), nested_present_child(1)];
         let initial = snapshot_with_children(3, "before-move", initial_children.clone());
@@ -2104,16 +2104,36 @@ mod tests {
 
         let mut io = MemoryIo::default();
         io.incoming.push_back(initial.clone());
+        let mut peer_io = MemoryIo::default();
+        peer_io.incoming.push_back(initial.clone());
         let mut driver = LiveSessionDriver::new(
             io,
             [7; 16],
             limits,
             Renderer::default(),
-            Allocator::default(),
+            Allocator {
+                next: 0,
+                allocations: 0,
+            },
+        )
+        .unwrap();
+        let mut peer = LiveSessionDriver::new(
+            peer_io,
+            [7; 16],
+            limits,
+            Renderer::default(),
+            Allocator {
+                next: 10,
+                allocations: 0,
+            },
         )
         .unwrap();
         assert_eq!(
             block_on(driver.receive_once()).unwrap(),
+            LiveSessionEvent::SnapshotPublished { revision: 3 }
+        );
+        assert_eq!(
+            block_on(peer.receive_once()).unwrap(),
             LiveSessionEvent::SnapshotPublished { revision: 3 }
         );
 
@@ -2128,16 +2148,28 @@ mod tests {
         assert!(move_beyond_bound.len() < limits.max_message_bytes);
         assert!(Envelope::decode(&move_beyond_bound, limits).is_ok());
         let original = driver.presentation().published().cloned().unwrap();
-        driver.io.incoming.push_back(move_beyond_bound);
+        let peer_original = peer.presentation().published().cloned().unwrap();
+        driver.io.incoming.push_back(move_beyond_bound.clone());
+        peer.io.incoming.push_back(move_beyond_bound);
         assert!(matches!(
             block_on(driver.receive_once()),
             Ok(LiveSessionEvent::ResyncSent { .. })
         ));
+        assert!(matches!(
+            block_on(peer.receive_once()),
+            Ok(LiveSessionEvent::ResyncSent { .. })
+        ));
         assert_resync_frame(&driver.io.sent[0]);
+        assert_resync_frame(&peer.io.sent[0]);
         let request = Envelope::decode(&driver.io.sent[0], limits)
             .unwrap()
             .request
             .expect("moved-tree recovery request is correlated");
+        let peer_request = Envelope::decode(&peer.io.sent[0], limits)
+            .unwrap()
+            .request
+            .expect("peer moved-tree recovery request is correlated");
+        assert_ne!(request, peer_request);
 
         let regressed_snapshot = frame_with_request(
             16,
@@ -2152,6 +2184,28 @@ mod tests {
             LiveSessionEvent::ResyncAwaitingSnapshot { request }
         );
         assert_eq!(driver.io.sent.len(), 1);
+        assert_eq!(driver.presentation().published(), Some(&original));
+        assert_eq!(driver.renderer.trees, vec![snapshot_present(&initial)]);
+        assert_eq!(peer.presentation().published(), Some(&peer_original));
+        assert_eq!(peer.renderer.trees, vec![snapshot_present(&initial)]);
+
+        peer.io.incoming.push_back(frame_with_request(
+            16,
+            [7; 16],
+            Some(peer_request),
+            snapshot_body_with_children(4, "peer-recovered", initial_children.clone()),
+        ));
+        assert_eq!(
+            block_on(peer.receive_once()).unwrap(),
+            LiveSessionEvent::SnapshotPublished { revision: 4 }
+        );
+        peer.io
+            .incoming
+            .push_back(delta(4, 5, "peer-after-recovery"));
+        assert_eq!(
+            block_on(peer.receive_once()).unwrap(),
+            LiveSessionEvent::DeltaPublished { revision: 5 }
+        );
         assert_eq!(driver.presentation().published(), Some(&original));
         assert_eq!(driver.renderer.trees, vec![snapshot_present(&initial)]);
 
@@ -2177,6 +2231,16 @@ mod tests {
             &snapshot_present(&recovered)
         );
         assert_eq!(driver.renderer.trees[2], snapshot_present(&recovered));
+        let peer_recovered = snapshot_with_children(
+            5,
+            "peer-after-recovery",
+            vec![nested_present_child(18), nested_present_child(1)],
+        );
+        assert_eq!(
+            peer.presentation().published().unwrap().present(),
+            &snapshot_present(&peer_recovered)
+        );
+        assert_eq!(peer.renderer.trees[2], snapshot_present(&peer_recovered));
     }
 
     #[test]
