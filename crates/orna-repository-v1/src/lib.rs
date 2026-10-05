@@ -53,10 +53,9 @@ pub use init::{
     initialize_repository, inspect_metadata,
 };
 pub use native_graph::{
-    AdmittedBlobReference, CapturedBlobCandidate, GitHashAlgorithm, GraphError,
-    NativeGraphContext, NativeObjectKind, NativeOid, ProtectedContentPin,
-    ProtectedContentTransfer, Pub3ReleaseReceipt, RangeVerification, RepositoryReadScope,
-    VerifiedBlobRange,
+    AdmittedBlobReference, CapturedBlobCandidate, GitHashAlgorithm, GraphError, NativeGraphContext,
+    NativeObjectKind, NativeOid, ProtectedContentPin, ProtectedContentTransfer, Pub3ReleaseReceipt,
+    RangeVerification, RepositoryReadScope, VerifiedBlobRange,
 };
 pub use row_store::{AdmittedRow, RowMapSnapshot};
 pub use transport::{FetchError, FetchReport, FetchRequest, FetchedRef, PushRequest, RequestedRef};
@@ -225,6 +224,8 @@ const JOURNAL_MAGIC: &[u8] = b"ORNA-PUB-JOURNAL\0";
 const CHECKOUT_JOURNAL_MAGIC: &[u8] = b"ORNA-CHECKOUT-JOURNAL\0";
 const GIT_INDEX_LOCK_MAGIC: &[u8] = b"ORNA-GIT-INDEX-LOCK\0";
 const MAX_JOURNAL_BYTES: usize = 64 * 1024 * 1024;
+const MAX_MIGRATION_IDENTITY_RECORDS: usize = 65_536;
+const MAX_MIGRATION_IDENTITY_COMPONENT_BYTES: usize = 1024 * 1024;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum PublicationMaterializationPhase {
@@ -342,6 +343,298 @@ impl PublicationJournalEntry {
     }
 }
 
+/// One checkpoint natural-key predecessor across the legacy-to-format-3
+/// consumer identity transition. Source and partition values are their exact
+/// canonical typed identity bytes; `None` remains distinct from every encoded
+/// partition value.
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct StreamCheckpointIdentityPredecessor {
+    legacy_consumer_identity: [u8; 32],
+    legacy_source_identity: Vec<u8>,
+    legacy_partition_identity: Option<Vec<u8>>,
+    format3_consumer_identity: [u8; 32],
+    format3_source_identity: Vec<u8>,
+    format3_partition_identity: Option<Vec<u8>>,
+}
+
+impl StreamCheckpointIdentityPredecessor {
+    pub fn new(
+        legacy_consumer_identity: [u8; 32],
+        legacy_source_identity: Vec<u8>,
+        legacy_partition_identity: Option<Vec<u8>>,
+        format3_consumer_identity: [u8; 32],
+        format3_source_identity: Vec<u8>,
+        format3_partition_identity: Option<Vec<u8>>,
+    ) -> Result<Self, RepositoryError> {
+        validate_migration_identity_component(&legacy_source_identity, false)?;
+        validate_migration_identity_component(
+            legacy_partition_identity.as_deref().unwrap_or_default(),
+            legacy_partition_identity.is_none(),
+        )?;
+        validate_migration_identity_component(&format3_source_identity, false)?;
+        validate_migration_identity_component(
+            format3_partition_identity.as_deref().unwrap_or_default(),
+            format3_partition_identity.is_none(),
+        )?;
+        Ok(Self {
+            legacy_consumer_identity,
+            legacy_source_identity,
+            legacy_partition_identity,
+            format3_consumer_identity,
+            format3_source_identity,
+            format3_partition_identity,
+        })
+    }
+
+    pub const fn legacy_consumer_identity(&self) -> &[u8; 32] {
+        &self.legacy_consumer_identity
+    }
+
+    pub fn legacy_source_identity(&self) -> &[u8] {
+        &self.legacy_source_identity
+    }
+
+    pub fn legacy_partition_identity(&self) -> Option<&[u8]> {
+        self.legacy_partition_identity.as_deref()
+    }
+
+    pub const fn format3_consumer_identity(&self) -> &[u8; 32] {
+        &self.format3_consumer_identity
+    }
+
+    pub fn format3_source_identity(&self) -> &[u8] {
+        &self.format3_source_identity
+    }
+
+    pub fn format3_partition_identity(&self) -> Option<&[u8]> {
+        self.format3_partition_identity.as_deref()
+    }
+
+    fn legacy_key(&self) -> ([u8; 32], Vec<u8>, Option<Vec<u8>>) {
+        (
+            self.legacy_consumer_identity,
+            self.legacy_source_identity.clone(),
+            self.legacy_partition_identity.clone(),
+        )
+    }
+
+    fn format3_key(&self) -> ([u8; 32], Vec<u8>, Option<Vec<u8>>) {
+        (
+            self.format3_consumer_identity,
+            self.format3_source_identity.clone(),
+            self.format3_partition_identity.clone(),
+        )
+    }
+}
+
+/// Complete bounded predecessor inventory supplied with an explicit
+/// format-1/2 to format-3 publication. An empty inventory is explicit evidence
+/// that the migration has no persistent stream checkpoints to carry.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MigrationContinuityRecord {
+    predecessors: Vec<StreamCheckpointIdentityPredecessor>,
+}
+
+impl MigrationContinuityRecord {
+    pub fn new(
+        mut predecessors: Vec<StreamCheckpointIdentityPredecessor>,
+    ) -> Result<Self, RepositoryError> {
+        if predecessors.len() > MAX_MIGRATION_IDENTITY_RECORDS {
+            return Err(RepositoryError::InvalidFormatMigration);
+        }
+        predecessors.sort();
+        let mut encoded_bytes = 5usize; // record version and entry count
+        let mut legacy_keys = HashSet::new();
+        let mut format3_keys = HashSet::new();
+        let mut consumer_forward = BTreeMap::new();
+        let mut consumer_reverse = BTreeMap::new();
+        for predecessor in &predecessors {
+            validate_migration_identity_component(&predecessor.legacy_source_identity, false)?;
+            validate_migration_identity_component(
+                predecessor
+                    .legacy_partition_identity
+                    .as_deref()
+                    .unwrap_or_default(),
+                predecessor.legacy_partition_identity.is_none(),
+            )?;
+            validate_migration_identity_component(&predecessor.format3_source_identity, false)?;
+            validate_migration_identity_component(
+                predecessor
+                    .format3_partition_identity
+                    .as_deref()
+                    .unwrap_or_default(),
+                predecessor.format3_partition_identity.is_none(),
+            )?;
+            encoded_bytes = encoded_bytes
+                .checked_add(80)
+                .and_then(|length| length.checked_add(predecessor.legacy_source_identity.len()))
+                .and_then(|length| {
+                    length.checked_add(
+                        predecessor
+                            .legacy_partition_identity
+                            .as_ref()
+                            .map_or(0, Vec::len),
+                    )
+                })
+                .and_then(|length| length.checked_add(predecessor.format3_source_identity.len()))
+                .and_then(|length| {
+                    length.checked_add(
+                        predecessor
+                            .format3_partition_identity
+                            .as_ref()
+                            .map_or(0, Vec::len),
+                    )
+                })
+                .ok_or(RepositoryError::InvalidFormatMigration)?;
+            if encoded_bytes > MAX_JOURNAL_BYTES {
+                return Err(RepositoryError::InvalidFormatMigration);
+            }
+            if !legacy_keys.insert(predecessor.legacy_key())
+                || !format3_keys.insert(predecessor.format3_key())
+            {
+                return Err(RepositoryError::InvalidFormatMigration);
+            }
+            match consumer_forward.get(&predecessor.legacy_consumer_identity) {
+                Some(mapped) if mapped != &predecessor.format3_consumer_identity => {
+                    return Err(RepositoryError::InvalidFormatMigration);
+                }
+                Some(_) => {}
+                None => {
+                    consumer_forward.insert(
+                        predecessor.legacy_consumer_identity,
+                        predecessor.format3_consumer_identity,
+                    );
+                }
+            }
+            match consumer_reverse.get(&predecessor.format3_consumer_identity) {
+                Some(mapped) if mapped != &predecessor.legacy_consumer_identity => {
+                    return Err(RepositoryError::InvalidFormatMigration);
+                }
+                Some(_) => {}
+                None => {
+                    consumer_reverse.insert(
+                        predecessor.format3_consumer_identity,
+                        predecessor.legacy_consumer_identity,
+                    );
+                }
+            }
+        }
+        Ok(Self { predecessors })
+    }
+
+    pub fn predecessors(&self) -> &[StreamCheckpointIdentityPredecessor] {
+        &self.predecessors
+    }
+
+    fn encode(&self, bytes: &mut Vec<u8>) -> Result<(), RepositoryError> {
+        bytes.push(1); // continuity-record version
+        put_u32(bytes, self.predecessors.len())?;
+        for predecessor in &self.predecessors {
+            bytes.extend_from_slice(&predecessor.legacy_consumer_identity);
+            put_migration_identity_component(bytes, &predecessor.legacy_source_identity)?;
+            put_optional_bytes(bytes, predecessor.legacy_partition_identity.as_deref())?;
+            bytes.extend_from_slice(&predecessor.format3_consumer_identity);
+            put_migration_identity_component(bytes, &predecessor.format3_source_identity)?;
+            put_optional_bytes(bytes, predecessor.format3_partition_identity.as_deref())?;
+            if bytes.len() > MAX_JOURNAL_BYTES {
+                return Err(RepositoryError::InvalidPublicationJournal);
+            }
+        }
+        Ok(())
+    }
+
+    fn decode(bytes: &[u8], cursor: &mut usize) -> Result<Self, RepositoryError> {
+        if take_byte(bytes, cursor)? != 1 {
+            return Err(RepositoryError::InvalidPublicationJournal);
+        }
+        let count = usize::try_from(take_u32(bytes, cursor)?)
+            .map_err(|_| RepositoryError::InvalidPublicationJournal)?;
+        if count > MAX_MIGRATION_IDENTITY_RECORDS {
+            return Err(RepositoryError::InvalidPublicationJournal);
+        }
+        let mut predecessors = Vec::with_capacity(count);
+        for _ in 0..count {
+            let legacy_consumer_identity = take_fixed_array::<32>(bytes, cursor)?;
+            let legacy_source_identity = take_migration_identity_component(bytes, cursor)?;
+            let legacy_partition_identity =
+                take_optional_migration_identity_component(bytes, cursor)?;
+            let format3_consumer_identity = take_fixed_array::<32>(bytes, cursor)?;
+            let format3_source_identity = take_migration_identity_component(bytes, cursor)?;
+            let format3_partition_identity =
+                take_optional_migration_identity_component(bytes, cursor)?;
+            let predecessor = StreamCheckpointIdentityPredecessor::new(
+                legacy_consumer_identity,
+                legacy_source_identity,
+                legacy_partition_identity,
+                format3_consumer_identity,
+                format3_source_identity,
+                format3_partition_identity,
+            )
+            .map_err(|_| RepositoryError::InvalidPublicationJournal)?;
+            if predecessors
+                .last()
+                .is_some_and(|previous| previous >= &predecessor)
+            {
+                return Err(RepositoryError::InvalidPublicationJournal);
+            }
+            predecessors.push(predecessor);
+        }
+        Self::new(predecessors).map_err(|_| RepositoryError::InvalidPublicationJournal)
+    }
+}
+
+fn validate_migration_identity_component(
+    value: &[u8],
+    nullable: bool,
+) -> Result<(), RepositoryError> {
+    if value.len() > MAX_MIGRATION_IDENTITY_COMPONENT_BYTES || (!nullable && value.is_empty()) {
+        return Err(RepositoryError::InvalidFormatMigration);
+    }
+    Ok(())
+}
+
+fn put_migration_identity_component(
+    bytes: &mut Vec<u8>,
+    value: &[u8],
+) -> Result<(), RepositoryError> {
+    validate_migration_identity_component(value, false)?;
+    put_optional_bytes(bytes, Some(value))
+}
+
+fn take_migration_identity_component(
+    bytes: &[u8],
+    cursor: &mut usize,
+) -> Result<Vec<u8>, RepositoryError> {
+    let value = take_optional_migration_identity_component(bytes, cursor)?
+        .ok_or(RepositoryError::InvalidPublicationJournal)?;
+    validate_migration_identity_component(&value, false)
+        .map_err(|_| RepositoryError::InvalidPublicationJournal)?;
+    Ok(value)
+}
+
+fn take_optional_migration_identity_component(
+    bytes: &[u8],
+    cursor: &mut usize,
+) -> Result<Option<Vec<u8>>, RepositoryError> {
+    let length = take_u32(bytes, cursor)?;
+    if length == u32::MAX {
+        return Ok(None);
+    }
+    let length = usize::try_from(length).map_err(|_| RepositoryError::InvalidPublicationJournal)?;
+    if length == 0 || length > MAX_MIGRATION_IDENTITY_COMPONENT_BYTES {
+        return Err(RepositoryError::InvalidPublicationJournal);
+    }
+    let end = cursor
+        .checked_add(length)
+        .ok_or(RepositoryError::InvalidPublicationJournal)?;
+    let value = bytes
+        .get(*cursor..end)
+        .ok_or(RepositoryError::InvalidPublicationJournal)?
+        .to_vec();
+    *cursor = end;
+    Ok(Some(value))
+}
+
 /// A restart-safe publication record stored in the private runtime area.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PublicationJournal {
@@ -350,6 +643,7 @@ pub struct PublicationJournal {
     base_index_tree: Option<IndexTreeRef>,
     runtime_intent_id: Option<[u8; 16]>,
     compact_manifest: Option<CompactManifestWitness>,
+    migration_continuity: Option<MigrationContinuityRecord>,
     entries: Vec<PublicationJournalEntry>,
     stage: PublicationJournalStage,
     wire_version: u8,
@@ -411,6 +705,7 @@ impl PublicationJournal {
             base_index_tree,
             runtime_intent_id: None,
             compact_manifest: None,
+            migration_continuity: None,
             entries,
             stage: PublicationJournalStage::Prepared,
             wire_version: 5,
@@ -454,6 +749,29 @@ impl PublicationJournal {
         self.compact_manifest.as_ref()
     }
 
+    /// Binds the complete stream/checkpoint predecessor inventory to an
+    /// explicit legacy-format migration journal. This promotes only that
+    /// journal to wire version 6; ordinary publication remains version 5.
+    pub fn with_migration_continuity(
+        mut self,
+        continuity: MigrationContinuityRecord,
+    ) -> Result<Self, RepositoryError> {
+        if self.migration_continuity.is_some()
+            || self.compact_manifest.is_some()
+            || self.stage != PublicationJournalStage::Prepared
+        {
+            return Err(RepositoryError::InvalidFormatMigration);
+        }
+        self.migration_continuity = Some(continuity);
+        self.wire_version = 6;
+        self.binding_version = 6;
+        Ok(self)
+    }
+
+    pub fn migration_continuity(&self) -> Option<&MigrationContinuityRecord> {
+        self.migration_continuity.as_ref()
+    }
+
     pub const fn stage(&self) -> PublicationJournalStage {
         self.stage
     }
@@ -489,6 +807,14 @@ impl PublicationJournal {
                 witness.encode(&mut bytes)?;
             }
             None => bytes.push(0),
+        }
+        if self.wire_version >= 6 {
+            self.migration_continuity
+                .as_ref()
+                .ok_or(RepositoryError::InvalidPublicationJournal)?
+                .encode(&mut bytes)?;
+        } else if self.migration_continuity.is_some() {
+            return Err(RepositoryError::InvalidPublicationJournal);
         }
         bytes.push(self.stage.code());
         put_u32(&mut bytes, self.entries.len())?;
@@ -526,7 +852,7 @@ impl PublicationJournal {
         }
         let mut cursor = JOURNAL_MAGIC.len();
         let version = take_byte(bytes, &mut cursor)?;
-        if version != 5 {
+        if version != 5 && version != 6 {
             return Err(RepositoryError::InvalidPublicationJournal);
         }
         let old_head =
@@ -550,6 +876,14 @@ impl PublicationJournal {
             )?),
             _ => return Err(RepositoryError::InvalidPublicationJournal),
         };
+        let migration_continuity = if version >= 6 {
+            Some(MigrationContinuityRecord::decode(bytes, &mut cursor)?)
+        } else {
+            None
+        };
+        if migration_continuity.is_some() && compact_manifest.is_some() {
+            return Err(RepositoryError::InvalidPublicationJournal);
+        }
         let stage = PublicationJournalStage::from_code(take_byte(bytes, &mut cursor)?)?;
         let count = take_u32(bytes, &mut cursor)? as usize;
         if count == 0 {
@@ -585,6 +919,7 @@ impl PublicationJournal {
             base_index_tree,
             runtime_intent_id,
             compact_manifest,
+            migration_continuity,
             entries,
             stage,
             wire_version: version,
@@ -604,7 +939,7 @@ impl PublicationJournal {
     fn quarantine_name(&self, index: usize) -> Result<String, RepositoryError> {
         let mut stable = self.clone();
         stable.stage = PublicationJournalStage::Prepared;
-        stable.wire_version = 5;
+        stable.wire_version = stable.binding_version;
         for entry in &mut stable.entries {
             entry.materialization = PublicationMaterialization::clean();
         }
@@ -2143,7 +2478,7 @@ impl Repository {
         candidate: &PrivateCommit,
         journal: &mut PublicationJournal,
     ) -> Result<IndexGeneration, RepositoryError> {
-        self.publish_candidate_impl(expected_index, candidate, journal, false)
+        self.publish_candidate_impl_with_migration(expected_index, candidate, journal, false, false)
     }
 
     /// Explicitly publishes a caller-built format-3 migration from a captured
@@ -2161,6 +2496,9 @@ impl Repository {
         candidate: &PrivateCommit,
         journal: &mut PublicationJournal,
     ) -> Result<IndexGeneration, RepositoryError> {
+        if journal.migration_continuity().is_none() {
+            return Err(RepositoryError::InvalidFormatMigration);
+        }
         let old_head = expected_index
             .head()
             .ok_or(RepositoryError::InvalidFormatMigration)?;
@@ -2210,7 +2548,7 @@ impl Repository {
             return Err(RepositoryError::InvalidFormatMigration);
         }
 
-        self.publish_candidate(expected_index, candidate, journal)
+        self.publish_candidate_impl_with_migration(expected_index, candidate, journal, false, true)
     }
 
     /// The common PUB-1 ref/index/worktree machinery. Compact candidates are
@@ -2223,6 +2561,28 @@ impl Repository {
         journal: &mut PublicationJournal,
         permit_compact: bool,
     ) -> Result<IndexGeneration, RepositoryError> {
+        self.publish_candidate_impl_with_migration(
+            expected_index,
+            candidate,
+            journal,
+            permit_compact,
+            false,
+        )
+    }
+
+    fn publish_candidate_impl_with_migration(
+        &self,
+        expected_index: &IndexGeneration,
+        candidate: &PrivateCommit,
+        journal: &mut PublicationJournal,
+        permit_compact: bool,
+        permit_legacy_migration: bool,
+    ) -> Result<IndexGeneration, RepositoryError> {
+        if journal.migration_continuity().is_some() != permit_legacy_migration
+            || (permit_legacy_migration && journal.compact_manifest().is_some())
+        {
+            return Err(RepositoryError::InvalidFormatMigration);
+        }
         if journal.stage() != PublicationJournalStage::Prepared
             || journal.runtime_intent_id().is_none()
             || expected_index.head() != Some(journal.old_head())
