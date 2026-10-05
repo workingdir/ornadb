@@ -875,7 +875,82 @@ pub async fn commit_vfs_table_activation(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{
+        NoFault, RuntimeIdentity, RuntimeTableRows, TableActivationCandidateValidator,
+        TableMutation, WriterLease,
+    };
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct ExactRuntimeCandidateValidator {
+        tables: Vec<String>,
+        key: Vec<u8>,
+        value: Vec<u8>,
+        accept: bool,
+    }
+
+    impl TableActivationCandidateValidator for ExactRuntimeCandidateValidator {
+        fn tables(&self) -> &[String] {
+            &self.tables
+        }
+
+        fn validate(&mut self, rows: &RuntimeTableRows) -> Result<(), SafeDiagnostic> {
+            let expected = vec![(self.key.clone(), self.value.clone())];
+            if self.accept && rows.get("books") == Some(&expected) {
+                Ok(())
+            } else {
+                Err(rejected())
+            }
+        }
+    }
+
+    async fn activate_runtime_candidate(
+        runtime: Arc<RuntimeState>,
+        writer: WriterLease,
+        candidate: ActivationCandidate<CwdCapture>,
+        key: Vec<u8>,
+        mutation_id: [u8; 16],
+        accept: bool,
+    ) -> Result<ActivationDecision<CwdCapture>, TableActivationError> {
+        let context = runtime
+            .begin_activation()
+            .await
+            .map_err(TableActivationError::Runtime)?;
+        assert_eq!(context.capture(), candidate.baseline().snapshot());
+
+        let value = candidate.replacement_bytes().to_vec();
+        let mutation = TableMutation::new(mutation_id, "books", key.clone(), Some(value.clone()))
+            .map_err(TableActivationError::Runtime)?;
+        let mutations = [mutation];
+        let mut validator = ExactRuntimeCandidateValidator {
+            tables: vec!["books".into()],
+            key,
+            value,
+            accept,
+        };
+        let faults = NoFault;
+
+        match commit_vfs_table_activation(
+            &runtime,
+            ValidatedTableActivationCommit {
+                writer,
+                context: &context,
+                mutations: &mutations,
+                next_digest: [mutation_id[0]; 32],
+                validator: &mut validator,
+                faults: &faults,
+            },
+        )
+        .await
+        {
+            Ok(next_capture) => Ok(ActivationDecision::Accepted(SnapshotPin::capture(Arc::new(
+                next_capture,
+            )))),
+            Err(TableActivationError::ValidationFailed(diagnostic)) => {
+                Ok(ActivationDecision::Rejected(diagnostic))
+            }
+            Err(error) => Err(error),
+        }
+    }
 
     fn fixture_image() -> Arc<VfsFileSnapshot<u64>> {
         let contents = include_str!("../tests/fixtures/publication-repository-main.orna");
@@ -1199,6 +1274,120 @@ mod tests {
                 .unwrap()
                 .replacement_bytes(),
             &[0x58]
+        );
+    }
+
+    #[tokio::test]
+    async fn exported_temp_rename_uses_validated_runtime_commit_and_shared_cache_epoch() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = Arc::new(
+            RuntimeState::open_path(
+                &temp.path().join("state.db"),
+                RuntimeIdentity {
+                    database_id: [0x11; 16],
+                    repository_id: [0x22; 16],
+                },
+                [0x33; 32],
+                None,
+            )
+            .await
+            .unwrap(),
+        );
+        let writer = runtime.acquire_lease([0x44; 16]).await.unwrap();
+
+        let baseline = include_str!("../tests/fixtures/publication-repository-main.orna");
+        let accepted_bytes = include_str!("../tests/fixtures/checkpoint_snapshot_v1.orna");
+        let rejected_bytes = include_str!("../tests/fixtures/case_closure_edge_tail_sixty.orna");
+        assert_ne!(baseline.as_bytes(), accepted_bytes.as_bytes());
+        assert_ne!(accepted_bytes.as_bytes(), rejected_bytes.as_bytes());
+
+        let initial_capture = Arc::new(runtime.capture().await.unwrap());
+        let image = Arc::new(VfsFileSnapshot::new(
+            SnapshotPin::capture(Arc::clone(&initial_capture)),
+            Arc::<[u8]>::from(baseline.as_bytes()),
+        ));
+        let repository = crate::vfs::VfsRepositoryCache::new();
+        let target = repository.managed_file(image).await.unwrap();
+        let old_handle = target.open_read().await;
+        let directory = SnapshotReaddirCursor::new(
+            SnapshotPin::capture(initial_capture),
+            0_u64,
+        );
+        assert!(old_handle.projection_is_current().await.unwrap());
+        assert!(directory.projection_is_current().await.unwrap());
+
+        let accepted_save = target.begin_temporary_replacement(1 << 20).await;
+        accepted_save
+            .write_at(0, accepted_bytes.as_bytes())
+            .await
+            .unwrap();
+        let accepted_runtime = Arc::clone(&runtime);
+        let accepted = target
+            .rename_over(&accepted_save, move |candidate| {
+                activate_runtime_candidate(
+                    accepted_runtime,
+                    writer,
+                    candidate,
+                    vec![0x51],
+                    [0x61; 16],
+                    true,
+                )
+            })
+            .await
+            .unwrap();
+        let TemporaryRenameOutcome::Applied { generation, handle } = accepted else {
+            panic!("validated runtime activation should accept the editor replacement");
+        };
+        assert_eq!(generation, 1);
+        assert_eq!(repository.generation().await, 1);
+        assert!(!old_handle.projection_is_current().await.unwrap());
+        assert!(!directory.projection_is_current().await.unwrap());
+        assert!(handle.projection_is_current().await.unwrap());
+        assert_eq!(handle.read_at(0, accepted_bytes.len()), accepted_bytes.as_bytes());
+        assert_eq!(
+            runtime
+                .committed_table_row("books", &[0x51])
+                .await
+                .unwrap(),
+            Some(accepted_bytes.as_bytes().to_vec())
+        );
+
+        let rejected_save = target.begin_temporary_replacement(1 << 20).await;
+        rejected_save
+            .write_at(0, rejected_bytes.as_bytes())
+            .await
+            .unwrap();
+        let rejected_runtime = Arc::clone(&runtime);
+        let rejected = target
+            .rename_over(&rejected_save, move |candidate| {
+                activate_runtime_candidate(
+                    rejected_runtime,
+                    writer,
+                    candidate,
+                    vec![0x52],
+                    [0x62; 16],
+                    false,
+                )
+            })
+            .await
+            .unwrap();
+        assert!(matches!(rejected, TemporaryRenameOutcome::Rejected { .. }));
+        assert_eq!(repository.generation().await, 1);
+        assert_eq!(target.open_read().await.read_at(0, accepted_bytes.len()), accepted_bytes.as_bytes());
+        assert_eq!(
+            rejected_save
+                .retained_invalid_draft()
+                .await
+                .unwrap()
+                .replacement_bytes(),
+            rejected_bytes.as_bytes()
+        );
+        assert_eq!(
+            runtime
+                .committed_table_row("books", &[0x52])
+                .await
+                .unwrap(),
+            None
         );
     }
 }
