@@ -5,6 +5,10 @@ use tempfile::TempDir;
 
 const DATABASE_ID: &str = "9f237b7e-6844-4498-bcd5-d24641c07449";
 
+fn canonical_database(database_id: &str) -> String {
+    format!("{{\n    repository_format: 3,\n    database_id: \"{database_id}\",\n}}\n")
+}
+
 fn git(directory: &Path, arguments: &[&str]) {
     let output = Command::new("git")
         .current_dir(directory)
@@ -80,13 +84,8 @@ fn repository(database: Option<&str>, legacy_format: Option<&str>, store: bool) 
 
 #[test]
 fn admits_final_format_three_metadata_and_keeps_root_seams_pinned() {
-    let directory = repository(
-        Some(&format!(
-            "{{repository_format: 3, database_id: \"{DATABASE_ID}\"}}\n"
-        )),
-        None,
-        true,
-    );
+    let database = canonical_database(DATABASE_ID);
+    let directory = repository(Some(&database), None, true);
     let repository = Repository::discover(directory.path()).expect("discover repository");
     let context = repository
         .open_format_context()
@@ -108,22 +107,14 @@ fn admits_final_format_three_metadata_and_keeps_root_seams_pinned() {
 fn context_binds_database_identity_to_its_committed_snapshot() {
     const FIRST_DATABASE_ID: &str = "9f237b7e-6844-4498-bcd5-d24641c07449";
     const SECOND_DATABASE_ID: &str = "a4a0a7d1-4f5c-4dc4-a5bf-f3f7f6a8d7e1";
-    let directory = repository(
-        Some(&format!(
-            "{{repository_format: 3, database_id: \"{FIRST_DATABASE_ID}\"}}\n"
-        )),
-        None,
-        true,
-    );
+    let first_database = canonical_database(FIRST_DATABASE_ID);
+    let directory = repository(Some(&first_database), None, true);
     let repository = Repository::discover(directory.path()).expect("discover repository");
     let first = repository
         .open_format_context()
         .expect("admit first committed identity");
 
-    commit_database(
-        directory.path(),
-        &format!("{{repository_format: 3, database_id: \"{SECOND_DATABASE_ID}\"}}\n"),
-    );
+    commit_database(directory.path(), &canonical_database(SECOND_DATABASE_ID));
     let second = repository
         .open_format_context()
         .expect("admit second committed identity");
@@ -167,7 +158,7 @@ fn dispatches_legacy_formats_as_explicit_read_only_inputs() {
 fn fails_closed_on_unknown_mixed_malformed_and_unavailable_metadata() {
     let unknown = repository(
         Some(&format!(
-            "{{repository_format: 99, database_id: \"{DATABASE_ID}\"}}\n"
+            "{{\n    repository_format: 99,\n    database_id: \"{DATABASE_ID}\",\n}}\n"
         )),
         None,
         false,
@@ -179,9 +170,7 @@ fn fails_closed_on_unknown_mixed_malformed_and_unavailable_metadata() {
     assert_eq!(error.code(), "ORNA-REPO-CONTEXT-003");
 
     let mixed = repository(
-        Some(&format!(
-            "{{repository_format: 3, database_id: \"{DATABASE_ID}\"}}\n"
-        )),
+        Some(&canonical_database(DATABASE_ID)),
         Some("format 1\n"),
         false,
     );
@@ -192,7 +181,7 @@ fn fails_closed_on_unknown_mixed_malformed_and_unavailable_metadata() {
     assert_eq!(error.code(), "ORNA-REPO-CONTEXT-004");
 
     let malformed = repository(
-        Some("{repository_format: 3, database_id: \"not-a-uuid\"}\n"),
+        Some("{\n    repository_format: 3,\n    database_id: \"not-a-uuid\",\n}\n"),
         None,
         false,
     );
@@ -215,7 +204,7 @@ fn rejects_oversized_and_noncanonical_final_records() {
     let oversized_id = "x".repeat(70_000);
     let oversized = repository(
         Some(&format!(
-            "{{repository_format: 3, database_id: \"{oversized_id}\"}}\n"
+            "{{\n    repository_format: 3,\n    database_id: \"{oversized_id}\",\n}}\n"
         )),
         None,
         false,
@@ -250,6 +239,38 @@ fn rejects_an_unborn_snapshot_as_unavailable() {
         .open_format_context()
         .unwrap_err();
     assert_eq!(error.code(), "ORNA-REPO-CONTEXT-005");
+}
+
+#[test]
+fn rejects_noncanonical_final_database_record_bytes() {
+    for database in [
+        format!("{{\n    database_id: \"{DATABASE_ID}\",\n    repository_format: 3,\n}}\n"),
+        format!("{{repository_format: 3, database_id: \"{DATABASE_ID}\"}}\n"),
+        format!("{{\n  repository_format: 3,\n  database_id: \"{DATABASE_ID}\",\n}}\n"),
+    ] {
+        let directory = repository(Some(&database), None, false);
+        let error = Repository::discover(directory.path())
+            .unwrap()
+            .open_format_context()
+            .unwrap_err();
+        assert_eq!(error.code(), "ORNA-REPO-CONTEXT-002");
+    }
+}
+
+#[test]
+fn rejects_unenumerated_legacy_storage_profiles() {
+    for database in [
+        "{repository_format: 1, storage_profile: \"compact-storage-v1\"}\n",
+        "{repository_format: 2, storage_profile: \"compact-storage-v2\"}\n",
+        "{repository_format: 1, storage_profile: \"future-profile\"}\n",
+    ] {
+        let directory = repository(None, Some(database), false);
+        let error = Repository::discover(directory.path())
+            .unwrap()
+            .open_format_context()
+            .unwrap_err();
+        assert_eq!(error.code(), "ORNA-REPO-CONTEXT-002");
+    }
 }
 
 #[test]
