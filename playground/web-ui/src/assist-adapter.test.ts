@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { completionRankingFields, hoverMarkdown, signatureHelpFields } from './assist-adapter';
+import { completionRankingFields, hoverMarkdown, inlayHintFields, signatureHelpFields } from './assist-adapter';
 
 describe('LSP completion ranking adapter', () => {
   it('preserves backend ordering and preselection for Monaco', () => {
@@ -73,5 +73,57 @@ describe('LSP signature help adapter', () => {
   it('returns no provider value when the LSP response has no usable signatures', () => {
     expect(signatureHelpFields({ signatures: [{ parameters: [] }] })).toBeUndefined();
     expect(signatureHelpFields(null)).toBeUndefined();
+  });
+});
+
+describe('LSP inlay hint adapter', () => {
+  it('preserves standard parameter and inferred type hints for Monaco', () => {
+    expect(inlayHintFields([
+      {
+        position: { line: 3, character: 20 },
+        label: 'lower: ',
+        kind: 2,
+        paddingRight: true,
+      },
+      {
+        position: { line: 5, character: 12 },
+        label: ': Int',
+        kind: 1,
+        tooltip: { kind: 'markdown', value: 'Inferred from the initializer.' },
+        paddingLeft: true,
+      },
+      {
+        position: { line: -1, character: 0 },
+        label: 'invalid',
+      },
+    ])).toEqual([
+      {
+        position: { line: 3, character: 20 },
+        label: 'lower: ',
+        kind: 2,
+        paddingRight: true,
+      },
+      {
+        position: { line: 5, character: 12 },
+        label: ': Int',
+        kind: 1,
+        tooltip: 'Inferred from the initializer.',
+        paddingLeft: true,
+      },
+    ]);
+  });
+
+  it('converts label part values and drops malformed hints', () => {
+    expect(inlayHintFields([
+      {
+        position: { line: 0, character: 1 },
+        label: [{ value: 'T', tooltip: { kind: 'markdown', value: 'type detail' } }],
+      },
+      { position: { line: 0 }, label: 'missing character' },
+      { position: { line: 0, character: 1 }, label: 3 },
+    ])).toEqual([{
+      position: { line: 0, character: 1 },
+      label: [{ label: 'T', tooltip: 'type detail' }],
+    }]);
   });
 });
