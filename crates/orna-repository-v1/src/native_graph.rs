@@ -931,7 +931,10 @@ impl NativeGraphContext {
     /// Captures an already-authorized, stable input stream into native OGB-2
     /// objects and returns a context-bound candidate rooted by a provisional
     /// private ref. `max_bytes` is an explicit per-capture ceiling; the source
-    /// is never reopened by path.
+    /// is never reopened by path. Before publishing its descriptor in an ORP
+    /// row, promote the candidate with [`Self::protect_captured_blob`]; the
+    /// resulting pin's transfer record carries the descriptor and content
+    /// identity into the row's durable acceptance transaction.
     pub fn capture_blob_candidate<R: Read>(
         &self,
         mut authorized_source: R,
