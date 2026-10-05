@@ -4114,7 +4114,12 @@ mod tests {
         let remote_path = remote.to_str().expect("remote path");
         git(&local, &["remote", "add", "origin", remote_path]);
         git(&local, &["push", "origin", "HEAD:refs/heads/main"]);
+        git(
+            root.path(),
+            &["--git-dir", "remote.git", "symbolic-ref", "HEAD", "refs/heads/main"],
+        );
         git(root.path(), &["clone", remote_path, "updater"]);
+        assert_eq!(git(&updater, &["rev-parse", "HEAD"]), initial);
         git(&updater, &["config", "user.email", "fetch@example.invalid"]);
         git(&updater, &["config", "user.name", "Fetch test"]);
         std::fs::write(updater.join("tracked.txt"), "advanced\n").expect("advanced file");
