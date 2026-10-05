@@ -10,7 +10,7 @@ use std::{fmt, io::Read};
 use sha2::{Digest, Sha256};
 
 use crate::native_graph::{
-    GraphError, MAX_GRAPH_HEIGHT, MAX_REFS, NativeObjectId, NativeObjectKind,
+    GraphError, NativeObjectId, NativeObjectKind, MAX_GRAPH_HEIGHT, MAX_REFS,
 };
 
 pub const MAX_BLOB_LENGTH: u64 = i64::MAX as u64;
