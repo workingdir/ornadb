@@ -39,6 +39,16 @@ pub struct HostProviderRole {
     pub required: bool,
 }
 
+/// One generated Orna declaration paired with its native registry operation.
+/// The declaration is an ABI/type artifact; execution stays in the registered
+/// Rust provider selected by the same operation metadata.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct HostBindingDeclaration {
+    pub module: String,
+    pub operation: String,
+    pub source: String,
+}
+
 #[derive(Deserialize)]
 struct RawHostRegistry {
     abi_version: super::AbiVersion,
@@ -94,6 +104,54 @@ impl SystemHostOperationRegistry {
 
     pub fn roles(&self) -> impl Iterator<Item = &HostProviderRole> {
         self.roles.values()
+    }
+
+    /// Generate declaration stubs for the operations in one native provider
+    /// role. Their signatures and operation identities come only from the
+    /// generated typed registry; native dispatch remains implemented by Rust.
+    pub fn binding_declarations_for_role(
+        &self,
+        role_name: &str,
+    ) -> Result<Vec<HostBindingDeclaration>, String> {
+        let role = self
+            .role(role_name)
+            .ok_or_else(|| format!("unknown host provider role `{role_name}`"))?;
+        let mut declarations = Vec::with_capacity(role.operations.len());
+        for operation_name in &role.operations {
+            let operation = self
+                .operation(operation_name)
+                .ok_or_else(|| format!("host role `{role_name}` references a missing operation"))?;
+            let signature_prefix = format!("fn {}", operation.name);
+            let tail = operation
+                .signature
+                .strip_prefix(&signature_prefix)
+                .ok_or_else(|| {
+                    format!(
+                        "host operation `{}` has a mismatched signature",
+                        operation.name
+                    )
+                })?;
+            let (module, local_name) = operation
+                .name
+                .rsplit_once('.')
+                .ok_or_else(|| format!("host operation `{}` has no module", operation.name))?;
+            if module.is_empty() || local_name.is_empty() || !tail.starts_with('(') {
+                return Err(format!(
+                    "host operation `{}` has an invalid signature",
+                    operation.name
+                ));
+            }
+            declarations.push(HostBindingDeclaration {
+                module: module.to_owned(),
+                operation: operation.name.clone(),
+                source: format!(
+                    "// host-op: {}\npub fn {local_name}{tail} = error(code: \"sys.binding.stub\", message: \"generated host declaration\");\n",
+                    operation.name
+                ),
+            });
+        }
+        declarations.sort_by(|left, right| left.operation.cmp(&right.operation));
+        Ok(declarations)
     }
 }
 
