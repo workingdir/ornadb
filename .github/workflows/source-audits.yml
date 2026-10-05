@@ -68,6 +68,9 @@ jobs:
       - name: Prove hash-pinned std snapshot replay behavior
         run: cargo test --locked -p orna-evaluator-v1 --test standard_snapshot_replay
 
+      - name: Prove hash-pinned runtime historical snapshot behavior
+        run: cargo test --locked -p orna-runtime-v1 --test historical_snapshots
+
       - name: Audit editor source and generated artifacts
         run: cargo test --locked -p orna-syntax-v1 --test editor_artifacts
 
