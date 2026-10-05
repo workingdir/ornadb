@@ -8,7 +8,8 @@ use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 use orna_application_v1::{ApplicationLiveAdapter, LIVE_RUN_EVENTS_WATCH_SOURCE};
 use orna_live_v1::{
     HttpConnection, LiveHost, LiveSessionAuthority, LiveTransport, SessionMetadata,
-    SystemCredentialIssuer, TransportLimits, WireRequest,
+    SystemCredentialIssuer, TransportLimits, WebSocketApplicationPreparation, WebSocketOutput,
+    WebSocketState, WireRequest, WireResponse, encode_websocket_output, parse_http_request,
 };
 use orna_protocol_v1::{Envelope, Limits as ProtocolLimits, Message, PresentationContext};
 use orna_repository_v1::{
@@ -301,11 +302,7 @@ fn serve_shared_connection(
 ) -> io::Result<()> {
     stream.set_read_timeout(Some(StdDuration::from_secs(15)))?;
     if peek_websocket_request(&stream) {
-        stream.set_read_timeout(None)?;
-        let mut state = state
-            .lock()
-            .map_err(|_| io::Error::other("live session state is unavailable"))?;
-        return serve_websocket_connection(stream, &mut state);
+        return serve_shared_websocket_connection(stream, state);
     }
 
     let mut reader = BufReader::new(stream);
@@ -332,6 +329,183 @@ fn serve_shared_connection(
         return serve_session_http_request(stream, request, &mut state);
     }
     write_response(&mut stream, host_route(root, identity, &request))
+}
+
+fn serve_shared_websocket_connection(
+    mut stream: TcpStream,
+    shared_state: &Mutex<ServeState>,
+) -> io::Result<()> {
+    stream.set_read_timeout(Some(StdDuration::from_secs(15)))?;
+    let mut writer = stream.try_clone()?;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .map_err(|_| io::Error::other("live connection executor unavailable"))?;
+    let (request, mut input) = read_websocket_upgrade_request(&mut stream)?;
+    let mut attachment = [0; 16];
+    getrandom::fill(&mut attachment)
+        .map_err(|_| io::Error::other("socket identity unavailable"))?;
+
+    {
+        let mut state = shared_state
+            .lock()
+            .map_err(|_| io::Error::other("live session state is unavailable"))?;
+        let upgrade = match state
+            .live
+            .begin_websocket_upgrade(&request, attachment, now_ms())
+        {
+            Ok(upgrade) => upgrade,
+            Err(response) => {
+                write_wire_response(&mut writer, &response)?;
+                return Ok(());
+            }
+        };
+        let response = upgrade.response().clone();
+        let encoded = match response.encode_http(TransportLimits::default()) {
+            Ok(encoded) => encoded,
+            Err(error) => {
+                state.live.abort_websocket_upgrade(&upgrade);
+                return Err(io::Error::other(error));
+            }
+        };
+        if !state
+            .live
+            .begin_websocket_upgrade_delivery(&upgrade, now_ms())
+        {
+            state.live.abort_websocket_upgrade(&upgrade);
+            return Err(io::Error::other("WebSocket session upgrade was retired"));
+        }
+        if let Err(error) = writer.write_all(&encoded).and_then(|()| writer.flush()) {
+            state.live.abort_websocket_upgrade(&upgrade);
+            return Err(error);
+        }
+        if response.status != 101 {
+            state.live.abort_websocket_upgrade(&upgrade);
+            return Ok(());
+        }
+        if !state.live.finish_websocket_upgrade_delivery(&upgrade) {
+            state.live.abort_websocket_upgrade(&upgrade);
+            return Err(io::Error::other(
+                "WebSocket session upgrade delivery expired",
+            ));
+        }
+        runtime
+            .block_on(state.live.commit_websocket_upgrade(upgrade, now_ms()))
+            .map_err(io::Error::other)?;
+    }
+
+    stream.set_read_timeout(None)?;
+    let mut socket = WebSocketState::new(attachment);
+    let mut chunk = [0; 8192];
+    loop {
+        let mut pending = input.as_slice();
+        loop {
+            let prepared = {
+                let mut state = shared_state
+                    .lock()
+                    .map_err(|_| io::Error::other("live session state is unavailable"))?;
+                runtime.block_on(state.live.prepare_websocket_application(
+                    &mut socket,
+                    now_ms(),
+                    pending,
+                ))
+            };
+            pending = &[];
+            let preparation = match prepared {
+                Ok(preparation) => preparation,
+                Err(error) => {
+                    let mut state = shared_state
+                        .lock()
+                        .map_err(|_| io::Error::other("live session state is unavailable"))?;
+                    let _ = runtime.block_on(state.live.close_websocket_connection(
+                        attachment,
+                        now_ms(),
+                        &mut state.application,
+                    ));
+                    return Err(io::Error::other(error));
+                }
+            };
+            let (output, close) = match preparation {
+                WebSocketApplicationPreparation::Pending => break,
+                WebSocketApplicationPreparation::Output(output) => {
+                    let close = matches!(&output, WebSocketOutput::Close { .. });
+                    (output, close)
+                }
+                WebSocketApplicationPreparation::Work(ticket) => {
+                    let completion = {
+                        let mut state = shared_state
+                            .lock()
+                            .map_err(|_| io::Error::other("live session state is unavailable"))?;
+                        runtime.block_on(ticket.execute(&mut state.application))
+                    };
+                    let output = {
+                        let mut state = shared_state
+                            .lock()
+                            .map_err(|_| io::Error::other("live session state is unavailable"))?;
+                        runtime.block_on(state.live.complete_application(completion))
+                    }
+                    .map_err(io::Error::other)?;
+                    let close = matches!(&output, WebSocketOutput::Close { .. });
+                    (output, close)
+                }
+            };
+            if let Some(encoded) = encode_websocket_output(&output, TransportLimits::default())
+                .map_err(io::Error::other)?
+            {
+                writer.write_all(&encoded)?;
+                writer.flush()?;
+            }
+            if close {
+                return Ok(());
+            }
+        }
+
+        input.clear();
+        let read = stream.read(&mut chunk)?;
+        if read == 0 {
+            let mut state = shared_state
+                .lock()
+                .map_err(|_| io::Error::other("live session state is unavailable"))?;
+            let _ = runtime.block_on(state.live.close_websocket_connection(
+                attachment,
+                now_ms(),
+                &mut state.application,
+            ));
+            return Ok(());
+        }
+        input.extend_from_slice(&chunk[..read]);
+    }
+}
+
+fn read_websocket_upgrade_request(stream: &mut TcpStream) -> io::Result<(WireRequest, Vec<u8>)> {
+    let limits = TransportLimits::default();
+    let mut buffered = Vec::new();
+    let mut chunk = [0; 8192];
+    loop {
+        let read = stream.read(&mut chunk)?;
+        if read == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "incomplete WebSocket upgrade request",
+            ));
+        }
+        buffered.extend_from_slice(&chunk[..read]);
+        match parse_http_request(&buffered, limits) {
+            Ok(Some(request)) => {
+                let remainder = buffered.split_off(request.consumed());
+                return Ok((request.request().clone(), remainder));
+            }
+            Ok(None) => {}
+            Err(error) => return Err(io::Error::other(error)),
+        }
+    }
+}
+
+fn write_wire_response(stream: &mut TcpStream, response: &WireResponse) -> io::Result<()> {
+    let encoded = response
+        .encode_http(TransportLimits::default())
+        .map_err(io::Error::other)?;
+    stream.write_all(&encoded)?;
+    stream.flush()
 }
 
 fn serve_websocket_connection(stream: TcpStream, state: &mut ServeState) -> io::Result<()> {

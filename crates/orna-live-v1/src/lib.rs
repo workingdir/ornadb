@@ -6455,6 +6455,27 @@ impl LiveTransport {
         outcome
     }
 
+    /// Closes an accepted WebSocket through the application callback used by
+    /// the synchronous socket bridge. Executable hosts that release shared
+    /// transport state while waiting for socket input use this when the peer
+    /// closes the underlying TCP stream.
+    ///
+    /// # Errors
+    ///
+    /// Returns a redacted application or transport close error.
+    pub async fn close_websocket_connection<A>(
+        &mut self,
+        attachment: [u8; 16],
+        now: u64,
+        application: &mut A,
+    ) -> std::result::Result<(), HttpIoError>
+    where
+        A: LiveApplication,
+    {
+        self.close_websocket_attachment(attachment, now, application)
+            .await
+    }
+
     /// Parses exactly the three live-session HTTP endpoint shapes.
     #[allow(clippy::too_many_lines)]
     pub async fn handle(
