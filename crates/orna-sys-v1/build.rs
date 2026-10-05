@@ -3,6 +3,11 @@ use std::{
     path::{Path, PathBuf},
 };
 
+#[path = "src/abi_version.rs"]
+mod abi_version;
+#[path = "src/host_registry_model.rs"]
+mod host_registry_model;
+
 mod build_host;
 mod build_provider;
 mod build_support;
@@ -72,13 +77,15 @@ fn main() {
     let out_dir = PathBuf::from(env::var_os("OUT_DIR").expect("build output directory"));
     fs::write(out_dir.join("api_sys.json"), artifacts.api_json)
         .expect("write generated api/sys.json");
-    let host_registry = build_host::generate_host_registry(&source_root)
-        .expect("annotated native sys host operations form a valid registry");
+    let typed_host_registry = build_host::generate_typed_host_registry(&source_root)
+        .expect("annotated native sys host operations form a valid typed registry");
+    let host_registry = build_host::serialize_host_registry(&typed_host_registry)
+        .expect("serialize typed native sys host-operation registry");
     let host_registry_schema = build_host::generate_host_registry_schema()
         .expect("generate deterministic native sys host-operation schema");
     build_host::validate_host_registry_json(&host_registry, &host_registry_schema)
         .expect("generated native sys host-operation registry matches its schema");
-    let host_bindings = build_host::generate_host_binding_artifacts(&host_registry)
+    let host_bindings = build_host::generate_host_binding_artifacts(&typed_host_registry)
         .expect("typed native sys host-operation registry generates binding declarations");
     fs::write(out_dir.join("system_host_operations.json"), host_registry)
         .expect("write generated native sys host-operation registry");

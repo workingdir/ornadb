@@ -8,6 +8,11 @@ use orna_sys_v1::{
     system_host_operation_registry_json, system_host_operation_registry_schema_json,
 };
 
+#[path = "../src/abi_version.rs"]
+mod abi_version;
+#[path = "../src/host_registry_model.rs"]
+mod host_registry_model;
+
 #[path = "../build_host.rs"]
 mod build_host;
 
@@ -147,8 +152,11 @@ fn embedded_host_registry_matches_deterministic_annotated_method_projection() {
 #[test]
 fn generated_host_binding_artifacts_are_registry_backed_and_parse_as_orna_modules() {
     let source_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-    let host_registry = build_host::generate_host_registry(&source_root)
-        .expect("native host operations regenerate from Rust annotations");
+    let host_registry = build_host::generate_typed_host_registry(&source_root)
+        .expect("native host operations regenerate as a typed registry from Rust annotations");
+    let host_registry_json = build_host::serialize_host_registry(&host_registry)
+        .expect("typed host registry serializes deterministically");
+    assert_eq!(host_registry_json, system_host_operation_registry_json());
     let artifacts = build_host::generate_host_binding_artifacts(&host_registry)
         .expect("typed native host registry emits binding declarations");
     assert_eq!(

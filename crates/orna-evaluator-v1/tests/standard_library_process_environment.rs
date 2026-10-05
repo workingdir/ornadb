@@ -1,5 +1,9 @@
-use orna_evaluator_v1::{AdmittedReplSession, Limits, SysHostBindingRegistry};
+use orna_evaluator_v1::{
+    AdmittedReplSession, Limits, SysHostBindingRegistry, reference_standard_profile,
+    reference_standard_sources,
+};
 use orna_foundation_v1::{CanonicalValue, OvbRaw};
+use orna_semantic_v1::{Catalogue, StandardDependencyProfile};
 use orna_syntax_v1::{Declaration, Pattern, TypeExpr, parse_module};
 use orna_sys_v1::{
     ClockProvider, EnvironmentProvider, ProcessProvider, system_host_binding_modules_json,
@@ -166,8 +170,40 @@ fn emitted_environment_declarations_parse_typecheck_and_dispatch_to_native_provi
         );
     }
 
-    let mut session = AdmittedReplSession::with_reference_standard(Limits::default())
-        .unwrap_or_else(|error| panic!("reference std failed to load: {}", error.code()));
+    let mut standard_sources = reference_standard_sources().into_iter().collect::<Vec<_>>();
+    let mut replaced_environment = false;
+    for (path, source) in &mut standard_sources {
+        if path == "std/io/environment.orna" {
+            *source = module_source.clone();
+            replaced_environment = true;
+        }
+    }
+    assert!(
+        replaced_environment,
+        "reference source bundle contains environment module"
+    );
+
+    let reference_profile = reference_standard_profile();
+    let mut profile = StandardDependencyProfile::from_sources(
+        "generated-native-host-binding-test",
+        standard_sources.clone(),
+    )
+    .expect("generated module graph has valid standard paths")
+    .with_prelude_exports(reference_profile.prelude_exports().iter().cloned());
+    for (path, exports) in reference_profile.module_prelude_exports() {
+        profile = profile.with_module_prelude_exports(path.clone(), exports.iter().cloned());
+    }
+    let catalogue = Catalogue::authoritative_core()
+        .with_standard_sources(&profile, standard_sources.clone())
+        .expect("emitted host module loads into the standard module graph");
+    let mut session =
+        AdmittedReplSession::from_catalogue(&[], catalogue, standard_sources, Limits::default())
+            .unwrap_or_else(|error| {
+                panic!(
+                    "emitted standard module graph failed to type-check: {}",
+                    error.code()
+                )
+            });
     session
         .submit(include_str!("fixtures/stdlib-use-io-t7auz.orna"))
         .unwrap_or_else(|error| panic!("std.io import failed: {}", error.code()));
