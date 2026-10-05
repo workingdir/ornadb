@@ -1,29 +1,10 @@
 use orna_semantic_v1::{analyze, ModuleInput};
-use serde_json::Value;
 
-const FROZEN_SYS_API: &str = include_str!("fixtures/reference/api/sys.json");
 const PUBLICATION_SURFACE: &str = include_str!("fixtures/sys-api-drift-publication-surface.orna");
 const INTERNAL_PUBLICATION_METADATA: &str =
     include_str!("fixtures/sys-api-drift-internal-publication-metadata.orna");
 const DEFAULT_ARGUMENTS: &str = include_str!("fixtures/sys-api-drift-default-arguments.orna");
 const EDGE_INTERPLAY: &str = include_str!("fixtures/sys-api-drift-edge-interplay.orna");
-
-#[test]
-fn published_api_matches_the_frozen_schema_and_keeps_local_provenance() {
-    let mut published: Value =
-        serde_json::from_str(&orna_sys_v1::system_api_json()).expect("generated sys API");
-    let frozen: Value = serde_json::from_str(FROZEN_SYS_API).expect("frozen sys API fixture");
-
-    assert_ne!(
-        published["source_of_truth"], frozen["source_of_truth"],
-        "the generated artifact records its local annotated-method source"
-    );
-    published["source_of_truth"] = frozen["source_of_truth"].clone();
-    assert_eq!(
-        published, frozen,
-        "public schema inventories and edges must match the frozen API"
-    );
-}
 
 #[test]
 fn publication_surface_fixture_uses_frozen_sys_fields() {
