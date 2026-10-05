@@ -171,17 +171,25 @@ impl NativeGraphContext {
         row_snapshot: crate::row_store::RowMapSnapshot,
     ) -> Result<Self, GraphError> {
         let version = row_snapshot.version();
-        if store_root.algorithm() != algorithm
-            || version.database_id() != &database_id
+        let schema_oid = version.schema().schema_oid();
+        if store_root.algorithm() != algorithm || schema_oid.algorithm() != algorithm {
+            return Err(GraphError::InvalidOidWidth {
+                expected: algorithm.width(),
+                actual: if store_root.algorithm() != algorithm {
+                    store_root.as_bytes().len()
+                } else {
+                    schema_oid.as_bytes().len()
+                },
+            });
+        }
+        if version.database_id() != &database_id
+            || version.schema().database_id() != &database_id
             || version.store_root() != &store_root
             || version.schema().schema_digest() != &schema_digest
         {
-            return Err(GraphError::InvalidOidWidth {
-                expected: algorithm.width(),
-                actual: store_root.as_bytes().len(),
-            });
+            return Err(GraphError::ContextMismatch);
         }
-        Ok(Self {
+        let context = Self {
             repository,
             repository_id,
             identity: ContextIdentity(identity),
@@ -193,7 +201,30 @@ impl NativeGraphContext {
             schema_digest,
             row_snapshot,
             cancelled: Arc::new(AtomicBool::new(false)),
-        })
+        };
+        context.validate_sealed_schema_node()?;
+        Ok(context)
+    }
+
+    fn validate_sealed_schema_node(&self) -> Result<(), GraphError> {
+        let scope = self.open_read_scope()?;
+        let mut objects = ObjectBudget::new(
+            MAX_RANGE_GRAPH_OBJECTS,
+            scope.max_objects,
+            Arc::clone(&scope.objects_used),
+            MAX_RANGE_METADATA_BYTES,
+            Arc::clone(&scope.metadata_used),
+        );
+        let schema_oid = self.row_snapshot.version().schema().schema_oid();
+        let node = self.read_native_node(schema_oid, &scope, &mut objects)?;
+        match node {
+            NodeData::Schema { schema_digest, .. } if schema_digest == self.schema_digest => Ok(()),
+            NodeData::Schema { .. } => Err(GraphError::ContentIdentityMismatch),
+            other => Err(GraphError::WrongNodeKind {
+                expected: NodeKind::Schema,
+                actual: other.kind(),
+            }),
+        }
     }
 
     /// Opens the repository owner's fixed-budget read scope. Each range is
