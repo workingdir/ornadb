@@ -35838,7 +35838,7 @@ fn nested_checkpoint_identity_survives_paired_compaction_chain_handoff_folds_816
 
     let alpha = b"history-61/checkpoint/alpha".to_vec();
     let catalog_only = b"history-61/checkpoint/catalog-only".to_vec();
-    let run = |first_order, last_order, identity_index| {
+    let run = |first_order: u64, last_order: u64, identity_index: usize| {
         orna_storage_v1::BranchMergePairedCheckpointRedoUndoCompactionNestedCompactionHandoffRunSnapshot {
             merge_ordinal: 5,
             fold_ordinal: 2,
