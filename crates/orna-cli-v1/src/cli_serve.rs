@@ -25,6 +25,7 @@ use std::{
     net::{SocketAddr, TcpListener, TcpStream},
     path::{Path, PathBuf},
     process::{Command, Stdio},
+    sync::{Arc, Mutex},
     time::{Duration as StdDuration, SystemTime, UNIX_EPOCH},
 };
 
@@ -244,15 +245,20 @@ fn new_serve_state_with_project(
     })
 }
 
-fn serve_listener(listener: &TcpListener, mut state: ServeState) -> io::Result<()> {
+fn serve_listener(listener: &TcpListener, state: ServeState) -> io::Result<()> {
+    let root = state.root.clone();
+    let identity = state.identity;
+    let state = Arc::new(Mutex::new(state));
     for accepted in listener.incoming() {
         let stream = accepted?;
-        // The live transport's protocol state is mutable and currently
-        // exposes a synchronous connection driver, so this first executable
-        // host serializes accepted connections. Static and Git routes remain
-        // ordinary short HTTP requests; a future async listener actor can
-        // multiplex them without changing their route contract.
-        let _ = serve_connection(stream, &mut state);
+        let connection_state = Arc::clone(&state);
+        let connection_root = root.clone();
+        std::thread::Builder::new()
+            .name("orna-serve-connection".into())
+            .spawn(move || {
+                let _ =
+                    serve_shared_connection(stream, &connection_state, &connection_root, identity);
+            })?;
     }
     Ok(())
 }
@@ -260,20 +266,7 @@ fn serve_listener(listener: &TcpListener, mut state: ServeState) -> io::Result<(
 fn serve_connection(mut stream: TcpStream, state: &mut ServeState) -> io::Result<()> {
     stream.set_read_timeout(Some(StdDuration::from_secs(15)))?;
     if peek_websocket_request(&stream) {
-        stream.set_read_timeout(None)?;
-        let mut attachment = [0; 16];
-        getrandom::fill(&mut attachment)
-            .map_err(|_| io::Error::other("socket identity unavailable"))?;
-        let mut connection = HttpConnection::new(TransportLimits::default());
-        let mut clock = now_ms;
-        let _ = state.live.serve_accepted_websocket_socket(
-            stream,
-            &mut connection,
-            attachment,
-            &mut clock,
-            &mut state.application,
-        );
-        return Ok(());
+        return serve_websocket_connection(stream, state);
     }
 
     let mut reader = BufReader::new(stream);
@@ -294,30 +287,95 @@ fn serve_connection(mut stream: TcpStream, state: &mut ServeState) -> io::Result
     };
     stream = reader.into_inner();
     if request.path.starts_with("/orna/session") {
-        let wire = WireRequest {
-            method: request.method,
-            path: request.path,
-            headers: request.headers,
-            body: request.body,
-        };
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .build()
-            .map_err(|_| io::Error::other("live request executor unavailable"))?;
-        let response = runtime.block_on(state.live.handle(
-            wire,
-            now_ms(),
-            &mut state.authority,
-            &mut state.issuer,
-            &mut state.deletion,
-        ));
-        let bytes = response
-            .encode_http(TransportLimits::default())
-            .map_err(|_| io::Error::other("live response could not be encoded"))?;
-        stream.write_all(&bytes)?;
-        return Ok(());
+        return serve_session_http_request(stream, request, state);
     }
     let response = host_route(&state.root, state.identity, &request);
     write_response(&mut stream, response)
+}
+
+fn serve_shared_connection(
+    mut stream: TcpStream,
+    state: &Mutex<ServeState>,
+    root: &Path,
+    identity: RuntimeIdentity,
+) -> io::Result<()> {
+    stream.set_read_timeout(Some(StdDuration::from_secs(15)))?;
+    if peek_websocket_request(&stream) {
+        stream.set_read_timeout(None)?;
+        let mut state = state
+            .lock()
+            .map_err(|_| io::Error::other("live session state is unavailable"))?;
+        return serve_websocket_connection(stream, &mut state);
+    }
+
+    let mut reader = BufReader::new(stream);
+    let request = match read_request(&mut reader) {
+        Ok(request) => request,
+        Err(_) => {
+            let mut stream = reader.into_inner();
+            write_response(
+                &mut stream,
+                Response::new(
+                    400,
+                    "application/json",
+                    br#"{"error":"bad_request"}"#.to_vec(),
+                ),
+            )?;
+            return Ok(());
+        }
+    };
+    stream = reader.into_inner();
+    if request.path.starts_with("/orna/session") {
+        let mut state = state
+            .lock()
+            .map_err(|_| io::Error::other("live session state is unavailable"))?;
+        return serve_session_http_request(stream, request, &mut state);
+    }
+    write_response(&mut stream, host_route(root, identity, &request))
+}
+
+fn serve_websocket_connection(stream: TcpStream, state: &mut ServeState) -> io::Result<()> {
+    stream.set_read_timeout(None)?;
+    let mut attachment = [0; 16];
+    getrandom::fill(&mut attachment)
+        .map_err(|_| io::Error::other("socket identity unavailable"))?;
+    let mut connection = HttpConnection::new(TransportLimits::default());
+    let mut clock = now_ms;
+    let _ = state.live.serve_accepted_websocket_socket(
+        stream,
+        &mut connection,
+        attachment,
+        &mut clock,
+        &mut state.application,
+    );
+    Ok(())
+}
+
+fn serve_session_http_request(
+    mut stream: TcpStream,
+    request: Request,
+    state: &mut ServeState,
+) -> io::Result<()> {
+    let wire = WireRequest {
+        method: request.method,
+        path: request.path,
+        headers: request.headers,
+        body: request.body,
+    };
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .map_err(|_| io::Error::other("live request executor unavailable"))?;
+    let response = runtime.block_on(state.live.handle(
+        wire,
+        now_ms(),
+        &mut state.authority,
+        &mut state.issuer,
+        &mut state.deletion,
+    ));
+    let bytes = response
+        .encode_http(TransportLimits::default())
+        .map_err(|_| io::Error::other("live response could not be encoded"))?;
+    stream.write_all(&bytes)
 }
 
 // The project root is selected once by `orna serve`; requests never supply a
@@ -331,6 +389,7 @@ fn host_route(root: &Path, identity: RuntimeIdentity, request: &Request) -> Resp
     }
     match (request.method.as_str(), request.path.as_str()) {
         ("GET", "/api/examples") => playground_examples(root),
+        ("GET", "/api/playground/revision") => playground_revision(root),
         ("GET", "/api/clone") => match clone_report(root, identity) {
             Ok(report) => Response::new(200, "application/json", report),
             Err(_) => unavailable_response(),
@@ -368,6 +427,18 @@ fn git_listing_route(
     }
     match request.path.as_str() {
         "/" => Some(commit_log_page(root, identity)),
+        "/playground/theme.css" => Some(playground_style(
+            root,
+            "Theme",
+            "wiki-basic",
+            &request.query,
+        )),
+        "/playground/layout.css" => Some(playground_style(
+            root,
+            "Layout",
+            "responsive",
+            &request.query,
+        )),
         "/playground" => Some(playground_asset(root, identity, &request.path)),
         path if path.starts_with("/playground/") => {
             Some(playground_asset(root, identity, &request.path))
@@ -416,6 +487,8 @@ fn commit_log_page(root: &Path, identity: RuntimeIdentity) -> Response {
 
 const MAX_PLAYGROUND_ASSET_BYTES: usize = 8 * 1024 * 1024;
 const MAX_PLAYGROUND_ASSET_ROW_BYTES: usize = 16 * 1024 * 1024;
+const MAX_PLAYGROUND_STYLE_BYTES: usize = 256 * 1024;
+const MAX_PLAYGROUND_STYLE_ROW_BYTES: usize = 512 * 1024;
 const MAX_PLAYGROUND_EXAMPLE_BYTES: usize = 2 * 1024 * 1024;
 const MAX_PLAYGROUND_SAMPLE_BYTES: usize = 64 * 1024;
 const MAX_PLAYGROUND_FILE_EXAMPLES: usize = 100;
@@ -464,6 +537,106 @@ fn playground_asset(root: &Path, identity: RuntimeIdentity, request_path: &str) 
         .headers
         .push(("X-Content-Type-Options".into(), "nosniff".into()));
     response
+}
+
+fn playground_revision(root: &Path) -> Response {
+    let Ok(repository) = Repository::discover(root) else {
+        return unavailable_response();
+    };
+    let Ok(Some(commit)) = repository.head() else {
+        return unavailable_response();
+    };
+    let mut response = Response::new(
+        200,
+        "application/json",
+        format!("{{\"revision\":{}}}", json_string(commit.as_str())).into_bytes(),
+    );
+    response
+        .headers
+        .push(("Cache-Control".into(), "no-store".into()));
+    response
+}
+
+fn playground_style(root: &Path, table: &str, expected_id: &str, query: &str) -> Response {
+    let Ok(repository) = Repository::discover(root) else {
+        return unavailable_response();
+    };
+    let revision = match playground_style_revision(query) {
+        Ok(revision) => revision,
+        Err(()) => return bad_request_response(),
+    };
+    let commit = match revision {
+        Some(revision) => match resolve_listing_commit(&repository, revision) {
+            Some(commit) => commit,
+            None => return not_found_response(),
+        },
+        None => match repository.head() {
+            Ok(Some(commit)) => commit,
+            _ => return unavailable_response(),
+        },
+    };
+    let schema = match repository.read_committed_file(
+        &commit,
+        Path::new("playground.orna"),
+        MAX_PLAYGROUND_SAMPLE_BYTES,
+    ) {
+        Ok(schema) => schema,
+        Err(_) => return unavailable_response(),
+    };
+    let Ok(schema) = String::from_utf8(schema) else {
+        return unavailable_response();
+    };
+    if !has_playground_style_table(&schema, table) {
+        return unavailable_response();
+    }
+    let Ok(record_path) = ManagedPath::new(
+        Path::new("playground")
+            .join(table)
+            .join(format!("{expected_id}.orna")),
+    ) else {
+        return bad_request_response();
+    };
+    let Ok(source) = repository.read_committed_file(
+        &commit,
+        record_path.as_path(),
+        MAX_PLAYGROUND_STYLE_ROW_BYTES,
+    ) else {
+        return not_found_response();
+    };
+    let Ok(source) = String::from_utf8(source) else {
+        return unavailable_response();
+    };
+    let Some((name, css)) = decode_playground_style(&source, expected_id) else {
+        return unavailable_response();
+    };
+    if name.is_empty() || css.len() > MAX_PLAYGROUND_STYLE_BYTES {
+        return unavailable_response();
+    }
+    let mut response = Response::new(200, "text/css; charset=utf-8", css.into_bytes());
+    response
+        .headers
+        .push(("Cache-Control".into(), "no-cache".into()));
+    response
+        .headers
+        .push(("X-Content-Type-Options".into(), "nosniff".into()));
+    response
+}
+
+fn playground_style_revision(query: &str) -> Result<Option<&str>, ()> {
+    if query.is_empty() {
+        return Ok(None);
+    }
+    let mut parameters = query.split('&');
+    let Some((name, revision)) = parameters
+        .next()
+        .and_then(|parameter| parameter.split_once('='))
+    else {
+        return Err(());
+    };
+    if name != "revision" || revision.is_empty() || parameters.next().is_some() {
+        return Err(());
+    }
+    Ok(Some(revision))
 }
 
 fn normalize_playground_route_path(request_path: &str) -> Option<String> {
@@ -857,6 +1030,27 @@ fn decode_playground_asset(source: &str, expected_id: &str) -> Option<(String, S
     let media_type = literal_string(unique_record_field(&fields, "media_type")?)?;
     let content = literal_string(unique_record_field(&fields, "content")?)?;
     Some((path, media_type, content))
+}
+
+fn has_playground_style_table(source: &str, expected_table: &str) -> bool {
+    has_playground_record_table(source, expected_table, &["name", "css"])
+}
+
+fn decode_playground_style(source: &str, expected_id: &str) -> Option<(String, String)> {
+    let parsed = parse_row(source);
+    if !parsed.is_ok() {
+        return None;
+    }
+    let Expr::Record { fields, .. } = parsed.value else {
+        return None;
+    };
+    let id = literal_string(unique_record_field(&fields, "id")?)?;
+    if id != expected_id {
+        return None;
+    }
+    let name = literal_string(unique_record_field(&fields, "name")?)?;
+    let css = literal_string(unique_record_field(&fields, "css")?)?;
+    Some((name, css))
 }
 
 fn decode_playground_route(source: &str, expected_id: &str) -> Option<(String, String)> {
@@ -2305,7 +2499,8 @@ mod tests {
         assert_eq!(page.status, 200);
         assert_eq!(page.content_type, "text/html; charset=utf-8");
         let page = String::from_utf8(page.body).expect("database page UTF-8");
-        assert!(page.contains("<main>database shell</main>"));
+        assert!(page.contains("<main>database shell"));
+        assert!(page.contains("id=\"style-reload-status\""));
         assert!(page.contains(&format!(
             "data-database=\"{}\"",
             format_uuid(identity.database_id)
@@ -2346,7 +2541,8 @@ mod tests {
         }));
         let embed = String::from_utf8(embed.body).expect("embedded page UTF-8");
         assert!(embed.contains("<header data-page-header hidden>"));
-        assert!(embed.contains("<main>database shell</main>"));
+        assert!(embed.contains("<main>database shell"));
+        assert!(embed.contains("id=\"style-reload-status\""));
         let embed_with_slash = playground_asset(directory.path(), identity, "/playground/embed/");
         assert_eq!(embed_with_slash.status, 200);
         let script = playground_asset(directory.path(), identity, "/playground/assets/app.js");
@@ -2503,6 +2699,35 @@ mod tests {
             normalize_playground_route_path("/playground/%2e%2e/README.txt"),
             None
         );
+    }
+
+    #[test]
+    fn playground_theme_and_layout_records_match_the_declared_tables() {
+        const PLAYGROUND_SCHEMA: &str = include_str!("../tests/fixtures/playground-schema.orna");
+        const PLAYGROUND_THEME: &str = include_str!("../tests/fixtures/playground-theme.orna");
+        const PLAYGROUND_LAYOUT: &str = include_str!("../tests/fixtures/playground-layout.orna");
+
+        assert!(has_playground_style_table(PLAYGROUND_SCHEMA, "Theme"));
+        assert!(has_playground_style_table(PLAYGROUND_SCHEMA, "Layout"));
+        assert_eq!(
+            decode_playground_style(PLAYGROUND_THEME, "wiki-basic"),
+            Some(("Wiki basic".into(), ":root { --text: #202122; }".into()))
+        );
+        assert_eq!(
+            decode_playground_style(PLAYGROUND_LAYOUT, "responsive"),
+            Some((
+                "Responsive layout".into(),
+                ".workspace { display: grid; } @media (max-width: 64rem) { .workspace { grid-template-columns: 1fr; } }".into(),
+            ))
+        );
+        assert_eq!(
+            decode_playground_style(PLAYGROUND_THEME, "different-id"),
+            None
+        );
+        assert!(!has_playground_style_table(
+            "pub table Theme(id: Int) { name: Str, css: Str }",
+            "Theme"
+        ));
     }
 
     #[test]
