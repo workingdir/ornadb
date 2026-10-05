@@ -1,4 +1,4 @@
-//! Format- and context-scoped selection for the native sys catalogue.
+//! Format- and context-scoped selection for native sys API declarations.
 //!
 //! This module selects declaration metadata only. It deliberately does not
 //! implement Blob values, codecs, repository readers, or runtime execution.
@@ -11,8 +11,8 @@ use serde::Deserialize;
 
 use super::{SystemEffect, SystemFunctionDescriptor};
 
-const GENERATED_SYSTEM_CATALOGUE: &str =
-    include_str!(concat!(env!("OUT_DIR"), "/system_api_catalogue.json"));
+const GENERATED_API_SELECTION: &str =
+    include_str!(concat!(env!("OUT_DIR"), "/system_api_selection.json"));
 
 /// Repository writer/reader format coordinates recorded by the final
 /// publication. Format 3 is the only current writer.
@@ -266,7 +266,7 @@ impl SystemCallable {
 }
 
 #[derive(Clone, Debug, Deserialize)]
-struct RawCatalogue<'a> {
+struct RawApiSelection<'a> {
     #[serde(borrow)]
     functions: Vec<RawFunction<'a>>,
 }
@@ -297,17 +297,17 @@ struct RawFunction<'a> {
     contexts: Option<Vec<&'a str>>,
 }
 
-/// Immutable native catalogue keyed by callable name, then selected through a
+/// Immutable native API selection keyed by callable name, then selected through a
 /// recorded [`SystemFormatContext`].
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct SystemCatalogue {
+pub struct SystemApiSelection {
     callables: BTreeMap<String, SystemCallable>,
 }
 
-impl SystemCatalogue {
+impl SystemApiSelection {
     fn from_generated() -> Self {
-        let raw: RawCatalogue<'static> = serde_json::from_str(GENERATED_SYSTEM_CATALOGUE)
-            .expect("build-validated native sys format catalogue");
+        let raw: RawApiSelection<'static> = serde_json::from_str(GENERATED_API_SELECTION)
+            .expect("build-validated native sys API selection");
         let callables = raw
             .functions
             .into_iter()
@@ -413,11 +413,11 @@ pub enum SystemDispatchError {
     },
 }
 
-/// The native typed format/context catalogue.
-pub fn system_catalogue() -> &'static SystemCatalogue {
-    static CATALOGUE: std::sync::LazyLock<SystemCatalogue> =
-        std::sync::LazyLock::new(SystemCatalogue::from_generated);
-    &CATALOGUE
+/// The native typed format/context API selection.
+pub fn system_api_selection() -> &'static SystemApiSelection {
+    static API_SELECTION: std::sync::LazyLock<SystemApiSelection> =
+        std::sync::LazyLock::new(SystemApiSelection::from_generated);
+    &API_SELECTION
 }
 
 /// Context-aware descriptor selection for callers that only need metadata.
@@ -425,7 +425,7 @@ pub fn system_function_descriptor_for(
     context: SystemFormatContext,
     name: &str,
 ) -> Option<&'static SystemFunctionDescriptor> {
-    system_catalogue().descriptor(context, name)
+    system_api_selection().descriptor(context, name)
 }
 
 /// Compatibility alias for the context-aware selector.
@@ -433,10 +433,10 @@ pub fn system_callable_for(
     context: SystemFormatContext,
     name: &str,
 ) -> Result<&'static SystemCallable, SystemDispatchError> {
-    system_catalogue().dispatch(context, name)
+    system_api_selection().dispatch(context, name)
 }
 
-/// Exact generated native catalogue bytes used to construct the typed table.
-pub fn system_api_catalogue_json() -> &'static str {
-    GENERATED_SYSTEM_CATALOGUE
+/// Exact generated native API selection bytes used to construct the typed table.
+pub fn system_api_selection_json() -> &'static str {
+    GENERATED_API_SELECTION
 }
