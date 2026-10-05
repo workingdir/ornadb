@@ -187,7 +187,10 @@ fn symbol_token_type(kind: analysis::EditorSymbolKind) -> Option<u32> {
     match kind {
         analysis::EditorSymbolKind::Type | analysis::EditorSymbolKind::Table => Some(TOKEN_TYPE),
         analysis::EditorSymbolKind::Enum => Some(TOKEN_ENUM),
+        analysis::EditorSymbolKind::EnumVariant => Some(TOKEN_ENUM),
         analysis::EditorSymbolKind::Protocol => Some(TOKEN_INTERFACE),
+        analysis::EditorSymbolKind::Method => Some(TOKEN_FUNCTION),
+        analysis::EditorSymbolKind::Field | analysis::EditorSymbolKind::Constant => None,
         analysis::EditorSymbolKind::Function => Some(TOKEN_FUNCTION),
         analysis::EditorSymbolKind::Other => None,
     }
