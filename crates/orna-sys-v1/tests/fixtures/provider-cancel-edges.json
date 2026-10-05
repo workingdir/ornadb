@@ -1,0 +1,47 @@
+{
+  "operation": "sys.cancel",
+  "handle_parameter": "invocation",
+  "reason_parameter": "reason",
+  "reason_type": "Str?",
+  "result_type": "Bool",
+  "witnesses": ["sys.Value", "sys.StreamRef"],
+  "wrong_handle_type": "sys.FunctionRef",
+  "wrong_result_type": "Int",
+  "cases": [
+    {
+      "name": "explicit-null-reason",
+      "reason_type": "Str?",
+      "payload": "null",
+      "protected": false,
+      "accepted": true
+    },
+    {
+      "name": "empty-reason",
+      "reason_type": "Str?",
+      "payload": "",
+      "protected": false,
+      "accepted": true
+    },
+    {
+      "name": "unicode-control-reason",
+      "reason_type": "Str?",
+      "payload": "cancel:\u0000\u001fλ",
+      "protected": false,
+      "accepted": true
+    },
+    {
+      "name": "protected-reason",
+      "reason_type": "Str?",
+      "payload": "cancel-reason-secret-sentinel",
+      "protected": true,
+      "accepted": true
+    },
+    {
+      "name": "non-optional-reason-type",
+      "reason_type": "Str",
+      "payload": "plain-string-type",
+      "protected": false,
+      "accepted": false
+    }
+  ]
+}
