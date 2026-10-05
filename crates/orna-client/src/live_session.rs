@@ -609,6 +609,15 @@ mod tests {
         property: &str,
         children: Vec<Vec<u8>>,
     ) -> Vec<u8> {
+        snapshot_body_with_children_and_pin_digest(revision, property, children, 2)
+    }
+
+    fn snapshot_body_with_children_and_pin_digest(
+        revision: u8,
+        property: &str,
+        children: Vec<Vec<u8>>,
+        pin_digest: u8,
+    ) -> Vec<u8> {
         let mut body = vec![0xa3, 0x00, revision, 0x01, 0xd9, 0xea, 0x6c, 0x84, 0x64];
         body.extend(b"text");
         body.extend([0xf6, 0xa1]);
@@ -620,7 +629,7 @@ mod tests {
         body.extend([0x66]);
         body.extend(b"sha256");
         body.extend([0x58, 32]);
-        body.extend([2; 32]);
+        body.extend([pin_digest; 32]);
         body
     }
 
@@ -2385,6 +2394,174 @@ mod tests {
         let peer_recovered = snapshot_with_children(
             5,
             "peer-after-recovery",
+            vec![nested_present_child(18), nested_present_child(1)],
+        );
+        assert_eq!(
+            peer.presentation().published().unwrap().present(),
+            &snapshot_present(&peer_recovered)
+        );
+        assert_eq!(peer.renderer.revisions, vec![3, 4, 5]);
+        assert_eq!(peer.renderer.trees[2], snapshot_present(&peer_recovered));
+        assert!(!peer.presentation().awaiting_snapshot());
+    }
+
+    #[test]
+    fn equal_revision_conflicting_pin_keeps_live_sessions_fenced_independently() {
+        let limits = Limits::default();
+        let initial_children = vec![nested_present_child(18), nested_present_child(1)];
+        let initial = snapshot_with_children(3, "before-move", initial_children.clone());
+        let mut io = MemoryIo::default();
+        io.incoming.push_back(initial.clone());
+        let mut peer_io = MemoryIo::default();
+        peer_io.incoming.push_back(initial.clone());
+        let mut driver = LiveSessionDriver::new(
+            io,
+            [7; 16],
+            limits,
+            Renderer::default(),
+            Allocator::default(),
+        )
+        .unwrap();
+        let mut peer = LiveSessionDriver::new(
+            peer_io,
+            [7; 16],
+            limits,
+            Renderer::default(),
+            Allocator {
+                next: 10,
+                allocations: 0,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            block_on(driver.receive_once()).unwrap(),
+            LiveSessionEvent::SnapshotPublished { revision: 3 }
+        );
+        assert_eq!(
+            block_on(peer.receive_once()).unwrap(),
+            LiveSessionEvent::SnapshotPublished { revision: 3 }
+        );
+
+        let move_beyond_bound = delta_with_operations(
+            3,
+            4,
+            vec![move_between_paths_operation(
+                nested_child_path(0, 1),
+                nested_child_path(19, 0),
+            )],
+        );
+        assert!(Envelope::decode(&move_beyond_bound, limits).is_ok());
+        let original = driver.presentation().published().cloned().unwrap();
+        let peer_original = peer.presentation().published().cloned().unwrap();
+        driver.io.incoming.push_back(move_beyond_bound.clone());
+        peer.io.incoming.push_back(move_beyond_bound);
+        assert!(matches!(
+            block_on(driver.receive_once()),
+            Ok(LiveSessionEvent::ResyncSent { .. })
+        ));
+        assert!(matches!(
+            block_on(peer.receive_once()),
+            Ok(LiveSessionEvent::ResyncSent { .. })
+        ));
+        assert_resync_frame(&driver.io.sent[0]);
+        assert_resync_frame(&peer.io.sent[0]);
+        let request = Envelope::decode(&driver.io.sent[0], limits)
+            .unwrap()
+            .request
+            .expect("moved-tree recovery request is correlated");
+        let peer_request = Envelope::decode(&peer.io.sent[0], limits)
+            .unwrap()
+            .request
+            .expect("peer moved-tree recovery request is correlated");
+        assert_ne!(request, peer_request);
+
+        let conflicting_pin = frame_with_request(
+            16,
+            [7; 16],
+            Some(request),
+            snapshot_body_with_children_and_pin_digest(
+                3,
+                "before-move",
+                initial_children.clone(),
+                3,
+            ),
+        );
+        assert!(Envelope::decode(&conflicting_pin, limits).is_ok());
+        let decoded = Envelope::decode(&conflicting_pin, limits).unwrap();
+        match &decoded.message {
+            Message::Snapshot {
+                present, snapshot, ..
+            } => {
+                assert_eq!(present, original.present());
+                assert_ne!(snapshot, original.snapshot());
+            }
+            _ => panic!("expected a recovery snapshot with the conflicting pin"),
+        }
+        driver.io.incoming.push_back(conflicting_pin);
+        assert_eq!(
+            block_on(driver.receive_once()).unwrap(),
+            LiveSessionEvent::ResyncAwaitingSnapshot { request }
+        );
+        assert_eq!(driver.io.sent.len(), 1);
+        assert_eq!(driver.presentation().published(), Some(&original));
+        assert!(driver.presentation().awaiting_snapshot());
+        assert_eq!(driver.renderer.revisions, vec![3]);
+        assert_eq!(driver.renderer.trees, vec![snapshot_present(&initial)]);
+        assert_eq!(peer.presentation().published(), Some(&peer_original));
+        assert!(peer.presentation().awaiting_snapshot());
+        assert_eq!(peer.renderer.revisions, vec![3]);
+
+        peer.io.incoming.push_back(frame_with_request(
+            16,
+            [7; 16],
+            Some(peer_request),
+            snapshot_body_with_children(4, "peer-recovered", initial_children.clone()),
+        ));
+        assert_eq!(
+            block_on(peer.receive_once()).unwrap(),
+            LiveSessionEvent::SnapshotPublished { revision: 4 }
+        );
+        peer.io
+            .incoming
+            .push_back(delta(4, 5, "peer-after-pin-recovery"));
+        assert_eq!(
+            block_on(peer.receive_once()).unwrap(),
+            LiveSessionEvent::DeltaPublished { revision: 5 }
+        );
+        assert_eq!(driver.presentation().published(), Some(&original));
+        assert!(driver.presentation().awaiting_snapshot());
+
+        driver.io.incoming.push_back(frame_with_request(
+            16,
+            [7; 16],
+            Some(request),
+            snapshot_body_with_children(4, "recovered", initial_children.clone()),
+        ));
+        assert_eq!(
+            block_on(driver.receive_once()).unwrap(),
+            LiveSessionEvent::SnapshotPublished { revision: 4 }
+        );
+        driver
+            .io
+            .incoming
+            .push_back(delta(4, 5, "after-pin-recovery"));
+        assert_eq!(
+            block_on(driver.receive_once()).unwrap(),
+            LiveSessionEvent::DeltaPublished { revision: 5 }
+        );
+
+        let recovered = snapshot_with_children(5, "after-pin-recovery", initial_children.clone());
+        assert_eq!(
+            driver.presentation().published().unwrap().present(),
+            &snapshot_present(&recovered)
+        );
+        assert_eq!(driver.renderer.revisions, vec![3, 4, 5]);
+        assert_eq!(driver.renderer.trees[2], snapshot_present(&recovered));
+        assert!(!driver.presentation().awaiting_snapshot());
+
+        let peer_recovered = snapshot_with_children(
+            5,
+            "peer-after-pin-recovery",
             vec![nested_present_child(18), nested_present_child(1)],
         );
         assert_eq!(
