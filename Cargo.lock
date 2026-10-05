@@ -1584,7 +1584,7 @@ version = "1.0.0"
 
 [[package]]
 name = "orna-sys-v1"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "orna-security-v1",
  "orna-syntax-v1",
