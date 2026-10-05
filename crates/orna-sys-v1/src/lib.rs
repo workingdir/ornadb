@@ -657,6 +657,9 @@ pub struct SystemFunctionDescriptor {
     pub effect: SystemEffect,
     pub signature: &'static str,
     pub purpose: &'static str,
+    /// Release coordinate for a callable introduced after the original API.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub since: Option<&'static str>,
     /// Extended source documentation for editor hover and reference views.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub documentation: Option<&'static str>,
@@ -681,10 +684,16 @@ pub enum SystemEffect {
 mod system_api;
 pub use system_api::*;
 
-/// Returns the generated descriptor for a portable system function.
+mod format_catalogue;
+pub use format_catalogue::*;
+
+/// Returns final-format declaration metadata for a portable system function.
 ///
-/// The descriptor is static declaration metadata. It does not grant
-/// invocation or administrative authority.
+/// This compatibility lookup is deliberately not an availability resolver:
+/// historical-only callables are absent. Select a callable for a recorded
+/// repository using [`system_callable_for`] instead. The descriptor is static
+/// declaration metadata and does not grant invocation or administrative
+/// authority.
 pub fn system_function_descriptor(name: &str) -> Option<&'static SystemFunctionDescriptor> {
     SYSTEM_FUNCTION_DESCRIPTORS
         .iter()
@@ -5133,7 +5142,10 @@ mod tests {
         let document: serde_json::Value = serde_json::from_str(&system_api_json())
             .expect("generated sys API must remain valid JSON");
 
-        assert_eq!(document["status"], "specification");
+        assert_eq!(
+            document["status"],
+            "Final 1.1.0 specification contract; engine execution not claimed"
+        );
         let functions = document["functions"]
             .as_array()
             .expect("sys API must declare function descriptors");
