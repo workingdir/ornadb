@@ -3343,6 +3343,9 @@ impl Repository {
             ));
         }
 
+        self.validate_checkout_target_context(plan.target.commit())
+            .map_err(CheckoutExecutionError::Repository)?;
+
         validate(self, plan).map_err(CheckoutExecutionError::Validation)?;
         self.verify_checkout_preflight_locked(plan)
             .map_err(CheckoutExecutionError::Repository)?;
@@ -3370,6 +3373,32 @@ impl Repository {
             return Err(CheckoutExecutionError::Repository(
                 RepositoryError::GitOperationFailed,
             ));
+        }
+        Ok(())
+    }
+
+    /// Admits the immutable target snapshot before checkout can make it
+    /// visible. Format-3 targets must carry the committed source and native
+    /// store roots; legacy formats remain read-only checkout targets.
+    fn validate_checkout_target_context(
+        &self,
+        target: &GitCommitRef,
+    ) -> Result<(), RepositoryError> {
+        let snapshot = self
+            .pin_snapshot(target.as_str())
+            .map_err(|_| RepositoryError::CheckoutTargetInvalid)?;
+        let context = self
+            .open_format_context_at(&snapshot)
+            .map_err(|_| RepositoryError::CheckoutTargetInvalid)?;
+        if context.supports_writes() {
+            context
+                .validate_schema_root()
+                .map_err(|_| RepositoryError::CheckoutTargetInvalid)?;
+            context
+                .validate_store_root()
+                .map_err(|_| RepositoryError::CheckoutTargetInvalid)?;
+        } else if !context.is_read_only() {
+            return Err(RepositoryError::CheckoutTargetInvalid);
         }
         Ok(())
     }
@@ -7005,6 +7034,7 @@ pub enum RepositoryError {
     CheckoutPlanStale,
     CheckoutDiscardSetMismatch,
     CheckoutExecutionUnsafe,
+    CheckoutTargetInvalid,
     InvalidCheckoutJournal,
     CheckoutRecoveryRequired,
     RuntimeCompletionRequired,
@@ -7069,6 +7099,9 @@ impl fmt::Display for RepositoryError {
             }
             Self::CheckoutExecutionUnsafe => {
                 f.write_str("checkout target does not match the current commit")
+            }
+            Self::CheckoutTargetInvalid => {
+                f.write_str("checkout target does not admit as a repository snapshot")
             }
             Self::InvalidCheckoutJournal => f.write_str("invalid checkout recovery journal"),
             Self::CheckoutRecoveryRequired => {
