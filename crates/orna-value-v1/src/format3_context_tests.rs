@@ -140,6 +140,12 @@ fn ovb2_blob_encoder_preflights_sink_and_streams_public_encoding() {
     let expected =
         hex_bytes("d9eace83436162637818746578742f706c61696e3b636861727365743d7574662d38f6");
 
+    assert_eq!(
+        encode_ovb2_bounded(&blob, u64::try_from(expected.len() - 1).unwrap(),),
+        Err(Error::QuotaExceeded)
+    );
+    assert_eq!(resolver.reads.load(Ordering::SeqCst), 0);
+
     let mut undersized_output = Vec::new();
     assert_eq!(
         blob.encode_ovb2_to_writer(
@@ -151,7 +157,10 @@ fn ovb2_blob_encoder_preflights_sink_and_streams_public_encoding() {
     assert!(undersized_output.is_empty());
     assert_eq!(resolver.reads.load(Ordering::SeqCst), 0);
 
-    assert_eq!(encode_ovb2(&blob).unwrap(), expected);
+    assert_eq!(
+        encode_ovb2_bounded(&blob, u64::try_from(expected.len()).unwrap()).unwrap(),
+        expected
+    );
     assert_eq!(resolver.reads.load(Ordering::SeqCst), 2);
     assert_eq!(resolver.max_request.load(Ordering::SeqCst), 2);
 }
