@@ -2,27 +2,40 @@ import * as monaco from 'monaco-editor/esm/vs/editor/editor.api.js';
 import EditorWorker from 'monaco-editor/esm/vs/editor/editor.worker.js?worker';
 import '../node_modules/monaco-editor/min/vs/editor/editor.main.css';
 import { loadOrnaEditorConfig, registerOrnaLanguage } from './language';
-import { completionRankingFields, hoverMarkdown, signatureHelpFields } from './assist-adapter';
+import {
+  completionRankingFields,
+  hoverMarkdown,
+  inlayHintFields,
+  signatureHelpFields,
+} from './assist-adapter';
 import { exampleIndexForKey, exampleIndexForPath, isExample } from './example-feed';
 import { formatRunResult, formatThrownError, type RunResult } from './results';
 import { servedRuntime } from './runtime';
-import './styles.css';
+import { startStyleReload } from './style-reload';
+import './theme.css';
+import './layout.css';
 
-type LspAction = 'diagnostics' | 'completions' | 'hover' | 'signature_help';
+type LspAction = 'diagnostics' | 'completions' | 'hover' | 'signature_help' | 'inlay_hints';
 type Position = { line: number; character: number };
+type DocumentRange = { start: Position; end: Position };
 type LspReply = { id: number; value?: unknown; error?: string };
 
 globalThis.MonacoEnvironment = { getWorker: () => new EditorWorker() };
-const pageStyle = getComputedStyle(document.documentElement);
-monaco.editor.defineTheme('orna-basic', {
-  base: 'vs',
-  inherit: true,
-  rules: [],
-  colors: {
-    'editor.background': pageStyle.getPropertyValue('--background').trim() || '#fff',
-    'editor.foreground': pageStyle.getPropertyValue('--text').trim() || '#202122',
-  },
-});
+function syncEditorTheme(): void {
+  const pageStyle = getComputedStyle(document.documentElement);
+  monaco.editor.defineTheme('orna-basic', {
+    base: 'vs',
+    inherit: true,
+    rules: [],
+    colors: {
+      'editor.background': pageStyle.getPropertyValue('--background').trim() || '#fff',
+      'editor.foreground': pageStyle.getPropertyValue('--text').trim() || '#202122',
+    },
+  });
+  monaco.editor.setTheme('orna-basic');
+}
+syncEditorTheme();
+window.addEventListener('orna:playground-styles-updated', syncEditorTheme);
 
 function requiredElement<T extends Element>(selector: string): T {
   const element = document.querySelector<T>(selector);
@@ -81,11 +94,16 @@ lspWorker.addEventListener('error', (event) => {
   editorStatus.textContent = 'Editor analysis unavailable';
 });
 
-function requestLsp(action: LspAction, source: string, position?: Position): Promise<unknown> {
+function requestLsp(
+  action: LspAction,
+  source: string,
+  position?: Position,
+  range?: DocumentRange,
+): Promise<unknown> {
   const id = nextLspId++;
   return new Promise((resolve, reject) => {
     pendingLsp.set(id, { resolve, reject });
-    lspWorker.postMessage({ id, action, source, position });
+    lspWorker.postMessage({ id, action, source, position, range });
   });
 }
 
@@ -162,6 +180,44 @@ monaco.languages.registerSignatureHelpProvider('orna', {
       value: response,
       dispose: () => undefined,
     };
+  },
+});
+
+monaco.languages.registerInlayHintsProvider('orna', {
+  displayName: 'Orna inlay hints',
+  async provideInlayHints(model, range, token) {
+    if (token.isCancellationRequested) return { hints: [], dispose: () => undefined };
+    const response = await requestLsp('inlay_hints', model.getValue(), undefined, {
+      start: {
+        line: range.startLineNumber - 1,
+        character: range.startColumn - 1,
+      },
+      end: {
+        line: range.endLineNumber - 1,
+        character: range.endColumn - 1,
+      },
+    });
+    if (token.isCancellationRequested) return { hints: [], dispose: () => undefined };
+    const hints = inlayHintFields(response).map((hint): monaco.languages.InlayHint => ({
+      label: typeof hint.label === 'string'
+        ? hint.label
+        : hint.label.map((part) => ({ label: part.label, tooltip: part.tooltip })),
+      position: {
+        lineNumber: hint.position.line + 1,
+        column: hint.position.character + 1,
+      },
+      ...(hint.kind === undefined
+        ? {}
+        : {
+          kind: hint.kind === 1
+            ? monaco.languages.InlayHintKind.Type
+            : monaco.languages.InlayHintKind.Parameter,
+        }),
+      ...(hint.tooltip === undefined ? {} : { tooltip: { value: hint.tooltip } }),
+      ...(hint.paddingLeft === undefined ? {} : { paddingLeft: hint.paddingLeft }),
+      ...(hint.paddingRight === undefined ? {} : { paddingRight: hint.paddingRight }),
+    }));
+    return { hints, dispose: () => undefined };
   },
 });
 
@@ -250,6 +306,7 @@ async function initializeEditor(): Promise<void> {
     value: '',
     language: config.language.id,
     theme: 'orna-basic',
+    inlayHints: { enabled: 'on' },
     ariaLabel: 'Orna source editor',
     automaticLayout: true,
     minimap: { enabled: false },
@@ -379,3 +436,4 @@ window.addEventListener('beforeunload', () => {
   editor?.dispose();
   lspWorker.terminate();
 }, { once: true });
+startStyleReload();
