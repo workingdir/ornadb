@@ -20,9 +20,10 @@ use fs2::FileExt;
 use tempfile::TempDir;
 use uuid::{Uuid, Version};
 
-use orna_syntax_v1::{Expr, LiteralKind, parse_row};
-
 use crate::{Repository, RepositoryError, scrub_git_routing_environment, valid_branch_name};
+
+#[path = "format_context.rs"]
+pub(crate) mod format_context;
 
 const FORMAT_DIRECTORY: &str = ".orna";
 const FORMAT_FILE: &str = "format.orna";
@@ -595,8 +596,8 @@ fn parse_format(bytes: &[u8]) -> Result<(), RepositoryInitError> {
     {
         return Err(RepositoryInitError::MetadataMalformed);
     }
-    if integer_literal(&repository_format.value) != Some(REPOSITORY_FORMAT)
-        || string_literal(&storage_profile.value) != Some(STORAGE_PROFILE)
+    if format_context::integer_literal(&repository_format.value) != Some(REPOSITORY_FORMAT)
+        || format_context::string_literal(&storage_profile.value) != Some(STORAGE_PROFILE)
     {
         return Err(RepositoryInitError::MetadataUnsupported);
     }
@@ -608,44 +609,13 @@ fn parse_database(bytes: &[u8]) -> Result<DatabaseId, RepositoryInitError> {
     if fields.len() != 1 || fields[0].name != "database_id" {
         return Err(RepositoryInitError::MetadataMalformed);
     }
-    let value = string_literal(&fields[0].value).ok_or(RepositoryInitError::MetadataMalformed)?;
+    let value = format_context::string_literal(&fields[0].value)
+        .ok_or(RepositoryInitError::MetadataMalformed)?;
     DatabaseId::from_str(value).map_err(|_| RepositoryInitError::MetadataMalformed)
 }
 
 fn parse_record(bytes: &[u8]) -> Result<Vec<orna_syntax_v1::RecordField>, RepositoryInitError> {
-    let source = std::str::from_utf8(bytes).map_err(|_| RepositoryInitError::MetadataMalformed)?;
-    let parsed = parse_row(source);
-    if !parsed.is_ok() {
-        return Err(RepositoryInitError::MetadataMalformed);
-    }
-    match parsed.value {
-        Expr::Record { fields, .. } => Ok(fields),
-        _ => Err(RepositoryInitError::MetadataMalformed),
-    }
-}
-
-fn integer_literal(value: &Expr) -> Option<i64> {
-    let Expr::Literal {
-        text,
-        kind: LiteralKind::Integer,
-        ..
-    } = value
-    else {
-        return None;
-    };
-    text.parse().ok()
-}
-
-fn string_literal(value: &Expr) -> Option<&str> {
-    let Expr::Literal {
-        text,
-        kind: LiteralKind::String,
-        ..
-    } = value
-    else {
-        return None;
-    };
-    text.strip_prefix('"')?.strip_suffix('"')
+    format_context::parse_record(bytes).map_err(|_| RepositoryInitError::MetadataMalformed)
 }
 
 impl FromStr for DatabaseId {
