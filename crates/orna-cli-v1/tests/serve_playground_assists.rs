@@ -104,7 +104,7 @@ fn served_assist_clients_run_concurrent_inlay_proofs_against_database_assets() {
         .expect("write crate-local Playground schema fixture");
 
     let source_playground = repo_root.join("playground");
-    for table in ["Asset", "Entry", "Route"] {
+    for table in ["Asset", "Entry", "Layout", "Route", "Theme"] {
         copy_tree(
             &source_playground.join(table),
             &project_root.join("playground").join(table),
@@ -118,9 +118,9 @@ fn served_assist_clients_run_concurrent_inlay_proofs_against_database_assets() {
         project_root,
         &[
             "-c",
-            "user.name=OrnaDB served-assists proof",
+            "user.name=kierandrewett",
             "-c",
-            "user.email=served-assists@example.invalid",
+            "user.email=kieran@drewett.dev",
             "commit",
             "--quiet",
             "-m",
