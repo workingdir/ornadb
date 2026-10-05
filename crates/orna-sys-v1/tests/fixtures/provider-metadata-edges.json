@@ -7,6 +7,7 @@
   "signature": "fn sys.meta<T>(value: T): sys.ValueMetadata<T>",
   "metadata_type": "sys.ValueMetadata<T>",
   "wrong_result_type": "sys.ValueMetadata<sys.NotTheInputType>",
+  "result_diagnostic_type": "sys.ValueMetadata<T>",
   "fields": [
     { "name": "static_type", "type": "sys.TypeRef" },
     { "name": "nominal_type", "type": "sys.TypeRef?" },
