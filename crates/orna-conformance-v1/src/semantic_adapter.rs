@@ -9104,6 +9104,16 @@ fn merge_upsert_row(
 fn table_key_components(encoded: &[u8], arity: usize) -> Result<Vec<Value>, EvaluationError> {
     let key = Value::decode(encoded).map_err(|_| transaction_error("ORNA-EVAL-TABLE-KEY"))?;
     match (arity, key.raw()) {
+        (_, OvbRaw::Tag(60015, tuple)) => match tuple.as_ref() {
+            OvbRaw::Array(values) if values.len() == arity => values
+                .iter()
+                .cloned()
+                .map(|value| {
+                    Value::new(value).map_err(|_| transaction_error("ORNA-EVAL-TABLE-KEY"))
+                })
+                .collect(),
+            _ => Err(transaction_error("ORNA-EVAL-TABLE-KEY")),
+        },
         (1, _) => Ok(vec![key]),
         (_, OvbRaw::Array(values)) if values.len() == arity => values
             .iter()
@@ -9892,6 +9902,39 @@ mod transaction_admission_tests {
                 "row {id} escaped the relation-scan limit rollback"
             );
         }
+    }
+
+    #[test]
+    fn tagged_tuple_key_components_reject_wrong_arity_and_keep_valid_forms() {
+        let components = || {
+            vec![
+                OvbRaw::Text("north".into()),
+                OvbRaw::Text("pencil".into()),
+            ]
+        };
+        let tagged = Value::new(OvbRaw::Tag(
+            60015,
+            Box::new(OvbRaw::Array(components())),
+        ))
+        .expect("typed tuple")
+        .encode()
+        .expect("encoded typed tuple");
+
+        assert!(
+            super::table_key_components(&tagged, 1).is_err(),
+            "a two-component tagged tuple cannot satisfy a one-component key"
+        );
+        let decoded = super::table_key_components(&tagged, 2).expect("valid tagged tuple");
+        assert!(matches!(decoded[0].raw(), OvbRaw::Text(value) if value == "north"));
+        assert!(matches!(decoded[1].raw(), OvbRaw::Text(value) if value == "pencil"));
+
+        let plain = Value::new(OvbRaw::Array(components()))
+            .expect("plain composite key")
+            .encode()
+            .expect("encoded plain composite key");
+        let decoded = super::table_key_components(&plain, 2).expect("valid plain array key");
+        assert!(matches!(decoded[0].raw(), OvbRaw::Text(value) if value == "north"));
+        assert!(matches!(decoded[1].raw(), OvbRaw::Text(value) if value == "pencil"));
     }
 
     #[test]
