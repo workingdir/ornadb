@@ -1,0 +1,35 @@
+{
+  "operation": "sys.invoke(Value)",
+  "parameter": "function",
+  "expected_type": "sys.FunctionRef",
+  "cases": [
+    {
+      "name": "empty-public-reference",
+      "argument_type": "sys.FunctionRef",
+      "payload": "",
+      "protected": false,
+      "accepted": true
+    },
+    {
+      "name": "unicode-control-reference",
+      "argument_type": "sys.FunctionRef",
+      "payload": "callback:\u0000\u001fλ",
+      "protected": false,
+      "accepted": true
+    },
+    {
+      "name": "protected-reference",
+      "argument_type": "sys.FunctionRef",
+      "payload": "private-callback-identity",
+      "protected": true,
+      "accepted": true
+    },
+    {
+      "name": "object-reference-type-mismatch",
+      "argument_type": "sys.ObjectRef",
+      "payload": "wrong-reference-family",
+      "protected": false,
+      "accepted": false
+    }
+  ]
+}
