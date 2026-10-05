@@ -6,7 +6,8 @@ is the source for the shell, assets, programs, and examples.
 
 ## Database records and routes
 
-`playground.orna` declares `Sample`, `Asset`, `Entry`, and `Route` tables.
+`playground.orna` declares `Sample`, `Asset`, `Entry`, `Route`, `Theme`, and
+`Layout` tables.
 Sample rows and the legacy `playground/examples/*.orna` files feed
 `/api/examples`. The shell, browser client, live bridge modules, Orna LSP
 WebAssembly package, Monaco workers, generated editor configuration, and
@@ -20,6 +21,13 @@ alongside the Asset rows. `orna-syntax-v1` generates editor configuration
 from the language lexer; the browser loads it from
 `/playground/assets/orna-editor-config.json`.
 
+Theme and responsive layout CSS are stored as named `playground.Theme` and
+`playground.Layout` rows. The build keeps Monaco's support styles as Asset rows
+and writes the shell's theme and layout styles to those dedicated tables.
+`/playground/theme.css` and `/playground/layout.css` read their rows from the
+committed Git listing, with an optional revision query selecting a specific
+commit.
+
 `npm run build` creates the browser bundle and refreshes these rows. Commit the
 generated rows with source changes. For each request, `orna serve` resolves
 Route, Entry, and Asset rows from one committed `HEAD`; it does not read
@@ -29,14 +37,22 @@ with the embed entry hiding the marked page header and applying its framing
 policy. Static assets are returned with their checked media type and
 `X-Content-Type-Options: nosniff`. A commit that changes a Route, Entry, or
 Asset row is visible on the next request without restarting `orna serve`.
+Accepted connections run independently. Mutable live protocol state remains
+serialized, while Git listings, database assets, and the example feed keep
+serving during an open presentation WebSocket. Each asset or example response
+resolves its rows from one committed `HEAD`.
+`/api/playground/revision` reports the committed Git object ID. The open page
+polls it every two seconds and swaps both stylesheet links only after both
+revision-pinned rows load, then updates Monaco's theme from the new CSS tokens.
 
 Monaco uses the database-served shell assets to run the Orna LSP worker. The
-worker supplies standard-library completion and hover alongside signature
-help and diagnostics. The `/playground/assets/embed.js` classic script creates
-an iframe pointed at the same database's `/playground/embed` route. Set
-`data-target` to append the iframe to a container, and optionally set
-`data-height`, `data-title`, or `data-loading`. The entry script itself is a
-committed Asset row.
+worker supplies standard-library completion, hover, signature help, and
+parameter and inferred type hints alongside diagnostics. Standard call hints
+use the same pinned source catalogue as hover and signature help. The
+`/playground/assets/embed.js` classic script creates an iframe pointed at the
+same database's `/playground/embed` route. Set `data-target` to append the
+iframe to a container, and optionally set `data-height`, `data-title`, or
+`data-loading`. The entry script itself is a committed Asset row.
 
 The browser sends explicit Run requests to the same clone's
 `orna.present.v1` session. Source evaluation and presentation remain in the
@@ -65,8 +81,23 @@ The test initializes a temporary Orna Git database, commits crate-local
 `orna serve` process without a build directory, then uses curl to check the
 Git listing, database-resident shell, editor configuration, embeddable script,
 CSS/JavaScript and WebAssembly rows, committed examples, and live session. It
-commits new Route and Entry rows after startup and proves new URLs change from
-404 to an HTML page and a JavaScript asset with the checked media type,
-without restarting the server. A WebSocket client follows the existing watch,
-fingerprinted Eval, and Resync exchange to prove independent results and
-presentation deltas.
+commits new Route and Entry rows after startup and proves the new HTML route
+and JavaScript asset (with the checked media type) change from 404 to 200
+without restarting the server. It also checks DB-resident Theme/Layout CSS,
+an uncommitted style remaining invisible, the committed revision changing both
+styles, and the old revision continuing to serve both old styles. A WebSocket
+client follows the existing watch, fingerprinted Eval, and Resync exchange to
+prove independent results and presentation deltas. While that WebSocket
+remains open, the test commits a new Route, Entry, Asset, and Sample snapshot
+and concurrently fetches the asset and example feed to prove the responses use
+committed database rows during live presentation deltas.
+
+The browser assist proof loads the LSP JavaScript and WebAssembly from an
+active `orna serve` database:
+
+```sh
+npm run prove:served-assists -- http://127.0.0.1:18087
+```
+
+It verifies completion ranking, standard-library hover and signature help, and
+imported and qualified standard-library inlay hints from the served module.
