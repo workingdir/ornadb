@@ -3,6 +3,7 @@
   "api_function": "sys.meta",
   "role": "langitem.sys.meta",
   "role_version": "1.0",
+  "builtin_provider": "orna.sys.v1",
   "signature": "fn sys.meta<T>(value: T): sys.ValueMetadata<T>",
   "metadata_type": "sys.ValueMetadata<T>",
   "wrong_result_type": "sys.ValueMetadata<sys.NotTheInputType>",
