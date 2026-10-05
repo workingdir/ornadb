@@ -19,6 +19,8 @@ mod completion_contract;
 mod hover_semantic_contract;
 #[path = "support/syntax_v1_action_signature_contract.rs"]
 mod syntax_v1_action_signature_contract;
+#[path = "support/syntax_v1_definition_contract.rs"]
+mod syntax_v1_definition_contract;
 #[path = "support/syntax_v1_depth_contract.rs"]
 mod syntax_v1_depth_contract;
 #[path = "support/syntax_v1_diagnostics_document_links_contract.rs"]
@@ -430,6 +432,53 @@ fn protocol_type_hierarchy_and_monikers_match_editor_attachment_contract() {
 }
 
 #[test]
+fn protocol_definitions_match_editor_attachment_contract() {
+    let provider_uri = "file:///workspace/workspace-hierarchy-provider-v1.orna";
+    let caller_uri = "file:///workspace/workspace-hierarchy-caller-v1.orna";
+    let requests = syntax_v1_definition_contract::request_data(
+        WORKSPACE_HIERARCHY_PROVIDER_SOURCE,
+        WORKSPACE_HIERARCHY_CALLER_SOURCE,
+    );
+    let mut client = Client::spawn();
+    initialize(&mut client);
+    for (uri, source) in [
+        (provider_uri, WORKSPACE_HIERARCHY_PROVIDER_SOURCE),
+        (caller_uri, WORKSPACE_HIERARCHY_CALLER_SOURCE),
+    ] {
+        let diagnostics = open(&mut client, uri, source);
+        assert!(
+            diagnostics["diagnostics"].as_array().unwrap().is_empty(),
+            "{diagnostics}"
+        );
+    }
+
+    let definition = |client: &mut Client, uri: &str, request_name: &str| {
+        client.request(
+            "textDocument/definition",
+            json!({
+                "textDocument":{"uri":uri},
+                "position":requests[request_name],
+            }),
+        )
+    };
+    let evidence = json!({
+        "definition_cross_file": definition(&mut client, caller_uri, "cross_file_reference"),
+        "definition_shadowed_parameter": definition(&mut client, provider_uri, "shadowed_reference"),
+        "definition_unresolved": definition(&mut client, provider_uri, "unresolved_reference"),
+        "definition_ambiguous": definition(&mut client, caller_uri, "ambiguous_reference"),
+    });
+    syntax_v1_definition_contract::assert_contract(
+        WORKSPACE_HIERARCHY_PROVIDER_SOURCE,
+        WORKSPACE_HIERARCHY_CALLER_SOURCE,
+        provider_uri,
+        caller_uri,
+        &evidence,
+        "protocol client",
+    );
+    client.shutdown();
+}
+
+#[test]
 fn protocol_conformance_uses_v1_for_every_advertised_editor_feature() {
     let uri = "file:///workspace/ji3t0-lsp-v1.orna";
     let mut client = Client::spawn();
@@ -754,6 +803,10 @@ fn neovim_loads_generated_v1_syntax_and_queries_the_lsp_server() {
         DOCUMENT_HIGHLIGHT_CODE_LENS_SOURCE
     );
     let workspace_hierarchy_requests = syntax_v1_workspace_hierarchy_contract::request_data(
+        WORKSPACE_HIERARCHY_PROVIDER_SOURCE,
+        WORKSPACE_HIERARCHY_CALLER_SOURCE,
+    );
+    let definition_requests = syntax_v1_definition_contract::request_data(
         WORKSPACE_HIERARCHY_PROVIDER_SOURCE,
         WORKSPACE_HIERARCHY_CALLER_SOURCE,
     );
@@ -1118,6 +1171,23 @@ local function hierarchy_request(method, params, bufnr)
   assert(response ~= nil and response.err == nil, "Neovim " .. method .. " request failed: " .. vim.inspect(request_error or response))
   return response.result
 end
+local definition_requests = vim.fn.json_decode(vim.env.ORNA_DEFINITION_REQUESTS)
+local definition_cross_file = hierarchy_request("textDocument/definition", {
+  textDocument = { uri = workspace_caller_uri },
+  position = definition_requests.cross_file_reference,
+}, workspace_caller_bufnr)
+local definition_shadowed_parameter = hierarchy_request("textDocument/definition", {
+  textDocument = { uri = workspace_provider_uri },
+  position = definition_requests.shadowed_reference,
+}, workspace_provider_bufnr)
+local definition_unresolved = hierarchy_request("textDocument/definition", {
+  textDocument = { uri = workspace_provider_uri },
+  position = definition_requests.unresolved_reference,
+}, workspace_provider_bufnr)
+local definition_ambiguous = hierarchy_request("textDocument/definition", {
+  textDocument = { uri = workspace_caller_uri },
+  position = definition_requests.ambiguous_reference,
+}, workspace_caller_bufnr)
 local workspace_mid = hierarchy_request("workspace/symbol", { query = "mid" }, workspace_caller_bufnr)
 local workspace_mid_repeat = hierarchy_request("workspace/symbol", { query = "mid" }, workspace_caller_bufnr)
 local workspace_rem = hierarchy_request("workspace/symbol", { query = "rem" }, workspace_caller_bufnr)
@@ -1361,6 +1431,10 @@ vim.fn.writefile({ vim.fn.json_encode({
   workspace_caller_uri = workspace_caller_uri,
   workspace_provider_code_lenses = workspace_provider_code_lenses,
   workspace_caller_code_lenses = workspace_caller_code_lenses,
+  definition_cross_file = definition_cross_file,
+  definition_shadowed_parameter = definition_shadowed_parameter,
+  definition_unresolved = definition_unresolved,
+  definition_ambiguous = definition_ambiguous,
   type_hierarchy_provider_uri = type_hierarchy_provider_uri,
   type_hierarchy_caller_uri = type_hierarchy_caller_uri,
   type_document_item = type_document_item,
@@ -1413,6 +1487,7 @@ vim.fn.writefile({
   "LSP_CODE_ACTION=pass",
   "LSP_WORKSPACE_SYMBOL=pass",
   "LSP_CALL_HIERARCHY=pass",
+  "LSP_DEFINITION_NAVIGATION=pass",
   "LSP_TYPE_HIERARCHY_MONIKERS=pass",
   "LSP_DOCUMENT_HIGHLIGHT=pass",
   "LSP_CODE_LENS=pass",
@@ -1485,6 +1560,10 @@ vim.cmd("qa!")
         .env(
             "ORNA_WORKSPACE_HIERARCHY_REQUESTS",
             serde_json::to_string(&workspace_hierarchy_requests).unwrap(),
+        )
+        .env(
+            "ORNA_DEFINITION_REQUESTS",
+            serde_json::to_string(&definition_requests).unwrap(),
         )
         .env(
             "ORNA_TYPE_HIERARCHY_REQUESTS",
@@ -1622,6 +1701,18 @@ vim.cmd("qa!")
         hover_semantic_result["workspace_caller_uri"]
             .as_str()
             .expect("Neovim workspace caller URI"),
+        &hover_semantic_result,
+        "Neovim",
+    );
+    syntax_v1_definition_contract::assert_contract(
+        WORKSPACE_HIERARCHY_PROVIDER_SOURCE,
+        WORKSPACE_HIERARCHY_CALLER_SOURCE,
+        hover_semantic_result["workspace_provider_uri"]
+            .as_str()
+            .expect("Neovim definition provider URI"),
+        hover_semantic_result["workspace_caller_uri"]
+            .as_str()
+            .expect("Neovim definition caller URI"),
         &hover_semantic_result,
         "Neovim",
     );
@@ -1848,6 +1939,10 @@ fn emacs_eglot_attaches_and_proves_hover_rename_references_and_semantic_tokens()
         WORKSPACE_HIERARCHY_PROVIDER_SOURCE,
         WORKSPACE_HIERARCHY_CALLER_SOURCE,
     );
+    let definition_requests = syntax_v1_definition_contract::request_data(
+        WORKSPACE_HIERARCHY_PROVIDER_SOURCE,
+        WORKSPACE_HIERARCHY_CALLER_SOURCE,
+    );
     assert_eq!(
         fs::read_to_string(&type_hierarchy_provider_fixture).unwrap(),
         TYPE_HIERARCHY_PROVIDER_SOURCE
@@ -1956,6 +2051,12 @@ fn emacs_eglot_attaches_and_proves_hover_rename_references_and_semantic_tokens()
                      :character (gethash "character" end)))))
 (defun orna-test-workspace-hierarchy-position (name)
   (let* ((requests (json-parse-string (getenv "ORNA_WORKSPACE_HIERARCHY_REQUESTS")
+                                      :object-type 'hash-table))
+         (position (gethash name requests)))
+    (list :line (gethash "line" position)
+          :character (gethash "character" position))))
+(defun orna-test-definition-position (name)
+  (let* ((requests (json-parse-string (getenv "ORNA_DEFINITION_REQUESTS")
                                       :object-type 'hash-table))
          (position (gethash name requests)))
     (list :line (gethash "line" position)
@@ -2269,6 +2370,31 @@ fn emacs_eglot_attaches_and_proves_hover_rename_references_and_semantic_tokens()
               (error "Eglot did not provide a URI for the workspace caller: %S" params))
             (setq workspace-caller-uri uri
                   workspace-server (eglot-current-server))))
+        (puthash "definition_cross_file"
+                 (jsonrpc-request
+                  workspace-server :textDocument/definition
+                  (list :textDocument (list :uri workspace-caller-uri)
+                        :position (orna-test-definition-position "cross_file_reference")))
+                 workspace-evidence)
+        (puthash "definition_shadowed_parameter"
+                 (jsonrpc-request
+                  workspace-server :textDocument/definition
+                  (list :textDocument (list :uri workspace-provider-uri)
+                        :position (orna-test-definition-position "shadowed_reference")))
+                 workspace-evidence)
+        (puthash "definition_unresolved"
+                 (jsonrpc-request
+                  workspace-server :textDocument/definition
+                  (list :textDocument (list :uri workspace-provider-uri)
+                        :position (orna-test-definition-position "unresolved_reference")))
+                 workspace-evidence)
+        (puthash "definition_ambiguous"
+                 (jsonrpc-request
+                  workspace-server :textDocument/definition
+                  (list :textDocument (list :uri workspace-caller-uri)
+                        :position (orna-test-definition-position "ambiguous_reference")))
+                 workspace-evidence)
+        (princ "EMACS_LSP_DEFINITION_NAVIGATION=pass\n")
         (puthash "workspace_provider_code_lenses"
                  (jsonrpc-request
                   workspace-server :textDocument/codeLens
@@ -2658,6 +2784,10 @@ fn emacs_eglot_attaches_and_proves_hover_rename_references_and_semantic_tokens()
             serde_json::to_string(&workspace_hierarchy_requests).unwrap(),
         )
         .env(
+            "ORNA_DEFINITION_REQUESTS",
+            serde_json::to_string(&definition_requests).unwrap(),
+        )
+        .env(
             "ORNA_TYPE_HIERARCHY_REQUESTS",
             serde_json::to_string(&type_hierarchy_requests).unwrap(),
         )
@@ -2712,6 +2842,18 @@ fn emacs_eglot_attaches_and_proves_hover_rename_references_and_semantic_tokens()
         hover_semantic_result["workspace_caller_uri"]
             .as_str()
             .expect("Emacs Eglot workspace caller URI"),
+        &hover_semantic_result,
+        "Emacs Eglot",
+    );
+    syntax_v1_definition_contract::assert_contract(
+        WORKSPACE_HIERARCHY_PROVIDER_SOURCE,
+        WORKSPACE_HIERARCHY_CALLER_SOURCE,
+        hover_semantic_result["workspace_provider_uri"]
+            .as_str()
+            .expect("Emacs Eglot definition provider URI"),
+        hover_semantic_result["workspace_caller_uri"]
+            .as_str()
+            .expect("Emacs Eglot definition caller URI"),
         &hover_semantic_result,
         "Emacs Eglot",
     );
