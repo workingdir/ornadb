@@ -18,7 +18,7 @@ mod build_host;
 #[allow(dead_code)]
 mod build_support;
 
-const SYS_API_V1_SHA256: &str = "b569785bfaa204b366b2cee444c01a9aa8dd74c710852fdad925dcfae60a256f";
+const SYS_API_V1_SHA256: &str = "06ea44ae524baa1310c0b84b63f58c5ed2a90d7cc5b67d248c8cbbf9538f04fb";
 
 fn export(schema: bool, output_path: Option<&std::path::Path>) -> Vec<u8> {
     export_mode(schema.then_some("--schema"), output_path)
@@ -91,7 +91,7 @@ fn dev_exports_are_byte_stable_and_api_export_matches_the_embedded_schema() {
     assert_eq!(
         format!("{:x}", Sha256::digest(&exported)),
         SYS_API_V1_SHA256,
-        "the export preserves the frozen Orna 1.0.0 contract bytes"
+        "the export preserves the frozen final 1.1 contract bytes"
     );
 
     let api: Value = serde_json::from_slice(&exported).expect("exported API JSON");
@@ -108,7 +108,7 @@ fn dev_exports_are_byte_stable_and_api_export_matches_the_embedded_schema() {
     build_support::validate_published_schema_shape(&api, &schema)
         .expect("exported contract matches the embedded schema");
     build_support::validate_api_document(&api)
-        .expect("exported contract satisfies the 1.0 type graph and schema invariants");
+        .expect("exported contract satisfies the final 1.1 type graph and schema invariants");
 
     assert_eq!(
         export(false, None),

@@ -9,7 +9,7 @@ use serde_json::Value;
 #[allow(dead_code)]
 mod build_support;
 
-const SYS_API_V1_SHA256: &str = "ce59a945835ec9a5b7af56d9760b1cea810a480e642fee53ceabdd618ba08747";
+const SYS_API_V1_SHA256: &str = "06ea44ae524baa1310c0b84b63f58c5ed2a90d7cc5b67d248c8cbbf9538f04fb";
 const SYSTEM_API_FIXTURE: &str = include_str!("fixtures/system-api-annotation.orna");
 const GENERIC_TYPE_GRAPH_FIXTURE: &str = include_str!("fixtures/sys-generic-type-graph.orna");
 
@@ -40,7 +40,7 @@ fn published_artifact_is_the_deterministic_registry_projection() {
     let digest = format!("{:x}", Sha256::digest(generated.as_bytes()));
     assert_eq!(
         digest, SYS_API_V1_SHA256,
-        "the on-demand api/sys.json export matches the reviewed docs-enriched 1.0 artifact"
+        "the on-demand api/sys.json export matches the reviewed final 1.1 artifact"
     );
 }
 
@@ -94,6 +94,7 @@ fn every_portable_function_has_the_collected_runtime_descriptor() {
         assert_eq!(descriptor.effect, effect, "effect for {name}");
         assert_eq!(descriptor.signature, function["signature"], "signature for {name}");
         assert_eq!(descriptor.purpose, function["purpose"], "purpose for {name}");
+        assert_eq!(descriptor.since, function["since"].as_str(), "since for {name}");
         assert_eq!(
             descriptor.documentation,
             function["documentation"].as_str(),
