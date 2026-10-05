@@ -28,8 +28,12 @@ await lsp.default(await wasmResponse.arrayBuffer());
 const source = [
   'use std.math.{clamp, increment};',
   'pub fn incremental(value: Int): Int = value + 2;',
-  'pub fn exercise(value: Int): Int = increment(value);',
+  'pub fn exercise(value: Int): Int {',
+  '    let next = increment(value);',
+  '    next',
+  '}',
   'pub fn bounded(value: Int, lower: Int, upper: Int): Int = clamp(value, lower, upper);',
+  'pub fn qualified_bounded(value: Int, lower: Int, upper: Int): Int = std.math.clamp(value, lower, upper);',
 ].join('\n');
 function positionAt(offset) {
   const prefix = source.slice(0, offset);
@@ -74,6 +78,35 @@ assert.deepEqual(signature.signatures[0].parameters.map(({ label }) => label), [
   'upper: Int',
 ]);
 
+const lastLine = source.split('\n').at(-1);
+const inlayHints = JSON.parse(lsp.inlay_hints(
+  source,
+  0,
+  0,
+  source.split('\n').length - 1,
+  [...lastLine].length,
+));
+const inlayLabels = inlayHints.map(({ label }) => label);
+assert.ok(inlayLabels.includes(': Int'), 'standard return type should infer a local type hint');
+assert.ok(inlayLabels.includes('value: '), 'standard call should show its parameter name');
+assert.ok(inlayLabels.includes('lower: '), 'standard call should show its lower bound name');
+assert.ok(inlayLabels.includes('upper: '), 'standard call should show its upper bound name');
+
+const qualifiedOffset = source.indexOf('std.math.clamp(value, lower, upper)');
+assert.notEqual(qualifiedOffset, -1);
+const qualifiedEnd = qualifiedOffset + 'std.math.clamp(value, lower, upper)'.length;
+const qualifiedStartPosition = positionAt(qualifiedOffset);
+const qualifiedEndPosition = positionAt(qualifiedEnd);
+const qualifiedHints = JSON.parse(lsp.inlay_hints(
+  source,
+  qualifiedStartPosition.line,
+  qualifiedStartPosition.character,
+  qualifiedEndPosition.line,
+  qualifiedEndPosition.character,
+));
+assert.deepEqual(qualifiedHints.map(({ label }) => label), ['value: ', 'lower: ', 'upper: ']);
+
 console.log('served WASM completion order: increment, incremental; exact match preselected');
 console.log('served WASM hover: std.math.increment signature and documentation verified');
 console.log('served WASM signature help: std.math.clamp active upper parameter and hints verified');
+console.log('served WASM inlay hints: imported and qualified std calls plus inferred result type verified');
