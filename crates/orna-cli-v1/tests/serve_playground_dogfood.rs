@@ -1089,6 +1089,24 @@ fn orna_serve_hosts_playground_with_pending_evals_and_snapshot_correct_deltas() 
         "Sample",
         &[("live-after-start", LIVE_PROGRAM_ROW)],
     );
+    let uncommitted_programs = curl(&format!("{base_url}/api/examples"), &[])
+        .expect("curl the catalog while the new program row is uncommitted");
+    assert_eq!(uncommitted_programs.status, 200);
+    let uncommitted_programs: JsonValue =
+        serde_json::from_str(&uncommitted_programs.body).expect("uncommitted example catalog JSON");
+    let uncommitted_program_list = uncommitted_programs["examples"]
+        .as_array()
+        .expect("uncommitted committed example catalog");
+    assert_eq!(uncommitted_program_list.len(), 4);
+    assert!(
+        uncommitted_program_list
+            .iter()
+            .all(|example| { example["path"] != "playground/Sample/live-after-start.orna" })
+    );
+    println!(
+        "uncommitted DB program stayed out of /api/examples (HTTP {}, 4 committed rows, exit 0)",
+        uncommitted_programs["examples"].as_array().unwrap().len()
+    );
     git(
         project.path(),
         &["add", "playground/Sample/live-after-start.orna"],
