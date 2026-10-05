@@ -1186,6 +1186,53 @@ impl NativeGraphContext {
         self.finish_protection(&reference, pin_id, cleanup, protected_ref, scope)
     }
 
+    /// Accepts a graph-issued pin into the canonical format-3 ORP Blob value.
+    /// The pin is usable only with the graph owner and snapshot that issued it,
+    /// and its durable protected ref must still resolve to the verified OGB-2
+    /// descriptor. The returned value is ready to place in an ORP row; its
+    /// transfer evidence remains available for the durable row-acceptance
+    /// transaction.
+    pub fn accept_protected_blob_pin(
+        &self,
+        pin: ProtectedContentPin,
+    ) -> Result<OrpBlobBinding, GraphError> {
+        let expected_ref = format!("refs/orna/pins/{}", hex_encode(&pin.pin_id));
+        if pin.context != self.identity
+            || pin.repository_id != self.repository_id
+            || pin.database_id != self.database_id
+            || pin.owner_id != self.owner_id
+            || pin.snapshot_id != self.snapshot_id
+            || pin.descriptor_oid.algorithm() != self.algorithm
+            || pin.protected_ref != expected_ref
+        {
+            return Err(GraphError::ContextMismatch);
+        }
+
+        let output = self.git_output(&["rev-parse", "--verify", &pin.protected_ref])?;
+        let resolved = std::str::from_utf8(&output)
+            .map_err(|_| GraphError::InvalidProtectedRef)?
+            .trim();
+        let resolved = NativeOid::from_hex(self.algorithm, resolved)?;
+        if resolved != pin.descriptor_oid {
+            return Err(GraphError::InvalidProtectedRef);
+        }
+
+        let encoded_value = canonical_value_bytes(&CborValue::Tag(
+            60111,
+            Box::new(CborValue::Array(vec![
+                CborValue::Unsigned(pin.identity.length()),
+                CborValue::Bytes(pin.identity.sha256().to_vec()),
+                CborValue::Text("application/octet-stream".to_owned()),
+                CborValue::Null,
+                CborValue::Bytes(pin.descriptor_oid.as_bytes().to_vec()),
+            ])),
+        ));
+        Ok(OrpBlobBinding {
+            encoded_value,
+            pin,
+        })
+    }
+
     fn finish_protection(
         &self,
         reference: &AdmittedBlobReference,
@@ -2606,8 +2653,11 @@ pub struct CapturedBlobCandidate {
 /// constructor.  Dropping it does not release that Git ref.
 #[derive(Debug)]
 pub struct ProtectedContentPin {
+    context: ContextIdentity,
     repository_id: [u8; 32],
     database_id: [u8; 16],
+    owner_id: [u8; 16],
+    snapshot_id: [u8; 32],
     pin_id: [u8; 16],
     descriptor_oid: NativeOid,
     identity: crate::blob_store::ContentIdentity,
@@ -2626,8 +2676,11 @@ impl ProtectedContentPin {
             return Err(GraphError::InvalidProtectedRef);
         }
         Ok(Self {
+            context: reference.context,
             repository_id,
             database_id,
+            owner_id: reference.owner_id,
+            snapshot_id: reference.snapshot_id,
             pin_id,
             descriptor_oid: reference.descriptor_oid.clone(),
             identity: reference.identity,
@@ -2657,6 +2710,38 @@ impl ProtectedContentPin {
 
     pub(crate) fn protected_ref(&self) -> &str {
         &self.protected_ref
+    }
+}
+
+/// Canonical format-3 ORP Blob value produced only by accepting a durable,
+/// graph-issued protected pin. The pin stays attached so its native transfer
+/// evidence can accompany the row through durable acceptance.
+#[derive(Debug)]
+pub struct OrpBlobBinding {
+    encoded_value: Vec<u8>,
+    pin: ProtectedContentPin,
+}
+
+impl OrpBlobBinding {
+    /// Canonical CBOR encoding of the format-3 Blob value (tag 60111).
+    pub fn encoded_value(&self) -> &[u8] {
+        &self.encoded_value
+    }
+
+    pub fn descriptor_oid(&self) -> &NativeOid {
+        &self.pin.descriptor_oid
+    }
+
+    pub const fn content_identity(&self) -> crate::blob_store::ContentIdentity {
+        self.pin.identity
+    }
+
+    pub fn transfer_record(&self) -> ProtectedContentTransfer {
+        self.pin.transfer_record()
+    }
+
+    pub fn into_pin(self) -> ProtectedContentPin {
+        self.pin
     }
 }
 
@@ -4459,6 +4544,28 @@ mod persisted_orp_tests {
         );
         assert!(fixture_ref_exists(directory.path(), pin.protected_ref()));
         assert!(!fixture_ref_exists(directory.path(), &pending_ref));
+    }
+
+    #[test]
+    fn protected_pin_acceptance_rejects_a_tampered_descriptor() {
+        let (_directory, graph) = capture_test_context();
+        let scope = graph.open_read_scope().expect("owner read scope");
+        let payload = b"tampered pin descriptor must not bind a row";
+        let candidate = graph
+            .capture_blob_candidate(&payload[..], payload.len() as u64, &scope)
+            .expect("capture authorized stream");
+        let mut pin = graph
+            .protect_captured_blob(candidate, &scope)
+            .expect("protect complete OGB-2 closure");
+        let mut tampered_oid = pin.descriptor_oid.as_bytes().to_vec();
+        tampered_oid[0] ^= 1;
+        pin.descriptor_oid = NativeOid::new(graph.algorithm, tampered_oid)
+            .expect("valid-width tampered OID");
+
+        assert!(matches!(
+            graph.accept_protected_blob_pin(pin),
+            Err(GraphError::InvalidProtectedRef)
+        ));
     }
 
     #[test]
