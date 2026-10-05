@@ -97,8 +97,13 @@ const standardSourceManifest = await readFile(
 const standardSourcePaths = [...standardSourceManifest.matchAll(
   /^pub const REFERENCE_STANDARD_[A-Z0-9_]+_PATH_V1: &str = "([^"]+)";$/gm,
 )].map(([, path]) => path);
-if (standardSourcePaths.length !== 75) {
-  throw new Error(`Expected 75 canonical standard source paths, found ${standardSourcePaths.length}.`);
+const declaredStandardSourceCount = Number(standardSourceManifest.match(
+  /pub fn reference_standard_sources_v1\(\) -> \[\(String, String\); (\d+)\]/,
+)?.[1]);
+if (!Number.isInteger(declaredStandardSourceCount) || standardSourcePaths.length !== declaredStandardSourceCount) {
+  throw new Error(
+    `Expected ${declaredStandardSourceCount} canonical standard source paths, found ${standardSourcePaths.length}.`,
+  );
 }
 
 const extraAssets = [
