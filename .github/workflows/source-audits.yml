@@ -64,6 +64,9 @@ jobs:
           cargo test --locked -p orna-runtime-v1
           --test publication_metadata --test publication_repository_conformance
 
+      - name: Prove hash-pinned runtime checkpoint audit fixture behavior
+        run: cargo test --locked -p orna-runtime-v1 --test checkpoints_conformance_audit
+
       - name: Prove hash-pinned evaluator hash and random snapshot behavior
         run: >-
           cargo test --locked -p orna-evaluator-v1
