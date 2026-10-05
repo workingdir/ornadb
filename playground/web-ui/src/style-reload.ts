@@ -11,6 +11,8 @@ export function revisionStylesheetHref(path: string, revision: string): string {
   return `${path}${separator}revision=${encodeURIComponent(revision)}`;
 }
 
+export const PLAYGROUND_REVISION_CHANGED_EVENT = 'orna:playground-revision-changed';
+
 type RevisionResponse = { revision: string };
 
 function responseRevision(value: unknown): value is RevisionResponse {
@@ -43,6 +45,7 @@ export function startStyleReload(): void {
   let activeTheme = theme;
   let activeLayout = layout;
   let currentRevision: string | undefined;
+  let observedRevision: string | undefined;
   let checking = false;
   let active = true;
   const poll = async (): Promise<void> => {
@@ -54,6 +57,12 @@ export function startStyleReload(): void {
       const value: unknown = await response.json();
       if (!responseRevision(value)) throw new Error('The server returned an invalid revision.');
       const revision = value.revision;
+      if (hasNewRevision(observedRevision, revision)) {
+        observedRevision = revision;
+        window.dispatchEvent(new CustomEvent(PLAYGROUND_REVISION_CHANGED_EVENT, {
+          detail: revision,
+        }));
+      }
       if (!hasNewRevision(currentRevision, revision)) return;
       const replacingCommittedStyles = currentRevision !== undefined;
 

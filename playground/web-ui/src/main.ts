@@ -9,14 +9,22 @@ import {
   signatureHelpFields,
 } from './assist-adapter';
 import {
+  exampleCatalogChanged,
+  exampleIndexForRefresh,
   exampleIndexForKey,
   exampleIndexForSearch,
-  isExample,
+  parseExampleCatalog,
   pushExampleSelection,
+  shouldReplaceExampleSource,
+  type Example,
 } from './example-feed';
 import { formatRunResult, formatThrownError, type RunResult } from './results';
 import { servedRuntime } from './runtime';
-import { startStyleReload } from './style-reload';
+import {
+  isCommittedRevision,
+  PLAYGROUND_REVISION_CHANGED_EVENT,
+  startStyleReload,
+} from './style-reload';
 import './theme.css';
 import './layout.css';
 
@@ -69,6 +77,11 @@ let nextLspId = 1;
 
 let activeRun = false;
 let examplesReady = false;
+let loadedExampleSource: string | undefined;
+let examplesRevision: string | undefined;
+let observedExampleRevision: string | undefined;
+let lastRequestedExampleRevision: string | undefined;
+let exampleRefreshInFlight = false;
 let liveRuntimeReady = typeof (globalThis as typeof globalThis & { ornaPlaygroundRun?: unknown }).ornaPlaygroundRun === 'function';
 const runtime = servedRuntime();
 
@@ -80,6 +93,17 @@ window.addEventListener('orna:runtime-ready', () => {
   liveRuntimeReady = true;
   updateRunButton();
 }, { once: true });
+
+window.addEventListener(PLAYGROUND_REVISION_CHANGED_EVENT, (event) => {
+  const revision = (event as CustomEvent<unknown>).detail;
+  if (!isCommittedRevision(revision)) return;
+  observedExampleRevision = revision;
+  if (examplesReady && revision === examplesRevision) {
+    lastRequestedExampleRevision = revision;
+    return;
+  }
+  void refreshExamplesForRevision();
+});
 
 async function executeSource(source: string): Promise<RunResult> {
   return runtime.run(source);
@@ -340,6 +364,7 @@ function loadSelectedExample(updateUrl = false): void {
     pushExampleSelection(window.history, window.location.href, option.value);
   }
   activeEditor.setValue(source);
+  loadedExampleSource = source;
   const name = option.textContent ?? 'Example';
   editorStatus.textContent = `${name} loaded. Edit the source or run it as-is.`;
   exampleStatus.textContent = `${name} loaded into the source editor.`;
@@ -365,37 +390,114 @@ examplesSelect.addEventListener('keydown', (event) => {
   loadSelectedExample(true);
 });
 
+async function fetchExampleCatalog(): Promise<{ revision: string; examples: Example[] }> {
+  const response = await fetch('/api/examples', { cache: 'no-store' });
+  if (!response.ok) throw new Error(`Examples request failed (${response.status}).`);
+  const catalog = parseExampleCatalog(await response.json());
+  if (!catalog) throw new Error('The server returned an invalid example catalog.');
+  return catalog;
+}
+
+function currentExampleCatalog(): Example[] {
+  return Array.from(examplesSelect.options, (option) => ({
+    name: option.textContent ?? '',
+    path: option.value,
+    source: option.dataset.source ?? '',
+  })).filter((example) => example.path !== '');
+}
+
+function replaceExampleOptions(examples: readonly Example[], selectedIndex: number): void {
+  examplesSelect.replaceChildren();
+  if (examples.length === 0) {
+    const empty = document.createElement('option');
+    empty.textContent = 'No database examples';
+    examplesSelect.append(empty);
+    examplesSelect.disabled = true;
+    examplesSelect.selectedIndex = -1;
+    return;
+  }
+  for (const example of examples) {
+    const option = document.createElement('option');
+    option.value = example.path;
+    option.textContent = example.name;
+    option.dataset.source = example.source;
+    examplesSelect.append(option);
+  }
+  examplesSelect.disabled = false;
+  examplesSelect.selectedIndex = selectedIndex;
+}
+
+async function refreshExamplesForRevision(): Promise<void> {
+  const requestedRevision = observedExampleRevision;
+  if (!examplesReady || !requestedRevision || requestedRevision === examplesRevision ||
+      requestedRevision === lastRequestedExampleRevision || exampleRefreshInFlight) {
+    return;
+  }
+  lastRequestedExampleRevision = requestedRevision;
+  exampleRefreshInFlight = true;
+  try {
+    const catalog = await fetchExampleCatalog();
+    const current = currentExampleCatalog();
+    if (exampleCatalogChanged(current, catalog.examples)) {
+      const previousPath = examplesSelect.selectedOptions[0]?.value ?? null;
+      const shouldUpdateSource = shouldReplaceExampleSource(
+        loadedExampleSource,
+        editor?.getValue(),
+      );
+      const selectedIndex = exampleIndexForRefresh(catalog.examples, previousPath);
+      const selectedExample = catalog.examples[selectedIndex];
+      replaceExampleOptions(catalog.examples, selectedIndex);
+
+      if (selectedExample) {
+        const selectionOrSourceChanged = previousPath !== selectedExample.path ||
+          loadedExampleSource !== selectedExample.source;
+        loadedExampleSource = selectedExample.source;
+        if (shouldUpdateSource && selectionOrSourceChanged) loadSelectedExample();
+        exampleStatus.textContent = shouldUpdateSource
+          ? `${catalog.examples.length} committed examples updated.`
+          : `${catalog.examples.length} committed examples updated; unsaved editor source was kept.`;
+      } else {
+        if (shouldUpdateSource && editor) {
+          editor.setValue('');
+          loadedExampleSource = '';
+        }
+        editorStatus.textContent = 'No committed playground examples';
+        exampleStatus.textContent = shouldUpdateSource
+          ? 'No committed examples are available.'
+          : 'No committed examples are available; unsaved editor source was kept.';
+      }
+    }
+    examplesRevision = catalog.revision;
+  } catch {
+    exampleStatus.textContent = 'The committed examples could not be refreshed.';
+  } finally {
+    exampleRefreshInFlight = false;
+    if (observedExampleRevision !== undefined &&
+        observedExampleRevision !== lastRequestedExampleRevision &&
+        observedExampleRevision !== examplesRevision) {
+      void refreshExamplesForRevision();
+    }
+  }
+}
+
 async function loadExamples(): Promise<void> {
   try {
-    const response = await fetch('/api/examples');
-    if (!response.ok) throw new Error(`Examples request failed (${response.status}).`);
-    const payload: unknown = await response.json();
-    const examples = asArray(asRecord(payload)?.examples).filter(isExample);
-    examplesSelect.replaceChildren();
+    const catalog = await fetchExampleCatalog();
+    examplesRevision = catalog.revision;
+    const examples = catalog.examples;
     if (examples.length === 0) {
-      const empty = document.createElement('option');
-      empty.textContent = 'No database examples';
-      examplesSelect.append(empty);
-      examplesSelect.disabled = true;
+      replaceExampleOptions(examples, -1);
       editorStatus.textContent = 'No committed playground examples';
       exampleStatus.textContent = 'No committed examples are available.';
       examplesReady = true;
       updateRunButton();
-      return;
+    } else {
+      replaceExampleOptions(examples, exampleIndexForSearch(examples, window.location.search));
+      loadSelectedExample();
+      editorStatus.textContent = `${examples.length} committed ${examples.length === 1 ? 'example' : 'examples'} loaded.`;
+      examplesReady = true;
+      updateRunButton();
     }
-    for (const example of examples) {
-      const option = document.createElement('option');
-      option.value = example.path;
-      option.textContent = example.name;
-      option.dataset.source = example.source;
-      examplesSelect.append(option);
-    }
-    examplesSelect.disabled = false;
-    examplesSelect.selectedIndex = exampleIndexForSearch(examples, window.location.search);
-    loadSelectedExample();
-    editorStatus.textContent = `${examples.length} committed ${examples.length === 1 ? 'example' : 'examples'} loaded.`;
-    examplesReady = true;
-    updateRunButton();
   } catch (error) {
     const option = document.createElement('option');
     option.textContent = 'Examples unavailable';
@@ -405,6 +507,7 @@ async function loadExamples(): Promise<void> {
     examplesReady = true;
     updateRunButton();
   }
+  void refreshExamplesForRevision();
 }
 
 const resultTabs = Array.from(document.querySelectorAll<HTMLButtonElement>('[data-output-tab]'));

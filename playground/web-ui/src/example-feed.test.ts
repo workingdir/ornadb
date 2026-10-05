@@ -1,10 +1,14 @@
 import { describe, expect, it } from 'vitest';
 import {
+  exampleCatalogChanged,
+  exampleIndexForRefresh,
   exampleIndexForKey,
   exampleIndexForPath,
   exampleIndexForSearch,
   isExample,
+  parseExampleCatalog,
   pushExampleSelection,
+  shouldReplaceExampleSource,
 } from './example-feed';
 
 describe('database example feed', () => {
@@ -41,6 +45,41 @@ describe('database example feed', () => {
     expect(exampleIndexForSearch(examples, '?example=playground%2FSample%2Farithmetic.orna')).toBe(1);
     expect(exampleIndexForSearch(examples, '?example=playground%2FSample%2Fmissing.orna')).toBe(0);
     expect(exampleIndexForSearch(examples, '?other=1')).toBe(0);
+  });
+
+  it('parses only revision-pinned database catalog rows', () => {
+    const revision = 'a'.repeat(40);
+    expect(parseExampleCatalog({
+      revision,
+      examples: [
+        { name: 'Hello', path: 'playground/Sample/hello.orna', source: '1 + 1' },
+        { name: 'Invalid', path: 'playground/Sample/invalid.orna' },
+      ],
+    })).toEqual({
+      revision,
+      examples: [{ name: 'Hello', path: 'playground/Sample/hello.orna', source: '1 + 1' }],
+    });
+    expect(parseExampleCatalog({ revision: 'invalid', examples: [] })).toBeUndefined();
+  });
+
+  it('detects catalog changes and retains the selected path across reorder or removal', () => {
+    const current = [
+      { name: 'Hello', path: 'playground/Sample/hello.orna', source: '1 + 1' },
+      { name: 'Math', path: 'playground/Sample/math.orna', source: '6 * 7' },
+    ];
+    expect(exampleCatalogChanged(current, current.map((example) => ({ ...example })))).toBe(false);
+    expect(exampleCatalogChanged(current, [...current, {
+      name: 'New', path: 'playground/Sample/new.orna', source: '2 + 2',
+    }])).toBe(true);
+    expect(exampleIndexForRefresh([current[1], current[0]], current[0].path)).toBe(1);
+    expect(exampleIndexForRefresh([current[1]], current[0].path)).toBe(0);
+    expect(exampleIndexForRefresh([], current[0].path)).toBe(-1);
+  });
+
+  it('replaces a refreshed source only while the editor still matches the loaded sample', () => {
+    expect(shouldReplaceExampleSource('1 + 1', '1 + 1')).toBe(true);
+    expect(shouldReplaceExampleSource('1 + 1', '1 + 2')).toBe(false);
+    expect(shouldReplaceExampleSource(undefined, '')).toBe(false);
   });
 
   it('pushes a selected path while preserving other URL state and skips duplicate history', () => {
