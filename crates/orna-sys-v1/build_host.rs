@@ -9,7 +9,13 @@ use serde::Serialize;
 use serde_json::{Value, json};
 use syn::visit::Visit;
 
+#[cfg(test)]
+use orna_sys_v1::{
+    AbiVersion, HostOperationDescriptor, HostProviderRole, SystemHostOperationRegistry,
+};
+#[cfg(not(test))]
 use crate::abi_version::AbiVersion;
+#[cfg(not(test))]
 use crate::host_registry_model::{
     HostOperationDescriptor, HostProviderRole, SystemHostOperationRegistry,
 };
