@@ -20,6 +20,10 @@ use num_traits::{Signed, ToPrimitive, Zero};
 use sha2::{Digest as _, Sha256};
 use unicode_normalization::UnicodeNormalization;
 
+#[cfg(test)]
+#[path = "format3_context_tests.rs"]
+mod format3_context_tests;
+
 pub const OVB_VERSION: &str = "OVB-1";
 pub const CANONICAL_NAN_BITS: u64 = 0x7ff8_0000_0000_0000;
 const MAX_DEPTH: usize = 128;
@@ -666,34 +670,6 @@ impl Format3Context {
         })
     }
 
-    /// Test-only construction seam. Production repository/runtime code must
-    /// issue this context from its validated persisted metadata and owner
-    /// capability; this constructor is not compiled into the normal API.
-    #[cfg(feature = "test-support")]
-    pub fn for_tests(
-        database_uuid: [u8; 16],
-        pin: Snapshot,
-        git_oid_algorithm: GitHash,
-        schema_root: NativeOid,
-        store_root: NativeOid,
-        availability: AvailabilityState,
-        owner: OwnerLifetime,
-        quota: Format3Quota,
-        resolver: Arc<dyn BlobResolver>,
-    ) -> Result<Self> {
-        Self::from_persisted(
-            database_uuid,
-            pin,
-            git_oid_algorithm,
-            schema_root,
-            store_root,
-            availability,
-            owner,
-            quota,
-            resolver,
-        )
-    }
-
     pub fn coordinates(&self) -> Format3Coordinates {
         self.inner.coordinates
     }
@@ -722,12 +698,6 @@ impl Format3Context {
         AvailabilityState::from_byte(self.inner.availability.load(AtomicOrdering::Acquire))
     }
 
-    pub fn set_availability(&self, availability: AvailabilityState) {
-        self.inner
-            .availability
-            .store(availability as u8, AtomicOrdering::Release);
-    }
-
     pub fn owner(&self) -> OwnerLifetime {
         self.inner.owner.clone()
     }
@@ -746,7 +716,9 @@ impl Format3Context {
 
     pub fn expire(&self) {
         self.inner.owner.expire();
-        self.set_availability(AvailabilityState::Expired);
+        self.inner
+            .availability
+            .store(AvailabilityState::Expired as u8, AtomicOrdering::Release);
     }
 
     pub fn reference(
@@ -765,6 +737,7 @@ fn validate_format3_metadata(
     schema_root: &NativeOid,
     store_root: &NativeOid,
 ) -> Result<()> {
+    validate_snapshot_pin(pin)?;
     if snapshot_database(pin) != database_uuid
         || !oid_matches_algorithm(schema_root, git_oid_algorithm)
         || !oid_matches_algorithm(store_root, git_oid_algorithm)
@@ -775,6 +748,28 @@ fn validate_format3_metadata(
         if *algorithm != git_oid_algorithm || oid.len() != git_oid_algorithm.oid_width() {
             return Err(Error::InvalidContext);
         }
+    }
+    Ok(())
+}
+
+fn validate_snapshot_pin(snapshot: &Snapshot) -> Result<()> {
+    match snapshot {
+        Snapshot::Cwd {
+            database,
+            runtime,
+            generation,
+            ..
+        } => {
+            let expected = Snapshot::cwd(*database, *runtime, generation.clone())
+                .map_err(|_| Error::InvalidContext)?;
+            if &expected != snapshot {
+                return Err(Error::InvalidContext);
+            }
+        }
+        Snapshot::Commit {
+            algorithm, oid, ..
+        } if oid.len() != algorithm.oid_width() => return Err(Error::InvalidContext),
+        Snapshot::Commit { .. } => {}
     }
     Ok(())
 }
@@ -997,6 +992,14 @@ impl Blob {
         })
     }
 
+    fn read_chunk_limit(&self) -> u64 {
+        self.context
+            .as_ref()
+            .map(|context| context.quota().max_read_bytes())
+            .unwrap_or(MAX_BLOB_READ)
+            .min(MAX_BLOB_READ)
+    }
+
     pub fn read(&self, offset: u64, length: u64) -> Result<Vec<u8>> {
         if length > MAX_BLOB_READ || offset > self.length() {
             return Err(Error::InvalidRange);
@@ -1032,8 +1035,9 @@ impl Blob {
         let mut result = Vec::new();
         result.try_reserve_exact(capacity).map_err(|_| Error::Limit)?;
         let mut offset = 0_u64;
+        let chunk_limit = self.read_chunk_limit();
         while offset < self.length() {
-            let size = (self.length() - offset).min(MAX_BLOB_READ);
+            let size = (self.length() - offset).min(chunk_limit);
             result.extend(self.read(offset, size)?);
             offset = offset.checked_add(size).ok_or(Error::Limit)?;
         }
@@ -1060,8 +1064,9 @@ impl Blob {
         let mut left_digest = Sha256::new();
         let mut right_digest = Sha256::new();
         let mut offset = 0_u64;
+        let chunk_limit = self.read_chunk_limit().min(other.read_chunk_limit());
         while offset < self.length() {
-            let size = (self.length() - offset).min(MAX_BLOB_READ);
+            let size = (self.length() - offset).min(chunk_limit);
             let left = self.read(offset, size)?;
             let right = other.read(offset, size)?;
             if left != right {
@@ -1435,10 +1440,11 @@ impl ContextValue {
         if matches!(format, ValueFormat::Rov3 | ValueFormat::Sov3) && context.is_none() {
             return Err(Error::InvalidContext);
         }
+        let oid_algorithm = context.as_ref().map(Format3Context::git_oid_algorithm);
         if format == ValueFormat::Ovb1 {
             Value::new(raw.clone())?;
         } else {
-            validate_context_raw(&raw, 0, format)?;
+            validate_context_raw(&raw, 0, format, oid_algorithm)?;
         }
         Ok(Self {
             format,
@@ -1464,7 +1470,8 @@ impl ContextValue {
     }
 
     pub fn encode(&self) -> Result<Vec<u8>> {
-        encode_context_raw(&self.raw, self.format)
+        let oid_algorithm = self.context.as_ref().map(Format3Context::git_oid_algorithm);
+        encode_context_raw(&self.raw, self.format, oid_algorithm)
     }
 
     pub fn decode(bytes: &[u8], format: ValueFormat) -> Result<Self> {
@@ -1673,22 +1680,27 @@ fn raw_suffix(raw: &Raw) -> Result<Option<String>> {
     }
 }
 
-fn validate_context_raw(value: &Raw, depth: usize, format: ValueFormat) -> Result<()> {
+fn validate_context_raw(
+    value: &Raw,
+    depth: usize,
+    format: ValueFormat,
+    oid_algorithm: Option<GitHash>,
+) -> Result<()> {
     if depth > MAX_DEPTH {
         return Err(Error::Limit);
     }
     match value {
         Raw::Array(values) => {
             for value in values {
-                validate_context_raw(value, depth + 1, format)?;
+                validate_context_raw(value, depth + 1, format, oid_algorithm)?;
             }
         }
         Raw::Map(entries) => {
             let mut previous = None;
             for (key, value) in entries {
-                validate_context_raw(key, depth + 1, format)?;
-                validate_context_raw(value, depth + 1, format)?;
-                let encoded = encode_context_raw(key, format)?;
+                validate_context_raw(key, depth + 1, format, oid_algorithm)?;
+                validate_context_raw(value, depth + 1, format, oid_algorithm)?;
+                let encoded = encode_context_raw(key, format, oid_algorithm)?;
                 if previous.as_ref().is_some_and(|prior: &Vec<u8>| encoded <= *prior) {
                     return Err(Error::DuplicateOrUnorderedMapKey);
                 }
@@ -1698,21 +1710,26 @@ fn validate_context_raw(value: &Raw, depth: usize, format: ValueFormat) -> Resul
         Raw::Tag(number, payload)
             if matches!(*number, OVB2_BLOB_TAG | ROV3_BLOB_TAG | SOV3_BLOB_TAG | ROV3_OVERFLOW_TAG) =>
         {
-            validate_context_tag(*number, payload, format)?;
+            validate_context_tag(*number, payload, format, oid_algorithm)?;
         }
         Raw::Tag(number, payload) => {
             if *number == 0 {
                 return Err(Error::ProtectedValue);
             }
             validate_tag(*number, payload)?;
-            validate_context_raw(payload, depth + 1, format)?;
+            validate_context_raw(payload, depth + 1, format, oid_algorithm)?;
         }
         _ => validate_raw(value, depth)?,
     }
     Ok(())
 }
 
-fn validate_context_tag(number: u64, payload: &Raw, format: ValueFormat) -> Result<()> {
+fn validate_context_tag(
+    number: u64,
+    payload: &Raw,
+    format: ValueFormat,
+    oid_algorithm: Option<GitHash>,
+) -> Result<()> {
     let allowed = match number {
         OVB2_BLOB_TAG => format == ValueFormat::Ovb2,
         ROV3_BLOB_TAG | ROV3_OVERFLOW_TAG => format == ValueFormat::Rov3,
@@ -1735,7 +1752,7 @@ fn validate_context_tag(number: u64, payload: &Raw, format: ValueFormat) -> Resu
             };
             validate_length(length)?;
             bytes32(sha)?;
-            NativeOid::from_bytes(oid)?;
+            validate_context_oid(oid, oid_algorithm)?;
             validate_annotation_fields(media_type, suffix)
         }
         SOV3_BLOB_TAG => {
@@ -1750,11 +1767,20 @@ fn validate_context_tag(number: u64, payload: &Raw, format: ValueFormat) -> Resu
             let [Raw::Bytes(oid)] = array(payload)?.as_slice() else {
                 return Err(Error::InvalidTag);
             };
-            NativeOid::from_bytes(oid)?;
+            validate_context_oid(oid, oid_algorithm)?;
             Ok(())
         }
         _ => Err(Error::InvalidTag),
     }
+}
+
+fn validate_context_oid(oid: &[u8], algorithm: Option<GitHash>) -> Result<()> {
+    let oid = NativeOid::from_bytes(oid)?;
+    let algorithm = algorithm.ok_or(Error::InvalidContext)?;
+    if !oid_matches_algorithm(&oid, algorithm) {
+        return Err(Error::InvalidOid);
+    }
+    Ok(())
 }
 
 fn validate_length(raw: &Raw) -> Result<u64> {
@@ -1774,22 +1800,31 @@ fn validate_annotation_fields(media_type: &str, suffix: &Raw) -> Result<()> {
     Ok(())
 }
 
-fn encode_context_raw(value: &Raw, format: ValueFormat) -> Result<Vec<u8>> {
+fn encode_context_raw(
+    value: &Raw,
+    format: ValueFormat,
+    oid_algorithm: Option<GitHash>,
+) -> Result<Vec<u8>> {
     if format == ValueFormat::Ovb1 {
         return encode_raw(value);
     }
-    validate_context_raw(value, 0, format)?;
+    validate_context_raw(value, 0, format, oid_algorithm)?;
     let mut output = Vec::new();
-    write_context_raw(value, format, &mut output)?;
+    write_context_raw(value, format, oid_algorithm, &mut output)?;
     Ok(output)
 }
 
-fn write_context_raw(value: &Raw, format: ValueFormat, output: &mut Vec<u8>) -> Result<()> {
+fn write_context_raw(
+    value: &Raw,
+    format: ValueFormat,
+    oid_algorithm: Option<GitHash>,
+    output: &mut Vec<u8>,
+) -> Result<()> {
     match value {
         Raw::Map(entries) => {
             let mut encoded = Vec::with_capacity(entries.len());
             for (key, value) in entries {
-                encoded.push((encode_context_raw(key, format)?, key, value));
+                encoded.push((encode_context_raw(key, format, oid_algorithm)?, key, value));
             }
             encoded.sort_by(|left, right| left.0.cmp(&right.0));
             if encoded.windows(2).any(|pair| pair[0].0 == pair[1].0) {
@@ -1798,20 +1833,20 @@ fn write_context_raw(value: &Raw, format: ValueFormat, output: &mut Vec<u8>) -> 
             head(output, 5, encoded.len() as u64);
             for (key, _, value) in encoded {
                 output.extend(key);
-                write_context_raw(value, format, output)?;
+                write_context_raw(value, format, oid_algorithm, output)?;
             }
             Ok(())
         }
         Raw::Array(values) => {
             head(output, 4, values.len() as u64);
             for value in values {
-                write_context_raw(value, format, output)?;
+                write_context_raw(value, format, oid_algorithm, output)?;
             }
             Ok(())
         }
         Raw::Tag(number, value) => {
             head(output, 6, *number);
-            write_context_raw(value, format, output)
+            write_context_raw(value, format, oid_algorithm, output)
         }
         _ => write_raw(value, output),
     }

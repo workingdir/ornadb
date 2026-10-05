@@ -6,9 +6,6 @@ rust-version = "1.95"
 license = "Apache-2.0"
 description = "Orna OVB-1 compatibility and format-3 canonical values"
 
-[features]
-test-support = []
-
 [dependencies]
 num-bigint = "0.4.6"
 num-integer = "0.1.47"
