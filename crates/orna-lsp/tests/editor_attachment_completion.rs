@@ -19,6 +19,8 @@ mod hover_semantic_contract;
 mod syntax_v1_action_signature_contract;
 #[path = "support/syntax_v1_depth_contract.rs"]
 mod syntax_v1_depth_contract;
+#[path = "support/syntax_v1_diagnostics_document_links_contract.rs"]
+mod syntax_v1_diagnostics_document_links_contract;
 #[path = "support/syntax_v1_folding_selection_contract.rs"]
 mod syntax_v1_folding_selection_contract;
 #[path = "support/syntax_v1_workspace_hierarchy_contract.rs"]
@@ -35,6 +37,10 @@ const WORKSPACE_HIERARCHY_PROVIDER_SOURCE: &str =
 const WORKSPACE_HIERARCHY_CALLER_SOURCE: &str =
     include_str!("fixtures/workspace-hierarchy-caller-v1.orna");
 const FOLDING_SELECTION_SOURCE: &str = include_str!("fixtures/folding-selection-v1.orna");
+const DIAGNOSTIC_SOURCE: &str = include_str!("fixtures/incremental-malformed-v1.orna");
+const DOCUMENT_LINKS_SOURCE: &str = include_str!("fixtures/document-links-v1.orna");
+const DOCUMENT_LINK_TARGET_SOURCE: &str = include_str!("fixtures/library/math.orna");
+const DOCUMENT_LINK_DIRECTORY_TARGET_SOURCE: &str = include_str!("fixtures/library/math/main.orna");
 
 #[test]
 fn attachment_input_matches_its_crate_local_fixture() {
@@ -125,6 +131,38 @@ fn vim_lsp_attaches_and_exposes_hover_semantic_tokens_and_completion() {
     );
     let folding_selection_requests =
         syntax_v1_folding_selection_contract::request_data(FOLDING_SELECTION_SOURCE);
+    let diagnostic_fixture =
+        root.join("crates/orna-lsp/tests/fixtures/incremental-malformed-v1.orna");
+    assert_eq!(
+        fs::read_to_string(&diagnostic_fixture).unwrap(),
+        DIAGNOSTIC_SOURCE
+    );
+    let diagnostic_recovery = DIAGNOSTIC_SOURCE
+        .replace("value + ;", "value + 1;")
+        .trim_end()
+        .to_owned();
+    assert!(
+        orna_syntax_v1::parse_module(&diagnostic_recovery)
+            .diagnostics
+            .is_empty()
+    );
+    let document_links_fixture = root.join("crates/orna-lsp/tests/fixtures/document-links-v1.orna");
+    let document_link_target_fixture =
+        root.join("crates/orna-lsp/tests/fixtures/library/math.orna");
+    let document_link_directory_target_fixture =
+        root.join("crates/orna-lsp/tests/fixtures/library/math/main.orna");
+    assert_eq!(
+        fs::read_to_string(&document_links_fixture).unwrap(),
+        DOCUMENT_LINKS_SOURCE
+    );
+    assert_eq!(
+        fs::read_to_string(&document_link_target_fixture).unwrap(),
+        DOCUMENT_LINK_TARGET_SOURCE
+    );
+    assert_eq!(
+        fs::read_to_string(&document_link_directory_target_fixture).unwrap(),
+        DOCUMENT_LINK_DIRECTORY_TARGET_SOURCE
+    );
     let lsp_binary = env!("CARGO_BIN_EXE_orna-lsp");
     let vim_script = format!(
         r#"
@@ -505,6 +543,98 @@ while len(g:orna_folding_selection_responses) < 2 && reltimefloat(reltime()) < s
     sleep 10m
 endwhile
 call assert_equal(2, len(g:orna_folding_selection_responses), 'vim-lsp folding/selection requests timed out')
+
+function! OrnaCaptureDiagnostics(name, data) abort
+    let g:orna_diagnostic_responses[a:name] = a:data['response']['result']
+endfunction
+function! OrnaCaptureDocumentLinks(name, data) abort
+    let g:orna_document_link_responses[a:name] = a:data['response']['result']
+endfunction
+let g:orna_diagnostic_responses = {{}}
+execute 'edit ' . fnameescape($ORNA_TEST_DIAGNOSTIC_FIXTURE)
+call assert_equal('orna', &filetype)
+let s:deadline = reltimefloat(reltime()) + 10.0
+while !lsp#capabilities#has_completion_provider('orna') && reltimefloat(reltime()) < s:deadline
+    sleep 10m
+endwhile
+call assert_true(lsp#capabilities#has_completion_provider('orna'), 'diagnostic fixture did not attach')
+let s:diagnostic_document = lsp#get_text_document_identifier()
+call lsp#send_request('orna', {{
+    \ 'method': 'textDocument/diagnostic',
+    \ 'params': {{ 'textDocument': s:diagnostic_document }},
+    \ 'on_notification': function('OrnaCaptureDiagnostics', ['invalid']),
+\ }})
+let s:deadline = reltimefloat(reltime()) + 10.0
+while !has_key(g:orna_diagnostic_responses, 'invalid') && reltimefloat(reltime()) < s:deadline
+    sleep 10m
+endwhile
+call assert_true(has_key(g:orna_diagnostic_responses, 'invalid'), 'vim-lsp pull diagnostics request timed out')
+call setline(1, $ORNA_DIAGNOSTIC_RECOVERY_SOURCE)
+call lsp#send_request('orna', {{
+    \ 'method': 'textDocument/diagnostic',
+    \ 'params': {{ 'textDocument': s:diagnostic_document }},
+    \ 'on_notification': function('OrnaCaptureDiagnostics', ['recovered']),
+\ }})
+let s:deadline = reltimefloat(reltime()) + 10.0
+while !has_key(g:orna_diagnostic_responses, 'recovered') && reltimefloat(reltime()) < s:deadline
+    sleep 10m
+endwhile
+call assert_true(has_key(g:orna_diagnostic_responses, 'recovered'), 'vim-lsp recovery diagnostics request timed out')
+
+let g:orna_document_link_responses = {{}}
+execute 'edit ' . fnameescape($ORNA_TEST_DOCUMENT_LINKS_FIXTURE)
+call assert_equal('orna', &filetype)
+let s:deadline = reltimefloat(reltime()) + 10.0
+while !lsp#capabilities#has_completion_provider('orna') && reltimefloat(reltime()) < s:deadline
+    sleep 10m
+endwhile
+call assert_true(lsp#capabilities#has_completion_provider('orna'), 'document-link fixture did not attach')
+let s:document_links_document = lsp#get_text_document_identifier()
+call lsp#send_request('orna', {{
+    \ 'method': 'textDocument/documentLink',
+    \ 'params': {{ 'textDocument': s:document_links_document }},
+    \ 'on_notification': function('OrnaCaptureDocumentLinks', ['unresolved']),
+\ }})
+let s:deadline = reltimefloat(reltime()) + 10.0
+while !has_key(g:orna_document_link_responses, 'unresolved') && reltimefloat(reltime()) < s:deadline
+    sleep 10m
+endwhile
+call assert_true(has_key(g:orna_document_link_responses, 'unresolved'), 'vim-lsp unresolved document-link request timed out')
+execute 'edit ' . fnameescape($ORNA_TEST_DOCUMENT_LINK_TARGET_FIXTURE)
+call assert_equal('orna', &filetype)
+let s:deadline = reltimefloat(reltime()) + 10.0
+while !lsp#capabilities#has_completion_provider('orna') && reltimefloat(reltime()) < s:deadline
+    sleep 10m
+endwhile
+call assert_true(lsp#capabilities#has_completion_provider('orna'), 'document-link target fixture did not attach')
+let s:document_link_target_document = lsp#get_text_document_identifier()
+call lsp#send_request('orna', {{
+    \ 'method': 'textDocument/documentLink',
+    \ 'params': {{ 'textDocument': s:document_links_document }},
+    \ 'on_notification': function('OrnaCaptureDocumentLinks', ['resolved']),
+\ }})
+let s:deadline = reltimefloat(reltime()) + 10.0
+while !has_key(g:orna_document_link_responses, 'resolved') && reltimefloat(reltime()) < s:deadline
+    sleep 10m
+endwhile
+call assert_true(has_key(g:orna_document_link_responses, 'resolved'), 'vim-lsp resolved document-link request timed out')
+execute 'edit ' . fnameescape($ORNA_TEST_DOCUMENT_LINK_DIRECTORY_FIXTURE)
+call assert_equal('orna', &filetype)
+let s:deadline = reltimefloat(reltime()) + 10.0
+while !lsp#capabilities#has_completion_provider('orna') && reltimefloat(reltime()) < s:deadline
+    sleep 10m
+endwhile
+call assert_true(lsp#capabilities#has_completion_provider('orna'), 'ambiguous document-link fixture did not attach')
+call lsp#send_request('orna', {{
+    \ 'method': 'textDocument/documentLink',
+    \ 'params': {{ 'textDocument': s:document_links_document }},
+    \ 'on_notification': function('OrnaCaptureDocumentLinks', ['ambiguous']),
+\ }})
+let s:deadline = reltimefloat(reltime()) + 10.0
+while !has_key(g:orna_document_link_responses, 'ambiguous') && reltimefloat(reltime()) < s:deadline
+    sleep 10m
+endwhile
+call assert_true(has_key(g:orna_document_link_responses, 'ambiguous'), 'vim-lsp ambiguous document-link request timed out')
 call writefile([json_encode({{
     \ 'omnifunc': &l:omnifunc,
     \ 'completion': s:response['result'],
@@ -544,6 +674,14 @@ call writefile([json_encode({{
     \ 'folding_ranges': g:orna_folding_selection_responses.folding_ranges,
     \ 'selection_ranges': g:orna_folding_selection_responses.selection_ranges,
     \ 'folding_selection_uri': s:folding_selection_document['uri'],
+    \ 'diagnostic_invalid': g:orna_diagnostic_responses.invalid['items'],
+    \ 'diagnostic_recovered': g:orna_diagnostic_responses.recovered['items'],
+    \ 'diagnostic_uri': s:diagnostic_document['uri'],
+    \ 'document_links_unresolved': g:orna_document_link_responses.unresolved,
+    \ 'document_links_resolved': g:orna_document_link_responses.resolved,
+    \ 'document_links_ambiguous': g:orna_document_link_responses.ambiguous,
+    \ 'document_links_uri': s:document_links_document['uri'],
+    \ 'document_links_target_uri': s:document_link_target_document['uri'],
     \ 'consumer_uri': s:consumer_document['uri'],
     \ 'provider_uri': s:provider_document['uri'],
     \ 'references': s:references,
@@ -575,6 +713,17 @@ qa!
         .env("ORNA_WORKSPACE_PROVIDER_FIXTURE", &workspace_provider)
         .env("ORNA_WORKSPACE_CALLER_FIXTURE", &workspace_caller)
         .env("ORNA_FOLDING_SELECTION_FIXTURE", &folding_selection_fixture)
+        .env("ORNA_TEST_DIAGNOSTIC_FIXTURE", &diagnostic_fixture)
+        .env("ORNA_DIAGNOSTIC_RECOVERY_SOURCE", &diagnostic_recovery)
+        .env("ORNA_TEST_DOCUMENT_LINKS_FIXTURE", &document_links_fixture)
+        .env(
+            "ORNA_TEST_DOCUMENT_LINK_TARGET_FIXTURE",
+            &document_link_target_fixture,
+        )
+        .env(
+            "ORNA_TEST_DOCUMENT_LINK_DIRECTORY_FIXTURE",
+            &document_link_directory_target_fixture,
+        )
         .env(
             "ORNA_DEPTH_RANGES",
             serde_json::to_string(&depth_ranges).unwrap(),
@@ -679,6 +828,31 @@ qa!
         &evidence["selection_ranges"],
         "Vim vim-lsp",
     );
+    syntax_v1_diagnostics_document_links_contract::assert_diagnostics(
+        DIAGNOSTIC_SOURCE,
+        &evidence["diagnostic_invalid"],
+        "Vim vim-lsp",
+    );
+    syntax_v1_diagnostics_document_links_contract::assert_diagnostics_cleared_items(
+        &evidence["diagnostic_recovered"],
+        "Vim vim-lsp",
+    );
+    syntax_v1_diagnostics_document_links_contract::assert_no_document_links(
+        &evidence["document_links_unresolved"],
+        "Vim vim-lsp without open targets",
+    );
+    syntax_v1_diagnostics_document_links_contract::assert_document_link(
+        DOCUMENT_LINKS_SOURCE,
+        &evidence["document_links_resolved"],
+        evidence["document_links_target_uri"]
+            .as_str()
+            .expect("Vim document-link target URI"),
+        "Vim vim-lsp",
+    );
+    syntax_v1_diagnostics_document_links_contract::assert_no_document_links(
+        &evidence["document_links_ambiguous"],
+        "Vim vim-lsp with ambiguous targets",
+    );
     let consumer_uri = evidence["consumer_uri"]
         .as_str()
         .expect("Vim consumer document URI");
@@ -705,7 +879,7 @@ qa!
         "Vim vim-lsp",
     );
     println!(
-        "Vim integration evidence: ATTACHED=pass DEPENDENCY_ORDER=consumer-before-provider OMNIFUNC=pass COMPLETION=pass HOVER=pass REFERENCES=pass RENAME=pass SEMANTIC_TOKENS=pass SEMANTIC_DEPTH=pass RANGED_TOKENS=pass INLAY_HINT_DEPTH=pass SIGNATURE_HELP=pass CODE_ACTION=pass WORKSPACE_SYMBOL=pass CALL_HIERARCHY=pass FOLDING_RANGE=pass SELECTION_RANGE=pass"
+        "Vim integration evidence: ATTACHED=pass DEPENDENCY_ORDER=consumer-before-provider OMNIFUNC=pass COMPLETION=pass HOVER=pass REFERENCES=pass RENAME=pass SEMANTIC_TOKENS=pass SEMANTIC_DEPTH=pass RANGED_TOKENS=pass INLAY_HINT_DEPTH=pass SIGNATURE_HELP=pass CODE_ACTION=pass WORKSPACE_SYMBOL=pass CALL_HIERARCHY=pass FOLDING_RANGE=pass SELECTION_RANGE=pass DIAGNOSTICS=pass DOCUMENT_LINKS=pass"
     );
 }
 

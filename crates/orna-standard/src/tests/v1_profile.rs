@@ -525,6 +525,62 @@ fn pinned_numeric_conversions_are_included_in_the_captured_snapshot() {
 }
 
 #[test]
+fn pinned_numeric_algorithms_typecheck_behavior_proofs() {
+    let sources = reference_standard_sources_v1();
+    let (path, source) = sources
+        .iter()
+        .find(|(path, _)| path == REFERENCE_STANDARD_NUMERIC_PATH_V1)
+        .expect("the pinned source bundle includes std.numeric");
+    assert_eq!(path, REFERENCE_STANDARD_NUMERIC_PATH_V1);
+    for declaration in [
+        "pub protocol Zero",
+        "pub protocol Signed",
+        "pub protocol Integer",
+        "pub fn gcd<T impl Integer + Zero + Signed>",
+        "pub fn lcm<T impl Integer + Zero + Signed + Div + Mul>",
+    ] {
+        assert!(source.contains(declaration), "missing {declaration}");
+    }
+    reference_standard_profile_v1()
+        .verify_source(path, source)
+        .expect("numeric algorithm source bytes are recorded by the captured std profile");
+    let catalogue = reference_standard_catalogue_v1()
+        .expect("numeric algorithms resolve in the captured standard catalogue");
+    let consumer = include_str!("fixtures/v1_numeric_algorithms_consumer_t770s.orna");
+    let parsed = orna_syntax_v1::parse_module_with_file(
+        consumer,
+        "numeric_algorithms_consumer.orna",
+    );
+    assert!(parsed.is_ok(), "{:#?}", parsed.diagnostics);
+    let analysis = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "numeric_algorithms_consumer.orna",
+            consumer,
+        )],
+        &catalogue,
+    );
+    assert!(
+        analysis.is_ok(),
+        "{}",
+        analysis
+            .diagnostics
+            .iter()
+            .map(|diagnostic| format!("{}: {}", diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+    let module = analysis
+        .modules
+        .values()
+        .find(|module| module.namespace.display() == "numeric_algorithms_consumer")
+        .expect("the arithmetic behavior proofs were analyzed");
+    assert!(matches!(
+        &module.symbols["behavior_proof"].ty,
+        Type::Function { result, .. } if result.as_ref() == &Type::Bool
+    ));
+}
+
+#[test]
 fn pinned_text_builder_is_included_in_the_captured_snapshot() {
     let sources = reference_standard_sources_v1();
     let (index, (path, source)) = sources

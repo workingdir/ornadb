@@ -20,6 +20,20 @@ export interface SignatureHelpFields {
   activeParameter: number;
 }
 
+export interface InlayHintLabelPartFields {
+  label: string;
+  tooltip?: string;
+}
+
+export interface InlayHintFields {
+  position: { line: number; character: number };
+  label: string | InlayHintLabelPartFields[];
+  kind?: 1 | 2;
+  tooltip?: string;
+  paddingLeft?: boolean;
+  paddingRight?: boolean;
+}
+
 export function completionRankingFields(value: Record<string, unknown>): CompletionRankingFields {
   const fields: CompletionRankingFields = {};
   if (typeof value.sortText === 'string') fields.sortText = value.sortText;
@@ -72,4 +86,44 @@ export function signatureHelpFields(value: unknown): SignatureHelpFields | undef
     activeSignature: typeof response.activeSignature === 'number' ? response.activeSignature : 0,
     activeParameter: typeof response.activeParameter === 'number' ? response.activeParameter : 0,
   };
+}
+
+export function inlayHintFields(value: unknown): InlayHintFields[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((entry): InlayHintFields[] => {
+    if (typeof entry !== 'object' || entry === null || Array.isArray(entry)) return [];
+    const hint = entry as Record<string, unknown>;
+    const position = hint.position;
+    if (typeof position !== 'object' || position === null || Array.isArray(position)) return [];
+    const coordinates = position as Record<string, unknown>;
+    if (!Number.isInteger(coordinates.line) || Number(coordinates.line) < 0
+      || !Number.isInteger(coordinates.character) || Number(coordinates.character) < 0) return [];
+    let label: InlayHintFields['label'];
+    if (typeof hint.label === 'string') {
+      label = hint.label;
+    } else if (Array.isArray(hint.label)) {
+      const parts = hint.label.flatMap((partEntry): InlayHintLabelPartFields[] => {
+        if (typeof partEntry !== 'object' || partEntry === null || Array.isArray(partEntry)) return [];
+        const part = partEntry as Record<string, unknown>;
+        if (typeof part.value !== 'string') return [];
+        const mapped: InlayHintLabelPartFields = { label: part.value };
+        if (part.tooltip) mapped.tooltip = hoverMarkdown(part.tooltip);
+        return [mapped];
+      });
+      if (parts.length === 0) return [];
+      label = parts;
+    } else {
+      return [];
+    }
+
+    const mapped: InlayHintFields = {
+      position: { line: Number(coordinates.line), character: Number(coordinates.character) },
+      label,
+    };
+    if (hint.kind === 1 || hint.kind === 2) mapped.kind = hint.kind;
+    if (hint.tooltip) mapped.tooltip = hoverMarkdown(hint.tooltip);
+    if (typeof hint.paddingLeft === 'boolean') mapped.paddingLeft = hint.paddingLeft;
+    if (typeof hint.paddingRight === 'boolean') mapped.paddingRight = hint.paddingRight;
+    return [mapped];
+  });
 }
