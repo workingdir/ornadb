@@ -11,7 +11,9 @@ import {
 import { exampleIndexForKey, exampleIndexForPath, isExample } from './example-feed';
 import { formatRunResult, formatThrownError, type RunResult } from './results';
 import { servedRuntime } from './runtime';
-import './styles.css';
+import { startStyleReload } from './style-reload';
+import './theme.css';
+import './layout.css';
 
 type LspAction = 'diagnostics' | 'completions' | 'hover' | 'signature_help' | 'inlay_hints';
 type Position = { line: number; character: number };
@@ -19,16 +21,21 @@ type DocumentRange = { start: Position; end: Position };
 type LspReply = { id: number; value?: unknown; error?: string };
 
 globalThis.MonacoEnvironment = { getWorker: () => new EditorWorker() };
-const pageStyle = getComputedStyle(document.documentElement);
-monaco.editor.defineTheme('orna-basic', {
-  base: 'vs',
-  inherit: true,
-  rules: [],
-  colors: {
-    'editor.background': pageStyle.getPropertyValue('--background').trim() || '#fff',
-    'editor.foreground': pageStyle.getPropertyValue('--text').trim() || '#202122',
-  },
-});
+function syncEditorTheme(): void {
+  const pageStyle = getComputedStyle(document.documentElement);
+  monaco.editor.defineTheme('orna-basic', {
+    base: 'vs',
+    inherit: true,
+    rules: [],
+    colors: {
+      'editor.background': pageStyle.getPropertyValue('--background').trim() || '#fff',
+      'editor.foreground': pageStyle.getPropertyValue('--text').trim() || '#202122',
+    },
+  });
+  monaco.editor.setTheme('orna-basic');
+}
+syncEditorTheme();
+window.addEventListener('orna:playground-styles-updated', syncEditorTheme);
 
 function requiredElement<T extends Element>(selector: string): T {
   const element = document.querySelector<T>(selector);
@@ -429,3 +436,4 @@ window.addEventListener('beforeunload', () => {
   editor?.dispose();
   lspWorker.terminate();
 }, { once: true });
+startStyleReload();
