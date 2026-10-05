@@ -9,13 +9,14 @@ use std::{
 
 use orna_sys_v1::{
     SystemProviderAbi, system_api_json, system_api_schema_json, system_binding_modules_json,
-    system_binding_stubs, system_dispatch_table, system_host_operation_registry_json,
+    system_binding_stubs, system_dispatch_table, system_host_binding_modules_json,
+    system_host_binding_stubs, system_host_operation_registry_json,
     system_host_operation_registry_schema_json, system_provider_abi_json,
     system_provider_abi_schema_json,
 };
 use serde_json::Value;
 
-const USAGE: &str = "sys-api-export [--schema|--provider-abi|--provider-abi-schema|--host-operations|--host-operations-schema|--bindings|--binding-modules] [output-path] | --all output-directory";
+const USAGE: &str = "sys-api-export [--schema|--provider-abi|--provider-abi-schema|--host-operations|--host-operations-schema|--bindings|--binding-modules|--host-bindings|--host-binding-modules] [output-path] | --all output-directory";
 
 fn write_export(root: &Path, relative_path: &Path, content: &str) -> Result<(), Box<dyn Error>> {
     let path = root.join(relative_path);
@@ -26,6 +27,34 @@ fn write_export(root: &Path, relative_path: &Path, content: &str) -> Result<(), 
         fs::create_dir_all(parent)?;
     }
     fs::write(path, content)?;
+    Ok(())
+}
+
+fn export_module_tree(
+    output_dir: &Path,
+    tree_name: &str,
+    modules_json: &str,
+) -> Result<(), Box<dyn Error>> {
+    let modules: std::collections::BTreeMap<String, String> = serde_json::from_str(modules_json)?;
+    for (module_path, source) in modules {
+        let relative_path = Path::new(&module_path);
+        let valid_path = !relative_path.is_absolute()
+            && relative_path
+                .components()
+                .all(|component| matches!(component, Component::Normal(_)))
+            && relative_path
+                .extension()
+                .and_then(|extension| extension.to_str())
+                == Some("orna");
+        if !valid_path {
+            return Err(format!("invalid generated binding module path `{module_path}`").into());
+        }
+        write_export(
+            output_dir,
+            &Path::new(tree_name).join(relative_path),
+            &source,
+        )?;
+    }
     Ok(())
 }
 
@@ -49,6 +78,11 @@ fn export_all(output_dir: &Path) -> Result<(), Box<dyn Error>> {
         ),
         ("system_bindings.orna", system_binding_stubs()),
         ("system_binding_modules.json", system_binding_modules_json()),
+        ("system_host_bindings.orna", system_host_binding_stubs()),
+        (
+            "system_host_binding_modules.json",
+            system_host_binding_modules_json(),
+        ),
     ];
     if output_dir.exists() && fs::read_dir(output_dir)?.next().is_some() {
         return Err(format!(
@@ -62,27 +96,12 @@ fn export_all(output_dir: &Path) -> Result<(), Box<dyn Error>> {
         write_export(output_dir, Path::new(name), content)?;
     }
 
-    let modules: std::collections::BTreeMap<String, String> =
-        serde_json::from_str(system_binding_modules_json())?;
-    for (module_path, source) in modules {
-        let relative_path = Path::new(&module_path);
-        let valid_path = !relative_path.is_absolute()
-            && relative_path
-                .components()
-                .all(|component| matches!(component, Component::Normal(_)))
-            && relative_path
-                .extension()
-                .and_then(|extension| extension.to_str())
-                == Some("orna");
-        if !valid_path {
-            return Err(format!("invalid generated binding module path `{module_path}`").into());
-        }
-        write_export(
-            output_dir,
-            &Path::new("system_bindings").join(relative_path),
-            &source,
-        )?;
-    }
+    export_module_tree(output_dir, "system_bindings", system_binding_modules_json())?;
+    export_module_tree(
+        output_dir,
+        "system_host_bindings",
+        system_host_binding_modules_json(),
+    )?;
     Ok(())
 }
 
@@ -202,6 +221,8 @@ fn main() -> Result<(), Box<dyn Error>> {
         ),
         Some("--bindings") => (system_binding_stubs(), arguments.next()),
         Some("--binding-modules") => (system_binding_modules_json(), arguments.next()),
+        Some("--host-bindings") => (system_host_binding_stubs(), arguments.next()),
+        Some("--host-binding-modules") => (system_host_binding_modules_json(), arguments.next()),
         Some(argument) if argument.starts_with("--") => {
             return Err(format!("unknown option `{argument}`; usage: {USAGE}").into());
         }
