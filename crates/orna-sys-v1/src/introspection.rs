@@ -7211,6 +7211,25 @@ fn explain_query_core_with_wal_rotation_chains(
                     &mut details,
                     &spill_chain_window_restore_chain_fold,
                 );
+                if let Some(window_restore_envelope_fold) =
+                    query_paired_bounded_window_spill_chain_window_restore_envelope_fold(
+                        &spill_chain_window_fold,
+                        &spill_chain_window_restore_chain_fold,
+                        window_cost_restoration_fold,
+                        join_pair_identities,
+                        checkpoint_compaction_chains,
+                        segment_rotation_chains,
+                        stream_compaction_chains,
+                        spill_restore_chains,
+                        stream_rotation_chains,
+                        wal_rotation_chains,
+                    )
+                {
+                    add_paired_bounded_window_spill_chain_window_restore_envelope_fold_details(
+                        &mut details,
+                        &window_restore_envelope_fold,
+                    );
+                }
             }
         }
         current = push_unary(
@@ -9214,6 +9233,25 @@ struct QueryPairedBoundedWindowSpillChainWindowRestoreChainFold {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+struct QueryPairedBoundedWindowSpillChainWindowRestoreEnvelopeFold {
+    identity: String,
+    chain_window_fold_identity: String,
+    chain_fold_identity: String,
+    spill_window_fold_identity: String,
+    restore_chain_fold_identity: String,
+    window_restore_chain_fold_identity: String,
+    restore_envelope_fold_identity: String,
+    chain_pair_count: u64,
+    spill_window_count: u64,
+    restore_pair_count: u64,
+    restore_fold_count: u64,
+    restore_envelope_pair_count: u64,
+    window_identity_count: u64,
+    totals: QueryAggregateSpillTotals,
+    overflowed: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 struct QueryPairedWindowCompactionSpillFold {
     identity: String,
     window_pair_count: u64,
@@ -9369,6 +9407,10 @@ struct QueryPairedWindowCostRestorationFold {
     window_restore_envelope_chain_transition: Option<&'static str>,
     cost_window_restore_envelope_chain_fold_identity: Option<String>,
     cost_window_restore_envelope_chain_transition: Option<&'static str>,
+    cost_window_restore_envelope_chain_carry_identity: Option<String>,
+    cost_window_restore_envelope_chain_carry_transition: Option<&'static str>,
+    cost_window_restore_envelope_chain_distinct_states: BTreeSet<String>,
+    cost_window_restore_envelope_chain_distinct_state_count: u64,
     window_fold_identity: Option<String>,
     restore_chain_fold_identity: Option<String>,
     window_restore_chain_fold_identity: Option<String>,
@@ -12072,6 +12114,48 @@ fn query_paired_window_restore_chain_descriptor_fold_identity(
     stream_rotation_chains: &[QueryPairedStreamRotationChainDescription],
     wal_rotation_chains: &[QueryPairedWalRotationChainDescription],
 ) -> Option<(String, u64)> {
+    let identities = query_paired_window_restore_chain_descriptor_identities(
+        checkpoint_compaction_chains,
+        segment_rotation_chains,
+        stream_compaction_chains,
+        spill_restore_chains,
+        stream_rotation_chains,
+        wal_rotation_chains,
+    );
+    if identities.is_empty() {
+        return None;
+    }
+
+    let restore_chain_count = u64::try_from(identities.values().map(Vec::len).sum::<usize>())
+        .unwrap_or(u64::MAX);
+    let mut hash = Sha256::new();
+    hash.update(b"orna.sys.query-paired-window-restore-chain-descriptor-fold.v1\0");
+    hash.update(restore_chain_count.to_be_bytes());
+    for ((kind, pair_identity), chain_identities) in identities {
+        hash_part(&mut hash, kind.as_bytes());
+        hash_part(&mut hash, pair_identity.as_bytes());
+        hash.update((chain_identities.len() as u64).to_be_bytes());
+        for identity in chain_identities {
+            hash_part(&mut hash, identity.as_bytes());
+        }
+    }
+    Some((
+        format!(
+            "paired-window-restore-chain-descriptor-fold:{}",
+            hex(&hash.finalize())
+        ),
+        restore_chain_count,
+    ))
+}
+
+fn query_paired_window_restore_chain_descriptor_identities(
+    checkpoint_compaction_chains: &[QueryPairedCheckpointSegmentCompactionChainDescription],
+    segment_rotation_chains: &[QueryPairedSegmentRotationChainDescription],
+    stream_compaction_chains: &[QueryPairedStreamCompactionChainDescription],
+    spill_restore_chains: &[QueryPairedCheckpointSpillRestoreChainDescription],
+    stream_rotation_chains: &[QueryPairedStreamRotationChainDescription],
+    wal_rotation_chains: &[QueryPairedWalRotationChainDescription],
+) -> BTreeMap<(String, String), Vec<String>> {
     let mut identities = BTreeMap::<(String, String), Vec<String>>::new();
     for chain in checkpoint_compaction_chains {
         identities
@@ -12127,30 +12211,271 @@ fn query_paired_window_restore_chain_descriptor_fold_identity(
             .or_default()
             .push(query_paired_wal_rotation_chain_identity(chain));
     }
-    if identities.is_empty() {
+    for chain_identities in identities.values_mut() {
+        chain_identities.sort();
+    }
+    identities
+}
+
+/// Builds one exact window/restore envelope for each paired join edge that
+/// has both a window identity and restore descriptors. The envelope uses
+/// stable descriptor inputs rather than cost ancestry, so spill settings do
+/// not rewrite the restore component.
+fn query_paired_window_restore_envelope_fold_identity(
+    window_cost_restoration_fold: &QueryPairedWindowCostRestorationFold,
+    pairs: &[QueryJoinPairIdentityDescription],
+    restore_chain_identities: &BTreeMap<(String, String), Vec<String>>,
+) -> Option<(String, u64)> {
+    let mut pair_envelopes = BTreeMap::new();
+    for pair in pairs {
+        let Some(window_identity) = window_cost_restoration_fold
+            .window_identities
+            .get(pair.identity.as_str())
+        else {
+            continue;
+        };
+        let restore_chains = restore_chain_identities
+            .iter()
+            .filter(|((_, pair_identity), _)| pair_identity == pair.identity.as_str())
+            .collect::<Vec<_>>();
+        if restore_chains.is_empty() {
+            continue;
+        }
+
+        let mut envelope_hash = Sha256::new();
+        envelope_hash.update(b"orna.sys.query-paired-window-restore-envelope.v1\0");
+        hash_part(&mut envelope_hash, pair.identity.as_str().as_bytes());
+        hash_part(&mut envelope_hash, pair.left_source.as_str().as_bytes());
+        hash_part(&mut envelope_hash, pair.right_source.as_str().as_bytes());
+        hash_optional_text(
+            &mut envelope_hash,
+            pair.predicate.as_ref().map(ExpressionRef::as_str),
+        );
+        hash_part(&mut envelope_hash, window_identity.as_bytes());
+        envelope_hash.update((restore_chains.len() as u64).to_be_bytes());
+        for ((kind, _), chain_identities) in restore_chains {
+            hash_part(&mut envelope_hash, kind.as_bytes());
+            envelope_hash.update((chain_identities.len() as u64).to_be_bytes());
+            for identity in chain_identities {
+                hash_part(&mut envelope_hash, identity.as_bytes());
+            }
+        }
+        pair_envelopes.insert(
+            pair.identity.as_str().to_owned(),
+            format!(
+                "paired-window-restore-envelope:{}",
+                hex(&envelope_hash.finalize())
+            ),
+        );
+    }
+    if pair_envelopes.is_empty() {
         return None;
     }
 
-    let restore_chain_count = u64::try_from(identities.values().map(Vec::len).sum::<usize>())
-        .unwrap_or(u64::MAX);
-    let mut hash = Sha256::new();
-    hash.update(b"orna.sys.query-paired-window-restore-chain-descriptor-fold.v1\0");
-    hash.update(restore_chain_count.to_be_bytes());
-    for ((kind, pair_identity), chain_identities) in identities {
-        hash_part(&mut hash, kind.as_bytes());
-        hash_part(&mut hash, pair_identity.as_bytes());
-        hash.update((chain_identities.len() as u64).to_be_bytes());
-        for identity in chain_identities {
-            hash_part(&mut hash, identity.as_bytes());
-        }
+    let pair_count = u64::try_from(pair_envelopes.len()).unwrap_or(u64::MAX);
+    let mut fold_hash = Sha256::new();
+    fold_hash.update(b"orna.sys.query-paired-window-restore-envelope-fold.v1\0");
+    fold_hash.update(pair_count.to_be_bytes());
+    for (pair_identity, envelope_identity) in &pair_envelopes {
+        hash_part(&mut fold_hash, pair_identity.as_bytes());
+        hash_part(&mut fold_hash, envelope_identity.as_bytes());
     }
     Some((
         format!(
-            "paired-window-restore-chain-descriptor-fold:{}",
+            "paired-window-restore-envelope-fold:{}",
+            hex(&fold_hash.finalize())
+        ),
+        pair_count,
+    ))
+}
+
+fn query_paired_bounded_window_spill_chain_window_restore_envelope_fold(
+    chain_window_fold: &QueryPairedBoundedWindowSpillChainWindowFold,
+    restore_chain_fold: &QueryPairedBoundedWindowSpillChainWindowRestoreChainFold,
+    window_cost_restoration_fold: &QueryPairedWindowCostRestorationFold,
+    pairs: &[QueryJoinPairIdentityDescription],
+    checkpoint_compaction_chains: &[QueryPairedCheckpointSegmentCompactionChainDescription],
+    segment_rotation_chains: &[QueryPairedSegmentRotationChainDescription],
+    stream_compaction_chains: &[QueryPairedStreamCompactionChainDescription],
+    spill_restore_chains: &[QueryPairedCheckpointSpillRestoreChainDescription],
+    stream_rotation_chains: &[QueryPairedStreamRotationChainDescription],
+    wal_rotation_chains: &[QueryPairedWalRotationChainDescription],
+) -> Option<QueryPairedBoundedWindowSpillChainWindowRestoreEnvelopeFold> {
+    let restore_chain_identities = query_paired_window_restore_chain_descriptor_identities(
+        checkpoint_compaction_chains,
+        segment_rotation_chains,
+        stream_compaction_chains,
+        spill_restore_chains,
+        stream_rotation_chains,
+        wal_rotation_chains,
+    );
+    let (restore_envelope_fold_identity, restore_envelope_pair_count) =
+        query_paired_window_restore_envelope_fold_identity(
+            window_cost_restoration_fold,
+            pairs,
+            &restore_chain_identities,
+        )?;
+    let mut count_overflowed = false;
+    let window_identity_count =
+        u64::try_from(window_cost_restoration_fold.window_identities.len()).unwrap_or_else(|_| {
+            count_overflowed = true;
+            u64::MAX
+        });
+    let overflowed = chain_window_fold.overflowed || count_overflowed;
+
+    let mut hash = Sha256::new();
+    hash.update(b"orna.sys.query-paired-bounded-window-spill-chain-window-restore-envelope.v1\0");
+    hash_part(&mut hash, chain_window_fold.identity.as_bytes());
+    hash_part(&mut hash, chain_window_fold.chain_fold_identity.as_bytes());
+    hash_part(&mut hash, chain_window_fold.spill_window_fold_identity.as_bytes());
+    hash_part(&mut hash, restore_chain_fold.identity.as_bytes());
+    hash_part(&mut hash, restore_envelope_fold_identity.as_bytes());
+    hash.update(chain_window_fold.pair_count.to_be_bytes());
+    hash.update(chain_window_fold.spill_window_count.to_be_bytes());
+    hash.update(restore_chain_fold.restore_pair_count.to_be_bytes());
+    hash.update(restore_chain_fold.restore_fold_count.to_be_bytes());
+    hash.update(restore_envelope_pair_count.to_be_bytes());
+    hash.update(window_identity_count.to_be_bytes());
+    hash_query_aggregate_spill_totals(&mut hash, chain_window_fold.totals);
+    hash.update([u8::from(overflowed)]);
+
+    Some(QueryPairedBoundedWindowSpillChainWindowRestoreEnvelopeFold {
+        identity: format!(
+            "paired-bounded-window-spill-chain-window-restore-envelope:{}",
             hex(&hash.finalize())
         ),
-        restore_chain_count,
-    ))
+        chain_window_fold_identity: chain_window_fold.identity.clone(),
+        chain_fold_identity: chain_window_fold.chain_fold_identity.clone(),
+        spill_window_fold_identity: chain_window_fold.spill_window_fold_identity.clone(),
+        restore_chain_fold_identity: restore_chain_fold.restore_chain_fold_identity.clone(),
+        window_restore_chain_fold_identity: restore_chain_fold
+            .window_restore_chain_fold_identity
+            .clone(),
+        restore_envelope_fold_identity,
+        chain_pair_count: chain_window_fold.pair_count,
+        spill_window_count: chain_window_fold.spill_window_count,
+        restore_pair_count: restore_chain_fold.restore_pair_count,
+        restore_fold_count: restore_chain_fold.restore_fold_count,
+        restore_envelope_pair_count,
+        window_identity_count,
+        totals: chain_window_fold.totals,
+        overflowed,
+    })
+}
+
+fn add_paired_bounded_window_spill_chain_window_restore_envelope_fold_details(
+    details: &mut BTreeMap<String, PlanDetail>,
+    fold: &QueryPairedBoundedWindowSpillChainWindowRestoreEnvelopeFold,
+) {
+    for (key, value) in [
+        (
+            "paired_bounded_window_spill_chain_window_restore_envelope_fold_identity",
+            fold.identity.as_str(),
+        ),
+        (
+            "paired_bounded_window_spill_chain_window_restore_envelope_window_fold_identity",
+            fold.chain_window_fold_identity.as_str(),
+        ),
+        (
+            "paired_bounded_window_spill_chain_window_restore_envelope_chain_fold_identity",
+            fold.chain_fold_identity.as_str(),
+        ),
+        (
+            "paired_bounded_window_spill_chain_window_restore_envelope_spill_window_fold_identity",
+            fold.spill_window_fold_identity.as_str(),
+        ),
+        (
+            "paired_bounded_window_spill_chain_window_restore_envelope_restore_chain_fold_identity",
+            fold.restore_chain_fold_identity.as_str(),
+        ),
+        (
+            "paired_bounded_window_spill_chain_window_restore_envelope_window_restore_chain_fold_identity",
+            fold.window_restore_chain_fold_identity.as_str(),
+        ),
+        (
+            "paired_bounded_window_spill_chain_window_restore_envelope_restore_envelope_fold_identity",
+            fold.restore_envelope_fold_identity.as_str(),
+        ),
+    ] {
+        details.insert(key.to_owned(), PlanDetail::Text(value.to_owned()));
+    }
+    details.insert(
+        "paired_bounded_window_spill_chain_window_restore_envelope_pairing".to_owned(),
+        PlanDetail::Text(
+            "exact_bounded_chain_window_spills_with_paired_window_restore_envelopes".to_owned(),
+        ),
+    );
+    for (key, value) in [
+        (
+            "paired_bounded_window_spill_chain_window_restore_envelope_chain_pair_count",
+            fold.chain_pair_count,
+        ),
+        (
+            "paired_bounded_window_spill_chain_window_restore_envelope_spill_window_count",
+            fold.spill_window_count,
+        ),
+        (
+            "paired_bounded_window_spill_chain_window_restore_envelope_restore_pair_count",
+            fold.restore_pair_count,
+        ),
+        (
+            "paired_bounded_window_spill_chain_window_restore_envelope_restore_fold_count",
+            fold.restore_fold_count,
+        ),
+        (
+            "paired_bounded_window_spill_chain_window_restore_envelope_pair_count",
+            fold.restore_envelope_pair_count,
+        ),
+        (
+            "paired_bounded_window_spill_chain_window_restore_envelope_window_identity_count",
+            fold.window_identity_count,
+        ),
+        (
+            "paired_bounded_window_spill_chain_window_restore_envelope_spill_stage_count",
+            fold.totals.stage_count,
+        ),
+        (
+            "paired_bounded_window_spill_chain_window_restore_envelope_unknown_working_set_count",
+            fold.totals.unknown_working_set_count,
+        ),
+    ] {
+        details.insert(key.to_owned(), PlanDetail::Integer(value));
+    }
+    details.insert(
+        "paired_bounded_window_spill_chain_window_restore_envelope_overflowed".to_owned(),
+        PlanDetail::Boolean(fold.overflowed),
+    );
+    let estimate_status = if fold.overflowed {
+        "overflow"
+    } else if fold.totals.unknown_working_set_count > 0 {
+        "unknown_working_set"
+    } else {
+        "computed"
+    };
+    details.insert(
+        "paired_bounded_window_spill_chain_window_restore_envelope_estimate_status".to_owned(),
+        PlanDetail::Text(estimate_status.to_owned()),
+    );
+    for (key, value) in [
+        (
+            "paired_bounded_window_spill_chain_window_restore_envelope_estimated_bytes",
+            fold.totals.estimated_bytes,
+        ),
+        (
+            "paired_bounded_window_spill_chain_window_restore_envelope_estimated_io_blocks",
+            fold.totals.estimated_io_blocks,
+        ),
+        (
+            "paired_bounded_window_spill_chain_window_restore_envelope_estimated_io_work",
+            fold.totals.estimated_io_work,
+        ),
+    ] {
+        if let Some(value) = value {
+            details.insert(key.to_owned(), PlanDetail::Integer(value));
+        } else {
+            details.remove(key);
+        }
+    }
 }
 
 fn add_paired_bounded_window_spill_chain_window_restore_chain_fold_details(
@@ -15452,6 +15777,10 @@ fn query_paired_window_cost_restoration_seed(
         window_restore_envelope_chain_transition: None,
         cost_window_restore_envelope_chain_fold_identity: None,
         cost_window_restore_envelope_chain_transition: None,
+        cost_window_restore_envelope_chain_carry_identity: None,
+        cost_window_restore_envelope_chain_carry_transition: None,
+        cost_window_restore_envelope_chain_distinct_states: BTreeSet::new(),
+        cost_window_restore_envelope_chain_distinct_state_count: 0,
         window_fold_identity: None,
         restore_chain_fold_identity: None,
         window_restore_chain_fold_identity: None,
@@ -15893,6 +16222,18 @@ fn query_paired_window_cost_restoration_fold(
         }
         _ => None,
     };
+    let mut cost_window_restore_envelope_chain_distinct_states = previous
+        .map_or_else(BTreeSet::new, |fold| {
+            fold.cost_window_restore_envelope_chain_distinct_states.clone()
+        });
+    if let Some(composite_identity) = cost_window_restore_envelope_chain_fold_identity.as_ref() {
+        cost_window_restore_envelope_chain_distinct_states.insert(composite_identity.clone());
+    }
+    let cost_window_restore_envelope_chain_distinct_state_count =
+        u64::try_from(cost_window_restore_envelope_chain_distinct_states.len()).unwrap_or_else(|_| {
+            overflowed = true;
+            u64::MAX
+        });
     let cost_window_restore_envelope_chain_transition =
         cost_window_restore_envelope_chain_fold_identity.as_ref().map(|_| {
             let cost_advanced = previous.is_none_or(|fold| {
@@ -15914,9 +16255,57 @@ fn query_paired_window_cost_restoration_fold(
                 (false, false, false) => "carried_across_sparse_input",
             }
         });
+    let previous_cost_window_restore_envelope_carry_identity = previous
+        .and_then(|fold| fold.cost_window_restore_envelope_chain_carry_identity.as_deref());
+    let previous_cost_window_restore_envelope_identity = previous
+        .and_then(|fold| fold.cost_window_restore_envelope_chain_fold_identity.as_deref());
+    let cost_window_restore_envelope_chain_carry_identity =
+        match cost_window_restore_envelope_chain_fold_identity.as_deref() {
+            Some(composite_identity)
+                if previous_cost_window_restore_envelope_identity
+                    == Some(composite_identity) =>
+            {
+                previous_cost_window_restore_envelope_carry_identity
+                    .map(str::to_owned)
+            }
+            Some(composite_identity) => {
+                let mut carry_hash = Sha256::new();
+                carry_hash.update(
+                    b"orna.sys.query-paired-window-cost-restoration-cost-window-restore-envelope-carry-fold.v1\0",
+                );
+                hash_optional_text(
+                    &mut carry_hash,
+                    previous_cost_window_restore_envelope_carry_identity,
+                );
+                hash_part(&mut carry_hash, composite_identity.as_bytes());
+                Some(format!(
+                    "paired-window-cost-restoration-cost-window-restore-envelope-carry-fold:{}",
+                    hex(&carry_hash.finalize())
+                ))
+            }
+            None => previous_cost_window_restore_envelope_carry_identity.map(str::to_owned),
+        };
+    let cost_window_restore_envelope_chain_carry_transition =
+        match (
+            previous_cost_window_restore_envelope_carry_identity,
+            previous_cost_window_restore_envelope_identity,
+            cost_window_restore_envelope_chain_fold_identity.as_deref(),
+        ) {
+            (None, _, Some(_)) => Some("initialized_cost_restore_envelope_carry"),
+            (Some(_), Some(previous_identity), Some(current_identity))
+                if previous_identity == current_identity =>
+            {
+                Some("carried_duplicate_or_sparse_cost_restore_envelope_input")
+            }
+            (Some(_), _, Some(_)) => Some("advanced_cost_restore_envelope_carry"),
+            (Some(_), _, None) => Some("carried_without_cost_restore_envelope_input"),
+            _ => None,
+        };
     let parent_identity = previous.map(|fold| fold.identity.clone());
 
     let mut hash = Sha256::new();
+    hash.update(b"orna.sys.query-paired-window-cost-restoration-fold.v14\0");
+    hash.update(b"orna.sys.query-paired-window-cost-restoration-fold.v13\0");
     hash.update(b"orna.sys.query-paired-window-cost-restoration-fold.v12\0");
     hash.update(b"orna.sys.query-paired-window-cost-restoration-fold.v11\0");
     hash.update(b"orna.sys.query-paired-window-cost-restoration-fold.v10\0");
@@ -15972,6 +16361,14 @@ fn query_paired_window_cost_restoration_fold(
         &mut hash,
         cost_window_restore_envelope_chain_fold_identity.as_deref(),
     );
+    hash_optional_text(
+        &mut hash,
+        cost_window_restore_envelope_chain_carry_identity.as_deref(),
+    );
+    hash.update(cost_window_restore_envelope_chain_distinct_state_count.to_be_bytes());
+    for composite_identity in &cost_window_restore_envelope_chain_distinct_states {
+        hash_part(&mut hash, composite_identity.as_bytes());
+    }
     hash.update([u8::from(overflowed)]);
 
     QueryPairedWindowCostRestorationFold {
@@ -15995,6 +16392,10 @@ fn query_paired_window_cost_restoration_fold(
         window_restore_envelope_chain_transition,
         cost_window_restore_envelope_chain_fold_identity,
         cost_window_restore_envelope_chain_transition,
+        cost_window_restore_envelope_chain_carry_identity,
+        cost_window_restore_envelope_chain_carry_transition,
+        cost_window_restore_envelope_chain_distinct_states,
+        cost_window_restore_envelope_chain_distinct_state_count,
         window_fold_identity,
         restore_chain_fold_identity,
         window_restore_chain_fold_identity,
@@ -16208,6 +16609,47 @@ fn add_paired_window_cost_restoration_fold_details(
         );
         details.remove(
             "paired_window_cost_restoration_cost_window_restore_envelope_chain_transition",
+        );
+    }
+    if let Some(cost_window_restore_envelope_chain_carry_identity) =
+        fold.cost_window_restore_envelope_chain_carry_identity.as_ref()
+    {
+        details.insert(
+            "paired_window_cost_restoration_cost_window_restore_envelope_chain_carry_identity"
+                .to_owned(),
+            PlanDetail::Text(cost_window_restore_envelope_chain_carry_identity.clone()),
+        );
+        details.insert(
+            "paired_window_cost_restoration_cost_window_restore_envelope_chain_carry_policy"
+                .to_owned(),
+            PlanDetail::Text(
+                "advance_on_distinct_composite_states_and_carry_exact_repeats".to_owned(),
+            ),
+        );
+        details.insert(
+            "paired_window_cost_restoration_cost_window_restore_envelope_chain_distinct_state_count"
+                .to_owned(),
+            PlanDetail::Integer(fold.cost_window_restore_envelope_chain_distinct_state_count),
+        );
+        if let Some(transition) = fold.cost_window_restore_envelope_chain_carry_transition {
+            details.insert(
+                "paired_window_cost_restoration_cost_window_restore_envelope_chain_carry_transition"
+                    .to_owned(),
+                PlanDetail::Text(transition.to_owned()),
+            );
+        }
+    } else {
+        details.remove(
+            "paired_window_cost_restoration_cost_window_restore_envelope_chain_carry_identity",
+        );
+        details.remove(
+            "paired_window_cost_restoration_cost_window_restore_envelope_chain_carry_policy",
+        );
+        details.remove(
+            "paired_window_cost_restoration_cost_window_restore_envelope_chain_distinct_state_count",
+        );
+        details.remove(
+            "paired_window_cost_restoration_cost_window_restore_envelope_chain_carry_transition",
         );
     }
     if let Some(parent_identity) = fold.parent_identity.as_ref() {
@@ -18027,5 +18469,160 @@ mod byte_cap_handoff_route_scope_tests {
             hash.finalize()
         };
         assert_eq!(fingerprint(stale_route), fingerprint(canonical_route));
+    }
+}
+
+#[cfg(test)]
+mod paired_window_cost_restore_envelope_carry_tests {
+    use super::*;
+
+    #[test]
+    fn duplicate_sparse_fold_input_carries_composite_identity() {
+        let initial = query_paired_window_cost_restoration_fold(
+            None,
+            "pair:child-a",
+            "cost:left-a",
+            "cost:right-a",
+            "pair:child-a",
+            Some("window:child-a"),
+            None,
+            &[("checkpoint_cost_restoration", Some("restore:child-a"))],
+        );
+        assert!(
+            initial
+                .cost_window_restore_envelope_chain_fold_identity
+                .is_some()
+        );
+        assert_eq!(
+            initial.cost_window_restore_envelope_chain_distinct_state_count,
+            1
+        );
+        assert_eq!(
+            initial.cost_window_restore_envelope_chain_carry_transition,
+            Some("initialized_cost_restore_envelope_carry")
+        );
+
+        let sparse = query_paired_window_cost_restoration_fold(
+            Some(&initial),
+            "pair:child-a",
+            "cost:left-a",
+            "cost:right-a",
+            "pair:child-a",
+            None,
+            None,
+            &[],
+        );
+        assert_ne!(
+            initial.identity, sparse.identity,
+            "the outer fold still records the repeated sparse step"
+        );
+        assert_eq!(
+            initial.cost_window_restore_envelope_chain_fold_identity,
+            sparse.cost_window_restore_envelope_chain_fold_identity
+        );
+        assert_eq!(
+            initial.cost_window_restore_envelope_chain_carry_identity,
+            sparse.cost_window_restore_envelope_chain_carry_identity
+        );
+        assert_eq!(
+            sparse.cost_window_restore_envelope_chain_distinct_state_count,
+            1
+        );
+        assert_eq!(
+            sparse.cost_window_restore_envelope_chain_carry_transition,
+            Some("carried_duplicate_or_sparse_cost_restore_envelope_input")
+        );
+
+        let repeated_sparse = query_paired_window_cost_restoration_fold(
+            Some(&sparse),
+            "pair:child-a",
+            "cost:left-a",
+            "cost:right-a",
+            "pair:child-a",
+            None,
+            None,
+            &[],
+        );
+        assert_eq!(
+            sparse.cost_window_restore_envelope_chain_carry_identity,
+            repeated_sparse.cost_window_restore_envelope_chain_carry_identity
+        );
+        assert_eq!(
+            repeated_sparse.cost_window_restore_envelope_chain_distinct_state_count,
+            1
+        );
+        assert_eq!(
+            repeated_sparse.cost_window_restore_envelope_chain_carry_transition,
+            Some("carried_duplicate_or_sparse_cost_restore_envelope_input")
+        );
+
+        let changed_cost = query_paired_window_cost_restoration_fold(
+            Some(&sparse),
+            "pair:child-a",
+            "cost:left-a-changed",
+            "cost:right-a",
+            "pair:child-a",
+            None,
+            None,
+            &[],
+        );
+        assert_ne!(
+            sparse.cost_window_restore_envelope_chain_carry_identity,
+            changed_cost.cost_window_restore_envelope_chain_carry_identity
+        );
+        assert_eq!(
+            changed_cost.cost_window_restore_envelope_chain_distinct_state_count,
+            2
+        );
+        assert_eq!(
+            changed_cost.cost_window_restore_envelope_chain_carry_transition,
+            Some("advanced_cost_restore_envelope_carry")
+        );
+
+        let returned_cost_state = query_paired_window_cost_restoration_fold(
+            Some(&changed_cost),
+            "pair:child-a",
+            "cost:left-a",
+            "cost:right-a",
+            "pair:child-a",
+            None,
+            None,
+            &[],
+        );
+        assert_eq!(
+            initial.cost_window_restore_envelope_chain_fold_identity,
+            returned_cost_state.cost_window_restore_envelope_chain_fold_identity
+        );
+        assert_eq!(
+            returned_cost_state.cost_window_restore_envelope_chain_distinct_state_count,
+            2,
+            "returning to an earlier composite does not count it twice"
+        );
+
+        let changed_restore = query_paired_window_cost_restoration_fold(
+            Some(&sparse),
+            "pair:child-a",
+            "cost:left-a",
+            "cost:right-a",
+            "pair:child-a",
+            None,
+            None,
+            &[(
+                "checkpoint_cost_restoration",
+                Some("restore:child-a:changed"),
+            )],
+        );
+        assert_ne!(
+            sparse.cost_window_restore_envelope_chain_carry_identity,
+            changed_restore.cost_window_restore_envelope_chain_carry_identity
+        );
+        assert_eq!(
+            changed_restore.cost_window_restore_envelope_chain_distinct_state_count,
+            2
+        );
+        assert_eq!(
+            changed_restore.cost_window_restore_envelope_chain_carry_transition,
+            Some("advanced_cost_restore_envelope_carry")
+        );
     }
 }
