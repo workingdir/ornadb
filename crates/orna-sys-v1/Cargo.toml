@@ -1,10 +1,10 @@
 [package]
 name = "orna-sys-v1"
-version = "1.0.0"
+version = "1.1.0"
 edition = "2024"
 rust-version = "1.95"
 license = "Apache-2.0"
-description = "Bounded pre-effect admission for Orna 1.0 reflective invocation"
+description = "Final Orna 1.1.0 portable sys catalogue and bounded pre-effect admission"
 build = "build.rs"
 
 [features]
