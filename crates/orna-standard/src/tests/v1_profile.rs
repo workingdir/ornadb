@@ -7,6 +7,7 @@ use crate::{
     REFERENCE_STANDARD_MONEY_PATH_V1,
     REFERENCE_STANDARD_BITS_PATH_V1, REFERENCE_STANDARD_QUERY_PATH_V1,
     REFERENCE_STANDARD_TEXT_PATH_V1, REFERENCE_STANDARD_TEXT_BUILDER_PATH_V1,
+    REFERENCE_STANDARD_TEXT_LINES_PATH_V1,
     REFERENCE_STANDARD_STATS_PATH_V1,
     REFERENCE_STANDARD_TIME_PATH_V1,
     REFERENCE_STANDARD_TIME_CALENDAR_PATH_V1,
@@ -60,7 +61,7 @@ use crate::{
 #[test]
 fn pinned_ui_presentation_helpers_are_included_as_source() {
     let sources = reference_standard_sources_v1();
-    assert_eq!(sources.len(), 75);
+    assert_eq!(sources.len(), 76);
     assert_eq!(sources[49].0, REFERENCE_STANDARD_UI_PATH_V1);
     let parsed = orna_syntax_v1::parse_module_with_file(
         &sources[49].1,
@@ -327,6 +328,46 @@ fn pinned_iteration_and_traversal_utilities_are_included_and_typecheck() {
     assert!(parsed.is_ok(), "{path}: {:#?}", parsed.diagnostics);
     reference_standard_catalogue_v1()
         .expect("iteration utilities resolve in the captured standard catalogue");
+}
+
+#[test]
+fn pinned_text_line_utilities_are_included_and_typecheck() {
+    let sources = reference_standard_sources_v1();
+    let (index, (path, source)) = sources
+        .iter()
+        .enumerate()
+        .find(|(_, (path, _))| path == REFERENCE_STANDARD_TEXT_LINES_PATH_V1)
+        .expect("the pinned source bundle includes std.text.lines");
+    assert_eq!(index, 75, "text line utilities append without moving old sources");
+    assert_eq!(path, REFERENCE_STANDARD_TEXT_LINES_PATH_V1);
+    for declaration in [
+        "pub fn split(value: Str): [Str]",
+        "pub fn join(lines: [Str]): Str",
+        "pub fn count(value: Str): Int",
+        "pub fn normalise(value: Str): Str",
+    ] {
+        assert!(source.contains(declaration), "missing text line utility `{declaration}`");
+    }
+    for contract in [
+        "Empty text has no lines",
+        "LF, CRLF, and lone CR",
+        "terminal line breaks produce a final empty line",
+        "Joining uses LF",
+        "standardizing every recognized separator to one LF",
+    ] {
+        assert!(source.contains(contract), "missing text line contract `{contract}`");
+    }
+    let profile = reference_standard_profile_v1();
+    profile
+        .verify_source(path, source)
+        .expect("text line source bytes match the captured standard profile");
+    let mut changed_source = source.clone();
+    changed_source.push_str("\n// changed after profile capture\n");
+    assert!(profile.verify_source(path, &changed_source).is_err());
+    let parsed = orna_syntax_v1::parse_module_with_file(source, path);
+    assert!(parsed.is_ok(), "{path}: {:#?}", parsed.diagnostics);
+    reference_standard_catalogue_v1()
+        .expect("text line utilities resolve in the captured standard catalogue");
 }
 
 #[test]
@@ -2011,7 +2052,7 @@ fn reference_standard_uses_pinned_orna_1_source_and_resolves_its_imports() {
     ] {
         assert!(sources[33].1.contains(contract), "missing std.test contract `{contract}`");
     }
-    assert_eq!(sources.len(), 75);
+    assert_eq!(sources.len(), 76);
     assert_eq!(sources[49].0, REFERENCE_STANDARD_UI_PATH_V1);
     for declaration in [
         "pub fn Field<T>(label: Str, value: T): UI",
@@ -2473,7 +2514,7 @@ fn pinned_filesystem_effect_is_visible_to_consumers_and_forbidden_in_assertions(
 #[test]
 fn pinned_filesystem_path_and_metadata_modules_are_captured_and_typecheck() {
     let sources = reference_standard_sources_v1();
-    assert_eq!(sources.len(), 75);
+    assert_eq!(sources.len(), 76);
     for (index, path) in [
         (42, REFERENCE_STANDARD_IO_PATH_MODULE_PATH_V1),
         (43, REFERENCE_STANDARD_IO_METADATA_PATH_V1),
@@ -2537,7 +2578,7 @@ fn pinned_filesystem_path_and_metadata_modules_are_captured_and_typecheck() {
 #[test]
 fn pinned_io_buffer_module_is_captured_and_resolves_stream_adapters() {
     let sources = reference_standard_sources_v1();
-    assert_eq!(sources.len(), 75);
+    assert_eq!(sources.len(), 76);
     let (path, source) = sources
         .iter()
         .find(|(path, _)| path == REFERENCE_STANDARD_IO_BUFFER_PATH_V1)
@@ -2574,7 +2615,7 @@ fn pinned_io_buffer_module_is_captured_and_resolves_stream_adapters() {
 #[test]
 fn pinned_process_and_environment_modules_are_captured_and_typecheck() {
     let sources = reference_standard_sources_v1();
-    assert_eq!(sources.len(), 75);
+    assert_eq!(sources.len(), 76);
     for (index, path) in [
         (44, REFERENCE_STANDARD_IO_PROCESS_PATH_V1),
         (45, REFERENCE_STANDARD_IO_ENVIRONMENT_PATH_V1),
