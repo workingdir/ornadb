@@ -4804,6 +4804,10 @@ bfdd87bc8b2a29499393d2d09201b7c48ea05678a73dff922bd588873a3eaf65  crates/orna-st
 3d6a4794b86143294f9ee01fd86aaafcdbfbb2c21f12f87b0b35d4b887cde47e  crates/orna-storage-v1/tests/fixtures/git-history-replaced-row-after.orna
 bfdd87bc8b2a29499393d2d09201b7c48ea05678a73dff922bd588873a3eaf65  crates/orna-storage-v1/tests/fixtures/git-history-replaced-row-before.orna
 5c42917d34bc9160ecef4f00d9a10b3090b7c31b96e47a771bf053234b20cbbf  crates/orna-storage-v1/tests/fixtures/key-path-roundtrip-row.orna
+70e782d9804def40d45f21b622f780748e7892e110be42f32900d37daad18fb3  crates/orna-storage-v1/tests/fixtures/merge-budget-table-one-base.orna
+0186ec11e4500df4c45d077c0bc54530a27f35e03d2647275388c876c604875f  crates/orna-storage-v1/tests/fixtures/merge-budget-table-one-edit.orna
+e0bf5caf0a23c0157ac5d14ed6b6e9cd5b5d8d623ca1f067a4493ef87de5bc96  crates/orna-storage-v1/tests/fixtures/merge-budget-table-two-base.orna
+85b97f54ce9c7465565f19b7cb65228a91ca119e6dbe98f5c256560e96c956d7  crates/orna-storage-v1/tests/fixtures/merge-budget-table-two-edit.orna
 32ae785526aba403979519c0333c75cc51fee48986f87ac98ae650fa79dff742  crates/orna-storage-v1/tests/fixtures/merge-checkpoint-base.orna
 2c0dc38ab3084c2dda81ba9564e721f537a69e7606f96098709f9ffbf89caef8  crates/orna-storage-v1/tests/fixtures/merge-checkpoint-edited.orna
 ca65501ae11292e07954bd484d8ea18f9bd42b98aafcaed0ea9031ea882aadc4  crates/orna-storage-v1/tests/fixtures/merge-checkpoint-positionless-edited.orna
