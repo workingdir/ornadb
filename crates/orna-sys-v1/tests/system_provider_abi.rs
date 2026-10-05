@@ -5884,40 +5884,29 @@ fn provider_metadata_edges_preserve_generic_schema_and_dispatch_contracts() {
         "metadata dispatch preserves its generic value witness"
     );
 
-    let mut direct_abi_json: Value =
-        serde_json::from_str(system_provider_abi_json()).expect("generated ABI is valid JSON");
-    let direct_provider_id = ProviderId::new("fixture.metadata.direct").unwrap();
-    let role_rows = direct_abi_json["roles"]
-        .as_array_mut()
-        .expect("generated provider ABI has role rows");
-    let role_row = role_rows
-        .iter_mut()
-        .find(|row| row["name"] == role_name)
-        .expect("generated provider ABI contains the metadata role");
-    role_row["builtin_provider"] = Value::String(direct_provider_id.as_str().to_owned());
-    let direct_abi_json = direct_abi_json.to_string();
-    build_host::validate_json_against_schema(&direct_abi_json, &provider_schema)
-        .expect("directly bound metadata role remains schema-valid");
-    let direct_table = SystemProviderAbi::from_json(&direct_abi_json)
-        .expect("schema-validated direct metadata role parses into typed contracts");
-    let direct_role = direct_table.role(role_name).unwrap();
+    assert_eq!(
+        role_contract.builtin_provider.as_ref().map(ProviderId::as_str),
+        fixture["builtin_provider"].as_str()
+    );
+    assert!(role_contract.required);
+    assert!(!role_contract.replaceable);
     let direct_offer = ProviderOffer {
-        provider: direct_provider_id,
-        role: role.clone(),
-        version: direct_role.version,
-        effects: direct_role.effects.clone(),
-    };
-
-    let mut selected_registry = ProviderRoleRegistry::from_baked_abi(&table).unwrap();
-    let selected_offer = ProviderOffer {
-        provider: ProviderId::new("fixture.metadata.selected").unwrap(),
+        provider: role_contract
+            .builtin_provider
+            .clone()
+            .expect("sys.meta role has a baked provider"),
         role: role.clone(),
         version: role_contract.version,
         effects: role_contract.effects.clone(),
     };
-    selected_registry
-        .bind(selected_offer.clone())
-        .expect("replaceable metadata role accepts a compatible selected provider");
+
+    let selected_registry = ProviderRoleRegistry::from_baked_abi(&table)
+        .expect("required metadata role resolves its baked provider");
+    let selected_offer = selected_registry
+        .resolve(role_name)
+        .expect("selected metadata provider resolves from the registry")
+        .clone();
+    assert_eq!(selected_offer, direct_offer);
 
     let cases = fixture["cases"]
         .as_array()
@@ -6004,7 +5993,7 @@ fn provider_metadata_edges_preserve_generic_schema_and_dispatch_contracts() {
             response: Ok(expected_result.clone()),
             calls: AtomicUsize::new(0),
         };
-        let direct_result = direct_table
+        let direct_result = table
             .dispatch_to_provider(
                 operation_name,
                 &direct_provider,
@@ -6113,7 +6102,7 @@ fn provider_metadata_edges_preserve_generic_schema_and_dispatch_contracts() {
                 |_| Ok(()),
             )
         } else {
-            direct_table.dispatch_to_provider(
+            table.dispatch_to_provider(
                 operation_name,
                 &wrong_result_provider,
                 &[first_input.clone()],
@@ -6150,7 +6139,7 @@ fn provider_metadata_edges_preserve_generic_schema_and_dispatch_contracts() {
                 |_| Ok(()),
             )
         } else {
-            direct_table.dispatch_to_provider(
+                table.dispatch_to_provider(
                 operation_name,
                 &arity_provider,
                 &[],
@@ -6173,9 +6162,9 @@ fn provider_metadata_edges_preserve_generic_schema_and_dispatch_contracts() {
     assert_eq!(selected_routes, cases.len());
     assert_eq!(protected_inputs, 1);
     println!(
-        "provider_metadata_edge_parity operation={operation_name} cases={} protected_inputs={protected_inputs} schema_validations=3 direct_routes={direct_routes} selected_routes={selected_routes} result_type_mismatches={result_type_mismatches} argument_count_rejections={argument_count_rejections} total_cases={}",
+        "provider_metadata_edge_parity operation={operation_name} cases={} protected_inputs={protected_inputs} schema_validations=2 direct_routes={direct_routes} selected_routes={selected_routes} result_type_mismatches={result_type_mismatches} argument_count_rejections={argument_count_rejections} total_cases={}",
         cases.len(),
-        cases.len() * 2 + result_type_mismatches + argument_count_rejections + 3
+        cases.len() * 2 + result_type_mismatches + argument_count_rejections + 2
     );
 }
 
