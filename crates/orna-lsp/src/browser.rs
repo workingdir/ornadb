@@ -90,6 +90,19 @@ pub fn references(source: String, line: u32, character: u32, include_declaration
     ))
 }
 
+/// Returns document symbols for an Orna source module as an LSP JSON array.
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen::prelude::wasm_bindgen)]
+pub fn document_symbols(source: String) -> String {
+    let document = document(source);
+    let parsed = parse_document(&document);
+    let mapper = PositionMapper::new(&document.text);
+    json(&analysis::document_symbols(
+        &parsed,
+        &document.text,
+        &mapper,
+    ))
+}
+
 /// Returns signature help from the existing LSP signature implementation.
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen::prelude::wasm_bindgen)]
 pub fn signature_help(source: String, line: u32, character: u32) -> String {
@@ -136,7 +149,8 @@ pub fn inlay_hints(
 #[cfg(test)]
 mod tests {
     use super::{
-        completions, definition, diagnostics, hover, inlay_hints, references, signature_help,
+        completions, definition, diagnostics, document_symbols as browser_document_symbols, hover,
+        inlay_hints, references, signature_help,
     };
 
     const SOURCE: &str = include_str!("browser/fixtures/browser-intelligence.orna");
@@ -148,6 +162,10 @@ mod tests {
     const STANDARD_INLAY_SOURCE: &str = include_str!("browser/fixtures/standard-inlay-hints.orna");
     const STANDARD_NAVIGATION_SOURCE: &str =
         include_str!("browser/fixtures/standard-definition-references.orna");
+    const STANDARD_SYMBOL_SOURCE: &str =
+        include_str!("browser/fixtures/standard-document-symbols.orna");
+    const NESTED_STANDARD_SYMBOL_SOURCE: &str =
+        include_str!("browser/fixtures/standard-document-symbols-nested.orna");
 
     fn position(source: &str, byte: usize) -> (u32, u32) {
         let prefix = &source[..byte];
@@ -444,6 +462,41 @@ mod tests {
                 .iter()
                 .all(|location| location["uri"] == "file:///playground/main.orna")
         );
+    }
+
+    #[test]
+    fn browser_document_symbols_preserve_standard_declarations_and_source_ranges() {
+        for (source, expected_names) in [
+            (STANDARD_SYMBOL_SOURCE, vec!["increment", "clamp"]),
+            (NESTED_STANDARD_SYMBOL_SOURCE, vec!["split", "count"]),
+        ] {
+            let response: serde_json::Value =
+                serde_json::from_str(&browser_document_symbols(source.to_owned()))
+                    .expect("document symbols JSON");
+            let symbols = response.as_array().expect("document symbol list");
+            assert_eq!(
+                symbols
+                    .iter()
+                    .map(|symbol| symbol["name"].as_str().expect("symbol name"))
+                    .collect::<Vec<_>>(),
+                expected_names
+            );
+            for symbol in symbols {
+                assert_eq!(symbol["kind"], 12, "LSP function symbol kind");
+                assert!(!symbol["detail"].as_str().unwrap_or_default().is_empty());
+                let selection = &symbol["selectionRange"];
+                let line_number =
+                    selection["start"]["line"].as_u64().expect("selection line") as usize;
+                let start = selection["start"]["character"]
+                    .as_u64()
+                    .expect("selection start") as usize;
+                let end = selection["end"]["character"]
+                    .as_u64()
+                    .expect("selection end") as usize;
+                let line = source.lines().nth(line_number).expect("symbol source line");
+                assert_eq!(&line[start..end], symbol["name"].as_str().unwrap());
+            }
+        }
     }
 
     #[test]

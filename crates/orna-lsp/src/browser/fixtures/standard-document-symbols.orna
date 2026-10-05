@@ -1,0 +1,6 @@
+/// Returns the exact successor of a value.
+pub fn increment(value: Int): Int = value + 1;
+
+/// Bounds a value to the inclusive interval.
+pub fn clamp(value: Int, lower: Int, upper: Int): Int =
+    if value < lower { lower } else { if value > upper { upper } else { value } };

@@ -34,6 +34,23 @@ export interface InlayHintFields {
   paddingRight?: boolean;
 }
 
+export interface MonacoSymbolRangeFields {
+  startLineNumber: number;
+  startColumn: number;
+  endLineNumber: number;
+  endColumn: number;
+}
+
+export interface DocumentSymbolFields {
+  name: string;
+  detail: string;
+  kind: number;
+  tags: number[];
+  range: MonacoSymbolRangeFields;
+  selectionRange: MonacoSymbolRangeFields;
+  children: DocumentSymbolFields[];
+}
+
 export function completionRankingFields(value: Record<string, unknown>): CompletionRankingFields {
   const fields: CompletionRankingFields = {};
   if (typeof value.sortText === 'string') fields.sortText = value.sortText;
@@ -125,5 +142,61 @@ export function inlayHintFields(value: unknown): InlayHintFields[] {
     if (typeof hint.paddingLeft === 'boolean') mapped.paddingLeft = hint.paddingLeft;
     if (typeof hint.paddingRight === 'boolean') mapped.paddingRight = hint.paddingRight;
     return [mapped];
+  });
+}
+
+function record(value: unknown): Record<string, unknown> | undefined {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : undefined;
+}
+
+function symbolRangeFields(value: unknown): MonacoSymbolRangeFields | undefined {
+  const range = record(value);
+  const start = record(range?.start);
+  const end = record(range?.end);
+  if (!start || !end) return undefined;
+  const coordinates = [start.line, start.character, end.line, end.character];
+  if (!coordinates.every((coordinate) => Number.isInteger(coordinate) && Number(coordinate) >= 0)) {
+    return undefined;
+  }
+  return {
+    startLineNumber: Number(start.line) + 1,
+    startColumn: Number(start.character) + 1,
+    endLineNumber: Number(end.line) + 1,
+    endColumn: Number(end.character) + 1,
+  };
+}
+
+function documentSymbol(value: unknown): DocumentSymbolFields | undefined {
+  const symbol = record(value);
+  if (!symbol || typeof symbol.name !== 'string'
+    || typeof symbol.kind !== 'number' || !Number.isInteger(symbol.kind)
+    || symbol.kind < 1 || symbol.kind > 26) return undefined;
+  const range = symbolRangeFields(symbol.range);
+  const selectionRange = symbolRangeFields(symbol.selectionRange);
+  if (!range || !selectionRange) return undefined;
+  const children = Array.isArray(symbol.children)
+    ? symbol.children.flatMap((child) => {
+      const mapped = documentSymbol(child);
+      return mapped ? [mapped] : [];
+    })
+    : [];
+  return {
+    name: symbol.name,
+    detail: typeof symbol.detail === 'string' ? symbol.detail : '',
+    kind: symbol.kind - 1,
+    tags: Array.isArray(symbol.tags) ? symbol.tags.filter((tag): tag is number => tag === 1) : [],
+    range,
+    selectionRange,
+    children,
+  };
+}
+
+export function documentSymbolFields(value: unknown): DocumentSymbolFields[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((entry) => {
+    const mapped = documentSymbol(entry);
+    return mapped ? [mapped] : [];
   });
 }

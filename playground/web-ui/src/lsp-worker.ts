@@ -1,4 +1,4 @@
-type Action = 'diagnostics' | 'completions' | 'hover' | 'definition' | 'references' | 'signature_help' | 'inlay_hints';
+type Action = 'diagnostics' | 'completions' | 'hover' | 'definition' | 'references' | 'document_symbols' | 'signature_help' | 'inlay_hints';
 type Position = { line: number; character: number };
 type Request = {
   id: number;
@@ -16,6 +16,7 @@ type OrnaLspModule = {
   hover: (source: string, line: number, character: number) => string;
   definition: (source: string, line: number, character: number) => string;
   references: (source: string, line: number, character: number, includeDeclaration: boolean) => string;
+  document_symbols: (source: string) => string;
   signature_help: (source: string, line: number, character: number) => string;
   inlay_hints: (
     source: string,
@@ -63,6 +64,9 @@ workerScope.addEventListener('message', async ({ data }) => {
         break;
       case 'references':
         serialized = lsp.references(data.source, line, character, data.includeDeclaration ?? false);
+        break;
+      case 'document_symbols':
+        serialized = lsp.document_symbols(data.source);
         break;
       case 'signature_help':
         serialized = lsp.signature_help(data.source, line, character);

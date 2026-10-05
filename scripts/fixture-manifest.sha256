@@ -3232,6 +3232,8 @@ cc65b25177b4a62dfcef28ef1da7fe88ca7bf533e227285882d13eb032405b36  crates/orna-ls
 7448019e1215ea705ad3416bc881c489dfcc1720400162ff0b5ef39c83acfeff  crates/orna-lsp/src/browser/fixtures/browser-intelligence.orna
 9217afe5354b9d31db8467723528fc99b7ca08977dd1d0d0e82677e9853e472f  crates/orna-lsp/src/browser/fixtures/standard-completion-ranking.orna
 da6ad46340105608940dc6649ea41a03caad041c5d9a0a28d92a3e653de6f471  crates/orna-lsp/src/browser/fixtures/standard-definition-references.orna
+4295d957bba64ad74a7acb9585fb701262d7911b1bd8f7ccc16f69bd80a5edf9  crates/orna-lsp/src/browser/fixtures/standard-document-symbols-nested.orna
+4063030231f779b16310242bd2d02b15fca48126ce1c15664a39ca35992d7c1d  crates/orna-lsp/src/browser/fixtures/standard-document-symbols.orna
 11aa3d9691dc679777f093cf3ae7369ccb8b4b9160a235cb6894fb8a5bed840d  crates/orna-lsp/src/browser/fixtures/standard-inlay-hints.orna
 02f372407ed86c6c12d749f66890dbb378cd4a08201cec7ea64af6ee0bdc2dd0  crates/orna-lsp/src/browser/fixtures/standard-signature-help.orna
 f4e8d5cfdb20469a0205e848d75d377e63d3b54ad383d005ce0959d27b277110  crates/orna-lsp/tests/fixtures/accepted-corpus.txt

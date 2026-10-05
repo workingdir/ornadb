@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import { completionRankingFields, hoverMarkdown, inlayHintFields, signatureHelpFields } from './assist-adapter';
+import {
+  completionRankingFields,
+  documentSymbolFields,
+  hoverMarkdown,
+  inlayHintFields,
+  signatureHelpFields,
+} from './assist-adapter';
 
 describe('LSP completion ranking adapter', () => {
   it('preserves backend ordering and preselection for Monaco', () => {
@@ -125,5 +131,54 @@ describe('LSP inlay hint adapter', () => {
       position: { line: 0, character: 1 },
       label: [{ label: 'T', tooltip: 'type detail' }],
     }]);
+  });
+});
+
+describe('LSP document symbol adapter', () => {
+  it('maps standard declarations, kinds, hierarchy, and exact Monaco ranges', () => {
+    expect(documentSymbolFields([{
+      name: 'lines',
+      kind: 3,
+      range: { start: { line: 0, character: 0 }, end: { line: 4, character: 1 } },
+      selectionRange: { start: { line: 0, character: 4 }, end: { line: 0, character: 9 } },
+      children: [{
+        name: 'split',
+        detail: 'pub fn split(value: Str): [Str]',
+        kind: 12,
+        tags: [1],
+        range: { start: { line: 2, character: 0 }, end: { line: 2, character: 45 } },
+        selectionRange: { start: { line: 2, character: 7 }, end: { line: 2, character: 12 } },
+      }],
+    }])).toEqual([{
+      name: 'lines',
+      detail: '',
+      kind: 2,
+      tags: [],
+      range: { startLineNumber: 1, startColumn: 1, endLineNumber: 5, endColumn: 2 },
+      selectionRange: { startLineNumber: 1, startColumn: 5, endLineNumber: 1, endColumn: 10 },
+      children: [{
+        name: 'split',
+        detail: 'pub fn split(value: Str): [Str]',
+        kind: 11,
+        tags: [1],
+        range: { startLineNumber: 3, startColumn: 1, endLineNumber: 3, endColumn: 46 },
+        selectionRange: { startLineNumber: 3, startColumn: 8, endLineNumber: 3, endColumn: 13 },
+        children: [],
+      }],
+    }]);
+  });
+
+  it('drops malformed symbols and invalid ranges', () => {
+    expect(documentSymbolFields([
+      { name: 'missing ranges', kind: 12 },
+      {
+        name: 'negative range',
+        kind: 12,
+        range: { start: { line: -1, character: 0 }, end: { line: 0, character: 1 } },
+        selectionRange: { start: { line: 0, character: 0 }, end: { line: 0, character: 1 } },
+      },
+      { name: 3, kind: 12 },
+    ])).toEqual([]);
+    expect(documentSymbolFields(null)).toEqual([]);
   });
 });

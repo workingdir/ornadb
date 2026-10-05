@@ -4,6 +4,7 @@ import '../node_modules/monaco-editor/min/vs/editor/editor.main.css';
 import { loadOrnaEditorConfig, registerOrnaLanguage } from './language';
 import {
   completionRankingFields,
+  documentSymbolFields,
   hoverMarkdown,
   inlayHintFields,
   signatureHelpFields,
@@ -20,7 +21,7 @@ import { startStyleReload } from './style-reload';
 import './theme.css';
 import './layout.css';
 
-type LspAction = 'diagnostics' | 'completions' | 'hover' | 'definition' | 'references' | 'signature_help' | 'inlay_hints';
+type LspAction = 'diagnostics' | 'completions' | 'hover' | 'definition' | 'references' | 'document_symbols' | 'signature_help' | 'inlay_hints';
 type Position = { line: number; character: number };
 type DocumentRange = { start: Position; end: Position };
 type LspReply = { id: number; value?: unknown; error?: string };
@@ -163,6 +164,35 @@ function completionKind(kind: unknown): monaco.languages.CompletionItemKind | un
   if (typeof kind !== 'number' || !Number.isInteger(kind) || kind < 1 || kind > 25) return undefined;
   return (kind - 1) as monaco.languages.CompletionItemKind;
 }
+
+monaco.languages.registerDocumentSymbolProvider('orna', {
+  displayName: 'Orna document symbols',
+  async provideDocumentSymbols(model, token) {
+    if (token.isCancellationRequested) return [];
+    const response = await requestLsp('document_symbols', model.getValue());
+    if (token.isCancellationRequested) return [];
+    const toMonacoSymbol = (symbol: ReturnType<typeof documentSymbolFields>[number]): monaco.languages.DocumentSymbol => ({
+      name: symbol.name,
+      detail: symbol.detail,
+      kind: symbol.kind as monaco.languages.SymbolKind,
+      tags: symbol.tags.map(() => monaco.languages.SymbolTag.Deprecated),
+      range: new monaco.Range(
+        symbol.range.startLineNumber,
+        symbol.range.startColumn,
+        symbol.range.endLineNumber,
+        symbol.range.endColumn,
+      ),
+      selectionRange: new monaco.Range(
+        symbol.selectionRange.startLineNumber,
+        symbol.selectionRange.startColumn,
+        symbol.selectionRange.endLineNumber,
+        symbol.selectionRange.endColumn,
+      ),
+      ...(symbol.children.length > 0 ? { children: symbol.children.map(toMonacoSymbol) } : {}),
+    });
+    return documentSymbolFields(response).map(toMonacoSymbol);
+  },
+});
 
 monaco.languages.registerCompletionItemProvider('orna', {
   triggerCharacters: ['.', '('],

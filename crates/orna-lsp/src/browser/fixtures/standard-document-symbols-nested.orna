@@ -1,0 +1,8 @@
+use std.collection as collection;
+use std.text as text;
+
+/// Splits text into logical lines.
+pub fn split(value: Str): [Str] = text.split(value, "");
+
+/// Counts logical lines.
+pub fn count(value: Str): Int = collection.count(split(value));

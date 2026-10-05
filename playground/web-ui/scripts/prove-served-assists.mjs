@@ -73,6 +73,21 @@ const standardSource = await get('/playground/assets/stdlib/std/math.orna');
 assert.match(standardSource.headers.get('content-type') ?? '', /text\/plain/);
 const standardText = await standardSource.text();
 assert.match(standardText, /pub fn increment\(value: Int\)/);
+const mathSymbols = JSON.parse(lsp.document_symbols(standardText));
+assert.ok(mathSymbols.some(({ name, kind }) => name === 'increment' && kind === 12));
+assert.ok(mathSymbols.some(({ name, kind }) => name === 'clamp' && kind === 12));
+for (const symbol of mathSymbols) {
+  const symbolLine = standardText.split(/\r?\n/)[symbol.selectionRange.start.line];
+  assert.equal(
+    symbolLine.slice(symbol.selectionRange.start.character, symbol.selectionRange.end.character),
+    symbol.name,
+    `standard document symbol range for ${symbol.name}`,
+  );
+}
+const nestedSource = await get('/playground/assets/stdlib/std/text/lines.orna');
+assert.match(nestedSource.headers.get('content-type') ?? '', /text\/plain/);
+const nestedSymbols = JSON.parse(lsp.document_symbols(await nestedSource.text()));
+assert.deepEqual(nestedSymbols.map(({ name }) => name), ['split', 'join', 'count', 'normalise']);
 const declarationLine = standardText.split(/\r?\n/)[definition.range.start.line];
 assert.equal(
   declarationLine.slice(definition.range.start.character, definition.range.end.character),
@@ -232,4 +247,5 @@ console.log('served WASM hover: std.math.increment signature and documentation v
 console.log('served WASM signature help: std.math.clamp active upper parameter and hints verified');
 console.log('served WASM inlay hints: imported and qualified std calls plus inferred result type verified');
 console.log('served WASM definition/references: DB standard source, imported and qualified calls, and local shadowing verified');
+console.log('served WASM document symbols: root and nested DB standard modules have exact symbol ranges');
 console.log('concurrent served WASM inlay sessions: independent labels and source positions verified');
