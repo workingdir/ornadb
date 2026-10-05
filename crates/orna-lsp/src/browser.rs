@@ -3,7 +3,7 @@
 //! The web worker owns transport and Monaco adapts LSP-shaped JSON to its
 //! provider interfaces. Parsing and language features remain in `analysis`.
 
-use lsp_types::{Position, Uri};
+use lsp_types::{Position, Range, Uri};
 use serde::Serialize;
 
 use crate::{
@@ -75,9 +75,38 @@ pub fn signature_help(source: String, line: u32, character: u32) -> String {
     ))
 }
 
+/// Returns inlay hints for the requested document range as an LSP JSON array.
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen::prelude::wasm_bindgen)]
+pub fn inlay_hints(
+    source: String,
+    start_line: u32,
+    start_character: u32,
+    end_line: u32,
+    end_character: u32,
+) -> String {
+    let document = document(source);
+    let parsed = parse_document(&document);
+    let mapper = PositionMapper::new(&document.text);
+    json(&crate::inlay::inlay_hints(
+        &parsed,
+        &document.text,
+        &mapper,
+        &Range {
+            start: Position {
+                line: start_line,
+                character: start_character,
+            },
+            end: Position {
+                line: end_line,
+                character: end_character,
+            },
+        },
+    ))
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{completions, diagnostics, hover, signature_help};
+    use super::{completions, diagnostics, hover, inlay_hints, signature_help};
 
     const SOURCE: &str = include_str!("browser/fixtures/browser-intelligence.orna");
     const STANDARD_SOURCE: &str = include_str!("analysis/fixtures/standard-math-import.orna");
@@ -85,6 +114,7 @@ mod tests {
         include_str!("browser/fixtures/standard-completion-ranking.orna");
     const STANDARD_SIGNATURE_SOURCE: &str =
         include_str!("browser/fixtures/standard-signature-help.orna");
+    const STANDARD_INLAY_SOURCE: &str = include_str!("browser/fixtures/standard-inlay-hints.orna");
 
     fn position(source: &str, byte: usize) -> (u32, u32) {
         let prefix = &source[..byte];
@@ -268,5 +298,50 @@ mod tests {
         assert_eq!(parameters[0]["label"], "value: Int");
         assert_eq!(parameters[1]["label"], "lower: Int");
         assert_eq!(parameters[2]["label"], "upper: Int");
+    }
+
+    #[test]
+    fn browser_standard_inlay_hints_cover_imported_and_qualified_calls() {
+        let (end_line, end_character) =
+            position(STANDARD_INLAY_SOURCE, STANDARD_INLAY_SOURCE.len());
+        let hints: serde_json::Value = serde_json::from_str(&inlay_hints(
+            STANDARD_INLAY_SOURCE.to_owned(),
+            0,
+            0,
+            end_line,
+            end_character,
+        ))
+        .expect("standard inlay hints JSON");
+        let hints = hints.as_array().expect("inlay hint list");
+        let labels = hints
+            .iter()
+            .map(|hint| hint["label"].as_str().expect("hint label"))
+            .collect::<Vec<_>>();
+        assert!(labels.contains(&": Int"), "{labels:?}");
+        assert!(labels.contains(&"value: "), "{labels:?}");
+        assert!(labels.contains(&"lower: "), "{labels:?}");
+        assert!(labels.contains(&"upper: "), "{labels:?}");
+
+        let qualified_start = STANDARD_INLAY_SOURCE
+            .find("std.math.clamp(value, lower, upper)")
+            .expect("qualified clamp call");
+        let qualified_end = qualified_start + "std.math.clamp(value, lower, upper)".len();
+        let (start_line, start_character) = position(STANDARD_INLAY_SOURCE, qualified_start);
+        let (end_line, end_character) = position(STANDARD_INLAY_SOURCE, qualified_end);
+        let ranged: serde_json::Value = serde_json::from_str(&inlay_hints(
+            STANDARD_INLAY_SOURCE.to_owned(),
+            start_line,
+            start_character,
+            end_line,
+            end_character,
+        ))
+        .expect("qualified call inlay hints JSON");
+        let ranged_labels = ranged
+            .as_array()
+            .expect("qualified call hints")
+            .iter()
+            .map(|hint| hint["label"].as_str().expect("hint label"))
+            .collect::<Vec<_>>();
+        assert_eq!(ranged_labels, ["value: ", "lower: ", "upper: "]);
     }
 }
