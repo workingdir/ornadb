@@ -494,6 +494,17 @@ fn bounded_spill_chain_restore_envelope_preserves_unknowns_and_requires_restore_
             "paired_bounded_window_spill_chain_window_restore_envelope_estimated_bytes"
         )
     );
+    assert!(
+        unknown.details().contains_key(
+            "paired_bounded_window_spill_chain_window_restore_envelope_carry_identity"
+        )
+    );
+    assert!(
+        integer(
+            unknown,
+            "paired_bounded_window_spill_chain_window_restore_envelope_carry_state_count"
+        ) > 0
+    );
 
     let no_restore = plan(
         5_000,
@@ -513,6 +524,11 @@ fn bounded_spill_chain_restore_envelope_preserves_unknowns_and_requires_restore_
     assert!(
         !project(&no_restore).details().contains_key(
             "paired_bounded_window_spill_chain_window_restore_envelope_fold_identity"
+        )
+    );
+    assert!(
+        !project(&no_restore).details().contains_key(
+            "paired_bounded_window_spill_chain_window_restore_envelope_carry_identity"
         )
     );
 
@@ -535,5 +551,166 @@ fn bounded_spill_chain_restore_envelope_preserves_unknowns_and_requires_restore_
         !project(&unbounded_only).details().contains_key(
             "paired_bounded_window_spill_chain_window_restore_envelope_fold_identity"
         )
+    );
+    assert!(
+        !project(&unbounded_only).details().contains_key(
+            "paired_bounded_window_spill_chain_window_restore_envelope_carry_identity"
+        )
+    );
+}
+
+#[test]
+fn bounded_spill_restore_envelope_carry_binds_distinct_ancestry_states_8192() {
+    let parsed = orna_syntax_v1::parse_module(FIXTURE);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+    assert_eq!(parsed.value.items.len(), 2);
+
+    let baseline = plan(
+        5_000,
+        8_000,
+        false,
+        "checkpoint:restore-v1",
+        true,
+        true,
+        false,
+        true,
+    );
+    let no_tail = plan(
+        5_000,
+        8_000,
+        false,
+        "checkpoint:restore-v1",
+        true,
+        false,
+        false,
+        true,
+    );
+    let reordered = plan(
+        5_000,
+        8_000,
+        false,
+        "checkpoint:restore-v1",
+        true,
+        true,
+        true,
+        true,
+    );
+    let changed_spill = plan(
+        5_001,
+        8_000,
+        false,
+        "checkpoint:restore-v1",
+        true,
+        true,
+        false,
+        true,
+    );
+    let changed_restore = plan(
+        5_000,
+        8_000,
+        false,
+        "checkpoint:restore-v2",
+        true,
+        true,
+        false,
+        true,
+    );
+
+    let baseline = project(&baseline);
+    let carry_identity_key =
+        "paired_bounded_window_spill_chain_window_restore_envelope_carry_identity";
+    let carry_source_key =
+        "paired_bounded_window_spill_chain_window_restore_envelope_carry_source_identity";
+    let carry_state_count_key =
+        "paired_bounded_window_spill_chain_window_restore_envelope_carry_state_count";
+    let direct_restore_key =
+        "paired_bounded_window_spill_chain_window_restore_envelope_restore_envelope_fold_identity";
+    let spill_window_key =
+        "paired_bounded_window_spill_chain_window_restore_envelope_spill_window_fold_identity";
+    let bounded_fold_key =
+        "paired_bounded_window_spill_chain_window_restore_envelope_fold_identity";
+
+    assert!(
+        text(baseline, carry_identity_key)
+            .starts_with("paired-bounded-window-spill-chain-window-restore-envelope-carry:")
+    );
+    assert!(
+        text(baseline, carry_source_key)
+            .starts_with("paired-window-cost-restoration-cost-window-restore-envelope-carry-fold:")
+    );
+    assert_eq!(
+        text(
+            baseline,
+            "paired_bounded_window_spill_chain_window_restore_envelope_carry_policy"
+        ),
+        "bind_bounded_spill_state_to_distinct_cost_restore_envelope_states"
+    );
+
+    let no_tail = project(&no_tail);
+    assert_eq!(
+        text(baseline, bounded_fold_key),
+        text(no_tail, bounded_fold_key),
+        "family 62's exact spill and direct restore components remain stable across a sparse tail"
+    );
+    assert_eq!(
+        text(baseline, direct_restore_key),
+        text(no_tail, direct_restore_key)
+    );
+    assert_ne!(
+        text(baseline, carry_identity_key),
+        text(no_tail, carry_identity_key),
+        "the new carry identity binds the sparse join's distinct cost/restore state"
+    );
+    assert_eq!(
+        integer(baseline, carry_state_count_key),
+        integer(no_tail, carry_state_count_key) + 1
+    );
+
+    let reordered = project(&reordered);
+    assert_eq!(
+        text(baseline, carry_identity_key),
+        text(reordered, carry_identity_key),
+        "descriptor ordering does not rewrite the carried bounded identity"
+    );
+    assert_eq!(
+        integer(baseline, carry_state_count_key),
+        integer(reordered, carry_state_count_key)
+    );
+
+    let changed_spill = project(&changed_spill);
+    assert_ne!(
+        text(baseline, spill_window_key),
+        text(changed_spill, spill_window_key)
+    );
+    assert_eq!(
+        text(baseline, direct_restore_key),
+        text(changed_spill, direct_restore_key),
+        "the direct restore envelope excludes spill budgets"
+    );
+    assert_ne!(
+        text(baseline, carry_identity_key),
+        text(changed_spill, carry_identity_key)
+    );
+    assert_eq!(
+        integer(baseline, carry_state_count_key),
+        integer(changed_spill, carry_state_count_key)
+    );
+
+    let changed_restore = project(&changed_restore);
+    assert_eq!(
+        text(baseline, spill_window_key),
+        text(changed_restore, spill_window_key)
+    );
+    assert_ne!(
+        text(baseline, direct_restore_key),
+        text(changed_restore, direct_restore_key)
+    );
+    assert_ne!(
+        text(baseline, carry_identity_key),
+        text(changed_restore, carry_identity_key)
+    );
+    assert_eq!(
+        integer(baseline, carry_state_count_key),
+        integer(changed_restore, carry_state_count_key)
     );
 }
