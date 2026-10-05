@@ -1476,7 +1476,7 @@ mod graph_bridge_tests {
     }
 
     #[test]
-    fn captured_ogb2_closure_is_admitted_through_committed_orp_row() {
+    fn captured_ogb2_protected_pin_is_admitted_through_committed_orp_row() {
         let directory = repository();
         let root = directory.path();
         let relation_id = [0x73; 16];
@@ -1503,10 +1503,14 @@ mod graph_bridge_tests {
         let pin = graph
             .protect_captured_blob(candidate, &write_scope)
             .expect("verify and durably protect the OGB-2 closure");
-        let transfer = pin.transfer_record();
-        let identity = transfer.content_identity();
-        let descriptor_oid = transfer.descriptor_oid().clone();
+        let binding = graph
+            .accept_protected_blob_pin(pin)
+            .expect("accept the durable pin as a canonical ORP Blob binding");
+        let identity = binding.content_identity();
+        let descriptor_oid = binding.descriptor_oid().clone();
+        let transfer = binding.transfer_record();
         assert_eq!(identity, crate::blob_store::digest_bytes(&payload));
+        assert_eq!(transfer.content_identity(), identity);
 
         let algorithm = writing_context
             .validate_store_root()
@@ -1514,18 +1518,7 @@ mod graph_bridge_tests {
             .oid
             .algorithm();
         let mut stored_fields = vec![0x81];
-        cbor_head(&mut stored_fields, 6, 60111);
-        cbor_head(&mut stored_fields, 4, 5);
-        cbor_head(&mut stored_fields, 0, identity.length());
-        cbor_bytes(&mut stored_fields, &identity.sha256());
-        cbor_head(
-            &mut stored_fields,
-            3,
-            b"application/octet-stream".len() as u64,
-        );
-        stored_fields.extend_from_slice(b"application/octet-stream");
-        stored_fields.push(0xf6);
-        cbor_bytes(&mut stored_fields, descriptor_oid.as_bytes());
+        stored_fields.extend_from_slice(binding.encoded_value());
 
         let row_root = write_native_node(
             root,
