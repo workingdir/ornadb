@@ -45,6 +45,7 @@ const PROVIDER_SCHEMA_CAPTURE_EDGE_FIXTURE: &str =
     include_str!("fixtures/provider-schema-capture-edges.json");
 const PROVIDER_FUNCTION_REFERENCE_EDGE_FIXTURE: &str =
     include_str!("fixtures/provider-function-reference-edges.json");
+const PROVIDER_CANCEL_EDGE_FIXTURE: &str = include_str!("fixtures/provider-cancel-edges.json");
 
 fn resolve_type(ty: &TypeExpr) -> Result<AbiType, String> {
     match ty {
@@ -2295,6 +2296,87 @@ fn generated_provider_promise_callback_binding_matches_schema_and_idl() {
         "generated_provider_promise_callback_binding_parity operations={} schema_validated=1 schema_rows={schema_rows} typed_contracts={typed_contracts} macro_bindings={macro_bindings} idl_operations={idl_operations} handle_result_pairs=1 completion_callback=1 total_cases={}",
         OPERATIONS.len(),
         1 + schema_rows + typed_contracts + macro_bindings + idl_operations + 3
+    );
+}
+
+#[test]
+fn generated_provider_cancel_binding_matches_schema_and_idl() {
+    const OPERATION: &str = "sys.cancel";
+
+    let fixture: Value = serde_json::from_str(PROVIDER_CANCEL_EDGE_FIXTURE)
+        .expect("crate-local provider cancellation fixture is valid JSON");
+    assert_eq!(fixture["operation"], OPERATION);
+    let generated_schema = build_provider::generate_provider_registry_schema()
+        .expect("provider cancellation schema regenerates from its typed source");
+    assert_eq!(generated_schema, system_provider_abi_schema_json());
+    build_host::validate_json_against_schema(system_provider_abi_json(), &generated_schema)
+        .expect("embedded cancellation operation conforms to the regenerated provider schema");
+
+    let registry = orna_sys_v1::SystemProviderAbi::from_json(system_provider_abi_json())
+        .expect("schema-validated cancellation registry parses into typed contracts");
+    let contract = registry
+        .operation(OPERATION)
+        .expect("generic cancellation operation exists in the typed provider registry");
+    let descriptor = system_function_descriptor(OPERATION)
+        .expect("cancellation operation has a macro-generated descriptor");
+    assert_eq!(descriptor.signature, contract.signature.source);
+    assert_eq!(contract.effects.iter().next(), Some(descriptor.effect));
+    assert!(contract.role.is_some());
+    assert_eq!(
+        contract
+            .signature
+            .parameters
+            .iter()
+            .map(|parameter| parameter.name.as_str())
+            .collect::<Vec<_>>(),
+        ["invocation", "reason"]
+    );
+    assert_eq!(
+        contract.signature.parameters[0].ty.canonical(),
+        "sys.InvocationHandle<T>"
+    );
+    assert_eq!(
+        contract.signature.parameters[1].ty.canonical(),
+        fixture["reason_type"]
+            .as_str()
+            .expect("fixture reason type")
+    );
+    assert_eq!(
+        contract.signature.parameters[1].default.as_deref(),
+        Some("null")
+    );
+    assert_eq!(
+        contract.signature.result.canonical(),
+        fixture["result_type"]
+            .as_str()
+            .expect("fixture result type")
+    );
+
+    let source = system_binding_stubs();
+    let parsed = parse_module(source);
+    assert!(
+        parsed.is_ok(),
+        "generated cancellation binding bundle parses: {:?}",
+        parsed.diagnostics
+    );
+    let marker = format!("// sys-op: {OPERATION}");
+    let declaration = source
+        .split("\n\n")
+        .find(|declaration| declaration.lines().any(|line| line == marker))
+        .expect("generated binding bundle contains the cancellation operation");
+    validate_stub_contract(declaration, contract)
+        .unwrap_or_else(|error| panic!("cancellation binding parity: {error}"));
+    let cases = fixture["cases"]
+        .as_array()
+        .expect("cancellation fixture has edge cases");
+    assert_eq!(cases.len(), 5);
+    assert!(cases.iter().all(|case| {
+        case["accepted"].as_bool() == Some(case["reason_type"].as_str() == Some("Str?"))
+    }));
+    println!(
+        "generated_provider_cancel_binding_parity operation={OPERATION} cases={} schema_validated=1 typed_contract=1 macro_binding=1 generated_stub=1 handle_type=sys.InvocationHandle<T> reason_default=null result_type=Bool total_cases={}",
+        cases.len(),
+        cases.len() + contract.signature.parameters.len() + 6
     );
 }
 
