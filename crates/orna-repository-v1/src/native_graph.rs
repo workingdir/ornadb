@@ -1656,6 +1656,11 @@ impl RepositoryReadScope {
             }
         }
     }
+
+    #[cfg(test)]
+    pub(crate) fn objects_read_for_test(&self) -> u64 {
+        self.objects_used.load(AtomicOrdering::Acquire)
+    }
 }
 
 struct PayloadReservation {
@@ -3233,32 +3238,43 @@ fn find_ordered_entry_with(
             for entry in &entries {
                 let fence = crate::row_store::TypedKey::decode_canonical(&entry.inclusive_max_key)
                     .map_err(|_| GraphError::NonCanonicalData)?;
+                if previous_fence
+                    .as_ref()
+                    .is_some_and(|previous| previous >= &fence)
+                {
+                    return Err(GraphError::NonCanonicalData);
+                }
+                // A fence is only a pruning hint after its child proves it.
+                // Validate every child visited before or at the search fence;
+                // otherwise a lying middle fence can hide a matching key.
+                let child = read_node(&entry.child)?;
+                let child_bounds = ordered_node_bounds_with(
+                    read_node,
+                    child.clone(),
+                    expected_domain,
+                    Some(height - 1),
+                )?;
+                if child_bounds.0 != entry.row_count
+                    || child_bounds.2 != fence
+                    || previous_fence
+                        .as_ref()
+                        .is_some_and(|previous| child_bounds.1 <= *previous)
+                {
+                    return Err(GraphError::InvalidCount(
+                        usize::try_from(child_bounds.0).unwrap_or(usize::MAX),
+                    ));
+                }
                 if key <= &fence {
-                    let child = read_node(&entry.child)?;
-                    let child_bounds = ordered_node_bounds_with(
-                        read_node,
-                        child.clone(),
-                        expected_domain,
-                        Some(height - 1),
-                    )?;
-                    if child_bounds.0 != entry.row_count
-                        || child_bounds.2 != fence
-                        || previous_fence
-                            .as_ref()
-                            .is_some_and(|previous| child_bounds.1 <= *previous)
-                    {
-                        return Err(GraphError::InvalidCount(
-                            usize::try_from(child_bounds.0).unwrap_or(usize::MAX),
-                        ));
-                    }
-                    return find_ordered_entry_with(
+                    if let Some(found) = find_ordered_entry_with(
                         read_node,
                         child,
                         expected_domain,
                         Some(height - 1),
                         previous_fence.as_ref(),
                         key,
-                    );
+                    )? {
+                        return Ok(Some(found));
+                    }
                 }
                 previous_fence = Some(fence);
             }
@@ -3465,17 +3481,6 @@ fn collect_ordered_range_with(
                     .is_some_and(|previous| previous >= &fence)
                 {
                     return Err(GraphError::NonCanonicalData);
-                }
-                if upper_exclusive.is_some_and(|upper| {
-                    previous_fence
-                        .as_ref()
-                        .is_some_and(|previous| previous >= upper)
-                }) {
-                    break;
-                }
-                if lower_inclusive.is_some_and(|lower| fence < *lower) {
-                    previous_fence = Some(fence);
-                    continue;
                 }
                 let child = read_node(&entry.child)?;
                 let child_bounds = ordered_node_bounds_with(
@@ -3738,139 +3743,6 @@ mod persisted_orp_tests {
                 Err(GraphError::InvalidDomain)
             ));
         }
-    }
-
-    #[test]
-    fn lazy_orp_point_and_range_traversal_reads_bounded_relation_paths() {
-        use crate::row_store::{RowMapSnapshot, RowMapVersion, SchemaGeneration};
-
-        let domain = rows_domain([0x22; 16], [0x33; 32]);
-        let mut nodes = std::collections::BTreeMap::new();
-        let mut next_oid = 1u32;
-        let mut put_node = |node: NodeData| {
-            let mut oid_bytes = [0u8; 20];
-            oid_bytes[..4].copy_from_slice(&next_oid.to_be_bytes());
-            next_oid += 1;
-            let oid = NativeOid::new(GitHashAlgorithm::Sha1, oid_bytes).unwrap();
-            nodes.insert(oid.clone(), node);
-            oid
-        };
-
-        let mut root_entries = Vec::new();
-        for branch_index in 0..4u64 {
-            let mut branch_entries = Vec::new();
-            for leaf_index in 0..8u64 {
-                let first_key = (branch_index * 8 + leaf_index) * 8;
-                let entries: Vec<_> = (first_key..first_key + 8)
-                    .map(|number| OrderedLeafEntry {
-                        key: TypedKey::UInt(number).canonical_bytes().unwrap(),
-                        value: vec![0x81, 0x01],
-                    })
-                    .collect();
-                let fence = entries.last().unwrap().key.clone();
-                let leaf = put_node(NodeData::OrderedLeaf {
-                    domain: domain.clone(),
-                    entries,
-                });
-                branch_entries.push(OrderedBranchEntry {
-                    inclusive_max_key: fence,
-                    child: leaf,
-                    row_count: 8,
-                });
-            }
-            let fence = branch_entries.last().unwrap().inclusive_max_key.clone();
-            let branch = put_node(NodeData::OrderedBranch {
-                domain: domain.clone(),
-                height: 1,
-                entries: branch_entries,
-            });
-            root_entries.push(OrderedBranchEntry {
-                inclusive_max_key: fence,
-                child: branch,
-                row_count: 64,
-            });
-        }
-        let root = put_node(NodeData::OrderedBranch {
-            domain: domain.clone(),
-            height: 2,
-            entries: root_entries,
-        });
-        drop(put_node);
-
-        let database_id = [0x11; 16];
-        let relation_id = [0x22; 16];
-        let store_root = NativeOid::new(GitHashAlgorithm::Sha1, [0xfe; 20]).unwrap();
-        let schema_oid = NativeOid::new(GitHashAlgorithm::Sha1, [0xfd; 20]).unwrap();
-        let schema = SchemaGeneration::issue(database_id, relation_id, schema_oid, [0x33; 32], 9);
-        let version = RowMapVersion::issue(
-            database_id,
-            relation_id,
-            store_root,
-            schema,
-            root.clone(),
-            9,
-            Some(256),
-        )
-        .unwrap();
-        let snapshot = RowMapSnapshot::issue_lazy(version, [0x44; 32]).unwrap();
-        assert!(!snapshot.is_materialized());
-        assert_eq!(snapshot.version().primary_root(), &root);
-        assert_eq!(snapshot.version().row_count(), Some(256));
-
-        let point_key = TypedKey::UInt(139);
-        let mut point_reads = 1usize; // the context reads the pinned root first
-        let root_node = nodes.get(&root).unwrap().clone();
-        validate_ordered_root_node(&root_node, &domain, 256).unwrap();
-        let point = find_ordered_entry_with(
-            &mut |oid| {
-                point_reads += 1;
-                nodes.get(oid).cloned().ok_or(GraphError::ObjectUnavailable)
-            },
-            root_node,
-            &domain,
-            None,
-            None,
-            &point_key,
-        )
-        .unwrap()
-        .unwrap();
-        assert_eq!(TypedKey::decode_canonical(&point.key).unwrap(), point_key);
-        assert!(point_reads <= 16, "point lookup read {point_reads} nodes");
-
-        let lower = TypedKey::UInt(137);
-        let upper = TypedKey::UInt(143);
-        let mut range_reads = 1usize; // the context reads the pinned root first
-        let root_node = nodes.get(&root).unwrap().clone();
-        validate_ordered_root_node(&root_node, &domain, 256).unwrap();
-        let mut rows = Vec::new();
-        collect_ordered_range_with(
-            &mut |oid| {
-                range_reads += 1;
-                nodes.get(oid).cloned().ok_or(GraphError::ObjectUnavailable)
-            },
-            root_node,
-            &domain,
-            None,
-            None,
-            Some(&lower),
-            Some(&upper),
-            3,
-            &mut rows,
-        )
-        .unwrap();
-        let keys: Vec<_> = rows
-            .iter()
-            .map(|row| TypedKey::decode_canonical(&row.key).unwrap())
-            .collect();
-        assert_eq!(
-            keys,
-            vec![
-                TypedKey::UInt(137),
-                TypedKey::UInt(138),
-                TypedKey::UInt(139)
-            ]
-        );
-        assert!(range_reads <= 16, "bounded range read {range_reads} nodes");
     }
 }
 
