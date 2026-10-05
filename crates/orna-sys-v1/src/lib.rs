@@ -19,79 +19,78 @@ use std::{
     time::{Duration, Instant},
 };
 
+use orna_security_v1::{SecretMetadata, SecretRef};
 use serde::{
     Serialize, Serializer,
     ser::{SerializeSeq, SerializeStruct},
 };
 use sha2::{Digest, Sha256};
-use orna_security_v1::{SecretMetadata, SecretRef};
 
 mod introspection;
 pub use introspection::{
-    Dependency, DependencyConfidence, DependencyGraph, DependencyGraphError, DependencyInput,
-    DependencyKind,
-    DefinitionRef, DisjunctStormBranchDescription, DisjunctStormCascadeDescription,
-    DisjunctStormLimitRebindDescription,
-    DisjunctStormDescription, ExplainedPlan, ExplainError, ExpressionRef, FileRef,
-    FunctionPlanDescription, FunctionRef, MutableBranchSnapshot,
-    QueryDecorrelatedSubqueryDescription, QueryJoinDescription,
+    DefinitionRef, Dependency, DependencyConfidence, DependencyGraph, DependencyGraphError,
+    DependencyInput, DependencyKind, DisjunctStormBranchDescription,
+    DisjunctStormCascadeDescription, DisjunctStormDescription, DisjunctStormLimitRebindDescription,
+    ExplainError, ExplainedPlan, ExpressionRef, FileRef, FunctionPlanDescription, FunctionRef,
+    MAX_DEPENDENCY_EDGES, MAX_DEPENDENCY_OBJECTS, MAX_PLAN_EXPRESSIONS, MAX_PLAN_NODES,
+    MAX_REFERENCE_BYTES, MutableBranchSnapshot, Plan, PlanByteCapHandoffRoute,
+    PlanByteCapScopeSegment, PlanDetail, PlanNode, PlanNodeKind, PlanNodeRef, PlanNullOrder,
+    PlanOrdering, PlanSortDirection, PlanWindowFrameBound, QueryCheckpointGenerationDescription,
+    QueryDecorrelatedSubqueryDescription, QueryJoinDescription, QueryJoinPairIdentityDescription,
     QueryLimitPushdownDescription, QueryMutationDescription, QueryMutationKind,
     QueryPairedCheckpointSegmentCompactionChainDescription,
     QueryPairedCheckpointSegmentCompactionStepDescription,
-    QueryPairedSegmentRotationChainDescription, QueryPairedSegmentRotationDescription,
-    QueryPairedStreamCompactionChainDescription,
-    QueryPairedStreamCompactionOccurrenceDescription,
-    QueryCheckpointGenerationDescription,
     QueryPairedCheckpointSpillRestoreChainDescription,
     QueryPairedCheckpointSpillRestoreOccurrenceDescription,
-    QueryPairedStreamRotationChainDescription,
-    QueryPairedStreamRotationOccurrenceDescription,
-    QueryPairedWalRotationChainDescription,
-    QueryPairedWalRotationOccurrenceDescription,
-    QueryPartialIndexDescription,
-    QuerySourceStatistics, QueryJoinPairIdentityDescription,
-    MAX_DEPENDENCY_EDGES, MAX_DEPENDENCY_OBJECTS, MAX_PLAN_EXPRESSIONS,
-    MAX_PLAN_NODES, MAX_REFERENCE_BYTES, Plan, PlanByteCapHandoffRoute, PlanByteCapScopeSegment,
-    PlanDetail, PlanNode, PlanNodeKind, PlanNodeRef,
-    PlanNullOrder,
-    PlanOrdering, PlanSortDirection, PlanWindowFrameBound, QueryPlanDescription, SnapshotRef,
-    SourceSpan, QueryWindowAggregatePushdownDescription, QueryWindowSpillDescription,
-    explain_function,
-    explain_query, explain_query_with_decorrelated_subqueries,
+    QueryPairedSegmentRotationChainDescription, QueryPairedSegmentRotationDescription,
+    QueryPairedStreamCompactionChainDescription, QueryPairedStreamCompactionOccurrenceDescription,
+    QueryPairedStreamRotationChainDescription, QueryPairedStreamRotationOccurrenceDescription,
+    QueryPairedWalRotationChainDescription, QueryPairedWalRotationOccurrenceDescription,
+    QueryPartialIndexDescription, QueryPlanDescription, QuerySourceStatistics,
+    QueryWindowAggregatePushdownDescription, QueryWindowSpillDescription, SnapshotRef, SourceSpan,
+    explain_function, explain_query, explain_query_with_conjunct_disjunct_limit_chain,
+    explain_query_with_decorrelated_subqueries,
+    explain_query_with_disjunct_branch_limit_conjunct_cascade,
+    explain_query_with_disjunct_conjunct_limit_chain, explain_query_with_disjunct_limit_chain,
+    explain_query_with_disjunct_limit_conjunct_chain,
+    explain_query_with_disjunct_storm_branch_limit_chains, explain_query_with_disjunct_storm_chain,
+    explain_query_with_input_disjunct_limit_conjunct_chain,
+    explain_query_with_input_limit_conjunct_disjunct_chain,
+    explain_query_with_input_limit_conjunct_disjunct_limit_conjunct_chain,
+    explain_query_with_input_limit_disjunct_chain,
+    explain_query_with_input_limit_disjunct_conjunct_chain,
+    explain_query_with_join_pair_identities,
     explain_query_with_join_pair_identities_and_limit_pushdowns,
     explain_query_with_join_pair_identities_and_limit_window_aggregate_pushdowns,
+    explain_query_with_join_pair_identities_and_window_aggregate_pushdowns,
     explain_query_with_join_pair_identities_limit_window_aggregate_and_spill_pushdowns,
+    explain_query_with_join_pair_identities_window_aggregate_and_spill_pushdowns,
+    explain_query_with_limit_chain,
+    explain_query_with_paired_cost_restoration_and_window_pushdowns,
+    explain_query_with_paired_cost_restoration_and_window_spill_pushdowns,
     explain_query_with_partial_indexes,
     explain_query_with_partial_indexes_and_decorrelated_subqueries,
     explain_query_with_partial_indexes_and_decorrelated_subqueries_and_join_pair_identities,
     explain_query_with_partial_indexes_and_join_pair_identities,
-    explain_query_with_partial_indexes_and_paired_checkpoint_segment_compaction_chains,
-    explain_query_with_paired_cost_restoration_and_window_pushdowns,
-    explain_query_with_paired_cost_restoration_and_window_spill_pushdowns,
     explain_query_with_partial_indexes_and_paired_checkpoint_compaction_and_segment_rotation_chains,
     explain_query_with_partial_indexes_and_paired_checkpoint_rotation_and_stream_compaction_chains,
     explain_query_with_partial_indexes_and_paired_checkpoint_rotation_stream_and_spill_restore_chains,
+    explain_query_with_partial_indexes_and_paired_checkpoint_segment_compaction_chains,
     explain_query_with_partial_indexes_and_paired_checkpoint_stream_rotation_chains,
     explain_query_with_partial_indexes_and_paired_checkpoint_wal_rotation_chains,
     explain_query_with_window_aggregate_pushdowns,
-    explain_query_with_join_pair_identities,
-    explain_query_with_join_pair_identities_and_window_aggregate_pushdowns,
-    explain_query_with_join_pair_identities_window_aggregate_and_spill_pushdowns,
-    explain_query_with_conjunct_disjunct_limit_chain,
-    explain_query_with_disjunct_conjunct_limit_chain,
-    explain_query_with_disjunct_limit_conjunct_chain,
-    explain_query_with_disjunct_limit_chain, explain_query_with_input_limit_conjunct_disjunct_chain,
-    explain_query_with_input_limit_disjunct_chain,
-    explain_query_with_input_disjunct_limit_conjunct_chain,
-    explain_query_with_input_limit_conjunct_disjunct_limit_conjunct_chain,
-    explain_query_with_input_limit_disjunct_conjunct_chain, explain_query_with_limit_chain,
-    explain_query_with_disjunct_branch_limit_conjunct_cascade,
-    explain_query_with_disjunct_storm_chain,
-    explain_query_with_disjunct_storm_branch_limit_chains,
 };
+
+mod abi_version;
+pub use abi_version::AbiVersion;
 
 mod provider;
 pub use provider::*;
+
+mod host_registry_model;
+pub use host_registry_model::{
+    HostBindingDeclaration, HostOperationDescriptor, HostProviderRole, SystemHostOperationRegistry,
+};
 
 mod host_registry;
 pub use host_registry::*;
@@ -232,8 +231,12 @@ impl ValueMetadataFacts {
         protocols: impl IntoIterator<Item = TypeId>,
         codecs: impl IntoIterator<Item = String>,
     ) -> Result<Self, ValueMetadataError> {
-        let protocols = protocols.into_iter().collect::<std::collections::BTreeSet<_>>();
-        let codecs = codecs.into_iter().collect::<std::collections::BTreeSet<_>>();
+        let protocols = protocols
+            .into_iter()
+            .collect::<std::collections::BTreeSet<_>>();
+        let codecs = codecs
+            .into_iter()
+            .collect::<std::collections::BTreeSet<_>>();
         if nominal_type
             .iter()
             .chain(protocols.iter())
@@ -721,7 +724,6 @@ impl PlanRef {
         &self.0
     }
 }
-
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 pub enum InvocationMode {
@@ -1774,13 +1776,7 @@ struct SynchronousReservation {
 impl SynchronousReservation {
     fn begin(mut self) -> Result<SynchronousExecution, AdmissionError> {
         #[cfg(test)]
-        if let Some(hook) = self
-            .executions
-            .enter_hook
-            .lock()
-            .unwrap()
-            .clone()
-        {
+        if let Some(hook) = self.executions.enter_hook.lock().unwrap().clone() {
             let (state, wake) = &*hook;
             let mut state = state.lock().unwrap();
             state.0 = true;
@@ -1825,7 +1821,6 @@ impl Drop for SynchronousReservation {
         }
     }
 }
-
 
 struct SynchronousExecution {
     executions: Arc<SynchronousExecutions>,
@@ -2188,9 +2183,7 @@ impl RuntimeSupervisor {
                     None => None,
                     Some(result) => {
                         let worker = match self.workers.lock() {
-                            Ok(mut workers) => {
-                                workers.remove(handle.invocation().id())
-                            }
+                            Ok(mut workers) => workers.remove(handle.invocation().id()),
                             Err(poisoned) => {
                                 self.workers.clear_poison();
                                 let mut workers = poisoned.into_inner();
@@ -2715,7 +2708,6 @@ pub fn explain_diagnostic(
     })
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3050,13 +3042,12 @@ mod tests {
         let mut rotated_secret = first;
         rotated_secret.arguments = args(vec![Argument {
             name: "a".into(),
-            value: TypedValue::protected_with_secret_ref(
-                ty("Int"),
-                "rotated-secret",
-                &reference,
-            ),
+            value: TypedValue::protected_with_secret_ref(ty("Int"), "rotated-secret", &reference),
         }]);
-        assert!(matches!(runtime.admit(rotated_secret), Ok(Admission::Active { .. })));
+        assert!(matches!(
+            runtime.admit(rotated_secret),
+            Ok(Admission::Active { .. })
+        ));
     }
 
     #[test]
@@ -3094,7 +3085,9 @@ mod tests {
                     name: "b".into(),
                     value: TypedValue::protected(
                         ty("Str"),
-                        include_str!("../tests/fixtures/secret-surface.orna").trim().as_bytes(),
+                        include_str!("../tests/fixtures/secret-surface.orna")
+                            .trim()
+                            .as_bytes(),
                     ),
                 },
                 Argument {
@@ -4015,10 +4008,7 @@ mod tests {
             InvocationStatus::Queued
         );
         let reason = diagnostic("queued-cancelled");
-        assert_eq!(
-            supervisor.cancel(&handle, Some(reason.clone())),
-            Ok(true)
-        );
+        assert_eq!(supervisor.cancel(&handle, Some(reason.clone())), Ok(true));
         supervisor.release_held_worker_start();
 
         let result = supervisor
@@ -4318,7 +4308,6 @@ mod tests {
         assert_eq!(result.status, InvocationStatus::Succeeded);
         assert!(supervisor.workers.lock().unwrap().is_empty());
     }
-
 
     #[test]
     fn public_handle_and_await_result_have_the_portable_terminal_shape() {
@@ -5113,9 +5102,9 @@ mod tests {
         };
         assert!(value.is_redacted());
         assert_eq!(value.canonical(), None);
-        assert!(!format!("{state:?}").contains(include_str!(
-            "../tests/fixtures/secret-surface.orna"
-        )));
+        assert!(
+            !format!("{state:?}").contains(include_str!("../tests/fixtures/secret-surface.orna"))
+        );
     }
     #[test]
     fn serialized_diagnostics_redact_secrets() {
