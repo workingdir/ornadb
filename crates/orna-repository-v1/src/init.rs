@@ -1,10 +1,9 @@
 //! Canonical tracked repository metadata initialization.
 //!
-//! The record spelling in this module is an implementation-defined encoding:
-//! the repository chapters require the information, but do not prescribe exact
-//! bytes.  We deliberately use ordinary Orna record expressions and validate
-//! every persisted record through `orna-syntax-v1`; this module is not a
-//! second parser for an ad hoc metadata language.
+//! The final format-3 database record uses the publication's canonical byte
+//! spelling. We deliberately use ordinary Orna record expressions and
+//! validate every persisted record through `orna-syntax-v1`; this module is
+//! not a second parser for an ad hoc metadata language.
 
 use std::{
     ffi::OsString,
@@ -20,17 +19,18 @@ use fs2::FileExt;
 use tempfile::TempDir;
 use uuid::{Uuid, Version};
 
-use orna_syntax_v1::{Expr, LiteralKind, parse_row};
+use crate::{scrub_git_routing_environment, valid_branch_name, Repository, RepositoryError};
 
-use crate::{Repository, RepositoryError, scrub_git_routing_environment, valid_branch_name};
+#[path = "format_context.rs"]
+pub(crate) mod format_context;
 
 const FORMAT_DIRECTORY: &str = ".orna";
 const FORMAT_FILE: &str = "format.orna";
 const DATABASE_FILE: &str = "database.orna";
 const MAIN_FILE: &str = "main.orna";
 const MAX_METADATA_BYTES: u64 = 64 * 1024;
-const REPOSITORY_FORMAT: i64 = 1;
-const STORAGE_PROFILE: &str = "compact-storage-v1";
+const REPOSITORY_FORMAT: i64 = 3;
+const STORAGE_PROFILE: &str = "store-3";
 const MAX_INHERITED_GIT_CONFIG_ENTRIES: usize = 1024;
 
 /// A stable repository identity, represented by UUIDv4 bytes.
@@ -313,12 +313,12 @@ fn inspect_metadata_unlocked(
     let database = read_regular_file(&metadata_root.join(DATABASE_FILE))?;
     match (format, database) {
         (None, None) => Err(RepositoryInitError::MetadataIncomplete),
-        (Some(format), Some(database)) => {
-            parse_format(&format)?;
+        (None, Some(database)) => {
             let database_id = parse_database(&database)?;
             Ok(Some(RepositoryMetadata { database_id }))
         }
-        _ => Err(RepositoryInitError::MetadataIncomplete),
+        (Some(_), Some(_)) => Err(RepositoryInitError::MetadataUnsupported),
+        (_, None) => Err(RepositoryInitError::MetadataIncomplete),
     }
 }
 
@@ -347,7 +347,6 @@ fn stage_metadata(
     staging: &TempDir,
     metadata: &RepositoryMetadata,
 ) -> Result<(), RepositoryInitError> {
-    create_new_file(&staging.path().join(FORMAT_FILE), format_bytes())?;
     create_new_file(
         &staging.path().join(DATABASE_FILE),
         &database_bytes(metadata),
@@ -398,7 +397,7 @@ fn publish_staging_directory(
     repository: &Repository,
     staging: &TempDir,
 ) -> Result<(), RepositoryInitError> {
-    use rustix::fs::{RenameFlags, renameat_with};
+    use rustix::fs::{renameat_with, RenameFlags};
 
     let parent = repository.worktree();
     let parent_file = File::open(parent).map_err(|_| RepositoryInitError::LocalStateUnavailable)?;
@@ -567,85 +566,13 @@ fn open_lock_file(path: &Path) -> Result<File, RepositoryInitError> {
         .map_err(|_| RepositoryInitError::LocalStateUnavailable)
 }
 
-fn format_bytes() -> &'static [u8] {
-    b"{repository_format: 1, storage_profile: \"compact-storage-v1\"}\n"
-}
-
 fn database_bytes(metadata: &RepositoryMetadata) -> Vec<u8> {
-    format!("{{database_id: \"{}\"}}\n", metadata.database_id).into_bytes()
-}
-
-fn parse_format(bytes: &[u8]) -> Result<(), RepositoryInitError> {
-    let fields = parse_record(bytes)?;
-    if fields.len() != 2 {
-        return Err(RepositoryInitError::MetadataMalformed);
-    }
-    let Some(repository_format) = fields
-        .iter()
-        .find(|field| field.name == "repository_format")
-    else {
-        return Err(RepositoryInitError::MetadataMalformed);
-    };
-    let Some(storage_profile) = fields.iter().find(|field| field.name == "storage_profile") else {
-        return Err(RepositoryInitError::MetadataMalformed);
-    };
-    if fields
-        .iter()
-        .any(|field| field.name != "repository_format" && field.name != "storage_profile")
-    {
-        return Err(RepositoryInitError::MetadataMalformed);
-    }
-    if integer_literal(&repository_format.value) != Some(REPOSITORY_FORMAT)
-        || string_literal(&storage_profile.value) != Some(STORAGE_PROFILE)
-    {
-        return Err(RepositoryInitError::MetadataUnsupported);
-    }
-    Ok(())
+    format_context::canonical_database_bytes(&metadata.database_id)
 }
 
 fn parse_database(bytes: &[u8]) -> Result<DatabaseId, RepositoryInitError> {
-    let fields = parse_record(bytes)?;
-    if fields.len() != 1 || fields[0].name != "database_id" {
-        return Err(RepositoryInitError::MetadataMalformed);
-    }
-    let value = string_literal(&fields[0].value).ok_or(RepositoryInitError::MetadataMalformed)?;
-    DatabaseId::from_str(value).map_err(|_| RepositoryInitError::MetadataMalformed)
-}
-
-fn parse_record(bytes: &[u8]) -> Result<Vec<orna_syntax_v1::RecordField>, RepositoryInitError> {
-    let source = std::str::from_utf8(bytes).map_err(|_| RepositoryInitError::MetadataMalformed)?;
-    let parsed = parse_row(source);
-    if !parsed.is_ok() {
-        return Err(RepositoryInitError::MetadataMalformed);
-    }
-    match parsed.value {
-        Expr::Record { fields, .. } => Ok(fields),
-        _ => Err(RepositoryInitError::MetadataMalformed),
-    }
-}
-
-fn integer_literal(value: &Expr) -> Option<i64> {
-    let Expr::Literal {
-        text,
-        kind: LiteralKind::Integer,
-        ..
-    } = value
-    else {
-        return None;
-    };
-    text.parse().ok()
-}
-
-fn string_literal(value: &Expr) -> Option<&str> {
-    let Expr::Literal {
-        text,
-        kind: LiteralKind::String,
-        ..
-    } = value
-    else {
-        return None;
-    };
-    text.strip_prefix('"')?.strip_suffix('"')
+    format_context::parse_canonical_database(bytes)
+        .map_err(|_| RepositoryInitError::MetadataMalformed)
 }
 
 impl FromStr for DatabaseId {
@@ -670,8 +597,8 @@ mod tests {
     };
 
     use super::{
-        DATABASE_FILE, FORMAT_DIRECTORY, FORMAT_FILE, Repository, RepositoryInitError,
-        initialize_repository, inspect_metadata,
+        initialize_repository, inspect_metadata, Repository, RepositoryInitError, DATABASE_FILE,
+        FORMAT_DIRECTORY, FORMAT_FILE,
     };
 
     fn git(directory: &Path, arguments: &[&str]) -> String {
@@ -695,14 +622,14 @@ mod tests {
         let initialized = initialize_repository(&target).unwrap();
         let database_id = initialized.metadata().database_id().to_string();
         assert!(initialized.created());
-        assert_eq!(
-            fs::read_to_string(target.join(FORMAT_DIRECTORY).join(FORMAT_FILE)).unwrap(),
-            "{repository_format: 1, storage_profile: \"compact-storage-v1\"}\n"
-        );
+        assert_eq!(initialized.metadata().repository_format(), 3);
+        assert_eq!(initialized.metadata().storage_profile(), "store-3");
         assert_eq!(
             fs::read_to_string(target.join(FORMAT_DIRECTORY).join(DATABASE_FILE)).unwrap(),
-            format!("{{database_id: \"{database_id}\"}}\n")
+            include_str!("../tests/fixtures/format-context/database-template.orna")
+                .replace("00000000-0000-4000-8000-000000000000", &database_id)
         );
+        assert!(!target.join(FORMAT_DIRECTORY).join(FORMAT_FILE).exists());
         assert_eq!(fs::read(target.join("main.orna")).unwrap(), b"");
         assert_eq!(
             inspect_metadata(initialized.repository())
@@ -760,13 +687,11 @@ mod tests {
         let error = initialize_repository(target.path()).unwrap_err();
         assert_eq!(error.code(), "ORNA-REPO-INIT-005");
         assert!(matches!(error, RepositoryInitError::MetadataIncomplete));
-        assert!(
-            !target
-                .path()
-                .join(FORMAT_DIRECTORY)
-                .join(FORMAT_FILE)
-                .exists()
-        );
+        assert!(!target
+            .path()
+            .join(FORMAT_DIRECTORY)
+            .join(FORMAT_FILE)
+            .exists());
         assert!(!target.path().join("main.orna").exists());
     }
 
