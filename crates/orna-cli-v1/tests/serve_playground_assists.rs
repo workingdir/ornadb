@@ -104,7 +104,7 @@ fn served_assist_clients_run_concurrent_inlay_proofs_against_database_assets() {
         .expect("write crate-local Playground schema fixture");
 
     let source_playground = repo_root.join("playground");
-    for table in ["Asset", "Entry", "Layout", "Route", "Theme"] {
+    for table in ["Asset", "Entry", "Layout", "Route", "Sample", "Theme"] {
         copy_tree(
             &source_playground.join(table),
             &project_root.join("playground").join(table),
