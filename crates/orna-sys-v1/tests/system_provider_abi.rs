@@ -17,6 +17,8 @@ const PROVIDER_TUPLE_ENTRY_EDGE_FIXTURE: &str =
     include_str!("fixtures/provider-tuple-entry-edges.json");
 const PROVIDER_SCHEMA_CAPTURE_EDGE_FIXTURE: &str =
     include_str!("fixtures/provider-schema-capture-edges.json");
+const PROVIDER_FUNCTION_REFERENCE_EDGE_FIXTURE: &str =
+    include_str!("fixtures/provider-function-reference-edges.json");
 
 #[path = "../build_host.rs"]
 #[allow(dead_code)]
@@ -88,6 +90,31 @@ impl SystemOperationProvider for InvokeValueProvider {
             code,
             payload: None,
         })
+    }
+}
+
+struct FunctionReferenceEdgeProvider {
+    offer: ProviderOffer,
+    operation: OperationId,
+    expected_arguments: Vec<TypedValue>,
+    response: TypedValue,
+    calls: AtomicUsize,
+}
+
+impl SystemOperationProvider for FunctionReferenceEdgeProvider {
+    fn offer(&self) -> &ProviderOffer {
+        &self.offer
+    }
+
+    fn invoke(
+        &self,
+        operation: &OperationId,
+        arguments: &[TypedValue],
+    ) -> Result<TypedValue, ProviderFailure> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        assert_eq!(operation, &self.operation);
+        assert_eq!(arguments, self.expected_arguments);
+        Ok(self.response.clone())
     }
 }
 
@@ -2931,6 +2958,190 @@ fn provider_tuple_entry_edges_preserve_generated_binding_and_dispatch_contracts(
             + registry_routes
             + 4
             + 1
+    );
+}
+
+#[test]
+fn provider_function_reference_edges_preserve_generated_binding_and_dispatch_contracts() {
+    let fixture: Value = serde_json::from_str(PROVIDER_FUNCTION_REFERENCE_EDGE_FIXTURE)
+        .expect("crate-local provider function-reference fixture is valid JSON");
+    let operation_name = fixture["operation"]
+        .as_str()
+        .expect("function-reference fixture identifies a provider operation");
+    let parameter_name = fixture["parameter"]
+        .as_str()
+        .expect("function-reference fixture identifies a parameter");
+    let expected_function_type = fixture["expected_type"]
+        .as_str()
+        .expect("function-reference fixture identifies its expected type");
+    let cases = fixture["cases"]
+        .as_array()
+        .expect("function-reference fixture has edge cases");
+    assert_eq!(cases.len(), 4);
+
+    let generated_schema = build_provider::generate_provider_registry_schema()
+        .expect("provider function-reference schema regenerates from its typed source");
+    assert_eq!(generated_schema, system_provider_abi_schema_json());
+    build_host::validate_json_against_schema(system_provider_abi_json(), &generated_schema)
+        .expect("embedded function-reference contracts conform to their generated schema");
+    let table = SystemProviderAbi::from_json(system_provider_abi_json())
+        .expect("schema-validated function-reference registry parses into typed contracts");
+    let registry = ProviderRoleRegistry::from_baked_abi(&table)
+        .expect("function-reference provider roles resolve from the generated table");
+    let contract = table
+        .operation(operation_name)
+        .expect("function-reference operation exists in the generated typed table");
+    let generated = system_function_descriptor(operation_name)
+        .expect("function-reference operation has a macro-generated binding");
+    assert_eq!(generated.signature, contract.signature.source);
+    assert_eq!(contract.effects.iter().next(), Some(generated.effect));
+    let parameter_index = contract
+        .signature
+        .parameters
+        .iter()
+        .position(|parameter| parameter.name == parameter_name)
+        .expect("function-reference parameter exists in the generated operation");
+    let parameter = &contract.signature.parameters[parameter_index];
+    assert_eq!(parameter.ty.canonical(), expected_function_type);
+    let role = contract
+        .role
+        .as_ref()
+        .expect("function-reference operation has a provider role");
+    let offer = registry
+        .resolve(role.as_str())
+        .expect("function-reference provider offer resolves")
+        .clone();
+
+    let mut accepted_cases = 0;
+    let mut rejected_cases = 0;
+    let mut direct_routes = 0;
+    let mut registry_routes = 0;
+    let mut argument_mismatch_diagnostics = 0;
+    let mut protected_references = 0;
+    for case in cases {
+        let case_name = case["name"]
+            .as_str()
+            .expect("function-reference fixture case has a stable name");
+        let argument_type = case["argument_type"]
+            .as_str()
+            .expect("function-reference fixture case has an argument type");
+        let payload = case["payload"]
+            .as_str()
+            .expect("function-reference fixture case has an opaque payload")
+            .as_bytes()
+            .to_vec();
+        let protected = case["protected"]
+            .as_bool()
+            .expect("function-reference fixture case states protection");
+        let accepted = case["accepted"]
+            .as_bool()
+            .expect("function-reference fixture case states acceptance");
+        assert_eq!(
+            accepted,
+            argument_type == expected_function_type,
+            "fixture acceptance matches the generated callback type for {case_name}"
+        );
+        let callback_value = if protected {
+            protected_references += 1;
+            let value = TypedValue::protected(TypeId::new(argument_type), payload.clone());
+            assert!(value.is_redacted());
+            assert!(value.canonical().is_none());
+            assert!(
+                !format!("{value:?}").contains(
+                    std::str::from_utf8(&payload).expect("protected fixture payload is UTF-8")
+                ),
+                "protected callback identity stays out of debug output"
+            );
+            value
+        } else {
+            TypedValue::public(TypeId::new(argument_type), payload.clone())
+        };
+        if !protected {
+            assert_eq!(callback_value.canonical(), Some(payload.as_slice()));
+        }
+
+        let arguments = contract
+            .signature
+            .parameters
+            .iter()
+            .enumerate()
+            .map(|(index, operation_parameter)| {
+                if index == parameter_index {
+                    callback_value.clone()
+                } else {
+                    TypedValue::public(
+                        TypeId::new(operation_parameter.ty.canonical()),
+                        operation_parameter
+                            .default
+                            .as_deref()
+                            .unwrap_or(&operation_parameter.name)
+                            .as_bytes()
+                            .to_vec(),
+                    )
+                }
+            })
+            .collect::<Vec<_>>();
+        let result = TypedValue::public(
+            TypeId::new(contract.signature.result.canonical()),
+            format!("function-reference-{case_name}").into_bytes(),
+        );
+        let provider_for = || FunctionReferenceEdgeProvider {
+            offer: offer.clone(),
+            operation: contract.id.clone(),
+            expected_arguments: arguments.clone(),
+            response: result.clone(),
+            calls: AtomicUsize::new(0),
+        };
+        let direct_provider = provider_for();
+        let registry_provider = provider_for();
+        let direct_result =
+            table.dispatch_to_provider(generated.name, &direct_provider, &arguments, |_| Ok(()));
+        let registry_result = registry.dispatch_to_provider(
+            &table,
+            generated.name,
+            &registry_provider,
+            &arguments,
+            |_| Ok(()),
+        );
+        if accepted {
+            let expected = Ok(orna_sys_v1::SystemDispatchResult::Returned(result));
+            assert_eq!(direct_result, expected, "direct route accepts {case_name}");
+            assert_eq!(
+                registry_result, expected,
+                "selected-provider route accepts {case_name}"
+            );
+            assert_eq!(direct_provider.calls.load(Ordering::SeqCst), 1);
+            assert_eq!(registry_provider.calls.load(Ordering::SeqCst), 1);
+            accepted_cases += 1;
+            direct_routes += 1;
+            registry_routes += 1;
+        } else {
+            let expected = ProviderDiagnostic::ArgumentTypeMismatch {
+                operation: contract.id.clone(),
+                parameter: parameter.name.clone(),
+                expected: expected_function_type.to_owned(),
+                actual: argument_type.to_owned(),
+            };
+            assert_eq!(direct_result, Err(expected.clone()));
+            assert_eq!(registry_result, Err(expected.clone()));
+            assert_eq!(direct_result, registry_result);
+            assert_eq!(expected.code(), "sys.abi.argument_type_mismatch");
+            assert_eq!(direct_provider.calls.load(Ordering::SeqCst), 0);
+            assert_eq!(registry_provider.calls.load(Ordering::SeqCst), 0);
+            rejected_cases += 1;
+            argument_mismatch_diagnostics += 2;
+        }
+    }
+    assert_eq!(accepted_cases, 3);
+    assert_eq!(rejected_cases, 1);
+    assert_eq!(direct_routes, accepted_cases);
+    assert_eq!(registry_routes, direct_routes);
+    assert_eq!(argument_mismatch_diagnostics, rejected_cases * 2);
+    assert_eq!(protected_references, 1);
+    println!(
+        "provider_function_reference_edge_parity operation={operation_name} cases={} protected_references={protected_references} schema_validated=1 generated_binding=1 accepted_cases={accepted_cases} rejected_cases={rejected_cases} direct_routes={direct_routes} registry_routes={registry_routes} matching_argument_diagnostics={argument_mismatch_diagnostics} total_cases={}",
+        cases.len(),
+        cases.len() * 4 + 5
     );
 }
 
