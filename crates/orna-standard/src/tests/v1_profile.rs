@@ -352,9 +352,11 @@ fn pinned_text_line_utilities_are_included_and_typecheck() {
         "Empty text has no lines",
         "Split accepts LF, CRLF,",
         "and lone CR",
-        "terminal line breaks produce a final empty line",
+        "terminal line",
+        "breaks produce a final empty line.",
         "Joining uses LF",
-        "standardizing every recognized separator to one LF",
+        "standardizing",
+        "every recognized separator to one LF.",
     ] {
         assert!(source.contains(contract), "missing text line contract `{contract}`");
     }
