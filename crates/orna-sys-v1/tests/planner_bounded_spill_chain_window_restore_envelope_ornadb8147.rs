@@ -63,9 +63,10 @@ fn spill(
 
 fn restore_chain(
     checkpoint_identity: &str,
+    pair_identity: &str,
 ) -> QueryPairedCheckpointSegmentCompactionChainDescription {
     QueryPairedCheckpointSegmentCompactionChainDescription {
-        join_pair_identity: object("pair:Restore"),
+        join_pair_identity: object(pair_identity),
         branch: MutableBranchSnapshot {
             name: "branch:restore".to_owned(),
             generation: 12,
@@ -179,8 +180,8 @@ fn plan(
     ];
     let mut restore_chains = if include_restore {
         vec![
-            restore_chain(restore_checkpoint_identity),
-            restore_chain("checkpoint:restore-sidecar-v1"),
+            restore_chain(restore_checkpoint_identity, "pair:Restore"),
+            restore_chain("checkpoint:restore-first-v1", "pair:First"),
         ]
     } else {
         Vec::new()
@@ -337,8 +338,8 @@ fn bounded_spill_chain_window_restore_envelope_identity_tracks_paired_components
             baseline,
             "paired_bounded_window_spill_chain_window_restore_envelope_pair_count"
         ),
-        1,
-        "only the restore pair has both a window identity and direct restore descriptors"
+        2,
+        "only pairs with both a window identity and direct restore descriptors enter the envelope"
     );
     assert_eq!(
         integer(
@@ -383,7 +384,7 @@ fn bounded_spill_chain_window_restore_envelope_identity_tracks_paired_components
     assert_eq!(
         text(baseline, restore_envelope_key),
         text(project(&reordered), restore_envelope_key),
-        "multiple same-pair restore descriptors fold in canonical identity order"
+        "restore descriptors fold in canonical pair order regardless of input order"
     );
 
     let changed_spill = project(&changed_spill);
