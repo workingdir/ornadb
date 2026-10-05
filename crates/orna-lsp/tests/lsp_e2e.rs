@@ -13,6 +13,8 @@ mod syntax_v1_action_signature_contract;
 mod syntax_v1_depth_contract;
 #[path = "support/syntax_v1_diagnostics_document_links_contract.rs"]
 mod syntax_v1_diagnostics_document_links_contract;
+#[path = "support/syntax_v1_document_symbols_contract.rs"]
+mod syntax_v1_document_symbols_contract;
 #[path = "support/syntax_v1_folding_selection_contract.rs"]
 mod syntax_v1_folding_selection_contract;
 #[path = "support/syntax_v1_workspace_hierarchy_contract.rs"]
@@ -1071,6 +1073,28 @@ fn v1_workspace_model_powers_editor_features_across_open_files() {
             .iter()
             .any(|symbol| symbol["name"] == "Outcome")
     );
+    client.shutdown();
+}
+
+#[test]
+fn document_symbols_return_nested_declarations_with_utf16_ranges() {
+    let uri = "file:///workspace/document-symbols-v1.orna";
+    let mut client = Client::spawn();
+    initialize(&mut client);
+    let published = open(
+        &mut client,
+        uri,
+        syntax_v1_document_symbols_contract::SOURCE,
+    );
+    assert!(
+        published["diagnostics"].as_array().unwrap().is_empty(),
+        "document-symbol fixture did not parse: {published}"
+    );
+    let symbols = client.request(
+        "textDocument/documentSymbol",
+        json!({"textDocument":{"uri":uri}}),
+    );
+    syntax_v1_document_symbols_contract::assert_contract(&symbols, "LSP protocol");
     client.shutdown();
 }
 
