@@ -1480,6 +1480,20 @@ fn orna_serve_hosts_playground_with_pending_evals_and_snapshot_correct_deltas() 
         } if present == updated_present
     ));
 
+    let before_add_examples = curl(&format!("{base_url}/api/examples"), &[])
+        .expect("curl the catalog before adding a new Sample row");
+    assert_eq!(before_add_examples.status, 200);
+    let before_add_examples: JsonValue = serde_json::from_str(&before_add_examples.body)
+        .expect("catalog before Sample addition JSON");
+    let before_add_revision = before_add_examples["revision"]
+        .as_str()
+        .expect("revision before Sample addition")
+        .to_owned();
+    assert_eq!(
+        before_add_examples["examples"].as_array().map(Vec::len),
+        Some(4)
+    );
+
     write_fixture_rows(
         project.path(),
         "Sample",
@@ -1492,7 +1506,7 @@ fn orna_serve_hosts_playground_with_pending_evals_and_snapshot_correct_deltas() 
         serde_json::from_str(&uncommitted_examples.body).expect("uncommitted examples JSON");
     assert_eq!(
         uncommitted_examples["revision"].as_str(),
-        Some(initial_examples_revision.as_str())
+        Some(before_add_revision.as_str())
     );
     assert_eq!(
         uncommitted_examples["examples"].as_array().map(Vec::len),
@@ -1531,7 +1545,7 @@ fn orna_serve_hosts_playground_with_pending_evals_and_snapshot_correct_deltas() 
     let added_revision = added_examples["revision"]
         .as_str()
         .expect("revision after Sample commit");
-    assert_ne!(added_revision, initial_examples_revision);
+    assert_ne!(added_revision, before_add_revision);
     let added_examples = added_examples["examples"]
         .as_array()
         .expect("updated committed examples");
