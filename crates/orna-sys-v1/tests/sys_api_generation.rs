@@ -16,6 +16,15 @@ const SYSTEM_API_FIXTURE: &str = include_str!("fixtures/system-api-annotation.or
 const GENERIC_TYPE_GRAPH_FIXTURE: &str = include_str!("fixtures/sys-generic-type-graph.orna");
 
 #[test]
+fn package_metadata_identifies_the_final_catalogue_contract() {
+    assert_eq!(env!("CARGO_PKG_VERSION"), "1.1.0");
+    assert_eq!(
+        env!("CARGO_PKG_DESCRIPTION"),
+        "Final Orna 1.1.0 portable sys catalogue and bounded pre-effect admission"
+    );
+}
+
+#[test]
 fn native_projection_validates_frozen_authority_without_self_declaring_normativity() {
     let native_inventory: Value =
         serde_json::from_str(include_str!("../src/system_api_inventory.json"))
