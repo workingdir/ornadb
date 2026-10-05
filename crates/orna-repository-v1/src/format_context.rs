@@ -8,13 +8,14 @@
 
 use std::{fmt, process::Command, str::FromStr};
 
+use orna_foundation_v1::{OvbRaw, Value};
 use orna_syntax_v1::{Expr, LiteralKind, RecordField, parse_row};
 use sha2::{Digest, Sha256};
 
 use crate::{Repository, RepositoryError};
 use crate::{
-    native_graph::{GitHashAlgorithm, NativeGraphContext, NativeOid},
-    row_store::RowMapSnapshot,
+    native_graph::{GitHashAlgorithm, NativeGraphContext, NativeOid, RepositoryReadScope},
+    row_store::{AdmittedRow, RowMapSnapshot, RowValue, TypedKey},
 };
 
 use super::DatabaseId;
@@ -200,6 +201,62 @@ pub struct RepositoryFormatContext {
     snapshot: RepositorySnapshotPin,
 }
 
+/// One ORP-1 row admitted through the OGS-1 graph pinned by this repository
+/// format context. The row, row-map version, graph authority, and bounded read
+/// scope remain together for downstream consumers.
+pub struct CommittedRowContext {
+    row_map: RowMapSnapshot,
+    graph: NativeGraphContext,
+    scope: RepositoryReadScope,
+    row: AdmittedRow,
+}
+
+impl CommittedRowContext {
+    /// The repository-issued row-map version that admitted this row.
+    pub fn row_map_snapshot(&self) -> &RowMapSnapshot {
+        &self.row_map
+    }
+
+    /// The graph authority pinned to the same committed repository snapshot.
+    pub fn graph_context(&self) -> &NativeGraphContext {
+        &self.graph
+    }
+
+    /// The bounded read scope used to admit the row.
+    pub fn read_scope(&self) -> &RepositoryReadScope {
+        &self.scope
+    }
+
+    /// The ORP-1 row admitted by the pinned graph lookup.
+    pub fn admitted_row(&self) -> &AdmittedRow {
+        &self.row
+    }
+
+    /// Returns one inline field as canonical OVB bytes.
+    ///
+    /// Whole-row overflow values need the graph's overflow value reader and
+    /// are rejected here rather than interpreted as ordinary field tuples.
+    pub fn canonical_field_bytes(
+        &self,
+        field_index: usize,
+    ) -> Result<Option<Vec<u8>>, FormatContextError> {
+        let RowValue::Inline { encoded, .. } = self.row.value() else {
+            return Err(FormatContextError::GraphContextInvalid);
+        };
+        let value = Value::decode(encoded).map_err(|_| FormatContextError::GraphContextInvalid)?;
+        let OvbRaw::Array(fields) = value.raw() else {
+            return Err(FormatContextError::GraphContextInvalid);
+        };
+        let Some(field) = fields.get(field_index) else {
+            return Ok(None);
+        };
+        Value::new(field.clone())
+            .and_then(|value| value.encode())
+            .map(Some)
+            .map_err(|_| FormatContextError::GraphContextInvalid)
+    }
+}
+
 impl fmt::Debug for RepositoryFormatContext {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
@@ -334,6 +391,35 @@ impl RepositoryFormatContext {
             relation_id,
         )
         .map_err(|_| FormatContextError::GraphContextInvalid)
+    }
+
+    /// Admits one committed ORP-1 row by canonical typed logical-key bytes
+    /// and returns the complete graph-backed context required by consumers.
+    /// Native object IDs never enter this point-lookup API.
+    pub fn open_committed_row(
+        &self,
+        relation_id: [u8; 16],
+        canonical_key: &[u8],
+    ) -> Result<Option<CommittedRowContext>, FormatContextError> {
+        let key = TypedKey::decode_canonical(canonical_key)
+            .map_err(|_| FormatContextError::GraphContextInvalid)?;
+        let row_map = self.load_row_map(relation_id)?;
+        let graph = self.open_native_graph(&row_map)?;
+        let scope = graph
+            .open_read_scope()
+            .map_err(|_| FormatContextError::GraphContextInvalid)?;
+        let Some(row) = graph
+            .lookup_row(&key, &scope)
+            .map_err(|_| FormatContextError::GraphContextInvalid)?
+        else {
+            return Ok(None);
+        };
+        Ok(Some(CommittedRowContext {
+            row_map,
+            graph,
+            scope,
+            row,
+        }))
     }
 
     /// Issues native Git graph authority only for a sealed row-map snapshot

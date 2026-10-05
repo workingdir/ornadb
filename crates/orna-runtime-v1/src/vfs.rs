@@ -7,6 +7,8 @@
 
 use std::{future::Future, sync::Arc};
 
+use orna_foundation_v1::{OvbRaw, Value};
+use orna_repository_v1::{CommittedRowContext, FormatContextError, RepositoryFormatContext};
 use tokio::sync::Mutex;
 
 use super::{
@@ -111,6 +113,236 @@ impl<S> SnapshotReadHandle<S> {
         let end = start.saturating_add(limit).min(self.image.bytes.len());
         self.image.bytes[start..end].to_vec()
     }
+}
+
+/// A schema-resolved managed field address. `table` is the runtime relation
+/// name, while `relation_id` selects the corresponding committed ORP-1 map.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct VfsFieldPath {
+    table: String,
+    relation_id: [u8; 16],
+    canonical_key: Vec<u8>,
+    field_index: usize,
+}
+
+impl VfsFieldPath {
+    pub fn new(
+        table: impl Into<String>,
+        relation_id: [u8; 16],
+        canonical_key: Vec<u8>,
+        field_index: usize,
+    ) -> Self {
+        Self {
+            table: table.into(),
+            relation_id,
+            canonical_key,
+            field_index,
+        }
+    }
+
+    pub fn table(&self) -> &str {
+        &self.table
+    }
+
+    pub fn relation_id(&self) -> [u8; 16] {
+        self.relation_id
+    }
+
+    pub fn canonical_key(&self) -> &[u8] {
+        &self.canonical_key
+    }
+
+    pub fn field_index(&self) -> usize {
+        self.field_index
+    }
+}
+
+/// The committed graph authority retained by one open VFS field generation.
+pub struct VfsCommittedRowPin {
+    path: VfsFieldPath,
+    committed_row: Arc<CommittedRowContext>,
+    runtime_capture: Option<CwdCapture>,
+}
+
+impl VfsCommittedRowPin {
+    pub fn path(&self) -> &VfsFieldPath {
+        &self.path
+    }
+
+    pub fn committed_row(&self) -> &CommittedRowContext {
+        &self.committed_row
+    }
+
+    /// The local runtime generation after an accepted replacement, if any.
+    pub fn runtime_capture(&self) -> Option<&CwdCapture> {
+        self.runtime_capture.as_ref()
+    }
+
+    fn after_activation(&self, capture: CwdCapture) -> SnapshotPin<Self> {
+        SnapshotPin::capture(Arc::new(Self {
+            path: self.path.clone(),
+            committed_row: Arc::clone(&self.committed_row),
+            runtime_capture: Some(capture),
+        }))
+    }
+}
+
+/// A field handle initialized from one committed ORP-1 lookup.
+pub struct VfsFieldHandle {
+    image: Arc<VfsFileSnapshot<VfsCommittedRowPin>>,
+}
+
+impl VfsFieldHandle {
+    pub fn path(&self) -> &VfsFieldPath {
+        self.image.pin().snapshot().path()
+    }
+
+    pub fn open_read(&self) -> SnapshotReadHandle<VfsCommittedRowPin> {
+        SnapshotReadHandle::open(Arc::clone(&self.image))
+    }
+
+    /// Starts a private replacement from this exact committed field image.
+    pub fn open_temp_replacement(&self, max_file_bytes: usize) -> EditDraft<VfsCommittedRowPin> {
+        EditDraft::open(Arc::clone(&self.image), max_file_bytes)
+    }
+}
+
+/// Errors opening a graph-backed VFS field projection.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum VfsOpenError {
+    Repository(FormatContextError),
+    FieldNotPresent,
+}
+
+impl From<FormatContextError> for VfsOpenError {
+    fn from(error: FormatContextError) -> Self {
+        Self::Repository(error)
+    }
+}
+
+/// Errors before or during validated VFS replacement.
+#[derive(Debug)]
+pub enum VfsSaveError {
+    Runtime(super::RuntimeError),
+    DraftChanged,
+    TargetMismatch,
+    TargetMutationMissing,
+    AmbiguousTargetMutation,
+    InvalidReplacement,
+    StaleRuntimeCapture,
+}
+
+/// FUSE-free production bridge from a committed repository field to the
+/// runtime's validated EDIT-1 table activation boundary.
+pub struct RepositoryVfs;
+
+impl RepositoryVfs {
+    /// Opens one schema-resolved field through the committed ORP-1 row map.
+    /// The returned handle retains its OGS-1 graph context and admitted row.
+    pub fn open_committed_field(
+        format: &RepositoryFormatContext,
+        path: VfsFieldPath,
+    ) -> Result<Option<VfsFieldHandle>, VfsOpenError> {
+        let Some(committed_row) = format.open_committed_row(
+            path.relation_id,
+            &path.canonical_key,
+        )? else {
+            return Ok(None);
+        };
+        let bytes = committed_row
+            .canonical_field_bytes(path.field_index)?
+            .ok_or(VfsOpenError::FieldNotPresent)?;
+        let pin = SnapshotPin::capture(Arc::new(VfsCommittedRowPin {
+            path,
+            committed_row: Arc::new(committed_row),
+            runtime_capture: None,
+        }));
+        let image = Arc::new(VfsFileSnapshot::new(pin, bytes));
+        Ok(Some(VfsFieldHandle { image }))
+    }
+
+    /// Renames a completed temporary field onto its managed path. The exact
+    /// temp bytes must be the selected field in one complete row mutation;
+    /// acceptance runs the runtime's existing validated atomic transaction.
+    pub async fn rename_temp_onto_field(
+        runtime: &RuntimeState,
+        target: &VfsFieldPath,
+        draft: &EditDraft<VfsCommittedRowPin>,
+        expected_temp_bytes: &[u8],
+        request: ValidatedTableActivationCommit<'_>,
+    ) -> Result<FsyncOutcome<VfsCommittedRowPin>, VfsSaveError> {
+        let baseline = draft.baseline().await;
+        if baseline.pin().snapshot().path() != target {
+            return Err(VfsSaveError::TargetMismatch);
+        }
+
+        let target = target.clone();
+        let expected_temp_bytes: Arc<[u8]> = Arc::from(expected_temp_bytes);
+        draft
+            .fsync_with(move |candidate| async move {
+                if candidate.replacement_bytes() != expected_temp_bytes.as_ref() {
+                    return Err(VfsSaveError::DraftChanged);
+                }
+                let baseline = candidate.baseline().clone_pin();
+                if baseline
+                    .snapshot()
+                    .runtime_capture()
+                    .is_some_and(|capture| request.context.capture() != capture)
+                {
+                    return Err(VfsSaveError::StaleRuntimeCapture);
+                }
+                let mut matching = request.mutations.iter().filter(|mutation| {
+                    mutation.table() == target.table()
+                        && mutation.key() == target.canonical_key()
+                        && mutation.value().is_some()
+                        && mutation.rekey_to().is_none()
+                });
+                let target_mutation = matching
+                    .next()
+                    .ok_or(VfsSaveError::TargetMutationMissing)?;
+                if matching.next().is_some() {
+                    return Err(VfsSaveError::AmbiguousTargetMutation);
+                }
+                let encoded_row = target_mutation
+                    .value()
+                    .ok_or(VfsSaveError::TargetMutationMissing)?;
+                let projected = canonical_field_from_row(encoded_row, target.field_index())?
+                    .ok_or(VfsSaveError::InvalidReplacement)?;
+                if projected.as_slice() != expected_temp_bytes.as_ref() {
+                    return Err(VfsSaveError::InvalidReplacement);
+                }
+
+                match commit_vfs_table_activation(runtime, request).await {
+                    Ok(capture) => Ok(ActivationDecision::Accepted(
+                        baseline.snapshot().after_activation(capture),
+                    )),
+                    Err(TableActivationError::ValidationFailed(diagnostic)) => {
+                        Ok(ActivationDecision::Rejected(diagnostic))
+                    }
+                    Err(TableActivationError::Runtime(error)) => {
+                        Err(VfsSaveError::Runtime(error))
+                    }
+                }
+            })
+            .await
+    }
+}
+
+fn canonical_field_from_row(
+    encoded_row: &[u8],
+    field_index: usize,
+) -> Result<Option<Vec<u8>>, VfsSaveError> {
+    let value = Value::decode(encoded_row).map_err(|_| VfsSaveError::InvalidReplacement)?;
+    let OvbRaw::Array(fields) = value.raw() else {
+        return Err(VfsSaveError::InvalidReplacement);
+    };
+    let Some(field) = fields.get(field_index) else {
+        return Ok(None);
+    };
+    Value::new(field.clone())
+        .and_then(|value| value.encode())
+        .map(Some)
+        .map_err(|_| VfsSaveError::InvalidReplacement)
 }
 
 /// A readdir continuation paired with the exact snapshot used for its scan.
@@ -387,7 +619,7 @@ impl<S> EditDraft<S> {
 /// The VFS call boundary into the runtime's single validated table transaction.
 /// Callers prepare complete typed row mutations and graph-issued pin transfers
 /// in the request; this wrapper adds no journal or publication authority.
-pub async fn commit_vfs_table_activation(
+async fn commit_vfs_table_activation(
     runtime: &RuntimeState,
     request: ValidatedTableActivationCommit<'_>,
 ) -> Result<CwdCapture, TableActivationError> {

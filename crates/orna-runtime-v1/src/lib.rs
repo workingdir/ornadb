@@ -61,6 +61,7 @@ pub use activation::{
 mod checkpoint_bootstrap;
 mod catalogue;
 mod invocation;
+mod vfs;
 pub use catalogue::{
     CatalogueAdmission, CatalogueAdmissionResult, CatalogueDeclaration, CatalogueError,
     CatalogueFunction, CatalogueFunctionDeclaration, CatalogueModule, CatalogueModuleDeclaration,
@@ -73,6 +74,11 @@ pub use invocation::{
     InvocationObservationStatus, InvocationObservationTailCursor,
     InvocationObservationTailEntry, InvocationObservationTailPage, MaterializedProcedure,
     MaterializedProcedureParameter,
+};
+pub use vfs::{
+    ActivationCandidate, ActivationDecision, EditDraft, EditDraftError, FsyncOutcome,
+    RepositoryVfs, RetainedInvalidDraft, SnapshotPin, SnapshotReadHandle, VfsCommittedRowPin,
+    VfsFieldHandle, VfsFieldPath, VfsFileSnapshot, VfsOpenError, VfsSaveError,
 };
 
 const SCHEMA: &str = r#"
@@ -19278,6 +19284,12 @@ mod tests {
     }
 
     fn repository_with_empty_format3_row_map() -> (TempDir, Repository, [u8; 16]) {
+        repository_with_format3_row_map(None)
+    }
+
+    fn repository_with_format3_row_map(
+        row: Option<(&[u8], &[u8])>,
+    ) -> (TempDir, Repository, [u8; 16]) {
         let (temp, repository) = repository();
         let root = temp.path();
         let database_id = [0, 0, 0, 0, 0, 0, 0x40, 0, 0x80, 0, 0, 0, 0, 0, 0, 1];
@@ -19315,10 +19327,18 @@ mod tests {
         row_domain.extend_from_slice(b"rows");
         append_cbor_bytes(&mut row_domain, &relation_id);
         append_cbor_bytes(&mut row_domain, &schema_digest);
-        let mut empty_rows = vec![0x84, 0x01, 0x01];
-        empty_rows.extend_from_slice(&row_domain);
-        empty_rows.push(0x80);
-        let row_root_oid = native_fixture_node(root, &empty_rows, &[]);
+        let mut rows = vec![0x84, 0x01, 0x01];
+        rows.extend_from_slice(&row_domain);
+        match row {
+            Some((key, value)) => {
+                rows.push(0x81);
+                rows.push(0x82);
+                rows.extend_from_slice(key);
+                rows.extend_from_slice(value);
+            }
+            None => rows.push(0x80),
+        }
+        let row_root_oid = native_fixture_node(root, &rows, &[]);
 
         let mut relation_domain = vec![0x82, 0x69];
         relation_domain.extend_from_slice(b"relations");
@@ -19332,7 +19352,7 @@ mod tests {
         append_cbor_bytes(&mut relation_map, &git_oid_bytes(&schema_oid));
         append_cbor_bytes(&mut relation_map, &git_oid_bytes(&row_root_oid));
         relation_map.push(0xf6);
-        relation_map.push(0x00);
+        relation_map.push(if row.is_some() { 0x01 } else { 0x00 });
         let relation_map_oid = native_fixture_node(
             root,
             &relation_map,
@@ -20214,6 +20234,87 @@ mod tests {
         assert_eq!(checkpoint.generation, 1);
         assert_eq!(checkpoint.digest, digest(6));
         assert_eq!(state.capture().await.unwrap(), next);
+    }
+
+    #[tokio::test]
+    async fn repository_vfs_reads_committed_field_and_renames_validated_edit() {
+        let key = vec![0x07]; // canonical SOV-3 encoding of unsigned key 7
+        let committed_row = vec![0x82, 0x01, 0x02]; // OVB tuple [1, 2]
+        let (_temp, repo, relation_id) =
+            repository_with_format3_row_map(Some((&key, &committed_row)));
+        let format = repo.open_format_context().unwrap();
+        let path = VfsFieldPath::new("books", relation_id, key.clone(), 1);
+        let field = RepositoryVfs::open_committed_field(&format, path.clone())
+            .unwrap()
+            .expect("committed ORP-1 row and field should be readable");
+        let old_reader = field.open_read();
+        assert_eq!(old_reader.read_at(0, 16), [0x02]);
+
+        let draft = field.open_temp_replacement(1024);
+        draft.truncate(0).await.unwrap();
+        draft.write_at(0, &[0x03]).await.unwrap();
+
+        let state = RuntimeState::open(
+            &repo,
+            RuntimeIdentity {
+                database_id: *format.database_id().unwrap().as_bytes(),
+                repository_id: id(2),
+            },
+            digest(3),
+        )
+        .await
+        .unwrap();
+        let writer = state.acquire_lease(id(4)).await.unwrap();
+        let context = state.begin_activation().await.unwrap();
+        let replacement_row = vec![0x82, 0x01, 0x03]; // OVB tuple [1, 3]
+        let mutation = TableMutation::new(
+            id(5),
+            "books",
+            key.clone(),
+            Some(replacement_row.clone()),
+        )
+        .unwrap();
+        let mut validator = ObservingTableActivationValidator {
+            tables: vec!["books".into()],
+            calls: 0,
+            seen: None,
+        };
+
+        let outcome = RepositoryVfs::rename_temp_onto_field(
+            &state,
+            &path,
+            &draft,
+            &[0x03],
+            ValidatedTableActivationCommit {
+                writer,
+                context: &context,
+                mutations: &[mutation],
+                next_digest: digest(6),
+                validator: &mut validator,
+                faults: &NoFault,
+            },
+        )
+        .await
+        .unwrap();
+        let accepted = match outcome {
+            FsyncOutcome::Accepted(handle) => handle,
+            FsyncOutcome::Rejected(diagnostic) => {
+                panic!("valid edit was rejected: {diagnostic:?}")
+            }
+            FsyncOutcome::Unchanged(_) => panic!("changed draft was not activated"),
+        };
+
+        assert_eq!(old_reader.read_at(0, 16), [0x02]);
+        assert_eq!(accepted.read_at(0, 16), [0x03]);
+        assert_eq!(validator.calls, 1);
+        assert_eq!(
+            validator.seen.as_ref().and_then(|rows| rows.get("books")),
+            Some(&vec![(key.clone(), replacement_row.clone())])
+        );
+        assert_eq!(
+            state.committed_table_row("books", &key).await.unwrap(),
+            Some(replacement_row)
+        );
     }
 
     #[tokio::test]
