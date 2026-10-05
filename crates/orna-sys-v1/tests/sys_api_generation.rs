@@ -1,3 +1,5 @@
+use std::path::Path;
+
 use orna_sys_v1::{
     SystemEffect, SYSTEM_FUNCTION_DESCRIPTORS, system_api_json, system_api_schema_json,
     system_function_descriptor,
@@ -12,6 +14,37 @@ mod build_support;
 const SYS_API_V1_SHA256: &str = "10ef7dab9665de4e065ee2b96797b2751c7c3f98f9886241011aee0cc8c0d40e";
 const SYSTEM_API_FIXTURE: &str = include_str!("fixtures/system-api-annotation.orna");
 const GENERIC_TYPE_GRAPH_FIXTURE: &str = include_str!("fixtures/sys-generic-type-graph.orna");
+
+#[test]
+fn native_projection_validates_frozen_authority_without_self_declaring_normativity() {
+    let native_inventory: Value =
+        serde_json::from_str(include_str!("../src/system_api_inventory.json"))
+            .expect("native sys inventory is JSON");
+    assert!(
+        native_inventory.get("source_of_truth").is_none(),
+        "native inventory must not declare itself normative"
+    );
+
+    let source_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let collector = build_support::collect_rust_sources(&source_root)
+        .expect("annotated implementation methods form a valid registry");
+    let registry = collector
+        .type_graph
+        .clone()
+        .expect("annotated implementation registry owns its type graph");
+    let schema = collector
+        .schema
+        .clone()
+        .expect("annotated implementation registry owns its schema contract");
+    let generated = build_support::generate_sys_artifacts(&collector.functions, registry, &schema)
+        .expect("native metadata projects the frozen authority");
+
+    assert_eq!(
+        generated.api_json,
+        build_support::FINAL_API_AUTHORITY_JSON,
+        "normative API bytes come from the frozen authority"
+    );
+}
 
 #[test]
 fn published_artifact_is_the_deterministic_registry_projection() {
@@ -46,9 +79,9 @@ fn published_json_schema_covers_the_generated_artifact_and_closed_type_graph() {
     build_support::validate_published_schema_shape(&api, &schema)
         .expect("published schema exactly covers generated artifact fields");
     assert_eq!(
-        build_support::final_api_pretty_json(&api).expect("authority artifact serialization"),
-        system_api_json().trim_end(),
-        "the generator must emit stable authority member order"
+        system_api_json(),
+        build_support::FINAL_API_AUTHORITY_JSON,
+        "the generated API uses the frozen authority bytes"
     );
     build_support::validate_api_document(&api)
         .expect("generated API type graph is closed and shape-valid");

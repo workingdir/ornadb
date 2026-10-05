@@ -62,15 +62,15 @@ impl TryFrom<u16> for RepositoryFormat {
     }
 }
 
-/// Human publication context paired with a recorded repository format.
+/// Typed publication context recorded by a repository header or runtime.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub enum RepositoryContext {
+pub enum PersistedRepositoryContext {
     Original100,
     Previous110Draft,
     Final20261005,
 }
 
-impl RepositoryContext {
+impl PersistedRepositoryContext {
     pub const fn label(self) -> &'static str {
         match self {
             Self::Original100 => "original 1.0.0",
@@ -92,15 +92,27 @@ impl RepositoryContext {
     }
 }
 
+/// Compatibility name for the typed context carried by persisted metadata.
+pub type RepositoryContext = PersistedRepositoryContext;
+
+/// Narrow boundary for repository/runtime owners that already decoded their
+/// persisted header. The caller supplies typed recorded metadata, never a
+/// human-selected publication label.
+pub trait PersistedRepositoryMetadata {
+    fn recorded_format_number(&self) -> u16;
+    fn recorded_context(&self) -> PersistedRepositoryContext;
+}
+
 /// A format and publication context recorded by a repository header/reader.
 ///
 /// Constructing this pair validates that the context belongs to the selected
-/// format. Callers cannot select a callable from a bare format number or an
-/// unrecorded context string.
+/// format. It can only be obtained from a typed persisted repository/runtime
+/// metadata source, so callers cannot select a callable from a bare format
+/// number or an unrecorded context string.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct SystemFormatContext {
     format: RepositoryFormat,
-    context: RepositoryContext,
+    context: PersistedRepositoryContext,
 }
 
 /// Public name used by later repository/runtime owners when they carry a
@@ -111,22 +123,6 @@ pub type RepositoryFormatContext = SystemFormatContext;
 pub type RecordedFormatContext = SystemFormatContext;
 
 impl SystemFormatContext {
-    pub const FORMAT_1_ORIGINAL_1_0_0: Self = Self {
-        format: RepositoryFormat::Original100,
-        context: RepositoryContext::Original100,
-    };
-    pub const FORMAT_2_PREVIOUS_1_1_0_DRAFT: Self = Self {
-        format: RepositoryFormat::Previous110Draft,
-        context: RepositoryContext::Previous110Draft,
-    };
-    pub const FORMAT_3_FINAL_2026_10_05: Self = Self {
-        format: RepositoryFormat::Final3,
-        context: RepositoryContext::Final20261005,
-    };
-    pub const FORMAT_1_ORIGINAL: Self = Self::FORMAT_1_ORIGINAL_1_0_0;
-    pub const FORMAT_2_PREVIOUS_DRAFT: Self = Self::FORMAT_2_PREVIOUS_1_1_0_DRAFT;
-    pub const FORMAT_3_FINAL: Self = Self::FORMAT_3_FINAL_2026_10_05;
-
     pub const fn format(self) -> RepositoryFormat {
         self.format
     }
@@ -135,7 +131,7 @@ impl SystemFormatContext {
         self.format
     }
 
-    pub const fn context(self) -> RepositoryContext {
+    pub const fn context(self) -> PersistedRepositoryContext {
         self.context
     }
 
@@ -144,23 +140,29 @@ impl SystemFormatContext {
     }
 
     pub const fn is_writer(self) -> bool {
-        matches!(self, Self::FORMAT_3_FINAL_2026_10_05)
+        matches!(self.format, RepositoryFormat::Final3)
     }
 
     pub const fn is_historical_reader(self) -> bool {
         self.context.is_historical()
     }
 
-    pub const fn new(format: RepositoryFormat, context: RepositoryContext) -> Option<Self> {
+    const fn new(
+        format: RepositoryFormat,
+        context: PersistedRepositoryContext,
+    ) -> Option<Self> {
         let matches_recorded_pair = matches!(
             (format, context),
             (
                 RepositoryFormat::Original100,
-                RepositoryContext::Original100
+                PersistedRepositoryContext::Original100
             ) | (
                 RepositoryFormat::Previous110Draft,
-                RepositoryContext::Previous110Draft
-            ) | (RepositoryFormat::Final3, RepositoryContext::Final20261005)
+                PersistedRepositoryContext::Previous110Draft
+            ) | (
+                RepositoryFormat::Final3,
+                PersistedRepositoryContext::Final20261005
+            )
         );
         if matches_recorded_pair {
             Some(Self { format, context })
@@ -169,23 +171,12 @@ impl SystemFormatContext {
         }
     }
 
-    pub fn from_recorded(format: u16, context: &str) -> Result<Self, FormatContextError> {
-        let format = RepositoryFormat::try_from(format)?;
-        let context = match context {
-            "original 1.0.0" => RepositoryContext::Original100,
-            "previous-1.1.0-draft.zip" => RepositoryContext::Previous110Draft,
-            "final-2026-10-05" => RepositoryContext::Final20261005,
-            _ => return Err(FormatContextError::UnknownContext(context.to_owned())),
-        };
+    pub fn from_persisted<M: PersistedRepositoryMetadata + ?Sized>(
+        metadata: &M,
+    ) -> Result<Self, FormatContextError> {
+        let format = RepositoryFormat::try_from(metadata.recorded_format_number())?;
+        let context = metadata.recorded_context();
         Self::new(format, context).ok_or(FormatContextError::MismatchedContext { format, context })
-    }
-}
-
-impl TryFrom<(u16, &str)> for SystemFormatContext {
-    type Error = FormatContextError;
-
-    fn try_from(recorded: (u16, &str)) -> Result<Self, Self::Error> {
-        Self::from_recorded(recorded.0, recorded.1)
     }
 }
 
@@ -194,10 +185,9 @@ impl TryFrom<(u16, &str)> for SystemFormatContext {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum FormatContextError {
     UnsupportedFormat(u16),
-    UnknownContext(String),
     MismatchedContext {
         format: RepositoryFormat,
-        context: RepositoryContext,
+        context: PersistedRepositoryContext,
     },
 }
 
@@ -206,9 +196,6 @@ impl fmt::Display for FormatContextError {
         match self {
             Self::UnsupportedFormat(format) => {
                 write!(formatter, "unsupported repository format {format}")
-            }
-            Self::UnknownContext(context) => {
-                write!(formatter, "unknown repository context `{context}`")
             }
             Self::MismatchedContext { format, context } => write!(
                 formatter,
