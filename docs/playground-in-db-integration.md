@@ -88,3 +88,7 @@ npm run prove:served-assists -- http://127.0.0.1:18087
 
 It verifies completion ranking, standard-library hover and signature help, and
 imported and qualified standard-library inlay hints from the served module.
+It also starts two independent Node workers that fetch the shell, LSP binding,
+and WebAssembly from `orna serve` concurrently. Each worker requests hints for
+a different standard-library source and checks its own labels and source
+positions, which catches cross-client response or document-state leakage.
