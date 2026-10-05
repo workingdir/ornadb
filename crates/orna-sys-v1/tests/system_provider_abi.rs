@@ -6113,7 +6113,7 @@ fn provider_metadata_edges_preserve_generic_schema_and_dispatch_contracts() {
             wrong_result,
             Err(ProviderDiagnostic::ResultTypeMismatch {
                 operation: contract.id.clone(),
-                expected: first_case["result_type"].as_str().unwrap().to_owned(),
+                expected: fixture["result_diagnostic_type"].as_str().unwrap().to_owned(),
                 actual: wrong_result_type.to_owned(),
             })
         );
