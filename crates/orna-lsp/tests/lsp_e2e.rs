@@ -13,6 +13,8 @@ mod syntax_v1_action_signature_contract;
 mod syntax_v1_depth_contract;
 #[path = "support/syntax_v1_diagnostics_document_links_contract.rs"]
 mod syntax_v1_diagnostics_document_links_contract;
+#[path = "support/syntax_v1_document_symbols_contract.rs"]
+mod syntax_v1_document_symbols_contract;
 #[path = "support/syntax_v1_folding_selection_contract.rs"]
 mod syntax_v1_folding_selection_contract;
 #[path = "support/syntax_v1_workspace_hierarchy_contract.rs"]
@@ -56,6 +58,10 @@ const TYPE_HIERARCHY_PROVIDER_SOURCE: &str =
 const TYPE_HIERARCHY_CALLER_SOURCE: &str = include_str!("fixtures/type-hierarchy-caller-v1.orna");
 const INLINE_VALUE_LINKED_EDITING_SOURCE: &str =
     include_str!("fixtures/inline-value-linked-editing-v1.orna");
+const FORMATTING_SOURCE: &str = include_str!("fixtures/formatting-v1.orna");
+const FORMATTING_INCOMPLETE_SOURCE: &str = include_str!("fixtures/formatting-incomplete-v1.orna");
+const FORMATTING_CRLF_SOURCE: &str = include_str!("fixtures/formatting-crlf-v1.orna");
+const RANGE_FORMATTING_SOURCE: &str = include_str!("fixtures/range-formatting-v1.orna");
 
 struct Client {
     child: Child,
@@ -164,6 +170,11 @@ fn initialize(client: &mut Client) {
     );
     assert!(result["capabilities"]["inlineValueProvider"].is_object());
     assert_eq!(result["capabilities"]["linkedEditingRangeProvider"], true);
+    assert_eq!(result["capabilities"]["documentFormattingProvider"], true);
+    assert_eq!(
+        result["capabilities"]["documentRangeFormattingProvider"],
+        true
+    );
     assert!(result["capabilities"]["typeHierarchyProvider"].is_object());
     assert_eq!(result["capabilities"]["monikerProvider"], true);
     assert_eq!(
@@ -231,6 +242,131 @@ fn initialize(client: &mut Client) {
         "call hierarchy capability was not enabled: {result}"
     );
     client.notify("initialized", json!({}));
+}
+
+#[test]
+fn document_and_range_formatting_are_lossless_idempotent_and_range_bounded() {
+    let mut client = Client::spawn();
+    initialize(&mut client);
+    let uri = "file:///formatting.orna";
+    let formatting_source = FORMATTING_SOURCE.replace("TRAILING", "  ");
+    client.notify(
+        "textDocument/didOpen",
+        json!({"textDocument":{"uri":uri,"languageId":"orna","version":1,"text":formatting_source.clone()}}),
+    );
+    client.notification("textDocument/publishDiagnostics");
+
+    let options = json!({"tabSize":2,"insertSpaces":true,"trimTrailingWhitespace":true});
+    let whole_edits = client.request(
+        "textDocument/formatting",
+        json!({"textDocument":{"uri":uri},"options":options.clone()}),
+    );
+    let expected = concat!(
+        "pub fn outer(value: Int): Int {\n",
+        "  let total = value;\n",
+        "  if total > 0 {\n",
+        "    total\n",
+        "  } else {\n",
+        "    0\n",
+        "  }\n",
+        "}\n\n",
+        "// 🧭 comment stays byte-for-byte, apart from its indentation.\n",
+        "/*\n",
+        "  block comment indentation and trailing spaces stay  \n",
+        "*/\n",
+        "pub fn compass(): Str = \"keep  spaces\";\n",
+    );
+    assert_eq!(whole_edits.as_array().unwrap().len(), 1, "{whole_edits}");
+    assert_eq!(whole_edits[0]["newText"], expected);
+    assert_eq!(
+        whole_edits[0]["range"]["start"],
+        json!({"line":0,"character":0})
+    );
+    assert_eq!(
+        whole_edits[0]["range"]["end"],
+        position_at(&formatting_source, formatting_source.len())
+    );
+
+    client.notify(
+        "textDocument/didChange",
+        json!({"textDocument":{"uri":uri,"version":2},"contentChanges":[{"text":expected}]}),
+    );
+    client.notification("textDocument/publishDiagnostics");
+    assert_eq!(
+        client.request(
+            "textDocument/formatting",
+            json!({"textDocument":{"uri":uri},"options":options}),
+        ),
+        json!([]),
+        "formatting an already formatted document must be idempotent"
+    );
+
+    let crlf_uri = "file:///formatting-crlf.orna";
+    client.notify(
+        "textDocument/didOpen",
+        json!({"textDocument":{"uri":crlf_uri,"languageId":"orna","version":1,"text":FORMATTING_CRLF_SOURCE}}),
+    );
+    client.notification("textDocument/publishDiagnostics");
+    let crlf_edits = client.request(
+        "textDocument/formatting",
+        json!({
+            "textDocument":{"uri":crlf_uri},
+            "options":{"tabSize":2,"insertSpaces":true}
+        }),
+    );
+    assert_eq!(
+        crlf_edits[0]["newText"],
+        "fn outer() {\r\n  let x = 1;\r\n}\r\n"
+    );
+
+    let range_uri = "file:///range-formatting.orna";
+    client.notify(
+        "textDocument/didOpen",
+        json!({"textDocument":{"uri":range_uri,"languageId":"orna","version":1,"text":RANGE_FORMATTING_SOURCE}}),
+    );
+    client.notification("textDocument/publishDiagnostics");
+    let range_edits = client.request(
+        "textDocument/rangeFormatting",
+        json!({
+            "textDocument":{"uri":range_uri},
+            "range":{"start":{"line":2,"character":0},"end":{"line":4,"character":0}},
+            "options":{"tabSize":2,"insertSpaces":true,"trimTrailingWhitespace":true}
+        }),
+    );
+    assert_eq!(range_edits.as_array().unwrap().len(), 1, "{range_edits}");
+    assert_eq!(
+        range_edits[0]["range"],
+        json!({"start":{"line":2,"character":0},"end":{"line":4,"character":0}})
+    );
+    assert_eq!(range_edits[0]["newText"], "  if true {\n    let b = 2;\n");
+    let tab_edits = client.request(
+        "textDocument/rangeFormatting",
+        json!({
+            "textDocument":{"uri":range_uri},
+            "range":{"start":{"line":2,"character":0},"end":{"line":4,"character":0}},
+            "options":{"tabSize":4,"insertSpaces":false}
+        }),
+    );
+    assert_eq!(tab_edits[0]["newText"], "\tif true {\n\t\tlet b = 2;\n");
+
+    let incomplete_uri = "file:///formatting-incomplete.orna";
+    client.notify(
+        "textDocument/didOpen",
+        json!({"textDocument":{"uri":incomplete_uri,"languageId":"orna","version":1,"text":FORMATTING_INCOMPLETE_SOURCE}}),
+    );
+    client.notification("textDocument/publishDiagnostics");
+    assert_eq!(
+        client.request(
+            "textDocument/formatting",
+            json!({
+                "textDocument":{"uri":incomplete_uri},
+                "options":{"tabSize":2,"insertSpaces":true}
+            }),
+        ),
+        json!([]),
+        "an incomplete token must not receive destructive whitespace edits"
+    );
+    client.shutdown();
 }
 
 #[test]
@@ -937,6 +1073,28 @@ fn v1_workspace_model_powers_editor_features_across_open_files() {
             .iter()
             .any(|symbol| symbol["name"] == "Outcome")
     );
+    client.shutdown();
+}
+
+#[test]
+fn document_symbols_return_nested_declarations_with_utf16_ranges() {
+    let uri = "file:///workspace/document-symbols-v1.orna";
+    let mut client = Client::spawn();
+    initialize(&mut client);
+    let published = open(
+        &mut client,
+        uri,
+        syntax_v1_document_symbols_contract::SOURCE,
+    );
+    assert!(
+        published["diagnostics"].as_array().unwrap().is_empty(),
+        "document-symbol fixture did not parse: {published}"
+    );
+    let symbols = client.request(
+        "textDocument/documentSymbol",
+        json!({"textDocument":{"uri":uri}}),
+    );
+    syntax_v1_document_symbols_contract::assert_contract(&symbols, "LSP protocol");
     client.shutdown();
 }
 

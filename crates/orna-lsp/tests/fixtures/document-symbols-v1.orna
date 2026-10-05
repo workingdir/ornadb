@@ -1,0 +1,22 @@
+// Unicode before the outline exercises UTF-16 positions: 🍊.
+pub enum Outcome {
+    success { value: Int },
+    failed { reason: Str },
+}
+
+pub protocol Renderable {
+    fn render(self): Str;
+}
+
+pub type Invoice {
+    id: Int,
+    impl Renderable {
+        fn render(self): Str = "invoice";
+    }
+}
+
+pub table Receipt(id: Int) {
+    total: Int,
+}
+
+pub fn identity(value: Int): Int = value;

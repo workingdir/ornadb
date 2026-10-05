@@ -1,0 +1,8 @@
+slicing.slice("", 0, 0) == ""
+&& slicing.slice("alpha", 0, 0) == ""
+&& slicing.slice("alpha", 1, 3) == "lph"
+&& slicing.slice("alpha", 3, 99) == "ha"
+&& slicing.slice("alpha", 99, 4) == ""
+&& slicing.slice("A🙂Z", 1, 1) == "🙂"
+&& slicing.slice("é🙂z", 0, 2) == "é"
+&& slicing.slice("é🙂z", 2, 1) == "🙂"
