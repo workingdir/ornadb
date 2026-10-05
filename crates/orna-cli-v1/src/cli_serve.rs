@@ -404,6 +404,8 @@ fn host_route(root: &Path, identity: RuntimeIdentity, request: &Request) -> Resp
 const MAX_LISTING_COMMITS: usize = 100;
 const MAX_LISTING_TREE_ENTRIES: usize = 10_000;
 const MAX_LISTING_FILE_BYTES: usize = 2 * 1024 * 1024;
+const MAX_DEVTOOLS_SOURCE_FILES: usize = 2_048;
+const MAX_DEVTOOLS_SOURCE_BYTES: usize = 16 * 1024 * 1024;
 const LISTING_STYLE: &str = "<style>:root{--page-width:72ch;--text:#202122;--background:#fff;--link:#0645ad;--visited:#0b0080;--rule:#a2a9b1;--body-font:Georgia,'Times New Roman',serif;--code-font:ui-monospace,monospace}body{max-width:var(--page-width);margin:1.5rem auto;padding:0 1rem;color:var(--text);background:var(--background);font:1rem/1.5 var(--body-font)}a{color:var(--link)}a:visited{color:var(--visited)}pre,textarea{overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;font-family:var(--code-font)}textarea{box-sizing:border-box;width:100%}button{font:inherit}table{border-collapse:collapse}th,td{border:1px solid var(--rule);padding:.2rem .45rem;text-align:left;vertical-align:top}</style>";
 /// Renderer-neutral data used by the simple Inspect-compatible HTML fallback.
 enum InspectionNode {
@@ -430,6 +432,7 @@ fn git_listing_route(
     }
     match request.path.as_str() {
         "/" => Some(commit_log_page(root, identity)),
+        "/devtools/tables" => Some(devtools_tables_page(root)),
         "/playground/theme.css" => Some(playground_style(
             root,
             Path::new("playground/web-ui/src/theme.css"),
@@ -474,6 +477,13 @@ fn commit_log_page(root: &Path, identity: RuntimeIdentity) -> Response {
     };
     let content = InspectionNode::Record(vec![
         (
+            "Database tables".into(),
+            InspectionNode::Link {
+                label: "Browse database tables".into(),
+                href: "/devtools/tables".into(),
+            },
+        ),
+        (
             "Playground".into(),
             InspectionNode::Link {
                 label: "Open the Orna playground".into(),
@@ -484,6 +494,181 @@ fn commit_log_page(root: &Path, identity: RuntimeIdentity) -> Response {
         ("Branches".into(), branches),
     ]);
     render_home_document(identity, &content)
+}
+
+struct DevtoolsTable {
+    name: String,
+    source_path: String,
+    keys: Vec<String>,
+    fields: Vec<String>,
+}
+
+fn devtools_tables_page(root: &Path) -> Response {
+    let Ok(repository) = Repository::discover(root) else {
+        return unavailable_response();
+    };
+    let Ok(Some(commit)) = repository.head() else {
+        return unavailable_response();
+    };
+    let Ok(entries) = repository.list_committed_tree(&commit, MAX_LISTING_TREE_ENTRIES) else {
+        return unavailable_response();
+    };
+
+    let mut source_files = entries
+        .into_iter()
+        .filter(|entry| {
+            matches!(entry.kind(), CommittedTreeEntryKind::File { .. })
+                && entry
+                    .path()
+                    .as_path()
+                    .extension()
+                    .and_then(std::ffi::OsStr::to_str)
+                    == Some("orna")
+                && !is_committed_row_path(entry.path().as_path())
+        })
+        .collect::<Vec<_>>();
+    source_files.sort_by(|left, right| left.path().as_path().cmp(right.path().as_path()));
+
+    let mut tables = Vec::new();
+    let mut source_bytes = 0usize;
+    let mut source_files_read = 0usize;
+    for entry in source_files {
+        if source_files_read >= MAX_DEVTOOLS_SOURCE_FILES {
+            return unavailable_response();
+        }
+        source_files_read += 1;
+        let path = entry.path().as_path();
+        let Ok(source) = repository.read_committed_file(&commit, path, MAX_LISTING_FILE_BYTES)
+        else {
+            return unavailable_response();
+        };
+        let Some(next_source_bytes) = source_bytes.checked_add(source.len()) else {
+            return unavailable_response();
+        };
+        if next_source_bytes > MAX_DEVTOOLS_SOURCE_BYTES {
+            return unavailable_response();
+        }
+        source_bytes = next_source_bytes;
+        let Ok(source) = String::from_utf8(source) else {
+            continue;
+        };
+        let parsed = parse_module(&source);
+        if !parsed.is_ok() {
+            continue;
+        }
+        for item in &parsed.value.items {
+            let Declaration::Table {
+                name,
+                keys,
+                members,
+                ..
+            } = &item.declaration
+            else {
+                continue;
+            };
+            let key_names = keys
+                .iter()
+                .filter_map(|key| match &key.pattern {
+                    Pattern::Name(name, _) => Some(name.clone()),
+                    _ => None,
+                })
+                .collect();
+            let field_names = members
+                .iter()
+                .filter_map(|member| match member {
+                    orna_syntax_v1::TableMember::Field { name, .. } => Some(name.clone()),
+                    _ => None,
+                })
+                .collect();
+            tables.push(DevtoolsTable {
+                name: name.clone(),
+                source_path: path.to_string_lossy().into_owned(),
+                keys: key_names,
+                fields: field_names,
+            });
+        }
+    }
+
+    tables.sort_by(|left, right| {
+        left.name
+            .cmp(&right.name)
+            .then_with(|| left.source_path.cmp(&right.source_path))
+    });
+    let table_nodes = tables
+        .into_iter()
+        .map(|table| {
+            let source_href = format!(
+                "/blob/{}/{}",
+                commit.as_str(),
+                percent_encode_path(&table.source_path)
+            );
+            InspectionNode::Record(vec![
+                ("Table".into(), InspectionNode::Text(table.name)),
+                (
+                    "Source".into(),
+                    InspectionNode::Link {
+                        label: table.source_path,
+                        href: source_href,
+                    },
+                ),
+                (
+                    "Key fields".into(),
+                    inspection_names(table.keys, "No declared key fields."),
+                ),
+                (
+                    "Fields".into(),
+                    inspection_names(table.fields, "No declared fields."),
+                ),
+            ])
+        })
+        .collect::<Vec<_>>();
+    let content = InspectionNode::Record(vec![
+        (
+            "Refresh".into(),
+            InspectionNode::Link {
+                label: "Refresh the committed table list".into(),
+                href: "/devtools/tables".into(),
+            },
+        ),
+        (
+            "Committed revision".into(),
+            InspectionNode::Text(commit.as_str().to_owned()),
+        ),
+        (
+            "Tables".into(),
+            if table_nodes.is_empty() {
+                InspectionNode::Text("No table declarations in committed source.".into())
+            } else {
+                InspectionNode::List(table_nodes)
+            },
+        ),
+    ]);
+    let mut response = render_inspection_document("Database tables", &[], &content);
+    response
+        .headers
+        .push(("Cache-Control".into(), "no-store".into()));
+    response
+}
+
+fn inspection_names(names: Vec<String>, empty_message: &str) -> InspectionNode {
+    if names.is_empty() {
+        InspectionNode::Text(empty_message.into())
+    } else {
+        InspectionNode::List(names.into_iter().map(InspectionNode::Text).collect())
+    }
+}
+
+fn is_committed_row_path(path: &Path) -> bool {
+    path.parent().is_some_and(|parent| {
+        parent.components().any(|component| {
+            component
+                .as_os_str()
+                .to_string_lossy()
+                .chars()
+                .next()
+                .is_some_and(char::is_uppercase)
+        })
+    })
 }
 
 const MAX_PLAYGROUND_ASSET_BYTES: usize = 8 * 1024 * 1024;
