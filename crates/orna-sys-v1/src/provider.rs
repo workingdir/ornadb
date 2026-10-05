@@ -8,7 +8,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde::Deserialize;
 
-use crate::{SystemEffect, TypedValue};
+use crate::{AbiVersion, SystemEffect, TypedValue};
 
 const GENERATED_PROVIDER_ABI: &str =
     include_str!(concat!(env!("OUT_DIR"), "/system_provider_abi.json"));
@@ -19,20 +19,6 @@ const PROVIDER_FAILURE_CODES: [&str; 3] = [
     "sys.abi.unavailable",
     "sys.abi.provider_failed",
 ];
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Deserialize)]
-pub struct AbiVersion {
-    pub major: u16,
-    pub minor: u16,
-}
-
-impl AbiVersion {
-    pub const V1_0: Self = Self { major: 1, minor: 0 };
-
-    pub const fn compatible_provider(self, provider: Self) -> bool {
-        self.major == provider.major && provider.minor >= self.minor
-    }
-}
 
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub struct OperationId(String);
