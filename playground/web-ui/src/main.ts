@@ -56,6 +56,7 @@ const astOutput = requiredElement<HTMLElement>('#ast-output');
 const outputStatus = requiredElement<HTMLElement>('#output-status');
 
 let editor: monaco.editor.IStandaloneCodeEditor | undefined;
+let sourceModel: monaco.editor.ITextModel | undefined;
 let editorReady = false;
 
 const lspWorker = new Worker(new URL('./lsp-worker.ts', import.meta.url), { type: 'module' });
@@ -68,7 +69,8 @@ let liveRuntimeReady = typeof (globalThis as typeof globalThis & { ornaPlaygroun
 const runtime = servedRuntime();
 
 function updateRunButton(): void {
-  runButton.disabled = activeRun || !editorReady || !examplesReady || !liveRuntimeReady;
+  const viewingStandardSource = editor?.getModel()?.uri.scheme === 'orna-stdlib';
+  runButton.disabled = activeRun || !editorReady || !examplesReady || !liveRuntimeReady || viewingStandardSource;
 }
 
 window.addEventListener('orna:runtime-ready', () => {
@@ -337,7 +339,8 @@ function showResult(result: RunResult): void {
 
 async function runSource(): Promise<void> {
   const activeEditor = editor;
-  if (activeRun || !editorReady || !examplesReady || !liveRuntimeReady || !activeEditor) return;
+  if (activeRun || !editorReady || !examplesReady || !liveRuntimeReady || !activeEditor
+    || activeEditor.getModel()?.uri.scheme === 'orna-stdlib') return;
   activeRun = true;
   updateRunButton();
   executionState.textContent = 'Running';
@@ -361,10 +364,14 @@ runButton.addEventListener('click', () => void runSource());
 async function initializeEditor(): Promise<void> {
   const config = await loadOrnaEditorConfig();
   registerOrnaLanguage(monaco.languages, config);
+  sourceModel = monaco.editor.createModel(
+    '',
+    config.language.id,
+    monaco.Uri.parse('file:///playground/main.orna'),
+  );
   editor = monaco.editor.create(editorHost, {
     ...config.editorOptions,
-    value: '',
-    language: config.language.id,
+    model: sourceModel,
     theme: 'orna-basic',
     inlayHints: { enabled: 'on' },
     ariaLabel: 'Orna source editor. F12 opens a definition; Shift+F12 lists references.',
@@ -380,6 +387,15 @@ async function initializeEditor(): Promise<void> {
     if (diagnosticTimer) clearTimeout(diagnosticTimer);
     diagnosticTimer = setTimeout(() => void updateDiagnostics(), 250);
   });
+  editor.onDidChangeModel(() => {
+    const viewingStandardSource = editor?.getModel()?.uri.scheme === 'orna-stdlib';
+    editor?.updateOptions({ readOnly: viewingStandardSource });
+    if (viewingStandardSource) {
+      examplesSelect.selectedIndex = -1;
+      editorStatus.textContent = 'Viewing standard-library source served from OrnaDB. Select an example to return to your code.';
+    }
+    updateRunButton();
+  });
   editorReady = true;
   editorStatus.textContent = 'Orna editor configuration loaded from the database.';
   updateRunButton();
@@ -390,8 +406,9 @@ function loadSelectedExample(): void {
   const option = examplesSelect.selectedOptions[0];
   const source = option?.dataset.source;
   const activeEditor = editor;
-  if (source === undefined || !activeEditor) return;
-  activeEditor.setValue(source);
+  if (source === undefined || !activeEditor || !sourceModel) return;
+  if (activeEditor.getModel() !== sourceModel) activeEditor.setModel(sourceModel);
+  sourceModel.setValue(source);
   const name = option.textContent ?? 'Example';
   editorStatus.textContent = `${name} loaded. Edit the source or run it as-is.`;
   exampleStatus.textContent = `${name} loaded into the source editor.`;
@@ -494,6 +511,7 @@ void initializeEditor()
   });
 window.addEventListener('beforeunload', () => {
   editor?.dispose();
+  sourceModel?.dispose();
   lspWorker.terminate();
 }, { once: true });
 startStyleReload();
