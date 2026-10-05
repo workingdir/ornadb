@@ -116,9 +116,12 @@ fn names(symbols: &[Value]) -> Vec<&str> {
 }
 
 fn children<'a>(symbol: &'a Value, context: &str) -> &'a [Value] {
-    symbol["children"]
-        .as_array()
-        .unwrap_or_else(|| panic!("{context}: {} has no outline children", symbol["name"]))
+    symbol["children"].as_array().unwrap_or_else(|| {
+        panic!(
+            "{context}: {} has no outline children: {symbol}",
+            symbol["name"]
+        )
+    })
 }
 
 fn expect_symbol<'a>(symbols: &'a [Value], name: &str, kind: u64, context: &str) -> &'a Value {
