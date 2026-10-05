@@ -242,6 +242,7 @@ impl ReplContext {
             exports: BTreeMap::new(),
             symbols,
             generic_functions: BTreeMap::new(),
+            protocols: BTreeMap::new(),
             prelude_exports: BTreeSet::new(),
             implicit: false,
         };

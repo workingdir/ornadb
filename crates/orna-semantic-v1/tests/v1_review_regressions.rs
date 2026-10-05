@@ -1461,6 +1461,7 @@ fn historical_snapshot_projects_nested_authority_module_roots() {
         symbols: exports.clone(),
         exports,
         generic_functions: BTreeMap::new(),
+        protocols: BTreeMap::new(),
         prelude_exports: BTreeSet::new(),
         implicit: false,
     };
