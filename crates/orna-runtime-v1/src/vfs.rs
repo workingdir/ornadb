@@ -14,11 +14,10 @@ use super::{
     TableActivationError, ValidatedTableActivationCommit,
 };
 
-/// One repository-wide invalidation clock shared by directory, attribute,
-/// and file-handle projections. A projection is current only while its
-/// captured generation still matches this clock.
+/// One repository-wide invalidation clock shared by projections in a VFS
+/// repository scope.
 #[derive(Clone, Default)]
-pub struct SharedCacheEpoch {
+struct SharedCacheEpoch {
     generation: Arc<Mutex<u64>>,
 }
 
@@ -30,7 +29,7 @@ pub struct CacheProjection {
 }
 
 impl SharedCacheEpoch {
-    pub async fn capture(&self) -> CacheProjection {
+    async fn capture(&self) -> CacheProjection {
         let generation = *self.generation.lock().await;
         CacheProjection {
             epoch: self.clone(),
@@ -38,7 +37,7 @@ impl SharedCacheEpoch {
         }
     }
 
-    pub async fn generation(&self) -> u64 {
+    async fn generation(&self) -> u64 {
         *self.generation.lock().await
     }
 }
@@ -53,12 +52,60 @@ impl CacheProjection {
     }
 }
 
+/// Repository-view owner for managed files and their shared projection epoch.
+/// Create one scope for a repository view, then construct every managed file
+/// through it so a committed replacement invalidates all of that view's
+/// projections together.
+#[derive(Default)]
+pub struct VfsRepositoryCache {
+    epoch: SharedCacheEpoch,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum VfsRepositoryCacheError {
+    ImageAlreadyScoped,
+}
+
+impl VfsRepositoryCache {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub async fn generation(&self) -> u64 {
+        self.epoch.generation().await
+    }
+
+    /// Admits an initial immutable image to this repository view. Images can
+    /// be admitted only once; an image already bound to another epoch cannot
+    /// be relabeled with this scope's current generation.
+    pub async fn managed_file<S>(
+        &self,
+        image: Arc<VfsFileSnapshot<S>>,
+    ) -> Result<Arc<ManagedFile<S>>, VfsRepositoryCacheError> {
+        if image.projection.is_some() || image.pin.projection.is_some() {
+            return Err(VfsRepositoryCacheError::ImageAlreadyScoped);
+        }
+        let projection = self.epoch.capture().await;
+        let image = Arc::new(VfsFileSnapshot::with_projection(&image, projection));
+        Ok(Arc::new(ManagedFile {
+            state: Mutex::new(ManagedFileState { image }),
+            cache_epoch: self.epoch.clone(),
+        }))
+    }
+}
+
 /// A retained owner-issued immutable row-map snapshot.
-pub struct SnapshotPin<S>(Arc<S>);
+pub struct SnapshotPin<S> {
+    snapshot: Arc<S>,
+    projection: Option<CacheProjection>,
+}
 
 impl<S> Clone for SnapshotPin<S> {
     fn clone(&self) -> Self {
-        Self(Arc::clone(&self.0))
+        Self {
+            snapshot: Arc::clone(&self.snapshot),
+            projection: self.projection.clone(),
+        }
     }
 }
 
@@ -66,12 +113,15 @@ impl<S> SnapshotPin<S> {
     /// Retains an opaque repository snapshot. The snapshot carries its own
     /// immutable version identity and remains the only row lookup authority.
     pub fn capture(snapshot: Arc<S>) -> Self {
-        Self(snapshot)
+        Self {
+            snapshot,
+            projection: None,
+        }
     }
 
     /// Borrows the same owner-issued snapshot captured by this pin.
     pub fn snapshot(&self) -> &S {
-        &self.0
+        &self.snapshot
     }
 
     /// Clones the pin for another handle that must remain on this version.
@@ -85,6 +135,7 @@ impl<S> SnapshotPin<S> {
 pub struct VfsFileSnapshot<S> {
     pin: SnapshotPin<S>,
     bytes: Arc<[u8]>,
+    projection: Option<CacheProjection>,
 }
 
 impl<S> VfsFileSnapshot<S> {
@@ -92,6 +143,17 @@ impl<S> VfsFileSnapshot<S> {
         Self {
             pin,
             bytes: bytes.into(),
+            projection: None,
+        }
+    }
+
+    fn with_projection(image: &Arc<Self>, projection: CacheProjection) -> Self {
+        let mut pin = image.pin.clone_pin();
+        pin.projection = Some(projection.clone());
+        Self {
+            pin,
+            bytes: Arc::clone(&image.bytes),
+            projection: Some(projection),
         }
     }
 
@@ -106,49 +168,51 @@ impl<S> VfsFileSnapshot<S> {
     pub fn is_empty(&self) -> bool {
         self.bytes.is_empty()
     }
+
+    pub fn projection(&self) -> Option<&CacheProjection> {
+        self.projection.as_ref()
+    }
 }
 
 /// A read-only open file; its bytes and row-map snapshot never advance.
 pub struct SnapshotReadHandle<S> {
     image: Arc<VfsFileSnapshot<S>>,
-    projection: Option<CacheProjection>,
 }
 
 impl<S> Clone for SnapshotReadHandle<S> {
     fn clone(&self) -> Self {
         Self {
             image: Arc::clone(&self.image),
-            projection: self.projection.clone(),
         }
     }
 }
 
 impl<S> SnapshotReadHandle<S> {
     pub fn open(image: Arc<VfsFileSnapshot<S>>) -> Self {
-        Self {
-            image,
-            projection: None,
-        }
-    }
-
-    pub fn open_projected(image: Arc<VfsFileSnapshot<S>>, projection: CacheProjection) -> Self {
-        Self {
-            image,
-            projection: Some(projection),
-        }
+        Self { image }
     }
 
     /// The cache observation attached to this handle, when it came from a
     /// managed repository view. Its pinned bytes remain readable if it goes
     /// stale; callers can refresh the projection against the shared epoch.
     pub fn projection(&self) -> Option<&CacheProjection> {
-        self.projection.as_ref()
+        self.image.projection()
     }
 
     pub async fn projection_is_current(&self) -> Option<bool> {
-        match &self.projection {
+        match self.projection() {
             Some(projection) => Some(projection.is_current().await),
             None => None,
+        }
+    }
+
+    /// Associates a cached attribute or other derived value with this exact
+    /// immutable image. The returned projection cannot be retagged with a
+    /// token captured from another image or epoch.
+    pub fn project<T>(&self, value: T) -> CacheProjectedValue<T, S> {
+        CacheProjectedValue {
+            image: Arc::clone(&self.image),
+            value,
         }
     }
 
@@ -182,28 +246,11 @@ impl<S> SnapshotReadHandle<S> {
 pub struct SnapshotReaddirCursor<S, C> {
     pin: SnapshotPin<S>,
     continuation: C,
-    projection: Option<CacheProjection>,
 }
 
 impl<S, C> SnapshotReaddirCursor<S, C> {
     pub fn new(pin: SnapshotPin<S>, continuation: C) -> Self {
-        Self {
-            pin,
-            continuation,
-            projection: None,
-        }
-    }
-
-    pub fn new_projected(
-        pin: SnapshotPin<S>,
-        continuation: C,
-        projection: CacheProjection,
-    ) -> Self {
-        Self {
-            pin,
-            continuation,
-            projection: Some(projection),
-        }
+        Self { pin, continuation }
     }
 
     pub fn pin(&self) -> &SnapshotPin<S> {
@@ -219,11 +266,39 @@ impl<S, C> SnapshotReaddirCursor<S, C> {
     }
 
     pub fn projection(&self) -> Option<&CacheProjection> {
-        self.projection.as_ref()
+        self.pin.projection.as_ref()
     }
 
     pub async fn projection_is_current(&self) -> Option<bool> {
-        match &self.projection {
+        match self.projection() {
+            Some(projection) => Some(projection.is_current().await),
+            None => None,
+        }
+    }
+}
+
+/// A derived cache value tied to the exact immutable image from which its
+/// projection was produced.
+pub struct CacheProjectedValue<T, S> {
+    image: Arc<VfsFileSnapshot<S>>,
+    value: T,
+}
+
+impl<T, S> CacheProjectedValue<T, S> {
+    pub fn value(&self) -> &T {
+        &self.value
+    }
+
+    pub fn pin(&self) -> &SnapshotPin<S> {
+        self.image.pin()
+    }
+
+    pub fn projection(&self) -> Option<&CacheProjection> {
+        self.image.projection()
+    }
+
+    pub async fn projection_is_current(&self) -> Option<bool> {
+        match self.projection() {
             Some(projection) => Some(projection.is_current().await),
             None => None,
         }
@@ -340,36 +415,13 @@ pub struct ManagedFile<S> {
 }
 
 impl<S> ManagedFile<S> {
-    pub fn new(image: Arc<VfsFileSnapshot<S>>) -> Arc<Self> {
-        Self::with_cache_epoch(image, SharedCacheEpoch::default())
-    }
-
-    /// Creates a managed file in a shared repository cache epoch. All files
-    /// and projected caches in one repository view should use the same epoch.
-    pub fn with_cache_epoch(
-        image: Arc<VfsFileSnapshot<S>>,
-        cache_epoch: SharedCacheEpoch,
-    ) -> Arc<Self> {
-        Arc::new(Self {
-            state: Mutex::new(ManagedFileState { image }),
-            cache_epoch,
-        })
-    }
-
     pub async fn open_read(&self) -> SnapshotReadHandle<S> {
-        let state = self.state.lock().await;
-        let image = Arc::clone(&state.image);
-        let projection = self.cache_epoch.capture().await;
-        SnapshotReadHandle::open_projected(image, projection)
+        SnapshotReadHandle::open(Arc::clone(&self.state.lock().await.image))
     }
 
     /// Returns the repository-wide invalidation generation.
     pub async fn cache_generation(&self) -> u64 {
         self.cache_epoch.generation().await
-    }
-
-    pub fn shared_cache_epoch(&self) -> SharedCacheEpoch {
-        self.cache_epoch.clone()
     }
 
     /// Creates a private sibling-save candidate and captures this destination's
@@ -458,15 +510,16 @@ impl<S> ManagedFile<S> {
                 Ok(TemporaryRenameOutcome::Rejected { diagnostic })
             }
             Ok(FsyncOutcome::Accepted(handle)) => {
-                destination.image = Arc::clone(&handle.image);
-                *cache_generation = next_generation;
-                let handle = SnapshotReadHandle::open_projected(
-                    Arc::clone(&handle.image),
+                let image = Arc::new(VfsFileSnapshot::with_projection(
+                    &handle.image,
                     CacheProjection {
                         epoch: self.cache_epoch.clone(),
                         generation: next_generation,
                     },
-                );
+                ));
+                destination.image = Arc::clone(&image);
+                *cache_generation = next_generation;
+                let handle = SnapshotReadHandle::open(image);
                 scratch_state.applied = Some((next_generation, handle.clone()));
                 Ok(TemporaryRenameOutcome::Applied {
                     generation: next_generation,
@@ -832,7 +885,8 @@ mod tests {
 
     #[tokio::test]
     async fn temp_fsync_is_scratch_only_and_rename_preserves_rejected_and_open_state() {
-        let target = ManagedFile::new(fixture_image());
+        let repository = VfsRepositoryCache::new();
+        let target = repository.managed_file(fixture_image()).await.unwrap();
         let old_handle = target.open_read().await;
         let old_bytes = old_handle.read_at(0, old_handle.len() as usize);
         let scratch = target.begin_temporary_replacement(1 << 20).await;
@@ -924,28 +978,35 @@ mod tests {
 
     #[tokio::test]
     async fn accepted_rename_invalidates_shared_directory_attribute_and_handle_projections() {
-        let epoch = SharedCacheEpoch::default();
-        let target = ManagedFile::with_cache_epoch(fixture_image(), epoch.clone());
+        let repository = VfsRepositoryCache::new();
+        let target = repository.managed_file(fixture_image()).await.unwrap();
+        let sibling = repository.managed_file(fixture_image()).await.unwrap();
         let old_handle = target.open_read().await;
+        let sibling_handle = sibling.open_read().await;
         let old_bytes = old_handle.read_at(0, old_handle.len() as usize);
-        let directory = SnapshotReaddirCursor::new_projected(
-            old_handle.pin().clone_pin(),
-            0_u64,
-            epoch.capture().await,
-        );
-        // Attribute caches use the same token type and repository epoch.
-        let attributes = epoch.capture().await;
+        let directory = SnapshotReaddirCursor::new(old_handle.pin().clone_pin(), 0_u64);
+        let attributes = old_handle.project(("size", old_handle.len()));
         assert_eq!(old_handle.projection().unwrap().generation(), 0);
         assert!(old_handle.projection_is_current().await.unwrap());
         assert!(directory.projection_is_current().await.unwrap());
-        assert!(attributes.is_current().await);
+        assert!(sibling_handle.projection_is_current().await.unwrap());
+        assert!(attributes.projection_is_current().await.unwrap());
+
+        let unrelated_scope = VfsRepositoryCache::new();
+        assert!(matches!(
+            unrelated_scope
+                .managed_file(Arc::clone(&old_handle.image))
+                .await,
+            Err(VfsRepositoryCacheError::ImageAlreadyScoped)
+        ));
 
         let scratch = target.begin_temporary_replacement(1 << 20).await;
         scratch.write_at(0, &[0x58]).await.unwrap();
-        assert_eq!(epoch.generation().await, 0);
+        assert_eq!(repository.generation().await, 0);
         assert!(old_handle.projection_is_current().await.unwrap());
         assert!(directory.projection_is_current().await.unwrap());
-        assert!(attributes.is_current().await);
+        assert!(sibling_handle.projection_is_current().await.unwrap());
+        assert!(attributes.projection_is_current().await.unwrap());
 
         let rejected_outcome = target
             .rename_over(&scratch, |_| async {
@@ -957,10 +1018,11 @@ mod tests {
             rejected_outcome,
             TemporaryRenameOutcome::Rejected { .. }
         ));
-        assert_eq!(epoch.generation().await, 0);
+        assert_eq!(repository.generation().await, 0);
         assert!(old_handle.projection_is_current().await.unwrap());
         assert!(directory.projection_is_current().await.unwrap());
-        assert!(attributes.is_current().await);
+        assert!(sibling_handle.projection_is_current().await.unwrap());
+        assert!(attributes.projection_is_current().await.unwrap());
 
         // A new editor revision can be accepted while the prior rejected
         // bytes remain available through the retained-draft interface.
@@ -978,15 +1040,22 @@ mod tests {
             panic!("validated rename should advance the shared projection epoch");
         };
         assert_eq!(generation, 1);
-        assert_eq!(epoch.generation().await, 1);
+        assert_eq!(repository.generation().await, 1);
         assert!(!old_handle.projection_is_current().await.unwrap());
         assert!(!directory.projection_is_current().await.unwrap());
-        assert!(!attributes.is_current().await);
+        assert!(!sibling_handle.projection_is_current().await.unwrap());
+        assert!(!attributes.projection_is_current().await.unwrap());
         assert_eq!(old_handle.read_at(0, old_bytes.len()), old_bytes);
         assert!(handle.projection_is_current().await.unwrap());
         let fresh_handle = target.open_read().await;
         assert_eq!(fresh_handle.projection().unwrap().generation(), 1);
         assert!(fresh_handle.projection_is_current().await.unwrap());
+        // A managed file that was not itself replaced keeps its old image
+        // stamp; opening it cannot relabel that stale image as current.
+        assert_eq!(
+            sibling.open_read().await.projection().unwrap().generation(),
+            0
+        );
         assert_eq!(
             scratch
                 .retained_invalid_draft()
