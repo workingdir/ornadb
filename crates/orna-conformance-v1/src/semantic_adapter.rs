@@ -9110,6 +9110,16 @@ fn table_key_components(encoded: &[u8], arity: usize) -> Result<Vec<Value>, Eval
             .cloned()
             .map(|value| Value::new(value).map_err(|_| transaction_error("ORNA-EVAL-TABLE-KEY")))
             .collect(),
+        (_, OvbRaw::Tag(60015, tuple)) => match tuple.as_ref() {
+            OvbRaw::Array(values) if values.len() == arity => values
+                .iter()
+                .cloned()
+                .map(|value| {
+                    Value::new(value).map_err(|_| transaction_error("ORNA-EVAL-TABLE-KEY"))
+                })
+                .collect(),
+            _ => Err(transaction_error("ORNA-EVAL-TABLE-KEY")),
+        },
         _ => Err(transaction_error("ORNA-EVAL-TABLE-KEY")),
     }
 }
