@@ -19,6 +19,7 @@ const PROVIDER_SCHEMA_CAPTURE_EDGE_FIXTURE: &str =
     include_str!("fixtures/provider-schema-capture-edges.json");
 const PROVIDER_FUNCTION_REFERENCE_EDGE_FIXTURE: &str =
     include_str!("fixtures/provider-function-reference-edges.json");
+const PROVIDER_CANCEL_EDGE_FIXTURE: &str = include_str!("fixtures/provider-cancel-edges.json");
 
 #[path = "../build_host.rs"]
 #[allow(dead_code)]
@@ -5510,6 +5511,328 @@ fn provider_stream_iterator_promise_edge_preserves_handle_and_terminal_result_ed
             + selected_provider_edges
             + terminal_result_mismatches
             + callback_visits
+    );
+}
+
+#[test]
+fn provider_cancel_edges_preserve_generated_binding_and_dispatch_contracts() {
+    const OPERATION: &str = "sys.cancel<T>";
+
+    let fixture: Value = serde_json::from_str(PROVIDER_CANCEL_EDGE_FIXTURE)
+        .expect("crate-local provider cancellation fixture is valid JSON");
+    assert_eq!(fixture["operation"], OPERATION);
+    let schema_json = build_provider::generate_provider_registry_schema()
+        .expect("provider cancellation schema regenerates from its typed source");
+    assert_eq!(schema_json, system_provider_abi_schema_json());
+    build_host::validate_json_against_schema(system_provider_abi_json(), &schema_json)
+        .expect("embedded cancellation contracts conform to the regenerated provider schema");
+    let table = SystemProviderAbi::from_json(system_provider_abi_json())
+        .expect("schema-validated cancellation registry parses into typed contracts");
+    let registry = ProviderRoleRegistry::from_baked_abi(&table)
+        .expect("cancellation role resolves from the generated provider table");
+    let contract = table
+        .operation(OPERATION)
+        .expect("generic cancellation operation exists in the typed provider table");
+    let generated = system_function_descriptor(OPERATION)
+        .expect("cancellation operation has a macro-generated binding");
+    assert_eq!(generated.signature, contract.signature.source);
+    assert_eq!(contract.effects.iter().next(), Some(generated.effect));
+    assert_eq!(
+        contract
+            .signature
+            .type_parameters
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        ["T"]
+    );
+    let handle_index = contract
+        .signature
+        .parameters
+        .iter()
+        .position(|parameter| parameter.name == fixture["handle_parameter"])
+        .expect("cancellation contract has its invocation-handle parameter");
+    let reason_index = contract
+        .signature
+        .parameters
+        .iter()
+        .position(|parameter| parameter.name == fixture["reason_parameter"])
+        .expect("cancellation contract has its optional reason parameter");
+    assert_eq!(handle_index, 0);
+    assert_eq!(reason_index, 1);
+    assert_eq!(
+        contract.signature.parameters[handle_index].ty.canonical(),
+        "sys.InvocationHandle<T>"
+    );
+    assert_eq!(
+        contract.signature.parameters[reason_index].ty.canonical(),
+        fixture["reason_type"]
+            .as_str()
+            .expect("fixture reason type")
+    );
+    assert_eq!(
+        contract.signature.parameters[reason_index]
+            .default
+            .as_deref(),
+        Some("null")
+    );
+    assert_eq!(
+        contract.signature.result.canonical(),
+        fixture["result_type"]
+            .as_str()
+            .expect("fixture result type")
+    );
+    let role = contract
+        .role
+        .as_ref()
+        .expect("cancellation operation has a provider role");
+    let offer = registry
+        .resolve(role.as_str())
+        .expect("cancellation provider offer resolves")
+        .clone();
+    let cases = fixture["cases"]
+        .as_array()
+        .expect("cancellation fixture has reason cases");
+    let witnesses = fixture["witnesses"]
+        .as_array()
+        .expect("cancellation fixture has invocation result witnesses");
+    assert_eq!(cases.len(), 5);
+    assert_eq!(witnesses.len(), 2);
+
+    let mut success_routes = 0;
+    let mut reason_mismatch_routes = 0;
+    let mut handle_mismatch_routes = 0;
+    let mut result_mismatch_routes = 0;
+    let mut omitted_reason_rejections = 0;
+    let mut protected_reasons = 0;
+    for witness in witnesses {
+        let witness_name = witness.as_str().expect("witness type is a string");
+        let handle_type = format!("sys.InvocationHandle<{witness_name}>");
+        for case in cases {
+            let case_name = case["name"].as_str().expect("reason case name");
+            let reason_type = case["reason_type"]
+                .as_str()
+                .expect("reason case has a static type");
+            let payload = case["payload"]
+                .as_str()
+                .expect("reason case has a payload")
+                .as_bytes()
+                .to_vec();
+            let protected = case["protected"]
+                .as_bool()
+                .expect("reason case states protection");
+            let accepted = case["accepted"]
+                .as_bool()
+                .expect("reason case states acceptance");
+            assert_eq!(accepted, reason_type == "Str?");
+            let handle = TypedValue::public(
+                TypeId::new(handle_type.clone()),
+                format!("cancel-handle:{witness_name}:{case_name}").into_bytes(),
+            );
+            let reason = if protected {
+                protected_reasons += 1;
+                let value = TypedValue::protected(TypeId::new(reason_type), payload.clone());
+                assert!(value.is_redacted());
+                assert!(value.canonical().is_none());
+                assert!(
+                    !format!("{value:?}").contains(
+                        std::str::from_utf8(&payload).expect("protected reason is UTF-8")
+                    ),
+                    "protected cancellation reason is absent from debug output"
+                );
+                value
+            } else {
+                TypedValue::public(TypeId::new(reason_type), payload.clone())
+            };
+            if !protected {
+                assert_eq!(reason.canonical(), Some(payload.as_slice()));
+            }
+            let arguments = vec![handle.clone(), reason];
+            let bool_result = TypedValue::public(TypeId::new("Bool"), b"true".to_vec());
+
+            for selected_route in [false, true] {
+                let provider = FunctionReferenceEdgeProvider {
+                    offer: offer.clone(),
+                    operation: contract.id.clone(),
+                    expected_arguments: arguments.clone(),
+                    response: bool_result.clone(),
+                    calls: AtomicUsize::new(0),
+                };
+                if accepted {
+                    let result = if selected_route {
+                        registry.dispatch_to_provider(
+                            &table,
+                            OPERATION,
+                            &provider,
+                            &arguments,
+                            |_| Ok(()),
+                        )
+                    } else {
+                        table.dispatch_to_provider(OPERATION, &provider, &arguments, |_| Ok(()))
+                    };
+                    assert_eq!(
+                        result,
+                        Ok(orna_sys_v1::SystemDispatchResult::Returned(
+                            bool_result.clone()
+                        )),
+                        "{case_name} cancellation reason dispatches through both routes"
+                    );
+                    assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
+                    success_routes += 1;
+                } else {
+                    let expected = ProviderDiagnostic::ArgumentTypeMismatch {
+                        operation: contract.id.clone(),
+                        parameter: "reason".to_owned(),
+                        expected: "Str?".to_owned(),
+                        actual: reason_type.to_owned(),
+                    };
+                    let result = if selected_route {
+                        registry.dispatch_to_provider(
+                            &table,
+                            OPERATION,
+                            &provider,
+                            &arguments,
+                            |_| Ok(()),
+                        )
+                    } else {
+                        table.dispatch_to_provider(OPERATION, &provider, &arguments, |_| Ok(()))
+                    };
+                    assert_eq!(result, Err(expected));
+                    assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
+                    reason_mismatch_routes += 1;
+                }
+            }
+        }
+
+        let reason = TypedValue::public(TypeId::new("Str?"), b"null".to_vec());
+        let invalid_handle = TypedValue::public(
+            TypeId::new(
+                fixture["wrong_handle_type"]
+                    .as_str()
+                    .expect("wrong handle type is a string"),
+            ),
+            b"wrong-invocation-family".to_vec(),
+        );
+        let invalid_arguments = vec![invalid_handle, reason.clone()];
+        for selected_route in [false, true] {
+            let provider = FunctionReferenceEdgeProvider {
+                offer: offer.clone(),
+                operation: contract.id.clone(),
+                expected_arguments: invalid_arguments.clone(),
+                response: TypedValue::public(TypeId::new("Bool"), b"true".to_vec()),
+                calls: AtomicUsize::new(0),
+            };
+            let expected = ProviderDiagnostic::ArgumentTypeMismatch {
+                operation: contract.id.clone(),
+                parameter: "invocation".to_owned(),
+                expected: "sys.InvocationHandle<T>".to_owned(),
+                actual: fixture["wrong_handle_type"]
+                    .as_str()
+                    .expect("wrong handle type is a string")
+                    .to_owned(),
+            };
+            let result = if selected_route {
+                registry.dispatch_to_provider(
+                    &table,
+                    OPERATION,
+                    &provider,
+                    &invalid_arguments,
+                    |_| Ok(()),
+                )
+            } else {
+                table.dispatch_to_provider(OPERATION, &provider, &invalid_arguments, |_| Ok(()))
+            };
+            assert_eq!(result, Err(expected));
+            assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
+            handle_mismatch_routes += 1;
+        }
+
+        let valid_handle = TypedValue::public(
+            TypeId::new(handle_type),
+            format!("cancel-handle:{witness_name}:invalid-result").into_bytes(),
+        );
+        let valid_arguments = vec![valid_handle, reason];
+        let wrong_result_type = fixture["wrong_result_type"]
+            .as_str()
+            .expect("wrong result type is a string");
+        for selected_route in [false, true] {
+            let provider = FunctionReferenceEdgeProvider {
+                offer: offer.clone(),
+                operation: contract.id.clone(),
+                expected_arguments: valid_arguments.clone(),
+                response: TypedValue::public(TypeId::new(wrong_result_type), b"wrong".to_vec()),
+                calls: AtomicUsize::new(0),
+            };
+            let result = if selected_route {
+                registry.dispatch_to_provider(
+                    &table,
+                    OPERATION,
+                    &provider,
+                    &valid_arguments,
+                    |_| Ok(()),
+                )
+            } else {
+                table.dispatch_to_provider(OPERATION, &provider, &valid_arguments, |_| Ok(()))
+            };
+            assert_eq!(
+                result,
+                Err(ProviderDiagnostic::ResultTypeMismatch {
+                    operation: contract.id.clone(),
+                    expected: "Bool".to_owned(),
+                    actual: wrong_result_type.to_owned(),
+                })
+            );
+            assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
+            result_mismatch_routes += 1;
+        }
+
+        let omitted_arguments = vec![valid_arguments[0].clone()];
+        for selected_route in [false, true] {
+            let provider = FunctionReferenceEdgeProvider {
+                offer: offer.clone(),
+                operation: contract.id.clone(),
+                expected_arguments: omitted_arguments.clone(),
+                response: TypedValue::public(TypeId::new("Bool"), b"true".to_vec()),
+                calls: AtomicUsize::new(0),
+            };
+            let result = if selected_route {
+                registry.dispatch_to_provider(
+                    &table,
+                    OPERATION,
+                    &provider,
+                    &omitted_arguments,
+                    |_| Ok(()),
+                )
+            } else {
+                table.dispatch_to_provider(OPERATION, &provider, &omitted_arguments, |_| Ok(()))
+            };
+            assert_eq!(
+                result,
+                Err(ProviderDiagnostic::ArgumentCountMismatch {
+                    operation: contract.id.clone(),
+                    expected: 2,
+                    actual: 1,
+                })
+            );
+            assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
+            omitted_reason_rejections += 1;
+        }
+    }
+
+    assert_eq!(success_routes, witnesses.len() * 4 * 2);
+    assert_eq!(reason_mismatch_routes, witnesses.len() * 2);
+    assert_eq!(handle_mismatch_routes, witnesses.len() * 2);
+    assert_eq!(result_mismatch_routes, witnesses.len() * 2);
+    assert_eq!(omitted_reason_rejections, witnesses.len() * 2);
+    assert_eq!(protected_reasons, witnesses.len());
+    println!(
+        "provider_cancel_edge_parity operation={OPERATION} witnesses={} cases={} protected_reasons={protected_reasons} schema_validated=1 generated_binding=1 success_routes={success_routes} reason_mismatch_routes={reason_mismatch_routes} handle_mismatch_routes={handle_mismatch_routes} result_mismatch_routes={result_mismatch_routes} omitted_reason_rejections={omitted_reason_rejections} total_cases={}",
+        witnesses.len(),
+        cases.len(),
+        cases.len() * witnesses.len() * 2
+            + handle_mismatch_routes
+            + result_mismatch_routes
+            + omitted_reason_rejections
     );
 }
 
