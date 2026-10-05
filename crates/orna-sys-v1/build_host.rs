@@ -1,4 +1,8 @@
-use std::{collections::BTreeMap, fs, path::Path};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fs,
+    path::Path,
+};
 
 use quote::ToTokens;
 use serde_json::{Value, json};
@@ -80,6 +84,142 @@ pub fn generate_host_registry(source_root: &Path) -> Result<String, String> {
         "roles": roles.into_values().collect::<Vec<_>>(),
     });
     serde_json::to_string_pretty(&registry).map_err(|error| error.to_string())
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GeneratedHostBindingArtifacts {
+    pub modules: BTreeMap<String, String>,
+    pub modules_json: String,
+    pub bundle: String,
+}
+
+/// Emit the consumer-facing Orna declarations from the typed native registry.
+/// The generated functions are signature stubs; evaluation still dispatches to
+/// the Rust implementation named by each registry operation.
+pub fn generate_host_binding_artifacts(
+    host_registry_json: &str,
+) -> Result<GeneratedHostBindingArtifacts, String> {
+    let registry: Value = serde_json::from_str(host_registry_json)
+        .map_err(|error| format!("invalid native host registry JSON: {error}"))?;
+    let operations = registry["operations"]
+        .as_array()
+        .ok_or_else(|| "native host registry operations must be an array".to_owned())?;
+    let roles = registry["roles"]
+        .as_array()
+        .ok_or_else(|| "native host registry roles must be an array".to_owned())?;
+
+    let mut operations_by_name = BTreeMap::new();
+    for operation in operations {
+        let name = operation["name"]
+            .as_str()
+            .ok_or_else(|| "native host operation name must be a string".to_owned())?;
+        if operations_by_name.insert(name, operation).is_some() {
+            return Err(format!("duplicate native host operation `{name}`"));
+        }
+    }
+
+    let mut referenced = BTreeSet::new();
+    let mut declarations = BTreeMap::<String, Vec<(String, String)>>::new();
+    for role in roles {
+        let role_name = role["name"]
+            .as_str()
+            .ok_or_else(|| "native host role name must be a string".to_owned())?;
+        let role_operations = role["operations"]
+            .as_array()
+            .ok_or_else(|| format!("native host role `{role_name}` operations must be an array"))?;
+        let mut role_operation_names = role_operations
+            .iter()
+            .map(|name| {
+                name.as_str().ok_or_else(|| {
+                    format!("native host role `{role_name}` operation name must be a string")
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        role_operation_names.sort_unstable();
+        for operation_name in role_operation_names {
+            if !referenced.insert(operation_name) {
+                return Err(format!(
+                    "native host operation `{operation_name}` appears in multiple roles"
+                ));
+            }
+            let operation = operations_by_name.get(operation_name).ok_or_else(|| {
+                format!(
+                    "native host role `{role_name}` references missing operation `{operation_name}`"
+                )
+            })?;
+            if operation["role"].as_str() != Some(role_name) {
+                return Err(format!(
+                    "native host operation `{operation_name}` has a mismatched role"
+                ));
+            }
+            let signature = operation["signature"].as_str().ok_or_else(|| {
+                format!("native host operation `{operation_name}` has no signature")
+            })?;
+            let signature_prefix = format!("fn {operation_name}");
+            let tail = signature.strip_prefix(&signature_prefix).ok_or_else(|| {
+                format!("native host operation `{operation_name}` has a mismatched signature")
+            })?;
+            let (module, local_name) = operation_name
+                .rsplit_once('.')
+                .ok_or_else(|| format!("native host operation `{operation_name}` has no module"))?;
+            if module.is_empty() || local_name.is_empty() || !tail.starts_with('(') {
+                return Err(format!(
+                    "native host operation `{operation_name}` has an invalid signature"
+                ));
+            }
+            let relative_path = format!("{}.orna", module.replace('.', "/"));
+            let declaration = format!(
+                "// host-op: {operation_name}\npub fn {local_name}{tail} = error(code: \"sys.binding.stub\", message: \"generated host declaration\");\n"
+            );
+            declarations
+                .entry(relative_path)
+                .or_default()
+                .push((operation_name.to_owned(), declaration));
+        }
+    }
+    if referenced.len() != operations_by_name.len() {
+        let missing = operations_by_name
+            .keys()
+            .filter(|name| !referenced.contains(*name))
+            .copied()
+            .collect::<Vec<_>>();
+        return Err(format!(
+            "native host operations are not assigned to a role: {missing:?}"
+        ));
+    }
+
+    let mut modules = BTreeMap::new();
+    for (relative_path, mut module_declarations) in declarations {
+        module_declarations.sort_by(|left, right| left.0.cmp(&right.0));
+        let module_name = relative_path
+            .strip_suffix(".orna")
+            .expect("generated host module path has .orna extension")
+            .replace('/', ".");
+        let mut source = format!("// host-module: {module_name}\n");
+        for (_, declaration) in module_declarations {
+            source.push_str(&declaration);
+        }
+        modules.insert(relative_path, source);
+    }
+
+    let mut modules_json =
+        serde_json::to_string_pretty(&modules).map_err(|error| error.to_string())?;
+    modules_json.push('\n');
+    let mut bundle = String::from(
+        "// Generated native host binding declaration bundle. Module markers identify emitted .orna files.\n",
+    );
+    for (relative_path, source) in &modules {
+        bundle.push_str("\n// host-file: ");
+        bundle.push_str(relative_path);
+        bundle.push('\n');
+        bundle.push_str(source);
+    }
+
+    Ok(GeneratedHostBindingArtifacts {
+        modules,
+        modules_json,
+        bundle,
+    })
 }
 
 pub fn generate_host_registry_schema() -> Result<String, String> {
