@@ -5,7 +5,7 @@
 //! This crate does not publish, project, compact, or contact a remote.
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     fmt,
     fs::{self, OpenOptions},
     future::{Future, Ready, ready},
@@ -5947,6 +5947,16 @@ impl RuntimeState {
         if mutations.is_empty() {
             return Err(TableActivationError::Runtime(
                 RuntimeError::EmptyMutationBatch,
+            ));
+        }
+        let mut protected_pin_ids = BTreeSet::new();
+        if mutations
+            .iter()
+            .flat_map(TableMutation::protected_content_transfers)
+            .any(|transfer| !protected_pin_ids.insert(*transfer.pin_id()))
+        {
+            return Err(TableActivationError::Runtime(
+                RuntimeError::InvalidTableMutation,
             ));
         }
         let encoded = mutations
@@ -18710,8 +18720,9 @@ mod tests {
         cell::Cell,
         collections::{BTreeMap, VecDeque},
         future::{Ready, ready},
+        io::Write,
         path::Path,
-        process::Command,
+        process::{Command, Stdio},
         sync::{
             Arc, Mutex,
             atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -19175,6 +19186,199 @@ mod tests {
                 .success()
         );
     }
+
+    fn git_output(path: &Path, args: &[&str], input: Option<&[u8]>) -> Vec<u8> {
+        let mut child = Command::new("git")
+            .args(args)
+            .current_dir(path)
+            .stdin(if input.is_some() {
+                Stdio::piped()
+            } else {
+                Stdio::null()
+            })
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        if let Some(input) = input {
+            child.stdin.take().unwrap().write_all(input).unwrap();
+        }
+        let output = child.wait_with_output().unwrap();
+        assert!(
+            output.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        output.stdout
+    }
+
+    fn git_object(path: &Path, kind: &str, bytes: &[u8]) -> String {
+        String::from_utf8(git_output(
+            path,
+            &["hash-object", "-w", "-t", kind, "--stdin"],
+            Some(bytes),
+        ))
+        .unwrap()
+        .trim()
+        .to_owned()
+    }
+
+    fn git_tree(path: &Path, entries: &str) -> String {
+        String::from_utf8(git_output(path, &["mktree"], Some(entries.as_bytes())))
+            .unwrap()
+            .trim()
+            .to_owned()
+    }
+
+    fn native_fixture_node(path: &Path, data: &[u8], dependencies: &[(&str, &str)]) -> String {
+        let data_oid = git_object(path, "blob", data);
+        let mut dependencies = dependencies.to_vec();
+        dependencies.sort_by_key(|(oid, _)| *oid);
+        let refs_oid = if dependencies.is_empty() {
+            None
+        } else {
+            let refs = dependencies
+                .iter()
+                .map(|(oid, kind)| {
+                    let mode = if *kind == "tree" { "040000" } else { "100644" };
+                    format!("{mode} {kind} {oid}\t{oid}\n")
+                })
+                .collect::<String>();
+            Some(git_tree(path, &refs))
+        };
+        let mut envelope = format!("100644 blob {data_oid}\tdata\n");
+        if let Some(refs_oid) = refs_oid {
+            envelope.push_str(&format!("040000 tree {refs_oid}\trefs\n"));
+        }
+        git_tree(path, &envelope)
+    }
+
+    fn append_cbor_head(output: &mut Vec<u8>, major: u8, value: usize) {
+        let prefix = major << 5;
+        match value {
+            0..=23 => output.push(prefix | value as u8),
+            24..=255 => output.extend_from_slice(&[prefix | 24, value as u8]),
+            _ => panic!("fixture CBOR value is unexpectedly large"),
+        }
+    }
+
+    fn append_cbor_bytes(output: &mut Vec<u8>, bytes: &[u8]) {
+        append_cbor_head(output, 2, bytes.len());
+        output.extend_from_slice(bytes);
+    }
+
+    fn git_oid_bytes(oid: &str) -> Vec<u8> {
+        oid.as_bytes()
+            .chunks_exact(2)
+            .map(|pair| {
+                let hex = std::str::from_utf8(pair).unwrap();
+                u8::from_str_radix(hex, 16).unwrap()
+            })
+            .collect()
+    }
+
+    fn repository_with_empty_format3_row_map() -> (TempDir, Repository, [u8; 16]) {
+        let (temp, repository) = repository();
+        let root = temp.path();
+        let database_id = [0, 0, 0, 0, 0, 0, 0x40, 0, 0x80, 0, 0, 0, 0, 0, 0, 1];
+        let relation_id = id(0x43);
+        let database_uuid = "00000000-0000-4000-8000-000000000001";
+        let database = format!(
+            "{{\n    repository_format: 3,\n    database_id: \"{database_uuid}\",\n}}\n"
+        );
+        let schema_source = b"capture transaction test schema";
+        std::fs::create_dir_all(root.join(".orna/store")).unwrap();
+        std::fs::write(root.join(".orna/database.orna"), &database).unwrap();
+        std::fs::write(root.join(".orna/store/data"), b"store marker").unwrap();
+        std::fs::write(root.join("main.orna"), schema_source).unwrap();
+        git(root, &["add", "--all"]);
+        git(root, &["commit", "-m", "format3 graph fixture metadata"]);
+
+        let schema_digest: [u8; 32] = Sha256::digest(schema_source).into();
+        let chunk_oid = git_object(root, "blob", schema_source);
+        let mut byte_index = vec![0x85, 0x01, 0x04, 0x00];
+        append_cbor_head(&mut byte_index, 0, schema_source.len());
+        byte_index.push(0x81);
+        byte_index.push(0x83);
+        append_cbor_head(&mut byte_index, 0, schema_source.len());
+        append_cbor_bytes(&mut byte_index, &git_oid_bytes(&chunk_oid));
+        append_cbor_bytes(&mut byte_index, &schema_digest);
+        let byte_index_oid = native_fixture_node(root, &byte_index, &[(chunk_oid.as_str(), "blob")]);
+
+        let mut schema = vec![0x85, 0x01, 0x06];
+        append_cbor_head(&mut schema, 0, schema_source.len());
+        append_cbor_bytes(&mut schema, &schema_digest);
+        append_cbor_bytes(&mut schema, &git_oid_bytes(&byte_index_oid));
+        let schema_oid = native_fixture_node(root, &schema, &[(byte_index_oid.as_str(), "tree")]);
+
+        let mut row_domain = vec![0x83, 0x64];
+        row_domain.extend_from_slice(b"rows");
+        append_cbor_bytes(&mut row_domain, &relation_id);
+        append_cbor_bytes(&mut row_domain, &schema_digest);
+        let mut empty_rows = vec![0x84, 0x01, 0x01];
+        empty_rows.extend_from_slice(&row_domain);
+        empty_rows.push(0x80);
+        let row_root_oid = native_fixture_node(root, &empty_rows, &[]);
+
+        let mut relation_domain = vec![0x82, 0x69];
+        relation_domain.extend_from_slice(b"relations");
+        append_cbor_bytes(&mut relation_domain, &database_id);
+        let mut relation_map = vec![0x84, 0x01, 0x01];
+        relation_map.extend_from_slice(&relation_domain);
+        relation_map.push(0x81);
+        relation_map.push(0x82);
+        append_cbor_bytes(&mut relation_map, &relation_id);
+        relation_map.push(0x84);
+        append_cbor_bytes(&mut relation_map, &git_oid_bytes(&schema_oid));
+        append_cbor_bytes(&mut relation_map, &git_oid_bytes(&row_root_oid));
+        relation_map.push(0xf6);
+        relation_map.push(0x00);
+        let relation_map_oid = native_fixture_node(
+            root,
+            &relation_map,
+            &[(schema_oid.as_str(), "tree"), (row_root_oid.as_str(), "tree")],
+        );
+
+        let mut store_root = vec![0x83, 0x01, 0x00];
+        append_cbor_bytes(&mut store_root, &git_oid_bytes(&relation_map_oid));
+        let store_root_oid =
+            native_fixture_node(root, &store_root, &[(relation_map_oid.as_str(), "tree")]);
+
+        let database_oid = git_object(root, "blob", database.as_bytes());
+        let source_oid = git_object(root, "blob", schema_source);
+        let orna_tree = git_tree(
+            root,
+            &format!(
+                "100644 blob {database_oid}\tdatabase.orna\n040000 tree {store_root_oid}\tstore\n"
+            ),
+        );
+        let root_tree = git_tree(
+            root,
+            &format!(
+                "040000 tree {orna_tree}\t.orna\n100644 blob {source_oid}\tmain.orna\n"
+            ),
+        );
+        let parent = String::from_utf8(git_output(root, &["rev-parse", "HEAD"], None))
+            .unwrap()
+            .trim()
+            .to_owned();
+        let commit = String::from_utf8(git_output(
+            root,
+            &["commit-tree", &root_tree, "-p", &parent, "-m", "format3 graph fixture"],
+            None,
+        ))
+        .unwrap()
+        .trim()
+        .to_owned();
+        let head_ref = String::from_utf8(git_output(root, &["symbolic-ref", "HEAD"], None))
+            .unwrap()
+            .trim()
+            .to_owned();
+        git(root, &["update-ref", &head_ref, &commit]);
+
+        (temp, repository, relation_id)
+    }
+
     fn repository() -> (TempDir, Repository) {
         let temp = TempDir::new().unwrap();
         git(temp.path(), &["init"]);
@@ -20014,32 +20218,83 @@ mod tests {
 
     #[tokio::test]
     async fn validated_table_activation_commits_protected_blob_transfer_atomically() {
-        let (_temp, repo) = repository();
-        let state = open_state(&repo).await;
+        let (_temp, repo, relation_id) = repository_with_empty_format3_row_map();
+        let format_context = repo.open_format_context().unwrap();
+        let row_map = format_context.load_row_map(relation_id).unwrap();
+        let graph = format_context.open_native_graph(&row_map).unwrap();
+        let scope = graph.open_read_scope().unwrap();
+        let payload = b"graph-issued captured Blob";
+        let candidate = graph
+            .capture_blob_candidate(&payload[..], payload.len() as u64, &scope)
+            .unwrap();
+        let pin = graph.protect_captured_blob(candidate, &scope).unwrap();
+
+        let state = RuntimeState::open(
+            &repo,
+            RuntimeIdentity {
+                database_id: [0, 0, 0, 0, 0, 0, 0x40, 0, 0x80, 0, 0, 0, 0, 0, 0, 1],
+                repository_id: id(2),
+            },
+            digest(3),
+        )
+        .await
+        .unwrap();
         let lease = state.acquire_lease(id(4)).await.unwrap();
         let context = state.begin_activation().await.unwrap();
-        let transfer = ProtectedContentTransferEvidence {
-            repository_id: [0x41; 32],
-            database_id: context.capture().database_id(),
-            pin_id: [0x42; 16],
-            descriptor_oid: NativeOid::new(GitHashAlgorithm::Sha1, [0x43; 20]).unwrap(),
-            identity: ContentIdentity::new(3, [0x44; 32]).unwrap(),
-        };
-        let mut mutation = table_mutation(5, 1, Some(9));
-        mutation.protected_content.push(transfer.clone());
-        mutation.protected_content_from_pins = true;
+        let expected_transfer =
+            ProtectedContentTransferEvidence::from_transfer(&pin.transfer_record());
+        let mutation = table_mutation(5, 1, Some(9))
+            .with_protected_content_pin(&pin)
+            .unwrap();
         let encoded = mutation
             .runtime_mutation_with_protected_content(&context.capture().database_id())
             .unwrap();
         let decoded = TableMutation::decode(&encoded).unwrap();
         assert_eq!(
             decoded.protected_content_transfers(),
-            std::slice::from_ref(&transfer)
+            std::slice::from_ref(&expected_transfer)
         );
         assert!(matches!(
             decoded.runtime_mutation_with_protected_content(&context.capture().database_id()),
             Err(RuntimeError::InvalidTableMutation)
         ));
+
+        let duplicate_mutations = [
+            table_mutation(15, 1, Some(8))
+                .with_protected_content_pin(&pin)
+                .unwrap(),
+            table_mutation(16, 2, Some(10))
+                .with_protected_content_pin(&pin)
+                .unwrap(),
+        ];
+        let mut duplicate_validator = ObservingTableActivationValidator {
+            tables: vec!["books".into()],
+            calls: 0,
+            seen: None,
+        };
+        let before_duplicate = context.capture().clone();
+        let duplicate = state
+            .commit_validated_table_activation(ValidatedTableActivationCommit {
+                writer: lease,
+                context: &context,
+                mutations: &duplicate_mutations,
+                next_digest: digest(6),
+                validator: &mut duplicate_validator,
+                faults: &NoFault,
+            })
+            .await;
+        assert!(matches!(
+            duplicate,
+            Err(TableActivationError::Runtime(
+                RuntimeError::InvalidTableMutation
+            ))
+        ));
+        assert_eq!(duplicate_validator.calls, 0);
+        assert_eq!(state.capture().await.unwrap(), before_duplicate);
+        assert!(state.pending().await.unwrap().is_empty());
+        assert_eq!(state.latest_checkpoint().await.unwrap(), None);
+        assert_eq!(state.committed_table_row("books", &[1]).await.unwrap(), None);
+        assert_eq!(state.committed_table_row("books", &[2]).await.unwrap(), None);
 
         let mut validator = ObservingTableActivationValidator {
             tables: vec!["books".into()],
@@ -20093,7 +20348,7 @@ mod tests {
             TableMutation::decode(committed)
                 .unwrap()
                 .protected_content_transfers(),
-            std::slice::from_ref(&transfer)
+            std::slice::from_ref(&expected_transfer)
         );
         assert_eq!(state.capture().await.unwrap(), next);
     }
