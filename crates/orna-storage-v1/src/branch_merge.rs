@@ -4498,6 +4498,42 @@ pub enum BranchMergePairedCheckpointRedoNestedCheckpointIdentityCompactionChainH
     },
 }
 
+/// One family-61 checkpoint restore fold bound to an outer paired handoff identity.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BranchMergePairedCheckpointRedoNestedHandoffIdentityCheckpointIdentityCompactionChainHandoffFoldSnapshot {
+    pub nested_handoff_identity: BranchMergePairedHandoffIdentity,
+    pub restore_fold: BranchMergePairedCheckpointRedoNestedCheckpointIdentityCompactionChainHandoffFoldSnapshot,
+}
+
+/// One restored slot retaining its outer paired handoff identity.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BranchMergePairedCheckpointRedoNestedHandoffIdentityCheckpointIdentityCompactionChainHandoffFoldSlotSnapshot {
+    pub restore_fold_ordinal: usize,
+    pub nested_handoff_identity: BranchMergePairedHandoffIdentity,
+    pub restored_slot: BranchMergePairedCheckpointRedoNestedCheckpointIdentityCompactionChainHandoffFoldSlotSnapshot,
+}
+
+/// A checkpoint stream retaining the outer handoff and nested checkpoint identities.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BranchMergePairedCheckpointRedoNestedHandoffIdentityCheckpointIdentityCompactionChainHandoffFoldStreamSnapshot {
+    pub restore_fold_ordinal: usize,
+    pub nested_handoff_identity: BranchMergePairedHandoffIdentity,
+    pub checkpoint_identity: BranchMergePairedCheckpointIdentity,
+    pub nested_rewind_identity: BranchMergePairedUndoChainIdentity,
+    pub checkpoint_id: CheckpointId,
+    pub slots: Vec<BranchMergePairedCheckpointRedoNestedHandoffIdentityCheckpointIdentityCompactionChainHandoffFoldSlotSnapshot>,
+}
+
+/// A malformed nested checkpoint fold rejected with its outer paired handoff identity.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum BranchMergePairedCheckpointRedoNestedHandoffIdentityCheckpointIdentityCompactionChainHandoffFoldError {
+    RestoreFold {
+        restore_fold_ordinal: usize,
+        nested_handoff_identity: BranchMergePairedHandoffIdentity,
+        source: BranchMergePairedCheckpointRedoNestedCheckpointIdentityCompactionChainHandoffFoldError,
+    },
+}
+
 /// One outer handoff identity enclosing a paired rewind/compaction restore fold.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BranchMergePairedCheckpointRedoNestedHandoffIdentityRewindCompactionChainFoldSnapshot {
@@ -13598,6 +13634,73 @@ pub fn restore_paired_checkpoint_redo_sparse_nested_checkpoint_identity_across_c
                 .collect();
             BranchMergePairedCheckpointRedoNestedCheckpointIdentityCompactionChainHandoffFoldStreamSnapshot {
                 restore_fold_ordinal,
+                checkpoint_identity,
+                nested_rewind_identity,
+                checkpoint_id: stream.checkpoint_id,
+                slots,
+            }
+        })
+        .collect())
+}
+
+/// Restores family-61 checkpoint folds without dropping outer handoff identity.
+///
+/// The outer directional handoff pair is attached to checkpoint streams and
+/// every expanded slot, including catalogue-only streams. Errors retain that
+/// pair together with the complete checkpoint/rewind/compaction/handoff source.
+pub fn restore_paired_checkpoint_redo_sparse_nested_handoff_identity_across_checkpoint_compaction_chain_handoff_folds(
+    known_checkpoint_ids: &[CheckpointId],
+    restore_folds: &[BranchMergePairedCheckpointRedoNestedHandoffIdentityCheckpointIdentityCompactionChainHandoffFoldSnapshot],
+) -> Result<
+    Vec<BranchMergePairedCheckpointRedoNestedHandoffIdentityCheckpointIdentityCompactionChainHandoffFoldStreamSnapshot>,
+    BranchMergePairedCheckpointRedoNestedHandoffIdentityCheckpointIdentityCompactionChainHandoffFoldError,
+> {
+    let checkpoint_folds = restore_folds
+        .iter()
+        .map(|fold| fold.restore_fold.clone())
+        .collect::<Vec<_>>();
+    let restored = restore_paired_checkpoint_redo_sparse_nested_checkpoint_identity_across_compaction_chain_handoff_folds(
+        known_checkpoint_ids,
+        &checkpoint_folds,
+    )
+    .map_err(|source| {
+        let restore_fold_ordinal = match &source {
+            BranchMergePairedCheckpointRedoNestedCheckpointIdentityCompactionChainHandoffFoldError::RestoreFold {
+                restore_fold_ordinal,
+                ..
+            } => *restore_fold_ordinal,
+        };
+        BranchMergePairedCheckpointRedoNestedHandoffIdentityCheckpointIdentityCompactionChainHandoffFoldError::RestoreFold {
+            restore_fold_ordinal,
+            nested_handoff_identity: restore_folds[restore_fold_ordinal]
+                .nested_handoff_identity
+                .clone(),
+            source,
+        }
+    })?;
+
+    Ok(restored
+        .into_iter()
+        .map(|stream| {
+            let restore_fold_ordinal = stream.restore_fold_ordinal;
+            let nested_handoff_identity =
+                restore_folds[restore_fold_ordinal].nested_handoff_identity.clone();
+            let checkpoint_identity = stream.checkpoint_identity;
+            let nested_rewind_identity = stream.nested_rewind_identity;
+            let slots = stream
+                .slots
+                .into_iter()
+                .map(|restored_slot| {
+                    BranchMergePairedCheckpointRedoNestedHandoffIdentityCheckpointIdentityCompactionChainHandoffFoldSlotSnapshot {
+                        restore_fold_ordinal,
+                        nested_handoff_identity: nested_handoff_identity.clone(),
+                        restored_slot,
+                    }
+                })
+                .collect();
+            BranchMergePairedCheckpointRedoNestedHandoffIdentityCheckpointIdentityCompactionChainHandoffFoldStreamSnapshot {
+                restore_fold_ordinal,
+                nested_handoff_identity,
                 checkpoint_identity,
                 nested_rewind_identity,
                 checkpoint_id: stream.checkpoint_id,
