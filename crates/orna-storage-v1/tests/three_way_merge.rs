@@ -13944,6 +13944,130 @@ fn multi_table_row_conflicts_precede_checkpoint_resets_at_shared_budget() {
 }
 
 #[test]
+fn multi_table_row_read_budget_stops_at_next_table_without_partial_plan() {
+    let build_inputs = || {
+        let mut merge_schema = schema(true, FieldType::Str);
+        let mut second_table = merge_schema.tables[0].clone();
+        second_table.id = id(2);
+        second_table.name = "ContactArchive".into();
+        merge_schema.tables.push(second_table);
+
+        let mut base = ThreeWaySnapshot {
+            schema: merge_schema.clone(),
+            tables: BTreeMap::new(),
+            checkpoints: BTreeMap::new(),
+        };
+        let mut left = ThreeWaySnapshot {
+            schema: merge_schema.clone(),
+            tables: BTreeMap::new(),
+            checkpoints: BTreeMap::new(),
+        };
+        let mut right = ThreeWaySnapshot {
+            schema: merge_schema,
+            tables: BTreeMap::new(),
+            checkpoints: BTreeMap::new(),
+        };
+        let mut source = FixtureRows::default();
+
+        for (index, (table_number, base_source, edit_source)) in [
+            (1, MULTI_TABLE_BASE_ONE, MULTI_TABLE_EDIT_ONE),
+            (2, MULTI_TABLE_BASE_TWO, MULTI_TABLE_EDIT_TWO),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let table_id = id(table_number);
+            let mut base_row = parse_fixture(base_source, RowKeyKind::Explicit);
+            base_row.table = table_id.clone();
+            let mut edited_row = parse_fixture(edit_source, RowKeyKind::Explicit);
+            edited_row.table = table_id.clone();
+
+            let base_locator = format!("multi-read-budget-base-{table_number}");
+            let left_locator = format!("multi-read-budget-left-{table_number}");
+            let right_locator = format!("multi-read-budget-right-{table_number}");
+            base.tables.insert(
+                table_id.clone(),
+                manifest(70 + index as u8, 80 + index as u8, base_locator.as_bytes()),
+            );
+            left.tables.insert(
+                table_id.clone(),
+                manifest(90 + index as u8, 100 + index as u8, left_locator.as_bytes()),
+            );
+            right.tables.insert(
+                table_id.clone(),
+                manifest(110 + index as u8, 120 + index as u8, right_locator.as_bytes()),
+            );
+
+            source.add(MergeSide::Base, base_locator.as_bytes(), vec![base_row]);
+            source.add(MergeSide::Left, left_locator.as_bytes(), vec![edited_row.clone()]);
+            source.add(MergeSide::Right, right_locator.as_bytes(), vec![edited_row]);
+        }
+        (base, left, right, source)
+    };
+
+    let (base, left, right, mut capped_source) = build_inputs();
+    let error = merge_three_way_snapshots(
+        &base,
+        &left,
+        &right,
+        &mut capped_source,
+        BranchMergeBudget { max_rows_examined: 3, max_conflicts: 0 },
+    )
+    .expect_err("the first row in table two crosses a budget after table one completes");
+    let BranchMergeError::BudgetExceeded { report } = error else {
+        panic!("an over-budget multi-table scan cannot return a partial plan")
+    };
+    assert_eq!(report.rows_examined, 4, "the report counts the first row beyond the cap");
+    assert_eq!(report.conflicts_lower_bound, 0);
+    assert_eq!(report.affected_ranges, [(id(1), KeyRange::all()), (id(2), KeyRange::all())].into_iter().collect());
+    assert_eq!(
+        capped_source.visited,
+        vec![
+            (MergeSide::Base, b"multi-read-budget-base-1".to_vec()),
+            (MergeSide::Left, b"multi-read-budget-left-1".to_vec()),
+            (MergeSide::Right, b"multi-read-budget-right-1".to_vec()),
+            (MergeSide::Base, b"multi-read-budget-base-2".to_vec()),
+        ],
+        "bounded scans finish the lower table before opening the next table",
+    );
+
+    let (base, left, right, mut exact_source) = build_inputs();
+    let plan = merge_three_way_snapshots(
+        &base,
+        &left,
+        &right,
+        &mut exact_source,
+        BranchMergeBudget { max_rows_examined: 6, max_conflicts: 0 },
+    )
+    .expect("the exact budget materializes both complete table plans");
+    assert_eq!(plan.report.rows_examined, 6);
+    assert_eq!(plan.tables.keys().copied().collect::<Vec<_>>(), vec![id(1), id(2)]);
+    assert_eq!(
+        exact_source.visited,
+        vec![
+            (MergeSide::Base, b"multi-read-budget-base-1".to_vec()),
+            (MergeSide::Left, b"multi-read-budget-left-1".to_vec()),
+            (MergeSide::Right, b"multi-read-budget-right-1".to_vec()),
+            (MergeSide::Base, b"multi-read-budget-base-2".to_vec()),
+            (MergeSide::Left, b"multi-read-budget-left-2".to_vec()),
+            (MergeSide::Right, b"multi-read-budget-right-2".to_vec()),
+        ],
+        "exact-budget reads retain ascending table and base/left/right order",
+    );
+    for table_id in [id(1), id(2)] {
+        let MergedSegment::Rows { rows, .. } = &plan.tables[&table_id].segments[0] else {
+            panic!("changed table {table_id:?} is represented by a materialized row segment")
+        };
+        let mut expected = parse_fixture(
+            if table_id == id(1) { MULTI_TABLE_EDIT_ONE } else { MULTI_TABLE_EDIT_TWO },
+            RowKeyKind::Explicit,
+        );
+        expected.table = table_id;
+        assert_eq!(rows, &[expected]);
+    }
+}
+
+#[test]
 fn row_delete_edit_checkpoint_delete_reset_tail_closes_at_shared_budgets() {
     let before_id = b"consumer/a-before-tombstone".to_vec();
     let left_delete_before_id = b"consumer/b-left-delete-closure".to_vec();
