@@ -34,7 +34,7 @@ pub struct Collector {
 pub struct GeneratedSysArtifacts {
     pub api_json: String,
     pub schema_json: String,
-    pub catalogue_json: String,
+    pub api_selection_json: String,
     pub provider_abi_json: String,
     pub binding_modules: BTreeMap<String, String>,
     pub binding_modules_json: String,
@@ -100,7 +100,7 @@ pub fn generate_sys_artifacts(
         .collect::<Vec<_>>();
     let api = generate_system_api_document(registry, function_metadata)?;
     validate_published_schema_shape(&api, schema)?;
-    let mut api_json = canonical_pretty_json(&api).map_err(|error| error.to_string())?;
+    let mut api_json = final_api_pretty_json(&api)?;
     api_json.push('\n');
 
     let mut schema_json = canonical_pretty_json(schema).map_err(|error| error.to_string())?;
@@ -128,7 +128,7 @@ pub fn generate_sys_artifacts(
     Ok(GeneratedSysArtifacts {
         api_json,
         schema_json,
-        catalogue_json: generate_system_catalogue_json(functions)?,
+        api_selection_json: generate_system_api_selection_json(functions)?,
         provider_abi_json,
         binding_modules,
         binding_modules_json,
@@ -136,16 +136,16 @@ pub fn generate_sys_artifacts(
     })
 }
 
-/// Generate the internal native catalogue projection. Unlike `api/sys.json`,
-/// this keeps the explicit format admissions so runtime selection can remain
-/// typed and fail closed. It is not a value codec or executable dispatch map.
-pub fn generate_system_catalogue_json(functions: &[Function]) -> Result<String, String> {
+/// Generate the internal callable-selection projection. Unlike `api/sys.json`,
+/// this keeps explicit format admissions so later runtime selection can remain
+/// typed and fail closed. It contains no durable rows, references, or codecs.
+pub fn generate_system_api_selection_json(functions: &[Function]) -> Result<String, String> {
     let functions = functions
         .iter()
         .map(|function| function.metadata.clone())
         .collect::<Vec<_>>();
-    let catalogue = serde_json::json!({"functions": functions});
-    let mut json = canonical_pretty_json(&catalogue).map_err(|error| error.to_string())?;
+    let selection = serde_json::json!({"functions": functions});
+    let mut json = canonical_pretty_json(&selection).map_err(|error| error.to_string())?;
     json.push('\n');
     Ok(json)
 }
@@ -300,6 +300,262 @@ pub fn canonical_pretty_json(value: &Value) -> Result<String, serde_json::Error>
     }
 
     serde_json::to_string_pretty(&sort(value.clone()))
+}
+
+/// Serialize the final API artifact in the authority's reviewed member order.
+///
+/// Other generated artifacts intentionally use canonical lexicographic JSON,
+/// but the published final API is a byte-addressed compatibility artifact.
+/// This ordering layer operates only on the native registry projection; it
+/// does not read the authority or manufacture durable rows/references.
+pub fn final_api_pretty_json(value: &Value) -> Result<String, String> {
+    const ROOT: &[&str] = &[
+        "title",
+        "language_version",
+        "sys_version",
+        "status",
+        "removed_names",
+        "singletons",
+        "opaque_identifiers",
+        "reference_aliases",
+        "value_types",
+        "enums",
+        "relations",
+        "functions",
+        "failure_codes",
+        "counts",
+        "source_of_truth",
+        "value_profiles",
+    ];
+    const REMOVED_NAMES: &[&str] = &[
+        "sys.runtime",
+        "sys.runtime_info",
+        "sys.admin.set_storage_preference",
+        "sys.admin.rewrite_storage",
+    ];
+    const ENUMS: &[&str] = &[
+        "sys.RuntimeMode",
+        "sys.ObjectKind",
+        "sys.Visibility",
+        "sys.Severity",
+        "sys.SnapshotKind",
+        "sys.ChangeKind",
+        "sys.ChangeArea",
+        "sys.RunStatus",
+        "sys.InvocationStatus",
+        "sys.TransactionStatus",
+        "sys.StreamStatus",
+        "sys.FailureStatus",
+        "sys.LeaseStatus",
+        "sys.BuildStatus",
+        "sys.TestStatus",
+        "sys.AssertionOwnerKind",
+        "sys.AssertionScope",
+        "sys.ClientKind",
+        "sys.DependencyConfidence",
+        "sys.DependencyKind",
+        "sys.DiffScope",
+        "sys.EffectKind",
+        "sys.ExtensionTrust",
+        "sys.FileKind",
+        "sys.GitObjectKind",
+        "sys.HostAccess",
+        "sys.IndexKind",
+        "sys.InvokeTransaction",
+        "sys.ListenerKind",
+        "sys.MaintenanceKind",
+        "sys.PlanNodeKind",
+        "sys.ProtocolMemberKind",
+        "sys.ReferenceAction",
+        "sys.SettingScope",
+        "sys.SettingSource",
+        "sys.StatisticKind",
+        "sys.StorageFileKind",
+        "sys.StorageProfile",
+        "sys.TypeKind",
+        "sys.VerificationStatus",
+        "sys.VerifyScope",
+        "sys.ChangeTargetKind",
+    ];
+    const COUNTS: &[&str] = &[
+        "singletons",
+        "opaque_identifiers",
+        "reference_aliases",
+        "value_types",
+        "enums",
+        "relations",
+        "functions",
+        "failure_codes",
+    ];
+    const VALUE_PROFILES: &[&str] = &["new", "stored", "semantic", "legacy_wire"];
+
+    fn known_order<'a>(object: &'a serde_json::Map<String, Value>, hint: &str) -> Vec<&'a str> {
+        fn add<'a>(
+            object: &'a serde_json::Map<String, Value>,
+            order: &mut Vec<&'a str>,
+            keys: &[&str],
+        ) {
+            for wanted in keys {
+                if let Some(actual) = object.keys().find(|key| key.as_str() == *wanted) {
+                    order.push(actual.as_str());
+                }
+            }
+        }
+
+        let mut order = Vec::new();
+        match hint {
+            "root" => add(object, &mut order, ROOT),
+            "removed_names" => add(object, &mut order, REMOVED_NAMES),
+            "enums" => add(object, &mut order, ENUMS),
+            "counts" => add(object, &mut order, COUNTS),
+            "value_profiles" => add(object, &mut order, VALUE_PROFILES),
+            "functions" => {
+                let blob_metadata =
+                    object
+                        .get("name")
+                        .and_then(Value::as_str)
+                        .is_some_and(|name| {
+                            matches!(
+                                name,
+                                "sys.blob.media_type"
+                                    | "sys.blob.suffix"
+                                    | "sys.blob.annotate"
+                                    | "sys.blob.same_content"
+                            )
+                        });
+                if blob_metadata {
+                    add(
+                        object,
+                        &mut order,
+                        &["name", "signature", "effect", "purpose"],
+                    );
+                } else {
+                    add(
+                        object,
+                        &mut order,
+                        &["name", "effect", "signature", "purpose"],
+                    );
+                }
+                add(
+                    object,
+                    &mut order,
+                    &[
+                        "documentation",
+                        "preconditions",
+                        "snapshot_rule",
+                        "ownership",
+                        "since",
+                        "contract",
+                    ],
+                );
+            }
+            "singletons" => add(object, &mut order, &["name", "type", "availability"]),
+            "reference_aliases" => add(object, &mut order, &["name", "target", "definition"]),
+            "value_types" => add(
+                object,
+                &mut order,
+                &[
+                    "name",
+                    "kind",
+                    "purpose",
+                    "type_parameters",
+                    "fields",
+                    "invariants",
+                ],
+            ),
+            "relations" => {
+                let invocation_or_failure = object
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .is_some_and(|name| matches!(name, "sys.Invocation" | "sys.Failure"));
+                add(
+                    object,
+                    &mut order,
+                    &[
+                        "name",
+                        "grouped_handle",
+                        "kind",
+                        "availability",
+                        "key",
+                        "purpose",
+                        "fields",
+                        "writable",
+                        "reference_type",
+                    ],
+                );
+                if invocation_or_failure {
+                    add(object, &mut order, &["invariants", "key_fields"]);
+                } else {
+                    add(object, &mut order, &["key_fields", "invariants"]);
+                }
+            }
+            "fields" => add(object, &mut order, &["name", "type"]),
+            _ if object.contains_key("replacement") => {
+                add(object, &mut order, &["replacement", "diagnostic", "reason"])
+            }
+            _ => {}
+        }
+        for key in object.keys() {
+            if !order.contains(&key.as_str()) {
+                order.push(key);
+            }
+        }
+        order
+    }
+
+    fn render(value: &Value, level: usize, hint: &str, output: &mut String) -> Result<(), String> {
+        match value {
+            Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => {
+                output.push_str(&serde_json::to_string(value).map_err(|error| error.to_string())?);
+            }
+            Value::Array(values) => {
+                output.push('[');
+                if !values.is_empty() {
+                    for (index, value) in values.iter().enumerate() {
+                        output.push('\n');
+                        output.push_str(&"  ".repeat(level + 1));
+                        render(value, level + 1, hint, output)?;
+                        if index + 1 != values.len() {
+                            output.push(',');
+                        }
+                    }
+                    output.push('\n');
+                    output.push_str(&"  ".repeat(level));
+                }
+                output.push(']');
+            }
+            Value::Object(object) => {
+                output.push('{');
+                let keys = known_order(object, hint);
+                for (index, key) in keys.iter().enumerate() {
+                    output.push('\n');
+                    output.push_str(&"  ".repeat(level + 1));
+                    output
+                        .push_str(&serde_json::to_string(key).map_err(|error| error.to_string())?);
+                    output.push_str(": ");
+                    render(
+                        object.get(*key).expect("ordered API key exists"),
+                        level + 1,
+                        key,
+                        output,
+                    )?;
+                    if index + 1 != keys.len() {
+                        output.push(',');
+                    }
+                }
+                if !keys.is_empty() {
+                    output.push('\n');
+                    output.push_str(&"  ".repeat(level));
+                }
+                output.push('}');
+            }
+        }
+        Ok(())
+    }
+
+    let mut output = String::new();
+    render(value, 0, "root", &mut output)?;
+    Ok(output)
 }
 
 /// Assemble the published artifact from the registry-owned non-operation
@@ -893,7 +1149,6 @@ pub fn validate_function_metadata(metadata: &Value) -> Result<(), String> {
                 | "sys.blob.finish"
                 | "sys.blob.abort"
                 | "sys.blob.capture_file"
-                | "sys.blob.resource"
         ) {
             "invoke"
         } else {

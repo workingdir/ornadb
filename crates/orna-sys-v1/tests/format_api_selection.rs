@@ -2,14 +2,24 @@ use std::collections::BTreeSet;
 
 use orna_sys_v1::{
     RepositoryFormat, SystemCallableAvailability, SystemDispatchError, SystemFormatContext,
-    system_api_catalogue_json, system_api_json, system_callable_for, system_catalogue,
+    system_api_json, system_api_selection, system_api_selection_json, system_callable_for,
     system_function_descriptor,
 };
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 
 const FINAL: SystemFormatContext = SystemFormatContext::FORMAT_3_FINAL_2026_10_05;
 const ORIGINAL: SystemFormatContext = SystemFormatContext::FORMAT_1_ORIGINAL_1_0_0;
 const DRAFT: SystemFormatContext = SystemFormatContext::FORMAT_2_PREVIOUS_1_1_0_DRAFT;
+const FINAL_API_SHA256: &str = "10ef7dab9665de4e065ee2b96797b2751c7c3f98f9886241011aee0cc8c0d40e";
+
+#[test]
+fn generated_final_api_matches_authority_release_bytes() {
+    assert_eq!(
+        format!("{:x}", Sha256::digest(system_api_json().as_bytes())),
+        FINAL_API_SHA256
+    );
+}
 
 #[test]
 fn final_blob_inventory_is_admitted_only_to_format_three() {
@@ -77,17 +87,17 @@ fn retired_placement_apis_remain_historical_reader_only() {
 }
 
 #[test]
-fn native_catalogue_and_published_inventory_are_distinct_projections() {
-    let catalogue: Value =
-        serde_json::from_str(system_api_catalogue_json()).expect("native catalogue JSON");
-    let catalogue_functions = catalogue["functions"]
+fn native_api_selection_and_published_inventory_are_distinct_projections() {
+    let selection: Value =
+        serde_json::from_str(system_api_selection_json()).expect("native API selection JSON");
+    let selection_functions = selection["functions"]
         .as_array()
-        .expect("native catalogue functions");
-    assert_eq!(catalogue_functions.len(), 84);
-    assert!(catalogue_functions.iter().any(|function| {
+        .expect("native API selection functions");
+    assert_eq!(selection_functions.len(), 84);
+    assert!(selection_functions.iter().any(|function| {
         function["name"] == "sys.blob.length" && function["contexts"] == json!(["format-3"])
     }));
-    assert!(catalogue_functions.iter().any(|function| {
+    assert!(selection_functions.iter().any(|function| {
         function["name"] == "sys.admin.rewrite_storage"
             && function["contexts"] == json!(["format-1", "format-2"])
     }));
@@ -109,7 +119,7 @@ fn native_catalogue_and_published_inventory_are_distinct_projections() {
     assert!(!published_names.contains("sys.admin.set_storage_preference"));
     assert!(!published_names.contains("sys.admin.rewrite_storage"));
     assert!(published_names.contains("sys.blob.length"));
-    assert_eq!(system_catalogue().available(FINAL).count(), 82);
+    assert_eq!(system_api_selection().available(FINAL).count(), 82);
 }
 
 #[test]

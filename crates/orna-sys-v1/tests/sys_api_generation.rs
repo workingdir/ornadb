@@ -9,30 +9,9 @@ use serde_json::Value;
 #[allow(dead_code)]
 mod build_support;
 
-const SYS_API_V1_SHA256: &str = "06ea44ae524baa1310c0b84b63f58c5ed2a90d7cc5b67d248c8cbbf9538f04fb";
+const SYS_API_V1_SHA256: &str = "10ef7dab9665de4e065ee2b96797b2751c7c3f98f9886241011aee0cc8c0d40e";
 const SYSTEM_API_FIXTURE: &str = include_str!("fixtures/system-api-annotation.orna");
 const GENERIC_TYPE_GRAPH_FIXTURE: &str = include_str!("fixtures/sys-generic-type-graph.orna");
-
-fn assert_canonical_object_key_order(value: &Value) {
-    match value {
-        Value::Array(items) => {
-            for item in items {
-                assert_canonical_object_key_order(item);
-            }
-        }
-        Value::Object(object) => {
-            let keys = object.keys().collect::<Vec<_>>();
-            assert!(
-                keys.windows(2).all(|pair| pair[0] < pair[1]),
-                "JSON object members must be lexicographically ordered: {keys:?}"
-            );
-            for child in object.values() {
-                assert_canonical_object_key_order(child);
-            }
-        }
-        _ => {}
-    }
-}
 
 #[test]
 fn published_artifact_is_the_deterministic_registry_projection() {
@@ -66,11 +45,10 @@ fn published_json_schema_covers_the_generated_artifact_and_closed_type_graph() {
     assert_eq!(property_names, required_names);
     build_support::validate_published_schema_shape(&api, &schema)
         .expect("published schema exactly covers generated artifact fields");
-    assert_canonical_object_key_order(&api);
     assert_eq!(
-        build_support::canonical_pretty_json(&api).expect("canonical artifact serialization"),
+        build_support::final_api_pretty_json(&api).expect("authority artifact serialization"),
         system_api_json().trim_end(),
-        "the generator must emit stable canonical member order"
+        "the generator must emit stable authority member order"
     );
     build_support::validate_api_document(&api)
         .expect("generated API type graph is closed and shape-valid");

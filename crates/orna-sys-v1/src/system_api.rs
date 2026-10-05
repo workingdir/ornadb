@@ -160,7 +160,7 @@ pub struct SystemApiFunctionBindings;
 
 impl SystemApiFunctionBindings {
     #[ornasys(
-        function = r###"{"documentation":"Reports the public type identity, nominal metadata, and registered codec/protocol facts for `value`. The result is descriptive metadata only: it does not expose private payload bytes, evaluate the value, or grant permissions to use it.","effect":"read","name":"sys.meta","purpose":"Return safe static/nominal/codec/protocol metadata for a value.","signature":"fn sys.meta<T>(value: T): sys.ValueMetadata<T>"}"###,
+        function = r###"{"effect":"read","name":"sys.meta","purpose":"Return safe static/nominal/codec/protocol metadata for a value.","signature":"fn sys.meta<T>(value: T): sys.ValueMetadata<T>"}"###,
         role = "langitem.sys.meta@1.0",
         type_graph = "system_api_inventory.json",
         schema = "system_api_schema.json"
@@ -179,7 +179,7 @@ impl SystemApiFunctionBindings {
     }
 
     #[ornasys(
-        function = r###"{"documentation":"Resolves a name using the language's ordinary import and visibility rules. `at` pins the lookup to a snapshot; `from` supplies the module whose imports and visibility are applied. Lookup is descriptive and never invokes the resolved object.","effect":"read","name":"sys.resolve","purpose":"Resolve a visible semantic name using ordinary import rules at a selected snapshot.","signature":"fn sys.resolve(name: Str, kind: sys.ObjectKind? = null, at: sys.SnapshotRef = sys.current.snapshot, from: sys.ModuleRef? = null): sys.ObjectRef"}"###
+        function = r###"{"effect":"read","name":"sys.resolve","purpose":"Resolve a semantic name with ordinary visibility/import rules.","signature":"fn sys.resolve(name: Str, kind: sys.ObjectKind? = null, at: sys.SnapshotRef = sys.current.snapshot, from: sys.ModuleRef? = null): sys.ObjectRef"}"###
     )]
     pub fn sys_resolve(&self) -> &'static SystemFunctionDescriptor {
         system_function_descriptor("sys.resolve")
@@ -195,7 +195,7 @@ impl SystemApiFunctionBindings {
     }
 
     #[ornasys(
-        function = r###"{"documentation":"Returns the structured description associated with an already resolved object reference, including its kind-specific fields and snapshot context. Use this after `sys.resolve` when a client needs machine-readable details; it does not execute the object.","effect":"read","name":"sys.describe","purpose":"Return structured, snapshot-aware details for an already resolved object.","signature":"fn sys.describe(object: sys.ObjectRef): sys.ObjectDescription"}"###
+        function = r###"{"effect":"read","name":"sys.describe","purpose":"Return structured object description.","signature":"fn sys.describe(object: sys.ObjectRef): sys.ObjectDescription"}"###
     )]
     pub fn sys_describe(&self) -> &'static SystemFunctionDescriptor {
         system_function_descriptor("sys.describe")
@@ -349,7 +349,7 @@ impl SystemApiFunctionBindings {
     }
 
     #[ornasys(
-        function = r###"{"documentation":"Expands a diagnostic into its structured cause, related locations, and stable machine-readable explanation fields. The explanation preserves the diagnostic's identity and does not rewrite or suppress the original diagnostic.","effect":"read","name":"sys.explain(Diagnostic)","purpose":"Return the structured causes and related locations for a diagnostic.","signature":"fn sys.explain(diagnostic: sys.Diagnostic): sys.Explanation"}"###,
+        function = r###"{"effect":"read","name":"sys.explain(Diagnostic)","purpose":"Return structured causal explanation.","signature":"fn sys.explain(diagnostic: sys.Diagnostic): sys.Explanation"}"###,
         role = "langitem.sys.explain@1.0"
     )]
     pub fn sys_explain_diagnostic(&self) -> &'static SystemFunctionDescriptor {
@@ -794,7 +794,7 @@ impl SystemApiFunctionBindings {
     }
 
     #[ornasys(
-        function = r###"{"contexts":["format-3"],"contract":"blob-value-and-storage","effect":"invoke","name":"sys.blob.resource","purpose":"Read a safe package-relative resource in the caller module's admitted source snapshot. The fallback annotation is application/octet-stream with no suffix; explicit annotate changes metadata only.","since":"1.1.0","signature":"fn sys.blob.resource(path: Str): Blob"}"###
+        function = r###"{"contexts":["format-3"],"contract":"blob-value-and-storage","effect":"read","name":"sys.blob.resource","purpose":"Read a safe package-relative resource in the caller module's admitted source snapshot. The fallback annotation is application/octet-stream with no suffix; explicit annotate changes metadata only.","since":"1.1.0","signature":"fn sys.blob.resource(path: Str): Blob"}"###
     )]
     pub fn sys_blob_resource(&self) -> &'static SystemFunctionDescriptor {
         system_function_descriptor("sys.blob.resource")

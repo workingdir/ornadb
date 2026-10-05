@@ -684,8 +684,8 @@ pub enum SystemEffect {
 mod system_api;
 pub use system_api::*;
 
-mod format_catalogue;
-pub use format_catalogue::*;
+mod format_api_selection;
+pub use format_api_selection::*;
 
 /// Returns final-format declaration metadata for a portable system function.
 ///
