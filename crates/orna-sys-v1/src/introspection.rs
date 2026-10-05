@@ -9235,12 +9235,17 @@ struct QueryPairedBoundedWindowSpillChainWindowRestoreChainFold {
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct QueryPairedBoundedWindowSpillChainWindowRestoreEnvelopeFold {
     identity: String,
+    // Separate from `identity`: this also binds the nested cost/restore carry.
+    carry_identity: String,
     chain_window_fold_identity: String,
     chain_fold_identity: String,
     spill_window_fold_identity: String,
     restore_chain_fold_identity: String,
     window_restore_chain_fold_identity: String,
     restore_envelope_fold_identity: String,
+    cost_restore_envelope_carry_identity: Option<String>,
+    restore_envelope_carry_transition: Option<&'static str>,
+    restore_envelope_carry_state_count: u64,
     chain_pair_count: u64,
     spill_window_count: u64,
     restore_pair_count: u64,
@@ -12323,7 +12328,17 @@ fn query_paired_bounded_window_spill_chain_window_restore_envelope_fold(
             count_overflowed = true;
             u64::MAX
         });
-    let overflowed = chain_window_fold.overflowed || count_overflowed;
+    let cost_restore_envelope_carry_identity = window_cost_restoration_fold
+        .cost_window_restore_envelope_chain_carry_identity
+        .clone();
+    let restore_envelope_carry_transition = window_cost_restoration_fold
+        .cost_window_restore_envelope_chain_carry_transition;
+    let restore_envelope_carry_state_count = window_cost_restoration_fold
+        .cost_window_restore_envelope_chain_distinct_state_count;
+    let overflowed = chain_window_fold.overflowed
+        || restore_chain_fold.overflowed
+        || window_cost_restoration_fold.overflowed
+        || count_overflowed;
 
     let mut hash = Sha256::new();
     hash.update(b"orna.sys.query-paired-bounded-window-spill-chain-window-restore-envelope.v1\0");
@@ -12341,11 +12356,31 @@ fn query_paired_bounded_window_spill_chain_window_restore_envelope_fold(
     hash_query_aggregate_spill_totals(&mut hash, chain_window_fold.totals);
     hash.update([u8::from(overflowed)]);
 
+    let identity = format!(
+        "paired-bounded-window-spill-chain-window-restore-envelope:{}",
+        hex(&hash.finalize())
+    );
+    // Keep family 62's current-state digest stable while exposing the family
+    // 63 ancestry identity as a separate component.
+    let mut carry_hash = Sha256::new();
+    carry_hash.update(
+        b"orna.sys.query-paired-bounded-window-spill-chain-window-restore-envelope-carry.v1\0",
+    );
+    hash_part(&mut carry_hash, identity.as_bytes());
+    hash_optional_text(
+        &mut carry_hash,
+        cost_restore_envelope_carry_identity.as_deref(),
+    );
+    carry_hash.update(restore_envelope_carry_state_count.to_be_bytes());
+    carry_hash.update([u8::from(overflowed)]);
+    let carry_identity = format!(
+        "paired-bounded-window-spill-chain-window-restore-envelope-carry:{}",
+        hex(&carry_hash.finalize())
+    );
+
     Some(QueryPairedBoundedWindowSpillChainWindowRestoreEnvelopeFold {
-        identity: format!(
-            "paired-bounded-window-spill-chain-window-restore-envelope:{}",
-            hex(&hash.finalize())
-        ),
+        identity,
+        carry_identity,
         chain_window_fold_identity: chain_window_fold.identity.clone(),
         chain_fold_identity: chain_window_fold.chain_fold_identity.clone(),
         spill_window_fold_identity: chain_window_fold.spill_window_fold_identity.clone(),
@@ -12354,6 +12389,9 @@ fn query_paired_bounded_window_spill_chain_window_restore_envelope_fold(
             .window_restore_chain_fold_identity
             .clone(),
         restore_envelope_fold_identity,
+        cost_restore_envelope_carry_identity,
+        restore_envelope_carry_transition,
+        restore_envelope_carry_state_count,
         chain_pair_count: chain_window_fold.pair_count,
         spill_window_count: chain_window_fold.spill_window_count,
         restore_pair_count: restore_chain_fold.restore_pair_count,
@@ -12373,6 +12411,10 @@ fn add_paired_bounded_window_spill_chain_window_restore_envelope_fold_details(
         (
             "paired_bounded_window_spill_chain_window_restore_envelope_fold_identity",
             fold.identity.as_str(),
+        ),
+        (
+            "paired_bounded_window_spill_chain_window_restore_envelope_carry_identity",
+            fold.carry_identity.as_str(),
         ),
         (
             "paired_bounded_window_spill_chain_window_restore_envelope_window_fold_identity",
@@ -12401,6 +12443,34 @@ fn add_paired_bounded_window_spill_chain_window_restore_envelope_fold_details(
     ] {
         details.insert(key.to_owned(), PlanDetail::Text(value.to_owned()));
     }
+    if let Some(identity) = fold.cost_restore_envelope_carry_identity.as_ref() {
+        details.insert(
+            "paired_bounded_window_spill_chain_window_restore_envelope_carry_source_identity"
+                .to_owned(),
+            PlanDetail::Text(identity.clone()),
+        );
+    } else {
+        details.remove(
+            "paired_bounded_window_spill_chain_window_restore_envelope_carry_source_identity",
+        );
+    }
+    if let Some(transition) = fold.restore_envelope_carry_transition {
+        details.insert(
+            "paired_bounded_window_spill_chain_window_restore_envelope_carry_transition"
+                .to_owned(),
+            PlanDetail::Text(transition.to_owned()),
+        );
+    } else {
+        details.remove(
+            "paired_bounded_window_spill_chain_window_restore_envelope_carry_transition",
+        );
+    }
+    details.insert(
+        "paired_bounded_window_spill_chain_window_restore_envelope_carry_policy".to_owned(),
+        PlanDetail::Text(
+            "bind_bounded_spill_state_to_distinct_cost_restore_envelope_states".to_owned(),
+        ),
+    );
     details.insert(
         "paired_bounded_window_spill_chain_window_restore_envelope_pairing".to_owned(),
         PlanDetail::Text(
@@ -12439,6 +12509,10 @@ fn add_paired_bounded_window_spill_chain_window_restore_envelope_fold_details(
         (
             "paired_bounded_window_spill_chain_window_restore_envelope_unknown_working_set_count",
             fold.totals.unknown_working_set_count,
+        ),
+        (
+            "paired_bounded_window_spill_chain_window_restore_envelope_carry_state_count",
+            fold.restore_envelope_carry_state_count,
         ),
     ] {
         details.insert(key.to_owned(), PlanDetail::Integer(value));
