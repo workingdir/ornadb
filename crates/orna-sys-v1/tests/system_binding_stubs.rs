@@ -46,6 +46,7 @@ const PROVIDER_SCHEMA_CAPTURE_EDGE_FIXTURE: &str =
 const PROVIDER_FUNCTION_REFERENCE_EDGE_FIXTURE: &str =
     include_str!("fixtures/provider-function-reference-edges.json");
 const PROVIDER_CANCEL_EDGE_FIXTURE: &str = include_str!("fixtures/provider-cancel-edges.json");
+const PROVIDER_METADATA_EDGE_FIXTURE: &str = include_str!("fixtures/provider-metadata-edges.json");
 
 fn resolve_type(ty: &TypeExpr) -> Result<AbiType, String> {
     match ty {
@@ -1195,7 +1196,11 @@ fn generated_provider_tuple_entry_fixture_matches_schema_and_bindings() {
         let entries = case["entries"]
             .as_array()
             .unwrap_or_else(|| panic!("{case_name} fixture has an entries array"));
-        assert_eq!(entries.len(), entry_count, "{case_name} fixture cardinality");
+        assert_eq!(
+            entries.len(),
+            entry_count,
+            "{case_name} fixture cardinality"
+        );
         assert!(
             entries.iter().all(|entry| {
                 entry["type"]
@@ -1244,7 +1249,10 @@ fn generated_provider_tuple_entry_fixture_matches_schema_and_bindings() {
             .filter(|parameter| parameter.name == "arguments")
             .collect::<Vec<_>>();
         assert_eq!(map_parameters.len(), 1);
-        assert_eq!(map_parameters[0].ty, AbiType::Named("sys.ArgumentMap".to_owned()));
+        assert_eq!(
+            map_parameters[0].ty,
+            AbiType::Named("sys.ArgumentMap".to_owned())
+        );
         map_slots += map_parameters.len();
     }
 
@@ -2377,6 +2385,98 @@ fn generated_provider_cancel_binding_matches_schema_and_idl() {
         "generated_provider_cancel_binding_parity operation={OPERATION} cases={} schema_validated=1 typed_contract=1 macro_binding=1 generated_stub=1 handle_type=sys.InvocationHandle<T> reason_default=null result_type=Bool total_cases={}",
         cases.len(),
         cases.len() + contract.signature.parameters.len() + 6
+    );
+}
+
+#[test]
+fn generated_provider_metadata_edges_match_schema_and_bindings() {
+    let fixture: Value = serde_json::from_str(PROVIDER_METADATA_EDGE_FIXTURE)
+        .expect("crate-local provider metadata fixture is valid JSON");
+    let operation_name = fixture["operation"]
+        .as_str()
+        .expect("metadata fixture identifies its generic operation");
+    let api_function = fixture["api_function"]
+        .as_str()
+        .expect("metadata fixture identifies its public API function");
+
+    let generated_provider_schema = build_provider::generate_provider_registry_schema()
+        .expect("provider metadata schema regenerates from its typed source");
+    assert_eq!(generated_provider_schema, system_provider_abi_schema_json());
+    build_host::validate_json_against_schema(
+        system_provider_abi_json(),
+        &generated_provider_schema,
+    )
+    .expect("generated metadata provider contract validates against its schema");
+    build_host::validate_json_against_schema(&system_api_json(), system_api_schema_json())
+        .expect("generated metadata API inventory validates against its schema");
+
+    let registry = system_provider_abi();
+    let operation = registry
+        .operation(operation_name)
+        .expect("sys.meta generic operation exists in the generated provider registry");
+    assert_eq!(operation.signature.source, fixture["signature"]);
+    let role = operation
+        .role
+        .as_ref()
+        .expect("sys.meta has a provider role");
+    assert_eq!(role.as_str(), fixture["role"].as_str().unwrap());
+
+    let descriptor = system_function_descriptor(api_function)
+        .expect("sys.meta has a macro-generated public API descriptor");
+    assert_eq!(descriptor.signature, fixture["signature"]);
+
+    let api: Value = serde_json::from_str(&system_api_json())
+        .expect("generated system API inventory is valid JSON");
+    let generated_function = api["functions"]
+        .as_array()
+        .expect("generated system API exposes functions")
+        .iter()
+        .find(|function| function["name"] == api_function)
+        .expect("generated system API includes sys.meta");
+    assert_eq!(generated_function["signature"], fixture["signature"]);
+    let metadata_type = api["value_types"]
+        .as_array()
+        .expect("generated system API exposes value type schemas")
+        .iter()
+        .find(|value_type| value_type["name"] == fixture["metadata_type"])
+        .expect("generated system API includes sys.ValueMetadata<T>");
+    assert_eq!(metadata_type["fields"], fixture["fields"]);
+
+    let cases = fixture["cases"]
+        .as_array()
+        .expect("metadata fixture has value edge cases");
+    let generated_stub_bundle = system_binding_stubs();
+    let generated_parse = parse_module(generated_stub_bundle);
+    assert!(
+        generated_parse.is_ok(),
+        "generated metadata binding bundle parses: {:?}",
+        generated_parse.diagnostics
+    );
+    let marker = format!("// sys-op: {operation_name}");
+    let declaration = generated_stub_bundle
+        .split("\n\n")
+        .find(|declaration| declaration.lines().any(|line| line == marker))
+        .expect("generated binding bundle contains the generic sys.meta operation");
+    validate_stub_contract(declaration, operation)
+        .unwrap_or_else(|error| panic!("sys.meta generated binding parity: {error}"));
+
+    for case in cases {
+        let value_type = case["value_type"]
+            .as_str()
+            .expect("metadata edge names its input type");
+        assert_eq!(
+            case["result_type"],
+            format!("sys.ValueMetadata<{value_type}>")
+        );
+        assert_eq!(case["metadata"]["static_type"], value_type);
+        assert_eq!(case["metadata"]["redacted"], case["redacted"]);
+    }
+
+    println!(
+        "generated_provider_metadata_binding_parity operation={operation_name} cases={} schema_validated=2 api_schema_validated=1 metadata_fields={} typed_contract=1 macro_binding=1 generated_stub=1 total_cases={}",
+        cases.len(),
+        fixture["fields"].as_array().unwrap().len(),
+        cases.len() + fixture["fields"].as_array().unwrap().len() + 7
     );
 }
 
