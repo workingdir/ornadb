@@ -1474,4 +1474,117 @@ mod graph_bridge_tests {
             "git-backed ORP point lookup object reads: {point_objects} (operation_limit={MAX_RANGE_GRAPH_OBJECTS})"
         );
     }
+
+    #[test]
+    fn captured_ogb2_closure_is_admitted_through_committed_orp_row() {
+        let directory = repository();
+        let root = directory.path();
+        let relation_id = [0x73; 16];
+        let initial = context(root);
+        install_overflow_row_store(root, &initial, relation_id, None);
+
+        let writing_context = context(root);
+        let (schema_oid, schema_digest) = schema_node(root, &writing_context);
+        let snapshot = writing_context
+            .load_row_map(relation_id)
+            .expect("load the committed row-map identity");
+        let graph = writing_context
+            .open_native_graph(&snapshot)
+            .expect("admit the repository-owned graph context");
+        let write_scope = graph.open_read_scope().expect("owner write scope");
+
+        let payload: Vec<u8> = (0..(2 * crate::blob_store::GEAR_MAXIMUM + 73))
+            .map(|index| (index.wrapping_mul(37) & 0xff) as u8)
+            .collect();
+        let mut input = std::io::Cursor::new(payload.clone());
+        let candidate = graph
+            .capture_blob_candidate(&mut input, payload.len() as u64, &write_scope)
+            .expect("write a private OGB-2 candidate closure");
+        let pin = graph
+            .protect_captured_blob(candidate, &write_scope)
+            .expect("verify and durably protect the OGB-2 closure");
+        let transfer = pin.transfer_record();
+        let identity = transfer.content_identity();
+        let descriptor_oid = transfer.descriptor_oid().clone();
+        assert_eq!(identity, crate::blob_store::digest_bytes(&payload));
+
+        let algorithm = writing_context
+            .validate_store_root()
+            .expect("pinned native store")
+            .oid
+            .algorithm();
+        let mut stored_fields = vec![0x81];
+        cbor_head(&mut stored_fields, 6, 60111);
+        cbor_head(&mut stored_fields, 4, 5);
+        cbor_head(&mut stored_fields, 0, identity.length());
+        cbor_bytes(&mut stored_fields, &identity.sha256());
+        cbor_head(
+            &mut stored_fields,
+            3,
+            b"application/octet-stream".len() as u64,
+        );
+        stored_fields.extend_from_slice(b"application/octet-stream");
+        stored_fields.push(0xf6);
+        cbor_bytes(&mut stored_fields, descriptor_oid.as_bytes());
+
+        let row_root = write_native_node(
+            root,
+            algorithm,
+            &NodeData::OrderedLeaf {
+                domain: row_domain(relation_id, schema_digest),
+                entries: vec![OrderedLeafEntry {
+                    key: TypedKey::UInt(7).canonical_bytes().unwrap(),
+                    value: stored_fields,
+                }],
+            },
+        );
+        let database_id = writing_context.require_database_id().unwrap();
+        let mut relation_value = vec![0x84];
+        cbor_bytes(&mut relation_value, schema_oid.as_bytes());
+        cbor_bytes(&mut relation_value, row_root.as_bytes());
+        relation_value.push(0xf6);
+        relation_value.push(0x01);
+        let relation_map = write_native_node(
+            root,
+            algorithm,
+            &NodeData::OrderedLeaf {
+                domain: relations_domain(*database_id.as_bytes()),
+                entries: vec![OrderedLeafEntry {
+                    key: TypedKey::Bytes(relation_id.to_vec())
+                        .canonical_bytes()
+                        .unwrap(),
+                    value: relation_value,
+                }],
+            },
+        );
+        let store_root = write_native_node(root, algorithm, &NodeData::StoreRoot { relation_map });
+        commit_store_root(root, algorithm, &store_root);
+
+        let admitted_context = context(root);
+        let admitted_snapshot = admitted_context
+            .load_row_map(relation_id)
+            .expect("admit the committed ORP row map");
+        let admitted_graph = admitted_context
+            .open_native_graph(&admitted_snapshot)
+            .expect("bind row reads to the committed graph");
+        let read_scope = admitted_graph.open_read_scope().unwrap();
+        let row = admitted_graph
+            .lookup_row(&TypedKey::UInt(7), &read_scope)
+            .unwrap()
+            .expect("committed Blob row");
+        let reference = admitted_graph
+            .admit_blob_reference(&row, &descriptor_oid, &read_scope)
+            .expect("admit the descriptor only through its stored row");
+        let before_read = read_scope.objects_read_for_test();
+        let verified = admitted_graph
+            .read_blob_range(&reference, 0..identity.length(), &read_scope)
+            .expect("verify the complete OGB-2 closure");
+        let objects_read = read_scope.objects_read_for_test() - before_read;
+        assert!(objects_read > 0 && objects_read <= MAX_RANGE_GRAPH_OBJECTS);
+        assert_eq!(verified.bytes(), payload);
+        assert_eq!(
+            verified.verification(),
+            crate::native_graph::RangeVerification::FullBlob
+        );
+    }
 }
